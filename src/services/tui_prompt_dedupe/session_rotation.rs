@@ -1,77 +1,23 @@
 //! #5188: the Claude SESSION-ROTATION ledger.
 //!
 //! `/clear` (and any other continuation cutover) makes Claude Code open a brand
-//! new transcript JSONL and stop writing to the current one. The hook payload is
-//! the first place AgentDesk learns about it — `adopt_claude_continuation_session`
-//! rebinds the in-memory [`super::TuiRuntimeBinding`] there.
+//! new transcript JSONL. `adopt_claude_continuation_session` rebinds the
+//! in-memory [`super::TuiRuntimeBinding`] on the hook payload, but this ledger
+//! is also needed to carry the event to two consumers on OPPOSITE schedules
+//! that cannot share one record:
 //!
-//! Rebinding the mirror is necessary but NOT sufficient, and this ledger is what
-//! carries the event to the two places that also have to react:
+//! * **R2 (settle)**, `discord::claude_session_rotation`, is *pending work*:
+//!   the inflight pinned to the frozen transcript must be settled at the
+//!   rotation boundary. Runs on the ~500ms idle tick, retires once settled.
+//! * **R1 (rehydration)**, `tui_prompt_relay::rehydration`, is a *standing
+//!   authority*: without it, the 5s rehydrate tick would revert the freshly
+//!   adopted binding to the launch script's stale UUID. Lives in its own
+//!   pane-lifetime store ([`ADOPTED_SESSIONS`]) that settle never touches.
 //!
-//! 1. **The launch-script rehydration pass** (`tui_prompt_relay::rehydration`)
-//!    re-derives a binding from the on-disk launch script every few seconds. That
-//!    artifact still names the LAUNCH-time UUID, so without an explicit record of
-//!    "this session id came from a live hook payload" the pass happily overwrote
-//!    the freshly adopted binding back to the FROZEN transcript. That is the
-//!    observed production signature: `adopted Claude continuation session …`
-//!    followed by `rehydrated Claude TUI direct relay binding from launch script
-//!    … transcript_path=<old>.jsonl`, and delivery never followed the rotation.
-//!
-//! 2. **The inflight pinned to the frozen transcript** can never receive a
-//!    terminal — nothing will ever append to the file it is waiting on — so every
-//!    later turn on the channel reads `FOREIGN prior inflight is still live` and
-//!    aborts. It has to be settled deliberately at the rotation boundary
-//!    (`discord::claude_session_rotation`).
-//!
-//! The record deliberately keeps the FIRST observed `old_output_path`: repeated
-//! hooks may report further hops, but the delivery-critical fact is which
-//! transcript may still hold undelivered bytes.
-//!
-//! This ledger is in-memory only. A dcserver restart re-derives the binding from
-//! persisted artifacts (`persist_claude_continuation_session` rewrites them at
-//! adoption time), so a lost record cannot strand delivery across a restart.
-//!
-//! ## Two stores, two lifetimes — and why that separation is load-bearing
-//! The two consumers above want the SAME event but on OPPOSITE schedules, so
-//! they cannot share one record:
-//!
-//! * consumer 2 (settle) is *pending work*. It runs on the ~500ms idle tick and
-//!   must retire its record the moment the work is done, or it would re-settle
-//!   forever.
-//! * consumer 1 (rehydration) is a *standing authority*. It runs on the 5s
-//!   rehydrate tick and must keep out-ranking the launch script for as long as
-//!   the pane keeps that adopted session — which is the rest of the pane's life,
-//!   not the few hundred milliseconds the settle work takes.
-//!
-//! An earlier revision of this module served consumer 1 out of the settle ledger.
-//! That made the authority signal self-destruct: the settle pass reached
-//! `RebindOnly` on its very first tick (a `/clear` creates no inflight to drain),
-//! called [`clear_claude_session_rotation`], and the adopted id vanished ~500ms
-//! after adoption — normally BEFORE the 5s rehydration pass ever read it. The
-//! signal was therefore present for about one tick in ten and absent forever
-//! after, so rehydration reverted the binding to the frozen launch-script
-//! transcript in exactly the failure mode it was written to prevent.
-//!
-//! So the adopted session id lives in its OWN pane-lifetime store
-//! ([`ADOPTED_SESSIONS`]) that the settle path never touches. Its availability no
-//! longer depends on which of the two polls wins a race, because the pass that
-//! used to destroy it — the ~500ms settle tick — can no longer reach it.
-//!
-//! To be precise about lifetime, the record leaves the store by exactly three
-//! paths, and none of them fires while the pane is alive and still running the
-//! adopted session:
-//!
-//! * a newer adoption for the same pane OVERWRITES the entry. That is the
-//!   authority being restated, not lost.
-//! * [`forget_hook_adopted_claude_session_id`] removes it. Its only caller is
-//!   the 5s rehydrate pass, so this IS timer-driven — but it is gated on that
-//!   pass having confirmed the pane DEAD/orphaned, and a dead pane has no
-//!   delivery left to protect.
-//! * the [`ROTATION_RECORD_TTL`] `retain` in `lock_adopted_sessions` prunes it.
-//!   That runs on EVERY access rather than on a timer, but only evicts entries
-//!   older than 12h; see that constant for why reaching it is harmless.
-//!
-//! (see [`hook_adopted_claude_session_id`] for how the authority is read)
+//! The record keeps the FIRST observed `old_output_path` — the delivery-
+//! critical fact is which transcript may still hold undelivered bytes.
+//! In-memory only: `persist_claude_continuation_session` rewrites the on-disk
+//! launch script at adoption time, so a lost record cannot strand delivery.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};

@@ -1,16 +1,7 @@
-//! #5938 body-mutation telemetry — OBSERVATION ONLY.
+//! #5938 body-mutation telemetry — OBSERVATION ONLY. See #5938 for the
+//! watcher/bridge double-write mechanism this exists to fingerprint.
 //!
-//! The mechanism behind #5938 is established: the bridge-local `full_response`
-//! and the tmux watcher's accumulator seed each other through the durable
-//! inflight row, and `merge_forward_response_progress`
-//! (`inflight/save_store/identity_gate/stamp_merge.rs`) is longest-wins
-//! fail-open, so a body that already contains the turn twice wins every
-//! subsequent merge. What is NOT established is the *interleaving* of the two
-//! writes — watcher-first versus bridge-first. Both orders produce the same
-//! final length, so the delivered artifact cannot tell them apart, and the
-//! repair axis cannot be chosen without measuring it.
-//!
-//! So this module records and never intervenes. It does not block an append,
+//! This module records and never intervenes. It does not block an append,
 //! does not block an assignment, and does not change a merge rule. Blocking
 //! here would swallow legitimately repeated model text and manufacture a fresh
 //! #5941-class silent loss.
@@ -23,19 +14,10 @@
 //!
 //! READ THE ABSENCE OF A RECORD AS "NO RECORD", NEVER AS "NO MUTATION."
 //!
-//! That sentence is the whole contract, and it is written this way because the
-//! alternative has now failed twice. The first revision of this module asserted
-//! "these are ALL the places the bridge-local `full_response` body changes
-//! shape"; review produced a counterexample. The second replaced it with a
-//! three-class criterion plus a "named, so the boundary is a stated fact"
-//! enumeration and the claim that nothing outside it "can introduce a byte from
-//! the watcher's side"; review produced two more counterexamples — the terminal
-//! `Done` result on the TUI-direct path, which is decoded from the very output
-//! file the watcher tails, and the two `TurnBridgeContext.full_response` seeds
-//! that copy a durable row before the bridge task even starts. Both are now
-//! recorded. What is NOT repaired by recording them is the pattern: a prose
-//! completeness claim about a mutation surface this large is a claim the next
-//! reader will falsify. So this module no longer makes one, in any form.
+//! This wording is deliberate: two prior revisions of this module each claimed
+//! the recorded sites were exhaustive, and review found a counterexample both
+//! times (#5953). So this module no longer makes a completeness claim, in any
+//! form.
 //!
 //! Concretely, for anyone reading a per-turn readout:
 //!   * A record means that site ran and these bytes moved. Trust it.
@@ -46,49 +28,21 @@
 //!   * In particular, "no class-1 record this turn" is NOT evidence of
 //!     bridge-first. It is the absence of evidence either way.
 //!
-//! The classes below describe why each RECORDED site was chosen. They are a
-//! rationale for inclusion, not a partition of the surface.
-//!
-//! 1. CROSS-BOUNDARY ADOPTION — the site copies bytes the bridge did not itself
-//!    produce INTO the bridge-local body. These are what the watcher-first /
-//!    bridge-first question is read from, so this class gets every site found so
-//!    far: `ReconcileFromInflightState` and
-//!    `ReconcileToolArmLocalsFromInflightState` (durable inflight row, the
-//!    channel the watcher and the bridge seed each other through),
-//!    `RecoverBodyFromOutputFile` (the tmux output file, re-read directly by the
-//!    empty-response recovery path), `AdoptTerminalDoneResult` (the terminal
-//!    `Done` result, which on the TUI-direct path is decoded from that same
-//!    output file — see the variant's own doc), and `SeedFromTurnBridgeContext`
-//!    (the durable row copied into `TurnBridgeContext.full_response` before the
-//!    bridge task starts).
-//! 2. STREAM-LOOP ACCUMULATION — the composers that build the body during the
-//!    turn, including the one that SHRINKS it: `AppendStreamedTextChunk`,
-//!    `AppendToolBoundarySeparator`.
-//! 3. SHARED BLANKING — the site empties the bridge-local body AND the durable
-//!    row body together, so the bytes leave the shared channel rather than just
-//!    the local copy: `ClearResponseDeliveryState`, `SilenceRequeuedResponse`.
+//! See [`BodyMutationSite`]'s variants for why each recorded site was chosen —
+//! that is a rationale for inclusion, not a partition of the surface.
 //!
 //! KNOWN UNRECORDED SITES, as of this writing and WITHOUT any claim that the
-//! list is exhaustive — it is a starting point for the next investigation, not a
-//! boundary: the two `ProviderErrorPresentation` guidance replacements in
-//! `stream_loop/content_arms.rs`; API_FRICTION marker stripping in
-//! `post_loop_finalize.rs` and in
+//! list is exhaustive: the two `ProviderErrorPresentation` guidance
+//! replacements in `stream_loop/content_arms.rs`; API_FRICTION marker
+//! stripping in `post_loop_finalize.rs` and in
 //! `terminal_outcome_delivery/empty_response_recovery/handler.rs`; the
 //! `CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE` constant in
 //! `post_loop_finalize.rs`; the `String::new()` suppressions in
 //! `terminal_outcome_delivery.rs`, `handler.rs` (three) and
 //! `terminal_outcome_delivery/recovery_retry.rs`; and
 //! `prompt_too_long_guidance::render_for_requester` in
-//! `terminal_outcome_delivery/cancel_prompt_replace.rs`. Each of those replaces
-//! the body during TERMINAL delivery, after the interleaving this module
-//! measures has already happened, which is why they were lower priority — NOT a
-//! proof that they cannot matter.
-//!
-//! The WATCHER's own accumulator in `tmux_watcher.rs` is not instrumented here
-//! either. A watcher-first turn is EXPECTED to show up as a class-1 record whose
-//! `delta_sha8` covers bytes this bridge never appended; that is what the record
-//! shape was built for. Per the contract above, a turn without one has not been
-//! shown to be bridge-first.
+//! `terminal_outcome_delivery/cancel_prompt_replace.rs`. The WATCHER's own
+//! accumulator in `tmux_watcher.rs` is also not instrumented here.
 
 use crate::services::observability::{InvariantViolation, record_invariant_check};
 use sha2::{Digest, Sha256};

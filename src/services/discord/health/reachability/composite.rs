@@ -1,46 +1,23 @@
 //! Relay verdict composition and authority — #5071 T4-B6 (4987 S3).
 //!
-//! Everything above this file observes. This file is the first one that
-//! produces a `ReachabilityVerdict` from the durable materials the earlier
-//! slices landed, folds the external tier into it, and hands the product to a
-//! consumer:
+//! Everything above this file observes; this file produces a
+//! `ReachabilityVerdict` from the durable materials the earlier slices
+//! landed, folds in the external tier, and hands the product to a consumer.
 //!
-//! * [`classify_reachability`] is Tier A — 4987 §4.1's obligation↔receipt
-//!   answer, built from the T4-B2c ledger, the T4-B3 receipt projection, and
-//!   the T4-B4 coordinate comparison.
-//! * [`compose_relay_verdict`] is 4987 §4.3-1's
-//!   `worst(ReachabilityVerdict, ExternalRelayVerdict)`, with §4.3-2's
-//!   monotone-worsening restriction on the external tier.
-//! * [`relay_verdict_source`] is the 4987 §5.1 switch. Both modes compute and
-//!   publish the composed verdict; only `Composite` lets it change the reported
-//!   health polarity.
+//! * [`classify_reachability`] is Tier A — 4987 §4.1's obligation↔receipt answer.
+//! * [`compose_relay_verdict`] is 4987 §4.3-1's `worst(ReachabilityVerdict,
+//!   ExternalRelayVerdict)`, restricted by §4.3-2 to only worsen.
+//! * [`relay_verdict_source`] is the 4987 §5.1 switch; only `Composite` lets
+//!   the composed verdict change the reported health polarity.
 //!
-//! # Still non-destructive (4987 §7.1 / I15)
+//! Still non-destructive (4987 §7.1 / I15):
+//! [`RelayVerdict::authorizes_destructive_action`] is false on every composed
+//! value — destructive admission stays at the separate
+//! `relay_recovery::destructive_warrant_bind` gate.
 //!
-//! Composition adds authority over the health POLARITY and nothing else. No
-//! value produced here cancels a turn, kills a tmux session or a process,
-//! removes a registry entry, or force-cleans a mailbox or an in-flight row.
-//! [`RelayVerdict::authorizes_destructive_action`] answers false on every
-//! composed value. Recovery admission remains at the separate permanent
-//! `relay_recovery::destructive_warrant_bind` gate, independent of health polarity.
-//!
-//! # What this composition does NOT establish
-//!
-//! * The bounds below are chosen, not measured. 4987 §3.4 makes the age
-//!   histogram the OUTPUT of the observation period, so the numbers here are a
-//!   starting position to be replaced by that histogram, not a finding from it.
-//! * `TransportUnknownEvidence::UnreleasedDeliveryLease` has no producer here.
-//!   [`RelayVerdictProbe`] wires the placeholder leg and this file derives the
-//!   restart-boundary leg; a range whose only trace is an unreleased lease is
-//!   therefore not demoted out of `Unreachable` by this slice.
-//! * Nothing here reads the in-flight row. The row's own path reaches this file
-//!   only as `RelayVerdictProbe::row_output_path`, which is handed straight to
-//!   `super::divergence` as a comparison operand (I14) and is never used to
-//!   resolve, tail, or frame anything.
-//! * The composed verdict is produced on the DETAIL health path only, because
-//!   the pane-idle operand 4987 §-1.4 requires for a `Reachable` is derived
-//!   from the relay-health snapshot that only that path builds. The public
-//!   `/api/health` aggregate is unchanged by this slice in both modes.
+//! Not established here: the bounds below are chosen, not measured (4987
+//! §3.4); nothing here resolves/tails/frames the in-flight row's own path
+//! (I14); the composed verdict is DETAIL-path only.
 
 use std::path::Path;
 
@@ -358,16 +335,12 @@ impl RelayVerdictReport {
     }
 }
 
-/// #5071 relay-tail S1 (I-5): one string per branch.
+/// #5071 relay-tail S1 (I-5): one string per branch, so the published reason
+/// says which branch answered.
 ///
-/// Five producers used to spell `"transcript_unresolved"`, which made the
-/// published reason unable to say which of them answered — the exact question
-/// #adk-cc's `unknown{transcript_unresolved}` could not be asked. Every arm
-/// below is now reached by exactly one REACHABLE branch of
-/// [`classify_reachability`] or [`observe_relay_verdict`]; r2 review (legB
-/// P2): `receipt_store_unreadable` is spelled by two branches of
-/// `classify_reachability`, the second of them unreachable behind the guard
-/// that already answered it and kept so a reordering of those guards costs a
+/// `receipt_store_unreadable` is spelled by two branches of
+/// `classify_reachability`; the second is unreachable behind the guard that
+/// already answered it, kept so a reordering of those guards costs a
 /// conservative verdict rather than the polling task.
 fn unknown_reason_str(reason: ReachabilityUnknownReason) -> &'static str {
     match reason {
@@ -558,18 +531,13 @@ pub(in crate::services::discord) fn classify_reachability(
         // coordinate; no coordinate was ever framed.
         return ReachabilityVerdict::unknown(ReachabilityUnknownReason::NeverObserved, 0);
     };
-    // #5942 r3: every FAULT arm runs before the timer. A diverged coordinate, an
+    // Every FAULT arm runs before the timer (#5942): a diverged coordinate, an
     // unparseable store and a truncated read are things that went WRONG, and a
     // thing that went wrong must not be retired by a clock. `read_truncated`
-    // moved above the gate for that reason; it is hardcoded `false` at the
-    // production call site today, so this makes an ordering claim true rather
-    // than changing behaviour.
-    //
-    // r4 (P2-1): that claim now has a test. It had none, and an adversarial
-    // review moved this arm back under the gate with the whole suite still
-    // green — precisely because the production call site cannot reach it.
+    // is hardcoded `false` at the production call site today, so this makes an
+    // ordering claim true rather than changing behaviour.
     // `a_truncated_read_outranks_the_ttl_gate_even_when_every_expiry_conjunct_holds`
-    // is what fails if it moves again.
+    // pins the ordering.
     if inputs.read_truncated {
         return ReachabilityVerdict::unknown(ReachabilityUnknownReason::ReadTruncated, 0);
     }
@@ -577,11 +545,10 @@ pub(in crate::services::discord) fn classify_reachability(
     //
     // The gate sits above the transcript arm because that arm is what a ledger
     // with no producer can never pass, so such a channel re-answers
-    // `TranscriptUnresolved` every tick forever. r3 (P2-3) re-adjudicated the
-    // position rather than assuming it: the gate must not preempt a verdict the
-    // ladder would have called `Reachable`, and the only input that can produce
-    // one is 4987 §-1.4's positive incarnation-alive evidence — which
-    // `expired_without_a_producer` now refuses to expire over.
+    // `TranscriptUnresolved` every tick forever. The gate must not preempt a
+    // verdict the ladder would have called `Reachable`, and the only input
+    // that can produce one is 4987 §-1.4's positive incarnation-alive
+    // evidence — which `expired_without_a_producer` refuses to expire over.
     if let Some(unobserved_for_secs) = expired_without_a_producer(&inputs, ledger) {
         return ReachabilityVerdict::Expired {
             unobserved_for_secs,
