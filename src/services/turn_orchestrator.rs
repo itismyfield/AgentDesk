@@ -74,6 +74,24 @@ use turn_finished_signal::{
 pub(crate) const MAX_INTERVENTIONS_PER_CHANNEL: usize = 30;
 pub(crate) const INTERVENTION_DEDUP_WINDOW: Duration = Duration::from_secs(10);
 
+/// #5937 — how long a queued backlog may sit before an inbound claim stops
+/// waiting behind it. The idle-queue backstop drains every 60s, so a channel
+/// whose drain still works never reaches this; past it the drain is wedged and
+/// holding arrivals back would only pile them against the overflow cap.
+pub(crate) const INBOUND_ORDER_FAIL_OPEN_AFTER: Duration = Duration::from_secs(180);
+
+/// #5937 — whether a turn claim may take an idle slot ahead of queued work.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum TurnAdmissionOrder {
+    /// Claim as soon as the slot is free. Recovery, reaper and healing claims
+    /// are not inbound traffic and must not be held behind a backlog.
+    #[default]
+    Immediate,
+    /// Refuse the claim while older inbound work is still queued, so messages
+    /// reach the agent in the order they were sent.
+    BehindQueue,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InterventionMode {
     Soft,
@@ -865,6 +883,7 @@ impl ChannelMailboxHandle {
             request_owner,
             user_message_id,
             ActiveTurnKind::UserOrAgent,
+            TurnAdmissionOrder::Immediate,
             None,
         )
         .await
@@ -884,6 +903,7 @@ impl ChannelMailboxHandle {
             request_owner,
             user_message_id,
             ActiveTurnKind::UserOrAgent,
+            TurnAdmissionOrder::Immediate,
             Some(persistence),
         )
         .await
@@ -906,6 +926,7 @@ impl ChannelMailboxHandle {
             request_owner,
             user_message_id,
             turn_kind,
+            TurnAdmissionOrder::Immediate,
             None,
         )
         .await
@@ -918,6 +939,7 @@ impl ChannelMailboxHandle {
         request_owner: UserId,
         user_message_id: MessageId,
         turn_kind: ActiveTurnKind,
+        admission_order: TurnAdmissionOrder,
         persistence: QueuePersistenceContext,
     ) -> TryStartTurnResult {
         self.try_start_turn_kinded_result(
@@ -925,6 +947,7 @@ impl ChannelMailboxHandle {
             request_owner,
             user_message_id,
             turn_kind,
+            admission_order,
             Some(persistence),
         )
         .await
@@ -936,6 +959,7 @@ impl ChannelMailboxHandle {
         request_owner: UserId,
         user_message_id: MessageId,
         turn_kind: ActiveTurnKind,
+        admission_order: TurnAdmissionOrder,
         persistence: Option<QueuePersistenceContext>,
     ) -> TryStartTurnResult {
         self.request(
@@ -944,6 +968,7 @@ impl ChannelMailboxHandle {
                 request_owner,
                 user_message_id,
                 turn_kind,
+                admission_order,
                 persistence,
                 reply,
             },
@@ -1697,6 +1722,8 @@ enum ChannelMailboxMsg {
         user_message_id: MessageId,
         /// #3167 — priority class to record on the success branch.
         turn_kind: ActiveTurnKind,
+        /// #5937 — whether this claim may overtake queued inbound work.
+        admission_order: TurnAdmissionOrder,
         persistence: Option<QueuePersistenceContext>,
         reply: oneshot::Sender<TryStartTurnResult>,
     },
@@ -1904,6 +1931,50 @@ impl ActiveTurnKind {
 /// `Background` turns. Bounded + reset on every (re)set/claim/requeue ⇒
 /// provably non-permanent.
 const PENDING_USER_DISPATCH_MAX_YIELDS: u32 = 5;
+
+/// #5937 — true when this claim would jump ahead of inbound work that was sent
+/// earlier: either a queued backlog, or a head that `TakeNextSoft` already
+/// handed out and that has not claimed the slot yet.
+///
+/// Three claims are NOT overtakes and must pass. The dequeued head itself is
+/// the drain — refusing it would livelock the queue. A queued copy of the
+/// claiming message (catch-up duplicate, merged tail carrying only this id)
+/// is purged by the start path. And a backlog that has sat far past the 60s
+/// idle-queue backstop is wedged, so ordering fails open rather than pinning
+/// every later arrival behind it.
+fn inbound_order_defers_claim(
+    state: &ChannelMailboxState,
+    user_message_id: MessageId,
+    admission_order: TurnAdmissionOrder,
+) -> bool {
+    if admission_order != TurnAdmissionOrder::BehindQueue {
+        return false;
+    }
+    if state.pending_user_dispatch == Some(user_message_id)
+        || state
+            .pending_user_dispatch_source_ids
+            .contains(&user_message_id)
+    {
+        return false;
+    }
+    let mut foreign_backlog = false;
+    for item in &state.intervention_queue {
+        if item.message_id == user_message_id
+            && item
+                .source_message_ids
+                .iter()
+                .all(|id| *id == user_message_id)
+        {
+            continue;
+        }
+        if item.created_at.elapsed() >= INBOUND_ORDER_FAIL_OPEN_AFTER {
+            return false;
+        }
+        foreign_backlog = true;
+    }
+    foreign_backlog
+        || (state.pending_user_dispatch.is_some() && !pending_dispatch_lease_is_orphaned(state))
+}
 
 #[derive(Default)]
 struct ChannelMailboxState {
@@ -2355,6 +2426,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     request_owner,
                     user_message_id,
                     turn_kind,
+                    admission_order,
                     persistence,
                     reply,
                 } => {
@@ -2398,9 +2470,17 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             }
                         }
                     }
+                    // #5937 — an inbound arrival must not overtake messages that
+                    // are already queued: the queue is FIFO, but a claim that
+                    // finds the slot idle used to start immediately while older
+                    // queued work waited for the next drain, so the later message
+                    // reached the agent first.
+                    let order_yields =
+                        inbound_order_defers_claim(&state, user_message_id, admission_order);
                     let mut queue_exit_events = Vec::new();
                     let mut persistence_error = None;
-                    let can_start = state.cancel_token.is_none() && !background_yields;
+                    let can_start =
+                        state.cancel_token.is_none() && !background_yields && !order_yields;
                     if can_start && turn_kind == ActiveTurnKind::UserOrAgent {
                         let previous_queue = state.intervention_queue.clone();
                         queue_exit_events = purge_active_source_from_queue(
@@ -3553,6 +3633,256 @@ mod actor_hydrate_regression_tests {
             assert_eq!(persisted.len(), 1);
             assert_eq!(persisted[0].source_message_ids, vec![tail_id]);
             assert_eq!(persisted[0].text, "tail copy");
+        });
+    }
+
+    /// Claim the slot the way Discord text intake does (#5937).
+    async fn intake_claim(
+        handle: &ChannelMailboxHandle,
+        persistence: &QueuePersistenceContext,
+        owner: UserId,
+        user_message_id: MessageId,
+    ) -> bool {
+        handle
+            .try_start_turn_kinded_with_persistence(
+                Arc::new(CancelToken::new()),
+                owner,
+                user_message_id,
+                ActiveTurnKind::UserOrAgent,
+                TurnAdmissionOrder::BehindQueue,
+                persistence.clone(),
+            )
+            .await
+            .started
+    }
+
+    /// Dispatch the queued head the way the idle-queue drain does: take it,
+    /// then claim the slot for it.
+    async fn drain_one(
+        handle: &ChannelMailboxHandle,
+        persistence: &QueuePersistenceContext,
+        owner: UserId,
+    ) -> MessageId {
+        let taken = handle.take_next_soft(persistence.clone()).await;
+        let head = taken.intervention.expect("queued head must be promotable");
+        let _lease = taken.dispatch_lease;
+        assert!(
+            intake_claim(handle, persistence, owner, head.message_id).await,
+            "the dequeued head is the drain itself and must claim the slot"
+        );
+        head.message_id
+    }
+
+    /// #5937 — three consecutive injections must reach the agent in fire order.
+    /// ALPHA holds the slot, BRAVO queues behind it, and CHARLIE arrives after
+    /// the slot frees but before the drain promotes BRAVO. Without the inbound
+    /// order gate CHARLIE takes the idle slot and is delivered ahead of BRAVO.
+    #[test]
+    fn consecutive_inbound_messages_reach_the_agent_in_fire_order() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        run_async(async {
+            let registry = ChannelMailboxRegistry::default();
+            let channel_id = ChannelId::new(5_937_101);
+            let handle = registry.handle(channel_id);
+            let provider = ProviderKind::Claude;
+            let token_hash = "inbound_order_fire_order";
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let owner = UserId::new(5_937);
+            let alpha = MessageId::new(5_937_201);
+            let bravo = MessageId::new(5_937_202);
+            let charlie = MessageId::new(5_937_203);
+            let mut delivered = Vec::new();
+
+            assert!(
+                intake_claim(&handle, &persistence, owner, alpha).await,
+                "an arrival that finds an empty queue and an idle slot still starts immediately"
+            );
+            delivered.push(alpha);
+
+            assert!(
+                !intake_claim(&handle, &persistence, owner, bravo).await,
+                "BRAVO arrives while ALPHA holds the slot"
+            );
+            assert!(
+                handle
+                    .enqueue(
+                        make_intervention(bravo.get(), "bravo", Instant::now()),
+                        persistence.clone(),
+                    )
+                    .await
+                    .enqueued
+            );
+
+            handle.finish_turn(persistence.clone()).await;
+
+            assert!(
+                !intake_claim(&handle, &persistence, owner, charlie).await,
+                "CHARLIE must not take the idle slot ahead of the queued BRAVO"
+            );
+            assert!(
+                handle
+                    .enqueue(
+                        make_intervention(charlie.get(), "charlie", Instant::now()),
+                        persistence.clone(),
+                    )
+                    .await
+                    .enqueued
+            );
+
+            delivered.push(drain_one(&handle, &persistence, owner).await);
+            handle.finish_turn(persistence.clone()).await;
+            delivered.push(drain_one(&handle, &persistence, owner).await);
+            handle.finish_turn(persistence.clone()).await;
+
+            assert_eq!(
+                delivered,
+                vec![alpha, bravo, charlie],
+                "delivery order must match fire order"
+            );
+            assert!(
+                handle.snapshot().await.intervention_queue.is_empty(),
+                "every message must be delivered exactly once, none left behind"
+            );
+        });
+    }
+
+    /// #5937 — the order gate must not stall the drain it protects. During the
+    /// dequeue-to-claim window the queue is already empty and only the pending
+    /// dispatch reservation records the promoted head: an arrival then must wait,
+    /// and the head itself must still be admitted.
+    #[test]
+    fn dequeued_head_claims_the_slot_while_later_arrivals_wait() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        run_async(async {
+            let registry = ChannelMailboxRegistry::default();
+            let channel_id = ChannelId::new(5_937_111);
+            let handle = registry.handle(channel_id);
+            let provider = ProviderKind::Claude;
+            let token_hash = "inbound_order_head_exempt";
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let owner = UserId::new(5_937);
+            let head = MessageId::new(5_937_211);
+            let latecomer = MessageId::new(5_937_212);
+
+            assert!(
+                handle
+                    .enqueue(
+                        make_intervention(head.get(), "head", Instant::now()),
+                        persistence.clone(),
+                    )
+                    .await
+                    .enqueued
+            );
+
+            let taken = handle.take_next_soft(persistence.clone()).await;
+            let promoted = taken.intervention.expect("head must be promotable");
+            assert_eq!(promoted.message_id, head);
+            let _lease = taken.dispatch_lease;
+            assert!(
+                handle.snapshot().await.intervention_queue.is_empty(),
+                "the dequeue-to-claim window leaves the queue empty"
+            );
+
+            assert!(
+                !intake_claim(&handle, &persistence, owner, latecomer).await,
+                "an arrival during the dequeue-to-claim window waits behind the promoted head"
+            );
+            assert!(
+                intake_claim(&handle, &persistence, owner, head).await,
+                "the promoted head is the drain itself and must claim the slot"
+            );
+        });
+    }
+
+    /// #5937 — ordering fails open rather than bricking a channel whose drain
+    /// is wedged: once the backlog is older than `INBOUND_ORDER_FAIL_OPEN_AFTER`
+    /// a fresh arrival takes the idle slot again.
+    #[test]
+    fn inbound_order_fails_open_for_a_stalled_backlog() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        run_async(async {
+            let registry = ChannelMailboxRegistry::default();
+            let channel_id = ChannelId::new(5_937_121);
+            let handle = registry.handle(channel_id);
+            let provider = ProviderKind::Claude;
+            let token_hash = "inbound_order_fail_open";
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let owner = UserId::new(5_937);
+            let wedged = MessageId::new(5_937_221);
+            let arrival = MessageId::new(5_937_222);
+            let stalled_since = Instant::now()
+                .checked_sub(INBOUND_ORDER_FAIL_OPEN_AFTER + Duration::from_secs(1))
+                .expect("test clock must reach past the fail-open window");
+
+            handle
+                .replace_queue(
+                    vec![make_intervention(wedged.get(), "wedged", stalled_since)],
+                    persistence.clone(),
+                )
+                .await;
+
+            assert!(
+                intake_claim(&handle, &persistence, owner, arrival).await,
+                "a backlog past the fail-open window must not hold new arrivals"
+            );
+        });
+    }
+
+    /// #5937 — only inbound intake is ordered. Recovery, reaper and healing
+    /// claims are not queue traffic and keep taking an idle slot immediately.
+    #[test]
+    fn immediate_admission_still_takes_an_idle_slot_ahead_of_the_queue() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        run_async(async {
+            let registry = ChannelMailboxRegistry::default();
+            let channel_id = ChannelId::new(5_937_131);
+            let handle = registry.handle(channel_id);
+            let provider = ProviderKind::Claude;
+            let token_hash = "inbound_order_immediate";
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let queued = MessageId::new(5_937_231);
+            let healer = MessageId::new(5_937_232);
+
+            assert!(
+                handle
+                    .enqueue(
+                        make_intervention(queued.get(), "queued", Instant::now()),
+                        persistence.clone(),
+                    )
+                    .await
+                    .enqueued
+            );
+
+            let started = handle
+                .try_start_turn_kinded_with_persistence(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(5_937),
+                    healer,
+                    ActiveTurnKind::UserOrAgent,
+                    TurnAdmissionOrder::Immediate,
+                    persistence.clone(),
+                )
+                .await;
+            assert!(
+                started.started,
+                "immediate admission is unchanged by the inbound order gate"
+            );
         });
     }
 

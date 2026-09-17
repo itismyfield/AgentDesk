@@ -1,5 +1,6 @@
 //! One mailbox/token admission boundary shared by chat, headless and routine turns.
 use super::*;
+use crate::services::turn_orchestrator::TurnAdmissionOrder;
 
 pub(in crate::services::discord) async fn mailbox_try_start_turn_kinded_with_feedback(
     shared: &SharedData,
@@ -8,6 +9,49 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_kinded_with_fee
     request_owner: UserId,
     user_message_id: MessageId,
     turn_kind: ActiveTurnKind,
+) -> bool {
+    mailbox_try_start_turn_ordered(
+        shared,
+        channel_id,
+        cancel_token,
+        request_owner,
+        user_message_id,
+        turn_kind,
+        TurnAdmissionOrder::Immediate,
+    )
+    .await
+}
+
+/// #5937 — the Discord text-intake claim. Unlike recovery, reaper and healing
+/// claims, this one is inbound traffic, so it waits behind anything already
+/// queued for the channel instead of taking an idle slot ahead of it.
+pub(in crate::services::discord) async fn mailbox_try_start_turn_behind_queue(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    cancel_token: Arc<CancelToken>,
+    request_owner: UserId,
+    user_message_id: MessageId,
+) -> bool {
+    mailbox_try_start_turn_ordered(
+        shared,
+        channel_id,
+        cancel_token,
+        request_owner,
+        user_message_id,
+        ActiveTurnKind::UserOrAgent,
+        TurnAdmissionOrder::BehindQueue,
+    )
+    .await
+}
+
+async fn mailbox_try_start_turn_ordered(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    cancel_token: Arc<CancelToken>,
+    request_owner: UserId,
+    user_message_id: MessageId,
+    turn_kind: ActiveTurnKind,
+    admission_order: TurnAdmissionOrder,
 ) -> bool {
     let _recovery_admission = match crate::services::agent_recovery::admission::admit(
         &channel_id.get().to_string(),
@@ -33,6 +77,7 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_kinded_with_fee
             request_owner,
             user_message_id,
             turn_kind,
+            admission_order,
             queue_persistence_context(shared, &shared.provider, channel_id),
         )
         .await;

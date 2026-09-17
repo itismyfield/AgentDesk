@@ -20,7 +20,7 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_with_terminal_m
     session_key: Option<&str>,
 ) -> bool {
     let Some(pool) = shared.pg_pool.as_ref() else {
-        return super::super::super::mailbox_try_start_turn(
+        return crate::services::discord::queue_io::mailbox_try_start_turn_behind_queue(
             shared,
             channel_id,
             cancel_token,
@@ -30,7 +30,7 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_with_terminal_m
         .await;
     };
     let Some(session_key) = session_key.map(str::trim).filter(|value| !value.is_empty()) else {
-        return super::super::super::mailbox_try_start_turn(
+        return crate::services::discord::queue_io::mailbox_try_start_turn_behind_queue(
             shared,
             channel_id,
             cancel_token,
@@ -48,7 +48,7 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_with_terminal_m
                 channel_id,
                 error
             );
-            return super::super::super::mailbox_try_start_turn(
+            return crate::services::discord::queue_io::mailbox_try_start_turn_behind_queue(
                 shared,
                 channel_id,
                 cancel_token,
@@ -70,7 +70,7 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_with_terminal_m
             error
         );
         let _ = tx.rollback().await;
-        return super::super::super::mailbox_try_start_turn(
+        return crate::services::discord::queue_io::mailbox_try_start_turn_behind_queue(
             shared,
             channel_id,
             cancel_token,
@@ -80,7 +80,7 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_with_terminal_m
         .await;
     }
 
-    let started = super::super::super::mailbox_try_start_turn(
+    let started = crate::services::discord::queue_io::mailbox_try_start_turn_behind_queue(
         shared,
         channel_id,
         cancel_token,
