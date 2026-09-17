@@ -47,7 +47,7 @@ use front_requeue::requeue_intervention_front;
 #[cfg(test)]
 use inbound_order::INBOUND_ORDER_FAIL_OPEN_AFTER;
 pub(crate) use inbound_order::TurnAdmissionOrder;
-use inbound_order::{claim_yields, note_inbound_drain_progress};
+use inbound_order::{claim_yields, pause_inbound_stall_for_turn};
 pub(crate) use overflow::SoftInterventionProbe;
 use overflow::drain_head_overflow;
 #[cfg(test)]
@@ -1965,10 +1965,10 @@ struct ChannelMailboxState {
     /// is bounded and provably non-permanent.
     pending_user_dispatch_yield_count: u32,
     pending_user_dispatch_since: Option<Instant>,
-    /// #5937 — last time the drain advanced on this channel: a `UserOrAgent`
-    /// turn claimed the slot, or a live turn released it. The inbound order
-    /// gate fails open off this, never off a queued message's own age.
-    inbound_drain_progress_at: Option<Instant>,
+    /// #5937 — since when the drain has had a free slot it did not use. Only
+    /// idle time accrues, and no claim ever resets it, so a channel on a turn
+    /// cycle cannot hide a wedge and a fail-open cannot become a duty cycle.
+    inbound_stall_since: Option<Instant>,
     recently_valve_cleared_dispatch: Option<(MessageId, Instant)>,
     last_persistence: Option<QueuePersistenceContext>,
     recovery_started_at: Option<Instant>,
@@ -2023,9 +2023,11 @@ fn finalize_turn_state(
     preserve_queue: bool,
 ) -> FinishTurnResult {
     let removed_token = state.cancel_token.take();
-    if removed_token.is_some() {
-        note_inbound_drain_progress(state);
-    }
+    // #5937 — a slot this turn held was never a slot the drain could have used.
+    let held = state
+        .turn_started_instant
+        .filter(|_| removed_token.is_some());
+    pause_inbound_stall_for_turn(state, held);
     state.active_request_owner = None;
     state.active_user_message_id = None;
     state.active_turn_nonce = None;
@@ -2382,12 +2384,14 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     reply,
                 } => {
                     // #3167 BLOCKER-2 / #5937 — a claim yields to work that was
-                    // queued or reserved before it; see `inbound_order`.
-                    let yields =
-                        claim_yields(&mut state, turn_kind, user_message_id, admission_order);
+                    // queued or reserved before it; see `inbound_order`. A
+                    // claim that cannot start must disturb neither gate.
+                    let idle = state.cancel_token.is_none();
+                    let yields = idle
+                        && claim_yields(&mut state, turn_kind, user_message_id, admission_order);
                     let mut queue_exit_events = Vec::new();
                     let mut persistence_error = None;
-                    let can_start = state.cancel_token.is_none() && !yields;
+                    let can_start = idle && !yields;
                     if can_start && turn_kind == ActiveTurnKind::UserOrAgent {
                         let previous_queue = state.intervention_queue.clone();
                         queue_exit_events = purge_active_source_from_queue(
@@ -2421,16 +2425,15 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             // dequeue gates can treat a background turn as
                             // non-blocking.
                             state.active_turn_kind = turn_kind;
-                            // #3167 BLOCKER-2 / #5937 — retire the dequeue→claim
+                            // #3167 BLOCKER-2 — retire the dequeue→claim
                             // reservation only when this claim is the one it
-                            // reserved, and record the drain advancing.
+                            // reserved. (#5937: a claim is not drain progress.)
                             if turn_kind == ActiveTurnKind::UserOrAgent {
                                 settle_pending_dispatch_on_claim(
                                     &mut state,
                                     channel_id,
                                     user_message_id,
                                 );
-                                note_inbound_drain_progress(&mut state);
                             }
                             state.recovery_started_at = None;
                             state.turn_started_at = Some(Utc::now());
@@ -3364,7 +3367,11 @@ mod actor_hydrate_regression_tests {
             .join(format!("{}.dispatch", channel_id.get()))
     }
 
-    fn make_intervention(message_id: u64, text: &str, created_at: Instant) -> Intervention {
+    pub(super) fn make_intervention(
+        message_id: u64,
+        text: &str,
+        created_at: Instant,
+    ) -> Intervention {
         Intervention {
             author_id: UserId::new(1),
             author_is_bot: false,

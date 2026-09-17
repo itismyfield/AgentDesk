@@ -9,11 +9,11 @@ use super::{
     record_valve_cleared_pending_dispatch,
 };
 
-/// How long the drain may fail to advance before an inbound claim stops waiting
-/// behind queued work, measured from the last turn start or turn end. The
-/// idle-queue backstop runs every 60s, so three missed rounds mean the drain is
-/// wedged and holding arrivals back only piles them against the overflow cap.
-pub(super) const INBOUND_ORDER_FAIL_OPEN_AFTER: Duration = Duration::from_secs(180);
+/// How long the drain may fail to advance, counting only time the slot stood
+/// free for it to use, before an inbound claim stops waiting behind queued
+/// work. The idle-queue backstop runs every 60s, so three missed rounds mean
+/// the drain is wedged and holding arrivals back only feeds the overflow cap.
+pub(super) const INBOUND_ORDER_FAIL_OPEN_AFTER: Duration = Duration::from_secs(3 * 60);
 
 /// Whether a turn claim may take an idle slot ahead of queued work.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -26,9 +26,16 @@ pub(crate) enum TurnAdmissionOrder {
     BehindQueue,
 }
 
-/// The drain advanced: a `UserOrAgent` turn claimed the slot, or one ended.
-pub(super) fn note_inbound_drain_progress(state: &mut ChannelMailboxState) {
-    state.inbound_drain_progress_at = Some(Instant::now());
+/// A turn owned the slot from `turn_started` until now. A busy slot blocks the
+/// drain for an ordinary reason, so the stall clock skips that window — and
+/// skipping is not resetting: a turn that drained nothing buys no fresh window.
+pub(super) fn pause_inbound_stall_for_turn(
+    state: &mut ChannelMailboxState,
+    turn_started: Option<Instant>,
+) {
+    if let (Some(stalled_since), Some(held_since)) = (state.inbound_stall_since, turn_started) {
+        state.inbound_stall_since = Some(stalled_since + held_since.max(stalled_since).elapsed());
+    }
 }
 
 /// True when work that arrived earlier still owns the slot this claim wants.
@@ -56,12 +63,11 @@ fn background_defers_claim(state: &mut ChannelMailboxState, turn_kind: ActiveTur
     let yields = turn_kind.is_background() && (queue_non_empty || reservation_held);
     if yields && !queue_non_empty && reservation_held {
         state.pending_user_dispatch_yield_count += 1;
-        if state.pending_user_dispatch_yield_count >= PENDING_USER_DISPATCH_MAX_YIELDS {
-            if pending_dispatch_lease_is_orphaned(state)
-                && let Some(cleared_id) = clear_pending_user_dispatch(state)
-            {
-                record_valve_cleared_pending_dispatch(state, cleared_id);
-            }
+        if state.pending_user_dispatch_yield_count >= PENDING_USER_DISPATCH_MAX_YIELDS
+            && pending_dispatch_lease_is_orphaned(state)
+            && let Some(cleared_id) = clear_pending_user_dispatch(state)
+        {
+            record_valve_cleared_pending_dispatch(state, cleared_id);
         }
     }
     yields
@@ -69,11 +75,9 @@ fn background_defers_claim(state: &mut ChannelMailboxState, turn_kind: ActiveTur
 
 /// #5937 — true when this claim would jump ahead of inbound work sent earlier:
 /// a queued backlog, or a head `TakeNextSoft` handed out that has not claimed
-/// the slot yet. Three claims are not overtakes — the dequeued head itself (it
-/// is the drain), a queued copy of the claiming message (the start path purges
-/// it), and any claim on a channel whose drain has not advanced for
-/// `INBOUND_ORDER_FAIL_OPEN_AFTER`. That clock only runs while something is
-/// ahead of the claim, so an idle channel never accrues stall.
+/// the slot yet. Not overtakes: the dequeued head itself (it IS the drain, so
+/// it clears the stall), a queued copy of the claiming message, and any claim
+/// on a channel stalled for `INBOUND_ORDER_FAIL_OPEN_AFTER`.
 fn inbound_order_defers_claim(
     state: &mut ChannelMailboxState,
     user_message_id: MessageId,
@@ -87,6 +91,7 @@ fn inbound_order_defers_claim(
             .pending_user_dispatch_source_ids
             .contains(&user_message_id)
     {
+        state.inbound_stall_since = None;
         return false;
     }
     let foreign_backlog = state.intervention_queue.iter().any(|item| {
@@ -99,45 +104,29 @@ fn inbound_order_defers_claim(
     let reserved =
         state.pending_user_dispatch.is_some() && !pending_dispatch_lease_is_orphaned(state);
     if !foreign_backlog && !reserved {
-        state.inbound_drain_progress_at = None;
+        state.inbound_stall_since = None;
         return false;
     }
-    let stalled_since = *state
-        .inbound_drain_progress_at
-        .get_or_insert_with(Instant::now);
+    let stalled_since = *state.inbound_stall_since.get_or_insert_with(Instant::now);
     stalled_since.elapsed() < INBOUND_ORDER_FAIL_OPEN_AFTER
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Intervention, InterventionMode};
+    use super::super::actor_hydrate_regression_tests::make_intervention;
     use super::*;
-    use poise::serenity_prelude::UserId;
-
-    fn queued(message_id: u64, created_at: Instant) -> Intervention {
-        Intervention {
-            author_id: UserId::new(5_937),
-            author_is_bot: false,
-            message_id: MessageId::new(message_id),
-            queued_generation: 0,
-            source_message_ids: vec![MessageId::new(message_id)],
-            source_message_queued_generations: Vec::new(),
-            source_text_segments: Vec::new(),
-            text: "queued".to_string(),
-            mode: InterventionMode::Soft,
-            created_at,
-            reply_context: None,
-            has_reply_boundary: false,
-            merge_consecutive: false,
-            pending_uploads: Vec::new(),
-            voice_announcement: None,
-        }
-    }
 
     fn past_the_window() -> Instant {
         Instant::now()
             .checked_sub(INBOUND_ORDER_FAIL_OPEN_AFTER + Duration::from_secs(1))
-            .expect("test clock must reach past the fail-open window")
+            .expect("test clock reaches past the fail-open window")
+    }
+
+    fn with_queued(message_id: u64, created_at: Instant) -> ChannelMailboxState {
+        let mut state = ChannelMailboxState::default();
+        let queued = make_intervention(message_id, "queued", created_at);
+        state.intervention_queue.push(queued);
+        state
     }
 
     fn defers(state: &mut ChannelMailboxState, claim: u64) -> bool {
@@ -148,65 +137,40 @@ mod tests {
         )
     }
 
-    /// A message that merely waited a long time — behind a long turn, or behind
-    /// a parked capped retry — is not evidence of a wedged drain.
+    /// Waiting a long time behind a long turn is not evidence of a wedge.
     #[test]
     fn an_aged_queue_item_does_not_fail_open_while_the_drain_advances() {
-        let mut state = ChannelMailboxState::default();
-        state
-            .intervention_queue
-            .push(queued(5_937_401, past_the_window()));
-        note_inbound_drain_progress(&mut state);
+        let mut state = with_queued(5_937_401, past_the_window());
 
-        assert!(
-            defers(&mut state, 5_937_402),
-            "an arrival must still wait behind an old message when the drain is moving"
-        );
+        assert!(defers(&mut state, 5_937_402), "old work still leads");
     }
 
-    /// Merging rewrites the queued head's `created_at`, so message age can be
-    /// held at zero indefinitely by a user who keeps typing into a wedged
-    /// channel. The stall clock is not resettable that way.
+    /// Merging rewrites the queued head's `created_at`, so a user typing into a
+    /// wedged channel could hold message age at zero forever. Stall cannot be.
     #[test]
     fn a_stalled_drain_fails_open_even_when_every_queued_item_is_fresh() {
-        let mut state = ChannelMailboxState::default();
-        state
-            .intervention_queue
-            .push(queued(5_937_411, Instant::now()));
-        state.inbound_drain_progress_at = Some(past_the_window());
+        let mut state = with_queued(5_937_411, Instant::now());
+        state.inbound_stall_since = Some(past_the_window());
 
-        assert!(
-            !defers(&mut state, 5_937_412),
-            "a drain that has not advanced past the window must let arrivals through"
-        );
+        assert!(!defers(&mut state, 5_937_412), "a wedged drain yields");
     }
 
-    /// The #3167 BLOCKER-2 reservation guards the dequeue→claim window, where
-    /// the queue is empty; an aged queue entry must not answer for it.
+    /// The #3167 BLOCKER-2 reservation guards a window in which the queue is
+    /// empty, so an aged queue entry must not answer for it.
     #[test]
     fn an_aged_queue_item_does_not_release_a_live_reservation() {
-        let mut state = ChannelMailboxState::default();
-        state
-            .intervention_queue
-            .push(queued(5_937_421, past_the_window()));
+        let mut state = with_queued(5_937_421, past_the_window());
         state.pending_user_dispatch = Some(MessageId::new(5_937_422));
-        note_inbound_drain_progress(&mut state);
 
-        assert!(
-            defers(&mut state, 5_937_423),
-            "a live reservation holds the slot regardless of how old the backlog is"
-        );
+        assert!(defers(&mut state, 5_937_423), "the reservation holds");
     }
 
     #[test]
     fn nothing_ahead_of_the_claim_clears_the_stall_clock() {
         let mut state = ChannelMailboxState::default();
-        state.inbound_drain_progress_at = Some(past_the_window());
+        state.inbound_stall_since = Some(past_the_window());
 
         assert!(!defers(&mut state, 5_937_431));
-        assert!(
-            state.inbound_drain_progress_at.is_none(),
-            "stall must not accrue on a channel with nothing queued or reserved"
-        );
+        assert!(state.inbound_stall_since.is_none(), "no stall when idle");
     }
 }
