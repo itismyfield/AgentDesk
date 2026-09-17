@@ -413,6 +413,69 @@ mod tests {
         state
     }
 
+    /// #5981 — a stream tick can be the first write to land the native SID on
+    /// the durable row. The allocation witness has to ride along with it: once
+    /// the row is ahead of the birth-time witness, every later
+    /// `preserve_admitted_source` compares an already-advanced row, declines,
+    /// and the dormant claim a lost source falls back on refuses the very
+    /// episode it owns.
+    #[test]
+    fn stream_tick_stamp_carries_the_allocation_witness() {
+        use inflight::InflightEpisodePin;
+        let root = tempfile::tempdir().expect("runtime root");
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+
+        let channel = ChannelId::new(5_981_101);
+        let anchor = MessageId::new(5_981_102);
+        let mut admitted = synthetic_state(channel, anchor, "witness-5981", false);
+        admitted.relay_ownership_only = false;
+        admitted.session_id = None;
+        admitted.current_msg_id = 5_981_103;
+        admitted.external_turn_id = Some("external-witness-5981".into());
+        let actor = Arc::new(CancelToken::new());
+        admitted.turn_nonce = actor.turn_nonce().map(str::to_owned);
+        inflight::save_inflight_state(&admitted).expect("seed the admitted row");
+        assert!(bridge_handoff::record(&admitted, Some(&actor), None));
+
+        let before_pin = InflightEpisodePin::from_state(&admitted);
+        let mut baseline = admitted.clone();
+        let mut local = admitted.clone();
+        local.session_id = Some("native-session-5981".into());
+        assert_eq!(
+            inflight::save_stream_tick_state_if_bridge_authority(
+                &mut baseline,
+                &mut local,
+                &inflight::InflightTurnIdentity::from_state(&admitted),
+                admitted.current_msg_id,
+                admitted.current_msg_len,
+                "test::5981_stream_tick_witness",
+            ),
+            inflight::GuardedSaveOutcome::Saved,
+        );
+        assert_eq!(local.session_id.as_deref(), Some("native-session-5981"));
+        assert!(!before_pin.matches_state(&local));
+        assert!(
+            Arc::ptr_eq(
+                &bridge_handoff::retained_actor(&local).unwrap().unwrap(),
+                &actor
+            ),
+            "the witness follows its own episode across the stream-tick stamp"
+        );
+
+        // The same carry cannot hand a successor allocation A's proof.
+        let mut successor = local.clone();
+        successor.turn_nonce = Some("5981-successor-nonce".into());
+        bridge_handoff::preserve_stamped_source(
+            &InflightEpisodePin::from_state(&local),
+            &successor,
+        );
+        assert!(bridge_handoff::retained_actor(&successor).is_err());
+        assert!(Arc::ptr_eq(
+            &bridge_handoff::retained_actor(&local).unwrap().unwrap(),
+            &actor
+        ));
+    }
+
     #[test]
     fn admitted_source_witness_advances_only_the_original_allocation() {
         use inflight::InflightEpisodePin;
