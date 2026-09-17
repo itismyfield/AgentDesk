@@ -352,6 +352,71 @@ S6a `7d97f385ad`·`a9407c0ba4`·`f219523758`/PR #5495·#5496·#5497)을 직접 �
 
 ---
 
+## §12-2 추가 — T6 도달 불가 분기(슬라이스 3) **철거 보류(HOLD)** (2026-09-17)
+
+base `origin/main d72504ca89`. census `CENSUS-UNRECORDED-2026-09-17.md` 의 `## 도달 불가 분기`
+절은 단일 원인 `queue_status_card_enabled()`(`router/queue_status_presentation.rs:4-6`, 인자 없는
+`const fn` 이 `false` 를 반환) 아래 **756줄**을 "컴파일은 되지만 런타임에 도달 불가" 로 올렸다.
+**이 슬라이스는 그 756줄을 한 줄도 철거하지 않는다** — `git diff --numstat origin/main -- src/`
+기준 삭제 0줄이다.
+
+**판정: 영구 폐기가 아니라 꺼둔 피처 플래그다.** 상수가 `false` 라는 사실은 도달 불가성의
+증거이지 폐기의 증거가 아니다. 이 구별이 이 슬라이스의 전부다 — 지우는 순간 되켤 방법이 사라진다.
+
+### 판정 근거 (전부 실측)
+
+| 확인 항목 | 실측 결과 | 가리키는 방향 |
+|---|---|---|
+| 플래그 도입 커밋·이슈 | `5976708d40`(2026-07-17, PR #4597, 이슈 #4248·#4329). 파일은 이 커밋에서 신설됐고 상수는 **처음부터 `false`** 다 — `true` 였다가 뒤집힌 적이 없다 | 중립 |
+| 그 이슈들의 종결 사유 | #4248·#4329 둘 다 `CLOSED/COMPLETED`(2026-07-16). 다만 둘의 스코프는 "리액션 UX 를 넣는다" 이고 **카드 경로의 폐기를 선언하지 않는다** | 중립 |
+| 카드 경로를 소유한 이슈 | **#4754 `OPEN`**, `priority:P1`, `status:landed-partial`, 최종 갱신 2026-09-06. 제목이 "button-driven manual steering + **per-message busy-queue placeholders**" 다 | **되켤 수 있다** |
+| #4754 가 이 코드를 어떻게 다루는가 | 이슈 본문 Feasibility 절이 `queue_status_presentation.rs:1-6` 과 `queue_effects.rs:789-807`·`:808-930` 을 지목하며 "'One placeholder per input' requires **INVERTING this coalescing policy** — the biggest lift" 라고 적는다. 철거 대상이 아니라 **반전 대상**으로 기재돼 있다 | **되켤 수 있다** |
+| 되켜는 구현의 실재 | 브랜치 `feat/4754-manual-steer-button-v2` 의 `f680658189`(2026-08-02, PR #5107, slice B)가 이 상수를 **`false` → `true`** 로 뒤집고, doc 를 "Queue acceptance has one channel-scoped card. The card exposes the explicit manual-steer control" 로 바꾸고, 테스트를 `queued_user_messages_render_one_manual_steer_card` 로 개명하며, `queue_effects.rs` +47 · `intake_gate.rs` +8 을 **이 카드 경로 위에** 얹는다 | **되켤 수 있다** |
+| 되켜는 작업의 현재 상태 | PR #5107 은 `CLOSED`(미머지, 2026-08-02), 브랜치는 origin/main 에 694 커밋 뒤처져 있다. 그러나 #4754 의 최신 판정 코멘트는 "**설계 GO 는 유지하고 순서만 뒤로 둔다**" 이며 T5 와의 파일 충돌을 연기 사유로 명시한다 — 취소가 아니라 **연기** | **되켤 수 있다** |
+| 코드의 `#[allow(dead_code)] // #NNNN` 마킹 | 이 가족 어디에도 **없다**. `render_visible_queued_ack` 가 `debug_assert!(queue_status_card_enabled())` 로 시작하지만, 이는 "죽었다" 가 아니라 "이 경로는 플래그가 켜져야만 들어온다" 는 **전제 선언**이다 | 폐기 근거 부재 |
+| 문서의 되켤 계획 | #4754 코멘트가 다섯 계약(live identity / 복원 안전성 / replay 멱등 / capacity / stale click)과 **계약 6(주입 비인터럽트성)** 을 재개 시 선행 확인 항목으로 박제해 두었다. 설계 전문 `scratchpad/design-4754-authority-r3.md` 는 유실됐고 그 코멘트의 계약표가 정본이다 | **되켤 수 있다** |
+
+### 철거 대상이 **다른 살아 있는 계약의 입력**이기도 하다
+
+`reuse_any_queued_placeholder_for_channel`(`queue_effects.rs:849-950`)은 census 가 "도달 불가
+함수에서만 호출됨" 으로 분류한 102줄이지만, **#5035 Contract G 의 모듈 문서가 이 함수를 기전으로
+삼아 서술돼 있다** — `placeholder_controller/queued_card_gate.rs:4-6`·`:37` 이 "하나의 카드가 여러
+큐 항목을 대표한다(이 함수가 소유권을 최신 도착으로 옮기므로)" 와 "re-key 된 고아 매핑을 이
+함수가 여전히 주워 갈 수 있다" 를 Contract G 의 오차 방향 논증에 쓴다. 그 파일은 **다른 레인
+소유(이 슬라이스의 금지 파일)** 다. 함수만 지우면 손댈 수 없는 파일의 계약 서술이 근거를 잃는다.
+
+또한 #4754 의 마지막 코멘트는 `reuse_any_queued_placeholder_for_channel` 과 channel-scope re-key
+의 production 제거 여부를 **#5141 item 1 흡수의 수용 기준(census 항목)** 으로 걸어 두었다. 지금
+데드코드 명목으로 먼저 지우면 그 수용 기준은 측정 불가가 된다 — "per-entry 전환의 결과로
+사라졌는가" 를 물을 수 있어야 하는데, 무관한 사유로 이미 사라져 있게 된다.
+
+### CI 배선 결합
+
+`queue_status_presentation::tests` 는 fast-check 레인의 고정 선택자다 — `justfile:123` 과
+`tests/test_fast_check_ci_wiring.py:137` 이 같은 명령 문자열을 핀으로 들고 있다. 모듈을 지우면 이
+두 파일을 함께 고쳐야 하고, 그것은 "도달 불가 분기 정리" 가 아니라 CI 레인 축소다.
+
+### 이 슬라이스가 실제로 한 것
+
+코드 삭제 없음. 대신 재발 방지 기록 2건:
+
+1. `router/queue_status_presentation.rs` 의 상수에 **"parked, not retired"** doc 를 붙여
+   #4754·`f680658189`·PR #5107 을 코드 자리에서 가리키게 했다. 다음 census 가 `false` 한 줄만
+   읽고 같은 오판을 반복하지 않도록 하는 것이 목적이다. 동작 변경 없음.
+2. 이 절. **이 가족은 인벤토리상 "철거 후보" 가 아니라 "보류(HOLD)" 다.**
+
+### 철거를 다시 제안하기 전에 참이어야 할 것
+
+아래 중 **하나라도** 성립하지 않으면 재제안은 기각이다.
+
+- #4754 가 `CLOSED` 이고 종결 사유가 "카드 UX 폐기" 로 명시돼 있다 (현재: `OPEN`/P1).
+- 또는 #4754 가 카드 없는 설계로 재작성돼, per-message placeholder 요구가 스펙에서 빠졌다.
+- `feat/4754-manual-steer-button-v2` 가 삭제·폐기됐고 되살릴 계획이 없다.
+- #5141 item 1 의 수용 기준에서 `reuse_any_queued_placeholder_for_channel` 항목이 해소됐다.
+- `queued_card_gate.rs` 의 Contract G 서술이 이 함수를 더 이상 기전으로 쓰지 않는다.
+
+---
+
 ## S1 — cohort infra (배포 no-op) · 브랜치 `feat/5464-t5-s1-cohort`
 
 **S1: 대체한 레거시 경로 없음(순수 추가).**
