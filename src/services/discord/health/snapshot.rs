@@ -33,8 +33,8 @@ use super::{BotTokenReloadScopes, HealthRegistry, bot_token_reload_scopes};
 use crate::services::discord;
 use crate::services::discord::SharedData;
 use crate::services::discord::relay_health::{
-    FrontierProvenanceReport, RelayActiveTurn, RelayHealthSnapshot, RelayStallClassifier,
-    RelayStallState,
+    DurableFrontierObservation, FrontierProvenanceReport, RelayActiveTurn, RelayHealthSnapshot,
+    RelayStallClassifier, RelayStallState,
 };
 use crate::services::discord::relay_recovery::authority_observation::{
     self, RelayAuthorityObservationReport,
@@ -73,6 +73,9 @@ pub struct WatcherStateSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub watcher_owner_channel_id: Option<u64>,
     pub last_relay_offset: u64,
+    /// #5943: the DURABLE half of #5071's pair, which a restart cannot zero.
+    #[serde(skip)]
+    pub(in crate::services::discord) durable_frontier: DurableFrontierObservation,
     pub inflight_state_present: bool,
     pub last_relay_ts_ms: i64,
     /// Current tmux output JSONL length when an inflight `output_path` is known.
@@ -678,16 +681,12 @@ async fn watcher_state_snapshot_for_shared(
         tmux_session_alive,
         session.inflight_state_present,
     );
-    // #5071 T4-B4 (4987 S4): compare the row's transcript coordinate against
-    // the registry's independently resolved one by FILE IDENTITY. This does
-    // NOT replace T4-B0's path-string record in `SessionEnrichment`: that one
-    // is untouched and has already fired for this poll inside
-    // `SessionEnrichment::load`, through its
-    // `record_transcript_source_divergence`, so on a split the two records
-    // coexist until a follow-up slice retires B0's. Descriptive record only —
-    // the outcome feeds no verdict, no classifier, and no recovery here;
-    // T4-B6 owns composition. Unix-gated
-    // with the reachability tree because identity is the `(dev, ino)` pair.
+    // #5071 T4-B4 (4987 S4): compare the row's transcript coordinate against the
+    // registry's independently resolved one by FILE IDENTITY. Does NOT replace
+    // T4-B0's path-string record in `SessionEnrichment`, untouched and already
+    // fired for this poll; on a split the two coexist until a follow-up retires
+    // B0's. Descriptive only — no verdict, no classifier, no recovery here (T4-B6
+    // owns composition). Unix-gated with reachability: identity is `(dev, ino)`.
     #[cfg(unix)]
     super::reachability::divergence::observe_row_coordinate_divergence(
         provider_name,
@@ -736,6 +735,7 @@ async fn watcher_state_snapshot_for_shared(
         tmux_session: authoritative_tmux_session,
         watcher_owner_channel_id: session.watcher_owner_channel_id,
         last_relay_offset: session.last_relay_offset,
+        durable_frontier: session.frontier_provenance.durable_observation,
         inflight_state_present: session.inflight_state_present,
         last_relay_ts_ms: session.last_relay_ts_ms,
         last_capture_offset: session.last_capture_offset,

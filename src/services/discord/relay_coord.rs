@@ -35,19 +35,6 @@ pub(in crate::services) struct TmuxRelayCoord {
     pub(in crate::services::discord) confirmed_end_offset: Arc<std::sync::atomic::AtomicU64>,
     pub(in crate::services::discord) reset_state:
         std::sync::Mutex<relay_health::FrontierResetState>,
-    /// #5943: the read position the live watcher last committed for this
-    /// channel — `tmux_watcher::loop_poll_prologue`'s `current_offset`,
-    /// republished on every poll through the same write-back that commits it.
-    /// 0 = no watcher has committed one in this process lifetime.
-    ///
-    /// NOT a delivery frontier and never read as one; `confirmed_end_offset`
-    /// remains the sole relay-dedup authority. It exists so a redrive can tell
-    /// a frontier that names bytes the watcher has ALREADY READ apart from one
-    /// that names where the watcher still is — the two are identical at the
-    /// byte level (both are just `u64`) and opposite in meaning. Lags the
-    /// watcher by at most one poll, and only ever downward, so a redrive
-    /// reading it fails OPEN rather than refusing a rewind it should allow.
-    pub(in crate::services::discord) watcher_read_offset: Arc<std::sync::atomic::AtomicU64>,
     /// Wall-clock timestamp (ms since epoch) of the most recent confirmed
     /// relay. 0 = no confirmed relay observed yet. Read by the
     /// `watcher-state` observability endpoint (#964). Monotonic is NOT
@@ -87,7 +74,6 @@ impl TmuxRelayCoord {
             cancel_handoffs: Default::default(),
             confirmed_end_offset: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             reset_state: std::sync::Mutex::new(relay_health::FrontierResetState::default()),
-            watcher_read_offset: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_relay_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             reconnect_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             confirmed_end_generation_mtime_ns: Arc::new(std::sync::atomic::AtomicI64::new(0)),
@@ -97,35 +83,5 @@ impl TmuxRelayCoord {
 
     pub(in crate::services::discord) fn note_relay_progress_heartbeat(&self, now_ms: i64) {
         self.last_relay_ts_ms.store(now_ms, Ordering::Release);
-    }
-}
-
-impl super::SharedData {
-    /// #5943: record the read position the watcher is committing and hand the
-    /// same value straight back, so the published offset cannot drift from the
-    /// one the caller actually commits — the store rides ON the write-back
-    /// rather than beside it.
-    ///
-    /// Lives here rather than beside `committed_relay_offset` in the module root
-    /// because that root is a registered giant (`scripts/giant_file_registry.toml`,
-    /// #4712) whose production line count may not grow.
-    pub(in crate::services::discord) fn publish_watcher_read_offset(
-        &self,
-        channel_id: ChannelId,
-        read_offset: u64,
-    ) -> u64 {
-        self.tmux_relay_coord(channel_id)
-            .watcher_read_offset
-            .store(read_offset, Ordering::Release);
-        read_offset
-    }
-
-    /// #5943: the last read position a watcher published for this channel, or 0
-    /// when none has. See [`TmuxRelayCoord::watcher_read_offset`] for why a stale
-    /// read of this value can only make a caller more permissive.
-    pub(in crate::services::discord) fn watcher_read_offset(&self, channel_id: ChannelId) -> u64 {
-        self.tmux_relay_coord(channel_id)
-            .watcher_read_offset
-            .load(Ordering::Acquire)
     }
 }

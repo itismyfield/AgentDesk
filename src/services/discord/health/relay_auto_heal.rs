@@ -6,7 +6,7 @@ use poise::serenity_prelude::ChannelId;
 use super::snapshot::WatcherStateSnapshot;
 use super::{HealthRegistry, stall_liveness};
 use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
-use crate::services::discord::relay_health::RelayStallState;
+use crate::services::discord::relay_health::{DurableFrontierObservation, RelayStallState};
 use crate::services::discord::relay_recovery::{
     self, RelayRecoveryActionKind, RelayRecoveryApplySource, RelayRecoveryError,
 };
@@ -454,35 +454,42 @@ impl HealthRegistry {
             return Ok(false);
         }
 
-        let (applied, reattached, noop_cooldown_secs) = if nudge_existing_watcher_for_backlog(
+        let nudge = nudge_existing_watcher_for_backlog(
             &shared,
             provider,
             &snapshot,
             channel_id,
             now_unix_secs,
             token,
-        ) {
-            (true, false, None)
-        } else {
-            if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot)
-                || !shared.relay_frontier_token_is_current(channel_id, token)
-            {
-                return Ok(false);
+        );
+        let (applied, reattached, noop_cooldown_secs) = match nudge {
+            RedriveNudge::Enqueued => (true, false, None),
+            // #5943: a refusal is a NO-OP, never an escalation. `ReattachWatcher`
+            // reseeds from the same emptied coordinate map, so falling through
+            // would re-post the transcript by a second route. The alarm was
+            // emitted where the evidence was; the next poll re-decides.
+            RedriveNudge::RefusedUnrestored(_) => return Ok(false),
+            RedriveNudge::NotEnqueued => {
+                if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot)
+                    || !shared.relay_frontier_token_is_current(channel_id, token)
+                {
+                    return Ok(false);
+                }
+                let response = relay_recovery::auto_apply_relay_recovery_for_shared(
+                    self,
+                    shared.clone(),
+                    provider,
+                    channel_id.get(),
+                    RelayRecoveryActionKind::ReattachWatcher,
+                    RelayRecoveryApplySource::ProbeAutoHeal,
+                )
+                .await?;
+                (
+                    response.applied,
+                    true,
+                    Some(response.decision.auto_heal.window_secs),
+                )
             }
-            let response = relay_recovery::auto_apply_relay_recovery_for_shared(
-                self,
-                shared.clone(),
-                provider,
-                channel_id.get(),
-                RelayRecoveryActionKind::ReattachWatcher,
-                RelayRecoveryApplySource::ProbeAutoHeal,
-            )
-            .await?;
-            (
-                response.applied,
-                true,
-                Some(response.decision.auto_heal.window_secs),
-            )
         };
         if applied {
             if !shared.relay_frontier_token_is_current(channel_id, token) {
@@ -595,17 +602,17 @@ fn nudge_existing_watcher_for_backlog(
     channel_id: ChannelId,
     now_unix_secs: i64,
     token: RelayFrontierToken,
-) -> bool {
+) -> RedriveNudge {
     #[cfg(test)]
     let _test_clock = stall_liveness::set_redrive_grace_test_clock(
         now_unix_secs,
         snapshot.inflight_identity.clone(),
     );
     if !should_redrive_undelivered_backlog(provider, channel_id, snapshot, token) {
-        return false;
+        return RedriveNudge::NotEnqueued;
     }
     let Some(_frontier_mutation) = shared.acquire_relay_frontier_mutation(channel_id, token) else {
-        return false;
+        return RedriveNudge::NotEnqueued;
     };
 
     let owner_channel_id = snapshot
@@ -613,16 +620,17 @@ fn nudge_existing_watcher_for_backlog(
         .map(ChannelId::new)
         .unwrap_or(channel_id);
     let Some(watcher) = shared.tmux_watchers.get(&owner_channel_id) else {
-        return false;
+        return RedriveNudge::NotEnqueued;
     };
     if snapshot.tmux_session.as_deref() != Some(watcher.tmux_session_name.as_str()) {
-        return false;
+        return RedriveNudge::NotEnqueued;
     }
     if snapshot.inflight_output_path.as_deref() != Some(watcher.output_path.as_str()) {
-        return false;
+        return RedriveNudge::NotEnqueued;
     }
-    if !nudge_watcher_handle_for_backlog(shared, snapshot, watcher.value(), channel_id, token) {
-        return false;
+    match nudge_watcher_handle_for_backlog(shared, snapshot, watcher.value(), channel_id, token) {
+        RedriveNudge::Enqueued => {}
+        declined => return declined,
     }
 
     tracing::warn!(
@@ -635,98 +643,71 @@ fn nudge_existing_watcher_for_backlog(
         unread_bytes = ?snapshot.unread_bytes,
         "redrive nudged existing tmux watcher to re-read undelivered backlog from confirmed frontier"
     );
-    true
+    RedriveNudge::Enqueued
 }
 
-/// #5943: why a redrive declined to move a live watcher's resume point.
-///
-/// Both arms are fail-closed in the same way: the redrive leaves
-/// `resume_offset` exactly as it found it, so the watcher keeps reading FORWARD
-/// from where it is instead of re-reading — and re-posting — a prefix it has
-/// already relayed. The measured signature of that re-post is a message whose
-/// prefix matches an earlier one and whose body has since grown, which is why
-/// "no duplicates" has to be read as "no re-posts" and not as "no byte-identical
-/// messages".
+/// #5943: the durable witness that says a redrive's frontier is not a
+/// measurement. Carries the offset so the alarm names the evidence and not only
+/// the verdict.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RedriveResumeRefusal {
-    /// No channel is confirmed to own delivery for this backlog
-    /// (`watcher_owner_channel_id` is `None`). Both frontier witnesses are read
-    /// for the POLLED channel, so without an owner nothing says the polled
-    /// channel is where delivery happened — the frontier is unattributed rather
-    /// than measured, and a redrive has no ground to rewind anyone to it
-    /// (#5175's `NO delivery owner` frames are the live shape of this).
-    DeliveryOwnerUnknown,
-    /// The frontier names a point BEHIND what the watcher has already read, and
-    /// neither witness ever recorded a delivery — so that point is the
-    /// `unwrap_or` / never-advanced zero rather than a measurement.
-    UnwitnessedRewind,
+struct UnrestoredFrontier {
+    witnessed: u64,
 }
 
-impl RedriveResumeRefusal {
-    /// Structured refusal reason, in the same shape as the incumbent
-    /// `redrive_frontier_no_progress` event so operators can count all three
-    /// refusals off one field.
-    fn event(self) -> &'static str {
-        match self {
-            Self::DeliveryOwnerUnknown => "redrive_delivery_owner_unknown",
-            Self::UnwitnessedRewind => "redrive_unwitnessed_rewind",
-        }
-    }
+/// #5943: what a redrive attempt did, at the granularity the caller's next move
+/// depends on.
+///
+/// Three-valued rather than `bool` because the two ways of not enqueuing want
+/// OPPOSITE follow-ups: `NotEnqueued` still escalates to a watcher reattach, and
+/// [`Self::RefusedUnrestored`] must not — the reattach reseeds from the same
+/// emptied coordinate map and would re-post the transcript by a second route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RedriveNudge {
+    Enqueued,
+    RefusedUnrestored(UnrestoredFrontier),
+    NotEnqueued,
+}
 
-    fn message(self) -> &'static str {
-        match self {
-            Self::DeliveryOwnerUnknown => {
-                "redrive refused a frontier that no confirmed delivery owner vouches for"
-            }
-            Self::UnwitnessedRewind => {
-                "redrive refused to rewind a live watcher onto a frontier that never witnessed a delivery"
-            }
-        }
+#[cfg(test)]
+impl RedriveNudge {
+    fn enqueued(self) -> bool {
+        matches!(self, Self::Enqueued)
     }
 }
 
-/// #5943: the resume point a redrive may hand a live watcher, or why it may hand
-/// it none.
+/// #5943: the resume point a redrive may hand a live watcher, or the durable
+/// witness that refuses it. Contract I17 carries the full record.
 ///
-/// **Rewinding is the redrive's job, not its defect.** The backlog it re-drives
-/// is bytes the watcher READ but never relayed, so `requested_frontier <
-/// watcher_read_offset` is the ordinary healthy shape — the 2026-09-16 trace for
-/// channel 1479671298497183835 shows eight such redrives between 12:42 and
-/// 13:53, each chasing 53_037..134_917 unread bytes and each advancing the
-/// frontier afterwards. Refusing every rewind would retire the recovery path and
-/// turn this guard into the silent loss it exists to prevent.
+/// Direction is NOT consulted: the backlog a redrive re-drives is bytes the
+/// watcher READ but never relayed, so a frontier behind the read head is the
+/// ordinary healthy shape and refusing rewinds as a class would retire recovery.
+/// What is refused is a ZERO frontier that a durable delivery contradicts — the
+/// 2026-09-16T14:13:37Z..14:21:32Z shape on channel 1479671298497183835, five
+/// redrives at `last_relay_offset=0` with `unread_bytes=24_553_403` after a
+/// restart dropped the in-memory coordinate while the watcher kept reading. That
+/// zero meant "not restored yet", and no property of the VALUE separates it from
+/// "nothing delivered".
 ///
-/// What is refused is a rewind onto a frontier that never witnessed a delivery
-/// at all. At 14:13:37Z..14:21:32Z on that same channel five consecutive
-/// redrives ran with `last_relay_offset=0` and `unread_bytes=24_553_403` — the
-/// entire transcript — because a dcserver restart had dropped the in-memory
-/// coordinate while the watcher kept reading. The zero there did not mean
-/// "nothing has been delivered", it meant "not restored yet", and nothing about
-/// the VALUE separates those two. Provenance does: a frontier both of whose
-/// witnesses are still at zero has measured nothing, so it cannot be the ground
-/// for moving a watcher backwards over bytes it already relayed.
-///
-/// A watcher that has genuinely read nothing yet is not rewound BY a zero
-/// frontier (`0 < 0` is false), so the id-0 / fresh-session resume — the case
-/// where offset zero really is the right answer — still passes.
+/// The witness has to survive that restart, and only the durable one does: both
+/// of I12's terms live in `SharedData::tmux_relay_coords` (and `redrive_grace`
+/// forces them equal, so their `max()` is a no-op rather than a second witness),
+/// and the watcher's own read position was process-local too, parked at the same
+/// zero by the same event. A nonzero frontier is admitted unchanged, including
+/// one BEHIND the witness — that gap is the sink's confirm lag over an
+/// already-persisted batch, which is what recovery is for.
 fn redrive_resume_point(
     last_relay_offset: u64,
     committed_offset: u64,
-    watcher_read_offset: u64,
-    delivery_owner_confirmed: bool,
-) -> Result<u64, RedriveResumeRefusal> {
-    if !delivery_owner_confirmed {
-        return Err(RedriveResumeRefusal::DeliveryOwnerUnknown);
-    }
+    durable_frontier: DurableFrontierObservation,
+) -> Result<u64, UnrestoredFrontier> {
     let requested_frontier = last_relay_offset.max(committed_offset);
-    let rewinds_the_watcher = requested_frontier < watcher_read_offset;
-    // Both witnesses are delivery frontiers, so their maximum is past zero
-    // exactly when at least one of them recorded a delivery.
-    let frontier_witnessed_a_delivery = requested_frontier > 0;
-    if rewinds_the_watcher && !frontier_witnessed_a_delivery {
-        return Err(RedriveResumeRefusal::UnwitnessedRewind);
+    if requested_frontier > 0 {
+        return Ok(requested_frontier);
     }
-    Ok(requested_frontier)
+    match durable_frontier.durable_delivery_witness() {
+        Some(witnessed) => Err(UnrestoredFrontier { witnessed }),
+        None => Ok(requested_frontier),
+    }
 }
 
 fn nudge_watcher_handle_for_backlog(
@@ -735,48 +716,47 @@ fn nudge_watcher_handle_for_backlog(
     watcher: &crate::services::discord::TmuxWatcherHandle,
     channel_id: ChannelId,
     token: RelayFrontierToken,
-) -> bool {
+) -> RedriveNudge {
     if watcher.cancel.load(Ordering::Relaxed)
         || watcher.heartbeat_stale()
         || watcher.paused.load(Ordering::Relaxed)
     {
-        return false;
+        return RedriveNudge::NotEnqueued;
     }
     let Ok(mut resume_offset) = watcher.resume_offset.lock() else {
-        return false;
+        return RedriveNudge::NotEnqueued;
     };
     if redrive_should_yield_to_live_relay(shared, channel_id, snapshot)
         || !shared.relay_frontier_token_is_current(channel_id, token)
     {
-        return false;
+        return RedriveNudge::NotEnqueued;
     }
-    // The read position to compare against belongs to the watcher this redrive
-    // is about to move, which is the DELIVERY OWNER's — the polled channel's slot
-    // would be a different watcher's position, or nobody's.
-    let owner_channel_id = snapshot.watcher_owner_channel_id.map(ChannelId::new);
-    let watcher_read_offset = owner_channel_id.map_or(0, |owner| shared.watcher_read_offset(owner));
+    // The witness is read off the snapshot rather than out of `SharedData`: the
+    // coordinate map is the term this guard cannot trust (a restart empties it),
+    // and any read through `SharedData::tmux_relay_coord` CREATES the entry it
+    // was asked about, which would erase the very absence a provenance check
+    // downstream of here still needs to see.
     let requested_frontier = match redrive_resume_point(
         snapshot.last_relay_offset,
         token.committed_offset,
-        watcher_read_offset,
-        owner_channel_id.is_some(),
+        snapshot.durable_frontier,
     ) {
         Ok(frontier) => frontier,
-        Err(refusal) => {
+        Err(UnrestoredFrontier { witnessed }) => {
             tracing::warn!(
                 target: "agentdesk::discord::relay_recovery",
-                event = refusal.event(),
+                event = "redrive_unrestored_frontier",
                 channel_id = channel_id.get(),
                 watcher_owner_channel_id = ?snapshot.watcher_owner_channel_id,
                 requested_frontier = snapshot.last_relay_offset.max(token.committed_offset),
-                watcher_read_offset,
+                durable_relayed_start = witnessed,
                 pending_frontier = ?*resume_offset,
                 committed_frontier = token.committed_offset,
                 unread_bytes = ?snapshot.unread_bytes,
-                "{}",
-                refusal.message()
+                "redrive refused a zero frontier that a durable delivery contradicts; \
+                 the in-memory frontier is unrestored, not empty"
             );
-            return false;
+            return RedriveNudge::RefusedUnrestored(UnrestoredFrontier { witnessed });
         }
     };
     if resume_offset
@@ -793,7 +773,7 @@ fn nudge_watcher_handle_for_backlog(
             unread_bytes = ?snapshot.unread_bytes,
             "redrive refused to enqueue the same non-progressing frontier twice"
         );
-        return false;
+        return RedriveNudge::NotEnqueued;
     }
     *resume_offset = Some(requested_frontier);
     // #5943 (contract I16): a redrive re-reads an UNDELIVERED backlog —
@@ -813,7 +793,7 @@ fn nudge_watcher_handle_for_backlog(
     // stops doing so before the consumers have read it. The turn-start handoffs
     // in `turn_bridge::runtime_handoff_loop` keep their own clears: those really
     // do open a new turn.
-    true
+    RedriveNudge::Enqueued
 }
 
 async fn apply_orphan_pending_token_cleanup(
@@ -922,6 +902,85 @@ mod tests {
         }
     }
 
+    const GEN_NS: i64 = 1_757_000_000_000_000_000;
+
+    /// The durable witness as a restart actually leaves it: the row survived,
+    /// the live coordinate it would be compared against did not, so `observe`
+    /// can only answer `GenerationUnresolved` — the shape a guard keyed on
+    /// `RowPresent` reads `None` from.
+    fn restart_durable_witness(relayed_start: u64) -> DurableFrontierObservation {
+        DurableFrontierObservation::GenerationUnresolved {
+            relayed_start,
+            row_generation_ns: Some(GEN_NS),
+            live_generation_ns: None,
+        }
+    }
+
+    /// One live watcher, its resume slot, and a backlog snapshot for the same
+    /// channel — the shape every handle-level `_5943` case starts from.
+    struct RedriveCase {
+        shared: Arc<SharedData>,
+        watcher: crate::services::discord::TmuxWatcherHandle,
+        resume_offset: Arc<Mutex<Option<u64>>>,
+        turn_delivered: Arc<AtomicBool>,
+        snapshot: WatcherStateSnapshot,
+        channel_id: ChannelId,
+    }
+
+    impl RedriveCase {
+        fn nudge(&self) -> RedriveNudge {
+            nudge_handle(&self.shared, &self.snapshot, &self.watcher, self.channel_id)
+        }
+
+        fn resumed_at(&self) -> Option<u64> {
+            *self.resume_offset.lock().unwrap()
+        }
+    }
+
+    fn redrive_case(
+        channel_id: u64,
+        slug: &str,
+        last_relay_offset: u64,
+        capture_offset: u64,
+    ) -> RedriveCase {
+        let channel_id = ChannelId::new(channel_id);
+        let tmux_session = format!("AgentDesk-codex-5943-{slug}");
+        let output_path = format!("/tmp/agentdesk-5943-{slug}.jsonl");
+        let resume_offset = Arc::new(Mutex::new(None));
+        let turn_delivered = Arc::new(AtomicBool::new(true));
+        RedriveCase {
+            shared: crate::services::discord::make_shared_data_for_tests(),
+            watcher: watcher_handle(
+                &tmux_session,
+                &output_path,
+                resume_offset.clone(),
+                turn_delivered.clone(),
+            ),
+            resume_offset,
+            turn_delivered,
+            snapshot: backlog_snapshot(
+                channel_id,
+                &tmux_session,
+                &output_path,
+                last_relay_offset,
+                capture_offset,
+            ),
+            channel_id,
+        }
+    }
+
+    /// Every handle-level call in this set fetches the frontier token exactly
+    /// the way `nudge_existing_watcher_for_backlog` does.
+    fn nudge_handle(
+        shared: &SharedData,
+        snapshot: &WatcherStateSnapshot,
+        watcher: &crate::services::discord::TmuxWatcherHandle,
+        channel_id: ChannelId,
+    ) -> RedriveNudge {
+        let token = shared.relay_frontier_token(channel_id);
+        nudge_watcher_handle_for_backlog(shared, snapshot, watcher, channel_id, token)
+    }
+
     fn backlog_snapshot(
         channel_id: ChannelId,
         tmux_session: &str,
@@ -936,6 +995,7 @@ mod tests {
             tmux_session: Some(tmux_session.to_string()),
             watcher_owner_channel_id: Some(channel_id.get()),
             last_relay_offset,
+            durable_frontier: DurableFrontierObservation::RowAbsent,
             inflight_state_present: true,
             last_relay_ts_ms: 1_700_000_000_000,
             last_capture_offset: Some(capture_offset),
@@ -1058,27 +1118,33 @@ mod tests {
         let capture_offset = 301_613;
         let now = 1_800_000_000;
         let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, capture_offset);
-        assert!(!nudge_existing_watcher_for_backlog(
-            &shared,
-            &provider,
-            &snapshot,
-            channel_id,
-            now,
-            shared.relay_frontier_token(channel_id),
-        ));
+        assert!(
+            !nudge_existing_watcher_for_backlog(
+                &shared,
+                &provider,
+                &snapshot,
+                channel_id,
+                now,
+                shared.relay_frontier_token(channel_id),
+            )
+            .enqueued()
+        );
         assert_eq!(*resume_offset.lock().unwrap(), None);
         assert!(turn_delivered.load(Ordering::Acquire));
 
         let advanced_snapshot =
             backlog_snapshot(channel_id, tmux_session, output_path, 256, capture_offset);
-        assert!(!nudge_existing_watcher_for_backlog(
-            &shared,
-            &provider,
-            &advanced_snapshot,
-            channel_id,
-            now + 30,
-            shared.relay_frontier_token(channel_id),
-        ));
+        assert!(
+            !nudge_existing_watcher_for_backlog(
+                &shared,
+                &provider,
+                &advanced_snapshot,
+                channel_id,
+                now + 30,
+                shared.relay_frontier_token(channel_id),
+            )
+            .enqueued()
+        );
         assert_eq!(*resume_offset.lock().unwrap(), None);
         assert!(turn_delivered.load(Ordering::Acquire));
 
@@ -1121,22 +1187,28 @@ mod tests {
             128,
             capture_offset,
         );
-        assert!(!nudge_existing_watcher_for_backlog(
-            &shared,
-            &provider,
-            &snapshot,
-            channel_id,
-            now,
-            shared.relay_frontier_token(channel_id),
-        ));
-        assert!(!nudge_existing_watcher_for_backlog(
-            &shared,
-            &provider,
-            &snapshot,
-            channel_id,
-            now + stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
-            shared.relay_frontier_token(channel_id),
-        ));
+        assert!(
+            !nudge_existing_watcher_for_backlog(
+                &shared,
+                &provider,
+                &snapshot,
+                channel_id,
+                now,
+                shared.relay_frontier_token(channel_id),
+            )
+            .enqueued()
+        );
+        assert!(
+            !nudge_existing_watcher_for_backlog(
+                &shared,
+                &provider,
+                &snapshot,
+                channel_id,
+                now + stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
+                shared.relay_frontier_token(channel_id),
+            )
+            .enqueued()
+        );
         assert_eq!(*resume_offset.lock().unwrap(), None);
         assert!(turn_delivered.load(Ordering::Acquire));
 
@@ -1172,27 +1244,33 @@ mod tests {
         let capture_offset = 301_613;
         let now = 1_800_000_000;
         let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, capture_offset);
-        assert!(!nudge_existing_watcher_for_backlog(
-            &shared,
-            &provider,
-            &snapshot,
-            channel_id,
-            now,
-            shared.relay_frontier_token(channel_id),
-        ));
+        assert!(
+            !nudge_existing_watcher_for_backlog(
+                &shared,
+                &provider,
+                &snapshot,
+                channel_id,
+                now,
+                shared.relay_frontier_token(channel_id),
+            )
+            .enqueued()
+        );
         shared
             .tmux_relay_coord(channel_id)
             .confirmed_end_offset
             .store(256, Ordering::Release);
 
-        assert!(!nudge_existing_watcher_for_backlog(
-            &shared,
-            &provider,
-            &snapshot,
-            channel_id,
-            now + stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
-            shared.relay_frontier_token(channel_id),
-        ));
+        assert!(
+            !nudge_existing_watcher_for_backlog(
+                &shared,
+                &provider,
+                &snapshot,
+                channel_id,
+                now + stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
+                shared.relay_frontier_token(channel_id),
+            )
+            .enqueued()
+        );
         assert_eq!(*resume_offset.lock().unwrap(), None);
         assert!(turn_delivered.load(Ordering::Acquire));
 
@@ -1239,7 +1317,8 @@ mod tests {
                 channel_id,
                 1_800_000_000,
                 high_token,
-            ),
+            )
+            .enqueued(),
             "a reset between admission and nudge must veto the stale-H redrive"
         );
         assert_eq!(*resume_offset.lock().unwrap(), None);
@@ -1248,19 +1327,14 @@ mod tests {
 
     /// #5943: an admitted redrive must leave the bridge's delivery marker ALONE.
     ///
-    /// The redrive is admitted by `should_redrive_undelivered_backlog`, i.e. for
-    /// an UNDELIVERED backlog of the turn already in flight — it re-reads a turn,
-    /// it does not start one. Clearing `turn_delivered` here reached past the
-    /// watcher into two consumers that read the live marker for themselves:
-    /// `pre_emit_guard` (-> `tmux::should_suppress_relay_before_emit`) stops
+    /// The redrive re-reads a turn already in flight; it does not start one.
+    /// Clearing `turn_delivered` here reached past the watcher into consumers
+    /// that read the live marker for themselves: `pre_emit_guard` stops
     /// suppressing a relay the bridge already delivered, and every
     /// watcher-observed tmux death folds the marker into
     /// `terminal_delivery_observed`, so a cleared marker reports a delivered turn
-    /// as undelivered. The watcher still clears it in `loop_poll_prologue` once
-    /// it consumes this resume point; it just no longer happens before the
-    /// consumers have read it.
-    ///
-    /// Nothing pinned this before #5943, which is why the clear survived.
+    /// as undelivered. `loop_poll_prologue` still clears it once the watcher has
+    /// consumed the resume point. Nothing pinned this before #5943.
     #[test]
     fn redrive_does_not_clear_the_bridge_delivery_marker_5943() {
         let provider = ProviderKind::Codex;
@@ -1292,23 +1366,29 @@ mod tests {
             .confirmed_end_offset
             .store(snapshot.last_relay_offset, Ordering::Release);
         // The first pass only seeds the no-progress grace.
-        assert!(!nudge_existing_watcher_for_backlog(
-            &shared,
-            &provider,
-            &snapshot,
-            channel_id,
-            now,
-            shared.relay_frontier_token(channel_id),
-        ));
+        assert!(
+            !nudge_existing_watcher_for_backlog(
+                &shared,
+                &provider,
+                &snapshot,
+                channel_id,
+                now,
+                shared.relay_frontier_token(channel_id),
+            )
+            .enqueued()
+        );
 
-        assert!(nudge_existing_watcher_for_backlog(
-            &shared,
-            &provider,
-            &snapshot,
-            channel_id,
-            now + stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
-            shared.relay_frontier_token(channel_id),
-        ));
+        assert!(
+            nudge_existing_watcher_for_backlog(
+                &shared,
+                &provider,
+                &snapshot,
+                channel_id,
+                now + stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
+                shared.relay_frontier_token(channel_id),
+            )
+            .enqueued()
+        );
         assert_eq!(
             *resume_offset.lock().unwrap(),
             Some(snapshot.last_relay_offset),
@@ -1326,401 +1406,291 @@ mod tests {
         );
     }
 
-    /// #5943 M10. The requested frontier is the MAXIMUM of the two witnesses,
-    /// never the minimum.
-    ///
-    /// `nudge_existing_watcher_for_backlog` cannot observe this — its admission
-    /// gate only passes while the snapshot and the committed frontier agree, so
-    /// `max` and `min` return the same number there and the choice is invisible.
-    /// The handle-level entry point is where they can differ, and taking the
-    /// lower one would hand the watcher a resume point behind the frontier I12
-    /// forbids moving below.
+    /// #5943 M10. The requested frontier is the MAXIMUM of I12's two readings.
+    /// `nudge_existing_watcher_for_backlog` cannot observe this — its gate only
+    /// passes while the two agree — but the handle-level entry point can, and
+    /// the lower reading resumes below the frontier I12 forbids moving under.
     #[test]
-    fn redrive_requests_the_higher_of_the_two_frontier_witnesses_5943() {
-        let channel_id = ChannelId::new(5_943_002);
-        let tmux_session = "AgentDesk-codex-5943-frontier-max";
-        let output_path = "/tmp/agentdesk-5943-frontier-max.jsonl";
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let resume_offset = Arc::new(Mutex::new(None));
-        let turn_delivered = Arc::new(AtomicBool::new(true));
-        let watcher = watcher_handle(
-            tmux_session,
-            output_path,
-            resume_offset.clone(),
-            turn_delivered.clone(),
-        );
+    fn redrive_requests_the_higher_of_the_two_frontier_readings_5943() {
         // The watcher snapshot is AHEAD of the committed frontier, so the two
-        // witnesses disagree and only one of them is the safe request.
-        let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 256, 301_613);
-        shared
-            .tmux_relay_coord(channel_id)
+        // readings disagree and only one of them is the safe request.
+        let case = redrive_case(5_943_002, "frontier-max", 256, 301_613);
+        case.shared
+            .tmux_relay_coord(case.channel_id)
             .confirmed_end_offset
             .store(128, Ordering::Release);
 
-        assert!(nudge_watcher_handle_for_backlog(
-            &shared,
-            &snapshot,
-            &watcher,
-            channel_id,
-            shared.relay_frontier_token(channel_id),
-        ));
+        assert!(case.nudge().enqueued());
         assert_eq!(
-            *resume_offset.lock().unwrap(),
+            case.resumed_at(),
             Some(256),
             "the snapshot frontier (256) is ahead of the committed one (128); \
-             requesting the lower witness would rewind past I12's floor"
+             requesting the lower reading would rewind past I12's floor"
         );
     }
 
-    /// #5943 checkbox 1, refuse side. The measured pathology, reproduced at its
-    /// live coordinates.
+    /// #5943 checkbox 1, refuse side. The measured pathology at its live
+    /// coordinates: 2026-09-16T14:13:37Z..14:21:32Z, channel
+    /// 1479671298497183835, five consecutive redrives at `last_relay_offset=0`
+    /// with `unread_bytes=24_553_403` — the ENTIRE transcript — after a dcserver
+    /// restart dropped the in-memory frontier while the watcher kept reading.
     ///
-    /// 2026-09-16T14:13:37Z..14:21:32Z, channel 1479671298497183835: five
-    /// consecutive redrives ran with `last_relay_offset=0` and
-    /// `unread_bytes=24_553_403` — the ENTIRE transcript — because a dcserver
-    /// restart had dropped the in-memory frontier while the watcher kept
-    /// reading. Enqueuing that zero rewinds the watcher over every byte it has
-    /// already relayed, and the 800-message REST scan of adk-cc on 2026-09-15
-    /// is what that costs: 145 real claude-bot bodies, 28 of them re-posts
-    /// (19.3%), 22 of those partial — same prefix, longer body (784 -> 1627
-    /// chars). #5949 stopped the CONSUMER from disarming its guard on the way
-    /// past; this stops the rewind from being enqueued at all.
+    /// The witness is `GenerationUnresolved` because that same restart emptied
+    /// the map the live generation is read from, so a guard keyed on
+    /// `RowPresent` alone reads `None` here and admits the re-post — the
+    /// r1-review finding this test pins.
     #[test]
-    fn redrive_refuses_to_rewind_a_live_watcher_onto_an_unwitnessed_frontier_5943() {
-        let channel_id = ChannelId::new(5_943_010);
-        let tmux_session = "AgentDesk-codex-5943-unwitnessed-rewind";
-        let output_path = "/tmp/agentdesk-5943-unwitnessed-rewind.jsonl";
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let resume_offset = Arc::new(Mutex::new(None));
-        let turn_delivered = Arc::new(AtomicBool::new(true));
-        let watcher = watcher_handle(
-            tmux_session,
-            output_path,
-            resume_offset.clone(),
-            turn_delivered.clone(),
-        );
-        let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 0, 24_553_403);
-        shared.publish_watcher_read_offset(channel_id, 24_553_403);
+    fn redrive_refuses_a_zero_frontier_a_durable_delivery_contradicts_5943() {
+        let mut case = redrive_case(5_943_010, "unrestored-frontier", 0, 24_553_403);
+        case.snapshot.durable_frontier = restart_durable_witness(22_299_791);
 
         assert!(
-            !nudge_watcher_handle_for_backlog(
-                &shared,
-                &snapshot,
-                &watcher,
-                channel_id,
-                shared.relay_frontier_token(channel_id),
-            ),
-            "a frontier that never witnessed a delivery cannot ground a rewind"
+            !case.nudge().enqueued(),
+            "a durable delivery at 22_299_791 says this zero is unrestored, not empty"
         );
         assert_eq!(
-            *resume_offset.lock().unwrap(),
+            case.resumed_at(),
             None,
             "the refusal must leave the resume slot exactly as it found it"
         );
         assert!(
-            turn_delivered.load(Ordering::Relaxed),
+            case.turn_delivered.load(Ordering::Relaxed),
             "refusing a redrive must not touch the bridge's delivery marker either"
         );
     }
 
     /// #5943 checkbox 1, ALLOW side — the half that keeps this fix from becoming
-    /// the loss it prevents.
-    ///
-    /// Every healthy redrive is a rewind relative to the watcher's read
-    /// position: the backlog it re-drives is bytes the watcher READ and never
-    /// relayed, so the frontier is behind the read head by exactly the unread
-    /// count. The same channel's 12:42..13:53 window shows eight of these, each
-    /// chasing 53_037..134_917 unread bytes. A guard that refused them would
-    /// retire recovery and regress #5943 straight back into silent loss, so the
-    /// witnessed rewind must still be enqueued unchanged.
+    /// the loss it prevents. Every healthy redrive reaches BEHIND the watcher's
+    /// read position (the same channel's 12:42..13:53 window shows eight, each
+    /// chasing 53_037..134_917 unread bytes), and the witness here sits AHEAD of
+    /// the requested frontier: the ordinary lag between persisting a batch's
+    /// start offset and the sink confirming its POST.
     #[test]
-    fn redrive_still_rewinds_to_recover_a_witnessed_backlog_5943() {
-        let channel_id = ChannelId::new(5_943_011);
-        let tmux_session = "AgentDesk-codex-5943-witnessed-rewind";
-        let output_path = "/tmp/agentdesk-5943-witnessed-rewind.jsonl";
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let resume_offset = Arc::new(Mutex::new(None));
-        let turn_delivered = Arc::new(AtomicBool::new(true));
-        let watcher = watcher_handle(
-            tmux_session,
-            output_path,
-            resume_offset.clone(),
-            turn_delivered.clone(),
-        );
-        let snapshot = backlog_snapshot(
-            channel_id,
-            tmux_session,
-            output_path,
-            22_299_791,
-            22_434_708,
-        );
-        shared.publish_watcher_read_offset(channel_id, 22_434_708);
+    fn redrive_still_recovers_a_backlog_behind_the_durable_witness_5943() {
+        let mut case = redrive_case(5_943_011, "witnessed-backlog", 22_299_791, 22_434_708);
+        case.snapshot.durable_frontier = DurableFrontierObservation::RowPresent {
+            relayed_start: 22_380_000,
+            generation_ns: GEN_NS,
+        };
 
         assert!(
-            nudge_watcher_handle_for_backlog(
-                &shared,
-                &snapshot,
-                &watcher,
-                channel_id,
-                shared.relay_frontier_token(channel_id),
-            ),
-            "134_917 unread bytes behind a witnessed frontier is the redrive's own job"
+            case.nudge().enqueued(),
+            "134_917 unread bytes behind a restored frontier is the redrive's own job"
         );
         assert_eq!(
-            *resume_offset.lock().unwrap(),
+            case.resumed_at(),
             Some(22_299_791),
             "recovery must still reach back over the unrelayed bytes"
         );
     }
 
-    /// #5943 checkbox 2. Fail-closed when no channel is confirmed to own
-    /// delivery for this backlog.
-    ///
-    /// Both frontier witnesses are read for the POLLED channel. With
-    /// `watcher_owner_channel_id` unset nothing says the polled channel is where
-    /// delivery happened, so the frontier is unattributed rather than measured
-    /// and there is no ground to move any watcher to it. The frontier here is
-    /// otherwise IMPECCABLE — the same witnessed rewind the test above admits —
-    /// so the only thing that can refuse it is the missing owner.
+    /// #5943 r1 review P1-4. An unset `watcher_owner_channel_id` is NOT a
+    /// refusal. The r0 guard refused it as "no confirmed delivery owner", but
+    /// nothing else reads it that way: `nudge_existing_watcher_for_backlog`
+    /// substitutes the polled channel two statements earlier, and
+    /// `channel_binding` and `idle_recap` do their own `unwrap_or(*channel_id)`
+    /// — so that refusal was unreachable AND contradicted its neighbours.
     #[test]
-    fn redrive_is_refused_when_no_delivery_owner_is_confirmed_5943() {
-        let channel_id = ChannelId::new(5_943_012);
-        let tmux_session = "AgentDesk-codex-5943-owner-absent";
-        let output_path = "/tmp/agentdesk-5943-owner-absent.jsonl";
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let resume_offset = Arc::new(Mutex::new(None));
-        let turn_delivered = Arc::new(AtomicBool::new(true));
-        let watcher = watcher_handle(
-            tmux_session,
-            output_path,
-            resume_offset.clone(),
-            turn_delivered.clone(),
-        );
-        let mut snapshot = backlog_snapshot(
-            channel_id,
-            tmux_session,
-            output_path,
-            22_299_791,
-            22_434_708,
-        );
-        snapshot.watcher_owner_channel_id = None;
-        shared.publish_watcher_read_offset(channel_id, 22_434_708);
+    fn an_unset_delivery_owner_no_longer_decides_the_redrive_5943() {
+        let mut case = redrive_case(5_943_012, "owner-absent", 22_299_791, 22_434_708);
+        case.snapshot.watcher_owner_channel_id = None;
 
         assert!(
-            !nudge_watcher_handle_for_backlog(
-                &shared,
-                &snapshot,
-                &watcher,
-                channel_id,
-                shared.relay_frontier_token(channel_id),
-            ),
-            "no confirmed delivery owner means no frontier anyone can be moved to"
+            case.nudge().enqueued(),
+            "an unpopulated owner field is not evidence against a restored frontier"
         );
-        assert_eq!(
-            *resume_offset.lock().unwrap(),
-            None,
-            "an owner-less redrive must leave resume_offset at None"
-        );
+        assert_eq!(case.resumed_at(), Some(22_299_791));
     }
 
-    /// #5943 checkbox 1, boundary. A watcher that has genuinely read nothing yet
-    /// is not rewound BY a zero frontier, so the case where zero really IS the
-    /// right answer stays byte-identical to the pre-#5943 behaviour.
-    ///
-    /// This is the fresh-session / id-0 turn: no watcher has committed a read
-    /// position for the channel in this process lifetime, the frontier is zero
-    /// because nothing has been delivered yet, and the whole file is legitimate
-    /// backlog. Reading the guard as "refuse every zero frontier" would strand
-    /// the first turn of every session.
+    /// #5943 checkbox 1, boundary. The fresh-session / id-0 turn: no durable
+    /// row (`RowAbsent`), a zero frontier because nothing has been delivered,
+    /// and the whole file legitimate backlog. Reading the guard as "refuse every
+    /// zero" would strand the first turn of every session.
     #[test]
     fn a_fresh_watcher_still_accepts_the_zero_frontier_5943() {
-        let channel_id = ChannelId::new(5_943_013);
-        let tmux_session = "AgentDesk-codex-5943-fresh-zero";
-        let output_path = "/tmp/agentdesk-5943-fresh-zero.jsonl";
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let resume_offset = Arc::new(Mutex::new(None));
-        let turn_delivered = Arc::new(AtomicBool::new(true));
-        let watcher = watcher_handle(
-            tmux_session,
-            output_path,
-            resume_offset.clone(),
-            turn_delivered.clone(),
-        );
-        // No `publish_watcher_read_offset`: this watcher has never committed a
-        // read position, which is exactly what a fresh session looks like.
-        let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 0, 301_613);
+        let case = redrive_case(5_943_013, "fresh-zero", 0, 301_613);
 
         assert!(
-            nudge_watcher_handle_for_backlog(
-                &shared,
-                &snapshot,
-                &watcher,
-                channel_id,
-                shared.relay_frontier_token(channel_id),
-            ),
-            "offset zero is the correct resume point when nothing has been read yet"
+            case.nudge().enqueued(),
+            "offset zero is the correct resume point when nothing has been delivered yet"
         );
-        assert_eq!(*resume_offset.lock().unwrap(), Some(0));
+        assert_eq!(case.resumed_at(), Some(0));
     }
 
-    /// #5943. The partition itself, swept rather than sampled: what separates an
-    /// admitted rewind from a refused one is the frontier's WITNESS, never its
-    /// direction.
-    ///
-    /// The two counters are the point of the sweep. Without them this test still
-    /// passes against a guard that refuses every rewind (recovery retired,
-    /// silent loss restored) and against one that refuses none (the re-post
-    /// incident unchanged) — so it asserts that both kinds of rewind actually
-    /// occur in the matrix before asserting how each is classified.
+    /// #5943 r1 review P0-1/P0-2. The partition swept rather than sampled: what
+    /// separates an admitted resume point from a refused one is the DURABLE
+    /// witness, never the value alone and never the direction. The counters are
+    /// the point — without them this passes against a guard that refuses every
+    /// zero and against one that refuses none. `GenerationMismatch` admits
+    /// deliberately: it names a provably different incarnation, and
+    /// `watermark_after_output_regression` zeroes a re-created wrapper legally.
     #[test]
-    fn the_redrive_resume_decision_splits_rewinds_by_witness_not_direction_5943() {
-        for (last, committed, read) in [(0u64, 0u64, 0u64), (22_299_791, 0, 22_434_708)] {
-            assert_eq!(
-                redrive_resume_point(last, committed, read, false),
-                Err(RedriveResumeRefusal::DeliveryOwnerUnknown),
-                "an unconfirmed owner refuses regardless of how well-witnessed the frontier is"
-            );
-        }
-
+    fn the_redrive_resume_decision_turns_on_the_durable_witness_not_direction_5943() {
+        let row = |relayed_start| DurableFrontierObservation::RowPresent {
+            relayed_start,
+            generation_ns: GEN_NS,
+        };
+        let witnesses = [
+            (DurableFrontierObservation::RowAbsent, false),
+            (row(0), false),
+            (row(22_299_791), true),
+            (restart_durable_witness(22_299_791), true),
+            (
+                DurableFrontierObservation::GenerationMismatch {
+                    relayed_start: 22_299_791,
+                    row_generation_ns: GEN_NS - 1,
+                    live_generation_ns: GEN_NS,
+                },
+                false,
+            ),
+        ];
         let points = [0u64, 1, 4_096, 22_299_791, 24_553_403];
-        let (mut refused_rewinds, mut admitted_rewinds) = (0u32, 0u32);
-        for &read in &points {
+        let (mut refused, mut admitted_rewinds) = (0u32, 0u32);
+        for (durable, witnessed) in witnesses {
             for &last in &points {
                 for &committed in &points {
                     let frontier = last.max(committed);
-                    let outcome = redrive_resume_point(last, committed, read, true);
-                    if frontier >= read {
+                    let outcome = redrive_resume_point(last, committed, durable);
+                    if frontier == 0 && witnessed {
+                        refused += 1;
                         assert_eq!(
                             outcome,
-                            Ok(frontier),
-                            "{frontier} is not behind the read head {read}; nothing to refuse"
+                            Err(UnrestoredFrontier {
+                                witnessed: 22_299_791
+                            }),
+                            "a zero frontier under a durable delivery is unrestored"
                         );
                         continue;
                     }
-                    if frontier == 0 {
-                        refused_rewinds += 1;
-                        assert_eq!(outcome, Err(RedriveResumeRefusal::UnwitnessedRewind));
-                    } else {
-                        admitted_rewinds += 1;
-                        assert_eq!(
-                            outcome,
-                            Ok(frontier),
-                            "a witnessed frontier behind the read head is recoverable backlog"
-                        );
+                    assert_eq!(
+                        outcome,
+                        Ok(frontier),
+                        "{frontier} under {durable:?} is a resume point, not a re-post"
+                    );
+                    if let Some(relayed_start) = durable.durable_delivery_witness() {
+                        if frontier < relayed_start {
+                            admitted_rewinds += 1;
+                        }
                     }
                 }
             }
         }
         assert!(
-            refused_rewinds > 0 && admitted_rewinds > 0,
-            "the sweep must contain both kinds of rewind, or it proves nothing about the split \
-             ({refused_rewinds} refused, {admitted_rewinds} admitted)"
+            refused > 0 && admitted_rewinds > 0,
+            "the sweep must contain both a refused zero and a frontier admitted BEHIND its \
+             durable witness, or it proves nothing about the split \
+             ({refused} refused, {admitted_rewinds} admitted)"
         );
     }
 
-    /// #5943 checkbox 3. The duplicate-relay guard is still armed on the far
-    /// side of the redrive path.
+    /// #5943 r1 review P1-4/P0-2. A refusal must reach the caller as a REFUSAL,
+    /// not as "this nudge did not apply".
     ///
-    /// Composed rather than asserted twice: the producer here is the real
-    /// `nudge_watcher_handle_for_backlog`, and the value it enqueues is folded
-    /// through the real consumer, `watcher_resume_outcome`, the way
-    /// `loop_poll_prologue` folds it. Two independently-correct halves can still
-    /// compose into a re-post, which is what 2026-09-15 measured.
-    ///
-    /// Three things have to hold at once. The redrive must not clear
-    /// `turn_delivered` (#5949's rule) or the consumer arms no floor at all; the
-    /// floor must land AT the resume point, so `pre_emit_guard`'s
-    /// `data_start_offset < last_relayed_offset` stays false for the resumed
-    /// batch (a higher floor suppresses the WHOLE batch — placeholder deleted,
-    /// buffer discarded — which is loss, not a trim); and everything below the
-    /// resume point must remain suppressed, which is the guard being ALIVE
-    /// rather than merely harmless. The second nudge covers the other way to
-    /// re-post: asking for the same bytes twice.
-    // The resumed-batch assertion reads the watcher resume outcome, which lives
-    // behind the unix-only `discord::tmux` module tree.
-    #[cfg(unix)]
+    /// The two are handled oppositely one frame up: a plain no-nudge escalates
+    /// to `RelayRecoveryActionKind::ReattachWatcher`, which would respawn the
+    /// watcher against the same unrestored frontier and re-post the transcript by
+    /// a second route. Pinned at the seam the `apply` arm matches on.
     #[test]
-    fn the_duplicate_relay_guard_survives_the_redrive_path_5943() {
-        use crate::services::discord::tmux::tmux_watcher::loop_poll_prologue::watcher_resume::watcher_resume_outcome;
-
-        let channel_id = ChannelId::new(5_943_014);
-        let tmux_session = "AgentDesk-codex-5943-guard-survives";
-        let output_path = "/tmp/agentdesk-5943-guard-survives.jsonl";
+    fn a_refused_redrive_propagates_as_a_refusal_not_a_missed_nudge_5943() {
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(5_943_016);
+        let tmux_session = "AgentDesk-codex-5943-refusal-propagates";
+        let output_path = "/tmp/agentdesk-5943-refusal-propagates.jsonl";
         let shared = crate::services::discord::make_shared_data_for_tests();
         let resume_offset = Arc::new(Mutex::new(None));
         let turn_delivered = Arc::new(AtomicBool::new(true));
-        let watcher = watcher_handle(
-            tmux_session,
-            output_path,
-            resume_offset.clone(),
-            turn_delivered.clone(),
-        );
-        let read_position = 22_434_708;
-        let snapshot = backlog_snapshot(
+        shared.tmux_watchers.insert(
             channel_id,
-            tmux_session,
-            output_path,
-            22_299_791,
-            read_position,
+            watcher_handle(
+                tmux_session,
+                output_path,
+                resume_offset.clone(),
+                turn_delivered.clone(),
+            ),
         );
-        shared.publish_watcher_read_offset(channel_id, read_position);
+        stall_liveness::clear_stall_watchdog_liveness_state(
+            &provider,
+            channel_id,
+            Some(tmux_session),
+        );
 
-        assert!(nudge_watcher_handle_for_backlog(
+        let now = 1_800_000_000;
+        let mut snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 0, 24_553_403);
+        snapshot.durable_frontier = restart_durable_witness(22_299_791);
+        // First pass only seeds the no-progress grace; the second is the one
+        // that reaches the handle.
+        nudge_existing_watcher_for_backlog(
             &shared,
+            &provider,
             &snapshot,
-            &watcher,
             channel_id,
+            now,
             shared.relay_frontier_token(channel_id),
-        ));
-        assert!(
-            !nudge_watcher_handle_for_backlog(
+        );
+        assert_eq!(
+            nudge_existing_watcher_for_backlog(
                 &shared,
+                &provider,
                 &snapshot,
-                &watcher,
                 channel_id,
+                now + stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
                 shared.relay_frontier_token(channel_id),
             ),
-            "a pending frontier must not be re-enqueued; that is a re-post by another route"
+            RedriveNudge::RefusedUnrestored(UnrestoredFrontier {
+                witnessed: 22_299_791
+            }),
+            "a refusal reported as NotEnqueued would escalate to a watcher reattach"
         );
+        assert_eq!(*resume_offset.lock().unwrap(), None);
 
-        let enqueued = resume_offset
-            .lock()
-            .unwrap()
-            .expect("redrive enqueued a resume point");
+        stall_liveness::clear_stall_watchdog_liveness_state(
+            &provider,
+            channel_id,
+            Some(tmux_session),
+        );
+    }
+
+    /// #5943 r1 review P1-5. What the duplicate-relay guard does on the far side
+    /// of the redrive path is NOTHING, by construction, so the PR's earlier
+    /// "keeps the duplicate guard armed" claim is withdrawn rather than
+    /// restated. `pre_emit_guard` suppresses on `data_start_offset <
+    /// last_relayed_offset`; the caller assigns `data_start_offset =
+    /// current_offset = requested_offset` and `watcher_resume_outcome` pins the
+    /// floor at that same offset. Deliberate: that branch deletes the
+    /// placeholder and discards the buffer, so firing it here would turn a
+    /// re-post into total loss of `[floor, EOF)`. Both shapes are pinned.
+    // The resumed-batch fold lives behind the unix-only `discord::tmux` tree.
+    #[cfg(unix)]
+    #[test]
+    fn the_redrive_path_cannot_suppress_its_own_resumed_batch_5943() {
+        use crate::services::discord::tmux::tmux_watcher::loop_poll_prologue::watcher_resume::watcher_resume_outcome;
+
+        let read_position = 22_434_708;
+        let case = redrive_case(5_943_014, "guard-inert", 22_299_791, read_position);
+
+        assert!(case.nudge().enqueued());
+        let enqueued = case.resumed_at().expect("redrive enqueued a resume point");
         assert!(
-            turn_delivered.load(Ordering::Acquire),
-            "the redrive must hand the consumer a live delivery marker to arm the floor with"
-        );
-        let resumed = watcher_resume_outcome(
-            false,
-            turn_delivered.load(Ordering::Acquire),
-            enqueued,
-            read_position,
+            case.turn_delivered.load(Ordering::Acquire),
+            "the redrive must leave the bridge's delivery marker where it found it"
         );
 
-        let floor = resumed
+        let floor = watcher_resume_outcome(false, true, enqueued, read_position)
             .last_relayed_offset
-            .expect("the redrive path must leave the duplicate-relay guard armed");
-        assert_eq!(floor, enqueued, "the floor belongs AT the resume point");
-        // `pre_emit_guard` suppresses a batch when
-        // `data_start_offset < last_relayed_offset`, and the resumed batch starts
-        // at the resume point. Both directions matter: a floor that suppresses
-        // nothing is a re-post, a floor that suppresses the resumed batch is
-        // total loss of `[floor, EOF)` — the branch deletes the placeholder and
-        // discards the buffer rather than trimming the relayed prefix.
-        for (data_start_offset, expected_suppression) in [
-            (0u64, true),
-            (enqueued - 1, true),
-            (enqueued, false),
-            (enqueued + 1, false),
-        ] {
-            assert_eq!(
-                data_start_offset < floor,
-                expected_suppression,
-                "pre_emit_guard misclassifies a batch starting at {data_start_offset} \
-                 against the post-redrive floor {floor}"
-            );
-        }
+            .expect("a delivered marker pins a floor");
+        assert_eq!(
+            floor, enqueued,
+            "the floor lands AT the resume point, which is what makes it inert"
+        );
+        assert!(
+            !(enqueued < floor),
+            "the resumed batch must never be suppressed; that is loss, not a trim"
+        );
+        assert_eq!(
+            watcher_resume_outcome(false, false, enqueued, read_position).last_relayed_offset,
+            None,
+            "a cleared marker arms no floor at all, so there is no duplicate defence here either"
+        );
     }
 
     #[test]
@@ -1754,14 +1724,17 @@ mod tests {
             .store(snapshot.last_relay_offset, Ordering::Release);
         // Prime the stall observation, then mark a relay emission in-flight
         // (non-zero `relay_slot`) while the committed frontier stays frozen.
-        assert!(!nudge_existing_watcher_for_backlog(
-            &shared,
-            &provider,
-            &snapshot,
-            channel_id,
-            now,
-            shared.relay_frontier_token(channel_id),
-        ));
+        assert!(
+            !nudge_existing_watcher_for_backlog(
+                &shared,
+                &provider,
+                &snapshot,
+                channel_id,
+                now,
+                shared.relay_frontier_token(channel_id),
+            )
+            .enqueued()
+        );
         shared
             .tmux_relay_coord(channel_id)
             .relay_slot
@@ -1769,14 +1742,17 @@ mod tests {
         assert!(shared.relay_emission_in_flight(channel_id));
 
         // Even past the no-progress grace, the in-flight slot must veto redrive.
-        assert!(!nudge_existing_watcher_for_backlog(
-            &shared,
-            &provider,
-            &snapshot,
-            channel_id,
-            now + stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
-            shared.relay_frontier_token(channel_id),
-        ));
+        assert!(
+            !nudge_existing_watcher_for_backlog(
+                &shared,
+                &provider,
+                &snapshot,
+                channel_id,
+                now + stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
+                shared.relay_frontier_token(channel_id),
+            )
+            .enqueued()
+        );
         assert_eq!(*resume_offset.lock().unwrap(), None);
         assert!(turn_delivered.load(Ordering::Acquire));
 
@@ -1786,26 +1762,29 @@ mod tests {
             .tmux_relay_coord(channel_id)
             .relay_slot
             .store(0, Ordering::Release);
-        assert!(nudge_existing_watcher_for_backlog(
-            &shared,
-            &provider,
-            &snapshot,
-            channel_id,
-            now + stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
-            shared.relay_frontier_token(channel_id),
-        ));
+        assert!(
+            nudge_existing_watcher_for_backlog(
+                &shared,
+                &provider,
+                &snapshot,
+                channel_id,
+                now + stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
+                shared.relay_frontier_token(channel_id),
+            )
+            .enqueued()
+        );
         assert_eq!(
             *resume_offset.lock().unwrap(),
             Some(snapshot.last_relay_offset)
         );
         let (duplicate_enqueued, warn_logs) = capture_logs(tracing::Level::WARN, || {
-            nudge_watcher_handle_for_backlog(
+            nudge_handle(
                 &shared,
                 &snapshot,
                 shared.tmux_watchers.get(&channel_id).unwrap().value(),
                 channel_id,
-                shared.relay_frontier_token(channel_id),
             )
+            .enqueued()
         });
         assert!(
             !duplicate_enqueued,
@@ -1817,13 +1796,13 @@ mod tests {
             "a duplicate frontier emits exactly one diagnostic WARN"
         );
         let (_, error_logs) = capture_errors(|| {
-            nudge_watcher_handle_for_backlog(
+            nudge_handle(
                 &shared,
                 &snapshot,
                 shared.tmux_watchers.get(&channel_id).unwrap().value(),
                 channel_id,
-                shared.relay_frontier_token(channel_id),
             )
+            .enqueued()
         });
         assert!(
             !error_logs.contains("redrive_frontier_no_progress"),
@@ -1955,7 +1934,8 @@ mod tests {
             channel_id,
             now,
             shared.relay_frontier_token(channel_id),
-        );
+        )
+        .enqueued();
         if nudged {
             let shield_channel_id = snapshot
                 .watcher_owner_channel_id

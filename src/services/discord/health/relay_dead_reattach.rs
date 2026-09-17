@@ -196,7 +196,9 @@ fn reattach_lane_outcome(applied: bool, apply_status: Option<&str>) -> ReattachL
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::discord::relay_health::{RelayActiveTurn, RelayHealthSnapshot};
+    use crate::services::discord::relay_health::{
+        DurableFrontierObservation, RelayActiveTurn, RelayHealthSnapshot,
+    };
     use chrono::TimeZone;
     use std::sync::atomic::Ordering;
 
@@ -239,6 +241,7 @@ mod tests {
             tmux_session: Some("AgentDesk-codex-test".to_string()),
             watcher_owner_channel_id: Some(42),
             last_relay_offset: 0,
+            durable_frontier: DurableFrontierObservation::RowAbsent,
             inflight_state_present: true,
             last_relay_ts_ms: 0,
             last_capture_offset: Some(128),

@@ -984,7 +984,9 @@ mod tests {
     use poise::serenity_prelude::ChannelId;
     use tracing_subscriber::fmt::MakeWriter;
 
-    use crate::services::discord::relay_health::{RelayHealthSnapshot, RelayStallState};
+    use crate::services::discord::relay_health::{
+        DurableFrontierObservation, RelayHealthSnapshot, RelayStallState,
+    };
 
     use super::*;
 
@@ -1071,6 +1073,7 @@ mod tests {
             tmux_session: Some(tmux_session.to_string()),
             watcher_owner_channel_id: Some(channel_id),
             last_relay_offset: 10,
+            durable_frontier: DurableFrontierObservation::RowAbsent,
             inflight_state_present: true,
             last_relay_ts_ms: 1_700_000_000_000,
             last_capture_offset: capture_offset,

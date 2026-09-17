@@ -680,63 +680,83 @@ Numbered I18 because I13/I14/I15 stay reserved for the reachability obligations
   `session_relay_sink::turn_parser::resend_dedupe_tests` set; like I12/I16 this path emits
   tracing + counters rather than `record_invariant_check` rows).
 
-## I19. A redrive rewinds on a witness, not on a zero (#5943)
+## I19. A redrive resumes on a witness, not on a value (#5943)
 
 I16 stopped the redrive from disarming the duplicate-relay guard on its way
-past. I19 governs the rewind itself: which resume point the redrive is allowed
-to enqueue in the first place.
+past. I19 governs the resume point itself.
 
-- Definition: the backlog redrive may move a live watcher BACKWARD only onto a
-  frontier that some delivery actually witnessed, and may not run at all while no
-  channel is confirmed to own delivery for the backlog.
-- Producer: `health::relay_auto_heal::redrive_resume_point` decides, and
-  `nudge_watcher_handle_for_backlog` is its only caller. The frontier stays I12's
-  maximum of the two witnesses; what I19 adds is a comparison against the
-  watcher's own read position and a check that a delivery owner is confirmed. The
-  read position is read from the DELIVERY OWNER's coord entry, not the polled
-  channel's: the polled channel's slot belongs to a different watcher, or to
-  none.
-- Read position: the watcher republishes `loop_poll_prologue`'s `current_offset`
-  through `SharedData::publish_watcher_read_offset` on the same write-back that
-  commits it, into `TmuxRelayCoord::watcher_read_offset`. That slot is NOT a
-  delivery frontier and is never read as one — `confirmed_end_offset` remains the
-  sole relay-dedup authority. It exists because a frontier naming bytes the
-  watcher has ALREADY READ and one naming where the watcher still is are
-  identical at the byte level and opposite in meaning. It lags the watcher by at
-  most one poll and only ever downward, so a stale read makes the redrive more
-  permissive, never less.
-- What is NOT refused, and why it matters more than what is: rewinding is the
-  redrive's job. The backlog it re-drives is bytes the watcher read and never
-  relayed, so a frontier behind the read head is the ordinary healthy shape.
-  Refusing all of them would retire recovery and convert this invariant into the
-  silent loss it exists to prevent, so a witnessed frontier behind the read head
-  is still enqueued unchanged.
-- What is refused: a rewind onto a frontier whose two witnesses are BOTH still at
-  zero. `WatcherStateSnapshot::last_relay_offset` reaches zero through
+- Definition: the backlog redrive may not enqueue a resume point of zero while a
+  durable delivery record for the same channel says bytes have already been
+  relayed. Every other resume point, in either direction, is enqueued unchanged.
+- Producer: `health::relay_auto_heal::redrive_resume_point`, whose only caller is
+  `nudge_watcher_handle_for_backlog`. The offset requested is unchanged from I12
+  (`last_relay_offset.max(committed_offset)`); I19 adds one refusal condition on
+  that offset's PROVENANCE.
+- Direction is not consulted, and that is the load-bearing half. The backlog a
+  redrive re-drives is bytes the watcher read and never relayed, so a resume
+  point behind the read head is the ordinary healthy shape (channel
+  1479671298497183835, 2026-09-16 12:42..13:53: eight such redrives, each chasing
+  53_037..134_917 unread bytes). Refusing rewinds as a class would retire
+  recovery and convert this invariant into the silent loss it prevents.
+- What is refused: a zero that a durable delivery contradicts.
+  `WatcherStateSnapshot::last_relay_offset` reaches zero through
   `unwrap_or((0, 0, 0))` and `RelayFrontierToken::committed_offset` through a
-  coord that has never advanced, so the value cannot distinguish "nothing has
-  been delivered" from "not restored yet". Provenance can, and a frontier that
-  witnessed no delivery has none. A watcher that has genuinely read nothing yet
-  is not rewound by a zero frontier, so the id-0 / fresh-session resume still
-  passes.
-- Fail-closed arm: with `watcher_owner_channel_id` unset, both witnesses are read
-  for the POLLED channel while nothing says the polled channel is where delivery
-  happened. The frontier is unattributed rather than measured, so the redrive is
-  refused outright and `resume_offset` keeps whatever it already held.
-- Violation surface: the watcher re-reads a prefix it has already relayed, and
-  because the transcript grows between the two passes, the re-post carries the
-  same prefix with a longer body. The 2026-09-15 REST scan of adk-cc measured
-  that signature directly — 145 real bot bodies, 28 re-posts, 22 of them partial
-  (784 -> 1627 chars) — which is why this invariant is verified by counting
-  re-posts and not byte-identical duplicates.
-- Tracing events: `redrive_delivery_owner_unknown` and
-  `redrive_unwitnessed_rewind`, in I12's `redrive_frontier_no_progress` shape so
-  all three refusal reasons count off one `event` field.
-- Invariant key: `redrive_rewinds_only_onto_a_witnessed_frontier` (enforced by
-  the `relay_auto_heal::tests` `_5943` set: the refused unwitnessed rewind, the
-  admitted witnessed rewind, the owner-absent refusal, the fresh-watcher zero,
-  the swept witness/direction split, and the composed producer-to-consumer guard
-  test; like I12 and I16 this path emits tracing logs rather than
+  coord that never advanced, so the VALUE cannot separate "nothing was delivered"
+  from "not restored yet". At 2026-09-16T14:13:37Z..14:21:32Z five consecutive
+  redrives ran with `last_relay_offset=0` and `unread_bytes=24_553_403` — the
+  entire transcript — after a dcserver restart dropped the in-memory coordinate
+  while the watcher kept reading.
+- Witness: `DurableFrontierObservation::durable_delivery_witness`, carried onto
+  the snapshot as `WatcherStateSnapshot::durable_frontier`. It must be a term the
+  restart does not take with it, and it is the only one: both of I12's readings
+  live in `SharedData::tmux_relay_coords`, which the restart empties, and the
+  watcher's own read position was process-local for the same reason. `RowPresent`
+  alone is not the predicate — `live_generation_mtime_ns` is read off the
+  coordinate ENTRY, so after that restart `observe` can only answer
+  `GenerationUnresolved`; both count. `GenerationMismatch` does not: it names a
+  provably different incarnation, and `watermark_after_output_regression` resets
+  a re-created wrapper's watermark to zero legitimately.
+- I12's two readings are one reading spelled twice — `redrive_grace` admits a
+  redrive only while `snapshot.last_relay_offset == token.committed_offset`, so
+  their `max()` is a no-op on every production path into this guard. It is
+  retained because the handle-level entry point is reachable in tests where they
+  differ and the lower one would resume below I12's floor, NOT because it is a
+  second independent witness. It is not.
+- Not refused, deliberately: a resume point BEHIND the durable witness (the sink
+  confirm lag over an already-persisted batch — precisely what recovery is for),
+  and an unset `watcher_owner_channel_id` (the rest of the codebase already reads
+  that as "the polled channel": `nudge_existing_watcher_for_backlog`,
+  `RelayHealthSnapshot::channel_binding`, `idle_recap`).
+- On refusal the redrive is a NO-OP plus an alarm, never an escalation to
+  `RelayRecoveryActionKind::ReattachWatcher`: the reattach reseeds from the same
+  emptied coordinate map, so escalating re-posts by a second route.
+  `nudge_existing_watcher_for_backlog` returns `RedriveNudge` rather than `bool`
+  so the `apply` arm can tell a refusal from a nudge that merely did not apply,
+  and the next poll re-decides once the frontier is restored. A session that has
+  delivered nothing has no witness (`RowAbsent`), so the id-0 / fresh-session
+  resume at offset zero still passes.
+- Violation surface: the watcher re-reads a prefix it already relayed, and the
+  transcript grows between passes, so the re-post carries the same prefix with a
+  longer body. The 2026-09-15 REST scan of adk-cc measured it — 145 bot bodies,
+  28 re-posts, 22 partial (784 -> 1627 chars) — which is why this invariant is
+  verified by counting re-posts, not byte-identical duplicates.
+- What I19 does NOT give you: a duplicate-relay defence on the far side of the
+  resume. `pre_emit_guard` suppresses on `data_start_offset <
+  last_relayed_offset`, the caller assigns `data_start_offset = current_offset =
+  requested_offset`, and `watcher_resume_outcome` pins the floor at that same
+  offset — equal by construction — while a cleared delivery marker arms no floor
+  at all. That is deliberate: the branch deletes the placeholder and discards the
+  pending buffer, so firing it here would convert a re-post into total loss of
+  `[floor, EOF)`. The defences for this path are the refusal above and I12's
+  no-progress gate.
+- Tracing events: `redrive_unrestored_frontier`, in I12's
+  `redrive_frontier_no_progress` shape so both refusal reasons count off one
+  `event` field.
+- Invariant key: `redrive_resumes_only_onto_a_restored_frontier` (enforced by the
+  `relay_auto_heal::tests` `_5943` set: the refused unrestored zero, the admitted
+  backlog behind the witness, the owner-field non-decision, the fresh-watcher
+  zero, the swept witness/direction split, the refusal-propagation seam, and the
+  inert-floor test; like I12 and I16 this path emits tracing logs rather than
   `record_invariant_check` rows).
 
 ## How to add a new invariant

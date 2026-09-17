@@ -36,7 +36,9 @@ use poise::serenity_prelude::ChannelId;
 use serde::Serialize;
 
 use super::health::HealthRegistry;
-use super::relay_health::{RelayActiveTurn, RelayHealthSnapshot, RelayStallState};
+use super::relay_health::{
+    DurableFrontierObservation, RelayActiveTurn, RelayHealthSnapshot, RelayStallState,
+};
 use super::{
     SharedData, clear_watchdog_deadline_override, destructive_cancel_gate, health, inflight,
     mailbox_clear_channel, mailbox_clear_recovery_marker, mailbox_finish_turn, mailbox_snapshot,
@@ -656,6 +658,7 @@ mod axis_b_tests {
             tmux_session: None,
             watcher_owner_channel_id: None,
             last_relay_offset: 0,
+            durable_frontier: DurableFrontierObservation::RowAbsent,
             inflight_state_present: false,
             last_relay_ts_ms: 0,
             last_capture_offset: None,

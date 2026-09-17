@@ -179,6 +179,33 @@ impl DurableFrontierObservation {
             },
         }
     }
+
+    /// #5943: the relayed offset a DURABLE row vouches for, when one can still
+    /// be attributed to the transcript the caller is asking about.
+    ///
+    /// `relayed_start` is written into the in-flight row by `tmux_watcher` and
+    /// survives a dcserver restart, so it is the one frontier witness NOT
+    /// destroyed by the event that empties `SharedData::tmux_relay_coords`. A
+    /// guard whose discriminator is zeroed by the same event it must detect
+    /// discriminates nothing, which is why the in-memory readings cannot serve.
+    ///
+    /// [`Self::RowPresent`] alone is deliberately not the condition: it also
+    /// demands agreement with the LIVE generation, which is read off the
+    /// coordinate ENTRY — so after the restart this exists for, [`Self::observe`]
+    /// can only answer [`Self::GenerationUnresolved`].
+    /// [`Self::GenerationMismatch`] IS excluded, for the opposite reason: both
+    /// generations were witnessed and they name different incarnations, and a
+    /// cancel→respawn's fresh wrapper legitimately starts at zero
+    /// (`tmux_session_files::watermark_after_output_regression`).
+    pub(in crate::services::discord) fn durable_delivery_witness(self) -> Option<u64> {
+        match self {
+            Self::RowAbsent | Self::GenerationMismatch { .. } => None,
+            Self::RowPresent { relayed_start, .. }
+            | Self::GenerationUnresolved { relayed_start, .. } => {
+                (relayed_start > 0).then_some(relayed_start)
+            }
+        }
+    }
 }
 
 /// The two witnesses, side by side and neither derived from the other.

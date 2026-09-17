@@ -127,8 +127,7 @@ pub(super) async fn poll_watcher_output_or_continue(
 
     macro_rules! commit_poll_state {
         () => {{
-            *relay_offset_state.current_offset =
-                shared.publish_watcher_read_offset(channel_id, current_offset);
+            *relay_offset_state.current_offset = current_offset;
             *relay_offset_state.terminal_delivery_observed = terminal_delivery_observed;
             *relay_offset_state.last_relayed_offset = last_relayed_offset;
             *relay_offset_state.last_observed_generation_mtime_ns =

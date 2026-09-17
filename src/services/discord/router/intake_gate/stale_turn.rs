@@ -433,6 +433,8 @@ mod thread_guard_stale_pure_tests {
             tmux_session: Some("stale-proof-tmux".to_string()),
             watcher_owner_channel_id: attached.then_some(channel_id),
             last_relay_offset: 0,
+            durable_frontier:
+                crate::services::discord::relay_health::DurableFrontierObservation::RowAbsent,
             inflight_state_present: true,
             last_relay_ts_ms: 0,
             last_capture_offset: None,

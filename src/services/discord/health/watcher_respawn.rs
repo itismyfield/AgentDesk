@@ -889,7 +889,7 @@ mod tests {
 
     use crate::services::discord::health::STALL_WATCHDOG_INTERVAL_SECS;
     use crate::services::discord::relay_health::{
-        RelayActiveTurn, RelayHealthSnapshot, RelayStallState,
+        DurableFrontierObservation, RelayActiveTurn, RelayHealthSnapshot, RelayStallState,
     };
     use crate::services::provider::{CancelToken, ProviderKind};
 
@@ -914,6 +914,7 @@ mod tests {
             tmux_session: tmux_session.map(str::to_string),
             watcher_owner_channel_id: Some(channel_id),
             last_relay_offset: 10,
+            durable_frontier: DurableFrontierObservation::RowAbsent,
             inflight_state_present: inflight_present,
             last_relay_ts_ms: 1_700_000_000_000,
             last_capture_offset: Some(20),
