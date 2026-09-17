@@ -39,29 +39,6 @@ fn prune_recent_watcher_reattach_offsets(
     });
 }
 
-// #3034: write side of the watcher-reattach-offset dedup ring. The read side
-// (`matching_recent_watcher_reattach_offset`) is live in the watcher loop; the
-// record wiring is staged (the lookup defensively misses until then).
-#[allow(dead_code)]
-pub(super) fn record_recent_watcher_reattach_offset(
-    channel_id: ChannelId,
-    tmux_session_name: &str,
-    offset: u64,
-) {
-    let now = std::time::Instant::now();
-    let mut offsets = recent_watcher_reattach_offsets();
-    prune_recent_watcher_reattach_offsets(&mut offsets, now);
-    while offsets.len() >= RECENT_WATCHER_REATTACH_OFFSET_CAPACITY {
-        offsets.pop_front();
-    }
-    offsets.push_back(RecentWatcherReattachOffset {
-        channel_id,
-        tmux_session_name: tmux_session_name.to_string(),
-        offset,
-        recorded_at: now,
-    });
-}
-
 pub(super) fn matching_recent_watcher_reattach_offset(
     channel_id: ChannelId,
     tmux_session_name: &str,

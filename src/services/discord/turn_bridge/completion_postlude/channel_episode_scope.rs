@@ -449,9 +449,9 @@ mod tests {
     }
 
     /// Source pin for design L-4. This fixes the complete production caller set and
-    /// its token-registration contract. TUI-direct bridges retain their synthetic
-    /// claim's token, yielding Idle after release or Foreign when a successor has
-    /// claimed the retained mailbox handle.
+    /// its token-registration contract. The TUI-direct bridge retains its
+    /// synthetic claim's token, yielding Idle after release or Foreign when a
+    /// successor has claimed the retained mailbox handle.
     #[test]
     fn bridge_entry_sites_pin_mailbox_token_registration_contract() {
         let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -497,7 +497,12 @@ mod tests {
         assert_eq!(headless.matches(&spawn).count(), 1);
         assert_eq!(recovery.matches(&spawn).count(), 1);
         assert_eq!(tui_direct.matches(&spawn).count(), 0);
-        assert_eq!(tui_direct.matches(&pinned).count(), 2);
+        // T6 unrecorded dead-code sweep slice 1: 2 -> 1. The unwired legacy
+        // `relay_tui_idle_response_through_bridge` (zero production and zero
+        // test callers) was deleted; `stream_tui_idle_response_through_bridge`
+        // is now the only TUI-direct bridge entry, and it still pins the
+        // captured synthetic mailbox actor.
+        assert_eq!(tui_direct.matches(&pinned).count(), 1);
         assert!(intake.contains("cancel_token.clone(),\n            request_owner"));
         assert!(headless.contains("cancel_token.clone(),\n            request_owner"));
         assert!(recovery.contains("mailbox_recovery_kickoff(\n            shared,\n            channel_id,\n            cancel_token.clone(),"));
@@ -513,8 +518,8 @@ mod tests {
                     "    );"
                 ))
                 .count(),
-            2,
-            "both TUI-direct entries preserve the captured synthetic mailbox actor"
+            1,
+            "the surviving TUI-direct entry preserves the captured synthetic mailbox actor"
         );
     }
 }

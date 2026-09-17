@@ -265,7 +265,8 @@ pub(in crate::services::discord) enum OutputPlan {
 pub(in crate::services::discord) use fresh_send::RecordContext as FreshSendRecord;
 
 impl OutputPlan {
-    /// Map an `outbound::decide_policy` length decision into an `OutputPlan`.
+    /// Map an `outbound::decide_policy_with_limits` length decision into an
+    /// `OutputPlan`.
     ///
     /// - `Inline` → `Replace` (fits a single message; edit the placeholder in
     ///   place). The replace `lifecycle` is supplied by the caller because the

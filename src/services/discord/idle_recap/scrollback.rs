@@ -211,15 +211,6 @@ fn recap_composer_prompt(scrollback: &str) -> String {
     )
 }
 
-/// Backward-compatible summary-only wrapper for any local callers that still
-/// only need the recap sentence.
-#[allow(dead_code)]
-pub(crate) async fn summarize_with_haiku(scrollback: &str) -> Option<String> {
-    compose_with_haiku(scrollback)
-        .await
-        .and_then(|output| output.summary)
-}
-
 pub(crate) fn parse_recap_composer_output(raw: &str) -> Option<RecapComposerOutput> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {

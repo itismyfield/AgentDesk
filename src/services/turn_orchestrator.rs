@@ -57,10 +57,12 @@ pub(crate) use pending_queue_persistence::{
 use pending_queue_persistence::{
     cleanup_stale_pending_queue_tmp_files_in_dir, cleanup_stale_pending_queue_tmp_files_under_root,
 };
+#[cfg(test)]
+use queue_cancellation::cancel_soft_intervention_by_message_id;
 pub(crate) use queue_cancellation::has_soft_intervention_at;
 use queue_cancellation::{
-    cancel_soft_intervention_by_message_id, cancel_soft_intervention_by_primary_message_id,
-    dequeue_next_soft_intervention, has_soft_intervention,
+    cancel_soft_intervention_by_primary_message_id, dequeue_next_soft_intervention,
+    has_soft_intervention,
 };
 pub(crate) use source_generation::SourceMessageQueuedGeneration;
 pub(crate) use turn_finished_signal::TurnFinishedSignal;
@@ -1149,26 +1151,6 @@ impl ChannelMailboxHandle {
         .await
     }
 
-    pub(crate) async fn cancel_queued_message(
-        &self,
-        message_id: MessageId,
-        persistence: QueuePersistenceContext,
-    ) -> CancelQueuedMessageResult {
-        self.request(
-            |reply| ChannelMailboxMsg::CancelQueuedMessage {
-                message_id,
-                persistence,
-                reply,
-            },
-            CancelQueuedMessageResult {
-                removed: None,
-                queue_exit_events: Vec::new(),
-                persistence_error: None,
-            },
-        )
-        .await
-    }
-
     pub(crate) async fn cancel_queued_primary_message(
         &self,
         message_id: MessageId,
@@ -1763,11 +1745,6 @@ enum ChannelMailboxMsg {
         persistence: QueuePersistenceContext,
         consume_marker: bool,
         reply: oneshot::Sender<bool>,
-    },
-    CancelQueuedMessage {
-        message_id: MessageId,
-        persistence: QueuePersistenceContext,
-        reply: oneshot::Sender<CancelQueuedMessageResult>,
     },
     CancelQueuedPrimaryMessage {
         message_id: MessageId,
@@ -2833,36 +2810,6 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         );
                     }
                     let _ = reply.send(authorized);
-                }
-                ChannelMailboxMsg::CancelQueuedMessage {
-                    message_id,
-                    persistence,
-                    reply,
-                } => {
-                    state.last_persistence = Some(persistence.clone());
-                    let previous_queue = state.intervention_queue.clone();
-                    let mut cancel_result = cancel_soft_intervention_by_message_id(
-                        &mut state.intervention_queue,
-                        message_id,
-                    );
-                    if cancel_result.removed.is_some()
-                        || !cancel_result.queue_exit_events.is_empty()
-                    {
-                        if let Err(error) = persist_queue_or_restore(
-                            &mut state,
-                            channel_id,
-                            &persistence,
-                            previous_queue,
-                            "cancel_queued_message",
-                        ) {
-                            cancel_result = CancelQueuedMessageResult {
-                                removed: None,
-                                queue_exit_events: Vec::new(),
-                                persistence_error: Some(error),
-                            };
-                        }
-                    }
-                    let _ = reply.send(cancel_result);
                 }
                 ChannelMailboxMsg::CancelQueuedPrimaryMessage {
                     message_id,

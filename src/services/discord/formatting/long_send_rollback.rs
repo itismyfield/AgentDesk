@@ -25,15 +25,6 @@ pub(in crate::services::discord) enum RequiredReferenceRollbackError {
     Other(#[from] Error),
 }
 
-impl RequiredReferenceRollbackError {
-    pub(in crate::services::discord) fn as_error(&self) -> &(dyn std::error::Error + 'static) {
-        match self {
-            Self::UnknownReference { .. } => self,
-            Self::Other(error) => error.as_ref(),
-        }
-    }
-}
-
 fn is_unknown_required_reference(error: &(dyn std::error::Error + 'static)) -> bool {
     let mut current = Some(error);
     while let Some(error) = current {

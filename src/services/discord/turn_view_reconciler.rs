@@ -677,26 +677,6 @@ impl TurnViewReconciler {
         .await
     }
 
-    #[allow(dead_code)]
-    pub(in crate::services::discord) async fn note_turn_stopped(
-        &self,
-        shared: &SharedData,
-        target: TurnViewTarget,
-        owner: TurnViewOwner,
-        identity: TurnViewIdentity,
-        source: &'static str,
-    ) -> bool {
-        self.note_state(
-            shared,
-            target,
-            owner,
-            identity,
-            TurnViewState::Stopped,
-            source,
-        )
-        .await
-    }
-
     pub(in crate::services::discord) async fn note_turn_cleared(
         &self,
         shared: &SharedData,
@@ -730,25 +710,6 @@ impl TurnViewReconciler {
             )
             .await;
         delivery.delivered()
-    }
-
-    #[allow(dead_code)]
-    pub(in crate::services::discord) async fn note_anchor_replaced(
-        &self,
-        shared: &SharedData,
-        old_target: TurnViewTarget,
-        new_target: TurnViewTarget,
-        owner: TurnViewOwner,
-        identity: TurnViewIdentity,
-        source: &'static str,
-    ) -> bool {
-        let cleared = self
-            .note_turn_cleared(shared, old_target, owner.clone(), identity.clone(), source)
-            .await;
-        let started = self
-            .note_turn_started(shared, new_target, owner, identity, source)
-            .await;
-        cleared && started
     }
 
     #[cfg_attr(test, allow(dead_code))]

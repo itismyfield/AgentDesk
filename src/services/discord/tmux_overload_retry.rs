@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use std::sync::LazyLock;
-use std::sync::atomic::Ordering;
 
 use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
@@ -10,7 +9,6 @@ use crate::services::provider::ProviderKind;
 use super::SharedData;
 use super::gateway::{DiscordGateway, TurnGateway};
 
-pub(super) const PROVIDER_OVERLOAD_MAX_RETRIES: u8 = 3;
 const RETRY_PENDING_RELEASE_SAFETY_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(120);
 
@@ -22,40 +20,6 @@ pub(super) static PROVIDER_OVERLOAD_RETRY_STATE: LazyLock<
 pub(super) struct ProviderOverloadRetryState {
     pub(super) fingerprint: String,
     pub(super) attempts: u8,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ProviderOverloadDecision {
-    Retry {
-        attempt: u8,
-        delay: std::time::Duration,
-        fingerprint: String,
-    },
-    Exhausted,
-}
-
-pub(super) fn normalized_retry_payload_text(user_text: &str) -> &str {
-    let trimmed = user_text.trim();
-    if let Some((header, body)) = trimmed.split_once("\n\n") {
-        if header.contains("이전 대화 복원") || header.contains("자동 재시도") {
-            return body.trim();
-        }
-    }
-    trimmed
-}
-
-pub(super) fn provider_overload_fingerprint(user_text: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    normalized_retry_payload_text(user_text).hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
-}
-
-pub(super) fn provider_overload_retry_delay(attempt: u8) -> std::time::Duration {
-    let shift = u32::from(attempt.saturating_sub(1));
-    std::time::Duration::from_secs(120 * (1u64 << shift))
 }
 
 pub(super) fn clear_provider_overload_retry_state(channel_id: ChannelId) {
@@ -111,92 +75,6 @@ pub(super) fn schedule_discord_retry_with_history_completion_release(
         user_message_id,
         retry_text,
     );
-}
-
-pub(super) fn record_provider_overload_retry(
-    channel_id: ChannelId,
-    user_text: &str,
-) -> ProviderOverloadDecision {
-    let fingerprint = provider_overload_fingerprint(user_text);
-    let next_attempt = PROVIDER_OVERLOAD_RETRY_STATE
-        .get(&channel_id.get())
-        .and_then(|state| {
-            if state.fingerprint == fingerprint {
-                Some(state.attempts.saturating_add(1))
-            } else {
-                None
-            }
-        })
-        .unwrap_or(1);
-
-    if next_attempt > PROVIDER_OVERLOAD_MAX_RETRIES {
-        clear_provider_overload_retry_state(channel_id);
-        ProviderOverloadDecision::Exhausted
-    } else {
-        PROVIDER_OVERLOAD_RETRY_STATE.insert(
-            channel_id.get(),
-            ProviderOverloadRetryState {
-                fingerprint: fingerprint.clone(),
-                attempts: next_attempt,
-            },
-        );
-        ProviderOverloadDecision::Retry {
-            attempt: next_attempt,
-            delay: provider_overload_retry_delay(next_attempt),
-            fingerprint,
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn schedule_provider_overload_retry(
-    shared: Arc<SharedData>,
-    http: Arc<serenity::Http>,
-    provider: ProviderKind,
-    channel_id: ChannelId,
-    user_message_id: serenity::MessageId,
-    retry_text: String,
-    attempt: u8,
-    delay: std::time::Duration,
-    fingerprint: String,
-) {
-    tokio::spawn(async move {
-        tokio::time::sleep(delay).await;
-
-        if shared.restart.shutting_down.load(Ordering::Relaxed) {
-            return;
-        }
-
-        let should_send = PROVIDER_OVERLOAD_RETRY_STATE
-            .get(&channel_id.get())
-            .map(|state| state.fingerprint == fingerprint && state.attempts == attempt)
-            .unwrap_or(false);
-        if !should_send {
-            return;
-        }
-
-        if super::mailbox_has_active_turn(&shared, channel_id).await {
-            clear_provider_overload_retry_state(channel_id);
-            return;
-        }
-
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ↻ watcher overload auto-retry: channel {} attempt {}/{} after {}s",
-            channel_id.get(),
-            attempt,
-            PROVIDER_OVERLOAD_MAX_RETRIES,
-            delay.as_secs()
-        );
-        schedule_discord_retry_with_history_completion_release(
-            shared,
-            http,
-            provider,
-            channel_id,
-            user_message_id,
-            retry_text,
-        );
-    });
 }
 
 #[cfg(test)]

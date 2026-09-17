@@ -1766,23 +1766,6 @@ async fn mailbox_try_start_turn_kinded(
     .await
 }
 
-// #3034: dormant production restore path (wraps `mailbox.restore_active_turn`,
-// itself `#[allow(dead_code)]` in turn_orchestrator). Kept as the wired-but-not-
-// yet-dispatched rehydrate seam; do not delete without removing the method too.
-#[allow(dead_code)]
-async fn mailbox_restore_active_turn(
-    shared: &SharedData,
-    channel_id: ChannelId,
-    cancel_token: Arc<CancelToken>,
-    request_owner: UserId,
-    user_message_id: MessageId,
-) {
-    shared
-        .mailbox(channel_id)
-        .restore_active_turn(cancel_token, request_owner, user_message_id)
-        .await;
-}
-
 use queue_io::mailbox_recovery_kickoff;
 
 fn ensure_cancel_token_bound_from_inflight_state(
@@ -2758,39 +2741,6 @@ mod followup_retry_requeue_tests {
             );
         });
     }
-}
-
-async fn mailbox_cancel_soft_intervention(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    message_id: MessageId,
-) -> Option<Intervention> {
-    let result: CancelQueuedMessageResult = shared
-        .mailbox(channel_id)
-        .cancel_queued_message(
-            message_id,
-            queue_persistence_context(shared, provider, channel_id),
-        )
-        .await;
-    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
-    if let Some(removed) = result.removed.as_ref() {
-        let retry_identity = busy_followup_retry_store::resolve_identity(
-            provider,
-            channel_id.get(),
-            removed.message_id.get(),
-            &removed.source_message_ids,
-        );
-        if let Some(state) = retry_identity.state {
-            let _ = busy_followup_retry_store::clear_if_current(
-                provider,
-                channel_id.get(),
-                retry_identity.user_msg_id,
-                state.notice_message_id,
-            );
-        }
-    }
-    result.removed
 }
 
 async fn mailbox_clear_channel(

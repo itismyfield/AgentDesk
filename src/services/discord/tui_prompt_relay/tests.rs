@@ -3199,12 +3199,17 @@ fn s3t4_finalized_accepts_successor_and_missing_row() {
 fn s3t5_codex_abort_and_recv_error_use_shared_fail_closed_completion() {
     s3_completion_fixture(false, Some(false), Some(880003), Some(880005));
     s3_completion_fixture(false, None, Some(880003), Some(880005));
+    // T6 unrecorded dead-code sweep slice 1: 2 -> 1. The unwired legacy
+    // `relay_tui_idle_response_through_bridge` (zero production and zero test
+    // callers) was deleted, and it held one of the two call sites. The only
+    // surviving bridge entry point, `stream_tui_idle_response_through_bridge`,
+    // still routes abort/recv-error through the shared fail-closed completion.
     let source = include_str!("claude_idle_bridge.rs");
     assert_eq!(
         source
             .matches("    let result = finish_idle_bridge_completion(\n        completion,")
             .count(),
-        2
+        1
     );
 }
 
