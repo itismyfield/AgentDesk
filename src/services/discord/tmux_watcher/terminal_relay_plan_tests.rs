@@ -970,3 +970,98 @@ fn a_dropped_body_with_no_durable_record_violates_i17_5941() {
         "the invariant key is the alert table's status filter and the contract doc's key"
     );
 }
+
+/// A channel of its own: the counter below is process-global and cumulative, so
+/// sharing `LOST_CHANNEL` with the sibling I17 test would race under `--test-threads`.
+const PLAN_DRIVEN_CHANNEL: u64 = 1_479_671_298_497_183_836;
+
+/// Losses ADMITTED for `channel` — the aggregate counter the seam raises only
+/// after `record_required` passes, i.e. exactly when a DLQ row is owed.
+fn admitted_losses(channel: u64) -> u64 {
+    crate::services::observability::metrics::snapshot()
+        .into_iter()
+        .filter(|row| row.channel_id == channel)
+        .map(|row| row.relay_terminal_authority_denied)
+        .sum()
+}
+
+#[tokio::test]
+async fn the_plan_itself_admits_the_lost_body_to_the_record_5941() {
+    // The only #5941 test that enters through PRODUCTION. The others hand-build
+    // `OrphanTerminalFrameFacts`, and the wiring test greps the call site's
+    // ARGUMENT LIST — so `let current_response = "";` planted on the line ABOVE
+    // the call falsifies `record_required` forever, writes zero dead-letter rows
+    // and leaves every one of them green. The gap was the ENTRY POINT, not the
+    // strength of any assertion, so this one drives `run_terminal_relay_plan`
+    // itself over the incident shape: a soft stop-hook terminal carrying an
+    // assistant body, no inflight row (soft-terminal authority is denied) and no
+    // cached relay producer (the sink never owns the frame).
+    let root = tempfile::tempdir().expect("isolated runtime root");
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel = serenity::ChannelId::new(PLAN_DRIVEN_CHANNEL);
+    let before = admitted_losses(PLAN_DRIVEN_CHANNEL);
+
+    let http = std::sync::Arc::new(serenity::Http::new("fixture-no-network"));
+    let provider = ProviderKind::Claude;
+    let session = SESSION.to_string();
+    let output_path = root.path().join("out.jsonl").display().to_string();
+    let all_data = String::new();
+    let full_response = format!("{}{LOST_BODY}", "x".repeat(SENT_PREFIX));
+    let tool_state = WatcherToolState::new();
+    let context = TerminalRelayPlanContext {
+        http: &http,
+        shared: &shared,
+        channel_id: channel,
+        watcher_provider: &provider,
+        tmux_session_name: &session,
+        output_path: &output_path,
+        inflight_before_relay: &None,
+        cached_relay_producer: &None,
+        prompt_anchor_present_before_relay: false,
+        external_input_lease_before_relay: false,
+        session_bound_relay_turn_fully_mirrored: false,
+        session_bound_relay_turn_first_forwarded_sequence: None,
+        split_trailing_turn_follows: false,
+        startup_soft_terminal_authority: tui_direct_binding(),
+    };
+    let locals = TerminalRelayPlanLocals {
+        current_offset: FRAME_END,
+        data_start_offset: FRAME_START,
+        all_data: &all_data,
+        full_response: &full_response,
+        current_response: LOST_BODY,
+        response_sent_offset: SENT_PREFIX,
+        has_assistant_response: true,
+        terminal_kind: Some(WatcherTerminalKind::SoftStopHookSummary),
+        task_notification_kind: None,
+        assistant_text_seen: true,
+        fresh_assistant_text_seen: true,
+        tool_state: &tool_state,
+        placeholder_msg_id: None,
+        status_panel_msg_id: None,
+    };
+    let mut session_bound_relay_ack = None;
+    let mut monitor_auto_turn_claimed = false;
+    let mut monitor_auto_turn_finished = false;
+    let mut monitor_auto_turn_synthetic_msg_id = None;
+    let mut monitor_auto_turn_ledger_generation = None;
+    let mut state = TerminalRelayPlanState {
+        all_data_session_bound_relay_ack: &mut session_bound_relay_ack,
+        monitor_auto_turn_claimed: &mut monitor_auto_turn_claimed,
+        monitor_auto_turn_finished: &mut monitor_auto_turn_finished,
+        monitor_auto_turn_synthetic_msg_id: &mut monitor_auto_turn_synthetic_msg_id,
+        monitor_auto_turn_ledger_generation: &mut monitor_auto_turn_ledger_generation,
+    };
+
+    let outcome = run_terminal_relay_plan(&context, locals, &mut state).await;
+    assert!(
+        matches!(outcome, TerminalRelayPlanOutcome::Proceed(_)),
+        "the plan must reach its terminal decision rather than bailing before the seam"
+    );
+    assert_eq!(
+        admitted_losses(PLAN_DRIVEN_CHANNEL) - before,
+        1,
+        "a frame the plan itself left with no delivery owner must be admitted to the record exactly once"
+    );
+}
