@@ -468,6 +468,12 @@ banner "Build token serialization tests (#5663)"
 # cargo sites, so a dropped wiring or a new unserialized one cannot pass silently.
 "$PYTHON" -m unittest tests.test_build_token_serialization_5663
 
+banner "Build token fairness tests (#5968)"
+# The token is handed out first-come-first-served; before #5968 it was not, and
+# a lane that released and re-entered starved a waiter for 49 minutes. Same
+# reason as above -- Python, so only this unittest run gates it.
+"$PYTHON" -m unittest tests.test_build_token_fairness_5968
+
 banner "Generate inventory docs (refresh workspace; gate source-of-truth invariants, #3036)"
 # Inventory snapshots are untracked, so generate them in the CI workspace
 # before checks consume their source-of-truth data. The generator hard-fails
