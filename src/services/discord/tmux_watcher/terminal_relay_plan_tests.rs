@@ -625,12 +625,15 @@ fn a_body_the_sink_already_put_on_screen_requires_no_record_5941() {
     // proof did not (`SentButUncommitted` -> `TerminalUnknown` -> `RingUnknown`),
     // so `session_bound_ack_confirms_transport` is false and the watcher denies
     // itself in the SAME pass — every watcher-side conjunct then reads "nobody
-    // delivered this" about a body the user is already reading. r2 P1-A: `TimedOut`
-    // is the same shape (the deadline elapsed with the POST still IN FLIGHT). The
-    // table is every non-transport-confirming arm, i.e. all that reach this seam.
+    // delivered this" about a body the user is already reading. `TimedOut` is NOT
+    // the same shape and stays recordable: it is the deadline fall-through in
+    // `wait_for_session_bound_relay_delivery_ack`, returned after the ack ring
+    // stayed SILENT and never settled afterwards — an absence of evidence, which
+    // is the case the record exists for. The table is every non-transport-
+    // confirming arm, i.e. all seven that reach this seam.
     for (ack, want) in [
         (SessionBoundRelayAckOutcome::RingUnknown, false),
-        (SessionBoundRelayAckOutcome::TimedOut, false),
+        (SessionBoundRelayAckOutcome::TimedOut, true),
         (SessionBoundRelayAckOutcome::NotDelivered, true),
         (SessionBoundRelayAckOutcome::Dropped, true),
         (SessionBoundRelayAckOutcome::SinkError, true),

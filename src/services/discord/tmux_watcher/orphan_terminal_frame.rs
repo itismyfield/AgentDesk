@@ -49,13 +49,20 @@ impl OrphanTerminalFrameFacts<'_> {
     /// bodies are excluded: 18 of the 33 denials in the 2026-09-16 incident
     /// carried one. The last two conjuncts ask the SINK side, which the six
     /// above never do — a watcher that refused to send is no evidence the sink
-    /// did not send. `RingUnknown` (`SentButUncommitted`: the POST landed, only
-    /// its commit PROOF was lost) and `TimedOut` (the deadline elapsed with the
-    /// POST still IN FLIGHT) are the ONLY arms that are not evidence of
-    /// non-delivery; the other five stay recordable. The range conjunct is
-    /// `> 0`, not the pre-r1 `> data_start_offset`, which excluded every turn
-    /// served out of the #1216 leftover buffer, whose `data_start_offset` is the
-    /// CARRIED buffer's turn start and can sit at or above this consumed range.
+    /// did not send. `RingUnknown` is the ONLY excluded ack arm, because it is
+    /// the only one carrying POSITIVE evidence of delivery: its sole producer is
+    /// the sink's own `SentButUncommitted` report (`session_relay_sink/
+    /// terminal_handoff.rs` → `stream_relay.rs::deliver_frame`), i.e. the POST
+    /// landed and only its commit PROOF was lost. `TimedOut` is the opposite
+    /// shape — `session_bound_ack.rs::wait_for_session_bound_relay_delivery_ack`
+    /// returns it by falling through its deadline after the ack ring stayed
+    /// SILENT, and no later path settles it — so it is an ABSENCE of evidence,
+    /// which `terminal_relay_plan.rs` reads as "the sink MAY have posted". A
+    /// maybe is what the record exists for: the other six arms stay recordable.
+    /// The range conjunct is `> 0`, not the pre-r1 `> data_start_offset`, which
+    /// excluded every turn served out of the #1216 leftover buffer, whose
+    /// `data_start_offset` is the CARRIED buffer's turn start and can sit at or
+    /// above this consumed range.
     pub(super) fn record_required(&self) -> bool {
         self.denial.is_some()
             && self.watcher_direct_fallback_requested
@@ -66,7 +73,7 @@ impl OrphanTerminalFrameFacts<'_> {
             && self.terminal_event_consumed_offset > 0
             && !matches!(
                 self.session_bound_ack_outcome,
-                SessionBoundRelayAckOutcome::RingUnknown | SessionBoundRelayAckOutcome::TimedOut
+                SessionBoundRelayAckOutcome::RingUnknown
             )
             && !dr::range_already_committed(
                 self.terminal_event_consumed_offset,
