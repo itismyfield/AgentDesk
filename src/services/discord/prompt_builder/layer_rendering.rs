@@ -117,20 +117,9 @@ static AGENT_PERFORMANCE_CACHE_MISSES: std::sync::atomic::AtomicU64 =
 /// underlying rollup never changed within the day.
 ///
 /// The day boundary is UTC; rollovers are observable via the `day_bucket`
-/// number changing. Operators can force a refresh mid-day via
-/// [`invalidate_agent_performance_cache`].
+/// number changing.
 pub(super) fn agent_performance_day_bucket() -> i64 {
     chrono::Utc::now().timestamp() / 86_400
-}
-
-/// Compatibility alias for the legacy name. Retained because external
-/// tests still reference `agent_performance_hour_bucket`; the function now
-/// returns a *day* bucket, but the name was deliberately kept to minimize
-/// the call-site diff. Prefer [`agent_performance_day_bucket`] in new code.
-// #3034: test-only contract surface (legacy-name compatibility alias).
-#[allow(dead_code)]
-pub(super) fn agent_performance_hour_bucket() -> i64 {
-    agent_performance_day_bucket()
 }
 
 /// Snapshot of cache observability counters. `(hits, misses)`. Atomically
@@ -144,33 +133,6 @@ pub fn agent_performance_cache_metrics() -> (u64, u64) {
         AGENT_PERFORMANCE_CACHE_HITS.load(std::sync::atomic::Ordering::Relaxed),
         AGENT_PERFORMANCE_CACHE_MISSES.load(std::sync::atomic::Ordering::Relaxed),
     )
-}
-
-/// Explicitly drop every cached self-feedback entry. Intended for the
-/// daily rollup writer to call after persisting new data, so the next turn
-/// picks up the fresh snapshot without waiting for the UTC day boundary.
-///
-/// Idempotent — safe to call when no entries exist.
-// #3034: cache-invalidation hook for the daily rollup writer (#2666);
-// exercised by tests, rollup-writer wiring pending.
-#[allow(dead_code)]
-pub fn invalidate_agent_performance_cache() {
-    let cache = AGENT_PERFORMANCE_PROMPT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(mut guard) = cache.lock() {
-        guard.clear();
-    }
-}
-
-/// Drop the cached entry for a single role. Useful when a per-role
-/// rollup is refreshed while leaving others stale.
-// #3034: per-role cache-invalidation hook (#2666); exercised by tests,
-// rollup-writer wiring pending.
-#[allow(dead_code)]
-pub fn invalidate_agent_performance_cache_for_role(role_id: &str) {
-    let cache = AGENT_PERFORMANCE_PROMPT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(mut guard) = cache.lock() {
-        guard.remove(role_id);
-    }
 }
 
 /// Look up the cached self-feedback section if it is still valid for the
@@ -394,67 +356,6 @@ mod bucket_cadence_tests {
         let next_day = same_day_a + 86_400;
         assert_eq!(same_day_a / 86_400, same_day_b / 86_400);
         assert_ne!(same_day_a / 86_400, next_day / 86_400);
-    }
-
-    #[test]
-    fn hour_bucket_alias_returns_day_bucket() {
-        let _guard = BUCKET_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        // The legacy name is retained for source-compat, but it now
-        // returns the daily value too. We assert by sampling both at
-        // (approximately) the same instant; on a slow machine the second
-        // call could roll the day, so retry up to a few times.
-        for _ in 0..5 {
-            let day = agent_performance_day_bucket();
-            let hour = agent_performance_hour_bucket();
-            if day == hour {
-                return;
-            }
-        }
-        panic!("agent_performance_hour_bucket must return the day bucket");
-    }
-
-    #[test]
-    fn invalidate_drops_cached_entry() {
-        let _guard = BUCKET_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        reset_agent_performance_cache_for_layer_rendering_tests();
-        // Hand-craft an entry without going through a RoleBinding so we
-        // don't need the Discord settings types in this layer's tests.
-        store_agent_performance_section("role-x".into(), 1, Some("payload-v1".into()));
-        assert_eq!(
-            lookup_cached_agent_performance_section("role-x", 1),
-            Some(Some("payload-v1".into()))
-        );
-        invalidate_agent_performance_cache();
-        assert_eq!(
-            lookup_cached_agent_performance_section("role-x", 1),
-            None,
-            "invalidate must remove all entries"
-        );
-    }
-
-    #[test]
-    fn invalidate_for_role_only_touches_that_role() {
-        let _guard = BUCKET_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        reset_agent_performance_cache_for_layer_rendering_tests();
-        store_agent_performance_section("role-A".into(), 7, Some("a".into()));
-        store_agent_performance_section("role-B".into(), 7, Some("b".into()));
-        invalidate_agent_performance_cache_for_role("role-A");
-        assert_eq!(
-            lookup_cached_agent_performance_section("role-A", 7),
-            None,
-            "role-A entry should be gone"
-        );
-        assert_eq!(
-            lookup_cached_agent_performance_section("role-B", 7),
-            Some(Some("b".into())),
-            "role-B entry must survive a targeted invalidation"
-        );
     }
 
     #[test]

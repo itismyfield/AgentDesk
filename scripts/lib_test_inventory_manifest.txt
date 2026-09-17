@@ -2329,7 +2329,6 @@ services::cswap::tests::usage_age_seconds_recomputes_at_serve_time
 services::discord::abandon_request_store::probe_contract_tests::drain_http_contract_covers_live_terminal_prose_fences_and_transient_failures
 services::discord::abandon_request_store::tests::abandoned_card_renders_terminal_marker
 services::discord::abandon_request_store::tests::completed_terminal_request_upgrades_abort_for_same_panel
-services::discord::abandon_request_store::tests::defer_only_for_exact_live_anchor
 services::discord::abandon_request_store::tests::enqueue_is_idempotent_and_removable
 services::discord::abandon_request_store::tests::enqueue_skips_zero_ids_and_scopes_by_token
 services::discord::abandon_request_store::tests::enqueue_surfaces_write_failure
@@ -2508,18 +2507,6 @@ services::discord::commands::voice::auto_join_tests::occupancy_registry_isolates
 services::discord::compact_turn_authority::tests::external_interactive_turns_are_compact_eligible
 services::discord::compact_turn_authority::tests::monitor_triggered_turn_stays_gated
 services::discord::completion_footer_metadata::tests::bridge_and_watcher_finalize_inputs_render_identical_metadata_4806
-services::discord::completion_footer_metadata::tests::completed_footer_accepted_model_is_exact_deterministic_and_bounded_4860
-services::discord::completion_footer_metadata::tests::completed_footer_elapsed_boundaries_are_compact_4860
-services::discord::completion_footer_metadata::tests::completed_footer_is_single_line_deterministic_and_privacy_bounded_4860
-services::discord::completion_footer_metadata::tests::completed_footer_model_membership_is_exact_and_fail_closed_4860
-services::discord::completion_footer_metadata::tests::completed_footer_omits_missing_and_zero_window_context_4860
-services::discord::completion_footer_metadata::tests::completed_footer_percent_is_floor_clamped_and_overflow_safe_4860
-services::discord::completion_footer_metadata::tests::completed_footer_rejects_invalid_approved_entries_and_overlength_models_4860
-services::discord::completion_footer_metadata::tests::completed_footer_renders_only_exact_approved_model_ids_4860
-services::discord::completion_footer_metadata::tests::completed_footer_renders_owner_format_and_fixed_order_4860
-services::discord::completion_footer_metadata::tests::completed_footer_sanitizes_host_injection_paths_and_private_identity_4860
-services::discord::completion_footer_metadata::tests::completed_footer_token_boundaries_are_decimal_and_lowercase_4860
-services::discord::completion_footer_metadata::tests::completed_footer_truncates_host_on_utf8_character_boundary_4860
 services::discord::completion_footer_metadata::tests::completion_footer_fixture_pins_requested_order_and_dedup_4846
 services::discord::completion_footer_metadata::tests::duplicate_separators_never_leave_old_metadata_in_content_4806
 services::discord::completion_footer_metadata::tests::malformed_suffix_does_not_become_refresh_metadata_4806
@@ -3087,8 +3074,6 @@ services::discord::idle_recap::tests::channel_has_active_turn_false_for_stale_in
 services::discord::idle_recap::tests::channel_has_active_turn_false_when_no_inflight
 services::discord::idle_recap::tests::channel_has_active_turn_true_for_fresh_inflight
 services::discord::idle_recap::tests::channel_has_active_turn_true_for_mailbox_active_without_inflight
-services::discord::idle_recap::tests::clear_idle_recap_for_channel_deletes_card_and_clears_pointer
-services::discord::idle_recap::tests::clear_idle_recap_for_channel_noop_when_no_card_recorded
 services::discord::idle_recap::tests::clear_specific_card_clears_when_pointer_still_matches_captured_id
 services::discord::idle_recap::tests::clear_specific_card_targets_captured_id_and_cas_is_noop_when_pointer_advanced
 services::discord::idle_recap::tests::concurrent_same_session_recap_persist_keeps_newer_card_when_older_persists_later
@@ -3729,7 +3714,6 @@ services::discord::outbound::turn_output_controller::tests::i1_commit_advance_is
 services::discord::outbound::turn_output_controller::tests::i2_ambiguous_releases_without_commit_or_advance
 services::discord::outbound::turn_output_controller::tests::no_commit_on_fallback_surfaces_fell_back
 services::discord::outbound::turn_output_controller::tests::noop_plan_skips_without_touching_lease
-services::discord::outbound::turn_output_controller::tests::output_plan_from_length_decision_maps_each_variant
 services::discord::outbound::turn_output_controller::tests::post_heartbeat_renews_held_lease_and_stops_before_commit
 services::discord::outbound::turn_output_controller::tests::proceed_markerless_sends_when_acquire_fails
 services::discord::outbound::turn_output_controller::tests::replace_partial_continuation_failure_does_not_commit_or_advance
@@ -3800,9 +3784,6 @@ services::discord::placeholder_live_events::slot_rehydration::tests::compact_pro
 services::discord::placeholder_live_events::slot_rehydration::tests::tail_start_offset_clamps_to_size_floor_when_boundary_is_out_of_window
 services::discord::placeholder_live_events::subagent_panel::tests::tombstone_expires_after_ttl_and_is_pruned_on_push
 services::discord::placeholder_live_events::subagent_panel::tests::tombstone_ring_caps_at_capacity_evicting_oldest_first
-services::discord::placeholder_live_events::subagent_rollout::tests::rollout_str_computes_tool_count_tokens_and_duration
-services::discord::placeholder_live_events::subagent_rollout::tests::rollout_str_empty_is_empty_summary
-services::discord::placeholder_live_events::subagent_rollout::tests::rollout_str_skips_malformed_lines_without_panic
 services::discord::placeholder_live_events::subagent_rollout::tests::tool_use_result_agent_id_without_accounting_is_not_a_completion_summary
 services::discord::placeholder_live_events::subagent_rollout::tests::tool_use_result_async_launch_ack_is_not_a_completion_summary
 services::discord::placeholder_live_events::subagent_rollout::tests::tool_use_result_missing_is_none
@@ -4127,9 +4108,6 @@ services::discord::prompt_builder::dispatch_contract_tests::shared_prompt_gate_o
 services::discord::prompt_builder::dispatch_contract_tests::shared_prompt_gate_on_selects_full_review_lite_and_headless_profiles
 services::discord::prompt_builder::layer_rendering::bucket_cadence_tests::bucket_rollover_causes_miss_then_refill
 services::discord::prompt_builder::layer_rendering::bucket_cadence_tests::day_bucket_increments_at_utc_midnight_only
-services::discord::prompt_builder::layer_rendering::bucket_cadence_tests::hour_bucket_alias_returns_day_bucket
-services::discord::prompt_builder::layer_rendering::bucket_cadence_tests::invalidate_drops_cached_entry
-services::discord::prompt_builder::layer_rendering::bucket_cadence_tests::invalidate_for_role_only_touches_that_role
 services::discord::prompt_builder::layer_rendering::bucket_cadence_tests::metrics_counters_track_hits_and_misses
 services::discord::prompt_builder::layer_rendering::workspace_aware_shared_rules_tests::agentdesk_workspace_keeps_repo_relative_doc_refs
 services::discord::prompt_builder::layer_rendering::workspace_aware_shared_rules_tests::foreign_workspace_omits_repo_relative_doc_refs
@@ -4703,7 +4681,6 @@ services::discord::router::intake_gate::reply_context_tests::attachment_reply_co
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::queue_blocked_stale_active_turn_release_publishes_completion_event
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::stale_active_turn_proof_classifies_no_owner_as_queue_blocked_orphan
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::stale_active_turn_proof_preserves_explicit_background_status
-services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_inflight_is_stale_classifies_disk_state
 services::discord::router::intake_queue_transaction::tests::accepted_commit_applies_reaction_and_advances_checkpoint
 services::discord::router::intake_queue_transaction::tests::accepted_commit_can_apply_static_reaction
 services::discord::router::intake_queue_transaction::tests::accepted_commit_records_reaction_failure_without_claiming_application
