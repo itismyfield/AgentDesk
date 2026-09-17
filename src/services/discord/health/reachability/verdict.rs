@@ -1,38 +1,20 @@
 //! The `ReachabilityVerdict` type set — 4987 §-1.3b and §4.1 (#5071 T4-B1).
 //!
-//! This file is vocabulary and polarity. It deliberately holds no composition
-//! rule, no threshold, no clock read, and no I/O:
+//! This file is vocabulary and polarity: no composition rule, no threshold, no
+//! clock read, no I/O — that is deferred to T4-B6's `worst(ReachabilityVerdict,
+//! ExternalRelayVerdict)` (gated behind `G-T4`).
 //!
-//! * choosing `Degraded` vs `Unreachable` from `warn_bound`/`fail_bound` is
-//!   deferred composition; T4-B2c only records observations in the ledger;
-//! * the final product `worst(ReachabilityVerdict, ExternalRelayVerdict)` is
-//!   T4-B6, and turning it on is gated behind `G-T4`.
+//! Polarity (4987 §4.1): `ReachabilityVerdict != Reachable` ⇒ the final health
+//! verdict is not GREEN, whatever the structural signals say. The converse
+//! does NOT hold: `Reachable` does not *declare* health, it only fails to deny
+//! it — §-1.4 additionally requires positive incarnation-alive evidence.
 //!
-//! Landing the names first is what lets B2..B6 be reviewed against one fixed
-//! set instead of each slice inventing its own spelling.
-//!
-//! # Polarity (4987 §4.1)
-//!
-//! > `ReachabilityVerdict != Reachable` ⇒ the final health verdict is not
-//! > GREEN, whatever the structural signals say.
-//!
-//! The converse does NOT hold: `Reachable` does not *declare* health, it only
-//! fails to deny it — §-1.4 additionally requires positive incarnation-alive
-//! evidence before a producer may spell it, and producing verdicts remains the
-//! later B6 composition task.
-//!
-//! # `TransportUnknown` is neither health nor a redelivery warrant
-//!
-//! §-1.3b introduced it for the POST-succeeded/receipt-write-failed crash
-//! window, because round 1 sent that window straight to `Unreachable`, a human
-//! then redelivered by hand, and that produced the duplicate #4986 was refusing
-//! to create. So it is false for both [`ReachabilityVerdict::permits_health`]
-//! (§-1.3b puts it on the degraded side) and
+//! `TransportUnknown` is neither health nor a redelivery warrant. §-1.3b
+//! covers the POST-succeeded/receipt-write-failed crash window (#4986): it is
+//! false for both [`ReachabilityVerdict::permits_health`] and
 //! [`ReachabilityVerdict::authorizes_redelivery`], and it is the only variant
-//! that sets [`ReachabilityVerdict::requires_manual_redelivery_ban_notice`].
-//! Encoding "neither" rather than "one of the two" is the point: a non-GREEN
-//! variant is exactly what a later reader is tempted to read as permission to
-//! act, and 4987 §7.1/I15 denies that to every variant.
+//! that sets [`ReachabilityVerdict::requires_manual_redelivery_ban_notice`] —
+//! 4987 §7.1/I15 denies destructive action to every variant regardless.
 
 /// The reachability verdict, 4987 §-1.3b (which extends §4.1 with
 /// `TransportUnknown`).
@@ -120,12 +102,9 @@ pub(in crate::services::discord) enum NotAliveObligationState {
     WithinGrace,
 }
 
-/// Why the obligation set could not be produced (4987 §4.1).
-///
-/// #5071 relay-tail S1 (I-5): five branches used to spell `TranscriptUnresolved`
-/// between them, so the reason published on the health detail could not say
-/// which one answered. `TranscriptUnresolved` now means the resolution ladder
-/// and nothing else; the other four are named below.
+/// Why the obligation set could not be produced (4987 §4.1). #5071
+/// relay-tail S1 (I-5): `TranscriptUnresolved` means the resolution ladder
+/// and nothing else; every other reason is named below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum ReachabilityUnknownReason {
     /// Every rank of the 4987 §-1.3 resolution ladder failed — a coordinate
@@ -344,10 +323,8 @@ mod tests {
     }
 
     /// The fixture above is a hand-written list, and a hand-written list is
-    /// what a new variant walks straight past — #5942 r1 added `Expired` to the
-    /// enum and the truth table in `relay_recovery::destructive_warrant` kept
-    /// grading five rows out of six until r2 noticed. No `_` arm, so a seventh
-    /// variant stops this module compiling until someone names it.
+    /// what a new variant walks straight past (#5942). No `_` arm, so a
+    /// seventh variant stops this module compiling until someone names it.
     fn verdict_index(verdict: &ReachabilityVerdict) -> usize {
         match verdict {
             ReachabilityVerdict::Reachable => 0,

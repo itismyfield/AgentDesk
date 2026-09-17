@@ -1,93 +1,21 @@
 //! Canonical obligation extraction — 4987 S1 second half + blocker B1′
 //! (#5071 T4-B2a).
 //!
-//! # This file is INACTIVE, like the rest of the tree
+//! INACTIVE, like the rest of the tree — see [`super`] module docs. This is
+//! the Rust half of 4987 §2.2/§2.4's durable-obligation rule;
+//! `scripts/relay_watchdog.py`'s `canonical_obligation_records` is the Python
+//! half, compared byte for byte against `tests/fixtures/relay_obligation/`
+//! via `scripts/check_reachability_canonical_equivalence.py` — proof of
+//! equivalence only for the cases in that corpus, not over all inputs.
 //!
-//! Nothing in production calls anything below. The [`super`] module docs state
-//! the rule for the whole tree and this slice keeps it: T4-B2a lands the
-//! canonical framing and the machine that proves the two implementations of it
-//! agree, T4-B2b lands the durable ledger, T4-B2c wires the observation task,
-//! and only then does 4987 S1 observation start. The consumers that exist
-//! today are this file's own tests and
-//! `scripts/check_reachability_canonical_equivalence.py`.
-//!
-//! 4987 §2.2 names the term the relay never had: a *durable obligation*, the
-//! "what should have been delivered" side of the subtraction. §2.4 then names
-//! the hazard in computing it twice — the in-band Rust prober and the
-//! out-of-band Python watchdog would each define "assistant text block" their
-//! own way, and then one of the two oracles is always wrong. This file is the
-//! Rust half of the single rule; `scripts/relay_watchdog.py`'s
-//! `canonical_obligation_records` is the Python half; and
-//! `tests/fixtures/relay_obligation/` is the golden corpus both are compared
-//! against byte for byte.
-//!
-//! # The canonical schema
-//!
-//! One record per physical line, five fields, exactly as 4987 §-1.5 spells it:
-//! `(generation, start, end, identity, reason)`.
-//!
-//! ```text
-//! relay_obligation_canonical_v1
-//! <generation_mtime_ns>\t<start>\t<end>\t<dev>:<ino>\t<REASON>
-//! next_offset\t<where the cursor resumes>
-//! ```
-//!
-//! The `next_offset` trailer is part of the compared bytes, not a convenience.
-//! The framing rules below are ALL cursor rules — a partial line holds the
-//! cursor, an oversized run passes it — and an encoding of the records alone
-//! cannot see the difference. Measured, not assumed: with the trailer omitted,
-//! the mutation that makes a partial line advance the cursor SURVIVED the whole
-//! corpus.
-//!
-//! * `start`/`end` are ABSOLUTE byte offsets into the transcript, half-open,
-//!   and `end` includes the line terminator. Byte offsets, not block indices,
-//!   because a receipt covers a byte range (4987 §-1.3 `IncarnationRange`) and
-//!   the subtraction has to be defined on the same coordinate the receipt uses.
-//! * `identity` is the `(dev, ino)` of the file the bytes were read from, so a
-//!   rotation cannot make two different files' offsets comparable.
-//! * `reason` is emitted for EVERY line, not only for obligations. Recording
-//!   the skips is what makes the equivalence gate load-bearing: an
-//!   implementation that started silently dropping harness-control records
-//!   would otherwise agree with the other one on the obligation lines and pass.
-//!
-//! # Framing (the edge cases 4987 §-1.5 assigns to this slice)
-//!
-//! * **Partial line** — a chunk that ends without a terminator emits
-//!   [`ObligationReason::PartialLine`] and does NOT advance
-//!   [`ObligationScan::next_offset`] past it, so the next read takes those
-//!   bytes as the head of the completed line. A partial line is never an
-//!   obligation: half a JSON record is not evidence of anything.
-//! * **CRLF** — the terminator is `\n`; exactly one immediately preceding `\r`
-//!   is stripped before classification, and both bytes stay inside `[start,
-//!   end)`. A line that is only `\r\n` is [`ObligationReason::BlankLine`].
-//! * **Multi-byte** — splitting on `0x0A` cannot land inside a UTF-8 multi-byte
-//!   sequence (continuation bytes are `0x80..=0xBF`), so line framing is
-//!   codepoint-safe by construction, and a chunk boundary that does fall
-//!   mid-character can only produce a `PartialLine`, whose bytes are re-read
-//!   whole. Ranges are byte offsets throughout; no codepoint index is ever
-//!   emitted.
-//! * **Rotation** — handled by carrying `identity` in every record rather than
-//!   by anything this function does: [`super::tail::read_incremental`] refuses
-//!   to resume a cursor whose `(dev, ino)` moved. This file only guarantees
-//!   that a record can never be attributed to a file it was not read from.
-//! * **Oversized line** — a single line longer than `oversized_line_limit`
-//!   would otherwise pin `next_offset` forever, because no bounded read could
-//!   ever see its terminator. It is emitted as
-//!   [`ObligationReason::OversizedLine`] and the cursor advances. It is NOT an
-//!   obligation, and [`ObligationScan::observation_is_incomplete`] reports it
-//!   so that a reader of the scan can spell it `Unknown{ReadTruncated}` — the
-//!   read did not see a whole record, and 4987 §-1.4 makes "did not see"
-//!   non-GREEN rather than absent. That reader is a later slice's; this one
-//!   only makes the fact available.
-//!
-//! # What the equivalence gate proves, and over what
-//!
-//! It proves that both implementations produce identical bytes **for the cases
-//! in the golden corpus**. It is not a proof over all inputs: the two runtimes
-//! do not share a JSON parser or a Unicode whitespace table, so the corpus is
-//! where each disputable shape has to be written down. `scripts/
-//! check_reachability_canonical_equivalence.py` states the residual differences
-//! it knows about.
+//! Canonical schema (4987 §-1.5): one record per physical line,
+//! `(generation, start, end, identity, reason)`. `start`/`end` are absolute
+//! half-open byte offsets (the receipt's `IncarnationRange` coordinate);
+//! `identity` is `(dev, ino)`, so a rotation cannot make two files' offsets
+//! comparable; `reason` is emitted for EVERY line, not only obligations, so a
+//! silently-dropped record type cannot pass the equivalence gate unnoticed.
+//! See [`classify_line`] for the framing ladder (partial line, CRLF,
+//! multi-byte, rotation, oversized line).
 
 use super::discovery::TranscriptFileId;
 
