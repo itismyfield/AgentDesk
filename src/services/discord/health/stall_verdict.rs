@@ -1393,7 +1393,7 @@ mod tests {
             frontier_provenance: FrontierProvenanceReport::of(
                 FrontierProvenance::observe(
                     CoordFrontierObservation::Absent,
-                    DurableFrontierObservation::observe(Some(4_096), Some(7), None),
+                    DurableFrontierObservation::observe(Some(4_096), Some(7), None, None),
                 ),
                 None,
             ),

@@ -2882,7 +2882,10 @@ services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_s
 services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_skips_completed_idle_wakeup_turn
 services::discord::health::redaction::tests::visible_message_id_redacts_zero_placeholders
 services::discord::health::relay_auto_heal::tests::a_fresh_watcher_still_accepts_the_zero_frontier_5943
+services::discord::health::relay_auto_heal::tests::a_freshly_born_turn_resumes_at_its_birth_offset_not_zero_5943
+services::discord::health::relay_auto_heal::tests::a_generation_mismatch_still_floors_the_redrive_at_the_turn_start_5943
 services::discord::health::relay_auto_heal::tests::a_refused_redrive_propagates_as_a_refusal_not_a_missed_nudge_5943
+services::discord::health::relay_auto_heal::tests::a_zero_relayed_offset_still_floors_the_redrive_at_the_turn_start_5943
 services::discord::health::relay_auto_heal::tests::an_unset_delivery_owner_no_longer_decides_the_redrive_5943
 services::discord::health::relay_auto_heal::tests::frontier_reset_invalidates_placeholder_shield_episode_4181
 services::discord::health::relay_auto_heal::tests::frontier_reset_rearms_capped_attempt_episode_4181
@@ -2902,6 +2905,7 @@ services::discord::health::relay_auto_heal::tests::redrive_reuse_no_op_reattach_
 services::discord::health::relay_auto_heal::tests::redrive_self_reattach_identity_rejects_unrelated_synthetic_turns_4299
 services::discord::health::relay_auto_heal::tests::redrive_stale_frontier_token_cannot_nudge_after_reset_4181
 services::discord::health::relay_auto_heal::tests::redrive_still_recovers_a_backlog_behind_the_durable_witness_5943
+services::discord::health::relay_auto_heal::tests::six_refused_redrives_back_off_and_cap_once_5943
 services::discord::health::relay_auto_heal::tests::the_redrive_path_cannot_suppress_its_own_resumed_batch_5943
 services::discord::health::relay_auto_heal::tests::the_redrive_resume_decision_turns_on_the_durable_witness_not_direction_5943
 services::discord::health::relay_dead_reattach::tests::relay_dead_reattach_no_longer_fences_on_live_relay_emission

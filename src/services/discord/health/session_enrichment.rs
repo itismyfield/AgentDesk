@@ -386,12 +386,10 @@ impl SessionEnrichment {
             inflight_tmux_session.as_deref(),
             watcher_binding_tmux_session.as_deref(),
         );
-        // #5071 relay-tail S1 (I-4): one lookup, two independent readings, and
-        // — since the r1 review — through the same reader the counterpart's
-        // observation goes through. The tuple below keeps its
-        // `unwrap_or((0, 0, 0))` meaning byte for byte, S2 owns making an
-        // unsourced frontier unknown, while `coord_observation` records whether
-        // that zero came from an entry or from the miss.
+        // #5071 relay-tail S1 (I-4): one lookup, two independent readings,
+        // through the same reader as the counterpart's observation. The tuple
+        // keeps its `unwrap_or((0, 0, 0))` meaning; `coord_observation` records
+        // whether that zero came from an entry or from the miss.
         let coord = read_coord_frontier(shared, channel);
         let coord_observation = coord.observation;
         let live_generation_mtime_ns = coord.live_generation_ns;
@@ -406,6 +404,7 @@ impl SessionEnrichment {
                 .and_then(|state| state.last_watcher_relayed_generation_mtime_ns)
                 .filter(|generation| *generation != 0),
             live_generation_mtime_ns,
+            inflight.as_ref().and_then(|state| state.turn_start_offset),
         );
         let output_path_for_metadata = inflight
             .as_ref()
@@ -928,6 +927,7 @@ mod tests {
                     Some(4_096),
                     Some(OLD_GENERATION_NS),
                     live_generation_ns,
+                    None,
                 ),
             )
             .hypothesis()
