@@ -16,6 +16,7 @@ mod dispatch_cleanup;
 mod dispatch_reservation;
 mod episode_identity;
 mod front_requeue;
+mod inbound_order;
 mod overflow;
 mod pending_queue_persistence;
 mod queue_cancellation;
@@ -42,6 +43,10 @@ use episode_identity::{
     reset_watchdog_extension_state, take_watchdog_override_if_current,
 };
 use front_requeue::requeue_intervention_front;
+#[cfg(test)]
+use inbound_order::INBOUND_ORDER_FAIL_OPEN_AFTER;
+pub(crate) use inbound_order::TurnAdmissionOrder;
+use inbound_order::claim_yields;
 pub(crate) use overflow::SoftInterventionProbe;
 use overflow::drain_head_overflow;
 #[cfg(test)]
@@ -73,24 +78,6 @@ use turn_finished_signal::{
 
 pub(crate) const MAX_INTERVENTIONS_PER_CHANNEL: usize = 30;
 pub(crate) const INTERVENTION_DEDUP_WINDOW: Duration = Duration::from_secs(10);
-
-/// #5937 — how long a queued backlog may sit before an inbound claim stops
-/// waiting behind it. The idle-queue backstop drains every 60s, so a channel
-/// whose drain still works never reaches this; past it the drain is wedged and
-/// holding arrivals back would only pile them against the overflow cap.
-pub(crate) const INBOUND_ORDER_FAIL_OPEN_AFTER: Duration = Duration::from_secs(180);
-
-/// #5937 — whether a turn claim may take an idle slot ahead of queued work.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum TurnAdmissionOrder {
-    /// Claim as soon as the slot is free. Recovery, reaper and healing claims
-    /// are not inbound traffic and must not be held behind a backlog.
-    #[default]
-    Immediate,
-    /// Refuse the claim while older inbound work is still queued, so messages
-    /// reach the agent in the order they were sent.
-    BehindQueue,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InterventionMode {
@@ -1932,50 +1919,6 @@ impl ActiveTurnKind {
 /// provably non-permanent.
 const PENDING_USER_DISPATCH_MAX_YIELDS: u32 = 5;
 
-/// #5937 — true when this claim would jump ahead of inbound work that was sent
-/// earlier: either a queued backlog, or a head that `TakeNextSoft` already
-/// handed out and that has not claimed the slot yet.
-///
-/// Three claims are NOT overtakes and must pass. The dequeued head itself is
-/// the drain — refusing it would livelock the queue. A queued copy of the
-/// claiming message (catch-up duplicate, merged tail carrying only this id)
-/// is purged by the start path. And a backlog that has sat far past the 60s
-/// idle-queue backstop is wedged, so ordering fails open rather than pinning
-/// every later arrival behind it.
-fn inbound_order_defers_claim(
-    state: &ChannelMailboxState,
-    user_message_id: MessageId,
-    admission_order: TurnAdmissionOrder,
-) -> bool {
-    if admission_order != TurnAdmissionOrder::BehindQueue {
-        return false;
-    }
-    if state.pending_user_dispatch == Some(user_message_id)
-        || state
-            .pending_user_dispatch_source_ids
-            .contains(&user_message_id)
-    {
-        return false;
-    }
-    let mut foreign_backlog = false;
-    for item in &state.intervention_queue {
-        if item.message_id == user_message_id
-            && item
-                .source_message_ids
-                .iter()
-                .all(|id| *id == user_message_id)
-        {
-            continue;
-        }
-        if item.created_at.elapsed() >= INBOUND_ORDER_FAIL_OPEN_AFTER {
-            return false;
-        }
-        foreign_backlog = true;
-    }
-    foreign_backlog
-        || (state.pending_user_dispatch.is_some() && !pending_dispatch_lease_is_orphaned(state))
-}
-
 #[derive(Default)]
 struct ChannelMailboxState {
     cancel_token: Option<Arc<CancelToken>>,
@@ -2430,57 +2373,13 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     persistence,
                     reply,
                 } => {
-                    // #3167 BLOCKER-2 — background yields to a queued backlog AND
-                    // to a reserved dequeue→claim window. The start rule used to
-                    // only check `cancel_token.is_some()`. After a background
-                    // finalizer releases the slot, another background cycle
-                    // (monitor relay / self-paced TUI loop) could win the race
-                    // for the freed slot AHEAD of the deferred kickoff that
-                    // drains a queued user intervention — starving the user
-                    // indefinitely. Refuse a Background start whenever a backlog
-                    // is already queued, OR while a `pending_user_dispatch`
-                    // reservation is live: `TakeNextSoft` REMOVES the queued
-                    // head before the dequeued user turn actually claims the
-                    // slot, leaving an EMPTY queue during that window — without
-                    // the reservation a Background start would slip in and
-                    // race-win ahead of the user. A `false` return is the
-                    // background callers' normal lost-race path (they do not
-                    // error or hot-spin; the watcher relays terminal output
-                    // independently of the mailbox slot, so no output is
-                    // dropped). UserOrAgent starts are UNCHANGED.
-                    let queue_non_empty = !state.intervention_queue.is_empty();
-                    let reservation_held = state.pending_user_dispatch.is_some();
-                    let background_yields =
-                        turn_kind.is_background() && (queue_non_empty || reservation_held);
-                    // SAFETY VALVE: only the dequeue→claim window (queue empty,
-                    // reservation held) can deadlock if the dequeued user turn is
-                    // lost. Count those refusals; a queue-backed refusal is a real
-                    // backlog and is never counted. After N consecutive
-                    // reservation-only refusals, drop the (possibly stale)
-                    // reservation so Background can proceed next time.
-                    if background_yields && !queue_non_empty && reservation_held {
-                        state.pending_user_dispatch_yield_count += 1;
-                        if state.pending_user_dispatch_yield_count
-                            >= PENDING_USER_DISPATCH_MAX_YIELDS
-                        {
-                            if pending_dispatch_lease_is_orphaned(&state)
-                                && let Some(cleared_id) = clear_pending_user_dispatch(&mut state)
-                            {
-                                record_valve_cleared_pending_dispatch(&mut state, cleared_id);
-                            }
-                        }
-                    }
-                    // #5937 — an inbound arrival must not overtake messages that
-                    // are already queued: the queue is FIFO, but a claim that
-                    // finds the slot idle used to start immediately while older
-                    // queued work waited for the next drain, so the later message
-                    // reached the agent first.
-                    let order_yields =
-                        inbound_order_defers_claim(&state, user_message_id, admission_order);
+                    // #3167 BLOCKER-2 / #5937 — a claim yields to work that was
+                    // queued or reserved before it; see `inbound_order`.
+                    let yields =
+                        claim_yields(&mut state, turn_kind, user_message_id, admission_order);
                     let mut queue_exit_events = Vec::new();
                     let mut persistence_error = None;
-                    let can_start =
-                        state.cancel_token.is_none() && !background_yields && !order_yields;
+                    let can_start = state.cancel_token.is_none() && !yields;
                     if can_start && turn_kind == ActiveTurnKind::UserOrAgent {
                         let previous_queue = state.intervention_queue.clone();
                         queue_exit_events = purge_active_source_from_queue(
