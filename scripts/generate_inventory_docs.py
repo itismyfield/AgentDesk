@@ -237,6 +237,12 @@ def test_line_count(text: str) -> int:
     fixtures (#3036).
     """
 
+    return len(test_line_numbers(text))
+
+
+def test_line_numbers(text: str) -> set[int]:
+    """Line numbers covered by ``#[cfg(test)] mod`` blocks (1-based)."""
+
     total = line_count(text)
     test_lines: set[int] = set()
     for match in _CFG_MOD_RE.finditer(text):
@@ -252,7 +258,7 @@ def test_line_count(text: str) -> int:
         for line in range(start_line, end_line + 1):
             if 1 <= line <= total:
                 test_lines.add(line)
-    return len(test_lines)
+    return test_lines
 
 
 def split_prod_test_lines(text: str) -> tuple[int, int]:

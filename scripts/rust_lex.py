@@ -112,3 +112,136 @@ def strip_line(line: str, state: StripState) -> str:
         out.append(line[i])
         i += 1
     return "".join(out)
+
+
+# Structural segmentation. `strip_line` blanks strings AND comments, so it
+# cannot answer "did the code change?" -- a literal edit would read as blank on
+# both sides. `lex_segments` keeps literal bytes and labels each run instead.
+
+# Char literal including escapes (`'\''`, `'\u{2F}'`) and the `b'x'` byte form.
+# Lifetimes (`'a`) do not match and fall through as ordinary code.
+_CHAR_LITERAL_FULL = re.compile(
+    r"b?'(?:\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]{1,6}\}|.)|[^'\\\n])'"
+)
+
+# String openers, raw form first so `r#"` never degrades to `r` + `#"`.
+_STRING_OPEN_FULL = re.compile(r'b?r(?P<hashes>#*)"|b?"')
+
+# Only these can begin a literal or comment, so a code run skips the rest.
+_SPECIAL_STARTS = frozenset('/"\'rb')
+
+CODE = "code"
+LITERAL = "literal"
+COMMENT = "comment"
+SPACE = "space"
+
+
+def _scan_block_comment(line: str, start: int, state: StripState) -> int:
+    i, n = start, len(line)
+    while i < n and state.block_depth > 0:
+        if line.startswith("/*", i):
+            state.block_depth += 1
+            i += 2
+        elif line.startswith("*/", i):
+            state.block_depth -= 1
+            i += 2
+        else:
+            i += 1
+    return i
+
+
+def _scan_quoted_string(line: str, start: int, state: StripState) -> int:
+    i, n = start, len(line)
+    while i < n:
+        if line[i] == "\\":
+            i += 2
+            continue
+        if line[i] == '"':
+            state.in_string = False
+            return i + 1
+        i += 1
+    return n
+
+
+def _scan_raw_string(line: str, start: int, state: StripState) -> int:
+    closer = '"' + "#" * (state.raw_hashes or 0)
+    end = line.find(closer, start)
+    if end < 0:
+        return len(line)
+    state.raw_hashes = None
+    return end + len(closer)
+
+
+def lex_segments(line: str, state: StripState) -> list[tuple[str, str]]:
+    """Split one line into labelled ``(kind, text)`` runs, literal-aware.
+
+    Kinds are ``code``, ``literal`` (delimiters included), ``comment``
+    (delimiters included) and ``space``. `state` carries the cross-line
+    string/raw-string/block-comment position, so callers feed lines in order.
+    Concatenating every ``text`` reproduces the line exactly.
+    """
+
+    segments: list[tuple[str, str]] = []
+    i, n = 0, len(line)
+    while i < n:
+        if state.block_depth > 0:
+            end = _scan_block_comment(line, i, state)
+            segments.append((COMMENT, line[i:end]))
+            i = end
+            continue
+        if state.raw_hashes is not None:
+            end = _scan_raw_string(line, i, state)
+            segments.append((LITERAL, line[i:end]))
+            i = end
+            continue
+        if state.in_string:
+            end = _scan_quoted_string(line, i, state)
+            segments.append((LITERAL, line[i:end]))
+            i = end
+            continue
+        if line.startswith("//", i):
+            segments.append((COMMENT, line[i:]))
+            i = n
+            continue
+        if line.startswith("/*", i):
+            state.block_depth = 1
+            end = _scan_block_comment(line, i + 2, state)
+            segments.append((COMMENT, line[i:end]))
+            i = end
+            continue
+        opener = _STRING_OPEN_FULL.match(line, i)
+        if opener:
+            if opener.group("hashes") is None:
+                state.in_string = True
+                end = _scan_quoted_string(line, opener.end(), state)
+            else:
+                state.raw_hashes = len(opener.group("hashes"))
+                end = _scan_raw_string(line, opener.end(), state)
+            segments.append((LITERAL, line[i:end]))
+            i = end
+            continue
+        char_literal = _CHAR_LITERAL_FULL.match(line, i)
+        if char_literal:
+            segments.append((LITERAL, char_literal.group(0)))
+            i = char_literal.end()
+            continue
+        if line[i].isspace():
+            end = i
+            while end < n and line[end].isspace():
+                end += 1
+            segments.append((SPACE, line[i:end]))
+            i = end
+            continue
+        end = i + 1
+        while end < n and not line[end].isspace():
+            if line[end] in _SPECIAL_STARTS and (
+                line.startswith("//", end)
+                or line.startswith("/*", end)
+                or _STRING_OPEN_FULL.match(line, end)
+                or _CHAR_LITERAL_FULL.match(line, end)
+            ):
+                break
+            end += 1
+        segments.append((CODE, line[i:end]))
+        i = end
+    return segments
