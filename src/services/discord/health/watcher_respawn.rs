@@ -234,6 +234,27 @@ pub(super) async fn complete_force_clean_watcher_recovery(
     }
 }
 
+/// Arm the absences the stall watchdog's watcher-derived candidate loop cannot
+/// reach (#5957), then drive every tracked absence — including one whose
+/// respawn failed on an earlier tick (#3410) — on the same tick.
+pub(super) async fn sweep_and_retry_absences(
+    registry: &HealthRegistry,
+    provider: &ProviderKind,
+    runtimes: &[Arc<SharedData>],
+    watcher_derived: &std::collections::HashSet<ChannelId>,
+    now_unix_secs: i64,
+) {
+    observe_watcher_absence_for_unwatched_work(
+        registry,
+        provider,
+        runtimes,
+        watcher_derived,
+        now_unix_secs,
+    )
+    .await;
+    retry_pending_watcher_respawns(registry, provider, runtimes, now_unix_secs).await;
+}
+
 /// Re-attempt a respawn for every channel still tracked as watcher-absent whose
 /// backoff has elapsed (the durable cross-tick retry queue). A channel whose
 /// respawn failed dropped out of the watcher-derived candidate loop, so this is
@@ -786,11 +807,7 @@ async fn retry_pending_watcher_respawn(
 /// An exhausted channel logs once and then stays parked rather than being
 /// dropped, so a watcher that does come back still clears it through
 /// [`clear_watcher_absence`] and a later absence starts from a clean count.
-fn respawn_attempt_due(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    now_unix_secs: i64,
-) -> bool {
+fn respawn_attempt_due(provider: &ProviderKind, channel_id: ChannelId, now_unix_secs: i64) -> bool {
     let Some(mut state) = WATCHER_ABSENCE.get_mut(&WatcherAbsenceKey::new(provider, channel_id))
     else {
         return false;
@@ -1558,20 +1575,16 @@ mod tests {
             let script = dir.path().join("tmux");
             std::fs::write(
                 &script,
-                format!(
-                    "#!/bin/sh\nwhile [ \"${{1#-}}\" != \"$1\" ]; do shift; done\n{body}\n"
-                ),
+                format!("#!/bin/sh\nwhile [ \"${{1#-}}\" != \"$1\" ]; do shift; done\n{body}\n"),
             )
             .expect("write fake tmux");
             let mut perms = std::fs::metadata(&script).expect("stat").permissions();
             perms.set_mode(0o755);
             std::fs::set_permissions(&script, perms).expect("chmod");
 
-            let joined = std::env::join_paths(
-                std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(
-                    &std::env::var_os("PATH").unwrap_or_default(),
-                )),
-            )
+            let joined = std::env::join_paths(std::iter::once(dir.path().to_path_buf()).chain(
+                std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+            ))
             .expect("join PATH");
             let path = crate::config::TestEnvVarGuard::set_path(
                 "PATH",
@@ -1899,7 +1912,10 @@ mod tests {
     #[test]
     fn relay_work_terms_cannot_qualify_a_channel_the_arming_gate_rejects() {
         let mut mailbox = crate::services::turn_orchestrator::ChannelMailboxSnapshot::default();
-        assert!(!mailbox_owes_relay_work(&mailbox), "an idle mailbox owes nothing");
+        assert!(
+            !mailbox_owes_relay_work(&mailbox),
+            "an idle mailbox owes nothing"
+        );
 
         mailbox.cancel_token = Some(std::sync::Arc::new(CancelToken::new()));
         mailbox.pending_user_dispatch = Some(MessageId::new(5_957_200));
@@ -1909,7 +1925,10 @@ mod tests {
         );
 
         mailbox.active_user_message_id = Some(MessageId::new(5_957_201));
-        assert!(mailbox_owes_relay_work(&mailbox), "an active turn owes relay work");
+        assert!(
+            mailbox_owes_relay_work(&mailbox),
+            "an active turn owes relay work"
+        );
     }
 
     #[test]
