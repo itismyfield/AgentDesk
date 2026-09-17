@@ -85,7 +85,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_PRUNE_GLOBAL_SLASH_COMMANDS` | `src/services/discord/runtime_bootstrap/framework_setup.rs:284` |  |
 | `AGENTDESK_PYTHON3_PATH` | `src/engine/ops/runtime_ops.rs:18` |  |
 | `AGENTDESK_QUEUE_EXIT_CLEAR_RETRY_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs:492` |  |
-| `AGENTDESK_REBIND_ORIGIN_DEADLINE_SECS` | `src/services/discord/inflight/rebind_reap.rs:268` | Reads `AGENTDESK_REBIND_ORIGIN_DEADLINE_SECS`; on absence / parse failure falls back to [`REBIND_ORIGIN_DEADLINE_SECS_DEFAULT`]. |
+| `AGENTDESK_REBIND_ORIGIN_DEADLINE_SECS` | `src/services/discord/inflight/rebind_reap.rs:166` | #3581: resolve the rebind-origin reap deadline from `AGENTDESK_REBIND_ORIGIN_DEADLINE_SECS` (clamped to [`REBIND_ORIGIN_DEADLINE_SECS_MIN`]), falling back to [… |
 | `AGENTDESK_RECOVERY_ANCHOR_REPOST` | `src/services/discord/recovery_paths/shared.rs:243` | #3610 PR-2: gate for the recovery anchor-repost fallback (`AGENTDESK_RECOVERY_ANCHOR_REPOST`). |
 | `AGENTDESK_RELAY_CIRCUIT_STAMP` | `src/services/discord/relay_recovery_circuit_alert_producer.rs:19` (+1 more) |  |
 | `AGENTDESK_RELEASE_TMUX_SESSION` | `src/cli/dcserver.rs:19` (+1 more) |  |

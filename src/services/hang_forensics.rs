@@ -1,342 +1,34 @@
 //! #5147: forensics the self-watchdog records when it decides the runtime is
 //! unresponsive.
 //!
-//! ## Why this exists
+//! A thread `sample` cannot answer this: a task blocked in `await` (e.g. on
+//! Postgres) is invisible to it, and a healthy and a wedged runtime produce
+//! the same thread shapes. This module records three facts a sample cannot:
 //!
-//! Three investigations (#4756, #4770, #5147) tried to explain watchdog kills
-//! from the `sample` dump that `discord::health::recovery::spawn_watchdog`
-//! captures, and all three stalled. The dump cannot answer the question, for a
-//! structural rather than incidental reason: a `sample` of *any*
-//! `#[tokio::main]` process shows the main thread parked in
-//! `_pthread_cond_wait` (sitting in `Runtime::block_on`) and most
-//! `tokio-rt-worker` threads parked the same way (no work), with one worker in
-//! `kevent` (it holds the I/O driver). A *healthy* AgentDesk shows exactly that
-//! shape, so the shape proves nothing.
-//!
-//! What the dump also cannot show is what actually matters: the watchdog probes
-//! `GET /api/health`, that handler `await`s several Postgres queries, and a task
-//! blocked in an `await` is not a running thread — it does not appear in a
-//! thread sample at all.
-//!
-//! So this module records the three facts the dump structurally cannot carry.
-//!
-//! ### 1. Which stage of the probe failed — [`HealthProbeOutcome`]
-//!
-//! `ConnectFailed` means the TCP handshake never completed; `NoResponse` means
-//! the connection was established and the request written, but no bytes came
-//! back before the read timeout.
-//!
-//! **This field on its own does not separate a wedged runtime from a slow
-//! handler, and it must not be read that way.** The listen backlog completes
-//! the handshake *in the kernel*, with no participation from the accept loop, so
-//! a runtime that never polls its acceptor still lets `connect()` succeed —
-//! measured at 0.1 ms — and then times out on read, classifying as `NoResponse`
-//! exactly like a healthy runtime waiting on a slow query. The backlog depth is
-//! a kernel limit, not a tokio one (`mio` asks for `-1` and the kernel caps it:
-//! `kern.ipc.somaxconn`, measured at **128** on the release host). The exact
-//! depth does not matter; one free slot completes a handshake the acceptor
-//! never sees. So:
-//!
-//! * `ConnectFailed` means the handshake did not complete: the listening socket
-//!   is gone — **or its backlog is full**. The second case matters, and an
-//!   earlier draft of this file denied it ("not that the runtime is wedged").
-//!   A runtime that never polls its acceptor holds every slot it is given, so
-//!   with enough clients it eventually fills all 128 and the next `connect()`
-//!   fails. `ConnectFailed` therefore does not acquit the runtime; it only says
-//!   the handshake failed. That is why [`verdict`] still consults the beacon
-//!   for this stage, and why `undetermined_no_beacon` — not `listener_gone` —
-//!   is the honest answer when no beacon ran.
-//! * `NoResponse` covers **both** "the runtime is wedged" and "the handler is
-//!   waiting on Postgres".
-//! * `RequestFailed` means the connection was established and then the request
-//!   could not be written. The kernel keeps an accepted socket writable with no
-//!   help from the executor, so a *refused* write is a peer-side reset and not
-//!   a scheduling symptom — which is why this is the one failure stage
-//!   [`verdict`] settles without the beacon.
-//!
-//!   State the limit, because the stage is a fold and the conclusion is not:
-//!   [`probe_health_once`] maps **every** `write_all` error here, so a write
-//!   that merely timed out is *not* a peer reset. The request is 70 bytes to
-//!   loopback against a far larger socket buffer, so that has never been
-//!   observed — but if it happens, `verdict` prints
-//!   `connection_reset_before_request` with no evidence behind it, in the one
-//!   place that skips the beacon. `err=` on the same line distinguishes them.
-//!
-//! ### 2. Whether the runtime is scheduling tasks — [`RuntimeLiveness`]
-//!
-//! This is the discriminator `stage=` cannot be, and why the two are always
-//! reported together. [`spawn_runtime_liveness_beacon`] runs one tokio task
-//! storing a monotonic timestamp every [`RUNTIME_TICK_PERIOD`]. It depends on
-//! the timer driver and a worker thread and nothing else — not the acceptor,
-//! not the HTTP stack, not Postgres. A stale tick is positive evidence the
-//! runtime stopped polling; a fresh one, that it did not. [`verdict`] combines
-//! the two into the single conclusion the watchdog is entitled to draw.
-//!
-//! Read both labels literally; the asymmetry between them is the whole subtlety.
-//! The runtime is multi-threaded (`Runtime::new()`, so `worker_threads =
-//! available_parallelism()`, measured at **14** on the release host):
-//!
-//! * `runtime=stalled` means a task that wakes on a timer and stores two
-//!   atomics was not scheduled on **any** of those workers for
-//!   [`RUNTIME_TICK_STALE_MS`]. That is a strong statement and it is meant to
-//!   be: nothing short of a fully wedged runtime produces it.
-//! * `runtime=scheduling` is correspondingly weak. **One** idle worker is
-//!   enough to tick the beacon, so it rules out a fully wedged runtime and
-//!   nothing weaker. Thirteen of fourteen workers blocked in sync I/O or
-//!   `block_in_place` — executor starvation, which *is* the executor's fault —
-//!   still reads as `scheduling`, and the `handler_*` verdict that follows would
-//!   name the wrong component. `runtime_workers=` is logged beside it so the
-//!   next investigator can weigh how much slack that leaves.
-//!
-//! ### 3. What the database was doing — [`Breadcrumbs`]
-//!
-//! Every Postgres await on the **public `GET /api/health` path** — the endpoint
-//! the watchdog probes — brackets itself with a [`DbProbeGuard`]. Enumerated,
-//! because a partial claim would misread as `db_in_flight=0` == "the database is
-//! innocent" (all in `services::health_diagnostics`):
-//!
-//! The site-by-site enumeration and the rule for what counts as one acquire
-//! live in `health_diagnostics`' module docs, next to the code. Headline:
-//! **9 unconditional sequential acquires**, a 10th with a `health_registry`, an
-//! 11th on a providerless cluster standby, each able to block for the pool's
-//! 10s `acquire_timeout` against a 5s probe timeout.
-//!
-//! **Not covered**, stated explicitly so a future reader does not infer more
-//! than the counters carry:
-//!
-//! * `load_channel_session_state`, reached once per mailbox from
-//!   `enrich_mailbox_session_state` on `GET /api/health/detail` only. It is
-//!   shared with two non-health repair routes, so bracketing it *inside the
-//!   function* would count DB work no health probe performed. Bracketing its
-//!   health-only call site instead is open and the only obstacle is small — it
-//!   returns `Option`, so the predicate has to be `|_| true` rather than
-//!   `Result::is_ok`, which would score "no row" as a failure. Left undone
-//!   because `/api/health/detail` is not the probed endpoint, **not** because
-//!   it cannot be done. That endpoint's active-session audit query is bracketed
-//!   anyway, being health-only.
-//!
-//! The enumeration above is held by the *types* in `health_diagnostics`, not by
-//! a test: every health-path function there shadows its `Option<&PgPool>` with
-//! a [`ProbedPool`] and the two that take a pool directly take a `ProbedPool`,
-//! so no raw handle is in scope to await unbracketed. The exempt routes are
-//! exactly the ones that still hold a `&PgPool`. That scope is the **module**,
-//! not the health *path*: an await added to a health route elsewhere
-//! (`server::routes::health_api`) is outside anything here can see and would
-//! silently reopen the `db_in_flight=0` misreading. `ProbedPool`'s own docs
-//! list the rest of what the construction does not cover.
-//!
-//! ## What the log evidence actually supports
-//!
-//! Stated as an enumeration with **the predicate, the window and the base rate
-//! attached**, because the tempting summary ("a watchdog failure means the
-//! database was slow") is not true as a universal, and because a bare "X
-//! happened just before Y" is not evidence at all until X is shown to be rare
-//! at a random moment.
-//!
-//! ### How to reproduce every number below
-//!
-//! An earlier draft gave figures without saying what it had counted, and three
-//! of them then turned out to be wrong in ways nobody could check from the
-//! text. So, exactly:
-//!
-//! 1. **Corpus.** `~/.adk/release/logs/dcserver.stdout.log` plus its 10 rotated
-//!    siblings `.1`–`.10`, **restricted to
-//!    `[2026-07-12T23:50:43.386222Z, 2026-08-07T03:18:28.232513Z]`** — 11 files,
-//!    **603.462 h** of covered wall clock (the union of each file's first→last
-//!    stamp; the files abut to within a second and do not overlap).
-//!
-//!    ⚠️ **These logs rotate, so the figures below reproduce only inside that
-//!    window** and are not stable properties of the deployment. Two
-//!    recomputations four days apart disagreed on corpus length (638.0 h vs
-//!    603.5 h) purely because `.10` had aged out. Re-derive rather than trust;
-//!    if the window is gone, say so instead of quoting these numbers.
-//!
-//!    Strip the ANSI SGR escapes, then read the RFC3339 stamp at the head of
-//!    each line. **That
-//!    stamp is UTC**; the `[HH:MM:SS]` inside the message is KST (UTC+9), and
-//!    so are the `adk-hang-<pid>-<YYYYMMDD>-<HHMMSS>.txt` dump names. Parse the
-//!    head stamp as an *aware* UTC instant — an earlier analysis parsed it
-//!    naive, re-rendered through `utcfromtimestamp`, and shifted every reported
-//!    time by −9 h. **Six of the 13 kills land on a different calendar day
-//!    under that shift**, including the 2026-08-03 one an earlier draft
-//!    therefore reported as 08-02.
-//! 2. **Watchdog events.** `watchdog: health check failed (n/3)`,
-//!    `watchdog: runtime unresponsive`, `watchdog: health recovered`. A *streak*
-//!    opens at `(1/3)` and closes at the next `recovered` or `unresponsive`.
-//!    Corpus totals: **33 streaks, 13 of them ending in a kill, 20 recovering**.
-//! 3. **Postgres error — `P_pg`.** The pool-acquisition failures the watchdog
-//!    can actually be delayed by: a line matching
-//!    `pool timed out|PoolTimedOut|Connection refused \(os error 61\)` —
-//!    **13 061 lines** in the window.
-//!
-//!    ⚠️ **`P_pg` is the predicate for every Postgres figure below, with no
-//!    per-figure exceptions.** An earlier draft published this regex but
-//!    computed three bullets from `pool timed out|PoolTimedOut` alone (944
-//!    lines) and one from a fourth; each was individually reproducible and none
-//!    reproducible *from the text*, the only property this section is for. A
-//!    different predicate, where needed, is named at the point of use.
-//! 4. **Base rate.** Not 20 000 Monte-Carlo draws: at these hit counts that
-//!    estimator has ±30 % noise and is not reproducible without the seed.
-//!    Compute it *analytically* as the covered fraction of the union of
-//!    `[error, error + W]` windows — **for every control in this section, not
-//!    just the Postgres ones**. Same definition, deterministic answer.
-//!
-//!    ⚠️ **What that comparison assumes.** Comparing 11/13 against a base rate
-//!    over *uniformly random covered instants* treats kill times as drawn from
-//!    that same distribution — as carrying no information about when in the
-//!    corpus they fall, independently of Postgres. Not free: both are clumped,
-//!    so a common cause raising both densities in the same hours (a busy period,
-//!    a restart storm) would produce lift without either causing the other. The
-//!    lift is large enough that this is unlikely to explain all of it, but it is
-//!    why the module ships `db_in_flight` and the beacon, not just correlation.
-//!
-//! ### The findings
-//!
-//! * **Kills preceded by a `P_pg` line: 11 of 13, within 5 s.** The 11 deltas
-//!   are 0.06, 0.12, 0.44, 0.46, 0.92, 1.04, 1.16, 1.27, 2.56, 2.62 and 4.04 s.
-//!   Base rate of that predicate at a uniformly random covered instant:
-//!   **0.07975 %** (W = 5 s), so the lift is **≈1060×**. It survives the window
-//!   choice — at W = 6 s still 11 of 13 against 0.08589 % (≈985×), at W = 20 s
-//!   still 11 of 13 against 0.15772 % (≈537×). That lift is what makes this the
-//!   thing the module is built around. The three most recent kills
-//!   (`2026-08-04T12:41:08Z`, `2026-08-04T16:43:06Z`, `2026-08-05T16:05:13Z`)
-//!   are 3 of 3, at **0.44 s, 4.04 s and 1.04 s** — named events rather than a
-//!   trailing-window rate, because an earlier draft's "most recent 58.8 h"
-//!   stopped being computable the moment the corpus rotated.
-//! * **The two exceptions are not database-quiet — they are a different
-//!   database failure.** `2026-08-02T13:21:36Z` and `2026-08-03T03:21:51Z`
-//!   (dump names `adk-hang-84772-20260802-222136` and
-//!   `adk-hang-32033-20260803-122151`, which are KST — an earlier draft read
-//!   both as 08-02) had gone **5.2 h and 19.2 h** with no `P_pg` line. That on
-//!   its own is unremarkable — `P_pg` lines are heavily clumped, and the corpus
-//!   holds 54 `P_pg`-free stretches of an hour or more, the longest 77.4 h.
-//!   (**Endpoint rule**: gaps *between consecutive `P_pg` lines* only. The
-//!   right-censored tail — last line to end of coverage, 33.00 h — is excluded;
-//!   include it and it is 55. The left head is 0.00 h.) What
-//!   singles these two out is only that they are the two kills the 11-of-13
-//!   above does not cover.
-//!
-//!   What they do have is `EADDRNOTAVAIL`, the kernel refusing a *new outbound
-//!   connection*. Predicate `P_eaddr` = `Can't assign requested address`:
-//!   **20 lines, and every one of them falls between `2026-08-02T13:17:42Z` and
-//!   `2026-08-03T03:21:30Z`** — nowhere else in 603 h. Twelve precede the two
-//!   kills (13:17:42–13:21:10Z, 03:20:31–03:21:30Z); the other eight are
-//!   `[startup] postgres warmup pool unavailable` / `[config-audit]` pairs from
-//!   processes that had just restarted (13:22:24, 13:32:36, 15:06:28, 20:51:26),
-//!   i.e. downstream of a kill, not before one. ⚠️ An earlier draft said "the
-//!   only **9**, in exactly two bursts (7 and 2)" — those 9 are `P_eaddr` **also
-//!   restricted to `[policy-tick] advisory lock failed`**, an undisclosed
-//!   filter. "Confined to these two days" survives; "two bursts" does not.
-//! * **…and those same two streaks own all four instant-fail probes.** Of the
-//!   29 consecutive-failure gaps, 23 are 35.02–35.32 s (below) and **4 are
-//!   30.07–30.19 s — all four inside these two kills** (08-02: 30.13, 30.15;
-//!   08-03: 30.07, 30.19). A 30.1 s gap against a 30 s `CHECK_INTERVAL` means
-//!   the probe returned in ~0.1 s: it consumed none of its 5 s timeout, which
-//!   is what a `connect()` that fails immediately looks like. So the two facts
-//!   an earlier draft listed as separate bullets — "kills with no Postgres
-//!   error" and "probes that failed without waiting" — are the same two events.
-//!
-//!   ⚠️ **That co-location is all this says. n = 2, and no cause is claimed.**
-//!   An earlier draft called both "consistent with the host having run out of
-//!   the thing a new connection needs" — a mechanism sketched to fit two
-//!   observations, and "consistent with" is how a hypothesis gets quoted back
-//!   as a conclusion. With two events there is no base rate to test it against,
-//!   the direction is untested (the port shortage could as easily be a
-//!   *symptom*), and one episode has `P_eaddr` lines both before and after its
-//!   kill. The last confident correlation here (`routines::loader`, below) was
-//!   noise. What it buys is a prediction: if the ephemeral-port reading is
-//!   right, the next such event renders `stage=connect_failed` with `verdict` at
-//!   `listener_gone` or `undetermined_no_beacon`, never `handler_*`.
-//! * **First failures whose last `P_pg` line was an hour or more earlier:
-//!   11 of 33** — 2.0, 5.2, 5.2, 5.2, 11.2, 18.5, 19.2, 19.9, 23.2, 23.3,
-//!   27.7 h. **Two** of those escalated to a kill (the two above). (An earlier
-//!   draft listed 2.0, 13.1, 18.5, 19.9, 23.2, 23.3, 30.7, 30.7, 30.8, 44.8,
-//!   53.3 h — the same 11 streaks against `pool timed out|PoolTimedOut` instead
-//!   of `P_pg`; same count, same membership, same two kills, only shorter gaps,
-//!   because `P_pg` also sees the refused connections. And an earlier draft said
-//!   *four* kills, from a `kill_time - first_failure < 180 s` proximity test
-//!   that also matched two streaks which *recovered* after a single failure —
-//!   2026-08-02T13:18:04Z and 13:19:05Z — because a later, unrelated kill fell
-//!   inside the window.) Attribute a kill to the streak that logged it, not to
-//!   the clock.
-//!   Something other than Postgres delays the probe often enough to matter, it
-//!   is not modelled here, and the beacon plus `db_in_flight` are what will
-//!   tell the two apart next time.
-//! * **No second trigger has been identified.** An earlier draft attributed
-//!   those hour-gap failures to a `routines::loader` burst. That is **withdrawn
-//!   as a base-rate error**, and recorded rather than deleted because the next
-//!   investigator will find the same correlation and should not have to
-//!   re-derive that it is noise. In the 60 s before each of the 11 hour-gap
-//!   failures the loader emitted 28, 44, 52, 56, 56, 56, 56, 56, 56, 56, 56
-//!   lines, against a control of **p20 = 52, median = 56, p90 = 58** at random
-//!   covered instants: eight sit exactly at the modal density and three sit
-//!   *below* it. There is no burst. Across all 33 first failures the sign
-//!   reverses — 6.1 % (2 of 33) have a loader line within 5 s, versus
-//!   **15.0 %** of random covered instants (15.0019 %: analytic union of
-//!   `[event, event+5 s]` over 1 788 762 `routines::loader` lines ÷ 603.462 h).
-//!   An earlier draft said 15.2 %, from sampling the timeline on a 10 s grid
-//!   instead of the analytic union this section mandates. Same predicate, wrong
-//!   method; the section's own rule catches it. Two corrections travel with this: the control's p10 is **0**,
-//!   not 50 (10.4 % of the corpus — 62.7 h — has no loader line in the preceding
-//!   minute at all, in stretches beginning at the kills themselves, e.g. 17.9 h
-//!   from `2026-08-04T16:42Z`), and the loader's mean rate of 0.62 line/s is
-//!   dropped rather than quoted, because 0.62 × 60 = 37 is below every observed
-//!   count and so makes a *modal* minute look like a burst. The output is
-//!   clumped; only the density-controlled comparison discriminates.
-//! * **Failing probes wait the timeout out: 23 of 29** consecutive-failure gaps
-//!   are 35.02–35.32 s against a 30 s `CHECK_INTERVAL` — the probe's own 5 s
-//!   read timeout elapsing in full, so those probes *waited* rather than being
-//!   refused: "connected, handler never answered", and not a dead listening
-//!   socket. The other 6 are **not** that, and the earlier "~35 s vs ~30 s"
-//!   phrasing hid them: 4 are the 30.1 s instant-fails above, 2 are 60.4 s and
-//!   90.7 s (2× and 3× the interval, with a successful check between).
-//!   ⚠️ The denominator 29 is "diffs between consecutive failure LINES ≤ 100 s".
-//!   Every *within-streak* gap with no cutoff gives 31: the 60.4/90.7 s pair
-//!   drops out (a `health recovered` sits between them) and four long ones come
-//!   in — 238, 962, 1375, 1865 s. Three are in recovering streaks; **the 962 s
-//!   one is in a kill streak** (2026-07-14T17:16:04Z, first failure→kill 997.6 s
-//!   against ~70 s for every other kill) — the corpus's only evidence that the
-//!   watchdog thread's own scheduling is not always prompt.
-//!
-//! ## Cost and deadlock-safety
-//!
-//! The recording path is [`DbProbeGuard::new`] plus exactly one of `finish` /
-//! `Drop`. The three outcomes do not cost the same, so they are enumerated
-//! rather than averaged — "three atomics" was quoted for all three and is right
-//! for only one:
-//!
-//! | outcome | relaxed RMW | relaxed store | clock read |
-//! |---|---|---|---|
-//! | success (`finish(true)`) | 3 (`started+`, `in_flight+`, `in_flight-`) | 1 (`LAST_DB_OK_AT`) | 1 |
-//! | failure (`finish(false)`) | 4 (the above + `failed+`) | 1 (`LAST_DB_ERR_AT`) | 1 |
-//! | cancellation (`Drop`, unsettled) | 3 (`started+`, `in_flight+`, `in_flight-`) | 0 | 0 |
-//!
-//! No lock, no allocation and nothing that blocks on any of the three paths, so
-//! it cannot participate in — let alone deepen — a deadlock. It brackets a
-//! Postgres round trip costing milliseconds: overhead ~1e-7 in every column.
-//!
-//! The beacon costs one timer wakeup per [`RUNTIME_TICK_PERIOD`] and two
-//! relaxed stores; it never allocates after spawn and never touches the
-//! database, so it cannot itself be blocked by what it is measuring.
-//!
-//! The reading path ([`snapshot`]) runs on the watchdog's dedicated OS thread,
-//! which is not a tokio worker, at most once per 30s check. It only reads
-//! atomics, so it stays readable even when every tokio worker is stuck.
+//! 1. Which stage the probe reached — [`HealthProbeOutcome`]. `ConnectFailed`
+//!    does *not* mean the runtime is innocent: the kernel completes a TCP
+//!    handshake from the listen backlog (128 slots) with no accept-loop
+//!    participation, so a wedged acceptor reads as `NoResponse` until the
+//!    backlog fills — [`verdict`] always consults the beacon for this stage.
+//! 2. Whether the runtime is scheduling tasks — [`RuntimeLiveness`], driven
+//!    by [`spawn_runtime_liveness_beacon`]. One idle worker is enough to tick
+//!    it, so `Scheduling` rules out a wedged runtime but not partial executor
+//!    starvation; `runtime_workers=` is logged alongside it.
+//! 3. What Postgres was doing — [`Breadcrumbs::db_in_flight`], set by every
+//!    [`DbProbeGuard`] around a `GET /api/health` query (sites enumerated in
+//!    `services::health_diagnostics`). [`verdict`] combines all three; the
+//!    log-evidence analysis behind this design lives in #5147.
 
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-/// Monotonic epoch for every timestamp in this module. `Instant` cannot live in
-/// an atomic, so timestamps are stored as milliseconds since this point.
-/// Monotonic (rather than `SystemTime`) so a wall-clock adjustment cannot
-/// produce a nonsense age.
-///
-/// Being a `LazyLock`, this is *first use*, not process start: it is whichever
-/// of a probe, a beacon tick or a watchdog snapshot happens first. Nothing here
-/// reports an absolute time — every consumer takes a difference between two
-/// values measured against this same epoch — so the distinction cannot reach a
-/// log line. It is called out only so nobody later builds an uptime field on it.
+/// Monotonic epoch for every timestamp in this module. `Instant` cannot live
+/// in an atomic, so timestamps are stored as milliseconds since this point.
+/// Monotonic rather than `SystemTime` so a wall-clock adjustment cannot
+/// produce a nonsense age. This is first-use, not process start, but every
+/// consumer only ever takes a difference against this same epoch, so that
+/// distinction never reaches a log line — do not build an uptime field on it.
 static PROCESS_START: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 /// Stored timestamps are `mono_ms() + 1` so that `0` unambiguously means
@@ -353,44 +45,31 @@ static LAST_DB_ERR_AT: AtomicU64 = AtomicU64::new(0);
 static RUNTIME_TICKS: AtomicU64 = AtomicU64::new(0);
 static LAST_RUNTIME_TICK_AT: AtomicU64 = AtomicU64::new(0);
 /// Worker threads the runtime was built with, recorded once by
-/// [`spawn_runtime_liveness_beacon`]. `0` means the beacon never started, so
-/// nothing has ever asked the runtime.
-///
-/// Logged because `runtime=scheduling` says only that *one* worker was free.
-/// Without this number a reader cannot tell whether that leaves 13 other
-/// workers unaccounted for or none at all. See [`RuntimeLiveness`].
+/// [`spawn_runtime_liveness_beacon`]. `0` means the beacon never started.
+/// Logged because `runtime=scheduling` only says *one* worker was free; this
+/// is the denominator that makes that readable. See [`RuntimeLiveness`].
 static RUNTIME_WORKERS: AtomicU64 = AtomicU64::new(0);
 
 /// How often [`spawn_runtime_liveness_beacon`] proves the runtime is alive.
-///
-/// Short relative to the watchdog's 5s probe timeout so that "the runtime did
-/// not poll a ready timer for the entire probe window" is unambiguous, and long
-/// enough that the beacon is a rounding error next to the 30s check interval.
+/// Short enough that a stalled tick unambiguously spans the watchdog's 5s
+/// probe timeout, long enough to be a rounding error next to the 30s check.
 pub(crate) const RUNTIME_TICK_PERIOD: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// A tick older than this means the runtime is not scheduling tasks.
-///
-/// Five periods. The beacon is a timer, not a deadline, so it drifts under load
-/// and under `MissedTickBehavior::Delay`; the threshold has to tolerate that
-/// without tolerating a stall. It equals the probe's own read timeout
-/// (`recovery::spawn_watchdog`'s `TCP_TIMEOUT`, 5s), so crossing it means the
-/// runtime failed to run one trivial task for at least as long as the probe
-/// waited for a byte.
-///
-/// Both numbers, and the two relations that justify them, are pinned as
-/// literals by `tests::the_beacon_constants_are_pinned_in_absolute_units` and
-/// `tests::the_stale_threshold_matches_the_watchdogs_own_probe_timeout`. They
-/// have to be: an oracle written as `RUNTIME_TICK_STALE_MS + 1` moves with the
-/// constant it is meant to be checking and cannot fail.
+/// A tick older than this means the runtime is not scheduling tasks. Five
+/// periods, chosen to equal the probe's own read timeout
+/// (`recovery::spawn_watchdog`'s `TCP_TIMEOUT`, 5s) so crossing it means the
+/// runtime failed to run one trivial task for as long as the probe waited for
+/// a byte. Both this and `RUNTIME_TICK_PERIOD` are pinned as absolute
+/// literals in `tests` — an oracle relative to either constant would move
+/// with it and never fail.
 pub(crate) const RUNTIME_TICK_STALE_MS: u64 = 5_000;
 
 /// Brackets one Postgres health probe.
 ///
 /// Created before the query is issued and resolved by [`DbProbeGuard::finish`].
-/// If the future is instead *cancelled* mid-query the guard is dropped without
-/// `finish`, and `Drop` still decrements the in-flight counter — otherwise a
-/// cancelled probe would inflate `db_in_flight` forever and the breadcrumb
-/// would lie in exactly the situation it exists to describe.
+/// If instead the future is *cancelled* mid-query, `Drop` still decrements the
+/// in-flight counter — otherwise a cancelled probe would inflate
+/// `db_in_flight` forever.
 #[must_use = "the probe stays counted as in-flight until the guard is dropped"]
 pub(crate) struct DbProbeGuard {
     settled: bool,
@@ -427,19 +106,14 @@ impl Drop for DbProbeGuard {
 
 /// Brackets one `/api/health` Postgres await with a [`DbProbeGuard`].
 ///
-/// Takes the future rather than leaving each call site to open-code
-/// `new()`/`finish()`: the health handler awaits seven of these in sequence
-/// unconditionally (eight with a `health_registry`, nine on a cluster standby)
-/// and an unbracketed one is invisible — it would report `db_in_flight=0` at
-/// kill time and clear the database of a stall it caused.
+/// Takes the future itself, rather than leaving each call site to open-code
+/// `new()`/`finish()`, so an unbracketed await cannot go unrecorded and clear
+/// the database of a stall it caused.
 ///
-/// `succeeded` decides what counts as a healthy round trip. For a `sqlx` call
-/// that is `Result::is_ok`: a query that legitimately matched no rows still
-/// proves Postgres answered, and must not be recorded as a failed probe.
-///
-/// Cancellation-safe by construction. If the caller's future is dropped while
-/// the query is pending, `guard` is dropped without `finish` and its `Drop`
-/// releases the in-flight slot.
+/// `succeeded` decides what counts as a healthy round trip — for `sqlx`,
+/// `Result::is_ok`, since a query matching no rows still proves Postgres
+/// answered. Cancellation-safe: a dropped future still releases the slot via
+/// `guard`'s `Drop`.
 pub(crate) async fn observe_db<T>(
     query: impl std::future::Future<Output = T>,
     succeeded: impl FnOnce(&T) -> bool,
@@ -452,45 +126,24 @@ pub(crate) async fn observe_db<T>(
 
 /// A `PgPool` whose only *ordinary* use is an await under a [`DbProbeGuard`].
 ///
-/// #5147: `services::health_diagnostics` wraps its `Option<&PgPool>` parameter
-/// in one of these at the top of every function on the public `GET /api/health`
-/// path, **shadowing the raw pool out of scope**. What that buys, exactly: in
-/// those function bodies there is no `&PgPool` binding left to hand to
-/// `.fetch_one`/`.fetch_optional`/`.fetch_all`, so *writing another await the
-/// normal way* stops compiling instead of going unrecorded. That is the
-/// accident this is for.
+/// #5147: `services::health_diagnostics` wraps its `Option<&PgPool>` in one of
+/// these at the top of every `GET /api/health` function, shadowing the raw
+/// pool: with no `&PgPool` binding left, an unbracketed
+/// `.fetch_one`/`.fetch_optional`/`.fetch_all` stops compiling instead of
+/// going unrecorded.
 ///
-/// It is **not a capability boundary**, and an earlier draft said it was ("the
-/// handle never escapes"). [`probe`](ProbedPool::probe) hands the raw
+/// **Not a capability boundary.** [`probe`](ProbedPool::probe) hands the raw
 /// `&'p PgPool` to its closure with no bound on the return type, so
-/// `|p| ready(p)` returns the borrow and `|p| ready(p.clone())` an owned pool;
-/// both compile and either can then be awaited with no guard. True statement:
-/// a future *built* by that closure is awaited under the guard, because the
-/// closure is not `async`.
+/// `|p| ready(p.clone())` extracts an owned pool that can be awaited with no
+/// guard — only a future *built* by the closure is bracketed.
 ///
-/// This replaces a test that counted `observe_db(` occurrences against
-/// `.fetch_*(` occurrences in the module source. Counting cannot prove
-/// *pairing*: adversarial review deleted the bracket from the second
-/// `dispatch_outbox` query and added one to an exempt repair route, the totals
-/// matched, and the guard stayed green while a health-path await went
-/// unrecorded. Nothing here counts anything.
-///
-/// **What this does not cover**, stated so nobody reads it as total:
-///
-/// * A *new* sibling in that module taking `Option<&PgPool>` instead of
-///   wrapping it can still await unbracketed — nothing forces the parameter
-///   type. The converted functions are additionally pinned behaviourally by
-///   `assert_bracketed!`; a new one would have neither.
-/// * One [`probe`](ProbedPool::probe) whose closure `await`s twice records one
-///   probe for two round trips. Every call site issues exactly one query — a
-///   convention, not a constraint.
-/// * It covers only *this* module, not the health *path*
-///   (`server::routes::health_api` is the obvious gap).
-/// * **The handle is extractable** — see above. A sealed bound on `T` was tried
-///   and dropped: every real call site returns `Result<_, _>` and so does
-///   `|p| ready(Ok(p.clone()))`, so it moves the leak without closing it.
-///   Closing it means never handing the closure a pool, which the foreign
-///   `fn(&PgPool)` this path calls in `auto_queue::cleanup_tasks` rules out.
+/// **Does not cover:** a new sibling function taking `Option<&PgPool>`
+/// instead of wrapping it (nothing forces the parameter type —
+/// `assert_bracketed!` only pins the already-converted ones); a closure that
+/// awaits twice (records one probe for two round trips); anything outside
+/// this module (`server::routes::health_api` is the obvious gap); or the
+/// extracted-handle path above, which the foreign `fn(&PgPool)` signature in
+/// `auto_queue::cleanup_tasks` rules out closing.
 pub(crate) struct ProbedPool<'p> {
     pool: &'p sqlx::PgPool,
 }
@@ -532,35 +185,31 @@ pub(crate) fn record_runtime_tick() {
 
 /// Spawns the runtime-liveness beacon. Call once, from inside the runtime.
 ///
-/// The task awaits a timer and stores two atomics. It touches no lock, no
-/// channel, no socket and no database, so the only thing that can stop it is
-/// the runtime failing to poll a ready task — which is precisely the condition
-/// it exists to report. See [`RuntimeLiveness`].
+/// The task awaits a timer and stores two atomics — touching no lock,
+/// channel, socket, or database — so only the runtime itself failing to poll
+/// a ready task can stop it. See [`RuntimeLiveness`].
 ///
-/// The single production caller is
-/// [`discord::health::self_watchdog::spawn_watchdog`](crate::services::discord::health::self_watchdog::spawn_watchdog),
-/// which arms the beacon before it creates its thread. That is deliberate: the
-/// beacon is the watchdog's only evidence, and a separate boot-site call could
-/// be deleted while the watchdog kept running and kept concluding nothing.
+/// Single production caller:
+/// [`spawn_watchdog`](crate::services::discord::health::self_watchdog::spawn_watchdog),
+/// which arms the beacon before creating its thread so the two steps cannot
+/// be reordered or split apart.
 ///
-/// Returns [`BeaconArmed`], which is both the outcome and the token
-/// `spawn_watchdog` needs to create its thread. Off a runtime it reports the
-/// failure through that token rather than panicking: a missing beacon costs
-/// `verdict=undetermined_no_beacon`, a panic at boot costs the whole service.
+/// Returns [`BeaconArmed`], the token `spawn_watchdog` needs to create its
+/// thread. Off a runtime this reports failure through that token instead of
+/// panicking: a missing beacon costs `verdict=undetermined_no_beacon`; a
+/// panic at boot costs the whole service.
 pub(crate) fn spawn_runtime_liveness_beacon() -> BeaconArmed {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return BeaconArmed { workers: None };
     };
-    // Recorded here rather than at the read side because the watchdog reads
-    // from its own OS thread, where a runtime handle is not available. One
-    // relaxed store, once per process.
+    // Recorded here, not at the read side: the watchdog reads from its own OS
+    // thread, where no runtime handle is available.
     let workers = handle.metrics().num_workers() as u64;
     RUNTIME_WORKERS.store(workers, Ordering::Relaxed);
     handle.spawn(async {
         let mut interval = tokio::time::interval(RUNTIME_TICK_PERIOD);
-        // Default `Burst` would replay every tick missed during a stall in a
-        // tight loop the instant the runtime recovers, which is noise. `Delay`
-        // just resumes, so the recorded age reflects the real gap.
+        // `Delay` (not the default `Burst`) so a stall doesn't replay every
+        // missed tick in a burst once the runtime recovers.
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
@@ -574,27 +223,18 @@ pub(crate) fn spawn_runtime_liveness_beacon() -> BeaconArmed {
 
 /// Proof that [`spawn_runtime_liveness_beacon`] has already run.
 ///
-/// #5147: this exists so the *order* of the two boot steps is a data
-/// dependency rather than a claim.
-/// `discord::health::self_watchdog::spawn_watchdog_thread` takes one by value
-/// and the only way to obtain one is to call the arming function, so **at that
-/// call site** deleting the arming, or moving it into the spawned closure,
-/// stops compiling.
+/// #5147: makes the *order* of the two boot steps a data dependency rather
+/// than a convention — `spawn_watchdog_thread` takes one by value, and the
+/// only way to obtain one is to call the arming function, so deleting the
+/// arming (or moving it into the spawned closure) stops compiling.
 ///
-/// Read that scope literally; three nearby readings are false. It is `Copy`, so
-/// "by value" is not linear consumption — one token can start two threads. It
-/// says nothing about other ways to start one: `std::thread::spawn` compiles
-/// anywhere with no token in sight. And it is issued on the failure path too
-/// (`workers: None`), so it records that arming was *attempted*, not that it
-/// succeeded — [`BeaconArmed::boot_report`] is what distinguishes those, logged
-/// at ERROR by `spawn_watchdog_thread`. One edge of one call graph, not a
-/// crate-wide invariant.
+/// Scoped narrowly: `Copy` (one token can start two threads), says nothing
+/// about other ways to start a thread (`std::thread::spawn` needs no token),
+/// and is issued on the failure path too (`workers: None`) — it proves arming
+/// was *attempted*, not that it succeeded. [`BeaconArmed::boot_report`]
+/// distinguishes those, logged at ERROR by `spawn_watchdog_thread`.
 ///
-/// It replaces an `include_str!` byte-offset guard on `self_watchdog.rs` that
-/// adversarial review broke six ways and that also failed on correct code; that
-/// file's module doc enumerates the seven inputs, none of which can affect a
-/// name-resolution error. There is deliberately no public constructor and no
-/// `Default`.
+/// Deliberately no public constructor and no `Default`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use = "the watchdog thread takes this by value; dropping it means the beacon was armed for nothing"]
 pub(crate) struct BeaconArmed {
@@ -609,11 +249,10 @@ impl BeaconArmed {
         self.workers
     }
 
-    /// The line the boot path must emit, and at which level.
-    ///
-    /// `Err` means the beacon is **not** running, so every later watchdog
-    /// failure will report `verdict=undetermined_no_beacon`. Returned rather
-    /// than logged here so the text is assertable without a tracing subscriber.
+    /// The line the boot path must emit, and at which level. Returned rather
+    /// than logged here so the text is assertable without a tracing
+    /// subscriber; `Err` means every later watchdog failure will report
+    /// `verdict=undetermined_no_beacon`.
     pub(crate) fn boot_report(self) -> Result<String, String> {
         match self.workers {
             Some(workers) => Ok(format!(
@@ -633,16 +272,12 @@ impl BeaconArmed {
 /// Point-in-time view of the breadcrumbs, taken by the watchdog thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Breadcrumbs {
-    /// Health-path Postgres awaits outstanding right now, **process-wide**.
-    ///
-    /// This is a global gauge, not a per-request one — that is deliberate, it
-    /// is what lets the watchdog's own OS thread read it without touching
-    /// anything the runtime could be blocked on. The cost is that concurrent
-    /// `GET /api/health`, `/api/health/detail` and dashboard-poller requests
-    /// all contribute. So a non-zero value proves that *some* health request is
-    /// inside a Postgres await; it does **not** prove the request this probe
-    /// made is. `handler_blocked_on_db` inherits exactly that weakness and must
-    /// be read with it.
+    /// Health-path Postgres awaits outstanding right now, **process-wide**
+    /// rather than per-request — deliberately, so the watchdog's OS thread can
+    /// read it without touching anything the runtime could be blocked on. A
+    /// non-zero value proves *some* health request is inside a Postgres await,
+    /// not that the request this probe made is; `handler_blocked_on_db`
+    /// inherits that weakness.
     pub(crate) db_in_flight: u64,
     pub(crate) db_probes_started: u64,
     pub(crate) db_probes_failed: u64,
@@ -663,33 +298,25 @@ pub(crate) struct Breadcrumbs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuntimeLiveness {
     /// The beacon ticked within [`RUNTIME_TICK_STALE_MS`]: **at least one**
-    /// worker thread ran a ready timer task.
+    /// worker thread ran a ready timer task. One free worker is enough to tick
+    /// a beacon that only stores two atomics, so this:
     ///
-    /// State what this excludes and what it does not, because an earlier draft
-    /// asserted the executor's innocence here — *"a failed probe is the
-    /// handler's fault, not the executor's"* — and that is false. The runtime
-    /// is multi-threaded with `available_parallelism()` workers (14 on the
-    /// release host), and one free worker is enough to tick a beacon that only
-    /// stores two atomics.
-    ///
-    /// * **Excluded:** a fully wedged runtime — no worker polling anything.
-    /// * **Not excluded:** partial executor starvation. 13 of 14 workers
-    ///   blocked in sync I/O or `block_in_place` still tick the beacon, still
-    ///   read as `Scheduling`, and still produce a `handler_*` verdict — while
-    ///   the actual fault is the executor. Compare `runtime_workers=` against
-    ///   what the process is known to run concurrently before believing a
-    ///   `handler_*` verdict.
+    /// * **Excludes** a fully wedged runtime — no worker polling anything.
+    /// * **Does not exclude** partial executor starvation: N-1 of N workers
+    ///   blocked in sync I/O or `block_in_place` still tick the beacon and
+    ///   still produce a `handler_*` verdict, while the actual fault is the
+    ///   executor. Compare `runtime_workers=` against known concurrent load
+    ///   before believing a `handler_*` verdict.
     Scheduling { age_ms: u64 },
-    /// The beacon has not ticked for [`RUNTIME_TICK_STALE_MS`]: a task that
-    /// wakes on a timer and stores two atomics was not scheduled on **any** of
-    /// the runtime's `runtime_workers` worker threads for at least as long as
-    /// the probe waited for a byte. Nothing short of a fully wedged runtime
+    /// The beacon has not ticked for [`RUNTIME_TICK_STALE_MS`]: not **any** of
+    /// the runtime's worker threads ran the beacon task for at least as long
+    /// as the probe waited for a byte. Nothing short of a fully wedged runtime
     /// produces this.
     Stalled { age_ms: u64 },
-    /// The beacon never ticked. Either [`spawn_runtime_liveness_beacon`] was
-    /// never called, or it was called and the runtime never once polled it.
-    /// These are not distinguishable from the counters, so this deliberately
-    /// concludes nothing rather than guessing `Stalled`.
+    /// The beacon never ticked — either [`spawn_runtime_liveness_beacon`] was
+    /// never called, or the runtime never once polled it. Not distinguishable
+    /// from the counters, so this deliberately concludes nothing rather than
+    /// guessing `Stalled`.
     Unknown,
 }
 
@@ -760,17 +387,12 @@ impl Breadcrumbs {
 }
 
 /// The one conclusion the watchdog is entitled to draw, from the probe stage
-/// and the beacon together.
-///
-/// Neither input is sufficient alone, which is why this is a function and not a
-/// note to eyeball `stage=`: `stage=` cannot see a wedged runtime (the backlog
-/// answers `connect()` without the acceptor), and the beacon cannot see a dead
-/// listener or a stuck handler. `db_in_flight` splits the remainder — waiting on
-/// Postgres vs slow for another reason — but is process-wide (see
+/// and the beacon together — neither alone is enough: `stage=` cannot see a
+/// wedged runtime (the backlog answers `connect()` without the acceptor), and
+/// the beacon cannot see a dead listener or a stuck handler. `db_in_flight`
+/// splits the remainder but is process-wide (see
 /// [`Breadcrumbs::db_in_flight`]), so `handler_blocked_on_db` names *a* health
 /// request stuck in a query, not necessarily this one.
-///
-/// The seven values this returns, and what each is worth:
 ///
 /// | verdict                           | means                                                         |
 /// |-----------------------------------|---------------------------------------------------------------|
@@ -782,39 +404,22 @@ impl Breadcrumbs {
 /// | `connection_reset_before_request` | connected, then the write failed — handler never reached; read `err=`, this arm also absorbs a write timeout |
 /// | `undetermined_no_beacon`          | the beacon never ran; nothing may be concluded                 |
 ///
-/// Seven, not the five an earlier draft listed: that count omitted `responsive`
-/// and predates `connection_reset_before_request`. The set is pinned as a table
-/// by `tests::every_stage_and_liveness_combination_has_a_pinned_verdict`.
-///
-/// Matched **stage-first and exhaustively, no `_` arm**. The previous shape
-/// ended in `_ => "handler_slow_db_idle"` under a `Scheduling` guard, sweeping
-/// every `request_failed` cell into the two database buckets — a connection
-/// that never reached the handler, reported as "blocked on Postgres". Adding a
-/// stage is now a compile error here, not a silent DB verdict.
+/// Pinned exhaustively, stage-first with no `_` arm, by
+/// `tests::every_stage_and_liveness_combination_has_a_pinned_verdict` — adding
+/// a stage is a compile error here, not a silent DB verdict.
 pub(crate) fn verdict(outcome: &HealthProbeOutcome, crumbs: &Breadcrumbs) -> &'static str {
     use HealthProbeOutcome as Stage;
     match outcome {
         Stage::Responded { .. } => "responsive",
-        // Beacon-independent by construction. The connection was established,
-        // so the listener existed and the backlog had room; the write was then
-        // refused, which means the peer reset it. A wedged runtime does not do
-        // that — the kernel keeps an accepted socket writable with no help from
-        // the executor — so this conclusion neither needs the beacon nor may be
-        // downgraded to `undetermined_no_beacon` when there is none.
-        //
-        // The narrow case where that reasoning does not hold: `RequestFailed`
-        // also absorbs a write *timeout*, which is not a peer reset. See the
-        // variant's docs — unreachable in practice for a 70-byte loopback
-        // write, but this is the one arm that would print a conclusion with no
-        // evidence behind it, so `err=` has to be read before believing it.
+        // Beacon-independent: the connection was established, so the write
+        // was refused by the peer, not by a wedged runtime (an accepted
+        // socket stays writable in the kernel regardless of the executor).
+        // Exception: this variant also absorbs a write *timeout*, which is
+        // not a peer reset — read `err=` before trusting this verdict.
         Stage::RequestFailed { .. } => "connection_reset_before_request",
-        // `ConnectFailed` does NOT settle this on its own: a runtime that never
-        // polls its acceptor eventually fills the 128-slot backlog, and the
-        // next `connect()` then fails exactly like a closed socket. So the
-        // beacon still decides, and with no beacon the honest answer is that we
-        // do not know — a wrong `runtime_stalled` (or a wrong `listener_gone`)
-        // here would send the next investigation down the same dead end the
-        // last three took.
+        // `ConnectFailed` does NOT settle this alone: a wedged acceptor
+        // eventually fills the 128-slot backlog, after which `connect()`
+        // fails exactly like a closed socket. The beacon still decides.
         Stage::ConnectFailed { .. } => match crumbs.runtime_liveness() {
             RuntimeLiveness::Unknown => "undetermined_no_beacon",
             RuntimeLiveness::Stalled { .. } => "runtime_stalled",
@@ -843,38 +448,22 @@ pub(crate) enum HealthProbeOutcome {
     /// process whenever a provider is briefly disconnected.
     Responded { elapsed_ms: u64 },
     /// The TCP handshake never completed: the listening socket is gone, the
-    /// backlog is full, or the address is unroutable.
-    ///
-    /// This is not the *first* place a wedged runtime shows up. The kernel
-    /// completes the handshake from the listen backlog without the accept loop
-    /// running at all, so a runtime that never polls its acceptor lands in
-    /// `NoResponse` while the backlog still has room. It only reaches here once
-    /// the backlog is exhausted — so this stage cannot acquit the runtime
-    /// either, and [`verdict`] reads the beacon before concluding. See the
-    /// module docs for the backlog depth.
+    /// backlog is full, or the address is unroutable. Not the first place a
+    /// wedged runtime shows up — the kernel completes the handshake from the
+    /// backlog with no accept loop running, so this is only reached once the
+    /// backlog is also exhausted. [`verdict`] still reads the beacon here.
     ConnectFailed { elapsed_ms: u64, error: String },
     /// The connection was established but the request could not be written.
-    ///
     /// The handler was never reached, so this must never be classified as a
-    /// database or handler problem. It is also the only failure stage that
-    /// concludes without the beacon: an accepted socket stays writable in the
-    /// kernel whatever the executor is doing, so a **refused** write (RST /
-    /// `EPIPE`) is evidence about the peer, not about scheduling.
-    ///
-    /// Every `write_all` error folds into this variant, including the write
-    /// timeout [`probe_health_once`] also arms — and a timeout is *not* a peer
-    /// reset, so the beacon-free conclusion would not be earned. A 70-byte
-    /// loopback write into a socket buffer orders of magnitude larger has never
-    /// produced one, but `err=` is the field that tells them apart if it ever
-    /// does.
+    /// database or handler problem. Every `write_all` error folds into this
+    /// variant, including a write *timeout* — which is not a peer reset, so
+    /// `err=` is what tells them apart if it matters.
     RequestFailed { elapsed_ms: u64, error: String },
     /// The connection was established and the request written, but no bytes
-    /// came back before the read timeout.
-    ///
-    /// This bucket holds **two different failures** and cannot separate them on
-    /// its own: a wedged runtime (accepted by the backlog, never polled) and a
-    /// live runtime whose `/api/health` handler is waiting on Postgres.
-    /// [`RuntimeLiveness`] is what tells them apart.
+    /// came back before the read timeout. Holds **two different failures**
+    /// and cannot separate them on its own: a wedged runtime (accepted by the
+    /// backlog, never polled) and a live runtime waiting on Postgres.
+    /// [`RuntimeLiveness`] tells them apart.
     NoResponse { elapsed_ms: u64, error: String },
 }
 
@@ -979,11 +568,10 @@ pub(crate) fn probe_health_once(
     }
 }
 
-/// The breadcrumb counters are process-global — that is the whole point of the
-/// design, since the watchdog thread has to read them without holding anything
-/// the runtime could be blocked on. `cargo test` runs tests in parallel, so
-/// every test that asserts on a *delta* must first take this lock; otherwise a
-/// sibling test's guard moves the gauge mid-assertion.
+/// The breadcrumb counters are process-global, so the watchdog thread can
+/// read them without holding anything the runtime could be blocked on. Tests
+/// run in parallel, so any test asserting on a *delta* must take this lock
+/// first, or a sibling test's guard moves the gauge mid-assertion.
 ///
 /// Lives outside `mod tests` because `services::health_diagnostics` asserts on
 /// the same counters and has to share the lock, not a copy of it.
@@ -1092,19 +680,10 @@ mod tests {
         }
     }
 
-    /// How stale the beacon can be by the time the watchdog kills, measured
-    /// **from the last check that succeeded** — three `CHECK_INTERVAL`s (30s):
-    /// success, then failures at +30s, +60s and +90s, the last of which exits.
-    ///
-    /// Read it that way and only that way. It is *not* the length of the
-    /// failure streak: three failures 30s apart span **two** intervals, not
-    /// three. Measured over the preserved corpus, first-failure→kill is
-    /// 60.26–60.28 s when the probes fail instantly and 70.14–70.45 s when each
-    /// consumes its full 5s read timeout — never 90 s. The beacon's real age at
-    /// kill is therefore somewhere in [60s, 90s] depending on when the runtime
-    /// stopped ticking, and 90s is the upper bound this constant names.
-    ///
-    /// A literal, deliberately — see
+    /// Upper bound on beacon staleness at kill time, measured **from the last
+    /// successful check** — three `CHECK_INTERVAL`s (30s), not the length of
+    /// the failure streak (three failures 30s apart span two intervals, not
+    /// three). A literal, deliberately — see
     /// [`the_beacon_constants_are_pinned_in_absolute_units`].
     const AGE_AT_KILL_MS: u64 = 90_000;
 
@@ -1145,9 +724,8 @@ mod tests {
         );
     }
 
-    /// The worker count has to reach the log line, and `0` in production would
-    /// silently mean "we never asked". Pin that the beacon records the runtime
-    /// it was started on.
+    /// `0` in production would silently mean "we never asked"; pin that the
+    /// beacon records the worker count of the runtime it was started on.
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn the_beacon_records_the_runtime_worker_count() {
         let _serial = exclusive();
@@ -1178,14 +756,11 @@ mod tests {
 
     #[test]
     fn accepted_but_silent_server_is_classified_as_no_response() {
-        // Production shape: the runtime accepts the connection but the
-        // `/api/health` handler is blocked awaiting Postgres, so nothing is
-        // written back before the read timeout. The old `-> bool` probe
-        // reported this identically to a dead port.
+        // Production shape: connection accepted, handler blocked on Postgres,
+        // nothing written back before the read timeout.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr").to_string();
         let accepted = std::thread::spawn(move || {
-            // Accept and then hold the connection open, answering nothing.
             let (stream, _) = listener.accept().expect("accept");
             std::thread::sleep(Duration::from_millis(600));
             drop(stream);
@@ -1243,11 +818,9 @@ mod tests {
         assert_eq!(outcome.stage(), "connect_failed", "got {outcome:?}");
     }
 
-    /// MY-1: nothing exercised the `RequestFailed` arm of `stage`, `elapsed_ms`,
-    /// `error` or `is_ok`, so any of them could be swapped without a test
-    /// noticing. A live `RequestFailed` needs the peer to vanish between
-    /// `connect` and `write`, which is a race, so pin the whole table by
-    /// construction instead — that is where the mutable behaviour lives.
+    /// A live `RequestFailed` needs the peer to vanish between `connect` and
+    /// `write`, which is a race, so pin the whole table by construction
+    /// instead of reproducing it live.
     #[test]
     fn every_stage_reports_its_own_label_elapsed_error_and_verdict_input() {
         let cases = [
@@ -1307,13 +880,11 @@ mod tests {
         }
     }
 
-    /// MY-2: `read` returning `Ok(0)` means the peer completed the handshake,
-    /// took the request and then closed without answering. That is a failure,
-    /// and it must not be mistaken for the healthy `Ok(n > 0)` path.
-    ///
-    /// The server drains the request before shutting down on purpose: closing
-    /// with unread bytes still buffered makes the kernel send RST, and the
-    /// client would take the `Err` arm instead of the `Ok(0)` one this pins.
+    /// `read` returning `Ok(0)` means the peer completed the handshake, took
+    /// the request, and closed without answering — a failure, not to be
+    /// mistaken for the healthy `Ok(n > 0)` path. The server drains the
+    /// request before shutting down: closing with unread bytes buffered would
+    /// make the kernel send RST, taking the `Err` arm instead of `Ok(0)`.
     #[test]
     fn a_peer_that_takes_the_request_and_closes_without_answering_is_a_failure() {
         use std::io::Read;
@@ -1347,19 +918,15 @@ mod tests {
     // `stage=` alone cannot tell a wedged runtime from a slow handler. These
     // reproduce why, and pin the field that can.
 
-    /// The reviewer's finding, pinned as an executable fact: a listener whose
-    /// `accept` is NEVER called still completes the TCP handshake, because the
-    /// kernel does it from the listen backlog. This
-    /// is the shape of a runtime that has stopped polling its acceptor, and it
-    /// classifies as `no_response` — identical to a healthy runtime waiting on
-    /// Postgres, and nothing like `connect_failed`.
-    ///
-    /// If this ever starts returning `connect_failed`, the module docs and
-    /// [`verdict`] are both wrong and must be revisited.
+    /// A listener whose `accept` is never called still completes the TCP
+    /// handshake, because the kernel does it from the listen backlog — the
+    /// shape of a runtime that stopped polling its acceptor, classifying as
+    /// `no_response`, not `connect_failed`. If this ever returns
+    /// `connect_failed`, the module docs and [`verdict`] are both wrong.
     #[test]
     fn a_never_accepted_connection_is_no_response_not_connect_failed() {
-        // Bound but never accepted. Held for the whole probe so the socket
-        // stays open and the backlog stays available.
+        // Held for the whole probe so the socket stays open and the backlog
+        // stays available.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr").to_string();
 
@@ -1382,10 +949,8 @@ mod tests {
         let no_response = no_response();
 
         let wedged = Breadcrumbs {
-            // A wedged runtime cannot poll the beacon either. Absolute, not
-            // `RUNTIME_TICK_STALE_MS + 1`: this is the age the beacon actually
-            // has when the watchdog kills, and an expectation written in terms
-            // of the constant it is testing moves with it and proves nothing.
+            // Absolute, not `RUNTIME_TICK_STALE_MS + 1`: an expectation
+            // phrased relative to the constant under test moves with it.
             runtime_tick_age_ms: Some(AGE_AT_KILL_MS),
             db_in_flight: 0,
             ..crumbs()
@@ -1410,29 +975,14 @@ mod tests {
     }
 
     // ── The beacon's two numbers, pinned absolutely ───────────────────────
-    //
-    // #5147. Every threshold assertion in this file was originally
-    // phrased relative to the constant it was checking — `RUNTIME_TICK_STALE_MS
-    // + 1`, `RUNTIME_TICK_PERIOD * 3` — so the expectation moved with the
-    // constant and the constant had no coverage at all. Two independent
-    // mutations survived a 23/23 green run:
-    //
-    //   * `RUNTIME_TICK_STALE_MS: 5_000 -> 86_400_000` makes `runtime_stalled`
-    //     unreachable in production. The watchdog exits three 30s intervals
-    //     after the last successful check — 90s, and the failure streak itself
-    //     is only the last two of those — so a threshold of 24 hours can never
-    //     be crossed before the process is dead.
-    //   * `RUNTIME_TICK_PERIOD: 1s -> 3600s` makes the beacon stale at every
-    //     check, so *every* failure renders as `runtime_stalled` and the
-    //     discriminator discriminates nothing.
-    //
-    // That is the #5177 defect class: an oracle computed from the
-    // implementation. Nothing below may name a constant on the expectation
-    // side.
+    // #5177 defect class: an oracle computed from the constant it checks
+    // (`RUNTIME_TICK_STALE_MS + 1`, `RUNTIME_TICK_PERIOD * 3`) moves with a
+    // mutation and never fails. Nothing below may name a constant on the
+    // expectation side — literals only.
 
-    /// The literals themselves, plus the one relation the doc comment claims
-    /// ("Five periods"). The relation alone would still be satisfiable by any
-    /// pair in a 1:5 ratio, which is why both absolutes are pinned first.
+    /// The literals themselves, plus the "Five periods" relation between
+    /// them — pinned separately since the relation alone is satisfiable by
+    /// any pair in a 1:5 ratio.
     #[test]
     fn the_beacon_constants_are_pinned_in_absolute_units() {
         assert_eq!(
@@ -1460,21 +1010,8 @@ mod tests {
     /// The threshold's *other* documented relation: it equals the watchdog's
     /// own read timeout, so crossing it means the runtime failed to run one
     /// trivial task for at least as long as the probe waited for a byte.
-    ///
-    /// **Every expectation here is a literal on both sides.** The watchdog's
-    /// constants are *read* (so a change to either side is caught) but never
-    /// used to compute an expectation — `assert_eq!(A, B)` between two
-    /// constants that move together is the #5177 defect class and cannot fail.
-    ///
-    /// While these were function-local `const`s the only available technique
-    /// was `include_str!("discord/health/recovery.rs")` plus
-    /// `str::contains("… from_secs(5);")`, and that was measured to break both
-    /// ways: `str::contains` sees a file as one flat string and cannot tell
-    /// code from a comment, so commenting the real declaration out, leaving the
-    /// same literal behind in the comment and setting the live value to 60s
-    /// stays green, while rewriting it as the identical
-    /// `Duration::from_millis(5_000)` turns red. `self_watchdog` exists so
-    /// these can simply be imported.
+    /// Every expectation here is a literal on both sides — `assert_eq!(A, B)`
+    /// between two constants that move together is the #5177 defect class.
     #[test]
     fn the_stale_threshold_matches_the_watchdogs_own_probe_timeout() {
         use crate::services::discord::health::self_watchdog;
@@ -1531,8 +1068,7 @@ mod tests {
                 "at {age_ms}ms stale"
             );
         }
-        // The other side, so a threshold mutated *down* is caught too: a beacon
-        // that is ticking must never be reported as a stalled runtime.
+        // The other side: a threshold mutated *down* must also be caught.
         for age_ms in [0_u64, 1, 999, 1_000, 4_999, 5_000] {
             let crumbs = Breadcrumbs {
                 runtime_tick_age_ms: Some(age_ms),
@@ -1579,20 +1115,10 @@ mod tests {
         );
     }
 
-    /// #5147: the whole verdict table, every cell.
-    ///
-    /// Two defects hid in the cells nothing exercised. `verdict` used to test
-    /// the beacon first and end in `_ =>`, so **all six `request_failed`
-    /// cells** — a stage whose connection was reset before the handler was ever
-    /// reached — fell into `handler_blocked_on_db` / `handler_slow_db_idle`,
-    /// and there was not one `request_failed` × verdict test to notice. And a
-    /// `connect_failed` with no beacon has to stay `undetermined_no_beacon`,
-    /// because a wedged acceptor fills the backlog and then *also* fails
-    /// `connect()` — the module docs used to assert the opposite.
-    ///
-    /// Enumerated as a table so a new stage or a new liveness state cannot be
-    /// added without a row here, and so the two claims above are readable as
-    /// data rather than reconstructed from control flow.
+    /// #5147: the whole verdict table, every cell — including
+    /// `request_failed` (never blamed on the handler or database) and
+    /// `connect_failed` with no beacon (stays `undetermined_no_beacon`, since
+    /// a wedged acceptor also fails `connect()` once the backlog fills).
     #[test]
     fn every_stage_and_liveness_combination_has_a_pinned_verdict() {
         // (label, breadcrumbs)
@@ -1686,9 +1212,7 @@ mod tests {
             }
         }
 
-        // Every verdict the watchdog can print, in one place. Six is the
-        // count an earlier draft gave; it omitted `responsive` and predates
-        // `connection_reset_before_request`.
+        // Every verdict the watchdog can print, in one place.
         let mut rendered: Vec<&str> = expected.iter().flatten().copied().collect();
         rendered.sort_unstable();
         rendered.dedup();
@@ -1769,15 +1293,10 @@ mod tests {
     }
 
     /// The beacon has to survive being spawned on a real runtime, not just be
-    /// callable. Time is paused, so tokio auto-advances once the test task
-    /// idles and this costs no wall-clock.
-    ///
-    /// The window is **5 000 ms as a literal**, not `RUNTIME_TICK_PERIOD * n`.
-    /// The point of the beacon is to resolve the runtime's state *within one
-    /// probe timeout*, so the property worth pinning is "several ticks fit
-    /// inside 5s" — a property a period of 3600s fails. Phrased relative to the
-    /// period it would pass at any period whatsoever, which is exactly how
-    /// `RUNTIME_TICK_PERIOD: 1s -> 3600s` survived a 23/23 green run.
+    /// callable; time is paused so this costs no wall-clock. The window is
+    /// **5 000 ms as a literal**, not `RUNTIME_TICK_PERIOD * n` — the property
+    /// worth pinning is "several ticks fit inside 5s", not one relative to
+    /// whatever the period happens to be.
     #[tokio::test(start_paused = true)]
     async fn the_spawned_beacon_keeps_ticking() {
         let _serial = exclusive();
@@ -1793,11 +1312,8 @@ mod tests {
             before.runtime_ticks,
             after.runtime_ticks
         );
-        // No age assertion here: `PROCESS_START` is a real `Instant`, so under
-        // `start_paused` every tick lands within a millisecond of real "now"
-        // and any age bound would pass vacuously. The age/threshold behaviour
-        // is pinned on constructed `Breadcrumbs` instead, by
-        // `a_runtime_that_stopped_ticking_reads_as_stalled_before_the_watchdog_kills`.
+        // No age assertion: under `start_paused`, every tick lands within a
+        // millisecond of real "now", so any age bound would pass vacuously.
         after
             .runtime_tick_age_ms
             .expect("a running beacon must leave a timestamp");
@@ -1805,17 +1321,9 @@ mod tests {
 
     /// The beacon is only a discriminator if something starts it, and nothing
     /// else fails when the call is dropped — `verdict` degrades to
-    /// `undetermined_no_beacon`, quietly and forever.
-    ///
-    /// Pinning that at a *boot site* would mean `include_str!` on
-    /// `cli/dcserver.rs` plus `contains("spawn_runtime_liveness_beacon()")`,
-    /// and `str::contains` is comment-blind — `// spawn_runtime_liveness_beacon();`
-    /// satisfies it. So the coupling is a data dependency instead:
-    /// `spawn_watchdog` arms the beacon itself and feeds the resulting
-    /// [`BeaconArmed`] into the thread-spawning function, so there is no
-    /// separate call left to delete and no way to reorder the two. What remains
-    /// testable is the arming function's own contract, which is what these two
-    /// pin.
+    /// `undetermined_no_beacon`, quietly and forever. Boot-site coupling is
+    /// enforced elsewhere as a data dependency; what remains testable here is
+    /// the arming function's own contract.
     #[tokio::test]
     async fn arming_the_beacon_inside_a_runtime_reports_the_worker_count() {
         let _serial = exclusive();
@@ -1877,15 +1385,12 @@ mod tests {
         }
     }
 
-    /// This parses rather than searches: it splits the section into lines,
-    /// drops comment lines, splits on the first `=` and **truncates the value
-    /// at a trailing `#`**. That last step
-    /// is not cosmetic — without it `strip = true # keep symbols` yields the
-    /// value `true # keep symbols`, which is `!= "true"`, and
+    /// Parses rather than searches, truncating the value at a trailing `#`:
+    /// without that, `strip = true # keep symbols` yields `true # keep
+    /// symbols`, which is `!= "true"`, and
     /// [`release_profile_keeps_the_mach_o_symbol_table`] goes green on a fully
-    /// stripped binary. TOML has no `#` inside a bare value, and the two keys
-    /// read here are a bare bool/int and a quoted string with no `#` in it, so
-    /// truncating is exact for this table.
+    /// stripped binary. TOML has no `#` inside a bare value, so truncating is
+    /// exact for the bool/int and quoted-string keys read here.
     fn release_profile_key(key: &str) -> Option<String> {
         release_profile_section()
             .lines()
@@ -1900,9 +1405,6 @@ mod tests {
 
     #[test]
     fn an_inline_comment_cannot_forge_a_release_profile_value() {
-        // The regression this closes: `split_once('=')` used to keep the
-        // trailing comment in the value, so `strip = true # …` compared unequal
-        // to `"true"` and the symbol-table guard passed on a stripped binary.
         let section = "strip = true # keep symbols\ndebug = 1\n";
         let value = section
             .lines()
@@ -1918,20 +1420,12 @@ mod tests {
 
     #[test]
     fn release_profile_keeps_the_mach_o_symbol_table() {
-        // #5147: `sample`/`atos` have TWO independent name sources — the
+        // #5147: `sample`/`atos` have two independent name sources — the
         // binary's own Mach-O symbol table (LC_SYMTAB) and a UUID-matched
-        // .dSYM. Either one alone resolves our frames; measured on a fully
-        // stripped binary, the .dSYM by itself still recovers both the symbol
-        // name and `recovery.rs:1677`.
-        //
-        // `strip = true` (== `strip = "symbols"`) deletes LC_SYMTAB, which
-        // leaves the .dSYM as a single point of failure — and it is a separate
-        // 276 MB directory that deploy ships fail-open, that is ignored when
-        // its UUID does not match, and that no dump carries with it. In
-        // #4756/#4770/#5147 both sources were absent at once, which is why
-        // every one of our frames rendered as `load address 0x… + 0x…`.
-        // Keeping the symbol table is the layer that cannot get separated from
-        // the binary.
+        // .dSYM, which deploy ships fail-open and is ignored on a UUID
+        // mismatch. `strip = true` deletes LC_SYMTAB, leaving the .dSYM as a
+        // single point of failure; keeping the symbol table is the layer that
+        // cannot get separated from the binary.
         let strip = release_profile_key("strip")
             .expect("[profile.release] must state `strip` explicitly, not inherit it");
         assert!(
@@ -1946,9 +1440,8 @@ mod tests {
 
     #[test]
     fn release_profile_emits_a_dsym_for_line_numbers() {
-        // Function names come from the symbol table; file:line and inlined
-        // frames need debug info, which on macOS must be collected into a
-        // .dSYM by `split-debuginfo = "packed"`. Without `debug` there is
+        // File:line and inlined frames need debug info collected into a
+        // .dSYM by `split-debuginfo = "packed"`; without `debug` there is
         // nothing for dsymutil to collect.
         let debug = release_profile_key("debug")
             .expect("[profile.release] must set `debug` so a .dSYM has content");

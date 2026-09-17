@@ -1,41 +1,18 @@
 //! #5464 (#5071 T5) S1 — relay-authority cohort admission and rollout
 //! provenance.
 //!
-//! The AC2-R warrant (design r3 §1.1) is rolled out per channel behind two
-//! `runtime.*` knobs: `relay_authority_mode` decides whether the warrant is
-//! computed at all, and `relay_authority_cohort_percent` decides how much of
-//! the channel population it applies to. Every future consumer asks the same
-//! question here — `admits(mode, percent, channel_id)` — so a slice can never
-//! grow a second, divergent notion of "is this channel in the cohort".
+//! Cohort membership behind `runtime.relay_authority_mode` and
+//! `runtime.relay_authority_cohort_percent` is decided in exactly one place,
+//! `admits(mode, percent, channel_id)`, so no consumer grows a second,
+//! divergent notion of "is this channel in the cohort". Shipped defaults
+//! (`Legacy`, `0`) admit no channel; the only production reader in S1 is the
+//! health block below.
 //!
-//! **This slice admits nobody.** The shipped defaults are `Legacy` and `0`, and
-//! `admits` is a conjunction, so either default alone answers `false` for every
-//! channel. The only production reader in S1 is the health block below.
-//!
-//! The bucket function is deliberately NOT `DefaultHasher`/`RandomState`:
-//! cohort membership has to mean the same thing in every process and across
-//! every release, otherwise a restart reshuffles the cohort and the AC3
-//! promotion window (≥7 days, design §5.3) never accumulates a stable
-//! denominator. FNV-1a is written out here so the mapping is pinned by this
-//! file rather than by a std implementation detail, and
-//! `cohort_bucket_is_pinned_to_a_fixed_vector` fails if it ever moves.
-//!
-//! Uniformity is *measured* here, not asserted — r1 L-4 / r2 L-10 / r3 §8 L-12
-//! carried "the bucket spread is a design claim and not a measurement" as an
-//! open limit for three rounds. Two fixtures close it, each named for the
-//! snowflake field it actually moves — and each asserting that shape instead of
-//! only describing it:
-//! `cohort_bucket_spreads_snowflake_ids_across_all_buckets` strides the
-//! TIMESTAMP field (one `2^22` step per sample, so the worker/process/sequence
-//! low 22 bits are identical across the whole population), and
-//! `cohort_bucket_spreads_ids_that_move_only_in_the_low_bits` holds the
-//! timestamp still and varies those low bits instead. The timestamp-strided
-//! population is the harder input of the two — its worst bucket sits 7.7% off
-//! expected against the 25% bound, where the low-bit population's worst bucket
-//! sits 0.5% off — so stating the closure on the timestamp-adjacent shape is the
-//! conservative reading. What is closed is those two measured shapes; neither is
-//! an observed census of live channel ids, and a real guild's mix remains
-//! unmeasured.
+//! `cohort_bucket` uses FNV-1a rather than `DefaultHasher`/`RandomState` so
+//! cohort membership means the same thing across restarts and releases;
+//! `cohort_bucket_is_pinned_to_a_fixed_vector` pins the mapping, and the
+//! `cohort_bucket_spreads_*` tests measure its uniformity across two id
+//! shapes (not a census of live channel ids).
 
 use std::sync::atomic::{AtomicU16, Ordering};
 
@@ -48,10 +25,9 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// Stable `channel_id -> 0..100` bucket.
 ///
-/// Discord snowflakes carry their timestamp in the HIGH bits and a per-shard
-/// sequence in the LOW ones, so neither `id % 100` nor a byte-slice spreads
-/// evenly — ids minted close together share high bytes, and a quiet shard's low
-/// bytes barely move. Avalanching all eight through FNV-1a first earns the modulo.
+/// Snowflakes carry timestamp bits high and a per-shard sequence low, so
+/// neither `id % 100` nor a byte slice spreads evenly; FNV-1a avalanches all
+/// eight bytes first to earn the modulo.
 pub(crate) fn cohort_bucket(channel_id: u64) -> u8 {
     let mut hash = FNV_OFFSET_BASIS;
     for byte in channel_id.to_be_bytes() {
@@ -63,44 +39,15 @@ pub(crate) fn cohort_bucket(channel_id: u64) -> u8 {
 
 /// The cohort width actually in force for a configured `percent`.
 ///
-/// The clamp is fail-OPEN and stays that way: an out-of-range width widens to
-/// "everyone" instead of wrapping into a silently narrow cohort. `u8` parsing
-/// already refuses `256+`, so the reachable operator typo is `101..=255`, and
-/// every value in that band means the same cohort.
-///
-/// #5464 T5 S1 review follow-up 1 left the polarity open as a rollout-runbook
-/// decision, and #5071 T5 A6 settles it as option (b) — keep the clamp, publish
-/// both widths. Rejecting `>100` was the alternative and was not taken, though
-/// not for the reason first written here.
-///
-/// A rejection has one place to live, `config::validate_config`, and that gate
-/// is not private to the hot-reload path: it runs inside both
-/// `config::load_from_path` and `config::load`, which have 20 and 10 production
-/// call sites, plus one direct call in `discord::settings::write` — 31 in all,
-/// of which `config_live_reload::reload_from_path` is one. (To re-measure,
-/// classify a `git grep` of those names by `#[cfg(test)]` block.) So a rejected
-/// dial does not merely keep the last-known-good snapshot: it also fails a
-/// Discord settings write (`settings/write.rs:245`, the file this slice tests),
-/// answers HTTP 500 from the voice-config route, and fails four CLI entry
-/// points — wider than the miswidened cohort a veto would prevent. Boot is
-/// outside it: `config::load_graceful` never validates.
-///
-/// Nor is the clamp the quieter option, as the first draft implied. A rejection
-/// IS announced: `config_live_reload` logs path and error at WARN. Nothing
-/// publishes reload state to health, so that WARN is the only notice on the
-/// reject path — and the clamp path had none of its own until the one below.
-/// The report publishes both widths besides, answering the same typo from a poll.
-///
-/// Every clamp site funnels through here so "the width in force" has exactly
-/// one definition; a second `.min(100)` written elsewhere could disagree with
-/// the value the health block publishes, which is the specific failure this
-/// function exists to make impossible.
+/// Fail-open: an out-of-range width clamps to "everyone" rather than a
+/// silently narrow cohort (#5464 T5 S1 follow-up 1, #5071 T5 A6). Every
+/// clamp site funnels through here so the width in force has exactly one
+/// definition, matching what the health block publishes.
 pub(crate) fn effective_cohort_percent(percent: u8) -> u8 {
     let effective = percent.min(100);
     if effective != percent {
-        // One line per distinct out-of-range value, not one per call: `admits`
-        // runs this for every channel it judges, so an unconditional warn would
-        // write a line per admission check for as long as the typo is live.
+        // One line per distinct out-of-range value: `admits` runs this per
+        // channel, so an unconditional warn would spam per admission check.
         static LAST_WARNED: AtomicU16 = AtomicU16::new(u16::MAX);
         if LAST_WARNED.swap(u16::from(percent), Ordering::Relaxed) != u16::from(percent) {
             tracing::warn!(
@@ -115,36 +62,20 @@ pub(crate) fn effective_cohort_percent(percent: u8) -> u8 {
 
 /// The single relay-authority cohort predicate.
 ///
-/// Both operands are vetoes, and both defaults are the denying value: a mode
-/// that does not consult the cohort is out regardless of the width, and a width
-/// of `0` is out regardless of the mode (`bucket < 0` is false for every
-/// bucket). `percent` goes through `effective_cohort_percent`, which clamps
-/// rather than rejects; that function carries why, and why the health block
-/// publishes the configured width beside the clamped one.
-///
-/// S1 shipped this with no production caller — `#[allow(dead_code)]` and all —
-/// because that absence was what made the slice a deployment no-op. S2 is the
-/// first caller (`authority_observation::observing_dial`), so the attribute is
-/// gone: the dormancy argument is now carried by the dial's shipped values
-/// rather than by the absence of a call site.
+/// Both operands are vetoes and both defaults deny: a mode that doesn't
+/// consult the cohort is out regardless of width, and a width of `0` is out
+/// regardless of mode. `percent` is clamped via `effective_cohort_percent`
+/// before the comparison.
 pub(crate) fn admits(mode: RelayAuthorityMode, percent: u8, channel_id: u64) -> bool {
     mode.consults_cohort() && cohort_bucket(channel_id) < effective_cohort_percent(percent)
 }
 
-/// The relay-authority cohort question for a call site that ENFORCES, asked in
-/// one place so a consumer cannot grow its own dial read beside `admits`.
+/// The relay-authority cohort question for a call site that ENFORCES.
 ///
-/// Identical in shape and meaning to the bridge stream tick's
-/// `stream_loop_suppression_cohort_admits`, and for the same reasons: the mode
-/// predicate is `governs_destructive_authority` and NOT
-/// `records_authority_observations`, because `Observe` is the mode the AC3
-/// promotion evidence is collected under and has to stay behaviour-identical to
-/// `Legacy` for every consumer that is not the recorder. Both operands veto and
-/// both shipped values are the denying one, so a node nobody enrolled keeps the
-/// mapping that ships today.
-///
-/// Callers read this ONCE per decision and pass the answer down, so one pass
-/// through a fence cannot answer the question two different ways.
+/// The mode predicate is `governs_destructive_authority`, not
+/// `records_authority_observations`: `Observe` must stay behaviour-identical
+/// to `Legacy` for every consumer that is not the AC3 recorder. Callers read
+/// this ONCE per decision and pass the answer down.
 pub(crate) fn enforcement_admits(channel_id: u64) -> bool {
     let (mode, percent) = crate::config_live_reload::current()
         .map(|config| {
@@ -159,29 +90,14 @@ pub(crate) fn enforcement_admits(channel_id: u64) -> bool {
 
 /// Content fingerprint of the live cohort configuration (design §5.2).
 ///
-/// `config_live_reload` keeps no generation counter (r3 §5.2, measured), so
-/// rollout stages cannot be numbered monotonically. This fingerprints the
-/// settings instead: two windows at the same dial position share a fingerprint
-/// even if the operator moved the dial away and back (declared limit L-7). The
-/// promotion script separates such windows by the interleaved samples the dial's
-/// detour itself wrote — a sample carrying a different fingerprint sitting
-/// between two samples of one fingerprint. File order and a bare timestamp gap
-/// were both tried as the discriminator and both retired, because neither can
-/// tell a detour from an idle night; the gap survives only as a fallback for the
-/// two cases that leave no interleaved sample to find — the detour left the
-/// observing set and so wrote nothing at all, or samples did exist during it and
-/// were all lost while stranded. `segment_events` in
-/// `scripts/relay_authority_rollout_report.py` carries both branches and why the
-/// second is low-reachability (eviction bounds unpublished turns at one per
-/// channel — legA r3c P2-4).
+/// `config_live_reload` keeps no generation counter, so rollout windows are
+/// correlated by this fingerprint instead of a monotonic stage number;
+/// `segment_events` in `scripts/relay_authority_rollout_report.py` separates
+/// same-fingerprint windows via interleaved samples carrying a different one.
 ///
-/// The fingerprint is deliberately host-independent, which means it witnesses
-/// "the observed population disagreed about the dial", not "the dial moved":
-/// during a part-way config rollout two hosts' samples interleave and shred the
-/// window. That direction is fail-closed and is declared in `segment_events`
-/// (legA r3c P2-3). Any knob added to the cohort decision MUST join the
-/// canonical string below, or two materially different rollout windows become
-/// indistinguishable in AC3.
+/// Host-independent by design, so a part-way rollout across hosts shreds the
+/// window rather than silently merging it (legA r3c P2-3). Any knob added to
+/// the cohort decision MUST join the canonical string below.
 pub(crate) fn cohort_fingerprint(mode: RelayAuthorityMode, percent: u8) -> String {
     let canonical = format!(
         "mode={mode:?};percent={}",
@@ -197,9 +113,8 @@ pub(crate) fn cohort_fingerprint(mode: RelayAuthorityMode, percent: u8) -> Strin
 
 /// Read-only rollout provenance for `/api/health/detail`.
 ///
-/// Live triage only. The AC3 promotion gate reads the JSONL event log that a
-/// later slice writes, never this block (design §5.3): a health poll is a
-/// sample of *now* and cannot answer a 7-day window question.
+/// Live triage only; the AC3 promotion gate reads the JSONL event log a
+/// later slice writes, never this block (design §5.3).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct RelayAuthorityRolloutReport {
     /// The live mode, lowercased exactly as `agentdesk.yaml` spells it.
@@ -208,20 +123,9 @@ pub(crate) struct RelayAuthorityRolloutReport {
     /// operator reading this block sees the width that is actually in force.
     pub(crate) cohort_percent: u8,
     /// The width exactly as `agentdesk.yaml` spells it, BEFORE the clamp.
-    ///
-    /// S1 published `cohort_percent` alone, and review follow-up 1 booked that
-    /// as a rollout-runbook defect: a `200` typed for `20` reads back as `100`,
-    /// so the block confirmed a cohort the operator never asked for and left no
-    /// trace of the typo. Publishing both widths is what makes "is the value I
-    /// configured the value in force?" answerable from a health poll — the
-    /// question a rollback or a dial move has to answer before it moves.
     pub(crate) cohort_percent_configured: u8,
-    /// `true` exactly when the two widths above differ.
-    ///
-    /// Derivable from them, and published anyway: this is the key an operator
-    /// alert can watch without re-encoding the clamp rule, and unlike a
-    /// coincidental `cohort_percent == 100` it cannot be misread as a dial the
-    /// operator chose.
+    /// `true` exactly when the two widths above differ. Published so an
+    /// operator alert can watch it without re-encoding the clamp rule.
     pub(crate) cohort_percent_clamped: bool,
     /// Fingerprint of the two fields above; a later slice's JSONL correlation key.
     pub(crate) cohort_fingerprint: String,
@@ -229,19 +133,10 @@ pub(crate) struct RelayAuthorityRolloutReport {
 
 /// Build the rollout block from the live config.
 ///
-/// The fallback covers one narrow state: `config_live_reload::current()` answers
-/// `None` only before `config_live_reload::install` has published the boot
-/// config — a unit test, or startup before the install point — and that window
-/// reports the shipped `Legacy/0` dial, which is also the dormant answer.
-///
-/// A config that fails to parse is a *different* state and does not reach that
-/// fallback. `config_live_reload::reload_from_path` answers
-/// `ReloadOutcome::Rejected` and leaves the last-known-good snapshot installed,
-/// so an invalid or half-written `agentdesk.yaml` keeps the dial that was in
-/// force before the bad edit: if the operator had moved to `Observe`/`Enforce`,
-/// this block keeps reporting that and a later slice's consumer keeps admitting
-/// under it. The policy is fail-stale, not fail-closed — a broken edit is not a
-/// way to take the cohort back to nobody.
+/// Before `config_live_reload::install` publishes the boot config, this
+/// reports the shipped `Legacy/0` dial. A config that fails to parse instead
+/// keeps the last-known-good snapshot via `reload_from_path` — fail-stale,
+/// not fail-closed.
 pub(crate) fn rollout_report() -> RelayAuthorityRolloutReport {
     let (mode, percent) = crate::config_live_reload::current()
         .map(|config| {
@@ -255,12 +150,7 @@ pub(crate) fn rollout_report() -> RelayAuthorityRolloutReport {
 }
 
 /// The report builder, split from the live-config read above so a test can
-/// drive a dial position this process is not actually running under.
-///
-/// Without the split there is no way to cover a clamped width at all: the live
-/// dial a unit test sees is `config_live_reload::current() == None`, which can
-/// only ever produce the dormant `Legacy/0` shape, and installing a global
-/// config to move it would leak that dial into every other test in the binary.
+/// drive a dial position this process isn't actually running under.
 fn rollout_report_for(mode: RelayAuthorityMode, percent: u8) -> RelayAuthorityRolloutReport {
     let effective = effective_cohort_percent(percent);
     RelayAuthorityRolloutReport {
@@ -288,33 +178,25 @@ mod tests {
     /// above it is the timestamp.
     const LOW_22_MASK: u64 = (1 << 22) - 1;
 
-    /// Discord snowflakes strided by `2^22` — exactly the width of the
-    /// worker/process/sequence field — so each sample advances the TIMESTAMP
-    /// field by one tick while those low 22 bits hold the base's values for the
-    /// whole population. That is a burst of channels minted one per tick by the
-    /// same worker and process, and it is the harder of the two shapes for the
-    /// hash: every bit the modulo could key on sits in the high half.
-    ///
-    /// `low_bit_ids` is the complementary fixture. Both callers assert the split
-    /// they rely on rather than trusting this comment.
+    /// Discord snowflakes strided by `2^22` (worker/process/sequence field
+    /// width), so each sample advances only the TIMESTAMP field while the low
+    /// bits hold still — the harder shape for the hash, since every bit the
+    /// modulo could key on sits in the high half. `low_bit_ids` complements.
     fn snowflake_ids(count: u64) -> impl Iterator<Item = u64> {
         (0..count).map(|index| SNOWFLAKE_BASE + index * (LOW_22_MASK + 1))
     }
 
-    /// The complement of `snowflake_ids`: consecutive ids from the same base, so
-    /// the worker/process/sequence low bits carry every bit of the variation and
-    /// the timestamp field never advances (the base's low-22 value plus `count`
-    /// stays inside the 22-bit field for the counts used here).
+    /// The complement of `snowflake_ids`: consecutive ids from the same base,
+    /// so the low 22 bits carry all the variation and the timestamp field
+    /// never advances.
     fn low_bit_ids(count: u64) -> impl Iterator<Item = u64> {
         (0..count).map(|index| SNOWFLAKE_BASE + index)
     }
 
-    /// #5464 T5 C1's deployment no-op, stated the same way S1 states its own:
-    /// under the SHIPPED dial `enforcement_admits` answers `false` for every
+    /// Under the shipped dial, `enforcement_admits` answers `false` for every
     /// channel, so the watcher's rowless soft-terminal relaxation cannot be
-    /// taken without a config change. `Observe` is deliberately not enough
-    /// either — admitting it would change the behaviour the AC3 evidence
-    /// describes.
+    /// taken without a config change. `Observe` alone must not be enough
+    /// either, or it would change the behaviour the AC3 evidence describes.
     #[test]
     fn shipped_defaults_admit_no_channel_to_the_enforcement_cohort() {
         let defaults = crate::config::RuntimeSettingsConfig::default();
@@ -332,9 +214,8 @@ mod tests {
         }
     }
 
-    /// The S1 deployment no-op proof, stated as the property that makes it one:
-    /// under the SHIPPED defaults no channel is in the cohort, so no consumer a
-    /// later slice adds can take the new path without a config change.
+    /// Under the shipped defaults no channel is in the cohort, so no consumer
+    /// a later slice adds can take the new path without a config change.
     #[test]
     fn shipped_defaults_admit_no_channel_to_the_relay_authority_cohort() {
         let defaults = crate::config::RuntimeSettingsConfig::default();
@@ -353,9 +234,8 @@ mod tests {
         }
     }
 
-    /// Each operand vetoes on its own, so a half-configured rollout is still a
-    /// no-op. Moving only the mode admits nobody, and moving only the width
-    /// admits nobody.
+    /// Each operand vetoes alone, so a half-configured rollout is still a
+    /// no-op: moving only the mode, or only the width, admits nobody.
     #[test]
     fn either_dial_left_at_its_default_admits_nobody() {
         for channel_id in snowflake_ids(1_000) {
@@ -403,26 +283,19 @@ mod tests {
         }
     }
 
-    /// Closes design §8 L-12 ("the bucket spread is a claim, not a
-    /// measurement") for the timestamp-strided shape `snowflake_ids` builds —
-    /// and pins that shape here, so the measurement and its description cannot
-    /// drift apart.
+    /// Closes design §8 L-12 ("bucket spread is a claim, not a measurement")
+    /// for the timestamp-strided shape `snowflake_ids` builds.
     ///
-    /// The bound is deliberately loose — this asserts the hash avalanches, not
-    /// that it is cryptographic. A `% 100` of the raw snowflake fails it
-    /// outright, and this fixture is why: the stride is `2^22`, and
-    /// `2^22 % 100 == 4`, so a raw modulo walks the buckets four at a time and
-    /// reaches only 25 of the 100 (deviation 3.0 against the 0.25 bound).
-    /// Avalanching all eight bytes first is what earns the modulo.
+    /// Loose bound — asserts the hash avalanches, not that it's cryptographic.
+    /// A raw `% 100` fails outright: stride `2^22`, and `2^22 % 100 == 4`, so
+    /// a raw modulo reaches only 25 of 100 buckets.
     #[test]
     fn cohort_bucket_spreads_snowflake_ids_across_all_buckets() {
         const SAMPLES: u64 = 100_000;
         let expected = SAMPLES as f64 / 100.0;
         let mut counts = [0u32; 100];
         for (index, channel_id) in snowflake_ids(SAMPLES).enumerate() {
-            // The fixture's own shape, asserted rather than described: the
-            // worker/process/sequence low bits hold still and only the timestamp
-            // field advances, one tick per sample.
+            // Assert the fixture's own shape rather than merely describing it.
             assert_eq!(
                 channel_id & LOW_22_MASK,
                 SNOWFLAKE_BASE & LOW_22_MASK,
@@ -446,8 +319,7 @@ mod tests {
             );
         }
 
-        // A 10% cohort must actually be about 10% of the population, which is
-        // the property the rollout plan reads the dial as promising.
+        // A 10% cohort must actually admit about 10% of the population.
         let admitted = snowflake_ids(SAMPLES)
             .filter(|id| admits(RelayAuthorityMode::Observe, 10, *id))
             .count();
@@ -458,15 +330,10 @@ mod tests {
         );
     }
 
-    /// The other half of the snowflake, measured under the same bound: ids that
-    /// share one timestamp tick and differ only in the
-    /// worker/process/sequence low bits. Together with
-    /// `cohort_bucket_spreads_snowflake_ids_across_all_buckets` this covers both
-    /// fields instead of measuring one and describing the other.
-    ///
-    /// This case widens coverage; it does not discriminate. A raw `% 100` also
-    /// spreads consecutive ids evenly, so the counterfactual that fails belongs
-    /// to the timestamp-strided fixture, not to this one.
+    /// Complement of `cohort_bucket_spreads_snowflake_ids_across_all_buckets`:
+    /// ids sharing one timestamp tick, varying only in the low bits. Widens
+    /// coverage rather than discriminating — a raw `% 100` also spreads
+    /// consecutive ids evenly.
     #[test]
     fn cohort_bucket_spreads_ids_that_move_only_in_the_low_bits() {
         const SAMPLES: u64 = 100_000;
@@ -503,9 +370,8 @@ mod tests {
         );
     }
 
-    /// Cohort membership must survive a restart and a release. A changed hash
-    /// silently re-rolls every channel mid-rollout, so it has to break a test
-    /// instead.
+    /// Cohort membership must survive a restart and a release; a changed hash
+    /// must break this test instead of silently re-rolling every channel.
     #[test]
     fn cohort_bucket_is_pinned_to_a_fixed_vector() {
         for (channel_id, expected) in [
@@ -522,17 +388,9 @@ mod tests {
         }
     }
 
-    /// The fingerprint's half of the AC3 correlation key, pinned the same way
-    /// `cohort_bucket_is_pinned_to_a_fixed_vector` pins the bucket. Design §5.2
-    /// makes this string the JSONL window key, so a moved fingerprint does not
-    /// just re-roll a channel — it orphans every window already emitted under
-    /// the old spelling.
-    ///
-    /// The canonical string interpolates the DERIVED `Debug` (`mode=Legacy`),
-    /// which is not the serde wire spelling the health block publishes
-    /// (`"legacy"`). Nothing but these vectors stops a cosmetic cleanup — a
-    /// hand-written `Debug`, a switch to `Display`, or lowercasing the canonical
-    /// form — from silently re-keying the whole fleet.
+    /// Design §5.2 makes this string the JSONL window key; it interpolates
+    /// the derived `Debug` (`mode=Legacy`), not the serde spelling
+    /// (`"legacy"`) — a switch to `Display` would silently re-key the fleet.
     #[test]
     fn cohort_fingerprint_is_pinned_to_a_fixed_vector() {
         for (mode, percent, expected) in [
@@ -573,9 +431,8 @@ mod tests {
         assert_eq!(cohort_fingerprint(RelayAuthorityMode::Legacy, 0).len(), 16);
     }
 
-    /// With no live config loaded — the state a unit test and a very early
-    /// startup share — the block must report the dormant dial rather than
-    /// guessing.
+    /// With no live config loaded, the block must report the dormant dial
+    /// rather than guessing.
     #[test]
     fn rollout_report_without_a_live_config_reports_the_dormant_dial() {
         let report = rollout_report();
@@ -597,15 +454,10 @@ mod tests {
         );
     }
 
-    /// Closes #5464 T5 S1 review follow-up 1 ("the width clamp is fail-open and
-    /// health publishes only the clamped value, so an operator typo leaves no
-    /// evidence") at the shape the runbook decision chose: the clamp stays, and
-    /// both widths are published.
-    ///
-    /// The band matters. `u8` parsing refuses `256+` on its own, so `101..=255`
-    /// is the entire reachable typo space, and every value in it collapses to
-    /// the same cohort — which is exactly why the pre-clamp value cannot be
-    /// recovered from `cohort_percent` and has to be carried separately.
+    /// The clamp stays and both widths are published (#5464 T5 S1 follow-up 1).
+    /// `u8` parsing refuses `256+`, so `101..=255` is the entire reachable
+    /// typo space and every value collapses to the same cohort — why the
+    /// pre-clamp value must be carried separately.
     #[test]
     fn rollout_report_publishes_the_configured_width_beside_the_clamped_one() {
         for percent in [101u8, 200, 255] {
@@ -635,8 +487,7 @@ mod tests {
             );
         }
 
-        // In-range widths are published unchanged and are NOT flagged, so the
-        // flag reads as "your value was altered" rather than "a clamp exists".
+        // In-range widths must not be flagged as clamped.
         for percent in [0u8, 1, 25, 99, 100] {
             let report = rollout_report_for(RelayAuthorityMode::Observe, percent);
             assert_eq!(report.cohort_percent, percent);
@@ -648,10 +499,9 @@ mod tests {
         }
     }
 
-    /// The published effective width and the width `admits` actually gates on
-    /// are the same number, for every dial position in the typo band and out of
-    /// it. A second clamp rule written at either site would make the health
-    /// block describe a cohort other than the live one.
+    /// The published effective width and the width `admits` gates on are the
+    /// same number, in and out of the typo band. A second clamp rule
+    /// elsewhere would let the health block disagree with the live cohort.
     #[test]
     fn the_published_effective_width_is_the_width_admission_gates_on() {
         for percent in [0u8, 1, 25, 99, 100, 101, 200, 255] {
