@@ -349,9 +349,8 @@ mod tests {
             "offset_invariant_violation",
             "task_response_chunk_ambiguous",
             "task_card_post_ambiguous",
-            // #5941: the two halves of one loss — a terminal frame with no
-            // delivery owner, and the same frame left without even a durable
-            // record. Both were unmonitored while the incident reported healthy.
+            // #5941: the two halves of one loss — a frame with no delivery
+            // owner, and that frame left without even a durable record.
             "relay_terminal_authority_denied",
             "terminal_frame_without_owner_or_record",
         ] {

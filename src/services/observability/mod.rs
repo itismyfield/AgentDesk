@@ -158,14 +158,11 @@ pub(super) const RELAY_SIGNAL_DEFINITIONS: &[RelaySignal] = &[
         default_threshold: 1,
         label: "태스크 카드 전송 결과 불명(중복 위험 격리)",
     },
-    // #5941: the terminal-authority denial counter has had a producer since
-    // #5175 (`metrics::record_relay_terminal_authority_denied` writes it to
-    // `observability_events`) and no consumer here, so every body dropped at
-    // that seam scored zero on the operator monitor while the channel sat on a
-    // stranded placeholder. Threshold 1: one frame with no delivery owner is one
-    // lost answer. The per-conjunct counters (`..._no_inflight_row` etc.) stay
-    // out of the table — they are the same event, and paging twice for one loss
-    // would only teach operators to mute the signal.
+    // #5941: this counter has had a producer since #5175 and no consumer here,
+    // so every body dropped at that seam scored zero on the operator monitor.
+    // Threshold 1 is safe only because the producer counts ADMITTED losses
+    // (`OrphanTerminalFrameFacts::record_required`), not every denial: a denial
+    // with an empty body, or one the sink had delivered, must not page at 1.
     RelaySignal {
         key: "relay_terminal_authority_denied",
         event_type: "relay_root_cause_counter",
@@ -173,9 +170,8 @@ pub(super) const RELAY_SIGNAL_DEFINITIONS: &[RelaySignal] = &[
         default_threshold: 1,
         label: "터미널 프레임 배달 소유자 없음(무음 유실 벡터)",
     },
-    // #5941 I17: the denial above is survivable when the body is dead-lettered.
-    // This signal is the case where even that failed, i.e. the answer is gone
-    // with no durable trace at all.
+    // #5941 I17: the denial above is survivable when the body is dead-lettered;
+    // this signal is the case where even that failed and the answer is gone.
     RelaySignal {
         key: "terminal_frame_without_owner_or_record",
         event_type: "invariant_violation",

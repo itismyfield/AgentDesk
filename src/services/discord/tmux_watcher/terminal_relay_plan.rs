@@ -593,11 +593,9 @@ pub(super) async fn run_terminal_relay_plan<'a>(
         );
         // #5175 -> #5941: a terminal frame the sink did not deliver AND the
         // watcher is not authorized to deliver has NO owner. The WARN and the
-        // per-conjunct counter move with the seam (the `#5175:` grep and the
-        // hourly alert table key off them); what is new is that the body is
-        // written to the dead-letter queue instead of vanishing, and that a
-        // frame left with no record at all pages as an invariant violation
-        // instead of reading as healthy.
+        // per-conjunct counter move with the seam; what is new is that the body
+        // goes to the dead-letter queue instead of vanishing, and that a frame
+        // left with no record pages instead of reading as healthy.
         orphan_terminal_frame::observe_orphan_terminal_frame(
             shared,
             channel_id,
@@ -614,6 +612,7 @@ pub(super) async fn run_terminal_relay_plan<'a>(
                 data_start_offset,
                 current_offset,
                 terminal_event_consumed_offset: watcher_resend_range_end,
+                watcher_resend_committed,
                 terminal_kind,
                 session_bound_ack_outcome,
                 inflight_present: inflight_before_relay.is_some(),
