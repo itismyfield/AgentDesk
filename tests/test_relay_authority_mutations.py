@@ -155,12 +155,17 @@ exit 101
         return cargo
 
     @staticmethod
-    def run_script_with_fake_cargo(root: Path, cargo: Path) -> subprocess.CompletedProcess[str]:
+    def run_script_with_fake_cargo(
+        root: Path,
+        cargo: Path,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env.pop("RELAY_AUTHORITY_MUTATION_TEST_MODE", None)
         env.pop("RELAY_AUTHORITY_MUTATION_FIXTURE_RUNNER", None)
         env["CARGO_TERM_COLOR"] = "always"
         env["PATH"] = str(cargo.parent) + os.pathsep + env.get("PATH", "")
+        env.update(extra_env or {})
         return subprocess.run(
             ["bash", str(root / MUTATION_SCRIPT)],
             cwd=root,
@@ -169,6 +174,31 @@ exit 101
             capture_output=True,
             check=False,
         )
+
+    @staticmethod
+    def write_recording_cargo(root: Path, record: Path) -> Path:
+        bin_dir = root / "fake-bin"
+        bin_dir.mkdir()
+        cargo = bin_dir / "cargo"
+        cargo.write_text(
+            f"""#!/usr/bin/env bash
+set -euo pipefail
+{{
+  printf 'ARGV %s\\n' "$*"
+  printf 'CARGO_INCREMENTAL=%s\\n' "${{CARGO_INCREMENTAL-<unset>}}"
+  printf 'RUSTC_WRAPPER=%s\\n' "${{RUSTC_WRAPPER-<unset>}}"
+}} >>"{record}"
+printf '   Compiling agentdesk v0.1.0 (fake)\\n'
+printf '     Running unittests src/lib.rs (target/debug/deps/agentdesk-0123456789ab)\\n'
+printf 'running 1 test\\n'
+printf 'test the_named_target ... FAILED\\n'
+printf 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out\\n'
+exit 101
+""",
+            encoding="utf-8",
+        )
+        cargo.chmod(0o755)
+        return cargo
 
     @staticmethod
     def assert_sources_restored(test: unittest.TestCase, root: Path) -> None:
@@ -194,6 +224,37 @@ exit 101
             result.stdout.count("compile_ok=yes tests_passed=0 tests_failed=1"),
             MUTATION_COUNT,
             result.stdout,
+        )
+
+    def test_rows_build_incrementally_and_never_through_the_sccache_wrapper(self) -> None:
+        """The row loop pays one crate build per mutation, so the build shape is
+        the step's whole cost. Incremental keeps consecutive rows cheap; the
+        unset wrapper is what lets incremental run without voiding the cache
+        proof, so both are pinned together against a silent revert."""
+        root = self.copy_fixture()
+        record = root / "cargo-invocations.txt"
+        cargo = self.write_recording_cargo(root, record)
+        targets = [
+            row["target"]
+            for row in json.loads(
+                (REPO_ROOT / CONTRACT_MANIFEST).read_text(encoding="utf-8")
+            )["condition3_mutations"]
+        ]
+
+        result = self.run_script_with_fake_cargo(
+            root, cargo, extra_env={"RUSTC_WRAPPER": "sccache", "CARGO_INCREMENTAL": "0"}
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = record.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines.count("CARGO_INCREMENTAL=1"), MUTATION_COUNT, lines)
+        self.assertEqual(lines.count("RUSTC_WRAPPER=<unset>"), MUTATION_COUNT, lines)
+        self.assertEqual(
+            [line for line in lines if line.startswith("ARGV ")],
+            [
+                f"ARGV test --offline --lib {target} -- --exact --test-threads=1"
+                for target in targets
+            ],
         )
 
     def test_cache_proof_still_trips_on_a_cached_tree(self) -> None:

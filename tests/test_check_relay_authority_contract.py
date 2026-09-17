@@ -6,6 +6,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -365,6 +366,55 @@ class SelectionContract(unittest.TestCase):
         self.assertEqual(tuple(observed["command"]), contract.list_command(lane))
         self.assertNotIn("AGENTDESK_ROOT_DIR", observed["env"])
         self.assertEqual(result.selected, 1)
+
+
+class FloorGateEndToEnd(unittest.TestCase):
+    """`failures_for` is graded in isolation above. This drives the whole gate --
+    real `run_lane`, real cargo process, real `main` -- so a future refactor that
+    stops feeding the listing into the floor is caught here, not in review."""
+
+    def _run_against_listing(self, *, listed: int, minimum: int) -> tuple[int, str, str]:
+        temporary, manifest = manifest_path([active_lane(minimum=minimum)])
+        with temporary:
+            repo_root = Path(temporary.name)
+            bin_dir = repo_root / "fake-bin"
+            bin_dir.mkdir()
+            cargo = bin_dir / "cargo"
+            listing = "".join(f"fixture::module::t{index}: test\n" for index in range(listed))
+            cargo.write_text(
+                "#!/usr/bin/env bash\nset -euo pipefail\ncat <<'LIST'\n"
+                + listing
+                + f"{listed} tests, 0 benchmarks\n"
+                + "LIST\n",
+                encoding="utf-8",
+            )
+            cargo.chmod(0o755)
+            stdout, stderr = io.StringIO(), io.StringIO()
+            path = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+            with mock.patch.dict("os.environ", {"PATH": path}):
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    rc = contract.main([
+                        "--repo-root", str(repo_root),
+                        "--manifest", str(manifest),
+                    ])
+        return rc, stdout.getvalue(), stderr.getvalue()
+
+    def test_listing_below_the_declared_floor_makes_the_gate_red(self) -> None:
+        rc, stdout, stderr = self._run_against_listing(listed=2, minimum=3)
+        self.assertEqual(rc, 1, stdout + stderr)
+        self.assertIn("selected=2 minimum=3 rc=0", stdout)
+        self.assertIn("selected 2 below declared minimum 3", stderr)
+
+    def test_listing_that_meets_the_declared_floor_stays_green(self) -> None:
+        rc, stdout, stderr = self._run_against_listing(listed=3, minimum=3)
+        self.assertEqual(rc, 0, stdout + stderr)
+        self.assertIn("selected=3 minimum=3 rc=0", stdout)
+        self.assertEqual(stderr, "")
+
+    def test_an_empty_listing_is_red_even_though_cargo_exits_zero(self) -> None:
+        rc, stdout, stderr = self._run_against_listing(listed=0, minimum=1)
+        self.assertEqual(rc, 1, stdout + stderr)
+        self.assertIn("selected 0 tests", stderr)
 
 
 class MainContract(unittest.TestCase):
