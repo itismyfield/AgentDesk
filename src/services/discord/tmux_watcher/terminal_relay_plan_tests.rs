@@ -603,18 +603,19 @@ fn a_frame_with_no_consumed_range_at_all_requires_no_record_5941() {
 fn a_turn_served_from_the_leftover_buffer_still_requires_a_record_5941() {
     // #1216: a turn carried in the leftover buffer is serviced against the
     // CARRIED buffer's turn start, so its consumed end can sit at or below
-    // `data_start_offset` while a real body was lost. The pre-r1 guard
-    // (`consumed > data_start_offset`) excluded exactly these turns.
+    // `data_start_offset` while a real body was lost; the pre-r1 guard
+    // (`consumed > data_start_offset`) excluded exactly these turns. r2 P1-B:
+    // the committed floor does not re-exclude them — every `confirmed_end_offset`
+    // advance targets its OWN turn's consumed end (leftover bytes subtracted out),
+    // so a real prior turn's floor lands strictly below this one, `consumed_end
+    // - 1` being the tightest such floor.
     for consumed_end in [FRAME_START, FRAME_START - 1] {
         let facts = OrphanTerminalFrameFacts {
             terminal_event_consumed_offset: consumed_end,
-            watcher_resend_committed: 0,
+            watcher_resend_committed: consumed_end - 1,
             ..orphan_facts()
         };
-        assert!(
-            facts.record_required(),
-            "a leftover-served turn (consumed_end {consumed_end}) must not be dropped"
-        );
+        assert!(facts.record_required(), "leftover {consumed_end} dropped");
     }
 }
 
@@ -624,12 +625,24 @@ fn a_body_the_sink_already_put_on_screen_requires_no_record_5941() {
     // proof did not (`SentButUncommitted` -> `TerminalUnknown` -> `RingUnknown`),
     // so `session_bound_ack_confirms_transport` is false and the watcher denies
     // itself in the SAME pass — every watcher-side conjunct then reads "nobody
-    // delivered this" about a body the user is already reading.
-    let landed = OrphanTerminalFrameFacts {
-        session_bound_ack_outcome: SessionBoundRelayAckOutcome::RingUnknown,
-        ..orphan_facts()
-    };
-    assert!(!landed.record_required());
+    // delivered this" about a body the user is already reading. r2 P1-A: `TimedOut`
+    // is the same shape (the deadline elapsed with the POST still IN FLIGHT). The
+    // table is every non-transport-confirming arm, i.e. all that reach this seam.
+    for (ack, want) in [
+        (SessionBoundRelayAckOutcome::RingUnknown, false),
+        (SessionBoundRelayAckOutcome::TimedOut, false),
+        (SessionBoundRelayAckOutcome::NotDelivered, true),
+        (SessionBoundRelayAckOutcome::Dropped, true),
+        (SessionBoundRelayAckOutcome::SinkError, true),
+        (SessionBoundRelayAckOutcome::MissingTarget, true),
+        (SessionBoundRelayAckOutcome::NotAttempted, true),
+    ] {
+        let facts = OrphanTerminalFrameFacts {
+            session_bound_ack_outcome: ack,
+            ..orphan_facts()
+        };
+        assert_eq!(facts.record_required(), want, "{ack:?} decides wrong");
+    }
 
     // The same question asked of the offset authority: a range at or below the
     // committed floor was delivered, which is why the sibling
@@ -639,10 +652,7 @@ fn a_body_the_sink_already_put_on_screen_requires_no_record_5941() {
             watcher_resend_committed: committed,
             ..orphan_facts()
         };
-        assert!(
-            !delivered.record_required(),
-            "committed floor {committed} covers the consumed range {FRAME_END}"
-        );
+        assert!(!delivered.record_required(), "floor {committed} covers");
     }
     // One byte short of the range end is NOT a delivery: the tail is still lost.
     let partial = OrphanTerminalFrameFacts {

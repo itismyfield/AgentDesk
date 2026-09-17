@@ -1,8 +1,7 @@
 //! #5941: durable preservation for a terminal frame that ended with NO delivery
 //! owner — the sink did not deliver it and the watcher's soft-terminal authority
 //! was denied, so the body was dropped with only a WARN and a counter no alert
-//! table read. Split out of `terminal_relay_plan.rs` to keep that module inside
-//! the `src/services/discord/tmux_watcher/**` namespace size cap.
+//! table read. Split out of `terminal_relay_plan.rs` for that module's size cap.
 
 use super::*;
 
@@ -11,11 +10,10 @@ use super::*;
 pub(super) const TERMINAL_FRAME_OWNER_OR_RECORD_INVARIANT: &str =
     "terminal_frame_has_a_delivery_owner_or_a_record";
 
-/// The facts the #5175 denial seam already holds, named so the record decision
-/// is a pure function of them. The two coordinate systems are kept apart
-/// deliberately: `response_sent_offset`/`full_response_len` index the in-memory
-/// response String, while `data_start_offset`/`current_offset`/
-/// `terminal_event_consumed_offset` are transcript JSONL byte offsets.
+/// The facts the #5175 denial seam already holds, named so the record decision is a pure
+/// function of them. Two coordinate systems, kept apart deliberately:
+/// `response_sent_offset`/`full_response_len` index the in-memory response String;
+/// `data_start_offset`/`current_offset`/`terminal_event_consumed_offset` are JSONL offsets.
 pub(super) struct OrphanTerminalFrameFacts<'a> {
     pub(super) denial: Option<SoftTerminalAuthorityDenial>,
     pub(super) watcher_direct_fallback_requested: bool,
@@ -30,8 +28,8 @@ pub(super) struct OrphanTerminalFrameFacts<'a> {
     pub(super) current_offset: u64,
     pub(super) terminal_event_consumed_offset: u64,
     /// The resend-dedup committed floor the sibling `SkipAlreadyCommitted` arm
-    /// already consults over this exact range, carried here so the record
-    /// decision asks the same authority and not only the watcher's own refusal.
+    /// already consults over this exact range, so the record decision asks that
+    /// authority too and not only the watcher's own refusal.
     pub(super) watcher_resend_committed: u64,
     pub(super) terminal_kind: Option<WatcherTerminalKind>,
     pub(super) session_bound_ack_outcome: SessionBoundRelayAckOutcome,
@@ -51,13 +49,13 @@ impl OrphanTerminalFrameFacts<'_> {
     /// bodies are excluded: 18 of the 33 denials in the 2026-09-16 incident
     /// carried one. The last two conjuncts ask the SINK side, which the six
     /// above never do — a watcher that refused to send is no evidence the sink
-    /// did not send. `RingUnknown` is the sink's `SentButUncommitted`: the POST
-    /// landed and only its commit PROOF was lost, which is why the frontier
-    /// question `session_bound_ack_confirms_transport` reads false over a
-    /// delivered body. The range conjunct is `> 0`, not the pre-r1
-    /// `> data_start_offset`, which excluded every turn served out of the #1216
-    /// leftover buffer, where `data_start_offset` is the CARRIED buffer's turn
-    /// start and can sit at or above the range this pass consumed.
+    /// did not send. `RingUnknown` (`SentButUncommitted`: the POST landed, only
+    /// its commit PROOF was lost) and `TimedOut` (the deadline elapsed with the
+    /// POST still IN FLIGHT) are the ONLY arms that are not evidence of
+    /// non-delivery; the other five stay recordable. The range conjunct is
+    /// `> 0`, not the pre-r1 `> data_start_offset`, which excluded every turn
+    /// served out of the #1216 leftover buffer, whose `data_start_offset` is the
+    /// CARRIED buffer's turn start and can sit at or above this consumed range.
     pub(super) fn record_required(&self) -> bool {
         self.denial.is_some()
             && self.watcher_direct_fallback_requested
@@ -68,7 +66,7 @@ impl OrphanTerminalFrameFacts<'_> {
             && self.terminal_event_consumed_offset > 0
             && !matches!(
                 self.session_bound_ack_outcome,
-                SessionBoundRelayAckOutcome::RingUnknown
+                SessionBoundRelayAckOutcome::RingUnknown | SessionBoundRelayAckOutcome::TimedOut
             )
             && !dr::range_already_committed(
                 self.terminal_event_consumed_offset,
@@ -78,8 +76,7 @@ impl OrphanTerminalFrameFacts<'_> {
 
     /// The row itself, extracted so the payload mapping is pinned by running it
     /// rather than by grepping this file: `content` is the UNSENT tail (a
-    /// `full_response` here re-publishes the prefix the user already read) and
-    /// `channel_id` is the DELIVERY channel the plan was handed.
+    /// `full_response` here re-publishes the prefix the user already read).
     pub(super) fn dead_letter_record(
         &self,
         channel_id: serenity::ChannelId,
@@ -95,11 +92,10 @@ impl OrphanTerminalFrameFacts<'_> {
         }
     }
 
-    /// One line an operator can read back into both coordinate systems: the
-    /// response indices bounding `content`, and the JSONL range the frontier
-    /// refused to advance past. `generation_mtime_ns` fences the row to the
-    /// transcript generation it was cut from, so a later `/compact` cannot make
-    /// the offsets mean a different file.
+    /// One line an operator can read back into both coordinate systems: the response
+    /// indices bounding `content`, and the JSONL range the frontier refused to advance
+    /// past. `generation_mtime_ns` fences the row to the transcript generation it was cut
+    /// from, so a later `/compact` cannot repoint the offsets at another file.
     pub(super) fn reason(
         &self,
         denial: SoftTerminalAuthorityDenial,
@@ -136,11 +132,10 @@ impl OrphanTerminalFrameFacts<'_> {
 /// #5175's WARN and per-conjunct counter (unchanged), followed by the #5941
 /// durable record that turns a traceless loss into a recoverable row.
 ///
-/// Returns whether invariant I17 is intact as of the SYNCHRONOUS decision; a
-/// pool-backed write that fails later records the same violation from its own
-/// detached task. Production drops the value — the frame is already lost by the
-/// time we get here — and the regression test reads it, because "there is no
-/// record" must not be readable as "there is no problem".
+/// Returns whether invariant I17 is intact as of the SYNCHRONOUS decision; a pool-backed
+/// write that fails later reports the same violation from its own detached task. Production
+/// drops the value — the frame is already lost by then — and the regression test reads it,
+/// because "there is no record" must not be readable as "there is no problem".
 pub(super) fn observe_orphan_terminal_frame(
     shared: &SharedData,
     channel_id: serenity::ChannelId,
