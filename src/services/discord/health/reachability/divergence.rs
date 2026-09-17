@@ -1,65 +1,8 @@
-//! Row coordinate ↔ independently resolved coordinate comparison — 4987 §-1.5
-//! divergence, S4 (#5071 T4-B4).
+//! Row coordinate ↔ independently resolved coordinate comparison — 4987 §-1.5 divergence, S4 (#5071 T4-B4). #4986 형상1 was one channel whose in-flight row and live watcher registry named different transcripts; this module compares file **identity** ([`TranscriptFileId`], the `(dev, ino)` pair) rather than path strings, so equal-size different-inode files differ and the same file reached via a symlink or `..` alias agrees.
 //!
-//! #4986 형상1 is one channel whose in-flight row and live watcher registry
-//! named different transcripts: the row's `output_path` was ENOENT while the
-//! registry's file was alive and growing. 4987 redefines divergence for that
-//! shape as a comparison of file **identity** — [`TranscriptFileId`], the
-//! `(dev, ino)` pair — never of path strings:
+//! Every outcome is descriptive only (4987 §9.2 S4): nothing here produces a `ReachabilityVerdict`, feeds `RelayStallState`, or authorizes recovery, redelivery, or any destructive action — [`RowCoordinateDivergence::unknown_reason`] only names the [`ReachabilityUnknownReason`] the T4-B6 composition may spell from a non-GREEN outcome, and `obligation`/`ledger` must never depend on this module.
 //!
-//! * §-1.4 counterexample 4 is a wrapper and a native transcript of EQUAL
-//!   size and different inode, which a size or string comparison calls equal;
-//! * the same file reached through a symlink or a `..` alias differs as a
-//!   string and must not read as divergence;
-//! * "one side opens, the other does not" holds whether or not the strings
-//!   are equal (4987 §-1.3), so the dead row path beside the live registry
-//!   file is its own outcome rather than a string case.
-//!
-//! # This module decides nothing
-//!
-//! Every outcome is a descriptive attribute (4987 §9.2 S4). Nothing here
-//! produces a `ReachabilityVerdict`, feeds `RelayStallState`, or authorizes
-//! recovery, redelivery, or any destructive action;
-//! [`RowCoordinateDivergence::unknown_reason`] only names the
-//! [`ReachabilityUnknownReason`] the T4-B6 composition may spell from a
-//! non-GREEN outcome. The in-flight row's path enters this tree here and only
-//! here, as a comparison operand (4987 I14): obligation production does not
-//! read it, and `obligation`/`ledger` must never depend on this module.
-//!
-//! # Fail-closed, and the one stat failure that is a signal
-//!
-//! Two different things live here, and calling both of them "fail-closed"
-//! would misdescribe what the code does:
-//!
-//! * **The independently resolved side fails to stat** (or both sides do).
-//!   An equality claim between two identities needs both identities in hand,
-//!   so `(Unresolvable | Resolved(_), Unresolvable)` is
-//!   [`RowCoordinateDivergence::Unknown`], maps to no reason, and stays
-//!   silent — `discovery`'s fail-closed discipline. (A row that offered no
-//!   coordinate at all is [`RowCoordinateDivergence::NoRowCoordinate`],
-//!   regardless of the independent side.)
-//! * **The row side fails to stat while the independent side is alive.** This
-//!   is not a retreat, it is the designed detection. `(Unresolvable,
-//!   Resolved)` is
-//!   [`RowCoordinateDivergence::RowPathUnresolvableWhileRegistryLive`]:
-//!   [`RowCoordinateDivergence::is_non_green_signal`] answers `true`, the
-//!   `reachability_row_coordinate_divergence` record fires, and
-//!   [`RowCoordinateDivergence::unknown_reason`] yields
-//!   `TranscriptCoordinateDivergence`. 4987 §6.2's 검출표 #1 (:900) asks for
-//!   exactly this shape at 1 tick as the 모순의 직접 관측, and the same section's
-//!   mutation test (:926-936) specifies it. Its verdict type is
-//!   `Unknown{reason}`, which is **not** `Reachable` (4987:699) — that
-//!   `Unknown` is the verdict's name for "no obligation set is computable",
-//!   and must not be read as the silent
-//!   [`RowCoordinateDivergence::Unknown`] outcome above.
-//!
-//! Which stat errors reach the second bullet is deliberately not narrowed:
-//! the design says "stat 실패" without qualification, and `stat_transcript`
-//! answers `None` for ENOENT, for a directory, for a broken symlink, and for
-//! EACCES alike. A transcript under a directory whose search bit was dropped
-//! raises `PermissionDenied` (errno 13) from `fs::metadata` and therefore
-//! fires this signal; the comparison has no permission-vs-absence
-//! distinction to offer, and does not pretend to.
+//! Two fail-closed shapes, not one: when the independently resolved side (or both sides) fails to stat, no identity is comparable and the outcome is silent [`RowCoordinateDivergence::Unknown`] (`discovery`'s fail-closed discipline). When the row side fails to stat while the independent side is alive, that is the designed detection, not a retreat — [`RowCoordinateDivergence::RowPathUnresolvableWhileRegistryLive`], mapping to `TranscriptCoordinateDivergence` and firing `reachability_row_coordinate_divergence`. `stat_transcript` answers `None` uniformly for ENOENT, a directory, a broken symlink, and EACCES, so this comparison offers no permission-vs-absence distinction.
 
 use std::path::Path;
 
@@ -219,40 +162,9 @@ pub(in crate::services::discord) fn divergence(
     }
 }
 
-/// Stat both operands, compare, and emit the structured record when the
-/// outcome is one of the two non-GREEN shapes. One record per call — one per
-/// health poll for as long as the split lasts, the same no-dedupe contract as
-/// T4-B0's string-comparison record.
+/// Stat both operands, compare, and emit the structured record when the outcome is one of the two non-GREEN shapes — one record per call, per poll, no dedupe, same contract as T4-B0's string-comparison record. This **coexists with, not supersedes** T4-B0's `SessionEnrichment::record_transcript_source_divergence`: a split both records recognise logs twice, once as `relay_transcript_source_divergence` and once as `reachability_row_coordinate_divergence`, because B0 compares path strings and still shouts about aliases this comparison correctly calls `SameFile` — retiring it is a follow-up slice's item. Agreement and not-comparable outcomes stay silent.
 ///
-/// This **coexists with** that record rather than superseding it. T4-B0's
-/// `SessionEnrichment::record_transcript_source_divergence`
-/// (`session_enrichment.rs:196`) is untouched by this slice and still fires
-/// from the `SessionEnrichment::load` earlier in the very same poll
-/// (`snapshot.rs:461`), so a split that both records recognise now logs twice
-/// per poll: once as `relay_transcript_source_divergence`, once as
-/// `reachability_row_coordinate_divergence`. The two do not agree on what a
-/// split is — B0 compares path strings, so it still shouts about two aliases
-/// of one file that this comparison correctly calls `SameFile`. Retiring it is
-/// a follow-up slice's item, deliberately not this one's.
-///
-/// Agreement and not-comparable outcomes stay silent so an idle channel logs
-/// nothing.
-///
-/// The two stats are taken one after the other (row first, then registry), so
-/// the pair being compared is not an atomic snapshot, and a transcript
-/// rotation landing between them can be misread in EITHER direction:
-///
-/// * a one-poll `Diverged` on files that never disagreed; and
-/// * a one-poll `SameFile` that masks a real split. Measured: with the row at
-///   inode A and the registry at inode B (already diverged), a rotation that
-///   `rename`s the row's file onto the registry path and creates a fresh file
-///   at the row path between the two stats hands both operands
-///   `Resolved(A)` — `rename` carries the inode — and `SameFile` then names a
-///   state that held at no instant.
-///
-/// Neither is corrected inside the poll. The next poll re-observes, which
-/// recovers the true pair only if the files have settled by then; a rotation
-/// that recurs every poll can be misread every poll.
+/// The two stats are taken one after the other (row, then registry), not as an atomic snapshot: a transcript rotation landing between them can produce a one-poll `Diverged` on files that never disagreed, or a one-poll `SameFile` that masks a real split (`rename` carries the inode, so a rotation onto the registry path mid-comparison hands both operands the same identity). Neither is corrected inside the poll; the next poll re-observes, recovering the true pair only once the files have settled.
 pub(in crate::services::discord) fn observe_row_coordinate_divergence(
     provider: &str,
     channel_id: u64,

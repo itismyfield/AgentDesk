@@ -1,42 +1,34 @@
 //! The `ReachabilityVerdict` type set — 4987 §-1.3b and §4.1 (#5071 T4-B1).
-//!
-//! This file is vocabulary and polarity: no composition rule, no threshold, no
-//! clock read, no I/O — that is deferred to T4-B6's `worst(ReachabilityVerdict,
-//! ExternalRelayVerdict)` (gated behind `G-T4`).
-//!
-//! Polarity (4987 §4.1): `ReachabilityVerdict != Reachable` ⇒ the final health
-//! verdict is not GREEN, whatever the structural signals say. The converse
-//! does NOT hold: `Reachable` does not *declare* health, it only fails to deny
-//! it — §-1.4 additionally requires positive incarnation-alive evidence.
-//!
-//! `TransportUnknown` is neither health nor a redelivery warrant. §-1.3b
-//! covers the POST-succeeded/receipt-write-failed crash window (#4986): it is
-//! false for both [`ReachabilityVerdict::permits_health`] and
-//! [`ReachabilityVerdict::authorizes_redelivery`], and it is the only variant
-//! that sets [`ReachabilityVerdict::requires_manual_redelivery_ban_notice`] —
-//! 4987 §7.1/I15 denies destructive action to every variant regardless.
+//! Vocabulary and polarity only: no composition rule, no threshold, no clock
+//! read, no I/O — deferred to T4-B6's `worst(ReachabilityVerdict,
+//! ExternalRelayVerdict)` (gated behind `G-T4`). Polarity: `!= Reachable` ⇒
+//! not GREEN, but the converse doesn't hold — §-1.4 additionally requires
+//! positive incarnation-alive evidence. `TransportUnknown` (§-1.3b, the
+//! POST-succeeded/receipt-write-failed crash window, #4986) is neither health
+//! nor a redelivery warrant — false for both
+//! [`ReachabilityVerdict::permits_health`] and
+//! [`ReachabilityVerdict::authorizes_redelivery`] — and the only variant that
+//! sets [`ReachabilityVerdict::requires_manual_redelivery_ban_notice`]; 4987
+//! §7.1/I15 denies destructive action to every variant regardless.
 
 /// The reachability verdict, 4987 §-1.3b (which extends §4.1 with
-/// `TransportUnknown`).
-///
-/// The payload fields are the ones 4987 names; they are carried, never
-/// interpreted, here.
+/// `TransportUnknown`). Payload fields are the ones 4987 names; they are
+/// carried, never interpreted, here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) enum ReachabilityVerdict {
-    /// Every obligation in the incarnation range is covered by a confirmed and
-    /// committed receipt. 4987 §4.1 includes the zero-obligation case, but
-    /// §-1.4 then requires positive incarnation-alive evidence before a
-    /// producer may spell it — "nothing observed" is never GREEN.
+    /// Every obligation in the incarnation range is covered by a confirmed
+    /// and committed receipt. 4987 §4.1's zero-obligation case still needs
+    /// §-1.4's positive incarnation-alive evidence — "nothing observed" is
+    /// never GREEN.
     Reachable,
     /// Unsatisfied obligations passed `warn_bound` but not `fail_bound`.
     Degraded {
         oldest_unsatisfied_age_secs: u64,
         uncovered_ranges: u32,
     },
-    /// No receipt, but positive empirical evidence that the transport actually
-    /// happened (an unreleased delivery lease, a restart boundary crossed
-    /// mid-turn, a live placeholder). 4987 §-1.3b: this is **not**
-    /// `Unreachable`, its alarm wording differs, and it states "do not
+    /// No receipt, but positive empirical evidence the transport happened
+    /// (an unreleased delivery lease, a restart boundary crossed mid-turn, a
+    /// live placeholder). 4987 §-1.3b: **not** `Unreachable`; "do not
     /// redeliver by hand".
     TransportUnknown {
         since_secs: u64,
@@ -54,45 +46,32 @@ pub(in crate::services::discord) enum ReachabilityVerdict {
         since_secs: u64,
     },
     /// The ledger outlived every producer that could ever resolve it (#5942):
-    /// no observation committed it for longer than the TTL, its execution owner
-    /// is positively witnessed absent, and it holds nothing outstanding.
-    ///
-    /// This is **not** a health claim. It is the third answer the polarity gate
-    /// was missing: `Reachable` asserts the relay is answerable, `Unknown`
-    /// asserts it is unanswerable *right now*, and `Expired` records that there
-    /// is no longer anybody left to answer — so the entry withdraws from the
-    /// judgement instead of pinning it non-GREEN forever.
-    /// [`ReachabilityVerdict::permits_health`] stays false for it, exactly as it
-    /// is for `Unknown`; what changes is only whether the polarity gate counts
-    /// it, which [`ReachabilityVerdict::abstains_from_health_polarity`] answers.
+    /// no commit for longer than the TTL, execution owner positively
+    /// witnessed absent, nothing outstanding. **Not** a health claim — it
+    /// withdraws instead of pinning non-GREEN forever; see
+    /// [`ReachabilityVerdict::abstains_from_health_polarity`].
     Expired {
-        /// How long the ledger has gone without an observation commit.
+        /// Time since the last observation commit.
         unobserved_for_secs: u64,
     },
 }
 
 /// Why a `TransportUnknown` believes a transport occurred (4987 §-1.3b).
-///
-/// Every variant is an observation of a *trace*, never of a receipt: a receipt
-/// would have made the range `Reachable` instead.
+/// Every variant is an observation of a *trace*, never of a receipt: a
+/// receipt would have made the range `Reachable` instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum TransportUnknownEvidence {
     /// A delivery lease for this incarnation was taken and never released.
     UnreleasedDeliveryLease,
-    /// The uncovered range spans a dcserver restart boundary, i.e. the exact
-    /// success→commit crash window §-1.3b was created for.
+    /// The uncovered range spans a dcserver restart boundary (the crash window §-1.3b exists for).
     RestartBoundaryCrossed,
     /// A placeholder for the turn exists while its terminal receipt does not.
     PlaceholderPresent,
 }
 
 /// Which of the two obligation states accompanied a not-alive incarnation
-/// (#5071 relay-tail S1, I-5).
-///
-/// One family — the incarnation is not witnessed alive either way — but not one
-/// observation: "nothing was ever owed" and "something is owed and still inside
-/// its grace" are different facts about the relay, and the operator reading the
-/// detail surface acts on them differently.
+/// (#5071 relay-tail S1, I-5): "nothing was ever owed" vs. "something is
+/// owed and still inside its grace".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum NotAliveObligationState {
     /// Every obligation retired, or none was ever framed.
@@ -104,45 +83,38 @@ pub(in crate::services::discord) enum NotAliveObligationState {
 
 /// Why the obligation set could not be produced (4987 §4.1). #5071
 /// relay-tail S1 (I-5): `TranscriptUnresolved` means the resolution ladder
-/// and nothing else; every other reason is named below.
+/// and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum ReachabilityUnknownReason {
-    /// Every rank of the 4987 §-1.3 resolution ladder failed — a coordinate
-    /// exists to resolve and none of the ranks could resolve it.
+    /// Every rank of the 4987 §-1.3 resolution ladder failed to resolve an
+    /// existing coordinate.
     TranscriptUnresolved,
-    /// No ledger has ever been written for this channel. 4987 §-1.4: "not
-    /// observed" is not `Reachable` — and it is not an unresolved coordinate
-    /// either, because nothing ever framed one.
+    /// No ledger was ever written for this channel — 4987 §-1.4: "not
+    /// observed" is not `Reachable`, and no coordinate was ever framed.
     NeverObserved,
-    /// No provider owns this channel, so no durable material can even be
-    /// located. Upstream of every rank of the ladder.
+    /// No provider owns this channel; upstream of every rank of the ladder.
     ProviderUnresolved,
-    /// The ladder resolved and the incarnation is not witnessed alive. The
-    /// transcript is not the unknown here — the producer is.
+    /// The ladder resolved and the incarnation is not witnessed alive (the producer is the unknown here, not the transcript).
     IncarnationNotAliveWitnessed(NotAliveObligationState),
     /// Two independently resolved coordinates name different files, or the
-    /// file under an established cursor stopped being that file.
+    /// file under an established cursor changed identity.
     TranscriptCoordinateDivergence,
     /// The mailbox reports an active turn with no inflight row. 4987 §-1.4
-    /// demotes this to an explanatory attribute; it produces no verdict of its
-    /// own beyond this `Unknown`.
+    /// demotes this to an explanatory attribute — no verdict of its own.
     RowlessActiveTurn,
-    /// The bounded per-tick read hit its cap, so the tick did not see the whole
-    /// tail. See [`super::tail::TAIL_READ_CAP_BYTES`].
+    /// The bounded per-tick read hit its cap; see
+    /// [`super::tail::TAIL_READ_CAP_BYTES`].
     ReadTruncated,
-    /// The receipt store could not be read (4987 §-1.4 counterexample 7: a
-    /// malformed ledger is `Unknown`, never `Unreachable`).
+    /// The receipt store could not be read — a malformed ledger is
+    /// `Unknown`, never `Unreachable` (4987 §-1.4 counterexample 7).
     ReceiptStoreUnreadable,
 }
 
 impl ReachabilityVerdict {
     /// Whether this verdict permits a GREEN final health verdict — 4987 §4.1.
-    /// True for `Reachable` only; `TransportUnknown` is false here by the same
-    /// rule as `Unreachable`. Permission is not a declaration: §-1.4 still
-    /// requires positive incarnation-alive evidence before a producer may spell
-    /// `Reachable` at all. T4-B6's composed `RelayVerdict::permits_health`
-    /// delegates to this for its in-band arm, where a false answer blocks a
-    /// health declaration and authorizes nothing else.
+    /// True for `Reachable` only; §-1.4 still requires positive
+    /// incarnation-alive evidence. T4-B6's composed
+    /// `RelayVerdict::permits_health` delegates to this for its in-band arm.
     pub(in crate::services::discord) fn permits_health(&self) -> bool {
         match self {
             Self::Reachable => true,
@@ -150,20 +122,15 @@ impl ReachabilityVerdict {
             | Self::TransportUnknown { .. }
             | Self::Unreachable { .. }
             | Self::Unknown { .. }
-            // #5942: expiry withdraws an entry from the judgement; it never
-            // promotes it. An expired ledger proves nothing was delivered.
+            // #5942: expiry withdraws the entry; it never promotes it.
             | Self::Expired { .. } => false,
         }
     }
 
     /// Whether this verdict authorizes redelivering an uncovered range.
-    ///
     /// **No variant does**: 4987 keeps automatic range redelivery (S7) at
-    /// NO-GO, and §-1.3b singles out `TransportUnknown` as the variant most
-    /// likely to be misread as "we probably lost it, resend" — which is exactly
-    /// how the duplicate gets created. The arms are spelled out rather than
-    /// collapsed to `false` so a new variant is a compile error here and a
-    /// flipped arm dies in a named test instead of vanishing into a constant.
+    /// NO-GO. Arms are spelled out rather than collapsed to `false` so a new
+    /// variant is a compile error here.
     pub(in crate::services::discord) fn authorizes_redelivery(&self) -> bool {
         match self {
             Self::Reachable
@@ -177,12 +144,8 @@ impl ReachabilityVerdict {
 
     /// Whether this verdict authorizes a destructive action — turn cancel,
     /// tmux/process kill, registry removal, mailbox/inflight force-clean.
-    ///
-    /// **No variant does** (4987 §7.1 / I15). Convention plus a source lint,
-    /// not a sealed capability: §-1.5 records the decision not to put the
-    /// destructive `RelayRecoveryActionKind` variants behind a private
-    /// constructor, so a future caller CAN ignore this. It exists so that
-    /// ignoring it is a visible choice.
+    /// **No variant does** (4987 §7.1 / I15) — convention plus a source
+    /// lint, not a sealed capability (§-1.5).
     pub(in crate::services::discord) fn authorizes_destructive_action(&self) -> bool {
         match self {
             Self::Reachable
@@ -195,28 +158,17 @@ impl ReachabilityVerdict {
     }
 
     /// Whether an alarm for this verdict must carry the explicit "do not
-    /// redeliver by hand" notice (4987 §-1.3b). `TransportUnknown` only:
-    /// `Unreachable` gets the ordinary wording, and the ban notice exists
-    /// because the crash window looks like a loss and is not one.
+    /// redeliver by hand" notice (4987 §-1.3b): `TransportUnknown` only, since
+    /// the crash window looks like a loss and is not one.
     pub(in crate::services::discord) fn requires_manual_redelivery_ban_notice(&self) -> bool {
         matches!(self, Self::TransportUnknown { .. })
     }
 
     /// Whether this verdict withdraws from the health polarity instead of
-    /// deciding it (#5942).
-    ///
-    /// `Expired` only. This is deliberately a THIRD answer rather than a
-    /// loosening of [`ReachabilityVerdict::permits_health`]: 4987 §4.1's
-    /// `Unknown ⇒ not GREEN` rule is untouched, and no variant that could still
-    /// be observed gains a way out of it. What an expired entry loses is its
-    /// vote, not its non-GREEN status — it is still published, with its age, so
-    /// an operator sees a ledger that outlived its producer rather than
-    /// silence.
-    ///
-    /// Spelled as an exhaustive match for the reason
-    /// [`ReachabilityVerdict::authorizes_redelivery`] is: a new variant must
-    /// claim an answer here before it compiles, so nothing joins the abstaining
-    /// set by omission.
+    /// deciding it (#5942). `Expired` only — a THIRD answer, not a loosening
+    /// of [`ReachabilityVerdict::permits_health`]: it loses its vote, not
+    /// its non-GREEN status. Spelled as an exhaustive match so a new variant
+    /// must claim an answer here before it compiles.
     pub(in crate::services::discord) fn abstains_from_health_polarity(&self) -> bool {
         match self {
             Self::Expired { .. } => true,
@@ -237,8 +189,8 @@ impl ReachabilityVerdict {
     }
 
     /// Build an `Unknown` from a reason produced by the resolution ladder or
-    /// the tail reader. `since_secs` is supplied by the caller because this
-    /// file reads no clock.
+    /// tail reader. `since_secs` comes from the caller — this file reads no
+    /// clock.
     pub(in crate::services::discord) fn unknown(
         reason: ReachabilityUnknownReason,
         since_secs: u64,
@@ -252,7 +204,7 @@ mod tests {
     use super::*;
 
     /// Every variant, once, so the polarity tables below are exhaustive by
-    /// construction rather than by reviewer attention.
+    /// construction.
     fn every_verdict() -> Vec<ReachabilityVerdict> {
         vec![
             ReachabilityVerdict::Reachable,
@@ -322,9 +274,8 @@ mod tests {
         ]
     }
 
-    /// The fixture above is a hand-written list, and a hand-written list is
-    /// what a new variant walks straight past (#5942). No `_` arm, so a
-    /// seventh variant stops this module compiling until someone names it.
+    /// No `_` arm, so a seventh variant stops this module compiling until
+    /// someone names it (#5942).
     fn verdict_index(verdict: &ReachabilityVerdict) -> usize {
         match verdict {
             ReachabilityVerdict::Reachable => 0,
@@ -336,11 +287,8 @@ mod tests {
         }
     }
 
-    /// Every variant is REPRESENTED in `every_verdict()`, so the polarity tables
-    /// below are exhaustive by construction. "At least once" rather than
-    /// "exactly once" because the fixture deliberately carries several
-    /// `TransportUnknown` evidences and every `Unknown` reason; the property
-    /// that matters is that no variant is missing.
+    /// Every variant is represented at least once — the fixture deliberately
+    /// carries several `TransportUnknown` evidences and every `Unknown` reason.
     #[test]
     fn the_polarity_fixture_covers_every_verdict_variant() {
         const VERDICT_COUNT: usize = 6;
@@ -368,10 +316,8 @@ mod tests {
         }
     }
 
-    /// 4987 §-1.3b: `TransportUnknown` is not health. The named test exists
-    /// separately from the table above because this is the exact polarity the
-    /// design row calls out, and a table can be weakened without anyone
-    /// noticing which row it lost.
+    /// 4987 §-1.3b: `TransportUnknown` is not health — the exact polarity
+    /// the design row calls out.
     #[test]
     fn transport_unknown_is_not_health() {
         let verdict = ReachabilityVerdict::TransportUnknown {
@@ -413,9 +359,8 @@ mod tests {
         }
     }
 
-    /// The manual-redelivery ban notice is the one thing that distinguishes
-    /// `TransportUnknown`'s alarm from `Unreachable`'s, so it must be exactly
-    /// that variant — not "everything non-GREEN".
+    /// The manual-redelivery ban notice distinguishes `TransportUnknown`'s
+    /// alarm from `Unreachable`'s, so it must be exactly that variant.
     #[test]
     fn only_transport_unknown_carries_the_manual_redelivery_ban_notice() {
         for verdict in every_verdict() {
@@ -428,14 +373,8 @@ mod tests {
         }
     }
 
-    /// #5942: expiry is the ONLY verdict that withdraws from the polarity.
-    ///
-    /// The table is asserted in both directions for the reason
-    /// `only_reachable_permits_green_health` is: the failure mode this predicate
-    /// invites is a second variant quietly joining the abstaining set, which
-    /// would silence a real non-GREEN channel. `permits_health` is re-asserted
-    /// beside it so the two can never be confused — an expired verdict abstains
-    /// AND is still not health.
+    /// #5942: expiry is the ONLY verdict that withdraws from the polarity —
+    /// `permits_health` is re-asserted beside it: abstaining AND not health.
     #[test]
     fn only_expired_abstains_from_health_polarity() {
         for verdict in every_verdict() {
@@ -474,20 +413,12 @@ mod tests {
     }
 
     /// How many reasons 4987 §4.1 defines, and therefore how many distinct
-    /// indices [`unknown_reason_index`] may hand out. #5071 relay-tail S1
-    /// (I-5) took it from five to nine: three new variants, one of which
-    /// carries a two-state payload that is two reasons on the wire.
+    /// indices [`unknown_reason_index`] may hand out.
     const UNKNOWN_REASON_COUNT: usize = 9;
 
-    /// Give each `Unknown` reason its own index.
-    ///
-    /// This `match` is the mechanism, not the table it feeds: it has no `_` arm
-    /// and no or-pattern, so a sixth `ReachabilityUnknownReason` variant makes
-    /// this test module stop compiling until someone names it here — the same
-    /// spelled-out-arms device [`ReachabilityVerdict::authorizes_redelivery`]
-    /// uses in production. A hand-written list of reasons could not do that: a
-    /// new variant would simply not appear in it, and every assertion over it
-    /// would keep passing.
+    /// Give each `Unknown` reason its own index. No `_` arm and no
+    /// or-pattern, so a new `ReachabilityUnknownReason` variant stops this
+    /// module compiling until someone names it here.
     fn unknown_reason_index(reason: ReachabilityUnknownReason) -> usize {
         match reason {
             ReachabilityUnknownReason::TranscriptUnresolved => 0,
@@ -498,8 +429,7 @@ mod tests {
             ReachabilityUnknownReason::NeverObserved => 5,
             ReachabilityUnknownReason::ProviderUnresolved => 6,
             // The payload is matched out, not wildcarded: a third not-alive
-            // state has to claim its own index here, exactly as a sixth variant
-            // would.
+            // state has to claim its own index here too.
             ReachabilityUnknownReason::IncarnationNotAliveWitnessed(
                 NotAliveObligationState::NoneOutstanding,
             ) => 7,
@@ -510,16 +440,9 @@ mod tests {
     }
 
     /// The table below enumerates every `ReachabilityUnknownReason` exactly
-    /// once — none listed twice, none left out.
-    ///
-    /// That is all the body proves, and it proves it indirectly: it checks that
-    /// the table's [`unknown_reason_index`] values cover every index below
-    /// [`UNKNOWN_REASON_COUNT`] without collision, which they can only do if
-    /// the table is a permutation of the `match`'s arms. What forces a *future*
-    /// reason through this file is the exhaustiveness of that `match` — a
-    /// compiler obligation, which holds whether or not anyone reads this test.
-    /// The guarantee stops at this module: nothing here constrains how B2..B6
-    /// later choose to produce or consume the reasons.
+    /// once. Proved indirectly: [`unknown_reason_index`] values must cover
+    /// every index below [`UNKNOWN_REASON_COUNT`] without collision, which
+    /// only holds for a permutation of the `match`'s arms.
     #[test]
     fn every_unknown_reason_is_named_exactly_once() {
         let every_reason = [
@@ -539,8 +462,7 @@ mod tests {
         ];
 
         // Deliberately no `every_reason.len() == UNKNOWN_REASON_COUNT` assert:
-        // it would make the coverage loop below unreachable, and a check that
-        // cannot fail is what this test was rewritten to stop shipping.
+        // it would make the coverage loop below unreachable.
         let mut claimed: [Option<ReachabilityUnknownReason>; UNKNOWN_REASON_COUNT] =
             [None; UNKNOWN_REASON_COUNT];
         for reason in every_reason {

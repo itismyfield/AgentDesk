@@ -1,8 +1,7 @@
 //! Relay verdict composition and authority — #5071 T4-B6 (4987 S3).
 //!
-//! Everything above this file observes; this file produces a
-//! `ReachabilityVerdict` from the durable materials the earlier slices
-//! landed, folds in the external tier, and hands the product to a consumer.
+//! Produces a `ReachabilityVerdict` from the durable materials earlier slices
+//! land, folds in the external tier, and hands the product to a consumer.
 //!
 //! * [`classify_reachability`] is Tier A — 4987 §4.1's obligation↔receipt answer.
 //! * [`compose_relay_verdict`] is 4987 §4.3-1's `worst(ReachabilityVerdict,
@@ -10,14 +9,9 @@
 //! * [`relay_verdict_source`] is the 4987 §5.1 switch; only `Composite` lets
 //!   the composed verdict change the reported health polarity.
 //!
-//! Still non-destructive (4987 §7.1 / I15):
 //! [`RelayVerdict::authorizes_destructive_action`] is false on every composed
-//! value — destructive admission stays at the separate
+//! value (4987 §7.1 / I15) — destructive admission stays at the separate
 //! `relay_recovery::destructive_warrant_bind` gate.
-//!
-//! Not established here: the bounds below are chosen, not measured (4987
-//! §3.4); nothing here resolves/tails/frames the in-flight row's own path
-//! (I14); the composed verdict is DETAIL-path only.
 
 use std::path::Path;
 
@@ -44,23 +38,16 @@ use super::verdict::{
     TransportUnknownEvidence,
 };
 
-/// Obligation age at which composition stops reporting `Reachable`.
-///
-/// Chosen, not measured: it is four ticks of the observation cadence
-/// (`health::STALL_WATCHDOG_INTERVAL_SECS`), which is the shortest gap at which
-/// a missing receipt cannot still be explained by tick alignment between the
-/// observer and the delivery path. 4987 §-1.4 counterexample 6 is the case this
-/// bound exists for — a placeholder whose terminal receipt has not landed yet
-/// is `Reachable` under this bound and `Degraded` over it.
+/// Obligation age at which composition stops reporting `Reachable`. Chosen,
+/// not measured: four ticks of `health::STALL_WATCHDOG_INTERVAL_SECS`, the
+/// shortest gap a missing receipt can't still be tick-alignment noise (4987
+/// §-1.4 counterexample 6).
 const OBLIGATION_WARN_BOUND_SECS: u64 = 120;
 
 /// Obligation age at which composition reports `Unreachable`, unless a
-/// transport trace demotes it to `TransportUnknown` (4987 §-1.3b).
-///
-/// Chosen, not measured, on the same basis as the warn bound: it sits above the
-/// longest single provider turn this code path has to tolerate without calling
-/// a relay lost. Raising it costs detection latency; lowering it turns slow
-/// turns into false `Unreachable`s, which is the direction 4987 §7 rules out.
+/// transport trace demotes it to `TransportUnknown` (4987 §-1.3b). Chosen,
+/// not measured: above the longest single provider turn tolerated before
+/// calling a relay lost (4987 §7).
 const OBLIGATION_FAIL_BOUND_SECS: u64 = 600;
 
 /// Which tier's claim the composition took.
@@ -77,11 +64,9 @@ pub(in crate::services::discord) enum RelayVerdictTier {
 
 /// 4987 §4.3-1's product: `worst(ReachabilityVerdict, ExternalRelayVerdict)`.
 ///
-/// Both operands are kept rather than collapsed into one rung. The rung alone
-/// would lose the two things later readers need: which tier is responsible
-/// (an operator chases a different thing for each), and the in-band variant,
-/// which is what carries §-1.3b's manual-redelivery ban notice even when the
-/// external tier set the rung.
+/// Both operands are kept rather than collapsed into one rung: readers need
+/// which tier is responsible, and the in-band variant carries §-1.3b's
+/// manual-redelivery ban notice even when the external tier set the rung.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) struct RelayVerdict {
     in_band: ReachabilityVerdict,
@@ -89,22 +74,16 @@ pub(in crate::services::discord) struct RelayVerdict {
     decided_by: RelayVerdictTier,
 }
 
-/// The shared ladder both tiers project onto.
-///
-/// Spelled out per variant instead of derived from declaration order, for the
-/// same reason `ExternalRelayVerdict::severity` is: a reordered enum must not
-/// silently reorder the authority.
-///
-/// `TransportUnknown` and `Unknown` share a rung. Neither permits health and
-/// neither is `Unreachable`, and this file has no basis for ordering "a
-/// transport we saw a trace of" against "an obligation set we could not
-/// produce" — inventing one would put a false precision into the product.
+/// The shared ladder both tiers project onto. Spelled out per variant instead
+/// of derived from declaration order, so a reordered enum can't silently
+/// reorder the authority. `TransportUnknown` and `Unknown` share a rung —
+/// there is no basis to order "a transport trace" above "an obligation set
+/// we could not produce" without false precision.
 fn in_band_rank(verdict: &ReachabilityVerdict) -> u8 {
     match verdict {
-        // `Expired` shares rank 0 with `Reachable` because it makes no claim of
-        // loss for the external tier to outrank — not because it claims health.
-        // It does not: `permits_health` is false for it, and a watchdog that DID
-        // see loss still displaces it and degrades on its own evidence (#5942).
+        // `Expired` shares rank 0 with `Reachable`: it claims no loss for the
+        // external tier to outrank, not health — `permits_health` is false for
+        // it, and a watchdog that DID see loss still degrades it (#5942).
         ReachabilityVerdict::Reachable | ReachabilityVerdict::Expired { .. } => 0,
         ReachabilityVerdict::Degraded { .. } => 1,
         ReachabilityVerdict::TransportUnknown { .. } | ReachabilityVerdict::Unknown { .. } => 2,
@@ -113,10 +92,8 @@ fn in_band_rank(verdict: &ReachabilityVerdict) -> u8 {
 }
 
 /// The external tier's claim on the same ladder, or `None` when it made none.
-///
-/// `ExternalRelayVerdict::Unknown` is `None`, not rank 0: 4987 §-1.5 ① wants an
-/// unusable sidecar read to leave the in-band verdict EXACTLY as it was, and a
-/// rank of 0 would be a claim of "no loss" that the watchdog did not make.
+/// `Unknown` is `None`, not rank 0: 4987 §-1.5 ① wants an unusable sidecar
+/// read to leave the in-band verdict unchanged, not claim "no loss".
 fn external_rank(verdict: ExternalRelayVerdict) -> Option<u8> {
     match verdict {
         ExternalRelayVerdict::Unknown => None,
@@ -126,17 +103,10 @@ fn external_rank(verdict: ExternalRelayVerdict) -> Option<u8> {
     }
 }
 
-/// 4987 §4.3-1 / §4.3-2.
-///
-/// The external tier displaces the in-band one only on a STRICTLY higher rank.
-/// Equal ranks and lower ranks both keep Tier A, which is what makes §4.3-2's
-/// "the external tier may only worsen" hold: a watchdog `ok` after an in-band
-/// `Unreachable` cannot lift it, and an unusable sidecar read changes nothing
-/// at all (4987 §-1.4 counterexample 5).
-///
-/// The structural signals (`RelayStallState`) are not operands here. 4987
-/// §4.3-1 keeps them out of the product and gives them one job — choosing which
-/// recovery action to consider — which is where they stay.
+/// 4987 §4.3-1 / §4.3-2: the external tier displaces the in-band one only on
+/// a STRICTLY higher rank; equal and lower ranks keep Tier A, which is what
+/// makes §4.3-2's "external tier may only worsen" hold. `RelayStallState`
+/// structural signals are not operands here.
 pub(in crate::services::discord) fn compose_relay_verdict(
     in_band: ReachabilityVerdict,
     external: ExternalRelayVerdict,
@@ -165,56 +135,37 @@ impl RelayVerdict {
         self.decided_by
     }
 
-    /// Whether this composed verdict permits a GREEN health polarity — 4987
-    /// §4.1's rule carried through the composition.
-    ///
-    /// True only when Tier A spelled `Reachable` AND the external tier did not
-    /// displace it. Every other composed value, including every `Unknown`, is
-    /// false: §4.1 states directly that an unobservable relay is not a healthy
-    /// one, and `Unknown` folding into GREEN is the exact regression this
-    /// predicate exists to make impossible.
+    /// Whether this composed verdict permits a GREEN health polarity (4987
+    /// §4.1): true only when Tier A spelled `Reachable` AND the external tier
+    /// did not displace it — every `Unknown` is false.
     pub(in crate::services::discord) fn permits_health(&self) -> bool {
         matches!(self.decided_by, RelayVerdictTier::InBand) && self.in_band.permits_health()
     }
 
-    /// Whether this composed verdict withdraws from the health polarity rather
-    /// than deciding it (#5942).
-    ///
-    /// True only when Tier A itself expired AND the external tier did not
-    /// displace it. That second conjunct keeps the abstention from swallowing a
-    /// real finding: a watchdog that observed lost blocks outranks an expired
-    /// in-band ledger and degrades on its own evidence.
+    /// Whether this composed verdict withdraws from the health polarity
+    /// rather than deciding it (#5942): true only when Tier A itself expired
+    /// AND the external tier did not displace it.
     pub(in crate::services::discord) fn abstains_from_health_polarity(&self) -> bool {
         matches!(self.decided_by, RelayVerdictTier::InBand)
             && self.in_band.abstains_from_health_polarity()
     }
 
-    /// Whether an alarm for this composed verdict must carry §-1.3b's explicit
-    /// "do not redeliver by hand" notice.
-    ///
-    /// Read off the IN-BAND operand even when the external tier set the rung. A
-    /// watchdog `gap` over an in-band `TransportUnknown` does not make the
-    /// crash window a loss; the range still has a transport trace, and a human
-    /// who redelivers it still creates the duplicate #4986 refused to create.
+    /// Whether an alarm for this composed verdict must carry §-1.3b's
+    /// "do not redeliver by hand" notice. Read off the IN-BAND operand even
+    /// when the external tier set the rung — manual redelivery still creates
+    /// the duplicate #4986 refused to create.
     pub(in crate::services::discord) fn requires_manual_redelivery_ban_notice(&self) -> bool {
         self.in_band.requires_manual_redelivery_ban_notice()
     }
 
     /// Whether this composed verdict authorizes a destructive action — turn
     /// cancel, tmux/process kill, registry removal, mailbox/in-flight
-    /// force-clean.
-    ///
-    /// **No composed value does** (4987 §7.1 / I15). Composition changes what
-    /// health polarity may be declared; it grants no capability the operands
-    /// did not have, and neither operand has this one. Spelled as an exhaustive
-    /// match over the deciding tier plus the in-band delegate so a future tier
-    /// has to choose here before it compiles.
+    /// force-clean. **No composed value does** (4987 §7.1 / I15).
     pub(in crate::services::discord) fn authorizes_destructive_action(&self) -> bool {
         match self.decided_by {
             RelayVerdictTier::InBand => self.in_band.authorizes_destructive_action(),
-            // The external tier is a bounded read of somebody else's channel
-            // history (4987 §5.2). It is even further from a destruction
-            // warrant than Tier A, which already has none.
+            // A bounded read of somebody else's channel history (4987 §5.2) —
+            // further from a destruction warrant than Tier A, which has none.
             RelayVerdictTier::External => false,
         }
     }
@@ -241,8 +192,7 @@ impl RelayVerdict {
 }
 
 /// The 4987 §4.4 `reachability { verdict, oldest_unsatisfied_age_secs,
-/// uncovered_ranges, reason }` object, published on the health detail surface
-/// in BOTH switch modes.
+/// uncovered_ranges, reason }` object, published in BOTH switch modes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(in crate::services::discord) struct RelayVerdictReport {
     pub verdict: &'static str,
@@ -256,23 +206,16 @@ pub(in crate::services::discord) struct RelayVerdictReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_lost_blocks: Option<u32>,
     /// #5942: how long an `expired` entry's ledger went without an observation
-    /// commit. On that verdict only, so the expiry is read off the surface with
-    /// its age rather than inferred from a channel that quietly stopped
-    /// appearing in the degraded reasons.
+    /// commit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unobserved_for_secs: Option<u64>,
-    /// #5942: this entry withdrew from the health polarity instead of deciding
-    /// it. Separate from `governs_health_polarity`, which reports the §5.1
-    /// SWITCH: an expired entry under `Composite` carries both as true, which
-    /// is the pair an operator needs — the switch was live and it still did not
-    /// count.
+    /// #5942: withdrew from the health polarity instead of deciding it —
+    /// separate from `governs_health_polarity` (the §5.1 switch).
     pub health_polarity_abstained: bool,
     /// Whether this value was allowed to change the health polarity of the
-    /// entry it sits on. False under `RelayVerdictSource::Structural`, where
-    /// the same object is published purely as a shadow.
+    /// entry it sits on. False under `RelayVerdictSource::Structural`.
     pub governs_health_polarity: bool,
-    /// 4987 §-1.3b's ban notice, carried onto the surface so an operator
-    /// reading a non-GREEN entry is told not to redeliver by hand.
+    /// 4987 §-1.3b's ban notice: don't redeliver a non-GREEN entry by hand.
     pub manual_redelivery_banned: bool,
 }
 
@@ -336,12 +279,9 @@ impl RelayVerdictReport {
 }
 
 /// #5071 relay-tail S1 (I-5): one string per branch, so the published reason
-/// says which branch answered.
-///
-/// `receipt_store_unreadable` is spelled by two branches of
-/// `classify_reachability`; the second is unreachable behind the guard that
-/// already answered it, kept so a reordering of those guards costs a
-/// conservative verdict rather than the polling task.
+/// says which branch answered. `receipt_store_unreadable` is spelled by two
+/// branches of `classify_reachability`; the second is unreachable behind an
+/// already-answered guard, kept so a reorder costs a conservative verdict.
 fn unknown_reason_str(reason: ReachabilityUnknownReason) -> &'static str {
     match reason {
         ReachabilityUnknownReason::TranscriptUnresolved => "transcript_unresolved",
@@ -375,12 +315,11 @@ fn transport_evidence_str(evidence: TransportUnknownEvidence) -> &'static str {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum TranscriptLiveness {
     /// Every rank of the 4987 §-1.3 resolution ladder failed, or no observation
-    /// has ever run for this channel so there is nothing to resolve against.
+    /// has ever run for this channel.
     Unresolved,
     /// Resolved to a file of this length. `alive` is 4987 §-1.4's positive
-    /// evidence — file length advanced since the last observation, OR the pane
-    /// was confirmed idle. Both false means "we cannot see it", which §-1.4
-    /// states is never GREEN.
+    /// evidence (file grew since last observation, or the pane was confirmed
+    /// idle); both false is never GREEN.
     Resolved { eof: u64, alive: bool },
 }
 
@@ -390,17 +329,16 @@ pub(in crate::services::discord) struct ReachabilityInputs<'a> {
     pub provider: &'a ProviderKind,
     /// T4-B4's row ↔ independently-resolved coordinate comparison.
     pub divergence: RowCoordinateDivergence,
-    /// The durable ledger for this channel, or `None` when it could not be
-    /// read. `ledger_present` distinguishes "never written" from "will not
-    /// parse", which 4987 §-1.4 counterexample 7 requires.
+    /// The durable ledger for this channel, or `None` when unreadable.
+    /// `ledger_present` distinguishes "never written" from "will not parse"
+    /// (4987 §-1.4 counterexample 7).
     pub ledger: Option<&'a ReachabilityLedger>,
     pub ledger_present: bool,
-    /// #5942: when the ledger file was last committed, or `None` when that
-    /// could not be established. `None` never expires a ledger — an undated
-    /// ledger is not an old one.
+    /// #5942: when the ledger file was last committed, or `None` if that
+    /// could not be established. `None` never expires a ledger.
     pub ledger_observed_at_epoch_ms: Option<u64>,
-    /// #5942: what the caller could establish about the execution owner behind
-    /// this channel. Only [`ExecutorWitness::Absent`] can expire a ledger.
+    /// #5942: what the caller could establish about this channel's execution
+    /// owner. Only [`ExecutorWitness::Absent`] can expire a ledger.
     pub executor: ExecutorWitness,
     /// T4-B3's receipt projection read.
     pub receipts: &'a ReceiptIndexRead,
@@ -412,9 +350,8 @@ pub(in crate::services::discord) struct ReachabilityInputs<'a> {
     /// A placeholder exists for the turn while its terminal receipt does not.
     pub placeholder_present: bool,
     pub now_epoch_ms: u64,
-    /// This dcserver process's start time. An obligation first observed before
-    /// it spans a restart boundary — 4987 §-1.3b's POST-succeeded /
-    /// receipt-write-failed crash window.
+    /// This dcserver process's start time — an obligation first observed
+    /// before it spans a restart boundary (4987 §-1.3b's crash window).
     pub process_started_at_epoch_ms: u64,
 }
 
@@ -433,23 +370,13 @@ pub(super) fn age_secs(now_epoch_ms: u64, first_observed_at_epoch_ms: u64) -> u6
     now_epoch_ms.saturating_sub(first_observed_at_epoch_ms) / 1_000
 }
 
-/// Sweep the live obligations against the receipt projection.
-///
-/// The index is clamped to the transcript EOF first: `ReceiptIndex::covers` has
-/// no EOF input of its own and a stale-high same-generation frontier would
-/// otherwise retire byte ranges that no longer exist. That clamp is the
-/// consumer obligation the receipt-index module docs name.
-///
-/// `generation_proven` splits the covered obligations in two. The receipt
-/// projection key is `(provider, tmux_session, generation_mtime_ns)`, and the
-/// receipt-index module docs record that the bump-failure path can let a new
-/// incarnation publish its predecessor's `generation_mtime_ns` — so under that
-/// key alone, coverage may belong to the predecessor. The spawn nonce is the
-/// additional witness: when the ledger carries one, the incarnation this
-/// coverage is being read for is distinguishable from a same-generation
-/// predecessor, and the obligation may be retired. When it does not, the
-/// obligation is held instead of retired, and [`classify_reachability`] caps
-/// what a held obligation can produce.
+/// Sweep the live obligations against the receipt projection. The index is
+/// clamped to the transcript EOF first (a stale-high frontier would otherwise
+/// retire byte ranges that no longer exist). `generation_proven` splits
+/// covered obligations in two: a bump failure can let a new incarnation
+/// publish its predecessor's `generation_mtime_ns`, so the spawn-nonce
+/// witness decides retirable vs. held; [`classify_reachability`] caps what a
+/// held obligation produces.
 fn sweep_coverage(
     obligations: &[LedgerObligation],
     index: Option<ReceiptIndex>,
@@ -493,24 +420,13 @@ fn sweep_coverage(
     sweep
 }
 
-/// Produce the Tier A verdict — 4987 §4.1 / §-1.3b / §-1.4.
-///
-/// The `Unknown` arms are tried before the obligation ladder, because each of
-/// them means the obligation set on hand is not the whole one, and grading an
-/// incomplete set produces a confident answer about nothing. Within them the
-/// order is: coordinate divergence, then store readability, then transcript
-/// resolution, then read truncation, then the rowless-active-turn attribute.
-/// Only the divergence-first step is load bearing (a diverged pair makes every
-/// later operand ambiguous); the rest are mutually exclusive in practice and
-/// their order is a convention this comment records rather than a claim.
-///
-/// This function reads no clock and opens no file: `now_epoch_ms` and every
-/// material arrive from the caller.
-///
-/// #5071 relay-tail S1 (I-5): the `Unknown` arms name what they observed rather
-/// than sharing one reason. The ORDER above is unchanged and so is every
-/// verdict variant — only the label a branch hands to `Unknown` moved, and
-/// `Unknown` permits no health whichever label it carries.
+/// Produce the Tier A verdict — 4987 §4.1 / §-1.3b / §-1.4. The `Unknown` arms
+/// run before the obligation ladder, since grading an incomplete obligation
+/// set answers nothing. Order: coordinate divergence, store readability,
+/// transcript resolution, read truncation, rowless-active-turn — only
+/// divergence-first is load bearing (it makes every later operand ambiguous).
+/// #5071 relay-tail S1 (I-5): the `Unknown` arms name what they observed;
+/// `Unknown` permits no health regardless.
 pub(in crate::services::discord) fn classify_reachability(
     inputs: ReachabilityInputs<'_>,
 ) -> ReachabilityVerdict {
@@ -520,35 +436,24 @@ pub(in crate::services::discord) fn classify_reachability(
     if matches!(inputs.receipts, ReceiptIndexRead::Unknown(_))
         || (inputs.ledger.is_none() && inputs.ledger_present)
     {
-        // 4987 §-1.4 counterexample 7: a store that exists and will not parse is
-        // `Unknown`, never `Unreachable`. Its coverage is unknown, not absent.
+        // 4987 §-1.4 counterexample 7: a store that exists and won't parse is
+        // `Unknown`, never `Unreachable` — coverage is unknown, not absent.
         return ReachabilityVerdict::unknown(ReachabilityUnknownReason::ReceiptStoreUnreadable, 0);
     }
     let Some(ledger) = inputs.ledger else {
-        // No observation has ever recorded this channel. 4987 §-1.4: "not
-        // observed" is not `Reachable` — and #5071 relay-tail S1 (I-5): it is
-        // not an unresolved transcript either. Nothing here failed to resolve a
-        // coordinate; no coordinate was ever framed.
+        // Never observed. 4987 §-1.4: not `Reachable`; #5071 relay-tail S1
+        // (I-5): not an unresolved transcript either — no coordinate was framed.
         return ReachabilityVerdict::unknown(ReachabilityUnknownReason::NeverObserved, 0);
     };
-    // Every FAULT arm runs before the timer (#5942): a diverged coordinate, an
-    // unparseable store and a truncated read are things that went WRONG, and a
-    // thing that went wrong must not be retired by a clock. `read_truncated`
-    // is hardcoded `false` at the production call site today, so this makes an
-    // ordering claim true rather than changing behaviour.
-    // `a_truncated_read_outranks_the_ttl_gate_even_when_every_expiry_conjunct_holds`
-    // pins the ordering.
+    // Every FAULT arm runs before the timer (#5942): a thing that went WRONG
+    // must not be retired by a clock. `read_truncated` is hardcoded `false` at
+    // the production call site today, so this pins an ordering only.
     if inputs.read_truncated {
         return ReachabilityVerdict::unknown(ReachabilityUnknownReason::ReadTruncated, 0);
     }
-    // Now ask whether anybody is left to make this ledger say anything.
-    //
-    // The gate sits above the transcript arm because that arm is what a ledger
-    // with no producer can never pass, so such a channel re-answers
-    // `TranscriptUnresolved` every tick forever. The gate must not preempt a
-    // verdict the ladder would have called `Reachable`, and the only input
-    // that can produce one is 4987 §-1.4's positive incarnation-alive
-    // evidence — which `expired_without_a_producer` refuses to expire over.
+    // Checked before the transcript arm (a producerless ledger can never pass
+    // it), but must not preempt a `Reachable` verdict — `expired_without_a_producer`
+    // refuses to expire over §-1.4's positive alive evidence.
     if let Some(unobserved_for_secs) = expired_without_a_producer(&inputs, ledger) {
         return ReachabilityVerdict::Expired {
             unobserved_for_secs,
@@ -563,12 +468,10 @@ pub(in crate::services::discord) fn classify_reachability(
 
     let index = match inputs.receipts {
         ReceiptIndexRead::Ready(index) => Some(index.clone().with_frontier_clamped_to_eof(eof)),
-        // A genuinely absent store covers nothing. That is an answer, not a
-        // fault: it is how a channel that has never delivered reads.
+        // A genuinely absent store covers nothing — not a fault.
         ReceiptIndexRead::Absent => None,
-        // Already answered above. Re-answered rather than `unreachable!`,
-        // because this runs on the health poll and a reordering of the guards
-        // should cost a conservative verdict, not the polling task.
+        // Already answered above; re-answered rather than `unreachable!` so a
+        // guard reorder costs a conservative verdict, not the polling task.
         ReceiptIndexRead::Unknown(_) => {
             return ReachabilityVerdict::unknown(
                 ReachabilityUnknownReason::ReceiptStoreUnreadable,
@@ -592,19 +495,12 @@ pub(in crate::services::discord) fn classify_reachability(
     let oldest_held = oldest_uncovered.max(oldest_unproven);
 
     match oldest_held {
-        // Every obligation retired, or none was ever framed. 4987 §4.1 includes
-        // the zero-obligation case, and §-1.4 gates it on the positive
-        // incarnation-alive evidence checked here rather than on its absence.
+        // Every obligation retired, or none was ever framed (4987 §4.1); §-1.4
+        // gates this on positive alive evidence, not its absence.
         None => {
             if alive {
                 ReachabilityVerdict::Reachable
             } else {
-                // `since_secs` is 0: this reader knows the incarnation is not
-                // visibly alive right now, and holds no record of when it
-                // stopped being so.
-                //
-                // #5071 relay-tail S1 (I-5): the transcript resolved. What is
-                // unknown is the producer, with nothing owed to it.
                 ReachabilityVerdict::unknown(
                     ReachabilityUnknownReason::IncarnationNotAliveWitnessed(
                         NotAliveObligationState::NoneOutstanding,
@@ -614,16 +510,10 @@ pub(in crate::services::discord) fn classify_reachability(
             }
         }
         Some(oldest) if oldest < OBLIGATION_WARN_BOUND_SECS => {
-            // 4987 §-1.4 counterexample 6: inside the grace an unsatisfied
-            // obligation is not yet evidence of anything, so the same alive
-            // gate as the zero-obligation case decides.
+            // 4987 §-1.4 counterexample 6: inside the grace, not yet evidence.
             if alive {
                 ReachabilityVerdict::Reachable
             } else {
-                // #5071 relay-tail S1 (I-5): same not-alive producer as the
-                // zero-obligation arm above, with an obligation outstanding —
-                // `oldest` is how long it has been, and the grace it is inside
-                // is why that is not yet evidence.
                 ReachabilityVerdict::unknown(
                     ReachabilityUnknownReason::IncarnationNotAliveWitnessed(
                         NotAliveObligationState::WithinGrace,
@@ -640,10 +530,9 @@ pub(in crate::services::discord) fn classify_reachability(
                     uncovered_ranges: held_ranges,
                 };
             }
-            // Past `fail_bound` with at least one genuinely uncovered range.
-            // A trace of the transport demotes this to `TransportUnknown`
-            // (4987 §-1.3b); without one it is the §-1.4 counterexample 2
-            // true positive.
+            // Past `fail_bound` with a genuinely uncovered range: a transport
+            // trace demotes to `TransportUnknown` (4987 §-1.3b); without one
+            // it's the §-1.4 counterexample 2 true positive.
             match transport_evidence(
                 &sweep,
                 inputs.placeholder_present,
@@ -664,11 +553,10 @@ pub(in crate::services::discord) fn classify_reachability(
 
 /// Which trace, if any, says the transport happened without a receipt.
 ///
-/// Restart-boundary first: it is the window §-1.3b was created for (a POST that
-/// succeeded and a receipt write that did not survive the crash), and it is the
-/// one whose alarm wording differs. A placeholder is the weaker trace — it says
-/// a turn started, not that its bytes reached Discord — so it only answers when
-/// the restart boundary does not.
+/// Restart-boundary first: the window §-1.3b was created for (a POST that
+/// succeeded, a receipt write that didn't survive the crash), with different
+/// alarm wording. A placeholder is the weaker trace — a turn started, not that
+/// its bytes reached Discord — so it only answers when the boundary doesn't.
 fn transport_evidence(
     sweep: &CoverageSweep,
     placeholder_present: bool,
@@ -689,46 +577,36 @@ fn transport_evidence(
 /// What the live health path knows about one channel when it asks for a
 /// composed verdict.
 pub(in crate::services::discord) struct RelayVerdictProbe<'a> {
-    /// `None` when the health registry could not resolve the provider name to a
-    /// known kind. Every durable store this composition reads is addressed by
-    /// provider, so without one there is nothing to read — which composes to
-    /// `Unknown`, not to a pass.
+    /// `None` when the health registry could not resolve the provider name —
+    /// nothing here is readable without one, so this composes to `Unknown`.
     pub provider: Option<&'a ProviderKind>,
     pub channel_id: u64,
-    /// The in-flight row's transcript path. Handed to `super::divergence` as a
-    /// comparison operand and to nothing else (I14).
+    /// The in-flight row's transcript path, handed to `super::divergence` as a
+    /// comparison operand and nothing else (I14).
     pub row_output_path: Option<&'a str>,
     /// The registry's independently resolved transcript path.
     pub registry_output_path: Option<&'a str>,
-    /// 4987 §-1.4's second alive witness: the pane is up and has nothing
-    /// pending, so a transcript that is not growing is idle rather than dead.
+    /// 4987 §-1.4's second alive witness: pane up with nothing pending, so a
+    /// non-growing transcript is idle rather than dead.
     pub pane_idle_confirmed: bool,
     pub rowless_active_turn: bool,
     /// A placeholder message is outstanding for this channel.
     pub placeholder_present: bool,
-    /// #5942: what the caller could establish about this channel's execution
-    /// owner. The caller owns this probe because establishing it costs a tmux
-    /// round trip against a shared budget, which this file does not hold and
-    /// must not spend.
+    /// #5942: caller-owned since establishing it costs a tmux round trip
+    /// against a shared budget this file must not spend.
     pub executor: ExecutorWitness,
     pub now_epoch_ms: u64,
     pub process_started_at_epoch_ms: u64,
 }
 
-/// Read this channel's durable materials and compose one verdict.
-///
-/// Three small reads: the T4-B2c ledger, the T4-B3 receipt projection, and the
-/// T4-B5 sidecar. Each is a whole-file read of a record the writers publish by
-/// atomic rename, so a concurrent writer shows this reader the old bytes or the
-/// new bytes and never a torn record. It takes no lock and mutates nothing.
-///
-/// The sidecar is gated on the ledger's own incarnation, so a sidecar written
-/// for a previous incarnation classifies as `WrongIncarnation` and contributes
-/// `ExternalRelayVerdict::Unknown` — which by [`compose_relay_verdict`] leaves
-/// the in-band verdict untouched. `accepted_epoch` is `None` on every call:
-/// this reader keeps no cross-tick state, so it accepts whatever epoch the
-/// sidecar currently carries and cannot detect a watchdog epoch regression
-/// between two of its own reads.
+/// Read this channel's durable materials and compose one verdict. Three small
+/// reads (T4-B2c ledger, T4-B3 receipt projection, T4-B5 sidecar), each a
+/// whole-file read published by atomic rename so a concurrent writer shows
+/// old or new bytes, never torn. Takes no lock, mutates nothing. The sidecar
+/// is gated on the ledger's own incarnation: one written for a previous
+/// incarnation classifies `WrongIncarnation` and contributes
+/// `ExternalRelayVerdict::Unknown`, which [`compose_relay_verdict`] leaves the
+/// in-band verdict untouched by.
 pub(in crate::services::discord) fn observe_relay_verdict(
     probe: RelayVerdictProbe<'_>,
 ) -> RelayVerdict {
@@ -738,9 +616,9 @@ pub(in crate::services::discord) fn observe_relay_verdict(
     );
 
     let Some(provider) = probe.provider else {
-        // #5071 relay-tail S1 (I-5): no provider owns this channel, so no
-        // ledger, receipt projection or sidecar can even be located. That is
-        // upstream of every rank of the resolution ladder, not a failure of it.
+        // #5071 relay-tail S1 (I-5): no provider owns this channel, so nothing
+        // can even be located — upstream of the resolution ladder, not a
+        // failure of it.
         return compose_relay_verdict(
             ReachabilityVerdict::unknown(ReachabilityUnknownReason::ProviderUnresolved, 0),
             ExternalRelayVerdict::Unknown,
@@ -777,9 +655,8 @@ pub(in crate::services::discord) fn observe_relay_verdict(
         executor: probe.executor,
         receipts: &receipts,
         transcript,
-        // The bounded read happens inside the observation task, which records
-        // its truncation in the ledger it writes. This reader does not tail,
-        // so it has no truncation of its own to report.
+        // The observation task records its own truncation in the ledger it
+        // writes; this reader doesn't tail, so it has none of its own.
         read_truncated: false,
         rowless_active_turn: probe.rowless_active_turn,
         placeholder_present: probe.placeholder_present,
@@ -801,10 +678,8 @@ pub(in crate::services::discord) fn observe_relay_verdict(
 }
 
 /// Resolve the registry's transcript and decide 4987 §-1.4's alive question.
-///
-/// Growth is measured against the ledger's `last_observed_len`, which the
-/// observation task stamps each tick. A file longer than that stamp advanced
-/// between the two reads. Equal lengths are not a claim that it died — that is
+/// Growth is measured against the ledger's `last_observed_len`, stamped each
+/// tick by the observation task. Equal lengths aren't a claim it died — that's
 /// what `pane_idle_confirmed` answers instead.
 fn transcript_liveness(
     registry_output_path: Option<&str>,
@@ -830,25 +705,12 @@ fn transcript_liveness(
     }
 }
 
-/// The only place 4987 §5.1's switch changes a snapshot's polarity (#5071 T4-B6).
-///
-/// The switch is also visible in the response as
-/// `RelayVerdictReport::governs_health_polarity`, on the detail build's mailbox
-/// entry in both modes; what it does NOT do anywhere else is change the aggregate the
-/// caller reads as the process's health. Under `Structural` this returns having
-/// touched neither output — that is what makes the shadow mode a shadow.
-///
-/// One reason per non-green CHANNEL, not per provider: the channel is what an
-/// operator has to look at, and the detail response carries one mailbox entry
-/// per channel. `Degraded`, never `Unhealthy`: 4987 §4.4 asks a
-/// non-`Reachable` relay to set the degraded flag, and taking the process out of
-/// HTTP readiness is authority this switch was not given.
-///
-/// Split out of the per-channel loop so the switch has a seam a test can call
-/// without a full `HealthRegistry`; #5736 added the registry-level pair that
-/// proves both builds reach this seam, not the detail build alone, and moved
-/// this seam beside the switch it reads — `health::snapshot` is a registered
-/// shrink target (#5447) and this is the switch's module, not the snapshot's.
+/// The only place 4987 §5.1's switch changes a snapshot's polarity (#5071
+/// T4-B6). Under `Structural` this touches neither output — that's what makes
+/// the shadow mode a shadow. One reason per non-green CHANNEL, not per
+/// provider. `Degraded`, never `Unhealthy`: 4987 §4.4 asks a non-`Reachable`
+/// relay to set the degraded flag; taking the process out of HTTP readiness
+/// is authority this switch was not given.
 pub(in crate::services::discord) fn apply_relay_verdict_polarity(
     composite_governs_polarity: bool,
     relay_verdict: &RelayVerdict,
@@ -865,12 +727,9 @@ pub(in crate::services::discord) fn apply_relay_verdict_polarity(
         "relay_verdict_{}_{provider}_{channel_id}",
         relay_verdict.label(),
     );
-    // #5942: an expired entry is recorded, not counted. Its OWN vector, not
-    // `degraded_reasons`, so the aggregate keeps publishing the channel — a
-    // growing set is how "it is spreading" stays visible — without pinning the
-    // node non-GREEN forever. Writing it into `degraded_reasons` and skipping
-    // the `worsen` is worse: every consumer that reads a non-empty
-    // `degraded_reasons` as "degraded" would see the same saturation renamed.
+    // #5942: an expired entry is recorded, not counted — its own vector, not
+    // `degraded_reasons`, so the channel stays visible without pinning the
+    // node non-GREEN forever.
     if relay_verdict.abstains_from_health_polarity() {
         expired_relay_ledgers.push(entry);
         return;
@@ -884,7 +743,7 @@ static RELAY_VERDICT_SOURCE_OVERRIDE: std::sync::Mutex<Option<RelayVerdictSource
     std::sync::Mutex::new(None);
 
 /// The live 4987 §5.1 switch. Same shape as `execution_identity_mode`: a live
-/// `agentdesk.yaml` edit applies on the next read without a restart, and an
+/// `agentdesk.yaml` edit applies on next read without a restart, and an
 /// unreadable config falls back to the compiled default (`Structural`).
 pub(in crate::services::discord) fn relay_verdict_source() -> RelayVerdictSource {
     #[cfg(test)]
