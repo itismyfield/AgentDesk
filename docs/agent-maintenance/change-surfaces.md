@@ -1313,7 +1313,8 @@ time for diagnostics; neither is a stored approval value.
     without one (bridge finalizes EXACTLY ONCE, "first wins"). The committed
     runtime-binding offset still advances on successful delivery and the
     start-offset clamp to `committed_relay_offset` is untouched (no double-send).
-    The Codex idle path (`relay_tui_idle_response_through_bridge`) is unchanged;
+    The Codex idle path (`relay_tui_idle_response_through_bridge`, since removed
+    unwired by the T6 unrecorded dead-code sweep slice 1) is unchanged;
     +54 from #3282: the deferred pending-start worker's terminal backstop ABORT
     (`backstop_abort_foreign_inflight_live`) now runs the injected
     `pending_start_abort_cleanup_fn` — resolved from the SAME
@@ -1348,7 +1349,7 @@ time for diagnostics; neither is a stored approval value.
     classifiers, the `strip_leading_*` / `normalize_*` parsers,
     `slash_command_control_kind`, the `format_ssh_direct_prompt_notification` /
     `format_slash_command_control_note` / `format_system_continuation_note`
-    formatters + their `extract_loop_body` / `format_count_with_commas` /
+    formatters + their `extract_loop_body` /
     `sanitize_inline_code` / `should_suppress_local_only_kind_note_after_continuation`
     helpers) moved verbatim to the capped `tui_prompt_relay/injected_prompt_policy.rs`
     sibling (318 prod LoC, below the giant threshold); names are re-imported via
@@ -1358,7 +1359,10 @@ time for diagnostics; neither is a stored approval value.
     `local_only_kind_note_suppressed_by_recent_continuation`,
     `bridge_task_notification_to_live_panel`, `is_local_only_slash_command_prompt`)
     plus all `#[cfg(test)]` coverage stay in this root. Frozen baseline 5434 -> 5142
-    (-292, locks in the shrink; zero logic change). #3479 rank-10 (behavior-preserving
+    (-292, locks in the shrink; zero logic change). The T6 unrecorded dead-code
+    sweep slice 1 later removed three unwired members of that moved cluster
+    (`format_count_with_commas`, `slash_command_control_prompt_is_local_command_stdout`,
+    `slash_command_control_prompt_is_caveat_only`). #3479 rank-10 (behavior-preserving
     extraction): the pure transcript/rollout prompt scanners (the
     `ClaudeIdleTranscriptScan` / `CodexIdleRolloutScan` enums, the three
     `scan_*` byte-stream parsers, and the two `*_idle_prompt_observation_should_tail_response`
@@ -1483,10 +1487,12 @@ time for diagnostics; neither is a stored approval value.
   - `src/services/discord/idle_recap/scrollback.rs` (#3479 scrollback: the tmux
     `capture-pane` tail capture, the `claude-e` transcript-tail fallback
     (`capture_transcript_scrollback` + the unit-testable `extract_transcript_tail_text`
-    / `parse_transcript_line_text` workers), and the Haiku `summarize_with_haiku`
-    call plus #4079's user-perspective suggested-reply prompt contract. Deps
+    / `parse_transcript_line_text` workers), and the Haiku `compose_with_haiku`
+    call plus #4079's user-perspective suggested-reply prompt contract (its
+    summary-only wrapper `summarize_with_haiku` was removed unwired by the T6
+    unrecorded dead-code sweep slice 1). Deps
     reached via `use super::*;`;
-    `capture_tmux_scrollback` / `capture_transcript_scrollback` / `summarize_with_haiku`
+    `capture_tmux_scrollback` / `capture_transcript_scrollback` / `compose_with_haiku`
     are re-exported by the parent so the `server::routes::idle_recap` caller keeps
     byte-identical `idle_recap::<fn>` call sites, while the parsing workers stay
     `pub(super)` for the parent's in-file tests; below the giant-file threshold).

@@ -45,13 +45,10 @@ pub(super) fn api_friction_guidance(profile: DispatchProfile) -> Option<String> 
 /// (`docs/source-of-truth.md`, `docs/memory-scope.md`) so they are never
 /// injected into agents whose workspace is a *different* repository (#4314),
 /// where those files do not exist and the reference would point at nothing.
-pub(super) fn workspace_has_agentdesk_docs(current_path: &str) -> bool {
-    workspace_has_agentdesk_docs_with(current_path, |p| std::path::Path::new(p).exists())
-}
-
-/// Filesystem-injectable seam for [`workspace_has_agentdesk_docs`] so tests
-/// can drive the path-existence decision deterministically without touching
-/// the real filesystem (#4314).
+///
+/// `exists` is the filesystem-injectable seam so tests can drive the
+/// path-existence decision deterministically without touching the real
+/// filesystem.
 pub(super) fn workspace_has_agentdesk_docs_with(
     current_path: &str,
     exists: impl Fn(&str) -> bool,

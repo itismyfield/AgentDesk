@@ -186,11 +186,6 @@ fn starts_with_compacted_local_command_stdout(normalized: &str) -> bool {
     !trimmed.contains('\r') && !trimmed.contains('\n')
 }
 
-pub(super) fn slash_command_control_prompt_is_local_command_stdout(prompt: &str) -> bool {
-    let (normalized, _peeled_caveat) = normalize_slash_command_control_prompt(prompt);
-    starts_with_complete_local_command_stdout(&normalized)
-}
-
 pub(super) fn normalize_slash_command_control_prompt(prompt: &str) -> (String, bool) {
     let normalized = strip_terminal_controls(prompt);
     let normalized = normalized.trim_start();
@@ -416,11 +411,6 @@ fn format_slash_command_control_note_unclamped(
     header
 }
 
-pub(super) fn slash_command_control_prompt_is_caveat_only(prompt: &str) -> bool {
-    let (normalized, peeled_caveat) = normalize_slash_command_control_prompt(prompt);
-    peeled_caveat && normalized.is_empty()
-}
-
 /// Pull the human-facing `/loop` directive body from raw echo or command args.
 pub(super) fn extract_loop_body(prompt: &str) -> Option<String> {
     let normalized = strip_terminal_controls(prompt);
@@ -469,18 +459,6 @@ pub(super) fn format_system_continuation_note(tmux_session_name: &str, _prompt: 
         "🧩 Session continued (compact/resume) · tmux: `{}`",
         sanitize_inline_code(tmux_session_name),
     )
-}
-
-pub(super) fn format_count_with_commas(count: usize) -> String {
-    let digits = count.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (idx, ch) in digits.chars().enumerate() {
-        if idx > 0 && (digits.len() - idx) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
 }
 
 pub(super) fn sanitize_inline_code(value: &str) -> String {

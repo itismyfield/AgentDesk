@@ -1,5 +1,4 @@
 use super::super::{inflight, task_supervisor};
-use super::claude_idle_bridge::compose_tui_idle_response;
 use super::*;
 #[cfg(unix)]
 fn advance_codex_tui_runtime_binding_and_marker_offset(
@@ -525,63 +524,6 @@ async fn run_codex_idle_response_tail(
         }
         _ => {}
     }
-}
-
-#[cfg(unix)]
-#[allow(dead_code)]
-fn collect_codex_idle_response(
-    rollout_path: PathBuf,
-    start_offset: u64,
-    tmux_session_name: String,
-) -> Result<(String, u64), String> {
-    let (tx, rx) = mpsc::channel();
-    let read_result =
-        crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset_for_tmux(
-            &rollout_path,
-            start_offset,
-            None,
-            tx,
-            None,
-            || crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_session_name),
-            &tmux_session_name,
-        )?;
-
-    let mut streamed = String::new();
-    let mut done_result: Option<String> = None;
-    let mut error_result: Option<String> = None;
-    let mut sideband = Vec::new();
-    for message in rx.try_iter() {
-        match message {
-            StreamMessage::Text { content } => streamed.push_str(&content),
-            StreamMessage::Done { result, .. } => done_result = Some(result),
-            StreamMessage::Error {
-                message, stderr, ..
-            } => {
-                let mut combined = message;
-                if !stderr.trim().is_empty() {
-                    combined.push_str("\n");
-                    combined.push_str(stderr.trim());
-                }
-                error_result = Some(combined);
-            }
-            StreamMessage::TaskNotification {
-                status, summary, ..
-            } => {
-                if !summary.trim().is_empty() {
-                    sideband.push(format!("[{status}] {summary}"));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let offset = match read_result {
-        ReadOutputResult::Completed { offset }
-        | ReadOutputResult::Cancelled { offset }
-        | ReadOutputResult::SessionDied { offset } => offset,
-    };
-    let response = compose_tui_idle_response(done_result, error_result, streamed, sideband);
-    Ok((response, offset))
 }
 
 #[cfg(unix)]

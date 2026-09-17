@@ -1,29 +1,3 @@
-use super::*;
-
-pub(crate) async fn resolve_watcher_dispatch_id(
-    shared: &Arc<SharedData>,
-    channel_id: ChannelId,
-    inflight_state: Option<&super::super::super::inflight::InflightTurnState>,
-) -> Option<String> {
-    inflight_state
-        .and_then(|state| state.dispatch_id.clone())
-        .or_else(|| {
-            inflight_state.and_then(|state| {
-                super::super::super::adk_session::parse_dispatch_id(&state.user_text)
-            })
-        })
-        .or(
-            super::super::super::adk_session::lookup_pending_dispatch_for_thread(
-                shared.api_port,
-                channel_id.get(),
-            )
-            .await,
-        )
-        .or_else(|| {
-            resolve_dispatched_thread_dispatch_from_db(shared.pg_pool.as_ref(), channel_id.get())
-        })
-}
-
 pub(crate) fn should_suppress_terminal_output_after_recent_stop(
     has_assistant_response: bool,
     inflight_missing: bool,

@@ -114,28 +114,11 @@ pub(in crate::services::discord) fn terminal_ui_generation_mtime_for_inflight(
         .unwrap_or_else(|| runtime_store::process_generation() as i64)
 }
 
-#[allow(dead_code)] // #3607 public sidecar API; production currently sweeps via list_obligations.
-pub(in crate::services::discord) fn read_obligation(
-    provider: &ProviderKind,
-    channel_id: u64,
-) -> Option<TerminalUiObligation> {
-    let root = runtime_store::discord_terminal_ui_obligations_root()?;
-    read_obligation_in_root(&root, provider.as_str(), channel_id)
-}
-
 pub(in crate::services::discord) fn list_obligations() -> Vec<TerminalUiObligation> {
     let Some(root) = runtime_store::discord_terminal_ui_obligations_root() else {
         return Vec::new();
     };
     list_obligations_in_root(&root)
-}
-
-#[allow(dead_code)] // #3607 public sidecar API; production currently clears by stored provider key.
-pub(in crate::services::discord) fn clear_obligation(
-    provider: &ProviderKind,
-    channel_id: u64,
-) -> bool {
-    clear_obligation_by_key(provider.as_str(), channel_id)
 }
 
 pub(crate) fn spawn_terminal_ui_obligation_sweeper(
@@ -473,6 +456,9 @@ fn write_obligation_in_root(root: &Path, obligation: &TerminalUiObligation) -> R
     )
 }
 
+/// Single-record reader kept for sidecar round-trip coverage; production
+/// reads the whole sidecar set through `list_obligations_in_root`.
+#[cfg(test)]
 fn read_obligation_in_root(
     root: &Path,
     provider: &str,

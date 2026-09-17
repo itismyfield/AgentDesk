@@ -134,13 +134,6 @@ pub(crate) struct DiscordOutboundPolicyDecision {
     pub(crate) thread_fallback: ThreadFallbackDecision,
 }
 
-// #3034: #1006 v3 default-limits convenience wrapper (prod delivery calls
-// `decide_policy_with_limits` with explicit limits). Kept as API symmetry.
-#[allow(dead_code)]
-pub(crate) fn decide_policy(message: &DiscordOutboundMessage) -> DiscordOutboundPolicyDecision {
-    decide_policy_with_limits(message, OutboundPolicyLimits::default())
-}
-
 pub(crate) fn decide_policy_with_limits(
     message: &DiscordOutboundMessage,
     limits: OutboundPolicyLimits,

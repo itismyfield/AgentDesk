@@ -113,10 +113,6 @@ impl StoreOutcome {
             StoreOutcome::Inserted(a) | StoreOutcome::Existing(a) => a,
         }
     }
-
-    pub fn was_inserted(&self) -> bool {
-        matches!(self, StoreOutcome::Inserted(_))
-    }
 }
 
 type ArtifactKey = (String, String, String); // (meeting_id, kind_slug, idempotency_key)
@@ -184,16 +180,6 @@ impl MeetingArtifactRepo {
         );
         let guard = self.inner.lock().expect("artifact repo mutex poisoned");
         guard.get(&key).cloned()
-    }
-
-    #[allow(dead_code)] // #3034: repo query API, see note above.
-    pub fn list_for_meeting(&self, meeting_id: &str) -> Vec<MeetingArtifact> {
-        let guard = self.inner.lock().expect("artifact repo mutex poisoned");
-        guard
-            .iter()
-            .filter(|((mid, _, _), _)| mid == meeting_id)
-            .map(|(_, v)| v.clone())
-            .collect()
     }
 
     #[allow(dead_code)] // #3034: repo query API, see note above.

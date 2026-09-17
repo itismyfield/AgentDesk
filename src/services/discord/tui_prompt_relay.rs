@@ -202,8 +202,6 @@ const CLAUDE_IDLE_INFLIGHT_DRAIN_POLL: Duration = Duration::from_millis(100);
 /// itself) so a prompt already written to the freshly-resolved transcript is
 /// still observed and its response relayed.
 const CLAUDE_IDLE_FRESH_TRANSCRIPT_LOOKBACK_BYTES: u64 = 65_536;
-const CODEX_IDLE_PROMPT_ANCHOR_WAIT: Duration = Duration::from_secs(2);
-const CODEX_IDLE_PROMPT_ANCHOR_POLL: Duration = Duration::from_millis(100);
 const TUI_DIRECT_SYNTHETIC_CLAIM_WAIT: Duration = Duration::from_secs(2);
 const TUI_DIRECT_SYNTHETIC_CLAIM_POLL: Duration = Duration::from_millis(100);
 pub(in crate::services::discord) const TUI_DIRECT_SYNTHETIC_OWNER_USER_ID: u64 = 1;

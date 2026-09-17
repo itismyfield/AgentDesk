@@ -223,9 +223,13 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
     "record_fresh_send_content_fingerprint": {
         "src/services/discord/outbound/turn_output_controller/fresh_send.rs": 1,
     },
-    # -- store 1: the shadow-mirror funnel and its four entry points ----------
+    # -- store 1: the shadow-mirror funnel and its three entry points ---------
+    # 4 -> 3 in the T6 unrecorded dead-code sweep slice 1: the unwired
+    # `shadow_mirror_same_channel_frontier_with_body` entry point (zero
+    # production and zero test callers) was deleted, taking its funnel call
+    # with it. No call moved; the remaining entry points are unchanged.
     "shadow_mirror_delivered_frontier": {
-        "src/services/discord/outbound/delivery_record.rs": 3,
+        "src/services/discord/outbound/delivery_record.rs": 2,
         "src/services/discord/turn_bridge/terminal_controller_cutover.rs": 1,
     },
     # 2 -> 3 in #5071 T1 S7: `record_recovery_terminal_delivery` joins

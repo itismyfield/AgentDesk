@@ -171,8 +171,9 @@ pub(crate) struct OutboundProducer {
     pub(crate) component: Option<String>,
 }
 
-// #3034: #1006 v3 outbound producer builder — serde-wire DTO API, not yet
-// adopted by every prod callsite. Kept as a coherent builder surface.
+// #3034: #1006 v3 outbound producer constructor — serde-wire DTO API, not yet
+// adopted by any prod callsite. The `producer` envelope field is retained for
+// wire compatibility with already-persisted outbound payloads.
 #[allow(dead_code)]
 impl OutboundProducer {
     pub(crate) fn new(source: impl Into<String>) -> Self {
@@ -180,11 +181,6 @@ impl OutboundProducer {
             source: source.into(),
             component: None,
         }
-    }
-
-    pub(crate) fn with_component(mut self, component: impl Into<String>) -> Self {
-        self.component = Some(component.into());
-        self
     }
 }
 
@@ -264,25 +260,6 @@ impl OutboundReferenceContext {
             thread_name_hint: None,
             metadata: Vec::new(),
         }
-    }
-
-    #[allow(dead_code)] // #3034: #1006 v3 builder, see note above.
-    pub(crate) fn with_thread_name_hint(mut self, thread_name_hint: impl Into<String>) -> Self {
-        self.thread_name_hint = Some(thread_name_hint.into());
-        self
-    }
-
-    #[allow(dead_code)] // #3034: #1006 v3 builder, see note above.
-    pub(crate) fn with_metadata(
-        mut self,
-        key: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Self {
-        self.metadata.push(OutboundMetadataEntry {
-            key: key.into(),
-            value: value.into(),
-        });
-        self
     }
 }
 
@@ -383,20 +360,6 @@ impl DiscordOutboundMessage {
         self
     }
 
-    // #3034: #1006 v3 envelope builders not yet adopted by every prod callsite;
-    // kept as a coherent serde-wire builder API.
-    #[allow(dead_code)]
-    pub(crate) fn with_producer(mut self, producer: OutboundProducer) -> Self {
-        self.producer = Some(producer);
-        self
-    }
-
-    #[allow(dead_code)] // #3034: #1006 v3 builder, see note above.
-    pub(crate) fn with_bot(mut self, bot: OutboundBotSelector) -> Self {
-        self.bot = bot;
-        self
-    }
-
     pub(crate) fn with_reference(mut self, reference: OutboundReferenceContext) -> Self {
         self.reference = Some(reference);
         self
@@ -405,36 +368,6 @@ impl DiscordOutboundMessage {
     pub(crate) fn with_summary(mut self, summary: impl Into<String>) -> Self {
         self.summary = Some(OutboundMessageSummary {
             content: summary.into(),
-        });
-        self
-    }
-
-    #[allow(dead_code)] // #3034: #1006 v3 builder, see note above.
-    pub(crate) fn with_bytes_attachment(
-        mut self,
-        filename: impl Into<String>,
-        content_type: Option<impl Into<String>>,
-        data: impl Into<Vec<u8>>,
-    ) -> Self {
-        self.attachments.push(OutboundAttachment {
-            filename: filename.into(),
-            content_type: content_type.map(Into::into),
-            source: OutboundAttachmentSource::Bytes { data: data.into() },
-        });
-        self
-    }
-
-    #[allow(dead_code)] // #3034: #1006 v3 builder, see note above.
-    pub(crate) fn with_path_attachment(
-        mut self,
-        filename: impl Into<String>,
-        content_type: Option<impl Into<String>>,
-        path: impl Into<PathBuf>,
-    ) -> Self {
-        self.attachments.push(OutboundAttachment {
-            filename: filename.into(),
-            content_type: content_type.map(Into::into),
-            source: OutboundAttachmentSource::Path { path: path.into() },
         });
         self
     }

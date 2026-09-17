@@ -54,7 +54,7 @@
 //! - Only [`write_delivered_frontier`] advances `delivered_frontier` — a lease
 //!   acquire/clear never touches it, so an ambiguous (`Unknown`/`NotDelivered`)
 //!   commit never advances the durable offset (I2).
-//! - `clear_lease` (release) clears `delivery_lease` ONLY; `delivered_frontier`
+//! - `clear_lease_at` (release) clears `delivery_lease` ONLY; `delivered_frontier`
 //!   survives (design §4.3).
 
 use std::fs;
@@ -86,7 +86,7 @@ const CONFIRMED_DELIVERY_RECEIPT_LIMIT: usize = 32;
 /// release-surviving delivered offset (only a `Delivered` outcome writes it).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::services::discord) struct DeliveryRecord {
-    /// Live/in-flight claim. CLEARED on release (`clear_lease`); a leftover
+    /// Live/in-flight claim. CLEARED on release (`clear_lease_at`); a leftover
     /// value after restart is the in-flight state B3 reconciles.
     #[serde(default)]
     pub delivery_lease: Option<DurableLease>,
@@ -415,18 +415,11 @@ pub(in crate::services::discord) fn read_record(
 }
 
 /// Acquire/refresh the transient lease. Preserves any existing
-/// `delivered_frontier` (never advances it — I2).
+/// `delivered_frontier` (never advances it — I2). Test-only: the B1 lease
+/// cutover (#3089 B0) never landed, so nothing in production writes the field.
+#[cfg(test)]
 fn upsert_lease_at(path: &Path, lease: DurableLease) -> Result<(), String> {
     mutate_record_at(path, |record| record.delivery_lease = Some(lease))
-}
-
-#[allow(dead_code)] // #3089 B0: called by B1's lease acquire on cutover.
-pub(in crate::services::discord) fn upsert_lease(
-    provider: &ProviderKind,
-    channel_id: u64,
-    lease: DurableLease,
-) -> Result<(), String> {
-    upsert_lease_at(&record_path_or_err(provider, channel_id)?, lease)
 }
 
 /// Raw path writer retained for record-shape tests and narrowly-scoped repair
@@ -657,22 +650,6 @@ fn write_confirmed_frontier_guarded_at_with_lock_authority(
         append_confirmed_receipt(&mut record, receipt);
     }
     write_record_at(path, &record)
-}
-
-fn write_confirmed_frontier_guarded_at(
-    path: &Path,
-    tmux_session_name: &str,
-    frontier: DeliveredCommit,
-    receipt: Option<ConfirmedDeliveryReceipt>,
-) -> Result<(), String> {
-    write_confirmed_frontier_guarded_at_with_before_lock(
-        path,
-        tmux_session_name,
-        frontier,
-        receipt,
-        EqualRangeAnchorPolicy::PreserveExisting,
-        || {},
-    )
 }
 
 fn write_delivered_frontier_guarded_at_with_before_lock(
@@ -1107,32 +1084,17 @@ pub(in crate::services::discord) fn confirmed_delivery_receipt_exists(
 }
 
 /// Release: clear the lease ONLY. `delivered_frontier` survives (design §4.3).
+/// Test-only, like `upsert_lease_at`.
+#[cfg(test)]
 fn clear_lease_at(path: &Path) -> Result<(), String> {
     mutate_record_at(path, |record| record.delivery_lease = None)
 }
 
-#[allow(dead_code)] // #3089 B0: called by B1's release path.
-pub(in crate::services::discord) fn clear_lease(
-    provider: &ProviderKind,
-    channel_id: u64,
-) -> Result<(), String> {
-    clear_lease_at(&record_path_or_err(provider, channel_id)?)
-}
-
 /// Remove the whole record (turn-end GC). `true` if a file was removed.
+/// Test-only: no production GC path calls it.
+#[cfg(test)]
 fn delete_record_at(path: &Path) -> bool {
     fs::remove_file(path).is_ok()
-}
-
-#[allow(dead_code)] // #3089 B0: called by B1/B2 at turn finalize.
-pub(in crate::services::discord) fn delete_record(
-    provider: &ProviderKind,
-    channel_id: u64,
-) -> bool {
-    match delivery_record_path(provider, channel_id) {
-        Some(path) => delete_record_at(&path),
-        None => false,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2536,31 +2498,6 @@ pub(in crate::services::discord) fn record_delivered_frontier_with_body(
         Some(terminal_anchor_channel_id),
         Some(body),
         ledger_user_msg_id,
-    );
-}
-
-pub(in crate::services::discord) fn shadow_mirror_same_channel_frontier_with_body(
-    shared: &crate::services::discord::SharedData,
-    provider: &ProviderKind,
-    channel: ChannelId,
-    tmux_session_name: &str,
-    range: (u64, u64),
-    is_delivered: bool,
-    terminal_anchor_msg_id: u64,
-    body: &str,
-    ledger_user_msg_id: u64,
-) {
-    shadow_mirror_delivered_frontier(
-        shared,
-        provider,
-        channel,
-        Some(tmux_session_name),
-        range,
-        is_delivered,
-        Some(terminal_anchor_msg_id),
-        Some(channel.get()),
-        Some(body),
-        (ledger_user_msg_id != 0).then_some(ledger_user_msg_id),
     );
 }
 

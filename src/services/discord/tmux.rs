@@ -789,48 +789,6 @@ mod restored_seed_discard_tests {
     }
 }
 
-#[allow(dead_code)] // #3034: #826/#897/#898 bg-trigger notify-outbox subsystem (unwired).
-fn lifecycle_reason_code_for_tmux_exit(reason: &str) -> &'static str {
-    let lower = reason.to_ascii_lowercase();
-    if tmux_exit_reason_is_normal_completion(reason) {
-        "lifecycle.normal_completion"
-    } else if lower.contains("force-kill")
-        || lower.contains("deadlock")
-        || lower.contains("prompt too long")
-        || lower.contains("auth")
-    {
-        "lifecycle.force_kill"
-    } else if lower.contains("idle") || lower.contains("turn cap") || lower.contains("cleanup") {
-        "lifecycle.auto_cleanup"
-    } else {
-        "lifecycle.tmux_terminated"
-    }
-}
-
-#[allow(dead_code)] // #3034: #826/#897 lifecycle-notify subsystem, see note above.
-fn tmux_death_lifecycle_notification_reason(reason: Option<&str>) -> Option<&str> {
-    let reason = reason?.trim();
-    if reason.is_empty() {
-        return None;
-    }
-
-    let reason = reason
-        .strip_prefix('[')
-        .and_then(|s| s.find("] ").map(|i| &s[i + 2..]))
-        .unwrap_or(reason)
-        .trim();
-    if reason.is_empty() || reason.eq_ignore_ascii_case("unknown") {
-        return None;
-    }
-
-    let lower = reason.to_ascii_lowercase();
-    if tmux_exit_reason_is_normal_completion(reason) || lower.contains("force-kill") {
-        return None;
-    }
-
-    Some(reason)
-}
-
 fn tmux_death_is_normal_completion(reason: Option<&str>, _diagnostic: Option<&str>) -> bool {
     reason.is_some_and(tmux_exit_reason_is_normal_completion)
 }
@@ -1442,67 +1400,6 @@ async fn drain_missing_inflight_dead_tmux_tail_to_eof(
             current_offset
         }
     }
-}
-
-/// #826 P1 #2 (option b): Decide which of the two offset watermarks
-/// (`last_relayed_offset`, `last_enqueued_offset`) a watcher tick should
-/// advance after attempting to deliver a terminal response.
-///
-///  - `last_relayed_offset` is the canonical "Discord has durably received
-///    this byte range" watermark. It must advance ONLY on confirmed
-///    foreground delivery (direct send or placeholder replace succeeded), or
-///    on the notify-path fallback that reached Discord.
-///  - `last_enqueued_offset` is the "outbox row committed" watermark. It
-///    advances when the notify-bot outbox insert succeeded — the outbox
-///    worker owns delivery + retry from there. Prevents re-enqueue of the
-///    same range on the next tick without conflating staging with delivery.
-///
-/// Both watermarks advance in lock-step on genuine delivery so a later
-/// dedupe check (which takes their max) sees a single unified floor.
-///
-/// Pure function extracted for regression-test coverage of the offset-commit
-/// gate; the runtime version lives inline in the watcher loop because it is
-/// intertwined with other relay bookkeeping.
-#[allow(dead_code)] // #3034: notify-path bg-trigger offset gate (unwired; #826/#897/#898).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(super) struct OffsetAdvanceDecision {
-    pub advance_relayed: bool,
-    pub advance_enqueued: bool,
-}
-
-#[allow(dead_code)] // #3034: notify-path offset gate, see note above.
-#[inline]
-pub(super) fn notify_path_offset_advance_decision(
-    has_current_response: bool,
-    enqueue_succeeded: bool,
-    direct_send_delivered: bool,
-) -> OffsetAdvanceDecision {
-    if direct_send_delivered {
-        // Confirmed foreground delivery. Lift both watermarks.
-        return OffsetAdvanceDecision {
-            advance_relayed: true,
-            advance_enqueued: true,
-        };
-    }
-    if enqueue_succeeded {
-        // Staged on the outbox — advance the enqueue watermark to dedupe the
-        // next tick, but leave the canonical relayed watermark alone.
-        return OffsetAdvanceDecision {
-            advance_relayed: false,
-            advance_enqueued: true,
-        };
-    }
-    if !has_current_response {
-        // Empty turn — advance both in lock-step (the original single-offset
-        // behaviour) so the watcher doesn't spin on this range.
-        return OffsetAdvanceDecision {
-            advance_relayed: true,
-            advance_enqueued: true,
-        };
-    }
-    // Nothing delivered, nothing staged — leave BOTH watermarks untouched so
-    // the next tick can try again.
-    OffsetAdvanceDecision::default()
 }
 
 #[inline]

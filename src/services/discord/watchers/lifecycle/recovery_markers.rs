@@ -121,35 +121,3 @@ pub(in crate::services::discord) async fn clear_recovery_handled_channels(shared
 
     let _ = shared;
 }
-
-pub(crate) async fn clear_provider_session_for_retry(
-    shared: &Arc<SharedData>,
-    channel_id: ChannelId,
-    tmux_session_name: &str,
-    fallback_session_id: Option<&str>,
-) {
-    let stale_sid = {
-        let mut data = shared.core.lock().await;
-        let old = data
-            .sessions
-            .get(&channel_id)
-            .and_then(|session| session.session_id.clone())
-            .or_else(|| fallback_session_id.map(ToString::to_string));
-        if let Some(session) = data.sessions.get_mut(&channel_id) {
-            session.clear_provider_session();
-        }
-        old
-    };
-
-    let session_key = format!(
-        "{}:{}",
-        crate::services::platform::hostname_short(),
-        tmux_session_name
-    );
-    super::super::super::adk_session::clear_provider_session_id(&session_key, shared.api_port)
-        .await;
-
-    if let Some(sid) = stale_sid {
-        let _ = super::super::super::internal_api::clear_stale_session_id(&sid).await;
-    }
-}
