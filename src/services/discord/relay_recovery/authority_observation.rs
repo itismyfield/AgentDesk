@@ -145,7 +145,7 @@ pub(in crate::services::discord) const fn entry_gate_new(
 /// Shipped stream-tick gate — the operand-for-operand mirror of
 /// `stream_tick::guarded_persist::visible_mutation_authority_after_guarded_save`,
 /// pinned against it over the full three-operand product by that file's
-/// `recorded_stream_gate_old_mirrors_the_shipped_authority_mapping`.
+/// `recorded_stream_gate_new_mirrors_the_shipped_authority_mapping`.
 pub(in crate::services::discord) const fn stream_gate_old(
     outcome: GuardedSaveOutcome,
     authority_unchanged: bool,

@@ -91,10 +91,10 @@
         "cargo",
         "test",
         "--lib",
-        "services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_inside_the_cohort_and_still_ends_lifecycle_outside_it"
+        "services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_without_ending_stream_lifecycle"
       ],
       "minimum": 1,
-      "derivation": "Measured on origin/main b4ee089369f12cb052993560b77e375226680342: the declared named selector plus -- --list selects one test; execution with -- --test-threads=1 passes one test (no ignored tests or DB soft-skip). Existing S4 witness only, not full T5 teardown or S7a coverage."
+      "derivation": "Re-measured on origin/main d72504ca89d34beac7b4edd47f032199cb5140db after T6 D1 renamed this witness from a_vanished_row_suppresses_inside_the_cohort_and_still_ends_lifecycle_outside_it: the declared named selector plus -- --list selects one test; execution with -- --test-threads=1 passes one test (no ignored tests or DB soft-skip). The lane minimum is unchanged at 1. Existing S4 witness only, not full T5 teardown or S7a coverage."
     },
     {
       "name": "t5-s4-same-authority-watcher-epoch",

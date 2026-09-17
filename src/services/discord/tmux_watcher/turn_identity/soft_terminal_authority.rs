@@ -221,9 +221,8 @@ impl WatcherSoftTerminalAuthority {
     ///
     /// Shaped after the one cell T5 S4 moved in the bridge stream tick
     /// (`guarded_persist::visible_mutation_authority_after_guarded_save`'s
-    /// `GuardedSaveOutcome::Missing if cohort_admits => Suppressed`): one
-    /// structural signal, relaxed inside the enforcement cohort only, with the
-    /// exact-episode veto (`IdentityMismatch` there) left where it was.
+    /// `GuardedSaveOutcome::Missing => Suppressed`): one structural signal
+    /// relaxed, with the exact-episode veto (`IdentityMismatch`) left in place.
     pub(crate) fn authorize_pre_relay_inflight_with_rowless_authority(
         &self,
         inflight_before_relay: Option<&crate::services::discord::inflight::InflightTurnState>,

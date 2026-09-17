@@ -913,7 +913,9 @@ targets = {
     # no commands or enforcement checks are removed or relaxed.
     # #5908 adds four S7a witnesses and the C1 module; retain their exact
     # commands below and refresh both workflow gate pins with this file.
-    "job_sha256" => "fb61b50f46c33c9219d205b8d13844fa3e11be6837dd1171513221b2b2890cbd",
+    # T6 D1 re-pins after renaming one existing S4 witness selector; no command
+    # is added, removed, or relaxed and the lane minimum stays 1.
+    "job_sha256" => "41165e789f367c80ff5d6ac52f2ee7679d911d4158e92d0869d49e3c6e2e2531",
     "job_timeout_minutes" => 50,
     "cargo_steps" => {
       "Verify named relay-authority targets and selection floors" => {
@@ -924,7 +926,7 @@ targets = {
         "commands" => [
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::session_relay_sink -- --test-threads=1",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_inside_the_cohort_and_still_ends_lifecycle_outside_it -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_without_ending_stream_lifecycle -- --test-threads=1",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority -- --test-threads=1",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::recorded_entry_gate_old_mirrors_the_shipped_lifecycle_gate -- --test-threads=1",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::the_deployed_enforce_dial_governs_every_channel_and_observe_governs_none -- --test-threads=1",
