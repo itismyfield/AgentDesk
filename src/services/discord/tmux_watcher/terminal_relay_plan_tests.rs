@@ -3,6 +3,10 @@
 //! Split out of `terminal_relay_plan.rs` to keep that module inside the
 //! `src/services/discord/tmux_watcher/**` namespace size cap.
 
+use super::orphan_terminal_frame::{
+    OrphanTerminalFrameFacts, TERMINAL_FRAME_OWNER_OR_RECORD_INVARIANT,
+    observe_orphan_terminal_frame,
+};
 use super::rowless_delivery_authority::{lease_has_live_holder, ledger_owes_output};
 use super::*;
 use crate::services::discord::inflight::RelayOwnerKind;
@@ -518,4 +522,364 @@ fn reader_pins_the_ledger_and_lease_operands_5464_c1() {
     );
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&marker);
+}
+
+// ---------------------------------------------------------------------------
+// #5941: the durable record at the #5175 loss seam, and the observability that
+// stops "there is no record" from reading as "there is no problem".
+// ---------------------------------------------------------------------------
+
+const LOST_BODY: &str = "the assistant answer the sink declined and the watcher could not send";
+const LOST_CHANNEL: u64 = 1_479_671_298_497_183_835;
+const SENT_PREFIX: usize = 4_096;
+const GENERATION_MTIME_NS: i64 = 1_758_000_000_000_000_000;
+
+/// The incident shape: a soft terminal, `TurnStartOutsideFrame` (the denial the
+/// stale 1h45m-old inflight row produced 33 times), an ownerless inflight row,
+/// and a non-empty unsent tail that nobody delivered.
+fn orphan_facts() -> OrphanTerminalFrameFacts<'static> {
+    OrphanTerminalFrameFacts {
+        denial: Some(SoftTerminalAuthorityDenial::TurnStartOutsideFrame),
+        watcher_direct_fallback_requested: true,
+        watcher_direct_fallback_authorized: false,
+        session_bound_relay_owns_terminal_delivery: false,
+        direct_terminal_response_refused_duplicate: false,
+        current_response: LOST_BODY,
+        response_sent_offset: SENT_PREFIX,
+        full_response_len: SENT_PREFIX + LOST_BODY.len(),
+        data_start_offset: FRAME_START,
+        current_offset: FRAME_END,
+        terminal_event_consumed_offset: FRAME_END,
+        terminal_kind: Some(WatcherTerminalKind::SoftStopHookSummary),
+        session_bound_ack_outcome: SessionBoundRelayAckOutcome::NotDelivered,
+        inflight_present: true,
+        inflight_relay_owner: "none",
+        startup_snapshot_authority: false,
+        tmux_session_name: SESSION,
+        placeholder_msg_id: Some(serenity::MessageId::new(5_941_000)),
+        request_owner_user_id: Some(343_742_347_365_974_026),
+    }
+}
+
+#[test]
+fn denied_terminal_frame_with_a_body_requires_a_durable_record_5941() {
+    assert!(
+        orphan_facts().record_required(),
+        "the incident shape — denial, unauthorized fallback, no other owner, non-empty body — is exactly what must be preserved"
+    );
+}
+
+#[test]
+fn a_frame_with_no_denial_requires_no_record_5941() {
+    // `denial: None` means authority was never refused, so this frame is not
+    // the loss seam at all. Recording it would inflate the audit count `D` and
+    // make the `D == N+` reconciliation with the #5175 WARNs unreadable.
+    let facts = OrphanTerminalFrameFacts {
+        denial: None,
+        ..orphan_facts()
+    };
+    assert!(!facts.record_required());
+}
+
+#[test]
+fn an_empty_terminal_body_requires_no_record_5941() {
+    // 18 of the 33 denials in the 2026-09-16 incident carried no body: nothing
+    // was lost, so a row for them would be noise that breaks the arithmetic.
+    let facts = OrphanTerminalFrameFacts {
+        current_response: "",
+        ..orphan_facts()
+    };
+    assert!(!facts.record_required());
+}
+
+#[test]
+fn a_frame_whose_consumed_range_did_not_advance_requires_no_record_5941() {
+    for consumed_end in [FRAME_START, FRAME_START - 1, 0] {
+        let facts = OrphanTerminalFrameFacts {
+            terminal_event_consumed_offset: consumed_end,
+            ..orphan_facts()
+        };
+        assert!(
+            !facts.record_required(),
+            "consumed_end {consumed_end} does not advance past data_start_offset {FRAME_START}"
+        );
+    }
+}
+
+#[test]
+fn a_frame_someone_else_delivered_requires_no_record_5941() {
+    // Three different owners, each of which means the body was NOT lost: the
+    // session-bound sink committed it, the duplicate guard refused it because it
+    // is already in the channel, or the watcher itself was authorized to send.
+    for facts in [
+        OrphanTerminalFrameFacts {
+            session_bound_relay_owns_terminal_delivery: true,
+            ..orphan_facts()
+        },
+        OrphanTerminalFrameFacts {
+            direct_terminal_response_refused_duplicate: true,
+            ..orphan_facts()
+        },
+        OrphanTerminalFrameFacts {
+            watcher_direct_fallback_authorized: true,
+            ..orphan_facts()
+        },
+        OrphanTerminalFrameFacts {
+            watcher_direct_fallback_requested: false,
+            ..orphan_facts()
+        },
+    ] {
+        assert!(
+            !facts.record_required(),
+            "a frame with a delivery owner must not be dead-lettered"
+        );
+    }
+}
+
+#[test]
+fn record_decision_is_pinned_across_every_kind_and_denial_pair_5941() {
+    // The record admission must agree with the AUTHORITY rule for every
+    // combination, not just the incident's. A hard provider result keeps its
+    // recovery fallback even when the soft contract denied it, so a denial
+    // alone must not conjure a dead letter there.
+    for terminal_kind in [
+        None,
+        Some(WatcherTerminalKind::HardResult),
+        Some(WatcherTerminalKind::SoftStopHookSummary),
+        Some(WatcherTerminalKind::SoftUserBoundary),
+    ] {
+        for denial in [
+            None,
+            Some(SoftTerminalAuthorityDenial::NoInflightRow),
+            Some(SoftTerminalAuthorityDenial::SessionMismatch),
+            Some(SoftTerminalAuthorityDenial::TurnStartOutsideFrame),
+            Some(SoftTerminalAuthorityDenial::RelayOwnerNone),
+            Some(SoftTerminalAuthorityDenial::TurnNonceMissing),
+            Some(SoftTerminalAuthorityDenial::TurnNonceMismatch),
+        ] {
+            let authorized =
+                watcher_direct_fallback_has_turn_authority(terminal_kind, denial.is_none());
+            let facts = OrphanTerminalFrameFacts {
+                denial,
+                terminal_kind,
+                watcher_direct_fallback_authorized: authorized,
+                ..orphan_facts()
+            };
+            assert_eq!(
+                facts.record_required(),
+                denial.is_some() && !authorized,
+                "kind {terminal_kind:?} denial {denial:?} authorized {authorized}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_record_reason_carries_both_coordinate_systems_5941() {
+    // The two systems are NOT interchangeable: `response_sent_offset` /
+    // `full_response_len` index the in-memory response String that bounds
+    // `content`, while `jsonl_start` / `jsonl_end` are transcript byte offsets
+    // the frontier failed to advance past. A recovery that reads one as the
+    // other re-publishes the wrong bytes, so both must survive in the row.
+    let facts = orphan_facts();
+    let reason = facts.reason(
+        SoftTerminalAuthorityDenial::TurnStartOutsideFrame,
+        &ProviderKind::Claude,
+        GENERATION_MTIME_NS,
+    );
+
+    assert!(
+        reason.starts_with("terminal_no_delivery_owner "),
+        "{reason}"
+    );
+    for expected in [
+        format!(
+            "denial={}",
+            SoftTerminalAuthorityDenial::TurnStartOutsideFrame.as_str()
+        ),
+        format!(
+            "terminal_kind={}",
+            WatcherTerminalKind::SoftStopHookSummary.as_str()
+        ),
+        format!("response_sent_offset={SENT_PREFIX}"),
+        format!("full_response_len={}", SENT_PREFIX + LOST_BODY.len()),
+        format!("jsonl_start={FRAME_START}"),
+        format!("jsonl_end={FRAME_END}"),
+        format!("current_offset={FRAME_END}"),
+        format!("generation_mtime_ns={GENERATION_MTIME_NS}"),
+        format!("tmux_session={SESSION}"),
+        format!("provider={}", ProviderKind::Claude.as_str()),
+        "inflight_relay_owner=none".to_string(),
+        "frame_ack_outcome=NotDelivered".to_string(),
+    ] {
+        assert!(
+            reason.contains(&expected),
+            "reason must carry `{expected}`: {reason}"
+        );
+    }
+    assert!(
+        !reason.contains(&format!("jsonl_start={SENT_PREFIX}")),
+        "the response coordinate must never be reported as a transcript offset: {reason}"
+    );
+}
+
+#[test]
+fn the_dead_letter_row_preserves_the_unsent_tail_and_the_delivery_channel_5941() {
+    // Behaviour cannot reach the INSERT without a pool, so pin the mapping at
+    // the source: `content` must be the UNSENT tail (`current_response`, not the
+    // whole `full_response`, which would re-deliver the prefix the user already
+    // read), and `channel_id` must be the DELIVERY channel the plan was handed,
+    // not the watcher's owner channel.
+    let module = include_str!("orphan_terminal_frame.rs");
+    let record = module
+        .split_once("RelayDeadLetterRecord {")
+        .expect("the seam must build a dead-letter record")
+        .1
+        .split_once("\n        },")
+        .expect("the record literal must terminate")
+        .0;
+
+    assert!(record.contains("kind: crate::db::relay_dead_letter::KIND_TERMINAL_NO_DELIVERY_OWNER"));
+    assert!(
+        record.contains("content: facts.current_response.to_string()"),
+        "the row must carry the unsent tail: {record}"
+    );
+    assert!(!record.contains("full_response"), "{record}");
+    assert!(
+        record.contains("channel_id: channel_id.to_string()"),
+        "{record}"
+    );
+    assert!(!record.contains("watcher_owner_channel_id"), "{record}");
+    assert!(
+        record.contains("author_id: facts.request_owner_user_id"),
+        "{record}"
+    );
+    assert!(
+        record.contains("message_id: facts.placeholder_msg_id"),
+        "{record}"
+    );
+    assert!(record.contains("reason,"), "{record}");
+    assert!(
+        module.contains("record_detached(\n        shared.pg_pool.as_ref(),"),
+        "the record must be written through the shared PG pool, fire-and-forget"
+    );
+}
+
+#[test]
+fn the_production_call_site_hands_the_seam_the_lost_body_5941() {
+    // The predicate tests above cannot see whether the plan actually feeds this
+    // seam the frame it lost: swapping `watcher_resend_range_end` for
+    // `data_start_offset`, or dropping the body, leaves them all green while
+    // restoring the silent loss.
+    let source = include_str!("terminal_relay_plan.rs");
+    let call_site = source
+        .split_once("orphan_terminal_frame::observe_orphan_terminal_frame(")
+        .expect("the plan must route the denial seam through the orphan-frame recorder")
+        .1
+        .split_once("\n        );")
+        .expect("the call must terminate")
+        .0;
+
+    for operand in [
+        "shared,",
+        "channel_id,",
+        "watcher_provider,",
+        "denial: soft_terminal_authority_denial,",
+        "current_response,",
+        "response_sent_offset,",
+        "full_response_len: full_response.len(),",
+        "data_start_offset,",
+        "terminal_event_consumed_offset: watcher_resend_range_end,",
+        "placeholder_msg_id,",
+        "request_owner_user_id: inflight_before_relay",
+    ] {
+        assert!(
+            call_site.contains(operand),
+            "the seam must be fed `{operand}` from the frame being lost: {call_site}"
+        );
+    }
+
+    // The WARN and the per-conjunct counter MOVED with the seam; they did not
+    // get duplicated, and they did not get dropped. Operators grep `#5175:`.
+    let module = include_str!("orphan_terminal_frame.rs");
+    assert!(!source.contains("record_relay_terminal_authority_denied("));
+    assert!(module.contains("record_relay_terminal_authority_denied("));
+    assert!(module.contains("#5175: terminal frame has NO delivery owner"));
+    assert!(module.contains("soft_terminal_denial = denial.as_str()"));
+}
+
+#[test]
+fn the_dead_letter_kind_survives_a_non_unix_build_5941() {
+    // The `kind` string is platform-independent but its only writer is the
+    // `#[cfg(unix)]` watcher, so a Windows build sees it unused and `-D warnings`
+    // turns that into CI red. Asserted in PAIR with the existing sibling so the
+    // test cannot pass by accident if the attribute convention changes.
+    let dlq = include_str!("../../../db/relay_dead_letter.rs");
+    for kind in [
+        "KIND_READOPT_RELAY_STUCK",
+        "KIND_TERMINAL_NO_DELIVERY_OWNER",
+    ] {
+        let before = dlq
+            .split_once(&format!("pub(crate) const {kind}:"))
+            .unwrap_or_else(|| panic!("{kind} must be declared"))
+            .0;
+        assert!(
+            before
+                .trim_end()
+                .ends_with("#[cfg_attr(not(unix), allow(dead_code))]"),
+            "{kind} must be declared unconditionally with a non-unix dead-code allowance"
+        );
+    }
+}
+
+#[test]
+fn a_dropped_body_with_no_durable_record_violates_i17_5941() {
+    // I17 (`docs/relay-state-contract.md`): a terminal frame carrying a body
+    // ends with a delivery owner or a record. Force the violating state — a
+    // record-required frame with NO pool to record it into — and prove the
+    // invariant check FIRES. This is the #5941 defect itself: the pre-fix code
+    // read the absence of a record as the absence of a problem and reported
+    // `healthy` while three answers were gone.
+    let root = tempfile::tempdir().expect("isolated runtime root");
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    assert!(
+        shared.pg_pool.is_none(),
+        "the violating state requires an unconfigured dead-letter sink"
+    );
+    let channel = serenity::ChannelId::new(LOST_CHANNEL);
+    let observe = |facts: &OrphanTerminalFrameFacts<'_>| {
+        observe_orphan_terminal_frame(&shared, channel, &ProviderKind::Claude, facts)
+    };
+
+    assert!(
+        !observe(&orphan_facts()),
+        "a body dropped with no delivery owner AND no durable record must violate I17"
+    );
+
+    // Same seam, but the body is not lost: no record is owed, so nothing pages.
+    for benign in [
+        OrphanTerminalFrameFacts {
+            session_bound_relay_owns_terminal_delivery: true,
+            ..orphan_facts()
+        },
+        OrphanTerminalFrameFacts {
+            current_response: "",
+            ..orphan_facts()
+        },
+        OrphanTerminalFrameFacts {
+            denial: None,
+            ..orphan_facts()
+        },
+    ] {
+        assert!(
+            observe(&benign),
+            "a frame with an owner, no body, or no denial must not page as an unrecorded loss"
+        );
+    }
+
+    assert_eq!(
+        TERMINAL_FRAME_OWNER_OR_RECORD_INVARIANT, "terminal_frame_has_a_delivery_owner_or_a_record",
+        "the invariant key is the alert table's status filter and the contract doc's key"
+    );
 }

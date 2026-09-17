@@ -42,6 +42,19 @@ pub(crate) const KIND_QUEUE_OVERFLOW: &str = "queue_overflow";
 /// writer).
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) const KIND_READOPT_RELAY_STUCK: &str = "readopt_relay_stuck";
+/// #5941: a terminal frame ended with NO delivery owner — the session-bound sink
+/// did not deliver it and the watcher's soft-terminal authority was denied — so the
+/// assembled body was dropped and the delivery frontier stayed put, leaving the
+/// channel with nothing but a stranded "still working" placeholder. Recording the
+/// body here is what makes that loss recoverable instead of traceless; the pre-#5941
+/// path left only a WARN and a counter no alert table read.
+///
+/// Same platform story as [`KIND_READOPT_RELAY_STUCK`]: the `kind` string is
+/// platform-independent, but its sole writer
+/// (`tmux_watcher::orphan_terminal_frame::observe_orphan_terminal_frame`) is
+/// `#[cfg(unix)]`, so a Windows build sees it unused.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) const KIND_TERMINAL_NO_DELIVERY_OWNER: &str = "terminal_no_delivery_owner";
 
 /// Self-maintenance horizon: rows older than this are pruned opportunistically
 /// after each successful insert.

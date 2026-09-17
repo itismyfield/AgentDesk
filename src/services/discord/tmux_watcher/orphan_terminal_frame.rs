@@ -1,0 +1,177 @@
+//! #5941: durable preservation for a terminal frame that ended with NO
+//! delivery owner — the session-bound sink did not deliver it and the watcher's
+//! soft-terminal authority was denied, so the assembled body was dropped with
+//! only a WARN and a counter no alert table read.
+//!
+//! Split out of `terminal_relay_plan.rs` to keep that module inside the
+//! `src/services/discord/tmux_watcher/**` namespace size cap.
+
+use super::*;
+
+/// #5941 invariant I17 (`docs/relay-state-contract.md`): a terminal frame
+/// carrying a body must end with a delivery owner or a durable record.
+pub(super) const TERMINAL_FRAME_OWNER_OR_RECORD_INVARIANT: &str =
+    "terminal_frame_has_a_delivery_owner_or_a_record";
+
+/// The facts the #5175 denial seam already holds, named so that the record
+/// decision is a pure function of them. Field names mirror the call site's
+/// locals; the two coordinate systems are kept apart deliberately —
+/// `response_sent_offset`/`full_response_len` index the in-memory response
+/// String, while `data_start_offset`/`current_offset`/
+/// `terminal_event_consumed_offset` are transcript JSONL byte offsets.
+pub(super) struct OrphanTerminalFrameFacts<'a> {
+    pub(super) denial: Option<SoftTerminalAuthorityDenial>,
+    pub(super) watcher_direct_fallback_requested: bool,
+    pub(super) watcher_direct_fallback_authorized: bool,
+    pub(super) session_bound_relay_owns_terminal_delivery: bool,
+    pub(super) direct_terminal_response_refused_duplicate: bool,
+    /// The unsent tail, `full_response[response_sent_offset..]`.
+    pub(super) current_response: &'a str,
+    pub(super) response_sent_offset: usize,
+    pub(super) full_response_len: usize,
+    pub(super) data_start_offset: u64,
+    pub(super) current_offset: u64,
+    pub(super) terminal_event_consumed_offset: u64,
+    pub(super) terminal_kind: Option<WatcherTerminalKind>,
+    pub(super) session_bound_ack_outcome: SessionBoundRelayAckOutcome,
+    pub(super) inflight_present: bool,
+    pub(super) inflight_relay_owner: &'a str,
+    pub(super) startup_snapshot_authority: bool,
+    pub(super) tmux_session_name: &'a str,
+    pub(super) placeholder_msg_id: Option<serenity::MessageId>,
+    pub(super) request_owner_user_id: Option<u64>,
+}
+
+impl OrphanTerminalFrameFacts<'_> {
+    /// Did this frame end with no delivery owner AND a body worth preserving?
+    ///
+    /// `denial.is_some()` is today implied by the two fallback flags; it is kept
+    /// because a hard-terminal veto can deny authority without routing through
+    /// them. The emptiness and range conjuncts are NOT redundant: 18 of the 33
+    /// denials in the 2026-09-16 incident carried an empty body, and a row with
+    /// no content is noise that would break the `D == N+` audit arithmetic.
+    pub(super) fn record_required(&self) -> bool {
+        self.denial.is_some()
+            && self.watcher_direct_fallback_requested
+            && !self.watcher_direct_fallback_authorized
+            && !self.session_bound_relay_owns_terminal_delivery
+            && !self.direct_terminal_response_refused_duplicate
+            && !self.current_response.is_empty()
+            && self.terminal_event_consumed_offset > self.data_start_offset
+    }
+
+    /// One line an operator can read back into both coordinate systems: the
+    /// response indices that bound `content`, and the JSONL range the delivery
+    /// frontier refused to advance past. `generation_mtime_ns` fences the row to
+    /// the transcript generation it was cut from, so a later `/compact` cannot
+    /// make the offsets silently mean a different file.
+    pub(super) fn reason(
+        &self,
+        denial: SoftTerminalAuthorityDenial,
+        provider: &ProviderKind,
+        generation_mtime_ns: i64,
+    ) -> String {
+        format!(
+            "{kind} denial={denial} terminal_kind={terminal_kind} \
+             response_sent_offset={response_sent_offset} full_response_len={full_response_len} \
+             jsonl_start={jsonl_start} jsonl_end={jsonl_end} current_offset={current_offset} \
+             generation_mtime_ns={generation_mtime_ns} tmux_session={tmux_session} \
+             provider={provider} inflight_relay_owner={inflight_relay_owner} \
+             frame_ack_outcome={frame_ack_outcome:?}",
+            kind = crate::db::relay_dead_letter::KIND_TERMINAL_NO_DELIVERY_OWNER,
+            denial = denial.as_str(),
+            terminal_kind = self
+                .terminal_kind
+                .map(WatcherTerminalKind::as_str)
+                .unwrap_or("unknown"),
+            response_sent_offset = self.response_sent_offset,
+            full_response_len = self.full_response_len,
+            jsonl_start = self.data_start_offset,
+            jsonl_end = self.terminal_event_consumed_offset,
+            current_offset = self.current_offset,
+            generation_mtime_ns = generation_mtime_ns,
+            tmux_session = self.tmux_session_name,
+            provider = provider.as_str(),
+            inflight_relay_owner = self.inflight_relay_owner,
+            frame_ack_outcome = self.session_bound_ack_outcome,
+        )
+    }
+}
+
+/// #5175's WARN and per-conjunct counter (unchanged), followed by the #5941
+/// durable record that turns a traceless loss into a recoverable row.
+///
+/// Returns whether invariant I17 held. Production drops the value — the whole
+/// point is that the frame is already lost by the time we get here — and the
+/// regression test reads it, because "there is no record" must not be readable
+/// as "there is no problem".
+pub(super) fn observe_orphan_terminal_frame(
+    shared: &SharedData,
+    channel_id: serenity::ChannelId,
+    provider: &ProviderKind,
+    facts: &OrphanTerminalFrameFacts<'_>,
+) -> bool {
+    let Some(denial) = facts.denial.filter(|_| {
+        facts.watcher_direct_fallback_requested && !facts.watcher_direct_fallback_authorized
+    }) else {
+        return true;
+    };
+    crate::services::observability::metrics::record_relay_terminal_authority_denied(
+        channel_id.get(),
+        provider.as_str(),
+        denial.metric_name(),
+    );
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::warn!(
+        provider = provider.as_str(),
+        channel_id = channel_id.get(),
+        tmux_session = %facts.tmux_session_name,
+        data_start_offset = facts.data_start_offset,
+        current_offset = facts.current_offset,
+        terminal_kind = facts.terminal_kind.map(WatcherTerminalKind::as_str).unwrap_or("unknown"),
+        soft_terminal_denial = denial.as_str(),
+        inflight_present = facts.inflight_present,
+        inflight_relay_owner = facts.inflight_relay_owner,
+        startup_snapshot_authority = facts.startup_snapshot_authority,
+        full_response_len = facts.current_response.len(),
+        session_bound_ack_outcome = ?facts.session_bound_ack_outcome,
+        "  [{ts}] ⚠ #5175: terminal frame has NO delivery owner — sink did not deliver and the soft terminal is unauthorized; body dropped and the delivery frontier will not advance"
+    );
+    if !facts.record_required() {
+        return true;
+    }
+    let reason = facts.reason(
+        denial,
+        provider,
+        dr::current_generation_mtime_ns(facts.tmux_session_name),
+    );
+    // The record is fire-and-forget, so a missing pool is the one case where the
+    // body leaves no trace at all. That is the state #5941 forbids reporting as
+    // healthy: page on it instead of dropping it into the same silence.
+    let invariant_held = crate::services::observability::record_invariant_check(
+        shared.pg_pool.is_some(),
+        crate::services::observability::InvariantViolation {
+            provider: Some(provider.as_str()),
+            channel_id: Some(channel_id.get()),
+            dispatch_id: None,
+            session_key: Some(facts.tmux_session_name),
+            turn_id: None,
+            invariant: TERMINAL_FRAME_OWNER_OR_RECORD_INVARIANT,
+            code_location: "src/services/discord/tmux_watcher/orphan_terminal_frame.rs:observe_orphan_terminal_frame",
+            message: "terminal frame body dropped with no delivery owner and no durable record",
+            details: serde_json::json!({ "reason": reason.as_str() }),
+        },
+    );
+    crate::db::relay_dead_letter::record_detached(
+        shared.pg_pool.as_ref(),
+        crate::db::relay_dead_letter::RelayDeadLetterRecord {
+            kind: crate::db::relay_dead_letter::KIND_TERMINAL_NO_DELIVERY_OWNER.to_string(),
+            channel_id: channel_id.to_string(),
+            author_id: facts.request_owner_user_id.map(|id| id.to_string()),
+            message_id: facts.placeholder_msg_id.map(|id| id.get().to_string()),
+            content: facts.current_response.to_string(),
+            reason,
+        },
+    );
+    invariant_held
+}
