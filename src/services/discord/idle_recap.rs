@@ -642,46 +642,6 @@ pub(crate) async fn lookup_active_recap_for_channel(
     Ok(row.map(|(k, c, m)| (k, c as u64, m as u64)))
 }
 
-/// Core clear sequence for an idle-recap card bound to a Discord channel,
-/// generic over the lookup / delete / clear-pointer operations so the
-/// decision logic is unit-testable without a live Postgres or Discord http.
-///
-/// Invariant (#3146): while an active turn exists for a channel — regardless
-/// of origin (Discord-intake OR a TUI-driven turn detected by the watcher) —
-/// the `📦 … idle N분` recap card must not remain shown. Both call sites feed
-/// the same `(channel_id)` key into this helper, so a turn that starts via the
-/// TUI clears the card exactly the way a Discord-origin turn already does.
-///
-/// When the lookup returns `None` (no recap card recorded for the channel)
-/// this is a no-op: a still-idle channel keeps its card.
-#[allow(dead_code)] // #3034: test-only seam (prod wrappers removed; see codex R3 P2 note above).
-async fn clear_idle_recap_for_channel_with<Lookup, LookupFut, Delete, DeleteFut, Clear, ClearFut>(
-    channel_id: u64,
-    lookup: Lookup,
-    delete: Delete,
-    clear: Clear,
-) where
-    Lookup: FnOnce(u64) -> LookupFut,
-    LookupFut: std::future::Future<Output = Result<Option<(String, u64, u64)>, sqlx::Error>>,
-    Delete: FnOnce(u64, u64) -> DeleteFut,
-    DeleteFut: std::future::Future<Output = ()>,
-    Clear: FnOnce(String, u64) -> ClearFut,
-    ClearFut: std::future::Future<Output = Result<bool, sqlx::Error>>,
-{
-    match lookup(channel_id).await {
-        Ok(Some((session_key, chan, msg))) => {
-            delete(chan, msg).await;
-            let _ = clear(session_key, msg).await;
-        }
-        Ok(None) => {}
-        Err(e) => tracing::warn!(
-            error = %e,
-            channel_id = channel_id,
-            "idle_recap clear lookup failed"
-        ),
-    }
-}
-
 // codex R3 P2: the non-captured `clear_idle_recap_for_channel` /
 // `spawn_clear_idle_recap_for_channel` wrappers were removed. Both the
 // Discord-intake path and the TUI claim path now capture the recap pointer
@@ -689,9 +649,7 @@ async fn clear_idle_recap_for_channel_with<Lookup, LookupFut, Delete, DeleteFut,
 // `spawn_clear_captured_idle_recap_for_channel` — see its doc-comment. The
 // non-captured variant ran `lookup_active_recap_for_channel` inside the
 // detached task, so a delayed clear could delete a NEWER card from a later
-// idle period (NOT self-healing). The generic
-// `clear_idle_recap_for_channel_with` seam below is retained only because the
-// unit tests exercise its lookup → delete → clear-pointer decision logic.
+// idle period (NOT self-healing).
 
 /// Clear ONLY the specific recap card identified by `(session_key, channel_id,
 /// message_id)` — never whatever card happens to be current at clear time.
@@ -888,80 +846,6 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::rc::Rc;
-
-    /// #3146 Part 1: when a turn becomes active for a channel that has a
-    /// recorded idle-recap card, the clear sequence must delete the card AND
-    /// clear the recap pointer. This exercises the SAME core helper both the
-    /// Discord-intake and the TUI-driven turn call sites use, so a TUI-origin
-    /// active turn clears the card exactly the way a Discord-origin turn does.
-    #[tokio::test]
-    async fn clear_idle_recap_for_channel_deletes_card_and_clears_pointer() {
-        let deleted: Rc<RefCell<Vec<(u64, u64)>>> = Rc::new(RefCell::new(Vec::new()));
-        let cleared: Rc<RefCell<Vec<(String, u64)>>> = Rc::new(RefCell::new(Vec::new()));
-        let deleted_for_closure = deleted.clone();
-        let cleared_for_closure = cleared.clone();
-
-        clear_idle_recap_for_channel_with(
-            777,
-            |channel_id| async move {
-                assert_eq!(channel_id, 777);
-                Ok(Some(("discord:codex:tui-sess".to_string(), 777, 4242)))
-            },
-            move |chan, msg| {
-                let deleted = deleted_for_closure.clone();
-                async move {
-                    deleted.borrow_mut().push((chan, msg));
-                }
-            },
-            move |session_key, msg| {
-                let cleared = cleared_for_closure.clone();
-                async move {
-                    cleared.borrow_mut().push((session_key, msg));
-                    Ok(true)
-                }
-            },
-        )
-        .await;
-
-        assert_eq!(deleted.borrow().as_slice(), &[(777, 4242)]);
-        assert_eq!(
-            cleared.borrow().as_slice(),
-            &[("discord:codex:tui-sess".to_string(), 4242)]
-        );
-    }
-
-    /// A still-idle channel (no recap pointer recorded) must NOT have anything
-    /// deleted or cleared — the clear is a no-op so a legitimately idle card
-    /// survives.
-    #[tokio::test]
-    async fn clear_idle_recap_for_channel_noop_when_no_card_recorded() {
-        let deleted = Rc::new(RefCell::new(0u32));
-        let cleared = Rc::new(RefCell::new(0u32));
-        let deleted_for_closure = deleted.clone();
-        let cleared_for_closure = cleared.clone();
-
-        clear_idle_recap_for_channel_with(
-            123,
-            |_channel_id| async move { Ok(None) },
-            move |_chan, _msg| {
-                let deleted = deleted_for_closure.clone();
-                async move {
-                    *deleted.borrow_mut() += 1;
-                }
-            },
-            move |_session_key, _msg| {
-                let cleared = cleared_for_closure.clone();
-                async move {
-                    *cleared.borrow_mut() += 1;
-                    Ok(true)
-                }
-            },
-        )
-        .await;
-
-        assert_eq!(*deleted.borrow(), 0);
-        assert_eq!(*cleared.borrow(), 0);
-    }
 
     /// codex R2 P2: the captured-id clear targets ONLY the id captured when the
     /// turn was claimed — it passes the CAPTURED message id to both the delete

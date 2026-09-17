@@ -1,33 +1,5 @@
 use super::*;
 
-/// #1446 Layer 2 — load the thread's persisted inflight state and report
-/// whether its `updated_at` is older than `INFLIGHT_STALENESS_THRESHOLD_SECS`.
-/// Returns `false` when no state file exists (nothing to clean) or when
-/// `updated_at` cannot be parsed (never infer staleness from missing data).
-///
-/// **Pure-classification helper only.** A stale `updated_at` is necessary
-/// but not sufficient to force-clean a live thread — `updated_at` only
-/// advances when `save_inflight_state` runs, so a healthy long Bash /
-/// large Read / slow LLM stream can legitimately go silent for minutes.
-/// `thread_guard_should_force_clean_stale_thread` adds the required
-/// secondary signal (watcher snapshot's `desynced == true`).
-#[allow(dead_code)] // #3034: #1446 Layer-2 classifier pinned by the intake-gate unit tests.
-pub(super) fn thread_guard_inflight_is_stale(
-    provider: &ProviderKind,
-    thread_id: serenity::ChannelId,
-    now_unix_secs: i64,
-) -> bool {
-    crate::services::discord::inflight::load_inflight_state(provider, thread_id.get())
-        .map(|state| {
-            crate::services::discord::inflight::inflight_state_is_stale(
-                &state,
-                now_unix_secs,
-                crate::services::discord::inflight::INFLIGHT_STALENESS_THRESHOLD_SECS,
-            )
-        })
-        .unwrap_or(false)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StaleActiveTurnProofClassification {
     LiveOrUnclear,
@@ -329,10 +301,9 @@ pub(super) async fn mailbox_has_live_active_turn_or_cleanup_stale_proof(
     true
 }
 
-/// #1446 Layer 2 — `thread_guard_inflight_is_stale` reads inflight files
-/// via the runtime root override, so we keep the always-on slice that
-/// only exercises the read+staleness classification (no `SharedData`
-/// construction). The `thread_guard_force_clean_stale_thread` integration
+/// #1446 Layer 2 — these cases read inflight files via the runtime root
+/// override, so we keep the always-on slice that needs no `SharedData`
+/// construction. The `thread_guard_force_clean_stale_thread` integration
 /// test that drives mailbox cancel / dispatch_thread_parents removal is
 /// still not in the default suite because it depends on `TestHealthHarness`.
 #[cfg(test)]
@@ -530,59 +501,6 @@ mod thread_guard_stale_pure_tests {
                 None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
             }
         }
-    }
-
-    /// `thread_guard_inflight_is_stale` must:
-    ///   1. report `true` for a stale on-disk inflight,
-    ///   2. report `false` for a fresh on-disk inflight,
-    ///   3. report `false` when the inflight file does not exist (nothing
-    ///      to clean — never cleanup a thread we know nothing about).
-    #[tokio::test]
-    async fn thread_guard_inflight_is_stale_classifies_disk_state() {
-        let temp = tempfile::tempdir().expect("create temp runtime root");
-        let _guard = EnvRootGuard::set(temp.path());
-
-        let provider = ProviderKind::Codex;
-        let now_unix = chrono::Utc::now().timestamp();
-
-        // Missing inflight → not stale.
-        assert!(
-            !super::thread_guard_inflight_is_stale(
-                &provider,
-                ChannelId::new(900_000_000_000_900),
-                now_unix
-            ),
-            "missing inflight must NOT be classified as stale"
-        );
-
-        // Stale inflight → stale.
-        let stale_channel = 900_000_000_000_901u64;
-        let stale_at = local_at_offset(
-            now_unix,
-            -(crate::services::discord::inflight::INFLIGHT_STALENESS_THRESHOLD_SECS as i64) - 5,
-        );
-        seed_inflight_with_updated_at(&provider, stale_channel, &stale_at);
-        assert!(
-            super::thread_guard_inflight_is_stale(
-                &provider,
-                ChannelId::new(stale_channel),
-                now_unix
-            ),
-            "stale inflight (updated_at={stale_at}) must be classified as stale"
-        );
-
-        // Fresh inflight → not stale.
-        let fresh_channel = 900_000_000_000_902u64;
-        let fresh_at = local_at_offset(now_unix, -5);
-        seed_inflight_with_updated_at(&provider, fresh_channel, &fresh_at);
-        assert!(
-            !super::thread_guard_inflight_is_stale(
-                &provider,
-                ChannelId::new(fresh_channel),
-                now_unix
-            ),
-            "fresh inflight (updated_at={fresh_at}) must NOT be classified as stale"
-        );
     }
 
     /// #1456: a stale active-turn proof with no attached watcher and no live

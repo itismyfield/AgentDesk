@@ -229,8 +229,8 @@ pub(in crate::services::discord) enum PlaceholderSlot {
 /// What the controller should do with the turn body, derived from the
 /// `outbound` length decision (`Inline → Replace`, `Split → SendNewChunks`).
 ///
-/// Built by owners (via `from_length_decision`) at cutover (A2+); A1 prod has
-/// no owner, so the variants and the mapping fn are dormant outside tests.
+/// Built by owners at cutover (A2+); A1 prod has no owner, so some variants
+/// are dormant.
 #[allow(dead_code)] // #3089 A1: built by owners at A2 cutover.
 pub(in crate::services::discord) enum OutputPlan {
     /// Publish a new anchor-less message. The body is carried by
@@ -263,39 +263,6 @@ pub(in crate::services::discord) enum OutputPlan {
 }
 
 pub(in crate::services::discord) use fresh_send::RecordContext as FreshSendRecord;
-
-impl OutputPlan {
-    /// Map an `outbound::decide_policy_with_limits` length decision into an
-    /// `OutputPlan`.
-    ///
-    /// - `Inline` → `Replace` (fits a single message; edit the placeholder in
-    ///   place). The replace `lifecycle` is supplied by the caller because the
-    ///   length decision alone cannot tell cancel / prompt-too-long / normal
-    ///   apart.
-    /// - `Split` → `SendNewChunks { chunk_count, delete_anchor: false }`.
-    /// - `Compact` collapses to its single rendered message → `Replace`.
-    /// - `FileAttachment` / `RejectOverLimit` are not turn-body relays through
-    ///   this controller → `NoOp` (the owner handles those out of band).
-    #[allow(dead_code)] // #3089 A1: called by owners at A2 cutover.
-    pub(in crate::services::discord) fn from_length_decision(
-        decision: &LengthPolicyDecision,
-        replace_lifecycle: PlaceholderLifecycle,
-    ) -> Self {
-        match decision {
-            LengthPolicyDecision::Inline { .. } | LengthPolicyDecision::Compact { .. } => {
-                OutputPlan::Replace {
-                    lifecycle: replace_lifecycle,
-                }
-            }
-            LengthPolicyDecision::Split { chunk_count, .. } => OutputPlan::SendNewChunks {
-                chunk_count: *chunk_count,
-                delete_anchor: false,
-            },
-            LengthPolicyDecision::FileAttachment { .. }
-            | LengthPolicyDecision::RejectOverLimit { .. } => OutputPlan::NoOp,
-        }
-    }
-}
 
 /// How a `Replace` plan's body reached Discord on a confirmed delivery, surfaced
 /// so an owner can mirror the legacy per-variant post-send cleanup — both advance
@@ -3391,57 +3358,6 @@ mod tests {
             "#3151: the inline commit (step {commit_step}) must be observable to a \
              post-send gateway await (step {first_commit_step})"
         );
-    }
-
-    /// `from_length_decision` mapping: Inline/Compact → Replace, Split →
-    /// SendNewChunks, FileAttachment/Reject → NoOp.
-    #[test]
-    fn output_plan_from_length_decision_maps_each_variant() {
-        use crate::services::discord::outbound::result::FallbackUsed;
-
-        let inline = LengthPolicyDecision::Inline { char_count: 10 };
-        assert!(matches!(
-            OutputPlan::from_length_decision(&inline, PlaceholderLifecycle::Completed),
-            OutputPlan::Replace {
-                lifecycle: PlaceholderLifecycle::Completed
-            }
-        ));
-
-        let compact = LengthPolicyDecision::Compact {
-            char_count: 3000,
-            compact_char_limit: 2000,
-            summary_available: false,
-            fallback_used: FallbackUsed::LengthCompacted,
-        };
-        assert!(matches!(
-            OutputPlan::from_length_decision(&compact, PlaceholderLifecycle::Aborted),
-            OutputPlan::Replace {
-                lifecycle: PlaceholderLifecycle::Aborted
-            }
-        ));
-
-        let split = LengthPolicyDecision::Split {
-            char_count: 5000,
-            chunk_char_limit: 2000,
-            chunk_count: 3,
-            fallback_used: FallbackUsed::LengthSplit,
-        };
-        assert!(matches!(
-            OutputPlan::from_length_decision(&split, PlaceholderLifecycle::Completed),
-            OutputPlan::SendNewChunks {
-                chunk_count: 3,
-                delete_anchor: false
-            }
-        ));
-
-        let reject = LengthPolicyDecision::RejectOverLimit {
-            char_count: 9999,
-            inline_char_limit: 2000,
-        };
-        assert!(matches!(
-            OutputPlan::from_length_decision(&reject, PlaceholderLifecycle::Completed),
-            OutputPlan::NoOp
-        ));
     }
 
     fn debug_outcome(o: &DeliveryOutcome) -> &'static str {

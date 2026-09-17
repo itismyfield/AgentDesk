@@ -388,13 +388,6 @@ fn build_terminal_card(record: &AbandonRecord) -> String {
     )
 }
 
-/// Pure defer decision: defer the abandon edit while a LIVE inflight row still
-/// anchors this exact `msg_id` as its placeholder (a re-adopt reused the id, or a
-/// late in-turn completion is editing it). Split out for unit testing.
-fn abandon_drain_defers_for_live_anchor(current_msg_id: Option<u64>, msg_id: u64) -> bool {
-    msg_id != 0 && current_msg_id == Some(msg_id)
-}
-
 fn inflight_matches_record_episode(
     state: &super::inflight::InflightTurnState,
     record: &AbandonRecord,
@@ -846,14 +839,6 @@ mod tests {
             pending[0].1.current_tool_line.as_deref(),
             Some("⚙ Bash: cargo build")
         );
-    }
-
-    #[test]
-    fn defer_only_for_exact_live_anchor() {
-        assert!(abandon_drain_defers_for_live_anchor(Some(5555), 5555));
-        assert!(!abandon_drain_defers_for_live_anchor(Some(0), 0));
-        assert!(!abandon_drain_defers_for_live_anchor(Some(9999), 5555));
-        assert!(!abandon_drain_defers_for_live_anchor(None, 5555));
     }
 
     #[test]
