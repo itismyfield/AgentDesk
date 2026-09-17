@@ -52,6 +52,10 @@ use super::snapshot::WatcherStateSnapshot;
 use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::ProviderKind;
 
+mod idle_relay_absence;
+
+use idle_relay_absence::observe_routable_unwatched_tui_sessions;
+
 /// A watcher absent for longer than this (despite a live AgentDesk tmux
 /// session that should own one) escalates from WARN to ERROR — the dead-man
 /// switch. Independent of the force-clean path: it fires for ANY cause of a
@@ -86,6 +90,11 @@ struct WatcherAbsenceState {
     first_seen_unix_secs: i64,
     last_seen_unix_secs: i64,
     escalated: bool,
+    /// #5957: one-shot latch for the routable-but-unwatched WARN. Separate from
+    /// `escalated` because the two ladders arm from different authorities — this
+    /// one from the surviving registry entry, `escalated` from a health snapshot
+    /// that does not exist for an idle channel.
+    idle_relay_announced: bool,
     minimum_initial_offset: Option<u64>,
     failed_attempts: u32,
     next_attempt_unix_secs: i64,
@@ -98,6 +107,7 @@ impl WatcherAbsenceState {
             first_seen_unix_secs: now_unix_secs,
             last_seen_unix_secs: now_unix_secs,
             escalated: false,
+            idle_relay_announced: false,
             minimum_initial_offset: None,
             failed_attempts: 0,
             next_attempt_unix_secs: now_unix_secs,
@@ -252,6 +262,11 @@ pub(super) async fn sweep_and_retry_absences(
         now_unix_secs,
     )
     .await;
+    // #5957: the registry-derived authority runs AFTER the relay-work one, so a
+    // channel both can reach is observed by the sweep carrying the richer
+    // evidence and this one steps aside (see `observed_on_this_tick`).
+    observe_routable_unwatched_tui_sessions(provider, runtimes, watcher_derived, now_unix_secs)
+        .await;
     retry_pending_watcher_respawns(registry, provider, runtimes, now_unix_secs).await;
 }
 
@@ -880,6 +895,10 @@ mod tests {
 
     use super::super::HealthRegistry;
     use super::super::snapshot::WatcherStateSnapshot;
+    use super::idle_relay_absence::{
+        IDLE_RELAY_ABSENCE_WARN_SECS, RoutableUnwatchedSession, observe_routable_unwatched_session,
+        observed_on_this_tick,
+    };
     use super::*;
 
     fn snapshot(
@@ -2140,5 +2159,239 @@ mod tests {
             1_000_000 + WATCHER_ABSENCE_DEADMAN_SECS as i64 + 100,
         ));
         clear_watcher_absence(&provider, channel);
+    }
+    const ADK_CC_SESSION: &str = "AgentDesk-claude-adk-cc";
+
+    /// The absence map is a process-global `DashMap` and these tests run in
+    /// parallel, so each one owns a distinct channel id rather than replaying
+    /// the incident's real one (that identity lives in the pure
+    /// `idle_relay_absence` tests, which touch no global state).
+    fn candidate(channel_id: ChannelId) -> RoutableUnwatchedSession {
+        RoutableUnwatchedSession {
+            channel_id,
+            tmux_session: ADK_CC_SESSION.to_string(),
+        }
+    }
+
+    fn idle_relay_announced(provider: &ProviderKind, channel_id: ChannelId) -> bool {
+        WATCHER_ABSENCE
+            .get(&WatcherAbsenceKey::new(provider, channel_id))
+            .is_some_and(|state| state.idle_relay_announced)
+    }
+
+    /// #5957 regression — the incident fixture: watcher stopped, tmux session
+    /// alive, authoritative routing entry and TUI binding both surviving, mailbox
+    /// and inflight both EMPTY.
+    ///
+    /// The 2026-09-16 gap needed a full dcserver restart (5h14m) because nothing
+    /// armed the absence. The absence map is the respawn retry queue, and
+    /// `sweep_and_retry_absences` drains it in the same pass that fills it, so
+    /// arming on the first tick after the stop IS recovery inside one
+    /// `STALL_WATCHDOG_INTERVAL_SECS` tick.
+    #[test]
+    fn a_routable_unwatched_session_reaches_the_respawn_queue_within_one_minute() {
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(5_957_301);
+        clear_watcher_absence(&provider, channel);
+
+        let watcher_stopped_at = 1_789_000_000i64;
+        let first_sweep = watcher_stopped_at + STALL_WATCHDOG_INTERVAL_SECS as i64;
+
+        assert!(
+            !pending_absent_channels(&provider).contains(&channel),
+            "nothing may be armed before the sweep runs"
+        );
+        observe_routable_unwatched_session(&provider, &candidate(channel), first_sweep);
+
+        assert!(
+            pending_absent_channels(&provider).contains(&channel),
+            "an idle channel whose routing outlived its watcher must enter the \
+             respawn queue; in the incident it never did and the relay stayed \
+             dead for 5h14m"
+        );
+        assert!(
+            respawn_attempt_due(&provider, channel, first_sweep),
+            "the respawn must be due on the same tick that arms the absence — \
+             `sweep_and_retry_absences` drains the queue right after filling it"
+        );
+        assert!(
+            first_sweep - watcher_stopped_at <= 60,
+            "recovery must start within a minute of the watcher stopping, got {}s",
+            first_sweep - watcher_stopped_at
+        );
+
+        clear_watcher_absence(&provider, channel);
+    }
+
+    /// #5957 regression — the observability half: a gap that does NOT recover
+    /// has to become loud at a bounded threshold instead of passing silently.
+    #[test]
+    fn an_unrecovered_routable_absence_warns_once_past_the_threshold() {
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(5_957_302);
+        clear_watcher_absence(&provider, channel);
+
+        let t0 = 1_789_100_000i64;
+        let candidate = candidate(channel);
+
+        observe_routable_unwatched_session(&provider, &candidate, t0);
+        assert!(
+            !idle_relay_announced(&provider, channel),
+            "a gap the next tick can heal must stay quiet"
+        );
+
+        observe_routable_unwatched_session(
+            &provider,
+            &candidate,
+            t0 + IDLE_RELAY_ABSENCE_WARN_SECS as i64 - 1,
+        );
+        assert!(
+            !idle_relay_announced(&provider, channel),
+            "below the threshold is still quiet"
+        );
+
+        observe_routable_unwatched_session(
+            &provider,
+            &candidate,
+            t0 + IDLE_RELAY_ABSENCE_WARN_SECS as i64,
+        );
+        assert!(
+            idle_relay_announced(&provider, channel),
+            "an unrecovered watcher-less live TUI session must announce itself; \
+             the incident spent 4h44m with no line at all"
+        );
+
+        clear_watcher_absence(&provider, channel);
+    }
+
+    /// The incident's own duration, replayed at the real tick cadence: the WARN
+    /// must fire, and exactly once, not on every one of the ~568 ticks.
+    #[test]
+    fn the_five_hour_incident_gap_warns_exactly_once() {
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(5_957_303);
+        clear_watcher_absence(&provider, channel);
+
+        let t0 = 1_789_200_000i64;
+        let candidate = candidate(channel);
+        let gap_secs: usize = 4 * 3600 + 44 * 60;
+        let mut announcements = 0usize;
+        let mut already = false;
+        for tick in (0..=gap_secs).step_by(STALL_WATCHDOG_INTERVAL_SECS as usize) {
+            observe_routable_unwatched_session(&provider, &candidate, t0 + tick as i64);
+            let announced = idle_relay_announced(&provider, channel);
+            if announced && !already {
+                announcements += 1;
+            }
+            already = announced;
+        }
+        assert_eq!(
+            announcements, 1,
+            "the 4h44m gap must produce exactly one announcement, not zero and \
+             not one per tick"
+        );
+
+        clear_watcher_absence(&provider, channel);
+    }
+
+    /// A channel the relay-work sweep already observed on this tick must not be
+    /// re-observed here: that sweep holds the richer evidence and owns the
+    /// dead-man ERROR ladder.
+    #[test]
+    fn a_channel_observed_on_this_tick_is_left_to_the_relay_work_sweep() {
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(5_957_304);
+        clear_watcher_absence(&provider, channel);
+
+        let now = 1_789_300_000i64;
+        let live = snapshot(
+            channel.get(),
+            Some(ADK_CC_SESSION),
+            Some(true),
+            true,
+            Some(5_957_001),
+        );
+        detect_and_escalate_watcher_absence(&provider, channel, &live, false, now);
+        assert!(
+            observed_on_this_tick(&WatcherAbsenceKey::new(&provider, channel), now),
+            "the relay-work sweep stamps the entry with this tick's clock"
+        );
+
+        // Even at a gap far past the threshold, the same-tick guard suppresses a
+        // second observation.
+        observe_routable_unwatched_session(&provider, &candidate(channel), now);
+        assert!(
+            !idle_relay_announced(&provider, channel),
+            "one observation per tick per channel"
+        );
+
+        clear_watcher_absence(&provider, channel);
+    }
+
+    /// A returning watcher clears the entry, which also resets the WARN latch —
+    /// a LATER gap must be able to announce itself again.
+    #[test]
+    fn a_recovered_channel_can_announce_a_later_gap_again() {
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(5_957_305);
+        clear_watcher_absence(&provider, channel);
+
+        let t0 = 1_789_400_000i64;
+        let candidate = candidate(channel);
+        observe_routable_unwatched_session(&provider, &candidate, t0);
+        observe_routable_unwatched_session(
+            &provider,
+            &candidate,
+            t0 + IDLE_RELAY_ABSENCE_WARN_SECS as i64,
+        );
+        assert!(idle_relay_announced(&provider, channel));
+
+        // Watcher comes back.
+        clear_watcher_absence(&provider, channel);
+        assert!(!idle_relay_announced(&provider, channel));
+
+        let t1 = t0 + 10_000;
+        observe_routable_unwatched_session(&provider, &candidate, t1);
+        assert!(
+            !idle_relay_announced(&provider, channel),
+            "a fresh absence starts quiet"
+        );
+        observe_routable_unwatched_session(
+            &provider,
+            &candidate,
+            t1 + IDLE_RELAY_ABSENCE_WARN_SECS as i64,
+        );
+        assert!(
+            idle_relay_announced(&provider, channel),
+            "the latch must not survive recovery"
+        );
+
+        clear_watcher_absence(&provider, channel);
+    }
+
+    /// #5957: the registry-derived sweep is only useful if the pass calls it.
+    /// This dies if `observe_routable_unwatched_tui_sessions` is dropped from
+    /// `sweep_and_retry_absences` — nothing else arms an absence for a channel
+    /// that owes no relay work.
+    #[test]
+    fn the_sweep_arms_the_registry_derived_absences_before_retrying() {
+        let body = include_str!("watcher_respawn.rs")
+            .split_once("pub(super) async fn sweep_and_retry_absences(")
+            .expect("sweep entry point")
+            .1
+            .split_once("\n}\n")
+            .expect("sweep body terminator")
+            .0;
+        let arm = body
+            .find("observe_routable_unwatched_tui_sessions(")
+            .expect("the registry-derived sweep must run in the pass");
+        let retry = body
+            .find("retry_pending_watcher_respawns(")
+            .expect("the retry must run in the pass");
+        assert!(
+            arm < retry,
+            "the absence must be armed before the queue is drained, or recovery \
+             waits a whole extra tick"
+        );
     }
 }
