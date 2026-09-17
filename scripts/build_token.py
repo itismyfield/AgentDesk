@@ -23,6 +23,12 @@ used, because the build's group intentionally holds an sccache daemon.
 
 An explicit --delegate-lease permits one cooperative wrapper hop. Ordinary
 children inherit no lease; this does not make whole-deploy wrapping or ABBA safe.
+
+Waiting is first-come-first-served. `acquire()` retries a non-blocking flock, so
+the kernel never queues the waiters; on 2026-09-17 that let a lane release the
+token and immediately re-enter, winning every handoff while a process that had
+waited 49 minutes never saw a free window (#5968). Waiters therefore take a
+numbered ticket next to the token and only the oldest one retries.
 """
 
 from __future__ import annotations
@@ -56,6 +62,20 @@ _HOMEBREW_BIN = "/opt/homebrew/bin"
 DEFAULT_WAIT_TIMEOUT_SECS = 14400.0
 WAIT_POLL_SECS = 0.5
 WAIT_NOTICE_SECS = 300.0
+# The waiting line lives beside the token it orders, so a temporary token in a
+# test gets its own queue and never touches the canonical one.
+QUEUE_DIR_SUFFIX = ".q"
+# Sticky, like /tmp itself: other lanes -- possibly other uids, the token is
+# 0o666 -- must be able to enqueue without being able to evict each other.
+_QUEUE_DIR_MODE = 0o1777
+# Both are dot-prefixed so a scan skips them: the counter is not a ticket, and a
+# ticket mid-creation is not yet anyone's place in line.
+_SEQUENCE_FILE = ".seq"
+_PENDING_PREFIX = ".pending-"
+# Bound on taking the counter: a thousandfold margin over the syscalls it
+# guards, and short enough to stay noise against any real wait deadline.
+_SEQUENCE_TRIES = 20
+_SEQUENCE_RETRY_SECS = 0.005
 EXIT_USAGE = 64
 EXIT_TOKEN_UNUSABLE = 69
 EXIT_TOKEN_TIMEOUT = 75
@@ -200,39 +220,198 @@ def _supervised() -> Iterator[_Supervisor]:
                 signal.signal(signum, supervisor.previous[signum])
 
 
+def queue_dir(path: str) -> str:
+    """Where `path`'s waiters line up."""
+    return path + QUEUE_DIR_SUFFIX
+
+
+def ticket_sequence(name: str) -> int | None:
+    """The arrival number encoded in a ticket filename, or None if it is not one."""
+    try:
+        return int(name.partition("-")[0])
+    except ValueError:
+        return None
+
+
+def reclaim_if_abandoned(qdir: str, name: str) -> bool:
+    """True when this ticket has no live owner; its file is removed on the way out.
+
+    A ticket records a place in line, but unlike an flock a file does not vanish
+    when its owner is killed, and a queue that accumulates dead entries is a
+    worse deadlock than the unfairness it replaced. So the liveness proof is
+    itself an flock, on the ticket: whoever can take it knows the kernel already
+    released it, which only happens once the owner's last fd is gone.
+    """
+    import fcntl
+
+    ticket = os.path.join(qdir, name)
+    try:
+        # Read-only is enough: flock locks the description, not the access mode,
+        # and a ticket owned by another uid is readable but not writable.
+        fd = os.open(ticket, os.O_RDONLY | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False  # Unreadable: leave the place standing rather than cut in.
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False  # Still locked, so its owner is alive and still queued.
+        with contextlib.suppress(OSError):
+            os.unlink(ticket)
+        return True
+    finally:
+        os.close(fd)
+
+
+def claim_sequence(qdir: str, queued: Iterable[str]) -> int:
+    """Take the next arrival number, never below a ticket already in the queue."""
+    import fcntl
+
+    ahead = [seq for seq in map(ticket_sequence, queued) if seq is not None]
+    fd = os.open(os.path.join(qdir, _SEQUENCE_FILE),
+                 os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o666)
+    try:
+        # This lock spans one read-modify-write, never a build -- but it is taken
+        # before `acquire()`'s deadline loop starts, so a stopped process holding
+        # it must not be able to block a caller indefinitely. Bounded spin, then
+        # give up: the caller's own except-OSError turns that into no ordering.
+        for attempt in range(_SEQUENCE_TRIES):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if attempt == _SEQUENCE_TRIES - 1:
+                    raise
+                time.sleep(_SEQUENCE_RETRY_SECS)
+        try:
+            counter = int(os.read(fd, 64).decode("ascii", "replace").strip() or 0)
+        except ValueError:
+            counter = 0
+        # Re-seed from the live queue too: a counter truncated or removed out of
+        # band would otherwise hand a newcomer a number ahead of everyone.
+        issued = max([counter, 0, *ahead]) + 1
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, str(issued).encode("ascii"))
+        return issued
+    finally:
+        os.close(fd)
+
+
+class _Ticket:
+    """One waiter's place in line, held open for as long as it waits."""
+
+    def __init__(self, qdir: str, name: str, sequence: int) -> None:
+        self.qdir, self.name, self.sequence = qdir, name, sequence
+
+    def survey(self) -> tuple[int, int]:
+        """(waiters older than me, waiters including me), reclaiming dead tickets."""
+        try:
+            entries = os.listdir(self.qdir)
+        except OSError:
+            return 0, 1  # No queue to read: degrade to unordered contention.
+        ahead = total = 0
+        for name in entries:
+            if name.startswith(".") or ticket_sequence(name) is None:
+                continue
+            if name != self.name and reclaim_if_abandoned(self.qdir, name):
+                continue
+            total += 1
+            # The nonce breaks a tie that only a re-seeded counter can produce,
+            # and it breaks it the same way in every waiter that reads it.
+            if (ticket_sequence(name), name) < (self.sequence, self.name):
+                ahead += 1
+        return ahead, max(total, 1)
+
+
+@contextlib.contextmanager
+def enqueue(path: str) -> Iterator[_Ticket | None]:
+    """Take a place in `path`'s waiting line, giving it up however the wait ends."""
+    import fcntl
+
+    qdir, fd, pending, ticket = queue_dir(path), -1, None, None
+    try:
+        os.makedirs(qdir, exist_ok=True)
+        with contextlib.suppress(OSError):
+            os.chmod(qdir, _QUEUE_DIR_MODE)
+        nonce = secrets.token_hex(8)
+        sequence = claim_sequence(qdir, os.listdir(qdir))
+        name = f"{sequence:020d}-{os.getpid()}-{nonce}"
+        pending = os.path.join(qdir, f"{_PENDING_PREFIX}{os.getpid()}-{nonce}")
+        fd = os.open(pending, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o666)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.write(fd, f"pid {os.getpid()} waiting since {time.strftime('%H:%M:%S')}\n".encode())
+        # Locked before it is visible, so a scan can never read a ticket still
+        # being created as one whose owner died.
+        os.rename(pending, os.path.join(qdir, name))
+        pending, ticket = None, _Ticket(qdir, name, sequence)
+    except OSError:
+        # The queue is best effort. A /tmp that cannot hold it costs ordering,
+        # never the build: fall back to the unordered contention it replaced.
+        ticket = None
+    try:
+        yield ticket
+    finally:
+        for leftover in (pending, None if ticket is None else os.path.join(qdir, ticket.name)):
+            if leftover is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(leftover)
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
 def acquire(fd: int, path: str, timeout: float) -> None:
-    """Block until this fd owns the token, or raise past the deadline."""
+    """Block until this fd owns the token, or raise past the deadline.
+
+    Only the oldest waiter retries the lock, which is what makes the handoff
+    first-come-first-served: a process that releases the token and re-enters
+    lands behind everyone already waiting instead of racing them for the
+    sub-poll-interval window its own release opened. Acquisition itself stays a
+    non-blocking retry so the periodic notice and the deadline keep running on
+    this thread -- a blocking flock would need a timer thread or SIGALRM, and
+    this wrapper's whole contract is that no signal path frees a live build's
+    token.
+    """
     import fcntl
 
     started = time.monotonic()
     deadline = started + timeout
     notice_at, since = started, time.strftime("%H:%M:%S")
-    while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return
-        except OSError as exc:
-            if exc.errno not in _WOULD_BLOCK:
-                raise BuildTokenError(f"build token {path} is unusable: {exc}") from exc
-        now = time.monotonic()
-        if now >= notice_at:
-            # A stall that prints nothing is indistinguishable from a hung
-            # build, and the default deadline here is four hours.
-            note = (f"build token: waiting for {path} since {since}: another release"
-                    f" build holds it ({now - started:.0f}s of {timeout:g}s; raise"
-                    f" {WAIT_TIMEOUT_ENV} to wait longer)\n")
-            try:
-                os.write(int(os.environ[DIAG_FD_ENV]), note.encode())
-            except (KeyError, ValueError, OSError):
-                sys.stderr.write(note)
-                sys.stderr.flush()
-            notice_at = now + WAIT_NOTICE_SECS
-        if now >= deadline:
-            raise BuildTokenTimeout(
-                f"build token {path} still held after {timeout:g}s: raise"
-                f" {WAIT_TIMEOUT_ENV} to wait longer, or clear the holder -- an"
-                " ancestor of this process holding the token deadlocks here")
-        time.sleep(WAIT_POLL_SECS)
+    with enqueue(path) as ticket:
+        while True:
+            ahead, queued = ticket.survey() if ticket is not None else (0, 1)
+            if ahead == 0:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return
+                except OSError as exc:
+                    if exc.errno not in _WOULD_BLOCK:
+                        raise BuildTokenError(f"build token {path} is unusable: {exc}") from exc
+            now = time.monotonic()
+            if now >= notice_at:
+                # A stall that prints nothing is indistinguishable from a hung
+                # build, and the default deadline here is four hours. The place
+                # in line separates the two stalls that used to read alike: a
+                # long build ahead holds the position, being overtaken raises it.
+                note = (f"build token: waiting for {path} since {since}: another release"
+                        f" build holds it (queue position {ahead + 1} of {queued};"
+                        f" {now - started:.0f}s of {timeout:g}s; raise"
+                        f" {WAIT_TIMEOUT_ENV} to wait longer)\n")
+                try:
+                    os.write(int(os.environ[DIAG_FD_ENV]), note.encode())
+                except (KeyError, ValueError, OSError):
+                    sys.stderr.write(note)
+                    sys.stderr.flush()
+                notice_at = now + WAIT_NOTICE_SECS
+            if now >= deadline:
+                raise BuildTokenTimeout(
+                    f"build token {path} still held after {timeout:g}s: raise"
+                    f" {WAIT_TIMEOUT_ENV} to wait longer, or clear the holder -- an"
+                    " ancestor of this process holding the token deadlocks here")
+            time.sleep(WAIT_POLL_SECS)
 
 
 @contextlib.contextmanager
