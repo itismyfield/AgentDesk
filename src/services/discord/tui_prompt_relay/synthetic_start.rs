@@ -476,7 +476,9 @@ mod tests {
                 row.started_at = "1970-01-01 00:00:01".into();
             }),
             ("user_msg_id", |row| row.user_msg_id += 1),
-            ("request_owner_user_id", |row| row.request_owner_user_id += 1),
+            ("request_owner_user_id", |row| {
+                row.request_owner_user_id += 1
+            }),
         ];
         for (axis, mutate) in successors {
             let mut successor = local.clone();
