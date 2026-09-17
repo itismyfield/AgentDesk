@@ -138,9 +138,12 @@ fn is_agentdesk_tmux_session(tmux_session: Option<&str>) -> bool {
 
 /// #3410 force-clean follow-through: release the stale mailbox ownership the
 /// cleanup left and respawn the watcher on the still-live tmux session, then
-/// feed the result into the dead-man switch. This is the single entry point
-/// `run_stall_watchdog_pass` calls after `apply_watchdog_orphan_token_cleanup`
-/// cancels the watcher.
+/// feed the result into the dead-man switch.
+///
+/// The unconditional mailbox release means only a caller that has already
+/// committed a force-clean may call this. No production path holds that
+/// commitment since #4460 retired the destructive branch-4 cleanup; absence is
+/// armed by `observe_watcher_absence_for_unwatched_work` instead (#5957).
 pub(super) async fn complete_force_clean_watcher_recovery(
     registry: &HealthRegistry,
     provider: &ProviderKind,
@@ -211,6 +214,95 @@ pub(super) async fn retry_pending_watcher_respawns(
         retry_pending_watcher_respawn(registry, provider, runtimes, channel_id, now_unix_secs)
             .await;
     }
+}
+
+/// #5957: record watcher absence for channels the watchdog pass can no longer
+/// see. `run_stall_watchdog_pass` derives its candidates from `tmux_watchers`,
+/// so a cancelled watcher takes its channel out of the pass entirely and
+/// nothing arms [`WATCHER_ABSENCE`] — leaving both the dead-man switch and
+/// [`retry_pending_watcher_respawns`] with nothing to act on.
+///
+/// Candidates come from relay work still owed (a mailbox entry or a persisted
+/// inflight row), never from the watcher stop event, so a deliberate
+/// `cancel=true` shutdown of a finished channel is not resurrected:
+/// `detect_and_escalate_watcher_absence` additionally requires a live
+/// AgentDesk tmux session and `watcher_ownership_expected`.
+///
+/// Returns the number of channels tracked as absent after this observation.
+pub(super) async fn observe_watcher_absence_for_unwatched_work(
+    registry: &HealthRegistry,
+    provider: &ProviderKind,
+    runtimes: &[Arc<SharedData>],
+    watcher_derived: &std::collections::HashSet<ChannelId>,
+    now_unix_secs: i64,
+) -> usize {
+    let mut absent = 0usize;
+    for (channel_id, shared) in
+        unwatched_relay_work_candidates(provider, runtimes, watcher_derived).await
+    {
+        let Some(snapshot) = registry
+            .snapshot_watcher_state_for_shared(provider, shared, channel_id.get())
+            .await
+        else {
+            continue;
+        };
+        detect_and_escalate_watcher_absence(provider, channel_id, &snapshot, false, now_unix_secs);
+        if WATCHER_ABSENCE.contains_key(&WatcherAbsenceKey::new(provider, channel_id)) {
+            absent += 1;
+        }
+    }
+    absent
+}
+
+/// Channels that are owed relay work but hold no watcher in any same-provider
+/// runtime, excluding the ones the caller already covered from `tmux_watchers`.
+/// Each is paired with the runtime to re-snapshot it from.
+///
+/// Work is read from the two authorities that outlive a watcher: the in-memory
+/// mailbox and the persisted inflight row.
+async fn unwatched_relay_work_candidates(
+    provider: &ProviderKind,
+    runtimes: &[Arc<SharedData>],
+    watcher_derived: &std::collections::HashSet<ChannelId>,
+) -> Vec<(ChannelId, Arc<SharedData>)> {
+    let mut seen: std::collections::HashSet<ChannelId> = watcher_derived.clone();
+    let mut candidates: Vec<(ChannelId, Arc<SharedData>)> = Vec::new();
+    for shared in runtimes {
+        for (channel_id, mailbox) in shared.mailboxes.snapshot_all().await {
+            if !mailbox_owes_relay_work(&mailbox) {
+                continue;
+            }
+            if seen.insert(channel_id) {
+                candidates.push((channel_id, shared.clone()));
+            }
+        }
+    }
+    if let Some(fallback) = runtimes.first() {
+        for (state, _) in discord::inflight::load_inflight_states_for_sweep(provider) {
+            if state.channel_id == 0 {
+                continue;
+            }
+            let channel_id = ChannelId::new(state.channel_id);
+            if seen.insert(channel_id) {
+                candidates.push((channel_id, fallback.clone()));
+            }
+        }
+    }
+    // Registry-wide presence (#3410 P2): a watcher owned by a sibling runtime
+    // is still a live watcher.
+    candidates.retain(|(channel_id, _)| runtime_owning_watcher(runtimes, *channel_id).is_none());
+    candidates
+}
+
+/// The mailbox half of "relay work still owed": an active turn, or inbound
+/// waiting behind one.
+fn mailbox_owes_relay_work(
+    mailbox: &crate::services::turn_orchestrator::ChannelMailboxSnapshot,
+) -> bool {
+    mailbox.active_user_message_id.is_some()
+        || mailbox.cancel_token.is_some()
+        || mailbox.pending_user_dispatch.is_some()
+        || !mailbox.intervention_queue.is_empty()
 }
 
 /// The runtime that currently owns `channel_id`'s watcher, if any runtime does
@@ -636,6 +728,7 @@ mod tests {
 
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
+    use crate::services::discord::health::STALL_WATCHDOG_INTERVAL_SECS;
     use crate::services::discord::relay_health::{
         RelayActiveTurn, RelayHealthSnapshot, RelayStallState,
     };
@@ -1321,6 +1414,204 @@ mod tests {
             "retry must run on a zero-candidate pass and resolve the absence"
         );
         clear_watcher_absence(&provider, channel);
+    }
+
+    /// Claim the mailbox's active-turn slot: the "relay work still owed" signal
+    /// that outlives the watcher.
+    async fn engage_mailbox(
+        shared: &crate::services::discord::SharedData,
+        channel: ChannelId,
+        user_message_id: u64,
+    ) {
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                shared,
+                channel,
+                std::sync::Arc::new(CancelToken::new()),
+                UserId::new(11),
+                MessageId::new(user_message_id),
+            )
+            .await,
+            "test fixture must own the turn"
+        );
+    }
+
+    async fn candidate_channels(
+        provider: &ProviderKind,
+        runtimes: &[std::sync::Arc<crate::services::discord::SharedData>],
+        watcher_derived: &std::collections::HashSet<ChannelId>,
+    ) -> Vec<ChannelId> {
+        unwatched_relay_work_candidates(provider, runtimes, watcher_derived)
+            .await
+            .into_iter()
+            .map(|(channel_id, _)| channel_id)
+            .collect()
+    }
+
+    /// #5957: the watchdog pass derives candidates from `tmux_watchers`, so the
+    /// channel whose watcher was just cancelled is invisible to every branch.
+    /// A mailbox that still owns a turn is the proof that relay work is owed,
+    /// and it outlives the watcher — so that channel must become a candidate.
+    #[tokio::test]
+    async fn unwatched_candidates_include_a_mailbox_channel_whose_watcher_was_cancelled() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(5_957_001);
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        engage_mailbox(&shared, channel, 5_957_101).await;
+        assert!(!shared.tmux_watchers.contains_key(&channel));
+
+        let runtimes = vec![shared.clone()];
+        let empty = std::collections::HashSet::new();
+        assert!(
+            candidate_channels(&provider, &runtimes, &empty)
+                .await
+                .contains(&channel),
+            "a mailbox-engaged channel with no watcher must be swept"
+        );
+
+        // The watcher-derived loop already covered it this tick: no double work.
+        let covered = std::collections::HashSet::from([channel]);
+        assert!(
+            !candidate_channels(&provider, &runtimes, &covered)
+                .await
+                .contains(&channel),
+            "a channel the watcher-derived loop already handled must be skipped"
+        );
+
+        // A live watcher of its own retires the channel from the sweep.
+        shared
+            .tmux_watchers
+            .insert(channel, test_watcher_handle("AgentDesk-codex-5957-own"));
+        assert!(
+            !candidate_channels(&provider, &runtimes, &empty)
+                .await
+                .contains(&channel),
+            "a channel with a live watcher is not absent"
+        );
+    }
+
+    /// #3410 P2 invariant, preserved by the #5957 sweep: presence is resolved
+    /// registry-wide, so a sibling runtime's watcher must not be reported absent
+    /// just because the runtime we enumerated from does not hold it.
+    #[tokio::test]
+    async fn unwatched_candidates_exclude_a_channel_served_by_a_sibling_runtime() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(5_957_002);
+        let non_owner = crate::services::discord::make_shared_data_for_tests();
+        let owner = crate::services::discord::make_shared_data_for_tests();
+        engage_mailbox(&non_owner, channel, 5_957_102).await;
+        owner
+            .tmux_watchers
+            .insert(channel, test_watcher_handle("AgentDesk-codex-5957-sibling"));
+
+        let runtimes = vec![non_owner, owner];
+        assert!(
+            !candidate_channels(&provider, &runtimes, &std::collections::HashSet::new())
+                .await
+                .contains(&channel),
+            "a sibling runtime's live watcher must suppress the absence"
+        );
+    }
+
+    /// #5957: a dead tmux session is not a recovery case. The sweep must arm
+    /// nothing there, so an intentional `cancel=true` shutdown is never
+    /// resurrected by the respawn retry the sweep feeds.
+    #[tokio::test]
+    async fn sweep_arms_nothing_for_a_channel_whose_tmux_is_gone() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(5_957_003);
+        clear_watcher_absence(&provider, channel);
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        engage_mailbox(&shared, channel, 5_957_103).await;
+        let registry = HealthRegistry::new();
+        let absent = observe_watcher_absence_for_unwatched_work(
+            &registry,
+            &provider,
+            &[shared],
+            &std::collections::HashSet::new(),
+            chrono::Utc::now().timestamp(),
+        )
+        .await;
+        assert_eq!(
+            absent, 0,
+            "no live AgentDesk tmux session ⇒ nothing to heal"
+        );
+        assert!(
+            !WATCHER_ABSENCE.contains_key(&WatcherAbsenceKey::new(&provider, channel)),
+            "a dead tmux session must not enter the respawn retry queue"
+        );
+    }
+
+    /// #5957 incident fixture — `AgentDesk-claude-adk-cc`, watcher cancelled at
+    /// 16:17:20Z with the tmux session still alive, then 5h14m of silence. Once
+    /// the absence is observed, every 30s tick of that window must keep the
+    /// channel in the respawn retry queue, and the dead-man must escalate once
+    /// per tracking period rather than on every tick.
+    #[test]
+    fn watcher_absence_feeds_the_retry_queue_for_the_whole_5h_gap() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(5_957_004);
+        clear_watcher_absence(&provider, channel);
+        let live = snapshot(
+            channel.get(),
+            Some("AgentDesk-codex-5957-gap"),
+            Some(true),
+            true,
+            Some(9001),
+        );
+        let t0 = 1_789_575_440; // 2026-09-16T16:17:20Z
+        let gap_secs = 5 * 3600 + 14 * 60;
+        let tick = STALL_WATCHDOG_INTERVAL_SECS as i64;
+
+        assert!(
+            !detect_and_escalate_watcher_absence(&provider, channel, &live, false, t0),
+            "the first observation only WARNs"
+        );
+        assert!(
+            pending_absent_channels(&provider).contains(&channel),
+            "the WARN must queue the channel for respawn"
+        );
+
+        // Production tick order: GC first, then the sweep's observation.
+        let mut escalations = 0;
+        let mut now = t0 + tick;
+        while now <= t0 + WATCHER_ABSENCE_STATE_TTL_SECS as i64 {
+            gc_watcher_absence_state(now);
+            if detect_and_escalate_watcher_absence(&provider, channel, &live, false, now) {
+                escalations += 1;
+            }
+            assert!(
+                pending_absent_channels(&provider).contains(&channel),
+                "the channel must stay queued for respawn at +{}s",
+                now - t0
+            );
+            now += tick;
+        }
+        assert_eq!(
+            escalations, 1,
+            "one ERROR per tracking period, not per tick"
+        );
+
+        // Past the TTL the GC drops the entry, but the sweep re-observes on the
+        // same tick — the retry queue is never left empty while work is owed.
+        now = t0 + gap_secs;
+        gc_watcher_absence_state(now);
+        assert!(!pending_absent_channels(&provider).contains(&channel));
+        detect_and_escalate_watcher_absence(&provider, channel, &live, false, now);
+        assert!(
+            pending_absent_channels(&provider).contains(&channel),
+            "a channel still owed relay work must be re-queued after the TTL GC"
+        );
+
+        // The watcher coming back retires the entry.
+        assert!(!detect_and_escalate_watcher_absence(
+            &provider,
+            channel,
+            &live,
+            true,
+            t0 + gap_secs,
+        ));
+        assert!(!pending_absent_channels(&provider).contains(&channel));
     }
 
     #[test]

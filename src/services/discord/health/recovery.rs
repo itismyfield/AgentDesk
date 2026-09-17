@@ -2131,6 +2131,18 @@ pub(crate) async fn run_stall_watchdog_pass(
         .await;
         continue;
     }
+    // #5957: the candidate loop above only reaches channels that still HAVE a
+    // watcher, so a cancelled watcher hides its channel from every branch. Arm
+    // the absence tracker from relay work still owed, then let the retry below
+    // respawn on this same tick.
+    watcher_respawn::observe_watcher_absence_for_unwatched_work(
+        registry,
+        provider,
+        &runtimes,
+        &seen,
+        now_unix_secs,
+    )
+    .await;
     // #3410 cross-tick retry: channels whose force-clean respawn failed dropped
     // out of the watcher-derived candidate loop (no watcher = not a candidate),
     // so re-attempt each still-tracked absent channel — never give up after one.
