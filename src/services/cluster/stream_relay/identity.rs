@@ -122,37 +122,45 @@ impl super::RelayProducer {
         .is_alive()
     }
 
+    /// `source_span` is the absolute JSONL byte range `payload` was read from
+    /// (#5948 / I18). Pass `None` when the caller cannot name one; the sink then
+    /// folds the payload unconditionally rather than guessing.
     pub fn try_send_frame_with_source(
         &self,
         payload: String,
         frame_identity: Option<RelayTurnIdentity>,
         relay_generation_mtime_ns: i64,
         relay_source_stamp: Option<SourceStamp>,
+        source_span: Option<(u64, u64)>,
     ) -> super::RelaySendOutcome {
-        self.enqueue(
+        self.try_send_request(super::RelayFrameRequest {
             payload,
-            None,
-            frame_identity,
-            None,
-            (relay_generation_mtime_ns != 0).then_some(relay_generation_mtime_ns),
-            relay_source_stamp,
-        )
+            terminal: None,
+            identity: frame_identity,
+            range: None,
+            generation: (relay_generation_mtime_ns != 0).then_some(relay_generation_mtime_ns),
+            stamp: relay_source_stamp,
+            span: source_span,
+        })
     }
 
+    /// See [`Self::try_send_frame_with_source`] for `source_span` (#5948 / I18).
     pub fn try_send_terminal_frame_with_source(
         &self,
         payload: String,
         terminal: super::TerminalCommitFence,
         relay_generation_mtime_ns: i64,
         relay_source_stamp: Option<SourceStamp>,
+        source_span: Option<(u64, u64)>,
     ) -> super::RelaySendOutcome {
-        self.enqueue(
+        self.try_send_request(super::RelayFrameRequest {
             payload,
-            Some(terminal),
-            None,
-            None,
-            (relay_generation_mtime_ns != 0).then_some(relay_generation_mtime_ns),
-            relay_source_stamp,
-        )
+            terminal: Some(terminal),
+            identity: None,
+            range: None,
+            generation: (relay_generation_mtime_ns != 0).then_some(relay_generation_mtime_ns),
+            stamp: relay_source_stamp,
+            span: source_span,
+        })
     }
 }

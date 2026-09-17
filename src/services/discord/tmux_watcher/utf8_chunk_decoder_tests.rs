@@ -230,3 +230,60 @@ fn decoder_mixed_carry_stays_poisoned_until_consumed_and_offset_jump_is_mixed() 
         "three contiguous reads from one source remain clean"
     );
 }
+
+/// #5979 (I18): a watcher rewind moves the read cursor back and empties
+/// `all_data`, but never reaches the decoder. The read that refills the EMPTY
+/// buffer must drop the tail buffered from the abandoned read instead of gluing
+/// it onto the replay — otherwise the replay reports the abandoned read's offset
+/// and every forwarded `source_span` shifts off the file. A continuing read, an
+/// empty read, and a read into a non-empty buffer keep the ordinary carry.
+#[test]
+fn utf8_decoder_drops_the_abandoned_tail_only_when_refilling_an_empty_buffer() {
+    use super::super::loop_poll_prologue::WatcherSourceAuthority;
+    use crate::services::cluster::stream_relay::SourceFileIdentity;
+    let source = WatcherSourceAuthority {
+        source_file: SourceFileIdentity::Unavailable,
+        generation_mtime_ns: 0,
+        reset_incarnation: 0,
+        source_stamp: None,
+    };
+    let line = "{\"type\":\"assistant\"}\n안\n";
+    let bytes = line.as_bytes();
+    let split = line.find('안').expect("fixture contains korean text") + 1;
+
+    // Rewind: the buffer was emptied and the next read starts at 100 again.
+    let mut decoder = Utf8ChunkDecoder::default();
+    let first = decoder.decode_source_for_buffer(&bytes[..split], 100, source, "");
+    assert_eq!(first.start_offset, Some(100));
+    assert!(decoder.has_pending());
+    let replay = decoder.decode_source_for_buffer(bytes, 100, source, "");
+    assert_eq!(
+        replay.start_offset,
+        Some(100),
+        "replay anchored at the rewind"
+    );
+    assert_eq!(replay.text, line);
+    assert!(!replay.mixed_read_provenance);
+    assert!(!decoder.has_pending());
+
+    // An empty read is not a read: the tail survives it (#5833 resume shape).
+    let mut decoder = Utf8ChunkDecoder::default();
+    decoder.decode_source_for_buffer(&bytes[..split], 100, source, "");
+    assert!(
+        decoder
+            .decode_source_for_buffer(&[], 0, source, "")
+            .text
+            .is_empty()
+    );
+    assert!(decoder.has_pending(), "empty read must not drop the tail");
+    let rest = decoder.decode_source_for_buffer(&bytes[split..], 100 + split as u64, source, "");
+    assert_eq!(rest.start_offset, Some(100 + split as u64 - 1));
+    assert_eq!(rest.text, &line[split - 1..]);
+
+    // A jump into a NON-empty buffer keeps the decoder's carry contract.
+    let mut decoder = Utf8ChunkDecoder::default();
+    let head = decoder.decode_source_for_buffer(&bytes[..split], 100, source, "");
+    let jumped = decoder.decode_source_for_buffer(&bytes[split..], 900, source, &head.text);
+    assert_eq!(jumped.text, &line[split - 1..]);
+    assert!(jumped.mixed_read_provenance);
+}
