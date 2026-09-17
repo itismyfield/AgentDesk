@@ -851,6 +851,29 @@ fn the_production_call_site_hands_the_seam_the_lost_body_5941() {
     assert!(module.contains("record_relay_terminal_authority_denied("));
     assert!(module.contains("#5175: terminal frame has NO delivery owner"));
     assert!(module.contains("soft_terminal_denial = denial.as_str()"));
+
+    // #5941 r3 P1-2: the PER-CONJUNCT cause counter answers "which authority
+    // conjunct refused" and must fire for EVERY denial, including the ones that
+    // lose nothing — a forged turn nonce is refused with an empty tail, so
+    // behind the record admission the one arm the counter exists to name never
+    // emits. Order, not presence: it has to precede the `record_required` gate.
+    let cause = module
+        .find("record_relay_terminal_denial_cause(")
+        .expect("the seam must emit the per-conjunct cause counter");
+    let gate = module
+        .find("if !facts.record_required() {")
+        .expect("the record admission gate must exist");
+    let aggregate = module
+        .find("metrics::record_relay_terminal_authority_denied(")
+        .expect("the seam must emit the aggregate denial counter");
+    assert!(
+        cause < gate,
+        "the per-conjunct cause counter must be emitted BEFORE the record admission gate"
+    );
+    assert!(
+        gate < aggregate,
+        "the aggregate counter feeds a threshold-1 alert row and must stay behind the admission"
+    );
 }
 
 #[test]

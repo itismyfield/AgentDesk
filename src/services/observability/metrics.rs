@@ -533,25 +533,31 @@ pub fn record_relay_terminal_ack_timeout(channel_id: u64, provider: &str) {
     super::emit::emit_relay_root_cause_counter(provider, channel_id, "relay_terminal_ack_timeout");
 }
 
+/// #5175: the per-conjunct cause counter. `denial_counter` names the failing
+/// authority conjunct (`relay_terminal_authority_denied_*`) so an alert can
+/// distinguish "the row vanished" from "a forged turn was correctly refused".
+///
+/// Split from [`record_relay_terminal_authority_denied`] by #5941 r3 so the
+/// caller can keep this one UNGATED alongside its WARN: the distinction it
+/// draws is worthless if the arm it was built to name — a forged turn nonce,
+/// which loses no body and so is never ADMITTED as a loss — never emits.
+pub fn record_relay_terminal_denial_cause(channel_id: u64, provider: &str, denial_counter: &str) {
+    super::emit::emit_relay_root_cause_counter(provider, channel_id, denial_counter);
+}
+
 /// #5175: convenience wrapper for
 /// `ObservabilityCounters::record_relay_terminal_authority_denied`.
 ///
-/// `denial_counter` names the failing authority conjunct
-/// (`relay_terminal_authority_denied_*`) and is emitted as its own root-cause
-/// counter so an alert can distinguish "the row vanished" from "a forged turn
-/// was correctly refused".
-pub fn record_relay_terminal_authority_denied(
-    channel_id: u64,
-    provider: &str,
-    denial_counter: &str,
-) {
+/// The AGGREGATE denial signal. #5941 gave it a threshold-1 alert row, which is
+/// safe only because its caller fires it on ADMITTED losses; the cause counter
+/// that used to ride along moved to [`record_relay_terminal_denial_cause`].
+pub fn record_relay_terminal_authority_denied(channel_id: u64, provider: &str) {
     global().record_relay_terminal_authority_denied(channel_id, provider);
     super::emit::emit_relay_root_cause_counter(
         provider,
         channel_id,
         "relay_terminal_authority_denied",
     );
-    super::emit::emit_relay_root_cause_counter(provider, channel_id, denial_counter);
 }
 
 /// #2838: convenience wrapper for `ObservabilityCounters::record_relay_uncommitted_inflight_cleared`.

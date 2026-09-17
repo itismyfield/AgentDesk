@@ -170,15 +170,26 @@ pub(super) fn observe_orphan_terminal_frame(
         session_bound_ack_outcome = ?facts.session_bound_ack_outcome,
         "  [{ts}] ⚠ #5175: terminal frame has NO delivery owner — sink did not deliver and the soft terminal is unauthorized; body dropped and the delivery frontier will not advance"
     );
-    if !facts.record_required() {
-        return true;
-    }
-    // Counted AFTER the admission: the alert table reads this counter at
-    // threshold 1 and most denials lose nothing. The WARN stays unconditional.
-    crate::services::observability::metrics::record_relay_terminal_authority_denied(
+    // The PER-CONJUNCT cause counter is #5175's forensic signal — "which
+    // authority conjunct refused" — and it fires with the WARN, ungated. Behind
+    // the admission it vanished for every denial with an empty unsent tail, and
+    // a forged turn-nonce probe (`TurnNonceMismatch`) is exactly that shape: the
+    // one case the counter was built to name had stopped reporting. No alert row
+    // reads these per-conjunct names (`RELAY_SIGNAL_DEFINITIONS` monitors the
+    // aggregate and the invariant only), so ungating them cannot page.
+    crate::services::observability::metrics::record_relay_terminal_denial_cause(
         channel_id.get(),
         provider.as_str(),
         denial.metric_name(),
+    );
+    if !facts.record_required() {
+        return true;
+    }
+    // The AGGREGATE counter stays AFTER the admission: its alert row reads it at
+    // threshold 1 and most denials lose nothing.
+    crate::services::observability::metrics::record_relay_terminal_authority_denied(
+        channel_id.get(),
+        provider.as_str(),
     );
     let reason = facts.reason(
         denial,
