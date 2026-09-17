@@ -37,6 +37,7 @@ use dispatch_reservation::{
     hydrate_pending_queue_into_state, merge_pending_dispatch_marker_into_state,
     pending_dispatch_lease_is_orphaned, reconcile_pending_dispatch_marker_before_take_next,
     record_valve_cleared_pending_dispatch, set_pending_user_dispatch,
+    settle_pending_dispatch_on_claim,
 };
 use episode_identity::{
     TurnNonceGuard, matching_cancel_token, persist_queue_or_restore,
@@ -46,7 +47,7 @@ use front_requeue::requeue_intervention_front;
 #[cfg(test)]
 use inbound_order::INBOUND_ORDER_FAIL_OPEN_AFTER;
 pub(crate) use inbound_order::TurnAdmissionOrder;
-use inbound_order::claim_yields;
+use inbound_order::{claim_yields, note_inbound_drain_progress};
 pub(crate) use overflow::SoftInterventionProbe;
 use overflow::drain_head_overflow;
 #[cfg(test)]
@@ -1964,6 +1965,10 @@ struct ChannelMailboxState {
     /// is bounded and provably non-permanent.
     pending_user_dispatch_yield_count: u32,
     pending_user_dispatch_since: Option<Instant>,
+    /// #5937 — last time the drain advanced on this channel: a `UserOrAgent`
+    /// turn claimed the slot, or a live turn released it. The inbound order
+    /// gate fails open off this, never off a queued message's own age.
+    inbound_drain_progress_at: Option<Instant>,
     recently_valve_cleared_dispatch: Option<(MessageId, Instant)>,
     last_persistence: Option<QueuePersistenceContext>,
     recovery_started_at: Option<Instant>,
@@ -2018,6 +2023,9 @@ fn finalize_turn_state(
     preserve_queue: bool,
 ) -> FinishTurnResult {
     let removed_token = state.cancel_token.take();
+    if removed_token.is_some() {
+        note_inbound_drain_progress(state);
+    }
     state.active_request_owner = None;
     state.active_user_message_id = None;
     state.active_turn_nonce = None;
@@ -2413,17 +2421,16 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             // dequeue gates can treat a background turn as
                             // non-blocking.
                             state.active_turn_kind = turn_kind;
-                            // #3167 BLOCKER-2 — a real (UserOrAgent) turn claiming the
-                            // slot satisfies any reserved dequeue→claim window: clear
-                            // the reservation and reset the valve counter.
+                            // #3167 BLOCKER-2 / #5937 — retire the dequeue→claim
+                            // reservation only when this claim is the one it
+                            // reserved, and record the drain advancing.
                             if turn_kind == ActiveTurnKind::UserOrAgent {
-                                consume_pending_dispatch_marker_if_matches(
+                                settle_pending_dispatch_on_claim(
                                     &mut state,
                                     channel_id,
                                     user_message_id,
-                                    "try_start_turn",
                                 );
-                                clear_pending_user_dispatch(&mut state);
+                                note_inbound_drain_progress(&mut state);
                             }
                             state.recovery_started_at = None;
                             state.turn_started_at = Some(Utc::now());
@@ -3701,11 +3708,12 @@ mod actor_hydrate_regression_tests {
         });
     }
 
-    /// #5937 — ordering fails open rather than bricking a channel whose drain
-    /// is wedged: once the backlog is older than `INBOUND_ORDER_FAIL_OPEN_AFTER`
-    /// a fresh arrival takes the idle slot again.
+    /// #5937 — a queued message can be older than `INBOUND_ORDER_FAIL_OPEN_AFTER`
+    /// simply because it waited out a long turn or a parked capped retry. Age
+    /// alone is not a wedged drain, so it must not release later arrivals; the
+    /// stall clock is unit-tested in `inbound_order`, which can wind it back.
     #[test]
-    fn inbound_order_fails_open_for_a_stalled_backlog() {
+    fn aged_backlog_does_not_overtake_while_the_drain_progresses() {
         let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
@@ -3716,25 +3724,104 @@ mod actor_hydrate_regression_tests {
             let channel_id = ChannelId::new(5_937_121);
             let handle = registry.handle(channel_id);
             let provider = ProviderKind::Claude;
-            let token_hash = "inbound_order_fail_open";
+            let token_hash = "inbound_order_aged_backlog";
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
             let owner = UserId::new(5_937);
-            let wedged = MessageId::new(5_937_221);
+            let aged = MessageId::new(5_937_221);
             let arrival = MessageId::new(5_937_222);
-            let stalled_since = Instant::now()
+            let long_waited = Instant::now()
                 .checked_sub(INBOUND_ORDER_FAIL_OPEN_AFTER + Duration::from_secs(1))
                 .expect("test clock must reach past the fail-open window");
 
             handle
                 .replace_queue(
-                    vec![make_intervention(wedged.get(), "wedged", stalled_since)],
+                    vec![make_intervention(aged.get(), "aged", long_waited)],
                     persistence.clone(),
                 )
                 .await;
 
             assert!(
-                intake_claim(&handle, &persistence, owner, arrival).await,
-                "a backlog past the fail-open window must not hold new arrivals"
+                !intake_claim(&handle, &persistence, owner, arrival).await,
+                "message age is not drain stall: the arrival still waits its turn"
+            );
+            assert_eq!(
+                drain_one(&handle, &persistence, owner).await,
+                aged,
+                "the aged message is still delivered first"
+            );
+        });
+    }
+
+    /// #5937 — an `Immediate` claim (recovery, reaper, healing) may take an idle
+    /// slot, but it does not own the dequeue→claim reservation a queued head is
+    /// holding. Erasing it would let the next arrival overtake that head.
+    #[test]
+    fn immediate_claim_preserves_a_foreign_pending_dispatch_reservation() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        run_async(async {
+            let registry = ChannelMailboxRegistry::default();
+            let channel_id = ChannelId::new(5_937_141);
+            let handle = registry.handle(channel_id);
+            let provider = ProviderKind::Claude;
+            let token_hash = "inbound_order_foreign_reservation";
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let owner = UserId::new(5_937);
+            let head = MessageId::new(5_937_241);
+            let healer = MessageId::new(5_937_242);
+            let latecomer = MessageId::new(5_937_243);
+
+            assert!(
+                handle
+                    .enqueue(
+                        make_intervention(head.get(), "head", Instant::now()),
+                        persistence.clone(),
+                    )
+                    .await
+                    .enqueued
+            );
+            let taken = handle.take_next_soft(persistence.clone()).await;
+            assert_eq!(
+                taken
+                    .intervention
+                    .as_ref()
+                    .expect("head must be promotable")
+                    .message_id,
+                head
+            );
+            let _lease = taken.dispatch_lease;
+
+            let healing = handle
+                .try_start_turn_kinded_with_persistence(
+                    Arc::new(CancelToken::new()),
+                    owner,
+                    healer,
+                    ActiveTurnKind::UserOrAgent,
+                    TurnAdmissionOrder::Immediate,
+                    persistence.clone(),
+                )
+                .await;
+            assert!(
+                healing.started,
+                "an immediate claim still takes an idle slot"
+            );
+            handle.finish_turn(persistence.clone()).await;
+
+            assert_eq!(
+                handle.snapshot().await.pending_user_dispatch,
+                Some(head),
+                "the healing turn must not consume the head's reservation"
+            );
+            assert!(
+                !intake_claim(&handle, &persistence, owner, latecomer).await,
+                "the promoted head still owns the slot the latecomer wants"
+            );
+            assert!(
+                intake_claim(&handle, &persistence, owner, head).await,
+                "the promoted head itself must still be able to claim"
             );
         });
     }
