@@ -121,6 +121,15 @@ fn terminal_ordering_fixture(
                 let entered = if let Some(prepare) = prepare.as_ref() { &prepare.entered } else { &barrier.entered };
                 tokio::time::timeout(Duration::from_secs(5), entered.notified())
                     .await.expect("actual adapter reaches the admitted terminal publication boundary");
+                // #5965: the bridge is parked INSIDE terminal preparation here, so every
+                // body recorded so far is pre-terminal streaming, not publication. The
+                // stream loop emits at most one such edit: `stream_loop.rs` drains `rx`
+                // after its blocking `recv`, and #3813's first-answer fast lane opens the
+                // gate when the reader has not yet queued `Done` at that instant. Under a
+                // parallel `--lib` sweep the forwarder is descheduled in that window often
+                // enough to make the edit appear, which is why measuring the terminal
+                // transport against zero was load-dependent. Measure against this boundary.
+                let streamed_before_terminal = gateway.bodies.lock().unwrap().len();
                 let before = crate::services::discord::mailbox_snapshot(&shared, channel).await;
                 assert!(before.cancel_token.as_ref().is_some_and(|token| Arc::ptr_eq(token, &original_actor)),
                     "the original synthetic actor must still own the turn DURING terminal transport");
@@ -198,9 +207,9 @@ fn terminal_ordering_fixture(
                 } else { None };
                 if let Some(prepare) = prepare.as_ref() { prepare.release.notify_one(); }
                 else { barrier.release.notify_one(); }
-                (replacement, row)
+                (replacement, row, streamed_before_terminal)
             };
-            let (delivered, (replacement, admitted_row)) = tokio::join!(
+            let (delivered, (replacement, admitted_row, streamed_before_terminal)) = tokio::join!(
                 tokio::time::timeout(Duration::from_secs(5), delivery), observe);
             let delivered = delivered.expect("terminal transport must settle");
             tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
@@ -250,7 +259,14 @@ fn terminal_ordering_fixture(
                 assert_eq!(quality[0].payload["payload"]["details"]["terminal_delivery_committed"], false);
                 assert_eq!(shared.turn_view_reconciler.ops(), pending_view,
                     "source loss does not clear or complete the pending view");
-                assert!(gateway.bodies.lock().unwrap().is_empty(), "{race:?} must execute zero gateway sends/edits");
+                // Bind the count first: an `assert_eq!` argument guard outlives the
+                // whole statement, so formatting `traffic_dump()` inline would
+                // self-deadlock on the failure path this message exists to explain.
+                let settled_traffic = gateway.bodies.lock().unwrap().len();
+                assert_eq!(settled_traffic, streamed_before_terminal,
+                    "{race:?} must execute zero gateway sends/edits for the terminal transport \
+                     ({streamed_before_terminal} pre-terminal streaming edit(s) at the boundary); \
+                     gateway traffic: {}", gateway.traffic_dump());
                 assert!(crate::services::discord::outbound::delivery_record::read_record(&provider, channel.get())
                     .is_none_or(|record| record.confirmed_deliveries.is_empty()), "no exact receipt before transport");
                 assert_eq!(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux).unwrap().last_offset, 0);
@@ -309,18 +325,45 @@ fn terminal_ordering_fixture(
                     )).await.unwrap_or_else(|_| panic!("{race:?} dormant recovery exceeds its bound"));
                 if !recovered {
                     let current = crate::services::discord::mailbox_snapshot(&shared, channel).await;
+                    // Claude-schema extraction: a Codex transcript always reads back
+                    // empty here, so `body_bytes`/`body_matches` only mean something
+                    // for `ProviderKind::Claude`. The provider is printed first so
+                    // the next reader is not misled by a structural zero.
                     let extracted = crate::services::discord::recovery_engine::extract_response_from_output_pub(
                         &output.to_string_lossy(), retained.turn_start_offset.unwrap());
-                    panic!("{race:?} dormant recovery did not settle the original exact source: \
+                    // #5965: `capture_dormant` also refuses on PROCESS-GLOBAL gates
+                    // keyed by the tmux session name and by (provider, channel). A
+                    // stale entry in any of them is indistinguishable from a genuine
+                    // source mismatch in the fields above, so name the gate instead
+                    // of leaving the next sweep failure to guess which one fired.
+                    let idle_tail_registered = CLAUDE_IDLE_RESPONSE_TAILS
+                        .lock().unwrap_or_else(|error| error.into_inner()).contains(tmux);
+                    let live_producer = crate::services::cluster::relay_producer_registry
+                        ::global_relay_producer_registry().get_live_producer(tmux).is_some();
+                    let watcher_can_own = synthetic_start::tui_direct_watcher_can_own_output(
+                        &shared.tmux_watchers, tmux, Some(output.as_path()));
+                    let live_lease = crate::services::tui_prompt_dedupe::external_input_relay_lease(
+                        provider.as_str(), tmux, channel.get()).map(|lease| lease.turn_id);
+                    // The very first gate is a `try_lock_owned` on the process-global
+                    // per-(provider, channel) serial lock. It is the only refusal that
+                    // leaves every field above intact, so report it explicitly rather
+                    // than letting a contended lock read as a source mismatch.
+                    let channel_serial_free = crate::services::discord::tui_direct_pending_start
+                        ::channel_lock(provider.as_str(), channel.get()).try_lock().is_ok();
+                    panic!("{race:?}/{provider:?} dormant recovery did not settle the original exact source: \
                         same_actor={}, cancelled={}, relay_in_flight={}, range={:?}..{}, file_end={}, \
-                        body_bytes={}/{}, body_matches={}, generation={:?}/{}, row_path={:?}, caller_path={:?}",
+                        body_bytes={}/{}, body_matches={}, generation={:?}/{}, row_path={:?}, caller_path={:?}, \
+                        channel_serial_free={channel_serial_free}, \
+                        idle_tail_registered={idle_tail_registered}, live_producer={live_producer}, \
+                        watcher_can_own={watcher_can_own}, live_lease={live_lease:?}, \
+                        streamed_before_terminal={streamed_before_terminal}, gateway traffic: {}",
                         current.cancel_token.as_ref().is_some_and(|actor| Arc::ptr_eq(actor, &original_actor)),
                         original_actor.cancelled.load(std::sync::atomic::Ordering::Acquire),
                         shared.relay_emission_in_flight(channel), retained.turn_start_offset, retained.last_offset,
                         std::fs::metadata(&output).unwrap().len(), retained.full_response.len(), extracted.len(),
                         retained.full_response == extracted, retained.tui_terminal_generation_mtime_ns,
                         crate::services::discord::turn_bridge::tmux_generation_file_mtime_ns(tmux),
-                        retained.output_path, output);
+                        retained.output_path, output, gateway.traffic_dump());
                 }
             }
             let replacement = if replace_after_delivery {
@@ -376,7 +419,11 @@ fn terminal_ordering_fixture(
                 assert!(crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).is_none());
                 assert!(after.cancel_token.is_none(), "A releases only after successful publication");
                 if source_race.is_some() {
-                    assert_eq!(gateway.bodies.lock().unwrap().len(), 1, "one confirmed publication settles the pending body");
+                    let published_traffic = gateway.bodies.lock().unwrap().len();
+                    assert_eq!(published_traffic, streamed_before_terminal + 1,
+                        "one confirmed publication settles the pending body past the \
+                         {streamed_before_terminal} pre-terminal streaming edit(s); \
+                         gateway traffic: {}", gateway.traffic_dump());
                 }
                 assert!(gateway.bodies.lock().unwrap().iter().any(|sent| !sent.trim().is_empty() && sent.contains(&body)));
                 let next = Arc::new(CancelToken::new());

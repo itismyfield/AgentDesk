@@ -2810,7 +2810,46 @@ struct S3Gateway {
     local_delivery: bool,
     terminal_barrier: Option<Arc<synthetic_terminal_ordering_tests::TerminalBarrier>>,
     bodies: std::sync::Mutex<Vec<String>>,
+    // #5965: parallel `--lib` sweeps report `bodies` assertions by count alone,
+    // which names neither the caller nor the payload. Record the gateway method
+    // behind each body at the same index so a failure can print both.
+    sites: std::sync::Mutex<Vec<&'static str>>,
     deleted: std::sync::Mutex<Vec<MessageId>>,
+}
+
+#[cfg(unix)]
+impl S3Gateway {
+    fn record(&self, site: &'static str, content: &str) {
+        self.bodies.lock().unwrap().push(content.to_string());
+        self.sites.lock().unwrap().push(site);
+    }
+
+    /// Render every recorded send/edit as `#index via <method> (<len> bytes)`
+    /// plus a bounded payload head, for assertion messages.
+    pub(super) fn traffic_dump(&self) -> String {
+        let bodies = self.bodies.lock().unwrap();
+        let sites = self.sites.lock().unwrap();
+        if bodies.is_empty() {
+            return "<no gateway sends/edits>".to_string();
+        }
+        bodies
+            .iter()
+            .enumerate()
+            .map(|(index, body)| {
+                let site = sites.get(index).copied().unwrap_or("unrecorded");
+                let head: String = body.chars().take(240).collect();
+                let ellipsis = if body.chars().count() > 240 {
+                    "…"
+                } else {
+                    ""
+                };
+                format!(
+                    "\n  #{index} via {site} ({} bytes): {head:?}{ellipsis}",
+                    body.len()
+                )
+            })
+            .collect()
+    }
 }
 #[cfg(unix)]
 impl TurnGateway for S3Gateway {
@@ -2820,7 +2859,7 @@ impl TurnGateway for S3Gateway {
         content: &'a str,
     ) -> super::super::gateway::GatewayFuture<'a, Result<MessageId, String>> {
         Box::pin(async move {
-            self.bodies.lock().unwrap().push(content.to_string());
+            self.record("send_message", content);
             Ok(MessageId::new(880003))
         })
     }
@@ -2845,7 +2884,7 @@ impl TurnGateway for S3Gateway {
         content: &'a str,
     ) -> super::super::gateway::GatewayFuture<'a, Result<(), String>> {
         Box::pin(async move {
-            self.bodies.lock().unwrap().push(content.to_string());
+            self.record("edit_message", content);
             Ok(())
         })
     }
@@ -2864,7 +2903,7 @@ impl TurnGateway for S3Gateway {
                 barrier.entered.notify_one();
                 barrier.release.notified().await;
             }
-            self.bodies.lock().unwrap().push(content.to_string());
+            self.record("replace_message_with_outcome", content);
             Ok(super::super::formatting::ReplaceLongMessageOutcome::EditedOriginal)
         })
     }
