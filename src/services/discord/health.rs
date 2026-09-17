@@ -617,12 +617,15 @@ impl HealthRegistry {
         )
     }
 
+    /// `expected_episode` pins the inflight row the absence sweep observed, so
+    /// the rebind adopts that row instead of clearing and re-minting it.
     pub(crate) async fn rebind_inflight_after_force_clean(
         &self,
         provider: &crate::services::provider::ProviderKind,
         channel_id: u64,
         tmux_override: Option<String>,
         minimum_initial_offset: Option<u64>,
+        expected_episode: Option<&super::inflight::InflightEpisodePin>,
     ) -> Option<Result<super::recovery_engine::RebindOutcome, super::recovery_engine::RebindError>>
     {
         let (http, shared) =
@@ -637,6 +640,7 @@ impl HealthRegistry {
                 channel_id,
                 tmux_override,
                 minimum_initial_offset,
+                expected_episode,
             )
             .await,
         )

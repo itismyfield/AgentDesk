@@ -2131,10 +2131,10 @@ pub(crate) async fn run_stall_watchdog_pass(
         .await;
         continue;
     }
-    // #5957: the candidate loop above only reaches channels that still HAVE a
-    // watcher, so a cancelled watcher hides its channel from every branch. Arm
-    // the absence tracker from relay work still owed, then let the retry below
-    // respawn on this same tick.
+    // #5957: the candidate loop above is derived from `tmux_watchers`, so a
+    // channel whose watcher was cancelled reaches no branch that could arm a
+    // watcher absence. Arm it from relay work still owed instead, then let the
+    // retry below respawn on this same tick.
     watcher_respawn::observe_watcher_absence_for_unwatched_work(
         registry,
         provider,

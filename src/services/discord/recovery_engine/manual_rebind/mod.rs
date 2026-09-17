@@ -182,6 +182,9 @@ pub(crate) async fn rebind_inflight_for_channel(
     .await
 }
 
+/// `expected_episode` pins the inflight row the caller observed. Supplying it
+/// keeps the `WatcherReattach` arm on its adopt branch, so a recovery that only
+/// needs a watcher back can never clear the row it was called to serve.
 pub(crate) async fn rebind_inflight_for_channel_with_minimum_start_offset(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -189,6 +192,7 @@ pub(crate) async fn rebind_inflight_for_channel_with_minimum_start_offset(
     channel_id: u64,
     tmux_session_override: Option<String>,
     minimum_initial_offset: Option<u64>,
+    expected_episode: Option<&super::inflight::InflightEpisodePin>,
 ) -> Result<RebindOutcome, RebindError> {
     rebind_inflight_for_channel_inner(
         http,
@@ -198,7 +202,7 @@ pub(crate) async fn rebind_inflight_for_channel_with_minimum_start_offset(
         tmux_session_override,
         ManualRebindOverrides::default(),
         minimum_initial_offset,
-        None,
+        expected_episode,
     )
     .await
 }
