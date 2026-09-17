@@ -153,6 +153,13 @@ mod tests {
         )
     }
 
+    /// Winding a clock back by the constant holds for any value of it, so the
+    /// window is pinned here: three missed 60s idle-queue backstop rounds.
+    #[test]
+    fn the_fail_open_window_spans_three_idle_queue_backstop_rounds() {
+        assert_eq!(INBOUND_ORDER_FAIL_OPEN_AFTER, Duration::from_secs(180));
+    }
+
     /// Waiting a long time behind a long turn is not evidence of a wedge.
     #[test]
     fn an_aged_queue_item_does_not_fail_open_while_the_drain_advances() {
@@ -188,5 +195,34 @@ mod tests {
 
         assert!(!defers(&mut state, 5_937_431));
         assert!(state.inbound_stall_since.is_none(), "no stall when idle");
+    }
+
+    /// Healing, reaper and routine turns claim `Immediate` and drain nothing.
+    /// Counting their cycle as progress let a channel refresh forever.
+    #[test]
+    fn an_immediate_turn_cycle_never_refreshes_the_stall_clock() {
+        let mut state = with_queued(5_937_441, Instant::now());
+        state.inbound_stall_since = Some(past_the_window());
+        let claim = MessageId::new(5_937_442);
+
+        inbound_order_defers_claim(&mut state, claim, TurnAdmissionOrder::Immediate);
+        pause_inbound_stall_for_turn(&mut state, Some(Instant::now()));
+
+        assert!(!defers(&mut state, 5_937_443), "immediate is not progress");
+    }
+
+    /// The claim a fail-open let through drained nothing either, so it must not
+    /// re-arm the clock; retiring the reservation is what unwedges the drain.
+    #[test]
+    fn a_fail_open_claim_retires_the_wedge_without_re_arming_the_clock() {
+        let mut state = with_queued(5_937_451, Instant::now());
+        state.pending_user_dispatch = Some(MessageId::new(5_937_452));
+        state.inbound_stall_since = Some(past_the_window());
+
+        assert!(!defers(&mut state, 5_937_453), "the wedged drain yields");
+        assert_eq!(state.pending_user_dispatch, None, "the wedge is retired");
+        pause_inbound_stall_for_turn(&mut state, Some(Instant::now()));
+
+        assert!(!defers(&mut state, 5_937_454), "and stays open after");
     }
 }

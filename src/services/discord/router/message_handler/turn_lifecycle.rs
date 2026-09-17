@@ -19,25 +19,23 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_with_terminal_m
     user_msg_id: MessageId,
     session_key: Option<&str>,
 ) -> bool {
-    let Some(pool) = shared.pg_pool.as_ref() else {
-        return crate::services::discord::queue_io::mailbox_try_start_turn_behind_queue(
+    // #5937 — one call site, so no bail-out path here can drift back to the
+    // unordered claim that lets text intake overtake queued inbound work.
+    let claim = async move || {
+        crate::services::discord::queue_io::mailbox_try_start_turn_behind_queue(
             shared,
             channel_id,
             cancel_token,
             request_owner,
             user_msg_id,
         )
-        .await;
+        .await
+    };
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        return claim().await;
     };
     let Some(session_key) = session_key.map(str::trim).filter(|value| !value.is_empty()) else {
-        return crate::services::discord::queue_io::mailbox_try_start_turn_behind_queue(
-            shared,
-            channel_id,
-            cancel_token,
-            request_owner,
-            user_msg_id,
-        )
-        .await;
+        return claim().await;
     };
     let thread_channel_id = channel_id.get().to_string();
     let mut tx = match pool.begin().await {
@@ -48,14 +46,7 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_with_terminal_m
                 channel_id,
                 error
             );
-            return crate::services::discord::queue_io::mailbox_try_start_turn_behind_queue(
-                shared,
-                channel_id,
-                cancel_token,
-                request_owner,
-                user_msg_id,
-            )
-            .await;
+            return claim().await;
         }
     };
 
@@ -70,24 +61,10 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_with_terminal_m
             error
         );
         let _ = tx.rollback().await;
-        return crate::services::discord::queue_io::mailbox_try_start_turn_behind_queue(
-            shared,
-            channel_id,
-            cancel_token,
-            request_owner,
-            user_msg_id,
-        )
-        .await;
+        return claim().await;
     }
 
-    let started = crate::services::discord::queue_io::mailbox_try_start_turn_behind_queue(
-        shared,
-        channel_id,
-        cancel_token,
-        request_owner,
-        user_msg_id,
-    )
-    .await;
+    let started = claim().await;
     if started
         && let Err(error) = sqlx::query(
             "UPDATE sessions
