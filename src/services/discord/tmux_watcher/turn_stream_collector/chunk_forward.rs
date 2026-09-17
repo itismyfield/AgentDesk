@@ -1,25 +1,19 @@
 //! Turning one decoded watcher read into a supervisor-relay forward: trim the
-//! pre-turn prefix, name the absolute source byte range the remaining bytes came
-//! from, and push them as either a terminal or a plain streaming frame. The
-//! outer read and the streaming reads differ only in which buffer offsets they
-//! carry, so both go through here rather than repeating the fence dispatch.
+//! pre-turn prefix, name the source byte range the rest came from, and push it
+//! as either a terminal or a plain streaming frame.
 use super::*;
 
 /// The bytes one decoded read contributes to the current turn, paired with the
-/// provenance the sink needs to place them — the read's source authority with
-/// the forwarded range folded in (#5948 I17).
+/// read's source authority carrying the forwarded range (#5948 I17).
 pub(in crate::services::discord::tmux::tmux_watcher) struct ForwardedChunk<'a> {
     text: &'a str,
     source_authority: SupervisorFrameSourceAuthority,
 }
 
-/// #5948 (I17): name the absolute JSONL byte range the forwarded bytes came
-/// from. `all_data` ends at `buffer_start_offset + buffer_len`, and the
-/// forwarded text is a SUFFIX of the decoded chunk (the pre-turn skip only trims
-/// a prefix), so the forwarded bytes end there too. A rewind re-reads from the
-/// turn's data start and hands the sink these same offsets under a fresh relay
-/// `sequence`; the offsets are what let the sink tell replay from genuinely new
-/// output.
+/// #5948 (I17): `all_data` ends at `buffer_start_offset + buffer_len`, and the
+/// forwarded text is a SUFFIX of the decoded chunk, so the forwarded bytes end
+/// there too. A rewind replays those same offsets under a fresh relay
+/// `sequence`, which is what lets the sink tell replay from genuinely new output.
 pub(in crate::services::discord::tmux::tmux_watcher) fn forwarded_chunk<'a>(
     decoded_text: &'a str,
     buffer_len: usize,
@@ -54,11 +48,9 @@ pub(in crate::services::discord::tmux::tmux_watcher) fn forward_turn_chunk_to_su
     terminal: Option<crate::services::cluster::stream_relay::TerminalCommitFence>,
 ) -> SupervisorRelayForward {
     match terminal {
-        // #3041 P1-3 (codex P1-3 issue 1): a single physical chunk may carry turn
-        // A's result PLUS turn B's first bytes. `all_data` after the parse holds
-        // turn B's leftover; split the decoded chunk at that boundary so the
-        // TERMINAL frame carries only turn A's bytes and turn B's tail rides a
-        // separate non-terminal frame (no black-hole, no shared-ACK reuse).
+        // #3041 P1-3 (codex P1-3 issue 1): one physical chunk may carry turn A's
+        // result PLUS turn B's first bytes, so split at the leftover boundary and
+        // let turn B's tail ride a separate non-terminal frame (no black-hole).
         Some(fence) => forward_terminal_chunk_with_trailing_to_supervisor_relay(
             tmux_session_name,
             chunk.text,
