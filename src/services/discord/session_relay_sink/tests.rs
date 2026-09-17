@@ -40,6 +40,7 @@ fn frame(binding: &MatchedChannel, payload: &str, sequence: u64) -> StreamFrame 
         relay_range: None,
         relay_generation_mtime_ns: None,
         relay_source_stamp: None,
+        source_span: None,
     }
 }
 
@@ -99,6 +100,7 @@ pub(super) fn terminal_frame_offset(
         relay_range: None,
         relay_generation_mtime_ns: None,
         relay_source_stamp: None,
+        source_span: None,
     }
 }
 

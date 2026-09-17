@@ -361,6 +361,34 @@ mod tests {
         }
     }
 
+    /// #5948 (DoD): the resend-suppression counter must have a real CONSUMER, not
+    /// just a producer. `relay_terminal_authority_denied` is the cautionary case
+    /// #5941 surfaced — emitted for months with nothing reading it. Membership in
+    /// this table is what makes the hourly #3561 operator alert read it, so guard
+    /// both the key and the status string the emit path actually writes.
+    #[test]
+    fn signal_table_monitors_rewind_resend_suppression() {
+        let signal = RELAY_SIGNAL_DEFINITIONS
+            .iter()
+            .find(|s| s.key == "relay_resend_suppressed")
+            .expect("the #5948 resend-suppression counter must be monitored");
+        assert_eq!(
+            signal.event_type, "relay_root_cause_counter",
+            "the parser emits it through `emit_relay_root_cause_counter`"
+        );
+        assert!(
+            signal.statuses.contains(&"relay_resend_suppressed"),
+            "the monitored status must equal the emitted one, or the window query \
+             counts zero forever; present: {:?}",
+            signal.statuses
+        );
+        assert!(
+            signal.default_threshold > 1,
+            "a rewind resend is recoverable and absorbed — paging on a single one \
+             would make the signal noise instead of a root cause"
+        );
+    }
+
     /// #3579: the operator alert table must NEVER count the watcher-owned
     /// `frame_ack_outcome` non-attempt as a relay-loss signal. `NotAttempted`
     /// (the session-bound ack-wait was intentionally SKIPPED because the watcher
