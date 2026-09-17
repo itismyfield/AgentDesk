@@ -81,12 +81,9 @@ fn retire_stalled_pending_dispatch(state: &mut ChannelMailboxState) {
 }
 
 /// #5937 — true when this claim would jump ahead of inbound work sent earlier: a queued
-/// backlog, or a head `TakeNextSoft` handed out that has not claimed the slot yet. Not
-/// overtakes: the dequeued head itself (it IS the drain, so it clears the stall), a queued copy
-/// of the claiming message, and any claim on a channel stalled for
-/// `INBOUND_ORDER_FAIL_OPEN_AFTER`. A whole window of free-slot stall also proves a
-/// reservation's holder is gone, so the fail-open retires it — else the drain stays wedged and
-/// one arrival per window is all the channel ever answers.
+/// backlog, or a head `TakeNextSoft` handed out that has not claimed the slot yet. The dequeued
+/// head itself (it IS the drain, so it clears the stall), a queued copy of the claiming message,
+/// and any claim on a channel stalled for `INBOUND_ORDER_FAIL_OPEN_AFTER` overtake nothing.
 fn inbound_order_defers_claim(
     state: &mut ChannelMailboxState,
     user_message_id: MessageId,
@@ -120,6 +117,9 @@ fn inbound_order_defers_claim(
     if stalled_since.elapsed() < INBOUND_ORDER_FAIL_OPEN_AFTER {
         return true;
     }
+    // #5937 r3 — a full window of free-slot stall also proves this reservation's
+    // holder is gone: retire it and admit in the same pass. Returning `true`
+    // instead buys order for nobody — a retired reservation defers no one after.
     if reserved {
         retire_stalled_pending_dispatch(state);
     }

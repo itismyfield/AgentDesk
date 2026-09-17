@@ -19,8 +19,11 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_with_terminal_m
     user_msg_id: MessageId,
     session_key: Option<&str>,
 ) -> bool {
-    // #5937 — one call site, so no bail-out path here can drift back to the
-    // unordered claim that lets text intake overtake queued inbound work.
+    // #5937 — every bail-out below returns through this one closure, so none of
+    // them can drift back to the unordered claim that lets text intake overtake
+    // queued inbound work. Structural, not measured: of the five returns only
+    // the no-pool one is execution-covered (by the test below); the other four
+    // need a live Postgres, which the lib test target does not have.
     let claim = async move || {
         crate::services::discord::queue_io::mailbox_try_start_turn_behind_queue(
             shared,
