@@ -16,6 +16,11 @@
 
 use crate::services::cluster::stream_relay::{RelayDroppedFrame, RelayTurnIdentity};
 
+pub(super) use super::supervisor_frame_source::{
+    SupervisorFrameSourceAuthority, source_authority_with_span,
+    split_source_span_at_terminal_boundary,
+};
+
 /// E5 (#2412): forward a freshly-read tmux output chunk into the
 /// supervisor-owned [`StreamRelay`] (if one exists for the session). The
 /// supervisor's [`RelayProducerRegistry`] is the bridge — it hands the
@@ -292,51 +297,6 @@ pub(super) fn carry_session_bound_ack_for_turn(
     }
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct SupervisorFrameSourceAuthority {
-    generation_mtime_ns: i64,
-    source_stamp: Option<crate::services::cluster::stream_relay::SourceStamp>,
-    /// #5948 (I17): absolute JSONL byte range the forwarded payload was read from,
-    /// when the caller knows it. It rides the source authority instead of a
-    /// separate parameter on every forward helper because it answers the same
-    /// question the authority already answers — where these bytes came from — one
-    /// coordinate finer. A caller that cannot name a range leaves it `None`; the
-    /// sink treats a named range as authoritative, so it is never invented here.
-    source_span: Option<(u64, u64)>,
-}
-
-impl From<i64> for SupervisorFrameSourceAuthority {
-    fn from(generation_mtime_ns: i64) -> Self {
-        Self {
-            generation_mtime_ns,
-            source_stamp: None,
-            source_span: None,
-        }
-    }
-}
-
-impl From<super::loop_poll_prologue::WatcherSourceAuthority> for SupervisorFrameSourceAuthority {
-    fn from(authority: super::loop_poll_prologue::WatcherSourceAuthority) -> Self {
-        Self {
-            generation_mtime_ns: authority.generation_mtime_ns,
-            source_stamp: authority.source_stamp,
-            source_span: None,
-        }
-    }
-}
-
-/// #5948 (I17): attach the absolute source byte range a forward carries to the
-/// authority that already describes the forward's provenance.
-pub(super) fn source_authority_with_span(
-    source_authority: impl Into<SupervisorFrameSourceAuthority>,
-    source_span: Option<(u64, u64)>,
-) -> SupervisorFrameSourceAuthority {
-    SupervisorFrameSourceAuthority {
-        source_span,
-        ..source_authority.into()
-    }
-}
-
 pub(super) fn forward_chunk_to_supervisor_relay(
     tmux_session_name: &str,
     chunk: &str,
@@ -503,24 +463,6 @@ pub(super) fn forward_terminal_chunk_with_trailing_to_supervisor_relay(
         trailing_turn_follows: true,
         trailing_first_forwarded_sequence,
     }
-}
-
-/// #5948 (I17): split one contiguous source byte range at the same boundary
-/// `split_decoded_chunk_at_terminal_boundary` splits the payload at, so each
-/// forwarded frame names exactly the bytes it carries. `None` in ⇒ `None` out on
-/// both sides: a caller that cannot name a range must not have one invented for
-/// it, because the sink treats a named range as authoritative.
-pub(super) fn split_source_span_at_terminal_boundary(
-    span: Option<(u64, u64)>,
-    terminal_len: usize,
-) -> (Option<(u64, u64)>, Option<(u64, u64)>) {
-    let Some((start, end)) = span else {
-        return (None, None);
-    };
-    let boundary = start.saturating_add(terminal_len as u64).min(end);
-    let terminal = (boundary > start).then_some((start, boundary));
-    let tail = (end > boundary).then_some((boundary, end));
-    (terminal, tail)
 }
 
 /// #3041 P1-3 (codex P1-3 issue 1 — multi-turn-chunk black-hole close): split the

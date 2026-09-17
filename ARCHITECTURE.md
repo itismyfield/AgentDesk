@@ -1094,6 +1094,7 @@ src/
 │   │   │   ├── stall_exit.rs
 │   │   │   ├── streaming_session_banner.rs
 │   │   │   ├── streaming_status_tick.rs
+│   │   │   ├── supervisor_frame_source.rs
 │   │   │   ├── supervisor_relay.rs
 │   │   │   ├── supervisor_relay_tests.rs
 │   │   │   ├── task_response_authority.rs
