@@ -238,6 +238,41 @@ pub(in crate::services::discord) fn preserve_admitted_source(
     }
 }
 
+/// #5981 — a stream tick persists the native SID (and any other field the live
+/// turn has learned) onto the durable row long before the terminal stamp runs.
+/// `preserve_admitted_source` then compares an already-advanced row against a
+/// birth-time witness and declines, leaving the allocation proof stale for the
+/// rest of the episode; the dormant claim that a lost source falls back on then
+/// refuses its own row. Carry the witness with the write instead.
+///
+/// Unlike `preserve_admitted_source` the caller holds no actor handle here.
+/// Exact equality against `before` proves the row is still the one the witness
+/// describes, and `is_same_episode_as` proves the write did not install a
+/// successor allocation; a missing witness or a dead one is left untouched.
+/// `is_same_episode_as` deliberately ignores relay ownership, so the same
+/// delegation gate `record` applies at insert is re-applied here: a tick that
+/// hands the relay to a watcher or a concurrent owner must not carry a witness
+/// onto a row `record` would have refused to witness at all.
+pub(in crate::services::discord) fn preserve_stamped_source(
+    before: &InflightEpisodePin,
+    stamped: &InflightTurnState,
+) {
+    if stamped.effective_relay_owner_kind() != RelayOwnerKind::None {
+        return;
+    }
+    let advanced = InflightEpisodePin::from_state(stamped);
+    if !before.is_same_episode_as(&advanced) {
+        return;
+    }
+    let mut claims = CLAIMS.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(witness) = claims
+        .get_mut(&(stamped.provider.clone(), stamped.channel_id))
+        .filter(|witness| witness.episode == *before && witness.actor.upgrade().is_some())
+    {
+        witness.episode = advanced;
+    }
+}
+
 pub(super) fn record(
     row: &InflightTurnState,
     actor: Option<&Arc<CancelToken>>,

@@ -270,6 +270,7 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         }
     }
 
+    let before_tick = crate::services::discord::inflight::InflightEpisodePin::from_state(&on_disk);
     let mut updated = on_disk.clone();
     let local_current_message = (state.current_msg_id, state.current_msg_len);
     if local_current_message != baseline_current_message
@@ -434,6 +435,13 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         "src/services/discord/inflight/save_store/identity_gate/stream_loop_patch.rs:save_stream_tick_state_preserving_current_message_races_in_root",
     ) {
         Ok(Some(persisted)) => {
+            // #5981: this write can be the first to land the native SID on the
+            // durable row. Carry the allocation witness with it so the dormant
+            // claim still recognizes the episode after a lost source.
+            crate::services::discord::tui_prompt_relay::preserve_stamped_source(
+                &before_tick,
+                &persisted,
+            );
             state.clone_from(&persisted);
             persisted_baseline.clone_from(&persisted);
             GuardedSaveOutcome::Saved

@@ -51,6 +51,24 @@ impl InflightEpisodePin {
         }
     }
 
+    /// #5981 — same allocation, advanced row. All seven birth axes (provider,
+    /// channel, owner, anchor, nonce, generation, start instant) must be
+    /// byte-identical; only fields a live turn can legitimately learn are
+    /// allowed to differ. `turn_start_offset` is deliberately not one of them:
+    /// the #3041 same-second tiebreak stays on the full-pin `==` that callers
+    /// pair this with. Callers use this before carrying a witness forward, so a
+    /// successor episode can never be adopted under the previous allocation's
+    /// proof.
+    pub(in crate::services::discord) fn is_same_episode_as(&self, other: &Self) -> bool {
+        self.provider == other.provider
+            && self.channel_id == other.channel_id
+            && self.request_owner_user_id == other.request_owner_user_id
+            && self.user_msg_id == other.user_msg_id
+            && self.turn_nonce == other.turn_nonce
+            && self.born_generation == other.born_generation
+            && self.started_at == other.started_at
+    }
+
     pub(in crate::services::discord) fn matches_state(&self, state: &InflightTurnState) -> bool {
         *self == Self::from_state(state)
     }
