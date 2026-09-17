@@ -16,7 +16,9 @@
 
 use crate::services::cluster::stream_relay::{RelayDroppedFrame, RelayTurnIdentity};
 
-pub(super) use super::supervisor_frame_source::{
+#[path = "supervisor_relay/supervisor_frame_source.rs"]
+mod supervisor_frame_source;
+pub(super) use self::supervisor_frame_source::{
     SupervisorFrameSourceAuthority, source_authority_with_span,
     split_source_span_at_terminal_boundary,
 };

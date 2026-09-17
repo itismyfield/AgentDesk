@@ -1,16 +1,20 @@
 //! #5948 (I17): where a supervisor forward's bytes came from —
 //! `SupervisorFrameSourceAuthority` plus the terminal/tail span split. PURE MOVE
-//! out of the sibling `supervisor_relay`; both stay under the 700-line cap.
+//! out of the parent `supervisor_relay`, which re-exports it; both stay under
+//! the 700-line cap.
+
+use crate::services::discord::tmux::tmux_watcher::loop_poll_prologue::WatcherSourceAuthority;
 
 #[derive(Clone, Copy)]
-pub(super) struct SupervisorFrameSourceAuthority {
-    pub(super) generation_mtime_ns: i64,
-    pub(super) source_stamp: Option<crate::services::cluster::stream_relay::SourceStamp>,
+pub(in crate::services::discord::tmux::tmux_watcher) struct SupervisorFrameSourceAuthority {
+    pub(in crate::services::discord::tmux::tmux_watcher) generation_mtime_ns: i64,
+    pub(in crate::services::discord::tmux::tmux_watcher) source_stamp:
+        Option<crate::services::cluster::stream_relay::SourceStamp>,
     /// #5948 (I17): absolute JSONL byte range the payload was read from, when
     /// known. It rides the authority rather than a per-helper parameter because
     /// it answers the same provenance question one coordinate finer. `None`
     /// when unnameable; a named range is authoritative, so never invented here.
-    pub(super) source_span: Option<(u64, u64)>,
+    pub(in crate::services::discord::tmux::tmux_watcher) source_span: Option<(u64, u64)>,
 }
 
 impl From<i64> for SupervisorFrameSourceAuthority {
@@ -23,8 +27,8 @@ impl From<i64> for SupervisorFrameSourceAuthority {
     }
 }
 
-impl From<super::loop_poll_prologue::WatcherSourceAuthority> for SupervisorFrameSourceAuthority {
-    fn from(authority: super::loop_poll_prologue::WatcherSourceAuthority) -> Self {
+impl From<WatcherSourceAuthority> for SupervisorFrameSourceAuthority {
+    fn from(authority: WatcherSourceAuthority) -> Self {
         Self {
             generation_mtime_ns: authority.generation_mtime_ns,
             source_stamp: authority.source_stamp,
@@ -35,7 +39,7 @@ impl From<super::loop_poll_prologue::WatcherSourceAuthority> for SupervisorFrame
 
 /// #5948 (I17): attach the absolute source byte range a forward carries to the
 /// authority that already describes the forward's provenance.
-pub(super) fn source_authority_with_span(
+pub(in crate::services::discord::tmux::tmux_watcher) fn source_authority_with_span(
     source_authority: impl Into<SupervisorFrameSourceAuthority>,
     source_span: Option<(u64, u64)>,
 ) -> SupervisorFrameSourceAuthority {
@@ -49,7 +53,7 @@ pub(super) fn source_authority_with_span(
 /// `split_decoded_chunk_at_terminal_boundary` splits the payload at, so each
 /// forwarded frame names exactly the bytes it carries. `None` in ⇒ `None` out on
 /// both sides: a range the caller cannot name must never be invented for it.
-pub(super) fn split_source_span_at_terminal_boundary(
+pub(in crate::services::discord::tmux::tmux_watcher) fn split_source_span_at_terminal_boundary(
     span: Option<(u64, u64)>,
     terminal_len: usize,
 ) -> (Option<(u64, u64)>, Option<(u64, u64)>) {

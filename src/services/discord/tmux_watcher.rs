@@ -123,12 +123,6 @@ mod supervisor_relay;
 #[path = "tmux_watcher/session_bound_ack.rs"]
 mod session_bound_ack;
 
-// #5948 (I17): the forward's source-provenance types split out of
-// `supervisor_relay` (pure move) to keep it under the namespace LoC cap;
-// `supervisor_relay` re-exports them so every call site stays unchanged.
-#[path = "tmux_watcher/supervisor_frame_source.rs"]
-mod supervisor_frame_source;
-
 // #3479 Phase-1 rank-2: two more cohesive PURE clusters extracted to sibling
 // submodules (pure move, zero logic change). `utf8_chunk_decoder` holds the
 // streaming UTF-8 chunk decoder; `terminal_readiness` holds the synchronous
