@@ -1636,6 +1636,9 @@ mod tests {
     /// resume point must remain suppressed, which is the guard being ALIVE
     /// rather than merely harmless. The second nudge covers the other way to
     /// re-post: asking for the same bytes twice.
+    // The resumed-batch assertion reads the watcher resume outcome, which lives
+    // behind the unix-only `discord::tmux` module tree.
+    #[cfg(unix)]
     #[test]
     fn the_duplicate_relay_guard_survives_the_redrive_path_5943() {
         use crate::services::discord::tmux::tmux_watcher::loop_poll_prologue::watcher_resume::watcher_resume_outcome;
