@@ -72,9 +72,9 @@ readonly DESTRUCTIVE_CANCEL_GATE="src/services/discord/destructive_cancel_gate.r
 # row pays one full crate build and seven already fill this step's 45-minute
 # budget, so widening the list would require raising that timeout. Add a target
 # in scripts/relay_authority_contract_targets.json instead.
-# The ci-pr.yml `mutation_sources` filter selects this list plus the files that
-# own each row's judging test; tests/test_relay_authority_mutations.py fails if
-# the two drift apart.
+# The ci-pr.yml `mutation_sources` filter selects this list, the file that owns
+# each row's judging test, and the modules those judges import fixtures from;
+# tests/test_relay_authority_mutations.py fails if the groups drift apart.
 readonly -a MUTATION_FILES=(
   "$TERMINAL_HANDOFF"
   "$SESSION_RELAY_SINK"

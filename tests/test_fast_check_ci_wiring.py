@@ -19,9 +19,10 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "854fc863c3e720b0f09184360385b6255dea915272f867fbef50a17c1d768496"
+    "09bebc28b03a789b8220ef0a32e6df4b851407584b7154aeef1409fa6fddc540"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
+FILTER_BLOCK_HEADER = re.compile(r"^            \w+:$", re.M)
 CROSS_OS_CONSUMER_SCRIPT = REPO_ROOT / "scripts/cross_os_consumer_paths.py"
 # #5828's own break (turn_bridge/mod.rs) plus the 22 files measured on PR #5834
 # that carry the same shim and were left unselected by the hand-written list.
@@ -228,15 +229,21 @@ def comment_out_in_filter(workflow: str, block: str, selector: str) -> str:
     was the last block naming these paths. #5997 added a second paths-filter
     step, inside `relay-authority-contract` and further down the file, that
     repeats some of them, so an unscoped edit silently mutates that block
-    instead and leaves the block under test intact.
+    instead and leaves the block under test intact. The search therefore stops
+    at the next block header: a selector this block does not list has to raise
+    rather than be commented out of a later one, where `assertNotIn` on THIS
+    block's survivors would then pass having proved nothing.
     """
-    head, separator, tail = workflow.partition(f"            {block}:\n")
+    head, separator, rest = workflow.partition(f"            {block}:\n")
     if not separator:
         raise AssertionError(f"missing filter block: {block!r}")
+    following = FILTER_BLOCK_HEADER.search(rest)
+    cut = following.start() if following else len(rest)
+    body, tail = rest[:cut], rest[cut:]
     line = f"              - '{selector}'"
-    if line not in tail:
+    if line not in body:
         raise AssertionError(f"{block!r} does not list {selector!r}")
-    return head + separator + tail.replace(line, f"              # - '{selector}'", 1)
+    return head + separator + body.replace(line, f"              # - '{selector}'", 1) + tail
 
 
 def glob_matcher(pattern: str) -> re.Pattern[str]:

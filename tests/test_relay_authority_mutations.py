@@ -54,6 +54,38 @@ JUDGE_FILES = {
 }
 # The gate's own wiring: editing either can change what the step proves.
 WIRING_FILES = ("scripts/run_relay_authority_mutations.sh", ".github/workflows/ci-pr.yml")
+# A judge's fixtures reach it through `use super::*` (its own parent module) or
+# `use super::<mod>::` (a sibling module); either can empty a judgment while
+# JUDGE_FILES and MUTATION_FILES both stay untouched, so the filter has to
+# select them too. `use super::{Item, ...}` is deliberately NOT followed: it
+# names items re-exported by the module root, which for these judges is
+# src/services/discord/mod.rs, and selecting that returns the job to the
+# unconditional cost this filter exists to remove.
+SUPER_IMPORT = re.compile(r"^use super::(\*|[a-z_][a-z0-9_]*::)", re.M)
+
+
+def _module_file(module: Path) -> str | None:
+    """`foo/bar.rs` and `foo/bar/mod.rs` are two spellings of one module."""
+    for candidate in (module.with_suffix(".rs"), module / "mod.rs"):
+        if (REPO_ROOT / candidate).is_file():
+            return candidate.as_posix()
+    return None
+
+
+def judge_fixture_owners() -> frozenset[str]:
+    """Every module a judging test pulls fixtures from, read off its imports."""
+    owners: set[str] = set()
+    for judge in sorted(set(JUDGE_FILES.values())):
+        parent = Path(judge).parent
+        source = (REPO_ROOT / judge).read_text(encoding="utf-8")
+        for token in SUPER_IMPORT.findall(source):
+            segment = token.rstrip(":")
+            if segment == "super":  # `use super::super::` leaves the subtree.
+                continue
+            owner = _module_file(parent if segment == "*" else parent / segment)
+            if owner is not None:
+                owners.add(owner)
+    return frozenset(owners)
 
 
 def script_mutation_files(script: str) -> tuple[str, ...]:
@@ -587,9 +619,25 @@ class MutationPathFilterContractTests(unittest.TestCase):
     def test_filter_is_exactly_the_mutated_judging_and_wiring_files(self) -> None:
         self.assertEqual(
             set(self.patterns),
-            set(self.declared) | set(JUDGE_FILES.values()) | set(WIRING_FILES),
+            set(self.declared)
+            | set(JUDGE_FILES.values())
+            | judge_fixture_owners()
+            | set(WIRING_FILES),
         )
         self.assertEqual(len(self.patterns), len(set(self.patterns)))
+
+    def test_the_fixture_owners_are_read_off_the_judges_not_restated(self) -> None:
+        """The equality above is only a real comparison while this derivation
+        finds something: a regex that matched nothing would make the fixture
+        group vanish from both sides at once. These two are the demonstrated
+        channels -- `delivery_orchestration_tests.rs` builds the M6/M8/M10
+        verdicts from `terminal_frame_offset` in a file it never mutates, and
+        S4-m5's judge takes its post-gate hook out of `relay_recovery.rs` the
+        same way."""
+        owners = judge_fixture_owners()
+        self.assertIn("src/services/discord/session_relay_sink/tests.rs", owners)
+        self.assertIn("src/services/discord/relay_recovery.rs", owners)
+        self.assertTrue(owners.issubset(set(self.patterns)), sorted(owners))
 
     def test_every_pattern_is_a_literal_path_that_exists(self) -> None:
         """Set equality above is only a real comparison while every pattern is
@@ -631,8 +679,14 @@ class MutationPathFilterContractTests(unittest.TestCase):
 
     def test_the_condition_runs_the_gate_unless_the_filter_said_unrelated(self) -> None:
         """The negative form is load-bearing: a missing or empty filter output
-        has to run the mutation gate, not skip it."""
-        self.assertTrue(STEP_CONDITION.endswith("!= 'false'"), STEP_CONDITION)
+        has to run the mutation gate, not skip it. Read off the workflow rather
+        than off STEP_CONDITION, which this file builds itself: deleting the
+        `if:` line outright has to fail here and not only next door."""
+        job = yaml.safe_load((REPO_ROOT / PR_WORKFLOW).read_text(encoding="utf-8"))["jobs"][
+            MUTATION_JOB
+        ]
+        step = next(s for s in job["steps"] if s.get("name") == MUTATION_STEP)
+        self.assertTrue(str(step["if"]).endswith("!= 'false'"), step.get("if"))
 
     def test_ci_script_checks_runs_this_contract(self) -> None:
         script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")

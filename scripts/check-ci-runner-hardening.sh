@@ -918,7 +918,7 @@ targets = {
     # #5997 re-pins after adding the mutation-surface paths-filter step and
     # gating the mutation step alone on it. No command is removed or relaxed,
     # and the job still declares neither `if:` nor `needs:`.
-    "job_sha256" => "edba8b6f247c92f8dd042ed2086155930b53846fbb9906b78d1cbfe6e1dcc489",
+    "job_sha256" => "e8f2b4c53485368bd2c268645dfd05aa33bf9fbd48b1eb13aa575ffe6b74dd1c",
     "job_timeout_minutes" => 50,
     "cargo_steps" => {
       "Verify named relay-authority targets and selection floors" => {
