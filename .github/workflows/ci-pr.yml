@@ -1577,7 +1577,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=802e676708f9099a609e555f9d687566d49f7757c656f85b8e44e57d6a00fb31
+          expected=854fc863c3e720b0f09184360385b6255dea915272f867fbef50a17c1d768496
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -1604,7 +1604,10 @@ jobs:
   # #5071 T0: this required-context candidate is intentionally unconditional.
   # Its version-controlled manifest names every current T1-T5 contract target,
   # records explicit GAP rows, and owns the selection floors. Condition-3 fixed
-  # mutations attach as a later step in this same job after target verification.
+  # mutations attach as a later step in this same job after target verification,
+  # and #5997 gates THAT STEP ALONE on the surface below. The job, the named
+  # targets and the #5321 backstop stay unconditional, so the floor this
+  # workflow's `library_sweep` comment measures is unchanged.
   # relay-authority-contract timeouts: 7 mutations x ~4.5min compile+test + ~6min
   # setup/base build (measured 2026-08-19, run 32194217057: 5 of 7 done at 30m16s
   # timeout). 50/45 give headroom without hiding growth.
@@ -1617,6 +1620,31 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
+
+      # #5997: this selects the mutation step alone. It carries the four sources
+      # `run_relay_authority_mutations.sh` mutates AND the file that owns each
+      # row's judging test: six of the seven rows are judged from a file they do
+      # not mutate, so a diff that only weakens a judge has to run the gate too.
+      # A job-level filter is not available here -- `check-ci-runner-hardening.sh`
+      # forbids `if:`/`needs:` on this job so the #5321 backstop stays
+      # independent -- so the filter runs as a step and gates a step.
+      # `tests/test_relay_authority_mutations.py` fails if this list and the
+      # script's `MUTATION_FILES` drift apart.
+      - name: Detect relay-authority mutation sources
+        id: mutation_paths
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            mutation_sources:
+              - 'src/services/discord/session_relay_sink.rs'
+              - 'src/services/discord/session_relay_sink/terminal_handoff.rs'
+              - 'src/services/discord/session_relay_sink/delivery_orchestration_tests.rs'
+              - 'src/services/discord/tmux_watcher_registry/fences.rs'
+              - 'src/services/discord/tmux_watcher_registry_restore_tests.rs'
+              - 'src/services/discord/destructive_cancel_gate.rs'
+              - 'src/services/discord/relay_recovery/tests.rs'
+              - 'scripts/run_relay_authority_mutations.sh'
+              - '.github/workflows/ci-pr.yml'
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -1664,6 +1692,7 @@ jobs:
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1
 
       - name: Require relay-authority mutations to be killed
+        if: steps.mutation_paths.outputs.mutation_sources != 'false'
         env:
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
@@ -1692,7 +1721,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=802e676708f9099a609e555f9d687566d49f7757c656f85b8e44e57d6a00fb31
+          expected=854fc863c3e720b0f09184360385b6255dea915272f867fbef50a17c1d768496
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

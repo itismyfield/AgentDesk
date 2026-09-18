@@ -19,7 +19,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "802e676708f9099a609e555f9d687566d49f7757c656f85b8e44e57d6a00fb31"
+    "854fc863c3e720b0f09184360385b6255dea915272f867fbef50a17c1d768496"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 CROSS_OS_CONSUMER_SCRIPT = REPO_ROOT / "scripts/cross_os_consumer_paths.py"
@@ -219,6 +219,24 @@ def replace_last(source: str, old: str, new: str) -> str:
     if not separator:
         raise AssertionError(f"missing text for final replacement: {old!r}")
     return head + new + tail
+
+
+def comment_out_in_filter(workflow: str, block: str, selector: str) -> str:
+    """Comment one pattern out of ONE named filter block.
+
+    A whole-file `replace_last` used to land on `cross_os_rust` only because it
+    was the last block naming these paths. #5997 added a second paths-filter
+    step, inside `relay-authority-contract` and further down the file, that
+    repeats some of them, so an unscoped edit silently mutates that block
+    instead and leaves the block under test intact.
+    """
+    head, separator, tail = workflow.partition(f"            {block}:\n")
+    if not separator:
+        raise AssertionError(f"missing filter block: {block!r}")
+    line = f"              - '{selector}'"
+    if line not in tail:
+        raise AssertionError(f"{block!r} does not list {selector!r}")
+    return head + separator + tail.replace(line, f"              # - '{selector}'", 1)
 
 
 def glob_matcher(pattern: str) -> re.Pattern[str]:
@@ -569,11 +587,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for selector in derived:
             with self.subTest(selector=selector):
                 survivors = paths_filter_definitions(
-                    replace_last(
-                        workflow,
-                        f"              - '{selector}'",
-                        f"              # - '{selector}'",
-                    )
+                    comment_out_in_filter(workflow, "cross_os_rust", selector)
                 )["cross_os_rust"]
                 self.assertNotIn(selector, survivors)
                 self.assertTrue(
@@ -721,6 +735,17 @@ class FastCheckCiWiringTests(unittest.TestCase):
             r'      CARGO_PROFILE_TEST_DEBUG: "0"\n'
             r"    steps:\n"
             r"      - uses: actions/checkout@v4\n\n"
+            # #5997: the mutation-surface filter sits between checkout and the
+            # toolchain so the gated step below can read its output.
+            r"(?:      #[^\n]*\n)+"
+            r"      - name: Detect relay-authority mutation sources\n"
+            r"        id: mutation_paths\n"
+            r"        uses: dorny/paths-filter@v3\n"
+            r"        with:\n"
+            r"          filters: \|\n"
+            r"            mutation_sources:\n"
+            r"(?:              - '[^']+'\n)+"
+            r"\n"
             r"      - name: Install Rust toolchain\n"
             r"        uses: dtolnay/rust-toolchain@master\n"
             r"        with:\n"
@@ -751,6 +776,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertRegex(
             job,
             r"(?m)^      - name: Require relay-authority mutations to be killed\n"
+            # #5997: the negative form is load-bearing -- a missing or empty
+            # filter output has to run the gate rather than skip it.
+            r"        if: steps\.mutation_paths\.outputs\.mutation_sources != 'false'\n"
             r"        env:\n"
             r"          BASH_ENV: /dev/null\n"
             r'          CARGO_PROFILE_DEV_DEBUG: "0"\n'

@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +34,54 @@ MUTATION_FILES = (
 # declared condition-3 floor stays four.
 MUTATION_COUNT = 7
 MUTATION_NAMES = ("M10", "M6", "M8", "anchor-drop", "S4-m5", "S4-m6", "S4-m7")
+PR_WORKFLOW = Path(".github/workflows/ci-pr.yml")
+MUTATION_JOB = "relay-authority-contract"
+MUTATION_STEP = "Require relay-authority mutations to be killed"
+FILTER_ID = "mutation_paths"
+FILTER_NAME = "mutation_sources"
+STEP_CONDITION = f"steps.{FILTER_ID}.outputs.{FILTER_NAME} != 'false'"
+# The file that DEFINES each row's judging test. Six of the seven rows are
+# judged from a file they do not mutate, so #5997's CI filter has to select
+# these as well: a diff that only weakens a judge must still run the gate.
+JUDGE_FILES = {
+    "M10": "src/services/discord/session_relay_sink/delivery_orchestration_tests.rs",
+    "M6": "src/services/discord/session_relay_sink/delivery_orchestration_tests.rs",
+    "M8": "src/services/discord/session_relay_sink/delivery_orchestration_tests.rs",
+    "anchor-drop": "src/services/discord/session_relay_sink/delivery_orchestration_tests.rs",
+    "S4-m5": "src/services/discord/relay_recovery/tests.rs",
+    "S4-m6": "src/services/discord/destructive_cancel_gate.rs",
+    "S4-m7": "src/services/discord/tmux_watcher_registry_restore_tests.rs",
+}
+# The gate's own wiring: editing either can change what the step proves.
+WIRING_FILES = ("scripts/run_relay_authority_mutations.sh", ".github/workflows/ci-pr.yml")
+
+
+def script_mutation_files(script: str) -> tuple[str, ...]:
+    """The `MUTATION_FILES` array as the shell script really declares it.
+
+    Parsed rather than restated: comparing the workflow filter against a second
+    hand-written copy of the list would pass while the script itself drifted.
+    """
+    constants = dict(re.findall(r'^readonly ([A-Z0-9_]+)="([^"]+)"$', script, re.M))
+    body = re.search(
+        r"^readonly -a MUTATION_FILES=\(\n(.*?)^\)$", script, re.M | re.S
+    )
+    assert body, "MUTATION_FILES array literal not found in the script"
+    return tuple(constants[name] for name in re.findall(r'"\$([A-Z0-9_]+)"', body.group(1)))
+
+
+def mutation_filter_patterns() -> tuple[str, ...]:
+    """The `mutation_sources` pattern list from the job's own filter step."""
+    job = yaml.safe_load((REPO_ROOT / PR_WORKFLOW).read_text(encoding="utf-8"))["jobs"][
+        MUTATION_JOB
+    ]
+    step = next(
+        candidate
+        for candidate in job["steps"]
+        if str(candidate.get("uses", "")).startswith("dorny/paths-filter")
+    )
+    assert step["id"] == FILTER_ID, step["id"]
+    return tuple(yaml.safe_load(step["with"]["filters"])[FILTER_NAME])
 
 
 def _cargo_log(body: str) -> str:
@@ -514,6 +565,78 @@ exit 101
 
     def test_script_mode_is_executable(self) -> None:
         self.assertTrue(os.access(REPO_ROOT / MUTATION_SCRIPT, os.X_OK))
+
+
+class MutationPathFilterContractTests(unittest.TestCase):
+    """#5997: the mutation step is the only path-gated step in an otherwise
+    unconditional required job, so its filter must stay exactly as wide as what
+    the step grades. A filter that drifts narrow skips the gate silently and CI
+    stays green, so the two lists are compared rather than trusted."""
+
+    maxDiff = None
+
+    def setUp(self) -> None:
+        self.patterns = mutation_filter_patterns()
+        self.declared = script_mutation_files(
+            (REPO_ROOT / MUTATION_SCRIPT).read_text(encoding="utf-8")
+        )
+
+    def test_the_script_array_is_the_list_this_fixture_copies(self) -> None:
+        self.assertEqual(self.declared, tuple(p.as_posix() for p in MUTATION_FILES))
+
+    def test_filter_is_exactly_the_mutated_judging_and_wiring_files(self) -> None:
+        self.assertEqual(
+            set(self.patterns),
+            set(self.declared) | set(JUDGE_FILES.values()) | set(WIRING_FILES),
+        )
+        self.assertEqual(len(self.patterns), len(set(self.patterns)))
+
+    def test_every_pattern_is_a_literal_path_that_exists(self) -> None:
+        """Set equality above is only a real comparison while every pattern is
+        a literal; one glob would make it silently over- or under-match."""
+        for pattern in self.patterns:
+            with self.subTest(pattern=pattern):
+                self.assertNotIn("*", pattern)
+                self.assertFalse(pattern.startswith("!"))
+                self.assertTrue((REPO_ROOT / pattern).is_file(), pattern)
+
+    def test_each_row_is_judged_from_a_file_the_filter_selects(self) -> None:
+        """The mutated file and the file defining the test that grades it are
+        different for six of the seven rows; both have to select the lane."""
+        manifest = json.loads((REPO_ROOT / CONTRACT_MANIFEST).read_text(encoding="utf-8"))
+        for row in manifest["condition3_mutations"]:
+            with self.subTest(mutation=row["name"]):
+                judge = JUDGE_FILES[row["name"]]
+                self.assertIn(row["file"], self.patterns)
+                self.assertIn(judge, self.patterns)
+                named = row["target"].rsplit("::", 1)[1]
+                source = (REPO_ROOT / judge).read_text(encoding="utf-8")
+                self.assertRegex(source, rf"\bfn {re.escape(named)}\b")
+
+    def test_only_the_mutation_step_is_gated_on_the_filter(self) -> None:
+        job = yaml.safe_load((REPO_ROOT / PR_WORKFLOW).read_text(encoding="utf-8"))["jobs"][
+            MUTATION_JOB
+        ]
+        # `check-ci-runner-hardening.sh` forbids both keys here so the #5321
+        # backstop stays independent of the `changes` job; that is why this is a
+        # step-level filter and not a job-level one.
+        self.assertNotIn("if", job)
+        self.assertNotIn("needs", job)
+        gated = {
+            step["name"]: step["if"]
+            for step in job["steps"]
+            if "name" in step and FILTER_ID in str(step.get("if", ""))
+        }
+        self.assertEqual(gated, {MUTATION_STEP: STEP_CONDITION})
+
+    def test_the_condition_runs_the_gate_unless_the_filter_said_unrelated(self) -> None:
+        """The negative form is load-bearing: a missing or empty filter output
+        has to run the mutation gate, not skip it."""
+        self.assertTrue(STEP_CONDITION.endswith("!= 'false'"), STEP_CONDITION)
+
+    def test_ci_script_checks_runs_this_contract(self) -> None:
+        script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
+        self.assertIn("unittest tests.test_relay_authority_mutations", script)
 
 
 if __name__ == "__main__":
