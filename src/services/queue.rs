@@ -711,7 +711,11 @@ impl QueueService {
             },
         )
         .await;
-        let queued_remaining = loss.queue_depth_after.or(queued_remaining);
+        // The drain is the documented source of truth, so it keeps precedence.
+        // The guard's depth only fills a gap the drain left empty: it comes from
+        // a mailbox that cannot distinguish "never answered" from "empty"
+        // (#6046), which is fine as a fallback and wrong as an override.
+        let queued_remaining = queued_remaining.or(loss.queue_depth_after);
 
         tracing::info!(
             "[queue-api] Cancelled turn: channel={}, session={:?}, tmux={}, killed={}, dispatch={:?}, lifecycle={}, agent={:?}, requested_provider={:?}, exact_match={}, queue_preserved={}, queued_before={:?}, queued_after={:?}, queue_disk_before={}, queue_disk_after={}, queue_purged={:?}, mailbox_foreground_free={:?}, queue_dropped_message_ids={:?}",
