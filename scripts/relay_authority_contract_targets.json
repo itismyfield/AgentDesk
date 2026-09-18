@@ -204,6 +204,20 @@
       ],
       "minimum": 5,
       "derivation": "Measured on origin/main 0ae1c5b77 with the declared command plus -- --list. This Rust production-path E2E drives the local Discord mock, mailbox lifecycle, durable queue wake, and production workers; dashboard Playwright is unrelated and nightly-only."
+    },
+    {
+      "name": "relay-e2e-scenario-census",
+      "boundary": "relay-e2e",
+      "status": "active",
+      "module": "services::discord::tui_prompt_relay::tests::scenario_census_e2e",
+      "command": [
+        "cargo",
+        "test",
+        "--lib",
+        "services::discord::tui_prompt_relay::tests::scenario_census_e2e"
+      ],
+      "minimum": 4,
+      "derivation": "Four tests: the class census, the per-file exclusion reasons, the production replay of the runnable scenarios through session_backend::process_stream_line and codex_tui::rollout_tail::RolloutRecordDecoder, and the #6033 pin. The floor is the count declared before each mutation run; a run that selects fewer is a failure, not a pass."
     }
   ]
 }

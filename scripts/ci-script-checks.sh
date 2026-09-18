@@ -303,8 +303,20 @@ banner "Relay-authority fixed mutation gate (#5071)"
 banner "Relay recovery targeted-lane wiring contract (#4423)"
 "$PYTHON" -m unittest tests.test_relay_recovery_ci_wiring
 
-banner "TUI relay assertion unit tests (#5065)"
-"$PYTHON" -m unittest scripts.e2e.tui_relay.test_assertions
+banner "TUI relay e2e harness unit tests (#5065/#5997)"
+# #5997: only test_assertions was wired here, so eight sibling modules covering
+# the same scenario machinery compiled in review and executed nowhere.
+"$PYTHON" -m unittest \
+  scripts.e2e.tui_relay.test_assertions \
+  scripts.e2e.tui_relay.test_cell_resolution \
+  scripts.e2e.tui_relay.test_discord_client \
+  scripts.e2e.tui_relay.test_driver_health \
+  scripts.e2e.tui_relay.test_durable_delivery \
+  scripts.e2e.tui_relay.test_fixtures \
+  scripts.e2e.tui_relay.test_known_gap \
+  scripts.e2e.tui_relay.test_matrix_runner \
+  scripts.e2e.tui_relay.test_post_deploy_relay_continuity
+"$PYTHON" -m unittest tests.test_e2e_scenario_lane_wiring
 
 banner "Relay-authority named-target floor contract (#5071)"
 "$PYTHON" scripts/check_relay_authority_contract.py --check-manifest

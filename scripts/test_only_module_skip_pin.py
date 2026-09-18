@@ -188,6 +188,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/local_model_queue_wake_e2e.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/discord_mock.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/mod.rs",
+        "src/services/discord/tui_prompt_relay/tests/scenario_census_e2e.rs",
         "src/services/provider/read_fault.rs",
     }
 )

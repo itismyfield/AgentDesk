@@ -110,6 +110,7 @@ class ManifestContract(unittest.TestCase):
             "t5-c1-rowless-terminal-ledger-and-lease",
             "t5-native-recovered-preview-terminal",
             "relay-e2e-local-model-queue-wake",
+            "relay-e2e-scenario-census",
         ])
         self.assertEqual({gap["boundary"] for gap in gaps}, {"T2", "T3", "T5"})
         self.assertTrue(all(lane.minimum > 0 for lane in lanes))

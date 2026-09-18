@@ -1577,7 +1577,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=09bebc28b03a789b8220ef0a32e6df4b851407584b7154aeef1409fa6fddc540
+          expected=abf881264b8ee119f6e654af0f392c5b9485a2b18512562a639dcda81ef46e05
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -1697,6 +1697,7 @@ jobs:
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::recovered_native_preview_terminal -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::tests::scenario_census_e2e -- --test-threads=1
 
       # The other nine filter consumers in this workflow read `== 'true'`; this
       # one is negative on purpose. A renamed step id or filter block makes the
@@ -1734,7 +1735,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=09bebc28b03a789b8220ef0a32e6df4b851407584b7154aeef1409fa6fddc540
+          expected=abf881264b8ee119f6e654af0f392c5b9485a2b18512562a639dcda81ef46e05
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

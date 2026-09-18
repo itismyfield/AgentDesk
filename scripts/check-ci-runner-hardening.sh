@@ -918,7 +918,13 @@ targets = {
     # #5997 re-pins after adding the mutation-surface paths-filter step and
     # gating the mutation step alone on it. No command is removed or relaxed,
     # and the job still declares neither `if:` nor `needs:`.
-    "job_sha256" => "e8f2b4c53485368bd2c268645dfd05aa33bf9fbd48b1eb13aa575ffe6b74dd1c",
+    # #5997 V2 re-pins after appending the scenario-census target to the named
+    # command list. Nothing is removed; the census target now inherits this
+    # inventory pin, so dropping its line from the workflow fails here too.
+    # The target is nested under `tests::` because declaring it at the relay
+    # root would push tui_prompt_relay.rs past its hotfile ceiling, and the
+    # ceiling may not be raised.
+    "job_sha256" => "feb18b590f02930e88324f196fbbf50a546ffe91d8e510b0c64922f4e17864de",
     "job_timeout_minutes" => 50,
     "cargo_steps" => {
       "Verify named relay-authority targets and selection floors" => {
@@ -938,6 +944,7 @@ targets = {
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests -- --test-threads=1",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::recovered_native_preview_terminal -- --test-threads=1",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::tests::scenario_census_e2e -- --test-threads=1",
         ],
         "timeout_minutes" => 30,
       },
