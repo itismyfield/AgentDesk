@@ -1627,8 +1627,8 @@ jobs:
       # mutate), and the modules those judges import fixtures from -- weakening a
       # fixture empties a judge without touching either of the first two.
       # `tests/test_relay_authority_mutations.py` derives that third group from
-      # the judges' own `use super::*` / `use super::<mod>::` lines and fails if
-      # this list drifts from it, so a new fixture channel cannot land unnoticed.
+      # the judges' file-top `use super::*` / `use super::<mod>::` lines and fails
+      # if this list drifts, so a channel opened there cannot land unnoticed.
       # A job-level filter is unavailable: `check-ci-runner-hardening.sh` forbids
       # `if:`/`needs:` here so the #5321 backstop stays independent of `changes`.
       # On this workflow's `pull_request`-only trigger dorny/paths-filter@v3 reads

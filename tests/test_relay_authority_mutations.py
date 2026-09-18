@@ -57,10 +57,11 @@ WIRING_FILES = ("scripts/run_relay_authority_mutations.sh", ".github/workflows/c
 # A judge's fixtures reach it through `use super::*` (its own parent module) or
 # `use super::<mod>::` (a sibling module); either can empty a judgment while
 # JUDGE_FILES and MUTATION_FILES both stay untouched, so the filter has to
-# select them too. `use super::{Item, ...}` is deliberately NOT followed: it
-# names items re-exported by the module root, which for these judges is
-# src/services/discord/mod.rs, and selecting that returns the job to the
-# unconditional cost this filter exists to remove.
+# select them too. `use super::{Item, ...}` is deliberately NOT followed: its
+# names mix re-exported items with sibling modules -- `inflight` in
+# destructive_cancel_gate.rs is src/services/discord/inflight.rs, 6046 lines --
+# and selecting those returns the job to the unconditional cost this filter
+# exists to remove.
 SUPER_IMPORT = re.compile(r"^use super::(\*|[a-z_][a-z0-9_]*::)", re.M)
 
 
@@ -73,7 +74,7 @@ def _module_file(module: Path) -> str | None:
 
 
 def judge_fixture_owners() -> frozenset[str]:
-    """Every module a judging test pulls fixtures from, read off its imports."""
+    """Every module a judging test pulls fixtures from in a file-top import."""
     owners: set[str] = set()
     for judge in sorted(set(JUDGE_FILES.values())):
         parent = Path(judge).parent
@@ -629,14 +630,16 @@ class MutationPathFilterContractTests(unittest.TestCase):
     def test_the_fixture_owners_are_read_off_the_judges_not_restated(self) -> None:
         """The equality above is only a real comparison while this derivation
         finds something: a regex that matched nothing would make the fixture
-        group vanish from both sides at once. These two are the demonstrated
+        group vanish from both sides at once. These three are the demonstrated
         channels -- `delivery_orchestration_tests.rs` builds the M6/M8/M10
-        verdicts from `terminal_frame_offset` in a file it never mutates, and
+        verdicts from `terminal_frame_offset` in a file it never mutates,
         S4-m5's judge takes its post-gate hook out of `relay_recovery.rs` the
-        same way."""
+        same way, and S4-m7's judge takes `TerminalDeliveryFence` out of
+        `tmux_watcher_registry.rs`."""
         owners = judge_fixture_owners()
         self.assertIn("src/services/discord/session_relay_sink/tests.rs", owners)
         self.assertIn("src/services/discord/relay_recovery.rs", owners)
+        self.assertIn("src/services/discord/tmux_watcher_registry.rs", owners)
         self.assertTrue(owners.issubset(set(self.patterns)), sorted(owners))
 
     def test_every_pattern_is_a_literal_path_that_exists(self) -> None:
