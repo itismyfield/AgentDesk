@@ -84,6 +84,71 @@ without production callers cannot close a DAG edge.
    and linked release evidence; exclude the substrate PRs, `#4898`, and all three
    discarded commits.
 
+### Coverage claims are gated on the production entrypoint
+
+"No production caller means no completion credit" above is a **blocking**
+acceptance gate, not advice. A coverage claim that does not reach the
+production entrypoint closes no DAG edge, and a review that finds one rejects
+the claim instead of filing a follow-up.
+
+**State the condition as a judgment you run, never as a shape you match.** A
+static form — "a test that calls the helper directly and only asserts is in
+violation" — misclassifies. Applied literally to the #6004 PostgreSQL test it
+returned *no violation*, because that test does reach deep, through
+`sweep_once_with`. The judgment below returned *violation* on the same code,
+from the same reviewer, the same day.
+
+> Delete the production call site the test claims to protect. Does the test go
+> red? If it does not, the coverage is nominal.
+
+Running it:
+
+- **Warning count is not a substitute signal.** W2 below is why.
+- **Aim mutants at the wiring, not only at predicate bodies.** A mutation table
+  that perturbs only predicates can pass in full while nothing pins the wiring.
+- Declare the expected test count before the run and compare it against the
+  `running N tests` line.
+- Check that each mutant's binary hash differs, which catches a shared `target/`
+  serving a stale binary. Do not read more into it than that: this toolchain's
+  link step is not bit-reproducible (independently reproduced 2026-09-18), so
+  rebuilding identical sources also yields distinct hashes. Distinctness is a
+  necessary condition, not evidence that the mutation took effect, and hash
+  equality proves nothing in either direction.
+
+**Evidence — PR #6004, 2026-09-18.** With all seven tests in the module running,
+PostgreSQL included, three wiring mutants survived:
+
+| Mutant | Manipulation | Result | Warnings |
+|---|---|---|---|
+| W1 | delete the single production call site in `framework_setup` | 7 passed | 189 → 195 (+6) |
+| W2 | `return false` from the spawn function before it spawns, so the sweep never starts | 7 passed | 189, unchanged from baseline |
+| W3 | remove both witnesses from the production sink | 7 passed | 190 (+1) |
+
+W2 is the entire reason this gate exists: every symbol stayed referenced, so the
+warning count did not move by one. No warning-based gate can catch that **in
+principle**; a person has to run the judgment.
+
+Why all seven still passed: that test injects a `CapturingSink` in place of the
+production sink and drives `sweep_once_with` directly, so the production sink's
+decision logic never executes. **A test that injects a fake does not pin what
+the fake replaced.**
+
+Repair, in priority order:
+
+1. **Make the production value consumed**, so the type checker enforces the
+   wiring. This document's own anchors were repaired that way in #4268: a
+   comment label could outlive the reference it named, so the anchor set is now
+   parsed from compiler-checked code and no comment is trusted.
+2. **Otherwise add a lexical wiring assertion to an existing test**, rather than
+   adding a test id — new ids pull in the inventory manifest and consume the
+   cap. `intake_delivery_sweep::tests` has the pattern to copy in
+   `spawn_wiring_claims_process_latch_before_observed_task`, which pins its own
+   spawn call site with `include_str!`.
+
+A lexical guard is the fallback, not the goal: it pins that the call site
+*exists*, not that the call is *meaningfully wired*. The exemplar says so in its
+own comment.
+
 ### Reference format
 
 Code anchors below are **symbol-path references**, not `file:line` (which
@@ -1104,5 +1169,6 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
    at every producer site so violations are observable in
    `observability_event` rows (counters + recent records).
 3. Add a regression test that intentionally violates the invariant to
-   prove the check fires.
+   prove the check fires, and run the production-entrypoint judgment on it
+   (see "Coverage claims are gated on the production entrypoint").
 4. Reference this document from the relevant sub-issue under #1222.
