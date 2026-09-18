@@ -45,6 +45,30 @@ pub(super) fn clear_pending_user_dispatch(state: &mut ChannelMailboxState) -> Op
     cleared
 }
 
+/// #5937 — a `UserOrAgent` claim retires the dequeue→claim reservation only
+/// when the claim IS that reservation. An unrelated claim (a healing turn, say)
+/// must leave it standing, or the head it covers loses its place in the inbound
+/// order. The durable marker is id-matched on its own and always reconciled.
+pub(super) fn settle_pending_dispatch_on_claim(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    user_message_id: MessageId,
+) {
+    consume_pending_dispatch_marker_if_matches(
+        state,
+        channel_id,
+        user_message_id,
+        "try_start_turn",
+    );
+    if state.pending_user_dispatch == Some(user_message_id)
+        || state
+            .pending_user_dispatch_source_ids
+            .contains(&user_message_id)
+    {
+        clear_pending_user_dispatch(state);
+    }
+}
+
 fn clear_pending_user_dispatch_if_matches(
     state: &mut ChannelMailboxState,
     message_id: MessageId,

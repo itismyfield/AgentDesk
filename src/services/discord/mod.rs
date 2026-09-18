@@ -3408,7 +3408,7 @@ mod idle_queue_background_supersede_tests {
                 drop(taken);
                 shared
                     .mailbox(channel_id)
-                    .age_pending_dispatch_for_test(
+                    .age_inbound_waits_for_test(
                         PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER
                             + std::time::Duration::from_secs(1),
                     )
