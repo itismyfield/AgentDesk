@@ -63,6 +63,18 @@ readonly SESSION_RELAY_SINK="src/services/discord/session_relay_sink.rs"
 # they mutate the child; the registry root no longer carries a mutated anchor.
 readonly WATCHER_FENCES="src/services/discord/tmux_watcher_registry/fences.rs"
 readonly DESTRUCTIVE_CANCEL_GATE="src/services/discord/destructive_cancel_gate.rs"
+# #5889: these four are the mutated sources, not the whole relay-authority
+# surface. The authority paths outside them -- soft-terminal direct send, the
+# turn_bridge entry-persist and stream-tick witnesses, the native recovered
+# preview and the tui_prompt_relay queue wake -- are graded by the named
+# targets of the "Run named relay-authority contract targets" step, which runs
+# unconditionally, rather than by a mutation row. They stay out because each
+# row pays one full crate build and seven already fill this step's 45-minute
+# budget, so widening the list would require raising that timeout. Add a target
+# in scripts/relay_authority_contract_targets.json instead.
+# The ci-pr.yml `mutation_sources` filter selects this list, the file that owns
+# each row's judging test, and the modules those judges import fixtures from;
+# tests/test_relay_authority_mutations.py fails if the groups drift apart.
 readonly -a MUTATION_FILES=(
   "$TERMINAL_HANDOFF"
   "$SESSION_RELAY_SINK"

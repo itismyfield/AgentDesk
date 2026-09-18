@@ -915,7 +915,10 @@ targets = {
     # commands below and refresh both workflow gate pins with this file.
     # T6 D1 re-pins after renaming one existing S4 witness selector; no command
     # is added, removed, or relaxed and the lane minimum stays 1.
-    "job_sha256" => "41165e789f367c80ff5d6ac52f2ee7679d911d4158e92d0869d49e3c6e2e2531",
+    # #5997 re-pins after adding the mutation-surface paths-filter step and
+    # gating the mutation step alone on it. No command is removed or relaxed,
+    # and the job still declares neither `if:` nor `needs:`.
+    "job_sha256" => "e8f2b4c53485368bd2c268645dfd05aa33bf9fbd48b1eb13aa575ffe6b74dd1c",
     "job_timeout_minutes" => 50,
     "cargo_steps" => {
       "Verify named relay-authority targets and selection floors" => {
@@ -941,6 +944,10 @@ targets = {
       "Require relay-authority mutations to be killed" => {
         "commands" => ["bash scripts/run_relay_authority_mutations.sh"],
         "timeout_minutes" => 45,
+        # #5997: the one conditional step inside this unconditional job. The
+        # negative form runs the gate unless the filter positively answered
+        # "unrelated", so a missing or empty output cannot skip it silently.
+        "if_condition" => "steps.mutation_paths.outputs.mutation_sources != 'false'",
       },
       "Pin required-check mirror content (#5321)" => {
         "commands" => [

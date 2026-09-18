@@ -21,6 +21,11 @@ RELAY_AUTHORITY_JOB = "relay-authority-contract"
 CONDITION3_MUTATION_SCRIPT = Path("scripts/run_relay_authority_mutations.sh")
 CONDITION3_MUTATION_COMMAND = f"bash {CONDITION3_MUTATION_SCRIPT}"
 RELAY_TARGET_STEP = "Run named relay-authority contract targets"
+# #5997: the mutation step is the one step in this job gated on a path filter --
+# the one selecting the mutated sources plus the files that own their judging
+# tests. Pinning the exact expression keeps "conditional" from widening into any
+# other condition; scripts/check-ci-runner-hardening.sh pins the same string.
+CONDITION3_MUTATION_IF = "steps.mutation_paths.outputs.mutation_sources != 'false'"
 TEST_ID_SUFFIX = ": test"
 
 
@@ -104,14 +109,15 @@ def validate_workflow_contract(
         step for step in steps
         if isinstance(step, dict)
         and step.get("run") == CONDITION3_MUTATION_COMMAND
-        and "if" not in step
+        and step.get("if", CONDITION3_MUTATION_IF) == CONDITION3_MUTATION_IF
         and not step.get("continue-on-error")
     ]
     if mutations_present and len(mutation_steps) != 1:
         raise ManifestError(
             f"condition3_mutations_present is true but workflow "
             f"jobs.{RELAY_AUTHORITY_JOB} must contain exactly one unconditional "
-            f"run step invoking {CONDITION3_MUTATION_COMMAND}"
+            f"run step invoking {CONDITION3_MUTATION_COMMAND}, or one guarded by "
+            f"exactly {CONDITION3_MUTATION_IF!r}"
         )
 
 

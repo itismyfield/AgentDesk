@@ -183,8 +183,9 @@ class PortableWin32BuildTokenContractTests(unittest.TestCase):
             self.assertEqual(cancelled.closed, [1]); self.assertEqual(cancelled.released, releases)
     def test_helper_only_change_selects_windows_required_lane(self):
         text = WORKFLOW.read_text(encoding="utf-8")
-        outputs = _workflow_block(text, "    outputs:")
-        filters = _workflow_block(text, "          filters: |")
+        changes = _workflow_block(text, "  changes:")
+        outputs = _workflow_block(changes, "    outputs:")
+        filters = _workflow_block(changes, "          filters: |")
         native = _workflow_block(text, "  win32_build_token:")
         mirror = _workflow_block(text, "  win32_build_token_required_context:")
         for block, line in ((outputs, "      win32_build_token: ${{ steps.filter.outputs.win32_build_token }}"), (filters, "            win32_build_token: ['scripts/build_token_win32.py', 'tests/test_build_token_win32_5663.py', '.github/workflows/ci-pr.yml']"), (native, "    runs-on: windows-latest"), (mirror, "    if: always()")):
