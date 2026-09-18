@@ -1072,6 +1072,7 @@ src/
 │   │   │   ├── loop_poll_prologue.rs
 │   │   │   ├── no_result_exits.rs
 │   │   │   ├── orphan_status_panel_cleanup.rs
+│   │   │   ├── orphan_terminal_frame.rs
 │   │   │   ├── panel_decisions.rs
 │   │   │   ├── panel_decisions_tests.rs
 │   │   │   ├── placeholder_reclaim.rs

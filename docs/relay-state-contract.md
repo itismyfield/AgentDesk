@@ -539,6 +539,72 @@ still spoken for, so this one steps past them rather than colliding.
   end-to-end `loop_poll_prologue` resume-consumption test; like I12 this path
   emits tracing logs rather than `record_invariant_check` rows).
 
+## I17. A terminal frame has a delivery owner or a record (#5941)
+
+Numbered I17 for the same reason I16 is not I13: `docs/design/4987-relay-reachability.md`
+§8.2 still reserves I13/I15 for the reachability obligations, and #5943 took I16.
+
+- Definition — SCOPED to the #5175 denial seam, not to the relay as a whole. A
+  terminal frame that REACHES the producer below carrying an undelivered body
+  must end with a delivery owner (the session-bound sink, or an authorized
+  soft-terminal watcher) or with a durable `relay_dead_letter` row preserving
+  that body — not with neither. Frames that never reach it are outside the
+  invariant: the seam runs only where the watcher REQUESTED a direct fallback and
+  was DENIED authority, so a frame nobody tried to relay, a frame relayed under
+  authority, and any loss on a path that does not run `terminal_relay_plan` are
+  all unobserved here and none of them can violate it.
+- Producer: `tmux_watcher::orphan_terminal_frame::observe_orphan_terminal_frame`,
+  called from `terminal_relay_plan` at the #5175 denial seam, where the sink has
+  already declined delivery and soft-terminal authority has been denied. The
+  record is admitted by `OrphanTerminalFrameFacts::record_required`: a denial, a
+  requested but unauthorized watcher fallback, no session-bound terminal
+  ownership, no #4081/#4714 duplicate refusal — read RAW, since the routed flag
+  ANDs in the authorization this seam has already denied — a NON-EMPTY unsent
+  body (18 of the 33 denials in the 2026-09-16 incident carried none), a
+  non-zero consumed JSONL range, and
+  — the SINK side of the question, which the watcher's own refusal is no
+  evidence about — neither a landed-but-unproven POST (`RingUnknown`, the sink's
+  `SentButUncommitted`) nor a range at or below the resend-dedup committed
+  floor. Without those last two a body already on screen is filed as ownerless.
+- Consumer: the #3561 hourly operator monitor. `RELAY_SIGNAL_DEFINITIONS` gains
+  two threshold-1 rows — `relay_terminal_authority_denied` (the loss itself,
+  whose counter had a producer since #5175 and no consumer) and
+  `terminal_frame_without_owner_or_record` (the loss that left no record
+  either). The DLQ row has no redelivery consumer yet; recovery is
+  operator-driven.
+- Violation surface: the record is fire-and-forget by construction
+  (`relay_dead_letter::record_detached_reporting` never blocks the watcher loop),
+  so the invariant is decided by the WRITE, not by the presence of a pool —
+  reported synchronously when no PG pool is configured, and from the detached
+  task when the INSERT fails. It fires rather than staying silent because #5941
+  lost three assistant answers while every health surface read `healthy`.
+- Strength of the guarantee — do not read it as more than it says. The write is
+  AT-LEAST-ONCE and NOT idempotent: a process death between the spawn and the
+  INSERT loses the row with every surface still reporting intact, and the write
+  carries no dedup key, so re-observing the SAME frame files another row. Read
+  that as the ordinary case, not the crash case: the watcher polls, and a frame
+  that stays terminal and unowned is re-observed on every tick until the offset
+  moves, so one loss routinely yields several rows; a restart merely adds to the
+  same pile (both pinned by the double-observe test). `D` below is a lower bound
+  that may also contain duplicates.
+- Boundary: this invariant does NOT claim the body was delivered, and it does
+  not advance the delivery frontier — only that the loss is attributable and the
+  content recoverable. The upstream fix (the bridge conceding relay authority
+  without finalizing, leaving a stale inflight row that denied authority for
+  1h45m) is #5944's.
+- Audit arithmetic: over a deploy window, `N+` = `#5175` WARN lines with
+  `full_response_len > 0`, `N0` = those with `full_response_len == 0`, and `D` =
+  `relay_dead_letter` rows with `kind = 'terminal_no_delivery_owner'`, and
+  `N+ + N0` is every WARN line. The relation is `D <= N+`, NOT `D == N+`: the
+  sink-side conjuncts withhold a row for every WARN whose body the sink had in
+  fact delivered, and those WARNs carry a body. `N+ - D` is that residual plus
+  the duplicate/lost rows above — a number to explain, not a violation. `D == 0`
+  proves nothing either; it is also what a silently broken writer looks like.
+- Invariant key: `terminal_frame_has_a_delivery_owner_or_a_record` (enforced by
+  `record_invariant_check` in the producer above, and by the
+  `terminal_relay_plan_tests` #5941 set, whose deliberate-violation test drives a
+  record-required frame through the producer with no pool configured).
+
 ## How to add a new invariant
 
 1. Document it here with the same structure (definition, producer,

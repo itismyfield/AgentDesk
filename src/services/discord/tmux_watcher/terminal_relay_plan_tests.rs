@@ -3,6 +3,10 @@
 //! Split out of `terminal_relay_plan.rs` to keep that module inside the
 //! `src/services/discord/tmux_watcher/**` namespace size cap.
 
+use super::orphan_terminal_frame::{
+    OrphanTerminalFrameFacts, TERMINAL_FRAME_OWNER_OR_RECORD_INVARIANT,
+    observe_orphan_terminal_frame,
+};
 use super::rowless_delivery_authority::{lease_has_live_holder, ledger_owes_output};
 use super::*;
 use crate::services::discord::inflight::RelayOwnerKind;
@@ -518,4 +522,594 @@ fn reader_pins_the_ledger_and_lease_operands_5464_c1() {
     );
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&marker);
+}
+
+// #5941: the durable record at the #5175 loss seam, and the observability that
+// stops "there is no record" from reading as "there is no problem".
+
+const LOST_BODY: &str = "the assistant answer the sink declined and the watcher could not send";
+const LOST_CHANNEL: u64 = 1_479_671_298_497_183_835;
+const SENT_PREFIX: usize = 4_096;
+const GENERATION_MTIME_NS: i64 = 1_758_000_000_000_000_000;
+
+/// The incident shape: a soft terminal, `TurnStartOutsideFrame` (the denial the
+/// stale 1h45m-old inflight row produced 33 times), and an unsent tail nobody
+/// delivered.
+fn orphan_facts() -> OrphanTerminalFrameFacts<'static> {
+    OrphanTerminalFrameFacts {
+        denial: Some(SoftTerminalAuthorityDenial::TurnStartOutsideFrame),
+        watcher_direct_fallback_requested: true,
+        watcher_direct_fallback_authorized: false,
+        session_bound_relay_owns_terminal_delivery: false,
+        duplicate_guard_refused_body: false,
+        current_response: LOST_BODY,
+        response_sent_offset: SENT_PREFIX,
+        full_response_len: SENT_PREFIX + LOST_BODY.len(),
+        data_start_offset: FRAME_START,
+        current_offset: FRAME_END,
+        terminal_event_consumed_offset: FRAME_END,
+        watcher_resend_committed: FRAME_START,
+        terminal_kind: Some(WatcherTerminalKind::SoftStopHookSummary),
+        session_bound_ack_outcome: SessionBoundRelayAckOutcome::NotDelivered,
+        inflight_present: true,
+        inflight_relay_owner: "none",
+        startup_snapshot_authority: false,
+        tmux_session_name: SESSION,
+        placeholder_msg_id: Some(serenity::MessageId::new(5_941_000)),
+        request_owner_user_id: Some(343_742_347_365_974_026),
+    }
+}
+
+#[test]
+fn denied_terminal_frame_with_a_body_requires_a_durable_record_5941() {
+    assert!(
+        orphan_facts().record_required(),
+        "the incident shape — denial, unauthorized fallback, no other owner, non-empty body — is exactly what must be preserved"
+    );
+}
+
+#[test]
+fn a_frame_with_no_denial_requires_no_record_5941() {
+    // Authority was never refused, so this is not the loss seam: a row here
+    // inflates `D` past the §I17 `D <= N+` audit bound.
+    let facts = OrphanTerminalFrameFacts {
+        denial: None,
+        ..orphan_facts()
+    };
+    assert!(!facts.record_required());
+}
+
+#[test]
+fn an_empty_terminal_body_requires_no_record_5941() {
+    // 18 of the 33 denials in the incident carried no body: nothing was lost.
+    let facts = OrphanTerminalFrameFacts {
+        current_response: "",
+        ..orphan_facts()
+    };
+    assert!(!facts.record_required());
+}
+
+#[test]
+fn a_frame_with_no_consumed_range_at_all_requires_no_record_5941() {
+    // A frame that consumed nothing has no JSONL identity to record against.
+    let facts = OrphanTerminalFrameFacts {
+        terminal_event_consumed_offset: 0,
+        ..orphan_facts()
+    };
+    assert!(!facts.record_required());
+}
+
+#[test]
+fn a_turn_served_from_the_leftover_buffer_still_requires_a_record_5941() {
+    // #1216: a turn carried in the leftover buffer is serviced against the
+    // CARRIED buffer's turn start, so its consumed end can sit at or below
+    // `data_start_offset` while a real body was lost; the pre-r1 guard
+    // (`consumed > data_start_offset`) excluded exactly these turns. r2 P1-B:
+    // the committed floor does not re-exclude them — every `confirmed_end_offset`
+    // advance targets its OWN turn's consumed end (leftover bytes subtracted out),
+    // so a real prior turn's floor lands strictly below this one, `consumed_end
+    // - 1` being the tightest such floor.
+    for consumed_end in [FRAME_START, FRAME_START - 1] {
+        let facts = OrphanTerminalFrameFacts {
+            terminal_event_consumed_offset: consumed_end,
+            watcher_resend_committed: consumed_end - 1,
+            ..orphan_facts()
+        };
+        assert!(facts.record_required(), "leftover {consumed_end} dropped");
+    }
+}
+
+#[test]
+fn a_body_the_sink_already_put_on_screen_requires_no_record_5941() {
+    // The #5941 r1 P1-1 interleaving: the sink's POST landed but its commit
+    // proof did not (`SentButUncommitted` -> `TerminalUnknown` -> `RingUnknown`),
+    // so `session_bound_ack_confirms_transport` is false and the watcher denies
+    // itself in the SAME pass — every watcher-side conjunct then reads "nobody
+    // delivered this" about a body the user is already reading. `TimedOut` is NOT
+    // the same shape and stays recordable: it is the deadline fall-through in
+    // `wait_for_session_bound_relay_delivery_ack`, returned after the ack ring
+    // stayed SILENT and never settled afterwards — an absence of evidence, which
+    // is the case the record exists for. The table is every non-transport-
+    // confirming arm, i.e. all seven that reach this seam.
+    for (ack, want) in [
+        (SessionBoundRelayAckOutcome::RingUnknown, false),
+        (SessionBoundRelayAckOutcome::TimedOut, true),
+        (SessionBoundRelayAckOutcome::NotDelivered, true),
+        (SessionBoundRelayAckOutcome::Dropped, true),
+        (SessionBoundRelayAckOutcome::SinkError, true),
+        (SessionBoundRelayAckOutcome::MissingTarget, true),
+        (SessionBoundRelayAckOutcome::NotAttempted, true),
+    ] {
+        let facts = OrphanTerminalFrameFacts {
+            session_bound_ack_outcome: ack,
+            ..orphan_facts()
+        };
+        assert_eq!(facts.record_required(), want, "{ack:?} decides wrong");
+    }
+
+    // The same question asked of the offset authority: a range at or below the
+    // committed floor was delivered, which is why the sibling
+    // `SkipAlreadyCommitted` arm suppresses a re-send over it.
+    for committed in [FRAME_END, FRAME_END + 1] {
+        let delivered = OrphanTerminalFrameFacts {
+            watcher_resend_committed: committed,
+            ..orphan_facts()
+        };
+        assert!(!delivered.record_required(), "floor {committed} covers");
+    }
+    // One byte short of the range end is NOT a delivery: the tail is still lost.
+    let partial = OrphanTerminalFrameFacts {
+        watcher_resend_committed: FRAME_END - 1,
+        ..orphan_facts()
+    };
+    assert!(partial.record_required());
+}
+
+#[test]
+fn a_frame_someone_else_delivered_requires_no_record_5941() {
+    // Each of these means the body was NOT lost: the sink committed it, the
+    // duplicate guard saw it in the channel, or the watcher was authorized.
+    //
+    // #5978 P1-1: the duplicate case pairs with `watcher_direct_fallback_authorized:
+    // false`, reachable only since the seam reads the RAW #4081/#4714 verdict — the
+    // routed flag ANDs in that same authorization, so this case used to assert over a
+    // state the wiring could not build. `..._is_not_admitted_to_the_record_5941` drives
+    // the pairing through production; this one pins the predicate.
+    for facts in [
+        OrphanTerminalFrameFacts {
+            session_bound_relay_owns_terminal_delivery: true,
+            ..orphan_facts()
+        },
+        OrphanTerminalFrameFacts {
+            duplicate_guard_refused_body: true,
+            ..orphan_facts()
+        },
+        OrphanTerminalFrameFacts {
+            watcher_direct_fallback_authorized: true,
+            ..orphan_facts()
+        },
+        OrphanTerminalFrameFacts {
+            watcher_direct_fallback_requested: false,
+            ..orphan_facts()
+        },
+    ] {
+        assert!(
+            !facts.record_required(),
+            "a frame with a delivery owner must not be dead-lettered"
+        );
+    }
+}
+
+#[test]
+fn record_decision_is_pinned_across_every_kind_and_denial_pair_5941() {
+    // The admission must agree with the AUTHORITY rule for every combination. A
+    // hard result keeps its recovery fallback even under a soft denial.
+    for terminal_kind in [
+        None,
+        Some(WatcherTerminalKind::HardResult),
+        Some(WatcherTerminalKind::SoftStopHookSummary),
+        Some(WatcherTerminalKind::SoftUserBoundary),
+    ] {
+        for denial in [
+            None,
+            Some(SoftTerminalAuthorityDenial::NoInflightRow),
+            Some(SoftTerminalAuthorityDenial::SessionMismatch),
+            Some(SoftTerminalAuthorityDenial::TurnStartOutsideFrame),
+            Some(SoftTerminalAuthorityDenial::RelayOwnerNone),
+            Some(SoftTerminalAuthorityDenial::TurnNonceMissing),
+            Some(SoftTerminalAuthorityDenial::TurnNonceMismatch),
+        ] {
+            let authorized =
+                watcher_direct_fallback_has_turn_authority(terminal_kind, denial.is_none());
+            let facts = OrphanTerminalFrameFacts {
+                denial,
+                terminal_kind,
+                watcher_direct_fallback_authorized: authorized,
+                ..orphan_facts()
+            };
+            assert_eq!(
+                facts.record_required(),
+                denial.is_some() && !authorized,
+                "kind {terminal_kind:?} denial {denial:?} authorized {authorized}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_record_reason_carries_both_coordinate_systems_5941() {
+    // The two systems are NOT interchangeable: `response_sent_offset` /
+    // `full_response_len` index the response String bounding `content`, while
+    // `jsonl_start` / `jsonl_end` are transcript byte offsets. A recovery that
+    // reads one as the other re-publishes the wrong bytes.
+    let facts = orphan_facts();
+    let reason = facts.reason(
+        SoftTerminalAuthorityDenial::TurnStartOutsideFrame,
+        &ProviderKind::Claude,
+        GENERATION_MTIME_NS,
+    );
+
+    assert!(
+        reason.starts_with("terminal_no_delivery_owner "),
+        "{reason}"
+    );
+    let denial = SoftTerminalAuthorityDenial::TurnStartOutsideFrame;
+    let kind = WatcherTerminalKind::SoftStopHookSummary;
+    for expected in [
+        format!("denial={}", denial.as_str()),
+        format!("terminal_kind={}", kind.as_str()),
+        format!("response_sent_offset={SENT_PREFIX}"),
+        format!("full_response_len={}", SENT_PREFIX + LOST_BODY.len()),
+        format!("jsonl_start={FRAME_START}"),
+        format!("jsonl_end={FRAME_END}"),
+        format!("current_offset={FRAME_END}"),
+        format!("generation_mtime_ns={GENERATION_MTIME_NS}"),
+        format!("tmux_session={SESSION}"),
+        format!("provider={}", ProviderKind::Claude.as_str()),
+        "inflight_relay_owner=none".to_string(),
+        "frame_ack_outcome=NotDelivered".to_string(),
+    ] {
+        assert!(
+            reason.contains(&expected),
+            "reason must carry `{expected}`: {reason}"
+        );
+    }
+    assert!(
+        !reason.contains(&format!("jsonl_start={SENT_PREFIX}")),
+        "the response coordinate must never be reported as a transcript offset: {reason}"
+    );
+}
+
+#[test]
+fn the_dead_letter_row_preserves_the_unsent_tail_and_the_delivery_channel_5941() {
+    // Run the mapping rather than grep it: `content` must be the UNSENT tail
+    // (`full_response` re-publishes the prefix the user already read) and
+    // `channel_id` the DELIVERY channel the plan was handed. Emptying either
+    // leaves a source grep green.
+    let facts = orphan_facts();
+    let row = facts.dead_letter_record(
+        serenity::ChannelId::new(LOST_CHANNEL),
+        "reason-under-test".to_string(),
+    );
+
+    assert_eq!(
+        row.kind,
+        crate::db::relay_dead_letter::KIND_TERMINAL_NO_DELIVERY_OWNER
+    );
+    assert_eq!(row.content, LOST_BODY, "the row must carry the unsent tail");
+    assert!(
+        row.content.len() < facts.full_response_len,
+        "the tail, not the whole response"
+    );
+    assert_eq!(row.channel_id, LOST_CHANNEL.to_string());
+    assert_eq!(row.author_id.as_deref(), Some("343742347365974026"));
+    assert_eq!(row.message_id.as_deref(), Some("5941000"));
+    assert_eq!(row.reason, "reason-under-test");
+
+    // A faithful copy, absences included: recovery must not invent a target.
+    let bare = OrphanTerminalFrameFacts {
+        placeholder_msg_id: None,
+        request_owner_user_id: None,
+        ..orphan_facts()
+    };
+    let row = bare.dead_letter_record(serenity::ChannelId::new(LOST_CHANNEL), String::new());
+    assert!(row.author_id.is_none() && row.message_id.is_none());
+}
+
+#[test]
+fn the_production_call_site_hands_the_seam_the_lost_body_5941() {
+    // Wiring the predicate tests above cannot reach: swapping
+    // `watcher_resend_range_end` for `data_start_offset`, or dropping the body,
+    // leaves every behavioural test green while restoring the silent loss.
+    let source = include_str!("terminal_relay_plan.rs");
+    let call_site = source
+        .split_once("orphan_terminal_frame::observe_orphan_terminal_frame(")
+        .expect("the plan must route the denial seam through the orphan-frame recorder")
+        .1
+        .split_once("\n        );")
+        .expect("the call must terminate")
+        .0;
+
+    for operand in [
+        "shared,",
+        "channel_id,",
+        "watcher_provider,",
+        "denial: soft_terminal_authority_denial,",
+        "current_response,",
+        "response_sent_offset,",
+        "full_response_len: full_response.len(),",
+        "data_start_offset,",
+        "terminal_event_consumed_offset: watcher_resend_range_end,",
+        "watcher_resend_committed,",
+        "placeholder_msg_id,",
+        "request_owner_user_id: inflight_before_relay",
+        "duplicate_guard_refused_body: direct_terminal_response_decision",
+    ] {
+        assert!(
+            call_site.contains(operand),
+            "the seam must be fed `{operand}` from the frame being lost: {call_site}"
+        );
+    }
+
+    // #5978 P1-1: the routed flag ANDs in the authorization this seam has already denied,
+    // which makes the duplicate conjunct unfalsifiable while every test above stays green.
+    assert!(
+        !call_site.contains("direct_terminal_response_refused_duplicate"),
+        "the duplicate conjunct must read the RAW guard verdict, not the routed flag: {call_site}"
+    );
+
+    // The WARN and the counter MOVED with the seam — not duplicated, not
+    // dropped. Operators grep `#5175:`.
+    let module = include_str!("orphan_terminal_frame.rs");
+    assert!(!source.contains("record_relay_terminal_authority_denied("));
+    assert!(module.contains("record_relay_terminal_authority_denied("));
+    assert!(module.contains("#5175: terminal frame has NO delivery owner"));
+    assert!(module.contains("soft_terminal_denial = denial.as_str()"));
+
+    // #5941 r3 P1-2: the PER-CONJUNCT cause counter answers "which authority
+    // conjunct refused" and must fire for EVERY denial, including the ones that
+    // lose nothing — a forged turn nonce is refused with an empty tail, so
+    // behind the record admission the one arm the counter exists to name never
+    // emits. Order, not presence: it has to precede the `record_required` gate.
+    let cause = module
+        .find("record_relay_terminal_denial_cause(")
+        .expect("the seam must emit the per-conjunct cause counter");
+    let gate = module
+        .find("if !facts.record_required() {")
+        .expect("the record admission gate must exist");
+    let aggregate = module
+        .find("metrics::record_relay_terminal_authority_denied(")
+        .expect("the seam must emit the aggregate denial counter");
+    assert!(
+        cause < gate,
+        "the per-conjunct cause counter must be emitted BEFORE the record admission gate"
+    );
+    assert!(
+        gate < aggregate,
+        "the aggregate counter feeds a threshold-1 alert row and must stay behind the admission"
+    );
+}
+
+#[test]
+fn the_dead_letter_kind_survives_a_non_unix_build_5941() {
+    // The `kind` string is platform-independent but its only writer is the
+    // `#[cfg(unix)]` watcher, so a Windows build sees it unused under
+    // `-D warnings`. Asserted in PAIR with the existing sibling.
+    let dlq = include_str!("../../../db/relay_dead_letter.rs");
+    for kind in [
+        "KIND_READOPT_RELAY_STUCK",
+        "KIND_TERMINAL_NO_DELIVERY_OWNER",
+    ] {
+        let before = dlq
+            .split_once(&format!("pub(crate) const {kind}:"))
+            .unwrap_or_else(|| panic!("{kind} must be declared"))
+            .0;
+        assert!(
+            before
+                .trim_end()
+                .ends_with("#[cfg_attr(not(unix), allow(dead_code))]"),
+            "{kind} must be declared unconditionally with a non-unix dead-code allowance"
+        );
+    }
+    // The behavioural half: this seam's discriminator is its own, so an operator
+    // filtering the DLQ by `kind` never mixes #5941 in with a sibling vector.
+    assert_eq!(
+        crate::db::relay_dead_letter::KIND_TERMINAL_NO_DELIVERY_OWNER,
+        "terminal_no_delivery_owner"
+    );
+    for sibling in [
+        crate::db::relay_dead_letter::KIND_CATCH_UP_TOO_OLD,
+        crate::db::relay_dead_letter::KIND_QUEUE_OVERFLOW,
+        crate::db::relay_dead_letter::KIND_READOPT_RELAY_STUCK,
+    ] {
+        assert_ne!(
+            sibling,
+            crate::db::relay_dead_letter::KIND_TERMINAL_NO_DELIVERY_OWNER
+        );
+    }
+}
+
+#[test]
+fn a_dropped_body_with_no_durable_record_violates_i17_5941() {
+    // I17 (`docs/relay-state-contract.md`): a terminal frame carrying a body
+    // ends with a delivery owner or a record. Force the violating state — a
+    // record-required frame with NO pool to record into — and prove the check
+    // FIRES. The pre-fix code read the absence of a record as the absence of a
+    // problem and reported `healthy` while three answers were gone.
+    let root = tempfile::tempdir().expect("isolated runtime root");
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    assert!(
+        shared.pg_pool.is_none(),
+        "the violating state requires an unconfigured dead-letter sink"
+    );
+    let channel = serenity::ChannelId::new(LOST_CHANNEL);
+    let observe = |facts: &OrphanTerminalFrameFacts<'_>| {
+        observe_orphan_terminal_frame(&shared, channel, &ProviderKind::Claude, facts)
+    };
+
+    assert!(
+        !observe(&orphan_facts()),
+        "a body dropped with no delivery owner AND no durable record must violate I17"
+    );
+
+    // Same seam, but the body is not lost: no record is owed, so nothing pages.
+    for benign in [
+        OrphanTerminalFrameFacts {
+            session_bound_relay_owns_terminal_delivery: true,
+            ..orphan_facts()
+        },
+        OrphanTerminalFrameFacts {
+            current_response: "",
+            ..orphan_facts()
+        },
+        OrphanTerminalFrameFacts {
+            denial: None,
+            ..orphan_facts()
+        },
+    ] {
+        assert!(
+            observe(&benign),
+            "a frame with an owner, no body, or no denial must not page as an unrecorded loss"
+        );
+    }
+
+    // #5941 r1: pin the guarantee at the level the code provides. A restart
+    // re-observing the same frame observes it AGAIN — no dedup key — so `D` may
+    // carry duplicates, exactly as the contract doc says.
+    assert!(!observe(&orphan_facts()) && !observe(&orphan_facts()));
+
+    assert_eq!(
+        TERMINAL_FRAME_OWNER_OR_RECORD_INVARIANT, "terminal_frame_has_a_delivery_owner_or_a_record",
+        "the invariant key is the alert table's status filter and the contract doc's key"
+    );
+}
+
+/// A channel of its own: the counter below is process-global and cumulative, so
+/// sharing `LOST_CHANNEL` with the sibling I17 test would race under `--test-threads`.
+const PLAN_DRIVEN_CHANNEL: u64 = 1_479_671_298_497_183_836;
+
+/// Likewise for the #5978 duplicate-guard half of the pairing.
+const DUPLICATE_GUARD_CHANNEL: u64 = 1_479_671_298_497_183_837;
+
+/// Losses ADMITTED for `channel` — the aggregate counter the seam raises only
+/// after `record_required` passes, i.e. exactly when a DLQ row is owed.
+fn admitted_losses(channel: u64) -> u64 {
+    crate::services::observability::metrics::snapshot()
+        .into_iter()
+        .filter(|row| row.channel_id == channel)
+        .map(|row| row.relay_terminal_authority_denied)
+        .sum()
+}
+
+/// Drives `run_terminal_relay_plan` over the #5941 incident shape and returns how
+/// many losses the seam ADMITTED. `already_on_channel` plants the #4081/#4714
+/// delivered-content fingerprint for `LOST_BODY` first, and is the ONLY input that
+/// differs between the two callers below — so the delta between them isolates the
+/// duplicate-guard conjunct from every other one.
+async fn admitted_losses_over_one_plan_pass(channel_id: u64, already_on_channel: bool) -> u64 {
+    let root = tempfile::tempdir().expect("isolated runtime root");
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel = serenity::ChannelId::new(channel_id);
+    let http = std::sync::Arc::new(serenity::Http::new("fixture-no-network"));
+    let provider = ProviderKind::Claude;
+    let session = SESSION.to_string();
+    if already_on_channel {
+        crate::services::discord::outbound::delivery_record::record_delivered_content_fingerprint(
+            &provider, channel, &session, LOST_BODY,
+        );
+    }
+    let before = admitted_losses(channel_id);
+    let output_path = root.path().join("out.jsonl").display().to_string();
+    let all_data = String::new();
+    let full_response = format!("{}{LOST_BODY}", "x".repeat(SENT_PREFIX));
+    let tool_state = WatcherToolState::new();
+    let context = TerminalRelayPlanContext {
+        http: &http,
+        shared: &shared,
+        channel_id: channel,
+        watcher_provider: &provider,
+        tmux_session_name: &session,
+        output_path: &output_path,
+        inflight_before_relay: &None,
+        cached_relay_producer: &None,
+        prompt_anchor_present_before_relay: false,
+        external_input_lease_before_relay: false,
+        session_bound_relay_turn_fully_mirrored: false,
+        session_bound_relay_turn_first_forwarded_sequence: None,
+        split_trailing_turn_follows: false,
+        startup_soft_terminal_authority: tui_direct_binding(),
+    };
+    let locals = TerminalRelayPlanLocals {
+        current_offset: FRAME_END,
+        data_start_offset: FRAME_START,
+        all_data: &all_data,
+        full_response: &full_response,
+        current_response: LOST_BODY,
+        response_sent_offset: SENT_PREFIX,
+        has_assistant_response: true,
+        terminal_kind: Some(WatcherTerminalKind::SoftStopHookSummary),
+        task_notification_kind: None,
+        assistant_text_seen: true,
+        // `should_direct_send` never asks for FRESHNESS, so a leftover buffer is
+        // still relayed — that is how the duplicate guard comes to matter here.
+        fresh_assistant_text_seen: false,
+        tool_state: &tool_state,
+        placeholder_msg_id: None,
+        status_panel_msg_id: None,
+    };
+    let mut session_bound_relay_ack = None;
+    let mut monitor_auto_turn_claimed = false;
+    let mut monitor_auto_turn_finished = false;
+    let mut monitor_auto_turn_synthetic_msg_id = None;
+    let mut monitor_auto_turn_ledger_generation = None;
+    let mut state = TerminalRelayPlanState {
+        all_data_session_bound_relay_ack: &mut session_bound_relay_ack,
+        monitor_auto_turn_claimed: &mut monitor_auto_turn_claimed,
+        monitor_auto_turn_finished: &mut monitor_auto_turn_finished,
+        monitor_auto_turn_synthetic_msg_id: &mut monitor_auto_turn_synthetic_msg_id,
+        monitor_auto_turn_ledger_generation: &mut monitor_auto_turn_ledger_generation,
+    };
+
+    let outcome = run_terminal_relay_plan(&context, locals, &mut state).await;
+    assert!(
+        matches!(outcome, TerminalRelayPlanOutcome::Proceed(_)),
+        "the plan must reach its terminal decision rather than bailing before the seam"
+    );
+    admitted_losses(channel_id) - before
+}
+
+#[tokio::test]
+async fn the_plan_itself_admits_the_lost_body_to_the_record_5941() {
+    // The only #5941 tests that enter through PRODUCTION. The others hand-build
+    // `OrphanTerminalFrameFacts`, and the wiring test greps the call site's
+    // ARGUMENT LIST — so `let current_response = "";` planted on the line ABOVE
+    // the call falsifies `record_required` forever, writes zero dead-letter rows
+    // and leaves every one of them green. The gap was the ENTRY POINT, not the
+    // strength of any assertion, so this one drives `run_terminal_relay_plan`
+    // itself over the incident shape: a soft stop-hook terminal carrying an
+    // assistant body, no inflight row (soft-terminal authority is denied) and no
+    // cached relay producer (the sink never owns the frame).
+    assert_eq!(
+        admitted_losses_over_one_plan_pass(PLAN_DRIVEN_CHANNEL, false).await,
+        1,
+        "a frame the plan itself left with no delivery owner must be admitted to the record exactly once"
+    );
+}
+
+#[tokio::test]
+async fn a_body_the_duplicate_guard_already_saw_is_not_admitted_to_the_record_5941() {
+    // #5978 P1-1, the other half of the pairing, and the reason the conjunct is no
+    // longer dead. Reachable shape, from the #5464 sample where 150 of 753 denials
+    // were `NoInflightRow`: a redrive leaves no inflight row, the watcher re-reads the
+    // leftover buffer and still requests a direct send, and the body is byte-identical
+    // to one already on the channel, so #4081/#4714 refuses it. NOTHING WAS LOST, so no
+    // row is owed and the threshold-1 aggregate behind that gate must not move — while
+    // the seam read the routed flag it did move.
+    assert_eq!(
+        admitted_losses_over_one_plan_pass(DUPLICATE_GUARD_CHANNEL, true).await,
+        0,
+        "a body the duplicate guard found already on the channel is not a loss and must not page"
+    );
 }

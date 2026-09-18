@@ -349,6 +349,10 @@ mod tests {
             "offset_invariant_violation",
             "task_response_chunk_ambiguous",
             "task_card_post_ambiguous",
+            // #5941: the two halves of one loss — a frame with no delivery
+            // owner, and that frame left without even a durable record.
+            "relay_terminal_authority_denied",
+            "terminal_frame_without_owner_or_record",
         ] {
             assert!(
                 keys.contains(&expected),
@@ -406,6 +410,10 @@ mod tests {
             "relay_uncommitted_inflight_cleared",
             "response_sent_offset_monotonic",
             "task_response_chunk_delivery_ambiguous",
+            // #5941: `metrics::record_relay_terminal_authority_denied` writes
+            // this status, and `orphan_terminal_frame` writes the invariant one.
+            "relay_terminal_authority_denied",
+            "terminal_frame_has_a_delivery_owner_or_a_record",
         ] {
             assert!(
                 statuses.contains(&expected),

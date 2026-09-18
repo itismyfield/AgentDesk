@@ -591,37 +591,48 @@ pub(super) async fn run_terminal_relay_plan<'a>(
             frame_ack_outcome = ?session_bound_ack_outcome,
             "relay flight recorder"
         );
-        // #5175: a terminal frame that the sink did not deliver AND the watcher
-        // is not authorized to deliver has NO owner — the body is silently lost
-        // and the delivery frontier never advances, so redrive re-publishes the
-        // previous answer forever. This used to leave only an INFO-level route
-        // string, which is why the watchdog scored the wedged channel `gap 0 /
-        // wedge 0` for a week. Promote it to WARN + a per-conjunct counter.
-        if let Some(denial) = soft_terminal_authority_denial
-            .filter(|_| watcher_direct_fallback_requested && !watcher_direct_fallback_authorized)
-        {
-            crate::services::observability::metrics::record_relay_terminal_authority_denied(
-                channel_id.get(),
-                watcher_provider.as_str(),
-                denial.metric_name(),
-            );
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                provider = watcher_provider.as_str(),
-                channel_id = channel_id.get(),
-                tmux_session = %tmux_session_name,
+        // #5175 -> #5941: a terminal frame the sink did not deliver AND the
+        // watcher is not authorized to deliver has NO owner. The WARN and the
+        // per-conjunct counter move with the seam; what is new is that the body
+        // goes to the dead-letter queue instead of vanishing, and that a frame
+        // left with no record pages instead of reading as healthy.
+        orphan_terminal_frame::observe_orphan_terminal_frame(
+            shared,
+            channel_id,
+            watcher_provider,
+            &orphan_terminal_frame::OrphanTerminalFrameFacts {
+                denial: soft_terminal_authority_denial,
+                watcher_direct_fallback_requested,
+                watcher_direct_fallback_authorized,
+                session_bound_relay_owns_terminal_delivery,
+                // #5978: the RAW verdict. The routed `..._refused_duplicate` ANDs in
+                // `watcher_direct_fallback_after_session_bound_ack` — the authorization THIS
+                // seam has already denied — so feeding it here pins the record conjunct true
+                // and dead-letters bodies the #4081/#4714 guard just found on the channel.
+                // Same text either way: an unauthorized fallback keeps
+                // `session_bound_fallback_uses_full_body` false, so the decision read
+                // `current_response` itself.
+                duplicate_guard_refused_body: direct_terminal_response_decision.refused_duplicate(),
+                current_response,
+                response_sent_offset,
+                full_response_len: full_response.len(),
                 data_start_offset,
                 current_offset,
-                terminal_kind = terminal_kind.map(WatcherTerminalKind::as_str).unwrap_or("unknown"),
-                soft_terminal_denial = denial.as_str(),
-                inflight_present = inflight_before_relay.is_some(),
-                inflight_relay_owner = inflight_relay_owner_kind,
-                startup_snapshot_authority = startup_soft_terminal_authority.startup_snapshot_authorized(),
-                full_response_len = current_response.len(),
-                ?session_bound_ack_outcome,
-                "  [{ts}] ⚠ #5175: terminal frame has NO delivery owner — sink did not deliver and the soft terminal is unauthorized; body dropped and the delivery frontier will not advance"
-            );
-        }
+                terminal_event_consumed_offset: watcher_resend_range_end,
+                watcher_resend_committed,
+                terminal_kind,
+                session_bound_ack_outcome,
+                inflight_present: inflight_before_relay.is_some(),
+                inflight_relay_owner: inflight_relay_owner_kind,
+                startup_snapshot_authority: startup_soft_terminal_authority
+                    .startup_snapshot_authorized(),
+                tmux_session_name,
+                placeholder_msg_id,
+                request_owner_user_id: inflight_before_relay
+                    .as_ref()
+                    .map(|state| state.request_owner_user_id),
+            },
+        );
         // #3041 P1-3 (codex P1-3 R7): turn-boundary ACK reset. THIS turn's terminal
         // ACK has now been waited on (`session_bound_ack_outcome` is captured) and
         // logged. If a forward on this pass SPLIT a result-bearing chunk with a
@@ -670,6 +681,9 @@ pub(super) async fn run_terminal_relay_plan<'a>(
         })
     }
 }
+
+#[path = "orphan_terminal_frame.rs"]
+mod orphan_terminal_frame;
 
 #[path = "rowless_delivery_authority.rs"]
 mod rowless_delivery_authority;

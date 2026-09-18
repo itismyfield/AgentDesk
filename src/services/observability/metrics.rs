@@ -89,9 +89,11 @@ pub struct AtomicCounters {
     /// sink did not acknowledge delivery AND the soft terminal failed the
     /// watcher's turn-authority contract, so neither actor posted the body. Any
     /// non-zero value is a silently dropped answer plus a frozen delivery
-    /// frontier (redrive then re-publishes the previous answer). The failing
-    /// conjunct is emitted alongside as a `relay_terminal_authority_denied_*`
-    /// root-cause counter.
+    /// frontier (redrive then re-publishes the previous answer). This is the
+    /// ADMITTED subset: it rises only once a body is actually owed a dead-letter
+    /// row. The failing conjunct is named by `relay_terminal_denial_cause`, which
+    /// is UNGATED (#5941) and so counts EVERY denial — including the ones that
+    /// lost nothing — so the two are not comparable per-event.
     pub relay_terminal_authority_denied: AtomicU64,
     /// #4794: observed prompt-notification emissions that hit an authoritative
     /// tmux-owner registry miss and were still pending when bounded three-state
@@ -533,25 +535,31 @@ pub fn record_relay_terminal_ack_timeout(channel_id: u64, provider: &str) {
     super::emit::emit_relay_root_cause_counter(provider, channel_id, "relay_terminal_ack_timeout");
 }
 
+/// #5175: the per-conjunct cause counter. `denial_counter` names the failing
+/// authority conjunct (`relay_terminal_authority_denied_*`) so an alert can
+/// distinguish "the row vanished" from "a forged turn was correctly refused".
+///
+/// Split from [`record_relay_terminal_authority_denied`] by #5941 r3 so the
+/// caller can keep this one UNGATED alongside its WARN: the distinction it
+/// draws is worthless if the arm it was built to name — a forged turn nonce,
+/// which loses no body and so is never ADMITTED as a loss — never emits.
+pub fn record_relay_terminal_denial_cause(channel_id: u64, provider: &str, denial_counter: &str) {
+    super::emit::emit_relay_root_cause_counter(provider, channel_id, denial_counter);
+}
+
 /// #5175: convenience wrapper for
 /// `ObservabilityCounters::record_relay_terminal_authority_denied`.
 ///
-/// `denial_counter` names the failing authority conjunct
-/// (`relay_terminal_authority_denied_*`) and is emitted as its own root-cause
-/// counter so an alert can distinguish "the row vanished" from "a forged turn
-/// was correctly refused".
-pub fn record_relay_terminal_authority_denied(
-    channel_id: u64,
-    provider: &str,
-    denial_counter: &str,
-) {
+/// The AGGREGATE denial signal. #5941 gave it a threshold-1 alert row, which is
+/// safe only because its caller fires it on ADMITTED losses; the cause counter
+/// that used to ride along moved to [`record_relay_terminal_denial_cause`].
+pub fn record_relay_terminal_authority_denied(channel_id: u64, provider: &str) {
     global().record_relay_terminal_authority_denied(channel_id, provider);
     super::emit::emit_relay_root_cause_counter(
         provider,
         channel_id,
         "relay_terminal_authority_denied",
     );
-    super::emit::emit_relay_root_cause_counter(provider, channel_id, denial_counter);
 }
 
 /// #2838: convenience wrapper for `ObservabilityCounters::record_relay_uncommitted_inflight_cleared`.
