@@ -542,7 +542,7 @@ still spoken for, so this one steps past them rather than colliding.
 ## I17. A terminal frame has a delivery owner or a record (#5941)
 
 Numbered I17 for the same reason I16 is not I13: `docs/design/4987-relay-reachability.md`
-§8.2 still reserves I13/I15 for the reachability obligations, and #5943 took I16.
+§8.2 still reserves I13/I14/I15 for the reachability obligations, and #5943 took I16.
 
 - Definition — SCOPED to the #5175 denial seam, not to the relay as a whole. A
   terminal frame that REACHES the producer below carrying an undelivered body
@@ -571,7 +571,13 @@ Numbered I17 for the same reason I16 is not I13: `docs/design/4987-relay-reachab
   whose counter had a producer since #5175 and no consumer) and
   `terminal_frame_without_owner_or_record` (the loss that left no record
   either). The DLQ row has no redelivery consumer yet; recovery is
-  operator-driven.
+  operator-driven. THAT CLAUSE IS TRUE ONLY UNTIL #6004 LANDS — the redelivery consumer
+  it adds is exactly the thing whose absence this sentence asserts, so #6004 updates it
+  in the same PR. Verified at this commit: `relay_dead_letter` exposes `insert`,
+  `prune_expired`, `record_detached` and `record_detached_reporting`; its only non-test
+  statements are an `INSERT` and a retention `DELETE`, and the table has no `SELECT`
+  outside `#[cfg(test)]` at all —
+  nothing reads a row back, which is what "no redelivery consumer" means here.
 - Violation surface: the record is fire-and-forget by construction
   (`relay_dead_letter::record_detached_reporting` never blocks the watcher loop),
   so the invariant is decided by the WRITE, not by the presence of a pool —
@@ -755,6 +761,340 @@ past. I19 governs the resume point itself.
 - Invariant key: `redrive_resumes_only_onto_a_restored_frontier` (enforced by the
   `relay_auto_heal::tests` `_5943` set; like I12 and I16 this path emits tracing
   logs rather than `record_invariant_check` rows).
+
+## I20. A live turn is proven by progress, not by the presence or age of its bookkeeping (#5996)
+
+Numbered I20 for the reason I16's note gives: I13/I14/I15 stay reserved for the
+reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
+
+- Definition: a consumer deciding whether a turn is still working may not read it
+  from the EXISTENCE of a bookkeeping record — the mailbox active-turn anchor, an
+  `intervention_queue` entry, an inflight row, a dispatch reservation — nor from
+  that record's AGE. Progress evidence is a term a finished turn cannot produce
+  and an unfinished one can: a durable completion witness, or a MEASURED count of
+  bytes still unrelayed. Existence and age are admissible only as a bounded
+  fallback where the witness is structurally unreadable, never as the authority.
+- Authority vs telemetry. AUTHORITATIVE: `InflightTurnState::terminal_delivery_committed`
+  (as `stale_synthetic_mailbox_owner_reclaim_reason` reads it),
+  `relay_recovery::unread_tail_is_proven_drained` over `SessionEnrichment`'s
+  `unread_bytes`, `relay_recovery::idle_tmux_repair_has_unrelayed_tail_answer`'s
+  terminal `result` past `last_offset`, and receipt coverage (`ReceiptIndex::covers`
+  under `reachability::composite::sweep_coverage`). TELEMETRY, never authority:
+  `RelayHealthSnapshot::last_relay_offset`, `mailbox_turn_age_secs`,
+  `ChannelMailboxState::turn_started_at`, `queue_depth`, and the bare
+  `inflight_state_present` / `mailbox_has_cancel_token` pair. The precedent is
+  `health::watcher_respawn::force_clean_respawn_offset_floor`: it discards the
+  snapshot offset into `_unfenced_snapshot_frontier`, floors on
+  `tmux::committed_frontier_for_current_generation`, and where no fence exists it
+  disables the floor rather than falling back to the value. That precedent bounds the
+  first list too: `unread_tail_is_proven_drained` is authoritative over a MEASURED
+  zero only. Its `Some(0)` is `capture.saturating_sub(last_relay_offset)` in
+  `health::session_enrichment::load` over that same unfenced frontier, so it is
+  equally the answer when the frontier runs AHEAD of the capture offset — a rotated
+  or truncated transcript, or the #4986 split where the row's `output_path` and the
+  watcher's file differ — and `relay_state_matches_inflight` compares tmux session
+  names only when row and binding BOTH carry one, so another session's frontier can
+  surface as `Some(0)` when either side is unnamed. The predicate's own doc comment
+  states both. A SATURATED zero and an UNATTRIBUTED zero therefore carry the grade of
+  `None` — UNMEASURED, not measured-empty. Separating the SATURATED zero is required and
+  possible everywhere: `last_capture_offset` and `last_relay_offset` are both `pub` on
+  `WatcherStateSnapshot`. A THIRD zero needs no rule here — `read_coord_frontier`'s
+  `unwrap_or` miss, which parks `last_relay_offset` at 0 and so makes `unread_bytes` the
+  whole capture offset. The tail then reads UNDRAINED and every gate below REFUSES: an (a)
+  bias, not a (b) hazard. `frontier_provenance` already grades it, as a field on
+  `SessionEnrichment` that reaches `/api/health/detail` through `MailboxHealthSnapshot`,
+  and its absence from `WatcherStateSnapshot` follows from a deliberate placement, one
+  step removed: `health::mailbox` says an observation-only field "has no business within"
+  the reach of `RelayHealthSnapshot`, naming that struct and not this one — and since that
+  snapshot is the one nested here, the exclusion carries.
+  Separating the UNATTRIBUTED zero needs `SessionEnrichment`,
+  `pub(super)` to `discord::health`. Inside that module the vacuous arm is
+  reconstructible, because `watcher_attached` IS `watcher_binding.is_some()` and the row's
+  `tmux_session_name` rides `inflight`. Outside it, nothing the snapshot carries
+  reconstructs it: `attached` is `watcher_attached || inflight_owner_matches_channel`, so
+  it cannot stand in for the left operand it widens, and `tmux_session` is
+  `liveness_probe_session`'s merged `inflight.or(watcher)`, which cannot say whether both
+  sides were named. One NAME invites the mistake and must not be trusted for it: the
+  nested `RelayHealthSnapshot.watcher_attached` reads like the narrow operand and is not.
+  Its two production builders disagree — the watcher-state path assigns the widened
+  `session.attached`, the health-detail path assigns `session.watcher_attached` — and it
+  is the widened one that reaches `relay_recovery` and the `/watcher-state` wire.
+  So outside that module this term is UNMEASURED and a consumer
+  there has NOT measured the tail; the row precondition below narrows that case, it does
+  not close it. What follows for such a consumer is not a weaker vote. The term does not
+  ENTER the conjunction: it is graded `None` before it is read,
+  `unread_tail_is_proven_drained(None)` is false, and a false conjunct makes the whole
+  conjunction false. A consumer outside `discord::health` therefore may not run this test
+  at all until the coordinate named under "What I20 does NOT give you" is published.
+  Running it on the raw field is the category error this invariant forbids — and
+  `server::routes::health_api` runs it that way today, which the gap bullet below records
+  as a gap rather than excusing here as a qualification.
+- THE DISCRIMINATOR between (a) state that lingers too long (this issue) and (b)
+  state retired too early (#5951 (b), #5775, #5755) is a MEASURED tail, never a
+  clock. Its SHAPE is written, in the idle-tmux branch of the
+  `stale-mailbox/repair` route: the row consents
+  (`inflight_state_allows_idle_tmux_repair_for_channel`), no terminal answer sits
+  past the watermark (`!channel_has_unrelayed_idle_tmux_tail_answer`), and the tail
+  is proven drained (`unread_tail_is_proven_drained`). All three hold → (a): the
+  record outlived its work, retiring it loses nothing. Any one fails → (b). The shape is
+  not yet the test: that route is `server::routes::health_api`, outside `discord::health`,
+  and it hands the predicate the snapshot's raw `unread_bytes` with no grade applied, so
+  what is implemented is the CONJUNCTION and not the MEASUREMENT this bullet's first
+  clause demands of it. Those are also not three defenses on a ROWLESS channel.
+  "The row consents" reads
+  `if snapshot.inflight_state_present { .. } else { true }`, so absence passes it, and
+  `channel_has_unrelayed_idle_tmux_tail_answer` is `load_inflight_state(..).is_some_and(..)`
+  whose note reads "Absent row → no tail answer to lose → false", so `!unrelayed_tail`
+  passes too. Rowless — the #5996 shape — the test collapses to the tail term alone,
+  and the qualification above is why that term is not unconditional. What keeps this
+  route safe is not the conjunction but two row-required preconditions outside it: the
+  tail term is `None` when there is no `output_path` to measure, and
+  `health::recovery::clear_idle_tmux_stale_turn` returns early when
+  `load_idle_tmux_stale_turn_inflight_clear_candidate` finds no row. A consumer
+  replicating this test where those are absent must require the row's EXISTENCE as an
+  explicit precondition — "the row consents" is true only where a row exists to consent.
+- Unmeasured resolves to (b), and that asymmetry is the whole guard. `unread_bytes`
+  is three-valued and its `None` is UNMEASURED, not measured-empty, so
+  `unread_tail_is_proven_drained(None)` is false; the sibling doc says why the two
+  compose only in conjunction ("two blind witnesses do not compose into a proof")
+  — `idle_tmux_repair_has_unrelayed_tail_answer` is blind under the same conditions,
+  false for an absent path or a failed extract. The cost argument is written at
+  `recovery_known_ids::live_pending_dispatch_message_ids` — call it the COST ASYMMETRY: a
+  false recover costs a duplicate, a false suppression costs a message.
+  A wrongly-preserved (a) wedge is
+  cleared by the next poll that measures; a wrongly-retired (b) turn is gone.
+  `classify_reachability` takes the same rule from the other side — every fault arm
+  that can preempt it runs before the timer, "a thing that went WRONG must not be
+  retired by a clock".
+- Honest gap; L1 must not paper over it. For the EXACT #5996 shape the
+  discriminator does not resolve today. `classify_reachability` short-circuits to
+  `Unknown(RowlessActiveTurn)` BEFORE it builds the receipt index and runs
+  `sweep_coverage`, so a rowless active turn can never obtain the delivery coverage
+  proving its answer landed — what the incident measured (`inflight_state_present
+  false`, `rowless_active_turn`, the answer delivered four minutes earlier). The
+  tail term answers there only through
+  `RelayHealthSnapshot::idle_witness_tail_is_not_waiting`'s `!bridge_inflight_present`
+  arm, a structural `None`, not a measurement; the route's three-conjunct test collapses
+  to that same term here too, so the gap is not the anchor axis alone. I20 does NOT
+  authorize releasing that anchor on today's operands; that shape becomes decidable only
+  with a receipt read ordered ahead of the short-circuit — follow-up, not this contract.
+  #6012 IS that follow-up, and its reordering makes this bullet's ordering clause stale;
+  #6012 updates this bullet in the same PR. Landing it does not by itself close the gap,
+  and no lane may read it as doing so: coverage that is not ISOLATED TO THE CURRENT TURN
+  cannot decide this shape, because a reading that shows framed obligations while
+  reporting no uncovered range is the same reading a live turn produces when it has framed
+  nothing yet. (Deliberately prose, not symbols: the counters that would carry this are
+  #6012's to name, and pinning one here before it lands buys a coordinate that rots.)
+  Obligations accumulate
+  across turns — `ObligationExtinction::ReceiptCovered` has no producer, so
+  `live_obligations` returns the INCARNATION's set, and `LedgerIncarnation` is keyed by
+  tmux session, generation, spawn nonce and transcript file id with no turn identifier in
+  it. Until a term separates this turn's obligations from the incarnation's, the release
+  stays unauthorized.
+- Second honest gap, and it is the contract's own. No consumer OUTSIDE `discord::health`
+  can run the discriminator today. `server::routes::health_api` holds the only production
+  copy of the three-conjunct shape and hands `unread_tail_is_proven_drained` the
+  snapshot's raw `unread_bytes`, so on the vacuous attribution arm — `_ => true` in
+  `health::session_enrichment::load` wherever the row or the watcher binding is unnamed —
+  a live turn's UNATTRIBUTED `Some(0)` reads as a measured-empty tail and all three
+  conjuncts pass. That route holds the only copy of this SHAPE, but it is not the only
+  SITE feeding the predicate an ungraded field. `relay_recovery::apply`'s `ReattachWatcher`
+  arm feeds it too, in the `episode.is_none()` branch — and for the `Manual` source that
+  branch is structurally guaranteed, because the episode reservation sits behind
+  `relay_recovery_circuit_breaker::should_use_durable_circuit`, which excludes `Manual`.
+  That branch is DESTRUCTIVE, and it is reachable in production from the operator route
+  (`health_api::relay_recovery_handler` to `health::handle_relay_recovery` to
+  `relay_recovery::run_relay_recovery_at`, applying as `Manual`), so unlike the watchdog
+  arm named above it is LIVE, not latent. Its other conjuncts differ — a loaded-state
+  `idle_tmux_repair_has_unrelayed_tail_answer` rather than the provider/channel
+  `channel_has_unrelayed_idle_tmux_tail_answer`, a readiness probe, and no
+  `inflight_state_allows_idle_tmux_repair_for_channel` — which is why it is a second site
+  and not a second copy. The OPERAND is what makes it bite: it reads
+  `RelayRecoveryEvidence::unread_bytes`, which `evidence_from_snapshot` fills from a
+  `RelayHealthSnapshot`, NOT from `WatcherStateSnapshot`. A lane that grades only the
+  struct named under "What I20 does NOT give you" leaves this destructive path ungraded
+  while believing the gap closed. The row precondition is real and is enforced
+  (`health::recovery::clear_idle_tmux_stale_turn` returns early when
+  `load_idle_tmux_stale_turn_inflight_clear_candidate` finds no row), but a row proves
+  `inflight_tmux_session` is `Some`, never that `watcher_binding_tmux_session` is — so it
+  narrows this case and does not close it. I20 does NOT authorize that route's present
+  form. The invariant is stated as what a retirement must earn, and the distance between
+  it and today's code is written HERE, as a gap with a named owner, rather than hedged
+  into the invariant as a qualification the code could be read to satisfy. Closing it is
+  the coordinate under "What I20 does NOT give you", L2's first task — not this
+  contract's, and not a sentence to soften when a lane finds it inconvenient.
+- Relation to I19 and I17. I19 is witness-vs-value on one field, a zero resume offset a
+  restart can fabricate; I20 is witness-vs-existence-and-age across four retirement
+  decisions. I19 admits a floor value when unwitnessed; I20 no fallback for the age term
+  except an unreadable witness. I17 makes a loss ATTRIBUTABLE; I20 a retirement EARNED.
+- Consumer — `turn_orchestrator::release_active_turn_anchor`. Its three callers —
+  `finalize_turn_state`, the `ChannelMailboxMsg::Clear` arm, and the force-`PurgeQueue`
+  arm's `clear_cancelled_active_anchor` — do not re-derive the release, but TWO
+  evidence-driven paths reach them. `synthetic_start::stale_reclaim` reads
+  `terminal_delivery_committed` and finalizes a `Cancel` through the identity-guarded
+  finish, which lands in `finalize_turn_state`; it is
+  DEMAND-DRIVEN — only where a new TUI-direct synthetic start finds the mailbox held —
+  and OWNER-SCOPED (`classify_reclaimable_mailbox_owner`). The second,
+  `relay_auto_heal::run_orphan_token_auto_heal_pass`, is PERIODIC but NOT evidence-driven:
+  `health::recovery::run_stall_watchdog_pass` drives it over every mailbox snapshot into
+  the `Clear` arm behind `eligible_orphan_pending_token`, whose age-free
+  `..._without_admission_grace` form runs only for the `StallWatchdog` source, not the
+  `ProbeAutoHeal` one this sweep uses — and that source reaches this action from no
+  production caller at this commit (`apply_watchdog_orphan_token_cleanup`'s only callers
+  sit in `health::recovery`'s `stall_watchdog_auto_heal_tests`, #4460 having retired the
+  force-clean branch that used to call it), so what follows about it is LATENT, not live.
+  Both forms are a ledger PRESENCE (`mailbox_has_cancel_token`) over absences, no witness
+  among them — and the graced form adds an AGE term on top
+  (`!orphan_pending_token_within_admission_grace` over `mailbox_turn_started_at_ms`),
+  making it presence + absences + age, the exact shape this invariant forbids. Both turn
+  on `tmux_alive == Some(false) || !is_agentdesk_tmux_session(..)`: an UNMEASURED producer
+  (`tmux_alive` `None`) passes that gate wherever the session is not named `AgentDesk-*`
+  — a PRE-EXISTING candidate violation of this invariant, not the gap filled — and where
+  it IS so named that same term refuses the repair (`protected_agentdesk_tmux_session`).
+  That refusal is not load-bearing on the `StallWatchdog` arm, where
+  `relay_recovery::auto_apply_relay_recovery_for_shared_at` nulls `tmux_session` and
+  `tmux_alive` before planning: `!is_agentdesk_tmux_session(None)` is then true and the
+  protected reason cannot be emitted at all. A lane re-wiring that arm into production
+  inherits the defeat along with it.
+  So what is missing is evidence, not periodicity, and the population is wider than the
+  sweep's reach: `stale_thread_proof` also preempts the classifier, after which
+  `eligible_stale_thread_proof` refuses that channel too (it requires
+  `!mailbox_has_cancel_token`), so the anchor outlives a lost release event in both
+  shapes, not only where a producer, watcher, or bridge row survives. Which path carries
+  the repair is L1's, provided the deciding term is a witness or a measured tail — that
+  sweep's gate is neither, so periodizing it unchanged is the retirement this invariant
+  forbids. Any release not driven by a turn-end event owes progress evidence, and neither
+  the anchor's presence nor its `turn_started_at` age is that.
+- Consumer — the `stale-mailbox/repair` route's `queue_not_empty` gate. A
+  `queue_depth > 0` is not "live queue evidence": it is equally the signature of a
+  queue that cannot drain — the state the gate is asked to repair — so the
+  `skipped_reason` names the opposite of what the field measures. Depth is
+  inadmissible as a liveness term; the authority is the GRADED form of the three-conjunct
+  test whose shape the same route already carries in its idle-tmux branch. GRADED, not the
+  form standing there today: that one reads the raw field from outside `discord::health`
+  and so measures nothing, and adopting it unchanged MOVES the category error into a
+  second gate rather than repairing it. The grade needs the coordinate under "What I20
+  does NOT give you"; until that lands this consumer has no admissible liveness term at
+  all, and it may not substitute one — not depth, not age, not the ungraded conjunction.
+  Carry it with the row precondition named above, because that branch is reached today
+  only after `queue_depth > 0` has returned CONFLICT, and retiring the depth gate admits
+  queued channels to it.
+- Consumer — `catch_up` phase 2's `existing_ids` membership test.
+  `recovery_known_message_ids` unions three sets and only one tests liveness:
+  `live_pending_dispatch_message_ids` reads an orphaned reservation as NOT live "so
+  a leaked marker can never suppress recovery of a genuinely unanswered message".
+  Cite it for that asymmetry, not as a term to copy. Its own test is
+  `pending_user_dispatch_lease_held_by_caller || reserved_at.elapsed() <
+  PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER` — a witness OR'd with an age, and the age is
+  an independent sufficient condition, not a fallback the readable witness can veto.
+  Read its DIRECTION off the consumer, not off the shape, because the shape misleads: a
+  `true` from either arm puts the id into `existing_ids`, where `catch_up` counts the
+  message a duplicate, advances the phase-2 checkpoint, and skips it. Both arms therefore
+  SUPPRESS recovery. They do not widen it, and the sentence above is the code's own
+  statement of that direction — an orphaned reservation reads NOT live precisely so the
+  marker cannot suppress. What widens recovery is a different pair: the two deliberate
+  divergences from the canonical `pending_dispatch_lease_is_orphaned` — the dropped
+  `cancel_token.is_none()` conjunct, and reading a missing `since` as NOT live — both of
+  which push `live` false. Its AGE arm is admissible only because it is BOUNDED, at
+  `PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER`'s 10 seconds, over the dequeue-to-claim
+  window the reservation marker exists to cover. That bound is that arm's ALONE: the
+  witness arm is `Arc::strong_count` on the lease, carries no clock, and holds the
+  suppression open for as long as some caller still holds a handle — which needs no
+  bound, because it is a witness and not a clock.
+  Unbounded, or reproduced in a gate whose
+  arms RETIRE state, the same disjunction is an I20 violation. L3 takes the COST ASYMMETRY
+  and that bound from it, and the conjunction from the discriminator — never the
+  disjunction itself, and never "witness OR age is safe because it widens recovery",
+  which is the inverted reading this paragraph exists to foreclose.
+  The queued-ids arm applies no such test — presence in `intervention_queue` counts
+  a message recovered whether or not it was ever dispatched. The destructive half is
+  the `advance_phase2_checkpoint` call, not the skip: a skip is retried next scan, an
+  advance forecloses it. Queue membership is not evidence of dispatch, and the
+  checkpoint may advance past a message only on evidence of dispatch or answer.
+- Consumer — `synthetic_start::stale_reclaim`'s age gate, right on one arm only.
+  `stale_synthetic_mailbox_owner_reclaim_reason` reclaims `OwnerInflightFinalized` —
+  the row's `terminal_delivery_committed` bit — with NO age gate, and
+  `requires_positive_owner_age` confines `STALE_SYNTHETIC_MAILBOX_OWNER_MIN_AGE_SECS`
+  to `OwnerInflightAbsent` / `OwnerInflightReplaced`, the two reasons with no row bit
+  to read. Its note calls that clock defense-in-depth over a positive proof, true only on
+  the REAL-USER arm, where `classify_reclaimable_mailbox_owner` demands the ledger's
+  `finished` bit through `is_readopted_mailbox_owner`. A SYNTHETIC owner leaves that
+  classifier before any ledger read, and the reason function answers `OwnerInflightAbsent`
+  on a `None` row before inspecting anything, so a synthetic-owned ROWLESS mailbox — the
+  #5996 shape — is retired on absence plus age alone; only demand bounds that today, and
+  periodizing this arm unchanged is the retirement I20 forbids. The age is never the
+  authority, and may not be extended to a reason whose witness IS readable.
+- What I20 does NOT give you. It does not authorize retiring state on the ABSENCE of
+  progress evidence — absence is the unmeasured case, which this invariant sends to
+  (b); a consumer reading "no witness" as "retire it" builds the very (b) loss the
+  discriminator prevents. It adds no coordinate for the DECISION it reassigns: every
+  authoritative term above already exists and I20 only reassigns which may DECIDE — with
+  TWO known exceptions, both about reaching a decision point, not about a new authority.
+  FIRST, `release_active_turn_anchor` takes only `&mut ChannelMailboxState`, carrying
+  neither channel nor provider, so L1 must pass both into that decision point before it
+  can record a violation there — `channel_id` is already a `finalize_turn_state` parameter
+  and the provider rides its `Option<&QueuePersistenceContext>` WHERE THAT IS `Some` (a
+  `None` call site carries no provider), two arguments rather than a new thread of
+  identity. SECOND, grading the UNATTRIBUTED zero outside `discord::health` needs a
+  coordinate that exists on NO struct at any visibility: the ATTRIBUTION GRADE of
+  `relay_state_matches_inflight` — whether the two session names were BOTH read and
+  agreed, or whether either side was unnamed and the `_ => true` arm answered vacuously.
+  `tmux_session_mismatch` is NOT that bit, and a lane must not ship it believing the gap
+  closed. It is `inflight_state_present && !relay_state_matches_inflight`, and its two
+  trailing `is_some()` conjuncts change no value: `_ => true` means
+  `!relay_state_matches_inflight` ALREADY entails that both names were read, so deleting
+  them yields the same field and does not produce the grade. The reason it reads `false`
+  on the vacuous arm is upstream — the vacuous arm sets `relay_state_matches_inflight`
+  TRUE — and there it is indistinguishable from a witnessed match. The grade must
+  therefore be DERIVED in
+  `health::session_enrichment::load`, the only scope holding both operands, and published
+  onto BOTH carriers that take `unread_bytes` out of the module — `WatcherStateSnapshot`
+  and the `RelayHealthSnapshot` nested in it, which is the one `evidence_from_snapshot`
+  reads on the way to `relay_recovery::apply`. Grading one and not the other closes
+  nothing. `SessionEnrichment` holds those operands but publishes no
+  such grade, which is why the derivation belongs at the source rather than at either
+  struct's boundary.
+  Publishing the attribution grade is L2's FIRST task, ahead of any gate it wires that
+  reads this term. THIS SENTENCE GOES STALE THE MOMENT L2 LANDS IT: L2 returns this bullet
+  to one exception in the same PR, or the contract starts lying about its own surface.
+  Duplicate relays after a retirement stay I18's and I19's.
+- It also puts nothing in conflict with the pinned "normal", and no lane may weaken
+  that to land a repair. `relay_recovery::tests::unpaired_active_token_is_observe_only`
+  pairs `mailbox_turn_age_secs: Some(601)` with a fixture whose `unread_bytes` is
+  `None` — UNMEASURED, so `ObserveOnly` is the verdict I20 requires and the test is
+  under-specified rather than wrong. A repair acting on that stall state belongs in a
+  NEW fixture naming a measured tail, and `scripts/deploy-release.sh` classifying
+  `unpaired_active_token` as `obs=` not `marker=` stays correct for the same reason.
+- Violation surface: retire on presence or age and a live turn loses its answer (the
+  #5951 (b) shape); trust presence or age as liveness and the queue wedges behind a
+  turn that finished — 12 minutes on channel 1490141479707086938 on 2026-09-18, with
+  `effective_state` already reading `idle`.
+- Observability, not optional here: I17 records its own failure on this point, #5175
+  leaving a counter with a producer and no consumer so the loss passed silently. Each
+  consuming lane wires `record_invariant_check(condition, InvariantViolation {
+  invariant: "live_turn_proven_by_progress_not_presence", .. })` where the retirement
+  decision is TAKEN, in the row form
+  `tmux_watcher::orphan_terminal_frame::observe_orphan_terminal_frame` uses, with
+  `details` naming WHICH term decided — witness, measured tail, an unreadable witness, or
+  age fallback. An age fallback must be countable apart from a witness, or its growth
+  is invisible and the clock silently becomes the authority again. Violations reach an
+  operator through the #3561 hourly table only once a lane ADDS the row:
+  `RELAY_SIGNAL_DEFINITIONS` matches `event_type = "invariant_violation"` against an
+  explicit `statuses` list (`relay_signal_alert`'s `status = ANY($2)`) with no wildcard
+  entry, so a key absent from that list counts zero forever — the #5175 shape this
+  bullet opened by naming. Nothing backstops that table: `record_invariant_check` emits
+  NOTHING while the condition HOLDS, so silence cannot be told from unwired, and the
+  `guard_fires` counter a violation bumps is keyed by channel and provider only
+  (`record_guard_fire`) — one bucket for all invariants, unable to name which fired.
+  One lane adds the threshold-1 entry carrying
+  `live_turn_proven_by_progress_not_presence` in `statuses`, as I17 and I18 each did.
+- Invariant key: `live_turn_proven_by_progress_not_presence`. This document lands the
+  contract only and enforces nothing by itself: steps 2 and 3 below — the
+  `record_invariant_check` wiring and a deliberate-violation test per consumer —
+  belong to the four consuming lanes, each citing this section; the rowless
+  receipt-coverage follow-up is a fifth lane citing the honest-gap bullet. #5996's DoD
+  clause — an unpaired active token with no progress evidence must not block the queue
+  — needs the anchor and route lanes together and is closed by neither alone (#5946).
 
 ## How to add a new invariant
 
