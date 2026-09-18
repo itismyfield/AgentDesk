@@ -692,7 +692,7 @@ impl RedriveNudge {
 }
 
 /// #5943: the resume point a redrive may hand a live watcher, or the durable
-/// witness that refuses it (contract I17). Direction is NOT consulted: a nonzero
+/// witness that refuses it (contract I19). Direction is NOT consulted: a nonzero
 /// frontier is admitted even BEHIND the witness (the sink's confirm lag).
 /// Refused is a ZERO a durable delivery contradicts: after a dcserver restart
 /// both I12 terms are gone, and the value cannot tell "not restored yet" from
