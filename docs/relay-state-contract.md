@@ -793,18 +793,35 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   `None` — UNMEASURED, not measured-empty. Separating the SATURATED zero is required and
   possible everywhere: `last_capture_offset` and `last_relay_offset` are both `pub` on
   `WatcherStateSnapshot`. Separating the UNATTRIBUTED zero needs `SessionEnrichment`,
-  `pub(super)` to `discord::health`, so outside that module this term is UNMEASURED and a
-  consumer there has NOT measured the tail; the row precondition below narrows that case,
-  it does not close it, and the term may not decide a retirement alone.
+  `pub(super)` to `discord::health`. Inside that module the vacuous arm is
+  reconstructible, because `watcher_attached` IS `watcher_binding.is_some()` and the row's
+  `tmux_session_name` rides `inflight`. Outside it, nothing the snapshot carries
+  reconstructs it: `attached` is `watcher_attached || inflight_owner_matches_channel`, so
+  it cannot stand in for the left operand it widens, and `tmux_session` is
+  `liveness_probe_session`'s merged `inflight.or(watcher)`, which cannot say whether both
+  sides were named. So outside that module this term is UNMEASURED and a consumer
+  there has NOT measured the tail; the row precondition below narrows that case, it does
+  not close it. What follows for such a consumer is not a weaker vote. The term does not
+  ENTER the conjunction: it is graded `None` before it is read,
+  `unread_tail_is_proven_drained(None)` is false, and a false conjunct makes the whole
+  conjunction false. A consumer outside `discord::health` therefore may not run this test
+  at all until the coordinate named under "What I20 does NOT give you" is published.
+  Running it on the raw field is the category error this invariant forbids — and
+  `server::routes::health_api` runs it that way today, which the gap bullet below records
+  as a gap rather than excusing here as a qualification.
 - THE DISCRIMINATOR between (a) state that lingers too long (this issue) and (b)
   state retired too early (#5951 (b), #5775, #5755) is a MEASURED tail, never a
-  clock — and it is already implemented, in the idle-tmux branch of the
+  clock. Its SHAPE is written, in the idle-tmux branch of the
   `stale-mailbox/repair` route: the row consents
   (`inflight_state_allows_idle_tmux_repair_for_channel`), no terminal answer sits
   past the watermark (`!channel_has_unrelayed_idle_tmux_tail_answer`), and the tail
   is proven drained (`unread_tail_is_proven_drained`). All three hold → (a): the
-  record outlived its work, retiring it loses nothing. Any one fails → (b). Those are
-  not three defenses on a ROWLESS channel. "The row consents" reads
+  record outlived its work, retiring it loses nothing. Any one fails → (b). The shape is
+  not yet the test: that route is `server::routes::health_api`, outside `discord::health`,
+  and it hands the predicate the snapshot's raw `unread_bytes` with no grade applied, so
+  what is implemented is the CONJUNCTION and not the MEASUREMENT this bullet's first
+  clause demands of it. Those are also not three defenses on a ROWLESS channel.
+  "The row consents" reads
   `if snapshot.inflight_state_present { .. } else { true }`, so absence passes it, and
   `channel_has_unrelayed_idle_tmux_tail_answer` is `load_inflight_state(..).is_some_and(..)`
   whose note reads "Absent row → no tail answer to lose → false", so `!unrelayed_tail`
@@ -840,6 +857,22 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   to that same term here too, so the gap is not the anchor axis alone. I20 does NOT
   authorize releasing that anchor on today's operands; that shape becomes decidable only
   with a receipt read ordered ahead of the short-circuit — follow-up, not this contract.
+- Second honest gap, and it is the contract's own. No consumer OUTSIDE `discord::health`
+  can run the discriminator today. `server::routes::health_api` holds the only production
+  copy of the three-conjunct shape and hands `unread_tail_is_proven_drained` the
+  snapshot's raw `unread_bytes`, so on the vacuous attribution arm — `_ => true` in
+  `health::session_enrichment::load` wherever the row or the watcher binding is unnamed —
+  a live turn's UNATTRIBUTED `Some(0)` reads as a measured-empty tail and all three
+  conjuncts pass. The row precondition is real and is enforced
+  (`health::recovery::clear_idle_tmux_stale_turn` returns early when
+  `load_idle_tmux_stale_turn_inflight_clear_candidate` finds no row), but a row proves
+  `inflight_tmux_session` is `Some`, never that `watcher_binding_tmux_session` is — so it
+  narrows this case and does not close it. I20 does NOT authorize that route's present
+  form. The invariant is stated as what a retirement must earn, and the distance between
+  it and today's code is written HERE, as a gap with a named owner, rather than hedged
+  into the invariant as a qualification the code could be read to satisfy. Closing it is
+  the coordinate under "What I20 does NOT give you", L2's first task — not this
+  contract's, and not a sentence to soften when a lane finds it inconvenient.
 - Relation to I19 and I17. I19 is witness-vs-value on one field, a zero resume offset a
   restart can fabricate; I20 is witness-vs-existence-and-age across four retirement
   decisions. I19 admits a floor value when unwitnessed; I20 no fallback for the age term
@@ -856,12 +889,23 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   `health::recovery::run_stall_watchdog_pass` drives it over every mailbox snapshot into
   the `Clear` arm behind `eligible_orphan_pending_token`, whose age-free
   `..._without_admission_grace` form runs only for the `StallWatchdog` source, not the
-  `ProbeAutoHeal` one this sweep uses. Both forms are a ledger PRESENCE
-  (`mailbox_has_cancel_token`) over absences, no witness among them, and both turn on
-  `tmux_alive == Some(false) || !is_agentdesk_tmux_session(..)`: an UNMEASURED producer
+  `ProbeAutoHeal` one this sweep uses — and that source reaches this action from no
+  production caller at this commit (`apply_watchdog_orphan_token_cleanup`'s only callers
+  sit in `health::recovery`'s `stall_watchdog_auto_heal_tests`, #4460 having retired the
+  force-clean branch that used to call it), so what follows about it is LATENT, not live.
+  Both forms are a ledger PRESENCE (`mailbox_has_cancel_token`) over absences, no witness
+  among them — and the graced form adds an AGE term on top
+  (`!orphan_pending_token_within_admission_grace` over `mailbox_turn_started_at_ms`),
+  making it presence + absences + age, the exact shape this invariant forbids. Both turn
+  on `tmux_alive == Some(false) || !is_agentdesk_tmux_session(..)`: an UNMEASURED producer
   (`tmux_alive` `None`) passes that gate wherever the session is not named `AgentDesk-*`
   — a PRE-EXISTING candidate violation of this invariant, not the gap filled — and where
   it IS so named that same term refuses the repair (`protected_agentdesk_tmux_session`).
+  That refusal is not load-bearing on the `StallWatchdog` arm, where
+  `relay_recovery::auto_apply_relay_recovery_for_shared_at` nulls `tmux_session` and
+  `tmux_alive` before planning: `!is_agentdesk_tmux_session(None)` is then true and the
+  protected reason cannot be emitted at all. A lane re-wiring that arm into production
+  inherits the defeat along with it.
   So what is missing is evidence, not periodicity, and the population is wider than the
   sweep's reach: `stale_thread_proof` also preempts the classifier, after which
   `eligible_stale_thread_proof` refuses that channel too (it requires
@@ -875,14 +919,28 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   `queue_depth > 0` is not "live queue evidence": it is equally the signature of a
   queue that cannot drain — the state the gate is asked to repair — so the
   `skipped_reason` names the opposite of what the field measures. Depth is
-  inadmissible as a liveness term; the authority is the three-conjunct test the same
-  route already holds in its idle-tmux branch — carried with the row precondition named
-  above, because that branch is reached today only after `queue_depth > 0` has returned
-  CONFLICT, and retiring the depth gate admits queued channels to it.
+  inadmissible as a liveness term; the authority is the GRADED form of the three-conjunct
+  test whose shape the same route already carries in its idle-tmux branch. GRADED, not the
+  form standing there today: that one reads the raw field from outside `discord::health`
+  and so measures nothing, and adopting it unchanged MOVES the category error into a
+  second gate rather than repairing it. The grade needs the coordinate under "What I20
+  does NOT give you"; until that lands this consumer has no admissible liveness term at
+  all, and it may not substitute one — not depth, not age, not the ungraded conjunction.
+  Carry it with the row precondition named above, because that branch is reached today
+  only after `queue_depth > 0` has returned CONFLICT, and retiring the depth gate admits
+  queued channels to it.
 - Consumer — `catch_up` phase 2's `existing_ids` membership test.
   `recovery_known_message_ids` unions three sets and only one tests liveness:
   `live_pending_dispatch_message_ids` reads an orphaned reservation as NOT live "so
   a leaked marker can never suppress recovery of a genuinely unanswered message".
+  Cite it for that asymmetry, not as a term to copy: its own test is
+  `pending_user_dispatch_lease_held_by_caller || reserved_at.elapsed() <
+  PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER` — a witness OR'd with an age, where the
+  witness IS readable, so the age is an alternative rather than the bounded fallback this
+  invariant allows only where the witness is structurally unreadable. It is sound HERE
+  because both arms widen recovery and the bullet's cost argument makes widening the safe
+  direction; reproduced in a gate whose arms RETIRE state, the same disjunction is an I20
+  violation. L3 takes the polarity from it and the conjunction from the discriminator.
   The queued-ids arm applies no such test — presence in `intervention_queue` counts
   a message recovered whether or not it was ever dispatched. The destructive half is
   the `advance_phase2_checkpoint` call, not the skip: a skip is retried next scan, an
@@ -904,14 +962,33 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
 - What I20 does NOT give you. It does not authorize retiring state on the ABSENCE of
   progress evidence — absence is the unmeasured case, which this invariant sends to
   (b); a consumer reading "no witness" as "retire it" builds the very (b) loss the
-  discriminator prevents. It adds no coordinate: every authoritative term above
-  already exists and I20 only reassigns which may DECIDE — with one known exception:
-  `release_active_turn_anchor` takes only `&mut ChannelMailboxState`, carrying neither
-  channel nor provider, so L1 must pass both into that decision point before it can
-  record a violation there — `channel_id` is already a `finalize_turn_state` parameter
+  discriminator prevents. It adds no coordinate for the DECISION it reassigns: every
+  authoritative term above already exists and I20 only reassigns which may DECIDE — with
+  TWO known exceptions, both about reaching a decision point, not about a new authority.
+  FIRST, `release_active_turn_anchor` takes only `&mut ChannelMailboxState`, carrying
+  neither channel nor provider, so L1 must pass both into that decision point before it
+  can record a violation there — `channel_id` is already a `finalize_turn_state` parameter
   and the provider rides its `Option<&QueuePersistenceContext>` WHERE THAT IS `Some` (a
   `None` call site carries no provider), two arguments rather than a new thread of
-  identity. Duplicate relays after a retirement stay I18's and I19's.
+  identity. SECOND, grading the UNATTRIBUTED zero outside `discord::health` needs a
+  coordinate that exists on NO struct at any visibility: the ATTRIBUTION GRADE of
+  `relay_state_matches_inflight` — whether the two session names were BOTH read and
+  agreed, or whether either side was unnamed and the `_ => true` arm answered vacuously.
+  `tmux_session_mismatch` is NOT that bit, and a lane must not ship it believing the gap
+  closed: that field additionally requires `watcher_binding_tmux_session` and
+  `inflight_tmux_session` to both be `Some`, so it reads `false` on the vacuous arm, where
+  it is indistinguishable from a witnessed match. The grade must therefore be DERIVED in
+  `health::session_enrichment::load`, the only scope holding both operands, and published
+  onto `WatcherStateSnapshot`; `SessionEnrichment` holds those operands but publishes no
+  such grade, which is why the derivation belongs at the source rather than at either
+  struct's boundary. `frontier_provenance` is its sibling one axis over — a THIRD grade,
+  distinct from saturation: it says whether `last_relay_offset` is a measurement or
+  `read_coord_frontier`'s `unwrap_or` miss, which two offsets that merely compare cannot
+  show — and it is likewise absent from the snapshot.
+  Publishing the attribution grade is L2's FIRST task, ahead of any gate it wires that
+  reads this term. THIS SENTENCE GOES STALE THE MOMENT L2 LANDS IT: L2 returns this bullet
+  to one exception in the same PR, or the contract starts lying about its own surface.
+  Duplicate relays after a retirement stay I18's and I19's.
 - It also puts nothing in conflict with the pinned "normal", and no lane may weaken
   that to land a repair. `relay_recovery::tests::unpaired_active_token_is_observe_only`
   pairs `mailbox_turn_age_secs: Some(601)` with a fixture whose `unread_bytes` is
