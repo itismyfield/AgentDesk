@@ -593,7 +593,7 @@ mod tests {
         observation: CaptureCoordinateObservation,
     ) -> WatcherStateSnapshot {
         use crate::services::discord::relay_health::{
-            RelayActiveTurn, RelayHealthSnapshot, RelayStallState,
+            DurableFrontierObservation, RelayActiveTurn, RelayHealthSnapshot, RelayStallState,
         };
 
         WatcherStateSnapshot {
@@ -602,6 +602,7 @@ mod tests {
             tmux_session: key.tmux_session_name.clone(),
             watcher_owner_channel_id: Some(key.channel_id),
             last_relay_offset: 0,
+            durable_frontier: DurableFrontierObservation::RowAbsent,
             inflight_state_present: true,
             last_relay_ts_ms: 0,
             last_capture_offset: observation.offset,

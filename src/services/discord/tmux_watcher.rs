@@ -140,7 +140,7 @@ mod utf8_chunk_decoder;
 mod jsonl_rotation;
 
 #[path = "tmux_watcher/loop_poll_prologue.rs"]
-mod loop_poll_prologue;
+pub(in crate::services::discord) mod loop_poll_prologue;
 
 #[path = "tmux_watcher/stall_exit.rs"]
 mod stall_exit;

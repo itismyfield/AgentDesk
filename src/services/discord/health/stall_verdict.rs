@@ -579,6 +579,7 @@ mod tests {
             tmux_session: Some("AgentDesk-codex-fixture".to_string()),
             watcher_owner_channel_id: Some(42),
             last_relay_offset: 10,
+            durable_frontier: DurableFrontierObservation::RowAbsent,
             inflight_state_present: true,
             last_relay_ts_ms: 0,
             last_capture_offset: Some(20),
@@ -1392,7 +1393,7 @@ mod tests {
             frontier_provenance: FrontierProvenanceReport::of(
                 FrontierProvenance::observe(
                     CoordFrontierObservation::Absent,
-                    DurableFrontierObservation::observe(Some(4_096), Some(7), None),
+                    DurableFrontierObservation::observe(Some(4_096), Some(7), None, None),
                 ),
                 None,
             ),

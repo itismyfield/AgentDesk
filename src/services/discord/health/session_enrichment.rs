@@ -386,12 +386,10 @@ impl SessionEnrichment {
             inflight_tmux_session.as_deref(),
             watcher_binding_tmux_session.as_deref(),
         );
-        // #5071 relay-tail S1 (I-4): one lookup, two independent readings, and
-        // — since the r1 review — through the same reader the counterpart's
-        // observation goes through. The tuple below keeps its
-        // `unwrap_or((0, 0, 0))` meaning byte for byte, S2 owns making an
-        // unsourced frontier unknown, while `coord_observation` records whether
-        // that zero came from an entry or from the miss.
+        // #5071 relay-tail S1 (I-4): one lookup, two independent readings,
+        // through the same reader as the counterpart's observation. The tuple
+        // keeps its `unwrap_or((0, 0, 0))` meaning; `coord_observation` records
+        // whether that zero came from an entry or from the miss.
         let coord = read_coord_frontier(shared, channel);
         let coord_observation = coord.observation;
         let live_generation_mtime_ns = coord.live_generation_ns;
@@ -406,6 +404,7 @@ impl SessionEnrichment {
                 .and_then(|state| state.last_watcher_relayed_generation_mtime_ns)
                 .filter(|generation| *generation != 0),
             live_generation_mtime_ns,
+            inflight.as_ref().and_then(|state| state.turn_start_offset),
         );
         let output_path_for_metadata = inflight
             .as_ref()
@@ -928,6 +927,7 @@ mod tests {
                     Some(4_096),
                     Some(OLD_GENERATION_NS),
                     live_generation_ns,
+                    None,
                 ),
             )
             .hypothesis()
@@ -1247,6 +1247,80 @@ mod tests {
             divergence_record_count(&agreed_logs),
             0,
             "agreeing sources must stay silent; got:\n{agreed_logs}"
+        );
+    }
+
+    // #5943 lens B M5a (lens A P2-3): `load` is the ONLY production feed of the
+    // row's birth offset into `DurableFrontierObservation::observe`, and that
+    // observation is the floor `relay_auto_heal::redrive_resume_point` resumes
+    // an unwitnessed redrive from. Every floor test hand-builds the observation,
+    // so severing this one argument — `turn_start_offset` pinned to `None` —
+    // left them all green while the P0 (a fresh turn redriven from zero) came
+    // back. This drives the real `load` off a persisted born row and fails on
+    // exactly that cut: the observation degrades to `RowAbsent`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn health_load_carries_the_row_birth_offset_into_the_durable_observation_5943() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tmp.path(),
+        );
+
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(5_943_000_000_000_044);
+        let tmux_session_name = "AgentDesk-codex-5943-birth-offset";
+        let shared = discord::make_shared_data_for_tests();
+        shared.tmux_watchers.insert(
+            channel,
+            watcher_handle(tmux_session_name, NATIVE_TRANSCRIPT),
+        );
+
+        // A row exactly as its birth leaves it: `turn_start_offset` pinned to
+        // the offset the turn began at, nothing relayed yet.
+        let row = discord::inflight::InflightTurnState::new(
+            provider.clone(),
+            channel.get(),
+            None,
+            5_943_000_000_000_000,
+            5_943_000_000_000_001,
+            5_943_000_000_000_002,
+            "5943 birth-offset fixture".to_string(),
+            None,
+            Some(tmux_session_name.to_string()),
+            Some(NATIVE_TRANSCRIPT.to_string()),
+            None,
+            22_299_791,
+        );
+        assert_eq!(row.turn_start_offset, Some(22_299_791));
+        assert_eq!(row.last_watcher_relayed_offset, None);
+        discord::inflight::save_inflight_state(&row).expect("persist inflight fixture");
+
+        let enrichment = SessionEnrichment::load(&shared, Some(&provider), channel).await;
+
+        assert_eq!(
+            enrichment
+                .inflight
+                .as_ref()
+                .and_then(|state| state.turn_start_offset),
+            Some(22_299_791),
+            "the loaded row must carry the birth offset, otherwise the wiring assertion is vacuous"
+        );
+        let observed = enrichment.frontier_provenance.durable_observation;
+        assert_eq!(
+            observed,
+            DurableFrontierObservation::RowUnrelayed {
+                turn_start_offset: 22_299_791
+            },
+            "load must feed the row's birth offset to the durable observation; got {observed:?}"
+        );
+        assert_eq!(observed.turn_start_offset(), Some(22_299_791));
+        assert_eq!(
+            observed.durable_delivery_witness(),
+            None,
+            "a row that relayed nothing is a floor, never a witness"
         );
     }
 }

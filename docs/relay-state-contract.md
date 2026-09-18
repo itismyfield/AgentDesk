@@ -532,7 +532,7 @@ still spoken for, so this one steps past them rather than colliding.
   issue correction withdrew that reading, leaving only time correlation — and
   nothing here depends on it.
 - Tracing events: none of its own. The redrive's own refusals are I12's
-  (`redrive_frontier_no_progress`).
+  (`redrive_frontier_no_progress`) and I19's.
 - Invariant key: `redrive_may_not_disarm_the_delivery_marker` (enforced by
   `relay_auto_heal::tests::redrive_does_not_clear_the_bridge_delivery_marker_5943`,
   the `tmux_watcher::watcher_resume::tests` resume-contract set, and the
@@ -679,6 +679,82 @@ Numbered I18 because I13/I14/I15 stay reserved for the reachability obligations
 - Invariant key: `rewind_resend_identified_by_source_bytes` (enforced by the
   `session_relay_sink::turn_parser::resend_dedupe_tests` set; like I12/I16 this path emits
   tracing + counters rather than `record_invariant_check` rows).
+
+## I19. A redrive resumes on a witness, not on a value (#5943)
+
+I16 stopped the redrive from disarming the duplicate-relay guard on its way
+past. I19 governs the resume point itself.
+
+- Definition: the backlog redrive may not enqueue a resume point of zero while
+  the CURRENT TURN's in-flight row says bytes of it have already been relayed,
+  and it may not enqueue zero for a turn whose row records where the turn began.
+  Every other resume point, in either direction, is enqueued unchanged.
+- Producer: `health::relay_auto_heal::redrive_resume_point`, whose only caller is
+  `nudge_watcher_handle_for_backlog`. The offset requested is unchanged from I12
+  (`last_relay_offset.max(committed_offset)`); I19 decides what a ZERO means.
+- Direction is not consulted, and that is the load-bearing half: a resume point
+  behind the read head is the ordinary healthy shape (channel 1479671298497183835,
+  2026-09-16 12:42..13:53: eight such redrives). Refusing rewinds as a class
+  would convert this invariant into the loss it prevents.
+- What is refused: a zero that a durable delivery contradicts. Both I12 readings
+  reach zero through a coord that never advanced or was never restored, so the
+  VALUE cannot separate "nothing was delivered" from "not restored yet". At
+  2026-09-16T14:13:37Z..14:21:32Z five consecutive redrives ran with
+  `last_relay_offset=0` and `unread_bytes=24_553_403` — the entire transcript —
+  after a dcserver restart dropped the in-memory coordinate.
+- Witness: `DurableFrontierObservation::durable_delivery_witness`, carried onto
+  the snapshot as `WatcherStateSnapshot::durable_frontier`: the one term the
+  restart does not take with it (both I12 readings live in the emptied
+  `SharedData::tmux_relay_coords`). `RowPresent` alone is not the predicate —
+  `live_generation_mtime_ns` is read off the coordinate ENTRY, so after that
+  restart `observe` can only answer `GenerationUnresolved`; both count. Three
+  shapes give NO witness: `GenerationMismatch` (a different incarnation, whose
+  re-created wrapper legitimately zeroes), a `relayed_start` of zero (the very
+  value the guard distrusts), and a row with no relayed offset (`RowUnrelayed`,
+  `RowAbsent`).
+- Floor (r3): an unwitnessed zero is NOT approved as zero. The row's
+  `last_watcher_relayed_offset` is `None` from the turn's birth until its first
+  relay, so every fresh turn arrives unwitnessed and zero would re-read every
+  earlier turn in the file. The same row's `turn_start_offset` (set at every
+  claim; what `recovery_watcher_start_offset` resumes from on reattach) is the
+  floor, under that function's rule: a capture shorter than the floor means the
+  file was re-created and zero is its start. Only a rowless turn (`RowAbsent`)
+  keeps zero: nothing durable says where it began, and a re-post is recoverable
+  where a skipped head is not.
+- I12's two readings are one reading spelled twice — `redrive_grace` admits a
+  redrive only while `snapshot.last_relay_offset == token.committed_offset`, so
+  their `max()` is a no-op on every production path into this guard; it is kept
+  for the handle-level entry point tests reach with the two apart.
+- Not refused, deliberately: a resume point BEHIND the durable witness (the sink
+  confirm lag over an already-persisted batch — precisely what recovery is for),
+  and an unset `watcher_owner_channel_id` (the rest of the codebase already reads
+  that as "the polled channel": `nudge_existing_watcher_for_backlog`,
+  `RelayHealthSnapshot::channel_binding`, `idle_recap`).
+- On refusal the redrive is counted as a no-progress attempt (r3): the same
+  backoff as a nudge, then `redrive_no_progress_capped` after
+  `REDRIVE_MAX_NO_PROGRESS_ATTEMPTS`, instead of re-running every poll. It never
+  escalates to `ReattachWatcher`: the refusal evidences an unrestored in-memory
+  frontier, not a dead watcher, and a reattach would cancel a watcher that is
+  still reading to resume it from the same durable row
+  (`last_offset.max(turn_start_offset)`, zero only on truncation).
+  `nudge_existing_watcher_for_backlog` returns `RedriveNudge` rather than `bool`
+  so the `apply` arm can tell a refusal from a nudge that did not apply.
+- Violation surface: a re-post of an already-relayed prefix with a longer body
+  (the transcript grows between passes). The 2026-09-15 REST scan of adk-cc
+  measured 145 bot bodies, 28 re-posts, 22 partial — so this invariant is
+  verified by counting re-posts, not byte-identical duplicates.
+- What I19 does NOT give you: a duplicate-relay defence past the resume.
+  `watcher_resume_outcome` pins the floor AT the requested offset, so
+  `pre_emit_guard` cannot fire on the resumed batch — deliberately, since that
+  branch discards the pending buffer and would turn a re-post into total loss of
+  `[floor, EOF)`. The defences here are the refusal, the floor, and I12's
+  no-progress gate.
+- Tracing events: `redrive_unrestored_frontier`, in I12's
+  `redrive_frontier_no_progress` shape so both refusal reasons count off one
+  `event` field; `redrive_no_progress_capped` once per capped refusal episode.
+- Invariant key: `redrive_resumes_only_onto_a_restored_frontier` (enforced by the
+  `relay_auto_heal::tests` `_5943` set; like I12 and I16 this path emits tracing
+  logs rather than `record_invariant_check` rows).
 
 ## How to add a new invariant
 

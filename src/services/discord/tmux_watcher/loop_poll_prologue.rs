@@ -1,6 +1,6 @@
 use super::*;
 #[path = "loop_poll_prologue/watcher_resume.rs"]
-mod watcher_resume;
+pub(in crate::services::discord) mod watcher_resume;
 use self::watcher_resume::watcher_resume_outcome;
 use crate::services::discord::session_relay_sink::journal::watcher as journal_watcher;
 use crate::services::discord::tmux::tmux_output_stream::watcher_source_witness;
@@ -175,8 +175,7 @@ pub(super) async fn poll_watcher_output_or_continue(
             last_observed_generation_mtime_ns =
                 Some(read_generation_file_mtime_ns(tmux_session_name));
         }
-        // Clear turn_delivered after preserving the duplicate-relay guard so
-        // future turns beyond this resume point can be relayed normally.
+        // Cleared after the floor is preserved so later turns still relay.
         turn_delivered.store(false, Ordering::Relaxed);
     }
 

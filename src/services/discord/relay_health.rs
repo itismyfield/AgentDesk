@@ -109,12 +109,15 @@ impl CoordFrontierObservation {
 /// `tmux_watcher::commit_decisions` persists), not a delivered end, and it
 /// arrives with the `.generation` mtime it was snapshotted against because an
 /// offset is only attributable to the incarnation that produced it.
+/// `turn_start_offset` is the same row's birth offset, the one a row carries
+/// BEFORE anything of the turn was relayed (#5943).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(in crate::services::discord) enum DurableFrontierObservation {
-    /// No durable row records a relayed offset for this channel — either there
-    /// is no row, or the row carries no `last_watcher_relayed_offset`.
+    /// No durable row, or a row that carries neither offset.
     RowAbsent,
+    /// A row that has relayed nothing yet (`None` from birth to first relay, #5943).
+    RowUnrelayed { turn_start_offset: u64 },
     /// A row records one, BOTH generations were witnessed, and they agree.
     ///
     /// r1 review (legA P1-1, legB P2-2): this used to also mean "nothing on
@@ -127,6 +130,7 @@ pub(in crate::services::discord) enum DurableFrontierObservation {
     RowPresent {
         relayed_start: u64,
         generation_ns: i64,
+        turn_start_offset: Option<u64>,
     },
     /// A row records one, but the two generations cannot be compared because
     /// one of the witnesses said nothing.
@@ -138,6 +142,7 @@ pub(in crate::services::discord) enum DurableFrontierObservation {
         relayed_start: u64,
         row_generation_ns: Option<i64>,
         live_generation_ns: Option<i64>,
+        turn_start_offset: Option<u64>,
     },
     /// A row records one, and the live coordinate's generation says it belongs
     /// to an earlier incarnation.
@@ -145,6 +150,7 @@ pub(in crate::services::discord) enum DurableFrontierObservation {
         relayed_start: u64,
         row_generation_ns: i64,
         live_generation_ns: i64,
+        turn_start_offset: Option<u64>,
     },
 }
 
@@ -158,25 +164,68 @@ impl DurableFrontierObservation {
         relayed_start: Option<u64>,
         row_generation_ns: Option<i64>,
         live_generation_ns: Option<i64>,
+        turn_start_offset: Option<u64>,
     ) -> Self {
         let Some(relayed_start) = relayed_start else {
-            return Self::RowAbsent;
+            return match turn_start_offset {
+                Some(turn_start_offset) => Self::RowUnrelayed { turn_start_offset },
+                None => Self::RowAbsent,
+            };
         };
         match (row_generation_ns, live_generation_ns) {
             (Some(row), Some(live)) if row == live => Self::RowPresent {
                 relayed_start,
                 generation_ns: row,
+                turn_start_offset,
             },
             (Some(row), Some(live)) => Self::GenerationMismatch {
                 relayed_start,
                 row_generation_ns: row,
                 live_generation_ns: live,
+                turn_start_offset,
             },
             (row_generation_ns, live_generation_ns) => Self::GenerationUnresolved {
                 relayed_start,
                 row_generation_ns,
                 live_generation_ns,
+                turn_start_offset,
             },
+        }
+    }
+
+    /// #5943: the relayed offset a DURABLE row vouches for — the row survives
+    /// the dcserver restart that empties `SharedData::tmux_relay_coords`, which
+    /// is why no in-memory reading can serve. [`Self::GenerationUnresolved`]
+    /// counts: after that restart the live generation has no entry to be read
+    /// from. Three shapes give none: [`Self::GenerationMismatch`] (a different
+    /// incarnation, whose fresh wrapper legitimately starts at zero —
+    /// `watermark_after_output_regression`), a zero `relayed_start` (the value
+    /// the guard exists to distrust), and a row that relayed nothing yet.
+    pub(in crate::services::discord) fn durable_delivery_witness(self) -> Option<u64> {
+        match self {
+            Self::RowAbsent | Self::RowUnrelayed { .. } | Self::GenerationMismatch { .. } => None,
+            Self::RowPresent { relayed_start, .. }
+            | Self::GenerationUnresolved { relayed_start, .. } => {
+                (relayed_start > 0).then_some(relayed_start)
+            }
+        }
+    }
+
+    /// #5943 r3: the row's birth offset, the floor a redrive resumes from when
+    /// [`Self::durable_delivery_witness`] has nothing to say.
+    pub(in crate::services::discord) fn turn_start_offset(self) -> Option<u64> {
+        match self {
+            Self::RowAbsent => None,
+            Self::RowUnrelayed { turn_start_offset } => Some(turn_start_offset),
+            Self::RowPresent {
+                turn_start_offset, ..
+            }
+            | Self::GenerationUnresolved {
+                turn_start_offset, ..
+            }
+            | Self::GenerationMismatch {
+                turn_start_offset, ..
+            } => turn_start_offset,
         }
     }
 }
@@ -1063,14 +1112,19 @@ mod tests {
     /// for "nothing contradicts the generation" and H2 was reachable without a
     /// comparison ever running. It now supplies the live witness it claims.
     fn row_present() -> DurableFrontierObservation {
-        DurableFrontierObservation::observe(Some(4_096), Some(GENERATION_NS), Some(GENERATION_NS))
+        DurableFrontierObservation::observe(
+            Some(4_096),
+            Some(GENERATION_NS),
+            Some(GENERATION_NS),
+            None,
+        )
     }
 
     /// The durable row an ABSENT coordinate produces: the row names an offset
     /// and its own generation, and there is no entry left to witness a live one.
     /// This — not [`row_present`] — is H1's production shape.
     fn row_with_unresolved_generation() -> DurableFrontierObservation {
-        DurableFrontierObservation::observe(Some(4_096), Some(GENERATION_NS), None)
+        DurableFrontierObservation::observe(Some(4_096), Some(GENERATION_NS), None, None)
     }
 
     /// The durable row an END with this coordinate reading actually polls
@@ -1137,42 +1191,63 @@ mod tests {
     #[test]
     fn a_durable_row_needs_two_witnessed_generations_to_agree_or_to_mismatch() {
         assert_eq!(
-            DurableFrontierObservation::observe(None, Some(GENERATION_NS), Some(GENERATION_NS + 1)),
+            DurableFrontierObservation::observe(
+                None,
+                Some(GENERATION_NS),
+                Some(GENERATION_NS + 1),
+                None
+            ),
             DurableFrontierObservation::RowAbsent,
             "no relayed offset is no row, whatever the generations say"
         );
         assert_eq!(
-            DurableFrontierObservation::observe(Some(9), None, Some(GENERATION_NS)),
+            DurableFrontierObservation::observe(None, None, None, Some(128)),
+            DurableFrontierObservation::RowUnrelayed {
+                turn_start_offset: 128
+            },
+            "#5943: a row born at 128 that relayed nothing yet is not rowless"
+        );
+        assert_eq!(
+            DurableFrontierObservation::observe(Some(9), None, Some(GENERATION_NS), None),
             DurableFrontierObservation::GenerationUnresolved {
                 relayed_start: 9,
                 row_generation_ns: None,
                 live_generation_ns: Some(GENERATION_NS),
+                turn_start_offset: None,
             },
             "a live generation alone compares against nothing"
         );
         assert_eq!(
-            DurableFrontierObservation::observe(Some(9), Some(GENERATION_NS), None),
+            DurableFrontierObservation::observe(Some(9), Some(GENERATION_NS), None, None),
             DurableFrontierObservation::GenerationUnresolved {
                 relayed_start: 9,
                 row_generation_ns: Some(GENERATION_NS),
                 live_generation_ns: None,
+                turn_start_offset: None,
             },
             "a row generation alone compares against nothing"
         );
         assert_eq!(
-            DurableFrontierObservation::observe(Some(9), None, None),
+            DurableFrontierObservation::observe(Some(9), None, None, None),
             DurableFrontierObservation::GenerationUnresolved {
                 relayed_start: 9,
                 row_generation_ns: None,
                 live_generation_ns: None,
+                turn_start_offset: None,
             },
             "neither witness is not an agreement either"
         );
         assert_eq!(
-            DurableFrontierObservation::observe(Some(9), Some(GENERATION_NS), Some(GENERATION_NS)),
+            DurableFrontierObservation::observe(
+                Some(9),
+                Some(GENERATION_NS),
+                Some(GENERATION_NS),
+                None
+            ),
             DurableFrontierObservation::RowPresent {
                 relayed_start: 9,
                 generation_ns: GENERATION_NS,
+                turn_start_offset: None,
             },
             "two witnesses agreeing is the only agreement"
         );
@@ -1180,12 +1255,14 @@ mod tests {
             DurableFrontierObservation::observe(
                 Some(9),
                 Some(GENERATION_NS),
-                Some(GENERATION_NS + 1)
+                Some(GENERATION_NS + 1),
+                None
             ),
             DurableFrontierObservation::GenerationMismatch {
                 relayed_start: 9,
                 row_generation_ns: GENERATION_NS,
                 live_generation_ns: GENERATION_NS + 1,
+                turn_start_offset: None,
             }
         );
     }
@@ -1242,6 +1319,7 @@ mod tests {
                     Some(4_096),
                     Some(GENERATION_NS),
                     Some(GENERATION_NS + 1),
+                    None,
                 ),
                 FrontierHypothesis::Indeterminate,
             ),
@@ -1251,17 +1329,17 @@ mod tests {
             // three uncompared shapes below used to be promoted to H2 anyway.
             (
                 CoordFrontierObservation::observe(Some(0)),
-                DurableFrontierObservation::observe(Some(4_096), Some(GENERATION_NS), None),
+                DurableFrontierObservation::observe(Some(4_096), Some(GENERATION_NS), None, None),
                 FrontierHypothesis::Indeterminate,
             ),
             (
                 CoordFrontierObservation::observe(Some(0)),
-                DurableFrontierObservation::observe(Some(4_096), None, Some(GENERATION_NS)),
+                DurableFrontierObservation::observe(Some(4_096), None, Some(GENERATION_NS), None),
                 FrontierHypothesis::Indeterminate,
             ),
             (
                 CoordFrontierObservation::observe(Some(0)),
-                DurableFrontierObservation::observe(Some(4_096), None, None),
+                DurableFrontierObservation::observe(Some(4_096), None, None, None),
                 FrontierHypothesis::Indeterminate,
             ),
         ];

@@ -21,9 +21,9 @@
 //! production line count may not grow — `giant_file_progress.py` fails the PR
 //! for a single added line, and that number is not the thing to raise either.
 
-pub(in crate::services::discord::tmux) struct WatcherResumeOutcome {
-    pub(in crate::services::discord::tmux) terminal_delivery_observed: bool,
-    pub(in crate::services::discord::tmux) last_relayed_offset: Option<u64>,
+pub(in crate::services::discord) struct WatcherResumeOutcome {
+    pub(in crate::services::discord) terminal_delivery_observed: bool,
+    pub(in crate::services::discord) last_relayed_offset: Option<u64>,
 }
 
 /// Resolve a queued resume point.
@@ -52,7 +52,7 @@ pub(in crate::services::discord::tmux) struct WatcherResumeOutcome {
 /// Nothing current is lost by declining: every watcher-observed death site ORs
 /// the LIVE `turn_delivered` in for itself, so a marker still set when the pane
 /// dies is still seen.
-pub(in crate::services::discord::tmux) fn watcher_resume_outcome(
+pub(in crate::services::discord) fn watcher_resume_outcome(
     terminal_delivery_observed: bool,
     bridge_delivered_turn: bool,
     requested_offset: u64,
