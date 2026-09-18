@@ -14,8 +14,15 @@ use super::{
 };
 use crate::services::provider::{CancelToken, ProviderKind};
 
-/// What the release site names when its call site carries no provider. A label
-/// for an UNMEASURED term, never a provider value — see #5996 below.
+/// What the release site RENDERS when its call site carries no provider.
+///
+/// This string is a display convenience and NOT the discriminator. No string
+/// can be one: `ProviderKind::Unsupported(String)::as_str` returns whatever
+/// provider name a config supplied, so an agent configured as `unidentified`
+/// renders exactly like the unmeasured case. The term a consumer must read is
+/// the separate `provider_measured` field, whose domain no provider name can
+/// reach. Naming an UNMEASURED term inside the MEASURED domain is the category
+/// error I20 forbids, and a label alone would have committed it.
 const UNIDENTIFIED_RELEASE_PROVIDER: &str = "unidentified";
 
 /// Drop the active-turn anchor, returning the token that turn owned. #5937 —
@@ -34,7 +41,15 @@ const UNIDENTIFIED_RELEASE_PROVIDER: &str = "unidentified";
 /// `ObligationExtinction::ReceiptCovered` has no producer — so until a term
 /// isolates the current turn the release stays unauthorized. `provider` is
 /// `None` at a call site carrying no `QueuePersistenceContext`; that absence is
-/// UNMEASURED and is named as such rather than defaulted to some provider.
+/// UNMEASURED and is carried out as the `provider_measured` term rather than
+/// defaulted to some provider.
+///
+/// What arrives is the CALL SITE's provider, never an attribution of the turn
+/// being retired. `HardStop` and `FinishCancelledTurn` pass
+/// `state.last_persistence`, which names whoever last sent a queue-persisting
+/// message — possibly an earlier turn. `Clear` and a force `PurgeQueue` name
+/// the caller doing the retiring. No lane may read either as "the provider
+/// whose turn this was".
 pub(super) fn release_active_turn_anchor(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
@@ -43,9 +58,15 @@ pub(super) fn release_active_turn_anchor(
     let removed_token = state.cancel_token.take();
     tracing::debug!(
         channel_id = channel_id.get(),
+        // The authoritative term. `provider` below can be forged by a config;
+        // this one cannot, so it is what a consumer reads.
+        provider_measured = provider.is_some(),
         provider = provider.map_or(UNIDENTIFIED_RELEASE_PROVIDER, ProviderKind::as_str),
         released_token = removed_token.is_some(),
-        "released the active-turn anchor without consulting progress evidence"
+        // Names the call, not an effect: the anchor fields are cleared whether
+        // or not a turn was live, so claiming a release happened would assert
+        // something this frame cannot know. `released_token` says what moved.
+        "active-turn anchor release ran without consulting progress evidence"
     );
     let held = state
         .turn_started_instant
@@ -136,6 +157,13 @@ mod lease_release_identity_tests {
     /// constant to `"claude"` left an interpolated assertion green.
     const UNMEASURED_FIELD: &str = "provider=\"unidentified\"";
 
+    /// The STRUCTURAL term. Unlike `UNMEASURED_FIELD` — which any config can
+    /// forge through `ProviderKind::Unsupported` — nothing in the provider
+    /// domain can reach this one, so it is what these tests treat as
+    /// authoritative for "was a provider measured at all".
+    const UNMEASURED_TERM: &str = "provider_measured=false";
+    const MEASURED_TERM: &str = "provider_measured=true";
+
     #[test]
     fn the_unmeasured_label_is_the_literal_these_tests_pin() {
         assert_eq!(
@@ -180,6 +208,10 @@ mod lease_release_identity_tests {
             logs.contains("provider=\"codex\""),
             "the release must name the provider its call site carried: {logs}"
         );
+        assert!(
+            logs.contains(MEASURED_TERM),
+            "a carried provider must read as measured: {logs}"
+        );
     }
 
     #[test]
@@ -202,6 +234,10 @@ mod lease_release_identity_tests {
         assert!(
             logs.contains(UNMEASURED_FIELD),
             "a call site with no persistence context carries no provider: {logs}"
+        );
+        assert!(
+            logs.contains(UNMEASURED_TERM),
+            "the unmeasured term must be carried structurally, not only rendered: {logs}"
         );
         assert!(
             !logs.contains("provider=\"claude\""),
@@ -241,6 +277,10 @@ mod lease_release_identity_tests {
             "the claim's context never reaches the release: {logs}"
         );
         assert!(
+            logs.contains(UNMEASURED_TERM),
+            "the unmeasured term must be carried structurally, not only rendered: {logs}"
+        );
+        assert!(
             !logs.contains("provider=\"codex\""),
             "the claim's provider must not be inferred at the release: {logs}"
         );
@@ -268,8 +308,63 @@ mod lease_release_identity_tests {
             "the second no-persistence call site carries no provider either: {logs}"
         );
         assert!(
+            logs.contains(UNMEASURED_TERM),
+            "the unmeasured term must be carried structurally, not only rendered: {logs}"
+        );
+        assert!(
             !logs.contains("provider=\"claude\""),
             "the missing provider must not be defaulted to one: {logs}"
+        );
+    }
+
+    /// #5996 — an adversarial review of this lane found that
+    /// `UNIDENTIFIED_RELEASE_PROVIDER` sits INSIDE the measured domain:
+    /// `ProviderKind::Unsupported(String)` is built from config and DB provider
+    /// strings, and `as_str` hands that string straight back. An agent
+    /// configured as `unidentified` therefore renders exactly like a call site
+    /// that carried nothing. This pins that the collision is real AND that the
+    /// structural term still separates the two, so no consumer has to decide a
+    /// retirement on a string a config can forge.
+    #[test]
+    fn a_provider_named_like_the_sentinel_stays_distinguishable_from_unmeasured() {
+        let forged = ProviderKind::Unsupported(UNIDENTIFIED_RELEASE_PROVIDER.to_string());
+        assert_eq!(
+            forged.as_str(),
+            UNIDENTIFIED_RELEASE_PROVIDER,
+            "this test proves nothing unless the rendering collision is real"
+        );
+
+        let channel_id = ChannelId::new(5_996_009);
+        let measured = captured_release_logs(async move {
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            assert!(
+                handle
+                    .try_start_turn(
+                        Arc::new(CancelToken::new()),
+                        UserId::new(5996),
+                        MessageId::new(9),
+                    )
+                    .await
+            );
+            let cleared = handle
+                .clear(QueuePersistenceContext::new(&forged, "l1-forged", None))
+                .await;
+            assert!(cleared.removed_token.is_some());
+        });
+
+        assert!(
+            measured.contains(UNMEASURED_FIELD),
+            "the rendered field is expected to collide; that is the defect: {measured}"
+        );
+        assert!(
+            measured.contains(MEASURED_TERM),
+            "a measured provider must say so structurally even when it renders \
+             like the sentinel: {measured}"
+        );
+        assert!(
+            !measured.contains(UNMEASURED_TERM),
+            "a carried provider must never read as unmeasured: {measured}"
         );
     }
 
@@ -311,6 +406,10 @@ mod lease_release_identity_tests {
             logs.contains("provider=\"gemini\""),
             "the Clear arm carries the provider its message named: {logs}"
         );
+        assert!(
+            logs.contains(MEASURED_TERM),
+            "a carried provider must read as measured: {logs}"
+        );
     }
 
     #[test]
@@ -344,6 +443,10 @@ mod lease_release_identity_tests {
         assert!(
             logs.contains("provider=\"qwen\""),
             "the force-purge arm carries the provider its message named: {logs}"
+        );
+        assert!(
+            logs.contains(MEASURED_TERM),
+            "a carried provider must read as measured: {logs}"
         );
     }
 
