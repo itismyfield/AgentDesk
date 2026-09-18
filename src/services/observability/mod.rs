@@ -111,6 +111,14 @@ pub(super) struct RelaySignal {
     pub(super) label: &'static str,
 }
 
+/// #5996 §I20 — the invariant key the stale-mailbox retirement decision emits.
+/// It lives beside the signal table rather than at the emit site because the two
+/// must be the SAME string: `relay_signal_alert` matches `status` exactly and has
+/// no wildcard, so a drifted key silences the alert instead of failing anything.
+/// Both sides read this symbol, which makes the match structural.
+pub(super) const LIVE_TURN_PROVEN_BY_PROGRESS_INVARIANT: &str =
+    "live_turn_proven_by_progress_not_presence";
+
 /// Canonical relay-loss signal table monitored by the #3561 operator alert
 /// job. Each entry maps 1:1 onto rows the emit path already persists to
 /// `observability_events` (see `emit::emit_relay_root_cause_counter` and
@@ -197,7 +205,7 @@ pub(super) const RELAY_SIGNAL_DEFINITIONS: &[RelaySignal] = &[
     RelaySignal {
         key: "retirement_without_progress_witness",
         event_type: "invariant_violation",
-        statuses: &["live_turn_proven_by_progress_not_presence"],
+        statuses: &[LIVE_TURN_PROVEN_BY_PROGRESS_INVARIANT],
         default_threshold: 1,
         label: "진행 증거 없는 은퇴 판정(메일박스 점유 유지)",
     },

@@ -445,8 +445,10 @@ mod tests {
             // this status, and `orphan_terminal_frame` writes the invariant one.
             "relay_terminal_authority_denied",
             "terminal_frame_has_a_delivery_owner_or_a_record",
-            // #5996: `stale_reclaim` writes this one.
-            "live_turn_proven_by_progress_not_presence",
+            // #5996: `stale_reclaim` writes this one, reading the SAME symbol
+            // the table does — so this assertion guards the row's presence, not
+            // a hand-copied string.
+            super::super::LIVE_TURN_PROVEN_BY_PROGRESS_INVARIANT,
         ] {
             assert!(
                 statuses.contains(&expected),

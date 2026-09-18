@@ -290,10 +290,10 @@ impl ReclaimableMailboxOwner {
 }
 
 /// #5996 — the invariant key `docs/relay-state-contract.md` §I20 assigns to this
-/// retirement decision. `RELAY_SIGNAL_DEFINITIONS` matches it as an
-/// `invariant_violation` `status`, so the string must stay identical in both.
-pub(super) const LIVE_TURN_PROVEN_BY_PROGRESS_INVARIANT: &str =
-    "live_turn_proven_by_progress_not_presence";
+/// retirement decision. Defined next to `RELAY_SIGNAL_DEFINITIONS`, which matches
+/// it as an `invariant_violation` `status`: one symbol read by both sides, so the
+/// emit path and the monitored status cannot drift into silence.
+pub(super) use crate::services::observability::LIVE_TURN_PROVEN_BY_PROGRESS_INVARIANT;
 
 /// #5996 / §I20 — the EMPIRICAL witness a reclaim reason actually read about
 /// THIS owner's own turn, or `None` when it read none.
@@ -468,8 +468,8 @@ pub(super) async fn release_reclaimable_stale_synthetic_mailbox_owner_if_current
     // #5996 / §I20: the retirement decision is TAKEN here, so grade it here.
     // The check runs AFTER the age gate on purpose — a violation then counts
     // only the reclaims that would otherwise have rested on the clock alone,
-    // which is what §I20 means by "an age fallback must be countable apart from
-    // a witness". Recording it on every young attempt would bury that count.
+    // which is §I20's requirement that an age fallback "must be countable apart
+    // from a witness". Recording it on every young attempt would bury that count.
     let witness = empirical_reclaim_witness(owner_kind, reason);
     crate::services::observability::record_invariant_check(
         witness.is_some(),
@@ -495,16 +495,18 @@ pub(super) async fn release_reclaimable_stale_synthetic_mailbox_owner_if_current
     );
     if witness.is_none() {
         // Retiring here would be the (b) loss §I20 forbids; the wedge this
-        // leaves is (a). Where the strand came from `claim_normal_episode`'s
-        // `clear_inflight` arm — its two earlier arms return `Err(())` without
-        // clearing, so reaching it is by construction a SAME-EPISODE miss —
-        // `do_finalize` recorded a `GuardedFinishResidue` and
+        // leaves is (a), and it is cleared — by two mechanisms, not one.
+        // Where `do_finalize` recorded a `GuardedFinishResidue`,
         // `reconcile_guarded_finish_residues` releases the anchor on the
-        // finalizer actor's 1s tick. That reaper is NOT universal: row deletes
-        // that never consult the mailbox (`inflight_heartbeat_sweeper`, the
-        // loader-side sweeps in `inflight/removal.rs`) strand the same shape
-        // with no residue to find. Refusing is still the graded answer, but do
-        // not read the reconciler as covering every strand.
+        // finalizer actor's 1s tick. Where no residue exists (row deletes that
+        // never consult the mailbox: `inflight_heartbeat_sweeper`, the
+        // loader-side sweeps in `inflight/removal.rs`), the watcher
+        // far-backstop still reaches it, because `claim_normal_episode`
+        // finishes from the OBSERVED mailbox snapshot rather than the row — so
+        // an absent row and a successor's row are equally no obstacle, one
+        // `WATCHER_REGISTER_BACKSTOP` (1800s) after a watcher-owned
+        // `register_start`. A turn with no such ledger entry is the residual
+        // open case (#6029).
         tracing::warn!(
             provider = %provider.as_str(),
             channel_id = channel_id.get(),

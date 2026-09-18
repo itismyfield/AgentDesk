@@ -962,6 +962,31 @@ mod tests {
             .await
         );
 
+        // #5996 M1 pin. The same owner, the same rowless state, the same absent
+        // witness as the call above — only the clock differs. The observation
+        // block sits AFTER the age gate, so this call is refused upstream of the
+        // grade and must contribute ZERO violations. Hoisting the block above
+        // the age gate makes this call emit one, and the count below goes to 2:
+        // that is the burial §I20 forbids when it requires an age fallback
+        // "must be countable apart from a witness". The placement is held by a
+        // number here, not by a comment at the call site.
+        assert!(
+            !release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+                &shared,
+                &provider,
+                refused_channel,
+                tmux,
+                stale_id,
+                Some(synthetic_owner()),
+                ActiveTurnKind::Background,
+                young_owner_started_at(),
+                stale_token.turn_nonce().map(str::to_owned),
+                next_id,
+            )
+            .await,
+            "a young owner is refused by the age gate, upstream of the witness grade"
+        );
+
         // `synthetic_state` builds a Claude row, so the witnessed arm reads
         // Claude; the rowless arm above keeps Codex. Distinct channels either
         // way, and the point is the reason, not the provider.
@@ -989,17 +1014,26 @@ mod tests {
         );
 
         let events = crate::services::observability::events::recent(200);
+        // Scope to the two channels THIS test drives. `recent` reads the
+        // process-global ring that sibling fixtures also write, so an unscoped
+        // count asserts over their output too: it dies for reasons that are not
+        // this test's, and a mutant it should survive kills it anyway.
         let violations: Vec<_> = events
             .iter()
             .filter(|event| event.event_type == "invariant_violation")
             .filter(|event| {
-                event.payload["invariant"] == "live_turn_proven_by_progress_not_presence"
+                event.payload["invariant"] == stale_reclaim::LIVE_TURN_PROVEN_BY_PROGRESS_INVARIANT
+            })
+            .filter(|event| {
+                event.channel_id == Some(refused_channel.get())
+                    || event.channel_id == Some(witnessed_channel.get())
             })
             .collect();
         assert_eq!(
             violations.len(),
             1,
-            "exactly the witnessless arm violates; present: {events:?}"
+            "exactly the aged witnessless call violates — the witnessed call has a \
+             readable witness and the young call never reaches the grade; present: {events:?}"
         );
         let violation = violations[0];
         assert_eq!(violation.channel_id, Some(refused_channel.get()));
