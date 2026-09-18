@@ -574,8 +574,10 @@ Numbered I17 for the same reason I16 is not I13: `docs/design/4987-relay-reachab
   operator-driven. THAT CLAUSE IS TRUE ONLY UNTIL #6004 LANDS — the redelivery consumer
   it adds is exactly the thing whose absence this sentence asserts, so #6004 updates it
   in the same PR. Verified at this commit: `relay_dead_letter` exposes `insert`,
-  `prune_expired`, `record_detached` and `record_detached_reporting`, and its only
-  non-test read of the table is `prune_expired`'s `DELETE`.
+  `prune_expired`, `record_detached` and `record_detached_reporting`; its only non-test
+  statements are an `INSERT` and a retention `DELETE`, and the table has no `SELECT`
+  outside `#[cfg(test)]` at all —
+  nothing reads a row back, which is what "no redelivery consumer" means here.
 - Violation surface: the record is fire-and-forget by construction
   (`relay_dead_letter::record_detached_reporting` never blocks the watcher loop),
   so the invariant is decided by the WRITE, not by the presence of a pool —
@@ -801,8 +803,10 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   whole capture offset. The tail then reads UNDRAINED and every gate below REFUSES: an (a)
   bias, not a (b) hazard. `frontier_provenance` already grades it, as a field on
   `SessionEnrichment` that reaches `/api/health/detail` through `MailboxHealthSnapshot`,
-  and its absence from `WatcherStateSnapshot` is deliberate — `health::mailbox` records
-  that an observation-only field "has no business within" the recovery decisions' reach.
+  and its absence from `WatcherStateSnapshot` follows from a deliberate placement, one
+  step removed: `health::mailbox` says an observation-only field "has no business within"
+  the reach of `RelayHealthSnapshot`, naming that struct and not this one — and since that
+  snapshot is the one nested here, the exclusion carries.
   Separating the UNATTRIBUTED zero needs `SessionEnrichment`,
   `pub(super)` to `discord::health`. Inside that module the vacuous arm is
   reconstructible, because `watcher_attached` IS `watcher_binding.is_some()` and the row's
@@ -855,8 +859,9 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   compose only in conjunction ("two blind witnesses do not compose into a proof")
   — `idle_tmux_repair_has_unrelayed_tail_answer` is blind under the same conditions,
   false for an absent path or a failed extract. The cost argument is written at
-  `recovery_known_ids::live_pending_dispatch_message_ids`: a false recover costs a
-  duplicate, a false suppression costs a message. A wrongly-preserved (a) wedge is
+  `recovery_known_ids::live_pending_dispatch_message_ids` — call it the COST ASYMMETRY: a
+  false recover costs a duplicate, a false suppression costs a message.
+  A wrongly-preserved (a) wedge is
   cleared by the next poll that measures; a wrongly-retired (b) turn is gone.
   `classify_reachability` takes the same rule from the other side — every fault arm
   that can preempt it runs before the timer, "a thing that went WRONG must not be
@@ -876,8 +881,11 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   #6012 IS that follow-up, and its reordering makes this bullet's ordering clause stale;
   #6012 updates this bullet in the same PR. Landing it does not by itself close the gap,
   and no lane may read it as doing so: coverage that is not ISOLATED TO THE CURRENT TURN
-  cannot decide this shape, because `obligations_framed > 0` beside `uncovered_ranges: 0`
-  is equally what a live turn that has framed nothing yet produces. Obligations accumulate
+  cannot decide this shape, because a reading that shows framed obligations while
+  reporting no uncovered range is the same reading a live turn produces when it has framed
+  nothing yet. (Deliberately prose, not symbols: the counters that would carry this are
+  #6012's to name, and pinning one here before it lands buys a coordinate that rots.)
+  Obligations accumulate
   across turns — `ObligationExtinction::ReceiptCovered` has no producer, so
   `live_obligations` returns the INCARNATION's set, and `LedgerIncarnation` is keyed by
   tmux session, generation, spawn nonce and transcript file id with no turn identifier in
@@ -987,9 +995,13 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   marker cannot suppress. What widens recovery is a different pair: the two deliberate
   divergences from the canonical `pending_dispatch_lease_is_orphaned` — the dropped
   `cancel_token.is_none()` conjunct, and reading a missing `since` as NOT live — both of
-  which push `live` false. The suppression is admissible only because it is BOUNDED, at
+  which push `live` false. Its AGE arm is admissible only because it is BOUNDED, at
   `PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER`'s 10 seconds, over the dequeue-to-claim
-  window the reservation marker exists to cover. Unbounded, or reproduced in a gate whose
+  window the reservation marker exists to cover. That bound is that arm's ALONE: the
+  witness arm is `Arc::strong_count` on the lease, carries no clock, and holds the
+  suppression open for as long as some caller still holds a handle — which needs no
+  bound, because it is a witness and not a clock.
+  Unbounded, or reproduced in a gate whose
   arms RETIRE state, the same disjunction is an I20 violation. L3 takes the COST ASYMMETRY
   and that bound from it, and the conjunction from the discriminator — never the
   disjunction itself, and never "witness OR age is safe because it widens recovery",
