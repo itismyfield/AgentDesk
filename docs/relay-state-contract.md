@@ -97,9 +97,12 @@ unsatisfied — and it is not a merge veto. A PR that lands a helper plus its un
 tests and leaves the consumer to a sibling PR is not in violation; it simply
 claims no edge, so no scaffolding exemption is needed or granted. What this
 section adds over "abstractions without production callers cannot close a DAG
-edge" above is not a new rule but an obligation: a specific judgment the
-reviewer RUNS, and a verdict they act on in the review rather than deferring to
-a follow-up issue.
+edge" above is the measurement that makes that standard judgeable, and the two
+do not have the same extension: read as "does a production caller exist", the
+#6004 test below is satisfied — it reaches `sweep_once_with`, which is
+production code — while the judgment rejects it. So what the reviewer owes is a
+specific judgment they RUN, and a verdict they act on in the review rather than
+deferring to a follow-up issue.
 
 **State the condition as a judgment you run, never as a shape you match.** A
 static form — "a test that calls the helper directly and only asserts is in
@@ -113,7 +116,9 @@ from the same reviewer, the same day.
 > it does not, the coverage is nominal.
 
 Running it takes a build. A reviewer who cannot build returns NO VERDICT on this
-gate and says so, rather than passing the claim by default. When running it:
+gate and says so, rather than passing the claim by default. NO VERDICT is not a
+pass: the edge stays open under completion gate 5 above until someone who can
+build runs the judgment and returns one. When running it:
 
 - **Warning count is not a substitute signal.** W2 below is why.
 - **Aim mutants at the wiring, not only at predicate bodies.** A mutation table
@@ -128,11 +133,10 @@ gate and says so, rather than passing the claim by default. When running it:
   Equality is not its mirror: precisely because a relink cannot land on the
   previous hash by chance, equality means no relink happened, so the run never
   built the mutant — treat that run as INVALID and rerun it, rather than as a
-  result to interpret. (An earlier draft closed
-  this bullet by declaring equality uninformative, which contradicted its own
-  opening clause and let two readers take opposite instructions from one bullet
-  — the exact failure this section exists to prevent, reproduced inside the
-  procedure meant to prevent it.)
+  result to interpret. (An earlier draft closed this bullet by declaring
+  equality uninformative, which contradicted its own opening clause and let two
+  readers take opposite instructions from one bullet — the ambiguity this
+  procedure is written to prevent, reproduced inside the procedure itself.)
 
 **Evidence — PR #6004, 2026-09-18.** With all seven tests in the module running,
 PostgreSQL included, three wiring mutants survived:
@@ -143,9 +147,10 @@ PostgreSQL included, three wiring mutants survived:
 | W2 | `return false` from the spawn function before it spawns, so the sweep never starts | 7 passed | 189, unchanged from baseline |
 | W3 | remove both witnesses from the production sink | 7 passed | 190 (+1) |
 
-W2 is the entire reason this gate exists: every symbol stayed referenced, so the
-warning count did not move by one. No warning-based gate can catch that **in
-principle**; a person has to run the judgment.
+W2 is why this gate is a human judgment and not a warning-count check: every
+symbol stayed referenced, so the warning count did not move by one. No
+warning-based gate can catch that **in principle**; a person has to run the
+judgment.
 
 Why all seven still passed: that test injects a `CapturingSink` in place of the
 production sink and drives `sweep_once_with` directly, so the production sink's
@@ -161,8 +166,12 @@ Repair, in priority order:
 2. **Otherwise add a lexical wiring assertion to an existing test**, rather than
    adding a test id — new ids pull in the inventory manifest and consume the
    cap. `intake_delivery_sweep::tests` has the pattern to copy in
-   `spawn_wiring_claims_process_latch_before_observed_task`, which pins its own
-   spawn call site with `include_str!`.
+   `spawn_wiring_claims_process_latch_before_observed_task`. Copy the half that
+   bears the load: it reads the PARENT module's source through
+   `include_str!("../framework_setup.rs")` and asserts that the production call
+   site appears exactly once. Its other half is an ordering guard over its own
+   module's source; that half pins no production entrypoint, and a guard copied
+   from it alone leaves exactly the nominal coverage this gate rejects.
 
 A lexical guard is the fallback, not the goal: it pins that the call site
 *exists*, not that the call is *meaningfully wired*. The exemplar says so in its
