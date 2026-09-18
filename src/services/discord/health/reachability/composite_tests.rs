@@ -428,7 +428,7 @@ fn in_band_ladder() -> Vec<ReachabilityVerdict> {
         ),
         ReachabilityVerdict::unknown(
             ReachabilityUnknownReason::RowlessActiveTurn {
-                obligations_framed: 2,
+                incarnation_live_obligations: 2,
                 uncovered_ranges: 1,
                 unproven_ranges: 0,
             },
@@ -508,7 +508,7 @@ fn unknown_never_composes_to_a_health_permitting_verdict() {
         // Carrying coverage must not make this one composable to GREEN: the
         // whole point of #5946 O1 is that an observation is not an authority.
         ReachabilityUnknownReason::RowlessActiveTurn {
-            obligations_framed: 2,
+            incarnation_live_obligations: 2,
             uncovered_ranges: 0,
             unproven_ranges: 0,
         },
@@ -1765,7 +1765,7 @@ fn a_rowless_active_turn_publishes_the_coverage_the_sweep_computed() {
     assert_eq!(
         verdict.in_band().unknown_reason(),
         Some(ReachabilityUnknownReason::RowlessActiveTurn {
-            obligations_framed: 2,
+            incarnation_live_obligations: 2,
             uncovered_ranges: 1,
             unproven_ranges: 0,
         }),
@@ -1780,7 +1780,7 @@ fn a_rowless_active_turn_publishes_the_coverage_the_sweep_computed() {
     assert_eq!(
         (
             report.uncovered_ranges,
-            report.obligations_framed,
+            report.incarnation_live_obligations,
             report.unproven_ranges
         ),
         (Some(1), Some(2), Some(0)),
@@ -1812,25 +1812,26 @@ fn a_rowless_active_turn_publishes_the_coverage_the_sweep_computed() {
     );
 }
 
-/// #5946 O1's required mitigation: `uncovered_ranges == 0` has two meanings and
-/// publishing it alone conflates them.
+/// The limit this payload does NOT overcome, pinned so nobody builds a repair
+/// gate on top of it (#5946 r2 P0).
 ///
-/// `sweep_coverage` skips every covered-and-proven obligation, so "N were framed
-/// and all N are covered" and "none was ever framed" both reduce to zero. Only
-/// the second is a live turn whose prose has not been written yet, and a repair
-/// gate that read zero as permission to retire would kill it. `obligations_framed`
-/// is what separates them, so the two shapes must not publish the same object.
+/// `ObligationExtinction::ReceiptCovered` has no producer, so a covered
+/// obligation is never subtracted from `live_obligations()`. From the second
+/// turn of an incarnation onward, a rowless turn that has framed nothing yet
+/// therefore publishes exactly what a turn whose obligations are all covered
+/// publishes: `uncovered_ranges: 0`, `unproven_ranges: 0`, a non-zero live
+/// count, and no age. The two are the SAME ledger, so no operand reachable from
+/// here tells them apart — `LedgerObligation` carries no turn identifier and the
+/// receipt projection key deliberately omits `turn_nonce`.
+///
+/// Reading `uncovered_ranges == 0` as "this turn's answer landed" would retire
+/// a turn that has not answered — the (b) failure this signal exists to expose.
+/// When a turn-scoped discriminator lands, this test should fail and be
+/// rewritten; that is the intent.
 #[test]
-fn a_rowless_turn_with_nothing_framed_is_distinguishable_from_one_fully_covered() {
-    let nothing_framed = observe_rowless_channel(
+fn a_carried_over_incarnation_publishes_what_a_fully_covered_turn_publishes() {
+    let carried_over = observe_rowless_channel(
         5_946_000_000_000_000_003,
-        Vec::new(),
-        proven_incarnation(),
-        Vec::new(),
-        true,
-    );
-    let fully_covered = observe_rowless_channel(
-        5_946_000_000_000_000_004,
         one_covered_one_uncovered(),
         proven_incarnation(),
         vec![
@@ -1839,70 +1840,101 @@ fn a_rowless_turn_with_nothing_framed_is_distinguishable_from_one_fully_covered(
         ],
         true,
     );
-
-    let framed = |verdict: &RelayVerdict| {
-        let report = RelayVerdictReport::of(verdict, true);
-        assert_eq!(
-            report.uncovered_ranges,
-            Some(0),
-            "both shapes must genuinely sweep to zero uncovered, or this test proves nothing"
-        );
-        report.obligations_framed
-    };
-
-    assert_eq!(framed(&nothing_framed), Some(0));
-    assert_eq!(framed(&fully_covered), Some(2));
-    assert_ne!(
-        framed(&nothing_framed),
-        framed(&fully_covered),
-        "zero uncovered ranges must not read the same for a turn that owes nothing yet and one \
-         whose every obligation is already covered"
-    );
+    let report = RelayVerdictReport::of(&carried_over, true);
 
     assert_eq!(
-        RelayVerdictReport::of(&nothing_framed, true).oldest_unsatisfied_age_secs,
-        None,
-        "with nothing held there is no oldest unsatisfied obligation; publishing 0 would read as \
-         one a second old"
+        (report.uncovered_ranges, report.unproven_ranges),
+        (Some(0), Some(0)),
+        "two obligations already covered sweep to nothing held, whether or not the CURRENT turn \
+         has framed anything"
     );
-}
+    assert_eq!(
+        report.incarnation_live_obligations,
+        Some(2),
+        "covered obligations stay in the live set, so the count is the incarnation's, not the \
+         turn's"
+    );
+    assert_eq!(
+        report.oldest_unsatisfied_age_secs, None,
+        "nothing is held, so there is no oldest unsatisfied obligation to publish"
+    );
 
-/// #5946 O1: three coverage states, never folded into two.
-///
-/// `sweep_coverage` splits covered obligations by whether the incarnation
-/// carries a spawn nonce, and caps what a covered-but-unproven one may produce.
-/// Collapsing `unproven` into either neighbour would either hide a real gap or
-/// invent one, so the published object keeps them apart — covered-and-proven is
-/// recoverable as `obligations_framed` minus the other two.
-#[test]
-fn a_rowless_turn_keeps_covered_unproven_distinct_from_uncovered() {
-    let verdict = observe_rowless_channel(
-        5_946_000_000_000_000_005,
-        one_covered_one_uncovered(),
-        unproven_incarnation(),
-        vec![receipt((4_000, 4_400), GENERATION)],
+    // A first turn that has framed nothing differs only in the live count, and
+    // that difference says "earlier turns existed" — never "this turn answered".
+    let first_turn = observe_rowless_channel(
+        5_946_000_000_000_000_004,
+        Vec::new(),
+        proven_incarnation(),
+        Vec::new(),
         true,
     );
-
+    let first_report = RelayVerdictReport::of(&first_turn, true);
     assert_eq!(
-        verdict.in_band().unknown_reason(),
+        (
+            first_report.uncovered_ranges,
+            first_report.unproven_ranges,
+            first_report.oldest_unsatisfied_age_secs
+        ),
+        (Some(0), Some(0), None),
+        "an empty ledger sweeps to the same zeros; only the live count moves"
+    );
+    assert_eq!(first_report.incarnation_live_obligations, Some(0));
+}
+
+/// `unproven_ranges` is an incarnation-wide switch, not a per-range property
+/// (#5946 r2 P2-1).
+///
+/// `sweep_coverage` is handed `ledger.incarnation.spawn_nonce.is_some()`, so the
+/// SAME receipts land in `unproven` or in covered-and-proven depending only on
+/// whether the incarnation carries a nonce. A nonce-less incarnation is reachable
+/// in production, and there every covered obligation is unproven — which makes
+/// `live - uncovered - unproven == 0` hold identically, so asserting that alone
+/// proves nothing. The contrast below is what carries the claim.
+#[test]
+fn the_unproven_count_is_an_incarnation_switch_not_a_per_range_property() {
+    let covered = || vec![receipt((4_000, 4_400), GENERATION)];
+
+    let proven = observe_rowless_channel(
+        5_946_000_000_000_000_005,
+        one_covered_one_uncovered(),
+        proven_incarnation(),
+        covered(),
+        true,
+    );
+    assert_eq!(
+        proven.in_band().unknown_reason(),
         Some(ReachabilityUnknownReason::RowlessActiveTurn {
-            obligations_framed: 2,
+            incarnation_live_obligations: 2,
+            uncovered_ranges: 1,
+            unproven_ranges: 0,
+        }),
+        "with a spawn nonce the covered obligation is proven and retirable; got {:?}",
+        proven.in_band()
+    );
+
+    let unproven = observe_rowless_channel(
+        5_946_000_000_000_000_006,
+        one_covered_one_uncovered(),
+        unproven_incarnation(),
+        covered(),
+        true,
+    );
+    assert_eq!(
+        unproven.in_band().unknown_reason(),
+        Some(ReachabilityUnknownReason::RowlessActiveTurn {
+            incarnation_live_obligations: 2,
             uncovered_ranges: 1,
             unproven_ranges: 1,
         }),
-        "a receipt under an unproven generation is neither retirable nor a gap; got {:?}",
-        verdict.in_band()
+        "the same receipt under a nonce-less incarnation is neither retirable nor a gap; got {:?}",
+        unproven.in_band()
     );
 
-    let report = RelayVerdictReport::of(&verdict, true);
-    let framed = report.obligations_framed.expect("framed count");
-    let uncovered = report.uncovered_ranges.expect("uncovered count");
-    let unproven = report.unproven_ranges.expect("unproven count");
-    assert_eq!(
-        framed - uncovered - unproven,
-        0,
-        "covered-and-proven must be recoverable from the published triple"
+    let proven_report = RelayVerdictReport::of(&proven, true);
+    let unproven_report = RelayVerdictReport::of(&unproven, true);
+    assert_ne!(
+        proven_report.unproven_ranges, unproven_report.unproven_ranges,
+        "identical receipts must publish different unproven counts, or the switch is not wired"
     );
 }
 
@@ -1927,7 +1959,7 @@ fn a_rowless_turn_carrying_coverage_still_grants_no_authority() {
         ),
     ] {
         let verdict = observe_rowless_channel(
-            5_946_000_000_000_000_006,
+            5_946_000_000_000_000_007,
             obligations,
             proven_incarnation(),
             confirmed,

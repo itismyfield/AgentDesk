@@ -192,10 +192,9 @@ impl RelayVerdict {
 }
 
 /// The 4987 §4.4 `reachability { verdict, oldest_unsatisfied_age_secs,
-/// uncovered_ranges, reason }` object, published in BOTH switch modes.
-/// #5946 O1 adds `obligations_framed` and `unproven_ranges`, which a rowless
-/// active turn now carries; this publishes an observation and authorizes
-/// nothing — retirement stays with #5996's repair gate.
+/// uncovered_ranges, reason }` object, published in BOTH switch modes —
+/// and, through `MailboxHealthSnapshot`, on `GET /api/health/detail`. Every
+/// field here is an external wire surface whatever its Rust visibility says.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(in crate::services::discord) struct RelayVerdictReport {
     pub verdict: &'static str,
@@ -204,15 +203,17 @@ pub(in crate::services::discord) struct RelayVerdictReport {
     pub oldest_unsatisfied_age_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uncovered_ranges: Option<u32>,
-    /// #5946 O1: how many live obligations the sweep looked at. Published with
-    /// `uncovered_ranges`, never without it — alone, `uncovered_ranges: 0`
-    /// cannot tell "all covered" from "none framed yet", and only the second
-    /// belongs to a turn whose prose is still coming.
+    /// #5946 O1: obligations the ledger holds for the INCARNATION, not for the
+    /// current turn — covered ones are never subtracted, so this only falls
+    /// when the incarnation is replaced. It does NOT separate "this turn's
+    /// obligations are all covered" from "this turn has framed nothing yet";
+    /// see [`ReachabilityUnknownReason::RowlessActiveTurn`] for why no operand
+    /// available here can, and read this as telemetry.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub obligations_framed: Option<u32>,
-    /// #5946 O1: covered, but under a generation key with no additional
-    /// witness. Kept separate so the three coverage states never collapse to
-    /// two.
+    pub incarnation_live_obligations: Option<u32>,
+    /// #5946 O1: covered under a generation key with no additional witness.
+    /// Incarnation-wide, not per-range: a nonce-less incarnation reports every
+    /// covered obligation here and none as covered-and-proven.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unproven_ranges: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -239,7 +240,7 @@ impl RelayVerdictReport {
         governs_health_polarity: bool,
     ) -> Self {
         let mut unobserved_for_secs = None;
-        let mut obligations_framed = None;
+        let mut incarnation_live_obligations = None;
         let mut unproven_ranges = None;
         let (oldest_unsatisfied_age_secs, uncovered_ranges, reason) = match verdict.in_band() {
             ReachabilityVerdict::Reachable => (None, None, None),
@@ -272,13 +273,13 @@ impl RelayVerdictReport {
             ReachabilityVerdict::Unknown {
                 reason:
                     reason @ ReachabilityUnknownReason::RowlessActiveTurn {
-                        obligations_framed: framed,
+                        incarnation_live_obligations: live,
                         uncovered_ranges: uncovered,
                         unproven_ranges: unproven,
                     },
                 since_secs,
             } => {
-                obligations_framed = Some(*framed);
+                incarnation_live_obligations = Some(*live);
                 unproven_ranges = Some(*unproven);
                 // An age only exists when something is actually held. With
                 // nothing held there is no oldest unsatisfied obligation, and
@@ -305,7 +306,7 @@ impl RelayVerdictReport {
             decided_by: verdict.decided_by(),
             oldest_unsatisfied_age_secs,
             uncovered_ranges,
-            obligations_framed,
+            incarnation_live_obligations,
             unproven_ranges,
             reason,
             external_lost_blocks,
@@ -461,11 +462,12 @@ fn sweep_coverage(
 
 /// Produce the Tier A verdict — 4987 §4.1 / §-1.3b / §-1.4. The `Unknown` arms
 /// run before the obligation ladder, since grading an incomplete obligation
-/// set answers nothing. Order: coordinate divergence, store readability,
-/// transcript resolution, read truncation — only divergence-first is load
-/// bearing (it makes every later operand ambiguous). Rowless-active-turn is
-/// the exception and runs AFTER the sweep (#5946 O1): its operands are
-/// computable, so it reports them instead of discarding them.
+/// set answers nothing. Actual order: coordinate divergence, store
+/// readability, never-observed, read truncation, ledger expiry, transcript
+/// resolution — only divergence-first is load bearing (it makes every later
+/// operand ambiguous). Rowless-active-turn is the exception and runs AFTER the
+/// sweep (#5946 O1): its operands are computable, so it reports them instead
+/// of discarding them.
 /// #5071 relay-tail S1 (I-5): the `Unknown` arms name what they observed;
 /// `Unknown` permits no health regardless.
 pub(in crate::services::discord) fn classify_reachability(
@@ -538,10 +540,14 @@ pub(in crate::services::discord) fn classify_reachability(
     // delivered — the verdict was not wrong, its operands were never computed.
     // The ladder above is untouched: every arm that outranks this one still
     // answers first, and the arms below still see the same `oldest_held`.
+    //
+    // What this still cannot do: `live_obligations()` is the INCARNATION's set
+    // (covered obligations are never subtracted), so these counts do not
+    // isolate the current turn. See `ReachabilityUnknownReason::RowlessActiveTurn`.
     if inputs.rowless_active_turn {
         return ReachabilityVerdict::unknown(
             ReachabilityUnknownReason::RowlessActiveTurn {
-                obligations_framed: ledger.live_obligations().len() as u32,
+                incarnation_live_obligations: ledger.live_obligations().len() as u32,
                 uncovered_ranges: sweep.uncovered_ages_secs.len() as u32,
                 unproven_ranges: sweep.unproven_ages_secs.len() as u32,
             },
