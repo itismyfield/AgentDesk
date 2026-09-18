@@ -977,7 +977,17 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   `recovery_known_ids::live_pending_dispatch_message_ids` — call it the COST ASYMMETRY: a
   false recover costs a duplicate, a false suppression costs a message.
   A wrongly-preserved (a) wedge is
-  cleared by the next poll that measures; a wrongly-retired (b) turn is gone.
+  recoverable and a wrongly-retired (b) turn is gone — but do not read the first
+  half as "the next poll clears it". WHO CLEARS AN (a) WEDGE IS SHAPE-SPECIFIC and
+  must be checked per shape, never assumed. For the rowless synthetic shape no
+  measuring poll clears it at all: the bullet below records that the discriminator
+  does not resolve for that shape. What clears it there is
+  `turn_finalizer::reconcile::reconcile_guarded_finish_residues`, which decides on
+  EPISODE IDENTITY rather than on a measurement, and which visits only a channel
+  that recorded a residue — so a producer that leaves this shape without recording
+  one has no cleaner, and the wedge persists indefinitely (#6029). The asymmetry
+  holds, because a persisting wedge still costs less than a lost message, but (a)'s
+  cost is larger than "cleared by the next poll" implies.
   `classify_reachability` takes the same rule from the other side — every fault arm
   that can preempt it runs before the timer, "a thing that went WRONG must not be
   retired by a clock".
