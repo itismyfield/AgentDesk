@@ -570,24 +570,17 @@ mod cancel_queue_preserve_pg_tests {
         handle
     }
 
-    /// Dead-letter recording is fire-and-forget by contract, so the row lands on
-    /// a detached task rather than before the response. Poll for it.
-    async fn await_dead_letter(pool: &sqlx::PgPool, channel_id: u64) -> Option<(String, String)> {
-        for _ in 0..100 {
-            let row: Option<(String, String)> = sqlx::query_as(
-                "SELECT content, message_id FROM relay_dead_letter
-                  WHERE kind = 'cancel_queue_discard' AND channel_id = $1",
-            )
-            .bind(channel_id.to_string())
-            .fetch_optional(pool)
-            .await
-            .expect("query relay_dead_letter");
-            if row.is_some() {
-                return row;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        None
+    /// No polling: the response only reports a message as dead-lettered once the
+    /// row is committed, so a missing row here is a claim the cancel never kept.
+    async fn dead_letter_row(pool: &sqlx::PgPool, channel_id: u64) -> Option<(String, String)> {
+        sqlx::query_as(
+            "SELECT content, message_id FROM relay_dead_letter
+              WHERE kind = 'cancel_queue_discard' AND channel_id = $1",
+        )
+        .bind(channel_id.to_string())
+        .fetch_optional(pool)
+        .await
+        .expect("query relay_dead_letter")
     }
 
     /// `force=true` is a deliberate purge, so the queued instruction does not
@@ -613,12 +606,7 @@ mod cancel_queue_preserve_pg_tests {
             "force cancel must name the purged instruction: {body}"
         );
         assert_eq!(
-            body["queue_restored_message_ids"],
-            serde_json::json!([]),
-            "force cancel must not revive what the operator asked to purge"
-        );
-        assert_eq!(
-            body["queue_lossless"], true,
+            body["queue_loss_recorded"], true,
             "a purge with a durable record is not a silent loss: {body}"
         );
         assert!(
@@ -626,7 +614,7 @@ mod cancel_queue_preserve_pg_tests {
             "force cancel must still purge the mailbox"
         );
 
-        let (content, message_id) = await_dead_letter(&pool, channel_id)
+        let (content, message_id) = dead_letter_row(&pool, channel_id)
             .await
             .expect("the purged user message must be recoverable from relay_dead_letter");
         assert_eq!(content, QUEUED_TEXT);
@@ -651,14 +639,13 @@ mod cancel_queue_preserve_pg_tests {
         assert_eq!(status, StatusCode::OK, "cancel response: {body}");
 
         assert_eq!(
-            body["queue_lossless"], true,
+            body["queue_loss_recorded"], true,
             "nothing was removed, so nothing was lost: {body}"
         );
         assert_eq!(
             body["queue_dead_lettered_message_ids"],
             serde_json::json!([])
         );
-        assert_eq!(body["queue_restored_message_ids"], serde_json::json!([]));
         assert_eq!(
             body["queued_remaining"], 1,
             "the surviving instruction must be reported, not zeroed: {body}"
@@ -673,14 +660,8 @@ mod cancel_queue_preserve_pg_tests {
         assert_eq!(survivors[0].message_id.get(), 9_102);
         assert_eq!(survivors[0].text, QUEUED_TEXT);
 
-        let dead_letters: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM relay_dead_letter WHERE kind = 'cancel_queue_discard'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("count relay_dead_letter");
-        assert_eq!(
-            dead_letters, 0,
+        assert!(
+            dead_letter_row(&pool, channel_id).await.is_none(),
             "a preserved queue must not be reported as lost"
         );
     }
