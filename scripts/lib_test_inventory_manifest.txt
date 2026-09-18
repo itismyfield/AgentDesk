@@ -2892,6 +2892,7 @@ services::discord::health::relay_auto_heal::tests::frontier_reset_rearms_capped_
 services::discord::health::relay_auto_heal::tests::redrive_actions_and_cap_alarm_continue_while_producer_is_vouched_4615
 services::discord::health::relay_auto_heal::tests::redrive_cap_resets_only_for_progress_identity_or_watcher_4299
 services::discord::health::relay_auto_heal::tests::redrive_does_not_clear_the_bridge_delivery_marker_5943
+services::discord::health::relay_auto_heal::tests::redrive_entrypoint_resumes_a_freshly_born_turn_at_its_birth_offset_5943
 services::discord::health::relay_auto_heal::tests::redrive_frozen_backlog_backs_off_and_caps_once_4299
 services::discord::health::relay_auto_heal::tests::redrive_nudge_requires_matching_output_path
 services::discord::health::relay_auto_heal::tests::redrive_nudge_skips_healthy_advancing_backlog
@@ -2924,6 +2925,7 @@ services::discord::health::session_enrichment::tests::a_probe_fault_withholds_th
 services::discord::health::session_enrichment::tests::a_registry_with_no_session_is_absent_even_on_an_exhausted_budget
 services::discord::health::session_enrichment::tests::an_exhausted_tmux_budget_withholds_a_live_session
 services::discord::health::session_enrichment::tests::health_load_carries_the_live_watcher_transcript_into_the_enrichment
+services::discord::health::session_enrichment::tests::health_load_carries_the_row_birth_offset_into_the_durable_observation_5943
 services::discord::health::session_enrichment::tests::health_load_records_transcript_source_divergence_only_when_the_paths_split
 services::discord::health::session_enrichment::tests::health_reads_the_live_watcher_transcript_off_the_channel_binding
 services::discord::health::session_enrichment::tests::health_reports_no_watcher_transcript_for_a_channel_without_a_binding

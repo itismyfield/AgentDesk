@@ -2324,6 +2324,128 @@ mod tests {
             .status();
     }
 
+    /// #5943 lens A P2-3 / lens B M5a: the production arm end to end. The floor
+    /// tests above hand-build `DurableFrontierObservation`, so none of them
+    /// crosses `SessionEnrichment::load`, the one place the row's birth offset
+    /// is fed to `observe`. This persists a real born row (`turn_start_offset`
+    /// set, nothing relayed) and drives `redrive_undelivered_backlog_at`: the
+    /// live watcher must be nudged — not refused as unrestored — and resumed at
+    /// the birth offset, not at zero.
+    #[tokio::test(flavor = "current_thread")]
+    async fn redrive_entrypoint_resumes_a_freshly_born_turn_at_its_birth_offset_5943() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tmp.path(),
+        );
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(5_943_030);
+        let tmux_session = "AgentDesk-codex-5943-born-floor";
+        let output_path = tmp.path().join("agentdesk-5943-born-floor.jsonl");
+        std::fs::File::create(&output_path)
+            .expect("create capture fixture")
+            .set_len(24_553_403)
+            .expect("size capture fixture");
+        let output_path = output_path.to_string_lossy().into_owned();
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", tmux_session])
+            .status();
+        assert!(
+            std::process::Command::new("tmux")
+                .args(["new-session", "-d", "-s", tmux_session])
+                .status()
+                .expect("start tmux fixture")
+                .success(),
+            "production snapshot must observe a live producer tmux session"
+        );
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let resume_offset = Arc::new(Mutex::new(None));
+        let turn_delivered = Arc::new(AtomicBool::new(true));
+        shared.tmux_watchers.insert(
+            channel_id,
+            watcher_handle(
+                tmux_session,
+                &output_path,
+                resume_offset.clone(),
+                turn_delivered,
+            ),
+        );
+        // Nothing relayed yet: the live coordinate keeps its never-advanced
+        // zero and the row's relayed offset stays `None` — the r3 P0 shape.
+        let started_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let mut inflight = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            None,
+            0,
+            5_943_031,
+            0,
+            "test".to_string(),
+            None,
+            Some(tmux_session.to_string()),
+            Some(output_path.clone()),
+            None,
+            22_299_791,
+        );
+        inflight.started_at = started_at.clone();
+        inflight.updated_at = started_at;
+        assert_eq!(inflight.turn_start_offset, Some(22_299_791));
+        assert_eq!(inflight.last_watcher_relayed_offset, None);
+        crate::services::discord::inflight::save_inflight_state(&inflight)
+            .expect("seed authoritative inflight");
+        clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
+
+        let registry = HealthRegistry::new();
+        let snapshot = registry
+            .snapshot_watcher_state_for_shared(&provider, shared.clone(), channel_id.get())
+            .await
+            .expect("production snapshot");
+        assert_eq!(snapshot.last_relay_offset, 0);
+        assert_eq!(
+            snapshot.durable_frontier,
+            DurableFrontierObservation::RowUnrelayed {
+                turn_start_offset: 22_299_791
+            },
+            "the production snapshot must carry the row's birth offset"
+        );
+
+        let base = chrono::Utc::now().timestamp();
+        assert!(
+            !registry
+                .redrive_undelivered_backlog_at(
+                    &provider,
+                    shared.clone(),
+                    channel_id,
+                    base - GRACE_SECS
+                )
+                .await
+                .expect("seed redrive grace"),
+            "the initial observation seeds the no-progress grace"
+        );
+        assert!(
+            registry
+                .redrive_undelivered_backlog_at(&provider, shared.clone(), channel_id, base)
+                .await
+                .expect("production redrive entrypoint"),
+            "an unwitnessed born turn must be nudged, not refused as unrestored"
+        );
+        assert_eq!(
+            *resume_offset.lock().unwrap(),
+            Some(22_299_791),
+            "the production arm resumes at the turn's birth offset, not at zero"
+        );
+
+        crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
+        clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", tmux_session])
+            .status();
+    }
+
     #[test]
     fn redrive_frozen_backlog_backs_off_and_caps_once_4299() {
         let _env_lock = crate::config::shared_test_env_lock()
