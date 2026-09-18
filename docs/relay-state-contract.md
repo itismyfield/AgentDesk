@@ -241,7 +241,7 @@ compiler-checked reference together.
 
 **How the two halves stay on together in CI.** The set-comparison half is an
 explicit `ci-pr.yml` step. The compile-existence half is the required
-`check_fast` job; a `relay_contract` path filter (the four anchor files, this
+`check_fast` job; a `relay_contract` path filter (the anchor files it lists, this
 doc, and the gate script) force-runs it for doc-only binding changes as well as
 Rust changes. No branch-name escape hatch may skip either half.
 
@@ -994,6 +994,23 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   `classify_reachability` takes the same rule from the other side — every fault arm
   that can preempt it runs before the timer, "a thing that went WRONG must not be
   retired by a clock".
+  The trade in the other direction is not free either. Removing a MEASURED (b) by
+  refusing to advance past it converts a loss into undone work: in `catch_up`, deferring
+  rather than skipping routes the sweep through `CatchUpRetryState::after_deferred_rearm`,
+  which admits re-arms only up to `CATCH_UP_RETRY_DEFERRED_REARM_LIMIT` — a budget the
+  retry state carries across fetch failures rather than resetting — and gives up with a
+  warning on the deferred scan past it. That residue is an (a), and a bounded one — the
+  code's own note is that the backlog then ages out or a fresh trigger restarts the
+  cycle. Read "ages out" as what it is: the age ceiling routes those messages to the
+  TooOld disposition, where an actionable human drop reaches the user through one
+  aggregated resend notice and a bot row stays internal dead-letter evidence — so they
+  are DROPPED WITH ATTRIBUTION, not
+  completed. The asymmetry still points the same way, since an attributed drop beats a
+  silent loss, but no lane may read "bounded" as "the work eventually finishes". What
+  does NOT follow is that every (b)
+  repair is free. I20 routes the UNMEASURED case to (b)-safe; it says nothing about
+  trading a measured (b) for an (a), and a lane proposing that trade owns showing it
+  pays.
 - Honest gap; L1 must not paper over it. For the EXACT #5996 shape the
   discriminator does not resolve today. `classify_reachability` no longer
   short-circuits ahead of the evidence: the `Unknown(RowlessActiveTurn)` arm now runs
@@ -1055,9 +1072,26 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   the coordinate under "What I20 does NOT give you", L2's first task — not this
   contract's, and not a sentence to soften when a lane finds it inconvenient.
 - Relation to I19 and I17. I19 is witness-vs-value on one field, a zero resume offset a
-  restart can fabricate; I20 is witness-vs-existence-and-age across four retirement
-  decisions. I19 admits a floor value when unwitnessed; I20 no fallback for the age term
-  except an unreadable witness. I17 makes a loss ATTRIBUTABLE; I20 a retirement EARNED.
+  restart can fabricate; I20 is witness-vs-existence-and-age across the retirement
+  decisions enumerated below. I19 admits a floor value when unwitnessed; I20 no fallback
+  for the age term except an unreadable witness. I17 makes a loss ATTRIBUTABLE; I20 a
+  retirement EARNED.
+- The consumer list below is an ENUMERATION, not a survey. It names the sites that were
+  examined. It does not certify that no other site decides a retirement this way, and
+  nothing in this document can make it certify that. Reading the list as a survey is the
+  same move this invariant forbids of its consumers — taking the existence of a record as
+  evidence of the thing the record is supposed to stand for. The list has already been
+  found short, and not at the margin: a fifth site sits inside
+  `catch_up::run_catch_up_sweep`, the very function the phase-2 consumer bullet's test
+  lives in. Its membership test resolves through
+  `catch_up::classification::classify_catch_up_message` to `Duplicate`, and a `Duplicate`
+  there raises the settled frontier through `advance_catch_up_settled_frontier`, which
+  `advance_last_message_checkpoint` then persists via `runtime_store::save_last_message_id`
+  — a DURABLE skip, where the phase-2 hit that
+  bullet describes moves only a loop-local checkpoint. Reviewing by file would not have
+  caught it, and neither would trusting this list. Look for the SHAPE — a
+  retirement decided on existence or age — and treat an entry here as a worked example of
+  it, never as the boundary of where it occurs.
 - Consumer — `turn_orchestrator::release_active_turn_anchor`. Its three callers —
   `finalize_turn_state`, the `ChannelMailboxMsg::Clear` arm, and the force-`PurgeQueue`
   arm's `clear_cancelled_active_anchor` — do not re-derive the release, but TWO
@@ -1226,8 +1260,16 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
 - Invariant key: `live_turn_proven_by_progress_not_presence`. This document lands the
   contract only and enforces nothing by itself: steps 2 and 3 below — the
   `record_invariant_check` wiring and a deliberate-violation test per consumer —
-  belong to the four consuming lanes, each citing this section; the rowless
-  receipt-coverage follow-up is a fifth lane citing the honest-gap bullet. #5996's DoD
+  belong to the consuming lanes enumerated above, each citing this section, and the
+  rowless receipt-coverage follow-up is one more, citing the honest-gap bullet. A site
+  the enumeration has not reached gets no lane, so it gets no wiring and no test, and it
+  never CALLS `record_invariant_check`. That is the SECOND failure named just above —
+  silence indistinguishable from unwired — not the first. The key is not the missing
+  part: it is per-INVARIANT, one lane adds it, and once added it covers every site. So
+  an unwired site does not even read as a zero. The row carries the other sites'
+  violations and looks populated, and the site with no lane is simply absent from a
+  table that appears to be reporting. That is why the list being an ENUMERATION is a
+  work-allocation fact and not only a rhetorical one. #5996's DoD
   clause — an unpaired active token with no progress evidence must not block the queue
   — needs the anchor and route lanes together and is closed by neither alone (#5946).
 
