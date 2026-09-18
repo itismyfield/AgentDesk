@@ -1057,11 +1057,14 @@ src/
 │   │   │   │   ├── existing_panel_update.rs
 │   │   │   │   ├── native_collector_tests.rs
 │   │   │   │   └── types.rs
+│   │   │   ├── supervisor_relay/
+│   │   │   │   └── supervisor_frame_source.rs
 │   │   │   ├── terminal_commit_epilogue/
 │   │   │   │   └── continuation_marker_tests.rs
 │   │   │   ├── turn_identity/
 │   │   │   │   └── soft_terminal_authority.rs
 │   │   │   ├── turn_stream_collector/
+│   │   │   │   ├── chunk_forward.rs
 │   │   │   │   └── state.rs
 │   │   │   ├── cancel_handoff.rs
 │   │   │   ├── commit_decisions.rs

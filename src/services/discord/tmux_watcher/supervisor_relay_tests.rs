@@ -180,3 +180,37 @@ fn per_turn_fully_mirrored_degrades_when_evicted_victim_matches() {
         "strict turn_start_offset keeps a different same-user same-start turn unaffected"
     );
 }
+
+/// #5948 (I18): a result+next-turn chunk is split at the terminal boundary, so
+/// the source range must split with it. Handing the whole range to both frames
+/// would make the sink read the tail's genuinely-new bytes as already folded and
+/// drop the next turn's opening — a silent loss, not a dedupe.
+#[test]
+fn source_span_splits_at_the_same_boundary_as_the_payload() {
+    assert_eq!(
+        split_source_span_at_terminal_boundary(Some((100, 180)), 30),
+        (Some((100, 130)), Some((130, 180))),
+        "the terminal frame owns [start, boundary) and the tail owns [boundary, end)"
+    );
+    assert_eq!(
+        split_source_span_at_terminal_boundary(Some((100, 180)), 80),
+        (Some((100, 180)), None),
+        "a chunk with no trailing turn keeps the whole range on the terminal frame"
+    );
+    assert_eq!(
+        split_source_span_at_terminal_boundary(Some((100, 180)), 0),
+        (None, Some((100, 180))),
+        "an empty terminal part names nothing; the tail keeps the range"
+    );
+    assert_eq!(
+        split_source_span_at_terminal_boundary(Some((100, 180)), 999),
+        (Some((100, 180)), None),
+        "a boundary past the range is clamped, never wrapped into an inverted span"
+    );
+    assert_eq!(
+        split_source_span_at_terminal_boundary(None, 30),
+        (None, None),
+        "a caller that cannot name a range must not have one invented for it — the \
+         sink treats a named range as authoritative"
+    );
+}

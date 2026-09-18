@@ -235,10 +235,7 @@ impl Utf8ChunkDecoder {
         source: super::loop_poll_prologue::WatcherSourceAuthority,
     ) -> DecodedUtf8Chunk {
         let had_pending = !self.pending.is_empty();
-        let contiguous = self
-            .pending_start_offset
-            .and_then(|start| start.checked_add(self.pending.len() as u64))
-            == Some(offset);
+        let contiguous = self.pending_end_offset() == Some(offset);
         let same_source = contiguous
             && source.generation_mtime_ns != 0
             && source.source_file != SourceFileIdentity::Unavailable
@@ -250,6 +247,32 @@ impl Utf8ChunkDecoder {
                 (!self.pending.is_empty() && (!had_pending || same_source)).then_some(source);
         }
         decoded
+    }
+
+    /// #5979 (I18): the read that refills an EMPTY `all_data`. A watcher rewind
+    /// empties the buffer and re-anchors it at the rewound cursor without reaching
+    /// this decoder, so gluing the abandoned read's split-scalar tail onto the
+    /// replay would re-anchor `all_data` at the tail's offset and shift every
+    /// forwarded `source_span` off the file. A read that does not continue the
+    /// tail drops it; a continuing read (#5833 cancelled-turn resume), an empty
+    /// read, and any read into a non-empty buffer keep the ordinary carry.
+    pub(super) fn decode_source_for_buffer(
+        &mut self,
+        chunk: &[u8],
+        offset: u64,
+        source: super::loop_poll_prologue::WatcherSourceAuthority,
+        buffer: &str,
+    ) -> DecodedUtf8Chunk {
+        if buffer.is_empty() && !chunk.is_empty() && self.pending_end_offset() != Some(offset) {
+            self.clear_pending();
+        }
+        self.decode_source(chunk, offset, source)
+    }
+
+    /// The file offset one past the buffered tail, when there is one.
+    fn pending_end_offset(&self) -> Option<u64> {
+        self.pending_start_offset
+            .and_then(|start| start.checked_add(self.pending.len() as u64))
     }
 
     fn decode(&mut self, chunk: &[u8], chunk_start_offset: u64) -> DecodedUtf8Chunk {

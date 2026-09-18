@@ -1101,7 +1101,7 @@ mod tests {
         };
         assert!(
             producer
-                .try_send_frame_with_source("observe".into(), None, 0, Some(stamp))
+                .try_send_frame_with_source("observe".into(), None, 0, Some(stamp), None)
                 .is_alive()
         );
         flush_pending().await;

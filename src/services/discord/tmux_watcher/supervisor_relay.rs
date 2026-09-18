@@ -16,6 +16,13 @@
 
 use crate::services::cluster::stream_relay::{RelayDroppedFrame, RelayTurnIdentity};
 
+#[path = "supervisor_relay/supervisor_frame_source.rs"]
+mod supervisor_frame_source;
+pub(super) use self::supervisor_frame_source::{
+    SupervisorFrameSourceAuthority, source_authority_with_span,
+    split_source_span_at_terminal_boundary,
+};
+
 /// E5 (#2412): forward a freshly-read tmux output chunk into the
 /// supervisor-owned [`StreamRelay`] (if one exists for the session). The
 /// supervisor's [`RelayProducerRegistry`] is the bridge — it hands the
@@ -292,30 +299,6 @@ pub(super) fn carry_session_bound_ack_for_turn(
     }
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct SupervisorFrameSourceAuthority {
-    generation_mtime_ns: i64,
-    source_stamp: Option<crate::services::cluster::stream_relay::SourceStamp>,
-}
-
-impl From<i64> for SupervisorFrameSourceAuthority {
-    fn from(generation_mtime_ns: i64) -> Self {
-        Self {
-            generation_mtime_ns,
-            source_stamp: None,
-        }
-    }
-}
-
-impl From<super::loop_poll_prologue::WatcherSourceAuthority> for SupervisorFrameSourceAuthority {
-    fn from(authority: super::loop_poll_prologue::WatcherSourceAuthority) -> Self {
-        Self {
-            generation_mtime_ns: authority.generation_mtime_ns,
-            source_stamp: authority.source_stamp,
-        }
-    }
-}
-
 pub(super) fn forward_chunk_to_supervisor_relay(
     tmux_session_name: &str,
     chunk: &str,
@@ -414,13 +397,20 @@ pub(super) fn forward_terminal_chunk_with_trailing_to_supervisor_relay(
 ) -> SupervisorRelayForward {
     let (terminal_part, tail_part) =
         split_decoded_chunk_at_terminal_boundary(decoded, leftover_len);
+    // #5948 (I18): the split is a byte split of one contiguous source range, so
+    // the span splits with it — the terminal frame owns `[start, boundary)` and
+    // the tail owns `[boundary, end)`. Handing both frames the WHOLE span would
+    // make the sink treat the tail's genuinely-new bytes as already folded.
+    let authority: SupervisorFrameSourceAuthority = source_authority.into();
+    let (terminal_span, tail_span) =
+        split_source_span_at_terminal_boundary(authority.source_span, terminal_part.len());
     let terminal_forward = forward_terminal_chunk_to_supervisor_relay(
         tmux_session_name,
         terminal_part,
         registry,
         cached_producer,
         terminal,
-        source_authority,
+        source_authority_with_span(authority, terminal_span),
     );
     if tail_part.is_empty() {
         return terminal_forward;
@@ -451,7 +441,7 @@ pub(super) fn forward_terminal_chunk_with_trailing_to_supervisor_relay(
         tail_part,
         registry,
         cached_producer,
-        source_authority,
+        source_authority_with_span(authority, tail_span),
     );
     let mirrored = terminal_forward.mirrored && tail_forward.mirrored;
     let ack_target = terminal_forward.ack_target;
@@ -536,8 +526,10 @@ pub(super) fn forward_chunk_to_supervisor_relay_inner(
     };
     // The relay treats each `try_send_frame` call as one frame. The caller
     // decodes only complete UTF-8 prefixes, so a multibyte scalar split across
-    // file reads is forwarded after the next read completes it instead of being
-    // replaced with U+FFFD.
+    // file reads (an incomplete trailing sequence) is held back and forwarded
+    // after the next read completes it. Only bytes that are genuinely invalid
+    // UTF-8 — not a truncated scalar — are replaced with U+FFFD, in
+    // `Utf8ChunkDecoder`'s `Err(_)` arm.
     let payload = chunk.to_string();
     // #3041 P1-3 R6: capture the terminal frame's `turn_start_offset` BEFORE the
     // fence is moved into the send so the resulting ack target can be turn-scoped
@@ -545,18 +537,21 @@ pub(super) fn forward_chunk_to_supervisor_relay_inner(
     // turn now being ACK-waited). A non-terminal frame has no fence → no ack
     // target is produced (the `outcome.sequence.map` below yields `None`).
     let ack_turn_start_offset = terminal.as_ref().and_then(|fence| fence.turn_start_offset);
+    let source_span = source_authority.and_then(|authority| authority.source_span);
     let outcome = match terminal {
         Some(fence) => producer.try_send_terminal_frame_with_source(
             payload,
             fence,
             source_authority.map_or(0, |authority| authority.generation_mtime_ns),
             source_authority.and_then(|authority| authority.source_stamp),
+            source_span,
         ),
         None => producer.try_send_frame_with_source(
             payload,
             frame_identity,
             source_authority.map_or(0, |authority| authority.generation_mtime_ns),
             source_authority.and_then(|authority| authority.source_stamp),
+            source_span,
         ),
     };
     if !outcome.is_alive() {

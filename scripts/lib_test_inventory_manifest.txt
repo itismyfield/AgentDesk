@@ -5806,6 +5806,7 @@ services::discord::tmux::tmux_watcher::streaming_status_tick::provider_output_gu
 services::discord::tmux::tmux_watcher::streaming_status_tick::provider_output_guard::tests::invariant_4371_watcher_rollover_never_selects_raw_control_data
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::forward_chunk_surfaces_backpressure_evicted_victim_identity
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::per_turn_fully_mirrored_degrades_when_evicted_victim_matches
+services::discord::tmux::tmux_watcher::supervisor_relay::tests::source_span_splits_at_the_same_boundary_as_the_payload
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::terminal_event_consumed_offset_excludes_buffered_tail
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::caller_arc_wiring
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::current_zero_id_row_can_complete
@@ -6017,6 +6018,8 @@ services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::
 services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::watcher_skips_status_panel_creation_for_non_external_input_turns
 services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::watcher_skips_status_panel_creation_when_panel_already_present
 services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::watcher_skips_status_panel_creation_when_v2_disabled
+services::discord::tmux::tmux_watcher::turn_stream_collector::chunk_forward::tests::forwarded_span_names_the_suffix_the_buffer_ends_with
+services::discord::tmux::tmux_watcher::turn_stream_collector::chunk_forward::tests::rewind_replay_keeps_file_coordinates_and_the_sink_suppresses_the_resend
 services::discord::tmux::tmux_watcher::two_message_panel::tests::completion_guard_ignores_synthetic_headless_panel_handle
 services::discord::tmux::tmux_watcher::two_message_panel::tests::completion_guard_off_and_equal_epoch_are_inert
 services::discord::tmux::tmux_watcher::two_message_panel::tests::completion_guard_supersedes_only_newer_epoch_for_owned_panel
@@ -6032,6 +6035,7 @@ services::discord::tmux::tmux_watcher::utf8_chunk_decoder::source_epoch_read_tes
 services::discord::tmux::tmux_watcher::utf8_chunk_decoder::tests::decoder_mixed_carry_stays_poisoned_until_consumed_and_offset_jump_is_mixed
 services::discord::tmux::tmux_watcher::utf8_chunk_decoder::tests::same_opened_source_keeps_split_utf8_provenance_across_decoder_calls
 services::discord::tmux::tmux_watcher::utf8_chunk_decoder::tests::utf8_decoder_buffers_split_multibyte_scalar_at_chunk_start
+services::discord::tmux::tmux_watcher::utf8_chunk_decoder::tests::utf8_decoder_drops_the_abandoned_tail_only_when_refilling_an_empty_buffer
 services::discord::tmux::tmux_watcher::utf8_chunk_decoder::tests::utf8_decoder_preserves_jsonl_when_multibyte_scalar_splits_after_prefix
 services::discord::tmux::tui_completion_gate_outcome_tests::busy_observed_still_emits
 services::discord::tmux::tui_completion_gate_outcome_tests::confirmed_idle_emits
