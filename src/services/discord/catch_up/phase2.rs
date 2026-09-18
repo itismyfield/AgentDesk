@@ -6,7 +6,13 @@ use super::super::MailboxEnqueueOutcome;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Phase2EnqueueCommit {
     Accepted,
-    Duplicate,
+    /// `AlreadyActiveTurn` — the refusal names THIS message as the mailbox's
+    /// active user turn, so a turn took it.
+    DuplicateActiveTurn,
+    /// `SourceIdAlreadyQueued` — the refusal names a queued entry holding this
+    /// id, which says accepted, not dispatched. #5996 keeps it apart from the
+    /// arm above for that reason alone; both still skip.
+    DuplicateQueued,
     LastItemDedup,
     Deferred,
 }
@@ -21,14 +27,16 @@ pub(super) fn classify_phase2_enqueue_commit(
     if catch_up_enqueue_accepted(outcome) {
         return Phase2EnqueueCommit::Accepted;
     }
-    if outcome.persistence_error.is_none()
-        && matches!(
-            outcome.refusal_reason,
-            Some(EnqueueRefusalReason::AlreadyActiveTurn)
-                | Some(EnqueueRefusalReason::SourceIdAlreadyQueued)
-        )
-    {
-        return Phase2EnqueueCommit::Duplicate;
+    if outcome.persistence_error.is_none() {
+        match outcome.refusal_reason {
+            Some(EnqueueRefusalReason::AlreadyActiveTurn) => {
+                return Phase2EnqueueCommit::DuplicateActiveTurn;
+            }
+            Some(EnqueueRefusalReason::SourceIdAlreadyQueued) => {
+                return Phase2EnqueueCommit::DuplicateQueued;
+            }
+            _ => {}
+        }
     }
     if outcome.persistence_error.is_none()
         && matches!(

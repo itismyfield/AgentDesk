@@ -1880,6 +1880,178 @@ fn queued_intervention(message_id: MessageId, index: usize) -> Intervention {
     }
 }
 
+/// #5996 / contract I20: phase 2 finds this message only in
+/// `intervention_queue`. That membership says the message was accepted for a
+/// turn, never that a turn took it, so the skip is right and the checkpoint
+/// advance is not: the advance rides `phase2_retry_after_checkpoint` into the
+/// retry state and the retry scan then fetches only past it, so a queue entry
+/// that is dropped before it drains is never seen again.
+#[tokio::test(flavor = "current_thread")]
+async fn queue_membership_alone_does_not_advance_the_phase2_checkpoint() {
+    let root = scoped_runtime_root();
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_453_016);
+
+    let bot_id = message_id_with_age(1, Duration::from_secs(300));
+    let queued_id = message_id_with_age(2, Duration::from_secs(120));
+    let fresh_id = message_id_with_age(3, Duration::from_secs(30));
+    // Registers the channel and puts phase 1 in `After(..)` mode, so phase 1
+    // takes fetch call 0 (the empty list) and phase 2 takes call 1. Phase 2's
+    // own starting checkpoint comes from the in-memory `last_message_ids`,
+    // which an empty phase-1 page leaves untouched.
+    write_checkpoint(root.path(), &provider, channel_id, bot_id.get());
+
+    // Fill to capacity with `queued_id` among the entries: phase 2 then skips
+    // it as a duplicate and defers on `fresh_id`, and that defer is what
+    // publishes the phase-2 checkpoint where this test can read it.
+    for index in 0..MAX_INTERVENTIONS_PER_CHANNEL {
+        let id = if index == 0 {
+            queued_id
+        } else {
+            MessageId::new(8_100_000_000_000_000_000 + index as u64)
+        };
+        let outcome = super::super::mailbox_enqueue_intervention(
+            &shared,
+            &provider,
+            channel_id,
+            queued_intervention(id, index),
+        )
+        .await;
+        assert!(super::catch_up_enqueue_accepted(&outcome));
+    }
+
+    let (api, outbox) = TestCatchUpApi::new(Vec::new());
+    let api = api.with_phase2_messages(vec![
+        discord_message(
+            channel_id,
+            fresh_id,
+            HUMAN_ID,
+            false,
+            "newer unanswered request",
+        ),
+        discord_message(
+            channel_id,
+            queued_id,
+            HUMAN_ID,
+            false,
+            "queued but never dispatched",
+        ),
+        discord_message(
+            channel_id,
+            bot_id,
+            CURRENT_BOT_ID,
+            true,
+            "previous bot response",
+        ),
+    ]);
+    run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
+
+    assert!(
+        api.fetch_calls.load(Ordering::Relaxed) >= 2,
+        "phase 2 must have run its own fetch, or this test proves nothing"
+    );
+    let retry = shared
+        .catch_up_retry_pending
+        .get(&channel_id)
+        .expect("the capacity-blocked fresh message must stay recoverable");
+    assert_eq!(
+        retry.checkpoint,
+        bot_id.get(),
+        "queue membership is not evidence of dispatch and must not move the checkpoint"
+    );
+    assert!(
+        retry.checkpoint < queued_id.get(),
+        "a checkpoint at or past the queued message forecloses its recovery"
+    );
+    assert!(
+        shared.last_message_ids.get(&channel_id).is_none(),
+        "a scan that recovered nothing must not establish a durable frontier"
+    );
+    assert!(outbox.lock().expect("outbox capture lock").is_empty());
+}
+
+/// The other half of the #5996 split: `active_user_message_id` names the
+/// message `try_start_turn` stamped onto the slot a turn holds, which IS the
+/// dispatch evidence I20 asks for. Removing the advance outright instead of
+/// grading it would wedge this scan on a message no rescan can help.
+#[tokio::test(flavor = "current_thread")]
+async fn an_active_turn_still_advances_the_phase2_checkpoint() {
+    let root = scoped_runtime_root();
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_453_017);
+
+    let bot_id = message_id_with_age(1, Duration::from_secs(300));
+    let active_id = message_id_with_age(2, Duration::from_secs(120));
+    let fresh_id = message_id_with_age(3, Duration::from_secs(30));
+    write_checkpoint(root.path(), &provider, channel_id, bot_id.get());
+
+    let started = super::super::mailbox_try_start_turn(
+        &shared,
+        channel_id,
+        Arc::new(crate::services::provider::CancelToken::new()),
+        serenity::UserId::new(HUMAN_ID),
+        active_id,
+    )
+    .await;
+    assert!(started, "the active turn must claim the slot");
+
+    for index in 0..MAX_INTERVENTIONS_PER_CHANNEL {
+        let outcome = super::super::mailbox_enqueue_intervention(
+            &shared,
+            &provider,
+            channel_id,
+            queued_intervention(
+                MessageId::new(8_200_000_000_000_000_000 + index as u64),
+                index,
+            ),
+        )
+        .await;
+        assert!(super::catch_up_enqueue_accepted(&outcome));
+    }
+
+    let (api, _outbox) = TestCatchUpApi::new(Vec::new());
+    let api = api.with_phase2_messages(vec![
+        discord_message(
+            channel_id,
+            fresh_id,
+            HUMAN_ID,
+            false,
+            "newer unanswered request",
+        ),
+        discord_message(
+            channel_id,
+            active_id,
+            HUMAN_ID,
+            false,
+            "the turn currently running",
+        ),
+        discord_message(
+            channel_id,
+            bot_id,
+            CURRENT_BOT_ID,
+            true,
+            "previous bot response",
+        ),
+    ]);
+    run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
+
+    assert!(
+        api.fetch_calls.load(Ordering::Relaxed) >= 2,
+        "phase 2 must have run its own fetch, or this test proves nothing"
+    );
+    let retry = shared
+        .catch_up_retry_pending
+        .get(&channel_id)
+        .expect("the capacity-blocked fresh message must stay recoverable");
+    assert_eq!(
+        retry.checkpoint,
+        active_id.get(),
+        "a turn took this message, so the checkpoint is earned and must move"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn production_sweep_checkpoint_stops_before_capacity_blocked_human() {
     let root = scoped_runtime_root();

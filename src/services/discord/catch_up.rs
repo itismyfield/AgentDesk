@@ -1348,7 +1348,10 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                         .await;
                     max_settled_id = advance_catch_up_settled_frontier(max_settled_id, mid);
                 }
-                Phase2EnqueueCommit::Duplicate => {
+                // Phase 1 advances its own settled frontier, not the phase-2
+                // checkpoint #5996 splits these variants for, so both arms land
+                // here unchanged.
+                Phase2EnqueueCommit::DuplicateActiveTurn | Phase2EnqueueCommit::DuplicateQueued => {
                     stats.record(CatchUpClassification::Duplicate);
                     max_settled_id = advance_catch_up_settled_frontier(max_settled_id, mid);
                 }
@@ -1549,7 +1552,13 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         let mailbox = mailbox_snapshot(shared, channel_id).await;
         let remaining_capacity =
             catch_up_remaining_queue_capacity(mailbox.intervention_queue.len());
-        let mut existing_ids = recovery_known_message_ids(&mailbox);
+        // #5996: keep the arm that answered for each id. `existing_ids` is this
+        // map's key set plus whatever this scan commits below, and only the map
+        // can say whether a membership carries the dispatch evidence a
+        // checkpoint advance must earn. It is never re-read for an id this scan
+        // inserted, because each message in the slice is visited once.
+        let known_arms = recovery_known_id_arms(&mailbox);
+        let mut existing_ids: HashSet<u64> = known_arms.keys().copied().collect();
         // #4564: same durable completed-turn ledger consult as phase 1, read once
         // per channel. A Settled outcome in phase 2 simply skips (no enqueue, no
         // notice) — an already-answered message must not be re-surfaced.
@@ -1593,7 +1602,15 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             // TooOld bit is intentionally irrelevant to phase 2.
             if existing_ids.contains(&mid) {
                 stats.duplicate += 1;
-                phase2_checkpoint = advance_phase2_checkpoint(phase2_checkpoint, mid);
+                // #5996 / I20: skip and advance are not one decision. The skip
+                // is retried next scan; the advance forecloses the message. An
+                // unrecognised id resolves to no-advance, the retryable side.
+                if known_arms
+                    .get(&mid)
+                    .is_some_and(|arm| arm.is_dispatch_evidence())
+                {
+                    phase2_checkpoint = advance_phase2_checkpoint(phase2_checkpoint, mid);
+                }
                 continue;
             }
             if phase2_checkpoint.is_some_and(|saved| mid <= saved) {
@@ -1726,9 +1743,16 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     max_recovered_id = advance_phase2_checkpoint(max_recovered_id, mid);
                     stats.enqueued += 1;
                 }
-                Phase2EnqueueCommit::Duplicate => {
+                Phase2EnqueueCommit::DuplicateActiveTurn => {
                     existing_ids.insert(mid);
                     phase2_checkpoint = advance_phase2_checkpoint(phase2_checkpoint, mid);
+                    stats.duplicate += 1;
+                }
+                // #5996 / I20: same queue membership as the gate above, reached
+                // only when something queued this id between the snapshot and
+                // this call. Skip it; it is not evidence a turn took it.
+                Phase2EnqueueCommit::DuplicateQueued => {
+                    existing_ids.insert(mid);
                     stats.duplicate += 1;
                 }
                 Phase2EnqueueCommit::LastItemDedup => {
@@ -3176,7 +3200,7 @@ mod catch_up_recovery_tests {
         };
         assert_eq!(
             classify_phase2_enqueue_commit(&duplicate),
-            Phase2EnqueueCommit::Duplicate
+            Phase2EnqueueCommit::DuplicateQueued
         );
 
         let already_active = super::super::MailboxEnqueueOutcome {
@@ -3187,7 +3211,7 @@ mod catch_up_recovery_tests {
         };
         assert_eq!(
             classify_phase2_enqueue_commit(&already_active),
-            Phase2EnqueueCommit::Duplicate
+            Phase2EnqueueCommit::DuplicateActiveTurn
         );
 
         let last_item_dedup = super::super::MailboxEnqueueOutcome {
