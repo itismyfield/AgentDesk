@@ -542,7 +542,7 @@ still spoken for, so this one steps past them rather than colliding.
 ## I17. A terminal frame has a delivery owner or a record (#5941)
 
 Numbered I17 for the same reason I16 is not I13: `docs/design/4987-relay-reachability.md`
-§8.2 still reserves I13/I15 for the reachability obligations, and #5943 took I16.
+§8.2 still reserves I13/I14/I15 for the reachability obligations, and #5943 took I16.
 
 - Definition — SCOPED to the #5175 denial seam, not to the relay as a whole. A
   terminal frame that REACHES the producer below carrying an undelivered body
@@ -780,7 +780,18 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   `health::watcher_respawn::force_clean_respawn_offset_floor`: it discards the
   snapshot offset into `_unfenced_snapshot_frontier`, floors on
   `tmux::committed_frontier_for_current_generation`, and where no fence exists it
-  disables the floor rather than falling back to the value.
+  disables the floor rather than falling back to the value. That precedent bounds the
+  first list too: `unread_tail_is_proven_drained` is authoritative over a MEASURED
+  zero only. Its `Some(0)` is `capture.saturating_sub(last_relay_offset)` in
+  `health::session_enrichment::load` over that same unfenced frontier, so it is
+  equally the answer when the frontier runs AHEAD of the capture offset — a rotated
+  or truncated transcript, or the #4986 split where the row's `output_path` and the
+  watcher's file differ — and `relay_state_matches_inflight` compares tmux session
+  names only when row and binding BOTH carry one, so another session's frontier can
+  surface as `Some(0)` when either side is unnamed. The predicate's own doc comment
+  states both. A SATURATED zero and an UNATTRIBUTED zero therefore carry the grade of
+  `None` — UNMEASURED, not measured-empty — and a consumer that cannot separate the
+  three has not measured the tail. This term may not decide a retirement alone.
 - THE DISCRIMINATOR between (a) state that lingers too long (this issue) and (b)
   state retired too early (#5951 (b), #5775, #5755) is a MEASURED tail, never a
   clock — and it is already implemented, in the idle-tmux branch of the
@@ -788,7 +799,19 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   (`inflight_state_allows_idle_tmux_repair_for_channel`), no terminal answer sits
   past the watermark (`!channel_has_unrelayed_idle_tmux_tail_answer`), and the tail
   is proven drained (`unread_tail_is_proven_drained`). All three hold → (a): the
-  record outlived its work, retiring it loses nothing. Any one fails → (b).
+  record outlived its work, retiring it loses nothing. Any one fails → (b). Those are
+  not three defenses on a ROWLESS channel. "The row consents" reads
+  `if snapshot.inflight_state_present { .. } else { true }`, so absence passes it, and
+  `channel_has_unrelayed_idle_tmux_tail_answer` is `load_inflight_state(..).is_some_and(..)`
+  whose note reads "Absent row → no tail answer to lose → false", so `!unrelayed_tail`
+  passes too. Rowless — the #5996 shape — the test collapses to the tail term alone,
+  and the qualification above is why that term is not unconditional. What keeps this
+  route safe is not the conjunction but two row-required preconditions outside it: the
+  tail term is `None` when there is no `output_path` to measure, and
+  `health::recovery::clear_idle_tmux_stale_turn` returns early when
+  `load_idle_tmux_stale_turn_inflight_clear_candidate` finds no row. A consumer
+  replicating this test where those are absent must require the row's EXISTENCE as an
+  explicit precondition — "the row consents" is true only where a row exists to consent.
 - Unmeasured resolves to (b), and that asymmetry is the whole guard. `unread_bytes`
   is three-valued and its `None` is UNMEASURED, not measured-empty, so
   `unread_tail_is_proven_drained(None)` is false; the sibling doc says why the two
@@ -798,8 +821,9 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   `recovery_known_ids::live_pending_dispatch_message_ids`: a false recover costs a
   duplicate, a false suppression costs a message. A wrongly-preserved (a) wedge is
   cleared by the next poll that measures; a wrongly-retired (b) turn is gone.
-  `classify_reachability` takes the same rule from the other side — every FAULT arm
-  runs before the timer, "a thing that went WRONG must not be retired by a clock".
+  `classify_reachability` takes the same rule from the other side — every fault arm
+  that can preempt it runs before the timer, "a thing that went WRONG must not be
+  retired by a clock".
 - Honest gap; L1 must not paper over it. For the EXACT #5996 shape the
   discriminator does not resolve today. `classify_reachability` short-circuits to
   `Unknown(RowlessActiveTurn)` BEFORE it builds the receipt index and runs
@@ -819,9 +843,15 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   unreadable witness. I17 makes a loss ATTRIBUTABLE; I20 makes a retirement EARNED.
 - Consumer — `turn_orchestrator::release_active_turn_anchor`. Its three callers are
   all event-driven: `finalize_turn_state`, the `ChannelMailboxMsg::Clear` arm, and
-  the force-`PurgeQueue` arm's `clear_cancelled_active_anchor`. None re-derives the
-  release from evidence, so a lost release event leaves the anchor held with no path
-  able to retire it. The anchor's presence is not evidence the turn is working, its
+  the force-`PurgeQueue` arm's `clear_cancelled_active_anchor`. None of the three
+  re-derives the release itself, but one evidence-driven path does reach the first:
+  `synthetic_start::stale_reclaim` reads `terminal_delivery_committed` and finalizes a
+  `Cancel` through `mailbox_finish_turn`, which lands in `finalize_turn_state`. That
+  path is DEMAND-DRIVEN — it fires only where a new TUI-direct synthetic start finds
+  the mailbox held — and OWNER-SCOPED (`classify_reclaimable_mailbox_owner`). What is
+  missing is a PERIODIC evidence-driven reaper, so a lost release event on a channel
+  nothing re-enters leaves the anchor held. Extend that path; do not build a second
+  one beside it. The anchor's presence is not evidence the turn is working, its
   `turn_started_at` age is not evidence it is wedged, and any release not driven by
   a turn-end event owes progress evidence.
 - Consumer — the `stale-mailbox/repair` route's `queue_not_empty` gate. A
@@ -829,7 +859,9 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   queue that cannot drain — the state the gate is asked to repair — so the
   `skipped_reason` names the opposite of what the field measures. Depth is
   inadmissible as a liveness term; the authority is the three-conjunct test the same
-  route already holds in its idle-tmux branch.
+  route already holds in its idle-tmux branch — carried with the row precondition named
+  above, because that branch is reached today only after `queue_depth > 0` has returned
+  CONFLICT, and retiring the depth gate admits queued channels to it.
 - Consumer — `catch_up` phase 2's `existing_ids` membership test.
   `recovery_known_message_ids` unions three sets and only one tests liveness:
   `live_pending_dispatch_message_ids` reads an orphaned reservation as NOT live "so
@@ -852,8 +884,10 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   progress evidence — absence is the unmeasured case, which this invariant sends to
   (b); a consumer reading "no witness" as "retire it" builds the very (b) loss the
   discriminator prevents. It adds no coordinate: every authoritative term above
-  already exists and I20 only reassigns which may DECIDE. Duplicate relays after a
-  retirement stay I18's and I19's.
+  already exists and I20 only reassigns which may DECIDE — with one known exception:
+  `release_active_turn_anchor` takes only `&mut ChannelMailboxState`, carrying neither
+  channel nor provider, so L1 must thread identity to that decision point before it can
+  record a violation there. Duplicate relays after a retirement stay I18's and I19's.
 - It also puts nothing in conflict with the pinned "normal", and no lane may weaken
   that to land a repair. `relay_recovery::tests::unpaired_active_token_is_observe_only`
   pairs `mailbox_turn_age_secs: Some(601)` with a fixture whose `unread_bytes` is
@@ -873,13 +907,23 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   `tmux_watcher::orphan_terminal_frame::observe_orphan_terminal_frame` uses, with
   `details` naming WHICH term decided — witness, measured tail, structural `None`, or
   age fallback. An age fallback must be countable apart from a witness, or its growth
-  is invisible and the clock silently becomes the authority again. Violations reach
-  an operator through the #3561 hourly table (`RELAY_SIGNAL_DEFINITIONS`), the
-  surface I17 and I18 already use.
+  is invisible and the clock silently becomes the authority again. Violations reach an
+  operator through the #3561 hourly table only once a lane ADDS the row:
+  `RELAY_SIGNAL_DEFINITIONS` matches `event_type = "invariant_violation"` against an
+  explicit `statuses` list (`relay_signal_alert`'s `status = ANY($2)`) with no wildcard
+  entry, so a key absent from that list counts zero forever — the #5175 shape this
+  bullet opened by naming. Nothing backstops that table: `record_invariant_check` emits
+  NOTHING while the condition HOLDS, so silence cannot be told from unwired, and the
+  `guard_fires` counter a violation bumps is keyed by channel and provider only
+  (`record_guard_fire`) — one bucket for all invariants, unable to name which fired.
+  One lane adds the threshold-1 entry carrying
+  `live_turn_proven_by_progress_not_presence` in `statuses`, as I17 and I18 each did.
 - Invariant key: `live_turn_proven_by_progress_not_presence`. This document lands the
   contract only and enforces nothing by itself: steps 2 and 3 below — the
   `record_invariant_check` wiring and a deliberate-violation test per consumer —
-  belong to the four consuming lanes, each of which cites this section.
+  belong to the four consuming lanes, each of which cites this section. #5996's DoD
+  clause — an unpaired active token with no progress evidence must not block the queue
+  — needs the anchor and route lanes together and is closed by neither alone (#5946).
 
 ## How to add a new invariant
 
