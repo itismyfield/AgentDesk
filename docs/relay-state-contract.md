@@ -994,6 +994,16 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   `classify_reachability` takes the same rule from the other side — every fault arm
   that can preempt it runs before the timer, "a thing that went WRONG must not be
   retired by a clock".
+  The trade in the other direction is not free either. Removing a MEASURED (b) by
+  refusing to advance past it converts a loss into undone work: in `catch_up`, deferring
+  rather than skipping routes the sweep through `CatchUpRetryState::after_deferred_rearm`,
+  which stops re-arming once `CATCH_UP_RETRY_DEFERRED_REARM_LIMIT` consecutive cycles are
+  spent and gives up with a warning. That residue is an (a), and a bounded one — the
+  code's own note is that the backlog then ages out or a fresh trigger restarts the cycle
+  — so the asymmetry still points the same way. What does NOT follow is that every (b)
+  repair is free. I20 routes the UNMEASURED case to (b)-safe; it says nothing about
+  trading a measured (b) for an (a), and a lane proposing that trade owns showing it
+  pays.
 - Honest gap; L1 must not paper over it. For the EXACT #5996 shape the
   discriminator does not resolve today. `classify_reachability` no longer
   short-circuits ahead of the evidence: the `Unknown(RowlessActiveTurn)` arm now runs
