@@ -1,6 +1,9 @@
 # Discord Outbound Migration — Coverage Map (#1006 v3 / #1280 / #1436 / #1457)
 
-> Last refreshed: 2026-09-02 (manual: #5679 transport extraction and coverage-map refresh).
+> Last refreshed: 2026-09-18 (manual: #5941 Step B DLQ redelivery consumer).
+>
+> `#5941` Step B widened `RECENT_DELIVERED_CONTENT_WINDOW_MS` in `src/services/discord/outbound/delivery_record.rs` to `pub(in crate::services::discord)`; the DLQ redelivery sweep DERIVES its claim-window ceiling from it, so the window cannot outlive the witness that answers "is this body already in the channel".
+> No function signature, owner, or Discord callsite changed, and the redelivery POST reuses the existing `formatting::send_long_message_raw_with_reference_*` path rather than adding one, so the callsite counts and categories below are unchanged.
 >
 > `#5679` extracted the non-fresh transport implementation from
 > `src/services/discord/outbound/turn_output_controller.rs` into

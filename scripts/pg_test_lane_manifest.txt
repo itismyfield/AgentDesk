@@ -77,6 +77,7 @@ src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs
 src/services/discord/runtime_bootstrap/intake_delivery_capability.rs
 src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs
 src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs
+src/services/discord/runtime_bootstrap/relay_dlq_redelivery/tests.rs
 src/services/discord/session_runtime.rs
 src/services/discord/task_notification_delivery/tests.rs
 src/services/discord/terminal_delivery_custody/pg_tests.rs
@@ -195,6 +196,7 @@ services::discord::runtime_bootstrap::gateway_lease_recovery_tests
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests
+services::discord::runtime_bootstrap::relay_dlq_redelivery::tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::task_notification_delivery::tests
 services::discord::terminal_delivery_custody::pg_tests
@@ -786,6 +788,7 @@ services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_settle
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_settles_stale_spawned_as_unknown_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_live_interactive_turn_without_dispatch_binding_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_rows_not_strictly_stale_pg
+services::discord::runtime_bootstrap::relay_dlq_redelivery::tests::sweep_returns_the_lost_body_to_its_channel_pg
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::exact_owned_row_with_null_cwd_is_channel_scoped_empty_path
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::fallback_refused_when_single_row_has_different_channel
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::legacy_null_channel_id_single_row_is_reused

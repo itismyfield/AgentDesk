@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "8c821233fcae257ceccc59fff5ab47e8ae42c1c1",
+  "measured_at_sha": "a6c9007a24e9db5a813de818cdcaab147ac0d048",
   "records": [
     {
       "root": "migrations/postgres",
@@ -25174,6 +25174,33 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:e47263d6ee1709833fc447840246998ec590f97e269dc61071503e358bfa5c45"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/relay_dlq_redelivery/tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:8b881a4b3e96c1f90303cda4223ca96ebf45bbcfadb320ad3bc3cc48900f4a10"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/relay_dlq_redelivery/tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:baff897aa47d2973b93e191e8a18c994e7f942e8bcdae27ae757c1288a43f68c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/relay_dlq_redelivery/tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:c3b2d267e6defa0c80da36eb5fb4f5ab813df7b7f4a9b79cbe4e3016ecd044c1"
     },
     {
       "root": "src",

@@ -191,6 +191,9 @@ pub(super) async fn run_bot_framework_setup(
     // 3-hour safety TTL so warm-resume sessions keep DB ownership.
     super::spawns::run_bot_spawn_stale_session_gc(&shared_clone);
     super::intake_delivery_sweep::spawn_intake_delivery_sweep(shared_clone.clone());
+    // #5941 Step B: nothing read `relay_dead_letter` back, so a preserved body
+    // never reached the user. This sweep is that reader.
+    super::relay_dlq_redelivery::spawn_relay_dlq_redelivery(shared_clone.clone());
 
     super::voice::run_bot_spawn_voice_auto_join(
         ctx,

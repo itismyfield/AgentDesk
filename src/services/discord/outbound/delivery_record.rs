@@ -77,7 +77,7 @@ const DELIVERY_RECORDS_DIR: &str = "discord_delivery_records";
 const FRESH_SEND_RECORDS_DIR: &str = "discord_fresh_send_records";
 const DELIVERY_OWNER_CONTEXT_DIR: &str = "discord_delivery_owner_context";
 const RECENT_DELIVERED_CONTENT_LIMIT: usize = 16;
-const RECENT_DELIVERED_CONTENT_WINDOW_MS: u64 = 15 * 60 * 1000;
+pub(in crate::services::discord) const RECENT_DELIVERED_CONTENT_WINDOW_MS: u64 = 15 * 60 * 1000;
 const CONFIRMED_DELIVERY_RECEIPT_LIMIT: usize = 32;
 
 /// Durable per-turn delivery record (design §4.3). Two **independent** durable

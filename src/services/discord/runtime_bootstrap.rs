@@ -15,6 +15,7 @@ mod intake_delivery_sweep;
 mod orphan_recovery;
 mod queued_placeholders;
 mod recovery_flush;
+mod relay_dlq_redelivery;
 mod restored_state;
 mod session_gc;
 mod shared_data;
