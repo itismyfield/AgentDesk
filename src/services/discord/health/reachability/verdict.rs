@@ -101,7 +101,24 @@ pub(in crate::services::discord) enum ReachabilityUnknownReason {
     TranscriptCoordinateDivergence,
     /// The mailbox reports an active turn with no inflight row. 4987 §-1.4
     /// demotes this to an explanatory attribute — no verdict of its own.
-    RowlessActiveTurn,
+    ///
+    /// Carries what the coverage sweep saw (#5946 O1). `uncovered_ranges` alone
+    /// is ambiguous: zero reads both as "every framed obligation is covered" and
+    /// as "nothing was ever framed", and a consumer that treats the second as
+    /// permission to retire kills a turn whose prose has not been written yet.
+    /// `obligations_framed` separates them, and `unproven_ranges` keeps
+    /// covered-under-an-unproven-generation distinct from genuinely uncovered —
+    /// three states, never folded into two. Reading `permits_health` and the
+    /// two authorization predicates is unchanged: `Unknown` grants nothing.
+    RowlessActiveTurn {
+        /// Live obligations the ledger framed at the moment of the verdict.
+        obligations_framed: u32,
+        /// Of those, the ones no receipt and no frontier covers.
+        uncovered_ranges: u32,
+        /// Of those, the ones covered under a generation key with no additional
+        /// witness. Covered-and-proven is `obligations_framed` minus these two.
+        unproven_ranges: u32,
+    },
     /// The bounded per-tick read hit its cap; see
     /// [`super::tail::TAIL_READ_CAP_BYTES`].
     ReadTruncated,
@@ -237,7 +254,11 @@ mod tests {
                 since_secs: 5,
             },
             ReachabilityVerdict::Unknown {
-                reason: ReachabilityUnknownReason::RowlessActiveTurn,
+                reason: ReachabilityUnknownReason::RowlessActiveTurn {
+                    obligations_framed: 2,
+                    uncovered_ranges: 1,
+                    unproven_ranges: 0,
+                },
                 since_secs: 5,
             },
             ReachabilityVerdict::Unknown {
@@ -423,7 +444,9 @@ mod tests {
         match reason {
             ReachabilityUnknownReason::TranscriptUnresolved => 0,
             ReachabilityUnknownReason::TranscriptCoordinateDivergence => 1,
-            ReachabilityUnknownReason::RowlessActiveTurn => 2,
+            // The coverage payload is an observation, not an identity: every
+            // rowless verdict claims this one index whatever the sweep saw.
+            ReachabilityUnknownReason::RowlessActiveTurn { .. } => 2,
             ReachabilityUnknownReason::ReadTruncated => 3,
             ReachabilityUnknownReason::ReceiptStoreUnreadable => 4,
             ReachabilityUnknownReason::NeverObserved => 5,
@@ -448,7 +471,11 @@ mod tests {
         let every_reason = [
             ReachabilityUnknownReason::TranscriptUnresolved,
             ReachabilityUnknownReason::TranscriptCoordinateDivergence,
-            ReachabilityUnknownReason::RowlessActiveTurn,
+            ReachabilityUnknownReason::RowlessActiveTurn {
+                obligations_framed: 2,
+                uncovered_ranges: 1,
+                unproven_ranges: 0,
+            },
             ReachabilityUnknownReason::ReadTruncated,
             ReachabilityUnknownReason::ReceiptStoreUnreadable,
             ReachabilityUnknownReason::NeverObserved,
