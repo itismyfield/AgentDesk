@@ -1828,7 +1828,7 @@ fi
 # Ensure release dir exists
 mkdir -p "$ADK_REL"/{bin,config,data,logs}
 
-export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-10G}"
+export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-40G}"
 if setup_sccache_env; then
     echo "▸ sccache cache: $SCCACHE_DIR (size $SCCACHE_CACHE_SIZE)"
 else

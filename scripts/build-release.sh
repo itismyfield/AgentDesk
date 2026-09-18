@@ -94,7 +94,7 @@ write_checksum() {
 echo "═══ Building AgentDesk v${VERSION} for ${OS}/${ARCH} ═══"
 echo ""
 
-export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-10G}"
+export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-40G}"
 if setup_sccache_env; then
   echo "▸ sccache cache: ${SCCACHE_DIR} (size ${SCCACHE_CACHE_SIZE})"
 else

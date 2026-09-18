@@ -789,7 +789,7 @@ class SccacheEnvTests(TokenTestCase):
     def test_a_resolvable_sccache_reaches_the_child_as_an_absolute_wrapper(self) -> None:
         seen = self.child_env()
         self.assertEqual(seen["RUSTC_WRAPPER"], str(self.tmp / "brew" / "sccache"))
-        self.assertEqual(seen["SCCACHE_CACHE_SIZE"], "10G")
+        self.assertEqual(seen["SCCACHE_CACHE_SIZE"], "40G")
         # 0, not the 600s default: a daemon reaped between two token waits loses
         # the hit counters that say whether the cache is worth anything.
         self.assertEqual(seen["SCCACHE_IDLE_TIMEOUT"], "0")

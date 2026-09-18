@@ -545,7 +545,7 @@ def run_protected(command: Sequence[str], env: Mapping[str, str], supervisor: _S
 # sccache opt-in for campaign cargo, which reaches cargo only through here: a shell
 # export of RUSTC_WRAPPER dies with the batch, and .cargo/config.toml ships
 # `rustc-wrapper = ""`, so the environment is the only switch. The probe order and the
-# /opt/homebrew/bin, $HOME/.cache/sccache, 10G and 0 literals are copied from
+# /opt/homebrew/bin, $HOME/.cache/sccache, 40G and 0 literals are copied from
 # `setup_sccache_env` (scripts/_defaults.sh:25) -- a bash function and a dict cannot
 # share an implementation -- so those four defaults move in both places or neither.
 # Two rules deliberately do NOT mirror it; do not "fix" them into agreement.
@@ -578,7 +578,9 @@ def apply_sccache_env(env: dict[str, str]) -> None:
         return  # An unusable cache directory costs the cache, never the build.
     env["PATH"] = path
     env["SCCACHE_DIR"] = cache_dir
-    env["SCCACHE_CACHE_SIZE"] = env.get("SCCACHE_CACHE_SIZE") or "10G"
+    # 40G, not sccache's own 10G: at the cap the cache evicts what the next
+    # worktree is about to ask for. The CI workflows keep 10G -- hosted runner disk.
+    env["SCCACHE_CACHE_SIZE"] = env.get("SCCACHE_CACHE_SIZE") or "40G"
     # 0 disables the idle exit. Campaign builds queue behind the token for tens of
     # minutes, so the 600s default reaps the daemon between them and its counters
     # restart at zero -- which reads as "sccache is off" and gets it re-enabled.
