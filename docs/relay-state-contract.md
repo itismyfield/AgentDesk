@@ -169,9 +169,7 @@ Repair, in priority order:
    not the id count. "Never add a test id" would be a shape rule, and this
    section's own thesis forbids shape rules: a reviewer applying the count
    literally and one running the judgment diverge, exactly as they did on the
-   static form above. The tree agrees — every wiring guard that exists is a
-   standalone id whose name carries its claim, and the shape a counting rule
-   would prefer has no instances at all. The manifest cost is real and small:
+   static form above. The manifest cost is real and small:
    `docs/pr-cap-check.md` sets the cap at 20 changed files and +800 added lines,
    so one id spends 0.125% of the addition budget. Spend it when the name buys a
    claim; do not spend it to restate one an existing test's name already makes.
@@ -689,8 +687,10 @@ Numbered I17 for the same reason I16 is not I13: `docs/design/4987-relay-reachab
   doc comment. So although the module now holds a claiming
   `SELECT ... FOR UPDATE SKIP LOCKED` and a settling `UPDATE`, nothing at this
   commit executes either one.
-  `redelivery_state` appears in no file but that module — no CLI, no script, no
-  operator surface. So a row written and never claimed has nowhere to go, which
+  Outside that module `redelivery_state` appears only in the migration that
+  declares the column, `0120_relay_dead_letter_redelivery.sql`, which adds it and
+  indexes it without reading a row back — no CLI, no operator surface anywhere.
+  So a row written and never claimed has nowhere to go, which
   is what "no redelivery consumer" means here. This records the state of this
   commit and claims nothing about a later one.
 - Violation surface: the record is fire-and-forget by construction
@@ -982,10 +982,13 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   must be checked per shape, never assumed. For the rowless synthetic shape no
   measuring poll clears it at all: the bullet below records that the discriminator
   does not resolve for that shape. What clears it there is
-  `turn_finalizer::reconcile::reconcile_guarded_finish_residues`, which decides on
-  EPISODE IDENTITY rather than on a measurement, and which visits only a channel
-  that recorded a residue — so a producer that leaves this shape without recording
-  one has no cleaner, and the wedge persists indefinitely (#6029). The asymmetry
+  `turn_finalizer::reconcile::reconcile_guarded_finish_residues`, which selects on
+  EPISODE IDENTITY and gates release on terminal evidence through
+  `zombie_foreground_release::terminal_evidence_allows_mailbox_release`, whose
+  other operands are an inflight-state file check and TUI idleness — never the
+  coverage a measuring poll would supply. And it visits only a channel that
+  recorded a residue, so a producer that leaves this shape without recording one
+  has no cleaner, and the wedge persists indefinitely (#6029). The asymmetry
   holds, because a persisting wedge still costs less than a lost message, but (a)'s
   cost is larger than "cleared by the next poll" implies.
   `classify_reachability` takes the same rule from the other side — every fault arm
