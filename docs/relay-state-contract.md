@@ -1055,9 +1055,21 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   the coordinate under "What I20 does NOT give you", L2's first task — not this
   contract's, and not a sentence to soften when a lane finds it inconvenient.
 - Relation to I19 and I17. I19 is witness-vs-value on one field, a zero resume offset a
-  restart can fabricate; I20 is witness-vs-existence-and-age across four retirement
-  decisions. I19 admits a floor value when unwitnessed; I20 no fallback for the age term
-  except an unreadable witness. I17 makes a loss ATTRIBUTABLE; I20 a retirement EARNED.
+  restart can fabricate; I20 is witness-vs-existence-and-age across the retirement
+  decisions enumerated below. I19 admits a floor value when unwitnessed; I20 no fallback
+  for the age term except an unreadable witness. I17 makes a loss ATTRIBUTABLE; I20 a
+  retirement EARNED.
+- The consumer list below is an ENUMERATION, not a survey. It names the sites that were
+  examined. It does not certify that no other site decides a retirement this way, and
+  nothing in this document can make it certify that. Reading the list as a survey is the
+  same move this invariant forbids of its consumers — taking the existence of a record as
+  evidence of the thing the record is supposed to stand for. The list has already been
+  found short, and not at the margin: a fifth site sits inside
+  `catch_up::run_catch_up_sweep`, the very function the phase-2 consumer bullet names,
+  some four hundred lines from the test that bullet describes. Reviewing by file would
+  not have caught it, and neither would trusting this list. Look for the SHAPE — a
+  retirement decided on existence or age — and treat an entry here as a worked example of
+  it, never as the boundary of where it occurs.
 - Consumer — `turn_orchestrator::release_active_turn_anchor`. Its three callers —
   `finalize_turn_state`, the `ChannelMailboxMsg::Clear` arm, and the force-`PurgeQueue`
   arm's `clear_cancelled_active_anchor` — do not re-derive the release, but TWO
