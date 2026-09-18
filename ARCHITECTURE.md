@@ -1138,6 +1138,9 @@ src/
 │   │   ├── tui_prompt_relay/
 │   │   │   ├── rehydration/
 │   │   │   │   └── idempotency_tests.rs
+│   │   │   ├── relay_e2e/
+│   │   │   │   ├── discord_mock.rs
+│   │   │   │   └── mod.rs
 │   │   │   ├── synthetic_start/
 │   │   │   │   ├── bridge_handoff.rs
 │   │   │   │   ├── claim.rs
