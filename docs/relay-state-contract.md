@@ -1002,7 +1002,9 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   warning on the deferred scan past it. That residue is an (a), and a bounded one — the
   code's own note is that the backlog then ages out or a fresh trigger restarts the
   cycle. Read "ages out" as what it is: the age ceiling routes those messages to the
-  TooOld disposition and a dead-letter record, so they are DROPPED WITH ATTRIBUTION, not
+  TooOld disposition, where an actionable human drop reaches the user through one
+  aggregated resend notice and a bot row stays internal dead-letter evidence — so they
+  are DROPPED WITH ATTRIBUTION, not
   completed. The asymmetry still points the same way, since an attributed drop beats a
   silent loss, but no lane may read "bounded" as "the work eventually finishes". What
   does NOT follow is that every (b)
@@ -1083,8 +1085,9 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   `catch_up::run_catch_up_sweep`, the very function the phase-2 consumer bullet's test
   lives in. Its membership test resolves through
   `catch_up::classification::classify_catch_up_message` to `Duplicate`, and a `Duplicate`
-  there advances the settled frontier through `advance_last_message_checkpoint` into
-  `runtime_store::save_last_message_id` — a DURABLE skip, where the phase-2 hit that
+  there raises the settled frontier through `advance_catch_up_settled_frontier`, which
+  `advance_last_message_checkpoint` then persists via `runtime_store::save_last_message_id`
+  — a DURABLE skip, where the phase-2 hit that
   bullet describes moves only a loop-local checkpoint. Reviewing by file would not have
   caught it, and neither would trusting this list. Look for the SHAPE — a
   retirement decided on existence or age — and treat an entry here as a worked example of
@@ -1259,9 +1262,14 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   `record_invariant_check` wiring and a deliberate-violation test per consumer —
   belong to the consuming lanes enumerated above, each citing this section, and the
   rowless receipt-coverage follow-up is one more, citing the honest-gap bullet. A site
-  the enumeration has not reached gets no lane, so it gets no wiring and no test, and by
-  the rule just above its key counts zero forever. That is why the list being an
-  ENUMERATION is a work-allocation fact and not only a rhetorical one. #5996's DoD
+  the enumeration has not reached gets no lane, so it gets no wiring and no test, and it
+  never CALLS `record_invariant_check`. That is the SECOND failure named just above —
+  silence indistinguishable from unwired — not the first. The key is not the missing
+  part: it is per-INVARIANT, one lane adds it, and once added it covers every site. So
+  an unwired site does not even read as a zero. The row carries the other sites'
+  violations and looks populated, and the site with no lane is simply absent from a
+  table that appears to be reporting. That is why the list being an ENUMERATION is a
+  work-allocation fact and not only a rhetorical one. #5996's DoD
   clause — an unpaired active token with no progress evidence must not block the queue
   — needs the anchor and route lanes together and is closed by neither alone (#5946).
 
