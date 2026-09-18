@@ -163,9 +163,19 @@ Repair, in priority order:
    wiring. This document's own anchors were repaired that way in #4268: a
    comment label could outlive the reference it named, so the anchor set is now
    parsed from compiler-checked code and no comment is trusted.
-2. **Otherwise add a lexical wiring assertion to an existing test**, rather than
-   adding a test id — new ids pull in the inventory manifest and consume the
-   cap. `intake_delivery_sweep::tests` has the pattern to copy in
+2. **Otherwise add a lexical wiring assertion, in a test whose NAME states what
+   the assertion protects.** Put it on an existing test when that test's name
+   already makes the claim; open a new id when it does not. The rule is the name,
+   not the id count. "Never add a test id" would be a shape rule, and this
+   section's own thesis forbids shape rules: a reviewer applying the count
+   literally and one running the judgment diverge, exactly as they did on the
+   static form above. The tree agrees — every wiring guard that exists is a
+   standalone id whose name carries its claim, and the shape a counting rule
+   would prefer has no instances at all. The manifest cost is real and small:
+   `docs/pr-cap-check.md` sets the cap at 20 changed files and +800 added lines,
+   so one id spends 0.125% of the addition budget. Spend it when the name buys a
+   claim; do not spend it to restate one an existing test's name already makes.
+   `intake_delivery_sweep::tests` has the pattern to copy in
    `spawn_wiring_claims_process_latch_before_observed_task`. Copy the half that
    bears the load: it reads **the module that holds the production call site**,
    here through `include_str!("../framework_setup.rs")`, and asserts that call
@@ -966,24 +976,27 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   that can preempt it runs before the timer, "a thing that went WRONG must not be
   retired by a clock".
 - Honest gap; L1 must not paper over it. For the EXACT #5996 shape the
-  discriminator does not resolve today. `classify_reachability` short-circuits to
-  `Unknown(RowlessActiveTurn)` BEFORE it builds the receipt index and runs
-  `sweep_coverage`, so a rowless active turn can never obtain the delivery coverage
-  proving its answer landed — what the incident measured (`inflight_state_present
-  false`, `rowless_active_turn`, the answer delivered four minutes earlier). The
+  discriminator does not resolve today. `classify_reachability` no longer
+  short-circuits ahead of the evidence: the `Unknown(RowlessActiveTurn)` arm now runs
+  AFTER it builds the receipt index and runs `sweep_coverage`, and it carries what the
+  sweep saw — `incarnation_live_obligations`, `uncovered_ranges` and `unproven_ranges`
+  on `ReachabilityUnknownReason::RowlessActiveTurn`, plus the oldest held age. That
+  reorder is the repair an earlier draft of this bullet named as the way out, and it
+  did NOT close the gap; no lane may cite it as having done so. What fails is the
+  SCOPE of those numbers, not their absence: coverage that is not ISOLATED TO THE
+  CURRENT TURN cannot decide this shape, because a reading that shows framed
+  obligations while reporting no uncovered range is the same reading a live turn
+  produces when it has framed nothing yet. So a rowless active turn still cannot
+  obtain the delivery coverage proving its answer landed — what the incident measured
+  (`inflight_state_present false`, `rowless_active_turn`, the answer delivered four
+  minutes earlier). The
   tail term answers there only through
   `RelayHealthSnapshot::idle_witness_tail_is_not_waiting`'s `!bridge_inflight_present`
   arm, a structural `None`, not a measurement; the route's three-conjunct test collapses
   to that same term here too, so the gap is not the anchor axis alone. I20 does NOT
-  authorize releasing that anchor on today's operands; that shape becomes decidable only
-  with a receipt read ordered ahead of the short-circuit — follow-up, not this contract.
-  #6012 IS that follow-up, and its reordering makes this bullet's ordering clause stale;
-  #6012 updates this bullet in the same PR. Landing it does not by itself close the gap,
-  and no lane may read it as doing so: coverage that is not ISOLATED TO THE CURRENT TURN
-  cannot decide this shape, because a reading that shows framed obligations while
-  reporting no uncovered range is the same reading a live turn produces when it has framed
-  nothing yet. (Deliberately prose, not symbols: the counters that would carry this are
-  #6012's to name, and pinning one here before it lands buys a coordinate that rots.)
+  authorize releasing that anchor on today's operands, and ORDERING ALONE never will
+  — that repair has now been tried. The shape becomes decidable only with
+  a term that isolates the current turn, and no operand reachable from here supplies one.
   Obligations accumulate
   across turns — `ObligationExtinction::ReceiptCovered` has no producer, so
   `live_obligations` returns the INCARNATION's set, and `LedgerIncarnation` is keyed by
