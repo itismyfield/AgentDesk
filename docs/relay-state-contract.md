@@ -1038,10 +1038,12 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   `health::recovery::run_stall_watchdog_pass` drives it over every mailbox snapshot into
   the `Clear` arm behind `eligible_orphan_pending_token`, whose age-free
   `..._without_admission_grace` form runs only for the `StallWatchdog` source, not the
-  `ProbeAutoHeal` one this sweep uses — and that source reaches this action from no
-  production caller at this commit (`apply_watchdog_orphan_token_cleanup`'s only callers
-  sit in `health::recovery`'s `stall_watchdog_auto_heal_tests`, #4460 having retired the
-  force-clean branch that used to call it), so what follows about it is LATENT, not live.
+  `ProbeAutoHeal` one this sweep uses — and at this commit no call site outside
+  `#[cfg(test)]` reaches this action (`apply_watchdog_orphan_token_cleanup` is called
+  only from `health::recovery`'s `stall_watchdog_auto_heal_tests`, #4460 having retired
+  the force-clean branch that used to call it), so what follows about it is LATENT, not
+  live. That is a reachability observation about this arm, not the Task #32 acceptance
+  gate: nothing here is claiming completion credit for anything.
   Both forms are a ledger PRESENCE (`mailbox_has_cancel_token`) over absences, no witness
   among them — and the graced form adds an AGE term on top
   (`!orphan_pending_token_within_admission_grace` over `mailbox_turn_started_at_ms`),
