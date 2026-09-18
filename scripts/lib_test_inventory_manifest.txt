@@ -2690,11 +2690,14 @@ services::discord::health::provider_probe::tests::stalled_reconcile_keeps_the_in
 services::discord::health::provider_probe::tests::standby_live_and_finalizing_evidence_remains_visible_for_fail_closed_restart
 services::discord::health::provider_probe::tests::standby_role_only_ignores_gateway_disconnect_and_masks_no_other_axis
 services::discord::health::provider_probe::tests::unfinished_reconcile_is_promoted_to_stalled_after_the_threshold
+services::discord::health::reachability::composite::composite_tests::a_carried_over_incarnation_publishes_what_a_fully_covered_turn_publishes
 services::discord::health::reachability::composite::composite_tests::a_ledger_inside_its_ttl_is_not_expired
 services::discord::health::reachability::composite::composite_tests::a_live_executor_blocks_expiry_of_a_stale_ledger
 services::discord::health::reachability::composite::composite_tests::a_live_placeholder_or_rowless_active_turn_blocks_expiry
 services::discord::health::reachability::composite::composite_tests::a_live_transcript_is_never_expired_even_with_no_executor_and_a_cold_ledger
 services::discord::health::reachability::composite::composite_tests::a_resolved_but_not_alive_transcript_still_expires_with_no_executor
+services::discord::health::reachability::composite::composite_tests::a_rowless_active_turn_publishes_the_coverage_the_sweep_computed
+services::discord::health::reachability::composite::composite_tests::a_rowless_turn_carrying_coverage_still_grants_no_authority
 services::discord::health::reachability::composite::composite_tests::a_stale_high_frontier_does_not_retire_an_obligation_past_the_transcript_eof
 services::discord::health::reachability::composite::composite_tests::a_truncated_read_outranks_the_ttl_gate_even_when_every_expiry_conjunct_holds
 services::discord::health::reachability::composite::composite_tests::an_abandoned_ledger_past_its_ttl_expires_out_of_the_health_judgment
@@ -2724,6 +2727,7 @@ services::discord::health::reachability::composite::composite_tests::the_ledger_
 services::discord::health::reachability::composite::composite_tests::the_ledger_ttl_is_counted_in_the_observation_tasks_own_cadence
 services::discord::health::reachability::composite::composite_tests::the_switch_changes_authority_and_not_the_composed_value
 services::discord::health::reachability::composite::composite_tests::the_ttl_clock_is_the_ledger_files_modification_time_not_its_access_time
+services::discord::health::reachability::composite::composite_tests::the_unproven_count_is_an_incarnation_switch_not_a_per_range_property
 services::discord::health::reachability::composite::composite_tests::transcript_unresolved_no_longer_answers_for_five_branches
 services::discord::health::reachability::composite::composite_tests::unknown_never_composes_to_a_health_permitting_verdict
 services::discord::health::reachability::discovery::tests::a_directory_is_not_a_transcript

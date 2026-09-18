@@ -84,6 +84,10 @@ pub(in crate::services::discord) enum NotAliveObligationState {
 /// Why the obligation set could not be produced (4987 §4.1). #5071
 /// relay-tail S1 (I-5): `TranscriptUnresolved` means the resolution ladder
 /// and nothing else.
+///
+/// Equality now includes `RowlessActiveTurn`'s counts, so two rowless verdicts
+/// whose coverage differs are no longer `==`. Nothing dedupes on this today; a
+/// future alarm that does must compare the discriminant, not the whole reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum ReachabilityUnknownReason {
     /// Every rank of the 4987 §-1.3 resolution ladder failed to resolve an
@@ -101,7 +105,42 @@ pub(in crate::services::discord) enum ReachabilityUnknownReason {
     TranscriptCoordinateDivergence,
     /// The mailbox reports an active turn with no inflight row. 4987 §-1.4
     /// demotes this to an explanatory attribute — no verdict of its own.
-    RowlessActiveTurn,
+    ///
+    /// Carries what the coverage sweep saw (#5946 O1).
+    ///
+    /// **The scope is the INCARNATION, not the current turn, and these numbers
+    /// cannot isolate one turn from another.** `ObligationExtinction::ReceiptCovered`
+    /// has no producer, so a covered obligation is never subtracted from
+    /// [`super::ledger::ReachabilityLedger::live_obligations`] — the count falls
+    /// only when the incarnation is replaced, and `LedgerIncarnation` carries no
+    /// turn identifier. The receipt side cannot supply one either: the projection
+    /// key in [`crate::services::discord::outbound::receipt_index`] deliberately
+    /// omits `turn_nonce`.
+    ///
+    /// The consequence a consumer must not walk into: from the SECOND turn of an
+    /// incarnation onward, a live turn that has framed nothing yet publishes
+    /// `uncovered_ranges: 0` beside a non-zero `incarnation_live_obligations` —
+    /// byte-for-byte what a turn whose obligations are all covered publishes.
+    /// **Reading that as "this turn's answer landed" retires a turn that has not
+    /// answered**, which is the (b) failure this signal was added to expose. A
+    /// turn-scoped discriminator is NOT implemented; until one exists these are
+    /// telemetry and the reader fails closed.
+    ///
+    /// `permits_health` and the two authorization predicates are unchanged:
+    /// `Unknown` grants nothing whatever the payload says.
+    RowlessActiveTurn {
+        /// Obligations the ledger holds for this INCARNATION. The ledger's own
+        /// words are "observed and not yet subtracted", not "undelivered":
+        /// covered ones stay in the set.
+        incarnation_live_obligations: u32,
+        /// Of those, the ones no receipt and no frontier covers.
+        uncovered_ranges: u32,
+        /// Of those, the ones covered under a generation key with no additional
+        /// witness. An incarnation-wide switch, not a per-range property:
+        /// `sweep_coverage` is handed `ledger.incarnation.spawn_nonce.is_some()`,
+        /// so a nonce-less incarnation sends EVERY covered obligation here.
+        unproven_ranges: u32,
+    },
     /// The bounded per-tick read hit its cap; see
     /// [`super::tail::TAIL_READ_CAP_BYTES`].
     ReadTruncated,
@@ -237,7 +276,11 @@ mod tests {
                 since_secs: 5,
             },
             ReachabilityVerdict::Unknown {
-                reason: ReachabilityUnknownReason::RowlessActiveTurn,
+                reason: ReachabilityUnknownReason::RowlessActiveTurn {
+                    incarnation_live_obligations: 2,
+                    uncovered_ranges: 1,
+                    unproven_ranges: 0,
+                },
                 since_secs: 5,
             },
             ReachabilityVerdict::Unknown {
@@ -423,7 +466,9 @@ mod tests {
         match reason {
             ReachabilityUnknownReason::TranscriptUnresolved => 0,
             ReachabilityUnknownReason::TranscriptCoordinateDivergence => 1,
-            ReachabilityUnknownReason::RowlessActiveTurn => 2,
+            // The coverage payload is an observation, not an identity: every
+            // rowless verdict claims this one index whatever the sweep saw.
+            ReachabilityUnknownReason::RowlessActiveTurn { .. } => 2,
             ReachabilityUnknownReason::ReadTruncated => 3,
             ReachabilityUnknownReason::ReceiptStoreUnreadable => 4,
             ReachabilityUnknownReason::NeverObserved => 5,
@@ -448,7 +493,11 @@ mod tests {
         let every_reason = [
             ReachabilityUnknownReason::TranscriptUnresolved,
             ReachabilityUnknownReason::TranscriptCoordinateDivergence,
-            ReachabilityUnknownReason::RowlessActiveTurn,
+            ReachabilityUnknownReason::RowlessActiveTurn {
+                incarnation_live_obligations: 2,
+                uncovered_ranges: 1,
+                unproven_ranges: 0,
+            },
             ReachabilityUnknownReason::ReadTruncated,
             ReachabilityUnknownReason::ReceiptStoreUnreadable,
             ReachabilityUnknownReason::NeverObserved,

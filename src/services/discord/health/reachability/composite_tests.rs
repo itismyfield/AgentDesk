@@ -426,7 +426,14 @@ fn in_band_ladder() -> Vec<ReachabilityVerdict> {
             ReachabilityUnknownReason::TranscriptCoordinateDivergence,
             30,
         ),
-        ReachabilityVerdict::unknown(ReachabilityUnknownReason::RowlessActiveTurn, 30),
+        ReachabilityVerdict::unknown(
+            ReachabilityUnknownReason::RowlessActiveTurn {
+                incarnation_live_obligations: 2,
+                uncovered_ranges: 1,
+                unproven_ranges: 0,
+            },
+            30,
+        ),
         ReachabilityVerdict::unknown(ReachabilityUnknownReason::ReadTruncated, 30),
         ReachabilityVerdict::unknown(ReachabilityUnknownReason::ReceiptStoreUnreadable, 30),
         ReachabilityVerdict::unknown(ReachabilityUnknownReason::NeverObserved, 30),
@@ -498,7 +505,13 @@ fn unknown_never_composes_to_a_health_permitting_verdict() {
     let unknown_reasons = [
         ReachabilityUnknownReason::TranscriptUnresolved,
         ReachabilityUnknownReason::TranscriptCoordinateDivergence,
-        ReachabilityUnknownReason::RowlessActiveTurn,
+        // Carrying coverage must not make this one composable to GREEN: the
+        // whole point of #5946 O1 is that an observation is not an authority.
+        ReachabilityUnknownReason::RowlessActiveTurn {
+            incarnation_live_obligations: 2,
+            uncovered_ranges: 0,
+            unproven_ranges: 0,
+        },
         ReachabilityUnknownReason::ReadTruncated,
         ReachabilityUnknownReason::ReceiptStoreUnreadable,
         // #5071 relay-tail S1 (I-5): the four reasons split out of
@@ -1632,4 +1645,345 @@ fn a_truncated_read_outranks_the_ttl_gate_even_when_every_expiry_conjunct_holds(
         "a truncated read must outrank the TTL gate; got {verdict:?} — a fault was retired by a \
          clock"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #5946 O1 — a rowless active turn reports what the sweep saw
+// ---------------------------------------------------------------------------
+
+/// Ages every obligation below share: past `warn_bound`, short of `fail_bound`,
+/// so the rowless-free control lands on `Degraded` and names an age.
+const ROWLESS_OBLIGATION_AGE_SECS: u64 = 300;
+
+/// An incarnation with NO spawn nonce: receipt coverage under its generation
+/// key is not attributable to it, which is what `unproven_ranges` reports.
+fn unproven_incarnation() -> LedgerIncarnation {
+    LedgerIncarnation::new(
+        SESSION.to_string(),
+        GENERATION,
+        None,
+        TranscriptFileId { dev: 7, ino: 11 },
+    )
+}
+
+/// Drive the REAL entry point — `observe_relay_verdict` — against real files at
+/// the canonical paths, the way `snapshot.rs` calls it.
+///
+/// Every other rowless assertion in this file builds [`ReachabilityInputs`] by
+/// hand through [`Case`], which calls `classify_reachability` directly and
+/// therefore cannot notice if the production wiring stops forwarding the flag
+/// or stops locating the receipt record. This reads both off disk instead, so
+/// deleting `rowless_active_turn: probe.rowless_active_turn` or the
+/// `delivery_record_path(...)` read turns these tests red.
+fn observe_rowless_channel(
+    channel_id: u64,
+    obligations: Vec<LedgerObligation>,
+    incarnation: LedgerIncarnation,
+    confirmed_deliveries: Vec<ConfirmedDeliveryReceipt>,
+    rowless_active_turn: bool,
+) -> RelayVerdict {
+    let root = tempdir().expect("temp runtime root");
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+    let provider = provider();
+
+    let ledger_file = ledger_path(&provider, channel_id).expect("canonical ledger path");
+    std::fs::create_dir_all(ledger_file.parent().expect("ledger parent"))
+        .expect("create canonical ledger directory");
+    std::fs::write(
+        &ledger_file,
+        serde_json::to_string(&ledger_with(obligations, incarnation)).expect("serialize ledger"),
+    )
+    .expect("write ledger");
+
+    let record_file = delivery_record_path(&provider, channel_id).expect("canonical record path");
+    std::fs::create_dir_all(record_file.parent().expect("record parent"))
+        .expect("create canonical delivery record directory");
+    std::fs::write(
+        &record_file,
+        serde_json::to_string(&DeliveryRecord {
+            confirmed_deliveries,
+            ..DeliveryRecord::default()
+        })
+        .expect("serialize record"),
+    )
+    .expect("write delivery record");
+
+    // Longer than the ledger's `last_observed_len`, which is 4987 §-1.4's
+    // growth witness — without it the transcript is not alive and a different
+    // arm answers.
+    let transcript = root.path().join("transcript.jsonl");
+    std::fs::write(&transcript, vec![b'x'; 4_800]).expect("write transcript");
+
+    observe_relay_verdict(RelayVerdictProbe {
+        provider: Some(&provider),
+        channel_id,
+        row_output_path: None,
+        registry_output_path: Some(transcript.to_str().expect("utf-8 transcript path")),
+        pane_idle_confirmed: false,
+        rowless_active_turn,
+        placeholder_present: false,
+        // Present: conjunct (1) of the #5942 TTL gate fails, so nothing below
+        // is answered by an expiry instead.
+        executor: ExecutorWitness::Present,
+        now_epoch_ms: NOW_MS,
+        process_started_at_epoch_ms: PROCESS_STARTED_MS,
+    })
+}
+
+/// Two obligations, the first covered by a confirmed receipt and the second not.
+fn one_covered_one_uncovered() -> Vec<LedgerObligation> {
+    vec![
+        obligation(4_000, 4_400, ROWLESS_OBLIGATION_AGE_SECS),
+        obligation(4_400, 4_800, ROWLESS_OBLIGATION_AGE_SECS),
+    ]
+}
+
+/// #5946 O1: the short-circuit now runs AFTER the sweep, so the verdict carries
+/// the coverage the channel actually has.
+///
+/// Before this, `rowless_active_turn` returned above the receipt index and
+/// `sweep_coverage`, so a rowless turn could never produce the evidence that
+/// would say its prose was already delivered — `uncovered_ranges` was simply
+/// absent from the published object. The 2026-09-18 adk-dash-cc capture is the
+/// population: 12 minutes of `unknown / rowless_active_turn` with a reply that
+/// had been delivered four minutes earlier and no field able to say so.
+///
+/// The control at the end is what makes this an ordering test rather than a
+/// spelling test: the same files with `rowless_active_turn: false` must still
+/// produce the ordinary `Degraded`, so moving the guard cannot be mistaken for
+/// changing the ladder.
+#[test]
+fn a_rowless_active_turn_publishes_the_coverage_the_sweep_computed() {
+    let verdict = observe_rowless_channel(
+        5_946_000_000_000_000_001,
+        one_covered_one_uncovered(),
+        proven_incarnation(),
+        vec![receipt((4_000, 4_400), GENERATION)],
+        true,
+    );
+
+    assert_eq!(
+        verdict.in_band().unknown_reason(),
+        Some(ReachabilityUnknownReason::RowlessActiveTurn {
+            incarnation_live_obligations: 2,
+            uncovered_ranges: 1,
+            unproven_ranges: 0,
+        }),
+        "the rowless arm must report the sweep it now runs after; got {:?} — a coverage-free \
+         verdict means the guard is back above `sweep_coverage`",
+        verdict.in_band()
+    );
+
+    let report = RelayVerdictReport::of(&verdict, true);
+    assert_eq!(report.verdict, "unknown");
+    assert_eq!(report.reason, Some("rowless_active_turn"));
+    assert_eq!(
+        (
+            report.uncovered_ranges,
+            report.incarnation_live_obligations,
+            report.unproven_ranges
+        ),
+        (Some(1), Some(2), Some(0)),
+        "4987 §4.4's published object must carry the coverage, not drop it"
+    );
+    assert_eq!(
+        report.oldest_unsatisfied_age_secs,
+        Some(ROWLESS_OBLIGATION_AGE_SECS),
+        "a held obligation has an age and the report must publish it"
+    );
+
+    // The ladder is unchanged: only the rowless flag differs.
+    let control = observe_rowless_channel(
+        5_946_000_000_000_000_002,
+        one_covered_one_uncovered(),
+        proven_incarnation(),
+        vec![receipt((4_000, 4_400), GENERATION)],
+        false,
+    );
+    assert_eq!(
+        *control.in_band(),
+        ReachabilityVerdict::Degraded {
+            oldest_unsatisfied_age_secs: ROWLESS_OBLIGATION_AGE_SECS,
+            uncovered_ranges: 1,
+        },
+        "the same channel without the rowless flag must still take the obligation ladder; got \
+         {:?} — moving the guard changed a verdict it must not touch",
+        control.in_band()
+    );
+}
+
+/// The limit this payload does NOT overcome, pinned so nobody builds a repair
+/// gate on top of it (#5946 r2 P0).
+///
+/// `ObligationExtinction::ReceiptCovered` has no producer, so a covered
+/// obligation is never subtracted from `live_obligations()`. From the second
+/// turn of an incarnation onward, a rowless turn that has framed nothing yet
+/// therefore publishes exactly what a turn whose obligations are all covered
+/// publishes: `uncovered_ranges: 0`, `unproven_ranges: 0`, a non-zero live
+/// count, and no age. The two are the SAME ledger, so no operand reachable from
+/// here tells them apart — `LedgerObligation` carries no turn identifier and the
+/// receipt projection key deliberately omits `turn_nonce`.
+///
+/// Reading `uncovered_ranges == 0` as "this turn's answer landed" would retire
+/// a turn that has not answered — the (b) failure this signal exists to expose.
+/// When a turn-scoped discriminator lands, this test should fail and be
+/// rewritten; that is the intent.
+#[test]
+fn a_carried_over_incarnation_publishes_what_a_fully_covered_turn_publishes() {
+    let carried_over = observe_rowless_channel(
+        5_946_000_000_000_000_003,
+        one_covered_one_uncovered(),
+        proven_incarnation(),
+        vec![
+            receipt((4_000, 4_400), GENERATION),
+            receipt((4_400, 4_800), GENERATION),
+        ],
+        true,
+    );
+    let report = RelayVerdictReport::of(&carried_over, true);
+
+    assert_eq!(
+        (report.uncovered_ranges, report.unproven_ranges),
+        (Some(0), Some(0)),
+        "two obligations already covered sweep to nothing held, whether or not the CURRENT turn \
+         has framed anything"
+    );
+    assert_eq!(
+        report.incarnation_live_obligations,
+        Some(2),
+        "covered obligations stay in the live set, so the count is the incarnation's, not the \
+         turn's"
+    );
+    assert_eq!(
+        report.oldest_unsatisfied_age_secs, None,
+        "nothing is held, so there is no oldest unsatisfied obligation to publish"
+    );
+
+    // A first turn that has framed nothing differs only in the live count, and
+    // that difference says "earlier turns existed" — never "this turn answered".
+    let first_turn = observe_rowless_channel(
+        5_946_000_000_000_000_004,
+        Vec::new(),
+        proven_incarnation(),
+        Vec::new(),
+        true,
+    );
+    let first_report = RelayVerdictReport::of(&first_turn, true);
+    assert_eq!(
+        (
+            first_report.uncovered_ranges,
+            first_report.unproven_ranges,
+            first_report.oldest_unsatisfied_age_secs
+        ),
+        (Some(0), Some(0), None),
+        "an empty ledger sweeps to the same zeros; only the live count moves"
+    );
+    assert_eq!(first_report.incarnation_live_obligations, Some(0));
+}
+
+/// `unproven_ranges` is an incarnation-wide switch, not a per-range property
+/// (#5946 r2 P2-1).
+///
+/// `sweep_coverage` is handed `ledger.incarnation.spawn_nonce.is_some()`, so the
+/// SAME receipts land in `unproven` or in covered-and-proven depending only on
+/// whether the incarnation carries a nonce. A nonce-less incarnation is reachable
+/// in production, and there every covered obligation is unproven — which makes
+/// `live - uncovered - unproven == 0` hold identically, so asserting that alone
+/// proves nothing. The contrast below is what carries the claim.
+#[test]
+fn the_unproven_count_is_an_incarnation_switch_not_a_per_range_property() {
+    let covered = || vec![receipt((4_000, 4_400), GENERATION)];
+
+    let proven = observe_rowless_channel(
+        5_946_000_000_000_000_005,
+        one_covered_one_uncovered(),
+        proven_incarnation(),
+        covered(),
+        true,
+    );
+    assert_eq!(
+        proven.in_band().unknown_reason(),
+        Some(ReachabilityUnknownReason::RowlessActiveTurn {
+            incarnation_live_obligations: 2,
+            uncovered_ranges: 1,
+            unproven_ranges: 0,
+        }),
+        "with a spawn nonce the covered obligation is proven and retirable; got {:?}",
+        proven.in_band()
+    );
+
+    let unproven = observe_rowless_channel(
+        5_946_000_000_000_000_006,
+        one_covered_one_uncovered(),
+        unproven_incarnation(),
+        covered(),
+        true,
+    );
+    assert_eq!(
+        unproven.in_band().unknown_reason(),
+        Some(ReachabilityUnknownReason::RowlessActiveTurn {
+            incarnation_live_obligations: 2,
+            uncovered_ranges: 1,
+            unproven_ranges: 1,
+        }),
+        "the same receipt under a nonce-less incarnation is neither retirable nor a gap; got {:?}",
+        unproven.in_band()
+    );
+
+    let proven_report = RelayVerdictReport::of(&proven, true);
+    let unproven_report = RelayVerdictReport::of(&unproven, true);
+    assert_ne!(
+        proven_report.unproven_ranges, unproven_report.unproven_ranges,
+        "identical receipts must publish different unproven counts, or the switch is not wired"
+    );
+}
+
+/// The coverage is an observation, not a licence. #5946 O1 lands the publication
+/// only; authorizing retirement on it belongs to #5996's repair gate, and until
+/// that contract exists a rowless verdict must grant exactly what it granted
+/// before: no health, no redelivery, no destruction.
+#[test]
+fn a_rowless_turn_carrying_coverage_still_grants_no_authority() {
+    for (obligations, confirmed) in [
+        (Vec::new(), Vec::new()),
+        (
+            one_covered_one_uncovered(),
+            vec![
+                receipt((4_000, 4_400), GENERATION),
+                receipt((4_400, 4_800), GENERATION),
+            ],
+        ),
+        (
+            one_covered_one_uncovered(),
+            vec![receipt((4_000, 4_400), GENERATION)],
+        ),
+    ] {
+        let verdict = observe_rowless_channel(
+            5_946_000_000_000_000_007,
+            obligations,
+            proven_incarnation(),
+            confirmed,
+            true,
+        );
+        assert!(
+            !verdict.permits_health(),
+            "an unobservable relay is not a healthy one whatever its coverage says; {:?}",
+            verdict.in_band()
+        );
+        assert!(
+            !verdict.in_band().authorizes_redelivery(),
+            "4987 S7 stays NO-GO; {:?}",
+            verdict.in_band()
+        );
+        assert!(
+            !verdict.authorizes_destructive_action(),
+            "4987 §7.1/I15; {:?}",
+            verdict.in_band()
+        );
+        assert!(
+            !verdict.abstains_from_health_polarity(),
+            "only #5942's `Expired` withdraws from the polarity; {:?}",
+            verdict.in_band()
+        );
+    }
 }
