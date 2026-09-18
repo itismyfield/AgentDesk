@@ -403,56 +403,96 @@ mod tests {
         }
     }
 
-    /// #5996 S3b: `mailbox_agent_turn_status` is four-valued, and "idle" is the
-    /// one value the wedged channel never carries — it reads "active" while the
-    /// mailbox holds a cancel token, "residual_held" once a turn has finished
-    /// without releasing, and "unknown" here on a dcserver predating the field.
-    /// Requiring "idle" therefore declined all three shape arms on the anchor's
-    /// existence rather than on any evidence.
+    /// #5996 S3b, and what it does NOT buy.
+    ///
+    /// Every fixture here is one a dcserver can actually publish, which
+    /// constrains them: `health/snapshot.rs` derives `has_cancel_token` and
+    /// `agent_turn_status` from one binding, and `residual_occupancy` reaches
+    /// `matches_observed_owner`, which requires the token. So "active",
+    /// "residual" and "residual_held" each imply a held token, and "idle" is the
+    /// only value that does not. A fixture pairing a non-idle status with an
+    /// absent token would be a shape no server emits, and an assertion on it
+    /// would restate the predicate instead of pinning behaviour.
+    ///
+    /// The consequence is the point. Holding the token keeps the first arm from
+    /// returning only when `live_work_present` is true, so on a current server
+    /// these findings are REPORTED, not posted: the repair set grows by nothing
+    /// and doctor stops being silent. The one place a candidate is really
+    /// carried to the route is a server old enough not to publish the field at
+    /// all, where the retired precondition compared its "unknown" default
+    /// against "idle".
     #[test]
-    fn an_active_agent_turn_status_no_longer_suppresses_the_three_shape_findings() {
-        fn fired(status: &str, mutate: impl FnOnce(&mut Value)) -> &'static str {
+    fn a_non_idle_agent_turn_status_no_longer_suppresses_the_shape_findings() {
+        fn verdict(mutate: impl FnOnce(&mut Value)) -> (&'static str, bool) {
             let mut snapshot = mailbox_with_provenance(e2_provenance());
-            snapshot["agent_turn_status"] = json!(status);
             mutate(&mut snapshot);
-            classify_mailbox_snapshot(&snapshot)
-                .unwrap_or_else(|| panic!("no finding fired while agent_turn_status is {status:?}"))
-                .id
+            let finding =
+                classify_mailbox_snapshot(&snapshot).expect("a named finding, not silence");
+            (finding.id, finding.live_work_present)
         }
 
+        // Token held (so the status is reachable), live evidence elsewhere.
+        for status in ["active", "residual_held"] {
+            assert_eq!(
+                verdict(|snapshot| {
+                    snapshot["agent_turn_status"] = json!(status);
+                    snapshot["process_present"] = json!(true);
+                    snapshot["inflight_state_present"] = json!(true);
+                }),
+                ("stale_watcher_inflight_without_active_turn", true),
+                "{status} must reach the second arm and report as live work"
+            );
+        }
+
+        // The queue is what keeps this out of the arm above; the tmux half of
+        // the reported shape. Also report-only.
         assert_eq!(
-            fired("active", |snapshot| {
-                snapshot["has_cancel_token"] = json!(false);
-                snapshot["inflight_state_present"] = json!(true);
-            }),
-            "stale_watcher_inflight_without_active_turn"
-        );
-        assert_eq!(
-            fired("unknown", |snapshot| {
-                snapshot["has_cancel_token"] = json!(false);
-                snapshot["session_record_present"] = json!(true);
-                snapshot["session_status"] = json!("working");
-            }),
-            "tmux_missing_with_session_record"
-        );
-        assert_eq!(
-            // The queue is what keeps this out of the two arms above, so this is
-            // the tmux-present half of the reported shape.
-            fired("active", |snapshot| {
+            verdict(|snapshot| {
+                snapshot["agent_turn_status"] = json!("active");
                 snapshot["queue_depth"] = json!(3);
                 snapshot["tmux_present"] = json!(true);
                 snapshot["inflight_state_present"] = json!(true);
             }),
-            "completed_output_not_relayed"
+            ("completed_output_not_relayed", true)
         );
+
+        // A dcserver predating the field publishes no `agent_turn_status` key.
+        // This is the only arm whose candidate actually reaches the route, so
+        // `live_work_present` is false here.
         assert_eq!(
-            // A finished turn that never released is not "idle" either.
-            fired("residual_held", |snapshot| {
+            verdict(|snapshot| {
+                snapshot
+                    .as_object_mut()
+                    .expect("object")
+                    .remove("agent_turn_status");
                 snapshot["has_cancel_token"] = json!(false);
-                snapshot["inflight_state_present"] = json!(true);
+                snapshot["session_record_present"] = json!(true);
+                snapshot["session_status"] = json!("working");
             }),
-            "stale_watcher_inflight_without_active_turn"
+            ("tmux_missing_with_session_record", false)
         );
+    }
+
+    /// Pins the production call site these predicates hang from:
+    /// `classify_mailbox_findings` is what `apply_stale_mailbox_fixes` and
+    /// `check_mailbox_consistency` call, and it reaches the per-mailbox verdict
+    /// through one `filter_map`. Deleting that reaches this test.
+    ///
+    /// It does not reach the two call sites above it, which need a live
+    /// `HealthSnapshot` and an HTTP client; that wiring predates this change and
+    /// stays unpinned.
+    #[test]
+    fn classify_mailbox_findings_carries_the_per_mailbox_verdict() {
+        let mut wedged = mailbox_with_provenance(e2_provenance());
+        wedged["queue_depth"] = json!(3);
+        let body = json!({ "mailboxes": [wedged], "global_active": 0 });
+
+        let ids = classify_mailbox_findings(&body)
+            .iter()
+            .map(|finding| finding.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["mailbox_busy_without_active_turn"]);
     }
 
     /// The one prohibition on this slice. The CLI identifies candidates; the
