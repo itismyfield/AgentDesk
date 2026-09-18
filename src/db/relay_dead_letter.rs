@@ -42,14 +42,8 @@ pub(crate) const KIND_QUEUE_OVERFLOW: &str = "queue_overflow";
 /// writer).
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) const KIND_READOPT_RELAY_STUCK: &str = "readopt_relay_stuck";
-/// #5941: a terminal frame ended with NO delivery owner — the session-bound sink did
-/// not deliver it and the watcher's soft-terminal authority was denied — so the body
-/// was dropped and the frontier stayed put, leaving the channel with a stranded
-/// "still working" placeholder. Recording the body here makes that loss recoverable
-/// instead of traceless; the pre-#5941 path left only a WARN and a counter no alert
-/// table read. Same platform story as [`KIND_READOPT_RELAY_STUCK`]: the sole writer
-/// (`tmux_watcher::orphan_terminal_frame::observe_orphan_terminal_frame`) is
-/// `#[cfg(unix)]`, so a Windows build sees the constant unused.
+/// Terminal frame body that ended with no delivery owner (sink did not deliver,
+/// soft-terminal authority denied). Sole writer is `#[cfg(unix)]`.
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) const KIND_TERMINAL_NO_DELIVERY_OWNER: &str = "terminal_no_delivery_owner";
 
@@ -121,12 +115,8 @@ pub(crate) fn record_detached(
     record_detached_reporting(pool, record, |_| {})
 }
 
-/// [`record_detached`] plus the one fact a caller cannot otherwise learn: whether
-/// the row actually landed. `on_recorded(false)` runs synchronously when no pool
-/// is configured and from inside the spawned task when the INSERT failed, so a
-/// caller whose invariant claims "the body is recoverable" decides it on the
-/// WRITE, not on the mere presence of a pool (#5941 r1). A process death between
-/// the spawn and the INSERT stays uncovered (`relay-state-contract.md` §I17).
+/// [`record_detached`] that also reports whether the row landed: `on_recorded(false)`
+/// when there is no pool or the INSERT fails, `on_recorded(true)` after a successful write.
 pub(crate) fn record_detached_reporting(
     pool: Option<&PgPool>,
     record: RelayDeadLetterRecord,
