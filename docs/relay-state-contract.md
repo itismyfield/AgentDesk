@@ -167,11 +167,17 @@ Repair, in priority order:
    adding a test id — new ids pull in the inventory manifest and consume the
    cap. `intake_delivery_sweep::tests` has the pattern to copy in
    `spawn_wiring_claims_process_latch_before_observed_task`. Copy the half that
-   bears the load: it reads the PARENT module's source through
-   `include_str!("../framework_setup.rs")` and asserts that the production call
-   site appears exactly once. Its other half is an ordering guard over its own
-   module's source; that half pins no production entrypoint, and a guard copied
-   from it alone leaves exactly the nominal coverage this gate rejects.
+   bears the load: it reads **the module that holds the production call site**,
+   here through `include_str!("../framework_setup.rs")`, and asserts that call
+   site appears exactly once. Identify that file by what it CONTAINS, never by
+   how it is related to the test — the relation is an accident of the example.
+   Here `framework_setup` is a sibling of the module under test; elsewhere the
+   wiring may sit in a parent or further away. "Read the parent module" is
+   specifically the wrong generalization, because the parent of
+   `intake_delivery_sweep::tests` is `intake_delivery_sweep` itself, which is
+   the source read by this test's OTHER half — an ordering guard that pins no
+   production entrypoint. A guard copied from that half alone leaves exactly
+   the nominal coverage this gate rejects.
 
 A lexical guard is the fallback, not the goal: it pins that the call site
 *exists*, not that the call is *meaningfully wired*. The exemplar says so in its
