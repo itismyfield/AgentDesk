@@ -679,14 +679,20 @@ Numbered I17 for the same reason I16 is not I13: `docs/design/4987-relay-reachab
   two threshold-1 rows — `relay_terminal_authority_denied` (the loss itself,
   whose counter had a producer since #5175 and no consumer) and
   `terminal_frame_without_owner_or_record` (the loss that left no record
-  either). The DLQ row has no redelivery consumer yet; recovery is
-  operator-driven. THAT CLAUSE IS TRUE ONLY UNTIL #6004 LANDS — the redelivery consumer
-  it adds is exactly the thing whose absence this sentence asserts, so #6004 updates it
-  in the same PR. Verified at this commit: `relay_dead_letter` exposes `insert`,
-  `prune_expired`, `record_detached` and `record_detached_reporting`; its only non-test
-  statements are an `INSERT` and a retention `DELETE`, and the table has no `SELECT`
-  outside `#[cfg(test)]` at all —
-  nothing reads a row back, which is what "no redelivery consumer" means here.
+  either). The DLQ row has no redelivery consumer, and NO operator path back
+  either — nothing here may be read as promising one, because no such surface
+  exists. Verified at `5f10fd4291`: `relay_dead_letter` exposes `insert`,
+  `prune_expired`, `record_detached`, `record_detached_reporting`,
+  `claim_pending_redeliveries` and `settle_redelivery`. The last two landed as
+  accessors ahead of any consumer and have NO caller anywhere, in tests or out —
+  the only occurrences of either name in the tree are its own definition and one
+  doc comment. So although the module now holds a claiming
+  `SELECT ... FOR UPDATE SKIP LOCKED` and a settling `UPDATE`, nothing at this
+  commit executes either one.
+  `redelivery_state` appears in no file but that module — no CLI, no script, no
+  operator surface. So a row written and never claimed has nowhere to go, which
+  is what "no redelivery consumer" means here. This records the state of this
+  commit and claims nothing about a later one.
 - Violation surface: the record is fire-and-forget by construction
   (`relay_dead_letter::record_detached_reporting` never blocks the watcher loop),
   so the invariant is decided by the WRITE, not by the presence of a pool —
@@ -1169,8 +1175,10 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   such grade, which is why the derivation belongs at the source rather than at either
   struct's boundary.
   Publishing the attribution grade is L2's FIRST task, ahead of any gate it wires that
-  reads this term. THIS SENTENCE GOES STALE THE MOMENT L2 LANDS IT: L2 returns this bullet
-  to one exception in the same PR, or the contract starts lying about its own surface.
+  reads this term. A lane that publishes that grade owns correcting this bullet in the
+  same change, or the contract starts lying about its own surface — an obligation this
+  document cannot enforce on itself, which is why #6025 tracks the pattern instead of
+  this sentence predicting its own repair.
   Duplicate relays after a retirement stay I18's and I19's.
 - It also puts nothing in conflict with the pinned "normal", and no lane may weaken
   that to land a repair. `relay_recovery::tests::unpaired_active_token_is_observe_only`
