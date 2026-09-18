@@ -150,6 +150,102 @@ pub(crate) fn record_detached_reporting(
     }))
 }
 
+/// Settled `redelivery_state` values (#5941 Step B, migration 0120). A row starts
+/// `'pending'`; [`claim_pending_redeliveries`] moves it to `'claimed'` exactly
+/// once, and only a settle leaves that state. A claim lost to a crash therefore
+/// stays `'claimed'` until an operator or #6009 recovers it.
+///
+/// The body was posted to the channel.
+pub(crate) const REDELIVERY_DELIVERED: &str = "delivered";
+/// Every byte of this row was already covered by a sibling row in the same plan.
+pub(crate) const REDELIVERY_SUPERSEDED: &str = "superseded";
+/// A witness answered that the body is already in the channel. Final.
+pub(crate) const REDELIVERY_DECLINED: &str = "declined";
+/// Back to the start: no witness could be READ, or the POST errored. Neither is
+/// a verdict about the body, so a later claim picks the row up again instead of
+/// retiring it unread.
+pub(crate) const REDELIVERY_PENDING: &str = "pending";
+
+/// One row claimed for redelivery. `id` settles it; the rest reconstruct the body.
+#[derive(Clone, Debug)]
+pub(crate) struct ClaimedDeadLetter {
+    pub id: i64,
+    pub channel_id: String,
+    pub message_id: Option<String>,
+    pub content: String,
+    pub reason: String,
+}
+
+/// Atomically claim up to `limit` pending rows of `kind` whose age is inside
+/// `[min_age_secs, max_age_secs]`. `FOR UPDATE SKIP LOCKED` makes the claim
+/// exactly-once across concurrent sweeps and cluster nodes; the returned rows
+/// are already `CLAIMED`, so a second call cannot hand them out again.
+///
+/// `min_age_secs` leaves the normal delivery path time to settle the turn;
+/// `max_age_secs` bounds the window to one in which the consumer's
+/// already-delivered witnesses can still answer.
+pub(crate) async fn claim_pending_redeliveries(
+    pool: &PgPool,
+    kind: &str,
+    min_age_secs: i64,
+    max_age_secs: i64,
+    limit: i64,
+) -> Result<Vec<ClaimedDeadLetter>, sqlx::Error> {
+    let rows: Vec<(i64, String, Option<String>, String, String)> = sqlx::query_as(
+        "UPDATE relay_dead_letter
+            SET redelivery_state = 'claimed'
+          WHERE id IN (
+                SELECT id
+                  FROM relay_dead_letter
+                 WHERE kind = $1
+                   AND redelivery_state = 'pending'
+                   AND created_at <= NOW() - ($2::BIGINT * INTERVAL '1 second')
+                   AND created_at >= NOW() - ($3::BIGINT * INTERVAL '1 second')
+                 ORDER BY id
+                 LIMIT $4
+                 FOR UPDATE SKIP LOCKED
+          )
+        RETURNING id, channel_id, message_id, content, reason",
+    )
+    .bind(kind)
+    .bind(min_age_secs)
+    .bind(max_age_secs)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, channel_id, message_id, content, reason)| ClaimedDeadLetter {
+                id,
+                channel_id,
+                message_id,
+                content,
+                reason,
+            },
+        )
+        .collect())
+}
+
+/// Settle a claimed row into a terminal `redelivery_state`. Guarded on the
+/// claim, so a repeated settle writes nothing and returns 0.
+pub(crate) async fn settle_redelivery(
+    pool: &PgPool,
+    id: i64,
+    state: &str,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE relay_dead_letter
+            SET redelivery_state = $2, redelivered_at = NOW()
+          WHERE id = $1 AND redelivery_state = 'claimed'",
+    )
+    .bind(id)
+    .bind(state)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
