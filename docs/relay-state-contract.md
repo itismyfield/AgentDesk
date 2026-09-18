@@ -163,9 +163,17 @@ Repair, in priority order:
    wiring. This document's own anchors were repaired that way in #4268: a
    comment label could outlive the reference it named, so the anchor set is now
    parsed from compiler-checked code and no comment is trusted.
-2. **Otherwise add a lexical wiring assertion to an existing test**, rather than
-   adding a test id — new ids pull in the inventory manifest and consume the
-   cap. `intake_delivery_sweep::tests` has the pattern to copy in
+2. **Otherwise add a lexical wiring assertion, in a test whose NAME states what
+   the assertion protects.** Put it on an existing test when that test's name
+   already makes the claim; open a new id when it does not. The rule is the name,
+   not the id count. "Never add a test id" would be a shape rule, and this
+   section's own thesis forbids shape rules: a reviewer applying the count
+   literally and one running the judgment diverge, exactly as they did on the
+   static form above. The manifest cost is real and small:
+   `docs/pr-cap-check.md` sets the cap at 20 changed files and +800 added lines,
+   so one id spends 0.125% of the addition budget. Spend it when the name buys a
+   claim; do not spend it to restate one an existing test's name already makes.
+   `intake_delivery_sweep::tests` has the pattern to copy in
    `spawn_wiring_claims_process_latch_before_observed_task`. Copy the half that
    bears the load: it reads **the module that holds the production call site**,
    here through `include_str!("../framework_setup.rs")`, and asserts that call
@@ -669,14 +677,22 @@ Numbered I17 for the same reason I16 is not I13: `docs/design/4987-relay-reachab
   two threshold-1 rows — `relay_terminal_authority_denied` (the loss itself,
   whose counter had a producer since #5175 and no consumer) and
   `terminal_frame_without_owner_or_record` (the loss that left no record
-  either). The DLQ row has no redelivery consumer yet; recovery is
-  operator-driven. THAT CLAUSE IS TRUE ONLY UNTIL #6004 LANDS — the redelivery consumer
-  it adds is exactly the thing whose absence this sentence asserts, so #6004 updates it
-  in the same PR. Verified at this commit: `relay_dead_letter` exposes `insert`,
-  `prune_expired`, `record_detached` and `record_detached_reporting`; its only non-test
-  statements are an `INSERT` and a retention `DELETE`, and the table has no `SELECT`
-  outside `#[cfg(test)]` at all —
-  nothing reads a row back, which is what "no redelivery consumer" means here.
+  either). The DLQ row has no redelivery consumer, and NO operator path back
+  either — nothing here may be read as promising one, because no such surface
+  exists. Verified at `5f10fd4291`: `relay_dead_letter` exposes `insert`,
+  `prune_expired`, `record_detached`, `record_detached_reporting`,
+  `claim_pending_redeliveries` and `settle_redelivery`. The last two landed as
+  accessors ahead of any consumer and have NO caller anywhere, in tests or out —
+  the only occurrences of either name in the tree are its own definition and one
+  doc comment. So although the module now holds a claiming
+  `SELECT ... FOR UPDATE SKIP LOCKED` and a settling `UPDATE`, nothing at this
+  commit executes either one.
+  Outside that module `redelivery_state` appears only in the migration that
+  declares the column, `0120_relay_dead_letter_redelivery.sql`, which adds it and
+  indexes it without reading a row back — no CLI, no operator surface anywhere.
+  So a row written and never claimed has nowhere to go, which
+  is what "no redelivery consumer" means here. This records the state of this
+  commit and claims nothing about a later one.
 - Violation surface: the record is fire-and-forget by construction
   (`relay_dead_letter::record_detached_reporting` never blocks the watcher loop),
   so the invariant is decided by the WRITE, not by the presence of a pool —
@@ -961,29 +977,45 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   `recovery_known_ids::live_pending_dispatch_message_ids` — call it the COST ASYMMETRY: a
   false recover costs a duplicate, a false suppression costs a message.
   A wrongly-preserved (a) wedge is
-  cleared by the next poll that measures; a wrongly-retired (b) turn is gone.
+  recoverable and a wrongly-retired (b) turn is gone — but do not read the first
+  half as "the next poll clears it". WHO CLEARS AN (a) WEDGE IS SHAPE-SPECIFIC and
+  must be checked per shape, never assumed. For the rowless synthetic shape no
+  measuring poll clears it at all: the bullet below records that the discriminator
+  does not resolve for that shape. What clears it there is
+  `turn_finalizer::reconcile::reconcile_guarded_finish_residues`, which selects on
+  EPISODE IDENTITY and gates release on terminal evidence through
+  `zombie_foreground_release::terminal_evidence_allows_mailbox_release`, whose
+  other operands are an inflight-state file check and TUI idleness — never the
+  coverage a measuring poll would supply. And it visits only a channel that
+  recorded a residue, so a producer that leaves this shape without recording one
+  has no cleaner, and the wedge persists indefinitely (#6029). The asymmetry
+  holds, because a persisting wedge still costs less than a lost message, but (a)'s
+  cost is larger than "cleared by the next poll" implies.
   `classify_reachability` takes the same rule from the other side — every fault arm
   that can preempt it runs before the timer, "a thing that went WRONG must not be
   retired by a clock".
 - Honest gap; L1 must not paper over it. For the EXACT #5996 shape the
-  discriminator does not resolve today. `classify_reachability` short-circuits to
-  `Unknown(RowlessActiveTurn)` BEFORE it builds the receipt index and runs
-  `sweep_coverage`, so a rowless active turn can never obtain the delivery coverage
-  proving its answer landed — what the incident measured (`inflight_state_present
-  false`, `rowless_active_turn`, the answer delivered four minutes earlier). The
+  discriminator does not resolve today. `classify_reachability` no longer
+  short-circuits ahead of the evidence: the `Unknown(RowlessActiveTurn)` arm now runs
+  AFTER it builds the receipt index and runs `sweep_coverage`, and it carries what the
+  sweep saw — `incarnation_live_obligations`, `uncovered_ranges` and `unproven_ranges`
+  on `ReachabilityUnknownReason::RowlessActiveTurn`, plus the oldest held age. That
+  reorder is the repair an earlier draft of this bullet named as the way out, and it
+  did NOT close the gap; no lane may cite it as having done so. What fails is the
+  SCOPE of those numbers, not their absence: coverage that is not ISOLATED TO THE
+  CURRENT TURN cannot decide this shape, because a reading that shows framed
+  obligations while reporting no uncovered range is the same reading a live turn
+  produces when it has framed nothing yet. So a rowless active turn still cannot
+  obtain the delivery coverage proving its answer landed — what the incident measured
+  (`inflight_state_present false`, `rowless_active_turn`, the answer delivered four
+  minutes earlier). The
   tail term answers there only through
   `RelayHealthSnapshot::idle_witness_tail_is_not_waiting`'s `!bridge_inflight_present`
   arm, a structural `None`, not a measurement; the route's three-conjunct test collapses
   to that same term here too, so the gap is not the anchor axis alone. I20 does NOT
-  authorize releasing that anchor on today's operands; that shape becomes decidable only
-  with a receipt read ordered ahead of the short-circuit — follow-up, not this contract.
-  #6012 IS that follow-up, and its reordering makes this bullet's ordering clause stale;
-  #6012 updates this bullet in the same PR. Landing it does not by itself close the gap,
-  and no lane may read it as doing so: coverage that is not ISOLATED TO THE CURRENT TURN
-  cannot decide this shape, because a reading that shows framed obligations while
-  reporting no uncovered range is the same reading a live turn produces when it has framed
-  nothing yet. (Deliberately prose, not symbols: the counters that would carry this are
-  #6012's to name, and pinning one here before it lands buys a coordinate that rots.)
+  authorize releasing that anchor on today's operands, and ORDERING ALONE never will
+  — that repair has now been tried. The shape becomes decidable only with
+  a term that isolates the current turn, and no operand reachable from here supplies one.
   Obligations accumulate
   across turns — `ObligationExtinction::ReceiptCovered` has no producer, so
   `live_obligations` returns the INCARNATION's set, and `LedgerIncarnation` is keyed by
@@ -1038,10 +1070,12 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   `health::recovery::run_stall_watchdog_pass` drives it over every mailbox snapshot into
   the `Clear` arm behind `eligible_orphan_pending_token`, whose age-free
   `..._without_admission_grace` form runs only for the `StallWatchdog` source, not the
-  `ProbeAutoHeal` one this sweep uses — and that source reaches this action from no
-  production caller at this commit (`apply_watchdog_orphan_token_cleanup`'s only callers
-  sit in `health::recovery`'s `stall_watchdog_auto_heal_tests`, #4460 having retired the
-  force-clean branch that used to call it), so what follows about it is LATENT, not live.
+  `ProbeAutoHeal` one this sweep uses — and at this commit no call site outside
+  `#[cfg(test)]` reaches this action (`apply_watchdog_orphan_token_cleanup` is called
+  only from `health::recovery`'s `stall_watchdog_auto_heal_tests`, #4460 having retired
+  the force-clean branch that used to call it), so what follows about it is LATENT, not
+  live. That is a reachability observation about this arm, not the Task #32 acceptance
+  gate: nothing here is claiming completion credit for anything.
   Both forms are a ledger PRESENCE (`mailbox_has_cancel_token`) over absences, no witness
   among them — and the graced form adds an AGE term on top
   (`!orphan_pending_token_within_admission_grace` over `mailbox_turn_started_at_ms`),
@@ -1154,8 +1188,10 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   such grade, which is why the derivation belongs at the source rather than at either
   struct's boundary.
   Publishing the attribution grade is L2's FIRST task, ahead of any gate it wires that
-  reads this term. THIS SENTENCE GOES STALE THE MOMENT L2 LANDS IT: L2 returns this bullet
-  to one exception in the same PR, or the contract starts lying about its own surface.
+  reads this term. A lane that publishes that grade owns correcting this bullet in the
+  same change, or the contract starts lying about its own surface — an obligation this
+  document cannot enforce on itself, which is why #6025 tracks the pattern instead of
+  this sentence predicting its own repair.
   Duplicate relays after a retirement stay I18's and I19's.
 - It also puts nothing in conflict with the pinned "normal", and no lane may weaken
   that to land a repair. `relay_recovery::tests::unpaired_active_token_is_observe_only`
