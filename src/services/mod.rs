@@ -155,6 +155,7 @@ pub(crate) mod tui_prompt_dedupe;
 pub(crate) mod tui_steering;
 pub(crate) mod tui_turn_state;
 pub mod turn_cancel_finalizer;
+pub mod turn_cancel_queue_guard;
 pub mod turn_lifecycle;
 pub mod turn_orchestrator;
 

@@ -434,3 +434,254 @@ mod cancel_force_tests {
         assert!(!resolve_cancel_force(false, &junk));
     }
 }
+
+/// #5176 R3 regression: `POST /api/turns/{channel_id}/cancel` must not destroy
+/// queued user messages in silence. Driven through the HTTP handler so the
+/// capture/preserve wiring is under test, not just the guard helper.
+#[cfg(test)]
+mod cancel_queue_preserve_pg_tests {
+
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        http::{Method, Request, StatusCode, header},
+    };
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    use super::super::{AppState, domains};
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::provider::ProviderKind;
+    use crate::services::turn_orchestrator::{
+        ChannelMailboxRegistry, Intervention, InterventionMode, QueuePersistenceContext,
+    };
+
+    const AUTH_TOKEN: &str = "cancel-queue-preserve-test-token";
+    const QUEUED_TEXT: &str = "the instruction #5176 threw away";
+
+    fn test_state(pool: sqlx::PgPool) -> AppState {
+        let mut config = crate::config::Config::default();
+        config.server.auth_token = Some(AUTH_TOKEN.to_string());
+        let engine = crate::engine::PolicyEngine::new(&config).expect("construct policy engine");
+        let broadcast_tx = crate::eventbus::new_broadcast();
+        let batch_buffer = crate::eventbus::spawn_batch_flusher(broadcast_tx.clone());
+        AppState {
+            pg_pool: Some(pool),
+            engine,
+            config: Arc::new(config),
+            broadcast_tx,
+            batch_buffer,
+            health_registry: None,
+            cluster_instance_id: None,
+        }
+    }
+
+    fn test_router(pool: sqlx::PgPool) -> Router {
+        let state = test_state(pool);
+        domains::ops::router(state.clone()).with_state(state)
+    }
+
+    async fn post_cancel(app: &Router, channel_id: u64, force: bool) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/turns/{channel_id}/cancel?force={force}"))
+            .header(header::AUTHORIZATION, format!("Bearer {AUTH_TOKEN}"))
+            .body(Body::empty())
+            .expect("build cancel request");
+        let response = app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("cancel request completes");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("read cancel body");
+        let body = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
+        (status, body)
+    }
+
+    /// An agent that owns the channel plus an active session, so the handler
+    /// resolves a cancel target instead of 404-ing.
+    async fn seed_cancel_target(pool: &sqlx::PgPool, channel_id: u64) {
+        let channel = channel_id.to_string();
+        sqlx::query("INSERT INTO agents (id, name, discord_channel_cc) VALUES ($1, $1, $2)")
+            .bind(format!("agent-{channel_id}"))
+            .bind(&channel)
+            .execute(pool)
+            .await
+            .expect("seed agent row");
+        sqlx::query(
+            "INSERT INTO sessions (
+                 channel_id, session_key, agent_id, provider, status, last_heartbeat
+             ) VALUES ($1, $2, $3, 'claude', 'turn_active', NOW())",
+        )
+        .bind(&channel)
+        .bind(format!("host:AgentDesk-claude-{channel_id}"))
+        .bind(format!("agent-{channel_id}"))
+        .execute(pool)
+        .await
+        .expect("seed session row");
+    }
+
+    fn queued_user_message(message_id: u64) -> Intervention {
+        Intervention {
+            author_id: UserId::new(4_242),
+            author_is_bot: false,
+            message_id: MessageId::new(message_id),
+            queued_generation: crate::services::discord::runtime_store::process_generation(),
+            source_message_ids: vec![MessageId::new(message_id)],
+            source_message_queued_generations: Vec::new(),
+            source_text_segments: Vec::new(),
+            text: QUEUED_TEXT.to_string(),
+            mode: InterventionMode::Soft,
+            created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        }
+    }
+
+    /// Publish a live mailbox for `channel_id` holding exactly one queued user
+    /// message. Returned handle keeps the actor reachable for the assertions.
+    async fn seed_queued_message(
+        channel_id: ChannelId,
+        message_id: u64,
+    ) -> crate::services::turn_orchestrator::ChannelMailboxHandle {
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(channel_id);
+        handle
+            .replace_queue(
+                vec![queued_user_message(message_id)],
+                QueuePersistenceContext::new(&ProviderKind::Claude, "", None),
+            )
+            .await;
+        assert_eq!(
+            handle.snapshot().await.intervention_queue.len(),
+            1,
+            "fixture must really enqueue one user message before the cancel"
+        );
+        handle
+    }
+
+    /// Dead-letter recording is fire-and-forget by contract, so the row lands on
+    /// a detached task rather than before the response. Poll for it.
+    async fn await_dead_letter(pool: &sqlx::PgPool, channel_id: u64) -> Option<(String, String)> {
+        for _ in 0..100 {
+            let row: Option<(String, String)> = sqlx::query_as(
+                "SELECT content, message_id FROM relay_dead_letter
+                  WHERE kind = 'cancel_queue_discard' AND channel_id = $1",
+            )
+            .bind(channel_id.to_string())
+            .fetch_optional(pool)
+            .await
+            .expect("query relay_dead_letter");
+            if row.is_some() {
+                return row;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        None
+    }
+
+    /// `force=true` is a deliberate purge, so the queued instruction does not
+    /// come back — but it must leave a durable record instead of vanishing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn force_cancel_dead_letters_the_queued_message_it_purges_pg() {
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let channel_id = 5_176_401_u64;
+        seed_cancel_target(&pool, channel_id).await;
+        let handle = seed_queued_message(ChannelId::new(channel_id), 9_101).await;
+
+        let app = test_router(pool.clone());
+        let (status, body) = post_cancel(&app, channel_id, true).await;
+        assert_eq!(status, StatusCode::OK, "cancel response: {body}");
+
+        assert_eq!(
+            body["queue_dead_lettered_message_ids"],
+            serde_json::json!(["9101".parse::<u64>().unwrap()]),
+            "force cancel must name the purged instruction: {body}"
+        );
+        assert_eq!(
+            body["queue_restored_message_ids"],
+            serde_json::json!([]),
+            "force cancel must not revive what the operator asked to purge"
+        );
+        assert_eq!(
+            body["queue_lossless"], true,
+            "a purge with a durable record is not a silent loss: {body}"
+        );
+        assert!(
+            handle.snapshot().await.intervention_queue.is_empty(),
+            "force cancel must still purge the mailbox"
+        );
+
+        let (content, message_id) = await_dead_letter(&pool, channel_id)
+            .await
+            .expect("the purged user message must be recoverable from relay_dead_letter");
+        assert_eq!(content, QUEUED_TEXT);
+        assert_eq!(message_id, "9101");
+    }
+
+    /// The preserve path must leave a queue it did not touch exactly as it was:
+    /// no purge, no duplicate, and no dead-letter noise.
+    #[tokio::test(flavor = "current_thread")]
+    async fn preserve_cancel_keeps_the_queued_message_and_records_nothing_pg() {
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let channel_id = 5_176_402_u64;
+        seed_cancel_target(&pool, channel_id).await;
+        let handle = seed_queued_message(ChannelId::new(channel_id), 9_102).await;
+
+        let app = test_router(pool.clone());
+        let (status, body) = post_cancel(&app, channel_id, false).await;
+        assert_eq!(status, StatusCode::OK, "cancel response: {body}");
+
+        assert_eq!(
+            body["queue_lossless"], true,
+            "nothing was removed, so nothing was lost: {body}"
+        );
+        assert_eq!(
+            body["queue_dead_lettered_message_ids"],
+            serde_json::json!([])
+        );
+        assert_eq!(body["queue_restored_message_ids"], serde_json::json!([]));
+        assert_eq!(
+            body["queued_remaining"], 1,
+            "the surviving instruction must be reported, not zeroed: {body}"
+        );
+
+        let survivors = handle.snapshot().await.intervention_queue;
+        assert_eq!(
+            survivors.len(),
+            1,
+            "a preserve cancel must not drop or duplicate the queued instruction"
+        );
+        assert_eq!(survivors[0].message_id.get(), 9_102);
+        assert_eq!(survivors[0].text, QUEUED_TEXT);
+
+        let dead_letters: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM relay_dead_letter WHERE kind = 'cancel_queue_discard'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count relay_dead_letter");
+        assert_eq!(
+            dead_letters, 0,
+            "a preserved queue must not be reported as lost"
+        );
+    }
+}

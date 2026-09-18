@@ -565,6 +565,10 @@ impl QueueService {
             channel_id: parsed_channel_id,
             tmux_name: tmux_name.clone(),
         };
+        // #5176 R3: read the queue before the cancel can empty it. Everything
+        // below is about putting back whatever this cancel takes.
+        let queue_capture =
+            crate::services::turn_cancel_queue_guard::capture_queue_before_cancel(&target).await;
         let lifecycle = if force {
             force_kill_turn_without_cancel_event(
                 health_registry.map(Arc::as_ref),
@@ -691,6 +695,24 @@ impl QueueService {
             lifecycle_queued_remaining
         };
 
+        // #5176 R3: the lossless contract's last line of defence. `force` asked
+        // for the queue to go, so its casualties are recorded rather than
+        // revived; the preserve path puts them back.
+        let preservation = crate::services::turn_cancel_queue_guard::preserve_queue_after_cancel(
+            &target,
+            &queue_capture,
+            session_key.as_deref(),
+            self.pg_pool.as_ref(),
+            if force {
+                crate::services::turn_cancel_queue_guard::CancelQueueDisposition::DeadLetterOnly
+            } else {
+                crate::services::turn_cancel_queue_guard::CancelQueueDisposition::Restore
+            },
+            "queue_api_cancel_turn",
+        )
+        .await;
+        let queued_remaining = preservation.queue_depth_after.or(queued_remaining);
+
         tracing::info!(
             "[queue-api] Cancelled turn: channel={}, session={:?}, tmux={}, killed={}, dispatch={:?}, lifecycle={}, agent={:?}, requested_provider={:?}, exact_match={}, queue_preserved={}, queued_before={:?}, queued_after={:?}, queue_disk_before={}, queue_disk_after={}, queue_purged={:?}, mailbox_foreground_free={:?}, queue_dropped_message_ids={:?}",
             channel_id,
@@ -738,6 +760,13 @@ impl QueueService {
             // Discord message id. Empty is the contract; non-empty is a bug
             // report the operator can act on.
             "queue_dropped_message_ids": lifecycle.queue_dropped_message_ids,
+            // #5176 R3: what happened to the messages this cancel removed.
+            // `queue_lossless=false` is the contract violation itself: a user
+            // instruction is gone with no durable record anywhere.
+            "queue_restored_message_ids": preservation.restored_message_ids,
+            "queue_dead_lettered_message_ids": preservation.dead_lettered_message_ids,
+            "queue_unpreserved_message_ids": preservation.unpreserved_message_ids,
+            "queue_lossless": preservation.is_lossless(),
             "dispatch_cancelled": dispatch_id,
             "turn_status": finalizer.status,
             "turn_completed_at": finalizer.completed_at.to_rfc3339(),

@@ -42,6 +42,7 @@ src/server/routes/dispatches/crud.rs
 src/server/routes/escalation.rs
 src/server/routes/memory_api.rs
 src/server/routes/message_outbox.rs
+src/server/routes/queue_api.rs
 src/server/routes/scheduled_messages/postgres_tests.rs
 src/server/routes/stats.rs
 src/server/routes/tests/auto_queue_preflight_harness_tests.rs
@@ -158,6 +159,7 @@ server::routes::dispatches::crud::tests::dispatch_api_pg_tests
 server::routes::escalation::manual_decision_gate_tests
 server::routes::memory_api::request_body_tests
 server::routes::message_outbox::tests
+server::routes::queue_api::cancel_queue_preserve_pg_tests
 server::routes::scheduled_messages::postgres_tests
 server::routes::stats::memento_feedback_stats_pg_tests
 server::task_dispatch_claims::task_dispatch_claims_pg_tests
@@ -579,6 +581,8 @@ server::routes::memory_api::request_body_tests::local_memory_api_uses_migrated_t
 server::routes::memory_api::request_body_tests::local_memory_migration_preserves_preexisting_route_table_rows
 server::routes::memory_api::request_body_tests::memory_recall_forget_handlers_use_local_when_memento_runtime_unavailable
 server::routes::message_outbox::tests::monitor_alert_action_id_is_durable_and_idempotent_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::force_cancel_dead_letters_the_queued_message_it_purges_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::preserve_cancel_keeps_the_queued_message_and_records_nothing_pg
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_create_persists_trimmed_explicit_bot
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_explicit_target_still_requires_agent_primary_channel
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_rejects_invalid_agent_primary_channel
