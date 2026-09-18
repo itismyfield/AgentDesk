@@ -7803,6 +7803,7 @@ services::observability::emit::tests::relay_root_cause_metric_wrappers_record_pe
 services::observability::emit::tests::warn_severity_invariant_still_emits_event_without_error_level
 services::observability::metrics::tests::identity_conflict_snapshot_preserves_closed_categories
 services::observability::metrics::tests::permanent_relay_loss_is_additive_and_exposed
+services::observability::metrics::tests::resend_suppression_reaches_the_snapshot_row
 services::observability::queries::alert_authority_tests::rollup_is_aggregation_only_and_rule_engine_is_sole_alerter_pg
 services::observability::recovery_audit::tests::build_recovery_audit_record_redacts_and_hashes_full_body
 services::observability::recovery_audit::tests::recovery_audit_pg_tests::recovery_audit_round_trips_and_fetches_by_turn
@@ -7816,6 +7817,7 @@ services::observability::relay_signal_alert::tests::effective_threshold_prefers_
 services::observability::relay_signal_alert::tests::signal_statuses_match_emit_path_names
 services::observability::relay_signal_alert::tests::signal_table_covers_documented_relay_loss_vectors
 services::observability::relay_signal_alert::tests::signal_table_excludes_benign_watcher_owned_non_attempt
+services::observability::relay_signal_alert::tests::signal_table_monitors_rewind_resend_suppression
 services::observability::turn_lifecycle::tests::normalize_label_collapses_future_ad_hoc_surface_variants
 services::observability::turn_lifecycle::tests::turn_event_metadata_is_compile_time_constant_backed
 services::observability::turn_lifecycle::tests::turn_event_notification_policy_and_copy_match_lifecycle_contract
