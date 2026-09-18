@@ -91,6 +91,16 @@ acceptance gate, not advice. A coverage claim that does not reach the
 production entrypoint closes no DAG edge, and a review that finds one rejects
 the claim instead of filing a follow-up.
 
+**What it blocks is the CLAIM, not the pull request.** A failed judgment
+withholds completion credit — the DAG edge stays open and the predecessor stays
+unsatisfied — and it is not a merge veto. A PR that lands a helper plus its unit
+tests and leaves the consumer to a sibling PR is not in violation; it simply
+claims no edge, so no scaffolding exemption is needed or granted. What this
+section adds over "abstractions without production callers cannot close a DAG
+edge" above is not a new rule but an obligation: a specific judgment the
+reviewer RUNS, and a verdict they act on in the review rather than deferring to
+a follow-up issue.
+
 **State the condition as a judgment you run, never as a shape you match.** A
 static form — "a test that calls the helper directly and only asserts is in
 violation" — misclassifies. Applied literally to the #6004 PostgreSQL test it
@@ -98,10 +108,12 @@ returned *no violation*, because that test does reach deep, through
 `sweep_once_with`. The judgment below returned *violation* on the same code,
 from the same reviewer, the same day.
 
-> Delete the production call site the test claims to protect. Does the test go
-> red? If it does not, the coverage is nominal.
+> Delete the production call site the test claims to protect. Does THAT test —
+> the one making the claim under review, not the module around it — go red? If
+> it does not, the coverage is nominal.
 
-Running it:
+Running it takes a build. A reviewer who cannot build returns NO VERDICT on this
+gate and says so, rather than passing the claim by default. When running it:
 
 - **Warning count is not a substitute signal.** W2 below is why.
 - **Aim mutants at the wiring, not only at predicate bodies.** A mutation table
@@ -109,11 +121,18 @@ Running it:
 - Declare the expected test count before the run and compare it against the
   `running N tests` line.
 - Check that each mutant's binary hash differs, which catches a shared `target/`
-  serving a stale binary. Do not read more into it than that: this toolchain's
-  link step is not bit-reproducible (independently reproduced 2026-09-18), so
-  rebuilding identical sources also yields distinct hashes. Distinctness is a
-  necessary condition, not evidence that the mutation took effect, and hash
-  equality proves nothing in either direction.
+  serving a stale binary. This toolchain's link step is not bit-reproducible
+  (independently reproduced 2026-09-18), so rebuilding identical sources also
+  yields distinct hashes. Distinctness is therefore a necessary condition, not
+  evidence that the mutation took effect; do not read more into it than that.
+  Equality is not its mirror: precisely because a relink cannot land on the
+  previous hash by chance, equality means no relink happened, so the run never
+  built the mutant — treat that run as INVALID and rerun it, rather than as a
+  result to interpret. (An earlier draft closed
+  this bullet by declaring equality uninformative, which contradicted its own
+  opening clause and let two readers take opposite instructions from one bullet
+  — the exact failure this section exists to prevent, reproduced inside the
+  procedure meant to prevent it.)
 
 **Evidence — PR #6004, 2026-09-18.** With all seven tests in the module running,
 PostgreSQL included, three wiring mutants survived:
