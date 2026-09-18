@@ -775,8 +775,8 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   terminal `result` past `last_offset`, and receipt coverage (`ReceiptIndex::covers`
   under `reachability::composite::sweep_coverage`). TELEMETRY, never authority:
   `RelayHealthSnapshot::last_relay_offset`, `mailbox_turn_age_secs`,
-  `ChannelMailboxState::turn_started_at`, `queue_depth`, bare
-  `inflight_state_present`. The precedent is
+  `ChannelMailboxState::turn_started_at`, `queue_depth`, and the bare
+  `inflight_state_present` / `mailbox_has_cancel_token` pair. The precedent is
   `health::watcher_respawn::force_clean_respawn_offset_floor`: it discards the
   snapshot offset into `_unfenced_snapshot_frontier`, floors on
   `tmux::committed_frontier_for_current_generation`, and where no fence exists it
@@ -793,9 +793,9 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   `None` — UNMEASURED, not measured-empty. Separating the SATURATED zero is required and
   possible everywhere: `last_capture_offset` and `last_relay_offset` are both `pub` on
   `WatcherStateSnapshot`. Separating the UNATTRIBUTED zero needs `SessionEnrichment`,
-  `pub(super)` to `discord::health`, so outside that module it is an explicit RESIDUAL
-  RISK the consumer must NAME, narrowed but not closed by the row precondition below.
-  This term may not decide a retirement alone.
+  `pub(super)` to `discord::health`, so outside that module this term is UNMEASURED and a
+  consumer there has NOT measured the tail; the row precondition below narrows that case,
+  it does not close it, and the term may not decide a retirement alone.
 - THE DISCRIMINATOR between (a) state that lingers too long (this issue) and (b)
   state retired too early (#5951 (b), #5775, #5755) is a MEASURED tail, never a
   clock — and it is already implemented, in the idle-tmux branch of the
@@ -848,20 +848,29 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   `finalize_turn_state`, the `ChannelMailboxMsg::Clear` arm, and the force-`PurgeQueue`
   arm's `clear_cancelled_active_anchor` — do not re-derive the release, but TWO
   evidence-driven paths reach them. `synthetic_start::stale_reclaim` reads
-  `terminal_delivery_committed` and finalizes a `Cancel` through
-  `mailbox_finish_turn_if_matches`, which lands in `finalize_turn_state`; it is
+  `terminal_delivery_committed` and finalizes a `Cancel` through the identity-guarded
+  finish, which lands in `finalize_turn_state`; it is
   DEMAND-DRIVEN — only where a new TUI-direct synthetic start finds the mailbox held —
   and OWNER-SCOPED (`classify_reclaimable_mailbox_owner`). The second,
-  `relay_auto_heal::run_orphan_token_auto_heal_pass`, is already PERIODIC and already
-  evidence-driven: `stall_watchdog_task` drives it over every mailbox snapshot into the
-  `Clear` arm behind `eligible_orphan_pending_token_without_admission_grace`, a
-  conjunction of STRUCTURAL absence terms carrying no age term at all
-  (`ORPHAN_PENDING_TOKEN_ADMISSION_GRACE` only delays it) — the `structural None`
-  decider named below. So the gap is not a missing periodic reaper: that sweep needs a
-  dead-or-unknown producer with no watcher and no bridge inflight, so the anchor outlives
-  a lost release event only where a producer, watcher, or bridge row survives. Which path
-  carries the repair is L1's. Any release not driven by a turn-end event owes progress
-  evidence, and neither the anchor's presence nor its `turn_started_at` age is that.
+  `relay_auto_heal::run_orphan_token_auto_heal_pass`, is PERIODIC but NOT evidence-driven:
+  `health::recovery::run_stall_watchdog_pass` drives it over every mailbox snapshot into
+  the `Clear` arm behind `eligible_orphan_pending_token`, whose age-free
+  `..._without_admission_grace` form runs only for the `StallWatchdog` source, not the
+  `ProbeAutoHeal` one this sweep uses. Both forms are a ledger PRESENCE
+  (`mailbox_has_cancel_token`) over absences, no witness among them, and both turn on
+  `tmux_alive == Some(false) || !is_agentdesk_tmux_session(..)`: an UNMEASURED producer
+  (`tmux_alive` `None`) passes that gate wherever the session is not named `AgentDesk-*`
+  — a PRE-EXISTING candidate violation of this invariant, not the gap filled — and where
+  it IS so named that same term refuses the repair (`protected_agentdesk_tmux_session`).
+  So what is missing is evidence, not periodicity, and the population is wider than the
+  sweep's reach: `stale_thread_proof` also preempts the classifier, after which
+  `eligible_stale_thread_proof` refuses that channel too (it requires
+  `!mailbox_has_cancel_token`), so the anchor outlives a lost release event in both
+  shapes, not only where a producer, watcher, or bridge row survives. Which path carries
+  the repair is L1's, provided the deciding term is a witness or a measured tail — that
+  sweep's gate is neither, so periodizing it unchanged is the retirement this invariant
+  forbids. Any release not driven by a turn-end event owes progress evidence, and neither
+  the anchor's presence nor its `turn_started_at` age is that.
 - Consumer — the `stale-mailbox/repair` route's `queue_not_empty` gate. A
   `queue_depth > 0` is not "live queue evidence": it is equally the signature of a
   queue that cannot drain — the state the gate is asked to repair — so the
@@ -900,8 +909,9 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   `release_active_turn_anchor` takes only `&mut ChannelMailboxState`, carrying neither
   channel nor provider, so L1 must pass both into that decision point before it can
   record a violation there — `channel_id` is already a `finalize_turn_state` parameter
-  and the provider rides its `QueuePersistenceContext`, two arguments rather than a new
-  thread of identity. Duplicate relays after a retirement stay I18's and I19's.
+  and the provider rides its `Option<&QueuePersistenceContext>` WHERE THAT IS `Some` (a
+  `None` call site carries no provider), two arguments rather than a new thread of
+  identity. Duplicate relays after a retirement stay I18's and I19's.
 - It also puts nothing in conflict with the pinned "normal", and no lane may weaken
   that to land a repair. `relay_recovery::tests::unpaired_active_token_is_observe_only`
   pairs `mailbox_turn_age_secs: Some(601)` with a fixture whose `unread_bytes` is
@@ -919,7 +929,7 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   invariant: "live_turn_proven_by_progress_not_presence", .. })` where the retirement
   decision is TAKEN, in the row form
   `tmux_watcher::orphan_terminal_frame::observe_orphan_terminal_frame` uses, with
-  `details` naming WHICH term decided — witness, measured tail, structural `None`, or
+  `details` naming WHICH term decided — witness, measured tail, an unreadable witness, or
   age fallback. An age fallback must be countable apart from a witness, or its growth
   is invisible and the clock silently becomes the authority again. Violations reach an
   operator through the #3561 hourly table only once a lane ADDS the row:
