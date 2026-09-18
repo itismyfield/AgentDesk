@@ -6337,7 +6337,8 @@ services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::orphan_row
 services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::orphan_row_is_reclaimable_skips_fresh_row
 services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::pending_start_reclaim_orphan_fn_uses_real_ordering_for_session_bound_orphan
 services::discord::tui_prompt_relay::synthetic_start::tests::admitted_source_witness_advances_only_the_original_allocation
-services::discord::tui_prompt_relay::synthetic_start::tests::aged_rowless_synthetic_owner_reclaims_and_finalizes_ledger
+services::discord::tui_prompt_relay::synthetic_start::tests::aged_rowless_synthetic_owner_is_refused_for_want_of_a_witness
+services::discord::tui_prompt_relay::synthetic_start::tests::aged_synthetic_owner_replaced_row_is_refused_for_want_of_a_witness
 services::discord::tui_prompt_relay::synthetic_start::tests::claim_adopting_existing_mailbox_does_not_increment_global_active
 services::discord::tui_prompt_relay::synthetic_start::tests::claim_rejects_existing_mailbox_without_original_actor_witness
 services::discord::tui_prompt_relay::synthetic_start::tests::finalized_reclaim_of_readopted_real_owner_does_not_suppress_completion_footer
@@ -6360,6 +6361,7 @@ services::discord::tui_prompt_relay::synthetic_start::tests::stamped_source_witn
 services::discord::tui_prompt_relay::synthetic_start::tests::stream_tick_stamp_carries_the_allocation_witness
 services::discord::tui_prompt_relay::synthetic_start::tests::synthetic_finish_routes_release_through_finalizer
 services::discord::tui_prompt_relay::synthetic_start::tests::synthetic_finish_session_key_mismatch_preserves_newer_turn
+services::discord::tui_prompt_relay::synthetic_start::tests::witnessless_reclaim_records_the_i20_violation_and_a_witnessed_one_does_not
 services::discord::tui_prompt_relay::synthetic_start::tests::young_rowless_synthetic_owner_is_not_reclaimed
 services::discord::tui_prompt_relay::tests::abort_cleanup_records_marker_and_keeps_hourglass
 services::discord::tui_prompt_relay::tests::bridge_adapter_inflight_marks_external_input_as_bridge_owned

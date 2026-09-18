@@ -189,6 +189,18 @@ pub(super) const RELAY_SIGNAL_DEFINITIONS: &[RelaySignal] = &[
         default_threshold: 1,
         label: "터미널 프레임 유실 기록 실패(복구 불가 유실)",
     },
+    // #5996 I20: a retirement decision that reached its gate with only the
+    // record's absence and a clock to read. The consumer refuses rather than
+    // retiring, so each row is a mailbox left wedged (an (a) loss) — visible
+    // only because this entry exists; `relay_signal_alert` has no wildcard, so a
+    // status missing from a `statuses` list counts zero forever.
+    RelaySignal {
+        key: "retirement_without_progress_witness",
+        event_type: "invariant_violation",
+        statuses: &["live_turn_proven_by_progress_not_presence"],
+        default_threshold: 1,
+        label: "진행 증거 없는 은퇴 판정(메일박스 점유 유지)",
+    },
 ];
 pub(super) const AGENT_QUALITY_EVENT_TYPES: &[&str] = &[
     "turn_start",
