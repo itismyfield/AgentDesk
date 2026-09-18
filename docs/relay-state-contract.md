@@ -241,7 +241,7 @@ compiler-checked reference together.
 
 **How the two halves stay on together in CI.** The set-comparison half is an
 explicit `ci-pr.yml` step. The compile-existence half is the required
-`check_fast` job; a `relay_contract` path filter (the four anchor files, this
+`check_fast` job; a `relay_contract` path filter (the anchor files it lists, this
 doc, and the gate script) force-runs it for doc-only binding changes as well as
 Rust changes. No branch-name escape hatch may skip either half.
 
@@ -997,10 +997,15 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   The trade in the other direction is not free either. Removing a MEASURED (b) by
   refusing to advance past it converts a loss into undone work: in `catch_up`, deferring
   rather than skipping routes the sweep through `CatchUpRetryState::after_deferred_rearm`,
-  which stops re-arming once `CATCH_UP_RETRY_DEFERRED_REARM_LIMIT` consecutive cycles are
-  spent and gives up with a warning. That residue is an (a), and a bounded one — the
-  code's own note is that the backlog then ages out or a fresh trigger restarts the cycle
-  — so the asymmetry still points the same way. What does NOT follow is that every (b)
+  which admits re-arms only up to `CATCH_UP_RETRY_DEFERRED_REARM_LIMIT` — a budget the
+  retry state carries across fetch failures rather than resetting — and gives up with a
+  warning on the deferred scan past it. That residue is an (a), and a bounded one — the
+  code's own note is that the backlog then ages out or a fresh trigger restarts the
+  cycle. Read "ages out" as what it is: the age ceiling routes those messages to the
+  TooOld disposition and a dead-letter record, so they are DROPPED WITH ATTRIBUTION, not
+  completed. The asymmetry still points the same way, since an attributed drop beats a
+  silent loss, but no lane may read "bounded" as "the work eventually finishes". What
+  does NOT follow is that every (b)
   repair is free. I20 routes the UNMEASURED case to (b)-safe; it says nothing about
   trading a measured (b) for an (a), and a lane proposing that trade owns showing it
   pays.
@@ -1075,9 +1080,13 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   same move this invariant forbids of its consumers — taking the existence of a record as
   evidence of the thing the record is supposed to stand for. The list has already been
   found short, and not at the margin: a fifth site sits inside
-  `catch_up::run_catch_up_sweep`, the very function the phase-2 consumer bullet names,
-  some four hundred lines from the test that bullet describes. Reviewing by file would
-  not have caught it, and neither would trusting this list. Look for the SHAPE — a
+  `catch_up::run_catch_up_sweep`, the very function the phase-2 consumer bullet's test
+  lives in. Its membership test resolves through
+  `catch_up::classification::classify_catch_up_message` to `Duplicate`, and a `Duplicate`
+  there advances the settled frontier through `advance_last_message_checkpoint` into
+  `runtime_store::save_last_message_id` — a DURABLE skip, where the phase-2 hit that
+  bullet describes moves only a loop-local checkpoint. Reviewing by file would not have
+  caught it, and neither would trusting this list. Look for the SHAPE — a
   retirement decided on existence or age — and treat an entry here as a worked example of
   it, never as the boundary of where it occurs.
 - Consumer — `turn_orchestrator::release_active_turn_anchor`. Its three callers —
@@ -1248,8 +1257,11 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
 - Invariant key: `live_turn_proven_by_progress_not_presence`. This document lands the
   contract only and enforces nothing by itself: steps 2 and 3 below — the
   `record_invariant_check` wiring and a deliberate-violation test per consumer —
-  belong to the four consuming lanes, each citing this section; the rowless
-  receipt-coverage follow-up is a fifth lane citing the honest-gap bullet. #5996's DoD
+  belong to the consuming lanes enumerated above, each citing this section, and the
+  rowless receipt-coverage follow-up is one more, citing the honest-gap bullet. A site
+  the enumeration has not reached gets no lane, so it gets no wiring and no test, and by
+  the rule just above its key counts zero forever. That is why the list being an
+  ENUMERATION is a work-allocation fact and not only a rhetorical one. #5996's DoD
   clause — an unpaired active token with no progress evidence must not block the queue
   — needs the anchor and route lanes together and is closed by neither alone (#5946).
 
