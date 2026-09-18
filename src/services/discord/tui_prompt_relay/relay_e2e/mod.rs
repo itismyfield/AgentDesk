@@ -5,14 +5,12 @@
 //! reads mailbox, durable queue, dispatch witnesses, relay leases and turn
 //! completion edges back out.
 //!
-//! Every wait here is state- or event-driven under a deadline. The harness needs
-//! a `multi_thread` runtime to drive a real HTTP server and real production
-//! workers, and `tokio`'s clock cannot be paused there, so a fixed sleep would
-//! be wall-clock flake. Scenarios must not add one.
-
-// The fixture carries the observation surface the #5997 scenarios need; those
-// scenarios land per repair lane, so parts are not called yet.
-#![allow(dead_code)]
+//! Every wait here is state- or event-driven under a deadline. Scenarios run on
+//! a `multi_thread` runtime, where `tokio`'s clock cannot be paused, so a fixed
+//! sleep is wall-clock flake. Scenarios must not add one.
+//!
+//! CI pins these to `env -u AGENTDESK_ROOT_DIR ... -- --test-threads=1`; a new
+//! scenario module inherits that only once it is named in the same invocation.
 
 mod discord_mock;
 
@@ -36,7 +34,8 @@ use crate::services::discord::{
 use crate::services::tui_prompt_dedupe as dedupe;
 use crate::services::turn_orchestrator as orchestrator;
 
-pub(super) use discord_mock::{CHANNEL_ID, USER_ID, user_message};
+pub(super) use discord_mock::CHANNEL_ID;
+use discord_mock::{USER_ID, history_message_json, user_message};
 
 /// Dedupe and lease tables key on the provider's wire name, not [`ProviderKind`].
 pub(super) const PROVIDER_KEY: &str = "claude";
@@ -82,37 +81,6 @@ fn watcher_handle(tmux_session_name: &str, output_path: &std::path::Path) -> Tmu
         last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
             crate::services::discord::tmux_watcher_now_ms(),
         )),
-    }
-}
-
-/// Wall-clock probe for per-injection-path settlement cost, anchored when created.
-pub(super) struct SettlementProbe {
-    rx: Receiver<TurnCompletionEvent>,
-    started: tokio::time::Instant,
-}
-
-impl SettlementProbe {
-    /// Settlement latency from this probe's creation to `expected`. Panics at
-    /// `budget`, naming every edge that arrived instead.
-    pub(super) async fn await_edge(
-        &mut self,
-        expected: TurnCompletionEvent,
-        budget: Duration,
-    ) -> Duration {
-        let deadline = self.started + budget;
-        let mut observed: Vec<TurnCompletionEvent> = Vec::new();
-        loop {
-            match tokio::time::timeout_at(deadline, self.rx.recv()).await {
-                Err(_) => panic!(
-                    "settlement did not reach {expected:?} within {budget:?}; observed={observed:?}"
-                ),
-                Ok(Ok(event)) if event == expected => return self.started.elapsed(),
-                Ok(Ok(event)) => observed.push(event),
-                Ok(Err(error)) => {
-                    panic!("settlement receiver must remain open; recv error={error:?}")
-                }
-            }
-        }
     }
 }
 
@@ -228,13 +196,19 @@ impl RelayE2eHarness {
         let event = serenity::FullEvent::Message {
             new_message: user_message(id, text),
         };
+        // Register the waiter before the spawn that dispatches the POST:
+        // `notify_waiters` leaves no permit, so a child that outruns the parent
+        // would otherwise strand this wait until its deadline.
+        let arrived = self.mock.first_placeholder_arrived.notified();
+        tokio::pin!(arrived);
+        arrived.as_mut().enable();
         let mut task = tokio::spawn({
             let ctx = self.ctx.clone();
             let data = self.clone_data();
             async move { router::handle_event(&ctx, &event, &data).await }
         });
         tokio::select! {
-            _ = self.mock.first_placeholder_arrived.notified() => {}
+            _ = &mut arrived => {}
             result = &mut task => {
                 let snapshot = self.mailbox().await;
                 let checkpoint = self.checkpoint();
@@ -285,13 +259,6 @@ impl RelayE2eHarness {
         subscribe_turn_completion_events(&self.shared)
     }
 
-    pub(super) fn start_settlement_probe(&self) -> SettlementProbe {
-        SettlementProbe {
-            rx: self.subscribe_completions(),
-            started: tokio::time::Instant::now(),
-        }
-    }
-
     /// Placeholder POSTs seen by the mock: the harness' dispatch witness.
     pub(super) fn placeholder_posts(&self) -> usize {
         self.mock.placeholder_posts.load(Ordering::SeqCst)
@@ -302,6 +269,23 @@ impl RelayE2eHarness {
         self.mock.local_note_posts.load(Ordering::SeqCst)
     }
 
+    /// Requests the mock could not answer. A non-empty list means production
+    /// took a failure path the scenario never asserted on.
+    pub(super) fn unhandled_requests(&self) -> Vec<String> {
+        self.mock.unhandled.lock().expect("unhandled log").clone()
+    }
+
+    /// Seeds the history `catch_up` phase 2 reads, newest first, as
+    /// `(message_id, content, is_bot)`.
+    // Consumed by the queue-reclaim scenario, which lands in a later lane.
+    #[allow(dead_code)]
+    pub(super) fn seed_channel_history(&self, entries: &[(u64, &str, bool)]) {
+        *self.mock.history.lock().expect("mock history") = entries
+            .iter()
+            .map(|(id, content, bot)| history_message_json(*id, content, *bot))
+            .collect();
+    }
+
     /// Level-triggered: safe to call after the POST has already landed.
     pub(super) async fn wait_for_placeholder_posts(&self, count: usize, timeout: Duration) -> bool {
         let posts = self.mock.placeholder_posts.clone();
@@ -310,13 +294,6 @@ impl RelayE2eHarness {
             Box::pin(async move { posts.load(Ordering::SeqCst) >= count })
         })
         .await
-    }
-
-    /// Edge-triggered: register before the action that should dispatch.
-    pub(super) async fn wait_for_next_placeholder(&self, timeout: Duration) -> bool {
-        tokio::time::timeout(timeout, self.mock.second_placeholder_arrived.notified())
-            .await
-            .is_ok()
     }
 
     /// Publishes this fixture's context and token on the shared HTTP cache, which

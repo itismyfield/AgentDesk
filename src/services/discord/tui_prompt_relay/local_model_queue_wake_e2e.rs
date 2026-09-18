@@ -346,9 +346,11 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         crate::services::tui_prompt_dedupe::PromptObservation::PublishedSshDirect
     );
 
+    // Level-triggered on the counter the mock bumps before it parks, so this
+    // holds whether the POST lands before or after the wait begins.
     assert!(
         harness
-            .wait_for_next_placeholder(Duration::from_millis(1500))
+            .wait_for_placeholder_posts(2, Duration::from_millis(1500))
             .await,
         "local /model must wake the occupied two-second deferred worker"
     );
@@ -364,10 +366,12 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         "production kickoff must durably dequeue B"
     );
     assert_eq!(harness.placeholder_posts(), 2);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(
-        harness.placeholder_posts(),
-        2,
+    // Deadline-bounded rather than a fixed sleep, same window: it covers a
+    // dispatch racing the wake, not the deferred worker's later kickoff.
+    assert!(
+        !harness
+            .wait_for_placeholder_posts(3, Duration::from_millis(100))
+            .await,
         "coalesced two-half wake must not dispatch B twice"
     );
     assert_eq!(harness.local_note_posts(), 2);
@@ -396,4 +400,11 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         std::time::Duration::from_millis(100),
     )
     .await;
+
+    // A 404 the mock never routed reads as green while production degrades.
+    let unhandled = harness.unhandled_requests();
+    assert!(
+        unhandled.is_empty(),
+        "mock Discord swallowed production calls as 404: {unhandled:?}"
+    );
 }

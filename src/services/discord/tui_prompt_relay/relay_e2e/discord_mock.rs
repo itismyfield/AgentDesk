@@ -1,8 +1,8 @@
 //! Mock Discord transport for the relay e2e harness: a loopback REST + gateway
 //! server, and a real `serenity::Context` pointed at it.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use axum::Json;
 use axum::Router;
@@ -17,22 +17,29 @@ use serenity::cache::Cache;
 use serenity::{ChannelId, MessageId, UserId};
 use tokio::sync::Notify;
 
-pub(in crate::services::discord) const CHANNEL_ID: u64 = 940_487_400_000_001;
-pub(in crate::services::discord) const USER_ID: u64 = 940_487_400_000_002;
-pub(in crate::services::discord) const BOT_ID: u64 = 940_487_400_000_003;
+pub(in crate::services::discord::tui_prompt_relay) const CHANNEL_ID: u64 = 940_487_400_000_001;
+pub(super) const USER_ID: u64 = 940_487_400_000_002;
+pub(super) const BOT_ID: u64 = 940_487_400_000_003;
 const FIRST_RESPONSE_MESSAGE_ID: u64 = 940_487_400_000_021;
 
 /// Counters and gates over the mock's message endpoint. A `"..."` body is the
 /// relay's placeholder post, which the harness uses as its dispatch witness;
 /// the first one parks until released so a second turn can queue behind an
 /// occupied mailbox.
+///
+/// `unhandled` records every request that reached the 404 fallback, so a
+/// production call the mock cannot answer fails an assertion instead of
+/// silently degrading a scenario into a weaker one.
 #[derive(Clone)]
 pub(super) struct DiscordMockState {
     pub(super) placeholder_posts: Arc<AtomicUsize>,
     pub(super) local_note_posts: Arc<AtomicUsize>,
     pub(super) first_placeholder_arrived: Arc<Notify>,
     pub(super) release_first_placeholder: Arc<Notify>,
-    pub(super) second_placeholder_arrived: Arc<Notify>,
+    pub(super) unhandled: Arc<Mutex<Vec<String>>>,
+    /// Channel history `catch_up` phase 2 reads, newest first. Empty until a
+    /// scenario seeds it, which is the "nothing to catch up" answer.
+    pub(super) history: Arc<Mutex<Vec<Value>>>,
     next_response_id: Arc<AtomicU64>,
 }
 
@@ -43,7 +50,8 @@ impl DiscordMockState {
             local_note_posts: Arc::new(AtomicUsize::new(0)),
             first_placeholder_arrived: Arc::new(Notify::new()),
             release_first_placeholder: Arc::new(Notify::new()),
-            second_placeholder_arrived: Arc::new(Notify::new()),
+            unhandled: Arc::new(Mutex::new(Vec::new())),
+            history: Arc::new(Mutex::new(Vec::new())),
             next_response_id: Arc::new(AtomicU64::new(FIRST_RESPONSE_MESSAGE_ID)),
         }
     }
@@ -124,6 +132,16 @@ pub(super) fn discord_message_json(id: u64, content: &str) -> Value {
     })
 }
 
+/// A history entry as `catch_up` phase 2 sees it: bot posts anchor the "last
+/// answered" boundary, user posts are the unanswered candidates ahead of it.
+pub(super) fn history_message_json(id: u64, content: &str, bot: bool) -> Value {
+    let mut message = discord_message_json(id, content);
+    if !bot {
+        message["author"] = discord_user_json(USER_ID, "queue-user", false);
+    }
+    message
+}
+
 async fn get_channel(Path(_channel_id): Path<u64>) -> Json<Value> {
     Json(private_channel_json())
 }
@@ -162,12 +180,36 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
                 )
                     .into_response();
             }
-            state.second_placeholder_arrived.notify_waiters();
         } else {
             state.local_note_posts.fetch_add(1, Ordering::SeqCst);
         }
         let id = state.next_response_id.fetch_add(1, Ordering::SeqCst);
         return (StatusCode::OK, Json(discord_message_json(id, &content))).into_response();
+    }
+
+    // `catch_up` phase 2 reads this before it can reach its dedup branch; an
+    // unseeded channel answers "nothing to catch up" rather than an error.
+    if method == Method::GET && path == format!("/api/v10/channels/{CHANNEL_ID}/messages") {
+        let history = state.history.lock().expect("mock history").clone();
+        return Json(Value::Array(history)).into_response();
+    }
+    if method == Method::PATCH
+        && path.starts_with(&format!("/api/v10/channels/{CHANNEL_ID}/messages/"))
+    {
+        let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+            .await
+            .unwrap_or_default();
+        let payload: Value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
+        let content = payload
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let id = path.rsplit('/').next().and_then(|tail| tail.parse().ok());
+        let id = id.unwrap_or(FIRST_RESPONSE_MESSAGE_ID);
+        return Json(discord_message_json(id, content)).into_response();
+    }
+    if method == Method::POST && path == format!("/api/v10/channels/{CHANNEL_ID}/typing") {
+        return StatusCode::NO_CONTENT.into_response();
     }
 
     if (method == Method::PUT || method == Method::DELETE)
@@ -181,10 +223,20 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
     {
         return StatusCode::NO_CONTENT.into_response();
     }
+    // `catch_up` resolves the bot identity here and skips every candidate whose
+    // author matches it, so `/users/@me` must not answer with the human.
+    if method == Method::GET && path == "/api/v10/users/@me" {
+        return Json(discord_user_json(BOT_ID, "queue-bot", true)).into_response();
+    }
     if method == Method::GET && path.starts_with("/api/v10/users/") {
         return Json(discord_user_json(USER_ID, "queue-user", false)).into_response();
     }
 
+    state
+        .unhandled
+        .lock()
+        .expect("unhandled log")
+        .push(format!("{method} {path}"));
     (
         StatusCode::NOT_FOUND,
         Json(json!({"message": format!("unhandled {method} {path}"), "code": 0})),
