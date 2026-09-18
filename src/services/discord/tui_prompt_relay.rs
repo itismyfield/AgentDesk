@@ -892,7 +892,8 @@ fn slash_command_control_turn_is_duplicate_external_replay(
 }
 
 #[cfg(all(test, unix))]
-#[path = "tui_prompt_relay/local_model_queue_wake_e2e.rs"]
 mod local_model_queue_wake_e2e;
+#[cfg(all(test, unix))]
+mod relay_e2e;
 #[cfg(test)]
 mod tests;
