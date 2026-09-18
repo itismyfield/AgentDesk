@@ -256,4 +256,130 @@ mod tests {
             "completion clear ordered after the episode guard must not see PlannedRestartSkipped"
         );
     }
+
+    fn birth_pin_5981() -> InflightEpisodePin {
+        let state = InflightTurnState::new(
+            ProviderKind::Claude,
+            5_981_501,
+            None,
+            7,
+            5_981_511,
+            5_981_512,
+            "is_same_episode_as axis pin".to_string(),
+            None,
+            Some("tmux-5981-axis".to_string()),
+            None,
+            None,
+            0,
+        );
+        let mut pin = InflightEpisodePin::from_state(&state);
+        pin.turn_nonce = Some("nonce-5981-base".to_string());
+        pin
+    }
+
+    #[test]
+    fn is_same_episode_as_accepts_an_advanced_row_of_the_same_allocation() {
+        let before = birth_pin_5981();
+        let mut advanced = before.clone();
+        advanced.channel_name = Some("learned-name".to_string());
+        advanced.current_msg_id += 1;
+        advanced.finalizer_turn_id += 1;
+        advanced.tmux_session_name = Some("tmux-5981-learned".to_string());
+        advanced.session_id = Some("native-session-5981".to_string());
+        advanced.output_path = Some("/tmp/5981/out.jsonl".to_string());
+        advanced.input_fifo_path = Some("/tmp/5981/in.fifo".to_string());
+        advanced.runtime_kind =
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper);
+        advanced.relay_owner_kind = RelayOwnerKind::Watcher;
+        advanced.turn_start_offset = Some(4_096);
+        advanced.terminal_delivery_committed = true;
+        assert_ne!(
+            before, advanced,
+            "the advanced row must differ on the non-axis fields"
+        );
+        assert!(
+            before.is_same_episode_as(&advanced),
+            "branch true: all seven birth axes equal must accept despite non-axis drift"
+        );
+    }
+
+    #[test]
+    fn is_same_episode_as_refuses_a_foreign_provider() {
+        let before = birth_pin_5981();
+        let mut other = before.clone();
+        other.provider = ProviderKind::Codex.as_str().to_string();
+        assert_ne!(before.provider, other.provider);
+        assert!(
+            !before.is_same_episode_as(&other),
+            "branch 1/7 provider: a pin differing only in provider must be refused"
+        );
+    }
+
+    #[test]
+    fn is_same_episode_as_refuses_a_foreign_channel_id() {
+        let before = birth_pin_5981();
+        let mut other = before.clone();
+        other.channel_id += 1;
+        assert!(
+            !before.is_same_episode_as(&other),
+            "branch 2/7 channel_id: a pin differing only in channel_id must be refused"
+        );
+    }
+
+    #[test]
+    fn is_same_episode_as_refuses_a_foreign_request_owner_user_id() {
+        let before = birth_pin_5981();
+        let mut other = before.clone();
+        other.request_owner_user_id += 1;
+        assert!(
+            !before.is_same_episode_as(&other),
+            "branch 3/7 request_owner_user_id: a pin differing only in owner must be refused"
+        );
+    }
+
+    #[test]
+    fn is_same_episode_as_refuses_a_foreign_user_msg_id() {
+        let before = birth_pin_5981();
+        let mut other = before.clone();
+        other.user_msg_id += 1;
+        assert!(
+            !before.is_same_episode_as(&other),
+            "branch 4/7 user_msg_id: a pin differing only in anchor must be refused"
+        );
+    }
+
+    #[test]
+    fn is_same_episode_as_refuses_a_foreign_turn_nonce() {
+        let before = birth_pin_5981();
+        let mut other = before.clone();
+        other.turn_nonce = Some("nonce-5981-successor".to_string());
+        assert_ne!(before.turn_nonce, other.turn_nonce);
+        assert!(
+            !before.is_same_episode_as(&other),
+            "branch 5/7 turn_nonce: a pin differing only in nonce must be refused"
+        );
+    }
+
+    #[test]
+    fn is_same_episode_as_refuses_a_foreign_born_generation() {
+        let before = birth_pin_5981();
+        let mut other = before.clone();
+        other.born_generation += 1;
+        assert!(
+            !before.is_same_episode_as(&other),
+            "branch 6/7 born_generation: a pin differing only in generation must be refused"
+        );
+    }
+
+    #[test]
+    fn is_same_episode_as_refuses_a_foreign_started_at() {
+        let before = birth_pin_5981();
+        let mut other = before.clone();
+        other.started_at = format!("{}-successor", before.started_at);
+        assert_ne!(before.started_at, other.started_at);
+        assert!(
+            !before.is_same_episode_as(&other),
+            "branch 7/7 started_at: a pin differing only in start instant must be refused"
+        );
+    }
 }
