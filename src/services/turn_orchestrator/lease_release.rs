@@ -1,8 +1,4 @@
-//! #5996 — the active-turn anchor release, extracted from the parent so the
-//! terms I20 asks that retirement point to carry can arrive without growing a
-//! registered giant (`scripts/giant_file_registry.toml`, `decision = "shrink"`,
-//! `#4710`). The parent kept this frame inline; nothing about the release
-//! changed in the move.
+//! #5996 — the active-turn anchor release, moved verbatim out of a registered giant.
 
 use std::sync::Arc;
 
@@ -14,42 +10,16 @@ use super::{
 };
 use crate::services::provider::{CancelToken, ProviderKind};
 
-/// What the release site RENDERS when its call site carries no provider.
-///
-/// This string is a display convenience and NOT the discriminator. No string
-/// can be one: `ProviderKind::Unsupported(String)::as_str` returns whatever
-/// provider name a config supplied, so an agent configured as `unidentified`
-/// renders exactly like the unmeasured case. The term a consumer must read is
-/// the separate `provider_measured` field, whose domain no provider name can
-/// reach. Naming an UNMEASURED term inside the MEASURED domain is the category
-/// error I20 forbids, and a label alone would have committed it.
+/// Rendering only, never the discriminator: `ProviderKind::Unsupported::as_str`
+/// returns whatever provider string a config supplied, so an agent named
+/// `unidentified` renders identically. `provider_measured` is the term a
+/// consumer reads, because no string can carry an UNMEASURED one.
 const UNIDENTIFIED_RELEASE_PROVIDER: &str = "unidentified";
 
 /// Drop the active-turn anchor, returning the token that turn owned. #5937 —
-/// the window this turn held was never drain time, so it is discounted here
-/// rather than at the turn end alone: `Clear` and a force `PurgeQueue` release
-/// this same anchor, and missing them counts a long turn as a wedged drain.
-///
-/// #5996 — I20's FIRST named exception. This retirement point carried neither
-/// channel nor provider, so it could not say WHICH anchor it retires; both now
-/// arrive. Nothing here DECIDES on them, and the arrival closes nothing: I20's
-/// discriminator (a durable completion witness, or a MEASURED unrelayed tail) is
-/// not reachable from this frame. #6012 reordered the rowless arm to run AFTER
-/// `sweep_coverage` and carry what it saw; the contract records that this did
-/// not close the gap and that ORDERING ALONE never will. What fails is the
-/// SCOPE of those numbers — they cover the INCARNATION, not this turn, because
-/// `ObligationExtinction::ReceiptCovered` has no producer — so until a term
-/// isolates the current turn the release stays unauthorized. `provider` is
-/// `None` at a call site carrying no `QueuePersistenceContext`; that absence is
-/// UNMEASURED and is carried out as the `provider_measured` term rather than
-/// defaulted to some provider.
-///
-/// What arrives is the CALL SITE's provider, never an attribution of the turn
-/// being retired. `HardStop` and `FinishCancelledTurn` pass
-/// `state.last_persistence`, which names whoever last sent a queue-persisting
-/// message — possibly an earlier turn. `Clear` and a force `PurgeQueue` name
-/// the caller doing the retiring. No lane may read either as "the provider
-/// whose turn this was".
+/// `Clear` and a force `PurgeQueue` release this same anchor. #5996 — the
+/// channel and the CALL SITE's provider (never the retiring turn's) now arrive
+/// here; nothing DECIDES on them, and I20 still does not authorize the release.
 pub(super) fn release_active_turn_anchor(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
@@ -58,14 +28,9 @@ pub(super) fn release_active_turn_anchor(
     let removed_token = state.cancel_token.take();
     tracing::debug!(
         channel_id = channel_id.get(),
-        // The authoritative term. `provider` below can be forged by a config;
-        // this one cannot, so it is what a consumer reads.
         provider_measured = provider.is_some(),
         provider = provider.map_or(UNIDENTIFIED_RELEASE_PROVIDER, ProviderKind::as_str),
         released_token = removed_token.is_some(),
-        // Names the call, not an effect: the anchor fields are cleared whether
-        // or not a turn was live, so claiming a release happened would assert
-        // something this frame cannot know. `released_token` says what moved.
         "active-turn anchor release ran without consulting progress evidence"
     );
     let held = state
@@ -84,14 +49,11 @@ pub(super) fn release_active_turn_anchor(
     removed_token
 }
 
-/// #5996 — the two terms I20 asks a retirement point to carry must ARRIVE at
-/// `release_active_turn_anchor`, and the `None` provider must stay visible as
-/// the unmeasured term it is. These tests pin the arrival only; nothing here
-/// asserts a release was EARNED, because on today's operands none can be.
+/// #5996 — these pin the ARRIVAL of I20's two terms, never that a release was earned.
 #[cfg(test)]
 mod lease_release_identity_tests {
-    use super::*;
     use super::super::*;
+    use super::*;
     use std::io::Write;
     use std::sync::Mutex;
 
