@@ -1892,6 +1892,13 @@ async fn queue_membership_alone_does_not_advance_the_phase2_checkpoint() {
     let shared = super::super::make_shared_data_for_tests();
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(4_453_016);
+    // Phase 2 — unlike phase 1 — passes `author_is_authorized` into
+    // `classify_phase2_message_with_utility_resolution`, and
+    // `user_is_authorized` is false for every id under default test settings.
+    // Without this the fresh human message classifies `NotAllowed`, phase 2
+    // skips it before the capacity gate, and the sweep never reaches the
+    // checkpoint decision this test exists to pin.
+    shared.settings.write().await.allow_all_users = true;
 
     let bot_id = message_id_with_age(1, Duration::from_secs(300));
     let queued_id = message_id_with_age(2, Duration::from_secs(120));
@@ -1947,9 +1954,13 @@ async fn queue_membership_alone_does_not_advance_the_phase2_checkpoint() {
     ]);
     run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
 
+    // This proves phase 2 issued its own request. It does NOT prove the sweep
+    // reached the message loop: the empty-page bail and the "no bot response
+    // found" bail both run after this counter moves. The retry assertion below
+    // is what pins that the loop ran and stopped where it should.
     assert!(
         api.fetch_calls.load(Ordering::Relaxed) >= 2,
-        "phase 2 must have run its own fetch, or this test proves nothing"
+        "phase 2 must have run its own fetch"
     );
     let retry = shared
         .catch_up_retry_pending
@@ -1981,6 +1992,10 @@ async fn an_active_turn_still_advances_the_phase2_checkpoint() {
     let shared = super::super::make_shared_data_for_tests();
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(4_453_017);
+    // Same reason as the sibling test above: phase 2 gates on
+    // `author_is_authorized`, so the fresh human message that must reach the
+    // capacity gate is otherwise classified `NotAllowed` and skipped.
+    shared.settings.write().await.allow_all_users = true;
 
     let bot_id = message_id_with_age(1, Duration::from_secs(300));
     let active_id = message_id_with_age(2, Duration::from_secs(120));
@@ -2037,9 +2052,13 @@ async fn an_active_turn_still_advances_the_phase2_checkpoint() {
     ]);
     run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
 
+    // This proves phase 2 issued its own request. It does NOT prove the sweep
+    // reached the message loop: the empty-page bail and the "no bot response
+    // found" bail both run after this counter moves. The retry assertion below
+    // is what pins that the loop ran and stopped where it should.
     assert!(
         api.fetch_calls.load(Ordering::Relaxed) >= 2,
-        "phase 2 must have run its own fetch, or this test proves nothing"
+        "phase 2 must have run its own fetch"
     );
     let retry = shared
         .catch_up_retry_pending
