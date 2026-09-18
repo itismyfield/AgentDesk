@@ -1348,9 +1348,17 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                         .await;
                     max_settled_id = advance_catch_up_settled_frontier(max_settled_id, mid);
                 }
-                // Phase 1 advances its own settled frontier, not the phase-2
-                // checkpoint #5996 splits these variants for, so both arms land
-                // here unchanged.
+                // Behaviour here is UNCHANGED by #5996: phase 1 folded these two
+                // meanings together before the split and still does. That is not
+                // a safety argument, and it should not be read as one.
+                // `DuplicateQueued` is a `SourceIdAlreadyQueued` refusal — queue
+                // membership, which I20 says is not evidence of dispatch — and
+                // advancing `max_settled_id` on it retires the message on the
+                // DURABLE frontier that reaches `runtime_store::save_last_message_id`.
+                // That is the same exposure as the membership gate this phase
+                // applies earlier, at a second coordinate. Filed with it in #6035,
+                // not repaired here, because the repair has to keep the frontier
+                // contiguous and needs its own measurement.
                 Phase2EnqueueCommit::DuplicateActiveTurn | Phase2EnqueueCommit::DuplicateQueued => {
                     stats.record(CatchUpClassification::Duplicate);
                     max_settled_id = advance_catch_up_settled_frontier(max_settled_id, mid);
