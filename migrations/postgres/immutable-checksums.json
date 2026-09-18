@@ -610,6 +610,11 @@
       "path": "migrations/postgres/0119_agent_recovery_pending_intents.sql",
       "sha256": "4f35dfd8d46fe79b41b98f44f78ef819555b19c34f7fe247bfb8332c3a5d7944",
       "version": 119
+    },
+    {
+      "path": "migrations/postgres/0120_relay_dead_letter_redelivery.sql",
+      "sha256": "ba6981fecb0e07c30dabf307d7b948e358ccfc9958ad6ab6c6f525cff62cf8a6",
+      "version": 120
     }
   ],
   "version": 1
