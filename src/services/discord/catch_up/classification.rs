@@ -155,41 +155,8 @@ pub(super) fn too_old_is_actionable(
         && notify_bot_id != Some(author_id)
 }
 
-fn disposition_for_utility_ids(
-    msg: &CatchUpMessageView,
-    bot_user_id: Option<u64>,
-    existing_ids: &std::collections::HashSet<u64>,
-    settled_ids: &std::collections::HashSet<u64>,
-    max_age_secs: i64,
-    allowed_bot_ids: &[u64],
-    announce_bot_id: Option<u64>,
-    notify_bot_id: Option<u64>,
-) -> CatchUpDisposition {
-    let outcome = classify_catch_up_message(
-        msg,
-        bot_user_id,
-        existing_ids,
-        settled_ids,
-        max_age_secs,
-        allowed_bot_ids,
-        announce_bot_id,
-        notify_bot_id,
-    );
-    CatchUpDisposition {
-        outcome,
-        actionable_too_old: too_old_is_actionable(
-            outcome,
-            msg.author_id,
-            msg.author_is_bot,
-            allowed_bot_ids,
-            announce_bot_id,
-            notify_bot_id,
-        ),
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
-fn phase2_disposition_for_utility_ids(
+fn disposition_for_utility_ids(
     msg: &CatchUpMessageView,
     bot_user_id: Option<u64>,
     existing_ids: &std::collections::HashSet<u64>,
@@ -200,7 +167,7 @@ fn phase2_disposition_for_utility_ids(
     notify_bot_id: Option<u64>,
     author_is_authorized: bool,
 ) -> CatchUpDisposition {
-    let mut disposition = disposition_for_utility_ids(
+    let mut outcome = classify_catch_up_message(
         msg,
         bot_user_id,
         existing_ids,
@@ -212,13 +179,21 @@ fn phase2_disposition_for_utility_ids(
     );
     let is_allowed_automation = allowed_bot_ids.contains(&msg.author_id)
         || announce_bot_id.is_some_and(|id| id == msg.author_id);
-    if disposition.outcome == CatchUpClassification::Recover
-        && !is_allowed_automation
-        && !author_is_authorized
+    if outcome == CatchUpClassification::Recover && !is_allowed_automation && !author_is_authorized
     {
-        disposition.outcome = CatchUpClassification::NotAllowed;
+        outcome = CatchUpClassification::NotAllowed;
     }
-    disposition
+    CatchUpDisposition {
+        outcome,
+        actionable_too_old: too_old_is_actionable(
+            outcome,
+            msg.author_id,
+            msg.author_is_bot,
+            allowed_bot_ids,
+            announce_bot_id,
+            notify_bot_id,
+        ),
+    }
 }
 
 fn decision_for_utility_resolution(
@@ -256,42 +231,17 @@ fn decision_for_utility_resolution(
 /// surfaced as something a human can resend. Only a semantic difference is
 /// deferred, so a stable legacy card or known non-actionable bot does not enter
 /// an identity retry loop merely because an unrelated utility lookup is down.
-pub(in crate::services::discord) fn classify_catch_up_message_with_utility_resolution(
-    msg: &CatchUpMessageView,
-    bot_user_id: Option<u64>,
-    existing_ids: &std::collections::HashSet<u64>,
-    settled_ids: &std::collections::HashSet<u64>,
-    max_age_secs: i64,
-    allowed_bot_ids: &[u64],
-    announce_resolution: UtilityBotUserIdResolution,
-    notify_resolution: UtilityBotUserIdResolution,
-) -> CatchUpClassificationDecision {
-    decision_for_utility_resolution(
-        msg,
-        announce_resolution,
-        notify_resolution,
-        |announce_bot_id, notify_bot_id| {
-            disposition_for_utility_ids(
-                msg,
-                bot_user_id,
-                existing_ids,
-                settled_ids,
-                max_age_secs,
-                allowed_bot_ids,
-                announce_bot_id,
-                notify_bot_id,
-            )
-        },
-    )
-}
-
-/// Phase-2 counterpart to [`classify_catch_up_message_with_utility_resolution`].
-/// In addition to sender classification, this includes the announce identity's
-/// authorization-bypass semantics. Without that extra disposition bit, a
-/// false-flag announce message can look like an ordinary unauthorized human
-/// while the utility lookup is down and be irreversibly skipped.
+///
+/// `author_is_authorized` carries the announce identity's authorization-bypass
+/// semantics into that comparison, which is why `is_allowed_automation` is
+/// checked before authorization: without that disposition bit a false-flag
+/// announce message looks like an ordinary unauthorized human while the utility
+/// lookup is down and would be irreversibly skipped. #6042 routes both catch-up
+/// phases through this one function so the live-intake gate
+/// (`router/intake_gate.rs`, which rejects before enqueue) and catch-up cannot
+/// diverge again.
 #[allow(clippy::too_many_arguments)]
-pub(in crate::services::discord) fn classify_phase2_message_with_utility_resolution(
+pub(in crate::services::discord) fn classify_catch_up_message_with_utility_resolution(
     msg: &CatchUpMessageView,
     bot_user_id: Option<u64>,
     existing_ids: &std::collections::HashSet<u64>,
@@ -307,7 +257,7 @@ pub(in crate::services::discord) fn classify_phase2_message_with_utility_resolut
         announce_resolution,
         notify_resolution,
         |announce_bot_id, notify_bot_id| {
-            phase2_disposition_for_utility_ids(
+            disposition_for_utility_ids(
                 msg,
                 bot_user_id,
                 existing_ids,

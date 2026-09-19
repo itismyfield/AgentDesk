@@ -53,6 +53,13 @@ pub(super) fn user_is_authorized(settings: &DiscordBotSettings, user_id: u64) ->
         || settings.allowed_user_ids.contains(&user_id)
 }
 
+/// Authorization for a recovered author, reading the live settings snapshot
+/// exactly as `check_auth` does so catch-up and live intake cannot diverge.
+pub(super) async fn author_authorized(shared: &Arc<SharedData>, user_id: u64) -> bool {
+    let settings = shared.settings.read().await;
+    user_is_authorized(&settings, user_id)
+}
+
 /// Check if a user is the owner (not just allowed)
 pub(super) async fn check_owner(user_id: UserId, shared: &Arc<SharedData>) -> bool {
     let settings = shared.settings.read().await;

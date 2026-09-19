@@ -228,7 +228,6 @@ mod classification_order_tests;
 use classification::{
     CatchUpClassification, CatchUpClassificationDecision, CatchUpMessageView, CatchUpScanStats,
     classify_catch_up_message, classify_catch_up_message_with_utility_resolution,
-    classify_phase2_message_with_utility_resolution,
 };
 #[cfg(test)]
 use phase2::catch_up_enqueue_accepted;
@@ -1204,6 +1203,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 &allowed_bot_ids,
                 announce_resolution,
                 notify_resolution,
+                discord_io::author_authorized(shared, msg.author.id.get()).await,
             ) {
                 CatchUpClassificationDecision::Determinate(outcome) => outcome,
                 CatchUpClassificationDecision::UtilityIdentityUnavailable => {
@@ -1600,11 +1600,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 age_secs: msg_age.num_seconds(),
                 trimmed_text: intervention_text.clone(),
             };
-            let author_is_authorized = {
-                let settings = shared.settings.read().await;
-                discord_io::user_is_authorized(&settings, msg.author.id.get())
-            };
-            match classify_phase2_message_with_utility_resolution(
+            match classify_catch_up_message_with_utility_resolution(
                 &utility_view,
                 current_bot_user_id,
                 &existing_ids,
@@ -1613,7 +1609,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 &allowed_bot_ids_phase2,
                 announce_resolution_phase2,
                 notify_resolution_phase2,
-                author_is_authorized,
+                discord_io::author_authorized(shared, msg.author.id.get()).await,
             ) {
                 CatchUpClassificationDecision::UtilityIdentityUnavailable => {
                     let retry_after = phase2_retry_after_checkpoint(
@@ -2623,6 +2619,12 @@ mod catch_up_recovery_tests {
     async fn phase1_deferred_commit_arms_retry_and_stops_before_later_message() {
         let root = scoped_runtime_root();
         let shared = super::super::make_shared_data_for_tests();
+        // #6042: phase 1 now gates on `author_is_authorized`, and
+        // `user_is_authorized` is false for every id under default test
+        // settings. Without this the fresh human message classifies
+        // `NotAllowed` and the sweep never reaches the behaviour this test
+        // exists to pin.
+        shared.settings.write().await.allow_all_users = true;
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(1479671298497183835);
         let author_id = 343742347365974026;
@@ -2706,6 +2708,12 @@ mod catch_up_recovery_tests {
     async fn phase1_recent_queue_cap_arms_retry_without_checkpoint() {
         let root = scoped_runtime_root();
         let shared = super::super::make_shared_data_for_tests();
+        // #6042: phase 1 now gates on `author_is_authorized`, and
+        // `user_is_authorized` is false for every id under default test
+        // settings. Without this the fresh human message classifies
+        // `NotAllowed` and the sweep never reaches the behaviour this test
+        // exists to pin.
+        shared.settings.write().await.allow_all_users = true;
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(1479671298497183835);
         let author_id = 343742347365974026;
@@ -2814,6 +2822,12 @@ mod catch_up_recovery_tests {
     async fn phase1_resend_after_real_dedup_window_survives_catch_up() {
         let root = scoped_runtime_root();
         let shared = super::super::make_shared_data_for_tests();
+        // #6042: phase 1 now gates on `author_is_authorized`, and
+        // `user_is_authorized` is false for every id under default test
+        // settings. Without this the fresh human message classifies
+        // `NotAllowed` and the sweep never reaches the behaviour this test
+        // exists to pin.
+        shared.settings.write().await.allow_all_users = true;
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(1479671298497183835);
         let author_id = 343742347365974026;
@@ -2855,6 +2869,12 @@ mod catch_up_recovery_tests {
     async fn phase1_true_rapid_resend_dedups_and_advances_checkpoint() {
         let root = scoped_runtime_root();
         let shared = super::super::make_shared_data_for_tests();
+        // #6042: phase 1 now gates on `author_is_authorized`, and
+        // `user_is_authorized` is false for every id under default test
+        // settings. Without this the fresh human message classifies
+        // `NotAllowed` and the sweep never reaches the behaviour this test
+        // exists to pin.
+        shared.settings.write().await.allow_all_users = true;
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(1479671298497183835);
         let author_id = 343742347365974026;
