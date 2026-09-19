@@ -2161,7 +2161,7 @@ fn apply_stale_mailbox_fixes(snapshot: &HealthSnapshot, options: &DoctorOptions)
                     "Stale Mailbox Repair",
                     "skipped stale mailbox repair because live work evidence exists",
                     FixSafety::ExplicitRestartRequired,
-                    "live tmux/process/dispatch/queue evidence present",
+                    "live tmux/process/dispatch evidence present",
                 )
                 .with_evidence(finding.evidence);
             }
