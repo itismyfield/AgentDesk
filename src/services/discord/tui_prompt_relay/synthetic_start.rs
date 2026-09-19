@@ -814,6 +814,39 @@ mod tests {
         let active_before = shared.restart.global_active.load(Ordering::Relaxed);
         assert_eq!(active_before, 1, "the deferred claim holds one active slot");
 
+        // #5996 r3 / FORWARD direction of the mutant pair. Put on disk the one
+        // thing production most plausibly HAS in this shape and that an
+        // exhaustiveness claim over readable witnesses must account for: the
+        // provider's own JSONL transcript carrying the authoritative turn-END
+        // terminator. The reader for it is reachable from the reclaim's module
+        // (`pub(in crate::services::discord)`), and it reads `Done` right here —
+        // asserted, not assumed. The refusal below must nevertheless stay GREEN,
+        // because that scan is a REVERSE walk for the most recent terminator
+        // over a tail window with no turn key: on a session shared with a
+        // successor it reports the SUCCESSOR's state, and the attribution its own
+        // doc points at (`pinned_finalize_user_msg_id` /
+        // `committed_completion_is_stale_for_newer_turn`, both taking the
+        // "pre-cleanup inflight snapshot") is exactly what this shape destroyed.
+        // If a later change ever wires this signal in as a witness, THIS
+        // assertion pair is what must be revisited first.
+        let transcript = root.path().join("4018-aged-turn-completed.jsonl");
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s\",\"cwd\":\"/repo\"}}\n\
+             {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":3}}\n",
+        )
+        .expect("write a Done provider transcript");
+        assert_eq!(
+            crate::services::discord::turn_finalizer::completion_signal_from_transcript(
+                &provider,
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui),
+                &transcript,
+            ),
+            crate::services::discord::turn_finalizer::CompletionSignal::Done,
+            "the transcript axis is readable from here and says Done — the refusal below \
+             must not be resting on that axis being unreachable"
+        );
+
         let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
             &shared,
             &provider,

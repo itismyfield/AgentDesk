@@ -323,6 +323,50 @@ pub(super) use crate::services::observability::LIVE_TURN_PROVEN_BY_PROGRESS_INVA
 /// this owner's relay finished. It is unreachable for a re-adopted real owner
 /// either way (see `ReclaimableMailboxOwner`), so refusing it costs that arm
 /// nothing.
+///
+/// Two further axes ARE reachable from here and still fail. They are recorded
+/// here so the next reader does not have to re-derive them.
+///
+/// The provider JSONL transcript. `turn_finalizer::completion_signal_state`
+/// is `pub(in crate::services::discord)` and `tmux_watcher_registry`'s
+/// `watcher_output_path` hands out a transcript path with no row at all — this
+/// very module tree already calls it in production
+/// (`synthetic_start::tui_direct_watcher_can_own_output`). So the value is
+/// reachable; what fails is attribution, and that reader's own doc says where
+/// the attribution lives: it takes "intentionally NO `turn_start_offset` param"
+/// because "TURN-correctness is guaranteed at the CALL SITE ... the watcher
+/// fresh-idle decision pins the finalize id from a PRE-CLEANUP INFLIGHT
+/// SNAPSHOT". Both pins it names take that row as their first argument
+/// (`tmux_watcher::turn_identity::pinned_finalize_user_msg_id`,
+/// `committed_completion_is_stale_for_newer_turn`) and both degrade to the
+/// unmeasured-reads-as-safe shape on `None` — `unwrap_or(0)`, and `false` for
+/// "this turn" and "no row" alike. The pin's input is exactly what the rowless
+/// shape destroyed. Underneath, the scan is a REVERSE walk for the most recent
+/// terminator over a tail window ("is the LAST turn fully over?"), keyed by
+/// nothing: on the live `AgentDesk-*` session this shape presumes, `Done` means
+/// a SUCCESSOR ended and `PausedLive` means a successor is running. Same
+/// attribution failure as the measured tail and the receipt sweep, in a fourth
+/// place. The far-backstop consumes the same signal into a DEADLINE
+/// (`turn_finalizer::watcher_backstop`) and says so itself — "absence proves
+/// nothing about the TURN" — which is the (a) horizon this refusal already hands
+/// the wedge to, not a witness that could replace it.
+///
+/// The mailbox actor's own snapshot. `mailboxes` is the one `SharedData`
+/// member whose turn attribution is guaranteed by construction, and the caller
+/// holds a whole `ChannelMailboxSnapshot` while passing five of its fields here.
+/// Of the eight it does not pass, seven carry no progress about the active turn
+/// (`intervention_queue`, `pending_user_dispatch*` and
+/// `recently_valve_cleared_dispatch` describe INBOUND work not yet started;
+/// `recovery_started_at` is a clock §I20 forbids reading as progress). The
+/// eighth, `cancel_token`, is this owner's own token, so it is the strongest
+/// candidate on the whole surface — and it is refused on a stronger ground than
+/// attribution: `cancelled` records that somebody ASKED for a stop, not that a
+/// relay finished, and `is_completion_cleanup()` is set only inside
+/// `do_finalize`'s `removed_token.is_some()` arm — the arm that REMOVES the
+/// active turn. While there is still a mailbox here to reclaim, that bit is
+/// false by construction of the wedge, and the watcher context passes
+/// `allow_completion_cleanup = false` besides. Reading it would be reading a
+/// constant.
 fn empirical_reclaim_witness(
     owner_kind: ReclaimableMailboxOwner,
     reason: StaleSyntheticReclaimReason,
