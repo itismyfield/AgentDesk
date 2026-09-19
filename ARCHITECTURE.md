@@ -950,6 +950,8 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── queued_placeholders/
 │   │   │   │   └── tests.rs
+│   │   │   ├── relay_dlq_redelivery/
+│   │   │   │   └── tests.rs
 │   │   │   ├── deferred_restart.rs
 │   │   │   ├── framework_setup.rs
 │   │   │   ├── gateway_lease.rs
@@ -964,6 +966,7 @@ src/
 │   │   │   ├── orphan_recovery.rs
 │   │   │   ├── queued_placeholders.rs
 │   │   │   ├── recovery_flush.rs
+│   │   │   ├── relay_dlq_redelivery.rs
 │   │   │   ├── restored_state.rs
 │   │   │   ├── session_gc.rs
 │   │   │   ├── shared_data.rs
