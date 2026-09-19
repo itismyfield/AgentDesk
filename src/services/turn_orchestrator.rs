@@ -17,6 +17,7 @@ mod dispatch_reservation;
 mod episode_identity;
 mod front_requeue;
 mod inbound_order;
+mod lease_release;
 mod overflow;
 mod pending_queue_persistence;
 mod queue_cancellation;
@@ -48,6 +49,7 @@ use front_requeue::requeue_intervention_front;
 use inbound_order::INBOUND_ORDER_FAIL_OPEN_AFTER;
 pub(crate) use inbound_order::TurnAdmissionOrder;
 use inbound_order::{claim_yields, pause_inbound_stall_for_turn};
+use lease_release::release_active_turn_anchor;
 pub(crate) use overflow::SoftInterventionProbe;
 use overflow::drain_head_overflow;
 #[cfg(test)]
@@ -2019,35 +2021,17 @@ fn log_queue_persistence_rollback(
     );
 }
 
-/// Drop the active-turn anchor, returning the token that turn owned. #5937 —
-/// the window this turn held was never drain time, so it is discounted here
-/// rather than at the turn end alone: `Clear` and a force `PurgeQueue` release
-/// this same anchor, and missing them counts a long turn as a wedged drain.
-fn release_active_turn_anchor(state: &mut ChannelMailboxState) -> Option<Arc<CancelToken>> {
-    let removed_token = state.cancel_token.take();
-    let held = state
-        .turn_started_instant
-        .filter(|_| removed_token.is_some());
-    pause_inbound_stall_for_turn(state, held);
-    state.active_request_owner = None;
-    state.active_user_message_id = None;
-    state.active_turn_nonce = None;
-    // #3167 — clear the priority class with the rest of the active-turn anchor.
-    state.active_turn_kind = ActiveTurnKind::default();
-    state.recovery_started_at = None;
-    state.turn_started_at = None;
-    state.turn_started_instant = None;
-    reset_watchdog_extension_state(state);
-    removed_token
-}
-
 fn finalize_turn_state(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
     persistence: Option<&QueuePersistenceContext>,
     preserve_queue: bool,
 ) -> FinishTurnResult {
-    let removed_token = release_active_turn_anchor(state);
+    let removed_token = release_active_turn_anchor(
+        state,
+        channel_id,
+        persistence.map(|context| &context.provider),
+    );
     if preserve_queue {
         return FinishTurnResult {
             removed_token,
@@ -2963,7 +2947,11 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 }
                 ChannelMailboxMsg::Clear { persistence, reply } => {
                     state.last_persistence = Some(persistence.clone());
-                    let removed_token = release_active_turn_anchor(&mut state);
+                    let removed_token = release_active_turn_anchor(
+                        &mut state,
+                        channel_id,
+                        Some(&persistence.provider),
+                    );
                     let previous_queue = state.intervention_queue.clone();
                     let queue_exit_events = state
                         .intervention_queue
@@ -3023,7 +3011,11 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         && state.cancel_token.as_ref().is_some_and(|token| {
                             token.cancelled.load(std::sync::atomic::Ordering::Relaxed)
                         }) {
-                        release_active_turn_anchor(&mut state);
+                        release_active_turn_anchor(
+                            &mut state,
+                            channel_id,
+                            Some(&persistence.provider),
+                        );
                         true
                     } else {
                         false
