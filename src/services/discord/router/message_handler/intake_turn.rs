@@ -2876,7 +2876,7 @@ mod turn_start_dispatch_guard_preservation_tests {
         let stale_call_pos = guard_src
             .find("stale_dispatch_turn_for_text(")
             .expect("turn-start dispatch-guard raw stale-text lookup exists");
-        let gate_before_lookup = guard_src[..stale_call_pos].find("!preserve_on_cancel");
+        let gate_before_lookup = guard_src[..stale_call_pos].find("&& !preserve_on_cancel");
 
         assert!(
             gate_before_lookup.is_some(),
