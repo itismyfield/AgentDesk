@@ -565,6 +565,10 @@ impl QueueService {
             channel_id: parsed_channel_id,
             tmux_name: tmux_name.clone(),
         };
+        // #5176 R3: read the queue before the cancel can empty it. Everything
+        // below is about putting back whatever this cancel takes.
+        let queue_capture =
+            crate::services::turn_cancel_queue_guard::capture_queue_before_cancel(&target).await;
         let lifecycle = if force {
             force_kill_turn_without_cancel_event(
                 health_registry.map(Arc::as_ref),
@@ -691,6 +695,28 @@ impl QueueService {
             lifecycle_queued_remaining
         };
 
+        // #5176 R3: name what this cancel took, with the message text, so the
+        // removal is recoverable by hand instead of vanishing. The `reason`
+        // separates an operator's deliberate purge from a preserve cancel that
+        // lost something anyway, so the rows can be told apart later.
+        let loss = crate::services::turn_cancel_queue_guard::record_queue_loss_after_cancel(
+            &target,
+            &queue_capture,
+            self.pg_pool.as_ref(),
+            lifecycle.queue_disk_present_before && !lifecycle.queue_disk_present_after,
+            if force {
+                "queue_api_cancel_turn_force"
+            } else {
+                "queue_api_cancel_turn"
+            },
+        )
+        .await;
+        // The drain is the documented source of truth, so it keeps precedence.
+        // The guard's depth only fills a gap the drain left empty: it comes from
+        // a mailbox that cannot distinguish "never answered" from "empty"
+        // (#6046), which is fine as a fallback and wrong as an override.
+        let queued_remaining = queued_remaining.or(loss.queue_depth_after);
+
         tracing::info!(
             "[queue-api] Cancelled turn: channel={}, session={:?}, tmux={}, killed={}, dispatch={:?}, lifecycle={}, agent={:?}, requested_provider={:?}, exact_match={}, queue_preserved={}, queued_before={:?}, queued_after={:?}, queue_disk_before={}, queue_disk_after={}, queue_purged={:?}, mailbox_foreground_free={:?}, queue_dropped_message_ids={:?}",
             channel_id,
@@ -738,6 +764,12 @@ impl QueueService {
             // Discord message id. Empty is the contract; non-empty is a bug
             // report the operator can act on.
             "queue_dropped_message_ids": lifecycle.queue_dropped_message_ids,
+            // #5176 R3: whether every message this cancel removed got a durable
+            // record. `false` is the contract violation itself. `null` means a
+            // queue it could have emptied was never read, so it cannot answer.
+            "queue_dead_lettered_message_ids": loss.dead_lettered_message_ids,
+            "queue_unpreserved_message_ids": loss.unpreserved_message_ids,
+            "queue_loss_recorded": loss.loss_recorded(),
             "dispatch_cancelled": dispatch_id,
             "turn_status": finalizer.status,
             "turn_completed_at": finalizer.completed_at.to_rfc3339(),
