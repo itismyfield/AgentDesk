@@ -8,15 +8,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId};
 
 use crate::services::provider::ProviderKind;
-use crate::services::turn_orchestrator::{
-    INTERVENTION_DEDUP_WINDOW, SourceMessageQueuedGeneration,
-};
+use crate::services::turn_orchestrator::SourceMessageQueuedGeneration;
 
 use super::*;
 
@@ -236,8 +234,10 @@ use classification::{
 use phase2::catch_up_enqueue_accepted;
 use phase2::{
     Phase2EnqueueCommit, Phase2RecoveryStats, advance_phase2_checkpoint,
-    catch_up_remaining_queue_capacity, classify_phase2_enqueue_commit,
-    log_catch_up_enqueue_not_accepted, phase2_retry_after_checkpoint,
+    catch_up_last_item_dedup_is_checkpoint_safe, catch_up_remaining_queue_capacity,
+    classify_phase2_enqueue_commit, log_catch_up_enqueue_not_accepted,
+    phase2_checkpoint_after_duplicate_commit, phase2_checkpoint_after_membership_skip,
+    phase2_known_arms_and_ids, phase2_retry_after_checkpoint,
 };
 use too_old_notice::{
     CATCH_UP_TOO_OLD_NOTICE_MAX_ITEMS, CatchUpTooOldDrop, CatchUpTooOldOutboxRequest,
@@ -765,23 +765,6 @@ fn catch_up_intervention_created_at(
         Ok(age) => scan_instant.checked_sub(age).unwrap_or(scan_instant),
         Err(_) => scan_instant,
     }
-}
-
-fn catch_up_message_id_gap(last_id: MessageId, current_id: MessageId) -> Option<Duration> {
-    let last_created_at = last_id.created_at();
-    let current_created_at = current_id.created_at();
-    current_created_at
-        .signed_duration_since(*last_created_at)
-        .to_std()
-        .ok()
-}
-
-fn catch_up_last_item_dedup_is_checkpoint_safe(
-    last: Option<&Intervention>,
-    message_id: MessageId,
-) -> bool {
-    last.and_then(|last| catch_up_message_id_gap(last.message_id, message_id))
-        .is_some_and(|gap| gap <= INTERVENTION_DEDUP_WINDOW)
 }
 
 /// Startup catch-up polling: fetch messages that arrived during the catch-up
@@ -1348,7 +1331,9 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                         .await;
                     max_settled_id = advance_catch_up_settled_frontier(max_settled_id, mid);
                 }
-                Phase2EnqueueCommit::Duplicate => {
+                // #5996 does not change this arm: phase 1 still retires a queued
+                // duplicate on the DURABLE frontier. Second coordinate, in #6035.
+                Phase2EnqueueCommit::DuplicateActiveTurn | Phase2EnqueueCommit::DuplicateQueued => {
                     stats.record(CatchUpClassification::Duplicate);
                     max_settled_id = advance_catch_up_settled_frontier(max_settled_id, mid);
                 }
@@ -1549,7 +1534,9 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         let mailbox = mailbox_snapshot(shared, channel_id).await;
         let remaining_capacity =
             catch_up_remaining_queue_capacity(mailbox.intervention_queue.len());
-        let mut existing_ids = recovery_known_message_ids(&mailbox);
+        // #5996: keep the arm that answered for each id — only the arm can say
+        // whether a membership carries the evidence an advance must earn.
+        let (known_arms, mut existing_ids) = phase2_known_arms_and_ids(&mailbox);
         // #4564: same durable completed-turn ledger consult as phase 1, read once
         // per channel. A Settled outcome in phase 2 simply skips (no enqueue, no
         // notice) — an already-answered message must not be re-surfaced.
@@ -1593,7 +1580,8 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             // TooOld bit is intentionally irrelevant to phase 2.
             if existing_ids.contains(&mid) {
                 stats.duplicate += 1;
-                phase2_checkpoint = advance_phase2_checkpoint(phase2_checkpoint, mid);
+                phase2_checkpoint =
+                    phase2_checkpoint_after_membership_skip(phase2_checkpoint, &known_arms, mid);
                 continue;
             }
             if phase2_checkpoint.is_some_and(|saved| mid <= saved) {
@@ -1726,9 +1714,13 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     max_recovered_id = advance_phase2_checkpoint(max_recovered_id, mid);
                     stats.enqueued += 1;
                 }
-                Phase2EnqueueCommit::Duplicate => {
+                // #5996: the active-turn refusal advances, the queued one does
+                // not. `phase2_checkpoint_after_duplicate_commit` holds the rule.
+                commit @ (Phase2EnqueueCommit::DuplicateActiveTurn
+                | Phase2EnqueueCommit::DuplicateQueued) => {
                     existing_ids.insert(mid);
-                    phase2_checkpoint = advance_phase2_checkpoint(phase2_checkpoint, mid);
+                    phase2_checkpoint =
+                        phase2_checkpoint_after_duplicate_commit(commit, phase2_checkpoint, mid);
                     stats.duplicate += 1;
                 }
                 Phase2EnqueueCommit::LastItemDedup => {
@@ -3176,7 +3168,7 @@ mod catch_up_recovery_tests {
         };
         assert_eq!(
             classify_phase2_enqueue_commit(&duplicate),
-            Phase2EnqueueCommit::Duplicate
+            Phase2EnqueueCommit::DuplicateQueued
         );
 
         let already_active = super::super::MailboxEnqueueOutcome {
@@ -3187,7 +3179,7 @@ mod catch_up_recovery_tests {
         };
         assert_eq!(
             classify_phase2_enqueue_commit(&already_active),
-            Phase2EnqueueCommit::Duplicate
+            Phase2EnqueueCommit::DuplicateActiveTurn
         );
 
         let last_item_dedup = super::super::MailboxEnqueueOutcome {

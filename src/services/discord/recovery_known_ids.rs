@@ -19,6 +19,42 @@ use serenity::MessageId;
 use super::ChannelMailboxSnapshot;
 use crate::services::turn_orchestrator::PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER;
 
+/// Which of the three sources answered for a known id.
+///
+/// #5996: the union below erases the provenance, and a consumer that only
+/// SKIPS on membership does not miss it. One that also RETIRES state does:
+/// `docs/relay-state-contract.md` I20 lets `catch_up`'s phase-2 checkpoint
+/// advance past a message "only on evidence of dispatch or answer", and the
+/// three arms do not agree on whether they carry that evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum RecoveryKnownIdArm {
+    /// `intervention_queue`. Presence says the message was ACCEPTED for a
+    /// turn, never that a turn took it — a queued entry that is dropped before
+    /// it drains was never dispatched at all.
+    Queued,
+    /// The #3167 dequeue→claim reservation. The head left the queue and has
+    /// not yet claimed the slot, so no turn has taken it either. An orphaned
+    /// marker deliberately reads as NOT live (see
+    /// [`live_pending_dispatch_message_ids`]) so recovery stays reachable;
+    /// a checkpoint advanced during the live window forecloses the very rescan
+    /// that fallback exists to reach.
+    PendingDispatch,
+    /// `active_user_message_id` — `try_start_turn` stamped THIS message onto
+    /// the slot the current turn holds.
+    ActiveTurn,
+}
+
+impl RecoveryKnownIdArm {
+    /// I20: "the checkpoint may advance past a message only on evidence of
+    /// dispatch or answer."
+    pub(in crate::services::discord) fn is_dispatch_evidence(self) -> bool {
+        match self {
+            Self::ActiveTurn => true,
+            Self::Queued | Self::PendingDispatch => false,
+        }
+    }
+}
+
 pub(in crate::services::discord) fn queued_message_ids(
     snapshot: &ChannelMailboxSnapshot,
 ) -> std::collections::HashSet<u64> {
@@ -76,23 +112,38 @@ fn live_pending_dispatch_message_ids(snapshot: &ChannelMailboxSnapshot) -> Vec<M
     ids
 }
 
-pub(in crate::services::discord) fn recovery_known_message_ids(
+/// The known-id union, each id carrying the arm that answered for it.
+///
+/// [`recovery_known_message_ids`] is this map's key set, so the three sources
+/// are walked once and the two views cannot drift apart.
+pub(in crate::services::discord) fn recovery_known_id_arms(
     snapshot: &ChannelMailboxSnapshot,
-) -> std::collections::HashSet<u64> {
-    let mut ids = queued_message_ids(snapshot);
-    if let Some(active_id) = snapshot.active_user_message_id {
-        ids.insert(active_id.get());
-    }
+) -> std::collections::HashMap<u64, RecoveryKnownIdArm> {
+    // Weakest evidence first: a later insert overwrites an earlier one, so an
+    // id claimed by two arms keeps the strongest claim.
+    let mut arms: std::collections::HashMap<u64, RecoveryKnownIdArm> = queued_message_ids(snapshot)
+        .into_iter()
+        .map(|id| (id, RecoveryKnownIdArm::Queued))
+        .collect();
     // #5191: the dequeue→claim window. Between the drain popping an
     // intervention and `try_start_turn` setting `active_user_message_id`, the
-    // message id lives in NEITHER of the two sets above, so a catch-up scan
+    // message id lives in NEITHER of the two other sets, so a catch-up scan
     // landing inside that window classified it `Recover` and enqueued a second
     // copy — one user message, two turns. The reservation marker is the only
     // in-mailbox evidence covering that gap, so recovery must consult it too.
     for reserved_id in live_pending_dispatch_message_ids(snapshot) {
-        ids.insert(reserved_id.get());
+        arms.insert(reserved_id.get(), RecoveryKnownIdArm::PendingDispatch);
     }
-    ids
+    if let Some(active_id) = snapshot.active_user_message_id {
+        arms.insert(active_id.get(), RecoveryKnownIdArm::ActiveTurn);
+    }
+    arms
+}
+
+pub(in crate::services::discord) fn recovery_known_message_ids(
+    snapshot: &ChannelMailboxSnapshot,
+) -> std::collections::HashSet<u64> {
+    recovery_known_id_arms(snapshot).into_keys().collect()
 }
 
 #[cfg(test)]
@@ -104,6 +155,26 @@ mod recovery_known_message_ids_tests {
     const RESERVED: u64 = 1_534_895_957_961_867_314;
     /// An id the reserved head absorbed by merging — it is NOT the primary.
     const MERGED_SOURCE: u64 = 1_534_895_957_961_867_300;
+
+    fn queued_intervention(message_id: u64) -> crate::services::turn_orchestrator::Intervention {
+        crate::services::turn_orchestrator::Intervention {
+            author_id: poise::serenity_prelude::UserId::new(4_162_001),
+            author_is_bot: false,
+            message_id: MessageId::new(message_id),
+            queued_generation: 0,
+            source_message_ids: vec![MessageId::new(message_id)],
+            source_message_queued_generations: Vec::new(),
+            source_text_segments: Vec::new(),
+            text: "queued".to_string(),
+            mode: crate::services::turn_orchestrator::InterventionMode::Soft,
+            created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        }
+    }
 
     fn snapshot_with_reservation(
         since: Option<Instant>,
@@ -177,6 +248,73 @@ mod recovery_known_message_ids_tests {
         assert!(
             known.contains(&MERGED_SOURCE),
             "an absorbed source id must not be re-exposed to recovery"
+        );
+    }
+
+    /// #5996: only the active-turn arm names a message a turn actually took,
+    /// so only it may move a checkpoint past one.
+    #[test]
+    fn only_the_active_turn_arm_is_dispatch_evidence() {
+        assert!(RecoveryKnownIdArm::ActiveTurn.is_dispatch_evidence());
+        assert!(!RecoveryKnownIdArm::Queued.is_dispatch_evidence());
+        assert!(!RecoveryKnownIdArm::PendingDispatch.is_dispatch_evidence());
+    }
+
+    /// #5996: the union erased which source answered. Each arm must be
+    /// recoverable, or `catch_up` cannot tell a dispatched message from a
+    /// merely queued one.
+    #[test]
+    fn each_source_reports_its_own_arm() {
+        const QUEUED: u64 = 1_534_895_957_961_867_001;
+        const ACTIVE: u64 = 1_534_895_957_961_867_002;
+        let snapshot = ChannelMailboxSnapshot {
+            intervention_queue: vec![queued_intervention(QUEUED)],
+            active_user_message_id: Some(MessageId::new(ACTIVE)),
+            pending_user_dispatch: Some(MessageId::new(RESERVED)),
+            pending_user_dispatch_since: Some(Instant::now()),
+            ..ChannelMailboxSnapshot::default()
+        };
+        let arms = recovery_known_id_arms(&snapshot);
+        assert_eq!(arms.get(&QUEUED), Some(&RecoveryKnownIdArm::Queued));
+        assert_eq!(arms.get(&ACTIVE), Some(&RecoveryKnownIdArm::ActiveTurn));
+        assert_eq!(
+            arms.get(&RESERVED),
+            Some(&RecoveryKnownIdArm::PendingDispatch)
+        );
+    }
+
+    /// The two views are one walk: whatever the map keys, the set contains.
+    #[test]
+    fn known_ids_are_exactly_the_arm_map_keys() {
+        const QUEUED: u64 = 1_534_895_957_961_867_003;
+        let snapshot = ChannelMailboxSnapshot {
+            intervention_queue: vec![queued_intervention(QUEUED)],
+            active_user_message_id: Some(MessageId::new(RESERVED)),
+            ..ChannelMailboxSnapshot::default()
+        };
+        let arms = recovery_known_id_arms(&snapshot);
+        let ids = recovery_known_message_ids(&snapshot);
+        assert_eq!(
+            arms.keys()
+                .copied()
+                .collect::<std::collections::HashSet<u64>>(),
+            ids
+        );
+    }
+
+    /// An id both queued and stamped active keeps the arm that can move a
+    /// checkpoint; resolving it the other way would re-open #5996 for it.
+    #[test]
+    fn active_turn_outranks_a_stale_queue_entry_for_the_same_id() {
+        const BOTH: u64 = 1_534_895_957_961_867_004;
+        let snapshot = ChannelMailboxSnapshot {
+            intervention_queue: vec![queued_intervention(BOTH)],
+            active_user_message_id: Some(MessageId::new(BOTH)),
+            ..ChannelMailboxSnapshot::default()
+        };
+        assert_eq!(
+            recovery_known_id_arms(&snapshot).get(&BOTH),
+            Some(&RecoveryKnownIdArm::ActiveTurn)
         );
     }
 
