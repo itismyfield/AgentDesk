@@ -353,6 +353,9 @@ mod tests {
             // owner, and that frame left without even a durable record.
             "relay_terminal_authority_denied",
             "terminal_frame_without_owner_or_record",
+            // #5996 I20: a retirement decision taken with neither a witness nor
+            // a measured tail to read.
+            "retirement_without_progress_witness",
         ] {
             assert!(
                 keys.contains(&expected),
@@ -442,6 +445,10 @@ mod tests {
             // this status, and `orphan_terminal_frame` writes the invariant one.
             "relay_terminal_authority_denied",
             "terminal_frame_has_a_delivery_owner_or_a_record",
+            // #5996: `stale_reclaim` writes this one, reading the SAME symbol
+            // the table does — so this assertion guards the row's presence, not
+            // a hand-copied string.
+            super::super::LIVE_TURN_PROVEN_BY_PROGRESS_INVARIANT,
         ] {
             assert!(
                 statuses.contains(&expected),

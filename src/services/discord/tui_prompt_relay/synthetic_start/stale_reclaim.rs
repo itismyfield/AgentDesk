@@ -17,7 +17,9 @@ pub(in crate::services::discord::tui_prompt_relay) async fn finish_tui_direct_sy
 ///     took, so the sub-120s follow-up loss (the ~79s task-notification drop) is
 ///     freed at once.
 ///   - ABSENT row + ledger `finished` (#4370 R3-1) → `OwnerInflightAbsent`,
-///     reclaimed only after `>= 120s`.
+///     reclaimed only after `>= 120s`. REAL-USER owners only: #5996 refuses the
+///     SYNTHETIC owner on this reason outright, so on that arm this clock can
+///     only ever REFUSE a reclaim, never authorize one (`empirical_reclaim_witness`).
 ///
 /// Note a re-adopted turn's `turn_started_at` is RESET to the re-adopt time
 /// (`turn_orchestrator.rs`), so this gate measures age-since-re-adopt, not the
@@ -227,6 +229,9 @@ fn stale_synthetic_mailbox_owner_reclaim_reason(
 ///     `terminal_delivery_committed`, so this arm can no longer steal a LIVE
 ///     re-adopted turn whose row is merely absent. The `>= 120s` gate is kept on
 ///     top as defense-in-depth (see R3-4) — `classify_reclaimable_mailbox_owner`.
+///     For the #4018 SYNTHETIC owner there is no such ledger entry to read, so
+///     #5996 refuses this reason there rather than letting the clock decide
+///     (`empirical_reclaim_witness`).
 ///   - `OwnerInflightFinalized` — NO age gate, reclaimed immediately. The reason
 ///     requires `terminal_delivery_committed == true`, which means ONLY that the
 ///     owner's assistant PROSE was already relayed. It does NOT mean the completion
@@ -261,7 +266,11 @@ fn stale_synthetic_mailbox_owner_reclaim_reason(
 ///           rows are refused at BOTH ends: recovery never records them
 ///           (`readopted_ledger_record_allowed`) and `classify_reclaimable_mailbox_owner`
 ///           never classifies them.
-///     It stays reachable only for the #4018 synthetic owner.
+///     It stays reachable only for the #4018 synthetic owner, where #5996 now
+///     refuses it: the row it reads belongs to a DIFFERENT turn and witnesses
+///     nothing about this owner. The variant is kept because deleting it would
+///     let a replaced row fall through to the successor's
+///     `terminal_delivery_committed` bit and retire this owner on it.
 #[derive(Clone, Copy)]
 enum ReclaimableMailboxOwner {
     /// #4018 — the TUI-direct synthetic relay owner.
@@ -277,6 +286,101 @@ impl ReclaimableMailboxOwner {
             Self::Synthetic => "synthetic_owner",
             Self::ReadoptedFromInflight => "readopted_from_inflight_real_owner",
         }
+    }
+}
+
+/// #5996 — the invariant key `docs/relay-state-contract.md` §I20 assigns to this
+/// retirement decision. Defined next to `RELAY_SIGNAL_DEFINITIONS`, which matches
+/// it as an `invariant_violation` `status`: one symbol read by both sides, so the
+/// emit path and the monitored status cannot drift into silence.
+pub(super) use crate::services::observability::LIVE_TURN_PROVEN_BY_PROGRESS_INVARIANT;
+
+/// #5996 / §I20 — the EMPIRICAL witness a reclaim reason actually read about
+/// THIS owner's own turn, or `None` when it read none.
+///
+/// §I20: "a consumer deciding whether a turn is still working may not read it
+/// from the EXISTENCE of a bookkeeping record ... nor from that record's AGE",
+/// and absence is the UNMEASURED case, which it sends to (b) — refuse, do not
+/// retire. So a `None` here is a REFUSAL, not a fallback to the clock.
+///
+/// Why the REAL-USER arm is untouched: for `OwnerInflightAbsent` the owner only
+/// reaches this function at all once `classify_reclaimable_mailbox_owner`'s
+/// `is_readopted_mailbox_owner` proved the ledger's `finished` bit, so there the
+/// witness IS read and `STALE_SYNTHETIC_MAILBOX_OWNER_MIN_AGE_SECS` sits on top
+/// of a positive proof as #4370 R3-4 intended.
+///
+/// Why the SYNTHETIC arm is not: that classifier short-circuits owner
+/// `TUI_DIRECT_SYNTHETIC_OWNER_USER_ID` before any ledger read, and the ledger
+/// can never hold that owner anyway — every insert path is gated by
+/// `recovery_engine::runtime::readopt_marker_eligible_real_user`, which excludes
+/// it. A rowless synthetic owner therefore has no readable witness at all, and
+/// `stale_synthetic_mailbox_owner_reclaim_reason` answers `OwnerInflightAbsent`
+/// on a `None` row before inspecting anything. That left the clock standing as
+/// the AUTHORITY — the #5996 shape.
+///
+/// `OwnerInflightReplaced` reads a row, but a row carrying a DIFFERENT
+/// `user_msg_id` is another turn's bookkeeping; it says nothing about whether
+/// this owner's relay finished. It is unreachable for a re-adopted real owner
+/// either way (see `ReclaimableMailboxOwner`), so refusing it costs that arm
+/// nothing.
+///
+/// Two further axes ARE reachable from here and still fail. They are recorded
+/// here so the next reader does not have to re-derive them.
+///
+/// The provider JSONL transcript. `turn_finalizer::completion_signal_state`
+/// is `pub(in crate::services::discord)` and `tmux_watcher_registry`'s
+/// `watcher_output_path` hands out a transcript path with no row at all — this
+/// very module tree already calls it in production
+/// (`synthetic_start::tui_direct_watcher_can_own_output`). So the value is
+/// reachable; what fails is attribution, and that reader's own doc says where
+/// the attribution lives: it takes "intentionally NO `turn_start_offset` param"
+/// because "TURN-correctness is guaranteed at the CALL SITE ... the watcher
+/// fresh-idle decision pins the finalize id from a PRE-CLEANUP INFLIGHT
+/// SNAPSHOT". Both pins it names take that row as their first argument
+/// (`tmux_watcher::turn_identity::pinned_finalize_user_msg_id`,
+/// `committed_completion_is_stale_for_newer_turn`) and both degrade to the
+/// unmeasured-reads-as-safe shape on `None` — `unwrap_or(0)`, and `false` for
+/// "this turn" and "no row" alike. The pin's input is exactly what the rowless
+/// shape destroyed. Underneath, the scan is a REVERSE walk for the most recent
+/// terminator over a tail window ("is the LAST turn fully over?"), keyed by
+/// nothing: on the live `AgentDesk-*` session this shape presumes, `Done` means
+/// a SUCCESSOR ended and `PausedLive` means a successor is running. Same
+/// attribution failure as the measured tail and the receipt sweep, in a fourth
+/// place. The far-backstop consumes the same signal into a DEADLINE
+/// (`turn_finalizer::watcher_backstop`) and says so itself — "absence proves
+/// nothing about the TURN" — which is the (a) horizon this refusal already hands
+/// the wedge to, not a witness that could replace it.
+///
+/// The mailbox actor's own snapshot. `mailboxes` is the one `SharedData`
+/// member whose turn attribution is guaranteed by construction, and the caller
+/// holds a whole `ChannelMailboxSnapshot` while passing five of its fields here.
+/// Of the eight it does not pass, seven carry no progress about the active turn
+/// (`intervention_queue`, `pending_user_dispatch*` and
+/// `recently_valve_cleared_dispatch` describe INBOUND work not yet started;
+/// `recovery_started_at` is a clock §I20 forbids reading as progress). The
+/// eighth, `cancel_token`, is this owner's own token, so it is the strongest
+/// candidate on the whole surface — and it is refused on a stronger ground than
+/// attribution: `cancelled` records that somebody ASKED for a stop, not that a
+/// relay finished, and `is_completion_cleanup()` is set only inside
+/// `do_finalize`'s `removed_token.is_some()` arm — the arm that REMOVES the
+/// active turn. While there is still a mailbox here to reclaim, that bit is
+/// false by construction of the wedge, and the watcher context passes
+/// `allow_completion_cleanup = false` besides. Reading it would be reading a
+/// constant.
+fn empirical_reclaim_witness(
+    owner_kind: ReclaimableMailboxOwner,
+    reason: StaleSyntheticReclaimReason,
+) -> Option<&'static str> {
+    match (owner_kind, reason) {
+        (_, StaleSyntheticReclaimReason::OwnerInflightFinalized) => {
+            Some("row_terminal_delivery_committed")
+        }
+        (
+            ReclaimableMailboxOwner::ReadoptedFromInflight,
+            StaleSyntheticReclaimReason::OwnerInflightAbsent,
+        ) => Some("readopted_mailbox_ledger_finished"),
+        (ReclaimableMailboxOwner::Synthetic, StaleSyntheticReclaimReason::OwnerInflightAbsent)
+        | (_, StaleSyntheticReclaimReason::OwnerInflightReplaced) => None,
     }
 }
 
@@ -401,6 +505,61 @@ pub(super) async fn release_reclaimable_stale_synthetic_mailbox_owner_if_current
             reclaimable_owner = owner_kind.as_str(),
             min_owner_age_secs = STALE_SYNTHETIC_MAILBOX_OWNER_MIN_AGE_SECS,
             "skipping TUI-direct synthetic mailbox reclaim; owner age has not positively crossed the stale threshold"
+        );
+        return false;
+    }
+
+    // #5996 / §I20: the retirement decision is TAKEN here, so grade it here.
+    // The check runs AFTER the age gate on purpose — a violation then counts
+    // only the reclaims that would otherwise have rested on the clock alone,
+    // which is §I20's requirement that an age fallback "must be countable apart
+    // from a witness". Recording it on every young attempt would bury that count.
+    let witness = empirical_reclaim_witness(owner_kind, reason);
+    crate::services::observability::record_invariant_check(
+        witness.is_some(),
+        crate::services::observability::InvariantViolation {
+            provider: Some(provider.as_str()),
+            channel_id: Some(channel_id.get()),
+            dispatch_id: None,
+            session_key: Some(tmux_session_name),
+            turn_id: None,
+            invariant: LIVE_TURN_PROVEN_BY_PROGRESS_INVARIANT,
+            code_location: "src/services/discord/tui_prompt_relay/synthetic_start/stale_reclaim.rs:release_reclaimable_stale_synthetic_mailbox_owner_if_current",
+            message: "stale mailbox owner reclaim reached its retirement decision with no readable progress witness",
+            details: serde_json::json!({
+                "decided_by": witness.unwrap_or("no_readable_witness"),
+                "reclaim_reason": reason.as_str(),
+                "reclaimable_owner": owner_kind.as_str(),
+                "min_owner_age_secs": STALE_SYNTHETIC_MAILBOX_OWNER_MIN_AGE_SECS,
+                "stale_user_message_id": active_user_message_id.get(),
+                "anchor_message_id": anchor_message_id.get(),
+                "retired": witness.is_some(),
+            }),
+        },
+    );
+    if witness.is_none() {
+        // Retiring here would be the (b) loss §I20 forbids; the wedge this
+        // leaves is (a), and it is cleared — by two mechanisms, not one.
+        // Where `do_finalize` recorded a `GuardedFinishResidue`,
+        // `reconcile_guarded_finish_residues` releases the anchor on the
+        // finalizer actor's 1s tick. Where no residue exists (row deletes that
+        // never consult the mailbox: `inflight_heartbeat_sweeper`, the
+        // loader-side sweeps in `inflight/removal.rs`), the watcher
+        // far-backstop still reaches it, because `claim_normal_episode`
+        // finishes from the OBSERVED mailbox snapshot rather than the row — so
+        // an absent row and a successor's row are equally no obstacle, one
+        // `WATCHER_REGISTER_BACKSTOP` (1800s) after a watcher-owned
+        // `register_start`. A turn with no such ledger entry is the residual
+        // open case (#6029).
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            tmux_session_name = %tmux_session_name,
+            stale_user_message_id = active_user_message_id.get(),
+            anchor_message_id = anchor_message_id.get(),
+            reclaim_reason = reason.as_str(),
+            reclaimable_owner = owner_kind.as_str(),
+            "refusing TUI-direct synthetic mailbox reclaim; no readable progress witness for this owner (#5996)"
         );
         return false;
     }

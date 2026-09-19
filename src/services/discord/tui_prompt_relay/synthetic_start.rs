@@ -713,16 +713,25 @@ mod tests {
         assert!(!next_claimed, "young owner must keep the mailbox slot");
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn aged_rowless_synthetic_owner_reclaims_and_finalizes_ledger() {
-        let root = tempfile::tempdir().expect("runtime root");
-        let _env = crate::config::set_agentdesk_root_for_test(root.path());
-        let provider = ProviderKind::Codex;
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let channel_id = ChannelId::new(4_018_201);
-        let tmux = "AgentDesk-codex-4018-aged";
-        let stale_id = MessageId::new(4_018_301);
-        let next_id = MessageId::new(4_018_401);
+    /// #5996 — build the EXACT incident shape: a synthetic-owned mailbox whose
+    /// durable inflight row is gone. The allocation is admitted through the real
+    /// deferred claim path (an unrelated preseeded mailbox token cannot be
+    /// adopted by the bridge), then the row is removed through
+    /// `clear_inflight_state_for_captured_episode` — the same primitive
+    /// `turn_finalizer::episode::claim_normal_episode`'s `clear_inflight` arm
+    /// uses, which is the production shape that strands a held mailbox with no
+    /// row. (The watcher's terminal-commit pass reaches the same
+    /// `..._turn_nonce_impl_in_root` body through
+    /// `clear_inflight_state_if_matches_identity_turn_nonce`, differing only in
+    /// `exact_nonce`.)
+    async fn seed_rowless_synthetic_owner(
+        shared: &Arc<SharedData>,
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+        tmux: &str,
+        stale_id: MessageId,
+        lease_turn_id: &str,
+    ) -> Arc<CancelToken> {
         let record = crate::services::discord::tui_direct_pending_start::TuiDirectPendingStart {
             provider: provider.as_str().into(),
             channel_id: channel_id.get(),
@@ -731,7 +740,7 @@ mod tests {
             anchor_message_id: stale_id.get(),
             lease_relay_owner: ExternalInputRelayOwner::BridgeAdapter.as_str().into(),
             lease_runtime_kind: None,
-            lease_turn_id: Some("external:codex:4018-aged".into()),
+            lease_turn_id: Some(lease_turn_id.into()),
             lease_session_key: None,
             generation: shared.restart.current_generation,
             created_at_ms: 0,
@@ -740,18 +749,16 @@ mod tests {
             attempt_count: 0,
             captured_source: None,
         };
-        // Admit the original allocation through the real deferred claim path;
-        // an unrelated preseeded mailbox token cannot be adopted by the bridge.
-        assert!(pending_start_claim_fn()(&shared, &record).await);
-        let stale_token = crate::services::discord::mailbox_snapshot(&shared, channel_id)
+        assert!(pending_start_claim_fn()(shared, &record).await);
+        let stale_token = crate::services::discord::mailbox_snapshot(shared, channel_id)
             .await
             .cancel_token
             .expect("deferred claim owns the mailbox");
-        let row = inflight::load_inflight_state(&provider, channel_id.get()).unwrap();
+        let row = inflight::load_inflight_state(provider, channel_id.get()).unwrap();
         assert_eq!(row.turn_nonce.as_deref(), stale_token.turn_nonce());
         assert_eq!(
             inflight::clear_inflight_state_for_captured_episode(
-                &provider,
+                provider,
                 channel_id.get(),
                 &inflight::InflightTurnIdentity::from_state(&row),
                 stale_token.turn_nonce(),
@@ -759,11 +766,85 @@ mod tests {
             inflight::GuardedClearOutcome::Cleared
         );
         assert!(
-            shared
-                .turn_finalizer
-                .has_live_watcher_pending(channel_id, shared.restart.current_generation)
-                .await,
-            "deferred synthetic claim register_start should be Pending before reclaim"
+            inflight::load_inflight_state(provider, channel_id.get()).is_none(),
+            "#5996 precondition: the mailbox is synthetic-owned and ROWLESS"
+        );
+        stale_token
+    }
+
+    /// #5996 / contract §I20: a synthetic-owned ROWLESS mailbox carries NO
+    /// readable progress witness — the row's `terminal_delivery_committed` bit
+    /// went with the row, and `readopted_mailbox_ledger` can never hold the
+    /// #4018 owner (`readopt_marker_eligible_real_user` excludes it at every
+    /// insert). Absence is the UNMEASURED case, so the reclaim is REFUSED and
+    /// the mailbox stays held. Until #5996 this same aged fixture retired the
+    /// owner on the `>= 120s` clock alone.
+    ///
+    /// What recovers the held mailbox in PRODUCTION is
+    /// `turn_finalizer::reconcile::reconcile_guarded_finish_residues`, on the
+    /// finalizer actor's 1s `RECONCILE_INTERVAL` — not anything this fixture
+    /// leaves standing. For a strand produced by `claim_normal_episode`'s
+    /// `clear_inflight` arm (its two earlier arms return `Err(())` WITHOUT
+    /// clearing, so reaching the clear is by construction a SAME-EPISODE miss)
+    /// `do_finalize` recorded a `GuardedFinishResidue`, the reconciler's
+    /// `release_authorized = same_terminal_episode || token.cancelled` holds on
+    /// its first conjunct, and only `tui_structurally_idle` is conditional —
+    /// holding a BUSY pane being the correct answer. Strands produced by row
+    /// deletes that never consult the mailbox leave no residue; that is a gap
+    /// in the reaper, not in this refusal, and it is reported separately.
+    #[tokio::test(flavor = "current_thread")]
+    async fn aged_rowless_synthetic_owner_is_refused_for_want_of_a_witness() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let provider = ProviderKind::Codex;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_018_201);
+        let tmux = "AgentDesk-codex-4018-aged";
+        let stale_id = MessageId::new(4_018_301);
+        let next_id = MessageId::new(4_018_401);
+        let stale_token = seed_rowless_synthetic_owner(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            stale_id,
+            "external:codex:4018-aged",
+        )
+        .await;
+        let active_before = shared.restart.global_active.load(Ordering::Relaxed);
+        assert_eq!(active_before, 1, "the deferred claim holds one active slot");
+
+        // #5996 r3 / FORWARD direction of the mutant pair. Put on disk the one
+        // thing production most plausibly HAS in this shape and that an
+        // exhaustiveness claim over readable witnesses must account for: the
+        // provider's own JSONL transcript carrying the authoritative turn-END
+        // terminator. The reader for it is reachable from the reclaim's module
+        // (`pub(in crate::services::discord)`), and it reads `Done` right here —
+        // asserted, not assumed. The refusal below must nevertheless stay GREEN,
+        // because that scan is a REVERSE walk for the most recent terminator
+        // over a tail window with no turn key: on a session shared with a
+        // successor it reports the SUCCESSOR's state, and the attribution its own
+        // doc points at (`pinned_finalize_user_msg_id` /
+        // `committed_completion_is_stale_for_newer_turn`, both taking the
+        // "pre-cleanup inflight snapshot") is exactly what this shape destroyed.
+        // If a later change ever wires this signal in as a witness, THIS
+        // assertion pair is what must be revisited first.
+        let transcript = root.path().join("4018-aged-turn-completed.jsonl");
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s\",\"cwd\":\"/repo\"}}\n\
+             {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":3}}\n",
+        )
+        .expect("write a Done provider transcript");
+        assert_eq!(
+            crate::services::discord::turn_finalizer::completion_signal_from_transcript(
+                &provider,
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui),
+                &transcript,
+            ),
+            crate::services::discord::turn_finalizer::CompletionSignal::Done,
+            "the transcript axis is readable from here and says Done — the refusal below \
+             must not be resting on that axis being unreachable"
         );
 
         let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
@@ -779,15 +860,23 @@ mod tests {
             next_id,
         )
         .await;
-        assert!(reclaimed, "aged row-less synthetic owner should reclaim");
-        assert!(stale_token.cancelled.load(Ordering::Relaxed));
-        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
         assert!(
-            !shared
+            !reclaimed,
+            "an aged row-less SYNTHETIC owner has no witness to retire it on (#5996 §I20)"
+        );
+        assert!(
+            !stale_token.cancelled.load(Ordering::Relaxed),
+            "the refusal must not cancel a turn it cannot prove finished"
+        );
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+        assert!(
+            shared
                 .turn_finalizer
                 .has_live_watcher_pending(channel_id, shared.restart.current_generation)
                 .await,
-            "finalizer-routed reclaim must leave no live Pending ledger residue"
+            "FIXTURE STATE ONLY: the deferred claim's Pending entry outlives the refusal \
+             here, but it is NOT what recovers production — the residue reconciler is \
+             (see this test's doc comment)"
         );
 
         let next_claimed = mailbox_try_start_turn_kinded(
@@ -799,7 +888,207 @@ mod tests {
             ActiveTurnKind::Background,
         )
         .await;
-        assert!(next_claimed, "new synthetic turn must claim after reclaim");
+        assert!(
+            !next_claimed,
+            "the refused mailbox stays held; the new synthetic turn is deferred, not admitted"
+        );
+    }
+
+    /// #5996 / §I20 — a row whose `user_msg_id` has moved on belongs to ANOTHER
+    /// turn and witnesses nothing about this owner, so `OwnerInflightReplaced`
+    /// is refused for the synthetic owner too. The reason variant is kept
+    /// (deleting it would let the successor's `terminal_delivery_committed` bit
+    /// retire this owner instead).
+    #[tokio::test(flavor = "current_thread")]
+    async fn aged_synthetic_owner_replaced_row_is_refused_for_want_of_a_witness() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_018_205);
+        let tmux = "AgentDesk-claude-4018-replaced-same";
+        let stale_id = MessageId::new(4_018_306);
+        let replacement_id = MessageId::new(4_018_307);
+        let next_id = MessageId::new(4_018_405);
+        let stale_token = seed_synthetic_mailbox_owner(&shared, channel_id, stale_id).await;
+        // Same tmux session, a successor `user_msg_id`, and the successor's own
+        // terminal bit set — none of which is evidence about THIS owner.
+        let state = synthetic_state(channel_id, replacement_id, tmux, true);
+        inflight::save_inflight_state(&state).expect("save same-session replacement row");
+
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            stale_id,
+            Some(synthetic_owner()),
+            ActiveTurnKind::Background,
+            old_owner_started_at(),
+            stale_token.turn_nonce().map(str::to_owned),
+            next_id,
+        )
+        .await;
+        assert!(
+            !reclaimed,
+            "another turn's row is not this owner's progress witness (#5996 §I20)"
+        );
+        assert!(!stale_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+    }
+
+    /// #5996 step 3 (`docs/relay-state-contract.md`, "How to add a new
+    /// invariant"): the deliberate violation that proves the check FIRES, and
+    /// its polarity — `record_invariant_check` emits nothing while the condition
+    /// holds, so a silent wiring is indistinguishable from an absent one unless
+    /// both arms are driven. The witnessed arm must leave the ring clean.
+    ///
+    /// The observability runtime is process-global, so the ring reset and the
+    /// read must not straddle a concurrent test's reset. The guard is taken in
+    /// this synchronous frame and the awaits run under `block_on` — the shape
+    /// `synthetic_terminal_ordering_tests` already uses here — so no
+    /// `await_holding_lock` suppression is needed for it.
+    #[test]
+    fn witnessless_reclaim_records_the_i20_violation_and_a_witnessed_one_does_not() {
+        let _telemetry = crate::services::observability::test_runtime_lock();
+        crate::services::observability::reset_for_tests();
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime")
+            .block_on(witnessless_reclaim_violation_body());
+    }
+
+    async fn witnessless_reclaim_violation_body() {
+        let provider = ProviderKind::Codex;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let refused_channel = ChannelId::new(4_018_206);
+        let witnessed_channel = ChannelId::new(4_018_207);
+        let tmux = "AgentDesk-codex-4018-i20";
+        let stale_id = MessageId::new(4_018_308);
+        let next_id = MessageId::new(4_018_406);
+
+        let stale_token = seed_rowless_synthetic_owner(
+            &shared,
+            &provider,
+            refused_channel,
+            tmux,
+            stale_id,
+            "external:codex:4018-i20",
+        )
+        .await;
+        assert!(
+            !release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+                &shared,
+                &provider,
+                refused_channel,
+                tmux,
+                stale_id,
+                Some(synthetic_owner()),
+                ActiveTurnKind::Background,
+                old_owner_started_at(),
+                stale_token.turn_nonce().map(str::to_owned),
+                next_id,
+            )
+            .await
+        );
+
+        // #5996 M1 pin. The same owner, the same rowless state, the same absent
+        // witness as the call above — only the clock differs. The observation
+        // block sits AFTER the age gate, so this call is refused upstream of the
+        // grade and must contribute ZERO violations. Hoisting the block above
+        // the age gate makes this call emit one, and the count below goes to 2:
+        // that is the burial §I20 forbids when it requires an age fallback
+        // "must be countable apart from a witness". The placement is held by a
+        // number here, not by a comment at the call site.
+        assert!(
+            !release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+                &shared,
+                &provider,
+                refused_channel,
+                tmux,
+                stale_id,
+                Some(synthetic_owner()),
+                ActiveTurnKind::Background,
+                young_owner_started_at(),
+                stale_token.turn_nonce().map(str::to_owned),
+                next_id,
+            )
+            .await,
+            "a young owner is refused by the age gate, upstream of the witness grade"
+        );
+
+        // `synthetic_state` builds a Claude row, so the witnessed arm reads
+        // Claude; the rowless arm above keeps Codex. Distinct channels either
+        // way, and the point is the reason, not the provider.
+        let witnessed_provider = ProviderKind::Claude;
+        let witnessed_tmux = "AgentDesk-claude-4018-i20-witnessed";
+        let witnessed_token =
+            seed_synthetic_mailbox_owner(&shared, witnessed_channel, stale_id).await;
+        let committed = synthetic_state(witnessed_channel, stale_id, witnessed_tmux, true);
+        inflight::save_inflight_state(&committed).expect("save finalized synthetic inflight");
+        assert!(
+            release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+                &shared,
+                &witnessed_provider,
+                witnessed_channel,
+                witnessed_tmux,
+                stale_id,
+                Some(synthetic_owner()),
+                ActiveTurnKind::Background,
+                old_owner_started_at(),
+                witnessed_token.turn_nonce().map(str::to_owned),
+                next_id,
+            )
+            .await,
+            "the row bit is a readable witness and must still retire without a clock"
+        );
+
+        let events = crate::services::observability::events::recent(200);
+        // Scope to the two channels THIS test drives. `recent` reads the
+        // process-global ring that sibling fixtures also write, so an unscoped
+        // count asserts over their output too: it dies for reasons that are not
+        // this test's, and a mutant it should survive kills it anyway.
+        let violations: Vec<_> = events
+            .iter()
+            .filter(|event| event.event_type == "invariant_violation")
+            .filter(|event| {
+                event.payload["invariant"] == stale_reclaim::LIVE_TURN_PROVEN_BY_PROGRESS_INVARIANT
+            })
+            .filter(|event| {
+                event.channel_id == Some(refused_channel.get())
+                    || event.channel_id == Some(witnessed_channel.get())
+            })
+            .collect();
+        assert_eq!(
+            violations.len(),
+            1,
+            "exactly the aged witnessless call violates — the witnessed call has a \
+             readable witness and the young call never reaches the grade; present: {events:?}"
+        );
+        let violation = violations[0];
+        assert_eq!(violation.channel_id, Some(refused_channel.get()));
+        assert_eq!(
+            violation.payload["details"]["decided_by"],
+            "no_readable_witness"
+        );
+        assert_eq!(
+            violation.payload["details"]["reclaim_reason"],
+            "owner_inflight_absent"
+        );
+        assert_eq!(
+            violation.payload["details"]["reclaimable_owner"],
+            "synthetic_owner"
+        );
+        assert_eq!(violation.payload["details"]["retired"], false);
+        assert_eq!(
+            stale_reclaim::LIVE_TURN_PROVEN_BY_PROGRESS_INVARIANT,
+            "live_turn_proven_by_progress_not_presence",
+            "the invariant key is the alert table's status filter and §I20's key; a status \
+             absent from `RELAY_SIGNAL_DEFINITIONS` counts zero forever (#5175)"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
