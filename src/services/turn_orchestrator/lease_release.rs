@@ -12,8 +12,8 @@ use crate::services::provider::{CancelToken, ProviderKind};
 
 /// Rendering only, never the discriminator: `ProviderKind::Unsupported::as_str`
 /// returns whatever provider string a config supplied, so an agent named
-/// `unidentified` renders identically. `provider_measured` is the term a
-/// consumer reads, because no string can carry an UNMEASURED one.
+/// `unidentified` renders identically. No consumer reads either term yet;
+/// `provider_measured` is the one a future consumer must read.
 const UNIDENTIFIED_RELEASE_PROVIDER: &str = "unidentified";
 
 /// Drop the active-turn anchor, returning the token that turn owned. #5937 —
@@ -285,8 +285,8 @@ mod lease_release_identity_tests {
     /// strings, and `as_str` hands that string straight back. An agent
     /// configured as `unidentified` therefore renders exactly like a call site
     /// that carried nothing. This pins that the collision is real AND that the
-    /// structural term still separates the two, so no consumer has to decide a
-    /// retirement on a string a config can forge.
+    /// structural term still separates the two, so the consumer a later lane
+    /// wires will not have to decide a retirement on a forgeable string.
     #[test]
     fn a_provider_named_like_the_sentinel_stays_distinguishable_from_unmeasured() {
         let forged = ProviderKind::Unsupported(UNIDENTIFIED_RELEASE_PROVIDER.to_string());
