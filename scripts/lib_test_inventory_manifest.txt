@@ -6487,6 +6487,10 @@ services::discord::tui_prompt_relay::tests::s5833_s1t1_external_turn_id_is_obser
 services::discord::tui_prompt_relay::tests::s5833_s1t1_synthetic_owns_durable_key_bridge_entry_is_read_only
 services::discord::tui_prompt_relay::tests::s5833_s1t2_legacy_rows_without_external_turn_id_still_deserialize
 services::discord::tui_prompt_relay::tests::s5833_s1t3_moved_builder_is_behaviour_identical
+services::discord::tui_prompt_relay::tests::scenario_census_e2e::e25_task_complete_final_body_is_dropped_pending_6033
+services::discord::tui_prompt_relay::tests::scenario_census_e2e::every_excluded_scenario_names_its_reason_in_its_own_file
+services::discord::tui_prompt_relay::tests::scenario_census_e2e::runnable_scenarios_replay_their_declared_markers_through_production_parsers
+services::discord::tui_prompt_relay::tests::scenario_census_e2e::scenario_census_matches_the_pinned_class_distribution
 services::discord::tui_prompt_relay::tests::slash_command_control_kind_distinguishes_distinct_unknown_commands
 services::discord::tui_prompt_relay::tests::slash_command_control_kind_is_stable_across_double_post_halves
 services::discord::tui_prompt_relay::tests::slash_command_control_note_loop_and_generic_stdout_show_body
