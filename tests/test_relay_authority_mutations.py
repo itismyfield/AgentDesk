@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -115,6 +117,13 @@ def mutation_filter_patterns() -> tuple[str, ...]:
     )
     assert step["id"] == FILTER_ID, step["id"]
     return tuple(yaml.safe_load(step["with"]["filters"])[FILTER_NAME])
+
+
+def setUpModule() -> None:
+    subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts/check_relay_mutation_sources.py")],
+        check=True,
+    )
 
 
 def _cargo_log(body: str) -> str:
@@ -288,6 +297,118 @@ exit 101
     def assert_sources_restored(test: unittest.TestCase, root: Path) -> None:
         for relative in MUTATION_FILES:
             test.assertEqual((root / relative).read_bytes(), (REPO_ROOT / relative).read_bytes())
+
+    def run_cargo_body(self, body: str) -> tuple[Path, subprocess.CompletedProcess[str]]:
+        root = self.copy_fixture()
+        cargo = root / "fake-bin/cargo"
+        cargo.parent.mkdir()
+        cargo.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + body)
+        cargo.chmod(0o755)
+        result = self.run_script_with_fake_cargo(root, cargo)
+        self.assert_sources_restored(self, root)
+        return root, result
+
+    def test_default_cargo_entrypoint_grades_valid_and_invalid_runs(self) -> None:
+        for body, rc, status in (
+            (KILLED_RUNNER, 0, "KILLED"),
+            (SURVIVED_RUNNER, 1, "SURVIVED"),
+            (BUILD_BROKEN_RUNNER, 95, "BUILD-BROKEN"),
+            (NO_TEST_RAN_RUNNER, 94, "NO-TEST-RAN"),
+        ):
+            with self.subTest(status=status):
+                _, result = self.run_cargo_body(body)
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, rc, output)
+                self.assertIn(f"status={status}", output)
+                self.assertEqual("MUTATION_SUMMARY" in output, rc == 0, output)
+
+    def test_default_cargo_entrypoint_rejects_contradictory_verdicts(self) -> None:
+        for body in (SURVIVED_RUNNER.replace("exit 0", "exit 101"),
+                     KILLED_RUNNER.replace("exit 101", "exit 0")):
+            with self.subTest(body=body):
+                _, result = self.run_cargo_body(body)
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 93, output)
+                self.assertIn("status=NO-VERDICT", output)
+                self.assertNotIn("MUTATION_RESULT", output)
+                self.assertNotIn("MUTATION_SUMMARY", output)
+
+    def test_default_cargo_entrypoint_rejects_incomplete_runs(self) -> None:
+        for body in (
+            KILLED_RUNNER.replace("running 1 test", "running 2 tests"),
+            KILLED_RUNNER.replace("running 1 test\n", ""),
+            KILLED_RUNNER.replace("0 ignored", "1 ignored"),
+            KILLED_RUNNER.replace("0 measured", "1 measured"),
+            KILLED_RUNNER.replace("running 1 test", "running 1 test\nrunning 1 test"),
+            KILLED_RUNNER.replace("exit 101", "printf 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 130 filtered out\\n'\nexit 101"),
+            _cargo_log(COMPILED_HEADER + "running 1 test\n") + "exit 101\n",
+        ):
+            with self.subTest(body=body):
+                _, result = self.run_cargo_body(body)
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 93, output)
+                self.assertIn("status=NO-VERDICT", output)
+                self.assertNotIn("MUTATION_RESULT", output)
+                self.assertNotIn("MUTATION_SUMMARY", output)
+
+    def test_source_provenance_allows_local_edits_but_rejects_ci_drift(self) -> None:
+        root = self.copy_fixture()
+        test_path = Path("tests/test_relay_authority_mutations.py")
+        for relative in (test_path, Path("scripts/check_relay_mutation_sources.py"),
+                         Path("scripts/ci-script-checks.sh")):
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(REPO_ROOT / relative, root / relative)
+        for args in (("init", "-q"), ("add", "."),
+                     ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                      "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture")):
+            subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+
+        python_shim = root / "python-shim"
+        python_shim.write_text(
+            f"#!{sys.executable}\nimport os, sys\n"
+            "if sys.argv[1:] == ['scripts/check_relay_mutation_sources.py']:\n"
+            "    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n"
+            "assert sys.argv[1:] == ['-m', 'unittest', 'tests.test_relay_authority_mutations']\n"
+            f"os.execv(sys.executable, [sys.executable, {str(root / test_path)!r}, "
+            "'RelayAuthorityMutationScriptTests.test_script_mode_is_executable'])\n"
+        )
+        python_shim.chmod(0o755)
+
+        def check(verify: bool, expected_rc: int) -> subprocess.CompletedProcess[str]:
+            script = (root / "scripts/ci-script-checks.sh").read_text()
+            section = script.split('banner "Relay-authority fixed mutation gate (#5071)"\n', 1)[1].split('\nbanner ', 1)[0]
+            env = {**os.environ, "PYTHON": str(python_shim), "GITHUB_ACTIONS": str(verify).lower()}
+            result = subprocess.run(
+                ["bash", "-euc", section], cwd=root, env=env, text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, expected_rc, result.stdout + result.stderr)
+            self.assertIn("MUTATION_SOURCE", result.stdout)
+            return result
+
+        check(True, 0)
+        for relative in (MUTATION_SCRIPT, test_path, Path("scripts/check_relay_mutation_sources.py"),
+                         Path("scripts/ci-script-checks.sh")):
+            with self.subTest(path=relative):
+                original = (root / relative).read_bytes()
+                try:
+                    (root / relative).write_bytes(original + b"\n# local development edit\n")
+                    local = check(False, 0)
+                    digest = hashlib.sha256((root / relative).read_bytes()).hexdigest()
+                    self.assertIn(f"path={relative} sha256={digest}", local.stdout)
+                    check(True, 1)
+                    subprocess.run(["git", "add", str(relative)], cwd=root, check=True)
+                    check(True, 1)
+                finally:
+                    (root / relative).write_bytes(original)
+                    subprocess.run(["git", "add", str(relative)], cwd=root, check=True)
+        check(True, 0)
+        (root / test_path).write_text(
+            "import unittest\n"
+            "class RelayAuthorityMutationScriptTests(unittest.TestCase):\n"
+            "    def test_script_mode_is_executable(self): pass\n"
+            "unittest.main()\n"
+        )
+        check(True, 1)
 
     def test_color_neutralization_keeps_cache_proof_color_proof(self) -> None:
         root = self.copy_fixture()

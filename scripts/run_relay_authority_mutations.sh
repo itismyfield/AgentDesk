@@ -28,6 +28,7 @@
 #     1  a mutation SURVIVED the test that is supposed to kill it
 #     2  invalid invocation: bad test mode, missing fixture runner, bad source
 #    75  another relay-authority mutation run holds the lock
+#    93  NO-VERDICT: incomplete run or exit status contradicts the test summary
 #    94  NO-TEST-RAN: the named test never executed, so nothing was proven (#5243)
 #    95  BUILD-BROKEN: the mutant did not compile, so it is not a valid mutant
 #         and cargo's rc=101 does not mean "the test caught it" (#5243)
@@ -195,8 +196,14 @@ restore_after_row() {
   done
 }
 
+no_verdict() {
+  printf 'ERROR mutation=%s status=NO-VERDICT rc=%d target=%s (%s)\n' "$1" "$2" "$3" "$5" >&2
+  cat "$4" >&2
+}
+
 run_target() {
   local mutation=$1 target=$2 log=$3 rc compile_count test_result rest passed failed
+  local summaries running summary_pattern
   if [[ "$MODE" == "fixture" ]]; then
     set +e
     "$FIXTURE_RUNNER" "$mutation" "$target" >"$log" 2>&1
@@ -242,20 +249,35 @@ run_target() {
     return 95
   fi
 
-  # The named test must actually have executed. `cargo test --lib <name> --exact`
-  # answers rc=0 with "0 passed; 0 failed" when the filter matches nothing, which
-  # the old script reported as "mutation survived" — red, but for the wrong
-  # reason. --exact names exactly one test, so exactly one must have run.
-  test_result="$( { grep -E '^test result: (ok|FAILED)\. [0-9]+ passed; [0-9]+ failed;' "$log" || true; } | head -n 1)"
+  summaries="$(grep -c '^test result:' "$log" || true)"
+  running="$(grep -E '^running [0-9]+ tests?$' "$log" || true)"
+  test_result="$(grep '^test result:' "$log" || true)"
+  summary_pattern='^test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; ([0-9]+) measured; [0-9]+ filtered out;?($| finished in .+s$)'
+  if [[ "$summaries" != 1 || ! "$test_result" =~ $summary_pattern ]]; then
+    no_verdict "$mutation" "$rc" "$target" "$log" "missing or ambiguous summary"
+    return 93
+  fi
+  if [[ "$running" == 'running 0 tests' && "${BASH_REMATCH[2]}" == 0 && "${BASH_REMATCH[3]}" == 0 ]]; then
+    printf 'MUTATION_ORACLE mutation=%s compile_ok=yes tests_passed=0 tests_failed=0\n' "$mutation"
+    printf 'ERROR mutation=%s status=NO-TEST-RAN rc=%d target=%s (named test did not execute)\n' "$mutation" "$rc" "$target" >&2
+    cat "$log" >&2
+    return 94
+  fi
+  if [[ "$running" != 'running 1 test' || "${BASH_REMATCH[4]}" != 0 || "${BASH_REMATCH[5]}" != 0 ]]; then
+    no_verdict "$mutation" "$rc" "$target" "$log" "incomplete named-test run"
+    return 93
+  fi
   case "$test_result" in
     'test result: ok. 1 passed; 0 failed;'* | 'test result: FAILED. 0 passed; 1 failed;'*) ;;
     *)
-      printf 'MUTATION_ORACLE mutation=%s compile_ok=yes tests_passed=0 tests_failed=0\n' "$mutation"
-      printf 'ERROR mutation=%s status=NO-TEST-RAN rc=%d target=%s (named test did not execute)\n' "$mutation" "$rc" "$target" >&2
-      cat "$log" >&2
-      return 94
-      ;;
+      no_verdict "$mutation" "$rc" "$target" "$log" "inconsistent named-test summary"
+      return 93 ;;
   esac
+  if [[ ( "$test_result" == 'test result: ok.'* && "$rc" != 0 ) ||
+        ( "$test_result" == 'test result: FAILED.'* && "$rc" == 0 ) ]]; then
+    no_verdict "$mutation" "$rc" "$target" "$log" "exit status contradicts summary"
+    return 93
+  fi
 
   rest="${test_result#*. }"
   passed="${rest%% passed;*}"
@@ -290,8 +312,8 @@ run_mutation() {
     rm -f "$log"
     exit 1
   fi
-  # 94/95/96 already streamed the full log to stderr inside run_target.
-  if ((rc == 94 || rc == 95 || rc == 96)); then
+  # Oracle failures already streamed the full log to stderr inside run_target.
+  if ((rc == 93 || rc == 94 || rc == 95 || rc == 96)); then
     rm -f "$log"
     exit "$rc"
   fi
