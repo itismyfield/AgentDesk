@@ -273,3 +273,6 @@ pub fn run_from_args() -> Result<()> {
         }
     }
 }
+
+#[cfg(test)]
+mod test_env_panic_probe;

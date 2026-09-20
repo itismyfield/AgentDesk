@@ -986,23 +986,55 @@ mod worktree_isolation_policy_tests {
     where
         F: FnOnce(&TempDir),
     {
-        // Serialize on the PROCESS-WIDE `AGENTDESK_ROOT_DIR` lock (shared with
-        // standby_relay / turn_finalizer / tmux(_watcher) / config tests) so
-        // this root-mutating helper cannot race a concurrent test in another
-        // module that also mutates the runtime root.
-        let _guard = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let temp = TempDir::new().expect("temp home");
         let root = temp.path().join(".adk");
         fs::create_dir_all(&root).unwrap();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &root) };
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            &root,
+        );
         f(&temp);
-        match previous {
-            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-        }
+    }
+
+    #[test]
+    fn temp_root_panic_restores_present_environment() {
+        crate::test_env_panic_probe::assert_restores_after_panic(
+            concat!(
+                module_path!(),
+                "::temp_root_panic_restores_present_environment"
+            ),
+            &["AGENTDESK_ROOT_DIR"],
+            true,
+            || {
+                with_temp_root(|temp| {
+                    crate::test_env_panic_probe::checkpoint(&[(
+                        "AGENTDESK_ROOT_DIR",
+                        temp.path().join(".adk").as_os_str(),
+                    )]);
+                })
+            },
+        );
+    }
+
+    #[test]
+    fn temp_root_panic_restores_absent_environment() {
+        crate::test_env_panic_probe::assert_restores_after_panic(
+            concat!(
+                module_path!(),
+                "::temp_root_panic_restores_absent_environment"
+            ),
+            &["AGENTDESK_ROOT_DIR"],
+            false,
+            || {
+                with_temp_root(|temp| {
+                    crate::test_env_panic_probe::checkpoint(&[(
+                        "AGENTDESK_ROOT_DIR",
+                        temp.path().join(".adk").as_os_str(),
+                    )]);
+                })
+            },
+        );
     }
 
     fn write_agentdesk_yaml(dir: &std::path::Path, content: &str) {

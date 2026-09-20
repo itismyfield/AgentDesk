@@ -798,19 +798,53 @@ mod tests {
     }
 
     #[test]
+    fn launch_env_panic_restores_present_environment() {
+        crate::test_env_panic_probe::assert_restores_after_panic(
+            concat!(
+                module_path!(),
+                "::launch_env_panic_restores_present_environment"
+            ),
+            &["AGENTDESK_ROOT_DIR", "HOSTNAME", "AGENTDESK_CONFIG"],
+            true,
+            prepare_launch_cleans_settings_when_script_write_fails,
+        );
+    }
+
+    #[test]
+    fn launch_env_panic_restores_absent_environment() {
+        crate::test_env_panic_probe::assert_restores_after_panic(
+            concat!(
+                module_path!(),
+                "::launch_env_panic_restores_absent_environment"
+            ),
+            &["AGENTDESK_ROOT_DIR", "HOSTNAME", "AGENTDESK_CONFIG"],
+            false,
+            prepare_launch_cleans_settings_when_script_write_fails,
+        );
+    }
+
+    #[test]
     fn prepare_launch_cleans_settings_when_script_write_fails() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let _context_guard = context_state_guard();
-        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
-        let previous_host = std::env::var_os("HOSTNAME");
         let root = tempfile::tempdir().unwrap();
         let _config_path = pin_provider_config_after_env_lock(root.path(), None);
-        unsafe {
-            std::env::set_var("AGENTDESK_ROOT_DIR", root.path());
-            std::env::set_var("HOSTNAME", "issue-2143-host");
-        }
+        let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let _hostname_env = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "HOSTNAME",
+            std::ffi::OsStr::new("issue-2143-host"),
+        );
+        crate::test_env_panic_probe::checkpoint(&[
+            ("AGENTDESK_ROOT_DIR", root.path().as_os_str()),
+            ("HOSTNAME", std::ffi::OsStr::new("issue-2143-host")),
+            (
+                "AGENTDESK_CONFIG",
+                root.path().join("agentdesk.yaml").as_os_str(),
+            ),
+        ]);
 
         let mut config = sample_config();
         config.tmux_session_name = format!("issue-2143-{}", uuid::Uuid::new_v4());
@@ -827,13 +861,5 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&files.launch_script_path);
-        match previous_root {
-            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-        }
-        match previous_host {
-            Some(value) => unsafe { std::env::set_var("HOSTNAME", value) },
-            None => unsafe { std::env::remove_var("HOSTNAME") },
-        }
     }
 }
