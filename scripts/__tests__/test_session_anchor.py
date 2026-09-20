@@ -64,6 +64,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class AnchorTests(unittest.TestCase):
+    compact_default = os.environ.get("SESSION_ANCHOR_TEST_COMPACT_DEFAULT", "500000")
+
     @classmethod
     def setUpClass(cls):
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -133,7 +135,7 @@ class AnchorTests(unittest.TestCase):
                 if name.startswith("cc"):
                     self.assertIn("--dangerously-skip-permissions", args)
                     text = args[args.index("--append-system-prompt") + 1]
-                    self.assertEqual(data["compact"], "500000" if name == "cct" else None)
+                    self.assertEqual(data["compact"], self.compact_default if name == "cct" else None)
                 else:
                     self.assertIn("--dangerously-bypass-approvals-and-sandbox", args)
                     self.assertIn("--no-alt-screen", args)
@@ -244,6 +246,15 @@ class AnchorTests(unittest.TestCase):
         self.assertEqual(anchor.extract_anchors({"anchorCount": 1,
                          "anchors": {"permanent": [{"content": content}]},
                          "injectionText": expected + "\n\n[CORE MEMORY]\nnot an anchor"}), expected)
+
+
+class MacMiniAnchorTests(AnchorTests):
+    compact_default = "1000000"
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.wrappers = SCRIPT.with_name("session-anchor-mac-mini.zsh").read_text()
 
 
 if __name__ == "__main__":

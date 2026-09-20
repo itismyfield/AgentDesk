@@ -8,6 +8,13 @@ binary does not update these personal shell files: when these sources change,
 refresh both installed copies from the reviewed checkout before opening a new
 shell. Python 3.11 or later is required; this Mac uses Homebrew Python.
 
+Mac mini uses `scripts/session-anchor-mac-mini.zsh` as the installed
+`~/.config/agentdesk/session-anchor.zsh` to preserve that host's 1M compact window
+and bare Codex alias. The Python helper is identical on both machines. Refresh
+the matching host variant when updating personal shell files. For its regression
+tests set `SESSION_ANCHOR_TEST_ZSHRC` to that variant and
+`SESSION_ANCHOR_TEST_COMPACT_DEFAULT=1000000`.
+
 On a new CLI process the helper reads the configured Memento MCP endpoint and
 credential environment variable, initializes MCP, and reads `context`. Only the
 complete `[ANCHOR MEMORY]` section is appended. Claude uses
