@@ -1878,7 +1878,8 @@ src/
 ├── pipeline.rs
 ├── queue_contract.rs
 ├── receipt.rs
-└── reconcile.rs
+├── reconcile.rs
+└── test_env_panic_probe.rs
 ```
 <!-- END GENERATED: SRC TREE -->
 
@@ -1927,6 +1928,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/queue_contract.rs` | Queue field compatibility contracts shared by planner prompts, API documentation, and runtime-facing consumers. |
 | `src/receipt.rs` | Receipt parsing and workspace attribution helpers. |
 | `src/reconcile.rs` | Boot-time reconciliation for persisted state and dispatch-runtime drift. |
+| `src/test_env_panic_probe.rs` | Isolated test-fixture panic and environment restoration probes. |
 <!-- END GENERATED: TOP LEVEL MODULE MAP -->
 
 ### Discord Runtime

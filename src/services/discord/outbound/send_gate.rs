@@ -512,18 +512,31 @@ agents:
 "#,
         )
         .unwrap(); // agentdesk-audit: allow-unwrap — test setup in #[cfg(test)] mod
-        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
+        checkpoint(&[("AGENTDESK_ROOT_DIR", temp.path().as_os_str())]);
 
         assert!(is_allowed_send_source_for(
             "project-agentdesk",
             SendCallerClass::Dashboard
         ));
+    }
 
-        match previous_root {
-            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-        }
+    use crate::test_env_panic_probe::{assert_root_restored, checkpoint};
+
+    #[test]
+    fn dashboard_role_labels_restores_env_after_panic_present() {
+        assert_root_restored(true, dashboard_can_use_dashboard_or_known_agent_role_labels);
+    }
+
+    #[test]
+    fn dashboard_role_labels_restores_env_after_panic_absent() {
+        assert_root_restored(
+            false,
+            dashboard_can_use_dashboard_or_known_agent_role_labels,
+        );
     }
 
     #[test]
@@ -586,8 +599,11 @@ agents:
 "#,
         )
         .unwrap(); // agentdesk-audit: allow-unwrap — test setup in #[cfg(test)] mod
-        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
+        checkpoint(&[("AGENTDESK_ROOT_DIR", temp.path().as_os_str())]);
 
         assert!(dm_default_agent_authorizes_unmapped_private_channel(
             true,
@@ -607,11 +623,22 @@ agents:
             &ProviderKind::Claude,
             true,
         ));
+    }
 
-        match previous_root {
-            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-        }
+    #[test]
+    fn dm_default_agent_restores_env_after_panic_present() {
+        assert_root_restored(
+            true,
+            dm_default_agent_allows_headless_private_channel_when_provider_bound,
+        );
+    }
+
+    #[test]
+    fn dm_default_agent_restores_env_after_panic_absent() {
+        assert_root_restored(
+            false,
+            dm_default_agent_allows_headless_private_channel_when_provider_bound,
+        );
     }
 
     #[test]

@@ -397,46 +397,43 @@ mod tests {
         let _guard = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let saved_home = std::env::var_os("HOME");
-        let saved_userprofile = std::env::var_os("USERPROFILE");
-        let saved_obsidian_root = std::env::var_os("OBSIDIAN_VAULT_ROOT");
-        let saved_remote_root = std::env::var_os("OBSIDIAN_REMOTE_VAULT_ROOT");
-        let saved_agents_src = std::env::var_os("AGENTDESK_OBSIDIAN_AGENTS_SRC");
-        let saved_skill_root = std::env::var_os("AGENTDESK_OBSIDIAN_SKILL_ROOT");
-        let saved_runtime_root = std::env::var_os("AGENTDESK_ROOT_DIR");
-        let kakao_env = [
-            "AGENTDESK_KAKAO_ENABLED",
-            "AGENTDESK_KAKAO_ACCOUNTS",
-            "AGENTDESK_KAKAO_DEFAULT_ACCOUNT",
-            "AGENTDESK_KAKAO_LANDING_URL",
-            "KAKAO_REST_API_KEY",
-            "KAKAO_ACCESS_TOKEN",
-            "KAKAO_REFRESH_TOKEN",
-        ];
-        let saved_kakao = kakao_env.map(|name| std::env::var_os(name));
-        for name in kakao_env {
+        let _saved = CONNECTOR_ENV_KEYS
+            .map(crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock);
+        for name in &CONNECTOR_ENV_KEYS[7..] {
             unsafe { std::env::remove_var(name) };
         }
 
         f();
-
-        restore_env("HOME", saved_home);
-        restore_env("USERPROFILE", saved_userprofile);
-        restore_env("OBSIDIAN_VAULT_ROOT", saved_obsidian_root);
-        restore_env("OBSIDIAN_REMOTE_VAULT_ROOT", saved_remote_root);
-        restore_env("AGENTDESK_OBSIDIAN_AGENTS_SRC", saved_agents_src);
-        restore_env("AGENTDESK_OBSIDIAN_SKILL_ROOT", saved_skill_root);
-        restore_env("AGENTDESK_ROOT_DIR", saved_runtime_root);
-        for (name, value) in kakao_env.into_iter().zip(saved_kakao) {
-            restore_env(name, value);
-        }
     }
+    const CONNECTOR_ENV_KEYS: [&str; 14] = [
+        "HOME",
+        "USERPROFILE",
+        "OBSIDIAN_VAULT_ROOT",
+        "OBSIDIAN_REMOTE_VAULT_ROOT",
+        "AGENTDESK_OBSIDIAN_AGENTS_SRC",
+        "AGENTDESK_OBSIDIAN_SKILL_ROOT",
+        "AGENTDESK_ROOT_DIR",
+        "AGENTDESK_KAKAO_ENABLED",
+        "AGENTDESK_KAKAO_ACCOUNTS",
+        "AGENTDESK_KAKAO_DEFAULT_ACCOUNT",
+        "AGENTDESK_KAKAO_LANDING_URL",
+        "KAKAO_REST_API_KEY",
+        "KAKAO_ACCESS_TOKEN",
+        "KAKAO_REFRESH_TOKEN",
+    ];
 
-    fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
-        match value {
-            Some(value) => unsafe { std::env::set_var(name, value) },
-            None => unsafe { std::env::remove_var(name) },
-        }
+    fn connector_checkpoint(home: &std::path::Path, root: &std::path::Path) {
+        let expected = CONNECTOR_ENV_KEYS.map(|key| {
+            (
+                key,
+                match key {
+                    "HOME" | "USERPROFILE" => Some(home.as_os_str()),
+                    "AGENTDESK_ROOT_DIR" => Some(root.as_os_str()),
+                    _ => None,
+                },
+            )
+        });
+        crate::test_env_panic_probe::checkpoint_values(&expected);
     }
 
     #[test]
@@ -542,6 +539,7 @@ mod tests {
                 std::env::remove_var("AGENTDESK_OBSIDIAN_AGENTS_SRC");
                 std::env::remove_var("AGENTDESK_OBSIDIAN_SKILL_ROOT");
             }
+            connector_checkpoint(&home, &root);
 
             let statuses = optional_connector_statuses();
 
@@ -566,6 +564,24 @@ mod tests {
     }
 
     #[test]
+    fn connector_runtime_stubs_restores_env_after_panic_present() {
+        crate::test_env_panic_probe::assert_restores_on_return_and_panic(
+            &CONNECTOR_ENV_KEYS,
+            true,
+            runtime_root_obsidian_stubs_are_discoverable_without_obsidian_env,
+        );
+    }
+
+    #[test]
+    fn connector_runtime_stubs_restores_env_after_panic_absent() {
+        crate::test_env_panic_probe::assert_restores_on_return_and_panic(
+            &CONNECTOR_ENV_KEYS,
+            false,
+            runtime_root_obsidian_stubs_are_discoverable_without_obsidian_env,
+        );
+    }
+
+    #[test]
     fn empty_obsidian_skill_stub_requires_real_skill_content() {
         with_connector_env(|| {
             let temp = tempfile::tempdir().unwrap();
@@ -583,6 +599,7 @@ mod tests {
                 std::env::remove_var("AGENTDESK_OBSIDIAN_AGENTS_SRC");
                 std::env::remove_var("AGENTDESK_OBSIDIAN_SKILL_ROOT");
             }
+            connector_checkpoint(&home, &root);
 
             let prompts = optional_connector_status_by_id("obsidian_agent_prompts").unwrap();
             let skills = optional_connector_status_by_id("obsidian_skill_root").unwrap();
@@ -591,6 +608,24 @@ mod tests {
             assert_eq!(skills.state, OptionalConnectorState::InvalidConfig);
             assert_eq!(skills.reason, Some("missing_skill_files"));
         });
+    }
+
+    #[test]
+    fn connector_skill_content_restores_env_after_panic_present() {
+        crate::test_env_panic_probe::assert_restores_on_return_and_panic(
+            &CONNECTOR_ENV_KEYS,
+            true,
+            empty_obsidian_skill_stub_requires_real_skill_content,
+        );
+    }
+
+    #[test]
+    fn connector_skill_content_restores_env_after_panic_absent() {
+        crate::test_env_panic_probe::assert_restores_on_return_and_panic(
+            &CONNECTOR_ENV_KEYS,
+            false,
+            empty_obsidian_skill_stub_requires_real_skill_content,
+        );
     }
 
     #[test]

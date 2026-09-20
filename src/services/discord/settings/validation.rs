@@ -274,14 +274,13 @@ mod voice_channel_guard_tests {
 
     fn with_temp_root<F>(f: F)
     where
-        F: FnOnce(),
+        F: FnOnce(&std::path::Path),
     {
         // Serialize on the process-wide `AGENTDESK_ROOT_DIR` lock so this
         // root-mutating helper cannot race a concurrent test in another module.
         let _guard = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
         let temp = TempDir::new().expect("temp home");
         let root = temp.path().join(".adk");
         let settings_dir = root.join("config");
@@ -304,12 +303,27 @@ agents:
 "#,
         )
         .unwrap();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &root) };
-        f();
-        match previous {
-            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-        }
+        let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            &root,
+        );
+        f(&root);
+    }
+
+    use crate::test_env_panic_probe::{assert_root_restored, checkpoint};
+
+    fn exercise_validation_runtime_root() {
+        with_temp_root(|root| checkpoint(&[("AGENTDESK_ROOT_DIR", root.as_os_str())]))
+    }
+
+    #[test]
+    fn validation_runtime_root_restores_env_after_panic_present() {
+        assert_root_restored(true, exercise_validation_runtime_root);
+    }
+
+    #[test]
+    fn validation_runtime_root_restores_env_after_panic_absent() {
+        assert_root_restored(false, exercise_validation_runtime_root);
     }
 
     fn bot_settings(provider: ProviderKind, allowed_channel_ids: Vec<u64>) -> DiscordBotSettings {
@@ -323,7 +337,7 @@ agents:
 
     #[test]
     fn allow_channel_recognizes_owner_voice_channel_without_allowlist_entry() {
-        with_temp_root(|| {
+        with_temp_root(|_root| {
             // codex owns the voice channel; its allowlist has only the text
             // channel, NOT the voice channel.
             let codex = bot_settings(ProviderKind::Codex, vec![TEXT_CHANNEL_ID]);
@@ -367,7 +381,7 @@ agents:
 
     #[test]
     fn full_guard_passes_voice_slash_command_for_owner_blocks_non_owner() {
-        with_temp_root(|| {
+        with_temp_root(|_root| {
             // Owner (codex) with a non-empty allowlist that omits the voice
             // channel — a slash command in the voice channel must pass the guard.
             let codex = bot_settings(ProviderKind::Codex, vec![TEXT_CHANNEL_ID]);
@@ -459,7 +473,7 @@ agents:
 
     #[test]
     fn restart_routing_change_orphans_provider_rebind_but_preserves_reroutable_and_valid() {
-        with_temp_root(|| {
+        with_temp_root(|_root| {
             // (1) STILL-VALID routing: the row's channel is still bound to this
             // bot's provider — `validate` is Ok, so recovery proceeds normally
             // and the row is never handed to the orphan-cleanup path.

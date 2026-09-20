@@ -186,13 +186,15 @@ mod tests {
     /// root and asserts a test never touches the live release store) and run the
     /// pure-predicate assertion while the env guard is held. Mirrors the
     /// `active_bridge_turn_guard_tests` helper in `tmux.rs`.
-    fn with_readopted_crash_turn(test: impl FnOnce(InflightTurnState)) {
+    fn with_readopted_crash_turn(test: impl FnOnce(InflightTurnState, &std::path::Path)) {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
-        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+        let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tmp.path(),
+        );
 
         let mut state = InflightTurnState::new(
             ProviderKind::Claude,
@@ -216,31 +218,42 @@ mod tests {
         state.set_relay_owner_kind(RelayOwnerKind::None);
         state.readopted_from_inflight = true;
 
-        test(state);
+        test(state, tmp.path());
+    }
 
-        match previous {
-            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-        }
+    use crate::test_env_panic_probe::{assert_root_restored, checkpoint};
+
+    fn exercise_readopted_crash_turn() {
+        with_readopted_crash_turn(|_, root| checkpoint(&[("AGENTDESK_ROOT_DIR", root.as_os_str())]))
+    }
+
+    #[test]
+    fn readopted_crash_turn_restores_env_after_panic_present() {
+        assert_root_restored(true, exercise_readopted_crash_turn);
+    }
+
+    #[test]
+    fn readopted_crash_turn_restores_env_after_panic_absent() {
+        assert_root_restored(false, exercise_readopted_crash_turn);
     }
 
     #[test]
     fn crash_readopt_real_user_live_turn_matches_the_black_hole_shape() {
-        with_readopted_crash_turn(|state| {
+        with_readopted_crash_turn(|state, _root| {
             assert!(crash_readopt_real_user_live_turn(&state));
         });
     }
 
     #[test]
     fn resume_required_holds_for_the_readopted_crash_turn() {
-        with_readopted_crash_turn(|state| {
+        with_readopted_crash_turn(|state, _root| {
             assert!(crash_readopt_live_relay_resume_required(&state));
         });
     }
 
     #[test]
     fn resume_required_needs_the_readopted_marker() {
-        with_readopted_crash_turn(|mut state| {
+        with_readopted_crash_turn(|mut state, _root| {
             state.readopted_from_inflight = false;
             assert!(
                 !crash_readopt_live_relay_resume_required(&state),
@@ -253,7 +266,7 @@ mod tests {
 
     #[test]
     fn committed_turn_is_not_a_black_hole_risk() {
-        with_readopted_crash_turn(|mut state| {
+        with_readopted_crash_turn(|mut state, _root| {
             state.terminal_delivery_committed = true;
             assert!(
                 !crash_readopt_real_user_live_turn(&state),
@@ -265,7 +278,7 @@ mod tests {
 
     #[test]
     fn watcher_owned_turn_is_not_a_black_hole_risk() {
-        with_readopted_crash_turn(|mut state| {
+        with_readopted_crash_turn(|mut state, _root| {
             state.set_relay_owner_kind(RelayOwnerKind::Watcher);
             assert!(
                 !crash_readopt_real_user_live_turn(&state),
@@ -276,7 +289,7 @@ mod tests {
 
     #[test]
     fn session_bound_relay_turn_is_not_a_black_hole_risk() {
-        with_readopted_crash_turn(|mut state| {
+        with_readopted_crash_turn(|mut state, _root| {
             state.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
             assert!(!crash_readopt_real_user_live_turn(&state));
             assert!(!crash_readopt_live_relay_resume_required(&state));
@@ -285,7 +298,7 @@ mod tests {
 
     #[test]
     fn synthetic_owner_turn_is_not_a_real_user_black_hole() {
-        with_readopted_crash_turn(|mut state| {
+        with_readopted_crash_turn(|mut state, _root| {
             state.request_owner_user_id =
                 crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
             assert!(!crash_readopt_real_user_live_turn(&state));
@@ -294,7 +307,7 @@ mod tests {
 
     #[test]
     fn rebind_origin_turn_is_owned_by_the_rebind_api() {
-        with_readopted_crash_turn(|mut state| {
+        with_readopted_crash_turn(|mut state, _root| {
             state.rebind_origin = true;
             assert!(!crash_readopt_real_user_live_turn(&state));
         });
@@ -313,7 +326,7 @@ mod tests {
     /// from `crash_readopt_real_user_live_turn` → this assert FAILS.
     #[test]
     fn planned_restart_missing_marker_does_not_dead_letter() {
-        with_readopted_crash_turn(|mut state| {
+        with_readopted_crash_turn(|mut state, _root| {
             state.readopted_from_inflight = false;
             state.set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart);
             assert!(
@@ -330,7 +343,7 @@ mod tests {
     /// `runtime::readopt_marker_eligible_real_user` → this assert FAILS.
     #[test]
     fn real_owner_id0_missing_marker_does_not_dead_letter() {
-        with_readopted_crash_turn(|mut state| {
+        with_readopted_crash_turn(|mut state, _root| {
             state.readopted_from_inflight = false;
             state.user_msg_id = 0;
             assert!(
@@ -345,7 +358,7 @@ mod tests {
     /// bridge, so the backstop MUST dead-letter the undelivered body.
     #[test]
     fn crash_real_user_missing_marker_dead_letters() {
-        with_readopted_crash_turn(|mut state| {
+        with_readopted_crash_turn(|mut state, _root| {
             state.readopted_from_inflight = false;
             assert!(
                 readopt_relay_black_hole_dead_letter_required(&state),
@@ -358,7 +371,7 @@ mod tests {
     /// is armed and the backstop is a no-op.
     #[test]
     fn marker_present_is_a_no_op() {
-        with_readopted_crash_turn(|state| {
+        with_readopted_crash_turn(|state, _root| {
             assert!(
                 !readopt_relay_black_hole_dead_letter_required(&state),
                 "when the marker persisted the resume guard is armed → no dead-letter"

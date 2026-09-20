@@ -1588,7 +1588,11 @@ fn status_panel_resets_across_two_tui_direct_spawns_via_stamped_nonce() {
         Err(poisoned) => poisoned.into_inner(),
     };
     let tmp = tempfile::tempdir().expect("tempdir");
-    unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+    let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        tmp.path(),
+    );
+    checkpoint(&[("AGENTDESK_ROOT_DIR", tmp.path().as_os_str())]);
 
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(30872);
@@ -1655,8 +1659,26 @@ fn status_panel_resets_across_two_tui_direct_spawns_via_stamped_nonce() {
             "a fresh TUI-direct spawn (distinct stamped nonce) must reset the panel"
         );
     }
+}
 
-    unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+use crate::test_env_panic_probe::{assert_root_restored, checkpoint};
+
+#[cfg(unix)]
+#[test]
+fn stamped_nonce_two_spawns_restores_env_after_panic_present() {
+    assert_root_restored(
+        true,
+        status_panel_resets_across_two_tui_direct_spawns_via_stamped_nonce,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn stamped_nonce_two_spawns_restores_env_after_panic_absent() {
+    assert_root_restored(
+        false,
+        status_panel_resets_across_two_tui_direct_spawns_via_stamped_nonce,
+    );
 }
 
 #[test]

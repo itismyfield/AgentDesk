@@ -57,9 +57,30 @@ pub(crate) fn assert_isolated<F, G>(test_name: &'static str, factory: F, root_wa
 where
     F: FnOnce() -> G + Send,
 {
+    run_isolated(test_name, root_was_present, || exercise_teardown(factory));
+}
+
+pub(crate) fn assert_restores_after_return(
+    test_name: &'static str,
+    root_was_present: bool,
+    exercise: impl FnOnce(),
+) {
+    run_isolated(test_name, root_was_present, || {
+        let baseline = std::env::var_os("AGENTDESK_ROOT_DIR");
+        exercise();
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        assert_eq!(
+            std::env::var_os("AGENTDESK_ROOT_DIR"),
+            baseline,
+            "actual test must restore the prior root on return"
+        );
+    });
+}
+
+fn run_isolated(test_name: &'static str, root_was_present: bool, exercise: impl FnOnce()) {
     let test_name = test_name.split_once("::").expect("crate-qualified test").1;
     if std::env::var(CHILD_MARKER).as_deref() == Ok(test_name) {
-        exercise_teardown(factory);
+        exercise();
         return;
     }
 
