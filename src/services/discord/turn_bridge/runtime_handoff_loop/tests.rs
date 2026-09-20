@@ -484,10 +484,7 @@ async fn runtime_adoption_pins_authoritative_incumbent_not_provisional_marker() 
 
 #[tokio::test]
 async fn thread_follow_up_tmux_ready_claim_records_intended_classification_4984() {
-    let _config_lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    let _observability_lock = crate::services::observability::test_runtime_lock();
+    let _locks = crate::services::observability::lock_env_then_runtime();
     crate::services::observability::reset_for_tests();
     let root = tempfile::tempdir().expect("runtime root");
     let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(

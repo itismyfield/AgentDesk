@@ -937,23 +937,16 @@ mod tests {
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
     }
 
-    /// #5996 step 3 (`docs/relay-state-contract.md`, "How to add a new
-    /// invariant"): the deliberate violation that proves the check FIRES, and
-    /// its polarity — `record_invariant_check` emits nothing while the condition
-    /// holds, so a silent wiring is indistinguishable from an absent one unless
-    /// both arms are driven. The witnessed arm must leave the ring clean.
-    ///
-    /// The observability runtime is process-global, so the ring reset and the
-    /// read must not straddle a concurrent test's reset. The guard is taken in
-    /// this synchronous frame and the awaits run under `block_on` — the shape
-    /// `synthetic_terminal_ordering_tests` already uses here — so no
-    /// `await_holding_lock` suppression is needed for it.
+    // Keep the global event ring isolated while checking both invariant outcomes.
     #[test]
     fn witnessless_reclaim_records_the_i20_violation_and_a_witnessed_one_does_not() {
-        let _telemetry = crate::services::observability::test_runtime_lock();
+        let _telemetry = crate::services::observability::lock_env_then_runtime();
         crate::services::observability::reset_for_tests();
         let root = tempfile::tempdir().expect("runtime root");
-        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
