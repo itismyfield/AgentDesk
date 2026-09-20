@@ -28,7 +28,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("description", body_param("string", false, "Durable objective and context.")),
             ("status", body_param("string", true, "planned|active|paused|completed|cancelled")),
             ("round", body_param("integer", true, "Positive campaign round.")),
-            ("nodes", body_param("array", false, "Full DAG: id/title/status/stage/round, dependencies, assignee/session_id/provider, issue_url/pr_url/head_sha, details/acceptance/findings/evidence/evidence_records/next_action/blocker. See docs/campaign-ledger.md.")),
+            ("nodes", body_param("array", false, "Full DAG: id/title/status/stage/group/round, dependencies, assignee/session_id/provider, issue_url/pr_url/head_sha, details/acceptance/findings/evidence/evidence_records/next_action/blocker. Optional group is trimmed; blank/omitted/null stays unclassified, independent of stage/status. See docs/campaign-ledger.md.")),
         ])
         .with_example(
             json!({"body": {"id": "release-a", "title": "Release A", "status": "planned", "round": 1, "nodes": []}}),
@@ -58,7 +58,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("description", body_param("string", false, "Durable objective and context.")),
             ("status", body_param("string", true, "planned|active|paused|completed|cancelled")),
             ("round", body_param("integer", true, "Positive campaign round.")),
-            ("nodes", body_param("array", false, "Complete replacement DAG, including durable evidence and next actions.")),
+            ("nodes", body_param("array", false, "Complete replacement DAG, including durable evidence, next actions and optional group labels. Group changes share revision CAS/history; blank/omitted/null means unclassified.")),
         ])
         .with_example(json!({"path": {"id": "release-a"}, "body": {"expected_revision": 1, "title": "Release A", "status": "paused", "round": 1, "nodes": []}}), json!({"campaign": {"id": "release-a", "title": "Release A", "description": "", "status": "paused", "round": 1, "revision": 2, "nodes": [], "created_at": "2026-09-20T00:00:00Z", "updated_at": "2026-09-20T00:01:00Z"}}))
         .with_error_example(409, json!({"body": {"expected_revision": 1, "title": "Release A", "status": "paused", "round": 1}}), json!({"error": "campaign revision conflict; reload before retrying", "code": "conflict", "context": {}}))

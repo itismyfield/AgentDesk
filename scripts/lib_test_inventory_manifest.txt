@@ -373,6 +373,7 @@ db::automation_candidates::verdict_tests::persist_iteration_outcome_pg_rolls_bac
 db::automation_candidates::verdict_tests::simplification_always_keeps
 db::automation_candidates::verdict_tests::timeout_always_discards
 db::campaigns::tests::campaign_checkpoint_keeps_unchanged_node_time_and_resume_context
+db::campaigns::tests::campaign_checkpoint_normalizes_optional_groups_without_inference
 db::campaigns::tests::campaign_validation_rejects_false_completion_and_bad_identity
 db::campaigns::tests::campaign_validation_rejects_missing_duplicate_and_cyclic_dependencies
 db::campaigns::tests::postgres_campaign_concurrent_cas_and_reconnect_preserve_canonical_history_pg

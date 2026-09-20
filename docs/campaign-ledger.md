@@ -31,12 +31,17 @@ Campaign fields: `id`, `title`, `description`, `status`, `round`, `revision`,
 `nodes`, `created_at`, `updated_at`. Status is `planned`, `active`, `paused`,
 `completed`, or `cancelled`. Round is a positive integer; revision starts at 1.
 
-Node fields: `id`, `title`, `status`, `stage`, `round`, `assignee`, `session_id`,
+Node fields: `id`, `title`, `status`, `stage`, `group`, `round`, `assignee`, `session_id`,
 `provider`, `dependencies`, `issue_url`, `pr_url`, `head_sha`, `evidence`,
 `next_action`, `blocker`, `details`, `acceptance`, `findings`, `evidence_records`,
 `updated_at`. Status is `pending`, `running`, `blocked`, `completed`, `failed`, or
 `skipped`. Stage is a separate free-text workflow label. Optional scalar fields
 may be null; arrays default to empty. `details` defaults to an empty string.
+`group` is an optional, caller-supplied organizational label independent of
+stage and status. Surrounding whitespace is trimmed; blank, null or omitted
+values become null (unclassified). Existing documents without this field stay
+unclassified; no group is inferred from titles, stages, or statuses. Group
+changes use the same revision CAS and durable history as other node changes.
 Evidence records contain a required `summary` and optional `command`, `result`,
 `head_sha`, `recorded_at` (RFC3339), and `references` (string array).
 
@@ -78,6 +83,7 @@ curl --fail-with-body --silent --show-error \
     {
       "id": "implement", "title": "Persist canonical checkpoints",
       "status": "running", "stage": "implementation", "round": 1,
+      "group": "Backend",
       "assignee": "backend", "session_id": "current-session", "provider": "codex",
       "dependencies": [], "issue_url": null, "pr_url": null,
       "details": "Write the DAG and revision history in one PostgreSQL transaction.",
@@ -88,6 +94,7 @@ curl --fail-with-body --silent --show-error \
     {
       "id": "review", "title": "Review durability evidence",
       "status": "pending", "stage": "review", "round": 1,
+      "group": null,
       "dependencies": ["implement"], "next_action": "Review the implementation evidence after it is completed."
     }
   ]

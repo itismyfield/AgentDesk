@@ -44,6 +44,8 @@ pub struct NodeInput {
     pub title: String,
     pub status: NodeStatus,
     pub stage: String,
+    #[serde(default)]
+    pub group: Option<String>,
     pub round: u32,
     pub assignee: Option<String>,
     pub session_id: Option<String>,
@@ -210,7 +212,15 @@ pub fn validate(input: &CampaignInput) -> Result<(), CampaignError> {
     Ok(())
 }
 
-fn checkpoint(id: String, input: CampaignInput, previous: Option<&Campaign>) -> Campaign {
+fn checkpoint(id: String, mut input: CampaignInput, previous: Option<&Campaign>) -> Campaign {
+    for node in &mut input.nodes {
+        node.group = node
+            .group
+            .as_deref()
+            .map(str::trim)
+            .filter(|group| !group.is_empty())
+            .map(str::to_owned);
+    }
     let now = Utc::now();
     let previous_nodes: HashMap<_, _> = previous
         .into_iter()
