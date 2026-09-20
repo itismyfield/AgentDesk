@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { CampaignNode } from "../../api/campaigns";
-import { campaignPositions, campaignProgress, safeCampaignLink } from "./campaignModel";
+import { campaignIssueLabel, campaignProgress, dependencyNeighborhood, EMPTY_FILTERS, filterCampaignNodes, groupCampaignNodes, safeCampaignLink } from "./campaignModel";
+import { makeCampaignNode, makeLargeCampaign } from "./campaignTestFixtures";
 
 function node(id: string, dependencies: string[] = [], status: CampaignNode["status"] = "pending"): CampaignNode {
-  return { id, title: id, dependencies, status, stage: "review", round: 2, assignee: null, session_id: null, provider: null, issue_url: null, pr_url: null, head_sha: null, evidence: [], next_action: null, blocker: null, updated_at: "", details: "", acceptance: [], findings: [], evidence_records: [] };
+  return makeCampaignNode(id, { dependencies, status });
 }
 
 describe("campaign progress", () => {
@@ -19,16 +20,34 @@ describe("campaign progress", () => {
   });
 });
 
-describe("campaign DAG layout", () => {
-  it("places a diamond join after all its predecessors regardless of input order", () => {
-    const positions = campaignPositions([node("join", ["left", "right"]), node("right", ["root"]), node("root"), node("left", ["root"])]);
-    expect(positions.get("join")!.x).toBeGreaterThan(positions.get("left")!.x);
-    expect(positions.get("join")!.x).toBeGreaterThan(positions.get("right")!.x);
-    expect(positions.get("left")!.x).toBeGreaterThan(positions.get("root")!.x);
-    expect(positions.get("left")!.y).not.toBe(positions.get("right")!.y);
+describe("large campaign exploration", () => {
+  it("groups only explicit categories and keeps unclassified work separate from status and stage", () => {
+    const groups = groupCampaignNodes(makeLargeCampaign().nodes);
+    expect(groups).toHaveLength(4);
+    expect(groups.at(-1)?.key).toBe("");
+    expect(groups.every((group) => group.nodes.length === 30)).toBe(true);
+    expect(groups.every((group) => group.progress.counts.running === 5)).toBe(true);
   });
-  it("does not hang on malformed legacy dependencies", () => {
-    expect(campaignPositions([node("a", ["b"]), node("b", ["a"]), node("c", ["missing"])]).size).toBe(3);
+  it("finds issue numbers independently of the canonical node ID and composes filters", () => {
+    const nodes = makeLargeCampaign().nodes;
+    expect(filterCampaignNodes(nodes, { ...EMPTY_FILTERS, query: "#5701" }).map((value) => value.id)).toEqual(["task-1"]);
+    expect(filterCampaignNodes(nodes, { ...EMPTY_FILTERS, query: "5701" }).map((value) => value.id)).toEqual(["task-1"]);
+    expect(filterCampaignNodes(nodes, { ...EMPTY_FILTERS, group: "Gateway", status: "blocked" })).toHaveLength(5);
+    expect(filterCampaignNodes(nodes, { ...EMPTY_FILTERS, hideCompleted: true })).toHaveLength(100);
+  });
+  it("bounds a 120-node fan-in/out and reports omitted and external connections", () => {
+    const upstream = Array.from({ length: 100 }, (_, index) => node(`up-${index}`));
+    const selected = node("selected", upstream.map((value) => value.id));
+    const downstream = Array.from({ length: 19 }, (_, index) => node(`down-${index}`, ["selected"]));
+    const context = dependencyNeighborhood([...upstream, selected, ...downstream], "selected");
+    expect(context.visible).toHaveLength(17);
+    expect(context.omittedUpstream).toBe(92);
+    expect(context.omittedDownstream).toBe(11);
+    expect(context.externalDependencies.get("selected")).toHaveLength(92);
+    expect(context.visible.map((value) => value.id)).toEqual(dependencyNeighborhood([...upstream, selected, ...downstream], "selected").visible.map((value) => value.id));
+  });
+  it("never turns an unsafe issue URL into a displayed issue number", () => {
+    expect(campaignIssueLabel(makeCampaignNode("safe-id", { issue_url: "javascript:/issues/5701" }))).toBe("safe-id");
   });
 });
 

@@ -24,6 +24,7 @@ export const campaignNodeSchema = z.looseObject({
   title: z.string().min(1).max(512).refine((value) => value.trim().length > 0),
   status: campaignNodeStatusSchema,
   stage: z.string().min(1).max(128).refine((value) => value.trim().length > 0),
+  group: nullableText,
   round: roundSchema,
   assignee: nullableText,
   session_id: nullableText,

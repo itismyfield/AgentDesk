@@ -64,6 +64,22 @@ Duplicate node IDs, duplicate/missing dependencies, self edges and cycles return
 skipped. The API validates structure, not the truth of a claimed test result;
 callers must verify their evidence before marking work complete.
 
+## Dashboard navigation
+
+The default campaign view is a compact, collapsible list organized by the stored
+`group`, intended for campaigns with hundreds of issues. Group labels describe
+work areas; they are independent of workflow stage and status. Missing labels
+remain ungrouped rather than being inferred from titles. Search and status/group
+filters narrow the list without changing the canonical DAG or completion counts.
+
+Select a task to inspect its session, review round, evidence and next action.
+Connections first summarizes relationships between groups, then provides a focused
+task dependency view rather than a miniature rendering of the entire campaign.
+Aggregated group relationships can be cyclic even when the task DAG is acyclic.
+The task view shows direct predecessors and successors across groups and filters,
+with explicit omitted counts and a complete connection list for high fan-in/out.
+The saved `running` status remains a checkpoint, not a live process-health signal.
+
 ## CLI usage
 
 Use the existing `curl` and `jq` tools. Set `ADK_URL` to the canonical server

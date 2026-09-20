@@ -2,34 +2,60 @@ import type { CampaignNode, CampaignNodeStatus } from "../../api/campaigns";
 
 export const NODE_STATUSES: CampaignNodeStatus[] = ["pending", "running", "blocked", "completed", "failed", "skipped"];
 
+export interface CampaignFilters {
+  query: string;
+  status: CampaignNodeStatus | "all";
+  group: string | null;
+  hideCompleted: boolean;
+}
+export const EMPTY_FILTERS: CampaignFilters = { query: "", status: "all", group: null, hideCompleted: false };
+export function campaignGroup(node: CampaignNode): string { return node.group || ""; }
+export function campaignIssueLabel(node: CampaignNode): string {
+  const safe = safeCampaignLink(node.issue_url);
+  const issue = safe ? new URL(safe).pathname.match(/\/issues\/(\d+)\/?$/)?.[1] : null;
+  return issue ? `#${issue}` : node.id;
+}
+export function filterCampaignNodes(nodes: CampaignNode[], filters: CampaignFilters): CampaignNode[] {
+  const query = filters.query.trim().toLocaleLowerCase();
+  return nodes.filter((node) => (!filters.hideCompleted || node.status !== "completed")
+    && (filters.status === "all" || node.status === filters.status)
+    && (filters.group === null || campaignGroup(node) === filters.group)
+    && (!query || [node.id, campaignIssueLabel(node), node.title, node.stage, node.group, node.assignee, node.session_id].some((value) => value?.toLocaleLowerCase().includes(query))));
+}
+export function groupCampaignNodes(nodes: CampaignNode[]) {
+  const groups = new Map<string, CampaignNode[]>();
+  for (const node of nodes) {
+    const key = campaignGroup(node);
+    const entries = groups.get(key) ?? [];
+    entries.push(node);
+    groups.set(key, entries);
+  }
+  return Array.from(groups, ([key, entries]) => ({ key, nodes: entries, progress: campaignProgress(entries) }))
+    .sort((a, b) => a.key === "" ? 1 : b.key === "" ? -1 : a.key.localeCompare(b.key));
+}
+
+/** Limit each side independently so high fan-in never hides every successor. */
+export function dependencyNeighborhood(nodes: CampaignNode[], selectedId: string, perSide = 8) {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const selected = byId.get(selectedId);
+  const upstream = selected?.dependencies.flatMap((id) => byId.has(id) ? [byId.get(id)!] : []) ?? [];
+  const downstream = nodes.filter((node) => node.dependencies.includes(selectedId));
+  const visibleUpstream = upstream.slice(0, perSide);
+  const visibleDownstream = downstream.slice(0, perSide);
+  const visible = selected ? [...visibleUpstream, selected, ...visibleDownstream] : [];
+  const visibleIds = new Set(visible.map((node) => node.id));
+  return {
+    selected, upstream, downstream, visibleUpstream, visibleDownstream, visible,
+    omittedUpstream: upstream.length - visibleUpstream.length,
+    omittedDownstream: downstream.length - visibleDownstream.length,
+    externalDependencies: new Map(visible.map((node) => [node.id, node.dependencies.filter((id) => !visibleIds.has(id))])),
+  };
+}
+
 export function campaignProgress(nodes: CampaignNode[]) {
   const counts = Object.fromEntries(NODE_STATUSES.map((status) => [status, 0])) as Record<CampaignNodeStatus, number>;
   for (const node of nodes) counts[node.status]++;
   return { counts, total: nodes.length, percent: nodes.length ? Math.floor(100 * counts.completed / nodes.length) : 0 };
-}
-
-/** Longest dependency depth puts every predecessor to the left, including joins. */
-export function campaignPositions(nodes: CampaignNode[]): Map<string, { x: number; y: number }> {
-  const byId = new Map(nodes.map((node) => [node.id, node]));
-  const depths = new Map<string, number>();
-  const visiting = new Set<string>();
-  const depth = (id: string): number => {
-    if (depths.has(id)) return depths.get(id)!;
-    if (visiting.has(id)) return 0; // Do not hang if an older server supplies invalid data.
-    visiting.add(id);
-    const dependencies = byId.get(id)?.dependencies.filter((dependency) => byId.has(dependency)) ?? [];
-    const value = dependencies.length ? Math.max(...dependencies.map(depth)) + 1 : 0;
-    visiting.delete(id);
-    depths.set(id, value);
-    return value;
-  };
-  const rows = new Map<number, number>();
-  return new Map(nodes.map((node) => {
-    const column = depth(node.id);
-    const row = rows.get(column) ?? 0;
-    rows.set(column, row + 1);
-    return [node.id, { x: column * 290, y: row * 130 }];
-  }));
 }
 
 export function safeCampaignLink(value: string | null): string | undefined {

@@ -44,7 +44,8 @@ it("saves against the edited revision while preserving sibling tasks and nullabl
 
 it("applies serde defaults for absent arrays and optional text while retaining additive fields", () => {
   const parsed = campaignSchema.parse({ ...campaignPayload, nodes: [{ ...campaignPayload.nodes[1], future_checkpoint: "keep" }] });
-  expect(parsed.nodes[0]).toMatchObject({ details: "", acceptance: [], findings: [], evidence: [], evidence_records: [], assignee: null, future_checkpoint: "keep" });
+  expect(parsed.nodes[0]).toMatchObject({ group: null, details: "", acceptance: [], findings: [], evidence: [], evidence_records: [], assignee: null, future_checkpoint: "keep" });
+  expect(campaignSchema.parse({ ...campaignPayload, nodes: [{ ...campaignPayload.nodes[1], group: "Gateway" }] }).nodes[0].group).toBe("Gateway");
   expect(campaignSchema.parse({ ...campaignPayload, nodes: [{ ...campaignPayload.nodes[0], evidence_records: [{ summary: "Minimal evidence" }] }] }).nodes[0].evidence_records[0])
     .toEqual({ summary: "Minimal evidence", command: null, result: null, head_sha: null, recorded_at: null, references: [] });
 });
@@ -54,7 +55,7 @@ it("rejects malformed node and evidence fields rather than passing unsafe values
     { dependencies: null }, { evidence: null }, { acceptance: null }, { evidence_records: null },
     { evidence_records: [{ summary: "CI", references: null }] },
     { evidence_records: [{ summary: "CI", recorded_at: "yesterday" }] },
-    { round: 0 }, { round: 1.5 }, { round: 4_294_967_296 }, { status: "unknown" }, { stage: " " }, { updated_at: "invalid" },
+    { round: 0 }, { round: 1.5 }, { round: 4_294_967_296 }, { status: "unknown" }, { stage: " " }, { group: 42 }, { updated_at: "invalid" },
   ]) {
     expect(campaignSchema.safeParse({ ...campaignPayload, nodes: [{ ...campaignPayload.nodes[0], ...patch }] }).success).toBe(false);
   }
