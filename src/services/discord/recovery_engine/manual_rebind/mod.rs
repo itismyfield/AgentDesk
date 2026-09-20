@@ -1042,11 +1042,8 @@ mod stall_watchdog_respawn_deadlock_tests {
     /// arm classifies this row `Pending` and the first assert fails.
     #[test]
     fn respawn_preflight_adopts_reacquired_orphan_row_instead_of_409() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+        let _env = crate::config::set_agentdesk_root_for_test(tmp.path());
 
         let provider = ProviderKind::Claude;
         let channel_id = 1_479_671_298_497_183_835_u64;
@@ -1108,11 +1105,8 @@ mod stall_watchdog_respawn_deadlock_tests {
     /// exist.
     #[test]
     fn respawn_with_absent_row_still_creates_new_synthetic_inflight() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+        let _env = crate::config::set_agentdesk_root_for_test(tmp.path());
 
         let provider = ProviderKind::Claude;
         let channel_id = 1_479_671_298_497_184_007_u64;
@@ -1311,6 +1305,41 @@ mod stall_watchdog_respawn_deadlock_tests {
             row.effective_relay_owner_kind(),
             super::inflight::RelayOwnerKind::Watcher,
             "the adopted row must stay watcher-owned"
+        );
+    }
+    #[test]
+    fn respawn_preflight_restores_present_root() {
+        crate::config::test_env::teardown_probe::assert_restores_after_return(
+            concat!(module_path!(), "::respawn_preflight_restores_present_root"),
+            true,
+            respawn_preflight_adopts_reacquired_orphan_row_instead_of_409,
+        );
+    }
+
+    #[test]
+    fn respawn_preflight_restores_absent_root() {
+        crate::config::test_env::teardown_probe::assert_restores_after_return(
+            concat!(module_path!(), "::respawn_preflight_restores_absent_root"),
+            false,
+            respawn_preflight_adopts_reacquired_orphan_row_instead_of_409,
+        );
+    }
+
+    #[test]
+    fn respawn_absent_row_restores_present_root() {
+        crate::config::test_env::teardown_probe::assert_restores_after_return(
+            concat!(module_path!(), "::respawn_absent_row_restores_present_root"),
+            true,
+            respawn_with_absent_row_still_creates_new_synthetic_inflight,
+        );
+    }
+
+    #[test]
+    fn respawn_absent_row_restores_absent_root() {
+        crate::config::test_env::teardown_probe::assert_restores_after_return(
+            concat!(module_path!(), "::respawn_absent_row_restores_absent_root"),
+            false,
+            respawn_with_absent_row_still_creates_new_synthetic_inflight,
         );
     }
 }

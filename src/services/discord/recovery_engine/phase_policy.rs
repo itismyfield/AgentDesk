@@ -150,11 +150,8 @@ mod tests {
 
     #[test]
     fn ownerless_live_inflight_with_partial_response_can_reattach_watcher() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+        let _env = crate::config::set_agentdesk_root_for_test(tmp.path());
 
         let mut state = inflight::InflightTurnState::new(
             ProviderKind::Codex,
@@ -183,11 +180,8 @@ mod tests {
 
     #[test]
     fn planned_restart_ownerless_live_inflight_with_restore_anchor_can_reattach_watcher() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+        let _env = crate::config::set_agentdesk_root_for_test(tmp.path());
 
         let mut state = inflight::InflightTurnState::new(
             ProviderKind::Codex,
@@ -244,11 +238,8 @@ mod tests {
     /// conjunct (or the adoption arm itself) and the row's own assert fails.
     #[test]
     fn orphaned_synthetic_watcher_row_adoption_quadrants() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+        let _env = crate::config::set_agentdesk_root_for_test(tmp.path());
 
         // (1) The #4400 orphan itself: adopted onto the resume machinery
         // instead of the pre-fix Pending → permanent 409 (kills the arm).
@@ -331,6 +322,59 @@ mod tests {
             recovery_phase_for_existing_inflight_rebind(&anchorless),
             RecoveryPhase::Pending,
             "an anchorless zero-id row cannot be adopted onto the watcher resume path"
+        );
+    }
+    #[test]
+    fn ownerless_live_restores_present_root() {
+        crate::config::test_env::teardown_probe::assert_restores_after_return(
+            concat!(module_path!(), "::ownerless_live_restores_present_root"),
+            true,
+            ownerless_live_inflight_with_partial_response_can_reattach_watcher,
+        );
+    }
+
+    #[test]
+    fn ownerless_live_restores_absent_root() {
+        crate::config::test_env::teardown_probe::assert_restores_after_return(
+            concat!(module_path!(), "::ownerless_live_restores_absent_root"),
+            false,
+            ownerless_live_inflight_with_partial_response_can_reattach_watcher,
+        );
+    }
+
+    #[test]
+    fn planned_restart_restores_present_root() {
+        crate::config::test_env::teardown_probe::assert_restores_after_return(
+            concat!(module_path!(), "::planned_restart_restores_present_root"),
+            true,
+            planned_restart_ownerless_live_inflight_with_restore_anchor_can_reattach_watcher,
+        );
+    }
+
+    #[test]
+    fn planned_restart_restores_absent_root() {
+        crate::config::test_env::teardown_probe::assert_restores_after_return(
+            concat!(module_path!(), "::planned_restart_restores_absent_root"),
+            false,
+            planned_restart_ownerless_live_inflight_with_restore_anchor_can_reattach_watcher,
+        );
+    }
+
+    #[test]
+    fn adoption_quadrants_restores_present_root() {
+        crate::config::test_env::teardown_probe::assert_restores_after_return(
+            concat!(module_path!(), "::adoption_quadrants_restores_present_root"),
+            true,
+            orphaned_synthetic_watcher_row_adoption_quadrants,
+        );
+    }
+
+    #[test]
+    fn adoption_quadrants_restores_absent_root() {
+        crate::config::test_env::teardown_probe::assert_restores_after_return(
+            concat!(module_path!(), "::adoption_quadrants_restores_absent_root"),
+            false,
+            orphaned_synthetic_watcher_row_adoption_quadrants,
         );
     }
 }

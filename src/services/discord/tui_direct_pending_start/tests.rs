@@ -2670,30 +2670,21 @@ async fn claim_false_exhausted_still_retains_record() {
 /// the process-global dedupe state. Lock order is env -> dedupe (the order
 /// `tui_prompt_dedupe::TEST_LOCK`'s doc pins globally).
 struct AnchorSlotRig {
-    _env_lock: std::sync::MutexGuard<'static, ()>,
     _dedupe_lock: std::sync::MutexGuard<'static, ()>,
-    _env: EnvReset,
-    _temp: tempfile::TempDir,
+    _root: crate::config::TestRuntimeRootGuard,
 }
 
 impl AnchorSlotRig {
     fn new() -> Self {
-        let env_lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let root = crate::config::TestRuntimeRootGuard::new();
         let dedupe_lock = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
-        let temp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         reset_present_for_tests();
         Self {
-            _env_lock: env_lock,
             _dedupe_lock: dedupe_lock,
-            _env: env,
-            _temp: temp,
+            _root: root,
         }
     }
 }
@@ -3565,5 +3556,31 @@ fn inline_claim_marker_wiring_records_only_when_claimed() {
         *recorded.borrow(),
         vec![("claude".to_string(), 42u64, 4242u64, "tmux-w".to_string())],
         "claimed forwards the exact prompt identity; unclaimed records nothing"
+    );
+}
+
+#[test]
+fn anchor_slot_rig_teardown_preserves_present_root() {
+    let _worker = worker_test_lock();
+    crate::config::test_env::teardown_probe::assert_isolated(
+        concat!(
+            module_path!(),
+            "::anchor_slot_rig_teardown_preserves_present_root"
+        ),
+        AnchorSlotRig::new,
+        true,
+    );
+}
+
+#[test]
+fn anchor_slot_rig_teardown_preserves_absent_root() {
+    let _worker = worker_test_lock();
+    crate::config::test_env::teardown_probe::assert_isolated(
+        concat!(
+            module_path!(),
+            "::anchor_slot_rig_teardown_preserves_absent_root"
+        ),
+        AnchorSlotRig::new,
+        false,
     );
 }
