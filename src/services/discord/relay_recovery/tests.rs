@@ -2949,7 +2949,7 @@ fn idle_tmux_snapshot_missing_output_path_denies_claude_tui_but_keeps_legacy_pan
 }
 
 #[test]
-fn frozen_busy_jsonl_uses_ready_pane_fallback_after_stale_window() {
+fn frozen_busy_jsonl_never_becomes_idle_merely_from_elapsed_time() {
     let _guard = auto_heal_test_lock().blocking_lock();
     let (_root_guard, temp) = isolated_agentdesk_root();
 
@@ -2961,13 +2961,13 @@ fn frozen_busy_jsonl_uses_ready_pane_fallback_after_stale_window() {
     set_output_mtime_age(&output_path, std::time::Duration::from_secs(20 * 60));
 
     assert!(
-        idle_tmux_repair_ready_for_input_with_pane_probe(
+        !idle_tmux_repair_ready_for_input_with_pane_probe(
             &provider,
             channel_id,
             "tmux-4030-frozen-ready",
             |_tmux, _provider| true,
         ),
-        "a long-frozen Busy JSONL may consume the pane-ready fallback"
+        "a quiet long-running provider must survive even if its pane looks ready"
     );
 }
 

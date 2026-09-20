@@ -17,6 +17,7 @@ export const STORAGE_KEYS = {
   kanbanAutoQueueOpen: "agentdesk.kanban.autoqueue.open",
   dashboardBottleneckThresholds: "agentdesk:dashboard:bottleneck-thresholds",
   dashboardActiveTab: "agentdesk.dashboard.active-tab",
+  dashboardActiveCampaign: "agentdesk.dashboard.active-campaign",
   settingsPanel: "agentdesk.settings.active-panel",
   settingsRuntimeCategory: "agentdesk.settings.runtime-category",
   settingsPipelineRepoCache: "agentdesk.settings.pipeline.repo-cache.v1",

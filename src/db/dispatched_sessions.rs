@@ -8,6 +8,12 @@ use crate::db::session_agent_resolution::{
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::session_activity::SessionActivityResolver;
 
+#[path = "dispatched_sessions/thread_gc.rs"]
+mod thread_gc;
+pub use thread_gc::gc_stale_thread_sessions_pg;
+#[cfg(test)]
+pub(crate) use thread_gc::gc_stale_thread_sessions_with_probe_pg;
+
 #[cfg(test)]
 #[path = "dispatched_sessions/tests.rs"]
 mod tests;
@@ -2356,85 +2362,6 @@ pub(crate) async fn load_session_update_payload_pg(
         "active_dispatch_id": row.try_get::<Option<String>, _>("active_dispatch_id").map_err(|error| format!("decode postgres active_dispatch_id for update {id}: {error}"))?,
         "last_heartbeat": last_heartbeat.map(|value| value.to_rfc3339()),
     })))
-}
-
-async fn backfill_legacy_thread_channel_ids_pg(pool: &PgPool) -> usize {
-    let session_keys = match sqlx::query_scalar::<_, String>(
-        "SELECT session_key
-         FROM sessions
-         WHERE thread_channel_id IS NULL",
-    )
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::warn!(
-                "[dispatched-sessions] backfill_legacy_thread_channel_ids_pg: failed to load session keys: {error}"
-            );
-            return 0;
-        }
-    };
-
-    let mut updated = 0usize;
-    for session_key in session_keys {
-        let Some(thread_channel_id) = parse_thread_channel_id_from_session_key(&session_key) else {
-            continue;
-        };
-
-        match sqlx::query(
-            "UPDATE sessions
-             SET thread_channel_id = $1
-             WHERE session_key = $2
-               AND thread_channel_id IS NULL",
-        )
-        .bind(&thread_channel_id)
-        .bind(&session_key)
-        .execute(pool)
-        .await
-        {
-            Ok(result) => updated += result.rows_affected() as usize,
-            Err(error) => tracing::warn!(
-                "[dispatched-sessions] backfill_legacy_thread_channel_ids_pg: failed to update {}: {}",
-                session_key,
-                error
-            ),
-        }
-    }
-
-    updated
-}
-
-/// Delete stale thread session rows and return the `session_key`s removed so
-/// the caller can reap the matching orphan tmux sessions. The inner CLI of a
-/// thread tmux session usually stays at an interactive prompt (its pane never
-/// goes dead), so the dead-pane reaper can't reap it; and once this GC removes
-/// the row, the idle-kill policy can no longer see it either. Returning the
-/// deleted keys lets the periodic GC kill those tmux sessions directly.
-pub async fn gc_stale_thread_sessions_pg(pool: &PgPool) -> Vec<String> {
-    let _ = backfill_legacy_thread_channel_ids_pg(pool).await;
-    match sqlx::query_scalar::<_, String>(
-        "DELETE FROM sessions
-         WHERE thread_channel_id IS NOT NULL
-           AND status IN ('idle', 'awaiting_user', 'disconnected', 'aborted')
-           AND (
-             (active_dispatch_id IS NULL
-               AND COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '1 hour')
-             OR COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '3 hours'
-           )
-         RETURNING session_key",
-    )
-    .fetch_all(pool)
-    .await
-    {
-        Ok(keys) => keys,
-        Err(error) => {
-            tracing::warn!(
-                "[dispatched-sessions] gc_stale_thread_sessions_pg: failed to delete stale sessions: {error}"
-            );
-            Vec::new()
-        }
-    }
 }
 
 /// Reconcile an **idle** session row whose tmux session has already vanished.

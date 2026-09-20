@@ -36,6 +36,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
     {
         "src/db/auto_queue/tests.rs",
         "src/db/automation_candidates/verdict_tests.rs",
+        "src/db/campaigns/tests.rs",
         "src/db/dispatched_sessions/canonical_identity_pg_tests.rs",
         "src/db/dispatched_sessions/tests.rs",
         "src/db/intake_outbox_dispatch_stamp/tests.rs",
@@ -191,6 +192,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/relay_e2e/mod.rs",
         "src/services/discord/tui_prompt_relay/tests/scenario_census_e2e.rs",
         "src/services/provider/read_fault.rs",
+        "src/services/tmux_turn_liveness/tests_pg.rs",
     }
 )
 

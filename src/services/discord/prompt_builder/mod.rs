@@ -10,6 +10,7 @@ mod dispatch_contract;
 mod layer_rendering;
 mod manifest;
 mod memory_guidance;
+mod session_anchors;
 
 pub(crate) use channel_recent_context::{
     ChannelRecentContextManifestInput, load_channel_recent_context,

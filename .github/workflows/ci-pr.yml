@@ -182,6 +182,23 @@ jobs:
             pg_db:
               - '.github/workflows/**'
               - 'justfile'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              # Canonical campaign/anchor recovery and idle-session protection
+              # execute in just test-postgres, including their pure unit seams.
+              - 'src/server/routes/campaigns.rs'
+              - 'src/services/memory/**'
+              - 'src/services/discord/prompt_builder/**'
+              - 'src/services/discord/relay_recovery.rs'
+              - 'src/services/discord/relay_recovery/**'
+              - 'src/services/discord/session_idle_cleanup.rs'
+              - 'src/services/dispatched_sessions.rs'
+              - 'src/services/tmux_turn_liveness.rs'
+              - 'src/services/tmux_turn_liveness/**'
+              - 'src/services/tui_turn_state.rs'
+              - 'src/services/tmux_common.rs'
+              - 'src/services/provider.rs'
+              - 'src/services/platform/tmux.rs'
               - 'migrations/**'
               - 'scripts/ci/postgres-service.sh'
               - 'src/db/**'
@@ -1486,7 +1503,7 @@ jobs:
           exit "$failed"
 
       - name: Install shellcheck
-        run: sudo apt-get install -y shellcheck
+        run: sudo apt-get install -y shellcheck zsh
 
       # This direct PR-job step is deliberately outside the aggregate it
       # inspects, so deleting an aggregate writer gate or its wiring test cannot

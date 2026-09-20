@@ -35,11 +35,6 @@ class ActionableOpsAlertRoutingContract(unittest.TestCase):
                 "github_sync.terminal_open_issue",
             ),
             (
-                "src/services/long_turn_watchdog.rs",
-                "long_turn_watchdog",
-                "long_turn_cluster",
-            ),
-            (
                 "src/services/observability/relay_signal_alert.rs",
                 "relay_signal_rollup",
                 "relay_signal.threshold",
@@ -58,6 +53,18 @@ class ActionableOpsAlertRoutingContract(unittest.TestCase):
         ]:
             with self.subTest(relative=relative):
                 self.assert_producer(relative, source, reason)
+
+    def test_long_turn_monitoring_is_not_registered_or_scheduled(self) -> None:
+        # Elapsed turn duration no longer triggers manager alerts or automatic
+        # watchdog extensions. Keep the removal contract instead of requiring
+        # the retired producer to participate in alert routing.
+        self.assertFalse((ROOT / "src/services/long_turn_watchdog.rs").exists())
+        self.assertFalse((ROOT / "policies/timeouts/long-turn-monitor.js").exists())
+        self.assertNotIn("long_turn_watchdog", self.source("src/services/mod.rs"))
+        self.assertNotIn("long_turn_watchdog", self.source("src/server/mod.rs"))
+        policy = self.source("policies/timeouts.js")
+        self.assertNotIn("long-turn-monitor", policy)
+        self.assertNotIn("_section_L", policy)
 
     def test_routine_stale_alert_overrides_both_targets_to_announce(self) -> None:
         text = self.source("src/services/routines/discord_log.rs")

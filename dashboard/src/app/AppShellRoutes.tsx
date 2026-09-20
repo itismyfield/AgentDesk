@@ -29,6 +29,7 @@ const AchievementsPage = lazy(() => import("../components/AchievementsPage"));
 const StatsPageView = lazy(() => import("../components/StatsPageView"));
 const OpsPageView = lazy(() => import("../components/OpsPageView"));
 const RoutinesPageView = lazy(() => import("../components/RoutinesPageView"));
+const CampaignsPanel = lazy(() => import("../components/campaigns/CampaignsPanel"));
 const KanbanTab = lazy(() => import("../components/agent-manager/KanbanTab"));
 const AgentManagerView = lazy(() => import("../components/AgentManagerView"));
 const MeetingsAndSkillsPage = lazy(() => import("../components/MeetingsAndSkillsPage"));
@@ -255,6 +256,7 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
                 }
               />
               <Route path="/routines" element={<RoutinesPageView />} />
+              <Route path="/campaigns" element={<div className="h-full overflow-auto p-4 pb-36 sm:p-6"><CampaignsPanel language={settings.language} /></div>} />
               <Route
                 path="/ops"
                 element={

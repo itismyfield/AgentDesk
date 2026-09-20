@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use poise::serenity_prelude::ChannelId;
 use serde::Serialize;
@@ -98,7 +98,6 @@ use auto_heal_attempts::{
     remaining_auto_heal_attempts,
 };
 
-const FROZEN_BUSY_JSONL_READY_FALLBACK_AGE: Duration = Duration::from_secs(10 * 60);
 /// Protect probe and manual cleanup across the #4569 incident window: mailbox
 /// admission at 05:16:44.468 was misclassified at 05:16:47.320 (~2.9 seconds).
 /// The 30-second margin plus the 30-second probe cadence reclaims a genuine

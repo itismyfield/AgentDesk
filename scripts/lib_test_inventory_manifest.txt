@@ -372,6 +372,11 @@ db::automation_candidates::verdict_tests::persist_iteration_outcome_pg_rolls_bac
 db::automation_candidates::verdict_tests::persist_iteration_outcome_pg_rolls_back_when_card_update_matches_zero_rows
 db::automation_candidates::verdict_tests::simplification_always_keeps
 db::automation_candidates::verdict_tests::timeout_always_discards
+db::campaigns::tests::campaign_checkpoint_keeps_unchanged_node_time_and_resume_context
+db::campaigns::tests::campaign_checkpoint_normalizes_optional_groups_without_inference
+db::campaigns::tests::campaign_validation_rejects_false_completion_and_bad_identity
+db::campaigns::tests::campaign_validation_rejects_missing_duplicate_and_cyclic_dependencies
+db::campaigns::tests::postgres_campaign_concurrent_cas_and_reconnect_preserve_canonical_history_pg
 db::dispatch_semaphores::tests::required_semaphore_names_accepts_object_and_singular_forms
 db::dispatch_semaphores::tests::required_semaphore_names_reads_required_namespace
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_actor_pin_missing_insert_and_retry_pg
@@ -996,6 +1001,7 @@ server::routes::bind_security_tests::loopback_host_is_never_downgraded
 server::routes::bind_security_tests::loopback_notation_edges_are_not_force_downgraded
 server::routes::bind_security_tests::nonloopback_with_token_binds_requested_host
 server::routes::bind_security_tests::nonloopback_without_token_is_forced_to_loopback
+server::routes::campaigns::tests::postgres_campaign_http_auth_conflict_and_history_pg
 server::routes::cluster::idle_kill_config_tests::idle_kill_owner_config_requires_explicit_nonempty_trusted_origin
 server::routes::departments::tests::db_error_preserves_500_and_verbatim_message
 server::routes::departments::tests::department_not_found_preserves_404_and_message
@@ -4183,6 +4189,8 @@ services::discord::prompt_builder::section_dedupe::tests::first_append_returns_t
 services::discord::prompt_builder::section_dedupe::tests::hash_differs_for_distinct_content
 services::discord::prompt_builder::section_dedupe::tests::large_section_still_records_first_time
 services::discord::prompt_builder::section_dedupe::tests::would_be_duplicate_does_not_mutate
+services::discord::prompt_builder::session_anchors::tests::session_anchors_use_native_claude_system_prompt_on_launch_and_resume
+services::discord::prompt_builder::session_anchors::tests::session_anchors_use_native_codex_developer_instructions
 services::discord::queue_exit_feedback_reconciler_tests::apply_queue_exit_feedback_adds_feedback_reaction_through_reconciler
 services::discord::queue_io::presleep_tests::abandoned_presence_auto_reconcile_releases_idle_queue_gate_but_keeps_durable_record
 services::discord::queue_io::presleep_tests::backstop_no_rearm_when_fire_observes_real_foreground_turn
@@ -4604,7 +4612,7 @@ services::discord::relay_recovery::tests::enforce_permits_the_dead_frontier_canc
 services::discord::relay_recovery::tests::fresh_orphan_shape_is_guarded_by_admission_grace
 services::discord::relay_recovery::tests::fresh_watcher_heartbeat_blocks_destructive_cancel_before_reattach
 services::discord::relay_recovery::tests::frozen_busy_jsonl_keeps_deny_when_pane_still_busy
-services::discord::relay_recovery::tests::frozen_busy_jsonl_uses_ready_pane_fallback_after_stale_window
+services::discord::relay_recovery::tests::frozen_busy_jsonl_never_becomes_idle_merely_from_elapsed_time
 services::discord::relay_recovery::tests::idle_tmux_repair_guard_detects_tail_answer_after_offset
 services::discord::relay_recovery::tests::idle_tmux_repair_guard_silent_when_partial_text_has_no_terminal_result
 services::discord::relay_recovery::tests::idle_tmux_repair_guard_silent_when_tail_empty
@@ -5028,7 +5036,6 @@ services::discord::runtime_bootstrap::relay_dlq_redelivery::tests::plan_trims_mu
 services::discord::runtime_bootstrap::relay_dlq_redelivery::tests::watcher_reason_format_still_carries_every_key_this_module_parses
 services::discord::runtime_bootstrap::restart_lifecycle_characterization_tests::check_deferred_restart_is_noop_without_restart_pending
 services::discord::runtime_bootstrap::restart_lifecycle_characterization_tests::deferred_restart_poller_consumes_marker_token_and_decrements_exactly_once
-services::discord::runtime_bootstrap::session_gc::thread_session_gc_tests::thread_gc_reap_candidate_requires_thread_owner_marker_and_existing_tmux
 services::discord::runtime_bootstrap::shutdown::lifecycle_tests::invariant_gateway_exit_releases_catalog_owner_before_diagnostics_and_takeover
 services::discord::runtime_bootstrap::spawns::tests::a_commit_under_another_nonce_forbids_this_ones_rollback
 services::discord::runtime_bootstrap::spawns::tests::a_committed_restart_survives_late_cancellation_in_a_dedicated_process
@@ -7732,11 +7739,6 @@ services::kakao_message::tests::feed_template_uses_a_bounded_first_line_title
 services::kakao_message::tests::message_text_is_trimmed_for_validation_but_not_rewritten
 services::kakao_message::tests::text_template_contains_only_the_configured_public_link
 services::kakao_message::tests::validation_rejects_private_or_credentialed_urls
-services::long_turn_watchdog::tests::alert_cooldown_exceeds_scan_cadence_by_default
-services::long_turn_watchdog::tests::alert_message_contains_actionable_context
-services::long_turn_watchdog::tests::cluster_threshold_triggers_at_three
-services::long_turn_watchdog::tests::dedupe_identity_is_stable_and_content_independent
-services::long_turn_watchdog::tests::fallback_channel_is_adk_cc_when_unconfigured
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_pg_reference_gate
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_terminal_reclaim
 services::maintenance::jobs::db_retention::tests::db_retention_keeps_skill_usage_rows_with_null_used_at
@@ -7805,6 +7807,15 @@ services::mcp_config::review_slim_tests::claude_mcp_config_arg_extends_review_al
 services::mcp_config::review_slim_tests::claude_mcp_config_arg_filters_review_catalog_to_allowlist
 services::mcp_config::review_slim_tests::claude_mcp_config_arg_keeps_full_catalog_for_non_review_dispatches
 services::memory::local::tests::recall_with_empty_catalog_returns_empty_guidance_without_panicking
+services::memory::memento::anchor::tests::anchor_snapshot_fetch_uses_scoped_mcp_context_and_ignores_general_recall
+services::memory::memento::anchor::tests::anchor_snapshot_flags_existing_truncation_without_rewriting
+services::memory::memento::anchor::tests::anchor_snapshot_policy_keeps_current_authority_above_retrieved_memories
+services::memory::memento::anchor::tests::anchor_snapshot_preserves_long_multiline_unicode_and_excludes_recall
+services::memory::memento::anchor::tests::anchor_snapshot_rejects_incomplete_and_mismatched_payloads
+services::memory::memento::anchor::tests::anchor_snapshot_survives_followup_and_refreshes_on_clear_or_replacement
+services::memory::memento::anchor::tests::anchor_snapshot_timeout_and_mcp_failure_have_distinct_safe_reasons
+services::memory::memento::anchor::tests::anchor_snapshot_timeout_budget_covers_initialization_and_respects_longer_settings
+services::memory::memento::anchor::tests::anchor_snapshot_workspace_follows_git_common_dir_for_worktrees
 services::memory::memento::static_slice_cache_tests::automatic_turn_capture_and_transcript_reflect_never_reach_memento_writers
 services::memory::memento::static_slice_cache_tests::build_static_slice_cache_key_omits_user_text_and_dispatch_profile
 services::memory::memento::static_slice_cache_tests::elide_static_slice_first_call_keeps_full_text
@@ -8668,6 +8679,10 @@ services::tmux_common::watcher_jsonl_owner_tests::files_under_a_provider_home_ar
 services::tmux_common::watcher_jsonl_owner_tests::provider_home_containment_is_decided_on_inode_identity
 services::tmux_common::watcher_jsonl_owner_tests::this_sessions_own_relay_jsonl_is_owned
 services::tmux_diagnostics::tests::process_backend_stopped_error_forces_recreate
+services::tmux_turn_liveness::idle_cleanup_tests::idle_cleanup_preserves_busy_unknown_and_approval_waiting_provider
+services::tmux_turn_liveness::idle_cleanup_tests::idle_cleanup_uses_native_provider_state_even_when_relay_is_absent_or_stale
+services::tmux_turn_liveness::tests_pg::idle_cleanup_preserves_approval_and_background_children_pg
+services::tmux_turn_liveness::tests_pg::thread_gc_preserves_resume_rows_when_new_turn_starts_or_kill_failed_pg
 services::tmux_wrapper::stderr_redaction_tests::redacted_stderr_line_masks_assignment_secret
 services::tmux_wrapper::stderr_redaction_tests::stderr_auth_prose_is_observed_without_synthetic_output
 services::tmux_wrapper::stderr_redaction_tests::stderr_unique_flood_uses_fixed_category_slots

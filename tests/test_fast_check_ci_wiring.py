@@ -41,7 +41,6 @@ CFG_SHIM_CONSUMERS = (
     "src/services/discord/router/message_handler/watchdog.rs",
     "src/services/discord/router/intake_dispatch/tests.rs",
     "src/services/discord/runtime_bootstrap/recovery_flush.rs",
-    "src/services/discord/runtime_bootstrap/session_gc.rs",
     "src/services/discord/turn_finalizer.rs",
     "src/services/discord/turn_finalizer/delivery_lease.rs",
     "src/services/discord/terminal_ui_obligation.rs",
@@ -994,14 +993,14 @@ class FastCheckCiWiringTests(unittest.TestCase):
             ),
             "previous GITHUB_ENV write": workflow.replace(
                 "      - name: Install shellcheck\n"
-                "        run: sudo apt-get install -y shellcheck\n",
+                "        run: sudo apt-get install -y shellcheck zsh\n",
                 "      - name: Install shellcheck\n"
                 "        run: echo \"PYTHON=/bin/true\" >> \"$GITHUB_ENV\"\n",
                 1,
             ),
             "previous GITHUB_PATH write": workflow.replace(
                 "      - name: Install shellcheck\n"
-                "        run: sudo apt-get install -y shellcheck\n",
+                "        run: sudo apt-get install -y shellcheck zsh\n",
                 "      - name: Install shellcheck\n"
                 "        run: echo \"/tmp/injected\" >> \"$GITHUB_PATH\"\n",
                 1,
@@ -1467,10 +1466,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
             ),
             "GITHUB_ENV prose without redirection": workflow.replace(
                 "      - name: Install shellcheck\n"
-                "        run: sudo apt-get install -y shellcheck\n",
+                "        run: sudo apt-get install -y shellcheck zsh\n",
                 "      - name: Install shellcheck\n"
                 "        # This prose mentions GITHUB_ENV but performs no write.\n"
-                "        run: sudo apt-get install -y shellcheck\n",
+                "        run: sudo apt-get install -y shellcheck zsh\n",
                 1,
             ),
             "aggregate timeout": workflow.replace(
