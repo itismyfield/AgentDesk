@@ -43,6 +43,15 @@ impl Probe {
     }
 
     fn observe(&mut self, expected: &Snapshot, actual: &Snapshot) {
+        self.observe_changes(expected, actual, None);
+    }
+
+    fn observe_changes(
+        &mut self,
+        expected: &Snapshot,
+        actual: &Snapshot,
+        changes: Option<&Snapshot>,
+    ) {
         self.seen += 1;
         self.valid = false;
         assert_eq!(self.seen, 1, "exactly one fixture checkpoint");
@@ -52,10 +61,22 @@ impl Probe {
             "all fixture keys observed"
         );
         assert_eq!(actual, expected, "exact fixture override");
+        if let Some(changes) = changes {
+            let mut keys = std::collections::HashSet::new();
+            for (key, _) in changes {
+                assert!(keys.insert(key), "duplicate changed key");
+                assert!(
+                    self.baseline.iter().any(|(name, _)| name == key),
+                    "unknown changed key"
+                );
+            }
+        }
         let mut changed = false;
         for ((key, value), (prior_key, prior)) in expected.iter().zip(&self.baseline) {
             assert_eq!(key, prior_key, "fixture key order");
-            if value.is_some() {
+            if changes.is_some_and(|changes| !changes.iter().any(|(name, _)| name == key)) {
+                assert_eq!(value, prior, "unlisted key must retain its baseline");
+            } else if value.is_some() {
                 assert_ne!(value, prior, "fixture must change {key} before checkpoint");
             }
             changed |= value != prior;
@@ -86,19 +107,44 @@ pub(crate) fn checkpoint(expected: &[(&'static str, &OsStr)]) {
     );
 }
 
+pub(crate) fn checkpoint_changes(changes: &[(&'static str, Option<&OsStr>)]) {
+    checkpoint_inner(changes, true);
+}
+
 pub(crate) fn checkpoint_values(expected: &[(&'static str, Option<&OsStr>)]) {
+    checkpoint_inner(expected, false);
+}
+
+fn checkpoint_inner(values: &[(&'static str, Option<&OsStr>)], preserve: bool) {
     let mode = ARMED.with(|armed| {
         let mut armed = armed.borrow_mut();
         let probe = armed.as_mut()?;
-        let expected: Snapshot = expected
+        let changes: Snapshot = values
             .iter()
             .map(|(key, value)| (*key, value.map(OsStr::to_os_string)))
             .collect();
+        let expected = if preserve {
+            probe
+                .baseline
+                .iter()
+                .map(|(key, prior)| {
+                    (
+                        *key,
+                        changes
+                            .iter()
+                            .find(|(name, _)| name == key)
+                            .map_or_else(|| prior.clone(), |(_, value)| value.clone()),
+                    )
+                })
+                .collect()
+        } else {
+            changes.clone()
+        };
         let actual = expected
             .iter()
             .map(|(key, _)| (*key, std::env::var_os(key)))
             .collect();
-        probe.observe(&expected, &actual);
+        probe.observe_changes(&expected, &actual, preserve.then_some(&changes));
         Some(probe.mode)
     });
     if mode == Some(Mode::Panic) {
@@ -269,7 +315,7 @@ fn check_protocol(mode: Mode) {
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err());
     };
     let mut cases = 0;
-    for case in 0..8 {
+    for case in 0..11 {
         let mut probe = Probe::new(snapshot("before"), mode);
         let expected = snapshot("fixture");
         if case != 0 {
@@ -292,6 +338,17 @@ fn check_protocol(mode: Mode) {
                     reject(&mut || probe.observe(&expected, &expected));
                 }
                 7 => probe.observe(&expected, &expected),
+                8 => reject(&mut || probe.observe_changes(&expected, &expected, Some(&vec![]))),
+                9 => reject(&mut || {
+                    probe.observe_changes(&expected, &expected, Some(&vec![("UNKNOWN", None)]))
+                }),
+                10 => reject(&mut || {
+                    probe.observe_changes(
+                        &expected,
+                        &expected,
+                        Some(&[expected.clone(), expected.clone()].concat()),
+                    )
+                }),
                 _ => unreachable!(),
             }
         }
@@ -308,7 +365,7 @@ fn check_protocol(mode: Mode) {
         }
         cases += 1;
     }
-    assert_eq!(cases, 8);
+    assert_eq!(cases, 11);
     for optional in [false, true] {
         let mut baseline = snapshot("before");
         let mut expected = snapshot("fixture");
@@ -320,6 +377,13 @@ fn check_protocol(mode: Mode) {
         probe.observe(&expected, &expected);
         probe.finish(complete());
     }
+    let mut baseline = snapshot("before");
+    baseline.push(("UNTOUCHED", Some("original".into())));
+    let mut expected = baseline.clone();
+    expected[0].1 = Some("fixture".into());
+    let mut probe = Probe::new(baseline, mode);
+    probe.observe_changes(&expected, &expected, Some(&snapshot("fixture")));
+    probe.finish(complete());
 }
 
 #[test]

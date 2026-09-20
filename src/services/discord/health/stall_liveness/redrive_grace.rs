@@ -701,6 +701,61 @@ mod tests {
         (env, dir, lock)
     }
 
+    const ENV_FIXTURES: &[fn()] = &[
+        stale_clear_preserves_successor_episode_baseline_4181,
+        stale_identity_persist_cannot_overwrite_successor_baseline_4181,
+        redrive_durable_gc_serializes_with_persist_and_ignores_staging_files_4181,
+        redrive_durable_gc_removes_invalid_boot_malformed_and_stale_4181,
+    ];
+
+    fn check_teardown(index: usize, present: bool) {
+        crate::config::test_env::teardown_probe::assert_scope_isolated(
+            present,
+            true,
+            ENV_FIXTURES[index],
+        );
+    }
+
+    #[test]
+    fn stale_clear_teardown_present() {
+        check_teardown(0, true);
+    }
+
+    #[test]
+    fn stale_clear_teardown_absent() {
+        check_teardown(0, false);
+    }
+
+    #[test]
+    fn stale_persist_teardown_present() {
+        check_teardown(1, true);
+    }
+
+    #[test]
+    fn stale_persist_teardown_absent() {
+        check_teardown(1, false);
+    }
+
+    #[test]
+    fn gc_serializes_teardown_present() {
+        check_teardown(2, true);
+    }
+
+    #[test]
+    fn gc_serializes_teardown_absent() {
+        check_teardown(2, false);
+    }
+
+    #[test]
+    fn gc_removes_teardown_present() {
+        check_teardown(3, true);
+    }
+
+    #[test]
+    fn gc_removes_teardown_absent() {
+        check_teardown(3, false);
+    }
+
     /// Deterministic monotonic clock for tests, injected through the same
     /// `RedriveClock` trait the production `MonotonicRedriveClock` implements —
     /// so tests exercise the real decision + GC code path (no `#[cfg]` split).
@@ -1229,7 +1284,7 @@ mod tests {
 
     #[test]
     fn stale_clear_preserves_successor_episode_baseline_4181() {
-        let (_env, _root, _lock) = isolated_runtime_root();
+        let _root_guard = isolated_runtime_root();
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(4_181_010);
         let old = frozen_backlog_snapshot(channel.get(), "AgentDesk-codex-4181-old-clear", 10, 20);
@@ -1286,7 +1341,7 @@ mod tests {
 
     #[test]
     fn stale_identity_persist_cannot_overwrite_successor_baseline_4181() {
-        let (_env, _root, _lock) = isolated_runtime_root();
+        let _root_guard = isolated_runtime_root();
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(4_181_011);
         let old = frozen_backlog_snapshot(channel.get(), "AgentDesk-codex-4181-shared", 10, 20);
@@ -1323,7 +1378,8 @@ mod tests {
 
     #[test]
     fn redrive_durable_gc_serializes_with_persist_and_ignores_staging_files_4181() {
-        let (_env, root, _lock) = isolated_runtime_root();
+        let root_guard = isolated_runtime_root();
+        let root = &root_guard.1;
         let records = root.path().join("records").join("codex");
         fs::create_dir_all(&records).unwrap();
         let channel_id = 4_181_012;
@@ -1367,7 +1423,8 @@ mod tests {
 
     #[test]
     fn redrive_durable_gc_removes_invalid_boot_malformed_and_stale_4181() {
-        let (_env, root, _lock) = isolated_runtime_root();
+        let root_guard = isolated_runtime_root();
+        let root = &root_guard.1;
         let records = root.path().join("records").join("codex");
         fs::create_dir_all(&records).unwrap();
         let sample = |boot_id: &str, last_seen: i64| DurableNoProgressBaseline {
