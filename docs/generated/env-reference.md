@@ -10,7 +10,7 @@ comment adjacent to that site (blank when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 88
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 89
 - Platform and third-party variables: 27
 
 ## AgentDesk variables
