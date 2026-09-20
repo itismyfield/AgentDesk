@@ -126,6 +126,10 @@ def setUpModule() -> None:
     )
 
 
+def _result_log(outcome: str = "failed") -> str:
+    return 'test ! -s "${!#}" || exit 42\n' + f"printf '%s %s\\n' {outcome} \"$4\" > \"${{!#}}\"\n"
+
+
 def _cargo_log(body: str) -> str:
     """A fixture-runner body that replays a realistic `cargo test --lib` log.
 
@@ -231,7 +235,7 @@ class RelayAuthorityMutationScriptTests(unittest.TestCase):
         cargo.write_text(
             f"""#!/usr/bin/env bash
 set -euo pipefail
-if [[ "${{CARGO_TERM_COLOR-}}" == "never" ]]; then
+{_result_log()}if [[ "${{CARGO_TERM_COLOR-}}" == "never" ]]; then
     printf '   {marker} agentdesk v0.1.0 (fake)\\n'
 else
     printf '\\033[1m\\033[92m   {marker}\\033[0m agentdesk v0.1.0 (fake)\\n'
@@ -276,7 +280,7 @@ exit 101
         cargo.write_text(
             f"""#!/usr/bin/env bash
 set -euo pipefail
-{{
+{_result_log()}{{
   printf 'ARGV %s\\n' "$*"
   printf 'CARGO_INCREMENTAL=%s\\n' "${{CARGO_INCREMENTAL-<unset>}}"
   printf 'RUSTC_WRAPPER=%s\\n' "${{RUSTC_WRAPPER-<unset>}}"
@@ -298,11 +302,11 @@ exit 101
         for relative in MUTATION_FILES:
             test.assertEqual((root / relative).read_bytes(), (REPO_ROOT / relative).read_bytes())
 
-    def run_cargo_body(self, body: str) -> tuple[Path, subprocess.CompletedProcess[str]]:
+    def run_cargo_body(self, body: str, outcome: str = "failed") -> tuple[Path, subprocess.CompletedProcess[str]]:
         root = self.copy_fixture()
         cargo = root / "fake-bin/cargo"
         cargo.parent.mkdir()
-        cargo.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + body)
+        cargo.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + _result_log(outcome) + body)
         cargo.chmod(0o755)
         result = self.run_script_with_fake_cargo(root, cargo)
         self.assert_sources_restored(self, root)
@@ -316,7 +320,7 @@ exit 101
             (NO_TEST_RAN_RUNNER, 94, "NO-TEST-RAN"),
         ):
             with self.subTest(status=status):
-                _, result = self.run_cargo_body(body)
+                _, result = self.run_cargo_body(body, "ok" if status == "SURVIVED" else "failed")
                 output = result.stdout + result.stderr
                 self.assertEqual(result.returncode, rc, output)
                 self.assertIn(f"status={status}", output)
@@ -327,6 +331,33 @@ exit 101
                      KILLED_RUNNER.replace("exit 101", "exit 0")):
             with self.subTest(body=body):
                 _, result = self.run_cargo_body(body)
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 93, output)
+                self.assertIn("status=NO-VERDICT", output)
+                self.assertNotIn("MUTATION_RESULT", output)
+                self.assertNotIn("MUTATION_SUMMARY", output)
+
+    def test_nested_child_failure_does_not_decide_the_parent_verdict(self) -> None:
+        child = "{\n" + KILLED_RUNNER.replace(COMPILED_HEADER, "").replace("exit 101\n", "") + "} >&2\n"
+        for parent, expected in ((KILLED_RUNNER, 0), (SURVIVED_RUNNER, 1)):
+            with self.subTest(parent_rc=expected):
+                _, result = self.run_cargo_body(child + parent, "ok" if expected == 1 else "failed")
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+
+    def test_nested_child_output_cannot_fill_missing_parent_evidence(self) -> None:
+        child = "{\n" + KILLED_RUNNER.replace(COMPILED_HEADER, "").replace("exit 101\n", "") + "} >&2\n"
+        for parent in (
+            _cargo_log(COMPILED_HEADER + "running 1 test\n") + "exit 101\n",
+            ': > "${!#}"\n' + KILLED_RUNNER,
+            'printf "failed wrong_target\\n" > "${!#}"\n' + KILLED_RUNNER,
+            'printf "failed %s\\n" "$4" >> "${!#}"\n' + KILLED_RUNNER,
+            'printf "ok %s\\n" "$4" > "${!#}"\n' + KILLED_RUNNER,
+            SURVIVED_RUNNER.replace("exit 0", "exit 101"),
+            KILLED_RUNNER.replace("exit 101", "exit 0"),
+            child.replace("} >&2", "}") + KILLED_RUNNER,
+        ):
+            with self.subTest(parent=parent):
+                _, result = self.run_cargo_body(child + parent)
                 output = result.stdout + result.stderr
                 self.assertEqual(result.returncode, 93, output)
                 self.assertIn("status=NO-VERDICT", output)
@@ -455,12 +486,19 @@ exit 101
         self.assertEqual(lines.count("CARGO_INCREMENTAL=1"), MUTATION_COUNT, lines)
         self.assertEqual(lines.count("RUSTC_WRAPPER=<unset>"), MUTATION_COUNT, lines)
         self.assertEqual(
-            [line for line in lines if line.startswith("ARGV ")],
+            [line.rsplit(" --logfile ", 1)[0] for line in lines if line.startswith("ARGV ")],
             [
-                f"ARGV test --offline --lib {target} -- --exact --test-threads=1"
+                f"ARGV test --offline --lib {target} -- --exact --test-threads=1 --no-capture"
                 for target in targets
             ],
         )
+
+        result_logs = [Path(line.rsplit(" --logfile ", 1)[1])
+                       for line in lines if line.startswith("ARGV ")]
+        self.assertEqual(len(set(result_logs)), MUTATION_COUNT)
+        self.assertTrue(all(not path.exists() for path in result_logs))
+        self.assertTrue(all(not Path(str(path).removesuffix(".results") + ".stdout").exists()
+                            for path in result_logs))
 
     def test_cache_proof_still_trips_on_a_cached_tree(self) -> None:
         root = self.copy_fixture()

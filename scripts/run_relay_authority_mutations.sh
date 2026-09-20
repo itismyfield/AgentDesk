@@ -203,10 +203,14 @@ no_verdict() {
 
 run_target() {
   local mutation=$1 target=$2 log=$3 rc compile_count test_result rest passed failed
-  local summaries running summary_pattern
+  local summaries running summary_pattern expected_result
+  # Keep child/panic diagnostics off the parent oracle; bind its result to the exact test.
+  local stdout_log="$log.stdout" result_log="$log.results"
+  : >"$stdout_log"
+  : >"$result_log"
   if [[ "$MODE" == "fixture" ]]; then
     set +e
-    "$FIXTURE_RUNNER" "$mutation" "$target" >"$log" 2>&1
+    "$FIXTURE_RUNNER" "$mutation" "$target" >"$stdout_log" 2>"$log"
     rc=$?
     set -e
   else
@@ -220,11 +224,14 @@ run_target() {
       # test, which this script grades as SURVIVED.
       env -u RUSTC_WRAPPER -u AGENTDESK_ROOT_DIR \
         CARGO_TERM_COLOR=never CARGO_INCREMENTAL=1 CARGO_TARGET_DIR="$TARGET_DIR" \
-        cargo test --offline --lib "$target" -- --exact --test-threads=1
-    ) >"$log" 2>&1
+        cargo test --offline --lib "$target" -- --exact --test-threads=1 \
+          --no-capture --logfile "$result_log"
+    ) >"$stdout_log" 2>"$log"
     rc=$?
     set -e
-
+  fi
+  cat "$stdout_log" >>"$log"
+  if [[ "$MODE" == "cargo" ]]; then
     compile_count="$(grep -Fc 'Compiling agentdesk v' "$log" || true)"
     if [[ "$compile_count" != "1" ]] || grep -Fq 'Fresh agentdesk v' "$log"; then
       printf 'ERROR mutation=%s cache-proof=invalid compile_count=%s expected=1 and no Fresh agentdesk\n' "$mutation" "$compile_count" >&2
@@ -249,9 +256,9 @@ run_target() {
     return 95
   fi
 
-  summaries="$(grep -c '^test result:' "$log" || true)"
-  running="$(grep -E '^running [0-9]+ tests?$' "$log" || true)"
-  test_result="$(grep '^test result:' "$log" || true)"
+  summaries="$(grep -c '^test result:' "$stdout_log" || true)"
+  running="$(grep -E '^running [0-9]+ tests?$' "$stdout_log" || true)"
+  test_result="$(grep '^test result:' "$stdout_log" || true)"
   summary_pattern='^test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; ([0-9]+) measured; [0-9]+ filtered out;?($| finished in .+s$)'
   if [[ "$summaries" != 1 || ! "$test_result" =~ $summary_pattern ]]; then
     no_verdict "$mutation" "$rc" "$target" "$log" "missing or ambiguous summary"
@@ -279,6 +286,15 @@ run_target() {
     return 93
   fi
 
+  expected_result="failed $target"
+  if ((rc == 0)); then
+    expected_result="ok $target"
+  fi
+  if [[ "$MODE" == "cargo" && "$(cat "$result_log")" != "$expected_result" ]]; then
+    no_verdict "$mutation" "$rc" "$target" "$log" "missing or inconsistent parent test result"
+    return 93
+  fi
+
   rest="${test_result#*. }"
   passed="${rest%% passed;*}"
   rest="${rest#* passed; }"
@@ -291,13 +307,17 @@ run_target() {
   return "$rc"
 }
 
+remove_run_logs() {
+  rm -f "$1" "$1.stdout" "$1.results"
+}
+
 run_mutation() {
   local mutation=$1 relative=$2 expected=$3 replacement=$4 target=$5 log rc command
   CURRENT_MUTATION="$mutation"
   restore_after_row
   apply_exact_mutation "$relative" "$expected" "$replacement"
   log="$(mktemp "${TMPDIR:-$REPO_ROOT/target}/relay-authority-${mutation}.XXXXXX")"
-  command="cargo test --offline --lib $target -- --exact --test-threads=1"
+  command="cargo test --offline --lib $target -- --exact --test-threads=1 --no-capture --logfile $log.results"
 
   if run_target "$mutation" "$target" "$log"; then
     rc=0
@@ -309,17 +329,17 @@ run_mutation() {
     printf 'MUTATION_RESULT mutation=%s status=SURVIVED rc=0 target=%s\n' "$mutation" "$target" >&2
     printf 'ERROR mutation survived: %s\nCOMMAND: %s\n' "$mutation" "$command" >&2
     cat "$log" >&2
-    rm -f "$log"
+    remove_run_logs "$log"
     exit 1
   fi
   # Oracle failures already streamed the full log to stderr inside run_target.
   if ((rc == 93 || rc == 94 || rc == 95 || rc == 96)); then
-    rm -f "$log"
+    remove_run_logs "$log"
     exit "$rc"
   fi
 
   printf 'MUTATION_RESULT mutation=%s status=KILLED rc=%d target=%s\n' "$mutation" "$rc" "$target"
-  rm -f "$log"
+  remove_run_logs "$log"
   restore_after_row
 }
 
