@@ -1795,6 +1795,8 @@ services::claude_tui::session::auto_compact_launch_tests::unset_setting_exports_
 services::claude_tui::session::auto_compact_launch_tests::unset_setting_scrubs_without_exporting_a_window
 services::claude_tui::session::tests::continuation_cutover_repairs_a_partial_artifact_update
 services::claude_tui::session::tests::continuation_cutover_rewrites_both_artifacts_and_is_idempotent
+services::claude_tui::session::tests::launch_env_panic_restores_absent_environment
+services::claude_tui::session::tests::launch_env_panic_restores_present_environment
 services::claude_tui::session::tests::launch_script_fences_the_absolute_compact_window
 services::claude_tui::session::tests::launch_script_model_switch_cannot_leave_a_stale_auto_compact_window
 services::claude_tui::session::tests::prepare_launch_cleans_settings_when_script_write_fails
@@ -2381,6 +2383,8 @@ services::discord::agent_handoff::tests::required_reply_to_routable_requester_ke
 services::discord::agent_handoff::tests::required_reply_to_unroutable_requester_avoids_send_to_agent
 services::discord::agentdesk_config::worktree_isolation_policy_tests::resolve_policy_compares_agent_provider_to_effective_channel_provider_by_default
 services::discord::agentdesk_config::worktree_isolation_policy_tests::resolve_policy_reads_channel_override_by_default
+services::discord::agentdesk_config::worktree_isolation_policy_tests::temp_root_panic_restores_absent_environment
+services::discord::agentdesk_config::worktree_isolation_policy_tests::temp_root_panic_restores_present_environment
 services::discord::answer_flush_barrier::tests::edit_replace_flush_holds_barrier_and_queued_card_waits_for_it
 services::discord::answer_flush_barrier::tests::first_edit_progress_bump_bridges_gap_before_first_continuation
 services::discord::answer_flush_barrier::tests::guard_clears_gate_on_drop
@@ -7968,6 +7972,8 @@ services::platform::tmux::availability::availability_cache_tests::unknown_spawn_
 services::platform::tmux::etime_tests::parse_ps_etime_handles_all_field_widths
 services::platform::tmux::live_pane_tests::dead_marker_hook_writes_marker_on_pane_exit
 services::platform::tmux::live_pane_tests::has_live_pane_reports_live_tmux_session
+services::platform::tmux::live_pane_tests::marker_env_panic_restores_absent_environment
+services::platform::tmux::live_pane_tests::marker_env_panic_restores_present_environment
 services::platform::tmux::paste_tests::paste_buffer_args_request_bracketed_lf_preserving_paste
 services::platform::tmux::paste_tests::paste_buffer_raw_args_do_not_request_bracketed_paste
 services::platform::tmux::session_server_tests::parse_sessions_with_server_pid_skips_empty_names_and_defaults_bad_pids

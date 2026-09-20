@@ -1105,23 +1105,53 @@ mod live_pane_tests {
     }
 
     #[test]
+    fn marker_env_panic_restores_present_environment() {
+        crate::test_env_panic_probe::assert_restores_after_panic(
+            concat!(
+                module_path!(),
+                "::marker_env_panic_restores_present_environment"
+            ),
+            &["AGENTDESK_ROOT_DIR", "HOSTNAME"],
+            true,
+            dead_marker_hook_writes_marker_on_pane_exit,
+        );
+    }
+
+    #[test]
+    fn marker_env_panic_restores_absent_environment() {
+        crate::test_env_panic_probe::assert_restores_after_panic(
+            concat!(
+                module_path!(),
+                "::marker_env_panic_restores_absent_environment"
+            ),
+            &["AGENTDESK_ROOT_DIR", "HOSTNAME"],
+            false,
+            dead_marker_hook_writes_marker_on_pane_exit,
+        );
+    }
+
+    #[test]
     fn dead_marker_hook_writes_marker_on_pane_exit() {
-        let _guard = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+
+        let root = std::env::temp_dir().join(format!("adk-issue-2424-hook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            &root,
+        );
+        let _hostname_env = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "HOSTNAME",
+            std::ffi::OsStr::new("issue-2424-hook-host"),
+        );
+        crate::test_env_panic_probe::checkpoint(&[
+            ("AGENTDESK_ROOT_DIR", root.as_os_str()),
+            ("HOSTNAME", std::ffi::OsStr::new("issue-2424-hook-host")),
+        ]);
 
         if !is_available() {
             eprintln!("skipping dead marker hook test: tmux is not available");
             return;
-        }
-
-        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
-        let previous_host = std::env::var_os("HOSTNAME");
-        let root = std::env::temp_dir().join(format!("adk-issue-2424-hook-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        unsafe {
-            std::env::set_var("AGENTDESK_ROOT_DIR", &root);
-            std::env::set_var("HOSTNAME", "issue-2424-hook-host");
         }
 
         let session = unique_test_session_name();
@@ -1154,14 +1184,7 @@ mod live_pane_tests {
         let _ = kill_session(&keeper, "dead marker hook keeper cleanup");
         crate::services::tmux_common::cleanup_session_temp_files(&session);
         let _ = std::fs::remove_dir_all(&root);
-        match previous_root {
-            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-        }
-        match previous_host {
-            Some(value) => unsafe { std::env::set_var("HOSTNAME", value) },
-            None => unsafe { std::env::remove_var("HOSTNAME") },
-        }
+
         // CI keeps the strict assertion (this is the regression signal); only
         // local hosts where the pane-exit hook is environment-dependent skip.
         if !marker_exists {
