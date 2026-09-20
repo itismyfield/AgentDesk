@@ -193,6 +193,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/relay_e2e/discord_mock.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/mod.rs",
         "src/services/discord/tui_prompt_relay/tests/scenario_census_e2e.rs",
+        "src/services/observability/test_support.rs",
         "src/services/provider/read_fault.rs",
         "src/services/tmux_turn_liveness/tests_pg.rs",
     }

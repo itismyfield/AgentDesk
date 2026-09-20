@@ -622,12 +622,9 @@ pub(crate) fn reset_for_tests() {
 }
 
 #[cfg(test)]
-pub(crate) fn test_runtime_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
+mod test_support;
+#[cfg(test)]
+pub(crate) use test_support::{lock_env_then_runtime, test_runtime_lock};
 
 #[cfg(test)]
 mod cancellation_observability_tests {

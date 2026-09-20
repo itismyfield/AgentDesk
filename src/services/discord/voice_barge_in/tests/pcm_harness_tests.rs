@@ -276,12 +276,9 @@ impl VoicePcmHarness {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn voice_pcm_harness_unattended_e2e() {
-    let _guard = observability::test_runtime_lock();
+    let _locks = observability::lock_env_then_runtime();
     observability::reset_for_tests();
     observability::init_observability(None);
-    let _env_lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
 
     let transcripts = [
         "오늘 일정 알려줘",
@@ -1238,12 +1235,9 @@ fn assert_no_play_context(harness: &VoicePcmHarness, context: &str) {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn voice_intake_chime_fires_before_turn_start() {
-    let _guard = observability::test_runtime_lock();
+    let _locks = observability::lock_env_then_runtime();
     observability::reset_for_tests();
     observability::init_observability(None);
-    let _env_lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
 
     let harness = VoicePcmHarness::new(&["오늘 일정 알려줘"]).await;
     harness.clear_play_requests();
@@ -1274,12 +1268,9 @@ async fn voice_intake_chime_fires_before_turn_start() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn voice_intake_chime_fires_even_when_turn_start_fails() {
-    let _guard = observability::test_runtime_lock();
+    let _locks = observability::lock_env_then_runtime();
     observability::reset_for_tests();
     observability::init_observability(None);
-    let _env_lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
 
     let harness = VoicePcmHarness::new(&["로그 확인해줘"]).await;
     harness.clear_play_requests();
@@ -1313,12 +1304,9 @@ async fn voice_intake_chime_fires_even_when_turn_start_fails() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn voice_intake_chime_absent_on_empty_transcript() {
-    let _guard = observability::test_runtime_lock();
+    let _locks = observability::lock_env_then_runtime();
     observability::reset_for_tests();
     observability::init_observability(None);
-    let _env_lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
 
     let harness = VoicePcmHarness::new(&["   "]).await;
     harness.clear_play_requests();
@@ -1340,12 +1328,9 @@ async fn voice_intake_chime_absent_on_empty_transcript() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn voice_intake_chime_absent_on_active_turn_barge_in() {
-    let _guard = observability::test_runtime_lock();
+    let _locks = observability::lock_env_then_runtime();
     observability::reset_for_tests();
     observability::init_observability(None);
-    let _env_lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
 
     let harness = VoicePcmHarness::new(&["멈춰"]).await;
     harness.clear_play_requests();
@@ -1391,12 +1376,9 @@ async fn voice_intake_chime_absent_on_active_turn_barge_in() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn voice_foreground_path_does_not_double_chime() {
-    let _guard = observability::test_runtime_lock();
+    let _locks = observability::lock_env_then_runtime();
     observability::reset_for_tests();
     observability::init_observability(None);
-    let _env_lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
 
     let harness = VoicePcmHarness::new(&["오늘 일정 알려줘"]).await;
     harness.clear_play_requests();
