@@ -173,6 +173,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/config/test_env.rs",
+        "src/config/test_env/teardown_probe.rs",
         "src/db/auto_queue/test_support.rs",
         "src/db/fixture_target.rs",
         "src/dispatch/test_support.rs",

@@ -68,7 +68,10 @@ src/
 │   ├── legacy_tmp_paths.rs
 │   └── mod.rs
 ├── config/
-│   └── agent_channels.rs
+│   ├── test_env/
+│   │   └── teardown_probe.rs
+│   ├── agent_channels.rs
+│   └── test_env.rs
 ├── db/
 │   ├── auto_queue/
 │   │   ├── entries/

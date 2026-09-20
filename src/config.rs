@@ -3877,65 +3877,9 @@ pub(crate) mod test_env_lock {
 }
 
 #[cfg(test)]
-pub(crate) struct TestEnvVarGuard {
-    _lock: Option<test_env_lock::SharedTestEnvLockGuard>,
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
+pub(crate) mod test_env;
 #[cfg(test)]
-impl TestEnvVarGuard {
-    pub(crate) fn set_path(key: &'static str, value: &std::path::Path) -> Self {
-        let lock = test_env_lock::acquire_shared_test_env_lock();
-        let previous = std::env::var_os(key);
-        unsafe { std::env::set_var(key, value) };
-        Self {
-            _lock: Some(lock),
-            key,
-            previous,
-        }
-    }
-
-    pub(crate) fn set_path_after_shared_test_env_lock(
-        key: &'static str,
-        value: &std::path::Path,
-    ) -> Self {
-        Self::set_value_after_shared_test_env_lock(key, value.as_os_str())
-    }
-
-    /// Same contract as `set_path_after_shared_test_env_lock` for env vars whose
-    /// value is not a path (`HOSTNAME`, feature flags). #5185 added it because
-    /// the hand-rolled save/`set_var`/restore shape it replaces leaks the
-    /// override to every later test in the process when an `assert!` between
-    /// the two halves unwinds past the restore.
-    pub(crate) fn set_value_after_shared_test_env_lock(
-        key: &'static str,
-        value: &std::ffi::OsStr,
-    ) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe { std::env::set_var(key, value) };
-        Self {
-            _lock: None,
-            key,
-            previous,
-        }
-    }
-}
-
-#[cfg(test)]
-impl Drop for TestEnvVarGuard {
-    fn drop(&mut self) {
-        match self.previous.take() {
-            Some(value) => unsafe { std::env::set_var(self.key, value) },
-            None => unsafe { std::env::remove_var(self.key) },
-        }
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn set_agentdesk_root_for_test(path: &std::path::Path) -> TestEnvVarGuard {
-    TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", path)
-}
+pub(crate) use test_env::{TestEnvVarGuard, TestRuntimeRootGuard, set_agentdesk_root_for_test};
 
 /// Runtime root plus both provider homes, each pinned to a fresh empty tempdir.
 ///
