@@ -274,40 +274,32 @@ fn watcher_orphan_preregistration_is_flag_gated_and_removed_after_persist() {
     );
 }
 
-/// #3293: `InflightTurnState::new` resolves the AgentDesk runtime store; the
-/// guard keeps this off the live `~/.adk/release`, falling back to a shared
-/// throwaway tempdir (#4514). Point `AGENTDESK_ROOT_DIR` at a per-test
-/// throwaway dir under the shared env lock so constructing a test inflight is
-/// deterministic; restore on drop.
-struct RuntimeRootGuard {
-    previous: Option<std::ffi::OsString>,
-    _root: tempfile::TempDir,
+fn isolate_agentdesk_runtime_root_for_two_message_tests() -> crate::config::TestRuntimeRootGuard {
+    crate::config::TestRuntimeRootGuard::new()
 }
 
-impl Drop for RuntimeRootGuard {
-    fn drop(&mut self) {
-        match self.previous.take() {
-            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-        }
-    }
+#[test]
+fn runtime_root_guard_teardown_preserves_present_root() {
+    crate::config::test_env::teardown_probe::assert_isolated(
+        concat!(
+            module_path!(),
+            "::runtime_root_guard_teardown_preserves_present_root"
+        ),
+        isolate_agentdesk_runtime_root_for_two_message_tests,
+        true,
+    );
 }
 
-fn isolate_agentdesk_runtime_root_for_two_message_tests()
--> (std::sync::MutexGuard<'static, ()>, RuntimeRootGuard) {
-    let lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    let root = tempfile::tempdir().expect("runtime root");
-    let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
-    unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
-    (
-        lock,
-        RuntimeRootGuard {
-            previous,
-            _root: root,
-        },
-    )
+#[test]
+fn runtime_root_guard_teardown_preserves_absent_root() {
+    crate::config::test_env::teardown_probe::assert_isolated(
+        concat!(
+            module_path!(),
+            "::runtime_root_guard_teardown_preserves_absent_root"
+        ),
+        isolate_agentdesk_runtime_root_for_two_message_tests,
+        false,
+    );
 }
 
 // Real HTTP adapter and watcher tail, with every external operation recorded.

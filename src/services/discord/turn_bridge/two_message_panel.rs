@@ -433,44 +433,32 @@ mod tests {
     use crate::services::discord::gateway::GatewayFuture;
     use std::sync::Mutex;
 
-    /// #3293: `InflightTurnState::new` resolves the AgentDesk runtime store to
-    /// stamp the born generation; the guard keeps this off the live
-    /// `~/.adk/release`, falling back to a shared throwaway tempdir (#4514).
-    /// Point `AGENTDESK_ROOT_DIR` at a per-test throwaway dir under the shared
-    /// env lock so constructing a test inflight is
-    /// deterministic regardless of the ambient environment; restore on drop.
-    struct RuntimeRootGuard {
-        previous: Option<std::ffi::OsString>,
-        _root: tempfile::TempDir,
+    fn isolate_agentdesk_runtime_root() -> crate::config::TestRuntimeRootGuard {
+        crate::config::TestRuntimeRootGuard::new()
     }
 
-    impl RuntimeRootGuard {
-        fn new() -> Self {
-            let root = tempfile::tempdir().expect("runtime root");
-            let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
-            unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
-            Self {
-                previous,
-                _root: root,
-            }
-        }
+    #[test]
+    fn runtime_root_guard_teardown_preserves_present_root() {
+        crate::config::test_env::teardown_probe::assert_isolated(
+            concat!(
+                module_path!(),
+                "::runtime_root_guard_teardown_preserves_present_root"
+            ),
+            isolate_agentdesk_runtime_root,
+            true,
+        );
     }
 
-    impl Drop for RuntimeRootGuard {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-            }
-        }
-    }
-
-    fn isolate_agentdesk_runtime_root() -> (std::sync::MutexGuard<'static, ()>, RuntimeRootGuard) {
-        let lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let root = RuntimeRootGuard::new();
-        (lock, root)
+    #[test]
+    fn runtime_root_guard_teardown_preserves_absent_root() {
+        crate::config::test_env::teardown_probe::assert_isolated(
+            concat!(
+                module_path!(),
+                "::runtime_root_guard_teardown_preserves_absent_root"
+            ),
+            isolate_agentdesk_runtime_root,
+            false,
+        );
     }
 
     fn test_inflight(current_msg_id: u64) -> InflightTurnState {
