@@ -42,6 +42,7 @@ pub(in crate::services::discord) async fn maybe_cleanup_sessions(shared: &Arc<Sh
     struct ExpiredSessionCleanup {
         channel_id: ChannelId,
         session_key: Option<String>,
+        tmux_session: Option<String>,
     }
 
     let provider = shared.settings.read().await.provider.clone();
@@ -59,6 +60,10 @@ pub(in crate::services::discord) async fn maybe_cleanup_sessions(shared: &Arc<Sh
             })
             .map(|(ch, s)| ExpiredSessionCleanup {
                 channel_id: *ch,
+                tmux_session: s
+                    .channel_name
+                    .as_ref()
+                    .map(|name| provider.build_tmux_session_name(name)),
                 session_key: s.channel_name.as_ref().map(|name| {
                     let tmux_name = provider.build_tmux_session_name(name);
                     adk_session::build_namespaced_session_key(
@@ -70,11 +75,53 @@ pub(in crate::services::discord) async fn maybe_cleanup_sessions(shared: &Arc<Sh
             })
             .collect()
     };
+    let mut safe_expired = Vec::new();
+    for candidate in expired {
+        // A missing watcher/inflight record can be a relay failure while the
+        // actual provider still works. Do not clear its mailbox or worktree.
+        let (Some(pool), Some(key), Some(tmux_name)) = (
+            shared.pg_pool.as_ref(),
+            candidate.session_key.as_deref(),
+            candidate.tmux_session.as_ref(),
+        ) else {
+            continue;
+        };
+        if super::mailbox_has_active_turn(shared, candidate.channel_id).await
+            || !crate::services::tmux_turn_liveness::idle_cleanup_session_is_unoccupied(pool, key)
+                .await
+        {
+            continue;
+        }
+        let tmux_name = tmux_name.clone();
+        let safe = tokio::task::spawn_blocking(move || {
+            use crate::services::platform::tmux::{SessionPresence, session_presence};
+            match session_presence(&tmux_name) {
+                SessionPresence::Missing => true,
+                SessionPresence::Present => {
+                    crate::services::tmux_turn_liveness::provider_session_is_proven_idle(&tmux_name)
+                }
+                SessionPresence::ProbeFailed => false,
+            }
+        })
+        .await
+        .unwrap_or(false);
+        if safe {
+            safe_expired.push(candidate);
+        }
+    }
+    let mut expired = safe_expired;
     if expired.is_empty() {
         return;
     }
     {
         let mut data = shared.core.lock().await;
+        expired.retain(|candidate| {
+            !shared.tmux_watchers.contains_key(&candidate.channel_id)
+                && data
+                    .sessions
+                    .get(&candidate.channel_id)
+                    .is_some_and(|session| session.last_active.elapsed() > SESSION_MAX_IDLE)
+        });
         for expired_session in &expired {
             let ch = expired_session.channel_id;
             // Clean up worktree if session had one

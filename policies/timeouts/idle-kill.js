@@ -158,6 +158,14 @@ module.exports = function attachIdleKill(timeouts, helpers) {
             continue;
           }
 
+          if (killResp.skipped_provider_activity_guard) {
+            agentdesk.log.info(
+              "[idle-kill] provider idle state not proven for " + s.session_key +
+              " (not counted toward budget)"
+            );
+            continue;
+          }
+
           if (killResp.skipped_live_activity_guard) {
             agentdesk.log.info(
               "[idle-kill] kill-tmux skipped live activity guard for " + s.session_key +

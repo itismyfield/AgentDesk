@@ -229,5 +229,15 @@ test-postgres:
     cargo test --lib db::intake_outbox_delivery_proof::tests -- --nocapture --test-threads=1
     cargo test --lib services::discord::turn_bridge::intake_settlement::tests -- --nocapture --test-threads=1
     cargo test --lib services::discord::runtime_bootstrap::intake_delivery_sweep::tests -- --nocapture --test-threads=1
+    # Session continuity must run on PRs through test_fast, not only main's
+    # non-PG sweep. Campaigns includes both canonical-PG and pure DAG tests.
+    cargo test --lib campaigns:: -- --nocapture --test-threads=1
+    cargo test --lib services::memory::memento::anchor::tests -- --nocapture --test-threads=1
+    cargo test --lib services::discord::prompt_builder::session_anchors::tests -- --nocapture --test-threads=1
+    cargo test --lib tmux_turn_liveness::idle_cleanup_tests -- --nocapture --test-threads=1
+    cargo test --lib tmux_turn_liveness::tests_pg -- --nocapture --test-threads=1
+    cargo test --lib frozen_busy_jsonl -- --nocapture --test-threads=1
+    cargo test --lib idle_tmux_snapshot_missing_output_path -- --nocapture --test-threads=1
+    cargo test --lib dispatched_sessions::kill_tmux_resume_tests -- --nocapture --test-threads=1
 
 check: fmt-check lint cargo-check test

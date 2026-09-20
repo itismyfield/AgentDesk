@@ -88,6 +88,8 @@ src/
 │   │   └── tests.rs
 │   ├── automation_candidates/
 │   │   └── verdict_tests.rs
+│   ├── campaigns/
+│   │   └── tests.rs
 │   ├── dispatched_sessions/
 │   │   ├── canonical_identity.rs
 │   │   ├── canonical_identity_pg_tests.rs
@@ -135,6 +137,7 @@ src/
 │   ├── agents.rs
 │   ├── automation_candidate_card_program.rs
 │   ├── automation_candidates.rs
+│   ├── campaigns.rs
 │   ├── cancel_tombstones.rs
 │   ├── dispatch_semaphores.rs
 │   ├── dispatched_sessions.rs
@@ -269,7 +272,8 @@ src/
 │   │   │   │       ├── part_07.rs
 │   │   │   │       ├── part_08.rs
 │   │   │   │       ├── part_09.rs
-│   │   │   │       └── part_10.rs
+│   │   │   │       ├── part_10.rs
+│   │   │   │       └── part_11.rs
 │   │   │   ├── guides.rs
 │   │   │   ├── inventory.rs
 │   │   │   └── taxonomy.rs
@@ -317,6 +321,7 @@ src/
 │   │   ├── auto_queue.rs
 │   │   ├── auto_queue_lifecycle_pg_tests.rs
 │   │   ├── automation_candidates.rs
+│   │   ├── campaigns.rs
 │   │   ├── claude_accounts_api.rs
 │   │   ├── cluster.rs
 │   │   ├── cron_api.rs
@@ -803,7 +808,8 @@ src/
 │   │   │   ├── manifest.rs
 │   │   │   ├── memory_guidance.rs
 │   │   │   ├── mod.rs
-│   │   │   └── section_dedupe.rs
+│   │   │   ├── section_dedupe.rs
+│   │   │   └── session_anchors.rs
 │   │   ├── queue_io/
 │   │   │   └── turn_admission.rs
 │   │   ├── recovery_engine/
@@ -1542,6 +1548,7 @@ src/
 │   ├── memory/
 │   │   ├── local.rs
 │   │   ├── memento.rs
+│   │   ├── memento_anchor.rs
 │   │   ├── memento_throttle.rs
 │   │   ├── mod.rs
 │   │   └── runtime_state.rs
@@ -1675,6 +1682,8 @@ src/
 │   │   └── session.rs
 │   ├── tmux_common/
 │   │   └── session_markers.rs
+│   ├── tmux_turn_liveness/
+│   │   └── tests_pg.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── extract.rs
 │   │   ├── observation.rs
@@ -1738,7 +1747,6 @@ src/
 │   ├── kakao_message.rs
 │   ├── kanban.rs
 │   ├── kanban_cards.rs
-│   ├── long_turn_watchdog.rs
 │   ├── mcp_config.rs
 │   ├── message_outbox.rs
 │   ├── message_outbox_circuit_authority.rs

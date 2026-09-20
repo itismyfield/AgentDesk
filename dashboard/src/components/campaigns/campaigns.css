@@ -1,0 +1,45 @@
+.campaigns-panel { color: var(--th-text-primary); display: grid; gap: 16px; }
+.campaigns-panel h2 { font-size: 20px; font-weight: 700; }
+.campaigns-panel h3 { font-size: 17px; font-weight: 650; overflow-wrap: anywhere; }
+.campaigns-panel h4 { font-size: 13px; font-weight: 650; margin-bottom: 6px; }
+.campaigns-panel p { font-size: 13px; line-height: 1.6; }
+.campaigns-panel header p, .campaign-muted, .campaigns-panel dt { color: var(--th-text-muted); }
+.campaign-row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; align-items: center; }
+.campaigns-panel button, .campaigns-panel input, .campaigns-panel select, .campaigns-panel textarea { border: 1px solid var(--th-border); border-radius: 8px; padding: 8px 12px; background: var(--th-card-bg); color: var(--th-text-primary); font: inherit; font-size: 13px; }
+.campaigns-panel button { cursor: pointer; }
+.campaigns-panel button:hover { border-color: var(--th-accent-info); }
+.campaigns-panel button:disabled { opacity: .55; cursor: wait; }
+.campaigns-panel :is(button, select, input, textarea):focus-visible { outline: 2px solid var(--th-accent-info); outline-offset: 3px; }
+.campaign-layout { display: grid; grid-template-columns: minmax(180px, 240px) minmax(0, 1fr); gap: 20px; align-items: start; }
+.campaign-list { display: grid; gap: 10px; }
+.campaign-list button { display: grid; gap: 10px; text-align: left; padding: 16px; overflow-wrap: anywhere; }
+.campaign-list button[aria-current="true"] { border-color: var(--th-accent-info); background: color-mix(in srgb, var(--th-accent-info) 9%, var(--th-card-bg)); }
+.campaign-list button > span:last-child { color: var(--th-text-muted); font-size: 12px; }
+.campaign-main { min-width: 0; display: grid; gap: 16px; padding: 20px; background: var(--th-card-bg); border: 1px solid var(--th-border); border-radius: 16px; }
+.campaign-description, .campaign-next p, .campaign-node-detail li { white-space: pre-wrap; overflow-wrap: anywhere; }
+.campaign-progress { width: 100%; height: 8px; accent-color: #16a34a; }
+.campaign-counts { display: flex; gap: 10px 16px; flex-wrap: wrap; font-size: 12px; }
+.campaign-badge { display: inline-block; width: fit-content; white-space: nowrap; padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; background: color-mix(in srgb, var(--th-text-muted) 14%, transparent); color: var(--th-text-primary); }
+.campaign-status-active, .campaign-status-running { background: #3b82f620; color: #60a5fa; }
+.campaign-status-completed { background: #16a34a20; color: #22c55e; }
+.campaign-status-blocked, .campaign-status-paused { background: #f59e0b20; color: #d97706; }
+.campaign-status-failed { background: #ef444420; color: #ef4444; }
+.campaign-graph { height: 350px; border: 1px solid var(--th-border); border-radius: 12px; overflow: hidden; background: var(--th-bg-surface); }
+.campaign-graph .react-flow__controls-button { color: var(--th-text-primary); padding: 5px; }
+.campaign-graph .react-flow__controls-button svg { fill: currentColor; }
+.campaign-graph-node { display: grid; gap: 7px; text-align: left; font-size: 12px; }
+.campaign-graph-node strong { overflow-wrap: anywhere; }
+.campaign-graph-node > span:not(.campaign-badge) { color: var(--th-text-muted); font-size: 10px; }
+.campaign-node-detail { display: grid; gap: 16px; border-top: 1px solid var(--th-border); padding-top: 16px; }
+.campaign-detail-grid, .campaign-edit-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; font-size: 13px; }
+.campaign-detail-grid dt { font-size: 11px; margin-bottom: 5px; }
+.campaign-detail-grid dd { overflow-wrap: anywhere; }
+.campaign-next { padding: 14px; border-radius: 10px; background: color-mix(in srgb, var(--th-accent-info) 8%, var(--th-card-bg)); }
+.campaign-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.campaign-actions a { font-size: 12px; color: var(--th-accent-info); }
+.campaign-node-detail ul { padding-left: 20px; list-style: disc; font-size: 12px; }
+.campaign-node-detail form { display: grid; gap: 14px; }
+.campaigns-panel label { display: grid; gap: 6px; font-size: 12px; }
+.campaigns-panel :is(input, select, textarea) { min-width: 0; width: 100%; }
+@media (max-width: 800px) { .campaign-layout { grid-template-columns: 1fr; } .campaign-list { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); } .campaign-main { padding: 14px; } }
+@media (max-width: 480px) { .campaign-detail-grid, .campaign-edit-grid { grid-template-columns: 1fr; } }

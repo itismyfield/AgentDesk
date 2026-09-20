@@ -216,9 +216,7 @@ pub(super) fn idle_tmux_repair_pane_ready_for_input(
     tmux_session: &str,
     provider: &ProviderKind,
 ) -> bool {
-    // Pre-existing recovery override for long-frozen Busy JSONL. This is
-    // intentionally not `FallbackPaneReadiness`: the override is scoped by
-    // `frozen_busy_jsonl_allows_pane_fallback` below.
+    // Used only for providers without structured turn-state evidence.
     crate::services::platform::tmux::capture_pane(tmux_session, -80)
         .map(|pane| {
             crate::services::provider::tmux_capture_indicates_ready_for_input(&pane, provider)
@@ -246,7 +244,7 @@ pub(super) fn idle_tmux_repair_ready_for_input_with_pane_probe(
 
 pub(super) fn idle_tmux_repair_snapshot_ready_for_input(
     provider: &ProviderKind,
-    channel_id: u64,
+    _channel_id: u64,
     tmux_session: &str,
     state: &super::inflight::InflightTurnState,
     pane_ready_for_input: impl Fn(&str, &ProviderKind) -> bool,
@@ -257,9 +255,9 @@ pub(super) fn idle_tmux_repair_snapshot_ready_for_input(
         .map(str::trim)
         .filter(|path| !path.is_empty())
     else {
-        if crate::services::tui_turn_state::claude_tui_output_path_missing(
+        if crate::services::tui_turn_state::provider_runtime_has_structured_jsonl_turn_state(
+            provider,
             state.runtime_kind,
-            state.output_path.as_deref(),
         ) {
             return false;
         }
@@ -278,50 +276,8 @@ pub(super) fn idle_tmux_repair_snapshot_ready_for_input(
     match structured_ready {
         crate::services::tui_turn_state::TuiReadyState::Ready => true,
         crate::services::tui_turn_state::TuiReadyState::Busy
-            if frozen_busy_jsonl_allows_pane_fallback(output_path) =>
-        {
-            let pane_ready = pane_ready_for_input(tmux_session, provider);
-            if pane_ready {
-                tracing::warn!(
-                    target: "agentdesk::discord::relay_recovery",
-                    provider = provider.as_str(),
-                    channel_id,
-                    tmux_session,
-                    output_path = %output_path.display(),
-                    stale_secs = FROZEN_BUSY_JSONL_READY_FALLBACK_AGE.as_secs(),
-                    "idle-tmux repair accepted pane-ready fallback for frozen Busy JSONL"
-                );
-            }
-            pane_ready
-        }
-        crate::services::tui_turn_state::TuiReadyState::Busy
         | crate::services::tui_turn_state::TuiReadyState::Unknown => false,
     }
-}
-
-fn frozen_busy_jsonl_allows_pane_fallback(output_path: &Path) -> bool {
-    output_file_quiescent_for_duration(output_path, FROZEN_BUSY_JSONL_READY_FALLBACK_AGE)
-}
-
-fn output_file_quiescent_for_duration(output_path: &Path, min_age: Duration) -> bool {
-    output_file_quiescent_for_duration_at(output_path, min_age, SystemTime::now())
-}
-
-fn output_file_quiescent_for_duration_at(
-    output_path: &Path,
-    min_age: Duration,
-    now: SystemTime,
-) -> bool {
-    let Ok(metadata) = std::fs::metadata(output_path) else {
-        return false;
-    };
-    if !metadata.is_file() || metadata.len() == 0 {
-        return false;
-    }
-    let Ok(modified) = metadata.modified() else {
-        return false;
-    };
-    now.duration_since(modified).is_ok_and(|age| age >= min_age)
 }
 
 /// #5071 relay-tail S2: how the destructive idle-tmux clear gates read

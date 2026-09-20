@@ -21,7 +21,6 @@ require("./timeouts/review-auto-accept")(timeouts, helpers);
 require("./timeouts/dispatch-maintenance")(timeouts, helpers);
 require("./timeouts/active-monitor")(timeouts, helpers);
 require("./timeouts/orphan-dispatch")(timeouts, helpers);
-require("./timeouts/long-turn-monitor")(timeouts, helpers);
 require("./timeouts/workspace-branch-guard")(timeouts, helpers);
 require("./timeouts/idle-kill")(timeouts, helpers);
 require("./timeouts/idle-recap")(timeouts, helpers);
@@ -46,7 +45,7 @@ timeouts.onTick30s = function(ev) {
   agentdesk.log.debug("[tick30s] total " + (Date.now() - start) + "ms");
 };
 
-// 1min tier: [A] [C] [D] [E] [L] (non-critical timeouts)
+// 1min tier: [A] [C] [D] [E] (non-critical timeouts)
 // [K] moved to 30s tier for critical-path isolation (#127)
 timeouts.onTick1min = function(ev) {
   var start = Date.now();
@@ -59,8 +58,6 @@ timeouts.onTick1min = function(ev) {
   agentdesk.log.debug("[tick1min][D] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_E(); } catch(e) { agentdesk.log.warn("[tick1min] E error: " + e); }
   agentdesk.log.debug("[tick1min][E] " + (Date.now() - t) + "ms");
-  t = Date.now(); try { timeouts._section_L(); } catch(e) { agentdesk.log.warn("[tick1min] L error: " + e); }
-  agentdesk.log.debug("[tick1min][L] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_N(); } catch(e) { agentdesk.log.warn("[tick1min] N error: " + e); }
   agentdesk.log.debug("[tick1min][N] " + (Date.now() - t) + "ms");
   agentdesk.log.debug("[tick1min] total " + (Date.now() - start) + "ms");

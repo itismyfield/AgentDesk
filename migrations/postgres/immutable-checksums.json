@@ -615,6 +615,11 @@
       "path": "migrations/postgres/0120_relay_dead_letter_redelivery.sql",
       "sha256": "ba6981fecb0e07c30dabf307d7b948e358ccfc9958ad6ab6c6f525cff62cf8a6",
       "version": 120
+    },
+    {
+      "path": "migrations/postgres/0121_campaigns.sql",
+      "sha256": "d59de79cfa690eef4b286059eb24ab2b4c38aacdf894d5a0976152141f4b38af",
+      "version": 121
     }
   ],
   "version": 1

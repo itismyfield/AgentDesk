@@ -1578,8 +1578,24 @@ async fn kill_tmux_session_impl(
     }
     let effective_provider_name = provider_name.or(session_provider.as_deref());
 
-    let tmux_was_alive = crate::services::platform::tmux::has_session(&tmux_name);
     let reason_is_idle_cleanup = reason_is_idle_cleanup_reason(reason);
+    let tmux_presence = crate::services::platform::tmux::session_presence(&tmux_name);
+    if (reason_is_idle_cleanup || minimum_idle_minutes.is_some())
+        && tmux_presence == crate::services::platform::tmux::SessionPresence::ProbeFailed
+    {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "tmux_killed": false,
+                "tmux_was_alive": null,
+                "tmux_session_name": tmux_name,
+                "session_row_preserved": true,
+                "skipped_provider_activity_guard": true,
+            })),
+        );
+    }
+    let tmux_was_alive = tmux_presence == crate::services::platform::tmux::SessionPresence::Present;
     let mut idle_decision_last_seen_nanos = None;
     let mut idle_decision_runtime_activity_nanos = None;
     let mut idle_decision_runtime_activity_age_minutes = None;
@@ -1686,7 +1702,50 @@ async fn kill_tmux_session_impl(
         }
     }
 
-    let tmux_killed = if tmux_was_alive {
+    // The final decision reads the provider-native transcript and live pane,
+    // independently of inflight/relay health. Quiet long turns, approval waits,
+    // background children and unknown evidence must all survive idle cleanup.
+    let mut idle_tmux_kill_result = None;
+    if tmux_was_alive && (reason_is_idle_cleanup || minimum_idle_minutes.is_some()) {
+        let unoccupied = crate::services::tmux_turn_liveness::idle_cleanup_session_is_unoccupied(
+            pool,
+            session_key,
+        )
+        .await;
+        let probe_name = tmux_name.clone();
+        let probe_reason = reason.to_string();
+        if unoccupied {
+            idle_tmux_kill_result = tokio::task::spawn_blocking(move || {
+                crate::services::tmux_turn_liveness::kill_proven_idle_provider_session(
+                    &probe_name,
+                    &probe_reason,
+                )
+            })
+            .await
+            .unwrap_or(None);
+        }
+        if idle_tmux_kill_result.is_none() {
+            tracing::info!(
+                session_key,
+                "idle cleanup preserved provider: idle state not proven"
+            );
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "tmux_killed": false,
+                    "tmux_was_alive": true,
+                    "tmux_session_name": tmux_name,
+                    "session_row_preserved": true,
+                    "skipped_provider_activity_guard": true,
+                })),
+            );
+        }
+    }
+
+    let tmux_killed = if let Some(killed) = idle_tmux_kill_result {
+        killed
+    } else if tmux_was_alive {
         crate::services::platform::tmux::kill_session(&tmux_name, reason)
     } else {
         false

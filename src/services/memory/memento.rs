@@ -30,6 +30,10 @@ const MEMENTO_CONTEXT_FULL_TOKEN_BUDGET: u64 = 1_000;
 const MEMENTO_CONTEXT_FULL_TYPES: &[&str] = &["preference", "error", "procedure", "decision"];
 const MEMENTO_MODEL_OUTPUT_MAX_BYTES: usize = 16 * 1024;
 
+#[path = "memento_anchor.rs"]
+mod anchor;
+pub(crate) use anchor::load_session_anchor_prompt;
+
 #[derive(Clone, Debug)]
 struct CachedMcpSession {
     endpoint: String,

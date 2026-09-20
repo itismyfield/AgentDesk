@@ -36,7 +36,7 @@ pub(super) fn canonical_category(category: &str) -> &'static str {
             "kanban"
         }
         "dispatches" | "dispatched-sessions" | "internal" | "messages" | "sessions" => "dispatches",
-        "auto-queue" | "cron" | "queue" => "queue",
+        "auto-queue" | "campaigns" | "cron" | "queue" => "queue",
         "routines" => "routines",
         "analytics" | "auth" | "cluster" | "docs" | "health" | "monitoring" | "stats" | "v1"
         | "provider-cli" | "claude-accounts" => "ops",
@@ -89,9 +89,13 @@ pub(super) fn category_to_group(category: &str) -> &'static str {
         // integrations — discord, github, meetings, provider, mcp
         "discord" | "github" | "github-dashboard" | "meetings" => "integrations",
         // automation — auto-queue, policies, scheduler, cron, maintenance
-        "auto-queue" | "automation-candidates" | "queue" | "cron" | "policies" | "routines" => {
-            "automation"
-        }
+        "auto-queue"
+        | "automation-candidates"
+        | "campaigns"
+        | "queue"
+        | "cron"
+        | "policies"
+        | "routines" => "automation",
         // config — settings, onboarding, knowledge, source-of-truth, skills,
         // offices, departments, memory (#1066 /api/memory dual-mode)
         "settings" | "onboarding" | "skills" | "offices" | "departments" | "memory" => "config",
@@ -155,6 +159,7 @@ pub(super) fn categories_for_group(
 
 pub(super) fn category_description(category: &str) -> &'static str {
     match category {
+        "campaigns" => "Durable campaign DAG checkpoints, evidence, and revision history.",
         "agents" => "Agent registry, turn control, setup, and activity timelines.",
         "kanban" => "Kanban cards, pipeline state, reviews, PM decisions, and repo board config.",
         "dispatches" => {

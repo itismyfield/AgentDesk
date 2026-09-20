@@ -1677,9 +1677,7 @@ pub(super) async fn handle_text_message(
     )
     .await;
 
-    // #5168: no server-side recall. The turn only needs the resolved memory
-    // settings so the prompt can name the backend and emit the memento scope
-    // hint; the model performs its own `context`/`recall` through the MCP.
+    // General recall stays model-owned; session anchors use the native instruction layer.
     let memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
     // Prepend pending file uploads
     let mut context_chunks = Vec::new();
@@ -1772,6 +1770,18 @@ pub(super) async fn handle_text_message(
         channel_recent_context.as_ref(),
         Some(&turn_id),
     );
+    let built_system_prompt = built_system_prompt
+        .with_session_anchors(
+            &memory_settings,
+            &provider,
+            &current_path,
+            channel_id,
+            memory_scope_channel_id,
+            role_binding.as_ref(),
+            session_id.as_deref(),
+            force_fresh_provider_session || session_was_cleared,
+        )
+        .await;
     let system_prompt_owned = built_system_prompt.system_prompt;
     if let Some(manifest) = built_system_prompt.manifest {
         crate::db::prompt_manifests::spawn_save_prompt_manifest(shared.pg_pool.clone(), manifest);

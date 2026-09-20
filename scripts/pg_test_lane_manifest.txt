@@ -5,6 +5,7 @@ src/db/auto_queue/entries/dispatch_failure.rs
 src/db/auto_queue/phase_gates.rs
 src/db/auto_queue/tests.rs
 src/db/automation_candidates/verdict_tests.rs
+src/db/campaigns/tests.rs
 src/db/dispatched_sessions.rs
 src/db/dispatched_sessions/canonical_identity_pg_tests.rs
 src/db/dispatched_sessions/rebind_override.rs
@@ -37,6 +38,7 @@ src/server/mod.rs
 src/server/multinode_regression.rs
 src/server/resource_locks.rs
 src/server/routes/auto_queue_lifecycle_pg_tests.rs
+src/server/routes/campaigns.rs
 src/server/routes/dispatched_sessions_tests.rs
 src/server/routes/dispatches/crud.rs
 src/server/routes/escalation.rs
@@ -110,6 +112,7 @@ src/services/session_forwarding.rs
 src/services/session_resume.rs
 src/services/settings.rs
 src/services/stale_turn_reconciler.rs
+src/services/tmux_turn_liveness/tests_pg.rs
 src/voice/announce_meta.rs
 src/voice/turn_link.rs
 [modules]
@@ -120,6 +123,7 @@ db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests
 db::auto_queue::tests::grouped_card_count_pg_tests
 db::automation_candidates::verdict_tests
+db::campaigns::tests
 db::dispatched_session_canonical_identity::pg_tests
 db::dispatched_session_rebind_override::tests
 db::dispatched_sessions::selector_cleanup_tests::session_authority_pg_tests
@@ -154,6 +158,7 @@ server::multinode_regression::multinode_regression_pg_tests
 server::resource_locks::resource_locks_pg_tests
 server::routes::auto_queue_lifecycle_pg_tests::tests
 server::routes::auto_queue_preflight_harness_tests
+server::routes::campaigns::tests
 server::routes::dispatched_sessions::tests
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests
 server::routes::escalation::manual_decision_gate_tests
@@ -232,6 +237,7 @@ services::session_forwarding::tests
 services::session_resume::tests
 services::settings::tests
 services::stale_turn_reconciler::tests
+services::tmux_turn_liveness::tests_pg
 voice::announce_meta::tests
 voice::turn_link::tests
 [tests]
@@ -331,6 +337,7 @@ db::auto_queue::tests::grouped_card_count_pg_tests::grouped_counts_use_one_statu
 db::automation_candidates::verdict_tests::materialize_dedupe_prefers_ready_child_over_review_parent_pg
 db::automation_candidates::verdict_tests::persist_iteration_outcome_pg_rolls_back_when_card_is_inactive
 db::automation_candidates::verdict_tests::persist_iteration_outcome_pg_rolls_back_when_card_update_matches_zero_rows
+db::campaigns::tests::postgres_campaign_concurrent_cas_and_reconnect_preserve_canonical_history_pg
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_actor_pin_missing_insert_and_retry_pg
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_actor_pin_missing_rejects_intervening_insert_pg
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_actor_pin_nullable_and_prior_nonce_alias_update_pg
@@ -572,6 +579,7 @@ server::routes::auto_queue_lifecycle_pg_tests::tests::patch_retired_deploy_phase
 server::routes::auto_queue_lifecycle_pg_tests::tests::postgres_auto_queue_lifecycle_http_routes_use_canonical_writers_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::stale_manual_rebind_cannot_reclaim_slot_after_canonical_completion_pg
 server::routes::auto_queue_preflight_harness_tests::auto_queue_preflight_fixture_sandbox_roundtrip_pg
+server::routes::campaigns::tests::postgres_campaign_http_auth_conflict_and_history_pg
 server::routes::dispatched_sessions::tests::precondition_changed_handler_contract_is_conflict_and_retryable_pg
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows
@@ -1032,6 +1040,8 @@ services::stale_turn_reconciler::tests::stale_busy_candidates_reconcile_only_aft
 services::stale_turn_reconciler::tests::stale_candidate_cas_rejects_heartbeat_move_and_is_non_latching_pg
 services::stale_turn_reconciler::tests::transport_unknown_warrant_vetoes_the_destructive_apply_and_reachable_releases_it_pg
 services::stale_turn_reconciler::tests::unreadable_inflight_provider_maps_unknown_and_preserves_busy_session_pg
+services::tmux_turn_liveness::tests_pg::idle_cleanup_preserves_approval_and_background_children_pg
+services::tmux_turn_liveness::tests_pg::thread_gc_preserves_resume_rows_when_new_turn_starts_or_kill_failed_pg
 voice::announce_meta::tests::durable_handoff_concurrent_consumers_yield_exactly_one_claim
 voice::announce_meta::tests::durable_handoff_persist_does_not_resurrect_consumed_row
 voice::announce_meta::tests::durable_handoff_round_trips_and_consumes_exactly_once

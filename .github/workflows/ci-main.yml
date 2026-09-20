@@ -271,7 +271,7 @@ jobs:
         run: python3 -m pip install --disable-pip-version-check pyyaml
 
       - name: Install shellcheck
-        run: sudo apt-get install -y shellcheck
+        run: sudo apt-get install -y shellcheck zsh
 
       - name: Run script checks
         run: ./scripts/ci-script-checks.sh

@@ -472,6 +472,9 @@ banner "Relay watchdog + PG tunnel supervisor tests (#4381/#4378)"
 # silently fall out of the deploy again (the 06-29 relay-gap-watch failure).
 "$PYTHON" -m unittest tests.test_relay_watchdog tests.test_pg_tunnel
 
+banner "Session anchor CLI tests"
+"$PYTHON" -m unittest scripts.__tests__.test_session_anchor
+
 banner "Build token serialization tests (#5663)"
 # scripts/build_token.py serializes the two release scripts' cargo sites; the
 # Makefile target and install.sh's source install stay outside it by design.

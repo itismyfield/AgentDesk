@@ -2405,24 +2405,49 @@ async fn backfill_legacy_thread_channel_ids_pg(pool: &PgPool) -> usize {
     updated
 }
 
-/// Delete stale thread session rows and return the `session_key`s removed so
-/// the caller can reap the matching orphan tmux sessions. The inner CLI of a
-/// thread tmux session usually stays at an interactive prompt (its pane never
-/// goes dead), so the dead-pane reaper can't reap it; and once this GC removes
-/// the row, the idle-kill policy can no longer see it either. Returning the
-/// deleted keys lets the periodic GC kill those tmux sessions directly.
+/// Reclaim only locally owned thread sessions whose tmux is confirmed missing.
+/// Even a provider proven idle can start a new turn before DELETE; never
+/// delete the canonical resume row while its tmux still exists.
 pub async fn gc_stale_thread_sessions_pg(pool: &PgPool) -> Vec<String> {
+    gc_stale_thread_sessions_with_probe_pg(pool, |key| async move {
+        tokio::task::spawn_blocking(move || {
+            use crate::services::platform::tmux::{SessionPresence, session_presence};
+            let Some(tmux_name) =
+                crate::services::discord::session_identity::tmux_name_from_session_key(&key)
+            else {
+                return SessionPresence::ProbeFailed;
+            };
+            // Missing on this host says nothing about a remote owner's tmux.
+            let marker = crate::services::tmux_common::current_tmux_owner_marker();
+            if !std::fs::read_to_string(crate::services::tmux_common::tmux_owner_path(&tmux_name))
+                .is_ok_and(|owner| owner.trim() == marker)
+            {
+                return SessionPresence::ProbeFailed;
+            }
+            session_presence(&tmux_name)
+        })
+        .await
+        .unwrap_or(crate::services::platform::tmux::SessionPresence::ProbeFailed)
+    })
+    .await
+}
+
+pub(crate) async fn gc_stale_thread_sessions_with_probe_pg<F, Fut>(
+    pool: &PgPool,
+    probe: F,
+) -> Vec<String>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = crate::services::platform::tmux::SessionPresence>,
+{
     let _ = backfill_legacy_thread_channel_ids_pg(pool).await;
-    match sqlx::query_scalar::<_, String>(
-        "DELETE FROM sessions
+    let candidates = match sqlx::query_scalar::<_, String>(
+        "SELECT session_key FROM sessions
          WHERE thread_channel_id IS NOT NULL
-           AND status IN ('idle', 'awaiting_user', 'disconnected', 'aborted')
-           AND (
-             (active_dispatch_id IS NULL
-               AND COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '1 hour')
-             OR COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '3 hours'
-           )
-         RETURNING session_key",
+           AND status IN ('idle', 'disconnected', 'aborted')
+           AND active_dispatch_id IS NULL
+           AND COALESCE(active_children, 0) = 0
+           AND COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '1 hour'",
     )
     .fetch_all(pool)
     .await
@@ -2434,7 +2459,39 @@ pub async fn gc_stale_thread_sessions_pg(pool: &PgPool) -> Vec<String> {
             );
             Vec::new()
         }
+    };
+    let mut deleted = Vec::new();
+    for key in candidates {
+        if !crate::services::tmux_turn_liveness::idle_cleanup_session_is_unoccupied(pool, &key)
+            .await
+        {
+            continue;
+        }
+        if probe(key.clone()).await != crate::services::platform::tmux::SessionPresence::Missing {
+            continue;
+        }
+        // Recheck occupancy and the idle deadline after the external probe.
+        let removed = sqlx::query(
+            "DELETE FROM sessions
+             WHERE session_key = $1
+               AND thread_channel_id IS NOT NULL
+               AND status IN ('idle', 'disconnected', 'aborted')
+               AND active_dispatch_id IS NULL
+               AND COALESCE(active_children, 0) = 0
+               AND COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '1 hour'
+               AND NOT EXISTS (
+                   SELECT 1 FROM sessions child
+                   WHERE child.parent_session_id = sessions.id AND child.closed_at IS NULL
+               )",
+        )
+        .bind(&key)
+        .execute(pool)
+        .await;
+        if removed.is_ok_and(|result| result.rows_affected() > 0) {
+            deleted.push(key);
+        }
     }
+    deleted
 }
 
 /// Reconcile an **idle** session row whose tmux session has already vanished.
