@@ -6079,6 +6079,8 @@ services::discord::tmux::tmux_watcher::two_message_panel::tests::creation_gate_o
 services::discord::tmux::tmux_watcher::two_message_panel::tests::reanchor_bind_bumps_epoch_atomically_and_guard_stale_skips_old_epoch
 services::discord::tmux::tmux_watcher::two_message_panel::tests::reanchor_gate_rejects_managed_bridge_owned_turn_even_when_watcher_relays
 services::discord::tmux::tmux_watcher::two_message_panel::tests::reanchor_inflight_reload_gate_requires_rollover_and_flag_on
+services::discord::tmux::tmux_watcher::two_message_panel::tests::runtime_root_guard_teardown_preserves_absent_root
+services::discord::tmux::tmux_watcher::two_message_panel::tests::runtime_root_guard_teardown_preserves_present_root
 services::discord::tmux::tmux_watcher::two_message_panel::tests::status_panel_http_adapter_preserves_completion_on_ledger_failure_4891
 services::discord::tmux::tmux_watcher::two_message_panel::tests::status_panel_watcher_tail_does_not_queue_completed_panel_4891
 services::discord::tmux::tmux_watcher::two_message_panel::tests::watcher_orphan_preregistration_is_flag_gated_and_removed_after_persist
@@ -7169,6 +7171,8 @@ services::discord::turn_bridge::two_message_panel::tests::reanchor_keeps_new_pan
 services::discord::turn_bridge::two_message_panel::tests::reanchor_moves_panel_below_new_answer_and_bumps_generation
 services::discord::turn_bridge::two_message_panel::tests::reanchor_send_failure_keeps_old_panel_and_epoch
 services::discord::turn_bridge::two_message_panel::tests::reanchor_without_a_live_panel_is_a_noop
+services::discord::turn_bridge::two_message_panel::tests::runtime_root_guard_teardown_preserves_absent_root
+services::discord::turn_bridge::two_message_panel::tests::runtime_root_guard_teardown_preserves_present_root
 services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_claims_pre_publish_reservation_by_correlation_pg
 services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_consumes_legacy_flagged_local_only_fallback_pg
 services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_falls_back_to_durable_pg_row

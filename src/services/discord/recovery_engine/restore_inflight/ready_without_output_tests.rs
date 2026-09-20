@@ -59,7 +59,9 @@ impl Fixture {
     {
         let owner = mailbox_snapshot(&self.shared, ChannelId::new(state.channel_id)).await;
         let mut captured = state.clone();
-        captured.save_generation = self.load().expect("persisted fixture").save_generation;
+        let persisted = self.load().expect("persisted fixture");
+        captured.save_generation = persisted.save_generation;
+        captured.updated_at = persisted.updated_at;
         settle_ready_without_output_for_actor(
             &self.shared,
             &captured.provider_kind().expect("fixture provider"),
@@ -175,6 +177,9 @@ async fn committed_eof_skips_transport_but_unknown_or_restart_rows_remain_owned(
             fixture.state.full_response.clear();
             fixture.state.response_sent_offset = 0;
         }
+        if case == 0 {
+            fixture.state.updated_at = "2000-01-01 00:00:00".to_string();
+        }
         fixture.claim().await;
         match case {
             0 => fixture.state.terminal_delivery_committed = true,
@@ -190,6 +195,13 @@ async fn committed_eof_skips_transport_but_unknown_or_restart_rows_remain_owned(
         // row while testing an invalid local recovery snapshot in case 2.
         if case != 2 {
             fixture.persist();
+        }
+        if case == 0 {
+            assert_ne!(
+                fixture.load().expect("persisted committed row").updated_at,
+                fixture.state.updated_at,
+                "persist must advance metadata beyond the local snapshot"
+            );
         }
         assert_eq!(
             fixture

@@ -298,6 +298,7 @@ banner "CI timeout wrapper tests (#4413)"
 "$PYTHON" -m unittest tests.test_ci_timeout
 
 banner "Relay-authority fixed mutation gate (#5071)"
+"$PYTHON" scripts/check_relay_mutation_sources.py
 "$PYTHON" -m unittest tests.test_relay_authority_mutations
 
 banner "Relay recovery targeted-lane wiring contract (#4423)"
