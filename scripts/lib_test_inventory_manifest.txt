@@ -7900,6 +7900,7 @@ services::observability::relay_signal_alert::tests::signal_statuses_match_emit_p
 services::observability::relay_signal_alert::tests::signal_table_covers_documented_relay_loss_vectors
 services::observability::relay_signal_alert::tests::signal_table_excludes_benign_watcher_owned_non_attempt
 services::observability::relay_signal_alert::tests::signal_table_monitors_rewind_resend_suppression
+services::observability::test_support::env_runtime_fixtures_finish_in_parallel
 services::observability::turn_lifecycle::tests::normalize_label_collapses_future_ad_hoc_surface_variants
 services::observability::turn_lifecycle::tests::turn_event_metadata_is_compile_time_constant_backed
 services::observability::turn_lifecycle::tests::turn_event_notification_policy_and_copy_match_lifecycle_contract

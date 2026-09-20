@@ -25,10 +25,13 @@ fn terminal_ordering_fixture(
     source_race: Option<SourceRace>,
     provider: ProviderKind,
 ) {
-    let _telemetry = crate::services::observability::test_runtime_lock();
+    let _telemetry = crate::services::observability::lock_env_then_runtime();
     crate::services::observability::reset_for_tests();
     let temp = tempfile::tempdir().unwrap();
-    let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+    let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        temp.path(),
+    );
     let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
