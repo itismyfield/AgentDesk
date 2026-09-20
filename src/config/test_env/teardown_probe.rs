@@ -138,7 +138,7 @@ fn run_isolated(test_name: &str, root_was_present: bool, exercise: impl FnOnce()
     println!("ADK_ROOT_TEARDOWN_CHILD=PASS test={test_name}");
 }
 
-fn exercise_teardown<F, G>(factory: F, scope: bool, temporary_root: bool)
+fn exercise_teardown<F, G>(factory: F, whole_scope: bool, temporary_root: bool)
 where
     F: FnOnce() -> G + Send,
 {
@@ -158,7 +158,7 @@ where
                     }));
                 })
             });
-            if scope {
+            if whole_scope {
                 arm.take().unwrap()();
             }
             let fixture = factory();
