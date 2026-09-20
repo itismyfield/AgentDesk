@@ -234,7 +234,9 @@ def audit(root: Path) -> tuple[list[str], int, list[str]]:
             dynamic.append(str(path))
         direct |= dynamic_key and root_evidence
         references = calls(path, text) if direct or "TestRuntimeRootGuard" in text or "TestEnvVarGuard" in text or "set_agentdesk_root_for_test" in text or "after_shared_test_env_lock" in text else []
-        borrowed = "after_shared_test_env_lock" in text and any("after_shared_test_env_lock" in name for name in references)
+        borrowed = bool(re.search(r"\b(?:set_path|set_value|capture)_after_shared_test_env_lock\b", text)) or any(
+            "after_shared_test_env_lock" in name for name in references
+        )
         owning = any(name.endswith(("::set_agentdesk_root_for_test", "::TestEnvVarGuard::set_path", "::TestRuntimeRootGuard::new")) for name in references)
         if not (direct or borrowed or owning):
             continue

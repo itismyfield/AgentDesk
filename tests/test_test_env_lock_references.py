@@ -143,6 +143,23 @@ class FileReferencePolicy(unittest.TestCase):
         self.check('const KEYS: &[&str] = &["AGENTDESK_ROOT_DIR", "OTHER"];\nstd::env::remove_var(name);', False)
         self.check(RAW + 'const KEYS: &[&str] = &["AGENTDESK_ROOT_DIR"];\nstd::env::set_var(name, value);', True)
 
+    def test_capture_function_value_requires_real_owner(self):
+        capture = "keys.map(crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock);"
+        for owner, valid in [("", False), ("PRIVATE_ENV_LOCK.lock();", False),
+                             ('// ' + RAW + '\nlet example = "' + RAW + '";', False),
+                             (RAW, True)]:
+            with self.subTest(owner=owner):
+                self.check(owner + capture, valid)
+
+    def test_actual_migrated_capture_stays_a_candidate(self):
+        path = "src/services/routines/migrated.rs"
+        source = (Path(__file__).resolve().parents[1] / path).read_text()
+        canonical = "crate::config::test_env_lock::acquire_shared_test_env_lock()"
+        self.assertIn(".map(crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock)", source)
+        self.assertIn(canonical, source)
+        self.check(source, True, path)
+        self.check(source.replace(canonical, "PRIVATE_ENV_LOCK.lock()"), False, path)
+
     def test_nonroot_dynamic_keys_are_reported_not_proved_safe(self):
         self.write('src/unknown.rs', 'std::env::set_var(name, value);')
         errors, _, outside = audit(self.root)
