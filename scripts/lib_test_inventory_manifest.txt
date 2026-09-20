@@ -4321,7 +4321,11 @@ services::discord::recovery_engine::manual_rebind::post_work_evidence_tests::rec
 services::discord::recovery_engine::manual_rebind::post_work_evidence_tests::synthetic_rebind_origin_row_is_watcher_owned
 services::discord::recovery_engine::manual_rebind::post_work_evidence_tests::tmux_ready_completion_requires_current_turn_work_evidence
 services::discord::recovery_engine::manual_rebind::stall_watchdog_respawn_deadlock_tests::rebind_full_path_adopts_orphan_row_and_resumes_at_committed_offset
+services::discord::recovery_engine::manual_rebind::stall_watchdog_respawn_deadlock_tests::respawn_absent_row_restores_absent_root
+services::discord::recovery_engine::manual_rebind::stall_watchdog_respawn_deadlock_tests::respawn_absent_row_restores_present_root
 services::discord::recovery_engine::manual_rebind::stall_watchdog_respawn_deadlock_tests::respawn_preflight_adopts_reacquired_orphan_row_instead_of_409
+services::discord::recovery_engine::manual_rebind::stall_watchdog_respawn_deadlock_tests::respawn_preflight_restores_absent_root
+services::discord::recovery_engine::manual_rebind::stall_watchdog_respawn_deadlock_tests::respawn_preflight_restores_present_root
 services::discord::recovery_engine::manual_rebind::stall_watchdog_respawn_deadlock_tests::respawn_with_absent_row_still_creates_new_synthetic_inflight
 services::discord::recovery_engine::manual_rebind_output_path::tests::claude_tui_selector_transcript_activity_probes_cached_and_raw_candidates
 services::discord::recovery_engine::manual_rebind_output_path::tests::claude_tui_selector_transcript_activity_re_resolves_stale_saved_path
@@ -4340,9 +4344,15 @@ services::discord::recovery_engine::manual_rebind_override::tests::health_rebind
 services::discord::recovery_engine::manual_rebind_override::tests::health_rebind_override_rejects_missing_and_non_regular_paths
 services::discord::recovery_engine::manual_rebind_override::tests::health_rebind_override_rejects_non_uuid_session_id
 services::discord::recovery_engine::manual_rebind_override::tests::health_rebind_override_rejects_symlink_escape_from_allowed_root
+services::discord::recovery_engine::phase_policy::tests::adoption_quadrants_restores_absent_root
+services::discord::recovery_engine::phase_policy::tests::adoption_quadrants_restores_present_root
 services::discord::recovery_engine::phase_policy::tests::orphaned_synthetic_watcher_row_adoption_quadrants
 services::discord::recovery_engine::phase_policy::tests::ownerless_live_inflight_with_partial_response_can_reattach_watcher
+services::discord::recovery_engine::phase_policy::tests::ownerless_live_restores_absent_root
+services::discord::recovery_engine::phase_policy::tests::ownerless_live_restores_present_root
 services::discord::recovery_engine::phase_policy::tests::planned_restart_ownerless_live_inflight_with_restore_anchor_can_reattach_watcher
+services::discord::recovery_engine::phase_policy::tests::planned_restart_restores_absent_root
+services::discord::recovery_engine::phase_policy::tests::planned_restart_restores_present_root
 services::discord::recovery_engine::rebind_runtime::tests::active_usage_snapshot_is_non_renderable_in_rebind_output
 services::discord::recovery_engine::rebind_runtime::tests::claude_rebind_adopted_transcript_session_id_follows_transcript_stem
 services::discord::recovery_engine::rebind_runtime::tests::claude_rebind_with_legacy_runtime_marker_does_not_adopt_transcript_as_claude_tui
@@ -6260,6 +6270,8 @@ services::discord::tui_direct_abort_marker::tests::unparseable_marker_is_quarant
 services::discord::tui_direct_abort_marker::warning_tests::deferred_claim_probe_mismatch_is_silent_but_evidence_rejection_warns_once
 services::discord::tui_direct_pending_start::tests::abandoned_presence_clear_keeps_durable_record
 services::discord::tui_direct_pending_start::tests::abort_pin_prefers_last_view_identity_over_successor_row
+services::discord::tui_direct_pending_start::tests::anchor_slot_rig_teardown_preserves_absent_root
+services::discord::tui_direct_pending_start::tests::anchor_slot_rig_teardown_preserves_present_root
 services::discord::tui_direct_pending_start::tests::backstop_abort_promotes_queued_follow_up_without_evicting_inflight
 services::discord::tui_direct_pending_start::tests::backstop_abort_releases_the_abandoned_prompt_anchor_slot
 services::discord::tui_direct_pending_start::tests::backstop_claim_safe_only_when_foreign_inflight_gone
