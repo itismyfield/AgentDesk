@@ -376,6 +376,11 @@ banner "Process-global Mutex<()> poison-recovery gate (#5185)"
 "$PYTHON" scripts/check_test_mutex_poison_recovery.py
 "$PYTHON" -m unittest tests.test_check_test_mutex_poison_recovery
 
+banner "Test ROOT file-reference policy"
+# Require canonical shared-lock references in discovered ROOT-mutating files.
+"$PYTHON" scripts/check_test_env_lock_references.py
+"$PYTHON" -m unittest tests.test_test_env_lock_references
+
 banner "Scheduled-message PG path-filter wiring contract"
 "$PYTHON" -m unittest tests.test_scheduled_messages_ci_wiring
 
