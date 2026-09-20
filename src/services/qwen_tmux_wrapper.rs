@@ -1,3 +1,4 @@
+use crate::services::process::stream_child::stream_queue;
 use crate::services::process::stream_child::{StreamChild, finish_reader, spawn_reader};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde_json::{Value, json};
@@ -369,15 +370,12 @@ fn run_turn_once(
     let mut watchdog = crate::services::qwen::QwenStreamWatchdog::default();
 
     loop {
-        if lifecycle
-            .drain_finished(&mut child)
+        lifecycle
+            .observe_and_seal(&mut child, &stdout_events)
             .map_err(|e| TurnFailure {
                 message: e.to_string(),
                 retryable: false,
-            })?
-        {
-            break;
-        }
+            })?;
         match stdout_events.recv_timeout(watchdog.poll_timeout()) {
             Ok(TurnReadEvent::Line(line)) => {
                 watchdog.observe_line();
@@ -458,8 +456,8 @@ fn run_turn_once(
 
 fn spawn_turn_stream_reader<R: std::io::Read + Send + 'static>(
     stdout: R,
-) -> mpsc::Receiver<TurnReadEvent> {
-    let (tx, rx) = mpsc::channel();
+) -> stream_queue::Receiver<TurnReadEvent> {
+    let (tx, rx) = stream_queue::channel();
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
@@ -965,9 +963,18 @@ mod child_exit_tests {
     use crate::services::process::stream_child::test_fixture::{CASES, ProviderFixture};
     #[test]
     fn actual_provider_exit_drains_terminal_without_waiting_for_descendant_fds() {
-        for mode in CASES {
+        run_cases(&CASES);
+    }
+
+    #[test]
+    fn published_terminal_survives_delayed_consumer_after_actual_exit() {
+        run_cases(&["delayed_normal"]);
+    }
+
+    fn run_cases(cases: &[&str]) {
+        for &mode in cases {
             let fixture = ProviderFixture::new("qwen", mode);
-            let normal = matches!(mode, "normal" | "quiet");
+            let normal = matches!(mode, "normal" | "quiet" | "delayed_normal");
             let path = fixture.path().join("out");
             let mut output = std::fs::File::create(&path).unwrap();
             let result = run_turn_once(

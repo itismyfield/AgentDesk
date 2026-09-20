@@ -1,3 +1,4 @@
+use crate::services::process::stream_child::stream_queue;
 use crate::services::process::stream_child::{EXIT_POLL, StreamChild, finish_reader, spawn_reader};
 #[cfg(unix)]
 mod followup_reader;
@@ -489,7 +490,7 @@ fn execute_qwen_streaming_attempt(
         QwenStreamWatchdog::default(),
         || {
             lifecycle
-                .drain_finished(&mut child)
+                .observe_and_seal(&mut child, &stdout_events)
                 .map_err(|e| e.to_string())
         },
     ) {
@@ -558,21 +559,19 @@ fn execute_qwen_streaming_attempt(
 }
 
 fn collect_qwen_stream_events(
-    stdout_events: &mpsc::Receiver<QwenStreamEvent>,
+    stdout_events: &stream_queue::Receiver<QwenStreamEvent>,
     cancel_token: Option<&CancelToken>,
     state: &mut QwenAttemptState,
     mut watchdog: QwenStreamWatchdog,
-    mut drain_finished: impl FnMut() -> Result<bool, String>,
+    mut observe_exit: impl FnMut() -> Result<(), String>,
 ) -> QwenStreamLoopResult {
     loop {
         if is_cancelled(cancel_token) {
             return QwenStreamLoopResult::Cancelled;
         }
 
-        match drain_finished() {
-            Ok(true) => return QwenStreamLoopResult::Eof,
-            Err(message) => return QwenStreamLoopResult::RetrySession { message },
-            Ok(false) => {}
+        if let Err(message) = observe_exit() {
+            return QwenStreamLoopResult::RetrySession { message };
         }
         match stdout_events.recv_timeout(watchdog.poll_timeout()) {
             Ok(QwenStreamEvent::Line(line)) => {
@@ -1607,9 +1606,18 @@ mod child_exit_tests {
     use crate::services::process::stream_child::test_fixture::{CASES, ProviderFixture};
     #[test]
     fn actual_provider_exit_drains_terminal_without_waiting_for_descendant_fds() {
-        for mode in CASES {
+        run_cases(&CASES);
+    }
+
+    #[test]
+    fn published_terminal_survives_delayed_consumer_after_actual_exit() {
+        run_cases(&["delayed_normal"]);
+    }
+
+    fn run_cases(cases: &[&str]) {
+        for &mode in cases {
             let fixture = ProviderFixture::new("qwen", mode);
-            let normal = matches!(mode, "normal" | "quiet");
+            let normal = matches!(mode, "normal" | "quiet" | "delayed_normal");
             let (tx, rx) = mpsc::channel();
             let result = execute_qwen_streaming_attempt(
                 fixture.cli.to_str().unwrap(),

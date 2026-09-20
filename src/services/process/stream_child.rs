@@ -1,3 +1,5 @@
+pub(crate) mod stream_queue;
+
 use std::io;
 use std::process::{Child, ExitStatus};
 use std::sync::{Arc, mpsc};
@@ -25,6 +27,8 @@ impl StreamChild {
         watchdog: Option<CancelWatchdog>,
     ) -> Self {
         let pid = child.id();
+        #[cfg(all(test, unix))]
+        stream_queue::test_delay::register_pid(pid);
         Self {
             pid,
             #[cfg(unix)]
@@ -100,13 +104,22 @@ impl StreamChild {
         }
         if self.status.is_some() {
             self.exited_at = Some(Instant::now());
+            #[cfg(all(test, unix))]
+            stream_queue::test_delay::after_exit();
         }
         Ok(())
     }
 
-    pub(crate) fn drain_finished(&mut self, child: &mut Child) -> io::Result<bool> {
+    pub(crate) fn observe_and_seal<T>(
+        &mut self,
+        child: &mut Child,
+        output: &stream_queue::Receiver<T>,
+    ) -> io::Result<()> {
         self.observe_exit(child)?;
-        Ok(self.exited_at.is_some_and(|at| at.elapsed() >= EXIT_DRAIN))
+        if self.exited_at.is_some_and(|at| at.elapsed() >= EXIT_DRAIN) {
+            output.seal();
+        }
+        Ok(())
     }
 
     pub(crate) fn terminate(&mut self, child: &mut Child) {

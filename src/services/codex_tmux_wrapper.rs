@@ -1,3 +1,4 @@
+use crate::services::process::stream_child::stream_queue;
 use crate::services::process::stream_child::{EXIT_POLL, StreamChild, finish_reader, spawn_reader};
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
@@ -264,7 +265,7 @@ fn run_turn(
         .stdout
         .take()
         .ok_or_else(|| "Failed to capture Codex stdout".to_string())?;
-    let (stdout_tx, stdout_rx) = mpsc::channel::<Result<Option<String>, String>>();
+    let (stdout_tx, stdout_rx) = stream_queue::channel::<Result<Option<String>, String>>();
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         loop {
@@ -293,12 +294,9 @@ fn run_turn(
     let mut saw_any_stdout = false;
     let first_event_timeout = codex_first_event_timeout();
     loop {
-        if lifecycle
-            .drain_finished(&mut child)
-            .map_err(|e| e.to_string())?
-        {
-            break;
-        }
+        lifecycle
+            .observe_and_seal(&mut child, &stdout_rx)
+            .map_err(|e| e.to_string())?;
         let next_line = match stdout_rx.recv_timeout(EXIT_POLL) {
             Ok(line) => line,
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -2206,9 +2204,18 @@ mod child_exit_tests {
     use crate::services::process::stream_child::test_fixture::{CASES, ProviderFixture};
     #[test]
     fn actual_provider_exit_drains_terminal_without_waiting_for_descendant_fds() {
-        for mode in CASES {
+        run_cases(&CASES);
+    }
+
+    #[test]
+    fn published_terminal_survives_delayed_consumer_after_actual_exit() {
+        run_cases(&["delayed_normal"]);
+    }
+
+    fn run_cases(cases: &[&str]) {
+        for &mode in cases {
             let fixture = ProviderFixture::new("codex", mode);
-            let normal = matches!(mode, "normal" | "quiet");
+            let normal = matches!(mode, "normal" | "quiet" | "delayed_normal");
             let path = fixture.path().join("out");
             let mut output = RotatingJsonlWriter::open(&path).unwrap();
             let result = run_turn(

@@ -8,8 +8,16 @@ pub(crate) struct ProviderFixture {
     pub(crate) cli: PathBuf,
     parent_group: i32,
     cleanup: mpsc::Receiver<(u32, ProcessIdentity)>,
+    delay: Option<super::stream_queue::test_delay::Guard>,
 }
-pub(crate) const CASES: [&str; 5] = ["error", "normal", "continuous", "escaped", "quiet"];
+pub(crate) const CASES: [&str; 6] = [
+    "error",
+    "normal",
+    "continuous",
+    "escaped",
+    "escaped_continuous",
+    "quiet",
+];
 impl ProviderFixture {
     pub(crate) fn new(provider: &str, mode: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
@@ -36,19 +44,19 @@ root = pathlib.Path(sys.argv[1])
 (root / "ready").touch()
 end = time.monotonic() + 8
 while time.monotonic() < end:
-    if sys.argv[2] == "continuous": print('{{}}', flush=True)
+    if sys.argv[2].endswith("continuous"): print('{{}}', flush=True)
     time.sleep(.005)
 (root / "fd-closed").touch()
 '''
-child = subprocess.Popen([sys.executable, '-c', code, str(root), mode], start_new_session=mode == 'escaped')
+child = subprocess.Popen([sys.executable, '-c', code, str(root), mode], start_new_session=mode.startswith('escaped'), stdout=subprocess.DEVNULL if mode == 'delayed_normal' else None, stderr=subprocess.DEVNULL if mode == 'delayed_normal' else None)
 (root / 'identity').write_text(json.dumps([os.getpid(), os.getpgrp(), child.pid, os.getpgid(child.pid)]))
 while not (root / 'ready').exists() or not (root / 'owner-ack').exists(): time.sleep(.001)
 if mode == 'cancel': time.sleep(8)
 if mode == 'quiet':
     time.sleep(.3)
     (root / 'quiet-finished').touch()
-if mode in ('normal', 'quiet'): print({terminal:?}, flush=True)
-sys.exit(0 if mode in ('normal', 'quiet') else 7)
+if mode in ('normal', 'quiet', 'delayed_normal'): print({terminal:?}, flush=True)
+sys.exit(0 if mode in ('normal', 'quiet', 'delayed_normal') else 7)
 "#)).unwrap();
         std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = dir.path().to_owned();
@@ -71,6 +79,7 @@ sys.exit(0 if mode in ('normal', 'quiet') else 7)
             cli,
             parent_group: unsafe { libc::getpgrp() },
             cleanup,
+            delay: (mode == "delayed_normal").then(super::stream_queue::test_delay::arm),
         }
     }
     pub(crate) fn path(&self) -> &Path {
@@ -109,6 +118,9 @@ sys.exit(0 if mode in ('normal', 'quiet') else 7)
         }
     }
     pub(crate) fn verify_return(&self, mode: &str) {
+        if let Some(delay) = &self.delay {
+            delay.verify();
+        }
         let ids: Vec<i32> =
             serde_json::from_str(&std::fs::read_to_string(self.path().join("identity")).unwrap())
                 .unwrap();

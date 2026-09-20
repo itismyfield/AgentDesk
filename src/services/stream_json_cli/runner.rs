@@ -1,5 +1,7 @@
 //! Provider-neutral process lifecycle for StreamJson CLIs.
 
+use crate::services::process::stream_child::stream_queue;
+
 use crate::services::process::stream_child::{EXIT_POLL, StreamChild, finish_reader, spawn_reader};
 
 use std::io::{BufRead, BufReader, Read};
@@ -89,7 +91,7 @@ fn run_prepared_with_clock(
         .stderr
         .take()
         .ok_or_else(|| "Failed to capture StreamJson stderr".to_string())?;
-    let (line_tx, line_rx) = mpsc::channel::<Option<String>>();
+    let (line_tx, line_rx) = stream_queue::channel::<Option<String>>();
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
@@ -120,12 +122,9 @@ fn run_prepared_with_clock(
             let _ = finish_reader(&stderr_handle);
             return Ok(());
         }
-        if lifecycle
-            .drain_finished(&mut child)
-            .map_err(|e| e.to_string())?
-        {
-            break;
-        }
+        lifecycle
+            .observe_and_seal(&mut child, &line_rx)
+            .map_err(|e| e.to_string())?;
         let now = now();
         if !saw_progress && now.duration_since(started_at) >= startup {
             lifecycle.terminate(&mut child);
@@ -355,9 +354,18 @@ mod child_exit_tests {
     use crate::services::process::stream_child::test_fixture::{CASES, ProviderFixture};
     #[test]
     fn actual_provider_exit_drains_terminal_without_waiting_for_descendant_fds() {
-        for mode in CASES {
+        run_cases(&CASES);
+    }
+
+    #[test]
+    fn published_terminal_survives_delayed_consumer_after_actual_exit() {
+        run_cases(&["delayed_normal"]);
+    }
+
+    fn run_cases(cases: &[&str]) {
+        for &mode in cases {
             let fixture = ProviderFixture::new("grok", mode);
-            let normal = matches!(mode, "normal" | "quiet");
+            let normal = matches!(mode, "normal" | "quiet" | "delayed_normal");
             let (tx, rx) = mpsc::channel();
             let prepared = PreparedCommand {
                 executable: fixture.cli.clone(),
@@ -369,7 +377,11 @@ mod child_exit_tests {
                 unset_env: vec![],
                 codec: Box::new(super::super::codec::MessagesJsonCodec::new()),
             };
-            run_prepared(prepared, tx, Duration::ZERO, None).unwrap();
+            let completed = run_prepared(prepared, tx, Duration::ZERO, None);
+            assert!(
+                completed.is_ok(),
+                "queued terminal must reach real codec: {completed:?}"
+            );
             let messages: Vec<_> = rx.try_iter().collect();
             assert_eq!(
                 messages

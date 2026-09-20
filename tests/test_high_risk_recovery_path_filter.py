@@ -153,7 +153,7 @@ class HighRiskRecoveryPathFilterTests(unittest.TestCase):
         for path in (
             "src/services/codex_tmux_wrapper.rs", "src/services/gemini.rs",
             "src/services/qwen.rs", "src/services/qwen_tmux_wrapper.rs",
-            "src/services/opencode.rs", "src/services/provider.rs",
+            "src/services/opencode.rs", "src/services/provider.rs", "src/services/provider_runtime.rs",
             "src/services/provider/cancel_watchdog.rs",
             "src/services/process.rs", "src/services/process/stream_child.rs",
             "src/services/stream_json_cli/runner.rs",
