@@ -21,29 +21,8 @@ mod worker_entry;
 
 pub(crate) use worker_entry::{IntakeRequest, execute_intake_turn_core};
 
-/// Bundle of Discord-runtime dependencies that `handle_text_message`
-/// reads from outside its per-message parameters. Phase 2-pre.2 of
-/// intake-node-routing (docs/design/intake-node-routing.md): the body
-/// reads only `http` and (optionally) `cache`, both of which are REST-
-/// or cache-backed primitives. Worker-side callers without a live shard
-/// pass `cache: None` and `ctx_for_chained_dispatch: None`; leader-side
-/// callers pass `Some(&ctx.cache)` and `Some(ctx)` to preserve the
-/// in-process category cache and the chained-dispatch path.
-///
-/// `ctx_for_chained_dispatch` is the only remaining `&serenity::Context`
-/// dependency: `DiscordGateway::new` accepts an optional
-/// `LiveDiscordTurnContext { ctx, .. }` that wires the queued-turn
-/// hand-off back through the gateway's live shard. Workers cannot
-/// participate in that flow (they have no shard) so they pass `None`
-/// and the gateway is constructed with `live_turn = None`.
-#[derive(Clone, Copy)]
-pub(in crate::services::discord) struct IntakeDeps<'a> {
-    pub http: &'a Arc<serenity::http::Http>,
-    pub cache: Option<&'a Arc<serenity::cache::Cache>>,
-    pub ctx_for_chained_dispatch: Option<&'a serenity::Context>,
-    pub shared: &'a Arc<SharedData>,
-    pub token: &'a str,
-}
+mod context;
+pub(in crate::services::discord) use context::IntakeDeps;
 
 #[cfg(test)]
 mod intake_outbox_state_builder_tests {
@@ -1771,16 +1750,16 @@ pub(super) async fn handle_text_message(
         Some(&turn_id),
     );
     let built_system_prompt = built_system_prompt
-        .with_session_anchors(
-            &memory_settings,
-            &provider,
-            &current_path,
-            channel_id,
-            memory_scope_channel_id,
-            role_binding.as_ref(),
-            session_id.as_deref(),
-            force_fresh_provider_session || session_was_cleared,
-        )
+        .with_session_anchors(crate::services::memory::SessionAnchorRequest {
+            settings: &memory_settings,
+            provider: &provider,
+            current_path: &current_path,
+            channel_id: channel_id.get(),
+            memory_scope_channel_id: memory_scope_channel_id.get(),
+            role_binding: role_binding.as_ref(),
+            session_id: session_id.as_deref(),
+            fresh: force_fresh_provider_session || session_was_cleared,
+        })
         .await;
     let system_prompt_owned = built_system_prompt.system_prompt;
     if let Some(manifest) = built_system_prompt.manifest {

@@ -181,17 +181,30 @@ impl MementoBackend {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct SessionAnchorRequest<'a> {
+    pub(crate) settings: &'a ResolvedMemorySettings,
+    pub(crate) provider: &'a ProviderKind,
+    pub(crate) current_path: &'a str,
+    pub(crate) channel_id: u64,
+    pub(crate) memory_scope_channel_id: u64,
+    pub(crate) role_binding: Option<&'a RoleBinding>,
+    pub(crate) session_id: Option<&'a str>,
+    pub(crate) fresh: bool,
+}
+
 pub(crate) async fn load_session_anchor_prompt(
-    settings: &ResolvedMemorySettings,
-    provider: &ProviderKind,
-    current_path: &str,
-    channel_id: u64,
-    memory_scope_channel_id: u64,
-    role_binding: Option<&RoleBinding>,
-    session_id: Option<&str>,
-    fresh: bool,
+    request: SessionAnchorRequest<'_>,
 ) -> Option<String> {
+    let SessionAnchorRequest {
+        settings,
+        provider,
+        current_path,
+        channel_id,
+        memory_scope_channel_id,
+        role_binding,
+        session_id,
+        fresh,
+    } = request;
     if !matches!(provider, ProviderKind::Claude | ProviderKind::Codex) {
         return None;
     }

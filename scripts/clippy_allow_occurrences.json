@@ -390,7 +390,12 @@
     {
       "path": "src/services/discord/router/message_handler/headless_turn.rs",
       "lint": "too_many_arguments",
-      "count": 4
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/router/message_handler/headless_turn/entrypoints.rs",
+      "lint": "too_many_arguments",
+      "count": 3
     },
     {
       "path": "src/services/discord/router/message_handler/intake_turn.rs",

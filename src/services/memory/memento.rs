@@ -21,7 +21,6 @@ use crate::runtime_layout;
 use crate::services::discord::DispatchProfile;
 use crate::services::discord::settings::ResolvedMemorySettings;
 
-const MEMENTO_MCP_PATH: &str = "/mcp";
 const MEMENTO_PROTOCOL_VERSION: &str = "2025-11-25";
 const MAX_WORKING_MEMORY_LINES: usize = 6;
 const MAX_MEMORY_LINES: usize = 6;
@@ -32,7 +31,10 @@ const MEMENTO_MODEL_OUTPUT_MAX_BYTES: usize = 16 * 1024;
 
 #[path = "memento_anchor.rs"]
 mod anchor;
-pub(crate) use anchor::load_session_anchor_prompt;
+pub(crate) use anchor::{SessionAnchorRequest, load_session_anchor_prompt};
+#[path = "memento_endpoint.rs"]
+mod endpoint;
+use endpoint::{mcp_url, normalize_memento_endpoint};
 
 #[derive(Clone, Debug)]
 struct CachedMcpSession {
@@ -575,14 +577,6 @@ fn env_var_value(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn normalize_memento_endpoint(endpoint: &str) -> String {
-    let trimmed = endpoint.trim().trim_end_matches('/');
-    trimmed
-        .strip_suffix(MEMENTO_MCP_PATH)
-        .unwrap_or(trimmed)
-        .to_string()
-}
-
 fn normalize_tool_feedback_trigger_type(trigger_type: Option<String>) -> String {
     match trigger_type
         .as_deref()
@@ -612,14 +606,6 @@ mod tool_feedback_trigger_type_tests {
             "sampled"
         );
     }
-}
-
-fn mcp_url(endpoint: &str) -> String {
-    format!(
-        "{}{}",
-        normalize_memento_endpoint(endpoint),
-        MEMENTO_MCP_PATH
-    )
 }
 
 /// #2660 — cache key for the static-slice tracker. Crucially excludes

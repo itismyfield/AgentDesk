@@ -94,7 +94,8 @@ src/
 │   │   ├── canonical_identity.rs
 │   │   ├── canonical_identity_pg_tests.rs
 │   │   ├── rebind_override.rs
-│   │   └── tests.rs
+│   │   ├── tests.rs
+│   │   └── thread_gc.rs
 │   ├── dispatches/
 │   │   ├── outbox/
 │   │   │   ├── claim.rs
@@ -898,6 +899,7 @@ src/
 │   │   │   │   └── stale_turn.rs
 │   │   │   ├── message_handler/
 │   │   │   │   ├── headless_turn/
+│   │   │   │   │   ├── entrypoints.rs
 │   │   │   │   │   └── routine_metadata.rs
 │   │   │   │   ├── intake_turn/
 │   │   │   │   │   ├── dispatch_stamp/
@@ -909,6 +911,7 @@ src/
 │   │   │   │   │   │   └── requeue_tests.rs
 │   │   │   │   │   ├── adk_thread.rs
 │   │   │   │   │   ├── claim_bootstrap.rs
+│   │   │   │   │   ├── context.rs
 │   │   │   │   │   ├── dispatch_runtime.rs
 │   │   │   │   │   ├── dispatch_stamp.rs
 │   │   │   │   │   ├── inflight_create_log.rs
@@ -1509,7 +1512,8 @@ src/
 │   │   │   └── selection_tests.rs
 │   │   └── auth_profiles.rs
 │   ├── dispatched_sessions/
-│   │   └── canonical_identity.rs
+│   │   ├── canonical_identity.rs
+│   │   └── tmux_cleanup.rs
 │   ├── dispatches/
 │   │   ├── discord_delivery/
 │   │   │   ├── guard.rs
@@ -1549,6 +1553,7 @@ src/
 │   │   ├── local.rs
 │   │   ├── memento.rs
 │   │   ├── memento_anchor.rs
+│   │   ├── memento_endpoint.rs
 │   │   ├── memento_throttle.rs
 │   │   ├── mod.rs
 │   │   └── runtime_state.rs

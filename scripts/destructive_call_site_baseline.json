@@ -29,7 +29,7 @@
         "src/services/discord/tmux_watcher/terminal_abort_exits.rs": 1,
         "src/services/discord/turn_bridge/retry_state.rs": 1,
         "src/services/discord/watchers/lifecycle/restore.rs": 1,
-        "src/services/dispatched_sessions.rs": 1,
+        "src/services/dispatched_sessions/tmux_cleanup.rs": 1,
         "src/services/provider/cancel_token_cleanup/executor.rs": 1,
         "src/services/qwen/session_lifecycle.rs": 3,
         "src/services/session_resume.rs": 1,

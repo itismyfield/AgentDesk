@@ -14,8 +14,9 @@ use crate::services::provider::ProviderKind;
 
 pub(crate) use local::LocalMemoryBackend;
 pub(crate) use memento::{
-    MementoBackend, MementoRememberRequest, MementoToolFeedbackRequest, load_session_anchor_prompt,
-    resolve_memento_agent_id, resolve_memento_workspace, sanitize_memento_workspace_segment,
+    MementoBackend, MementoRememberRequest, MementoToolFeedbackRequest, SessionAnchorRequest,
+    load_session_anchor_prompt, resolve_memento_agent_id, resolve_memento_workspace,
+    sanitize_memento_workspace_segment,
 };
 pub(crate) use memento_throttle::{
     memento_call_metrics_snapshot, note_memento_tool_feedback_trigger,

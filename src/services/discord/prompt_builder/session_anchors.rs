@@ -1,30 +1,12 @@
 use super::*;
+use crate::services::memory::{SessionAnchorRequest, load_session_anchor_prompt};
 
 impl BuiltSystemPrompt {
-    #[allow(clippy::too_many_arguments)]
     pub(in crate::services::discord) async fn with_session_anchors(
         mut self,
-        settings: &ResolvedMemorySettings,
-        provider: &ProviderKind,
-        current_path: &str,
-        channel_id: ChannelId,
-        memory_scope_channel_id: ChannelId,
-        role_binding: Option<&RoleBinding>,
-        session_id: Option<&str>,
-        fresh: bool,
+        request: SessionAnchorRequest<'_>,
     ) -> Self {
-        if let Some(anchors) = crate::services::memory::load_session_anchor_prompt(
-            settings,
-            provider,
-            current_path,
-            channel_id.get(),
-            memory_scope_channel_id.get(),
-            role_binding,
-            session_id,
-            fresh,
-        )
-        .await
-        {
+        if let Some(anchors) = load_session_anchor_prompt(request).await {
             self.append_anchor_layer(&anchors);
         }
         self
