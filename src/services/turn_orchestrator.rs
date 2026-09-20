@@ -7533,7 +7533,11 @@ mod finish_cancelled_turn_tests {
             Err(poisoned) => poisoned.into_inner(),
         };
         let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tmp.path(),
+        );
+        checkpoint(&[("AGENTDESK_ROOT_DIR", tmp.path().as_os_str())]);
 
         let provider = ProviderKind::Codex;
         let token_hash = "finish-cancelled-no-rehydrate";
@@ -7580,8 +7584,24 @@ mod finish_cancelled_turn_tests {
             snapshot.intervention_queue.is_empty(),
             "finish_cancelled_turn must not hydrate disk-only pending queues",
         );
+    }
 
-        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+    use crate::test_env_panic_probe::{assert_root_restored, checkpoint};
+
+    #[test]
+    fn cancelled_turn_cleanup_restores_env_after_panic_present() {
+        assert_root_restored(
+            true,
+            finish_cancelled_turn_clears_cancelled_active_without_rehydrating_queue,
+        );
+    }
+
+    #[test]
+    fn cancelled_turn_cleanup_restores_env_after_panic_absent() {
+        assert_root_restored(
+            false,
+            finish_cancelled_turn_clears_cancelled_active_without_rehydrating_queue,
+        );
     }
 
     #[tokio::test]

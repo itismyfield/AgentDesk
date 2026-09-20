@@ -30,12 +30,16 @@ impl TestEnvVarGuard {
         key: &'static str,
         value: &std::ffi::OsStr,
     ) -> Self {
-        let previous = std::env::var_os(key);
+        let guard = Self::capture_after_shared_test_env_lock(key);
         unsafe { std::env::set_var(key, value) };
+        guard
+    }
+
+    pub(crate) fn capture_after_shared_test_env_lock(key: &'static str) -> Self {
         Self {
             _lock: None,
             key,
-            previous,
+            previous: std::env::var_os(key),
         }
     }
 }

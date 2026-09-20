@@ -2474,7 +2474,11 @@ mod watcher_stream_progress_tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+        let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tmp.path(),
+        );
+        checkpoint(&[("AGENTDESK_ROOT_DIR", tmp.path().as_os_str())]);
 
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(1509350490461180105);
@@ -2533,8 +2537,24 @@ mod watcher_stream_progress_tests {
             persisted.last_offset, 777,
             "streaming progress must preserve the non-owned last_offset watermark"
         );
+    }
 
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+    use crate::test_env_panic_probe::{assert_root_restored, checkpoint};
+
+    #[test]
+    fn stream_tool_hold_witness_restores_env_after_panic_present() {
+        assert_root_restored(
+            true,
+            persist_watcher_stream_progress_persists_tool_hold_witness,
+        );
+    }
+
+    #[test]
+    fn stream_tool_hold_witness_restores_env_after_panic_absent() {
+        assert_root_restored(
+            false,
+            persist_watcher_stream_progress_persists_tool_hold_witness,
+        );
     }
 
     #[test]
@@ -2543,7 +2563,11 @@ mod watcher_stream_progress_tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+        let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tmp.path(),
+        );
+        checkpoint(&[("AGENTDESK_ROOT_DIR", tmp.path().as_os_str())]);
 
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(1509350490461180415);
@@ -2586,8 +2610,22 @@ mod watcher_stream_progress_tests {
             .expect("reload row");
         assert_eq!(reloaded.full_response, "already persisted prefix");
         assert_eq!(reloaded.response_sent_offset, state.response_sent_offset);
+    }
 
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+    #[test]
+    fn stream_rewind_seed_restores_env_after_panic_present() {
+        assert_root_restored(
+            true,
+            persist_watcher_stream_progress_skips_rewind_seed_before_body_catches_up_4115,
+        );
+    }
+
+    #[test]
+    fn stream_rewind_seed_restores_env_after_panic_absent() {
+        assert_root_restored(
+            false,
+            persist_watcher_stream_progress_skips_rewind_seed_before_body_catches_up_4115,
+        );
     }
 }
 
@@ -2661,7 +2699,11 @@ mod streaming_rollover_frozen_prefix_persistence_tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+        let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tmp.path(),
+        );
+        checkpoint(&[("AGENTDESK_ROOT_DIR", tmp.path().as_os_str())]);
 
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(1_521_269_012_347_097_158);
@@ -2747,7 +2789,22 @@ mod streaming_rollover_frozen_prefix_persistence_tests {
             vec![f1.get(), f2.get()],
             "the persisted frozen-prefix set is monotonic (union, no dup)"
         );
+    }
+    use crate::test_env_panic_probe::{assert_root_restored, checkpoint};
 
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+    #[test]
+    fn frozen_prefix_persistence_restores_env_after_panic_present() {
+        assert_root_restored(
+            true,
+            frozen_prefix_persists_across_iteration_and_restore_for_terminal_delete,
+        );
+    }
+
+    #[test]
+    fn frozen_prefix_persistence_restores_env_after_panic_absent() {
+        assert_root_restored(
+            false,
+            frozen_prefix_persists_across_iteration_and_restore_for_terminal_delete,
+        );
     }
 }
