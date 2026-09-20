@@ -49,13 +49,8 @@ module.exports = function attachIdleKill(timeouts, helpers) {
       // (status='idle', selector preserved) so the next message can rehydrate
       // the provider session through the recap path.
       //
-      // Scope: main channels only. Thread-suffixed sessions are filtered both
-      // server-side (`thread_channel_id IS NULL` + session_key regex guard)
-      // and client-side (parseSessionThreadId) so the JS LIMIT-50 window is
-      // not starved by thread-heavy backlogs. Thread sessions are managed
-      // by gc_stale_thread_sessions_pg, which deletes stale thread rows and
-      // reaps their owner-marked tmux sessions before an 8h JS backstop could
-      // observe them.
+      // Main channels only; thread GC removes records only after their
+      // locally owned tmux is confirmed missing, never while it is present.
       var mainChannelSqlGuard =
         "AND thread_channel_id IS NULL " +
         "AND session_key !~ '-t[0-9]{15,}(-dev)?$' ";
