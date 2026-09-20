@@ -1,3 +1,4 @@
+use crate::services::process::stream_child::{EXIT_POLL, StreamChild, finish_reader, spawn_reader};
 #[cfg(unix)]
 mod followup_reader;
 #[cfg(unix)]
@@ -65,7 +66,7 @@ pub(super) fn stamp_qwen_spawn_markers(tmux_session_name: &str) {
 
 const QWEN_CANCELLED_MESSAGE: &str = "Qwen request cancelled";
 const QWEN_SESSION_DEAD_MESSAGE: &str = "Qwen stream ended without a terminal result";
-pub(crate) const QWEN_STREAM_POLL_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const QWEN_STREAM_POLL_TIMEOUT: Duration = EXIT_POLL;
 // Allow up to 240 s for the first token: NVIDIA-backed large-context requests and upstream
 // rate-limit backoffs can legitimately exceed the normal interactive response budget.
 pub(crate) const QWEN_STREAM_STARTUP_WATCHDOG: Duration = Duration::from_secs(240);
@@ -455,6 +456,7 @@ fn execute_qwen_streaming_attempt(
         .map_err(|e| format!("Failed to start Qwen: {}", e))?;
 
     register_child_pid(cancel_token.as_deref(), child.id());
+    let mut lifecycle = StreamChild::new(&child, cancel_token.clone(), None);
 
     let stdout = child
         .stdout
@@ -465,7 +467,7 @@ fn execute_qwen_streaming_attempt(
         .take()
         .ok_or_else(|| "Failed to capture Qwen stderr".to_string())?;
     let stdout_events = spawn_line_stream_reader(stdout, "Qwen");
-    let stderr_handle = std::thread::spawn(move || {
+    let stderr_handle = spawn_reader(move || {
         let mut buf = String::new();
         let mut reader = BufReader::new(stderr);
         let _ = reader.read_to_string(&mut buf);
@@ -473,8 +475,8 @@ fn execute_qwen_streaming_attempt(
     });
 
     if is_cancelled(cancel_token.as_deref()) {
-        kill_child_tree(&mut child);
-        let stderr = stderr_handle.join().unwrap_or_default();
+        lifecycle.terminate(&mut child);
+        let stderr = finish_reader(&stderr_handle);
         emit_cancellation_error(&sender, String::new(), stderr, None);
         return Ok(QwenAttemptResult::Cancelled);
     }
@@ -485,16 +487,21 @@ fn execute_qwen_streaming_attempt(
         cancel_token.as_deref(),
         &mut state,
         QwenStreamWatchdog::default(),
+        || {
+            lifecycle
+                .drain_finished(&mut child)
+                .map_err(|e| e.to_string())
+        },
     ) {
         QwenStreamLoopResult::Cancelled => {
-            kill_child_tree(&mut child);
-            let stderr = stderr_handle.join().unwrap_or_default();
+            lifecycle.terminate(&mut child);
+            let stderr = finish_reader(&stderr_handle);
             emit_cancellation_error(&sender, state.raw_stdout, stderr, None);
             return Ok(QwenAttemptResult::Cancelled);
         }
         QwenStreamLoopResult::RetrySession { message } => {
-            kill_child_tree(&mut child);
-            let stderr = stderr_handle.join().unwrap_or_default();
+            lifecycle.terminate(&mut child);
+            let stderr = finish_reader(&stderr_handle);
             return Ok(QwenAttemptResult::RetrySession {
                 message,
                 stdout: state.raw_stdout,
@@ -505,10 +512,10 @@ fn execute_qwen_streaming_attempt(
         QwenStreamLoopResult::Eof => {}
     }
 
-    let status = child
-        .wait()
+    let status = lifecycle
+        .wait(&mut child)
         .map_err(|e| format!("Failed waiting for Qwen: {}", e))?;
-    let stderr = stderr_handle.join().unwrap_or_default();
+    let stderr = finish_reader(&stderr_handle);
 
     if is_cancelled(cancel_token.as_deref()) {
         emit_cancellation_error(&sender, state.raw_stdout, stderr, status.code());
@@ -555,12 +562,18 @@ fn collect_qwen_stream_events(
     cancel_token: Option<&CancelToken>,
     state: &mut QwenAttemptState,
     mut watchdog: QwenStreamWatchdog,
+    mut drain_finished: impl FnMut() -> Result<bool, String>,
 ) -> QwenStreamLoopResult {
     loop {
         if is_cancelled(cancel_token) {
             return QwenStreamLoopResult::Cancelled;
         }
 
+        match drain_finished() {
+            Ok(true) => return QwenStreamLoopResult::Eof,
+            Err(message) => return QwenStreamLoopResult::RetrySession { message },
+            Ok(false) => {}
+        }
         match stdout_events.recv_timeout(watchdog.poll_timeout()) {
             Ok(QwenStreamEvent::Line(line)) => {
                 watchdog.observe_line();
@@ -1585,5 +1598,75 @@ mod qwen_provider_lifecycle_tests {
         .expect("fresh turns ignore the previous provider session");
 
         assert!(matches!(strategy, QwenResumeStrategy::Fresh));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod child_exit_tests {
+    use super::*;
+    use crate::services::process::stream_child::test_fixture::{CASES, ProviderFixture};
+    #[test]
+    fn actual_provider_exit_drains_terminal_without_waiting_for_descendant_fds() {
+        for mode in CASES {
+            let fixture = ProviderFixture::new("qwen", mode);
+            let normal = matches!(mode, "normal" | "quiet");
+            let (tx, rx) = mpsc::channel();
+            let result = execute_qwen_streaming_attempt(
+                fixture.cli.to_str().unwrap(),
+                &fixture.resolution(),
+                "test",
+                None,
+                QwenResumeStrategy::Fresh,
+                fixture.path().to_str().unwrap(),
+                tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                rx.try_iter()
+                    .any(|m| matches!(m, StreamMessage::Done { .. })),
+                normal
+            );
+            if !normal {
+                assert!(matches!(
+                    result,
+                    QwenAttemptResult::RetrySession {
+                        exit_code: Some(7),
+                        ..
+                    }
+                ));
+            }
+            fixture.verify_return(mode);
+        }
+    }
+
+    #[test]
+    fn actual_quiet_provider_observes_exact_token_manual_cancel() {
+        let fixture = ProviderFixture::new("qwen", "cancel");
+        let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+        let cancel = fixture.cancel_after_accept(token.clone());
+        let (tx, _rx) = mpsc::channel();
+        let result = execute_qwen_streaming_attempt(
+            fixture.cli.to_str().unwrap(),
+            &fixture.resolution(),
+            "test",
+            None,
+            QwenResumeStrategy::Fresh,
+            fixture.path().to_str().unwrap(),
+            tx,
+            Some(token.clone()),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(matches!(result, QwenAttemptResult::Cancelled));
+        cancel.join().unwrap();
+        assert_eq!(token.cancel_source().as_deref(), Some("manual_cancel"));
+        assert_eq!(token.child_pid_value(), None);
+        fixture.verify_return("cancel");
     }
 }

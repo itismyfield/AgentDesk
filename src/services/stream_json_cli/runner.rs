@@ -1,5 +1,7 @@
 //! Provider-neutral process lifecycle for StreamJson CLIs.
 
+use crate::services::process::stream_child::{EXIT_POLL, StreamChild, finish_reader, spawn_reader};
+
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -8,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::platform::{BinaryResolution, apply_binary_resolution};
-use crate::services::process::{configure_child_process_group, kill_child_tree};
+use crate::services::process::configure_child_process_group;
 use crate::services::provider::{cancel_requested, register_child_pid, spawn_cancel_watchdog};
 
 use super::codec::StreamJsonCodec;
@@ -72,9 +74,10 @@ fn run_prepared_with_clock(
         .map_err(|error| format!("Failed to start StreamJson CLI: {error}"))?;
 
     register_child_pid(cancel.as_deref(), child.id());
-    let _watchdog = spawn_cancel_watchdog(cancel.clone(), "stream-json-cli");
+    let watchdog = spawn_cancel_watchdog(cancel.clone(), "stream-json-cli");
+    let mut lifecycle = StreamChild::new(&child, cancel.clone(), watchdog);
     if cancel_requested(cancel.as_deref()) {
-        kill_child_tree(&mut child);
+        lifecycle.terminate(&mut child);
         return Ok(());
     }
 
@@ -101,10 +104,10 @@ fn run_prepared_with_clock(
         }
         let _ = line_tx.send(None);
     });
-    let stderr_handle = std::thread::spawn(move || collect_stderr(stderr));
+    let stderr_handle = spawn_reader(move || collect_stderr(stderr));
 
     let mut codec = prepared.codec;
-    let poll = Duration::from_secs(5);
+    let poll = EXIT_POLL;
     let startup = startup_output_timeout(no_output_timeout);
     let started_at = now();
     let mut saw_progress = false;
@@ -112,16 +115,22 @@ fn run_prepared_with_clock(
 
     loop {
         if cancel_requested(cancel.as_deref()) {
-            kill_child_tree(&mut child);
+            lifecycle.terminate(&mut child);
             let _ = child.wait();
-            let _ = stderr_handle.join();
+            let _ = finish_reader(&stderr_handle);
             return Ok(());
+        }
+        if lifecycle
+            .drain_finished(&mut child)
+            .map_err(|e| e.to_string())?
+        {
+            break;
         }
         let now = now();
         if !saw_progress && now.duration_since(started_at) >= startup {
-            kill_child_tree(&mut child);
+            lifecycle.terminate(&mut child);
             let _ = child.wait();
-            let _ = stderr_handle.join();
+            let _ = finish_reader(&stderr_handle);
             return Err(format!(
                 "[{NO_OUTPUT_ERROR_MARKER}] StreamJson CLI produced no output for {} seconds",
                 startup.as_secs()
@@ -133,9 +142,9 @@ fn run_prepared_with_clock(
                 let messages = match codec.push_stdout_line(&line) {
                     Ok(messages) => messages,
                     Err(error) => {
-                        kill_child_tree(&mut child);
+                        lifecycle.terminate(&mut child);
                         let _ = child.wait();
-                        let _ = stderr_handle.join();
+                        let _ = finish_reader(&stderr_handle);
                         return Err(mark_no_output_error(saw_progress, error));
                     }
                 };
@@ -148,9 +157,9 @@ fn run_prepared_with_clock(
                 }
                 for message in messages {
                     if sender.send(message).is_err() {
-                        kill_child_tree(&mut child);
+                        lifecycle.terminate(&mut child);
                         let _ = child.wait();
-                        let _ = stderr_handle.join();
+                        let _ = finish_reader(&stderr_handle);
                         return Ok(());
                     }
                 }
@@ -160,10 +169,10 @@ fn run_prepared_with_clock(
         }
     }
 
-    let status = child
-        .wait()
+    let status = lifecycle
+        .wait(&mut child)
         .map_err(|error| format!("Failed waiting for StreamJson CLI: {error}"))?;
-    let stderr = stderr_handle.join().unwrap_or_default();
+    let stderr = finish_reader(&stderr_handle);
     if cancel_requested(cancel.as_deref()) {
         return Ok(());
     }
@@ -337,5 +346,71 @@ mod tests {
             mark_no_output_error(true, "provider exited".into()),
             "provider exited"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod child_exit_tests {
+    use super::*;
+    use crate::services::process::stream_child::test_fixture::{CASES, ProviderFixture};
+    #[test]
+    fn actual_provider_exit_drains_terminal_without_waiting_for_descendant_fds() {
+        for mode in CASES {
+            let fixture = ProviderFixture::new("grok", mode);
+            let normal = matches!(mode, "normal" | "quiet");
+            let (tx, rx) = mpsc::channel();
+            let prepared = PreparedCommand {
+                executable: fixture.cli.clone(),
+                resolution: fixture.resolution(),
+                args: vec![],
+                redacted_args: vec![],
+                current_dir: fixture.path().into(),
+                env: vec![],
+                unset_env: vec![],
+                codec: Box::new(super::super::codec::MessagesJsonCodec::new()),
+            };
+            run_prepared(prepared, tx, Duration::ZERO, None).unwrap();
+            let messages: Vec<_> = rx.try_iter().collect();
+            assert_eq!(
+                messages
+                    .iter()
+                    .any(|m| matches!(m, StreamMessage::Done { .. })),
+                normal,
+                "{mode}: {messages:?}"
+            );
+            if !normal {
+                assert!(messages.iter().any(|m| matches!(
+                    m,
+                    StreamMessage::Error {
+                        exit_code: Some(7),
+                        ..
+                    }
+                )));
+            }
+            fixture.verify_return(mode);
+        }
+    }
+
+    #[test]
+    fn actual_quiet_provider_observes_exact_token_manual_cancel() {
+        let fixture = ProviderFixture::new("grok", "cancel");
+        let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+        let cancel = fixture.cancel_after_accept(token.clone());
+        let (tx, _rx) = mpsc::channel();
+        let prepared = PreparedCommand {
+            executable: fixture.cli.clone(),
+            resolution: fixture.resolution(),
+            args: vec![],
+            redacted_args: vec![],
+            current_dir: fixture.path().into(),
+            env: vec![],
+            unset_env: vec![],
+            codec: Box::new(super::super::codec::MessagesJsonCodec::new()),
+        };
+        run_prepared(prepared, tx, Duration::ZERO, Some(token.clone())).unwrap();
+        cancel.join().unwrap();
+        assert_eq!(token.cancel_source().as_deref(), Some("manual_cancel"));
+        assert_eq!(token.child_pid_value(), None);
+        fixture.verify_return("cancel");
     }
 }

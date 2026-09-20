@@ -793,6 +793,16 @@ impl CancelToken {
         });
     }
 
+    pub(crate) fn clear_child_pid_if_matches(&self, pid: u32) {
+        let mut child = self
+            .child_pid
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if child.as_ref().is_some_and(|current| current.pid == pid) {
+            *child = None;
+        }
+    }
+
     pub(crate) fn clear_child_pid(&self) {
         *self.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }

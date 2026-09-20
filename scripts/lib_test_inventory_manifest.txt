@@ -2112,6 +2112,7 @@ services::codex::tui_hosting_tests::codex_wrapper_input_mode_detector_distinguis
 services::codex::tui_hosting_tests::live_reused_provider_session_is_preserved_when_wrapper_io_is_missing
 services::codex_remote_policy::tests::prerequisites_remain_unsatisfied
 services::codex_tmux_wrapper::accepted_turn_tests::accepted_quiet_process_reaches_terminal_without_retired_limits
+services::codex_tmux_wrapper::child_exit_tests::actual_provider_exit_drains_terminal_without_waiting_for_descendant_fds
 services::codex_tmux_wrapper::input::tests::effective_reasoning_effort_matches_what_a_turn_would_run_with
 services::codex_tmux_wrapper::input::tests::external_origin_slash_controls_still_reach_the_provider
 services::codex_tmux_wrapper::input::tests::model_argument_is_echoed_as_not_applied_and_never_changes_the_run_model
@@ -7683,6 +7684,8 @@ services::escalation_settings::tests::escalation_defaults_still_use_live_escalat
 services::gemini::accepted_turn_tests::quiet_accepted_stream_observes_manual_cancel
 services::gemini::accepted_turn_tests::quiet_accepted_stream_recovers_only_after_process_exit
 services::gemini::accepted_turn_tests::quiet_accepted_stream_waits_for_real_eof
+services::gemini::child_exit_tests::actual_provider_exit_drains_terminal_without_waiting_for_descendant_fds
+services::gemini::child_exit_tests::actual_quiet_provider_observes_exact_token_manual_cancel
 services::gemini::path_expansion_tests::expand_gemini_working_dir_keeps_existing_trimmed_relative_behavior
 services::gemini::path_expansion_tests::expand_gemini_working_dir_reuses_runtime_tilde_expansion
 services::git::commit_resolver::fail_closed_tests::git_tracked_change_paths_strict_fails_closed_on_non_repo_dir
@@ -7924,6 +7927,8 @@ services::onboarding::channel::tests::onboarding_routing_defaults_and_category_r
 services::onboarding::channel::tests::onboarding_routing_guild_override_preserves_runtime_and_artifacts
 services::onboarding::credential_token_permission_tests::write_credential_token_creates_owner_only_secret_file
 services::onboarding::secondary_command_provider_tests::supported_primary_providers_have_stable_secondary_defaults
+services::opencode::accepted_turn_tests::sse_actual_read_error_and_manual_cancel_still_abort
+services::opencode::accepted_turn_tests::successful_sse_read_reaches_terminal_without_elapsed_gate
 services::opencode::tests::hard_kill_marks_retiring_only_for_exclusive_session
 services::opencode::tests::hard_kill_veto_clears_retiring_for_shared_session
 services::opencode::tests::idle_disposal_delay_reschedules_until_ttl_elapsed
@@ -7940,7 +7945,6 @@ services::opencode::tests::process_sse_event_preserves_nested_provider_error_det
 services::opencode::tests::retiring_warm_server_rejects_new_lease_without_incrementing
 services::opencode::tests::scrub_startup_secrets_redacts_colon_delimited_forms
 services::opencode::tests::scrub_startup_secrets_redacts_entire_cookie_header_values
-services::opencode::tests::sse_idle_timer_refreshes_on_all_transport_lines
 services::opencode::tests::suspicious_active_leak_threshold_is_evidence_only
 services::opencode::tests::test_005_opencode_warm_server_key_separates_profile_id
 services::opencode::tests::warm_server_hard_kill_vetoed_when_co_resident
@@ -8040,8 +8044,10 @@ services::provider::cancel_token_cleanup::authority::tests::current_guard_blocks
 services::provider::cancel_token_cleanup::authority::tests::name_only_and_missing_bindings_are_unregistered
 services::provider::cancel_token_cleanup::authority::tests::old_generation_is_stale_after_new_generation_publishes
 services::provider::cancel_token_cleanup::authority::tests::provider_is_part_of_session_key
+services::provider::cancel_token_cleanup::executor::tests::child_detach_and_reap_wait_for_inflight_pid_dispatch
 services::provider::cancel_token_cleanup::executor::tests::failed_pid_dispatch_rolls_back_claim_for_retry
 services::provider::cancel_token_cleanup::executor::tests::failed_tmux_dispatch_rolls_back_name_claim_for_retry
+services::provider::cancel_token_cleanup::executor::tests::old_child_detach_preserves_successor_registration
 services::provider::cancel_token_cleanup::executor::tests::pid_only_claim_does_not_suppress_later_session_cleanup_name_kill
 services::provider::cancel_token_cleanup::executor::tests::pid_only_without_identity_preserves_fail_open_dispatch
 services::provider::cancel_token_cleanup::executor::tests::pid_only_without_target_does_not_consume_claim
@@ -8164,10 +8170,13 @@ services::provider_output_guard_tests::invariant_4371_system_notification_with_p
 services::provider_output_guard_tests::invariant_4371_tool_wrapper_terminal_compound_is_blocked
 services::queue::tests::force_purge_channel_mailbox_drains_queue_without_session_key
 services::queue::tests::force_purge_reaches_queue_hydrated_by_dedup_replay
+services::qwen::child_exit_tests::actual_provider_exit_drains_terminal_without_waiting_for_descendant_fds
+services::qwen::child_exit_tests::actual_quiet_provider_observes_exact_token_manual_cancel
 services::qwen::qwen_provider_lifecycle_tests::accepted_quiet_turn_survives_virtual_day
 services::qwen::qwen_provider_lifecycle_tests::default_startup_watchdog_allows_four_minutes_before_retry
 services::qwen::qwen_provider_lifecycle_tests::forced_fresh_turn_does_not_resume_cached_or_invalid_session
 services::qwen::qwen_provider_lifecycle_tests::live_reused_provider_session_is_preserved_when_wrapper_io_is_missing
+services::qwen_tmux_wrapper::child_exit_tests::actual_provider_exit_drains_terminal_without_waiting_for_descendant_fds
 services::release_source::tests::release_source_module_docs_define_release_fact_scope
 services::release_source::tests::release_source_passes_through_every_written_repo_dirty_verdict
 services::release_source::tests::release_source_reads_confirmed_identity
@@ -8624,6 +8633,8 @@ services::stream_json_cli::policy::tests::legacy_readonly_vector_remains_restric
 services::stream_json_cli::policy::tests::mode_less_vector_is_legacy
 services::stream_json_cli::policy::tests::omitted_mode_and_tools_are_provider_default
 services::stream_json_cli::policy::tests::stream_json_legacy_vector_does_not_become_allowlist
+services::stream_json_cli::runner::child_exit_tests::actual_provider_exit_drains_terminal_without_waiting_for_descendant_fds
+services::stream_json_cli::runner::child_exit_tests::actual_quiet_provider_observes_exact_token_manual_cancel
 services::stream_json_cli::runner::tests::accepted_stream_runs_past_virtual_day_until_real_eof
 services::stream_json_cli::runner::tests::exit_before_protocol_progress_gets_terminal_reset_marker
 services::stream_json_cli::runner::tests::no_output_error_has_machine_readable_marker

@@ -1,3 +1,4 @@
+use crate::services::process::stream_child::{EXIT_POLL, StreamChild, finish_reader, spawn_reader};
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -248,7 +249,16 @@ fn run_turn(
         .spawn()
         .map_err(|e| format!("Failed to start Codex: {}", e))?;
 
-    let child_pid = child.id();
+    let mut lifecycle = StreamChild::new(&child, None, None);
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to capture Codex stderr".to_string())?;
+    let stderr_handle = spawn_reader(move || {
+        let mut bytes = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut BufReader::new(stderr), &mut bytes);
+        bytes
+    });
 
     let stdout = child
         .stdout
@@ -283,25 +293,25 @@ fn run_turn(
     let mut saw_any_stdout = false;
     let first_event_timeout = codex_first_event_timeout();
     loop {
-        let next_line = if saw_any_stdout {
-            stdout_rx
-                .recv()
-                .map_err(|_| "Codex stdout reader disconnected".to_string())?
-        } else {
-            match stdout_rx.recv_timeout(first_event_timeout) {
-                Ok(line) => line,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    crate::services::process::kill_pid_tree(child_pid);
-                    let _ = child.wait();
+        if lifecycle
+            .drain_finished(&mut child)
+            .map_err(|e| e.to_string())?
+        {
+            break;
+        }
+        let next_line = match stdout_rx.recv_timeout(EXIT_POLL) {
+            Ok(line) => line,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if !saw_any_stdout && start.elapsed() >= first_event_timeout {
+                    lifecycle.terminate(&mut child);
                     return Err(format!(
                         "Codex produced no JSON event within {}s after sending prompt",
                         first_event_timeout.as_secs()
                     ));
                 }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err("Codex stdout reader disconnected".to_string());
-                }
+                continue;
             }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
 
         let Some(line) = next_line? else {
@@ -324,19 +334,16 @@ fn run_turn(
         handle_codex_wrapper_event(output, &json, thread_id, &mut state, start)?;
     }
 
-    // Kill Codex process tree (including any cmd.exe / bash children) before waiting.
-    // Without this, child processes spawned by Codex survive as orphan processes.
-    crate::services::process::kill_pid_tree(child_pid);
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    lifecycle.terminate(&mut child);
+    let status = lifecycle
+        .wait(&mut child)
+        .map_err(|e| format!("Failed to wait for Codex: {e}"))?;
+    let stderr = finish_reader(&stderr_handle);
 
-    let wait = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed to wait for Codex: {}", e))?;
-
-    if !wait.status.success() && !state.saw_turn_completed {
-        let stderr = String::from_utf8_lossy(&wait.stderr).trim().to_string();
+    if !status.success() && !state.saw_turn_completed {
+        let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
         let message = if stderr.is_empty() {
-            format!("Codex exited with code {:?}", wait.status.code())
+            format!("Codex exited with code {:?}", status.code())
         } else {
             stderr
         };
@@ -2189,6 +2196,40 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"d
             let rows = std::fs::read_to_string(path).unwrap();
             assert!(rows.contains("done"));
             assert!(rows.contains("\"type\":\"result\""));
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod child_exit_tests {
+    use super::*;
+    use crate::services::process::stream_child::test_fixture::{CASES, ProviderFixture};
+    #[test]
+    fn actual_provider_exit_drains_terminal_without_waiting_for_descendant_fds() {
+        for mode in CASES {
+            let fixture = ProviderFixture::new("codex", mode);
+            let normal = matches!(mode, "normal" | "quiet");
+            let path = fixture.path().join("out");
+            let mut output = RotatingJsonlWriter::open(&path).unwrap();
+            let result = run_turn(
+                &mut output,
+                fixture.cli.to_str().unwrap(),
+                None,
+                None,
+                None,
+                fixture.path().to_str().unwrap(),
+                "test",
+                &mut None,
+                None,
+                None,
+                None,
+                &[],
+            );
+            assert_eq!(result.is_ok(), normal, "{mode}: {result:?}");
+            if normal {
+                assert!(std::fs::read_to_string(path).unwrap().contains("done"));
+            }
+            fixture.verify_return(mode);
         }
     }
 }

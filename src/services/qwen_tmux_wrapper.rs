@@ -1,3 +1,4 @@
+use crate::services::process::stream_child::{StreamChild, finish_reader, spawn_reader};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -342,7 +343,7 @@ fn run_turn_once(
         retryable: false,
     })?;
 
-    let child_pid = child.id();
+    let mut lifecycle = StreamChild::new(&child, None, None);
     let stdout = child.stdout.take().ok_or_else(|| TurnFailure {
         message: "Failed to capture Qwen stdout".to_string(),
         retryable: false,
@@ -351,7 +352,7 @@ fn run_turn_once(
         message: "Failed to capture Qwen stderr".to_string(),
         retryable: false,
     })?;
-    let stderr_handle = std::thread::spawn(move || {
+    let stderr_handle = spawn_reader(move || {
         let mut buf = String::new();
         let mut reader = BufReader::new(stderr);
         let _ = std::io::Read::read_to_string(&mut reader, &mut buf);
@@ -368,6 +369,15 @@ fn run_turn_once(
     let mut watchdog = crate::services::qwen::QwenStreamWatchdog::default();
 
     loop {
+        if lifecycle
+            .drain_finished(&mut child)
+            .map_err(|e| TurnFailure {
+                message: e.to_string(),
+                retryable: false,
+            })?
+        {
+            break;
+        }
         match stdout_events.recv_timeout(watchdog.poll_timeout()) {
             Ok(TurnReadEvent::Line(line)) => {
                 watchdog.observe_line();
@@ -388,9 +398,9 @@ fn run_turn_once(
                 }
             }
             Ok(TurnReadEvent::ReadError(message)) => {
-                crate::services::process::kill_pid_tree(child_pid);
+                lifecycle.terminate(&mut child);
                 let _ = child.wait();
-                let _ = stderr_handle.join().unwrap_or_default();
+                let _ = finish_reader(&stderr_handle);
                 return Err(TurnFailure {
                     message,
                     retryable: true,
@@ -402,9 +412,9 @@ fn run_turn_once(
                     TurnWatchdogOutcome::Continue => {}
                     TurnWatchdogOutcome::Break => break,
                     TurnWatchdogOutcome::Retry { message } => {
-                        crate::services::process::kill_pid_tree(child_pid);
+                        lifecycle.terminate(&mut child);
                         let _ = child.wait();
-                        let _ = stderr_handle.join().unwrap_or_default();
+                        let _ = finish_reader(&stderr_handle);
                         return Err(TurnFailure {
                             message,
                             retryable: true,
@@ -415,17 +425,16 @@ fn run_turn_once(
         }
     }
 
-    crate::services::process::kill_pid_tree(child_pid);
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    lifecycle.terminate(&mut child);
 
-    let wait = child.wait_with_output().map_err(|e| TurnFailure {
+    let status = lifecycle.wait(&mut child).map_err(|e| TurnFailure {
         message: format!("Failed to wait for Qwen: {}", e),
         retryable: false,
     })?;
-    let stderr = stderr_handle.join().unwrap_or_default();
+    let stderr = finish_reader(&stderr_handle);
 
-    if !wait.status.success() && !saw_result {
-        let message = derive_wrapper_error_message(&stderr, wait.status.code());
+    if !status.success() && !saw_result {
+        let message = derive_wrapper_error_message(&stderr, status.code());
         return Err(TurnFailure {
             message,
             retryable: true,
@@ -948,4 +957,39 @@ fn emit_json_line(output: &mut std::fs::File, value: Value) -> Result<(), String
         .map_err(|e| format!("flush output line: {}", e))?;
     render_for_terminal(&line);
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod child_exit_tests {
+    use super::*;
+    use crate::services::process::stream_child::test_fixture::{CASES, ProviderFixture};
+    #[test]
+    fn actual_provider_exit_drains_terminal_without_waiting_for_descendant_fds() {
+        for mode in CASES {
+            let fixture = ProviderFixture::new("qwen", mode);
+            let normal = matches!(mode, "normal" | "quiet");
+            let path = fixture.path().join("out");
+            let mut output = std::fs::File::create(&path).unwrap();
+            let result = run_turn_once(
+                &mut output,
+                fixture.cli.to_str().unwrap(),
+                None,
+                fixture.path().to_str().unwrap(),
+                "test",
+                &mut None,
+                None,
+                &crate::services::qwen::QwenResumeStrategy::Fresh,
+            );
+            assert_eq!(
+                result.is_ok(),
+                normal,
+                "{mode}: {:?}",
+                result.err().map(|e| e.message)
+            );
+            if normal {
+                assert!(std::fs::read_to_string(path).unwrap().contains("done"));
+            }
+            fixture.verify_return(mode);
+        }
+    }
 }

@@ -318,36 +318,6 @@ function findRecentInflightForSession(sessionKey, tmuxName) {
   return best;
 }
 
-function inspectInflightProgress(sessionKey, tmuxName, recentWindowMin) {
-  var inflight;
-  try {
-    inflight = findRecentInflightForSession(sessionKey, tmuxName);
-  } catch (e) {
-    inflight = null; // revert to null on throw so that the rest of inspectInflightProgress works
-  }
-  if (!inflight) {
-    return {
-      inflight: null,
-      recent: false,
-      updated_age_min: null,
-      turn_age_min: null,
-      channel_id: null
-    };
-  }
-  var nowMs = Date.now();
-  var updatedAtMs = parseLocalTimestampMs(inflight.updated_at);
-  var startedAtMs = parseLocalTimestampMs(inflight.started_at);
-  var updatedAgeMin = updatedAtMs > 0 ? (nowMs - updatedAtMs) / 60000 : null;
-  var turnAgeMin = startedAtMs > 0 ? (nowMs - startedAtMs) / 60000 : null;
-  return {
-    inflight: inflight,
-    recent: updatedAgeMin !== null && updatedAgeMin <= recentWindowMin,
-    updated_age_min: updatedAgeMin,
-    turn_age_min: turnAgeMin,
-    channel_id: inflight.channel_id || null
-  };
-}
-
 function isZeroPlaceholderId(value) {
   return value === 0 || value === "0";
 }
@@ -403,7 +373,6 @@ module.exports = {
   isExternalInputTuiDirectSyntheticTurn: isExternalInputTuiDirectSyntheticTurn,
   isSyntheticMissingInflightReattachPlaceholder: isSyntheticMissingInflightReattachPlaceholder,
   findRecentInflightForSession: findRecentInflightForSession,
-  inspectInflightProgress: inspectInflightProgress,
   _queuePMDecision: _queuePMDecision,
   _flushPMDecisions: _flushPMDecisions
 };

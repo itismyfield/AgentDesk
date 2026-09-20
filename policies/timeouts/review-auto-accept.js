@@ -21,7 +21,6 @@ module.exports = function attachReviewAutoAccept(timeouts, helpers) {
   var resolveSessionAgentContext = helpers.resolveSessionAgentContext;
   var backfillMissingSessionAgentIds = helpers.backfillMissingSessionAgentIds;
   var findRecentInflightForSession = helpers.findRecentInflightForSession;
-  var inspectInflightProgress = helpers.inspectInflightProgress;
   var _queuePMDecision = helpers._queuePMDecision;
   var _flushPMDecisions = helpers._flushPMDecisions;
   var reviewTuningAggregateRetryKey = "review_tuning:auto_accept_aggregate_retry";

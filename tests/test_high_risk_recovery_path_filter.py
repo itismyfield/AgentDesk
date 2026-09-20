@@ -149,6 +149,18 @@ class HighRiskRecoveryPathFilterTests(unittest.TestCase):
                             for segment in body.split("/"):
                                 self.assertRegex(segment, SUPPORTED_SEGMENT)
 
+    def test_accepted_turn_provider_inputs_select_regressions(self) -> None:
+        for path in (
+            "src/services/codex_tmux_wrapper.rs", "src/services/gemini.rs",
+            "src/services/qwen.rs", "src/services/qwen_tmux_wrapper.rs",
+            "src/services/opencode.rs", "src/services/provider.rs",
+            "src/services/provider/cancel_watchdog.rs",
+            "src/services/process.rs", "src/services/process/stream_child.rs",
+            "src/services/stream_json_cli/runner.rs",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(LANE, select(self.filters, [path]))
+
     def test_unrelated_documentation_change_does_not_select_the_lane(self) -> None:
         changed = ["docs/architecture/relay.md", "README.md", "AGENTS.md"]
         self.assertNotIn(LANE, select(self.filters, changed))

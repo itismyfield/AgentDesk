@@ -94,16 +94,12 @@ test("timeouts helper module ignores synthetic reattach placeholders for infligh
     ]
   });
 
-  const progress = module.helpers.inspectInflightProgress(
+  const progress = module.helpers.findRecentInflightForSession(
     "provider:AgentDesk-codex-project-agentdesk",
     "AgentDesk-codex-project-agentdesk",
-    30,
-    180
   );
 
-  assert.equal(progress.inflight, null);
-  assert.equal(progress.channel_id, null);
-  assert.equal(progress.recent, false);
+  assert.equal(progress, null);
 });
 
 test("timeouts reconciliation module scans pending fallback dispatch keys", () => {
@@ -811,37 +807,17 @@ test("S7 active monitor exempts synthetic turns without force-kill or repeated l
       state.kv.set(key, JSON.stringify({ count: 3, ts: Date.now() - 31 * 60000 }));
       policy._section_I();
       const kills = () => state.httpPosts.filter((post) => post.url.endsWith("/force-kill"));
-      if (mode === "watchdog" || mode === "turn-cap") {
-        assert.equal(kills().length, 0);
-        assert.equal(state.httpPosts.length, 0);
-        assert.equal(state.kv.has(key), false);
-      } else if (owner === 2) {
-        assert.equal(kills().length, 1, "ordinary owner must still force-kill");
-      } else {
-        assert.equal(kills().length, 0, "synthetic owner must not force-kill");
-        const logCount = state.logs.info.length + state.logs.warn.length;
-        assert.equal(state.logs.info.filter((line) => line.includes("synthetic turn exempt")).length, 1);
-        state.kv.set(key, ' { "synthetic_exempt": true, "count": 0 } ');
-        // Simulate repeated deadlock windows by aging a counter timestamp if one is written.
-        for (let window = 0; window < 5; window++) {
-          const value = state.kv.get(key);
-          if (value && value.startsWith("{") && JSON.parse(value).ts) {
-            state.kv.set(key, JSON.stringify({ ...JSON.parse(value), ts: Date.now() - 31 * 60000 }));
-          }
-          policy._section_I();
-        }
-        assert.equal(kills().length, 0, "later windows must not force-kill");
-        assert.equal(state.logs.info.length + state.logs.warn.length, logCount, "no repeated logs");
-        assert.equal(state.httpPosts.length, 0);
-        assert.equal(state.timeoutMarkSessionIdleCalls.length, 0);
-        assert.equal(state.timeoutTerminationRecords.length, 0);
-        assert.equal(state.deadlockAlerts.length, 0);
-      }
+      for (let window = 0; window < 5; window++) policy._section_I();
+      assert.equal(kills().length, 0);
+      assert.equal(state.kv.has(key), false);
+      assert.equal(state.httpPosts.length, 0);
+      assert.equal(state.timeoutTerminationRecords.length, 0);
+      assert.equal(state.timeoutMarkSessionIdleCalls.length, 0);
     }
   }
 });
 
-test("timeouts active monitor opt-in review hang recovery retries stale review dispatches", () => {
+test("timeouts active monitor preserves quiet accepted review turns", () => {
   const sessionKey = "provider:AgentDesk-claude-review-session";
   const previousCheck = Date.now() - 16 * 60 * 1000;
   const { policy, state } = loadPolicy("policies/timeouts.js", {
@@ -892,17 +868,9 @@ test("timeouts active monitor opt-in review hang recovery retries stale review d
 
   policy._section_I();
 
-  assert.equal(state.httpPosts.length, 1);
-  assert.equal(
-    state.httpPosts[0].url,
-    "http://127.0.0.1:8791/api/sessions/" + encodeURIComponent(sessionKey) + "/force-kill"
-  );
-  assert.equal(state.httpPosts[0].body.retry, true);
-  assert.match(state.httpPosts[0].body.reason, /review hang timeout/);
-  assert.equal(state.deadlockAlerts.length, 1);
-  assert.match(state.deadlockAlerts[0].message, /재디스패치 완료/);
-  assert.equal(state.timeoutTerminationRecords.length, 1);
-  assert.equal(state.timeoutTerminationRecords[0].session_key, sessionKey);
+  assert.equal(state.httpPosts.length, 0);
+  assert.equal(state.deadlockAlerts.length, 0);
+  assert.equal(state.timeoutTerminationRecords.length, 0);
 });
 
 test("timeouts active monitor review fast path leaves non-review sessions on the normal threshold", () => {
@@ -1366,7 +1334,7 @@ test("timeouts idle-kill module excludes thread idle rows from the main batch", 
   });
 });
 
-test("S7 ordinary successor clears synthetic marker and starts its own counter", () => {
+test("S7 ordinary successor clears a legacy synthetic marker without a silence counter", () => {
   const sessionKey = "provider:AgentDesk-claude-successor";
   let source = "external_input";
   const { policy, state } = loadPolicy("policies/timeouts.js", {
@@ -1382,17 +1350,14 @@ test("S7 ordinary successor clears synthetic marker and starts its own counter",
     httpPost() { return { ok: true, tmux_killed: true }; }
   });
   const key = "deadlock_check:" + sessionKey;
+  state.kv.set(key, '{"synthetic_exempt":true,"count":0}');
   policy._section_I();
-  assert.equal(JSON.parse(state.kv.get(key)).synthetic_exempt, true);
+  assert.equal(state.kv.has(key), false);
   source = "managed";
   policy._section_I();
-  const counter = JSON.parse(state.kv.get(key));
-  assert.equal(counter.synthetic_exempt, undefined);
-  assert.equal(counter.count, 1);
-  assert.ok(counter.ts > 0);
-  assert.equal(state.httpPosts.filter((post) => post.url.endsWith("/force-kill")).length, 0);
-  policy._section_I();
-  assert.equal(JSON.parse(state.kv.get(key)).count, 1, "ordinary window must not double-count");
+  assert.equal(state.kv.has(key), false);
+  assert.equal(state.httpPosts.length, 0);
+
 });
 
 test("timeouts reconciliation uses typed card facade for title instead of db.query", () => {
@@ -1423,15 +1388,16 @@ test("timeouts reconciliation uses typed card facade for title instead of db.que
 
 test("active monitor preserves productive turns beyond four and six hours", () => {
   for (const ageMinutes of [241, 361, 1440]) {
+    for (const outputAge of [1, 121, 1440]) {
     const sessionKey = "provider:AgentDesk-codex-long-active";
     const { policy, state } = loadPolicy("policies/timeouts.js", {
       config: { server_port: 8791 },
       inflights: [{
         session_key: sessionKey, channel_id: "channel-long", provider: "codex",
         tmux_session_name: "AgentDesk-codex-long-active", request_owner_user_id: 2,
-        started_at: timestampMinutesAgo(ageMinutes), updated_at: timestampMinutesAgo(1)
+        started_at: timestampMinutesAgo(ageMinutes), updated_at: timestampMinutesAgo(outputAge)
       }],
-      timeouts: { deadlockCandidates: [{ session_key: sessionKey, agent_id: "agent-long" }] },
+      timeouts: { deadlockCandidates: [{ session_key: sessionKey, agent_id: "agent-long", last_heartbeat: timestampMinutesAgo(outputAge) }] },
       exec() { return "0\n"; },
       httpPost() { return { ok: true, tmux_killed: true }; }
     });
@@ -1442,5 +1408,6 @@ test("active monitor preserves productive turns beyond four and six hours", () =
     assert.equal(state.kv.has(key), false);
     assert.equal(state.timeoutTerminationRecords.length, 0);
     assert.equal(state.timeoutMarkSessionIdleCalls.length, 0);
+    }
   }
 });
