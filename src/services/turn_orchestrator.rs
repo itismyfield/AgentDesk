@@ -40,10 +40,7 @@ use dispatch_reservation::{
     record_valve_cleared_pending_dispatch, set_pending_user_dispatch,
     settle_pending_dispatch_on_claim,
 };
-use episode_identity::{
-    TurnNonceGuard, matching_cancel_token, persist_queue_or_restore,
-    reset_watchdog_extension_state, take_watchdog_override_if_current,
-};
+use episode_identity::{TurnNonceGuard, matching_cancel_token, persist_queue_or_restore};
 use front_requeue::requeue_intervention_front;
 #[cfg(test)]
 use inbound_order::INBOUND_ORDER_FAIL_OPEN_AFTER;
@@ -1347,29 +1344,6 @@ impl ChannelMailboxHandle {
         .await
     }
 
-    pub(crate) async fn extend_timeout(
-        &self,
-        extend_by_secs: u64,
-    ) -> Result<WatchdogDeadlineExtension, WatchdogDeadlineExtensionError> {
-        self.request(
-            |reply| ChannelMailboxMsg::ExtendTimeout {
-                extend_by_secs,
-                reply,
-            },
-            Err(WatchdogDeadlineExtensionError::MailboxUnavailable),
-        )
-        .await
-    }
-
-    pub(crate) async fn clear_timeout_override(&self) {
-        let _ = self
-            .request(
-                |reply| ChannelMailboxMsg::ClearTimeoutOverride { reply },
-                (),
-            )
-            .await;
-    }
-
     #[cfg(test)]
     pub(crate) async fn age_active_turn_for_test(&self, age: Duration) {
         let _ = self
@@ -1402,26 +1376,6 @@ impl ChannelMailboxHandle {
             )
             .await;
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct WatchdogDeadlineExtension {
-    pub(crate) requested_deadline_ms: i64,
-    pub(crate) new_deadline_ms: i64,
-    pub(crate) max_deadline_ms: i64,
-    pub(crate) applied_extend_secs: u64,
-    pub(crate) requested_extend_secs: u64,
-    pub(crate) extension_count: u32,
-    pub(crate) extension_count_limit: u32,
-    pub(crate) extension_total_secs: u64,
-    pub(crate) extension_total_secs_limit: u64,
-    pub(crate) clamped: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum WatchdogDeadlineExtensionError {
-    MailboxUnavailable,
-    NoActiveTurn,
 }
 
 /// #2443 — deterministic "recovery finished" signal per channel.
@@ -1857,17 +1811,6 @@ enum ChannelMailboxMsg {
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<RestartDrainResult>,
     },
-    ExtendTimeout {
-        extend_by_secs: u64,
-        reply: oneshot::Sender<Result<WatchdogDeadlineExtension, WatchdogDeadlineExtensionError>>,
-    },
-    TakeTimeoutOverride {
-        expected_token: Arc<CancelToken>,
-        reply: oneshot::Sender<Option<WatchdogDeadlineExtension>>,
-    },
-    ClearTimeoutOverride {
-        reply: oneshot::Sender<()>,
-    },
     #[cfg(test)]
     AgeActiveTurnForTest {
         age: Duration,
@@ -1986,9 +1929,6 @@ struct ChannelMailboxState {
     /// Monotonic companion to `turn_started_at`, for in-process race guards
     /// that must distinguish a stale active claim from a fresh same-id claim.
     turn_started_instant: Option<Instant>,
-    watchdog_deadline_override: Option<WatchdogDeadlineExtension>,
-    watchdog_extension_count: u32,
-    watchdog_extension_total_secs: u64,
 }
 
 fn persist_queue(
@@ -2076,66 +2016,6 @@ fn finalize_turn_state(
         queue_exit_events: pending_result.queue_exit_events,
         persistence_error: None,
     }
-}
-
-fn extend_active_watchdog_deadline(
-    state: &mut ChannelMailboxState,
-    requested_extend_secs: u64,
-) -> Result<WatchdogDeadlineExtension, WatchdogDeadlineExtensionError> {
-    let Some(cancel_token) = state.cancel_token.as_ref() else {
-        return Err(WatchdogDeadlineExtensionError::NoActiveTurn);
-    };
-
-    let count_limit = u32::MAX;
-    let total_secs_limit = u64::MAX;
-    let applied_extend_secs = requested_extend_secs;
-
-    let now_ms = Utc::now().timestamp_millis();
-    let current_deadline = cancel_token.watchdog_deadline_ms.load(Ordering::Relaxed);
-    let current_deadline = if current_deadline > 0 {
-        current_deadline
-    } else {
-        now_ms
-    };
-    let current_max_deadline = cancel_token
-        .watchdog_max_deadline_ms
-        .load(Ordering::Relaxed);
-    let current_max_deadline = if current_max_deadline > 0 {
-        current_max_deadline
-    } else {
-        current_deadline
-    };
-    let requested_deadline_ms =
-        std::cmp::max(current_deadline, now_ms) + requested_extend_secs as i64 * 1000;
-    let new_deadline_ms =
-        std::cmp::max(current_deadline, now_ms) + applied_extend_secs as i64 * 1000;
-    let max_deadline_ms = std::cmp::max(current_max_deadline, new_deadline_ms);
-
-    let new_deadline_ms = cancel_token.raise_watchdog_deadlines(new_deadline_ms, max_deadline_ms);
-    let max_deadline_ms = cancel_token
-        .watchdog_max_deadline_ms
-        .load(Ordering::Relaxed)
-        .max(new_deadline_ms);
-
-    state.watchdog_extension_count = state.watchdog_extension_count.saturating_add(1);
-    state.watchdog_extension_total_secs = state
-        .watchdog_extension_total_secs
-        .saturating_add(applied_extend_secs);
-
-    let extension = WatchdogDeadlineExtension {
-        requested_deadline_ms,
-        new_deadline_ms,
-        max_deadline_ms,
-        applied_extend_secs,
-        requested_extend_secs,
-        extension_count: state.watchdog_extension_count,
-        extension_count_limit: count_limit,
-        extension_total_secs: state.watchdog_extension_total_secs,
-        extension_total_secs_limit: total_secs_limit,
-        clamped: false,
-    };
-    state.watchdog_deadline_override = Some(extension);
-    Ok(extension)
 }
 
 #[cfg(test)]
@@ -2433,7 +2313,6 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             state.recovery_started_at = None;
                             state.turn_started_at = Some(Utc::now());
                             state.turn_started_instant = Some(Instant::now());
-                            reset_watchdog_extension_state(&mut state);
                             true
                         },
                         queue_exit_events,
@@ -2461,7 +2340,6 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     if was_idle || state.turn_started_instant.is_none() {
                         state.turn_started_instant = Some(Instant::now());
                     }
-                    reset_watchdog_extension_state(&mut state);
                     let _ = reply.send(());
                 }
                 ChannelMailboxMsg::RecoveryKickoff {
@@ -2486,7 +2364,6 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     if activated_turn || state.turn_started_instant.is_none() {
                         state.turn_started_instant = Some(recovery_started_at);
                     }
-                    reset_watchdog_extension_state(&mut state);
                     let _ = reply.send(RecoveryKickoffResult {
                         activated_turn,
                         refused_closed: false,
@@ -3175,25 +3052,6 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         },
                         persistence_error,
                     });
-                }
-                ChannelMailboxMsg::ExtendTimeout {
-                    extend_by_secs,
-                    reply,
-                } => {
-                    let _ = reply.send(extend_active_watchdog_deadline(&mut state, extend_by_secs));
-                }
-                ChannelMailboxMsg::TakeTimeoutOverride {
-                    expected_token,
-                    reply,
-                } => {
-                    let _ = reply.send(take_watchdog_override_if_current(
-                        &mut state,
-                        &expected_token,
-                    ));
-                }
-                ChannelMailboxMsg::ClearTimeoutOverride { reply } => {
-                    state.watchdog_deadline_override = None;
-                    let _ = reply.send(());
                 }
                 #[cfg(test)]
                 ChannelMailboxMsg::AgeActiveTurnForTest { age, reply } => {

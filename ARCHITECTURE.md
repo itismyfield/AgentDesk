@@ -923,7 +923,6 @@ src/
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── runtime_transition.rs
 │   │   │   │   │   ├── stale_dispatch_guard.rs
-│   │   │   │   │   ├── turn_watchdog.rs
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── attachments.rs

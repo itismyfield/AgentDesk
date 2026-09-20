@@ -23,7 +23,6 @@ module.exports = function attachDispatchMaintenance(timeouts, helpers) {
   var backfillMissingSessionAgentIds = helpers.backfillMissingSessionAgentIds;
   var findRecentInflightForSession = helpers.findRecentInflightForSession;
   var inspectInflightProgress = helpers.inspectInflightProgress;
-  var requestTurnWatchdogExtension = helpers.requestTurnWatchdogExtension;
   var _queuePMDecision = helpers._queuePMDecision;
   var _flushPMDecisions = helpers._flushPMDecisions;
 

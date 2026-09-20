@@ -172,12 +172,8 @@ pub(super) async fn release(
         .cancelled
         .store(true, std::sync::atomic::Ordering::Relaxed);
     super::super::saturating_decrement_global_active(shared);
-    super::cleanup::clear_watchdog_and_kick_thread_parents_after_turn_release(
-        shared,
-        &residue.provider,
-        channel_id,
-    )
-    .await;
+    super::cleanup::kick_thread_parents_after_turn_release(shared, &residue.provider, channel_id)
+        .await;
 
     let voice_deferred_enqueued = if residue.drain_voice {
         shared

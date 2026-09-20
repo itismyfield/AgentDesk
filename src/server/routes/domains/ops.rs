@@ -365,10 +365,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 post(queue_api::cancel_all_dispatches),
             )
             .route("/turns/{channel_id}/cancel", post(queue_api::cancel_turn))
-            .route(
-                "/turns/{channel_id}/extend-timeout",
-                post(queue_api::extend_turn_timeout),
-            )
             .route("/help", get(docs::api_help))
             .route("/docs", get(docs::api_docs))
             .route("/docs/{segment}", get(docs::api_docs_group_or_category))

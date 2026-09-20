@@ -160,7 +160,6 @@ pub(super) async fn apply_relay_recovery_decision(
                     token.cancelled.store(true, Ordering::Relaxed);
                     super::saturating_decrement_global_active(shared);
                 }
-                super::clear_watchdog_deadline_override(channel.get()).await;
                 let thread_parent_kickoffs =
                     super::turn_finalizer::cleanup::collect_and_clear_thread_parents(
                         shared, channel,

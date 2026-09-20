@@ -60,16 +60,6 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_curl("curl -X POST 'http://localhost:8787/api/turns/1473922824350601297/cancel?force=false'"),
         ep(
             "POST",
-            "/api/turns/{channel_id}/extend-timeout",
-            "queue",
-            "Extend live turn timeout",
-        )
-        .with_example(
-            json!({"path": {"channel_id": "1473922824350601297"}, "body": {"extend_secs": 1800}}),
-            json!({"ok": true, "channel_id": "1473922824350601297", "requested_extend_secs": 1800, "applied_extend_secs": 1800, "remaining_minutes": 30}),
-        ),
-        ep(
-            "POST",
             "/api/channels/{channel_id}/monitoring",
             "monitoring",
             "Create or update a channel monitoring status entry",

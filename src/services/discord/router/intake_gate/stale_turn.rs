@@ -251,7 +251,6 @@ async fn release_queue_blocked_stale_active_turn(
             shared, channel_id,
         );
     crate::services::discord::inflight::delete_inflight_state_file(provider, channel_id.get());
-    crate::services::discord::clear_watchdog_deadline_override(channel_id.get()).await;
     let finish = mailbox_finish_turn(shared, provider, channel_id).await;
     // #2044 F7: `finalize_orphaned_clear` owns both `cancelled.store(true)`
     // and the saturating `global_active` decrement — do not duplicate them here.

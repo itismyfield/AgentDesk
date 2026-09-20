@@ -811,10 +811,9 @@ test("S7 active monitor exempts synthetic turns without force-kill or repeated l
       state.kv.set(key, JSON.stringify({ count: 3, ts: Date.now() - 31 * 60000 }));
       policy._section_I();
       const kills = () => state.httpPosts.filter((post) => post.url.endsWith("/force-kill"));
-      if (mode === "watchdog") {
+      if (mode === "watchdog" || mode === "turn-cap") {
         assert.equal(kills().length, 0);
-        assert.equal(state.httpPosts.length, 1);
-        assert.match(state.httpPosts[0].url, /extend-timeout$/);
+        assert.equal(state.httpPosts.length, 0);
         assert.equal(state.kv.has(key), false);
       } else if (owner === 2) {
         assert.equal(kills().length, 1, "ordinary owner must still force-kill");
@@ -1419,5 +1418,29 @@ test("timeouts reconciliation uses typed card facade for title instead of db.que
   var pmDecisions = state.pmDecisions || [];
   if (pmDecisions.length > 0) {
     assert.equal(pmDecisions[0].title, "Test Card Title");
+  }
+});
+
+test("active monitor preserves productive turns beyond four and six hours", () => {
+  for (const ageMinutes of [241, 361, 1440]) {
+    const sessionKey = "provider:AgentDesk-codex-long-active";
+    const { policy, state } = loadPolicy("policies/timeouts.js", {
+      config: { server_port: 8791 },
+      inflights: [{
+        session_key: sessionKey, channel_id: "channel-long", provider: "codex",
+        tmux_session_name: "AgentDesk-codex-long-active", request_owner_user_id: 2,
+        started_at: timestampMinutesAgo(ageMinutes), updated_at: timestampMinutesAgo(1)
+      }],
+      timeouts: { deadlockCandidates: [{ session_key: sessionKey, agent_id: "agent-long" }] },
+      exec() { return "0\n"; },
+      httpPost() { return { ok: true, tmux_killed: true }; }
+    });
+    const key = "deadlock_check:" + sessionKey;
+    state.kv.set(key, JSON.stringify({ count: 3, ts: Date.now() - 31 * 60000 }));
+    policy._section_I();
+    assert.equal(state.httpPosts.length, 0, "productive turn must not be killed or require extension");
+    assert.equal(state.kv.has(key), false);
+    assert.equal(state.timeoutTerminationRecords.length, 0);
+    assert.equal(state.timeoutMarkSessionIdleCalls.length, 0);
   }
 });

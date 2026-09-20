@@ -124,12 +124,11 @@ pub(in crate::services::discord) fn snapshot_role_override(
         .map(|entry| *entry.value())
 }
 
-pub(in crate::services::discord) async fn clear_watchdog_and_kick_thread_parents_after_turn_release(
+pub(in crate::services::discord) async fn kick_thread_parents_after_turn_release(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::model::id::ChannelId,
 ) {
-    super::super::clear_watchdog_deadline_override(channel_id.get()).await;
     let thread_parent_kickoffs = collect_and_clear_thread_parents(shared, channel_id);
     kickoff_thread_parents_after_finalize(shared, provider, thread_parent_kickoffs);
 }
@@ -503,8 +502,7 @@ pub(super) async fn already_finalized_active_state(
         .cancelled
         .store(true, std::sync::atomic::Ordering::Relaxed);
     super::super::saturating_decrement_global_active(shared);
-    clear_watchdog_and_kick_thread_parents_after_turn_release(shared, provider, key.channel_id)
-        .await;
+    kick_thread_parents_after_turn_release(shared, provider, key.channel_id).await;
     if !finish.has_pending {
         remove_owned_role_override(shared, key.channel_id, owned_role_override);
     }

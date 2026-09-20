@@ -24,7 +24,6 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
   var findRecentInflightForSession = helpers.findRecentInflightForSession;
   var inspectInflightProgress = helpers.inspectInflightProgress;
   var isExternalInputTuiDirectSyntheticTurn = helpers.isExternalInputTuiDirectSyntheticTurn;
-  var requestTurnWatchdogExtension = helpers.requestTurnWatchdogExtension;
   var _queuePMDecision = helpers._queuePMDecision;
   var _flushPMDecisions = helpers._flushPMDecisions;
 
@@ -64,12 +63,10 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
 
   timeouts._section_I = function() {
       // ─── [I] 턴 데드락 감지 + 자동 복구 (30분 주기) ─────────
-      // 판별: sessions.last_heartbeat 기반. 정상 진행은 tmux live + inflight 최근 output으로 인정.
-      // 회복: 정상 진행이면 watchdog을 30분씩 롤링 연장. 최근 output이 없으면 연속 스톨만 카운트.
-      // 확정: 연속 스톨 상한 또는 turn 3시간 상한 도달 시 강제 중단 + 재디스패치.
+      // Live panes with recent output clear the stall counter regardless of turn age.
+      // Consecutive observations without progress retain the existing recovery policy.
       var DEADLOCK_MINUTES = 30;
       var MAX_EXTENSIONS = 3;
-      var MAX_TURN_MINUTES = 180;
       var REVIEW_HANG_AUTO_RECOVERY = configBool("review_hang_auto_recovery_enabled", false);
       var REVIEW_HANG_MINUTES = configIntAtLeast("review_hang_auto_recovery_stale_min", 15, 5);
       var REVIEW_HANG_MAX_EXTENSIONS = configIntAtLeast("review_hang_auto_recovery_max_extensions", 1, 0);
@@ -142,43 +139,12 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
         }
         var tmuxAlive = timeouts._tmuxHasLivePane(dlTmuxName);
         var inflightProgress = tmuxAlive
-          ? inspectInflightProgress(sess.session_key, dlTmuxName, sessionDeadlockMinutes, MAX_TURN_MINUTES)
-          : { recent: false, updated_age_min: null, turn_age_min: null, channel_id: null, max_turn_reached: false };
+          ? inspectInflightProgress(sess.session_key, dlTmuxName, sessionDeadlockMinutes)
+          : { recent: false, updated_age_min: null, turn_age_min: null, channel_id: null };
 
-        // Recent terminal output is the authoritative signal for "normal progress".
-        // A live pane alone is not enough — hung tools can leave a pane alive forever.
-        if (tmuxAlive && inflightProgress.recent && !inflightProgress.max_turn_reached) {
+        // Fresh producer output keeps the current turn alive without a time budget.
+        if (tmuxAlive && inflightProgress.recent) {
           agentdesk.kv.delete(deadlockKey);
-          var extendMin = sessionDeadlockMinutes;
-          if (inflightProgress.turn_age_min !== null) {
-            extendMin = Math.min(
-              sessionDeadlockMinutes,
-              Math.max(0, MAX_TURN_MINUTES - inflightProgress.turn_age_min)
-            );
-          }
-          var extendResp = requestTurnWatchdogExtension(inflightProgress.channel_id, extendMin);
-          var extendMinText = Math.max(1, Math.round(extendMin));
-          if (extendResp.ok) {
-            agentdesk.log.info("[deadlock] Session " + sess.session_key +
-              " — live pane + recent output confirmed. Extended watchdog +" + extendMinText + "min.");
-            sendDeadlockAlert(
-              "🟢 [Deadlock 점검] " + sess.agent_id + "\n" +
-              "session_key: " + sess.session_key + "\n" +
-              "tmux: " + (dlTmuxName || "unknown") + "\n" +
-              "최근 output: " + Math.round(inflightProgress.updated_age_min || 0) + "분 전\n" +
-              "정상 진행 확인, +" + extendMinText + "분 연장"
-            );
-          } else {
-            agentdesk.log.warn("[deadlock] Session " + sess.session_key +
-              " — recent output confirmed but watchdog extension failed: " + extendResp.error);
-            sendDeadlockAlert(
-              "🟢 [Deadlock 점검] " + sess.agent_id + "\n" +
-              "session_key: " + sess.session_key + "\n" +
-              "tmux: " + (dlTmuxName || "unknown") + "\n" +
-              "최근 output: " + Math.round(inflightProgress.updated_age_min || 0) + "분 전\n" +
-              "정상 진행 확인, watchdog 연장 실패: " + extendResp.error
-            );
-          }
           continue;
         }
 
@@ -225,19 +191,11 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
           continue;
         }
 
-        var hitTurnCap = tmuxAlive && inflightProgress.recent && inflightProgress.max_turn_reached;
-        if (hitTurnCap || extensions >= sessionMaxExtensions) {
-          // ── 데드락 확정: 강제 중단 + 자동 복구 ──
-          var totalMin = hitTurnCap
-            ? Math.max(MAX_TURN_MINUTES, Math.round(inflightProgress.turn_age_min || 0))
-            : sessionDeadlockMinutes * (sessionMaxExtensions + 1);
-          var timeoutLabel = hitTurnCap
-            ? (MAX_TURN_MINUTES + "분 상한 도달")
-            : (totalMin + "분 무응답");
+        if (extensions >= sessionMaxExtensions) {
+          var totalMin = sessionDeadlockMinutes * (sessionMaxExtensions + 1);
+          var timeoutLabel = totalMin + "분 무응답";
           agentdesk.log.warn("[deadlock] Session " + sess.session_key +
-            (hitTurnCap
-              ? " — max turn cap reached. Force cancelling + re-dispatch."
-              : " — max extensions (" + sessionMaxExtensions + ") reached. Force cancelling + re-dispatch."));
+            " — max extensions (" + sessionMaxExtensions + ") reached. Force cancelling + re-dispatch.");
 
           // 1) authoritative force-kill API로 tmux 종료 + inflight cleanup + dispatch fail/retry 일원화
           var forceKillResp = null;

@@ -151,7 +151,7 @@ pub struct CancelTurnQuery {
 }
 
 /// #3029(C): `force` carried in the request *body*, mirroring the JSON-body
-/// shape of `cancel_all_dispatches` / `extend_turn_timeout`. Clients that POST
+/// shape of `cancel_all_dispatches`. Clients that POST
 /// `{"force": true}` previously had it silently dropped because the handler
 /// only read `Query<CancelTurnQuery>`, downgrading an intended hard-kill to a
 /// soft cancel.
@@ -272,81 +272,6 @@ pub async fn get_watcher_state(
                 "channel_id": channel_id,
             })),
         )),
-    }
-}
-
-// ── POST /api/turns/:channel_id/extend-timeout ───────────────────
-
-#[derive(Deserialize)]
-pub struct ExtendTimeoutBody {
-    /// Seconds to extend. Default: 1800 (30 min).
-    #[serde(default = "default_extend_secs")]
-    pub extend_secs: u64,
-}
-
-fn default_extend_secs() -> u64 {
-    1800
-}
-
-/// Extend the watchdog timeout for an active turn in a channel.
-///
-/// The per-turn deadline moves with accepted operator extensions. Extensions are
-/// intentionally uncapped so productive long-running turns can continue.
-/// Also refreshes the voice-background handoff marker TTL (#2352).
-pub async fn extend_turn_timeout(
-    State(state): State<AppState>,
-    Path(channel_id): Path<String>,
-    Json(body): Json<ExtendTimeoutBody>,
-) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    let channel_num: u64 = channel_id
-        .parse()
-        .map_err(|_| AppError::bad_request("channel_id must be a numeric Discord channel ID"))?;
-
-    match crate::services::discord::extend_watchdog_deadline(
-        channel_num,
-        body.extend_secs,
-        state.pg_pool_ref(),
-    )
-    .await
-    {
-        Ok(extension) => {
-            let now_ms = chrono::Utc::now().timestamp_millis();
-            let remaining_min = (extension.new_deadline_ms - now_ms) / 1000 / 60;
-            let max_remaining_min = (extension.max_deadline_ms - now_ms) / 1000 / 60;
-            Ok((
-                StatusCode::OK,
-                Json(json!({
-                    "ok": true,
-                    "channel_id": channel_id,
-                    "requested_deadline_ms": extension.requested_deadline_ms,
-                    "new_deadline_ms": extension.new_deadline_ms,
-                    "effective_deadline_ms": extension.new_deadline_ms,
-                    "max_deadline_ms": extension.max_deadline_ms,
-                    "remaining_minutes": remaining_min,
-                    "effective_remaining_minutes": remaining_min,
-                    "max_remaining_minutes": max_remaining_min,
-                    "requested_extend_secs": extension.requested_extend_secs,
-                    "applied_extend_secs": extension.applied_extend_secs,
-                    "extension_count": extension.extension_count,
-                    "extension_count_limit": extension.extension_count_limit,
-                    "extension_total_secs": extension.extension_total_secs,
-                    "extension_total_secs_limit": extension.extension_total_secs_limit,
-                    "clamped": extension.clamped,
-                })),
-            ))
-        }
-        Err(
-            crate::services::turn_orchestrator::WatchdogDeadlineExtensionError::MailboxUnavailable,
-        ) => Ok((
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "no mailbox for channel", "channel_id": channel_id})),
-        )),
-        Err(crate::services::turn_orchestrator::WatchdogDeadlineExtensionError::NoActiveTurn) => {
-            Ok((
-                StatusCode::CONFLICT,
-                Json(json!({"error": "no active turn for channel", "channel_id": channel_id})),
-            ))
-        }
     }
 }
 

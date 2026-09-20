@@ -83,7 +83,14 @@ fn rowless_cancelled_native_split_utf8_preserves_original_decoder() {
     );
 }
 
+#[test]
+fn quiet_native_turn_resumes_after_virtual_day() {
+    native_collector_case("quiet_native_turn_resumes_after_virtual_day", 7);
+}
+
 fn native_collector_case(test_name: &str, mode: u8) {
+    let long_quiet = mode == 7;
+    let mode = if long_quiet { 1 } else { mode };
     let rowless = mode >= 4;
     let cancellation = if rowless { mode - 3 } else { mode };
     const CHILD: &str = "AGENTDESK_5833_NATIVE_COLLECTOR_CHILD";
@@ -465,6 +472,17 @@ fn native_collector_case(test_name: &str, mode: u8) {
                 *parser.all_data = saved.buffer;
                 *parser.all_data_start_offset = saved.buffer_start;
                 *parser.utf8_decoder = saved.utf8;
+                if long_quiet {
+                    saved
+                        .turn
+                        .as_mut()
+                        .unwrap()
+                        .active_read_state
+                        .as_mut()
+                        .unwrap()
+                        .last_output_at =
+                        tokio::time::Instant::now() - Duration::from_secs(24 * 3600);
+                }
                 *parser.continuation = saved.turn;
                 let resumed = tokio::time::timeout(
                     Duration::from_secs(30),

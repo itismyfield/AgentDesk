@@ -3,7 +3,7 @@ use crate::services::provider::cancel_token_cleanup::target::CapturedProcess;
 use crate::services::provider_auth::ProviderAuthSpec;
 use crate::utils::format::safe_prefix;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 pub(crate) mod cancel_token_claude_interrupt;
 pub(crate) mod cancel_token_cleanup;
@@ -15,7 +15,6 @@ pub use output_reader::{fold_read_output_result, poll_output_file_until_result};
 #[cfg(test)]
 pub(crate) mod read_fault;
 pub use cancel_watchdog::{CancelWatchdog, spawn_cancel_watchdog};
-use cancel_watchdog::{current_unix_millis, enforce_watchdog_deadline};
 pub use registry::{
     ProviderCatalogEntry, ProviderCompactionAdapter, ProviderExecutionAdapter,
     ProviderReadinessAdapter, ProviderRegistryEntry, StreamJsonDialectId, derived_counterpart_ids,
@@ -689,27 +688,13 @@ pub struct CancelToken {
     child_pid: Mutex<Option<CapturedProcess>>,
     cancel_source: Mutex<Option<String>>,
     cancel_source_kind: Mutex<Option<CancelSource>>,
-    /// Serializes cancellation attribution, timeout, and completion publication.
+    /// Serializes cancellation attribution and completion publication.
     cancellation_publication: Mutex<()>,
     /// SSH cancel flag — set to true to signal remote execution to close the channel
     #[allow(dead_code)]
     pub ssh_cancel: Mutex<Option<std::sync::Arc<AtomicBool>>>,
     /// Tmux binding for cleanup on cancel.
     pub(crate) tmux_binding: Mutex<Option<cancel_token_cleanup::authority::TmuxBinding>>,
-    /// Watchdog deadline as Unix timestamp in milliseconds.
-    /// The watchdog fires when `now_ms >= deadline_ms`. Extend by setting a future value.
-    /// Operator extensions may move this and the max cap together within configured limits.
-    pub watchdog_deadline_ms: AtomicI64,
-    /// The current ceiling for watchdog_deadline_ms. Operator extensions may move this forward.
-    pub watchdog_max_deadline_ms: AtomicI64,
-    /// claude-e rollout Phase 1 (counter-review round 3 with Codex). When
-    /// `true`, the synchronous `enforce_watchdog_deadline` poll inside
-    /// `spawn_cancel_watchdog` becomes a no-op for this token; the async
-    /// Discord watchdog at 30s cadence is the only deadline enforcer.
-    /// Set by the headless / text turn watchdog setup paths before they
-    /// store the deadline. Direct callers that need the legacy sub-30s
-    /// enforcement leave this `false`.
-    pub async_managed: AtomicBool,
     /// Normal turn-completion cleanup marker. The Discord bridge may flip
     /// `cancelled` after a terminal frame only to release lingering token
     /// observers; provider cancel watchdogs must not treat that as a live
@@ -756,9 +741,6 @@ impl CancelToken {
             cancellation_publication: Mutex::new(()),
             ssh_cancel: Mutex::new(None),
             tmux_binding: Mutex::new(None),
-            watchdog_deadline_ms: AtomicI64::new(0),
-            watchdog_max_deadline_ms: AtomicI64::new(0),
-            async_managed: AtomicBool::new(false),
             completion_cleanup: AtomicBool::new(false),
             claude_interrupt_claim: AtomicU8::new(0),
             claude_interrupt_generation: NEXT_CLAUDE_INTERRUPT_GENERATION
@@ -773,27 +755,6 @@ impl CancelToken {
 
     pub fn turn_nonce(&self) -> Option<&str> {
         self.turn_nonce.as_deref()
-    }
-
-    /// claude-e rollout Phase 1: opt this token out of synchronous
-    /// `enforce_watchdog_deadline` enforcement. The async Discord
-    /// watchdog still polls `watchdog_deadline_ms` at 30s and cancels
-    /// when the deadline expires; the per-provider sync poll inside
-    /// `spawn_cancel_watchdog` stops short-circuiting on it.
-    ///
-    /// Call this from the Discord turn-watchdog setup paths immediately
-    /// before storing `watchdog_deadline_ms`. Non-Discord callers leave
-    /// this flag at its `false` default and keep the historical
-    /// behaviour.
-    pub fn mark_async_managed(&self) {
-        self.async_managed.store(true, Ordering::Relaxed);
-    }
-
-    /// claude-e rollout Phase 1: read counterpart to
-    /// `mark_async_managed`. `enforce_watchdog_deadline` calls this to
-    /// decide whether to honour the sync deadline poll.
-    pub fn is_async_managed(&self) -> bool {
-        self.async_managed.load(Ordering::Relaxed)
     }
 
     pub fn mark_completion_cleanup(&self) {
@@ -932,41 +893,6 @@ impl CancelToken {
         self.set_cancel_source_kind_transactional(kind, |_| {});
     }
 
-    pub(crate) fn try_mark_watchdog_timeout(&self) -> bool {
-        let _publication = self
-            .cancellation_publication
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        self.publish_watchdog_timeout_locked()
-    }
-
-    fn publish_watchdog_timeout_locked(&self) -> bool {
-        if self.completion_cleanup.load(Ordering::Acquire) {
-            return false;
-        }
-
-        let mut kind = self
-            .cancel_source_kind
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let mut label = self
-            .cancel_source
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if self
-            .cancelled
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return false;
-        }
-        *kind = Some(CancelSource::WatchdogTimeout);
-        if label.is_none() {
-            *label = Some(CancelSource::WatchdogTimeout.as_label().to_string());
-        }
-        true
-    }
-
     pub(crate) fn publish_cancel(&self, source: impl Into<String>) {
         let _publication = self
             .cancellation_publication
@@ -1035,10 +961,7 @@ impl CancelToken {
 }
 
 pub fn cancel_requested(token: Option<&CancelToken>) -> bool {
-    token.is_some_and(|token| {
-        enforce_watchdog_deadline(token, current_unix_millis());
-        token.cancelled.load(Ordering::Relaxed)
-    })
+    token.is_some_and(|token| token.cancelled.load(Ordering::Relaxed))
 }
 
 pub fn register_child_pid(token: Option<&CancelToken>, child_pid: u32) {
@@ -1749,11 +1672,7 @@ mod codex_context_window_tests {
 
 #[cfg(test)]
 mod cancel_token_tests {
-    use super::{
-        CancelSource, CancelToken, cancel_requested, current_unix_millis,
-        enforce_watchdog_deadline, register_child_pid,
-    };
-    use std::sync::atomic::Ordering;
+    use super::{CancelSource, CancelToken, cancel_requested, register_child_pid};
     use std::sync::{Arc, Barrier};
     use std::thread;
 
@@ -1965,132 +1884,6 @@ mod cancel_token_tests {
 
         assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
         assert_eq!(token.cancel_source().as_deref(), Some("user_barge_in"));
-    }
-
-    #[test]
-    fn watchdog_deadline_enforcement_marks_cancelled_timeout() {
-        let token = CancelToken::new();
-        let now = current_unix_millis();
-        token
-            .watchdog_deadline_ms
-            .store(now + 1_000, Ordering::Relaxed);
-
-        assert!(!enforce_watchdog_deadline(&token, now + 999));
-        assert!(!token.cancelled.load(Ordering::Relaxed));
-
-        assert!(enforce_watchdog_deadline(&token, now + 1_000));
-        assert!(cancel_requested(Some(&token)));
-        assert_eq!(
-            token.cancel_source_kind(),
-            Some(CancelSource::WatchdogTimeout)
-        );
-        assert_eq!(token.cancel_source().as_deref(), Some("watchdog_timeout"));
-    }
-
-    #[test]
-    fn watchdog_poll_path_respects_completion_cleanup_before_timeout_commit() {
-        let token = CancelToken::new();
-        let now = current_unix_millis();
-        token
-            .watchdog_deadline_ms
-            .store(now + 1_000, Ordering::Relaxed);
-        token.mark_completion_cleanup();
-
-        assert!(!enforce_watchdog_deadline(&token, now + 1_000));
-        assert!(!token.cancelled.load(Ordering::Acquire));
-        assert!(!cancel_requested(Some(&token)));
-        assert_eq!(token.cancel_source_kind(), None);
-        assert_eq!(token.cancel_source(), None);
-    }
-
-    #[test]
-    fn watchdog_poll_path_commits_timeout_through_publication_boundary() {
-        let token = CancelToken::new();
-        let now = current_unix_millis();
-        token
-            .watchdog_deadline_ms
-            .store(now + 1_000, Ordering::Relaxed);
-
-        assert!(enforce_watchdog_deadline(&token, now + 1_000));
-        assert!(token.cancelled.load(Ordering::Acquire));
-        assert!(cancel_requested(Some(&token)));
-        assert_eq!(
-            token.cancel_source_kind(),
-            Some(CancelSource::WatchdogTimeout)
-        );
-        assert_eq!(token.cancel_source().as_deref(), Some("watchdog_timeout"));
-    }
-
-    #[test]
-    fn completion_cleanup_can_win_when_publication_is_held_before_poll() {
-        let token = Arc::new(CancelToken::new());
-        let now = current_unix_millis();
-        token
-            .watchdog_deadline_ms
-            .store(now + 1_000, Ordering::Relaxed);
-
-        let publication = token
-            .cancellation_publication
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let token_for_poll = Arc::clone(&token);
-        let poll =
-            std::thread::spawn(move || enforce_watchdog_deadline(&token_for_poll, now + 1_000));
-
-        token.completion_cleanup.store(true, Ordering::Release);
-        drop(publication);
-
-        assert!(!poll.join().expect("poll thread should finish"));
-        assert!(!token.cancelled.load(Ordering::Acquire));
-        assert_eq!(token.cancel_source_kind(), None);
-        assert_eq!(token.cancel_source(), None);
-    }
-
-    /// claude-e rollout Phase 1 (counter-review round 3 with Codex): when
-    /// a Discord turn watchdog marks the token as async-managed, the
-    /// per-provider sync poll inside `spawn_cancel_watchdog` must NOT fire
-    /// on an expired deadline — the async 30s reconcile loop owns it.
-    /// Non-Discord callers (legacy default) keep the original behaviour.
-    #[test]
-    fn watchdog_deadline_enforcement_skips_async_managed_token() {
-        let token = CancelToken::new();
-        let now = current_unix_millis();
-        token.mark_async_managed();
-        token
-            .watchdog_deadline_ms
-            .store(now + 1_000, Ordering::Relaxed);
-
-        // Deadline has expired, but `async_managed` suppresses the sync
-        // fire: enforce returns false, cancelled stays false, source kind
-        // stays None, and the public `cancel_requested` reports no cancel.
-        assert!(!enforce_watchdog_deadline(&token, now + 5_000));
-        assert!(!token.cancelled.load(Ordering::Relaxed));
-        assert_eq!(token.cancel_source_kind(), None);
-        assert!(!cancel_requested(Some(&token)));
-
-        // Explicit cancel still works — the gate is deadline-only.
-        token.cancelled.store(true, Ordering::Relaxed);
-        assert!(cancel_requested(Some(&token)));
-    }
-
-    #[test]
-    fn watchdog_deadline_enforcement_default_token_still_fires() {
-        // Companion to the async-managed test above: ensure the default
-        // (non-Discord) token path is unchanged. This guards against an
-        // accidental flip of the default in `CancelToken::new`.
-        let token = CancelToken::new();
-        let now = current_unix_millis();
-        assert!(!token.is_async_managed());
-        token
-            .watchdog_deadline_ms
-            .store(now + 1_000, Ordering::Relaxed);
-
-        assert!(enforce_watchdog_deadline(&token, now + 5_000));
-        assert!(cancel_requested(Some(&token)));
-        assert_eq!(
-            token.cancel_source_kind(),
-            Some(CancelSource::WatchdogTimeout)
-        );
     }
 }
 

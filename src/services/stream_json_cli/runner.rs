@@ -36,6 +36,16 @@ pub fn run_prepared(
     no_output_timeout: Duration,
     cancel: Option<std::sync::Arc<crate::services::provider::CancelToken>>,
 ) -> Result<(), String> {
+    run_prepared_with_clock(prepared, sender, no_output_timeout, cancel, Instant::now)
+}
+
+fn run_prepared_with_clock(
+    prepared: PreparedCommand,
+    sender: Sender<StreamMessage>,
+    no_output_timeout: Duration,
+    cancel: Option<std::sync::Arc<crate::services::provider::CancelToken>>,
+    mut now: impl FnMut() -> Instant,
+) -> Result<(), String> {
     tracing::info!(
         executable = %prepared.executable.display(),
         args = ?prepared.redacted_args,
@@ -95,9 +105,8 @@ pub fn run_prepared(
 
     let mut codec = prepared.codec;
     let poll = Duration::from_secs(5);
-    let (startup, idle) = no_output_watchdogs(no_output_timeout);
-    let started_at = Instant::now();
-    let mut last_progress_at = started_at;
+    let startup = startup_output_timeout(no_output_timeout);
+    let started_at = now();
     let mut saw_progress = false;
     let mut stdout_line_count = 0_u64;
 
@@ -108,19 +117,14 @@ pub fn run_prepared(
             let _ = stderr_handle.join();
             return Ok(());
         }
-        let now = Instant::now();
-        let (elapsed, limit) = if saw_progress {
-            (now.duration_since(last_progress_at), idle)
-        } else {
-            (now.duration_since(started_at), startup)
-        };
-        if limit.is_some_and(|limit| elapsed >= limit) {
+        let now = now();
+        if !saw_progress && now.duration_since(started_at) >= startup {
             kill_child_tree(&mut child);
             let _ = child.wait();
             let _ = stderr_handle.join();
             return Err(format!(
                 "[{NO_OUTPUT_ERROR_MARKER}] StreamJson CLI produced no output for {} seconds",
-                limit.expect("checked above").as_secs()
+                startup.as_secs()
             ));
         }
         match line_rx.recv_timeout(poll) {
@@ -141,7 +145,6 @@ pub fn run_prepared(
                 // polling interval.
                 if !line.trim().is_empty() {
                     saw_progress = true;
-                    last_progress_at = Instant::now();
                 }
                 for message in messages {
                     if sender.send(message).is_err() {
@@ -225,28 +228,63 @@ fn collect_stderr(mut reader: impl Read) -> String {
     String::from_utf8_lossy(&captured).into_owned()
 }
 
-/// `Duration::ZERO` means the caller permits an unbounded *turn* duration. It
-/// must not disable stream liveness detection: an outputless process has made
-/// no progress and cannot be distinguished from a poisoned `--resume` token.
-///
-/// The longer values for that mode allow genuinely long Grok turns while still
-/// recovering a CLI that never emits its initial streaming event.
-fn no_output_watchdogs(timeout: Duration) -> (Option<Duration>, Option<Duration>) {
-    if timeout.is_zero() {
-        (
-            Some(Duration::from_secs(90)),
-            Some(Duration::from_secs(300)),
-        )
-    } else {
-        (
-            Some(Duration::from_secs(60)),
-            Some(Duration::from_secs(120)),
-        )
-    }
+fn startup_output_timeout(timeout: Duration) -> Duration {
+    Duration::from_secs(if timeout.is_zero() { 90 } else { 60 })
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn accepted_stream_runs_past_virtual_day_until_real_eof() {
+        struct Codec(usize);
+        impl StreamJsonCodec for Codec {
+            fn push_stdout_line(&mut self, _: &str) -> Result<Vec<StreamMessage>, String> {
+                self.0 += 1;
+                Ok(vec![])
+            }
+            fn finish(&mut self, code: Option<i32>, _: &str) -> Result<Vec<StreamMessage>, String> {
+                assert_eq!(code, Some(0));
+                assert_eq!(
+                    self.0, 2,
+                    "both accepted stream events must reach the codec"
+                );
+                Ok(vec![])
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let prepared = PreparedCommand {
+            executable: "/bin/sh".into(),
+            resolution: BinaryResolution {
+                requested_binary: "sh".into(),
+                resolved_path: Some("/bin/sh".into()),
+                canonical_path: None,
+                source: None,
+                attempts: vec![],
+                failure_kind: None,
+                exec_path: None,
+            },
+            args: vec!["-c".into(), "printf 'accepted\nfinished\n'".into()],
+            redacted_args: vec![],
+            current_dir: dir.path().into(),
+            env: vec![],
+            unset_env: vec![],
+            codec: Box::new(Codec(0)),
+        };
+        let (tx, _rx) = mpsc::channel();
+        let start = Instant::now();
+        let mut ticks = 0;
+        let result = run_prepared_with_clock(prepared, tx, Duration::ZERO, None, || {
+            ticks += 1;
+            start + Duration::from_secs(if ticks > 2 { 24 * 3600 } else { 0 })
+        });
+        assert!(
+            result.is_ok(),
+            "accepted provider was terminated: {result:?}"
+        );
+        assert!(ticks >= 4);
+    }
+
     use super::*;
 
     #[test]
@@ -268,24 +306,18 @@ mod tests {
     }
 
     #[test]
-    fn zero_timeout_keeps_liveness_watchdogs_for_unbounded_turns() {
+    fn zero_timeout_preserves_startup_handshake_budget() {
         assert_eq!(
-            no_output_watchdogs(Duration::ZERO),
-            (
-                Some(Duration::from_secs(90)),
-                Some(Duration::from_secs(300))
-            )
+            startup_output_timeout(Duration::ZERO),
+            Duration::from_secs(90)
         );
     }
 
     #[test]
-    fn nonzero_no_output_timeout_keeps_default_watchdogs() {
+    fn nonzero_timeout_preserves_startup_handshake_budget() {
         assert_eq!(
-            no_output_watchdogs(Duration::from_secs(1)),
-            (
-                Some(Duration::from_secs(60)),
-                Some(Duration::from_secs(120))
-            )
+            startup_output_timeout(Duration::from_secs(1)),
+            Duration::from_secs(60)
         );
     }
 

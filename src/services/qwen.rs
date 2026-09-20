@@ -71,7 +71,6 @@ pub(crate) const QWEN_STREAM_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const QWEN_STREAM_STARTUP_WATCHDOG: Duration = Duration::from_secs(240);
 // Allow up to 120 s of silence after progress has been seen: covers long-running tool calls
 // (e.g. cargo build, test suites) where the model is waiting for a tool result between turns.
-pub(crate) const QWEN_STREAM_IDLE_WATCHDOG: Duration = Duration::from_secs(120);
 pub(crate) const QWEN_MAX_SESSION_RETRIES: usize = 1;
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
 pub(crate) const QWEN_CODE_SYSTEM_SETTINGS_ENV: &str = "QWEN_CODE_SYSTEM_SETTINGS_PATH";
@@ -102,33 +101,21 @@ pub(crate) const QWEN_SUPPORTED_ALLOWED_TOOLS: &[&str] = &[
 pub(crate) struct QwenStreamWatchdog {
     poll_timeout: Duration,
     startup_watchdog: Duration,
-    idle_watchdog: Duration,
     startup_silent_for: Duration,
-    idle_silent_for: Duration,
 }
 
 impl Default for QwenStreamWatchdog {
     fn default() -> Self {
-        Self::new(
-            QWEN_STREAM_POLL_TIMEOUT,
-            QWEN_STREAM_STARTUP_WATCHDOG,
-            QWEN_STREAM_IDLE_WATCHDOG,
-        )
+        Self::new(QWEN_STREAM_POLL_TIMEOUT, QWEN_STREAM_STARTUP_WATCHDOG)
     }
 }
 
 impl QwenStreamWatchdog {
-    pub(crate) const fn new(
-        poll_timeout: Duration,
-        startup_watchdog: Duration,
-        idle_watchdog: Duration,
-    ) -> Self {
+    pub(crate) const fn new(poll_timeout: Duration, startup_watchdog: Duration) -> Self {
         Self {
             poll_timeout,
             startup_watchdog,
-            idle_watchdog,
             startup_silent_for: Duration::ZERO,
-            idle_silent_for: Duration::ZERO,
         }
     }
 
@@ -136,13 +123,9 @@ impl QwenStreamWatchdog {
         self.poll_timeout
     }
 
-    // Called on every received line, not just meaningful ones.  Any stream activity resets both
-    // accumulators so a session that is producing non-content output (init handshake, system
-    // events) does not get prematurely retried.  The startup-vs-idle threshold selection is made
-    // by `on_timeout` based on `meaningful_progress_seen`, not here.
+    // Any stream activity refreshes the startup handshake budget.
     pub(crate) fn observe_line(&mut self) {
         self.startup_silent_for = Duration::ZERO;
-        self.idle_silent_for = Duration::ZERO;
     }
 
     pub(crate) fn on_timeout(&mut self, meaningful_progress_seen: bool) -> Option<String> {
@@ -154,10 +137,6 @@ impl QwenStreamWatchdog {
             return None;
         }
 
-        self.idle_silent_for += self.poll_timeout;
-        if self.idle_silent_for >= self.idle_watchdog {
-            return Some(self.idle_retry_message());
-        }
         None
     }
 
@@ -165,13 +144,6 @@ impl QwenStreamWatchdog {
         format!(
             "Qwen stream produced no output for {} seconds before first progress",
             self.startup_watchdog.as_secs()
-        )
-    }
-
-    pub(crate) fn idle_retry_message(&self) -> String {
-        format!(
-            "Qwen stream produced no output for {} seconds after progress",
-            self.idle_watchdog.as_secs()
         )
     }
 }
@@ -1550,6 +1522,24 @@ fn render_qwen_value(value: &Value) -> String {
 
 #[cfg(test)]
 mod qwen_provider_lifecycle_tests {
+    #[test]
+    fn accepted_quiet_turn_survives_virtual_day() {
+        let mut watchdog = super::QwenStreamWatchdog::new(
+            std::time::Duration::from_secs(3600),
+            std::time::Duration::from_secs(240),
+        );
+        for hour in 1..=24 {
+            assert!(
+                watchdog.on_timeout(true).is_none(),
+                "accepted turn at hour {hour}"
+            );
+        }
+        assert!(
+            watchdog.on_timeout(false).is_some(),
+            "startup remains bounded"
+        );
+    }
+
     use std::time::Duration;
 
     use super::{

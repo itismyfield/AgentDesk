@@ -618,7 +618,7 @@ time for diagnostics; neither is a stored approval value.
     `crash_resume_guard.rs`); -17 from #4151 removing
     `format_monitor_suppressed_body` — its only caller was the unreachable #1009
     MonitorAutoTurn suppressed-body replacement in tmux_watcher.rs (dead since
-    #1708; #4144 r2 closed the None-kind Edit path); -8 from #4198 routing the restored-watcher release D-section through the shared `turn_finalizer::cleanup` helpers (`snapshot_role_override` / `clear_watchdog_and_kick_thread_parents_after_turn_release` / `remove_owned_role_override`); +32 from #4105 adding
+    #1708; #4144 r2 closed the None-kind Edit path); -8 from #4198 routing the restored-watcher release D-section through the shared `turn_finalizer::cleanup` helpers (`snapshot_role_override` / `kick_thread_parents_after_turn_release` / `remove_owned_role_override`); +32 from #4105 adding
     cross-turn restored-seed identity (`RestoredWatcherTurn.turn_identity` +
     `restored_seed_reassigned_to_different_turn`) so a long-lived watcher reused
     for a new turn drops the prior turn's stale `full_response` seed; +101 from #4106 adding
@@ -1734,14 +1734,7 @@ time for diagnostics; neither is a stored approval value.
     S4 mechanical placeholder/status-panel `.ui` rewiring).
   - `src/services/discord/router/message_handler/headless_turn.rs` (frozen giant surface; +1 from #4309 threading the provider-known Claude-harness flag into worker-local per-turn prompt assembly; +1 from #4117 delaying the recovery-context take past the goal-lifecycle Consumed return; -207 from #4119 — inline watchdog loop extracted to the shared watchdog.rs timeout-notice helper; #3751 routes paused-watcher attach through owner-channel persistence helper with no net LoC change; +74 from #family-profile-probe DM-fresh provider session: `dm_fresh_routine_turn` discriminator routes a fresh DM routine turn through the shared `/goal fresh` machinery (`force_fresh_provider_session = goal_fresh || dm_fresh`) — thorough clear (in-memory + DB + stale id) + Claude TUI runtime-binding clear (`tui_prompt_dedupe::clear_tmux_runtime_binding`) + DB/live-TUI restore skip + launch fresh flag, so neither the persisted id nor the live tmux pane is reused (codex review P1/R2/R3 — four reuse layers: in-memory, DB, Codex wrapper, Claude TUI runtime-binding recovery); the `/goal` prompt rewrite stays goal-only so the probe prompt is sent verbatim; so a fresh DM routine turn never resumes the accumulated per-channel session (memento caseId is the only cross-run continuity); -45 from #3591 100턴 세션 리셋(AssistantTurnCap) 제거: reset 판정/clear/DB clear/display 블록 삭제; -2 from #3588 idle 세션 리셋 제거(IdleExpired display arm + `now` 인자 정리); +49 from #4305 recording the durable clear boundary for /goal-fresh and DM-fresh plus the routine identity-change path; +8 from #4571 wiring the native typing indicator spawn + per-turn identity into the non-silent headless turn path; +49 from #4658 scheduled-snapshot session isolation (incl. F1 non-disruption fix): `scheduled_snapshot_session_label` derives the ADK session key from the reservation label (not the channel name); the snapshot turn is deliberately kept OUT of `fresh_context_severance` (which records a DURABLE channel clear boundary + wipes the channel's in-memory provider session) and instead cold-starts by dropping the LOCAL session_id and disables live channel_recent_context via a dedicated `scheduled_snapshot_context` gate — so it runs isolated (DB `sessions` writeback is session_key-keyed) and never disturbs the channel's live session/continuity (AC-2);
     headless Discord turn launch/terminal-response path split from the router
-    message handler; bugfix only outside a further extraction plan; +54 from
-    #3557 (A) codex r2: the headless watchdog was missing the per-turn hard
-    ceiling cap that the foreground intake path already had — and it also
-    `mark_async_managed`s the token so the sync watchdog stops enforcing, leaving
-    this async loop as the ONLY bound. Added the initial-deadline
-    `min(now+timeout, ceiling)` cap + one-shot ceiling warn and the auto-extend
-    `clamp_auto_extend_deadline_ms` clamp, reusing the shared discord/mod.rs
-    helpers, so headless Codex honors its 4h ceiling end to end).
+    message handler; accepted turns have no elapsed or silence deadline).
   - `src/services/discord/meeting_orchestrator.rs` (#4712 de-giant: cohesive
     participant-selection, lifecycle, meeting-round, record-persistence, and
     selection-runtime clusters moved verbatim into `meeting_orchestrator/`

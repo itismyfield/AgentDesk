@@ -27,7 +27,6 @@ const GEMINI_NO_PREVIOUS_SESSIONS_MESSAGE: &str = "No previous sessions found fo
 const GEMINI_NO_SESSIONS_FOUND_MESSAGE: &str = "No sessions found for this project.";
 const GEMINI_DELETE_CURRENT_SESSION_MESSAGE: &str = "Cannot delete the current active session.";
 const GEMINI_STREAM_POLL_TIMEOUT: Duration = Duration::from_secs(5);
-const GEMINI_STREAM_IDLE_WATCHDOG: Duration = Duration::from_secs(120);
 const GEMINI_STREAM_STARTUP_WATCHDOG: Duration = Duration::from_secs(60);
 const GEMINI_MAX_SESSION_RETRIES: usize = 1;
 const GEMINI_TRUSTED_FOLDERS_PATH: &str = ".gemini/trustedFolders.json";
@@ -444,7 +443,6 @@ fn execute_gemini_streaming_attempt(
         cancel_token.as_deref(),
         &mut state,
         GEMINI_STREAM_POLL_TIMEOUT,
-        GEMINI_STREAM_IDLE_WATCHDOG,
         GEMINI_STREAM_STARTUP_WATCHDOG,
         || {
             child
@@ -517,14 +515,12 @@ fn collect_gemini_stream_events<F>(
     cancel_token: Option<&CancelToken>,
     state: &mut GeminiAttemptState,
     poll_timeout: Duration,
-    idle_watchdog: Duration,
     startup_watchdog: Duration,
     mut definitive_failure_observed: F,
 ) -> GeminiStreamLoopResult
 where
     F: FnMut() -> bool,
 {
-    let mut silent_for = Duration::ZERO;
     let mut startup_silent_for = Duration::ZERO;
 
     loop {
@@ -534,7 +530,6 @@ where
 
         match stdout_events.recv_timeout(poll_timeout) {
             Ok(GeminiStreamEvent::Line(line)) => {
-                silent_for = Duration::ZERO;
                 startup_silent_for = Duration::ZERO;
                 process_gemini_stream_line(&line, state, sender);
             }
@@ -564,14 +559,9 @@ where
                     }
                     continue;
                 }
-                silent_for += poll_timeout;
-                if silent_for >= idle_watchdog {
-                    let _ = definitive_failure_observed();
+                if definitive_failure_observed() {
                     return GeminiStreamLoopResult::RetrySession {
-                        message: format!(
-                            "Gemini stream produced no output for {} seconds",
-                            idle_watchdog.as_secs()
-                        ),
+                        message: "Gemini process exited without a terminal result".to_string(),
                     };
                 }
             }
@@ -1386,6 +1376,87 @@ mod path_expansion_tests {
         assert_eq!(
             expand_gemini_working_dir(r"~\agentdesk"),
             home.join("agentdesk")
+        );
+    }
+}
+
+#[cfg(test)]
+mod accepted_turn_tests {
+    use super::*;
+
+    fn accepted_state() -> (GeminiAttemptState, Sender<StreamMessage>) {
+        let (sender, _receiver) = mpsc::channel();
+        let mut state = GeminiAttemptState::default();
+        process_gemini_stream_line(
+            r#"{"type":"message","role":"assistant","content":"working"}"#,
+            &mut state,
+            &sender,
+        );
+        assert!(state.meaningful_progress_seen);
+        (state, sender)
+    }
+
+    #[test]
+    fn quiet_accepted_stream_waits_for_real_eof() {
+        let (tx, rx) = mpsc::channel();
+        let (mut state, sender) = accepted_state();
+        let mut polls = 0;
+        let outcome = collect_gemini_stream_events(
+            &rx,
+            &sender,
+            None,
+            &mut state,
+            Duration::ZERO,
+            Duration::from_secs(60),
+            || {
+                polls += 1;
+                if polls == 8 {
+                    tx.send(GeminiStreamEvent::Eof).unwrap();
+                }
+                false
+            },
+        );
+        assert!(matches!(outcome, GeminiStreamLoopResult::Eof));
+        assert_eq!(polls, 8);
+    }
+
+    #[test]
+    fn quiet_accepted_stream_observes_manual_cancel() {
+        let (_tx, rx) = mpsc::channel();
+        let (mut state, sender) = accepted_state();
+        let token = CancelToken::new();
+        let outcome = collect_gemini_stream_events(
+            &rx,
+            &sender,
+            Some(&token),
+            &mut state,
+            Duration::ZERO,
+            Duration::from_secs(60),
+            || {
+                token.publish_cancel("manual_cancel");
+                false
+            },
+        );
+        assert!(matches!(outcome, GeminiStreamLoopResult::Cancelled));
+        assert_eq!(token.cancel_source().as_deref(), Some("manual_cancel"));
+    }
+
+    #[test]
+    fn quiet_accepted_stream_recovers_only_after_process_exit() {
+        let (_tx, rx) = mpsc::channel();
+        let (mut state, sender) = accepted_state();
+        let outcome = collect_gemini_stream_events(
+            &rx,
+            &sender,
+            None,
+            &mut state,
+            Duration::ZERO,
+            Duration::from_secs(60),
+            || true,
+        );
+        assert!(
+            matches!(outcome, GeminiStreamLoopResult::RetrySession { message }
+            if message.contains("process exited"))
         );
     }
 }

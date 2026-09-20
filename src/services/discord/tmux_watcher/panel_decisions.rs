@@ -70,63 +70,6 @@ pub(super) fn watcher_fresh_idle_finalize_decision(
     }
 }
 
-/// #3419 R3 (codex HIGH): turn-watchdog TIMEOUT finalize decision, keyed on the
-/// live mailbox active-turn identity, not the on-disk inflight row — the
-/// mailbox `cancel_token`/active-turn slot is what wedges the soft-queue.
-/// `Finalize` requires the pinned snapshot's non-zero `user_msg_id` to still
-/// equal the mailbox's current `active_user_message_id`: the pinned turn is
-/// still the live token holder and timed out, so it's drained via the
-/// identity-guarded `mailbox_finish_turn_if_matches`, even if the on-disk
-/// inflight is now an id-0 synthetic row or absent. Otherwise `Skip`: a
-/// different live turn holds the mailbox, or there is no active turn / the
-/// pinned turn is id-0.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TimeoutFinalizeDecision {
-    /// No mailbox token to drain (no pinned turn, id-0, or wrong/no active
-    /// turn). Carries the pinned id (0 when absent/synthetic) for the skip log.
-    Skip { pinned_user_msg_id: u64 },
-    /// Still the live mailbox token holder and timed out — drain via the
-    /// single-authority path with the real pinned id.
-    Finalize { user_msg_id: u64 },
-}
-
-pub(super) fn watcher_timeout_finalize_decision(
-    pinned_startup_inflight: Option<&InflightTurnState>,
-    mailbox_active_user_msg_id: Option<u64>,
-    tmux_session_name: &str,
-) -> TimeoutFinalizeDecision {
-    let Some(pinned) = pinned_startup_inflight.filter(|state| {
-        state.user_msg_id != 0
-            && state.tmux_session_name.as_deref().map(str::trim) == Some(tmux_session_name.trim())
-    }) else {
-        return TimeoutFinalizeDecision::Skip {
-            pinned_user_msg_id: pinned_startup_inflight.map(|s| s.user_msg_id).unwrap_or(0),
-        };
-    };
-    if mailbox_active_user_msg_id == Some(pinned.user_msg_id) {
-        TimeoutFinalizeDecision::Finalize {
-            user_msg_id: pinned.user_msg_id,
-        }
-    } else {
-        TimeoutFinalizeDecision::Skip {
-            pinned_user_msg_id: pinned.user_msg_id,
-        }
-    }
-}
-
-/// #3419 B: single-authority predicate for whether the watcher turn is still
-/// ACTIVE (a real byte within `idle_window`, measured from the last non-empty
-/// read, AND under the absolute `cap`). The loop uses `while active` and the
-/// timeout-finalize gate uses its negation, so the two can't diverge.
-pub(super) fn watcher_turn_still_active(
-    idle_elapsed: std::time::Duration,
-    idle_window: std::time::Duration,
-    total_elapsed: std::time::Duration,
-    cap: std::time::Duration,
-) -> bool {
-    idle_elapsed < idle_window && total_elapsed < cap
-}
-
 pub(super) fn watcher_should_clear_stale_terminal_message_ids(
     inflight_present: bool,
     has_assistant_response: bool,

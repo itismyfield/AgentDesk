@@ -1001,9 +1001,17 @@ jobs:
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::catch_up::classification_order_tests::catch_up_human_visible_marker_recovers_and_strips_but_bot_marker_is_rejected -- --exact --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_gate::gate::tests -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib server::outbox_actionable_delivery::tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::watchdog::timeout_notice_tests -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::message_outbox::dedupe_key_tests -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_gate::live_intake_preserve_wiring_tests::one_admission_guard_precedes_all_soft_intervention_entrypoints -- --exact --test-threads=1
+
+      - name: Accepted turn lifetime regressions
+        run: |
+          env -u AGENTDESK_ROOT_DIR cargo test --lib accepted_turn_tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib accepted_quiet_turn_survives_virtual_day -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib accepted_stream_runs_past_virtual_day_until_real_eof -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib productive_turns_older_than_four_and_six_hours_defer_cleanup -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib quiet_native_turn_resumes_after_virtual_day -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::provider::cancel_watchdog::tests -- --test-threads=1
 
       # #5003: this production-path E2E previously ran only in main's broad
       # non-PG lane, so test-only fixes could merge without executing it on PRs.

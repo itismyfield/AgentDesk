@@ -31,13 +31,10 @@ pub(super) struct NoResultExitContext<'a> {
 
 pub(super) struct NoResultExitLocals<'a> {
     pub(super) found_result: bool,
-    pub(super) was_paused: bool,
     pub(super) epoch_snapshot: u64,
     pub(super) full_response: &'a String,
     pub(super) turn_is_external_input_for_session: bool,
     pub(super) finish_mailbox_on_completion: bool,
-    pub(super) startup_inflight_snapshot: Option<InflightTurnState>,
-    pub(super) is_prompt_too_long: bool,
     pub(super) prompt_too_long_killed: bool,
     pub(super) terminal_delivery_observed: bool,
     pub(super) active_read_state: Option<ActiveReadState>,
@@ -80,13 +77,10 @@ pub(super) async fn handle_no_result_exits(
     let watcher_instance_id = context.watcher_instance_id;
     let NoResultExitLocals {
         found_result,
-        was_paused,
         epoch_snapshot,
         full_response,
         turn_is_external_input_for_session,
         finish_mailbox_on_completion,
-        startup_inflight_snapshot,
-        is_prompt_too_long,
         prompt_too_long_killed,
         terminal_delivery_observed,
         active_read_state,
@@ -94,15 +88,12 @@ pub(super) async fn handle_no_result_exits(
     let mut current_offset = *state.current_offset;
     if !found_result {
         let ActiveReadState {
-            turn_start,
-            turn_timeout,
-            turn_idle_timeout,
-            last_output_at,
             tmux_death_observed,
             ready_for_input_failure_notice,
             ready_for_input_stall_dispatch_id,
             ready_for_input_stall_inflight_snapshot,
             fresh_ready_for_input_idle,
+            ..
         } = active_read_state.expect("active read state must exist when result was not found");
 
         if fresh_ready_for_input_idle {
@@ -714,102 +705,6 @@ pub(super) async fn handle_no_result_exits(
                 }
             }
             clear_provider_overload_retry_state(channel_id);
-            finish_monitor_auto_turn_if_claimed(
-                &shared,
-                &watcher_provider,
-                channel_id,
-                &mut *state.monitor_auto_turn_claimed,
-                &mut *state.monitor_auto_turn_finished,
-                &mut *state.monitor_auto_turn_synthetic_msg_id,
-                &mut *state.monitor_auto_turn_ledger_generation,
-            )
-            .await;
-            return NoResultExitOutcome::ContinueWatcherLoop;
-        }
-
-        // #3419 R2: turn-watchdog timeout fall-through (`!found_result` past the
-        // fresh-idle / tmux-death / cancel / notice exits). Pre-#3419 this left
-        // the turn UN-finalized (TurnFinalizer never ran, mailbox cancel_token
-        // leaked, soft-queue wedged). Route through the SAME
-        // `finish_restored_watcher_active_turn` entry normal completion uses (no
-        // new authority; once-gate makes a later normal finalize idempotent).
-        // Skip when paused/epoch-bumped or an error branch owns cleanup (below).
-        // #3419 R3 (codex HIGH — drain re-acquire id-0 wedge, no steal): key the
-        // decision on the LIVE MAILBOX active-turn id, not the on-disk inflight
-        // (the mailbox token wedges the queue; re-acquire can mint an id-0
-        // inflight while pinned A's token is still active, so R2's on-disk test
-        // Skipped A and left it wedged). Finalize ONLY when the mailbox still
-        // holds pinned A's token; a DIFFERENT live turn B / no active turn → Skip.
-        // The submit is A's REAL pinned id via identity-guarded
-        // `mailbox_finish_turn_if_matches`, so B can't be stolen / id-0 submitted.
-        // #3419 B: NOT-active (idle OR cap expired) routes the stuck turn
-        // through this C finalize; same predicate as the loop (single authority).
-        if !found_result
-            && !watcher_turn_still_active(
-                last_output_at.elapsed(),
-                turn_idle_timeout,
-                turn_start.elapsed(),
-                turn_timeout,
-            )
-            && !was_paused
-            && pause_epoch.load(Ordering::Relaxed) == epoch_snapshot
-            && !is_prompt_too_long
-        {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            // Wedge is the mailbox token; decide on its CURRENT active-turn id (different/absent = B took over / released).
-            let mailbox_active_user_msg_id = shared
-                .mailbox(channel_id)
-                .snapshot()
-                .await
-                .active_user_message_id
-                .map(serenity::MessageId::get);
-            match watcher_timeout_finalize_decision(
-                startup_inflight_snapshot.as_ref(),
-                mailbox_active_user_msg_id,
-                &tmux_session_name,
-            ) {
-                TimeoutFinalizeDecision::Skip { pinned_user_msg_id } => {
-                    tracing::warn!(
-                        "  [{ts}] ⚠ #3419: watcher turn watchdog timed out for {tmux_session_name} after {}s, but pinned turn {pinned_user_msg_id} no longer holds the mailbox token (id-0 / no active turn / newer turn took over); NOT finalizing — the live turn finalizes itself",
-                        turn_start.elapsed().as_secs()
-                    );
-                }
-                TimeoutFinalizeDecision::Finalize { user_msg_id } => {
-                    tracing::warn!(
-                        "  [{ts}] ⚠ #3419: watcher turn watchdog timed out for {tmux_session_name} after {}s (pinned turn {user_msg_id} still holds the mailbox token); routing through the single-authority finalizer to release the token and drain the queue",
-                        turn_start.elapsed().as_secs()
-                    );
-                    // Identity-matched clear: removes the row ONLY while still
-                    // the pinned turn (same identity INCL. turn_start_offset, so
-                    // clear key == decision key). A re-acquired id-0 / newer row →
-                    // `UserMsgMismatch` no-op (drain frees the token, stale row untouched).
-                    if let Some(pinned) = startup_inflight_snapshot.as_ref() {
-                        let _ = crate::services::discord::inflight::clear_inflight_state_if_matches_identity(
-                                &watcher_provider,
-                                channel_id.get(),
-                                &crate::services::discord::inflight::InflightTurnIdentity::from_state(pinned),
-                            );
-                    }
-                    // finish_mailbox=true releases the watcher token (wedge fix);
-                    // normal_completion=false; kickoff_queue=true admits the next
-                    // turn. The REAL pinned id keys IDENTITY-GUARDED
-                    // `mailbox_finish_turn_if_matches` (can't release a newer turn).
-                    finish_restored_watcher_active_turn(
-                            &shared,
-                            &watcher_provider,
-                            channel_id,
-                            user_msg_id,
-                            true,
-                            false,
-                            true,
-                            startup_inflight_snapshot.as_ref().map(
-                                crate::services::discord::turn_finalizer::SyntheticClaimSnapshot::from_row,
-                            ),
-                            "watcher turn watchdog timeout (#3419)",
-                        )
-                        .await;
-                }
-            }
             finish_monitor_auto_turn_if_claimed(
                 &shared,
                 &watcher_provider,

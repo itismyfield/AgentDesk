@@ -2,7 +2,6 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
-use std::time::Duration;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::platform::probe_provider_binary_version;
@@ -11,10 +10,6 @@ use crate::services::stream_json_cli::policy::ToolPolicy;
 use crate::services::stream_json_cli::request::ProviderTurnRequest;
 use crate::services::stream_json_cli::runner::{PreparedCommand, run_prepared};
 use crate::services::stream_json_cli::session::parse_strict_uuid;
-
-const PRINT_TIMEOUT_SKEW: Duration = Duration::from_secs(5);
-const PRINT_TIMEOUT_FLOOR: Duration = Duration::from_secs(30);
-const CLI_DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub fn execute(request: ProviderTurnRequest, sender: Sender<StreamMessage>) -> Result<(), String> {
     if request.remote_profile.is_some() {
@@ -44,10 +39,6 @@ pub(crate) fn build_argv(request: &ProviderTurnRequest) -> Result<Vec<String>, S
         "--output-format".to_string(),
         "stream-json".to_string(),
     ];
-    if let Some(timeout) = derived_print_timeout(request.timeout) {
-        args.push("--print-timeout".to_string());
-        args.push(timeout);
-    }
     if let Some(model) = request
         .model
         .as_deref()
@@ -107,15 +98,6 @@ pub(crate) fn prepare(request: &ProviderTurnRequest) -> Result<PreparedCommand, 
         ),
         codec: Box::new(AgyCodec::new()),
     })
-}
-
-fn derived_print_timeout(outer: Duration) -> Option<String> {
-    if outer < Duration::from_secs(35) && outer < CLI_DEFAULT_TIMEOUT {
-        return None;
-    }
-    let derived = outer.saturating_sub(PRINT_TIMEOUT_SKEW);
-    let secs = derived.max(PRINT_TIMEOUT_FLOOR).as_secs();
-    Some(format!("{secs}s"))
 }
 
 fn compose_envelope(system: &str, user: &str) -> String {
@@ -196,6 +178,6 @@ mod tests {
                 .iter()
                 .any(|arg| arg == "--dangerously-skip-permissions")
         );
-        assert!(args.contains(&"--print-timeout".to_string()));
+        assert!(!args.contains(&"--print-timeout".to_string()));
     }
 }

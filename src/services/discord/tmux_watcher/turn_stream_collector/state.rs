@@ -102,9 +102,6 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct RenderSeedState {
 
 #[derive(Clone)]
 pub(in crate::services::discord::tmux::tmux_watcher) struct ActiveReadState {
-    pub(in crate::services::discord::tmux::tmux_watcher) turn_start: tokio::time::Instant,
-    pub(in crate::services::discord::tmux::tmux_watcher) turn_timeout: std::time::Duration,
-    pub(in crate::services::discord::tmux::tmux_watcher) turn_idle_timeout: std::time::Duration,
     pub(in crate::services::discord::tmux::tmux_watcher) last_output_at: tokio::time::Instant,
     pub(in crate::services::discord::tmux::tmux_watcher) tmux_death_observed: bool,
     pub(in crate::services::discord::tmux::tmux_watcher) ready_for_input_failure_notice:

@@ -15,7 +15,6 @@ mod placeholder_handoff;
 pub(super) mod race_loss;
 mod runtime_transition;
 mod stale_dispatch_guard;
-mod turn_watchdog;
 mod voice_intake;
 mod worker_entry;
 
@@ -1796,18 +1795,6 @@ pub(super) async fn handle_text_message(
         provider_label,
         session_id.is_some(),
     );
-    // Spawn turn watchdog — detects deadline expiry and hands off to cancel reconciliation.
-    // The deadline is stored in cancel_token.watchdog_deadline_ms and can be
-    // extended via POST /api/turns/{channel_id}/extend-timeout.
-    turn_watchdog::spawn_text_turn_watchdog(
-        &cancel_token,
-        shared,
-        http,
-        channel_id,
-        &provider,
-        provider_label,
-    );
-
     // Resolve remote profile for this channel
     let remote_profile = {
         let data = shared.core.lock().await;
@@ -2195,7 +2182,6 @@ pub(super) async fn handle_text_message(
         cancel_token
             .cancelled
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        super::super::super::clear_watchdog_deadline_override(channel_id.get()).await;
         // #3813 Phase 1a: prep done but input deferred pre-submit (TUI busy) —
         // emit the partial span (input/total render `-`); the retry re-enters
         // intake and emits its own `submitted` span.

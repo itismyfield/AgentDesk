@@ -318,7 +318,7 @@ function findRecentInflightForSession(sessionKey, tmuxName) {
   return best;
 }
 
-function inspectInflightProgress(sessionKey, tmuxName, recentWindowMin, maxTurnMin) {
+function inspectInflightProgress(sessionKey, tmuxName, recentWindowMin) {
   var inflight;
   try {
     inflight = findRecentInflightForSession(sessionKey, tmuxName);
@@ -331,8 +331,7 @@ function inspectInflightProgress(sessionKey, tmuxName, recentWindowMin, maxTurnM
       recent: false,
       updated_age_min: null,
       turn_age_min: null,
-      channel_id: null,
-      max_turn_reached: false
+      channel_id: null
     };
   }
   var nowMs = Date.now();
@@ -345,8 +344,7 @@ function inspectInflightProgress(sessionKey, tmuxName, recentWindowMin, maxTurnM
     recent: updatedAgeMin !== null && updatedAgeMin <= recentWindowMin,
     updated_age_min: updatedAgeMin,
     turn_age_min: turnAgeMin,
-    channel_id: inflight.channel_id || null,
-    max_turn_reached: turnAgeMin !== null && turnAgeMin >= maxTurnMin
+    channel_id: inflight.channel_id || null
   };
 }
 
@@ -369,20 +367,6 @@ function isExternalInputTuiDirectSyntheticTurn(inf) {
   return !!inf && inf.turn_source === "external_input" &&
     (inf.request_owner_user_id === 1 || inf.request_owner_user_id === "1") &&
     inf.rebind_origin !== true;
-}
-
-function requestTurnWatchdogExtension(channelId, extendMinutes) {
-  if (!channelId) return { ok: false, error: "channel_id missing" };
-  var apiPort = agentdesk.config.get("server_port");
-  if (!apiPort) return { ok: false, error: "server_port missing" };
-  var extendSecs = Math.max(1, Math.round(extendMinutes * 60));
-  var url = "http://127.0.0.1:" + apiPort +
-    "/api/turns/" + encodeURIComponent(channelId) + "/extend-timeout";
-  var resp = agentdesk.http.post(url, { extend_secs: extendSecs });
-  if (!resp || resp.error) {
-    return { ok: false, error: resp && resp.error ? resp.error : "unknown error" };
-  }
-  return resp;
 }
 
 function _queuePMDecision(cardId, title, reason) {
@@ -420,7 +404,6 @@ module.exports = {
   isSyntheticMissingInflightReattachPlaceholder: isSyntheticMissingInflightReattachPlaceholder,
   findRecentInflightForSession: findRecentInflightForSession,
   inspectInflightProgress: inspectInflightProgress,
-  requestTurnWatchdogExtension: requestTurnWatchdogExtension,
   _queuePMDecision: _queuePMDecision,
   _flushPMDecisions: _flushPMDecisions
 };

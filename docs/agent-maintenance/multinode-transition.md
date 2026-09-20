@@ -1670,19 +1670,10 @@ redeploy leaves the old values live in the plist.
   clobbering it backward) and the commit path `max`-serializes its watermark
   against the reload, eliminating the backward-write race with the owner-gated
   `refresh_inflight_last_offset_*` advance.
-- #3671 (stall-watchdog force-clean deferral backstop): `health/stall_liveness.rs`
-  replaces the tick-count cleanup gate with an age-based absolute backstop. While
-  positive liveness is observed (`evaluate_stall_watchdog_liveness`) the force-clean
-  is deferred indefinitely up to `STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS` (4h, aligned
-  to the Codex per-turn hard ceiling); only a turn whose anchor age
-  (`started_at.max(boot)`, unchanged from `from_snapshot`) crosses that bound is
-  force-cleaned (finite detection ceiling per #3582 R1), and a dead relay
-  (`reason_codes == none`) still cleans on the first tick. The age is the turn's own
-  `judgment_basis.inflight_age_secs` threaded in from `health/recovery.rs`. This is
-  **worker-local**: the watchdog runs against the node-local per-channel inflight
-  snapshot and its own `DEFERRAL_STATE`/`OFFSET_OBSERVATIONS` dashmaps. No lease,
-  durable queue, leader/standby ownership, gateway startup order, or singleton
-  assumption is touched.
+- Producer liveness in `health/stall_liveness.rs` defers cleanup and paging
+  regardless of total turn age. Missing or stale evidence still follows the
+  existing recovery decision. The state and evidence remain worker-local; lease,
+  durable queue, gateway startup, and leader ownership are unchanged.
 - #3646 (relay-owner observability — OBSERVATION-ONLY): splits the relay flight
   recorder's collapsed `relay_owner_kind` into two distinct signals so the #3607
   None-ledger vs Watcher-finalize ambiguity is PG-resolvable, and adds three
