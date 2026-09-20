@@ -242,7 +242,7 @@ else
 fi
 printf '     Running unittests src/lib.rs (target/debug/deps/agentdesk-0123456789ab)\\n'
 printf 'running 1 test\\n'
-printf 'test the_named_target ... FAILED\\n'
+printf 'test %s ... FAILED\\n' \"$4\"
 printf 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out\\n'
 exit 101
 """,
@@ -288,7 +288,7 @@ set -euo pipefail
 printf '   Compiling agentdesk v0.1.0 (fake)\\n'
 printf '     Running unittests src/lib.rs (target/debug/deps/agentdesk-0123456789ab)\\n'
 printf 'running 1 test\\n'
-printf 'test the_named_target ... FAILED\\n'
+printf 'test %s ... FAILED\\n' \"$4\"
 printf 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out\\n'
 exit 101
 """,
@@ -306,7 +306,8 @@ exit 101
         root = self.copy_fixture()
         cargo = root / "fake-bin/cargo"
         cargo.parent.mkdir()
-        cargo.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + _result_log(outcome) + body)
+        cargo.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + _result_log(outcome)
+                         + "(\n" + body + ") | sed \"s/the_named_target/$4/g\"\n")
         cargo.chmod(0o755)
         result = self.run_script_with_fake_cargo(root, cargo)
         self.assert_sources_restored(self, root)
@@ -358,6 +359,22 @@ exit 101
         ):
             with self.subTest(parent=parent):
                 _, result = self.run_cargo_body(child + parent)
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 93, output)
+                self.assertIn("status=NO-VERDICT", output)
+                self.assertNotIn("MUTATION_RESULT", output)
+                self.assertNotIn("MUTATION_SUMMARY", output)
+
+    def test_parent_summary_must_follow_one_completed_parent_row(self) -> None:
+        row = "test the_named_target ... FAILED\n"
+        for body in (
+            KILLED_RUNNER.replace(row, ""),
+            KILLED_RUNNER.replace(row, row + row),
+            KILLED_RUNNER.replace(row, "test the_named_target ... child noise\nFAILED\n"),
+            KILLED_RUNNER.replace(row, "").replace("RELAY_AUTHORITY_LOG\nexit", row + "RELAY_AUTHORITY_LOG\nexit"),
+        ):
+            with self.subTest(body=body):
+                _, result = self.run_cargo_body(body)
                 output = result.stdout + result.stderr
                 self.assertEqual(result.returncode, 93, output)
                 self.assertIn("status=NO-VERDICT", output)

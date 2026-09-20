@@ -203,7 +203,7 @@ no_verdict() {
 
 run_target() {
   local mutation=$1 target=$2 log=$3 rc compile_count test_result rest passed failed
-  local summaries running summary_pattern expected_result
+  local summaries running summary_pattern expected_result row_status parent_rows parent_line summary_line running_line
   # Keep child/panic diagnostics off the parent oracle; bind its result to the exact test.
   local stdout_log="$log.stdout" result_log="$log.results"
   : >"$stdout_log"
@@ -287,12 +287,28 @@ run_target() {
   fi
 
   expected_result="failed $target"
+  row_status=FAILED
   if ((rc == 0)); then
     expected_result="ok $target"
+    row_status=ok
   fi
   if [[ "$MODE" == "cargo" && "$(cat "$result_log")" != "$expected_result" ]]; then
     no_verdict "$mutation" "$rc" "$target" "$log" "missing or inconsistent parent test result"
     return 93
+  fi
+
+  if [[ "$MODE" == "cargo" ]]; then
+    parent_rows="$(grep -nFx "test $target ... $row_status" "$stdout_log" || true)"
+    parent_line="${parent_rows%%:*}"
+    summary_line="$(grep -n '^test result:' "$stdout_log")"
+    summary_line="${summary_line%%:*}"
+    running_line="$(grep -nE '^running [0-9]+ tests?$' "$stdout_log")"
+    running_line="${running_line%%:*}"
+    if [[ -z "$parent_rows" || "$parent_rows" == *$'\n'* ]] ||
+      ((running_line >= parent_line || parent_line >= summary_line)); then
+      no_verdict "$mutation" "$rc" "$target" "$log" "missing or ambiguous parent completion row"
+      return 93
+    fi
   fi
 
   rest="${test_result#*. }"
