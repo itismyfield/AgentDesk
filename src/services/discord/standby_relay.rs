@@ -1248,7 +1248,7 @@ mod tests {
 
     #[test]
     fn standby_inflight_match_requires_same_output_and_placeholder() {
-        with_isolated_runtime_root(|| {
+        with_isolated_runtime_root(|_root| {
             let mut state = InflightTurnState::new(
                 ProviderKind::Codex,
                 1234,
@@ -1407,26 +1407,37 @@ mod tests {
         assert!(standby_should_send_new_chunks_for_placeholder(&overflowing));
     }
 
-    fn with_isolated_runtime_root<F: FnOnce()>(f: F) {
+    fn with_isolated_runtime_root<F: FnOnce(&std::path::Path)>(f: F) {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("create temp runtime dir for standby relay test");
-        unsafe {
-            std::env::set_var(
-                "AGENTDESK_ROOT_DIR",
-                tmp.path().to_str().expect("temp path must be valid utf-8"),
-            );
-        }
-        f();
-        unsafe {
-            std::env::remove_var("AGENTDESK_ROOT_DIR");
-        }
+        let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tmp.path(),
+        );
+        f(tmp.path());
+    }
+
+    use crate::test_env_panic_probe::{assert_root_restored, checkpoint};
+
+    fn exercise_standby_runtime_root() {
+        with_isolated_runtime_root(|root| checkpoint(&[("AGENTDESK_ROOT_DIR", root.as_os_str())]))
+    }
+
+    #[test]
+    fn standby_runtime_root_restores_env_after_panic_present() {
+        assert_root_restored(true, exercise_standby_runtime_root);
+    }
+
+    #[test]
+    fn standby_runtime_root_restores_env_after_panic_absent() {
+        assert_root_restored(false, exercise_standby_runtime_root);
     }
 
     #[test]
     fn standby_completion_clears_matching_inflight_with_identity_guard() {
-        with_isolated_runtime_root(|| {
+        with_isolated_runtime_root(|_root| {
             let provider = ProviderKind::Codex;
             let channel_id = ChannelId::new(1234);
             let state = InflightTurnState::new(
@@ -1465,7 +1476,7 @@ mod tests {
 
     #[test]
     fn standby_completion_keeps_mismatched_placeholder_inflight() {
-        with_isolated_runtime_root(|| {
+        with_isolated_runtime_root(|_root| {
             let provider = ProviderKind::Codex;
             let channel_id = ChannelId::new(1235);
             let state = InflightTurnState::new(
@@ -1505,7 +1516,7 @@ mod tests {
 
     #[test]
     fn standby_completion_uses_captured_identity_when_fresh_turn_reuses_output() {
-        with_isolated_runtime_root(|| {
+        with_isolated_runtime_root(|_root| {
             let provider = ProviderKind::Codex;
             let channel_id = ChannelId::new(1236);
             let mut old_state = InflightTurnState::new(
@@ -1566,7 +1577,7 @@ mod tests {
 
     #[test]
     fn standby_heartbeat_uses_captured_identity_when_fresh_turn_reuses_output() {
-        with_isolated_runtime_root(|| {
+        with_isolated_runtime_root(|_root| {
             let provider = ProviderKind::Codex;
             let channel_id = ChannelId::new(1237);
             let mut old_state = InflightTurnState::new(

@@ -3738,7 +3738,11 @@ services::discord::outbound::send_api::senddm_parse_tests::parse_senddm_body_pin
 services::discord::outbound::send_gate::send_source_tests::cli_cannot_impersonate_loopback_only_labels
 services::discord::outbound::send_gate::send_source_tests::dashboard_can_use_dashboard_or_known_agent_role_labels
 services::discord::outbound::send_gate::send_source_tests::dashboard_cannot_impersonate_system_or_headless_turn
+services::discord::outbound::send_gate::send_source_tests::dashboard_role_labels_restores_env_after_panic_absent
+services::discord::outbound::send_gate::send_source_tests::dashboard_role_labels_restores_env_after_panic_present
 services::discord::outbound::send_gate::send_source_tests::dm_default_agent_allows_headless_private_channel_when_provider_bound
+services::discord::outbound::send_gate::send_source_tests::dm_default_agent_restores_env_after_panic_absent
+services::discord::outbound::send_gate::send_source_tests::dm_default_agent_restores_env_after_panic_present
 services::discord::outbound::send_gate::send_source_tests::from_header_parses_known_caller_classes
 services::discord::outbound::send_gate::send_source_tests::headless_turn_is_allowed_internal_send_source
 services::discord::outbound::send_gate::send_source_tests::loopback_internal_keeps_existing_internal_label_acceptance
@@ -3952,6 +3956,8 @@ services::discord::placeholder_live_events::tests::session_banner_claimed_exactl
 services::discord::placeholder_live_events::tests::session_banner_dedup_falls_back_to_provider_session_id
 services::discord::placeholder_live_events::tests::session_banner_none_without_session_snapshot
 services::discord::placeholder_live_events::tests::session_banner_reemits_once_on_new_session_boundary
+services::discord::placeholder_live_events::tests::stamped_nonce_two_spawns_restores_env_after_panic_absent
+services::discord::placeholder_live_events::tests::stamped_nonce_two_spawns_restores_env_after_panic_present
 services::discord::placeholder_live_events::tests::status_events_from_json_captures_top_level_workflow_events
 services::discord::placeholder_live_events::tests::status_events_from_json_captures_workflow_progress_array
 services::discord::placeholder_live_events::tests::status_events_from_json_keeps_tool_result_visibility
@@ -4270,6 +4276,8 @@ services::discord::recovery_engine::crash_resume_guard::tests::crash_readopt_rea
 services::discord::recovery_engine::crash_resume_guard::tests::crash_real_user_missing_marker_dead_letters
 services::discord::recovery_engine::crash_resume_guard::tests::marker_present_is_a_no_op
 services::discord::recovery_engine::crash_resume_guard::tests::planned_restart_missing_marker_does_not_dead_letter
+services::discord::recovery_engine::crash_resume_guard::tests::readopted_crash_turn_restores_env_after_panic_absent
+services::discord::recovery_engine::crash_resume_guard::tests::readopted_crash_turn_restores_env_after_panic_present
 services::discord::recovery_engine::crash_resume_guard::tests::real_owner_id0_missing_marker_does_not_dead_letter
 services::discord::recovery_engine::crash_resume_guard::tests::rebind_origin_turn_is_owned_by_the_rebind_api
 services::discord::recovery_engine::crash_resume_guard::tests::resume_required_holds_for_the_readopted_crash_turn
@@ -5283,6 +5291,8 @@ services::discord::settings::validation::voice_channel_guard_tests::allow_channe
 services::discord::settings::validation::voice_channel_guard_tests::full_guard_passes_voice_slash_command_for_owner_blocks_non_owner
 services::discord::settings::validation::voice_channel_guard_tests::restart_orphan_classification_separates_provider_rebind_from_cross_bot_skip
 services::discord::settings::validation::voice_channel_guard_tests::restart_routing_change_orphans_provider_rebind_but_preserves_reroutable_and_valid
+services::discord::settings::validation::voice_channel_guard_tests::validation_runtime_root_restores_env_after_panic_absent
+services::discord::settings::validation::voice_channel_guard_tests::validation_runtime_root_restores_env_after_panic_present
 services::discord::settings::write::yaml_write_back_secret_tests::bot_settings_write_back_keeps_skip_serializing_secrets_on_disk
 services::discord::settings::write::yaml_write_back_secret_tests::bot_settings_write_back_preserves_unknown_keys_inside_modelled_sections
 services::discord::settings::write::yaml_write_back_secret_tests::bot_settings_write_back_preserves_unowned_document_keys
@@ -5407,6 +5417,8 @@ services::discord::standby_relay::tests::standby_heartbeat_uses_captured_identit
 services::discord::standby_relay::tests::standby_inflight_match_requires_same_output_and_placeholder
 services::discord::standby_relay::tests::standby_line_decoder_preserves_utf8_split_across_chunks
 services::discord::standby_relay::tests::standby_polling_start_offset_uses_turn_baseline
+services::discord::standby_relay::tests::standby_runtime_root_restores_env_after_panic_absent
+services::discord::standby_relay::tests::standby_runtime_root_restores_env_after_panic_present
 services::discord::standby_relay::tests::tui_assistant_fallback_extracts_final_text_without_result_event
 services::discord::startup_reclaim::tests::configured_candidates_are_provider_scoped_and_deduplicated
 services::discord::startup_reclaim::tests::every_inflight_discord_identity_is_protected_from_placeholder_cleanup
@@ -5635,6 +5647,8 @@ services::discord::tmux::restored_seed_discard_tests::stale_generation_and_legac
 services::discord::tmux::restored_seed_discard_tests::zero_persisted_delivery_channel_preserves_restored_seed_4911
 services::discord::tmux::restored_seed_discard_tests::zero_persisted_owner_channel_preserves_restored_seed_4911
 services::discord::tmux::restored_turn_injected_anchor_tests::restored_turn_carries_injected_prompt_message_id_for_streaming_reacquire
+services::discord::tmux::streaming_rollover_frozen_prefix_persistence_tests::frozen_prefix_persistence_restores_env_after_panic_absent
+services::discord::tmux::streaming_rollover_frozen_prefix_persistence_tests::frozen_prefix_persistence_restores_env_after_panic_present
 services::discord::tmux::streaming_rollover_frozen_prefix_persistence_tests::frozen_prefix_persists_across_iteration_and_restore_for_terminal_delete
 services::discord::tmux::terminal_finalize_liveness_tests::terminal_finalize_stop_candidate_requires_all_terminal_flags
 services::discord::tmux::terminal_finalize_liveness_tests::terminal_finalize_stop_decision_requires_dead_tmux
@@ -6145,6 +6159,10 @@ services::discord::tmux::watcher_lifecycle::tests::tests::turn_starts_reuse_heal
 services::discord::tmux::watcher_placeholder_status_tests::status_only_placeholder_requires_existing_card_or_activity
 services::discord::tmux::watcher_stream_progress_tests::persist_watcher_stream_progress_persists_tool_hold_witness
 services::discord::tmux::watcher_stream_progress_tests::persist_watcher_stream_progress_skips_rewind_seed_before_body_catches_up_4115
+services::discord::tmux::watcher_stream_progress_tests::stream_rewind_seed_restores_env_after_panic_absent
+services::discord::tmux::watcher_stream_progress_tests::stream_rewind_seed_restores_env_after_panic_present
+services::discord::tmux::watcher_stream_progress_tests::stream_tool_hold_witness_restores_env_after_panic_absent
+services::discord::tmux::watcher_stream_progress_tests::stream_tool_hold_witness_restores_env_after_panic_present
 services::discord::tmux::watcher_stream_progress_tests::streaming_tick_persists_silent_tool_hold_before_render_suppression_4104
 services::discord::tmux::watcher_stream_progress_tests::streaming_tick_persists_tool_hold_without_requiring_discord_edit_4104
 services::discord::tmux_error_detect::pure_tests::classifies_auth_and_overload_prose_without_retaining_source_text
@@ -7209,6 +7227,8 @@ services::discord::turn_finalizer::cleanup::tests::cleanup_targets_turn_identity
 services::discord::turn_finalizer::cleanup::tests::complete_finalize_snapshot_queues_status_panel_reconcile
 services::discord::turn_finalizer::cleanup::tests::finalize_ensures_deferred_claim_marker_for_synthetic_watcher_row
 services::discord::turn_finalizer::cleanup::tests::finalize_ensures_marker_from_submit_snapshot_when_watcher_precleared_row
+services::discord::turn_finalizer::cleanup::tests::finalizer_runtime_root_restores_env_after_panic_absent
+services::discord::turn_finalizer::cleanup::tests::finalizer_runtime_root_restores_env_after_panic_present
 services::discord::turn_finalizer::cleanup::tests::late_already_finalized_cleanup_releases_mailbox_and_rearms_once_4906
 services::discord::turn_finalizer::cleanup::tests::mailbox_release_backstop_coalesces_duplicate_arms_and_eventually_fires_4906
 services::discord::turn_finalizer::cleanup::tests::reaction_cleanup_retries_once_after_failed_attempt
@@ -7791,6 +7811,8 @@ services::maintenance::jobs::worktree_orphan_sweep::git_pointer_fallback_tests::
 services::maintenance::jobs::worktree_orphan_sweep::keep_set_query_failure_fail_closed_pg_tests::closed_pool_keep_set_query_error_skips_all_deletions
 services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::dirty_managed_worktree_is_preserved
 services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::managed_root_child_is_classified_and_worktree_is_not
+services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::managed_worktree_root_restores_env_after_panic_absent
+services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::managed_worktree_root_restores_env_after_panic_present
 services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::manual_worktree_in_flat_root_is_protected_by_naming
 services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::no_pg_is_noop_even_with_managed_orphans
 services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::terminal_managed_worktree_is_swept_via_recursion
@@ -7937,6 +7959,10 @@ services::opencode::tests::warm_server_snapshot_redacts_key_fields_and_reports_s
 services::opencode::tests::warm_server_snapshot_scrubs_secret_in_startup_tail
 services::opencode::tests::warm_server_snapshots_empty_pool_is_cold_start_safe
 services::operator_connectors::tests::connector_lookup_matches_capability_alias
+services::operator_connectors::tests::connector_runtime_stubs_restores_env_after_panic_absent
+services::operator_connectors::tests::connector_runtime_stubs_restores_env_after_panic_present
+services::operator_connectors::tests::connector_skill_content_restores_env_after_panic_absent
+services::operator_connectors::tests::connector_skill_content_restores_env_after_panic_present
 services::operator_connectors::tests::connector_state_labels_are_api_stable
 services::operator_connectors::tests::empty_obsidian_skill_stub_requires_real_skill_content
 services::operator_connectors::tests::explicit_missing_connector_reports_missing_path
@@ -8963,6 +8989,8 @@ services::turn_orchestrator::episode_identity::tests::watchdog_owner_matching_ta
 services::turn_orchestrator::episode_identity::tests::watchdog_owner_missing_and_idle_mailboxes_are_noops
 services::turn_orchestrator::episode_identity::tests::watchdog_owner_stale_cleanup_discard_preserves_successor
 services::turn_orchestrator::episode_identity::tests::watchdog_owner_stale_take_preserves_successor
+services::turn_orchestrator::finish_cancelled_turn_tests::cancelled_turn_cleanup_restores_env_after_panic_absent
+services::turn_orchestrator::finish_cancelled_turn_tests::cancelled_turn_cleanup_restores_env_after_panic_present
 services::turn_orchestrator::finish_cancelled_turn_tests::finish_cancelled_turn_clears_cancelled_active_without_rehydrating_queue
 services::turn_orchestrator::finish_cancelled_turn_tests::finish_cancelled_turn_is_noop_when_mailbox_is_idle
 services::turn_orchestrator::finish_cancelled_turn_tests::finish_cancelled_turn_preserves_uncancelled_active_turn
@@ -9086,6 +9114,8 @@ supervisor::tests::audit_only_signals_require_explicit_acknowledgement
 supervisor::tests::emit_signal_json_rejects_audit_only_signal_before_bridge_lookup
 supervisor::tests::orphan_recovery_clock_assignment_matches_transition_semantics
 supervisor::tests::supervisor_signal_support_states_are_explicit
+test_env_panic_probe::normal_probe_rejects_invalid_checkpoint_evidence
+test_env_panic_probe::panic_probe_rejects_invalid_checkpoint_evidence
 ui::ai_screen::tests::sanitize_user_input_filters_dangerous_patterns
 ui::ai_screen::tests::sanitize_user_input_is_case_insensitive
 ui::ai_screen::tests::sanitize_user_input_leaves_safe_text_intact

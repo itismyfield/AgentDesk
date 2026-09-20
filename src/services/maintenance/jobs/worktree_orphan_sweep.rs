@@ -1860,20 +1860,31 @@ mod managed_root_recursion_tests {
     fn with_managed_root_env<R>(body: impl FnOnce(&Path, &Path, &Path, &Path) -> R) -> R {
         let _guard = env_lock();
         let tmp = tempfile::tempdir().unwrap();
-        // managed_worktrees_root(repo) = $AGENTDESK_ROOT_DIR/worktrees/<repo_name>.
-        // Point the runtime root at tmp so it equals our on-disk managed root.
-        // SAFETY: serialized by the shared test env lock; restored before the
-        // lock is released.
-        unsafe {
-            std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path());
-        }
+        let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tmp.path(),
+        );
         let (worktrees_root, managed_root, wt) = setup_repo_with_managed_worktree(tmp.path());
         let repo = tmp.path().join("agentdesk");
-        let result = body(&repo, &worktrees_root, &managed_root, &wt);
-        unsafe {
-            std::env::remove_var("AGENTDESK_ROOT_DIR");
-        }
-        result
+        body(&repo, &worktrees_root, &managed_root, &wt)
+    }
+
+    use crate::test_env_panic_probe::{assert_root_restored, checkpoint};
+
+    fn exercise_managed_worktree_root() {
+        with_managed_root_env(|repo, _, _, _| {
+            checkpoint(&[("AGENTDESK_ROOT_DIR", repo.parent().unwrap().as_os_str())])
+        })
+    }
+
+    #[test]
+    fn managed_worktree_root_restores_env_after_panic_present() {
+        assert_root_restored(true, exercise_managed_worktree_root);
+    }
+
+    #[test]
+    fn managed_worktree_root_restores_env_after_panic_absent() {
+        assert_root_restored(false, exercise_managed_worktree_root);
     }
 
     #[test]
