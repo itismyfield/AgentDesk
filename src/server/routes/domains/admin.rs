@@ -14,7 +14,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
     protected_api_domain(
         Router::new()
             .route("/campaigns", get(campaigns::list).post(campaigns::create))
-            .route("/campaigns/{id}", get(campaigns::get).put(campaigns::replace))
+            .route(
+                "/campaigns/{id}",
+                get(campaigns::get).put(campaigns::replace),
+            )
             .route("/campaigns/{id}/history", get(campaigns::history))
             .route(
                 "/offices",
