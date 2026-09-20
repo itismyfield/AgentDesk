@@ -57,7 +57,11 @@ pub(crate) fn assert_isolated<F, G>(test_name: &'static str, factory: F, root_wa
 where
     F: FnOnce() -> G + Send,
 {
-    run_isolated(test_name, root_was_present, || exercise_teardown(factory));
+    run_isolated(
+        test_name.split_once("::").unwrap().1,
+        root_was_present,
+        || exercise_teardown(factory, false, true),
+    );
 }
 
 pub(crate) fn assert_restores_after_return(
@@ -65,20 +69,34 @@ pub(crate) fn assert_restores_after_return(
     root_was_present: bool,
     exercise: impl FnOnce(),
 ) {
-    run_isolated(test_name, root_was_present, || {
-        let baseline = std::env::var_os("AGENTDESK_ROOT_DIR");
-        exercise();
-        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-        assert_eq!(
-            std::env::var_os("AGENTDESK_ROOT_DIR"),
-            baseline,
-            "actual test must restore the prior root on return"
-        );
+    run_isolated(
+        test_name.split_once("::").unwrap().1,
+        root_was_present,
+        || {
+            let baseline = std::env::var_os("AGENTDESK_ROOT_DIR");
+            exercise();
+            let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+            assert_eq!(
+                std::env::var_os("AGENTDESK_ROOT_DIR"),
+                baseline,
+                "actual test must restore the prior root on return"
+            );
+        },
+    );
+}
+
+pub(crate) fn assert_scope_isolated(
+    present: bool,
+    temporary_root: bool,
+    exercise: impl FnOnce() + Send,
+) {
+    let thread = std::thread::current();
+    run_isolated(thread.name().unwrap(), present, || {
+        exercise_teardown(exercise, true, temporary_root)
     });
 }
 
-fn run_isolated(test_name: &'static str, root_was_present: bool, exercise: impl FnOnce()) {
-    let test_name = test_name.split_once("::").expect("crate-qualified test").1;
+fn run_isolated(test_name: &str, root_was_present: bool, exercise: impl FnOnce()) {
     if std::env::var(CHILD_MARKER).as_deref() == Ok(test_name) {
         exercise();
         return;
@@ -117,9 +135,10 @@ fn run_isolated(test_name: &'static str, root_was_present: bool, exercise: impl 
         log.contains("1 passed; 0 failed; 0 ignored"),
         "missing child test:\n{log}"
     );
+    println!("ADK_ROOT_TEARDOWN_CHILD=PASS test={test_name}");
 }
 
-fn exercise_teardown<F, G>(factory: F)
+fn exercise_teardown<F, G>(factory: F, whole_scope: bool, temporary_root: bool)
 where
     F: FnOnce() -> G + Send,
 {
@@ -128,29 +147,33 @@ where
     let (resume_tx, resume_rx) = mpsc::channel();
     std::thread::scope(|scope| {
         let actor = scope.spawn(move || {
-            let fixture = factory();
-            let root = crate::config::runtime_root().unwrap();
-            let observed_root = root.clone();
-            BEFORE_RESTORE.with(|hook| {
-                *hook.borrow_mut() = Some(Box::new(move || {
-                    let _ = entered_tx.send(observed_root);
-                    resume_rx
-                        .recv_timeout(Duration::from_secs(10))
-                        .expect("resume teardown");
-                }));
-            });
             let _clear_hook = ClearHook;
+            let mut arm = Some(|| {
+                BEFORE_RESTORE.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        let _ = entered_tx.send(std::env::var_os("AGENTDESK_ROOT_DIR"));
+                        resume_rx
+                            .recv_timeout(Duration::from_secs(10))
+                            .expect("resume teardown");
+                    }));
+                })
+            });
+            if whole_scope {
+                arm.take().unwrap()();
+            }
+            let fixture = factory();
+            if let Some(arm) = arm {
+                arm();
+            }
             drop(fixture);
-            root
         });
         let mut resume = ResumeOnDrop(Some(resume_tx));
         let root = entered_rx
             .recv_timeout(Duration::from_secs(10))
             .expect("restore hook entered");
-        assert!(
-            root.is_dir(),
-            "temporary root must survive through environment restoration"
-        );
+        let root_alive = root
+            .as_deref()
+            .is_some_and(|path| std::path::Path::new(path).is_dir());
         let held_until_restore = match crate::config::shared_test_env_lock().try_lock() {
             Err(std::sync::TryLockError::WouldBlock) => {
                 resume.resume();
@@ -165,12 +188,12 @@ where
                 );
                 resume.resume();
                 actor.join().expect("fixture teardown");
-                let observed = crate::config::runtime_root();
+                let observed = std::env::var_os("AGENTDESK_ROOT_DIR");
                 drop(competing_env);
                 drop(lock);
                 assert_eq!(
                     observed.as_deref(),
-                    Some(competing_root.path()),
+                    Some(competing_root.path().as_os_str()),
                     "fixture restoration overwrote a concurrent locked owner's root"
                 );
                 false
@@ -185,9 +208,15 @@ where
         );
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         assert_eq!(std::env::var_os("AGENTDESK_ROOT_DIR"), baseline);
-        assert!(
-            !root.exists(),
-            "fixture temporary root must be removed after teardown"
-        );
+        if temporary_root {
+            assert!(
+                root_alive,
+                "temporary root must survive through environment restoration"
+            );
+            assert!(
+                !std::path::Path::new(&root.unwrap()).exists(),
+                "fixture temporary root must be removed after teardown"
+            );
+        }
     });
 }

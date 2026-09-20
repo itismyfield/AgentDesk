@@ -856,21 +856,28 @@ fn path_to_string(path: std::path::PathBuf) -> String {
 mod tests {
     use axum::http::StatusCode;
     use serde_json::json;
-    use std::ffi::OsString;
-    use std::sync::{LazyLock, Mutex, MutexGuard};
 
     use super::{
         validate_migrated_launchd_entrypoint, validate_migrated_launchd_required_connectors,
         validate_migrated_launchd_required_paths,
     };
 
-    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-    fn env_lock() -> MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner())
+    struct MigratedEnvGuard {
+        _env: [crate::config::TestEnvVarGuard; 12],
+        _lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
     }
 
-    const MIGRATED_ENV_TEST_VARS: &[&str] = &[
+    fn env_lock() -> MigratedEnvGuard {
+        let lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let env = MIGRATED_ENV_TEST_VARS
+            .map(crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock);
+        MigratedEnvGuard {
+            _env: env,
+            _lock: lock,
+        }
+    }
+
+    const MIGRATED_ENV_TEST_VARS: [&str; 12] = [
         "HOME",
         "USERPROFILE",
         "AGENTDESK_SOURCE_ZPROFILE",
@@ -885,20 +892,157 @@ mod tests {
         "AGENTDESK_MEMORY_MERGE_SKILL",
     ];
 
-    fn snapshot_migrated_env() -> Vec<(&'static str, Option<OsString>)> {
-        MIGRATED_ENV_TEST_VARS
-            .iter()
-            .map(|name| (*name, std::env::var_os(name)))
-            .collect()
+    const ENV_FIXTURES: &[fn()] = &[
+        migrated_launchd_required_path_validation_uses_zprofile_env,
+        migrated_launchd_builtin_paths_require_job_specific_skill_files,
+        migrated_launchd_builtin_paths_require_banchan_messages,
+        migrated_launchd_builtin_workdir_honors_workspace_root,
+        migrated_launchd_required_connector_validation_blocks_missing_connector,
+        migrated_launchd_required_connector_validation_accepts_ready_connector,
+        migrated_launchd_required_connector_validation_uses_zprofile_skill_root,
+    ];
+
+    fn check_teardown(index: usize, present: bool) {
+        crate::config::test_env::teardown_probe::assert_scope_isolated(
+            present,
+            false,
+            ENV_FIXTURES[index],
+        );
     }
 
-    fn restore_migrated_env(snapshot: Vec<(&'static str, Option<OsString>)>) {
-        for (name, value) in snapshot {
-            match value {
-                Some(value) => unsafe { std::env::set_var(name, value) },
-                None => unsafe { std::env::remove_var(name) },
-            }
+    fn check_panic(index: usize, present: bool) {
+        crate::test_env_panic_probe::assert_restores_on_return_and_panic(
+            &MIGRATED_ENV_TEST_VARS,
+            present,
+            ENV_FIXTURES[index],
+        );
+    }
+
+    fn observe_home(home: &std::path::Path) {
+        crate::test_env_panic_probe::checkpoint_changes(&[
+            ("HOME", Some(home.as_os_str())),
+            ("USERPROFILE", None),
+            ("AGENTDESK_SOURCE_ZPROFILE", None),
+            ("AGENTDESK_OBSIDIAN_SKILL_ROOT", None),
+        ]);
+    }
+
+    fn observe_skill(root: &std::path::Path, disable_profile: bool) {
+        let mut changes = vec![("AGENTDESK_OBSIDIAN_SKILL_ROOT", Some(root.as_os_str()))];
+        if disable_profile {
+            changes.push(("AGENTDESK_SOURCE_ZPROFILE", Some(std::ffi::OsStr::new("0"))));
         }
+        crate::test_env_panic_probe::checkpoint_changes(&changes);
+    }
+
+    #[test]
+    fn zprofile_paths_teardown_present() {
+        check_teardown(0, true);
+    }
+
+    #[test]
+    fn zprofile_paths_teardown_absent() {
+        check_teardown(0, false);
+    }
+
+    #[test]
+    fn zprofile_paths_restores_env_after_panic_present() {
+        check_panic(0, true);
+    }
+
+    #[test]
+    fn zprofile_paths_restores_env_after_panic_absent() {
+        check_panic(0, false);
+    }
+
+    #[test]
+    fn job_skills_teardown_present() {
+        check_teardown(1, true);
+    }
+
+    #[test]
+    fn job_skills_teardown_absent() {
+        check_teardown(1, false);
+    }
+
+    #[test]
+    fn job_skills_restores_env_after_panic_present() {
+        check_panic(1, true);
+    }
+
+    #[test]
+    fn job_skills_restores_env_after_panic_absent() {
+        check_panic(1, false);
+    }
+
+    #[test]
+    fn banchan_teardown_present() {
+        check_teardown(2, true);
+    }
+
+    #[test]
+    fn banchan_teardown_absent() {
+        check_teardown(2, false);
+    }
+
+    #[test]
+    fn banchan_restores_env_after_panic_present() {
+        check_panic(2, true);
+    }
+
+    #[test]
+    fn banchan_restores_env_after_panic_absent() {
+        check_panic(2, false);
+    }
+
+    #[test]
+    fn workspace_root_restores_env_after_panic_present() {
+        check_panic(3, true);
+    }
+
+    #[test]
+    fn workspace_root_restores_env_after_panic_absent() {
+        check_panic(3, false);
+    }
+
+    #[test]
+    fn missing_connector_restores_env_after_panic_present() {
+        check_panic(4, true);
+    }
+
+    #[test]
+    fn missing_connector_restores_env_after_panic_absent() {
+        check_panic(4, false);
+    }
+
+    #[test]
+    fn ready_connector_restores_env_after_panic_present() {
+        check_panic(5, true);
+    }
+
+    #[test]
+    fn ready_connector_restores_env_after_panic_absent() {
+        check_panic(5, false);
+    }
+
+    #[test]
+    fn zprofile_connector_teardown_present() {
+        check_teardown(6, true);
+    }
+
+    #[test]
+    fn zprofile_connector_teardown_absent() {
+        check_teardown(6, false);
+    }
+
+    #[test]
+    fn zprofile_connector_restores_env_after_panic_present() {
+        check_panic(6, true);
+    }
+
+    #[test]
+    fn zprofile_connector_restores_env_after_panic_absent() {
+        check_panic(6, false);
     }
 
     #[test]
@@ -1004,7 +1148,6 @@ mod tests {
     #[test]
     fn migrated_launchd_required_path_validation_uses_zprofile_env() {
         let _lock = env_lock();
-        let snapshot = snapshot_migrated_env();
         let temp = tempfile::tempdir().unwrap();
         let skill_root = temp.path().join("profile-skills");
         let custom = skill_root.join("custom");
@@ -1024,6 +1167,7 @@ mod tests {
             std::env::remove_var("AGENTDESK_SOURCE_ZPROFILE");
             std::env::remove_var("AGENTDESK_OBSIDIAN_SKILL_ROOT");
         }
+        observe_home(temp.path());
         let checkpoint = json!({
             "migrated_launchd": {
                 "required_paths": [
@@ -1042,14 +1186,11 @@ mod tests {
             Some(&checkpoint),
         )
         .expect("zprofile-only migrated env should satisfy required path validation");
-
-        restore_migrated_env(snapshot);
     }
 
     #[test]
     fn migrated_launchd_builtin_paths_require_job_specific_skill_files() {
         let _lock = env_lock();
-        let snapshot = snapshot_migrated_env();
         let temp = tempfile::tempdir().unwrap();
         let unrelated = temp.path().join("other-skill");
         std::fs::create_dir_all(&unrelated).unwrap();
@@ -1058,6 +1199,7 @@ mod tests {
             std::env::set_var("AGENTDESK_OBSIDIAN_SKILL_ROOT", temp.path());
             std::env::set_var("AGENTDESK_SOURCE_ZPROFILE", "0");
         }
+        observe_skill(temp.path(), true);
 
         let err = validate_migrated_launchd_required_paths(
             "migrated-launchd/ai-integrated-briefing.js",
@@ -1080,14 +1222,11 @@ mod tests {
             None,
         )
         .expect("job-specific skill should satisfy builtin validation");
-
-        restore_migrated_env(snapshot);
     }
 
     #[test]
     fn migrated_launchd_builtin_paths_require_banchan_messages() {
         let _lock = env_lock();
-        let snapshot = snapshot_migrated_env();
         let temp = tempfile::tempdir().unwrap();
         let banchan = temp.path().join("banchan-day-reminder");
         std::fs::create_dir_all(&banchan).unwrap();
@@ -1096,6 +1235,7 @@ mod tests {
             std::env::set_var("AGENTDESK_OBSIDIAN_SKILL_ROOT", temp.path());
             std::env::set_var("AGENTDESK_SOURCE_ZPROFILE", "0");
         }
+        observe_skill(temp.path(), true);
 
         let err = validate_migrated_launchd_required_paths(
             "migrated-launchd/banchan-day-reminder-prep.js",
@@ -1118,8 +1258,6 @@ mod tests {
             None,
         )
         .expect("banchan skill and messages should satisfy builtin validation");
-
-        restore_migrated_env(snapshot);
     }
 
     #[test]
@@ -1129,12 +1267,14 @@ mod tests {
         let workspace_root = temp.path().join("workspaces-custom");
         let agentfactory = workspace_root.join("agentfactory");
         std::fs::create_dir_all(&agentfactory).unwrap();
-        let previous_workspace_root = std::env::var_os("AGENTDESK_WORKSPACE_ROOT");
-        let previous_agentfactory = std::env::var_os("AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR");
         unsafe {
             std::env::set_var("AGENTDESK_WORKSPACE_ROOT", &workspace_root);
             std::env::remove_var("AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR");
         }
+        crate::test_env_panic_probe::checkpoint_changes(&[
+            ("AGENTDESK_WORKSPACE_ROOT", Some(workspace_root.as_os_str())),
+            ("AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR", None),
+        ]);
 
         validate_migrated_launchd_required_paths(
             "migrated-launchd/memento-daily-report.js",
@@ -1142,17 +1282,6 @@ mod tests {
             None,
         )
         .expect("AGENTDESK_WORKSPACE_ROOT/agentfactory should satisfy builtin validation");
-
-        match previous_workspace_root {
-            Some(value) => unsafe { std::env::set_var("AGENTDESK_WORKSPACE_ROOT", value) },
-            None => unsafe { std::env::remove_var("AGENTDESK_WORKSPACE_ROOT") },
-        }
-        match previous_agentfactory {
-            Some(value) => unsafe {
-                std::env::set_var("AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR", value)
-            },
-            None => unsafe { std::env::remove_var("AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR") },
-        }
     }
 
     #[test]
@@ -1160,8 +1289,8 @@ mod tests {
         let _lock = env_lock();
         let temp = tempfile::tempdir().unwrap();
         let missing = temp.path().join("missing-skills");
-        let previous = std::env::var_os("AGENTDESK_OBSIDIAN_SKILL_ROOT");
         unsafe { std::env::set_var("AGENTDESK_OBSIDIAN_SKILL_ROOT", &missing) };
+        observe_skill(&missing, false);
         let metadata = json!({
             "migrated_launchd": {
                 "required_connectors": ["obsidian_skill_root"]
@@ -1175,10 +1304,6 @@ mod tests {
         )
         .expect_err("missing required connector must block enablement");
 
-        match previous {
-            Some(value) => unsafe { std::env::set_var("AGENTDESK_OBSIDIAN_SKILL_ROOT", value) },
-            None => unsafe { std::env::remove_var("AGENTDESK_OBSIDIAN_SKILL_ROOT") },
-        }
         assert_eq!(err.status(), StatusCode::CONFLICT);
         assert!(
             err.message()
@@ -1193,8 +1318,8 @@ mod tests {
         let skill = temp.path().join("ai-integrated-briefing");
         std::fs::create_dir_all(&skill).unwrap();
         std::fs::write(skill.join("SKILL.md"), "# AI integrated briefing\n").unwrap();
-        let previous = std::env::var_os("AGENTDESK_OBSIDIAN_SKILL_ROOT");
         unsafe { std::env::set_var("AGENTDESK_OBSIDIAN_SKILL_ROOT", temp.path()) };
+        observe_skill(temp.path(), false);
         let metadata = json!({
             "migrated_launchd": {
                 "required_connectors": [
@@ -1209,17 +1334,11 @@ mod tests {
             None,
         )
         .expect("ready connector should pass validation");
-
-        match previous {
-            Some(value) => unsafe { std::env::set_var("AGENTDESK_OBSIDIAN_SKILL_ROOT", value) },
-            None => unsafe { std::env::remove_var("AGENTDESK_OBSIDIAN_SKILL_ROOT") },
-        }
     }
 
     #[test]
     fn migrated_launchd_required_connector_validation_uses_zprofile_skill_root() {
         let _lock = env_lock();
-        let snapshot = snapshot_migrated_env();
         let temp = tempfile::tempdir().unwrap();
         let skill_root = temp.path().join("profile-skills");
         let skill = skill_root.join("ai-integrated-briefing");
@@ -1239,6 +1358,7 @@ mod tests {
             std::env::remove_var("AGENTDESK_SOURCE_ZPROFILE");
             std::env::remove_var("AGENTDESK_OBSIDIAN_SKILL_ROOT");
         }
+        observe_home(temp.path());
         let metadata = json!({
             "migrated_launchd": {
                 "required_connectors": ["obsidian_skill_root"]
@@ -1251,7 +1371,5 @@ mod tests {
             None,
         )
         .expect("zprofile-only skill root should satisfy migrated connector validation");
-
-        restore_migrated_env(snapshot);
     }
 }
