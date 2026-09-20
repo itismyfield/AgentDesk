@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -117,6 +119,17 @@ def mutation_filter_patterns() -> tuple[str, ...]:
     return tuple(yaml.safe_load(step["with"]["filters"])[FILTER_NAME])
 
 
+def setUpModule() -> None:
+    subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts/check_relay_mutation_sources.py")],
+        check=True,
+    )
+
+
+def _result_log(outcome: str = "failed") -> str:
+    return 'test ! -s "${!#}" || exit 42\n' + f"printf '%s %s\\n' {outcome} \"$4\" > \"${{!#}}\"\n"
+
+
 def _cargo_log(body: str) -> str:
     """A fixture-runner body that replays a realistic `cargo test --lib` log.
 
@@ -222,14 +235,14 @@ class RelayAuthorityMutationScriptTests(unittest.TestCase):
         cargo.write_text(
             f"""#!/usr/bin/env bash
 set -euo pipefail
-if [[ "${{CARGO_TERM_COLOR-}}" == "never" ]]; then
+{_result_log()}if [[ "${{CARGO_TERM_COLOR-}}" == "never" ]]; then
     printf '   {marker} agentdesk v0.1.0 (fake)\\n'
 else
     printf '\\033[1m\\033[92m   {marker}\\033[0m agentdesk v0.1.0 (fake)\\n'
 fi
 printf '     Running unittests src/lib.rs (target/debug/deps/agentdesk-0123456789ab)\\n'
 printf 'running 1 test\\n'
-printf 'test the_named_target ... FAILED\\n'
+printf 'test %s ... FAILED\\n' \"$4\"
 printf 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out\\n'
 exit 101
 """,
@@ -267,7 +280,7 @@ exit 101
         cargo.write_text(
             f"""#!/usr/bin/env bash
 set -euo pipefail
-{{
+{_result_log()}{{
   printf 'ARGV %s\\n' "$*"
   printf 'CARGO_INCREMENTAL=%s\\n' "${{CARGO_INCREMENTAL-<unset>}}"
   printf 'RUSTC_WRAPPER=%s\\n' "${{RUSTC_WRAPPER-<unset>}}"
@@ -275,7 +288,7 @@ set -euo pipefail
 printf '   Compiling agentdesk v0.1.0 (fake)\\n'
 printf '     Running unittests src/lib.rs (target/debug/deps/agentdesk-0123456789ab)\\n'
 printf 'running 1 test\\n'
-printf 'test the_named_target ... FAILED\\n'
+printf 'test %s ... FAILED\\n' \"$4\"
 printf 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out\\n'
 exit 101
 """,
@@ -288,6 +301,162 @@ exit 101
     def assert_sources_restored(test: unittest.TestCase, root: Path) -> None:
         for relative in MUTATION_FILES:
             test.assertEqual((root / relative).read_bytes(), (REPO_ROOT / relative).read_bytes())
+
+    def run_cargo_body(self, body: str, outcome: str = "failed") -> tuple[Path, subprocess.CompletedProcess[str]]:
+        root = self.copy_fixture()
+        cargo = root / "fake-bin/cargo"
+        cargo.parent.mkdir()
+        cargo.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + _result_log(outcome)
+                         + "(\n" + body + ") | sed \"s/the_named_target/$4/g\"\n")
+        cargo.chmod(0o755)
+        result = self.run_script_with_fake_cargo(root, cargo)
+        self.assert_sources_restored(self, root)
+        return root, result
+
+    def test_default_cargo_entrypoint_grades_valid_and_invalid_runs(self) -> None:
+        for body, rc, status in (
+            (KILLED_RUNNER, 0, "KILLED"),
+            (SURVIVED_RUNNER, 1, "SURVIVED"),
+            (BUILD_BROKEN_RUNNER, 95, "BUILD-BROKEN"),
+            (NO_TEST_RAN_RUNNER, 94, "NO-TEST-RAN"),
+        ):
+            with self.subTest(status=status):
+                _, result = self.run_cargo_body(body, "ok" if status == "SURVIVED" else "failed")
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, rc, output)
+                self.assertIn(f"status={status}", output)
+                self.assertEqual("MUTATION_SUMMARY" in output, rc == 0, output)
+
+    def test_default_cargo_entrypoint_rejects_contradictory_verdicts(self) -> None:
+        for body in (SURVIVED_RUNNER.replace("exit 0", "exit 101"),
+                     KILLED_RUNNER.replace("exit 101", "exit 0")):
+            with self.subTest(body=body):
+                _, result = self.run_cargo_body(body)
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 93, output)
+                self.assertIn("status=NO-VERDICT", output)
+                self.assertNotIn("MUTATION_RESULT", output)
+                self.assertNotIn("MUTATION_SUMMARY", output)
+
+    def test_nested_child_failure_does_not_decide_the_parent_verdict(self) -> None:
+        child = "{\n" + KILLED_RUNNER.replace(COMPILED_HEADER, "").replace("exit 101\n", "") + "} >&2\n"
+        for parent, expected in ((KILLED_RUNNER, 0), (SURVIVED_RUNNER, 1)):
+            with self.subTest(parent_rc=expected):
+                _, result = self.run_cargo_body(child + parent, "ok" if expected == 1 else "failed")
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+
+    def test_nested_child_output_cannot_fill_missing_parent_evidence(self) -> None:
+        child = "{\n" + KILLED_RUNNER.replace(COMPILED_HEADER, "").replace("exit 101\n", "") + "} >&2\n"
+        for parent in (
+            _cargo_log(COMPILED_HEADER + "running 1 test\n") + "exit 101\n",
+            ': > "${!#}"\n' + KILLED_RUNNER,
+            'printf "failed wrong_target\\n" > "${!#}"\n' + KILLED_RUNNER,
+            'printf "failed %s\\n" "$4" >> "${!#}"\n' + KILLED_RUNNER,
+            'printf "ok %s\\n" "$4" > "${!#}"\n' + KILLED_RUNNER,
+            SURVIVED_RUNNER.replace("exit 0", "exit 101"),
+            KILLED_RUNNER.replace("exit 101", "exit 0"),
+            child.replace("} >&2", "}") + KILLED_RUNNER,
+        ):
+            with self.subTest(parent=parent):
+                _, result = self.run_cargo_body(child + parent)
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 93, output)
+                self.assertIn("status=NO-VERDICT", output)
+                self.assertNotIn("MUTATION_RESULT", output)
+                self.assertNotIn("MUTATION_SUMMARY", output)
+
+    def test_parent_summary_must_follow_one_completed_parent_row(self) -> None:
+        row = "test the_named_target ... FAILED\n"
+        for body in (
+            KILLED_RUNNER.replace(row, ""),
+            KILLED_RUNNER.replace(row, row + row),
+            KILLED_RUNNER.replace(row, "test the_named_target ... child noise\nFAILED\n"),
+            KILLED_RUNNER.replace(row, "").replace("RELAY_AUTHORITY_LOG\nexit", row + "RELAY_AUTHORITY_LOG\nexit"),
+        ):
+            with self.subTest(body=body):
+                _, result = self.run_cargo_body(body)
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 93, output)
+                self.assertIn("status=NO-VERDICT", output)
+                self.assertNotIn("MUTATION_RESULT", output)
+                self.assertNotIn("MUTATION_SUMMARY", output)
+
+    def test_default_cargo_entrypoint_rejects_incomplete_runs(self) -> None:
+        for body in (
+            KILLED_RUNNER.replace("running 1 test", "running 2 tests"),
+            KILLED_RUNNER.replace("running 1 test\n", ""),
+            KILLED_RUNNER.replace("0 ignored", "1 ignored"),
+            KILLED_RUNNER.replace("0 measured", "1 measured"),
+            KILLED_RUNNER.replace("running 1 test", "running 1 test\nrunning 1 test"),
+            KILLED_RUNNER.replace("exit 101", "printf 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 130 filtered out\\n'\nexit 101"),
+            _cargo_log(COMPILED_HEADER + "running 1 test\n") + "exit 101\n",
+        ):
+            with self.subTest(body=body):
+                _, result = self.run_cargo_body(body)
+                output = result.stdout + result.stderr
+                self.assertEqual(result.returncode, 93, output)
+                self.assertIn("status=NO-VERDICT", output)
+                self.assertNotIn("MUTATION_RESULT", output)
+                self.assertNotIn("MUTATION_SUMMARY", output)
+
+    def test_source_provenance_allows_local_edits_but_rejects_ci_drift(self) -> None:
+        root = self.copy_fixture()
+        test_path = Path("tests/test_relay_authority_mutations.py")
+        for relative in (test_path, Path("scripts/check_relay_mutation_sources.py"),
+                         Path("scripts/ci-script-checks.sh")):
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(REPO_ROOT / relative, root / relative)
+        for args in (("init", "-q"), ("add", "."),
+                     ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                      "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture")):
+            subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+
+        python_shim = root / "python-shim"
+        python_shim.write_text(
+            f"#!{sys.executable}\nimport os, sys\n"
+            "if sys.argv[1:] == ['scripts/check_relay_mutation_sources.py']:\n"
+            "    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n"
+            "assert sys.argv[1:] == ['-m', 'unittest', 'tests.test_relay_authority_mutations']\n"
+            f"os.execv(sys.executable, [sys.executable, {str(root / test_path)!r}, "
+            "'RelayAuthorityMutationScriptTests.test_script_mode_is_executable'])\n"
+        )
+        python_shim.chmod(0o755)
+
+        def check(verify: bool, expected_rc: int) -> subprocess.CompletedProcess[str]:
+            script = (root / "scripts/ci-script-checks.sh").read_text()
+            section = script.split('banner "Relay-authority fixed mutation gate (#5071)"\n', 1)[1].split('\nbanner ', 1)[0]
+            env = {**os.environ, "PYTHON": str(python_shim), "GITHUB_ACTIONS": str(verify).lower()}
+            result = subprocess.run(
+                ["bash", "-euc", section], cwd=root, env=env, text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, expected_rc, result.stdout + result.stderr)
+            self.assertIn("MUTATION_SOURCE", result.stdout)
+            return result
+
+        check(True, 0)
+        for relative in (MUTATION_SCRIPT, test_path, Path("scripts/check_relay_mutation_sources.py"),
+                         Path("scripts/ci-script-checks.sh")):
+            with self.subTest(path=relative):
+                original = (root / relative).read_bytes()
+                try:
+                    (root / relative).write_bytes(original + b"\n# local development edit\n")
+                    local = check(False, 0)
+                    digest = hashlib.sha256((root / relative).read_bytes()).hexdigest()
+                    self.assertIn(f"path={relative} sha256={digest}", local.stdout)
+                    check(True, 1)
+                    subprocess.run(["git", "add", str(relative)], cwd=root, check=True)
+                    check(True, 1)
+                finally:
+                    (root / relative).write_bytes(original)
+                    subprocess.run(["git", "add", str(relative)], cwd=root, check=True)
+        check(True, 0)
+        (root / test_path).write_text(
+            "import unittest\n"
+            "class RelayAuthorityMutationScriptTests(unittest.TestCase):\n"
+            "    def test_script_mode_is_executable(self): pass\n"
+            "unittest.main()\n"
+        )
+        check(True, 1)
 
     def test_color_neutralization_keeps_cache_proof_color_proof(self) -> None:
         root = self.copy_fixture()
@@ -334,12 +503,19 @@ exit 101
         self.assertEqual(lines.count("CARGO_INCREMENTAL=1"), MUTATION_COUNT, lines)
         self.assertEqual(lines.count("RUSTC_WRAPPER=<unset>"), MUTATION_COUNT, lines)
         self.assertEqual(
-            [line for line in lines if line.startswith("ARGV ")],
+            [line.rsplit(" --logfile ", 1)[0] for line in lines if line.startswith("ARGV ")],
             [
-                f"ARGV test --offline --lib {target} -- --exact --test-threads=1"
+                f"ARGV test --offline --lib {target} -- --exact --test-threads=1 --no-capture"
                 for target in targets
             ],
         )
+
+        result_logs = [Path(line.rsplit(" --logfile ", 1)[1])
+                       for line in lines if line.startswith("ARGV ")]
+        self.assertEqual(len(set(result_logs)), MUTATION_COUNT)
+        self.assertTrue(all(not path.exists() for path in result_logs))
+        self.assertTrue(all(not Path(str(path).removesuffix(".results") + ".stdout").exists()
+                            for path in result_logs))
 
     def test_cache_proof_still_trips_on_a_cached_tree(self) -> None:
         root = self.copy_fixture()
