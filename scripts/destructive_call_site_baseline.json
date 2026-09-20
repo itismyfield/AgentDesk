@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "c85834a9c75bd88f29040f0f39f9d833dad99781",
+  "measured_at_sha": "f0d2eebe4eda35b367067cb24ac87da2e21c58d9",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {
@@ -22,7 +22,6 @@
         "src/services/discord/relay_recovery/tests.rs": 2,
         "src/services/discord/relay_recovery/tests/circuit_breaker_apply.rs": 2,
         "src/services/discord/router/message_handler/provider_isolation.rs": 1,
-        "src/services/discord/runtime_bootstrap/session_gc.rs": 1,
         "src/services/discord/tmux_reaper.rs": 4,
         "src/services/discord/tmux_watcher/placeholder_reclaim.rs": 1,
         "src/services/discord/tmux_watcher/post_stream_exit.rs": 1,
@@ -34,6 +33,7 @@
         "src/services/provider/cancel_token_cleanup/executor.rs": 1,
         "src/services/qwen/session_lifecycle.rs": 3,
         "src/services/session_resume.rs": 1,
+        "src/services/tmux_turn_liveness.rs": 1,
         "src/services/turn_lifecycle.rs": 1
       }
     },
@@ -55,8 +55,6 @@
         "src/services/discord/tmux_watcher_registry_restore_tests.rs": 1,
         "src/services/discord/tui_direct_pending_start.rs": 1,
         "src/services/discord/turn_bridge/resume_pin_tests.rs": 1,
-        "src/services/discord/turn_bridge/runtime_handoff_loop.rs": 1,
-        "src/services/discord/turn_bridge/runtime_handoff_loop/watcher_handoff.rs": 2,
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests.rs": 1,
         "src/services/discord/turn_finalizer.rs": 2,
         "src/services/discord/watchers/lifecycle/claims.rs": 3,
@@ -72,7 +70,7 @@
       }
     },
     "registry_remove": {
-      "comment": "Measured production external removals are 8/3/3/2 (total 16). The design's 10/2/3/2=17 counted turn_finalizer/watcher_backstop.rs:252, which is inside #[cfg(test)] at this SHA. health/recovery.rs remove_locked is classified as direct channel remove, not remove_tmux_session_locked.",
+      "comment": "Measured production external removals are 3/5/4/2 (total 14). The design's 10/2/3/2=17 counted turn_finalizer/watcher_backstop.rs:252, which is inside #[cfg(test)] at this SHA. health/recovery.rs remove_locked is classified as direct channel remove, not remove_tmux_session_locked.",
       "files": {
         "src/services/discord/health/recovery.rs": 2,
         "src/services/discord/health/relay_auto_heal.rs": 1,
@@ -81,8 +79,8 @@
         "src/services/discord/task_supervisor.rs": 1,
         "src/services/discord/tmux_watcher/post_stream_exit.rs": 1,
         "src/services/discord/tui_direct_pending_start.rs": 1,
-        "src/services/discord/turn_bridge/runtime_handoff_loop.rs": 2,
-        "src/services/discord/turn_bridge/runtime_handoff_loop/watcher_handoff.rs": 3,
+        "src/services/discord/turn_bridge/runtime_handoff_loop.rs": 1,
+        "src/services/discord/turn_bridge/runtime_handoff_loop/watcher_handoff.rs": 2,
         "src/services/discord/watchers/lifecycle/claims.rs": 2
       }
     },
@@ -110,7 +108,7 @@
         "src/services/discord/mod.rs": 4,
         "src/services/discord/placeholder_sweeper/abandon_guard.rs": 1,
         "src/services/discord/recovery_engine/manual_rebind/mod.rs": 2,
-        "src/services/discord/recovery_engine/restore_inflight.rs": 10,
+        "src/services/discord/recovery_engine/restore_inflight.rs": 9,
         "src/services/discord/recovery_engine/runtime.rs": 1,
         "src/services/discord/recovery_paths/restart.rs": 2,
         "src/services/discord/relay_recovery/apply.rs": 1,
@@ -124,8 +122,7 @@
         "src/services/discord/tmux_watcher/turn_identity.rs": 2,
         "src/services/discord/tui_direct_pending_start.rs": 2,
         "src/services/discord/tui_prompt_relay/synthetic_start.rs": 1,
-        "src/services/discord/turn_bridge/completion_postlude.rs": 2,
-        "src/services/discord/turn_bridge/guards.rs": 2,
+        "src/services/discord/turn_bridge/completion_postlude.rs": 1,
         "src/services/discord/turn_finalizer/cleanup.rs": 1,
         "src/services/discord/turn_finalizer/finalize.rs": 2,
         "src/services/discord/watchers/dispatched_origin_ghost.rs": 1,

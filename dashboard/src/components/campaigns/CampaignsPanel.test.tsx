@@ -18,7 +18,7 @@ const campaign: Campaign = {
   created_at: "2026-09-20T00:00:00Z", updated_at: "2026-09-20T00:00:00Z",
   nodes: [{ id: "review", title: "Review current head", status: "running", stage: "review", round: 3,
     assignee: "reviewer", session_id: "session-42", provider: "codex", dependencies: [], issue_url: null, pr_url: null,
-    head_sha: "abc123", evidence: ["Unit tests passed"], next_action: "Inspect the latest diff", blocker: null, updated_at: "2026-09-20T00:00:00Z" }],
+    head_sha: "abc123", evidence: ["Unit tests passed"], next_action: "Inspect the latest diff", blocker: null, updated_at: "2026-09-20T00:00:00Z", details: "", acceptance: [], findings: [], evidence_records: [] }],
 };
 let container: HTMLDivElement;
 let root: Root;

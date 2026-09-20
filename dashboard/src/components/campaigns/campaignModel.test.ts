@@ -3,7 +3,7 @@ import type { CampaignNode } from "../../api/campaigns";
 import { campaignPositions, campaignProgress, safeCampaignLink } from "./campaignModel";
 
 function node(id: string, dependencies: string[] = [], status: CampaignNode["status"] = "pending"): CampaignNode {
-  return { id, title: id, dependencies, status, stage: "review", round: 2, assignee: null, session_id: null, provider: null, issue_url: null, pr_url: null, head_sha: null, evidence: [], next_action: null, blocker: null, updated_at: "" };
+  return { id, title: id, dependencies, status, stage: "review", round: 2, assignee: null, session_id: null, provider: null, issue_url: null, pr_url: null, head_sha: null, evidence: [], next_action: null, blocker: null, updated_at: "", details: "", acceptance: [], findings: [], evidence_records: [] };
 }
 
 describe("campaign progress", () => {
