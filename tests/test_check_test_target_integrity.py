@@ -1593,5 +1593,568 @@ class KnownOffenderRegression(unittest.TestCase):
             self.assertEqual(integrity.main([]), 0)
 
 
+def write_files(root: Path, files: dict[str, str]) -> None:
+    for rel, text in files.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+
+
+def build_frame_repo(root: Path, files: dict[str, str], *,
+                     lib_path: str = "src/lib.rs") -> Path:
+    """Crate whose only content is the module layout under test.
+
+    Every layout built here is valid Rust, and the asserted leaf location
+    is the one rustc itself demands. Each layout was compiled standalone
+    with `rustc --edition 2021 --crate-type lib --emit=metadata`
+    (rustc 1.94.1 and 1.94.0; no cargo/linking/execution) as written and
+    again with each asserted leaf removed: only the layout as written
+    compiles, so the decoy locations are not accepted substitutes.
+    Unreferenced `decoy_*` files are never read by rustc.
+    """
+    (root / "Cargo.toml").write_text(
+        '[package]\nname = "fixture"\nversion = "0.1.0"\n'
+        f'edition = "2021"\n\n[lib]\npath = "{lib_path}"\n\n'
+        '[[bin]]\nname = "fixture"\npath = "src/main.rs"\n',
+        encoding="utf-8")
+    write_files(root, {"src/main.rs": "fn main() {}\n", **files})
+    return root / lib_path
+
+
+@contextlib.contextmanager
+def record_reads():
+    """Record every file path the walker actually opens."""
+    opened: list[str] = []
+    real = Path.read_text
+
+    def traced(self, *args, **kwargs):
+        opened.append(str(self))
+        return real(self, *args, **kwargs)
+
+    with mock.patch.object(Path, "read_text", traced):
+        yield opened
+
+
+class InlineDirectoryContext(unittest.TestCase):
+    """Descent must use rustc's directory context (#5008 item 8).
+
+    `collect_modules` resolved every declaration against the declaring
+    file's own directory. Rust carries a directory plus an unconsumed
+    relative component instead: `foo.rs` owns `foo/`, an inline
+    `mod x { ... }` nests one level deeper, an outlined `#[path]` picks a
+    file whose own children are its siblings, and an inline `#[path]`
+    renames the directory without consuming the pending component. The real
+    site is `src/services/discord/voice_barge_in.rs`, whose inline
+    `mod tests` holds `#[path = "pcm_harness_tests.rs"] mod
+    pcm_harness_tests;` and resolves to
+    `voice_barge_in/tests/pcm_harness_tests.rs`.
+
+    Every leaf module name exists in exactly one file, so the inventory
+    says which file the walker really opened, and each layout also ships
+    `decoy_*` files at the locations a wrong rule would read instead. No
+    leaf carries a `#[test]`: a module with no tests still has to be
+    inventoried, because that is what turns `unknown-module` into
+    `target-mismatch`.
+    """
+
+    # layout -> (files, {module: first declaration site}, forbidden modules)
+    LAYOUTS: dict[str, tuple[dict[str, str], dict[str, str],
+                             tuple[str, ...]]] = {
+        # `foo.rs` owns `foo/`; an inline scope appends its own name.
+        "non_mod_rs_inline": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs": "mod tests {\n    mod child;\n}\n",
+            "src/owner/tests/child.rs": "mod leaf_non_mod_rs {}\n",
+            "src/child.rs": "mod decoy_declaring_dir {}\n",
+            "src/tests/child.rs": "mod decoy_relative_dropped {}\n",
+        }, {
+            "owner": "src/lib.rs:1",
+            "tests": "src/owner.rs:1",
+            "child": "src/owner.rs:2",
+            "leaf_non_mod_rs": "src/owner/tests/child.rs:1",
+        }, ("decoy_declaring_dir", "decoy_relative_dropped")),
+        # `owner/mod.rs` owns `owner/` with nothing pending.
+        "mod_rs_inline": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner/mod.rs": "mod tests {\n    mod child;\n}\n",
+            "src/owner/tests/child.rs": "mod leaf_mod_rs {}\n",
+            "src/owner/child.rs": "mod decoy_mod_rs_flat {}\n",
+        }, {
+            "child": "src/owner/mod.rs:2",
+            "leaf_mod_rs": "src/owner/tests/child.rs:1",
+        }, ("decoy_mod_rs_flat",)),
+        # The real voice_barge_in shape: an outlined `#[path]` inside an
+        # inline scope resolves against the scope, not the file's own dir.
+        "outlined_path_inside_inline_scope": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                'mod tests {\n    #[path = "pcm.rs"]\n    mod pcm;\n}\n',
+            "src/owner/tests/pcm.rs": "mod leaf_in_scope {}\n",
+            "src/pcm.rs": "mod decoy_file_parent {}\n",
+        }, {
+            "pcm": "src/owner.rs:3",
+            "leaf_in_scope": "src/owner/tests/pcm.rs:1",
+        }, ("decoy_file_parent",)),
+        # `#[path]` on an INLINE module renames the directory, and rustc
+        # does not push the pending `layout` component first.
+        "inline_path_directory_override": ({
+            "src/lib.rs": "mod layout;\n",
+            "src/layout.rs":
+                '#[path = "moved_dir"]\nmod scope {\n    mod child;\n}\n',
+            "src/moved_dir/child.rs": "mod leaf_inline_path {}\n",
+            "src/layout/scope/child.rs": "mod decoy_override_ignored {}\n",
+            "src/layout/moved_dir/child.rs": "mod decoy_relative_used {}\n",
+        }, {
+            "child": "src/layout.rs:3",
+            "leaf_inline_path": "src/moved_dir/child.rs:1",
+        }, ("decoy_override_ignored", "decoy_relative_used")),
+        # A `#[path]` file is mod.rs-like: its children are its siblings.
+        "redirect_child_is_a_sibling": ({
+            "src/lib.rs": '#[path = "renamed.rs"]\nmod alpha;\n',
+            "src/renamed.rs": "mod nested;\n",
+            "src/nested.rs": "mod leaf_sibling {}\n",
+            "src/renamed/nested.rs": "mod decoy_stem_reattached {}\n",
+        }, {
+            "nested": "src/renamed.rs:1",
+            "leaf_sibling": "src/nested.rs:1",
+        }, ("decoy_stem_reattached",)),
+        # Braces inside a string literal must not move the scope, and an
+        # inline scope closed on one line must not leak into the next `mod`.
+        "nested_scopes_and_literal_braces": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                "mod outer {\n"
+                '    const BRACES: &str = "} mod fake { {";\n'
+                "    mod empty { }\n"
+                "    mod inner {\n"
+                "        mod deep;\n"
+                "    }\n"
+                "}\n"
+                "mod after_scopes;\n",
+            "src/owner/outer/inner/deep.rs": "mod leaf_deep {}\n",
+            "src/owner/after_scopes.rs": "mod leaf_after {}\n",
+            "src/owner/deep.rs": "mod decoy_scope_lost {}\n",
+            "src/owner/outer/after_scopes.rs": "mod decoy_scope_leaked {}\n",
+        }, {
+            "deep": "src/owner.rs:5",
+            "after_scopes": "src/owner.rs:8",
+            "leaf_deep": "src/owner/outer/inner/deep.rs:1",
+            "leaf_after": "src/owner/after_scopes.rs:1",
+        }, ("decoy_scope_lost", "decoy_scope_leaked", "fake")),
+    }
+
+    def test_every_frame_resolves_the_way_rustc_does(self) -> None:
+        for layout, (files, expected, forbidden) in self.LAYOUTS.items():
+            with self.subTest(layout=layout), \
+                    tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                lib = build_frame_repo(root, files)
+                diagnostics: list[str] = []
+                with record_reads() as opened:
+                    modules = integrity.collect_modules(
+                        lib, root, diagnostics=diagnostics)
+                for name, site in expected.items():
+                    self.assertEqual(modules.get(name), site,
+                                     f"{layout}: {name}")
+                for name in forbidden:
+                    self.assertNotIn(name, modules,
+                                     f"{layout}: decoy must not be recorded")
+                decoys = {str(root / rel) for rel, text in files.items()
+                          if "decoy" in text}
+                self.assertEqual(sorted(decoys & set(opened)), [],
+                                 f"{layout}: decoy file must never be read")
+                self.assertEqual(diagnostics, [],
+                                 f"{layout}: a valid layout warns about "
+                                 "nothing")
+                # No layout declares a `#[test]`; the names above are still
+                # the inventory the gate classifies filters against.
+                self.assertEqual(
+                    integrity.collect_static_tests(lib, root).tests, {},
+                    f"{layout}: fixture is a no-test marker layout")
+
+    ROOTS = {
+        # A crate root owns its own directory whatever it is called.
+        "custom_lib_root": ("src/custom_root.rs", {
+            "src/custom_root.rs": "mod child;\n",
+            "src/child.rs": "mod leaf_custom_root {}\n",
+            "src/custom_root/child.rs": "mod decoy_root_as_module {}\n",
+        }, "leaf_custom_root", "src/child.rs:1", "decoy_root_as_module"),
+        "integration_root": ("tests/smoke.rs", {
+            "tests/smoke.rs": "mod helper;\n",
+            "tests/helper.rs": "mod leaf_integration {}\n",
+            "tests/smoke/helper.rs": "mod decoy_test_as_module {}\n",
+        }, "leaf_integration", "tests/helper.rs:1", "decoy_test_as_module"),
+    }
+
+    def test_custom_and_integration_roots_own_their_directory(self) -> None:
+        for label, (root_rel, files, leaf, site, decoy) in self.ROOTS.items():
+            with self.subTest(root=label), \
+                    tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                build_frame_repo(root, files)
+                modules = integrity.collect_modules(root / root_rel, root)
+                self.assertEqual(modules.get(leaf), site, label)
+                self.assertNotIn(decoy, modules, label)
+
+    def test_integration_target_is_collected_once_through_validation(self) \
+            -> None:
+        # The lazy `--test` inventory used `setdefault`, whose argument is
+        # evaluated even when the target is already cached: the same root
+        # was re-walked and would re-emit its diagnostics per command.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_frame_repo(root, {
+                "src/lib.rs": "",
+                "tests/smoke.rs":
+                    'mod helper;\n#[path = "gone.rs"]\nmod absent;\n',
+                "tests/helper.rs": "mod leaf_integration {}\n",
+            })
+            inventories: dict[str, dict[str, str]] = {}
+            diagnostics: list[str] = []
+            for filt in ("leaf_integration::case", "other::case"):
+                spec = integrity.parse_command(
+                    f"cargo test --test smoke {filt}".split())
+                integrity.validate_command(spec, inventories, root,
+                                           diagnostics=diagnostics)
+            self.assertEqual(
+                inventories["test:smoke"].get("leaf_integration"),
+                "tests/helper.rs:1")
+            self.assertEqual(len(diagnostics), 1, diagnostics)
+            self.assertIn("tests/gone.rs", diagnostics[0])
+
+    def test_same_file_under_two_owners_is_walked_for_both(self) -> None:
+        # `src/owner/shared.rs` is both a plain child of `owner` and a
+        # `#[path]` alias at the crate root. rustc compiles this only when
+        # BOTH child files exist, so both ownerships must be walked while
+        # the reported site stays the real declaration line.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lib = build_frame_repo(root, {
+                "src/lib.rs": 'mod owner;\n#[path = "owner/shared.rs"]\n'
+                              "mod aliased;\n",
+                "src/owner.rs": "mod shared;\n",
+                "src/owner/shared.rs": "mod leaf_shared;\n",
+                "src/owner/shared/leaf_shared.rs": "mod leaf_owner_route {}\n",
+                "src/owner/leaf_shared.rs": "mod leaf_alias_route {}\n",
+            })
+            modules = integrity.collect_modules(lib, root)
+            self.assertEqual(modules.get("leaf_owner_route"),
+                             "src/owner/shared/leaf_shared.rs:1")
+            self.assertEqual(modules.get("leaf_alias_route"),
+                             "src/owner/leaf_shared.rs:1")
+            self.assertEqual(modules.get("leaf_shared"),
+                             "src/owner/shared.rs:1")
+
+
+class RustConsistentCrateProof(unittest.TestCase):
+    """The accepted design's valid-Rust counterexample, through main().
+
+    `src/lib.rs` declares an inline `outer` holding
+    `#[path = "renamed.rs"] mod alpha;`, so the child really lives at
+    `src/outer/renamed.rs` (confirmed with a standalone rustc compile).
+    A lane filtering `deep_child::case` on the bin is wrong either way, so
+    rc stays 1; what changes is that the gate stops calling the module
+    unknown and names the file it was actually declared in.
+    """
+
+    LIB = 'mod outer {\n    #[path = "renamed.rs"]\n    mod alpha;\n}\n'
+    CHILD = "mod deep_child {\n    #[test]\n    fn case() {}\n}\n"
+    BAD_BIN = "cargo test --bin fixture deep_child::case"
+    GOOD_LIB = "cargo test --lib outer::alpha::deep_child::case"
+
+    def build(self, root: Path, commands: tuple[str, ...], *,
+              decoy: bool = False) -> Path:
+        files = {
+            "src/lib.rs": self.LIB,
+            "src/outer/renamed.rs": self.CHILD,
+            "src/main.rs": "#[test]\nfn bin_smoke() {}\nfn main() {}\n",
+        }
+        if decoy:
+            # Same file name one directory up: what the old walker read.
+            files["src/renamed.rs"] = "mod decoy_only {}\n"
+        build_frame_repo(root, files)
+        write_files(root, {
+            str(integrity.LIB_INVENTORY_MANIFEST_REL):
+                integrity.render_lib_inventory_manifest(
+                    {"outer::alpha::deep_child::case"}),
+            str(integrity.SOURCE_FLOOR_REL): "workflows=1\njustfile=1\n",
+            "justfile": f"fixture:\n    {self.GOOD_LIB}\n",
+            "allowlist.txt": "",
+            ".github/workflows/ci-fixture.yml":
+                "jobs:\n  lane:\n    steps:\n" + "".join(
+                    f'      - run: "{command}"\n' for command in commands),
+        })
+        return root / ".github/workflows/ci-fixture.yml"
+
+    def run_main(self, root: Path, workflow: Path, *args: str) \
+            -> tuple[int, str, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), \
+                contextlib.redirect_stderr(stderr):
+            rc = integrity.main([
+                "--repo-root", str(root), "--workflow", str(workflow),
+                "--allowlist", str(root / "allowlist.txt"), *args,
+            ])
+        return rc, stdout.getvalue(), stderr.getvalue()
+
+    def test_deep_child_is_named_with_its_real_declaration_site(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflow = self.build(root, (self.BAD_BIN,))
+            rc, report, errs = self.run_main(root, workflow, "--enforce")
+            self.assertEqual(rc, 1, report)
+            self.assertIn(
+                "[target-mismatch] filter `deep_child::case` names module "
+                "`deep_child` declared in lib (src/outer/renamed.rs:1)",
+                report)
+            self.assertNotIn("unknown-module", report)
+            self.assertNotIn("module-path-", report)
+            self.assertEqual(errs, "")
+
+    def test_corrected_lib_command_stays_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflow = self.build(root, (self.GOOD_LIB,))
+            rc, report, errs = self.run_main(root, workflow, "--enforce")
+            self.assertEqual(rc, 0, report)
+            self.assertIn("test-target integrity check passed", report)
+            self.assertNotIn("module-path-", report)
+            self.assertEqual(errs, "")
+
+    def test_same_named_parent_decoy_is_never_read(self) -> None:
+        decoy_command = "cargo test --bin fixture decoy_only::case"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflow = self.build(root, (self.BAD_BIN, decoy_command),
+                                  decoy=True)
+            with record_reads() as opened:
+                rc, report, _ = self.run_main(root, workflow, "--enforce")
+            self.assertEqual(rc, 1, report)
+            self.assertIn("[unknown-module] module-path filter "
+                          "`decoy_only::case`", report)
+            self.assertIn("declared in lib (src/outer/renamed.rs:1)", report)
+            self.assertNotIn(str(root / "src/renamed.rs"), opened,
+                             "the walker must not read the same-named file "
+                             "next to the declaring source")
+            modules = integrity.collect_modules(root / "src/lib.rs", root)
+            self.assertNotIn("decoy_only", modules)
+            self.assertEqual(modules.get("deep_child"),
+                             "src/outer/renamed.rs:1")
+
+
+class UnresolvedPathDiagnostic(unittest.TestCase):
+    """Non-blocking diagnostic for an explicit path that does not resolve.
+
+    NOTE: the fault fixture below is an INCOMPLETE CHECKOUT and therefore
+    NOT valid Rust -- `#[path = "missing.rs"]` names a file that is not
+    there, which rustc rejects outright. It is a defensive input that pins
+    the diagnostic contract, never a valid-Rust oracle, so no descent
+    assertion is derived from it. The original #5008 item 8 asked for at
+    least a diagnostic here; it stays out of the Violation list, so it can
+    never change an exit code by itself.
+    """
+
+    FAULT = ('mod healthy;\nmod outer {\n    #[path = "missing.rs"]\n'
+             "    mod absent;\n}\n")
+    EXPECTED = ('test-target integrity: module-path-unresolved: src/lib.rs:4 '
+                'module `outer::absent` #[path = "missing.rs"] resolves to '
+                'src/outer/missing.rs, which does not exist; descent skipped')
+
+    def build(self, root: Path) -> Path:
+        build_frame_repo(root, {
+            "src/lib.rs": self.FAULT,
+            "src/healthy.rs":
+                "#[cfg(test)]\nmod tests { #[test] fn healthy_case() {} }\n",
+        })
+        command = "cargo test --lib healthy::tests::healthy_case"
+        write_files(root, {
+            str(integrity.LIB_INVENTORY_MANIFEST_REL):
+                integrity.render_lib_inventory_manifest(
+                    {"healthy::tests::healthy_case"}),
+            str(integrity.SOURCE_FLOOR_REL): "workflows=1\njustfile=1\n",
+            "justfile": f"fixture:\n    {command}\n",
+            "allowlist.txt": "",
+            ".github/workflows/ci-fixture.yml":
+                f'jobs:\n  lane:\n    steps:\n      - run: "{command}"\n',
+        })
+        return root / ".github/workflows/ci-fixture.yml"
+
+    def run_main(self, root: Path, workflow: Path, *args: str):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), \
+                contextlib.redirect_stderr(stderr):
+            rc = integrity.main([
+                "--repo-root", str(root), "--workflow", str(workflow),
+                "--allowlist", str(root / "allowlist.txt"), *args,
+            ])
+        return rc, stdout.getvalue(), stderr.getvalue()
+
+    def test_diagnostic_only_run_stays_rc_zero_in_both_modes(self) -> None:
+        for mode in ((), ("--enforce",)):
+            with self.subTest(mode=mode or ("default",)), \
+                    tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                workflow = self.build(root)
+                rc, report, errs = self.run_main(root, workflow, *mode)
+                self.assertEqual(rc, 0, report)
+                self.assertIn(self.EXPECTED, report.splitlines())
+                self.assertIn("test-target integrity check passed", report)
+                self.assertNotIn("ERROR", report)
+                self.assertNotIn("::warning::", report)
+                self.assertEqual(errs, "")
+
+    def test_restoring_the_file_clears_the_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflow = self.build(root)
+            write_files(root, {"src/outer/missing.rs": "mod recovered {}\n"})
+            rc, report, errs = self.run_main(root, workflow, "--enforce")
+            self.assertEqual(rc, 0, report)
+            self.assertNotIn("module-path-", report)
+            self.assertEqual(errs, "")
+            self.assertEqual(
+                integrity.collect_modules(root / "src/lib.rs", root)
+                .get("recovered"), "src/outer/missing.rs:1")
+
+    def test_existing_violations_keep_their_own_exit_codes(self) -> None:
+        # A diagnostic must not mask or upgrade the real finding next to it.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.build(root)
+            workflow = root / ".github/workflows/ci-fixture.yml"
+            workflow.write_text(
+                'jobs:\n  lane:\n    steps:\n      - run: "cargo test '
+                '--bin fixture healthy::tests::healthy_case"\n',
+                encoding="utf-8")
+            default_rc, default_report, _ = self.run_main(root, workflow)
+            enforce_rc, enforce_report, _ = self.run_main(root, workflow,
+                                                          "--enforce")
+            self.assertEqual((default_rc, enforce_rc), (0, 1), default_report)
+            for report in (default_report, enforce_report):
+                self.assertIn(self.EXPECTED, report.splitlines())
+                self.assertIn("target-mismatch", report)
+
+    def test_ambiguous_layout_is_reported_and_never_guessed(self) -> None:
+        # `x.rs` and `x/mod.rs` together is rejected by rustc itself.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lib = build_frame_repo(root, {
+                "src/lib.rs": "mod twin;\n",
+                "src/twin.rs": "mod decoy_flat_twin {}\n",
+                "src/twin/mod.rs": "mod decoy_dir_twin {}\n",
+            })
+            diagnostics: list[str] = []
+            modules = integrity.collect_modules(lib, root,
+                                                diagnostics=diagnostics)
+            self.assertEqual(diagnostics, [
+                "module-path-ambiguous: src/lib.rs:1 module `twin`: both "
+                "src/twin.rs, src/twin/mod.rs exist; descent skipped"])
+            self.assertEqual(modules, {"twin": "src/lib.rs:1"})
+
+
+class ConditionalAndUnsupportedPaths(unittest.TestCase):
+    """Unjudged branches must not be reported as definitively missing.
+
+    NOTE: every fixture here is an INCOMPLETE CHECKOUT -- `gone.rs` is
+    never on disk -- so none of them is a valid-Rust oracle and none is
+    used to derive a descent assertion. Whether the absence is a Rust
+    error at all depends on the compile configuration, which is exactly
+    the point: compiled standalone (rustc 1.94.1/1.94.0), `#[cfg(unix)]`
+    fail on this host and compile clean for a windows target, and the
+    `#[cfg(test)]` arm is clean as a plain lib and fails under `--cfg
+    test`. The gate has no cfg evaluator and is not growing one here, so
+    it may only speak for the configuration a test harness always has
+    (`cfg(test)`) and for unconditional declarations. Every other
+    `#[cfg]`, any `#[cfg_attr]`, and any `#[path]` spelling the line
+    parser cannot read stay unjudged and silent, whether the attribute
+    sits on the declaration, on an enclosing inline module, on the
+    outlined parent that led here, or at file level.
+    """
+
+    CASES = {
+        "cfg_test_is_active": (
+            {"src/lib.rs": '#[cfg(test)]\n#[path = "gone.rs"]\nmod maybe;\n'},
+            1),
+        "plain_declaration_is_active": (
+            {"src/lib.rs": '#[path = "gone.rs"]\nmod maybe;\n'}, 1),
+        "cfg_platform_is_unjudged": (
+            {"src/lib.rs": '#[cfg(unix)]\n#[path = "gone.rs"]\nmod maybe;\n'},
+            0),
+        "cfg_never_active_is_unjudged": (
+            {"src/lib.rs": '#[cfg(any())]\n#[path = "gone.rs"]\nmod maybe;\n'},
+            0),
+        "cfg_feature_is_unjudged": (
+            {"src/lib.rs":
+                '#[cfg(feature = "x")]\n#[path = "gone.rs"]\nmod maybe;\n'},
+            0),
+        "cfg_attr_is_never_guessed": (
+            {"src/lib.rs":
+                '#[cfg_attr(unix, path = "gone.rs")]\nmod maybe;\n'}, 0),
+        # A `cfg_attr` next to a readable `#[path]` may still gate the
+        # item away, so the readable path is not evidence on its own.
+        "cfg_attr_beside_a_path_is_unjudged": (
+            {"src/lib.rs": '#[cfg_attr(unix, doc = "note")]\n'
+                           '#[path = "gone.rs"]\nmod maybe;\n'}, 0),
+        "unreadable_path_spelling_is_unjudged": (
+            {"src/lib.rs": '#[path = r"gone.rs"]\nmod maybe;\n'}, 0),
+        # An unreadable `#[path]` also means the default `twin.rs` /
+        # `twin/mod.rs` pair is NOT what rustc resolves, so their both
+        # being present is not the ambiguity this gate reports.
+        "unreadable_path_hides_a_default_ambiguity": (
+            {"src/lib.rs": '#[path = r"elsewhere.rs"]\nmod twin;\n',
+             "src/elsewhere.rs": "pub fn used() {}\n",
+             "src/twin.rs": "pub fn unread() {}\n",
+             "src/twin/mod.rs": "pub fn unread() {}\n"}, 0),
+        "inline_parent_cfg_is_inherited": (
+            {"src/lib.rs": "#[cfg(unix)]\nmod gated {\n"
+                           '    #[path = "gone.rs"]\n    mod maybe;\n}\n'}, 0),
+        "outlined_parent_cfg_is_inherited": (
+            {"src/lib.rs": "#[cfg(unix)]\nmod gated;\n",
+             "src/gated.rs": '#[path = "gone.rs"]\nmod maybe;\n'}, 0),
+        "file_level_cfg_is_inherited": (
+            {"src/lib.rs": "mod gated;\n",
+             "src/gated.rs":
+                 '#![cfg(unix)]\n#[path = "gone.rs"]\nmod maybe;\n'}, 0),
+        "missing_plain_module_is_silent": (
+            {"src/lib.rs": "#[cfg(windows)]\nmod absent_regular;\n"}, 0),
+        "missing_unconditional_plain_module_is_silent": (
+            {"src/lib.rs": "mod absent_regular;\n"}, 0),
+    }
+
+    def test_only_judged_explicit_paths_are_reported(self) -> None:
+        for label, (files, expected) in self.CASES.items():
+            with self.subTest(case=label), \
+                    tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                lib = build_frame_repo(root, files)
+                diagnostics: list[str] = []
+                integrity.collect_modules(lib, root, diagnostics=diagnostics)
+                self.assertEqual(len(diagnostics), expected,
+                                 f"{label}: {diagnostics}")
+                for diagnostic in diagnostics:
+                    self.assertIn("module-path-unresolved", diagnostic)
+
+    def test_read_errors_propagate_and_never_become_missing(self) -> None:
+        # An unreadable file that exists is not an absent module: the OS
+        # error has to reach the caller, which fails the lane closed.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lib = build_frame_repo(root, {
+                "src/lib.rs": "mod owner;\n",
+                "src/owner.rs": "mod child;\n",
+                "src/owner/child.rs": "mod leaf {}\n",
+            })
+            diagnostics: list[str] = []
+            with mock.patch.object(Path, "read_text",
+                                   side_effect=OSError("unreadable source")):
+                with self.assertRaises(OSError):
+                    integrity.collect_modules(lib, root,
+                                              diagnostics=diagnostics)
+            self.assertEqual(diagnostics, [])
+            (root / "src/owner/child.rs").write_bytes(b"mod leaf {\xff}\n")
+            with self.assertRaises(UnicodeError):
+                integrity.collect_modules(lib, root)
+
+
 if __name__ == "__main__":
     unittest.main()
