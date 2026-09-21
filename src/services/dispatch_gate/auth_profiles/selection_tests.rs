@@ -33,7 +33,7 @@ fn install() {
 }
 
 fn select(channel: u64) -> String {
-    fallback::select(
+    fallback::select_for_launch(
         &ProviderKind::Codex,
         channel,
         &["a".into(), "b".into(), "c".into()],
@@ -100,4 +100,15 @@ fn disabling_gate_or_removing_override_releases_the_old_admission_threshold() {
     assert_eq!(select(9_203_106), "a");
     evaluate_agent_provider_pressure_with_overrides(AGENT, now, None, None, None);
     assert_eq!(select(9_203_107), "a");
+}
+
+#[test]
+fn exhausted_accounts_defer_automation_but_allow_session_launch() {
+    let _guard = super::super::tests::global_gate_test_guard();
+    install();
+    let now = chrono::Utc::now().timestamp();
+    pressure(100, 100, 100, now);
+    let decision = evaluate_agent_provider_pressure_with_overrides(AGENT, now, None, None, None);
+    assert!(decision.verdict.is_defer());
+    assert_eq!(select(9_203_108), "a");
 }

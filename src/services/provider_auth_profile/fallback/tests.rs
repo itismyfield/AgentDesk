@@ -209,3 +209,53 @@ fn no_eligible_account_never_falls_back_to_a_pressured_or_cooled_primary() {
         Some("b")
     );
 }
+
+#[test]
+fn session_launch_uses_configured_primary_when_all_accounts_are_pressured() {
+    let mut router = Router::default();
+    let candidates = vec!["work".into(), "backup".into()];
+    assert_eq!(
+        router.select_for_launch("claude", 72, &candidates, 100, |id| id == "backup"),
+        Some("backup".into())
+    );
+    assert_eq!(
+        router.select_for_launch("claude", 72, &candidates, 101, |_| false),
+        Some("work".into())
+    );
+    // Failure must refer to the account actually launched, not the old sticky backup.
+    assert_eq!(
+        router.fail("claude", 72, 42, 300, 102, |id| id == "backup"),
+        Some(("work".into(), "backup".into()))
+    );
+    assert_eq!(
+        router.select_for_launch("claude", 73, &["default".into()], 101, |_| false),
+        Some("default".into())
+    );
+    assert_eq!(
+        router.select_for_launch("claude", 74, &[], 101, |_| true),
+        None
+    );
+}
+
+#[test]
+fn session_launch_during_cooldown_preserves_bounded_retries() {
+    let mut router = Router::default();
+    let candidates = vec!["a".into(), "b".into()];
+    router.select_for_launch("claude", 75, &candidates, 100, |_| true);
+    assert_eq!(
+        router.fail("claude", 75, 42, 300, 101, |_| true),
+        Some(("a".into(), "b".into()))
+    );
+    assert_eq!(router.fail("claude", 75, 42, 300, 102, |_| true), None);
+    assert_eq!(
+        router.select_for_launch("claude", 75, &candidates, 103, |_| true),
+        Some("a".into())
+    );
+    assert_eq!(router.fail("claude", 75, 42, 300, 104, |_| true), None);
+    // Neither opening the session nor expiry of cooldown permits replaying this request.
+    assert_eq!(router.fail("claude", 75, 42, 300, 405, |_| true), None);
+    assert_eq!(
+        router.fail("claude", 75, 43, 300, 406, |_| true),
+        Some(("a".into(), "b".into()))
+    );
+}

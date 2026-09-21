@@ -388,15 +388,10 @@ fn spawn_auth_overlay_for_context(
         let selected = if policy.enabled
             && crate::services::provider_auth_profile::extra_account_login_supported(&provider)
         {
-            fallback::select(&provider, channel, &candidates, |id| {
+            fallback::select_for_launch(&provider, channel, &candidates, |id| {
                 fallback_profile_available(&provider, id, agent_id, &catalog)
             })
-            .ok_or_else(|| {
-                format!(
-                    "no eligible {} auth profile: accounts are pressured or cooling down",
-                    provider.as_str()
-                )
-            })?
+            .ok_or_else(|| format!("no configured {} auth profile", provider.as_str()))?
         } else {
             primary_overlay.profile_id.clone()
         };

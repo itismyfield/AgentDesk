@@ -1,5 +1,5 @@
-//! Same-provider account routing. Unknown usage is eligible; only known exhaustion
-//! or a classified execution failure temporarily removes an account from selection.
+//! Same-provider account routing. Prefer healthy accounts, but keep session launch
+//! possible when none are eligible. Automatic retries still require a healthy account.
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Mutex, OnceLock};
 
@@ -161,6 +161,28 @@ impl Router {
         Some(selected)
     }
 
+    fn select_for_launch(
+        &mut self,
+        provider: &str,
+        channel: u64,
+        candidates: &[String],
+        now: i64,
+        available: impl Fn(&str) -> bool,
+    ) -> Option<String> {
+        if let Some(selected) = self.select(provider, channel, candidates, now, available) {
+            return Some(selected);
+        }
+        // Cached usage must not prevent opening a CLI to use another model or tool.
+        // Record the actual launch account without resetting cooldowns or attempts.
+        let primary = candidates.first()?.clone();
+        let route = self.routes.get_mut(&(provider.to_string(), channel))?;
+        route.selected = primary.clone();
+        route.touched_at = now;
+        tracing::info!(provider, channel, profile_id = %primary,
+            "no healthy auth profile; allowing session launch with configured primary");
+        Some(primary)
+    }
+
     fn fail(
         &mut self,
         provider: &str,
@@ -207,7 +229,7 @@ fn router() -> &'static Mutex<Router> {
     ROUTER.get_or_init(|| Mutex::new(Router::default()))
 }
 
-pub(crate) fn select(
+pub(crate) fn select_for_launch(
     provider: &ProviderKind,
     channel: u64,
     candidates: &[String],
@@ -215,7 +237,7 @@ pub(crate) fn select(
 ) -> Option<String> {
     let now = chrono::Utc::now().timestamp();
     let mut router = router().lock().unwrap_or_else(|p| p.into_inner());
-    router.select(provider.as_str(), channel, candidates, now, available)
+    router.select_for_launch(provider.as_str(), channel, candidates, now, available)
 }
 
 pub(crate) fn fail(
