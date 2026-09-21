@@ -38,6 +38,13 @@ MOD_DECL = re.compile(
 )
 ATTR_PATH = re.compile(r'^\s*#\[path\s*=\s*"([^"]+)"\s*\]')
 ATTR_LINE = re.compile(r"^\s*#\[")
+RAW_STRING_OPEN = re.compile(r'r(#{0,255})"')
+CHAR_LITERAL = re.compile(r"'(?:\\.|[^\\'\n])'")
+# Leftmost start of anything that changes how the rest of the text is read.
+COMMENT_OR_LITERAL = re.compile(r"""//|/\*|r\#{0,255}"|"|'""")
+# Everything except the separators str.splitlines() splits on; only these
+# are blanked out, so comment removal never moves a line number.
+NON_LINE_BREAK = re.compile(r"[^\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]")
 # Options consuming a value; their value must not be read as a filter.
 CARGO_VALUE_OPTIONS = {
     "-p", "--package", "--exclude", "-j", "--jobs", "--features", "--profile",
@@ -378,6 +385,103 @@ def collect_static_tests(root: Path, repo_root: Path) -> StaticTestInventory:
     return StaticTestInventory(tests, module_errors, tuple(duplicate_tests))
 
 
+def _rust_literal_end(text: str, index: int) -> int | None:
+    """End offset of the string/char literal at `index`, else None.
+
+    Mirrors the token scanner's rules so a `'a` lifetime is not read as an
+    unterminated char literal and `r#"..."#` keeps its embedded quotes.
+    """
+    raw = RAW_STRING_OPEN.match(text, index)
+    if raw:
+        marker = '"' + raw.group(1)
+        end = text.find(marker, raw.end())
+        return len(text) if end < 0 else end + len(marker)
+    if text[index] == '"':
+        cursor = index + 1
+        while cursor < len(text):
+            if text[cursor] == "\\":
+                cursor += 2
+            elif text[cursor] == '"':
+                return cursor + 1
+            else:
+                cursor += 1
+        return len(text)
+    literal = CHAR_LITERAL.match(text, index)
+    return literal.end() if literal else None
+
+
+def _strip_rust_comments(text: str) -> str:
+    """Blank out line/block comments, keeping every other offset intact.
+
+    Comment bytes become spaces and line separators are preserved, so line
+    numbers and the surrounding layout are unchanged. String, raw-string and
+    char literals are skipped whole, so `//` inside `#[path = "a//b.rs"]` or
+    `/*` inside a string literal is never mistaken for a comment.
+    """
+    pieces: list[str] = []
+    copied = index = 0
+    while True:
+        hit = COMMENT_OR_LITERAL.search(text, index)
+        if hit is None:
+            break
+        index = hit.start()
+        token = hit.group()
+        if token not in ("//", "/*"):
+            literal = _rust_literal_end(text, index)
+            index = hit.end() if literal is None else literal
+            continue
+        if token == "//":
+            end = text.find("\n", index)
+            end = len(text) if end < 0 else end
+        else:
+            depth, end = 1, index + 2
+            while end < len(text) and depth:
+                if text.startswith("/*", end):
+                    depth, end = depth + 1, end + 2
+                elif text.startswith("*/", end):
+                    depth, end = depth - 1, end + 2
+                else:
+                    end += 1
+        pieces.append(text[copied:index])
+        pieces.append(NON_LINE_BREAK.sub(" ", text[index:end]))
+        copied = index = end
+    if not pieces:
+        return text
+    pieces.append(text[copied:])
+    return "".join(pieces)
+
+
+def _attribute_end(line: str, start: int = 0) -> int | None:
+    """End offset of the balanced `#[...]` attribute at `start`, else None.
+
+    An attribute whose brackets do not close on this line returns None so it
+    keeps the existing whole-line handling instead of swallowing the item
+    after it. Literals are skipped so `#[path = "a]b.rs"]` stays balanced.
+    """
+    index = start
+    while index < len(line) and line[index].isspace():
+        index += 1
+    if not line.startswith("#[", index):
+        return None
+    depth = 0
+    index += 1
+    while index < len(line):
+        char = line[index]
+        if char in "\"'" or (char == "r"
+                             and RAW_STRING_OPEN.match(line, index)):
+            end = _rust_literal_end(line, index)
+            index = index + 1 if end is None else end
+            continue
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if not depth:
+                return index + 1
+        index += 1
+    return None
+
+
 def collect_modules(root: Path, repo_root: Path) -> dict[str, str]:
     """Walk `mod` declarations from a crate root; name -> first decl site."""
     modules: dict[str, str] = {}
@@ -388,16 +492,27 @@ def collect_modules(root: Path, repo_root: Path) -> dict[str, str]:
             continue
         seen.add(source)
         pending_path: str | None = None
-        for lineno, line in enumerate(source.read_text("utf-8").splitlines(), 1):
-            attr = ATTR_PATH.match(line)
-            if attr:
-                pending_path = attr.group(1)
-                continue
-            match = MOD_DECL.match(line)
+        # Comments are trivia: a `// why this moved` line between #[path] and
+        # its `mod` must not detach the redirect.
+        text = _strip_rust_comments(source.read_text("utf-8"))
+        for lineno, line in enumerate(text.splitlines(), 1):
+            # An attribute and the item it decorates may share one line
+            # (`#[path = "x.rs"] mod x;`), so consume the attribute prefix
+            # instead of skipping the rest of the line with it.
+            remainder = line
+            while ATTR_LINE.match(remainder):
+                attr = ATTR_PATH.match(remainder)
+                end = attr.end() if attr else _attribute_end(remainder)
+                if end is None:
+                    break  # unbalanced: a multi-line attribute, handled below
+                if attr:
+                    pending_path = attr.group(1)
+                remainder = remainder[end:]
+            match = MOD_DECL.match(remainder)
             if not match:
                 # Other attributes (#[cfg], ...) may sit between #[path] and
-                # the mod item; any other non-blank line detaches the attr.
-                if line.strip() and not ATTR_LINE.match(line):
+                # the mod item; any other non-blank code detaches the attr.
+                if remainder.strip() and not ATTR_LINE.match(remainder):
                     pending_path = None
                 continue
             name, terminator = match.groups()
