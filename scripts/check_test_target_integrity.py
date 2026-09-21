@@ -24,13 +24,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import os
 import re
 import shlex
 import subprocess
 import sys
 import tomllib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
@@ -39,11 +38,6 @@ MOD_DECL = re.compile(
 )
 ATTR_PATH = re.compile(r'^\s*#\[path\s*=\s*"([^"]+)"\s*\]')
 ATTR_LINE = re.compile(r"^\s*#\[")
-# Head name of an attribute, inner (`#![...]`) or outer.
-ATTR_HEAD = re.compile(r"^\s*#!?\[\s*([A-Za-z_][A-Za-z0-9_]*)")
-ATTR_CFG_TEST = re.compile(r"^\s*#\[\s*cfg\s*\(\s*test\s*\)\s*\]")
-# A file-level `#![cfg(...)]` gates everything the file declares.
-INNER_CFG = re.compile(r"^\s*#!\[\s*cfg(?:_attr)?\s*\(")
 # Over-approximations of MOD_DECL's two terminators, used only to skip the
 # quadratic token pass on files where inline scopes cannot change a lookup.
 INLINE_MOD_HINT = re.compile(r"\bmod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{")
@@ -499,42 +493,15 @@ class _ModuleFrame:
     Mirrors rustc's module resolution state: `directory` is `dir_path` and
     `relative` is the unconsumed `DirOwnership::Owned { relative }` component
     a non-mod-rs `foo.rs` leaves behind, so its children live in `foo/`.
-    `names` is the logical module path and `inconclusive` records that some
-    ancestor was `#[cfg]`-gated or used a spelling this parser cannot read,
-    so a missing file there is not evidence of a broken tree.
     """
 
     directory: Path
     relative: str | None = None
-    names: tuple[str, ...] = ()
-    inconclusive: bool = False
 
     def child_dir(self) -> Path:
         """Directory that plain `mod x;`/`mod x {}` children descend into."""
         return (self.directory / self.relative if self.relative
                 else self.directory)
-
-
-def _attr_is_unjudged(attr_text: str) -> bool:
-    """True when an attribute may gate the item away or rewrite its path.
-
-    `#[cfg(test)]` is active in a test harness, so it stays judged; every
-    other `#[cfg]`, any `#[cfg_attr]`, and any `#[path]` spelling ATTR_PATH
-    could not read leave the declaration unjudged instead of asserting that
-    its file is really missing.
-    """
-    head = ATTR_HEAD.match(attr_text)
-    name = head.group(1) if head else ""
-    if name == "cfg":
-        return not ATTR_CFG_TEST.match(attr_text)
-    return name in ("cfg_attr", "path")
-
-
-def _display_path(path: Path, repo_root: Path) -> str:
-    """Repo-relative rendering of a candidate path, `..` segments folded."""
-    normalized = Path(os.path.normpath(path))
-    return (str(normalized.relative_to(repo_root))
-            if normalized.is_relative_to(repo_root) else str(normalized))
 
 
 def _inline_frames(text: str, frame: _ModuleFrame) -> dict[int, _ModuleFrame]:
@@ -551,7 +518,6 @@ def _inline_frames(text: str, frame: _ModuleFrame) -> dict[int, _ModuleFrame]:
     scopes: list[tuple[int, _ModuleFrame]] = []
     depth = 0
     pending_path: str | None = None
-    unjudged = False
     index = 0
     while index < len(tokens):
         token = tokens[index]
@@ -567,16 +533,8 @@ def _inline_frames(text: str, frame: _ModuleFrame) -> dict[int, _ModuleFrame]:
             head = next((item.value for item in attr
                          if item.kind == "ident"), "")
             if head == "path":
-                literal = next((item.value for item in attr
-                                if item.kind == "string"), None)
-                pending_path = literal or pending_path
-                unjudged = unjudged or literal is None
-            elif head == "cfg":
-                unjudged = unjudged or tuple(
-                    item.value for item in attr if item.kind == "ident"
-                ) != ("cfg", "test")
-            elif head == "cfg_attr":
-                unjudged = True
+                pending_path = next((item.value for item in attr
+                                     if item.kind == "string"), None)
             index = end
             continue
         if token.value == "mod" and token.kind == "ident" \
@@ -596,30 +554,27 @@ def _inline_frames(text: str, frame: _ModuleFrame) -> dict[int, _ModuleFrame]:
                 directory = (current.directory / pending_path if pending_path
                              else current.child_dir() / name)
                 depth += 1
-                scopes.append((depth, _ModuleFrame(
-                    directory, None, current.names + (name,),
-                    current.inconclusive or unjudged)))
+                scopes.append((depth, _ModuleFrame(directory)))
                 index = cursor + 1
-                pending_path, unjudged = None, False
+                pending_path = None
                 continue
-            pending_path, unjudged = None, False
+            pending_path = None
         if token.kind == "punct" and token.value == "{":
+            # A braced item owns the attributes written above it, so a
+            # `#[path]` it carried must not rename a later inline module.
             depth += 1
+            pending_path = None
         elif token.kind == "punct" and token.value == "}":
             depth -= 1
             while scopes and scopes[-1][0] > depth:
                 scopes.pop()
-            # A braced item ends here, so an attribute still pending was its
-            # own: its uncertainty covered that body, not the items after it.
-            pending_path, unjudged = None, False
         elif token.kind == "punct" and token.value == ";":
-            pending_path, unjudged = None, False
+            pending_path = None
         index += 1
     return frames
 
 
-def collect_modules(root: Path, repo_root: Path, *,
-                    diagnostics: list[str] | None = None) -> dict[str, str]:
+def collect_modules(root: Path, repo_root: Path) -> dict[str, str]:
     """Walk `mod` declarations from a crate root; name -> first decl site.
 
     Descent follows rustc's real directory ownership (confirmed against
@@ -627,9 +582,7 @@ def collect_modules(root: Path, repo_root: Path, *,
     whatever the root file is called, a plain `foo.rs` owns `foo/`, an
     inline `mod x { ... }` nests one level deeper, an outlined `#[path]`
     picks a file whose own children are siblings, and an inline `#[path]`
-    renames the directory. `diagnostics`, when given, collects non-blocking
-    notes about explicit paths that do not resolve; it never adds a
-    Violation, so it cannot change any exit code on its own.
+    renames the directory.
     """
     modules: dict[str, str] = {}
     queue = [(root, _ModuleFrame(root.parent))]
@@ -645,13 +598,9 @@ def collect_modules(root: Path, repo_root: Path, *,
             continue
         seen.add(identity)
         pending_path: str | None = None
-        pending_unjudged, attr_carry = False, ""
         # Comments are trivia: a `// why this moved` line between #[path] and
         # its `mod` must not detach the redirect.
         text = _strip_rust_comments(source.read_text("utf-8"))
-        lines = text.splitlines()
-        file_frame = replace(frame, inconclusive=frame.inconclusive or any(
-            INNER_CFG.match(line) for line in lines))
         # Tokenizing is quadratic in file size. Only an outlined `mod x;`
         # that can sit inside an inline scope needs a frame, and no scope
         # opens before the file's first `mod ... {`, so a file whose last
@@ -659,50 +608,36 @@ def collect_modules(root: Path, repo_root: Path, *,
         # frame. The hints over-approximate MOD_DECL, never the reverse.
         opener = INLINE_MOD_HINT.search(text)
         inline_frames = (
-            _inline_frames(text, file_frame)
+            _inline_frames(text, frame)
             if opener and OUTLINED_MOD_HINT.search(text, opener.end())
             else {}
         )
-        for lineno, line in enumerate(lines, 1):
+        for lineno, line in enumerate(text.splitlines(), 1):
             # An attribute and the item it decorates may share one line
             # (`#[path = "x.rs"] mod x;`), so consume the attribute prefix
             # instead of skipping the rest of the line with it.
-            # A `mod` line is never an attribute tail, so an unbalanced
-            # `#[` in a literal can only suppress detachment.
-            remainder = (attr_carry + line if attr_carry
-                         and not MOD_DECL.match(line) else line)
-            attr_carry = ""
+            remainder = line
             while ATTR_LINE.match(remainder):
                 attr = ATTR_PATH.match(remainder)
                 end = attr.end() if attr else _attribute_end(remainder)
                 if end is None:
-                    # An attribute may span lines. Carry it so its own head
-                    # is judged and its tail never reads as detaching code.
-                    attr_carry = remainder if len(remainder) < 2048 else ""
-                    break
+                    break  # unbalanced: a multi-line attribute, handled below
                 if attr:
                     pending_path = attr.group(1)
-                else:
-                    pending_unjudged = (pending_unjudged
-                                        or _attr_is_unjudged(remainder))
                 remainder = remainder[end:]
             match = MOD_DECL.match(remainder)
             if not match:
                 # Other attributes (#[cfg], ...) may sit between #[path] and
                 # the mod item; any other non-blank code detaches the attr.
                 if remainder.strip() and not ATTR_LINE.match(remainder):
-                    pending_path, pending_unjudged = None, False
+                    pending_path = None
                 continue
             name, terminator = match.groups()
-            redirect, unjudged = pending_path, pending_unjudged
-            pending_path, pending_unjudged = None, False
-            site = f"{source.relative_to(repo_root)}:{lineno}"
-            modules.setdefault(name, site)
+            redirect, pending_path = pending_path, None
+            modules.setdefault(name, f"{source.relative_to(repo_root)}:{lineno}")
             if terminator != ";":
                 continue  # inline module: same-file lines are already scanned
-            current = inline_frames.get(lineno, file_frame)
-            inconclusive = current.inconclusive or unjudged
-            names = current.names + (name,)
+            current = inline_frames.get(lineno, frame)
             if redirect is not None:
                 # An outlined `#[path]` resolves against the frame directory
                 # and never against its pending relative component.
@@ -710,36 +645,17 @@ def collect_modules(root: Path, repo_root: Path, *,
             else:
                 base = current.child_dir()
                 candidates = (base / f"{name}.rs", base / name / "mod.rs")
-            found = [item for item in candidates if item.is_file()]
-            rendered = ", ".join(_display_path(item, repo_root)
-                                 for item in candidates)
-            if len(found) > 1:
-                # rustc rejects `x.rs` and `x/mod.rs` together; picking one
-                # would inventory a file the compiler never reads.
-                if diagnostics is not None and not inconclusive:
-                    diagnostics.append(
-                        f"module-path-ambiguous: {site} module "
-                        f"`{'::'.join(names)}`: both {rendered} exist; "
-                        "descent skipped"
-                    )
-                continue
-            if not found:
-                if diagnostics is not None and redirect is not None \
-                        and not inconclusive:
-                    diagnostics.append(
-                        f"module-path-unresolved: {site} module "
-                        f"`{'::'.join(names)}` #[path = \"{redirect}\"] "
-                        f"resolves to {rendered}, which does not exist; "
-                        "descent skipped"
-                    )
-                continue
-            child = found[0]
-            # A `#[path]` file and a `mod.rs` both own their own directory;
-            # only a plain `x.rs` leaves `x` for its children to consume.
-            child_relative = (None if redirect is not None
-                              or child.name == "mod.rs" else child.stem)
-            queue.append((child, _ModuleFrame(
-                child.parent, child_relative, names, inconclusive)))
+            for candidate in candidates:
+                if candidate.is_file():
+                    # A `#[path]` file and a `mod.rs` both own their own
+                    # directory; only a plain `x.rs` leaves `x` behind for
+                    # its children to consume.
+                    relative = (None if redirect is not None
+                                or candidate.name == "mod.rs"
+                                else candidate.stem)
+                    queue.append((candidate,
+                                  _ModuleFrame(candidate.parent, relative)))
+                    break
     return modules
 
 
@@ -1011,8 +927,7 @@ def _lib_selection(spec: CommandSpec, test_ids: frozenset[str]) \
 
 def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
                      repo_root: Path,
-                     lib_test_ids: frozenset[str] | None = None, *,
-                     diagnostics: list[str] | None = None) \
+                     lib_test_ids: frozenset[str] | None = None) \
         -> list[tuple[str, str]]:
     """Return (kind, detail) findings for one parsed cargo test command."""
     findings: list[tuple[str, str]] = []
@@ -1028,11 +943,10 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
                 findings.append(("unknown-target",
                                  f"--test {name}: tests/{name}.rs not found"))
                 continue
-            # setdefault would re-walk (and re-diagnose) an integration
-            # root that a previous command already inventoried.
+            # setdefault evaluates its argument even on a hit, so it
+            # re-walked an integration root already inventoried here.
             if target not in inventories:
-                inventories[target] = collect_modules(
-                    path, repo_root, diagnostics=diagnostics)
+                inventories[target] = collect_modules(path, repo_root)
         if target not in inventories:
             findings.append(("unknown-target",
                              f"target `{target}` not found in Cargo.toml"))
@@ -1417,7 +1331,7 @@ def check_workflows(repo_root: Path, workflows: list[Path], allowlist: set[str],
                     diagnostics: list[str] | None = None) \
         -> list[Violation]:
     inventories = {
-        target: collect_modules(root, repo_root, diagnostics=diagnostics)
+        target: collect_modules(root, repo_root)
         for target, root in discover_targets(repo_root).items()
     }
     if lib_test_ids is None:
@@ -1456,8 +1370,7 @@ def check_workflows(repo_root: Path, workflows: list[Path], allowlist: set[str],
             if spec.skipped:
                 continue
             findings = validate_command(
-                spec, inventories, repo_root, lib_test_ids,
-                diagnostics=diagnostics,
+                spec, inventories, repo_root, lib_test_ids
             )
             if allowlisted:
                 # The allowlist only excuses legitimately-empty lanes; a
