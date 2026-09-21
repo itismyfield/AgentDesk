@@ -95,6 +95,13 @@ stats for `POSTGRES_SERVICE_CONTAINER` (empty means `agentdesk-postgres`) are re
 A non-cancellation failure also collects only the container's selected State fields.
 Probe capture and cleanup are bounded, and only each probe's own process group is
 terminated. Errors remain errors; the verifier never labels partial fields complete.
+Verification bounds: `State.Status` must belong to the documented `docker container ls`
+vocabulary; an unfamiliar label is still recorded verbatim but is never complete evidence.
+`State.ExitCode` deliberately keeps the nonnegative-integer policy, because its domain is
+the container's rather than the shell owner's; no `0..255` or other undocumented bound is
+imposed. `measured_path` must be `requested_path` or one of its lexical POSIX parents,
+reproducing the collector's nearest-existing-ancestor fallback without `resolve()`, `stat()`
+or the current runner environment, so exported evidence stays checkable after paths vanish.
 
 This cannot observe pressure during compilation, transient peaks, or the last
 minutes before a runner disappears. SIGKILL/host loss can remove the EXIT snapshot;

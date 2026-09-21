@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import selectors
 import shutil
@@ -24,6 +24,8 @@ STATE_FORMAT = ('{"Status":{{json .State.Status}},"ExitCode":{{.State.ExitCode}}
                 '"OOMKilled":{{.State.OOMKilled}},"Error":{{json .State.Error}}}')
 STATS_PATTERN = re.compile(r"\d+(?:\.\d+)?\s*[KMGTPE]?i?B\s*/\s*"
                            r"\d+(?:\.\d+)?\s*[KMGTPE]?i?B;\d+(?:\.\d+)?%")
+# docker container ls vocabulary; an unfamiliar label stays raw but is never complete evidence.
+SUPPORTED_STATES = ("created", "restarting", "running", "removing", "paused", "exited", "dead")
 
 
 def container_name() -> str:
@@ -176,6 +178,10 @@ def valid_fields(record: dict) -> bool:
             return False
         if not all(isinstance(entry.get(key), str) and entry[key] for key in ("requested_path", "measured_path")):
             return False
+        # The collector measures the requested path or its nearest existing lexical ancestor.
+        requested = PurePosixPath(entry["requested_path"])
+        if entry["measured_path"] not in {str(p) for p in (requested, *requested.parents)}:
+            return False
         if not all(nonnegative_int(entry.get(key)) for key in ("total_mib", "free_mib")):
             return False
         if not 0 <= entry["free_mib"] <= entry["total_mib"] or entry["total_mib"] == 0:
@@ -226,10 +232,10 @@ def verify(options) -> int:
             if phase == "exit" and nonnegative_int(status) and status not in (0, 130, 143):
                 if not isinstance(state, dict) or "error" in state:
                     problems.append("failure container state is unavailable")
-                elif not (isinstance(state.get("Status"), str) and state["Status"]
+                elif not (state.get("Status") in SUPPORTED_STATES
                           and nonnegative_int(state.get("ExitCode")) and type(state.get("OOMKilled")) is bool
                           and isinstance(state.get("Error"), str) and state.get("scope") == "postgres-container-only"):
-                    problems.append("invalid container state fields")
+                    problems.append("unsupported or invalid container state fields")
             elif state is not None:
                 problems.append("unexpected postmortem for before/success/cancellation")
     except (OSError, ValueError, KeyError, TypeError) as error:

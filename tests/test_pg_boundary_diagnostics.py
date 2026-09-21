@@ -112,6 +112,7 @@ def launch(script=None, *, enabled=True, mode="ok", broken=None, container=""):
                      ' hang) while [ ! -f "$CASE/release" ]; do sleep 0.05; done;;\nesac\n',
             "docker": '#!/bin/bash\nprintf "%s\\n" "$*" >> "$CASE/docker"\n'
                       'if [ "$BROKEN" = docker ]; then sleep 30; exit 1; fi\n'
+                      'if [ "$BROKEN" = state ] && [ "$1" = inspect ]; then echo \'{"Status":"not-a-container-state","ExitCode":0,"OOMKilled":false,"Error":""}\'; exit 0; fi\n'
                       'if [ "$1" = inspect ]; then echo \'{"Status":"running","ExitCode":0,"OOMKilled":false,"Error":""}\'; '
                       'else echo "64MiB / 15.6GiB;0.40%"; fi\n',
             "python3": f'#!{sys.executable}\nimport importlib.util,json,os,sys\nfrom pathlib import Path\n'
@@ -227,6 +228,13 @@ class BoundaryRuntimeTests(unittest.TestCase):
                 self.assertEqual(o.records, [])
                 self.assertIn("unavailable", o.stderr)
 
+    def test_unsupported_container_state_only_fails_verification(self):
+        with launch(mode="fail", broken="state") as (p, d):
+            o = outcome(p, d)
+            self.assertEqual(runtime_problems(o, 101), [])
+            self.assertEqual(o.records[-1]["pg_container_state"]["Status"], "not-a-container-state")
+            self.assertEqual(BoundaryVerifierTests().check(o.records), 1)
+
     def test_runtime_mutants_are_rejected(self):
         base = scalar()
         changes = (("exit \"$status\"", "exit 0", "fail", 101, True),
@@ -323,6 +331,13 @@ class BoundaryVerifierTests(unittest.TestCase):
     def test_valid_boundaries_and_failure_postmortem(self):
         for status in (0, 101, 130, 143):
             self.assertEqual(self.check(valid_records(status)), 0)
+        paths = (("/w/target", "/w"), ("/w/target", "/w/target"), ("./target", "."), (".", "."), ("/w/a/b/c", "/w"), ("/w", "/w"), ("/", "/"))
+        for state, (requested, measured) in zip(M.SUPPORTED_STATES, paths):
+            rows = valid_records(101)
+            rows[-1]["pg_container_state"].update(Status=state, Error="OCI runtime error")
+            for record in rows:
+                record["filesystems"]["runner_temp"].update(requested_path=requested, measured_path=measured)
+            self.assertEqual(self.check(rows), 0, (state, requested, measured))
 
     def test_missing_partial_stale_invalid_and_error_evidence(self):
         self.assertEqual(self.check(absent=True), 1)
@@ -348,6 +363,8 @@ class BoundaryVerifierTests(unittest.TestCase):
             for label in ("workspace_target", "runner_temp"):
                 for key in ("requested_path", "measured_path", "free_mib", "total_mib"):
                     changes.append(((index, "filesystems", label, key), None))
+                for key in ("requested_path", "measured_path"):
+                    changes.append(((index, "filesystems", label, key), "/unrelated"))
         for path, value in changes:
             with self.subTest(field=path, value=value):
                 rows = valid_records()
@@ -359,6 +376,9 @@ class BoundaryVerifierTests(unittest.TestCase):
         failed = valid_records(101)
         failed[-1]["pg_container_state"] = {"error": "timeout"}
         self.assertEqual(self.check(failed), 1)
+        for bad in ("not-a-container-state", "", "Running", None):
+            failed[-1]["pg_container_state"] = {**STATE, "Status": bad}
+            self.assertEqual(self.check(failed), 1, bad)
 
 
 class BoundaryProbeTests(unittest.TestCase):
