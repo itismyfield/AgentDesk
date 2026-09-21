@@ -12,6 +12,7 @@ configuration errors return code 2.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fnmatch
 import importlib.util
 import os
@@ -19,10 +20,11 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_REL = Path("scripts/pg_test_lane_baseline.txt")
@@ -88,6 +90,27 @@ CONFIGURATION_ERROR_FINDINGS = frozenset({"jobs-empty"})
 # check rather than warning, because omitted scope is indistinguishable from a
 # clean result.
 UNANALYZABLE_FINDINGS = frozenset({"pr-job-delegates-to-reusable-workflow", "unresolved-external-test-module"})
+# #6014: the hand-kept `pg_db` glob list and the computed manifest drifted,
+# rule3 deferred the difference, and a PR touching only a deferred file skipped
+# the PG lane while the required mirror recorded that skip as a pass. Rendering
+# the manifest `[files]` into the filter removes that drift at its source.
+PG_DB_BEGIN_MARKER = "# BEGIN generated pg_db source paths"
+PG_DB_END_MARKER = "# END generated pg_db source paths"
+PG_DB_WRITE_COMMAND = (
+    "python3 scripts/check_pg_test_lane_membership.py --write-pg-db-paths"
+)
+# Rendered verbatim (re-indented) at the head of the region. The ordering rule
+# it states is enforced by `_negations_before_block`, not merely requested.
+PG_DB_BLOCK_HEADER = (
+    f"{PG_DB_BEGIN_MARKER} -- #6014. Do not edit by hand.",
+    f"# Every file {MANIFEST_REL.as_posix()} [files] names as holding a live PG",
+    "# test, so a new PG test selects this lane on the PR that adds it. Run",
+    f"#   {PG_DB_WRITE_COMMAND}",
+    "# which scripts/ci-script-checks.sh reruns, demanding an empty diff. Keep",
+    "# this region first: paths-filter is last-match-wins, and the gate refuses",
+    "# a manual '!' exclusion placed ahead of it. See docs/ci/release-gates.md.",
+)
+_PG_DB_ENTRY = re.compile(r"^-\s+['\"]([^'\"]+)['\"]\s*$")
 
 
 def _load_coverage_module(repo_root: Path):
@@ -1060,9 +1083,13 @@ def pr_reusable_workflow_jobs(jobs: Iterable[Job]) -> tuple[tuple[str, str], ...
     return tuple(named)
 
 
-def parse_pg_db_patterns(path: Path) -> tuple[str, ...]:
-    """Parse the block-style dorny ``pg_db`` filter by relative indentation."""
-    lines = path.read_text("utf-8").splitlines()
+def pg_db_section_bounds(lines: list[str], source: str) -> tuple[int, int, int]:
+    """Locate the block-style dorny ``pg_db`` filter by relative indentation.
+
+    Returns ``(body_start, section_indent, section_end)``, the last exclusive.
+    Comments never end the section: the region's markers are comments, and so
+    are the hand-written rationales between entries.
+    """
     start = next(
         (
             (index, len(line) - len(line.lstrip()))
@@ -1072,22 +1099,214 @@ def parse_pg_db_patterns(path: Path) -> tuple[str, ...]:
         None,
     )
     if start is None:
-        raise ValueError(f"missing pg_db path filter in {path}")
+        raise ValueError(f"missing pg_db path filter in {source}")
     start_index, section_indent = start
-    patterns: list[str] = []
-    for line in lines[start_index + 1:]:
-        stripped = line.strip()
+    section_end = len(lines)
+    for index in range(start_index + 1, len(lines)):
+        stripped = lines[index].strip()
         if not stripped or stripped.startswith("#"):
             continue
-        indent = len(line) - len(line.lstrip())
-        if indent <= section_indent:
+        if len(lines[index]) - len(lines[index].lstrip()) <= section_indent:
+            section_end = index
             break
-        match = re.match(r"^-\s+['\"]([^'\"]+)['\"]\s*$", stripped)
+    return start_index + 1, section_indent, section_end
+
+
+def parse_pg_db_patterns(path: Path) -> tuple[str, ...]:
+    """Parse the block-style dorny ``pg_db`` filter by relative indentation."""
+    lines = path.read_text("utf-8").splitlines()
+    body_start, _, section_end = pg_db_section_bounds(lines, str(path))
+    patterns: list[str] = []
+    for line in lines[body_start:section_end]:
+        match = _PG_DB_ENTRY.match(line.strip())
         if match:
             patterns.append(match.group(1))
     if not patterns:
         raise ValueError(f"empty pg_db path filter in {path}")
     return tuple(patterns)
+
+
+def load_manifest_files(text: str, source: str) -> tuple[str, ...]:
+    """Read the ``[files]`` section of the PG lane manifest.
+
+    The authoritative side of the pair: `check_analysis` already fails on drift
+    between this file and the live inventory, so a stale manifest cannot
+    quietly become a stale filter.
+    """
+    entries: list[str] = []
+    current: str | None = None
+    seen = False
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1]
+            if current == "files":
+                if seen:
+                    raise ValueError(f"duplicate [files] section: {source}:{lineno}")
+                seen = True
+            continue
+        if current is None:
+            raise ValueError(f"manifest entry outside section: {source}:{lineno}")
+        if current == "files":
+            entries.append(line)
+    if not seen:
+        raise ValueError(f"missing [files] section: {source}")
+    if not entries:
+        raise ValueError(f"empty [files] section: {source}")
+    if entries != sorted(entries) or len(entries) != len(set(entries)):
+        raise ValueError(f"manifest [files] entries must be sorted and unique: {source}")
+    return tuple(entries)
+
+
+def render_pg_db_block(files: Iterable[str], indent: str) -> list[str]:
+    """Render the bracketed generated region, markers included.
+
+    Refuses any path that would not round-trip through `parse_pg_db_patterns`
+    as the same single positive pattern: a quote, a `#`, or a leading `!`/`-`
+    makes the region select something other than what the manifest says.
+    """
+    rendered = [f"{indent}{line}" for line in PG_DB_BLOCK_HEADER]
+    for path in files:
+        if path != path.strip() or not path:
+            raise ValueError(f"manifest path is not a bare relative path: {path!r}")
+        if path[0] in "!-#" or any(char in path for char in "'\"#"):
+            raise ValueError(
+                f"refusing to render manifest path {path!r}: a quote, '#', or a "
+                "leading '!'/'-' would change what the region selects"
+            )
+        rendered.append(f"{indent}- '{path}'")
+    rendered.append(f"{indent}{PG_DB_END_MARKER}")
+    return rendered
+
+
+class PgDbBlock(NamedTuple):
+    """Where the generated region sits inside ci-pr.yml.
+
+    `indent` is derived from the `pg_db:` key, never read off the markers: a
+    mis-indented region must not be able to declare itself correct.
+    """
+
+    lines: list[str]
+    body_start: int
+    begin: int
+    end: int
+    indent: str
+
+
+def locate_pg_db_block(text: str, source: str) -> PgDbBlock:
+    """Find the one generated region, or say exactly how the file is wrong.
+
+    Markers are searched file-wide, so a region that was moved, duplicated, or
+    half-deleted is reported as malformed rather than silently re-created.
+    """
+    lines = text.splitlines()
+    body_start, section_indent, section_end = pg_db_section_bounds(lines, source)
+    begins = [i for i, line in enumerate(lines) if line.strip().startswith(PG_DB_BEGIN_MARKER)]
+    ends = [i for i, line in enumerate(lines) if line.strip().startswith(PG_DB_END_MARKER)]
+    if len(begins) != 1 or len(ends) != 1:
+        raise ValueError(
+            f"{source}: expected exactly one '{PG_DB_BEGIN_MARKER}' and one "
+            f"'{PG_DB_END_MARKER}' line, found {len(begins)} and {len(ends)}. "
+            f"Restore the single bracketed region inside the pg_db filter, "
+            f"then rerun `{PG_DB_WRITE_COMMAND}`."
+        )
+    begin, end = begins[0], ends[0]
+    if not body_start <= begin < end < section_end:
+        raise ValueError(
+            f"{source}: the generated markers must bracket a region inside the "
+            f"pg_db filter (lines {body_start + 1}-{section_end}); found them on "
+            f"lines {begin + 1} and {end + 1}."
+        )
+    return PgDbBlock(lines, body_start, begin, end, " " * (section_indent + 2))
+
+
+def _negations_before_block(block: PgDbBlock) -> tuple[tuple[int, str], ...]:
+    """Manual `!` exclusions the generated region would silently overrule."""
+    offenders: list[tuple[int, str]] = []
+    for index in range(block.body_start, block.begin):
+        match = _PG_DB_ENTRY.match(block.lines[index].strip())
+        if match and match.group(1).startswith("!"):
+            offenders.append((index + 1, match.group(1)))
+    return tuple(offenders)
+
+
+def pg_db_block_plan(workflow_path: Path, manifest_path: Path) -> tuple[PgDbBlock, list[str]]:
+    """The located region plus the lines it is required to contain."""
+    block = locate_pg_db_block(workflow_path.read_text("utf-8"), str(workflow_path))
+    offenders = _negations_before_block(block)
+    if offenders:
+        detail = "; ".join(f"{workflow_path}:{lineno} {pattern!r}" for lineno, pattern in offenders)
+        raise ValueError(
+            f"{workflow_path}: {len(offenders)} negative pattern(s) precede the "
+            f"generated region and would be overruled by it with no diagnostic "
+            f"({detail}). dorny/paths-filter is last-match-wins: move the "
+            f"exclusion after '{PG_DB_END_MARKER}', or drop it."
+        )
+    files = load_manifest_files(manifest_path.read_text("utf-8"), str(manifest_path))
+    return block, render_pg_db_block(files, block.indent)
+
+
+def check_pg_db_generated_block(workflow_path: Path, manifest_path: Path) -> int:
+    """Return 0 in sync, 1 on drift, 2 when the region cannot be read."""
+    try:
+        block, expected = pg_db_block_plan(workflow_path, manifest_path)
+    except (OSError, ValueError) as error:
+        print(f"FAIL: [pg-db-generated] {error}", file=sys.stderr)
+        return 2
+    actual = block.lines[block.begin:block.end + 1]
+    if actual == expected:
+        entries = sum(1 for line in expected if _PG_DB_ENTRY.match(line.strip()))
+        print(
+            f"pg_db generated source paths in sync with "
+            f"{manifest_path.name} [files]: {entries} entries"
+        )
+        return 0
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
+    print(
+        f"FAIL: [pg-db-generated] {workflow_path}: the generated pg_db region "
+        f"does not match {manifest_path}. A file with live PostgreSQL tests the "
+        f"filter does not select skips the PG lane on its own PR, and the "
+        f"required mirror reports that skip as a pass.",
+        file=sys.stderr,
+    )
+    for line in missing:
+        print(f"  + {line.strip()}", file=sys.stderr)
+    for line in extra:
+        print(f"  - {line.strip()}", file=sys.stderr)
+    if not missing and not extra:
+        print("  (entries match; the region's order or indentation does not)", file=sys.stderr)
+    print(f"Run `{PG_DB_WRITE_COMMAND}` and commit the result.", file=sys.stderr)
+    return 1
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Replace `path` in one rename so a failed write cannot truncate it."""
+    handle, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="") as stream:
+            stream.write(text)
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+
+
+def write_pg_db_generated_block(workflow_path: Path, manifest_path: Path) -> int:
+    """Rewrite the region from the manifest. Idempotent; never creates it."""
+    try:
+        block, expected = pg_db_block_plan(workflow_path, manifest_path)
+    except (OSError, ValueError) as error:
+        print(f"FAIL: [pg-db-generated] {error}", file=sys.stderr)
+        return 2
+    lines = block.lines[:block.begin] + expected + block.lines[block.end + 1:]
+    _atomic_write_text(workflow_path, "\n".join(lines) + "\n")
+    entries = sum(1 for line in expected if _PG_DB_ENTRY.match(line.strip()))
+    print(f"wrote {entries} generated pg_db source path(s) into {workflow_path}")
+    return 0
 
 
 def path_selected(path: str, patterns: Iterable[str]) -> bool:
@@ -1561,11 +1780,18 @@ def check(repo_root: Path, baseline_path: Path, manifest_path: Path, baseline_re
     contract_rc = check_non_pg_filter_contract(repo_root)
     if contract_rc:
         return contract_rc
+    # Inside the default mode on purpose: the one unconditional CI call site
+    # already runs it, so a new PG source path fails closed without anybody
+    # remembering a second invocation. A malformed region is fatal before
+    # `analyze` reads the same filter.
+    block_rc = check_pg_db_generated_block(repo_root / PR_WORKFLOW_REL, manifest_path)
+    if block_rc == 2:
+        return 2
     analysis = analyze(repo_root, allowlist_path)
     baseline = parse_baseline(baseline_path.read_text("utf-8"), str(baseline_path))
     sha, reference = reference_baseline(repo_root, baseline_ref)
     allowlist = allowlist_path or repo_root / ALLOWLIST_REL
-    return check_analysis(
+    analysis_rc = check_analysis(
         analysis,
         baseline,
         reference,
@@ -1573,6 +1799,7 @@ def check(repo_root: Path, baseline_path: Path, manifest_path: Path, baseline_re
         reference_label=f"commit {sha}" if reference is not None else "bootstrap snapshot",
         allowlist_label=str(allowlist),
     )
+    return max(analysis_rc, block_rc)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1596,14 +1823,24 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="with --write-snapshots, rewrite only the manifest and preserve the baseline",
     )
+    parser.add_argument(
+        "--write-pg-db-paths",
+        action="store_true",
+        help="rewrite the generated pg_db region in ci-pr.yml from the manifest [files] section",
+    )
     args = parser.parse_args(argv)
     if args.manifest_only and not args.write_snapshots:
         parser.error("--manifest-only requires --write-snapshots")
+    if args.write_snapshots and args.write_pg_db_paths:
+        parser.error("--write-snapshots cannot be combined with --write-pg-db-paths")
     root = args.repo_root.resolve()
     baseline = args.baseline.resolve() if args.baseline else root / BASELINE_REL
     manifest = args.manifest.resolve() if args.manifest else root / MANIFEST_REL
     allowlist = args.allowlist.resolve() if args.allowlist else None
+    workflow = root / PR_WORKFLOW_REL
     try:
+        if args.write_pg_db_paths:
+            return write_pg_db_generated_block(workflow, manifest)
         if args.write_snapshots:
             analysis = analyze(root, allowlist)
             configuration_errors = _configuration_errors(analysis.findings)
