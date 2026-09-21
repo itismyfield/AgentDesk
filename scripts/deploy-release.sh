@@ -3117,6 +3117,10 @@ _post_deploy_smoke_wedge_unevaluable() {
     return 1
 }
 
+_post_deploy_smoke_wedge_reset() {
+    POST_DEPLOY_SMOKE_WEDGE_COVERAGE="not run: wedge check did not execute"
+}
+
 _post_deploy_smoke_wedge_not_ready() {
     POST_DEPLOY_SMOKE_WEDGE_COVERAGE="not evaluated: $1"
     _post_deploy_smoke_note "relay wedge=${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}"
@@ -3335,8 +3339,8 @@ _post_deploy_smoke_resolve_cluster_standby() {
     esac
 }
 
-# Wait once before the API snapshot and all relay checks. Non-arrival is a
-# coverage gap; stdout carries its reason to the runner without adding a finding.
+# Wait before snapshots or injection while recovery restores inflight identity (#5462).
+# Racing recovery can clear relay ownership; non-arrival is a coverage gap, not a finding.
 _post_deploy_smoke_wait_for_startup_recovery() {
     local budget="$POST_DEPLOY_SMOKE_RECOVERY_GATE_S"
     local body="$POST_DEPLOY_SMOKE_TMP_DIR/recovery-health-detail.json"
@@ -3372,6 +3376,7 @@ _post_deploy_smoke_wait_for_startup_recovery() {
             ' "$body" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE")
             case "$recovered" in
                 true)
+                    observation="fully_recovered=true arrived after recovery deadline"
                     [ "$((SECONDS - started))" -lt "$budget" ] || break
                     return 0
                     ;;
@@ -3609,6 +3614,7 @@ PY
 
 _run_post_deploy_functional_smoke() {
     local failed=0 recovery_gap recovery_confirmed=false
+    _post_deploy_smoke_wedge_reset
     POST_DEPLOY_SMOKE_READY=false
     POST_DEPLOY_SMOKE_FAILURES=()
     POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID=""

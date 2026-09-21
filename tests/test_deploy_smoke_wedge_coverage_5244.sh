@@ -43,12 +43,12 @@ sed -n "$((disposition_begin + 1)),$((disposition_end - 1))p" "$DEPLOY_SH" > "$D
 durable_clean_coverage=$(sed -n 's/^POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE="\([^"]*\)"$/\1/p' "$DEPLOY_SH" | head -1 || true)
 [ -n "$durable_clean_coverage" ] || fail 'durable clean coverage declaration is missing'
 
-runner_output=$(DURABLE_CLEAN_COVERAGE="$durable_clean_coverage" bash -s -- "$runner_source" "$TMP_ROOT" "$DISPOSITION" <<'CHILD'
+runner_output=$(DURABLE_CLEAN_COVERAGE="$durable_clean_coverage" bash -s -- "$runner_source" "$TMP_ROOT" "$DISPOSITION" "$REGION" <<'CHILD'
 set -euo pipefail
-runner_source="$1"; root="$2"; disposition_source="$3"; eval "$(<"$runner_source")"
+runner_source="$1"; root="$2"; disposition_source="$3"; eval "$(<"$4")"; eval "$(<"$runner_source")"
 ADK_REL="$root"; POST_DEPLOY_SMOKE_EVIDENCE="$root/runner.evidence"; POST_DEPLOY_SMOKE_TMP_DIR=""; POST_DEPLOY_SMOKE_FAILURES=(); POST_DEPLOY_SMOKE_STAMP=runner; REL_PORT=0; runner_wedge_called=0
 POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID=""; POST_DEPLOY_SMOKE_WEDGE_COVERAGE="clean-sentinel"; POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE="clean-sentinel"; POST_DEPLOY_SMOKE_DURABLE_COVERAGE="unevaluable: E-35 did not run"; POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE="$DURABLE_CLEAN_COVERAGE"
-_post_deploy_smoke_wait_for_startup_recovery() { return 0; }; _post_deploy_smoke_note() { :; }; _post_deploy_smoke_probe_apis() { return 0; }; _post_deploy_smoke_check_wedges() { runner_wedge_called=1; POST_DEPLOY_SMOKE_READY=true; return 0; }; _post_deploy_smoke_check_fail_closed_warn_rate() { return 0; }
+_post_deploy_smoke_wait_for_startup_recovery() { return 0; }; _post_deploy_smoke_note() { :; }; _post_deploy_smoke_probe_apis() { return 0; }; _post_deploy_smoke_check_wedges() { runner_wedge_called=1; POST_DEPLOY_SMOKE_WEDGE_COVERAGE="$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE"; POST_DEPLOY_SMOKE_READY=true; return 0; }; _post_deploy_smoke_check_fail_closed_warn_rate() { return 0; }
 # E-1 rc-0 skip fixture: leave the channel unset, so the durable probe returns 0.
 _post_deploy_smoke_check_relay_round_trip() { POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID=""; return 0; }
 _post_deploy_smoke_check_durable_record() { [ -z "$POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID" ] || return 1; return 0; }
@@ -392,6 +392,12 @@ curl() {
     printf '%s' "$body" > "$out"
     if [ "$write_code" = true ]; then printf '%s' "$code"; fi
 }
+if [ "$mode" = reinvoke ]; then
+    if _run_post_deploy_functional_smoke; then first_rc=0; else first_rc=$?; fi
+    printf 'FIRST_RESULT rc=%s coverage=%s\n' "$first_rc" "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE"
+    rmdir "$ADK_REL/logs"
+    printf blocker > "$ADK_REL/logs"
+fi
 if [ "$invocation" = disposition ]; then
     eval "$(<"$disposition")"
     printf 'CONTINUED\n'
@@ -409,6 +415,9 @@ CHILD
         *) expected_requests=3 ;;
     esac
     grep -q "^REQUEST_COUNT=$expected_requests$" <<< "$output" || fail "$mode-entry: wait and fresh probe request count differs"
+    if [ "$mode" = late ]; then
+        grep -qF 'startup recovery did not finish within 1s (fully_recovered=true arrived after recovery deadline)' <<< "$output" || fail 'late-entry: deadline observation reason is inaccurate'
+    fi
     if [ "$invocation" = disposition ]; then
         grep -q '^CONTINUED$' <<< "$output" || fail "$mode: disposition stopped deploy continuation"
         case "$mode" in
@@ -418,6 +427,9 @@ CHILD
         esac
     else
         case "$mode" in
+            reinvoke)
+                grep -q 'FIRST_RESULT rc=0 coverage=evaluated: 0 ' <<< "$output" || fail 'reinvoke-entry: first real run did not evaluate clean'
+                grep -q 'ENTRY_RESULT rc=1 coverage=not run: wedge check did not execute effects=2 warns=1' <<< "$output" || fail 'reinvoke-entry: setup failure retained prior wedge coverage' ;;
             marker)
                 grep -q 'channel=5997003 state=orphan_pending_token' <<< "$output" || fail 'fresh-entry: third snapshot marker missing'
                 grep -q 'ENTRY_RESULT rc=1 coverage=evaluated: 1 .* effects=2 warns=1' <<< "$output" || fail 'fresh-entry: marker verdict or relay continuation missing' ;;
@@ -430,7 +442,7 @@ CHILD
     fi
     printf 'ENTRY_CASE_DONE %s %s\n' "$mode" "$invocation"
 }
-for mode in marker clean permanent late wait_http http malformed empty regressed; do
+for mode in marker clean permanent late wait_http http malformed empty regressed reinvoke; do
     run_entry_case "$mode"
 done
 for mode in marker clean permanent; do run_entry_case "$mode" disposition; done
