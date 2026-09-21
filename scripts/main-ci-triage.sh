@@ -558,11 +558,17 @@ nightly_triage() {
   # Capture every page before inspecting it: a partial/failed read must not create an issue.
   issues="$(gh api "/repos/$repo/issues?state=all&per_page=100" --paginate)"
   candidates="$(jq -sce --arg title "$title" --arg ns "$namespace" '
-    if all(.[]; type == "array") then add else error("invalid issue pages") end |
-    map(select(.pull_request == null) | select(.title == $title or
-      ((.body // "" | split("\n")) | index($ns)))) |
-    if all(.[]; (.number | type == "number") and (.state == "open" or .state == "closed")
-      and (.body | type == "string")) then . else error("invalid issue") end
+    def valid_issue:
+      type == "object" and
+      (.number | type == "number" and . > 0 and . == floor) and
+      (.title | type == "string" and length > 0) and
+      (.state == "open" or .state == "closed") and
+      has("body") and (.body == null or (.body | type == "string")) and
+      ((has("pull_request") | not) or (.pull_request | type == "object"));
+    if length > 0 and all(.[]; type == "array") then add else error("invalid issue pages") end |
+    if all(.[]; valid_issue) then . else error("invalid issue record") end |
+    map(select(has("pull_request") | not) | select(.title == $title or
+      ((.body // "" | split("\n")) | index($ns))))
   ' <<<"$issues")"
   count="$(jq length <<<"$candidates")"
   if (( count > 1 )); then
@@ -570,6 +576,12 @@ nightly_triage() {
     return 1
   fi
   if (( count == 1 )); then
+    if ! jq -e --arg title "$title" --arg ns "$namespace" '
+      .[0] | .title == $title and ((.body // "" | split("\n")) | index($ns) != null)
+    ' <<<"$candidates" >/dev/null; then
+      echo 'incomplete canonical nightly identity; reconcile manually' >&2
+      return 1
+    fi
     number="$(jq -r '.[0].number' <<<"$candidates")"
     state="$(jq -r '.[0].state' <<<"$candidates")"
     body="$(jq -r '.[0].body' <<<"$candidates")"

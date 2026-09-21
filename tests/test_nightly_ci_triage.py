@@ -41,7 +41,7 @@ if a[0] == "api":
         kind, values = "issues", s["issues"]
     elif re_match := __import__('re').fullmatch(f"/repos/{repo}/issues/(\\d+)/comments\\?per_page=100", endpoint):
         kind = "comments"
-        values = next(i for i in s["issues"] if i["number"] == int(re_match[1]))["comments"]
+        values = next(i for i in s["issues"] if isinstance(i, dict) and i.get("number") == int(re_match[1]))["comments"]
     else: raise AssertionError(a)
     if s.get("fail_read") == kind: finish("[]", 1)
     if s.get("bad_json") == kind: finish("not-json")
@@ -64,7 +64,7 @@ if kind == "create":
     s["issues"].append(dict(number=7, state="open", title=a[5], body=pathlib.Path(a[7]).read_text(), comments=[]))
 else:
     assert a[:5] == ["issue", kind, "7", "--repo", repo], a
-    issue = next(i for i in s["issues"] if i["number"] == 7)
+    issue = next(i for i in s["issues"] if isinstance(i, dict) and i.get("number") == 7)
     if kind == "reopen":
         assert len(a) == 5, a
         issue["state"] = "open"
@@ -147,7 +147,7 @@ class NightlyTriage(unittest.TestCase):
     def test_exact_marker_on_last_page_and_closed_replay(self):
         self.seed(state="closed", comments=[{"body": "noise"}] * 4 + [{"body": marker()}])
         self.assertEqual(self.run_entry(sync=True), [])
-        self.seed(body=marker() + "extra")
+        self.seed(body=NS + "\n" + marker() + "extra")
         self.assertEqual(self.run_entry(), ["comment"])
 
     def test_closed_new_failure_reopens_before_comment(self):
@@ -176,6 +176,64 @@ class NightlyTriage(unittest.TestCase):
         self.save({"issues": [], "calls": [], "writes": []}); self.seed()
         state = self.load(); state["issues"] *= 2; self.save(state)
         self.assertEqual(self.run_entry(success=False), [])
+
+    def test_partial_canonical_identity_never_adopts_or_creates(self):
+        for state in ("open", "closed"):
+            for partial in ("title_only", "namespace_only"):
+                with self.subTest(state=state, partial=partial):
+                    self.seed(state=state, body="unrelated" if partial == "title_only" else NS)
+                    data = self.load()
+                    if partial == "namespace_only":
+                        data["issues"][0]["title"] = "Unrelated issue"
+                    self.save(data)
+                    self.assertEqual(self.run_entry(success=False, sync=True), [])
+
+    def test_canonical_plus_partial_conflict_and_true_ambiguity_never_write(self):
+        for collision in ("title_only", "namespace_only", "canonical"):
+            with self.subTest(collision=collision):
+                self.seed()
+                data = self.load()
+                data["issues"].insert(0, {"number": 8, "state": "closed",
+                    "title": "Unrelated issue" if collision == "namespace_only" else TITLE,
+                    "body": "unrelated" if collision == "title_only" else NS, "comments": []})
+                data["issues"].insert(1, {"number": 9, "state": "open",
+                    "title": "Ordinary issue", "body": None, "comments": []})
+                self.save(data)  # Canonical record is on the next fake API page.
+                self.assertEqual(self.run_entry(success=False, sync=True), [])
+
+    def test_malformed_issue_records_on_any_page_fail_before_filtering(self):
+        ordinary = {"number": 8, "state": "open", "title": "Ordinary issue", "body": None}
+        malformed = [None, {}]
+        for field in ("title", "body", "number", "state"):
+            malformed.append({key: value for key, value in ordinary.items() if key != field})
+        for field, value in [("title", None), ("body", 9), ("number", 0), ("number", -1),
+                ("number", 1.5), ("number", "8"), ("state", "unknown"), ("pull_request", True)]:
+            malformed.append({**ordinary, field: value})
+        for bad in malformed:
+            for position in ("only", "early", "late"):
+                with self.subTest(record=bad, position=position):
+                    self.seed()
+                    data = self.load()
+                    if position == "only":
+                        data["issues"] = [bad]
+                    elif position == "early":
+                        data["issues"] = [bad, ordinary, *data["issues"]]
+                    else:
+                        data["issues"] = [*data["issues"], ordinary, bad]
+                    self.save(data)
+                    self.assertEqual(self.run_entry(success=False, sync=True), [])
+
+    def test_valid_nullable_unrelated_and_later_canonical_pages(self):
+        ordinary = {"number": 8, "state": "open", "title": "Ordinary issue", "body": None}
+        data = self.load(); data["issues"] = [ordinary]; self.save(data)
+        self.assertEqual(self.run_entry(), ["label", "label", "create"])
+        self.seed()
+        data = self.load()
+        data["issues"] = [ordinary, {**ordinary, "number": 9}, *data["issues"]]
+        data["issues"].insert(0, {**ordinary, "number": 10, "title": TITLE,
+            "body": NS, "pull_request": {"url": "https://github.example/pull/10"}})
+        self.save(data)
+        self.assertEqual(self.run_entry(), ["comment"])
 
     def test_mandatory_write_errors_propagate(self):
         for kind in ("label", "create", "comment", "reopen"):
