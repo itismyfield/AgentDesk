@@ -47,3 +47,34 @@ separately, upstream attempt replay is checked, shutdown cause is established,
 and PostgreSQL readiness, compilation, selected tests/results/skips and the
 required complete nightly lanes are observed. This notification change does not
 change PostgreSQL filters, profiles, timeouts or repair those other failing lanes.
+
+## N1 mitigation: profiles and macOS tmux (Refs #6006)
+
+Only `full_macos`, `full_windows` and `postgres_full` set both
+`CARGO_PROFILE_DEV_DEBUG` and `CARGO_PROFILE_TEST_DEBUG` to `"0"` at job level.
+This aligns their debug-information settings with Main/PR, reducing build/link
+work at the cost of native backtrace detail. Panic/assertion text remains.
+The focused Windows Discord step retains its explicit debug env and `BASH_ENV`.
+macOS installs tmux and prints `tmux -V`; three historical failures directly
+reported missing tmux, two were inferred. Inspect all five, not a promised 55→50.
+
+Selectors, direct foreground Cargo statements, false-positive replay, runners,
+timeouts, registry/git-only cache, baselines and required contexts are unchanged.
+Both Cargo extractors must retain their full inventories: a generic wrapper can
+vanish from target-integrity extraction while membership still sees a substring.
+The focused regression module is in the PR/Main script-check aggregate, not the
+Nightly inline scripts job. No new required context or guard pin is introduced.
+
+The captured PG 143 occurred about five minutes into a 30-minute compile step,
+before tests; its cause is UNKNOWN. Debug-off is mitigation, not proof of OOM or
+causal identity with #4245. Workflow-red counts are not days or PG-failure counts;
+the Windows timings are not an isolated 3.7× debuginfo experiment. Repeated
+warnings do not establish link units or compiler phases. A build banner or a
+static inventory count does not establish PG test execution/readiness.
+
+Notification #6080/#6082/card/replay is already complete. Root will observe one
+post-merge Nightly at its exact SHA/run/attempt using the event-only watch.
+Require actual PG startup/readiness, compilation and selected per-target test
+results; legitimate zero-selected auxiliary targets are not themselves failure.
+Report PG separately from overall Nightly. B/C/E are outside N1, not dependent
+on one another; the old Windows residual is not current after #6081. #6006 stays OPEN.

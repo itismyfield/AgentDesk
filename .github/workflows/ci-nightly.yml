@@ -81,6 +81,14 @@ jobs:
     # macOS execution is isolated in ci-macos-trusted.yml, which has no
     # pull_request trigger and requires an org runner group.
     runs-on: macos-latest
+    # #6006: ci-main.yml and ci-pr.yml already build their cargo test lanes with
+    # debug information off; nightly never received it. Dropping native debug
+    # symbols reduces test build/link overhead in this lane. Trade-off: native
+    # backtrace frames lose symbol detail here; assertion and panic text are
+    # unaffected. This is a mitigation, not a proven shutdown-cause fix.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
 
@@ -97,9 +105,13 @@ jobs:
             echo "SCCACHE_GHA_ENABLED="
           } >> "$GITHUB_ENV"
 
+      # #6006: three macOS failures reported `start tmux fixture: ... NotFound`.
+      # ci-macos-trusted.yml already provisions tmux; this hosted lane did not.
+      # `tmux -V` is direct provisioning evidence in the log, not an assumption.
       - name: Install Opus on macOS
         run: |
-          brew install opus pkg-config
+          brew install opus pkg-config tmux
+          tmux -V
           echo "PKG_CONFIG_PATH=$(brew --prefix opus)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Setup sccache
@@ -133,6 +145,12 @@ jobs:
   full_windows:
     name: Full tests (windows-latest)
     runs-on: windows-latest
+    # #6006: see `full_macos` for the rationale and the backtrace trade-off.
+    # The focused Discord step below keeps its own explicit env block: it is a
+    # reviewed local contract, and inherited values alone would erase it.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
 
@@ -190,6 +208,9 @@ jobs:
       PGUSER: postgres
       PGPASSWORD: postgres
       AGENTDESK_REQUIRE_PG: "1"
+      # #6006: see `full_macos` for the rationale and the backtrace trade-off.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
 
