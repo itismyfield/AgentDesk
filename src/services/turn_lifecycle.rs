@@ -439,7 +439,7 @@ pub(crate) fn cleanup_policy_observability_surface(
 }
 
 #[cfg(test)]
-mod policy_observability_tests {
+pub(crate) mod policy_observability_tests {
     use crate::services::discord::{InflightRestartMode, TmuxCleanupPolicy};
 
     #[test]
@@ -468,9 +468,18 @@ mod policy_observability_tests {
     // Mutex held across awaits to serialize tests that reset/init the
     // process-global observability runtime; the hold must span the awaits to
     // keep concurrent tests from racing on the shared runtime. Test-only.
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn cancel_observability_emits_unknown_noop_direct_fallback() {
+        let _ = crate::services::observability::events::test_capture::capture_async(
+            cancel_observability_emits_unknown_noop_direct_fallback_scenario(|| {}),
+        )
+        .await;
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    pub(crate) async fn cancel_observability_emits_unknown_noop_direct_fallback_scenario(
+        before_observe: impl FnOnce(),
+    ) {
         let _guard = crate::services::observability::test_runtime_lock();
         crate::services::observability::reset_for_tests();
         crate::services::observability::init_observability(None);
@@ -492,10 +501,12 @@ mod policy_observability_tests {
         assert_eq!(result.queue_depth, None);
         assert!(!result.termination_recorded);
 
-        let event = crate::services::observability::events::recent(10)
-            .into_iter()
-            .find(|event| event.event_type == "turn_cancelled")
-            .expect("no-op direct-fallback cancel attempt should be recorded");
+        before_observe();
+        assert_noop_cancel_event();
+    }
+
+    pub(crate) fn assert_noop_cancel_event() {
+        let event = crate::services::observability::events::test_capture::one("turn_cancelled");
         assert_eq!(event.channel_id, None);
         assert_eq!(event.provider.as_deref(), Some("codex"));
         assert_eq!(event.payload["reason"], "queue-api cancel_turn (preserve)");

@@ -137,7 +137,7 @@ pub(crate) fn record_voice_flight_event(event: VoiceFlightEvent) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn payload_for(event: VoiceFlightEvent) -> Value {
@@ -231,7 +231,14 @@ mod tests {
 
     #[test]
     fn record_writes_structured_voice_flight_event() {
-        crate::services::observability::events::global().clear();
+        let _ = crate::services::observability::events::test_capture::capture_sync(|| {
+            record_writes_structured_voice_flight_event_scenario(|| {})
+        });
+    }
+
+    pub(crate) fn record_writes_structured_voice_flight_event_scenario(
+        before_observe: impl FnOnce(),
+    ) {
         let mut event = VoiceFlightEvent::new(VoiceFlightRoute::Queued);
         event.voice_channel_id = Some(123);
         event.control_channel_id = Some(123);
@@ -240,7 +247,8 @@ mod tests {
         event.stt_latency_ms = Some(88);
         record_voice_flight_event(event);
 
-        let recent = crate::services::observability::events::recent(1);
+        before_observe();
+        let recent = crate::services::observability::events::test_capture::snapshot();
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].event_type, VOICE_FLIGHT_EVENT_TYPE);
         assert_eq!(recent[0].channel_id, Some(123));

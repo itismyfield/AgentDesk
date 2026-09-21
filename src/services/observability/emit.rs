@@ -889,11 +889,19 @@ fn insert_if_absent(fields: &mut Map<String, Value>, key: &str, value: Option<&s
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
     fn every_emit_surface_records_one_recent_event() {
+        let _ = crate::services::observability::events::test_capture::capture_sync(|| {
+            every_emit_surface_records_one_recent_event_scenario(|| {})
+        });
+    }
+
+    pub(crate) fn every_emit_surface_records_one_recent_event_scenario(
+        before_observe: impl FnOnce(),
+    ) {
         let _guard = super::super::test_runtime_lock();
         super::super::reset_for_tests();
 
@@ -1002,7 +1010,8 @@ mod tests {
             payload: json!({"verdict": "pass"}),
         });
 
-        let events = events::recent(50);
+        before_observe();
+        let events = crate::services::observability::events::test_capture::snapshot();
         for expected in [
             "turn_started",
             "turn_finished",
@@ -1244,7 +1253,7 @@ mod tests {
     }
 
     #[test]
-    fn invariant_severity_routes_to_exact_log_level_and_suffix_4422() {
+    pub(crate) fn invariant_severity_routes_to_exact_log_level_and_suffix_4422() {
         let ((), logs) = super::invariant_log_test_capture::capture(|| {
             assert!(record_invariant_check_with_severity(
                 true,
@@ -1305,16 +1314,35 @@ mod tests {
         assert_eq!(logs[1].rendered_message, "[invariant] persisted rewind");
     }
 
+    pub(crate) const ROOT_CAUSE_ACTIONS: [fn(u64, &str); 3] = [
+        metrics::record_relay_terminal_ack_timeout,
+        metrics::record_relay_uncommitted_inflight_cleared,
+        metrics::record_relay_owner_unknown,
+    ];
+
     #[test]
     fn relay_root_cause_metric_wrappers_record_persistent_events() {
+        let _ = crate::services::observability::events::test_capture::capture_sync(|| {
+            relay_root_cause_metric_wrappers_record_persistent_events_scenario(
+                &ROOT_CAUSE_ACTIONS,
+                || {},
+            )
+        });
+    }
+
+    pub(crate) fn relay_root_cause_metric_wrappers_record_persistent_events_scenario(
+        actions: &[fn(u64, &str)],
+        before_observe: impl FnOnce(),
+    ) {
         let _guard = super::super::test_runtime_lock();
         super::super::reset_for_tests();
 
-        metrics::record_relay_terminal_ack_timeout(77, "Codex");
-        metrics::record_relay_uncommitted_inflight_cleared(77, "Codex");
-        metrics::record_relay_owner_unknown(77, "Codex");
+        for action in actions {
+            action(77, "Codex");
+        }
 
-        let events = events::recent(10);
+        before_observe();
+        let events = crate::services::observability::events::test_capture::snapshot();
         let counters = events
             .iter()
             .filter(|event| event.event_type == "relay_root_cause_counter")

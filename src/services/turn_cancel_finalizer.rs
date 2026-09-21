@@ -156,6 +156,13 @@ mod tests {
 
     #[tokio::test]
     async fn finalizer_builds_canonical_cancel_record_and_event() {
+        let _ = crate::services::observability::events::test_capture::capture_async(
+            finalizer_builds_canonical_cancel_record_and_event_scenario(),
+        )
+        .await;
+    }
+
+    async fn finalizer_builds_canonical_cancel_record_and_event_scenario() {
         let _guard = crate::services::observability::test_runtime_lock();
         crate::services::observability::reset_for_tests();
         crate::services::observability::init_observability(None);
@@ -203,10 +210,7 @@ mod tests {
             Some("dispatch-1633")
         );
 
-        let event = crate::services::observability::events::recent(10)
-            .into_iter()
-            .find(|event| event.event_type == "turn_cancelled")
-            .expect("turn_cancelled event should be recorded");
+        let event = crate::services::observability::events::test_capture::one("turn_cancelled");
         assert_eq!(event.channel_id, Some(1479671301387059200));
         assert_eq!(event.provider.as_deref(), Some("codex"));
         assert_eq!(event.payload["reason"], "operator stop");
@@ -258,6 +262,13 @@ mod tests {
 
     #[tokio::test]
     async fn finalizer_marks_session_key_noop_direct_fallback_cancel_attempt() {
+        let _ = crate::services::observability::events::test_capture::capture_async(
+            finalizer_marks_session_key_noop_direct_fallback_cancel_attempt_scenario(),
+        )
+        .await;
+    }
+
+    async fn finalizer_marks_session_key_noop_direct_fallback_cancel_attempt_scenario() {
         let _guard = crate::services::observability::test_runtime_lock();
         crate::services::observability::reset_for_tests();
         crate::services::observability::init_observability(None);
@@ -297,10 +308,7 @@ mod tests {
             Some("malformed-session-key")
         );
 
-        let event = crate::services::observability::events::recent(10)
-            .into_iter()
-            .find(|event| event.event_type == "turn_cancelled")
-            .expect("no-op direct-fallback cancel attempt should be recorded");
+        let event = crate::services::observability::events::test_capture::one("turn_cancelled");
         assert_eq!(event.channel_id, None);
         assert_eq!(event.provider.as_deref(), Some("codex"));
         assert_eq!(event.payload["lifecyclePath"], "direct-fallback");
@@ -311,6 +319,13 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_surface_payload_matrix_preserves_surface_specific_contract() {
+        let _ = crate::services::observability::events::test_capture::capture_async(
+            cancel_surface_payload_matrix_preserves_surface_specific_contract_scenario(),
+        )
+        .await;
+    }
+
+    async fn cancel_surface_payload_matrix_preserves_surface_specific_contract_scenario() {
         let _guard = crate::services::observability::test_runtime_lock();
         crate::services::observability::reset_for_tests();
         crate::services::observability::init_observability(None);
@@ -443,7 +458,7 @@ mod tests {
             );
         }
 
-        let events: Vec<_> = crate::services::observability::events::recent(10)
+        let events: Vec<_> = crate::services::observability::events::test_capture::snapshot()
             .into_iter()
             .filter(|event| event.event_type == "turn_cancelled")
             .collect();

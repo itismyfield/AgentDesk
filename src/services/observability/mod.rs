@@ -633,6 +633,13 @@ mod cancellation_observability_tests {
 
     #[tokio::test]
     async fn turn_cancelled_emit_records_normalized_payload_without_pg() {
+        let _ = crate::services::observability::events::test_capture::capture_async(
+            turn_cancelled_emit_records_normalized_payload_without_pg_scenario(),
+        )
+        .await;
+    }
+
+    async fn turn_cancelled_emit_records_normalized_payload_without_pg_scenario() {
         let _guard = test_runtime_lock();
         reset_for_tests();
         init_observability(None);
@@ -659,10 +666,7 @@ mod cancellation_observability_tests {
             ),
         );
 
-        let event = events::recent(10)
-            .into_iter()
-            .find(|event| event.event_type == "turn_cancelled")
-            .expect("turn_cancelled event should be recorded");
+        let event = crate::services::observability::events::test_capture::one("turn_cancelled");
         assert_eq!(event.channel_id, Some(42));
         assert_eq!(event.provider.as_deref(), Some("codex"));
         assert_eq!(event.payload["reason"], "queue-api cancel_turn (preserve)");

@@ -7900,6 +7900,11 @@ services::observability::emit::tests::invariant_violation_persists_its_severity_
 services::observability::emit::tests::relay_delete_records_required_fields_and_outcome
 services::observability::emit::tests::relay_root_cause_metric_wrappers_record_persistent_events
 services::observability::emit::tests::warn_severity_invariant_still_emits_event_without_error_level
+services::observability::events::capture_stress_tests::isolated_capture_interference_and_append_equivalence
+services::observability::events::capture_tests::async_capture_excludes_spawn_and_restores_after_cancellation
+services::observability::events::capture_tests::drain_commit_preserves_complete_recent_rows
+services::observability::events::capture_tests::scoped_future_moves_between_runtime_threads_without_leaking
+services::observability::events::capture_tests::sync_capture_restores_nested_and_panicking_scopes
 services::observability::metrics::tests::identity_conflict_snapshot_preserves_closed_categories
 services::observability::metrics::tests::permanent_relay_loss_is_additive_and_exposed
 services::observability::metrics::tests::resend_suppression_reaches_the_snapshot_row
