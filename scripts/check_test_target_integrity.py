@@ -264,10 +264,28 @@ def _rust_tokens(text: str) -> list[RustToken]:
             tokens.append(RustToken(ident.group(), line, "ident"))
             index += ident.end()
             continue
-        if char in "#[]{}();=:":
+        if char in "#![]{}();=:":
             tokens.append(RustToken(char, line))
         index += 1
     return tokens
+
+
+def _attribute_bracket(tokens: list[RustToken], index: int) -> int | None:
+    """Index of the `[` that opens the attribute at `index`, else None.
+
+    Only real punctuation opens one: the STRING `"#"` in front of an index
+    expression (`&"#"[{ ... }..]`) is ordinary code, and skipping its block
+    as an attribute drops the items inside it. `#![...]` opens one too.
+    """
+    if tokens[index].kind != "punct" or tokens[index].value != "#":
+        return None
+    cursor = index + 1
+    if cursor < len(tokens) and tokens[cursor].kind == "punct" \
+            and tokens[cursor].value == "!":
+        cursor += 1
+    return cursor if cursor < len(tokens) \
+        and tokens[cursor].kind == "punct" \
+        and tokens[cursor].value == "[" else None
 
 
 @dataclass(frozen=True)
@@ -303,15 +321,15 @@ def collect_static_tests(root: Path, repo_root: Path) -> StaticTestInventory:
             token = tokens[index]
             current_names = outer + tuple(scope[1] for scope in scopes)
             current_dir = scopes[-1][2] if scopes else base_dir
-            if token.value == "#" and index + 1 < len(tokens) \
-                    and tokens[index + 1].value == "[":
-                end = index + 2
+            bracket = _attribute_bracket(tokens, index)
+            if bracket is not None:
+                end = bracket + 1
                 attr_depth = 1
                 while end < len(tokens) and attr_depth:
                     attr_depth += tokens[end].value == "["
                     attr_depth -= tokens[end].value == "]"
                     end += 1
-                attr = tokens[index + 2:end - 1]
+                attr = tokens[bracket + 1:end - 1]
                 path_end = next((offset for offset, item in enumerate(attr)
                                  if item.value in ("(", "=", "]")), len(attr))
                 attr_path = tuple(item.value for item in attr[:path_end]
@@ -504,6 +522,23 @@ class _ModuleFrame:
                 else self.directory)
 
 
+def _macro_delimiter(tokens: list[RustToken], index: int) -> bool:
+    """Is the `{` at `index` a macro's token-tree delimiter, not a block?
+
+    `mac! { ... }` and `macro_rules! mac { ... }` delimit token trees. An
+    item a wrapper passes through stays an item of the file itself, so the
+    file's pending relative component has to survive the delimiter.
+    """
+    cursor = index - 1
+    if cursor > 1 and tokens[cursor].kind == "ident" \
+            and tokens[cursor - 1].value == "!" \
+            and tokens[cursor - 2].value == "macro_rules":
+        cursor -= 1  # `macro_rules! NAME {` names the macro being defined
+    return cursor > 0 and tokens[cursor].kind == "punct" \
+        and tokens[cursor].value == "!" \
+        and tokens[cursor - 1].kind == "ident"
+
+
 def _inline_frames(text: str, frame: _ModuleFrame) -> dict[int, _ModuleFrame]:
     """Map each line holding a `mod` item to the frame that encloses it.
 
@@ -514,8 +549,8 @@ def _inline_frames(text: str, frame: _ModuleFrame) -> dict[int, _ModuleFrame]:
     a bracket written inside one of its strings must not extend it over the
     items behind it. A block is not a module either, so the file's pending
     relative component is not in force inside one.
-    Only the enclosing inline frame is recorded; the declaration itself is
-    resolved by the caller.
+    Only the enclosing frame -- an inline module or a block -- is
+    recorded; the declaration itself is resolved by the caller.
     """
     tokens = _rust_tokens(text)
     frames: dict[int, _ModuleFrame] = {}
@@ -525,9 +560,9 @@ def _inline_frames(text: str, frame: _ModuleFrame) -> dict[int, _ModuleFrame]:
     index = 0
     while index < len(tokens):
         token = tokens[index]
-        if token.value == "#" and index + 1 < len(tokens) \
-                and tokens[index + 1].value == "[":
-            end = index + 2
+        bracket = _attribute_bracket(tokens, index)
+        if bracket is not None:
+            end = bracket + 1
             attr_depth = 1
             while end < len(tokens) and attr_depth:
                 # Only real punctuation closes the attribute. A `[` or `]`
@@ -538,7 +573,7 @@ def _inline_frames(text: str, frame: _ModuleFrame) -> dict[int, _ModuleFrame]:
                     attr_depth += tokens[end].value == "["
                     attr_depth -= tokens[end].value == "]"
                 end += 1
-            attr = tokens[index + 2:end - 1]
+            attr = tokens[bracket + 1:end - 1]
             head = next((item.value for item in attr
                          if item.kind == "ident"), "")
             if head == "path":
@@ -578,8 +613,11 @@ def _inline_frames(text: str, frame: _ModuleFrame) -> dict[int, _ModuleFrame]:
             # parses the items inside one, so an inline module declared in a
             # block of `owner.rs` descends into `scope/`, not `owner/scope/`.
             # The component is back in force once the block closes.
+            # A macro's delimiter is not a block: it wraps items of the
+            # file, so the component survives it.
             enclosing = scopes[-1][1] if scopes else frame
-            if enclosing.relative is not None:
+            if enclosing.relative is not None \
+                    and not _macro_delimiter(tokens, index):
                 scopes.append((depth, _ModuleFrame(enclosing.directory)))
         elif token.kind == "punct" and token.value == "}":
             depth -= 1

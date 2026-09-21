@@ -1836,6 +1836,63 @@ class InlineDirectoryContext(unittest.TestCase):
             "inner": "src/owner.rs:4",
             "leaf_block_path": "src/owner/scope/moved.rs:1",
         }, ("decoy_block_at_file_dir",)),
+        # Only real `#` PUNCTUATION opens an attribute. The string `"#"`
+        # in front of an index expression is ordinary code, and skipping
+        # its block as if it were `#[...]` loses both `mod`s with it.
+        "string_hash_before_an_index_is_not_an_attribute": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                'fn helper() {\n    let _ = &"#"[{\n        mod scope {\n'
+                '            #[path = "moved.rs"]\n            mod child;\n'
+                "        }\n        0\n    }..];\n}\n",
+            "src/scope/moved.rs": "mod leaf_string_hash {}\n",
+            "src/moved.rs": "mod decoy_string_hash_opened_attr {}\n",
+        }, {
+            "child": "src/owner.rs:5",
+            "leaf_string_hash": "src/scope/moved.rs:1",
+        }, ("decoy_string_hash_opened_attr",)),
+        # A byte string is the same token with a `b` in front of it.
+        "byte_string_hash_before_an_index_is_not_an_attribute": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                'fn helper() {\n    let _ = b"#"[{\n        mod scope {\n'
+                '            #[path = "moved.rs"]\n            mod child;\n'
+                "        }\n        0\n    }];\n}\n",
+            "src/scope/moved.rs": "mod leaf_byte_hash {}\n",
+            "src/moved.rs": "mod decoy_byte_hash_opened_attr {}\n",
+        }, {
+            "child": "src/owner.rs:5",
+            "leaf_byte_hash": "src/scope/moved.rs:1",
+        }, ("decoy_byte_hash_opened_attr",)),
+        # A macro's `{}` delimits a token tree, not a block: an item the
+        # wrapper passes through is still an item of `owner.rs`, so the
+        # file's pending `owner` component is still in force inside it.
+        "macro_delimiter_braces_are_not_a_block": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                "macro_rules! passthrough { ($($t:tt)*) => { $($t)* }; }\n"
+                "passthrough! {\n    mod scope {\n"
+                '        #[path = "moved.rs"]\n        mod child;\n    }\n}\n',
+            "src/owner/scope/moved.rs": "mod leaf_macro_wrapper {}\n",
+            "src/scope/moved.rs": "mod decoy_macro_read_as_block {}\n",
+        }, {
+            "child": "src/owner.rs:5",
+            "leaf_macro_wrapper": "src/owner/scope/moved.rs:1",
+        }, ("decoy_macro_read_as_block",)),
+        # The parenthesized form of the same wrapper never had a brace to
+        # misread, and must keep resolving exactly where it did.
+        "parenthesized_macro_wrapper_keeps_the_component": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                "macro_rules! passthrough { ($($t:tt)*) => { $($t)* }; }\n"
+                "passthrough!(\n    mod scope {\n"
+                '        #[path = "moved.rs"]\n        mod child;\n    }\n);\n',
+            "src/owner/scope/moved.rs": "mod leaf_paren_wrapper {}\n",
+            "src/scope/moved.rs": "mod decoy_paren_read_as_block {}\n",
+        }, {
+            "child": "src/owner.rs:5",
+            "leaf_paren_wrapper": "src/owner/scope/moved.rs:1",
+        }, ("decoy_paren_read_as_block",)),
     }
 
     def test_every_frame_resolves_the_way_rustc_does(self) -> None:
@@ -1885,6 +1942,12 @@ class InlineDirectoryContext(unittest.TestCase):
         "block_drops_the_files_pending_relative":
             ("leaf_block_scope::case", "src/scope/moved.rs",
              "src/owner/scope/moved.rs"),
+        "string_hash_before_an_index_is_not_an_attribute":
+            ("leaf_string_hash::case", "src/scope/moved.rs",
+             "src/moved.rs"),
+        "macro_delimiter_braces_are_not_a_block":
+            ("leaf_macro_wrapper::case", "src/owner/scope/moved.rs",
+             "src/scope/moved.rs"),
     }
 
     def test_boundary_layouts_reach_main_with_the_real_file(self) -> None:
