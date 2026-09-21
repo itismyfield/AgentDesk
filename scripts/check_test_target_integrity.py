@@ -510,6 +510,10 @@ def _inline_frames(text: str, frame: _ModuleFrame) -> dict[int, _ModuleFrame]:
     Scope is opened and closed by real `{`/`}` punctuation from the shared
     lexer, so braces inside strings, chars and comments never move it and an
     inline module closed on its own line cannot leak into the next `mod`.
+    An attribute is delimited by its own real `[`/`]` for the same reason:
+    a bracket written inside one of its strings must not extend it over the
+    items behind it. A block is not a module either, so the file's pending
+    relative component is not in force inside one.
     Only the enclosing inline frame is recorded; the declaration itself is
     resolved by the caller.
     """
@@ -526,8 +530,13 @@ def _inline_frames(text: str, frame: _ModuleFrame) -> dict[int, _ModuleFrame]:
             end = index + 2
             attr_depth = 1
             while end < len(tokens) and attr_depth:
-                attr_depth += tokens[end].value == "["
-                attr_depth -= tokens[end].value == "]"
+                # Only real punctuation closes the attribute. A `[` or `]`
+                # that is merely the value of a string token (`#[doc = "["]`)
+                # would otherwise swallow the item bodies written after it
+                # and leak the enclosing scope into the next `mod`.
+                if tokens[end].kind == "punct":
+                    attr_depth += tokens[end].value == "["
+                    attr_depth -= tokens[end].value == "]"
                 end += 1
             attr = tokens[index + 2:end - 1]
             head = next((item.value for item in attr
@@ -564,6 +573,14 @@ def _inline_frames(text: str, frame: _ModuleFrame) -> dict[int, _ModuleFrame]:
             # `#[path]` it carried must not rename a later inline module.
             depth += 1
             pending_path = None
+            # A block is not a module: rustc swaps the file's pending
+            # `Owned { relative }` ownership for `UnownedViaBlock` while it
+            # parses the items inside one, so an inline module declared in a
+            # block of `owner.rs` descends into `scope/`, not `owner/scope/`.
+            # The component is back in force once the block closes.
+            enclosing = scopes[-1][1] if scopes else frame
+            if enclosing.relative is not None:
+                scopes.append((depth, _ModuleFrame(enclosing.directory)))
         elif token.kind == "punct" and token.value == "}":
             depth -= 1
             while scopes and scopes[-1][0] > depth:

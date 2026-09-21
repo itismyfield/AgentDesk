@@ -1770,6 +1770,58 @@ class InlineDirectoryContext(unittest.TestCase):
             "child": "src/owner.rs:4",
             "leaf_after_alias": "src/owner/scope/child.rs:1",
         }, ("decoy_alias_leaked",)),
+        # An attribute is closed by its own real `]`. A bracket that is
+        # merely the value of one of its strings must not extend it over
+        # the item bodies behind it: `outer` would stay open and the
+        # top-level sibling would be read one directory too deep.
+        "attribute_string_brackets_never_extend_the_attribute": ({
+            "src/lib.rs":
+                'mod outer {\n    #[doc = "["]\n    pub fn helper() {}\n}\n'
+                '#[doc = "]"]\nmod sibling;\n',
+            "src/sibling.rs": "mod leaf_real_sibling {}\n",
+            "src/outer/sibling.rs": "mod decoy_attr_swallowed_scope {}\n",
+        }, {
+            "sibling": "src/lib.rs:6",
+            "leaf_real_sibling": "src/sibling.rs:1",
+        }, ("decoy_attr_swallowed_scope",)),
+        # The same boundary decides an inline `#[path]` directory name: the
+        # string `]` is the directory, not the end of the attribute.
+        "inline_path_directory_named_with_a_bracket": ({
+            "src/lib.rs": '#[path = "]"]\nmod outer {\n    mod child;\n}\n',
+            "src/]/child.rs": "mod leaf_bracket_directory {}\n",
+            "src/outer/child.rs": "mod decoy_bracket_attr_lost {}\n",
+        }, {
+            "child": "src/lib.rs:3",
+            "leaf_bracket_directory": "src/]/child.rs:1",
+        }, ("decoy_bracket_attr_lost",)),
+        # A block is not a module: rustc trades `owner.rs`'s pending `owner`
+        # component for block ownership while it parses the items inside
+        # `helper`, so the inline scope there descends into `scope/`.
+        "block_drops_the_files_pending_relative": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                "fn helper() {\n    mod scope {\n"
+                '        #[path = "moved.rs"]\n        mod child;\n    }\n}\n',
+            "src/scope/moved.rs": "mod leaf_block_scope {}\n",
+            "src/owner/scope/moved.rs": "mod decoy_relative_kept {}\n",
+        }, {
+            "child": "src/owner.rs:4",
+            "leaf_block_scope": "src/scope/moved.rs:1",
+        }, ("decoy_relative_kept",)),
+        # Dropping the component is not the same as renaming: an inline
+        # `#[path]` inside a block still names a directory of the file's
+        # own directory, and the component stays dropped under it.
+        "block_then_redirected_inline_scope": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                'fn helper() {\n    #[path = "renamed"]\n    mod scope {\n'
+                '        #[path = "moved.rs"]\n        mod child;\n    }\n}\n',
+            "src/renamed/moved.rs": "mod leaf_block_renamed {}\n",
+            "src/owner/renamed/moved.rs": "mod decoy_block_relative_kept {}\n",
+        }, {
+            "child": "src/owner.rs:5",
+            "leaf_block_renamed": "src/renamed/moved.rs:1",
+        }, ("decoy_block_relative_kept",)),
         # A `#[path]` module declared in a block resolves against the
         # inline scope holding the block, not against the file's own
         # directory -- the case the old declaring-directory rule lost.
@@ -1823,6 +1875,55 @@ class InlineDirectoryContext(unittest.TestCase):
             "tests/smoke/helper.rs": "mod decoy_test_as_module {}\n",
         }, "leaf_integration", "tests/helper.rs:1", "decoy_test_as_module"),
     }
+
+    # layout -> (filter, the leaf's real file, the file a lost boundary
+    # reads instead). Both are silent: rc stays 1 either way.
+    ENTRYPOINTS = {
+        "attribute_string_brackets_never_extend_the_attribute":
+            ("leaf_real_sibling::case", "src/sibling.rs",
+             "src/outer/sibling.rs"),
+        "block_drops_the_files_pending_relative":
+            ("leaf_block_scope::case", "src/scope/moved.rs",
+             "src/owner/scope/moved.rs"),
+    }
+
+    def test_boundary_layouts_reach_main_with_the_real_file(self) -> None:
+        # rc alone proves nothing here: a lost boundary keeps exit 1 while
+        # citing the decoy as the declaration site, so assert the cited
+        # file and that main() never opened the decoy at all.
+        for layout, (filt, site, decoy) in self.ENTRYPOINTS.items():
+            with self.subTest(layout=layout), \
+                    tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                build_frame_repo(root, self.LAYOUTS[layout][0])
+                workflow = root / ".github/workflows/ci-fixture.yml"
+                write_files(root, {
+                    str(integrity.LIB_INVENTORY_MANIFEST_REL):
+                        integrity.render_lib_inventory_manifest(set()),
+                    str(integrity.SOURCE_FLOOR_REL): "workflows=1\njustfile=1\n",
+                    "justfile": f"fixture:\n    cargo test --lib {filt}\n",
+                    "allowlist.txt": "",
+                    ".github/workflows/ci-fixture.yml":
+                        "jobs:\n  lane:\n    steps:\n"
+                        f'      - run: "cargo test --bin fixture {filt}"\n',
+                })
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with record_reads() as opened, \
+                        contextlib.redirect_stdout(stdout), \
+                        contextlib.redirect_stderr(stderr):
+                    rc = integrity.main([
+                        "--repo-root", str(root), "--workflow", str(workflow),
+                        "--allowlist", str(root / "allowlist.txt"), "--enforce",
+                    ])
+                report = stdout.getvalue()
+                self.assertEqual(rc, 1, report)
+                self.assertIn(
+                    f"[target-mismatch] filter `{filt}` names module "
+                    f"`{filt.split('::')[0]}` declared in lib ({site}:1)",
+                    report)
+                self.assertEqual(stderr.getvalue(), "")
+                self.assertNotIn(str(root / decoy), opened,
+                                 f"{layout}: main must not read the decoy")
 
     def test_custom_and_integration_roots_own_their_directory(self) -> None:
         for label, (root_rel, files, leaf, site, decoy) in self.ROOTS.items():
