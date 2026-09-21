@@ -1636,26 +1636,10 @@ def record_reads():
 
 
 class InlineDirectoryContext(unittest.TestCase):
-    """Descent must use rustc's directory context (#5008 item 8).
+    """Compiler-backed directory ownership (#5008 item 8).
 
-    `collect_modules` resolved every declaration against the declaring
-    file's own directory. Rust carries a directory plus an unconsumed
-    relative component instead: `foo.rs` owns `foo/`, an inline
-    `mod x { ... }` nests one level deeper, an outlined `#[path]` picks a
-    file whose own children are its siblings, and an inline `#[path]`
-    renames the directory without consuming the pending component, while
-    a `#[path]` written above any other item belongs to that item. The real
-    site is `src/services/discord/voice_barge_in.rs`, whose inline
-    `mod tests` holds `#[path = "pcm_harness_tests.rs"] mod
-    pcm_harness_tests;` and resolves to
-    `voice_barge_in/tests/pcm_harness_tests.rs`.
-
-    Every leaf module name exists in exactly one file, so the inventory
-    says which file the walker really opened, and each layout also ships
-    `decoy_*` files at the locations a wrong rule would read instead. No
-    leaf carries a `#[test]`: a module with no tests still has to be
-    inventoried, because that is what turns `unknown-module` into
-    `target-mismatch`.
+    Unique no-test leaves identify actual reads versus decoys; even empty
+    modules distinguish target-mismatch from unknown-module.
     """
 
     # layout -> (files, {module: first declaration site}, forbidden modules)
@@ -1684,8 +1668,7 @@ class InlineDirectoryContext(unittest.TestCase):
             "child": "src/owner/mod.rs:2",
             "leaf_mod_rs": "src/owner/tests/child.rs:1",
         }, ("decoy_mod_rs_flat",)),
-        # The real voice_barge_in shape: an outlined `#[path]` inside an
-        # inline scope resolves against the scope, not the file's own dir.
+        # voice_barge_in: outlined #[path] resolves in its enclosing inline scope.
         "outlined_path_inside_inline_scope": ({
             "src/lib.rs": "mod owner;\n",
             "src/owner.rs":
@@ -1696,8 +1679,7 @@ class InlineDirectoryContext(unittest.TestCase):
             "pcm": "src/owner.rs:3",
             "leaf_in_scope": "src/owner/tests/pcm.rs:1",
         }, ("decoy_file_parent",)),
-        # `#[path]` on an INLINE module renames the directory, and rustc
-        # does not push the pending `layout` component first.
+        # Inline #[path] renames the directory without consuming relative.
         "inline_path_directory_override": ({
             "src/lib.rs": "mod layout;\n",
             "src/layout.rs":
@@ -1719,8 +1701,7 @@ class InlineDirectoryContext(unittest.TestCase):
             "nested": "src/renamed.rs:1",
             "leaf_sibling": "src/nested.rs:1",
         }, ("decoy_stem_reattached",)),
-        # Braces inside a string literal must not move the scope, and an
-        # inline scope closed on one line must not leak into the next `mod`.
+        # Literal braces do not move scope; a closed inline scope cannot leak.
         "nested_scopes_and_literal_braces": ({
             "src/lib.rs": "mod owner;\n",
             "src/owner.rs":
@@ -1742,10 +1723,7 @@ class InlineDirectoryContext(unittest.TestCase):
             "leaf_deep": "src/owner/outer/inner/deep.rs:1",
             "leaf_after": "src/owner/after_scopes.rs:1",
         }, ("decoy_scope_lost", "decoy_scope_leaked", "fake")),
-        # `#[path]` above a non-module item belongs to that item. rustc
-        # keeps compiling (it is a deprecation warning, not an error) and
-        # still resolves the NEXT inline module normally, so the attribute
-        # must not survive into it.
+        # rustc warns on the non-module attribute, but it cannot rename a sibling.
         "path_on_a_closed_item_never_renames_a_later_scope": ({
             "src/lib.rs": "mod owner;\n",
             "src/owner.rs":
@@ -1757,8 +1735,7 @@ class InlineDirectoryContext(unittest.TestCase):
             "child": "src/owner.rs:4",
             "leaf_after_closed_item": "src/owner/scope/child.rs:1",
         }, ("decoy_attr_leaked",)),
-        # Every Rust item ends in a brace body or in `;`, so the same
-        # ownership rule has to hold for the `;` form too.
+        # Semicolon items consume their attributes just as braced items do.
         "path_on_a_semicolon_item_never_renames_a_later_scope": ({
             "src/lib.rs": "mod owner;\n",
             "src/owner.rs":
@@ -1770,10 +1747,7 @@ class InlineDirectoryContext(unittest.TestCase):
             "child": "src/owner.rs:4",
             "leaf_after_alias": "src/owner/scope/child.rs:1",
         }, ("decoy_alias_leaked",)),
-        # An attribute is closed by its own real `]`. A bracket that is
-        # merely the value of one of its strings must not extend it over
-        # the item bodies behind it: `outer` would stay open and the
-        # top-level sibling would be read one directory too deep.
+        # String brackets cannot extend an attribute over later item bodies.
         "attribute_string_brackets_never_extend_the_attribute": ({
             "src/lib.rs":
                 'mod outer {\n    #[doc = "["]\n    pub fn helper() {}\n}\n'
@@ -1784,8 +1758,7 @@ class InlineDirectoryContext(unittest.TestCase):
             "sibling": "src/lib.rs:6",
             "leaf_real_sibling": "src/sibling.rs:1",
         }, ("decoy_attr_swallowed_scope",)),
-        # The same boundary decides an inline `#[path]` directory name: the
-        # string `]` is the directory, not the end of the attribute.
+        # The string `]` names a directory; it does not close the attribute.
         "inline_path_directory_named_with_a_bracket": ({
             "src/lib.rs": '#[path = "]"]\nmod outer {\n    mod child;\n}\n',
             "src/]/child.rs": "mod leaf_bracket_directory {}\n",
@@ -1794,9 +1767,7 @@ class InlineDirectoryContext(unittest.TestCase):
             "child": "src/lib.rs:3",
             "leaf_bracket_directory": "src/]/child.rs:1",
         }, ("decoy_bracket_attr_lost",)),
-        # A block is not a module: rustc trades `owner.rs`'s pending `owner`
-        # component for block ownership while it parses the items inside
-        # `helper`, so the inline scope there descends into `scope/`.
+        # Function blocks drop the file's pending relative component.
         "block_drops_the_files_pending_relative": ({
             "src/lib.rs": "mod owner;\n",
             "src/owner.rs":
@@ -1808,9 +1779,7 @@ class InlineDirectoryContext(unittest.TestCase):
             "child": "src/owner.rs:4",
             "leaf_block_scope": "src/scope/moved.rs:1",
         }, ("decoy_relative_kept",)),
-        # Dropping the component is not the same as renaming: an inline
-        # `#[path]` inside a block still names a directory of the file's
-        # own directory, and the component stays dropped under it.
+        # Dropping relative is distinct from an inline #[path] directory rename.
         "block_then_redirected_inline_scope": ({
             "src/lib.rs": "mod owner;\n",
             "src/owner.rs":
@@ -1822,9 +1791,7 @@ class InlineDirectoryContext(unittest.TestCase):
             "child": "src/owner.rs:5",
             "leaf_block_renamed": "src/renamed/moved.rs:1",
         }, ("decoy_block_relative_kept",)),
-        # A `#[path]` module declared in a block resolves against the
-        # inline scope holding the block, not against the file's own
-        # directory -- the case the old declaring-directory rule lost.
+        # Block-local #[path] resolves in the enclosing inline directory.
         "block_level_path_resolves_against_its_inline_scope": ({
             "src/lib.rs": "mod owner;\n",
             "src/owner.rs":
@@ -1836,9 +1803,7 @@ class InlineDirectoryContext(unittest.TestCase):
             "inner": "src/owner.rs:4",
             "leaf_block_path": "src/owner/scope/moved.rs:1",
         }, ("decoy_block_at_file_dir",)),
-        # Only real `#` PUNCTUATION opens an attribute. The string `"#"`
-        # in front of an index expression is ordinary code, and skipping
-        # its block as if it were `#[...]` loses both `mod`s with it.
+        # A string `"#"` before an index expression is not attribute punctuation.
         "string_hash_before_an_index_is_not_an_attribute": ({
             "src/lib.rs": "mod owner;\n",
             "src/owner.rs":
@@ -1864,9 +1829,7 @@ class InlineDirectoryContext(unittest.TestCase):
             "child": "src/owner.rs:5",
             "leaf_byte_hash": "src/scope/moved.rs:1",
         }, ("decoy_byte_hash_opened_attr",)),
-        # A macro's `{}` delimits a token tree, not a block: an item the
-        # wrapper passes through is still an item of `owner.rs`, so the
-        # file's pending `owner` component is still in force inside it.
+        # Macro token-tree braces preserve the file's relative component.
         "macro_delimiter_braces_are_not_a_block": ({
             "src/lib.rs": "mod owner;\n",
             "src/owner.rs":
@@ -1879,8 +1842,7 @@ class InlineDirectoryContext(unittest.TestCase):
             "child": "src/owner.rs:5",
             "leaf_macro_wrapper": "src/owner/scope/moved.rs:1",
         }, ("decoy_macro_read_as_block",)),
-        # The parenthesized form of the same wrapper never had a brace to
-        # misread, and must keep resolving exactly where it did.
+        # Parenthesized wrappers retain the same directory ownership.
         "parenthesized_macro_wrapper_keeps_the_component": ({
             "src/lib.rs": "mod owner;\n",
             "src/owner.rs":
@@ -1893,10 +1855,7 @@ class InlineDirectoryContext(unittest.TestCase):
             "child": "src/owner.rs:5",
             "leaf_paren_wrapper": "src/owner/scope/moved.rs:1",
         }, ("decoy_paren_read_as_block",)),
-        # `!` in front of a block is not a macro header. The lexer drops
-        # the `&&`, so this arrives looking exactly like a call and only
-        # the source gap separates them. The block still drops the file's
-        # pending component, and the sibling behind it still gets it back.
+        # R3: source gaps distinguish dropped &&; closing the block restores relative.
         "and_unary_not_block_is_not_a_macro_header": ({
             "src/lib.rs": "mod owner;\n",
             "src/owner.rs":
@@ -1915,8 +1874,7 @@ class InlineDirectoryContext(unittest.TestCase):
             "leaf_and_unary_not": "src/scope/moved.rs:1",
             "leaf_and_tail": "src/owner/sibling/tail.rs:1",
         }, ("decoy_and_read_as_macro",)),
-        # The same block with nothing dropped in front of it: `if` is an
-        # `ident` here, so only the name itself can reject this one.
+        # R3: `if` lexes as an ident; its keyword status must reject the header.
         "if_unary_not_block_is_not_a_macro_header": ({
             "src/lib.rs": "mod owner;\n",
             "src/owner.rs":
@@ -1933,9 +1891,7 @@ class InlineDirectoryContext(unittest.TestCase):
             "leaf_if_unary_not": "src/scope/moved.rs:1",
             "leaf_if_tail": "src/owner/sibling/tail.rs:1",
         }, ("decoy_if_read_as_macro",)),
-        # An inner `#![...]` is one attribute whatever its payload spells.
-        # A `#[path]` written inside a disabled `cfg_attr` token tree is not
-        # a redirect, and must not rename the inline module behind it.
+        # MB: skip the whole inner attribute, not just a nested #[path] payload.
         "inner_attribute_payload_never_renames_a_later_scope": ({
             "src/lib.rs": "mod owner;\n",
             "src/owner.rs":
@@ -1947,9 +1903,7 @@ class InlineDirectoryContext(unittest.TestCase):
             "child": "src/owner.rs:4",
             "leaf_inner_attr": "src/owner/scope/moved.rs:1",
         }, ("decoy_inner_path_leaked",)),
-        # Shapes the header check has to keep accepting: a definition
-        # with a parenthesized transcriber (its `{` is still the
-        # definition's own delimiter) and a nested namespaced call.
+        # Preserve parenthesized transcribers and nested namespaced calls.
         "namespaced_and_nested_wrappers_keep_the_component": ({
             "src/lib.rs": "mod owner;\n",
             "src/owner.rs":
@@ -1971,6 +1925,46 @@ class InlineDirectoryContext(unittest.TestCase):
             "leaf_transcriber": "src/owner/defined/one.rs:1",
             "leaf_nested_wrapper": "src/owner/scope/moved.rs:1",
         }, ("decoy_transcriber_block", "decoy_nested_read_as_block")),
+        # R5: raw keyword and non-keyword definitions both have three-token names.
+        "raw_definition_names_keep_the_component": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                "macro_rules! r#match {\n    () => ( mod keyword_defined {\n"
+                "        mod one;\n    } );\n}\n"
+                "macro_rules! r#define_tree {\n"
+                "    () => ( mod ordinary_defined {\n"
+                "        mod two;\n    } );\n}\n"
+                "r#match!();\nr#define_tree!();\n"
+                'mod sibling {\n    #[path = "tail.rs"]\n    mod tail;\n}\n',
+            "src/owner/keyword_defined/one.rs": "mod leaf_raw_keyword {}\n",
+            "src/owner/ordinary_defined/two.rs": "mod leaf_raw_ordinary {}\n",
+            "src/owner/sibling/tail.rs": "mod leaf_raw_tail {}\n",
+            "src/keyword_defined/one.rs": "mod decoy_raw_keyword_block {}\n",
+            "src/ordinary_defined/two.rs": "mod decoy_raw_ordinary_block {}\n",
+        }, {
+            "one": "src/owner.rs:3",
+            "two": "src/owner.rs:8",
+            "tail": "src/owner.rs:15",
+            "leaf_raw_keyword": "src/owner/keyword_defined/one.rs:1",
+            "leaf_raw_ordinary": "src/owner/ordinary_defined/two.rs:1",
+            "leaf_raw_tail": "src/owner/sibling/tail.rs:1",
+        }, ("decoy_raw_keyword_block", "decoy_raw_ordinary_block")),
+        # R6: the function owns this inner path, not the next inline module.
+        "inner_path_on_a_function_never_renames_a_later_scope": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                'fn helper() {\n    #![path = "fake"]\n    mod scope {\n'
+                '        #[path = "moved.rs"]\n        mod child;\n    }\n}\n'
+                'mod sibling {\n    #[path = "tail.rs"]\n    mod tail;\n}\n',
+            "src/scope/moved.rs": "mod leaf_inner_owner {}\n",
+            "src/owner/sibling/tail.rs": "mod leaf_inner_tail {}\n",
+            "src/fake/moved.rs": "mod decoy_inner_path_to_next_item {}\n",
+        }, {
+            "child": "src/owner.rs:5",
+            "tail": "src/owner.rs:10",
+            "leaf_inner_owner": "src/scope/moved.rs:1",
+            "leaf_inner_tail": "src/owner/sibling/tail.rs:1",
+        }, ("decoy_inner_path_to_next_item",)),
     }
 
     def test_every_frame_resolves_the_way_rustc_does(self) -> None:
@@ -1991,8 +1985,7 @@ class InlineDirectoryContext(unittest.TestCase):
                           if "decoy" in text}
                 self.assertEqual(sorted(decoys & set(opened)), [],
                                  f"{layout}: decoy file must never be read")
-                # No layout declares a `#[test]`; the names above are still
-                # the inventory the gate classifies filters against.
+                # Empty modules still participate in filter classification.
                 self.assertEqual(
                     integrity.collect_static_tests(lib, root).tests, {},
                     f"{layout}: fixture is a no-test marker layout")
@@ -2011,8 +2004,7 @@ class InlineDirectoryContext(unittest.TestCase):
         }, "leaf_integration", "tests/helper.rs:1", "decoy_test_as_module"),
     }
 
-    # layout -> (filter, the leaf's real file, the file a lost boundary
-    # reads instead). Both are silent: rc stays 1 either way.
+    # layout -> (filter, actual file, decoy); rc=1 alone cannot distinguish them.
     ENTRYPOINTS = {
         "attribute_string_brackets_never_extend_the_attribute":
             ("leaf_real_sibling::case", "src/sibling.rs",
@@ -2038,12 +2030,16 @@ class InlineDirectoryContext(unittest.TestCase):
         "namespaced_and_nested_wrappers_keep_the_component":
             ("leaf_nested_wrapper::case", "src/owner/scope/moved.rs",
              "src/scope/moved.rs"),
+        "raw_definition_names_keep_the_component":
+            ("leaf_raw_keyword::case", "src/owner/keyword_defined/one.rs",
+             "src/keyword_defined/one.rs"),
+        "inner_path_on_a_function_never_renames_a_later_scope":
+            ("leaf_inner_owner::case", "src/scope/moved.rs",
+             "src/fake/moved.rs"),
     }
 
     def test_boundary_layouts_reach_main_with_the_real_file(self) -> None:
-        # rc alone proves nothing here: a lost boundary keeps exit 1 while
-        # citing the decoy as the declaration site, so assert the cited
-        # file and that main() never opened the decoy at all.
+        # Assert classification, actual site and decoy non-read, not just rc=1.
         for layout, (filt, site, decoy) in self.ENTRYPOINTS.items():
             with self.subTest(layout=layout), \
                     tempfile.TemporaryDirectory() as tmp:
@@ -2079,9 +2075,7 @@ class InlineDirectoryContext(unittest.TestCase):
                 self.assertEqual(stderr.getvalue(), "")
                 self.assertNotIn(str(root / decoy), opened,
                                  f"{layout}: main must not read the decoy")
-                # A lost boundary inventories the decoy instead, so it
-                # names THAT as the real module while the real leaf goes
-                # unknown; both classifications are part of the oracle.
+                # Check the opposite direction too: decoys must be unknown.
                 for name in decoys:
                     self.assertIn("[unknown-module] module-path filter "
                                   f"`{name}::case`", report)
@@ -2169,14 +2163,9 @@ class InlineDirectoryContext(unittest.TestCase):
 
 
 class RustConsistentCrateProof(unittest.TestCase):
-    """The accepted design's valid-Rust counterexample, through main().
+    """Compiler-backed main() oracle: real site, positive --enforce, no decoy.
 
-    `src/lib.rs` declares an inline `outer` holding
-    `#[path = "renamed.rs"] mod alpha;`, so the child really lives at
-    `src/outer/renamed.rs` (confirmed with a standalone rustc compile).
-    A lane filtering `deep_child::case` on the bin is wrong either way, so
-    rc stays 1; what changes is that the gate stops calling the module
-    unknown and names the file it was actually declared in.
+    Bin filtering stays invalid; the cited file, not rc=1, proves ownership.
     """
 
     LIB = 'mod outer {\n    #[path = "renamed.rs"]\n    mod alpha;\n}\n'
@@ -2265,12 +2254,7 @@ class RustConsistentCrateProof(unittest.TestCase):
 
 
 class MacroHeaderPredicate(unittest.TestCase):
-    """`_macro_delimiter` proves a header; it does not guess one.
-
-    The lexer keeps only the punctuation this gate needs, so `FLAG && !{`
-    is handed over as `ident`, `!`, `{` and `if` arrives as an ordinary
-    `ident`. Only the recorded source positions tell the two apart.
-    """
+    """Header predicate controls for spans, source gaps and keyword names."""
 
     # source -> is its last `{` a macro's token-tree delimiter?
     HEADERS = {
@@ -2292,6 +2276,13 @@ class MacroHeaderPredicate(unittest.TestCase):
         "{ }": False,
         '"passthrough" ! { }': False,  # a string is not a name
         "macro_rules! if { }": False,
+        "macro_rules! r#match { }": True,  # the name is three tokens wide
+        "macro_rules! r#define_tree { }": True,
+        "macro_rules /* c */ ! /* c */ r#match /* c */ { }": True,
+        "macro_rules! r #match { }": False,  # `r#NAME` must be contiguous
+        "macro_rules! r# match { }": False,
+        "macro_rules! r #plain { }": False,
+        "macro_rules! r# plain { }": False,
     }
 
     def last_brace(self, tokens: list) -> int:
@@ -2308,8 +2299,7 @@ class MacroHeaderPredicate(unittest.TestCase):
                     expected)
 
     def test_an_unproven_gap_is_not_a_macro_header(self) -> None:
-        # Positions are deliberately not part of a token's identity, so an
-        # equal token may carry no source, or the wrong source. Both fail.
+        # Spanless tokens and empty source cannot prove a header.
         source = "passthrough! { }"
         tokens = integrity._rust_tokens(source)
         index = self.last_brace(tokens)
@@ -2335,6 +2325,12 @@ class StaticAttributeBoundaries(unittest.TestCase):
             "inner_path_payload": ('#![cfg_attr(any(), opaque(#[path = "fake.rs"]))]\n'
                                    'mod child;\n',
                                    {"child::real_test": "src/child.rs:1"}),
+            # An inner attribute belongs to the form it is written in,
+            # so a function's own `#![path]` is not the next mod's.
+            "inner_path_on_a_function": ('fn helper() {\n'
+                                         '    #![path = "fake.rs"]\n}\n'
+                                         'mod child;\n',
+                                         {"child::real_test": "src/child.rs:1"}),
         }
         for label, (source, expected) in sources.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:

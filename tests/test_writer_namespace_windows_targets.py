@@ -488,11 +488,41 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             with self.assertRaisesRegex(proof.ProofError, "gate g count=2"):
                 proof.seal(plan)
 
+    def test_function_inner_path_still_seals(self) -> None:
+        # A count assertion that fails stops before `seal`, so this shape
+        # gets its own seal call rather than sharing the one above.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src/gate").mkdir(parents=True)
+            crate = root / "src/lib.rs"
+            crate.write_text('fn helper() {\n    #![path = "fake.rs"]\n}\n'
+                             "mod gate;\n", encoding="utf-8")
+            (root / "src/gate.rs").write_text("mod tests;\n", encoding="utf-8")
+            (root / "src/gate/tests.rs").write_text(
+                "#[test] fn proof_case() {}\n", encoding="utf-8")
+            (root / "src/fake.rs").write_text("mod decoy_only {}\n",
+                                              encoding="utf-8")
+            ids = ("gate::tests::proof_case",)
+            (root / "manifest.txt").write_text(
+                render_lib_inventory_manifest(set(ids)), encoding="utf-8")
+            plan = proof.ProofPlan(
+                root, "manifest.txt", "PROOF",
+                proof.GateSpec("g", "src/lib.rs", "gate", "src/gate.rs",
+                               "required"),
+                (proof.OwnerSpec("o", "g", "src/gate.rs", "tests",
+                                 "src/gate/tests.rs", "gate::tests",
+                                 "required", ids),))
+            sealed = proof.seal(plan)
+            self.assertEqual(sealed.execution_ids, ids)
+            self.assertEqual(sealed.absent, ())
+
     def test_module_count_uses_real_attribute_punctuation(self) -> None:
         sources = (
             '#[doc = "["]\nmod gate;\n#[doc = "]"]\nfn helper() {}\n',
             'fn helper() { let _ = &"#"[{ mod gate; 0 }..]; }\n',
             '#![cfg_attr(any(), opaque(#[path = "fake.rs"]))]\nmod gate;\n',
+            # An inner `#![path]` is the function's, not `gate`'s.
+            'fn helper() {\n    #![path = "fake.rs"]\n}\nmod gate;\n',
         )
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "lib.rs"
