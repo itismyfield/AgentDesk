@@ -17,7 +17,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DEPLOY_SH="$REPO_ROOT/scripts/deploy-release.sh"
+DEPLOY_SH="${DEPLOY_SH_OVERRIDE:-$REPO_ROOT/scripts/deploy-release.sh}"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-smoke-standby-test.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
@@ -45,14 +45,24 @@ POST_DEPLOY_SMOKE_RELAY_CELL="claude/adk-cc"
 POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY="$TMP_ROOT/health-detail.json"
 POST_DEPLOY_SMOKE_SESSIONS_BODY="$TMP_ROOT/sessions.json"
 POST_DEPLOY_SMOKE_HEALTH_BODY=""
-# #5462: the recovery gate polls /api/health/detail over loopback. Port 1 is
-# never served here, so the gate exhausts its (deliberately tiny) budget and
-# takes its not-evaluated path without needing a live runtime.
+# Fake transport never contacts a runtime; sleep advances the shell clock.
 POST_DEPLOY_SMOKE_TMP_DIR="$TMP_ROOT/tmp"
 POST_DEPLOY_SMOKE_RECOVERY_GATE_S=1
 ADK_DEFAULT_LOOPBACK=127.0.0.1
 REL_PORT=1
 mkdir -p "$POST_DEPLOY_SMOKE_TMP_DIR"
+curl() {
+    [ "${RECOVERY_STUB:-false}" = true ] || return 7
+    local out=""
+    while [ "$#" -gt 0 ]; do
+        [ "$1" = -o ] && { out="$2"; shift 2; continue; }
+        shift
+    done
+    [ -n "$out" ] || return 7
+    printf '%s\n' '{"fully_recovered":true,"mailboxes":[]}' > "$out"
+    printf 200
+}
+sleep() { SECONDS=$((SECONDS + $1)); }
 # The production functions loaded through eval consume these test globals, so
 # the linter cannot see the uses; exporting them states the contract. An array
 # cannot be exported, hence the targeted directive below.
@@ -183,7 +193,7 @@ fi
 POST_DEPLOY_SMOKE_HEALTH_BODY="$(health_body_with '{"cluster_standby": false}')"
 : > "$POST_DEPLOY_SMOKE_EVIDENCE"
 ( _post_deploy_smoke_check_relay_round_trip ) > "$TMP_ROOT/recovering.out" 2>&1 || true
-if ! grep -q 'relay E-1=not evaluated: startup recovery did not finish' "$TMP_ROOT/recovering.out"; then
+if ! grep -q 'relay E-1=not evaluated: startup recovery unconfirmed' "$TMP_ROOT/recovering.out"; then
     fail_test "a still-recovering runtime must record E-1 as not evaluated"
 fi
 if grep -q '^relay E-1 cell=' "$TMP_ROOT/recovering.out"; then
@@ -193,29 +203,25 @@ if grep -q 'FAIL:' "$TMP_ROOT/recovering.out"; then
     fail_test "an unconfirmed startup recovery is a coverage gap, not a relay finding"
 fi
 
-# A recovered runtime must pass straight through the gate. The stub answers the
-# gate's own poll, so reaching the (absent) cell config proves the gate opened.
-RECOVERED_BIN="$TMP_ROOT/recovered-bin"
-mkdir -p "$RECOVERED_BIN"
-cat > "$RECOVERED_BIN/curl" <<'STUB'
-#!/usr/bin/env bash
-set -euo pipefail
-out=""
-while [ "$#" -gt 0 ]; do
-    [ "$1" = "-o" ] && { out="$2"; shift 2; continue; }
-    shift
-done
-[ -n "$out" ] || exit 1
-printf '%s\n' '{"fully_recovered": true, "mailboxes": []}' > "$out"
-STUB
-chmod +x "$RECOVERED_BIN/curl"
+# Direct E-1 calls require this run's explicit readiness, even if old state exists.
+unset POST_DEPLOY_SMOKE_READY
+( _post_deploy_smoke_check_relay_round_trip ) > "$TMP_ROOT/unowned.out" 2>&1 || true
+grep -q 'startup recovery unconfirmed' "$TMP_ROOT/unowned.out" || fail_test 'direct E-1 without readiness must not inject'
+
+# A successful wait and the runner's fresh-snapshot decision open E-1.
+RECOVERY_STUB=true
+if ! _post_deploy_smoke_wait_for_startup_recovery; then
+    fail_test 'HTTP 200 fully_recovered=true must pass the recovery wait'
+fi
+export POST_DEPLOY_SMOKE_READY=true
 : > "$POST_DEPLOY_SMOKE_EVIDENCE"
-( PATH="$RECOVERED_BIN:$PATH" _post_deploy_smoke_check_relay_round_trip ) \
-    > "$TMP_ROOT/recovered.out" 2>&1 || true
+( _post_deploy_smoke_check_relay_round_trip ) > "$TMP_ROOT/recovered.out" 2>&1 || true
 if grep -q 'relay E-1=not evaluated' "$TMP_ROOT/recovered.out"; then
     fail_test "fully_recovered=true must open the recovery gate"
 fi
 if ! grep -q 'relay E-1=skipped: no E2E cell configured' "$TMP_ROOT/recovered.out"; then
+    cat "$TMP_ROOT/recovered.out" >&2
+    cat "$POST_DEPLOY_SMOKE_EVIDENCE" >&2
     fail_test "a recovered runtime must advance past the gate to cell resolution"
 fi
 

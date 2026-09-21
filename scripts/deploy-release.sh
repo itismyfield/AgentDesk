@@ -88,8 +88,9 @@ fi
 #                                          (default: claude-tui).
 #   AGENTDESK_POST_DEPLOY_SMOKE_RECOVERY_GATE_S
 #                                          bounded wait for startup recovery to
-#                                          report fully_recovered before E-1
-#                                          injects (default: 120 seconds; a
+#                                          report fully_recovered before wedge
+#                                          evaluation and relay injection
+#                                          (default: 120 seconds; a
 #                                          timeout records a not-evaluated
 #                                          coverage note, never a FAIL).
 #   AGENTDESK_POST_DEPLOY_SMOKE_LOG_LINES   recent dcserver log sample size
@@ -3036,6 +3037,9 @@ _post_deploy_smoke_fail() {
 _post_deploy_smoke_probe_apis() {
     local endpoint body_path http_code
     local failed=0
+    POST_DEPLOY_SMOKE_HEALTH_BODY=""
+    POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY=""
+    POST_DEPLOY_SMOKE_SESSIONS_BODY=""
 
     for endpoint in "${POST_DEPLOY_SMOKE_CORE_API_ENDPOINTS[@]}"; do
         body_path="$POST_DEPLOY_SMOKE_TMP_DIR/${endpoint//\//_}.json"
@@ -3049,19 +3053,20 @@ _post_deploy_smoke_probe_apis() {
             failed=1
             continue
         fi
-        if [ "$endpoint" = "/api/health" ]; then
-            POST_DEPLOY_SMOKE_HEALTH_BODY="$body_path"
-        elif [ "$endpoint" = "/api/health/detail" ]; then
-            POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY="$body_path"
-        elif [ "$endpoint" = "/api/sessions" ]; then
-            POST_DEPLOY_SMOKE_SESSIONS_BODY="$body_path"
-        fi
         if [ "$http_code" != "200" ]; then
             _post_deploy_smoke_fail "core API ${endpoint}: expected HTTP 200, got ${http_code}" || true
             failed=1
         elif [ ! -s "$body_path" ]; then
             _post_deploy_smoke_fail "core API ${endpoint}: HTTP 200 body was empty" || true
             failed=1
+        else
+            if [ "$endpoint" = "/api/health" ]; then
+                POST_DEPLOY_SMOKE_HEALTH_BODY="$body_path"
+            elif [ "$endpoint" = "/api/health/detail" ]; then
+                POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY="$body_path"
+            elif [ "$endpoint" = "/api/sessions" ]; then
+                POST_DEPLOY_SMOKE_SESSIONS_BODY="$body_path"
+            fi
         fi
     done
 
@@ -3110,6 +3115,11 @@ _post_deploy_smoke_wedge_unevaluable() {
     POST_DEPLOY_SMOKE_WEDGE_COVERAGE="unevaluable: $1"
     _post_deploy_smoke_fail "relay wedge check ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}" || true
     return 1
+}
+
+_post_deploy_smoke_wedge_not_ready() {
+    POST_DEPLOY_SMOKE_WEDGE_COVERAGE="not evaluated: $1"
+    _post_deploy_smoke_note "relay wedge=${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}"
 }
 
 _post_deploy_smoke_check_wedges() {
@@ -3176,6 +3186,7 @@ _post_deploy_smoke_check_wedges() {
         _post_deploy_smoke_note "relay wedge=${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}" || return 1
         return 0
     fi
+    POST_DEPLOY_SMOKE_READY=true
     if [ "$marker_count" = "0" ]; then
         _post_deploy_smoke_note "relay wedge=${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}" || return 1
         return 0
@@ -3324,31 +3335,12 @@ _post_deploy_smoke_resolve_cluster_standby() {
     esac
 }
 
-# #5462: E-1 must not inject while startup recovery is still restoring inflight
-# state for the target channel.
-#
-# The wedge check already declines to judge anything while
-# `fully_recovered` is false, but E-1 injected regardless — an asymmetry that
-# made the round-trip race the recovery engine. Observed on the 20260819T123143Z
-# and 20260819T212553Z deploys: `turn/start` was accepted, the TUI printed the
-# marker, then `recovery_engine::restore_inflight` spawned its own watcher for
-# the same channel ~1s later and cleared the turn's inflight identity
-# (`clear_inflight_state_if_matches_identity`), so the completed frame reached
-# the #5175 guard with no delivery owner and the body was dropped. Nothing at
-# all was posted (relay_count=0, raw_count=0) while live channels relayed fine.
-#
-# Recovery is in progress at the API-sweep moment on EVERY deploy, so a
-# point-in-time read cannot gate this; only a bounded wait can. Non-arrival is a
-# smoke coverage gap, never a relay finding, so every exit here is fail-open.
-#
-# Echoes nothing and returns 0 once `fully_recovered` is true. On timeout or an
-# unreadable state it echoes the not-evaluated reason and returns non-zero. It
-# never writes evidence notes itself: the caller owns that, and stdout here is
-# consumed by command substitution.
+# Wait once before the API snapshot and all relay checks. Non-arrival is a
+# coverage gap; stdout carries its reason to the runner without adding a finding.
 _post_deploy_smoke_wait_for_startup_recovery() {
     local budget="$POST_DEPLOY_SMOKE_RECOVERY_GATE_S"
     local body="$POST_DEPLOY_SMOKE_TMP_DIR/recovery-health-detail.json"
-    local interval=5 attempts attempt=0 started="$SECONDS" observation recovered
+    local interval=5 attempts attempt=0 started="$SECONDS" observation recovered remaining request_budget http_code
     case "$budget" in
         ''|*[!0-9]*|0)
             printf 'startup recovery wait budget is invalid: %s\n' "${budget:-<empty>}"
@@ -3364,33 +3356,42 @@ _post_deploy_smoke_wait_for_startup_recovery() {
     attempts=$((budget / interval + 1))
     observation="no /api/health/detail read"
     while [ "$attempt" -lt "$attempts" ]; do
+        remaining=$((budget - (SECONDS - started)))
+        [ "$remaining" -gt 0 ] || break
         attempt=$((attempt + 1))
-        if curl -sS --connect-timeout 2 --max-time 15 \
+        request_budget="$remaining"
+        [ "$request_budget" -le 15 ] || request_budget=15
+        if http_code=$(curl -sS --connect-timeout "$request_budget" --max-time "$request_budget" \
             -H "Origin: http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" \
-            -o "$body" \
+            -o "$body" -w '%{http_code}' \
             "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}/api/health/detail" \
-            2>> "$POST_DEPLOY_SMOKE_EVIDENCE"; then
+            2>> "$POST_DEPLOY_SMOKE_EVIDENCE") && [ "$http_code" = "200" ]; then
             recovered=$(jq -r '
                 if (.fully_recovered | type) == "boolean" then .fully_recovered
                 else "unreadable" end
             ' "$body" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE")
             case "$recovered" in
-                true) return 0 ;;
+                true)
+                    [ "$((SECONDS - started))" -lt "$budget" ] || break
+                    return 0
+                    ;;
                 false) observation="recovery still in progress" ;;
                 *) observation="fully_recovered missing or non-boolean" ;;
             esac
         else
             observation="/api/health/detail request failed"
         fi
-        [ "$((SECONDS - started))" -lt "$budget" ] || break
-        sleep "$interval"
+        remaining=$((budget - (SECONDS - started)))
+        [ "$remaining" -gt 0 ] || break
+        [ "$remaining" -le "$interval" ] || remaining="$interval"
+        sleep "$remaining"
     done
     printf 'startup recovery did not finish within %ss (%s)\n' "$budget" "$observation"
     return 1
 }
 
 _post_deploy_smoke_check_relay_round_trip() {
-    local recovery_gap cluster_standby channel_id relay_output relay_log
+    local cluster_standby channel_id relay_output relay_log
     local resolve_rc cell_busy cell_guard_rc
     local config_path="$ADK_REL/config/agentdesk.yaml"
     if [ -z "$POST_DEPLOY_SMOKE_HEALTH_BODY" ] || [ ! -s "$POST_DEPLOY_SMOKE_HEALTH_BODY" ]; then
@@ -3411,12 +3412,9 @@ _post_deploy_smoke_check_relay_round_trip() {
     # check did not run, which is what silently held for every prior deploy.
     _post_deploy_smoke_note "relay E-1=round-trip proceeding cluster_standby=false" || return 1
 
-    # #5462: bounded recovery gate, mirroring the wedge check's refusal to judge
-    # a still-recovering runtime. Skipping before the channel resolves also
-    # leaves E-35 on its own "channel unavailable" not-evaluated path, so a
-    # still-recovering node reports coverage gaps instead of relay findings.
-    if ! recovery_gap=$(_post_deploy_smoke_wait_for_startup_recovery); then
-        _post_deploy_smoke_note "relay E-1=not evaluated: ${recovery_gap}" || return 1
+    # The runner owns the single wait and validates the fresh snapshot.
+    if [ "${POST_DEPLOY_SMOKE_READY:-false}" != "true" ]; then
+        _post_deploy_smoke_note "relay E-1=not evaluated: startup recovery unconfirmed for this smoke run" || return 1
         return 0
     fi
 
@@ -3610,26 +3608,41 @@ PY
 }
 
 _run_post_deploy_functional_smoke() {
-    local failed=0
+    local failed=0 recovery_gap recovery_confirmed=false
+    POST_DEPLOY_SMOKE_READY=false
+    POST_DEPLOY_SMOKE_FAILURES=()
+    POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID=""
+    POST_DEPLOY_SMOKE_DURABLE_COVERAGE="unevaluable: E-35 did not run"
     mkdir -p "$ADK_REL/logs" || return 1
     : > "$POST_DEPLOY_SMOKE_EVIDENCE" || return 1
     POST_DEPLOY_SMOKE_TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-post-deploy-smoke.XXXXXX") || return 1
     _post_deploy_smoke_note "post-deploy functional smoke start stamp=${POST_DEPLOY_SMOKE_STAMP} port=${REL_PORT}" || return 1
 
+    if recovery_gap=$(_post_deploy_smoke_wait_for_startup_recovery); then
+        recovery_confirmed=true
+    fi
     if ! _post_deploy_smoke_probe_apis; then
         failed=1
     fi
-    if ! _post_deploy_smoke_check_wedges; then
-        failed=1
+    if [ "$recovery_confirmed" = "true" ]; then
+        if ! _post_deploy_smoke_check_wedges; then
+            failed=1
+        fi
+    else
+        _post_deploy_smoke_wedge_not_ready "$recovery_gap" || failed=1
     fi
     if ! _post_deploy_smoke_check_fail_closed_warn_rate; then
         failed=1
     fi
-    if ! _post_deploy_smoke_check_relay_round_trip; then
-        failed=1
-    fi
-    if ! _post_deploy_smoke_check_durable_record; then
-        failed=1
+    if [ "$POST_DEPLOY_SMOKE_READY" = "true" ]; then
+        if ! _post_deploy_smoke_check_relay_round_trip; then
+            failed=1
+        fi
+        if ! _post_deploy_smoke_check_durable_record; then
+            failed=1
+        fi
+    else
+        _post_deploy_smoke_note "relay E-1/E-35=not evaluated: startup recovery unconfirmed for this smoke run" || failed=1
     fi
     rm -rf "$POST_DEPLOY_SMOKE_TMP_DIR" 2>/dev/null || true
     POST_DEPLOY_SMOKE_TMP_DIR=""
