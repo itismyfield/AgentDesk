@@ -286,6 +286,7 @@ banner "CI runner hardening guard"
 "$PYTHON" -m unittest tests.test_discord_thread_create_ci_wiring
 # Nightly #6006 profiles, tmux and executable selection contracts.
 "$PYTHON" -m unittest tests.test_nightly_repair
+"$PYTHON" -m unittest tests.test_pg_boundary_diagnostics
 
 banner "PR infrastructure failure rerun classifier (#4392/#5207)"
 # These self-tests also enforce the #5207 sibling-regex sync contract: the
