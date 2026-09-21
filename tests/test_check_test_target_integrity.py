@@ -122,6 +122,43 @@ def run_fixture(command: str, allowlist: str = "", *,
         )
 
 
+def build_layout_repo(root: Path, route_decl: str, *,
+                      commands: tuple[str, ...] = (),
+                      main_rs: str | None = None,
+                      manifest: set[str] | None = None,
+                      extra_files: dict[str, str] | None = None) -> Path:
+    """Fixture crate whose `src/route.rs` carries one `#[path]` layout.
+
+    Every child module name exists in exactly one file, so the inventory says
+    which file the walker really opened: `from_redirect` only lives in the
+    redirect target and `from_sibling` only in the sibling's own file.
+    """
+    workflow = build_fixture_repo(root, GOOD_COMMAND)
+    (root / "src" / "route.rs").write_text(
+        route_decl + "mod route_sibling;\n", encoding="utf-8")
+    (root / "src" / "redirected_impl.rs").write_text(
+        "mod from_redirect {}\n#[cfg(test)]\n"
+        "mod tests { #[test] fn redirected_case() {} }\n", encoding="utf-8")
+    (root / "src" / "route").mkdir(exist_ok=True)
+    (root / "src" / "route" / "route_sibling.rs").write_text(
+        "mod from_sibling {}\n", encoding="utf-8")
+    if main_rs is not None:
+        (root / "src" / "main.rs").write_text(main_rs, encoding="utf-8")
+    for rel, text in (extra_files or {}).items():
+        (root / rel).write_text(text, encoding="utf-8")
+    if manifest is not None:
+        (root / integrity.LIB_INVENTORY_MANIFEST_REL).write_text(
+            integrity.render_lib_inventory_manifest(manifest),
+            encoding="utf-8")
+    if commands:
+        workflow.write_text(
+            "jobs:\n  lane:\n    steps:\n"
+            + "".join(f'      - run: "{command}"\n' for command in commands),
+            encoding="utf-8")
+    return workflow
+
+
+
 class MutationProof(unittest.TestCase):
     """Known-bad command must fail; the corrected command must pass."""
 
@@ -356,6 +393,210 @@ class PathRedirection(unittest.TestCase):
                      "activate_command"):
             with self.subTest(module=name):
                 self.assertIn(name, modules)
+
+
+class PathAttributeLayout(unittest.TestCase):
+    """`#[path]` must survive same-line and comment layouts (#5008 items 6/7).
+
+    Both defects were silent inventory losses, not crashes: the same-line form
+    dropped the module name and leaked its redirect onto the next `mod`, and a
+    comment between the attribute and its `mod` detached the redirect. A lost
+    module makes `unknown-module` collapse into nothing whenever the lib is
+    also selected, so the gate exits 0 with no output at all.
+    """
+
+    # Each layout declares the same `mod redirected_impl;`; only trivia and
+    # line breaks differ. `mod` is always the last line of the snippet.
+    LAYOUTS = {
+        "adjacent_control":
+            '#[path = "redirected_impl.rs"]\nmod redirected_impl;\n',
+        "cfg_between_control":
+            '#[path = "redirected_impl.rs"]\n#[cfg(test)]\n'
+            'mod redirected_impl;\n',
+        "same_line": '#[path = "redirected_impl.rs"] mod redirected_impl;\n',
+        "same_line_pub":
+            '#[path = "redirected_impl.rs"] pub mod redirected_impl;\n',
+        "same_line_then_cfg":
+            '#[path = "redirected_impl.rs"] #[cfg(test)] '
+            'mod redirected_impl;\n',
+        "cfg_then_same_line":
+            '#[cfg(test)] #[path = "redirected_impl.rs"] '
+            'mod redirected_impl;\n',
+        "same_line_block_comment":
+            '#[path = "redirected_impl.rs"] /* moved */ '
+            'mod redirected_impl;\n',
+        "trailing_comment":
+            '#[path = "redirected_impl.rs"] // moved\n'
+            'mod redirected_impl;\n',
+        "line_comment_between":
+            '#[path = "redirected_impl.rs"]\n// why this file moved\n'
+            'mod redirected_impl;\n',
+        "block_comment_between":
+            '#[path = "redirected_impl.rs"]\n/* why this file\n'
+            '   moved */\nmod redirected_impl;\n',
+        "doc_comment_between":
+            '#[path = "redirected_impl.rs"]\n/// the moved module\n'
+            'mod redirected_impl;\n',
+        "comment_then_cfg":
+            '#[path = "redirected_impl.rs"]\n// moved\n#[cfg(test)]\n'
+            'mod redirected_impl;\n',
+    }
+
+    def test_every_layout_keeps_identity_descent_and_sibling(self) -> None:
+        for layout, decl in self.LAYOUTS.items():
+            with self.subTest(layout=layout), \
+                    tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                build_layout_repo(root, decl)
+                modules = integrity.collect_modules(
+                    integrity.discover_targets(root)["lib"], root)
+                decl_line = decl.count("\n")
+                self.assertEqual(
+                    modules.get("redirected_impl"),
+                    f"src/route.rs:{decl_line}",
+                    "the redirected module keeps its own name and site")
+                self.assertEqual(
+                    modules.get("from_redirect"), "src/redirected_impl.rs:1",
+                    "the walker must descend into the redirect target")
+                self.assertEqual(
+                    modules.get("route_sibling"),
+                    f"src/route.rs:{decl_line + 1}",
+                    "the sibling `mod` keeps its own name and site")
+                self.assertEqual(
+                    modules.get("from_sibling"),
+                    "src/route/route_sibling.rs:1",
+                    "the redirect must not be reused for the next `mod`")
+
+    def test_every_layout_reports_the_real_declaration_site(self) -> None:
+        # rc alone proves nothing here: a lost module can turn one finding
+        # into a differently-worded one, so assert the kind, the filter and
+        # the file each module was actually declared in.
+        commands = ("cargo test --bin agentdesk "
+                    "redirected_impl::tests::redirected_case",
+                    "cargo test --bin agentdesk from_redirect::case",
+                    "cargo test --bin agentdesk from_sibling::case")
+        for layout, decl in self.LAYOUTS.items():
+            with self.subTest(layout=layout), \
+                    tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                workflow = build_layout_repo(root, decl, commands=commands)
+                violations = integrity.check_workflows(
+                    root, [workflow], set(), with_list_check=False)
+                self.assertEqual([v.kind for v in violations],
+                                 ["target-mismatch"] * 3,
+                                 [v.render() for v in violations])
+                sites = (f"src/route.rs:{decl.count(chr(10))}",
+                         "src/redirected_impl.rs:1",
+                         "src/route/route_sibling.rs:1")
+                for violation, command, site in zip(violations, commands,
+                                                    sites):
+                    filt = command.rsplit(" ", 1)[1]
+                    self.assertIn(f"filter `{filt}` names module",
+                                  violation.detail)
+                    self.assertIn(f"lib ({site})", violation.detail)
+
+    def test_bin_side_layout_loss_would_silence_the_gate(self) -> None:
+        # The worst shape of #5008 item 6: the bin module vanishes, so the
+        # lib-selecting command gets no finding at all and --enforce exits 0.
+        commands = ("cargo test --lib bin_owned::tests::owned_case",
+                    "cargo test --lib deep_child::case")
+        bin_layouts = {
+            "adjacent_control":
+                '#[path = "renamed_bin.rs"]\nmod bin_owned;\n',
+            "same_line": '#[path = "renamed_bin.rs"] mod bin_owned;\n',
+            "line_comment_between":
+                '#[path = "renamed_bin.rs"]\n// moved\nmod bin_owned;\n',
+            "block_comment_between":
+                '#[path = "renamed_bin.rs"]\n/* moved */\nmod bin_owned;\n',
+        }
+        for layout, decl in bin_layouts.items():
+            with self.subTest(layout=layout), \
+                    tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                workflow = build_layout_repo(
+                    root, self.LAYOUTS["adjacent_control"], commands=commands,
+                    main_rs=decl + "fn main() {}\n",
+                    manifest={"bin_owned::tests::owned_case",
+                              "deep_child::case",
+                              "high_risk_recovery::tests::recovery_case"},
+                    extra_files={"src/renamed_bin.rs":
+                                 "mod deep_child {}\n#[cfg(test)]\n"
+                                 "mod tests { #[test] fn owned_case() {} }\n"})
+                allow = root / "allowlist.txt"
+                allow.write_text("", encoding="utf-8")
+                stdout = io.StringIO()
+                with contextlib.redirect_stdout(stdout):
+                    rc = integrity.main([
+                        "--repo-root", str(root), "--workflow", str(workflow),
+                        "--allowlist", str(allow), "--enforce",
+                    ])
+                report = stdout.getvalue()
+                self.assertEqual(rc, 1, report)
+                self.assertIn(
+                    "[target-mismatch] filter `bin_owned::tests::owned_case` "
+                    "names module `bin_owned` declared in bin:agentdesk "
+                    f"(src/main.rs:{decl.count(chr(10))})", report)
+                self.assertIn(
+                    "[target-mismatch] filter `deep_child::case` names module "
+                    "`deep_child` declared in bin:agentdesk "
+                    "(src/renamed_bin.rs:1)", report)
+
+    def test_comment_stripping_leaves_literals_and_paths_intact(self) -> None:
+        # Naive comment stripping would cut `#[path = "nested//child.rs"]` in
+        # half and desynchronise on quotes that merely look like comments.
+        noise = ('const LINE: &str = "// not a comment";\n'
+                 'const BLOCK: &str = "/* still code */";\n'
+                 'const QUOTE: char = \'"\';\n'
+                 'const RAW: &str = r#"// "quoted" /* nested */"#;\n'
+                 'const TICK: &str = "it\'s fine";\n')
+        decl = (noise + '#[path = "nested//redirected_impl.rs"]\n'
+                '// the file moved\nmod redirected_impl;\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_layout_repo(
+                root, decl,
+                extra_files={"src/nested_redirect.rs": "mod unused {}\n"})
+            nested = root / "src" / "nested"
+            nested.mkdir()
+            (nested / "redirected_impl.rs").write_text(
+                "mod from_redirect {}\n", encoding="utf-8")
+            modules = integrity.collect_modules(
+                integrity.discover_targets(root)["lib"], root)
+        self.assertEqual(modules.get("redirected_impl"),
+                         f"src/route.rs:{decl.count(chr(10))}")
+        self.assertEqual(modules.get("from_redirect"),
+                         "src/nested/redirected_impl.rs:1",
+                         "the `//` inside the path string is not a comment")
+        self.assertEqual(modules.get("from_sibling"),
+                         "src/route/route_sibling.rs:1")
+
+    def test_commented_out_and_interposed_items_still_detach(self) -> None:
+        # Treating comments as trivia must not inventory a commented-out
+        # `mod`, and real code between #[path] and `mod` must keep detaching
+        # the attribute the way rustc does.
+        ghosts = ('// mod line_ghost;\n/* mod block_ghost;\n'
+                  '   mod second_ghost; */\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_layout_repo(
+                root, ghosts + self.LAYOUTS["adjacent_control"])
+            commented = integrity.collect_modules(
+                integrity.discover_targets(root)["lib"], root)
+        for ghost in ("line_ghost", "block_ghost", "second_ghost"):
+            self.assertNotIn(ghost, commented)
+        self.assertEqual(commented.get("from_redirect"),
+                         "src/redirected_impl.rs:1")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_layout_repo(
+                root, '#[path = "redirected_impl.rs"]\n'
+                'fn interposed() {}\nmod redirected_impl;\n')
+            detached = integrity.collect_modules(
+                integrity.discover_targets(root)["lib"], root)
+        self.assertEqual(detached.get("redirected_impl"), "src/route.rs:3")
+        self.assertNotIn("from_redirect", detached,
+                         "an item between #[path] and `mod` detaches it")
+
 
 
 class EmptyTargetRule(unittest.TestCase):
