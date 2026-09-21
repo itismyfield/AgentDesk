@@ -284,6 +284,8 @@ bash tests/test_cluster_deploy_peer_verdict_5189.sh
 banner "CI runner hardening guard"
 ./scripts/check-ci-runner-hardening.sh
 "$PYTHON" -m unittest tests.test_discord_thread_create_ci_wiring
+# Nightly #6006 profiles, tmux and executable selection contracts.
+"$PYTHON" -m unittest tests.test_nightly_repair
 
 banner "PR infrastructure failure rerun classifier (#4392/#5207)"
 # These self-tests also enforce the #5207 sibling-regex sync contract: the
