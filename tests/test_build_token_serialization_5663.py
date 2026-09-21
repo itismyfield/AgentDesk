@@ -789,7 +789,10 @@ class SccacheEnvTests(TokenTestCase):
     def test_a_resolvable_sccache_reaches_the_child_as_an_absolute_wrapper(self) -> None:
         seen = self.child_env()
         self.assertEqual(seen["RUSTC_WRAPPER"], str(self.tmp / "brew" / "sccache"))
-        self.assertEqual(seen["SCCACHE_CACHE_SIZE"], "10G")
+        self.assertEqual(seen["SCCACHE_CACHE_SIZE"], "40G")
+        # 0, not the 600s default: a daemon reaped between two token waits loses
+        # the hit counters that say whether the cache is worth anything.
+        self.assertEqual(seen["SCCACHE_IDLE_TIMEOUT"], "0")
         self.assertIn(str(self.tmp / "brew"), seen["PATH"].split(os.pathsep))
 
     def test_an_unset_cache_dir_defaults_to_the_dir_the_shell_exports(self) -> None:
@@ -801,16 +804,19 @@ class SccacheEnvTests(TokenTestCase):
 
     def test_without_sccache_the_child_environment_is_untouched(self) -> None:
         seen = self.child_env(sccache=False)
-        for key in ("RUSTC_WRAPPER", "SCCACHE_DIR", "SCCACHE_CACHE_SIZE"):
+        for key in ("RUSTC_WRAPPER", "SCCACHE_DIR", "SCCACHE_CACHE_SIZE",
+                    "SCCACHE_IDLE_TIMEOUT"):
             self.assertNotIn(key, seen, f"{key} leaked with no sccache to run")
         self.assertEqual(seen["PATH"], "/usr/bin:/bin")
 
     def test_caller_supplied_values_are_respected_including_an_empty_wrapper(self) -> None:
         self.assertEqual(self.child_env(env={"RUSTC_WRAPPER": ""})["RUSTC_WRAPPER"], "")
         kept = self.child_env(env={"SCCACHE_DIR": str(self.tmp / "own"),
-                                   "SCCACHE_CACHE_SIZE": "2G"})
+                                   "SCCACHE_CACHE_SIZE": "2G",
+                                   "SCCACHE_IDLE_TIMEOUT": "900"})
         self.assertEqual(kept["SCCACHE_DIR"], str(self.tmp / "own"))
         self.assertEqual(kept["SCCACHE_CACHE_SIZE"], "2G")
+        self.assertEqual(kept["SCCACHE_IDLE_TIMEOUT"], "900")
         self.assertEqual(kept["RUSTC_WRAPPER"], str(self.tmp / "brew" / "sccache"))
 
     def test_the_opt_out_skips_activation_entirely(self) -> None:
@@ -836,7 +842,7 @@ class SccacheEnvTests(TokenTestCase):
         blocked.write_text("")
         wanted = blocked / "sccache"
         seen = self.child_env(env={"SCCACHE_DIR": str(wanted)})
-        for key in ("RUSTC_WRAPPER", "SCCACHE_CACHE_SIZE"):
+        for key in ("RUSTC_WRAPPER", "SCCACHE_CACHE_SIZE", "SCCACHE_IDLE_TIMEOUT"):
             self.assertNotIn(key, seen, f"{key} was written before the dir failed")
         self.assertEqual(seen["PATH"], "/usr/bin:/bin")
         self.assertEqual(seen["SCCACHE_DIR"], str(wanted), "the caller's value stands")

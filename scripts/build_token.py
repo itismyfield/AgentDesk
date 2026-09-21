@@ -545,9 +545,9 @@ def run_protected(command: Sequence[str], env: Mapping[str, str], supervisor: _S
 # sccache opt-in for campaign cargo, which reaches cargo only through here: a shell
 # export of RUSTC_WRAPPER dies with the batch, and .cargo/config.toml ships
 # `rustc-wrapper = ""`, so the environment is the only switch. The probe order and the
-# /opt/homebrew/bin, $HOME/.cache/sccache and 10G literals are copied from
+# /opt/homebrew/bin, $HOME/.cache/sccache, 40G and 0 literals are copied from
 # `setup_sccache_env` (scripts/_defaults.sh:25) -- a bash function and a dict cannot
-# share an implementation -- so those three defaults move in both places or neither.
+# share an implementation -- so those four defaults move in both places or neither.
 # Two rules deliberately do NOT mirror it; do not "fix" them into agreement.
 # (1) Precedence. setup_sccache_env is imperative -- build-release.sh, deploy-release.sh
 # and install.sh call it to turn sccache on, so overwriting RUSTC_WRAPPER is the point
@@ -578,7 +578,13 @@ def apply_sccache_env(env: dict[str, str]) -> None:
         return  # An unusable cache directory costs the cache, never the build.
     env["PATH"] = path
     env["SCCACHE_DIR"] = cache_dir
-    env["SCCACHE_CACHE_SIZE"] = env.get("SCCACHE_CACHE_SIZE") or "10G"
+    # Adjustable local ceiling to reduce eviction risk; performance gain is unmeasured.
+    # Explicit caller limits, including CI-specific values, remain unchanged.
+    env["SCCACHE_CACHE_SIZE"] = env.get("SCCACHE_CACHE_SIZE") or "40G"
+    # 0 disables the idle exit. Campaign builds queue behind the token for tens of
+    # minutes, so the 600s default reaps the daemon between them and its counters
+    # restart at zero -- which reads as "sccache is off" and gets it re-enabled.
+    env["SCCACHE_IDLE_TIMEOUT"] = env.get("SCCACHE_IDLE_TIMEOUT") or "0"
     env["RUSTC_WRAPPER"] = sccache
 
 
