@@ -1965,6 +1965,22 @@ class InlineDirectoryContext(unittest.TestCase):
             "leaf_inner_owner": "src/scope/moved.rs:1",
             "leaf_inner_tail": "src/owner/sibling/tail.rs:1",
         }, ("decoy_inner_path_to_next_item",)),
+        # R7: a present `#[path]` joins the current directory whatever it
+        # spells, so `""` is presence, not absence.
+        "inline_empty_path_override_is_not_absence": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs": '#[path = ""]\nmod scope {\n    mod child;\n}\n'
+                            'mod sibling {\n    #[path = "tail.rs"]\n'
+                            "    mod tail;\n}\n",
+            "src/child.rs": "mod leaf_empty_override {}\n",
+            "src/owner/sibling/tail.rs": "mod leaf_empty_tail {}\n",
+            "src/owner/scope/child.rs": "mod decoy_empty_read_as_absent {}\n",
+        }, {
+            "child": "src/owner.rs:3",
+            "tail": "src/owner.rs:7",
+            "leaf_empty_override": "src/child.rs:1",
+            "leaf_empty_tail": "src/owner/sibling/tail.rs:1",
+        }, ("decoy_empty_read_as_absent",)),
     }
 
     def test_every_frame_resolves_the_way_rustc_does(self) -> None:
@@ -2036,6 +2052,9 @@ class InlineDirectoryContext(unittest.TestCase):
         "inner_path_on_a_function_never_renames_a_later_scope":
             ("leaf_inner_owner::case", "src/scope/moved.rs",
              "src/fake/moved.rs"),
+        "inline_empty_path_override_is_not_absence":
+            ("leaf_empty_override::case", "src/child.rs",
+             "src/owner/scope/child.rs"),
     }
 
     def test_boundary_layouts_reach_main_with_the_real_file(self) -> None:
@@ -2079,6 +2098,29 @@ class InlineDirectoryContext(unittest.TestCase):
                 for name in decoys:
                     self.assertIn("[unknown-module] module-path filter "
                                   f"`{name}::case`", report)
+
+    # spelling -> (actual leaf site, decoy site). Only an absent attribute
+    # consumes the file's relative component and appends the module's name.
+    PATH_SPELLINGS = {
+        '#[path = ""]\n': ("src/child.rs:1", None),
+        '#[path = "."]\n': ("src/child.rs:1", None),
+        '#[path = "moved"]\n': (None, None),
+        "": (None, "src/owner/scope/child.rs:1"),
+    }
+
+    def test_a_present_inline_path_is_not_an_absent_one(self) -> None:
+        files = self.LAYOUTS["inline_empty_path_override_is_not_absence"][0]
+        for spelling, (leaf, decoy) in self.PATH_SPELLINGS.items():
+            with self.subTest(path=spelling or "absent"), \
+                    tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                owner = files["src/owner.rs"].replace('#[path = ""]\n',
+                                                      spelling)
+                lib = build_frame_repo(root, {**files, "src/owner.rs": owner})
+                modules = integrity.collect_modules(lib, root)
+                self.assertEqual(modules.get("leaf_empty_override"), leaf)
+                self.assertEqual(modules.get("decoy_empty_read_as_absent"),
+                                 decoy)
 
     def test_custom_and_integration_roots_own_their_directory(self) -> None:
         for label, (root_rel, files, leaf, site, decoy) in self.ROOTS.items():

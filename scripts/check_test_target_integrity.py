@@ -644,7 +644,7 @@ def _inline_frames(text: str, frame: _ModuleFrame) -> dict[int, _ModuleFrame]:
             if cursor < len(tokens) and tokens[cursor].value == "{":
                 # Inline #[path] renames the directory without consuming relative;
                 # a plain inline module consumes relative, then appends its name.
-                directory = (current.directory / pending_path if pending_path
+                directory = (current.directory / pending_path if pending_path is not None
                              else current.child_dir() / name)
                 depth += 1
                 scopes.append((depth, _ModuleFrame(directory)))
