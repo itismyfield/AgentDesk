@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from check_test_target_integrity import (
+    _attribute_span,
     _rust_tokens,
     collect_static_tests,
     load_lib_inventory_manifest,
@@ -138,13 +139,11 @@ def _module_count(source: Path, module: str) -> int:
     index = 0
     while index < len(tokens):
         token = tokens[index]
-        if token.value == "#" and index + 1 < len(tokens) and tokens[index + 1].value == "[":
-            end, depth = index + 2, 1
-            while end < len(tokens) and depth:
-                depth += tokens[end].value == "["
-                depth -= tokens[end].value == "]"
-                end += 1
-            attr = tuple(item.value for item in tokens[index + 2:end - 1] if item.kind == "ident")
+        span = _attribute_span(tokens, index)
+        if span is not None:
+            bracket, end = span
+            attr = tuple(item.value for item in tokens[bracket + 1:end - 1]
+                         if item.kind == "ident")
             pending_path = pending_path or bool(attr and attr[0] == "path")
             index = end
             continue

@@ -460,5 +460,50 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         self.assertIn("RESULT selected=3 passed=3", outcome.result.stdout)
 
 
+    def test_inner_attribute_payload_does_not_count_as_a_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src/gate").mkdir(parents=True)
+            crate = root / "src/lib.rs"
+            source = '#![cfg_attr(any(), opaque(mod gate;))]\nmod gate;\n'
+            crate.write_text(source, encoding="utf-8")
+            (root / "src/gate.rs").write_text("mod tests;\n", encoding="utf-8")
+            (root / "src/gate/tests.rs").write_text(
+                "#[test] fn proof_case() {}\n", encoding="utf-8")
+            ids = ("gate::tests::proof_case",)
+            (root / "manifest.txt").write_text(
+                render_lib_inventory_manifest(set(ids)), encoding="utf-8")
+            plan = proof.ProofPlan(
+                root, "manifest.txt", "PROOF",
+                proof.GateSpec("g", "src/lib.rs", "gate", "src/gate.rs", "required"),
+                (proof.OwnerSpec("o", "g", "src/gate.rs", "tests",
+                                 "src/gate/tests.rs", "gate::tests", "required", ids),))
+            self.assertEqual(proof._module_count(crate, "gate"), 1)
+            sealed = proof.seal(plan)
+            self.assertEqual(sealed.execution_ids, ids)
+            self.assertEqual(sealed.absent, ())
+            self.assertIsNot(sealed.execution_ids, ids)
+            crate.write_text(source + "mod gate;\n", encoding="utf-8")
+            self.assertEqual(proof._module_count(crate, "gate"), 2)
+            with self.assertRaisesRegex(proof.ProofError, "gate g count=2"):
+                proof.seal(plan)
+
+    def test_module_count_uses_real_attribute_punctuation(self) -> None:
+        sources = (
+            '#[doc = "["]\nmod gate;\n#[doc = "]"]\nfn helper() {}\n',
+            'fn helper() { let _ = &"#"[{ mod gate; 0 }..]; }\n',
+            '#![cfg_attr(any(), opaque(#[path = "fake.rs"]))]\nmod gate;\n',
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "lib.rs"
+            for text in sources:
+                with self.subTest(source=text):
+                    source.write_text(text, encoding="utf-8")
+                    self.assertEqual(proof._module_count(source, "gate"), 1)
+            source.write_text('#[path = "fake.rs"]\nmod gate;\n', encoding="utf-8")
+            with self.assertRaisesRegex(proof.ProofError, "must not use"):
+                proof._module_count(source, "gate")
+
+
 if __name__ == "__main__":
     unittest.main()

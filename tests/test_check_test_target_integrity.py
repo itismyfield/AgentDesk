@@ -1593,5 +1593,159 @@ class KnownOffenderRegression(unittest.TestCase):
             self.assertEqual(integrity.main([]), 0)
 
 
+def write_files(root: Path, files: dict[str, str]) -> None:
+    for rel, text in files.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+
+
+def build_frame_repo(root: Path, files: dict[str, str], *,
+                     lib_path: str = "src/lib.rs") -> Path:
+    """Crate whose only content is the module layout under test.
+
+    Every layout built here is valid Rust, and the asserted leaf location
+    is the one rustc itself demands. Each layout was compiled standalone
+    with `rustc --edition 2021 --crate-type lib --emit=metadata`
+    (rustc 1.94.1 and 1.94.0; no cargo/linking/execution) as written and
+    again with each asserted leaf removed: only the layout as written
+    compiles, so the decoy locations are not accepted substitutes.
+    Unreferenced `decoy_*` files are never read by rustc.
+    """
+    (root / "Cargo.toml").write_text(
+        '[package]\nname = "fixture"\nversion = "0.1.0"\n'
+        f'edition = "2021"\n\n[lib]\npath = "{lib_path}"\n\n'
+        '[[bin]]\nname = "fixture"\npath = "src/main.rs"\n',
+        encoding="utf-8")
+    write_files(root, {"src/main.rs": "fn main() {}\n", **files})
+    return root / lib_path
+
+
+class InlineDirectoryContext(unittest.TestCase):
+    ROOTS = {
+        # A crate root owns its own directory whatever it is called.
+        "custom_lib_root": ("src/custom_root.rs", {
+            "src/custom_root.rs": "mod child;\n",
+            "src/child.rs": "mod leaf_custom_root {}\n",
+            "src/custom_root/child.rs": "mod decoy_root_as_module {}\n",
+        }, "leaf_custom_root", "src/child.rs:1", "decoy_root_as_module"),
+        "integration_root": ("tests/smoke.rs", {
+            "tests/smoke.rs": "mod helper;\n",
+            "tests/helper.rs": "mod leaf_integration {}\n",
+            "tests/smoke/helper.rs": "mod decoy_test_as_module {}\n",
+        }, "leaf_integration", "tests/helper.rs:1", "decoy_test_as_module"),
+    }
+
+    def test_custom_and_integration_roots_own_their_directory(self) -> None:
+        for label, (root_rel, files, leaf, site, decoy) in self.ROOTS.items():
+            with self.subTest(root=label), \
+                    tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                build_frame_repo(root, files)
+                modules = integrity.collect_modules(root / root_rel, root)
+                self.assertEqual(modules.get(leaf), site, label)
+                self.assertNotIn(decoy, modules, label)
+
+    def test_integration_target_is_collected_once_through_validation(self) \
+            -> None:
+        # The lazy `--test` inventory used `setdefault`, whose argument
+        # is evaluated even when the target is already cached, so the
+        # frame walk re-read the whole integration tree per command.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_frame_repo(root, {
+                "src/lib.rs": "",
+                "tests/smoke.rs": "mod helper;\n",
+                "tests/helper.rs": "mod leaf_integration {}\n",
+            })
+            inventories: dict[str, dict[str, str]] = {}
+            walked: list[Path] = []
+            real = integrity.collect_modules
+
+            def counted(source: Path, repo: Path) -> dict[str, str]:
+                walked.append(source)
+                return real(source, repo)
+
+            with mock.patch.object(integrity, "collect_modules", counted):
+                for filt in ("leaf_integration::case", "other::case"):
+                    spec = integrity.parse_command(
+                        f"cargo test --test smoke {filt}".split())
+                    integrity.validate_command(spec, inventories, root)
+            self.assertEqual(
+                inventories["test:smoke"].get("leaf_integration"),
+                "tests/helper.rs:1")
+            self.assertEqual(walked, [root / "tests/smoke.rs"])
+
+    def test_same_file_under_two_owners_is_walked_for_both(self) -> None:
+        # `src/owner/shared.rs` is both a plain child of `owner` and a
+        # `#[path]` alias at the crate root. rustc compiles this only when
+        # BOTH child files exist, so both ownerships must be walked while
+        # the reported site stays the real declaration line.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lib = build_frame_repo(root, {
+                "src/lib.rs": 'mod owner;\n#[path = "owner/shared.rs"]\n'
+                              "mod aliased;\n",
+                "src/owner.rs": "mod shared;\n",
+                "src/owner/shared.rs": "mod leaf_shared;\n",
+                "src/owner/shared/leaf_shared.rs": "mod leaf_owner_route {}\n",
+                "src/owner/leaf_shared.rs": "mod leaf_alias_route {}\n",
+            })
+            modules = integrity.collect_modules(lib, root)
+            self.assertEqual(modules.get("leaf_owner_route"),
+                             "src/owner/shared/leaf_shared.rs:1")
+            self.assertEqual(modules.get("leaf_alias_route"),
+                             "src/owner/leaf_shared.rs:1")
+            self.assertEqual(modules.get("leaf_shared"),
+                             "src/owner/shared.rs:1")
+
+    def test_read_errors_propagate_and_never_become_missing(self) -> None:
+        # An unreadable file that exists is not an absent module: the OS
+        # error has to reach the caller, which fails the lane closed.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lib = build_frame_repo(root, {
+                "src/lib.rs": "mod owner;\n",
+                "src/owner.rs": "mod child;\n",
+                "src/owner/child.rs": "mod leaf {}\n",
+            })
+            with mock.patch.object(Path, "read_text",
+                                   side_effect=OSError("unreadable source")):
+                with self.assertRaises(OSError):
+                    integrity.collect_modules(lib, root)
+            (root / "src/owner/child.rs").write_bytes(b"mod leaf {\xff}\n")
+            with self.assertRaises(UnicodeError):
+                integrity.collect_modules(lib, root)
+
+
+class StaticAttributeBoundaries(unittest.TestCase):
+    def test_attribute_payloads_do_not_change_item_boundaries(self) -> None:
+        sources = {
+            "inner_test_payload": ('#![cfg_attr(any(), opaque(#[test]))]\n'
+                                   'fn not_a_test() {}\n', {}),
+            "string_brackets": ('#[doc = "["]\n#[test]\nfn real_test() {}\n'
+                                '#[doc = "]"]\nfn not_a_test() {}\n',
+                                {"real_test": "src/lib.rs:3"}),
+            "string_hash_index": ('fn helper() { let _ = &"#"[{\n'
+                                  '#[test] fn nested() {}\n0 }..]; }\n',
+                                  {"nested": "src/lib.rs:2"}),
+            "inner_path_payload": ('#![cfg_attr(any(), opaque(#[path = "fake.rs"]))]\n'
+                                   'mod child;\n',
+                                   {"child::real_test": "src/child.rs:1"}),
+        }
+        for label, (source, expected) in sources.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                lib = build_frame_repo(root, {
+                    "src/lib.rs": source,
+                    "src/child.rs": "#[test] fn real_test() {}\n",
+                    "src/fake.rs": "#[test] fn fake_test() {}\n",
+                })
+                inventory = integrity.collect_static_tests(lib, root)
+                self.assertEqual(inventory.tests, expected)
+                self.assertEqual(inventory.module_errors, {})
+                self.assertEqual(inventory.duplicate_tests, ())
+
+
 if __name__ == "__main__":
     unittest.main()
