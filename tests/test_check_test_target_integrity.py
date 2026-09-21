@@ -2166,5 +2166,34 @@ class RustConsistentCrateProof(unittest.TestCase):
                              "src/outer/renamed.rs:1")
 
 
+class StaticAttributeBoundaries(unittest.TestCase):
+    def test_attribute_payloads_do_not_change_item_boundaries(self) -> None:
+        sources = {
+            "inner_test_payload": ('#![cfg_attr(any(), opaque(#[test]))]\n'
+                                   'fn not_a_test() {}\n', {}),
+            "string_brackets": ('#[doc = "["]\n#[test]\nfn real_test() {}\n'
+                                '#[doc = "]"]\nfn not_a_test() {}\n',
+                                {"real_test": "src/lib.rs:3"}),
+            "string_hash_index": ('fn helper() { let _ = &"#"[{\n'
+                                  '#[test] fn nested() {}\n0 }..]; }\n',
+                                  {"nested": "src/lib.rs:2"}),
+            "inner_path_payload": ('#![cfg_attr(any(), opaque(#[path = "fake.rs"]))]\n'
+                                   'mod child;\n',
+                                   {"child::real_test": "src/child.rs:1"}),
+        }
+        for label, (source, expected) in sources.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                lib = build_frame_repo(root, {
+                    "src/lib.rs": source,
+                    "src/child.rs": "#[test] fn real_test() {}\n",
+                    "src/fake.rs": "#[test] fn fake_test() {}\n",
+                })
+                inventory = integrity.collect_static_tests(lib, root)
+                self.assertEqual(inventory.tests, expected)
+                self.assertEqual(inventory.module_errors, {})
+                self.assertEqual(inventory.duplicate_tests, ())
+
+
 if __name__ == "__main__":
     unittest.main()

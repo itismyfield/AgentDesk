@@ -40,6 +40,17 @@ postgres`가 제거하는 것만 뺀 나머지를 `scripts/run_test_lane.py`를 
 > (`scripts/pg_test_lane_baseline.txt`의 `[rule1]`, 이제 비어 있다)이 모든 Rust
 > PR에서 실제 DB를 상대로 돌기 시작한다.
 >
+> #6014: `ci-pr.yml` `pg_db` filter의 **소스 경로 부분은 생성물**이다. `scripts/pg_test_lane_manifest.txt`의
+> `[files]`가 `# BEGIN/END generated pg_db source paths` 구간으로 렌더링되고, 재생성은
+> `python3 scripts/check_pg_test_lane_membership.py --write-pg-db-paths`다. 구간 밖의 수작업 글롭·비소스
+> 트리거(`migrations/**`, `justfile`, `Cargo.*` 등)와 주석은 보존된다. 기본 게이트가 구간 동기화를 함께
+> 검사하고, 무조건 실행되는 `scripts` 잡의 `ci-script-checks.sh`가 재생성 후 `git diff --exit-code`로
+> **커밋된 트리**가 생성 결과와 같은지 확인한다. dorny/paths-filter는 패턴을 각각 picomatch로 컴파일해
+> 전부 OR(`matchers.some`; 이 워크플로는 `predicate-quantifier` 미설정)하므로 `!`는 제외가 아니라 "그 외
+> 전부"를 고르는 양성 매처다(#5232) — `pg_db` 안의 `!`는 구간 앞뒤 무관하게 rc=2이고, 구간 누락·중복·역순도
+> 파일을 고치지 않고 rc=2다. 이로써 `[rule3]` debt는 21 → 0이고 baseline의 해당 섹션은 비었다. 이 변경은
+> PG 레인이 **선택되는 빈도**만 바꿀 뿐 잡 실행 시간에 대한 주장이 아니다.
+>
 > 이 성질은 `scripts/check_pg_test_lane_membership.py`의 **`[rule5]`**가
 > 기계적으로 지킨다: `ci-pr.yml`의 어떤 잡이 서비스를 시작하지 않은 채
 > `cargo test`로 PG 의존 테스트를 선택하면 **id를 전수로 지목하며 rc=1**이다.

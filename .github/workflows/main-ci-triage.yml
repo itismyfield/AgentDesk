@@ -4,6 +4,7 @@ on:
   workflow_run:
     workflows:
       - CI Main
+      - CI Nightly
     types:
       - completed
 
@@ -12,19 +13,61 @@ permissions:
   contents: read
   issues: write
 
-concurrency:
-  group: main-ci-triage-${{ github.event.workflow_run.id }}
-  cancel-in-progress: false
-
 jobs:
   triage:
     name: Triage main CI red/green streaks
-    if: github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion != 'cancelled'
+    if: >-
+      github.repository == 'itismyfield/AgentDesk' &&
+      github.event.repository.full_name == github.repository &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.action == 'completed' && github.event.workflow_run.status == 'completed' &&
+      github.event.workflow_run.id > 0 && github.event.workflow_run.run_attempt > 0 &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.name == 'CI Main' &&
+      github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion != 'cancelled'
+    concurrency:
+      group: main-ci-triage-${{ github.event.workflow_run.id }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          repository: itismyfield/AgentDesk
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Run main CI triage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AGENTDESK_API_URL: ${{ vars.AGENTDESK_API_URL }}
+          AGENTDESK_API_TOKEN: ${{ secrets.AGENTDESK_API_TOKEN }}
+        run: ./scripts/main-ci-triage.sh
+
+  nightly:
+    name: Record the first completed nightly failure
+    if: >-
+      github.repository == 'itismyfield/AgentDesk' &&
+      github.event.repository.full_name == github.repository &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.action == 'completed' && github.event.workflow_run.status == 'completed' &&
+      github.event.workflow_run.id > 0 && github.event.workflow_run.run_attempt > 0 &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.name == 'CI Nightly' &&
+      (github.event.workflow_run.event == 'schedule' || github.event.workflow_run.event == 'workflow_dispatch') &&
+      github.event.workflow_run.conclusion == 'failure'
+    concurrency:
+      group: agentdesk-nightly-failure-triage
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: itismyfield/AgentDesk
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record nightly failure
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           AGENTDESK_API_URL: ${{ vars.AGENTDESK_API_URL }}

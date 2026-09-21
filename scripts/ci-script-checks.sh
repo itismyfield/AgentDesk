@@ -294,6 +294,10 @@ banner "PR infrastructure failure rerun classifier (#4392/#5207)"
 ./scripts/ci/infra-failure-rerun.sh --self-test
 bash scripts/main-ci-triage.sh --self-test
 
+# Nightly notification contract (#6006).
+"$PYTHON" -m unittest tests.test_nightly_ci_triage
+# End nightly notification contract.
+
 banner "CI timeout wrapper tests (#4413)"
 "$PYTHON" -m unittest tests.test_ci_timeout
 
@@ -356,7 +360,15 @@ banner "Test-target integrity gate (#5003/#5008)"
 AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
 
 banner "PostgreSQL test-lane membership gate (#4979, enforced)"
+# The default mode also verifies the generated `pg_db` region of ci-pr.yml
+# against the manifest, so a new PG source path fails here rather than
+# skipping the PG lane on its own PR.
 "$PYTHON" scripts/check_pg_test_lane_membership.py --baseline-ref "$TEST_LANE_BASELINE_REF"
+# #6014: regenerate and demand an empty diff. The check above proves the region
+# is derivable; this proves the COMMITTED workflow is the derived one, and that
+# regenerating an in-sync tree is a no-op. Same shape as the SQL inventory above.
+"$PYTHON" scripts/check_pg_test_lane_membership.py --write-pg-db-paths
+git diff --exit-code HEAD -- .github/workflows/ci-pr.yml
 "$PYTHON" -m unittest tests.test_check_pg_test_lane_membership
 
 banner "New production file comment-ratio gate"

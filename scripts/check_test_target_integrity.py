@@ -288,6 +288,20 @@ def _attribute_bracket(tokens: list[RustToken], index: int) -> int | None:
         and tokens[cursor].value == "[" else None
 
 
+def _attribute_span(tokens: list[RustToken], index: int) -> tuple[int, int] | None:
+    """Return the opening bracket and exclusive end of a real attribute."""
+    bracket = _attribute_bracket(tokens, index)
+    if bracket is None:
+        return None
+    end, depth = bracket + 1, 1
+    while end < len(tokens) and depth:
+        if tokens[end].kind == "punct":
+            depth += tokens[end].value == "["
+            depth -= tokens[end].value == "]"
+        end += 1
+    return bracket, end
+
+
 @dataclass(frozen=True)
 class StaticTestInventory:
     tests: dict[str, str]
@@ -321,14 +335,9 @@ def collect_static_tests(root: Path, repo_root: Path) -> StaticTestInventory:
             token = tokens[index]
             current_names = outer + tuple(scope[1] for scope in scopes)
             current_dir = scopes[-1][2] if scopes else base_dir
-            bracket = _attribute_bracket(tokens, index)
-            if bracket is not None:
-                end = bracket + 1
-                attr_depth = 1
-                while end < len(tokens) and attr_depth:
-                    attr_depth += tokens[end].value == "["
-                    attr_depth -= tokens[end].value == "]"
-                    end += 1
+            span = _attribute_span(tokens, index)
+            if span is not None:
+                bracket, end = span
                 attr = tokens[bracket + 1:end - 1]
                 path_end = next((offset for offset, item in enumerate(attr)
                                  if item.value in ("(", "=", "]")), len(attr))
