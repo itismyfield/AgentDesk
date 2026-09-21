@@ -260,10 +260,42 @@ def _rust_tokens(text: str) -> list[RustToken]:
             tokens.append(RustToken(ident.group(), line, "ident"))
             index += ident.end()
             continue
-        if char in "#[]{}();=:":
+        if char in "#![]{}();=:":
             tokens.append(RustToken(char, line))
         index += 1
     return tokens
+
+
+def _attribute_bracket(tokens: list[RustToken], index: int) -> int | None:
+    """Index of the `[` that opens the attribute at `index`, else None.
+
+    Only real punctuation opens one: the STRING `"#"` in front of an index
+    expression (`&"#"[{ ... }..]`) is ordinary code, and skipping its block
+    as an attribute drops the items inside it. `#![...]` opens one too.
+    """
+    if tokens[index].kind != "punct" or tokens[index].value != "#":
+        return None
+    cursor = index + 1
+    if cursor < len(tokens) and tokens[cursor].kind == "punct" \
+            and tokens[cursor].value == "!":
+        cursor += 1
+    return cursor if cursor < len(tokens) \
+        and tokens[cursor].kind == "punct" \
+        and tokens[cursor].value == "[" else None
+
+
+def _attribute_span(tokens: list[RustToken], index: int) -> tuple[int, int] | None:
+    """Return the opening bracket and exclusive end of a real attribute."""
+    bracket = _attribute_bracket(tokens, index)
+    if bracket is None:
+        return None
+    end, depth = bracket + 1, 1
+    while end < len(tokens) and depth:
+        if tokens[end].kind == "punct":
+            depth += tokens[end].value == "["
+            depth -= tokens[end].value == "]"
+        end += 1
+    return bracket, end
 
 
 @dataclass(frozen=True)
@@ -299,15 +331,10 @@ def collect_static_tests(root: Path, repo_root: Path) -> StaticTestInventory:
             token = tokens[index]
             current_names = outer + tuple(scope[1] for scope in scopes)
             current_dir = scopes[-1][2] if scopes else base_dir
-            if token.value == "#" and index + 1 < len(tokens) \
-                    and tokens[index + 1].value == "[":
-                end = index + 2
-                attr_depth = 1
-                while end < len(tokens) and attr_depth:
-                    attr_depth += tokens[end].value == "["
-                    attr_depth -= tokens[end].value == "]"
-                    end += 1
-                attr = tokens[index + 2:end - 1]
+            span = _attribute_span(tokens, index)
+            if span is not None:
+                bracket, end = span
+                attr = tokens[bracket + 1:end - 1]
                 path_end = next((offset for offset, item in enumerate(attr)
                                  if item.value in ("(", "=", "]")), len(attr))
                 attr_path = tuple(item.value for item in attr[:path_end]
@@ -482,15 +509,46 @@ def _attribute_end(line: str, start: int = 0) -> int | None:
     return None
 
 
+@dataclass(frozen=True)
+class _ModuleFrame:
+    """Where rustc looks for the children of one module.
+
+    Mirrors rustc's module resolution state: `directory` is `dir_path` and
+    `relative` is the unconsumed `DirOwnership::Owned { relative }` component
+    a non-mod-rs `foo.rs` leaves behind, so its children live in `foo/`.
+    """
+
+    directory: Path
+    relative: str | None = None
+
+    def child_dir(self) -> Path:
+        """Directory that plain `mod x;`/`mod x {}` children descend into."""
+        return (self.directory / self.relative if self.relative
+                else self.directory)
+
+
 def collect_modules(root: Path, repo_root: Path) -> dict[str, str]:
-    """Walk `mod` declarations from a crate root; name -> first decl site."""
+    """Walk `mod` declarations from a crate root; name -> first decl site.
+
+    Descent follows rustc's real directory ownership (confirmed against
+    rustc 1.94.1 and 1.94.0): a root and a `mod.rs` own their directory
+    whatever the root file is called, a plain `foo.rs` owns `foo/`,
+    and an outlined `#[path]` picks a file whose own children are siblings.
+    Inline directory ownership is not modeled by this file-level walk.
+    """
     modules: dict[str, str] = {}
-    queue, seen = [root], set()
+    queue = [(root, _ModuleFrame(root.parent))]
+    # One physical file can be owned by two different directories (a
+    # `#[path]` alias of a normal module). Keep the frame in the identity so
+    # both ownerships are walked, while the reported site stays the source.
+    seen: set[tuple[Path, Path, str | None]] = set()
     while queue:
-        source = queue.pop()
-        if source in seen or not source.is_file():
+        source, frame = queue.pop()
+        identity = (source.resolve(), frame.directory.resolve(),
+                    frame.relative)
+        if identity in seen or not source.is_file():
             continue
-        seen.add(source)
+        seen.add(identity)
         pending_path: str | None = None
         # Comments are trivia: a `// why this moved` line between #[path] and
         # its `mod` must not detach the redirect.
@@ -520,19 +578,24 @@ def collect_modules(root: Path, repo_root: Path) -> dict[str, str]:
             modules.setdefault(name, f"{source.relative_to(repo_root)}:{lineno}")
             if terminator != ";":
                 continue  # inline module: same-file lines are already scanned
+            current = frame
             if redirect is not None:
-                # #[path = "..."] outside inline blocks is relative to the
-                # directory of the declaring source file.
-                candidates: tuple[Path, ...] = (source.parent / redirect,)
-            elif source.name in ("lib.rs", "main.rs", "mod.rs"):
-                base = source.parent
-                candidates = (base / f"{name}.rs", base / name / "mod.rs")
+                # An outlined `#[path]` resolves against the frame directory
+                # and never against its pending relative component.
+                candidates: tuple[Path, ...] = (current.directory / redirect,)
             else:
-                base = source.parent / source.stem
+                base = current.child_dir()
                 candidates = (base / f"{name}.rs", base / name / "mod.rs")
             for candidate in candidates:
                 if candidate.is_file():
-                    queue.append(candidate)
+                    # A `#[path]` file and a `mod.rs` both own their own
+                    # directory; only a plain `x.rs` leaves `x` behind for
+                    # its children to consume.
+                    relative = (None if redirect is not None
+                                or candidate.name == "mod.rs"
+                                else candidate.stem)
+                    queue.append((candidate,
+                                  _ModuleFrame(candidate.parent, relative)))
                     break
     return modules
 
@@ -821,7 +884,10 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
                 findings.append(("unknown-target",
                                  f"--test {name}: tests/{name}.rs not found"))
                 continue
-            inventories.setdefault(target, collect_modules(path, repo_root))
+            # setdefault evaluates its argument even on a hit, so it
+            # re-walked an integration root already inventoried here.
+            if target not in inventories:
+                inventories[target] = collect_modules(path, repo_root)
         if target not in inventories:
             findings.append(("unknown-target",
                              f"target `{target}` not found in Cargo.toml"))

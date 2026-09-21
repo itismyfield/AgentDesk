@@ -1446,6 +1446,16 @@ mod tests {
         );
         assert_eq!(receiver.join().unwrap(), 1);
 
+        // The worker started above is a real subprocess that keeps promoting
+        // through its idle grace, so it can still be the queue's promoter when
+        // the first request is gone. Every manual counter write, enqueue,
+        // quarantine and promote below therefore takes the same `worker.lock`
+        // production uses to keep one promoter per queue; blocking here waits
+        // out the worker's idle exit before this test becomes that promoter.
+        let _worker_lock = lock_relay_queue_file(&queue_dir.join("worker.lock"), false)
+            .unwrap()
+            .unwrap();
+
         std::fs::write(queue_dir.join("next-sequence"), b"not-a-sequence").unwrap();
         enqueue_ordered_hook_relay_request(
             &endpoint,
