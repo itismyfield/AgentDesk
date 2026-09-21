@@ -550,12 +550,6 @@ pub(super) async fn collect_turn_stream_until_terminal(
     }
     let mut active_read_state = None;
     if !found_result {
-        let turn_start = continuation
-            .as_ref()
-            .and_then(|turn| turn.active_read_state.as_ref())
-            .map_or_else(tokio::time::Instant::now, |read| read.turn_start);
-        let turn_timeout = crate::services::discord::turn_watchdog_timeout();
-        let turn_idle_timeout = crate::services::discord::turn_idle_timeout();
         let mut last_status_update = tokio::time::Instant::now();
         let mut last_output_at = continuation
             .as_ref()
@@ -581,17 +575,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
         let mut streaming_suppressed_by_missing_inflight = false;
         let mut fresh_ready_for_input_idle = false;
 
-        // #3419 B: read while ACTIVE — a real byte within the IDLE window
-        // (`last_output_at` advances only on a non-empty read) under a generous
-        // cap; shared predicate with the finalize gate (single authority).
-        while !found_result
-            && watcher_turn_still_active(
-                last_output_at.elapsed(),
-                turn_idle_timeout,
-                turn_start.elapsed(),
-                turn_timeout,
-            )
-        {
+        while !found_result {
             // Loop can wait minutes for a long tool/test; keep the registry heartbeat
             // fresh so the sweeper does not cancel relay on a healthy streaming watcher.
             last_heartbeat_ts_ms.store(
@@ -1053,9 +1037,6 @@ pub(super) async fn collect_turn_stream_until_terminal(
             }
         }
         active_read_state = Some(ActiveReadState {
-            turn_start,
-            turn_timeout,
-            turn_idle_timeout,
             last_output_at,
             tmux_death_observed,
             ready_for_input_failure_notice,

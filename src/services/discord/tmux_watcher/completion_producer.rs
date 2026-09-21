@@ -16,7 +16,7 @@ pub(in crate::services::discord) async fn release_restored_watcher_active_turn_b
 
     // #4106 review-fix (codex): snapshot the channel role override THIS turn owns
     // BEFORE any await. The removal below runs after awaits (mailbox finish +
-    // clear_watchdog_deadline_override), during which a fresh same-channel
+    // queue-parent handoff), during which a fresh same-channel
     // counter-model follow-up can insert its OWN override (intake_turn.rs) even
     // before it claims the slot. A bare channel-keyed remove would clobber that;
     // remove_owned_role_override only drops the value we still own.
@@ -66,7 +66,7 @@ pub(in crate::services::discord) async fn release_restored_watcher_active_turn_b
     token.cancelled.store(true, Ordering::Relaxed);
     crate::services::discord::saturating_decrement_global_active(shared);
 
-    crate::services::discord::turn_finalizer::cleanup::clear_watchdog_and_kick_thread_parents_after_turn_release(
+    crate::services::discord::turn_finalizer::cleanup::kick_thread_parents_after_turn_release(
         shared, provider, channel_id,
     )
     .await;

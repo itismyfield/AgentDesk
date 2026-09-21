@@ -295,10 +295,7 @@ pub(in crate::services::discord) async fn do_finalize_with_release(
         // (D) trailing terminal side-effects that today follow
         //     `mailbox_finish_turn` inline at the bridge/watcher call-sites.
         //     Moved here so they cannot diverge between the routed paths.
-        super::cleanup::clear_watchdog_and_kick_thread_parents_after_turn_release(
-            shared, &provider, channel_id,
-        )
-        .await;
+        super::cleanup::kick_thread_parents_after_turn_release(shared, &provider, channel_id).await;
 
         let voice_deferred_enqueued = if ctx.drain_voice {
             shared

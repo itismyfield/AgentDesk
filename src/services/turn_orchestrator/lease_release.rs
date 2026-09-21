@@ -4,10 +4,7 @@ use std::sync::Arc;
 
 use poise::serenity_prelude::ChannelId;
 
-use super::{
-    ActiveTurnKind, ChannelMailboxState, pause_inbound_stall_for_turn,
-    reset_watchdog_extension_state,
-};
+use super::{ActiveTurnKind, ChannelMailboxState, pause_inbound_stall_for_turn};
 use crate::services::provider::{CancelToken, ProviderKind};
 
 /// Rendering only, never the discriminator: `ProviderKind::Unsupported::as_str`
@@ -45,7 +42,6 @@ pub(super) fn release_active_turn_anchor(
     state.recovery_started_at = None;
     state.turn_started_at = None;
     state.turn_started_instant = None;
-    reset_watchdog_extension_state(state);
     removed_token
 }
 
@@ -449,7 +445,6 @@ mod lease_release_identity_tests {
             assert!(state.turn_started_at.is_none(), "{label}");
             assert!(state.turn_started_instant.is_none(), "{label}");
             assert!(state.recovery_started_at.is_none(), "{label}");
-            assert!(state.watchdog_deadline_override.is_none(), "{label}");
         }
     }
 }

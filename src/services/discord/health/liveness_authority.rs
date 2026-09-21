@@ -7,8 +7,7 @@ use poise::serenity_prelude::ChannelId;
 
 use super::snapshot::WatcherStateSnapshot;
 use super::stall_liveness::{
-    self, STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS, STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
-    STALL_WATCHDOG_TOOL_PHASE_FRESHNESS_SECS,
+    self, STALL_WATCHDOG_POSITIVE_LIVENESS_SECS, STALL_WATCHDOG_TOOL_PHASE_FRESHNESS_SECS,
 };
 use crate::services::discord::inflight::InflightTurnState;
 use crate::services::provider::ProviderKind;
@@ -110,7 +109,6 @@ pub(in crate::services::discord) enum ProducerLivenessClass {
     ProvenAlive,
     NoEvidence,
     TransientUnknown,
-    AbsoluteBackstop,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -187,7 +185,6 @@ pub(in crate::services::discord) enum VouchDenial {
     Stale,
     IdentityMismatch,
     NoEvidence,
-    PastAbsoluteCeiling,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -398,10 +395,7 @@ fn publish_from_tick(
         .as_deref()
         .and_then(crate::services::discord::inflight::parse_started_at_unix)
         .map(|started| now_unix_secs.saturating_sub(started).max(0) as u64);
-    let class = if raw_turn_age_secs.is_some_and(|age| age >= STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS)
-    {
-        ProducerLivenessClass::AbsoluteBackstop
-    } else if reasons.proves_alive() {
+    let class = if reasons.proves_alive() {
         ProducerLivenessClass::ProvenAlive
     } else if capture.transient_unknown {
         ProducerLivenessClass::TransientUnknown
@@ -462,17 +456,11 @@ pub(in crate::services::discord) fn vouch_for_inflight(
             reason: VouchDenial::IdentityMismatch,
         };
     }
-    let Some(raw_turn_age_secs) = verdict.raw_turn_age_secs else {
+    let Some(_) = verdict.raw_turn_age_secs else {
         return LivenessVouch::NotVouched {
             reason: VouchDenial::NoEvidence,
         };
     };
-    if raw_turn_age_secs.saturating_add(published_age_secs) >= STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS
-    {
-        return LivenessVouch::NotVouched {
-            reason: VouchDenial::PastAbsoluteCeiling,
-        };
-    }
     match verdict.class {
         ProducerLivenessClass::ProvenAlive => LivenessVouch::Vouched {
             reasons_csv: verdict.reasons.csv(),
@@ -492,9 +480,6 @@ pub(in crate::services::discord) fn vouch_for_inflight(
         }
         ProducerLivenessClass::NoEvidence => LivenessVouch::NotVouched {
             reason: VouchDenial::NoEvidence,
-        },
-        ProducerLivenessClass::AbsoluteBackstop => LivenessVouch::NotVouched {
-            reason: VouchDenial::PastAbsoluteCeiling,
         },
     }
 }
@@ -798,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn vouch_enforces_ttl_identity_and_absolute_ceiling() {
+    fn vouch_enforces_freshness_and_identity_without_turn_age_cap() {
         let key = binding(461_503);
         let store_key = (key.provider.clone(), key.channel_id);
         let base = ProducerLivenessVerdict {
@@ -855,8 +840,8 @@ mod tests {
             store_key,
             ProducerLivenessVerdict {
                 published_at_mono_secs: 200,
-                raw_turn_age_secs: Some(STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS),
-                ..base
+                raw_turn_age_secs: Some(8 * 3600),
+                ..base.clone()
             },
         );
         assert_eq!(
@@ -866,8 +851,9 @@ mod tests {
                 &inflight,
                 200
             ),
-            LivenessVouch::NotVouched {
-                reason: VouchDenial::PastAbsoluteCeiling
+            LivenessVouch::Vouched {
+                reasons_csv: base.reasons.csv(),
+                published_age_secs: 0
             }
         );
 
@@ -878,7 +864,7 @@ mod tests {
             store_key,
             ProducerLivenessVerdict {
                 published_at_mono_secs: 300,
-                raw_turn_age_secs: Some(STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS - 1),
+                raw_turn_age_secs: Some((8 * 3600) - 1),
                 ..prior_verdict
             },
         );
@@ -889,10 +875,11 @@ mod tests {
                 &inflight,
                 301
             ),
-            LivenessVouch::NotVouched {
-                reason: VouchDenial::PastAbsoluteCeiling
+            LivenessVouch::Vouched {
+                reasons_csv: base.reasons.csv(),
+                published_age_secs: 1
             },
-            "a verdict published just before the ceiling must expire when its monotonic age crosses it"
+            "fresh evidence remains valid regardless of total turn age"
         );
 
         let store_key = (key.provider.clone(), key.channel_id);

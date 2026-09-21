@@ -29,6 +29,14 @@ model, system-prompt envelope, tool policy and cancellation identity are preserv
 Restricted tool policies and remote execution remain explicitly unsupported.
 No credential location or permission capability is inferred.
 
+Accepted StreamJson turns remain active until process exit, stream failure, or
+explicit cancellation; silence only limits the initial startup handshake.
+AgentDesk does not pass `--print-timeout` to Antigravity. Unlimited headless turns
+require Antigravity CLI 1.2.6 or newer, whose
+[versioned release notes](https://github.com/google-antigravity/antigravity-cli/releases/tag/1.2.6)
+changed the CLI default from five minutes to unlimited. Older CLI versions retain
+their own default timeout.
+
 Regression coverage: `cargo test --lib stream_json_cli`,
 `cargo test --lib services::provider::`, and
 `cargo test --lib agy_discord_dispatch`.

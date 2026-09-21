@@ -984,18 +984,9 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.high_risk_recovery == 'true'",
     "runs_on" => "ubuntu-latest",
-    # #5034 re-pins after adding the attachment-delivery and catch-up
-    # operational-alert targets to the path-filtered required high-risk lane.
-    # #5170 re-pins after wiring the transition-busy requeue oracles, which the
-    # lib inventory manifest counted while no curated filter executed them.
-    # #5181 re-pins after widening that lane from the two named #5170 oracles to
-    # the whole `services::discord::queue_io::` module, now that the module's
-    # pre-existing #4270/#4893 failures are fixed rather than filtered around.
-    # #5147 re-pins after adding the hang-forensics and health-diagnostics
-    # test steps to this lane. Steps were only added -- none removed,
-    # reordered or given a relaxed env -- and the value is recomputed from
-    # the workflow with this script's own canonical_yaml, never copied.
-    "job_sha256" => "131ff4835b5b0811ceeb28a2a1b11efbf0d9f1dc6bf7ad87ab62da8d1dcd02bf",
+    # Pin the accepted-turn regressions and removal of the retired timeout test.
+    # All remaining commands and execution settings retain their reviewed values.
+    "job_sha256" => "bc9b37fe902f19c4d5100391da9c625ea69d32beadf415146798c5987af7d80b",
     "require_debug_env" => false,
     "cargo_steps" => {
       "Observe curated lane selections" => {

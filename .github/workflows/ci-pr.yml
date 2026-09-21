@@ -120,6 +120,17 @@ jobs:
               - 'src/db/**'
               - 'src/dispatch/**'
               - 'src/engine/**'
+              - 'src/services/codex_tmux_wrapper.rs'
+              - 'src/services/gemini.rs'
+              - 'src/services/qwen.rs'
+              - 'src/services/qwen_tmux_wrapper.rs'
+              - 'src/services/opencode.rs'
+              - 'src/services/provider.rs'
+              - 'src/services/provider_runtime.rs'
+              - 'src/services/provider/**'
+              - 'src/services/process.rs'
+              - 'src/services/process/**'
+              - 'src/services/stream_json_cli/**'
               - 'src/high_risk_recovery.rs'
               - 'src/kanban/**'
               - 'src/reconcile.rs'
@@ -1001,9 +1012,22 @@ jobs:
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::catch_up::classification_order_tests::catch_up_human_visible_marker_recovers_and_strips_but_bot_marker_is_rejected -- --exact --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_gate::gate::tests -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib server::outbox_actionable_delivery::tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::watchdog::timeout_notice_tests -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::message_outbox::dedupe_key_tests -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_gate::live_intake_preserve_wiring_tests::one_admission_guard_precedes_all_soft_intervention_entrypoints -- --exact --test-threads=1
+
+      - name: Accepted turn lifetime regressions
+        run: |
+          env -u AGENTDESK_ROOT_DIR cargo test --lib accepted_turn_tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib child_exit_tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::process::stream_child::stream_queue::tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::process::process_group_tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::process::simple_cancel_watcher_tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::provider::cancel_token_cleanup::executor::tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib accepted_quiet_turn_survives_virtual_day -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib accepted_stream_runs_past_virtual_day_until_real_eof -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib productive_turns_older_than_four_and_six_hours_defer_cleanup -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib quiet_native_turn_resumes_after_virtual_day -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::provider::cancel_watchdog::tests -- --test-threads=1
 
       # #5003: this production-path E2E previously ran only in main's broad
       # non-PG lane, so test-only fixes could merge without executing it on PRs.
@@ -1594,7 +1618,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=abf881264b8ee119f6e654af0f392c5b9485a2b18512562a639dcda81ef46e05
+          expected=53e57a6749cd5ff0cb422320b9db1d2d7b3b01028d863428c9280fed968db2b7
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -1752,7 +1776,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=abf881264b8ee119f6e654af0f392c5b9485a2b18512562a639dcda81ef46e05
+          expected=53e57a6749cd5ff0cb422320b9db1d2d7b3b01028d863428c9280fed968db2b7
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

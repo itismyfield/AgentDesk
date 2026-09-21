@@ -1648,26 +1648,6 @@ fn consume_sse(
     })
 }
 
-/// Whether a line successfully read from the SSE socket proves the transport is
-/// still alive and must therefore refresh the `SSE_READ_TIMEOUT` idle deadline
-/// in [`consume_sse_inner`].
-///
-/// Intentionally `true` for EVERY line — keep-alive comments (`:` / `event:`),
-/// `data:` chunks, the blank dispatch delimiter, and frames addressed to OTHER
-/// co-resident sessions on the shared `/global/event` stream. The warm pool
-/// multiplexes many sessions over one `opencode serve` SSE stream, so liveness
-/// is a property of the TRANSPORT, not of this session's dispatched events.
-/// Tying the refresh to `process_sse_event` returning `Some(_)` (which is `None`
-/// for keep-alives and any non-matching `sessionID`) would let a long-running
-/// turn that legitimately emits no data for >120s be falsely declared idle and
-/// `abort_session`'d — killing the live server-side turn — whenever co-resident
-/// traffic keeps the socket busy. Restores the pre-warm-pool transport-idle
-/// semantics; guarded by `sse_idle_timer_refreshes_on_all_transport_lines`.
-#[inline]
-fn sse_line_is_transport_liveness(_line: &str) -> bool {
-    true
-}
-
 fn consume_sse_inner(
     reader: BufReader<Box<dyn std::io::Read + Send>>,
     session_id: &str,
@@ -1679,20 +1659,11 @@ fn consume_sse_inner(
     let mut state = SseMessageState::default();
     let mut current_data = String::new();
     let mut terminal_seen = false;
-    let mut last_event = Instant::now();
 
     for line_result in reader.lines() {
         if is_cancelled(cancel_token) {
             abort_session(base_url, auth, session_id);
             return Err("OpenCode request cancelled".to_string());
-        }
-
-        if Instant::now().duration_since(last_event) > SSE_READ_TIMEOUT {
-            abort_session(base_url, auth, session_id);
-            return Err(format!(
-                "OpenCode SSE stream idle for >{}s",
-                SSE_READ_TIMEOUT.as_secs()
-            ));
         }
 
         let line = match line_result {
@@ -1716,14 +1687,6 @@ fn consume_sse_inner(
                 return Err(format!("OpenCode SSE stream read error: {e}"));
             }
         };
-
-        // Transport-liveness: any line we manage to read refreshes the idle
-        // deadline, BEFORE the keep-alive / data / dispatch branches below.
-        // (See `sse_line_is_transport_liveness` for why this must not be gated
-        // on this session's dispatched events in the shared warm-pool stream.)
-        if sse_line_is_transport_liveness(&line) {
-            last_event = Instant::now();
-        }
 
         // Keep-alive comment
         if line.starts_with(':') || line.starts_with("event:") {
@@ -3156,30 +3119,6 @@ mod tests {
         }
     }
 
-    /// Regression guard for the warm-pool SSE idle-timeout: the 120s
-    /// `SSE_READ_TIMEOUT` deadline is a TRANSPORT-idle guard, so every line read
-    /// from the shared `/global/event` stream must refresh it — keep-alives,
-    /// `event:` framing, `data:` chunks, the blank dispatch delimiter, and
-    /// frames for OTHER co-resident sessions. Gating the refresh on this
-    /// session's dispatched events (the bug this fix reverts) false-aborted
-    /// long-running turns that emit no data for >120s while co-resident traffic
-    /// kept the socket alive.
-    #[test]
-    fn sse_idle_timer_refreshes_on_all_transport_lines() {
-        for line in [
-            ":heartbeat",
-            "event: message.updated",
-            "data: {\"type\":\"message.updated\",\"properties\":{\"sessionID\":\"other-session\"}}",
-            "",
-            "data: {\"type\":\"session.idle\"}",
-        ] {
-            assert!(
-                sse_line_is_transport_liveness(line),
-                "line must count as transport liveness for the SSE idle timer: {line:?}"
-            );
-        }
-    }
-
     /// [TEST-006] empty pool is cold-start safe: returns empty, no panic.
     #[test]
     fn warm_server_snapshots_empty_pool_is_cold_start_safe() {
@@ -3231,5 +3170,52 @@ mod tests {
             10_000,
             true
         ));
+    }
+}
+
+#[cfg(test)]
+mod accepted_turn_tests {
+    use super::*;
+    #[test]
+    fn successful_sse_read_reaches_terminal_without_elapsed_gate() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let input = br#":keepalive
+data: {"type":"session.idle","properties":{"sessionID":"active"}}
+
+"#;
+        let reader =
+            BufReader::new(Box::new(std::io::Cursor::new(input)) as Box<dyn std::io::Read + Send>);
+        assert!(consume_sse_inner(reader, "active", &tx, None, "http://127.0.0.1:9", "").is_ok());
+        assert!(
+            rx.try_iter()
+                .any(|event| matches!(event, StreamMessage::Done { .. }))
+        );
+    }
+    #[test]
+    fn sse_actual_read_error_and_manual_cancel_still_abort() {
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("failed transport"))
+            }
+        }
+        let (tx, _) = std::sync::mpsc::channel();
+        for cancelled in [false, true] {
+            let token = CancelToken::new();
+            if cancelled {
+                token.publish_cancel("manual_cancel");
+            }
+            let reader = BufReader::new(Box::new(Broken) as Box<dyn std::io::Read + Send>);
+            let error = consume_sse_inner(
+                reader,
+                "active",
+                &tx,
+                Some(&token),
+                "http://127.0.0.1:9",
+                "",
+            )
+            .unwrap_err();
+            assert!(error.contains(if cancelled { "cancelled" } else { "read error" }));
+        }
     }
 }

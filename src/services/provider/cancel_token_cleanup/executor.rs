@@ -57,11 +57,6 @@ impl CancelToken {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
-        let child = self
-            .child_pid
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
         let authorization = authority::authorize(binding.as_ref());
 
         match authorization {
@@ -87,7 +82,6 @@ impl CancelToken {
             KillAuthorization::Current(guard) => self.request_cleanup_authorized(
                 request,
                 binding,
-                child,
                 KillAuthorizationState::Current,
                 Some(guard),
             ),
@@ -99,7 +93,6 @@ impl CancelToken {
                 self.request_cleanup_authorized(
                     request,
                     binding,
-                    child,
                     KillAuthorizationState::Unregistered,
                     None,
                 )
@@ -111,7 +104,6 @@ impl CancelToken {
         &self,
         request: CleanupRequest,
         binding: Option<TmuxBinding>,
-        child: Option<CapturedProcess>,
         authorization: KillAuthorizationState,
         guard: Option<SessionKillGuard>,
     ) -> CleanupOutcome {
@@ -129,6 +121,11 @@ impl CancelToken {
             request.intent,
             TmuxCleanupIntent::PidOnly | TmuxCleanupIntent::CleanupSession
         ) {
+            // Detaching a child waits for any PID dispatch before its owner reaps it.
+            let child = self
+                .child_pid
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             if let Some(target) = child.as_ref().or(request.hard_stop_target.as_ref()) {
                 // A claim is consumed only when this request actually dispatches its
                 // PID primitive. In particular, an early watchdog with no target must
@@ -223,6 +220,11 @@ impl CancelToken {
         #[cfg(test)]
         {
             let _ = target;
+            let barriers = PID_DISPATCH_BARRIERS.lock().unwrap().clone();
+            if let Some((entered, release)) = barriers {
+                entered.wait();
+                release.wait();
+            }
             PID_KILL_DISPATCHES.fetch_add(1, Ordering::Relaxed);
             return PID_KILL_SUCCEEDS.load(Ordering::Relaxed);
         }
@@ -336,6 +338,14 @@ pub(crate) fn set_pid_kill_succeeds_for_test(succeeds: bool) {
 }
 
 #[cfg(test)]
+static PID_DISPATCH_BARRIERS: std::sync::Mutex<
+    Option<(
+        std::sync::Arc<std::sync::Barrier>,
+        std::sync::Arc<std::sync::Barrier>,
+    )>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
 pub(crate) fn with_executor_dispatch_seam(test: impl FnOnce()) {
     use std::sync::{Mutex, OnceLock};
 
@@ -376,6 +386,82 @@ mod tests {
             name,
             token.claude_interrupt_generation,
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_detach_and_reap_wait_for_inflight_pid_dispatch() {
+        with_seam(|| {
+            use crate::services::process::{
+                configure_child_process_group, stream_child::StreamChild,
+            };
+            use std::sync::{Arc, Barrier, mpsc};
+            let token = Arc::new(CancelToken::new());
+            let mut command = std::process::Command::new("/bin/sh");
+            command.args(["-c", "exit 7"]);
+            configure_child_process_group(&mut command);
+            let mut child = command.spawn().unwrap();
+            let mut exited: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe {
+                    libc::waitid(
+                        libc::P_PID,
+                        child.id() as libc::id_t,
+                        &mut exited,
+                        libc::WEXITED | libc::WNOWAIT,
+                    )
+                },
+                0
+            );
+            token.store_child_pid_without_identity_for_test(child.id());
+            let mut lifecycle = StreamChild::new(&child, Some(token.clone()), None);
+            let entered = Arc::new(Barrier::new(2));
+            let release = Arc::new(Barrier::new(2));
+            *PID_DISPATCH_BARRIERS.lock().unwrap() = Some((entered.clone(), release.clone()));
+            let dispatch_token = token.clone();
+            let dispatch = std::thread::spawn(move || {
+                dispatch_token.request_cleanup(request(TmuxCleanupIntent::PidOnly))
+            });
+            entered.wait();
+            let held = token.child_pid.try_lock().is_err();
+            let (started_tx, started_rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
+            let reap = std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                let status = lifecycle.wait(&mut child).unwrap();
+                done_tx.send(status).unwrap();
+            });
+            started_rx.recv().unwrap();
+            let completed_while_dispatch_blocked = done_rx.try_recv().ok();
+            release.wait();
+            assert!(dispatch.join().unwrap().pid_killed);
+            reap.join().unwrap();
+            *PID_DISPATCH_BARRIERS.lock().unwrap() = None;
+            assert!(held, "PID dispatch must retain the registration fence");
+            assert!(completed_while_dispatch_blocked.is_none());
+            assert_eq!(done_rx.recv().unwrap().code(), Some(7));
+            assert_eq!(token.child_pid_value(), None);
+            token.pid_kill_claim.store(0, Ordering::Release);
+            let before = PID_KILL_DISPATCHES.load(Ordering::Relaxed);
+            token.request_cleanup(request(TmuxCleanupIntent::PidOnly));
+            assert_eq!(
+                PID_KILL_DISPATCHES.load(Ordering::Relaxed),
+                before,
+                "late cancel must not signal a reaped child"
+            );
+        });
+    }
+
+    #[test]
+    fn old_child_detach_preserves_successor_registration() {
+        with_seam(|| {
+            let token = CancelToken::new();
+            token.store_child_pid_without_identity_for_test(42);
+            token.clear_child_pid_if_matches(41);
+            assert_eq!(token.child_pid_value(), Some(42));
+            token.clear_child_pid_if_matches(42);
+            assert_eq!(token.child_pid_value(), None);
+        });
     }
 
     #[test]

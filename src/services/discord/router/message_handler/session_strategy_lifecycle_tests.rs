@@ -270,57 +270,6 @@ fn cli_just_spawned_for_emit_handles_none_and_blank_session_names() {
     assert!(cli_just_spawned_for_emit(Some("   ")));
 }
 
-#[test]
-fn watchdog_timeout_cancel_request_uses_canonical_cancel_source() {
-    let channel_id = serenity::ChannelId::new(1479671301387059200);
-    let mut inflight = InflightTurnState::new(
-        ProviderKind::Codex,
-        channel_id.get(),
-        Some("adk-cdx".to_string()),
-        343742347365974026,
-        1501205715878936748,
-        1501205715878936749,
-        "work on issue".to_string(),
-        Some("provider-session".to_string()),
-        Some("AgentDesk-codex-adk-cdx".to_string()),
-        Some("/tmp/agentdesk-output.jsonl".to_string()),
-        None,
-        0,
-    );
-    inflight.dispatch_id = Some("dispatch-1748".to_string());
-    inflight.session_key = Some("mac-mini:AgentDesk-codex-adk-cdx".to_string());
-
-    let request = watchdog_timeout_cancel_request(
-        &ProviderKind::Codex,
-        channel_id,
-        Some(&inflight),
-        Some(2),
-        true,
-    );
-
-    assert_eq!(request.reason, WATCHDOG_TIMEOUT_REASON);
-    assert_eq!(request.surface, WATCHDOG_TIMEOUT_CANCEL_SOURCE);
-    assert_eq!(
-        request.lifecycle_path,
-        "mailbox_cancel_active_turn.watchdog_timeout"
-    );
-    assert_eq!(request.queue_depth, Some(2));
-    assert!(request.queue_preserved);
-    assert!(request.termination_recorded);
-    assert_eq!(
-        request.correlation.dispatch_id.as_deref(),
-        Some("dispatch-1748")
-    );
-    assert_eq!(
-        request.correlation.session_key.as_deref(),
-        Some("mac-mini:AgentDesk-codex-adk-cdx")
-    );
-    assert_eq!(
-        request.correlation.turn_id.as_deref(),
-        Some("discord:1479671301387059200:1501205715878936748")
-    );
-}
-
 #[cfg(unix)]
 #[test]
 fn claude_tui_inflight_diagnostic_state_uses_persisted_timestamp_format() {

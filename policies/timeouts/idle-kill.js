@@ -22,8 +22,6 @@ module.exports = function attachIdleKill(timeouts, helpers) {
   var resolveSessionAgentContext = helpers.resolveSessionAgentContext;
   var backfillMissingSessionAgentIds = helpers.backfillMissingSessionAgentIds;
   var findRecentInflightForSession = helpers.findRecentInflightForSession;
-  var inspectInflightProgress = helpers.inspectInflightProgress;
-  var requestTurnWatchdogExtension = helpers.requestTurnWatchdogExtension;
   var _queuePMDecision = helpers._queuePMDecision;
   var _flushPMDecisions = helpers._flushPMDecisions;
 

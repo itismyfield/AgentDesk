@@ -14,29 +14,8 @@ const ANNOUNCEMENT_META_TTL: Duration = Duration::from_secs(30);
 /// process-local TTL because intake may be queued to another process or sit
 /// behind an active turn before worker execution.
 pub(crate) const DURABLE_ANNOUNCEMENT_META_TTL_SECS: i64 = 24 * 60 * 60;
-/// Voice-background handoff markers can outlive the short announce TTL because
-/// the background turn they trigger may run for minutes — or, with watchdog
-/// extensions, hours — before the terminal-delivery callback consults the
-/// marker.
-///
-/// 24h is generous: `turn_orchestrator::extend_active_watchdog_deadline` does
-/// not impose a practical cap on the number of extensions
-/// (`count_limit = u32::MAX`, `total_secs_limit = u64::MAX`), so a productive
-/// long turn can legitimately exceed the 1-hour default watchdog. Keeping
-/// markers alive for a full day prevents the spoken-summary path from
-/// silently dropping completions on extended turns (Codex #2274 review
-/// finding #2). Anything older than 24h almost certainly represents a
-/// turn that crashed or never reached terminal delivery.
-///
-/// The in-memory TTL is refreshed via `refresh_handoff_deadline` whenever the
-/// watchdog deadline is extended (#2352); the durable TTL is refreshed via
-/// `refresh_handoff_ttl_durable`, which resets the PG `expires_at` column.
+/// Keep voice routing metadata available through long background turns.
 const HANDOFF_META_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-
-/// Durable TTL for handoff rows, in seconds. Matches `HANDOFF_META_TTL` and
-/// the `expires_at` default expression in migration 0064. Refreshed by
-/// `refresh_handoff_ttl_durable` when the watchdog deadline is extended so
-/// long-running turns do not lose their routing marker (#2352).
 pub(crate) const DURABLE_HANDOFF_META_TTL_SECS: i64 = 24 * 60 * 60;
 const DURABLE_HANDOFF_PENDING_PREFIX: &str = "pending:";
 

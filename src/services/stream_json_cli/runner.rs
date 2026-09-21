@@ -1,5 +1,9 @@
 //! Provider-neutral process lifecycle for StreamJson CLIs.
 
+use crate::services::process::stream_child::stream_queue;
+
+use crate::services::process::stream_child::{EXIT_POLL, StreamChild, finish_reader, spawn_reader};
+
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -8,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::platform::{BinaryResolution, apply_binary_resolution};
-use crate::services::process::{configure_child_process_group, kill_child_tree};
+use crate::services::process::configure_child_process_group;
 use crate::services::provider::{cancel_requested, register_child_pid, spawn_cancel_watchdog};
 
 use super::codec::StreamJsonCodec;
@@ -36,6 +40,16 @@ pub fn run_prepared(
     no_output_timeout: Duration,
     cancel: Option<std::sync::Arc<crate::services::provider::CancelToken>>,
 ) -> Result<(), String> {
+    run_prepared_with_clock(prepared, sender, no_output_timeout, cancel, Instant::now)
+}
+
+fn run_prepared_with_clock(
+    prepared: PreparedCommand,
+    sender: Sender<StreamMessage>,
+    no_output_timeout: Duration,
+    cancel: Option<std::sync::Arc<crate::services::provider::CancelToken>>,
+    mut now: impl FnMut() -> Instant,
+) -> Result<(), String> {
     tracing::info!(
         executable = %prepared.executable.display(),
         args = ?prepared.redacted_args,
@@ -62,9 +76,10 @@ pub fn run_prepared(
         .map_err(|error| format!("Failed to start StreamJson CLI: {error}"))?;
 
     register_child_pid(cancel.as_deref(), child.id());
-    let _watchdog = spawn_cancel_watchdog(cancel.clone(), "stream-json-cli");
+    let watchdog = spawn_cancel_watchdog(cancel.clone(), "stream-json-cli");
+    let mut lifecycle = StreamChild::new(&child, cancel.clone(), watchdog);
     if cancel_requested(cancel.as_deref()) {
-        kill_child_tree(&mut child);
+        lifecycle.terminate(&mut child);
         return Ok(());
     }
 
@@ -76,7 +91,7 @@ pub fn run_prepared(
         .stderr
         .take()
         .ok_or_else(|| "Failed to capture StreamJson stderr".to_string())?;
-    let (line_tx, line_rx) = mpsc::channel::<Option<String>>();
+    let (line_tx, line_rx) = stream_queue::channel::<Option<String>>();
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
@@ -91,36 +106,33 @@ pub fn run_prepared(
         }
         let _ = line_tx.send(None);
     });
-    let stderr_handle = std::thread::spawn(move || collect_stderr(stderr));
+    let stderr_handle = spawn_reader(move || collect_stderr(stderr));
 
     let mut codec = prepared.codec;
-    let poll = Duration::from_secs(5);
-    let (startup, idle) = no_output_watchdogs(no_output_timeout);
-    let started_at = Instant::now();
-    let mut last_progress_at = started_at;
+    let poll = EXIT_POLL;
+    let startup = startup_output_timeout(no_output_timeout);
+    let started_at = now();
     let mut saw_progress = false;
     let mut stdout_line_count = 0_u64;
 
     loop {
         if cancel_requested(cancel.as_deref()) {
-            kill_child_tree(&mut child);
+            lifecycle.terminate(&mut child);
             let _ = child.wait();
-            let _ = stderr_handle.join();
+            let _ = finish_reader(&stderr_handle);
             return Ok(());
         }
-        let now = Instant::now();
-        let (elapsed, limit) = if saw_progress {
-            (now.duration_since(last_progress_at), idle)
-        } else {
-            (now.duration_since(started_at), startup)
-        };
-        if limit.is_some_and(|limit| elapsed >= limit) {
-            kill_child_tree(&mut child);
+        lifecycle
+            .observe_and_seal(&mut child, &line_rx)
+            .map_err(|e| e.to_string())?;
+        let now = now();
+        if !saw_progress && now.duration_since(started_at) >= startup {
+            lifecycle.terminate(&mut child);
             let _ = child.wait();
-            let _ = stderr_handle.join();
+            let _ = finish_reader(&stderr_handle);
             return Err(format!(
                 "[{NO_OUTPUT_ERROR_MARKER}] StreamJson CLI produced no output for {} seconds",
-                limit.expect("checked above").as_secs()
+                startup.as_secs()
             ));
         }
         match line_rx.recv_timeout(poll) {
@@ -129,9 +141,9 @@ pub fn run_prepared(
                 let messages = match codec.push_stdout_line(&line) {
                     Ok(messages) => messages,
                     Err(error) => {
-                        kill_child_tree(&mut child);
+                        lifecycle.terminate(&mut child);
                         let _ = child.wait();
-                        let _ = stderr_handle.join();
+                        let _ = finish_reader(&stderr_handle);
                         return Err(mark_no_output_error(saw_progress, error));
                     }
                 };
@@ -141,13 +153,12 @@ pub fn run_prepared(
                 // polling interval.
                 if !line.trim().is_empty() {
                     saw_progress = true;
-                    last_progress_at = Instant::now();
                 }
                 for message in messages {
                     if sender.send(message).is_err() {
-                        kill_child_tree(&mut child);
+                        lifecycle.terminate(&mut child);
                         let _ = child.wait();
-                        let _ = stderr_handle.join();
+                        let _ = finish_reader(&stderr_handle);
                         return Ok(());
                     }
                 }
@@ -157,10 +168,10 @@ pub fn run_prepared(
         }
     }
 
-    let status = child
-        .wait()
+    let status = lifecycle
+        .wait(&mut child)
         .map_err(|error| format!("Failed waiting for StreamJson CLI: {error}"))?;
-    let stderr = stderr_handle.join().unwrap_or_default();
+    let stderr = finish_reader(&stderr_handle);
     if cancel_requested(cancel.as_deref()) {
         return Ok(());
     }
@@ -225,28 +236,63 @@ fn collect_stderr(mut reader: impl Read) -> String {
     String::from_utf8_lossy(&captured).into_owned()
 }
 
-/// `Duration::ZERO` means the caller permits an unbounded *turn* duration. It
-/// must not disable stream liveness detection: an outputless process has made
-/// no progress and cannot be distinguished from a poisoned `--resume` token.
-///
-/// The longer values for that mode allow genuinely long Grok turns while still
-/// recovering a CLI that never emits its initial streaming event.
-fn no_output_watchdogs(timeout: Duration) -> (Option<Duration>, Option<Duration>) {
-    if timeout.is_zero() {
-        (
-            Some(Duration::from_secs(90)),
-            Some(Duration::from_secs(300)),
-        )
-    } else {
-        (
-            Some(Duration::from_secs(60)),
-            Some(Duration::from_secs(120)),
-        )
-    }
+fn startup_output_timeout(timeout: Duration) -> Duration {
+    Duration::from_secs(if timeout.is_zero() { 90 } else { 60 })
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn accepted_stream_runs_past_virtual_day_until_real_eof() {
+        struct Codec(usize);
+        impl StreamJsonCodec for Codec {
+            fn push_stdout_line(&mut self, _: &str) -> Result<Vec<StreamMessage>, String> {
+                self.0 += 1;
+                Ok(vec![])
+            }
+            fn finish(&mut self, code: Option<i32>, _: &str) -> Result<Vec<StreamMessage>, String> {
+                assert_eq!(code, Some(0));
+                assert_eq!(
+                    self.0, 2,
+                    "both accepted stream events must reach the codec"
+                );
+                Ok(vec![])
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let prepared = PreparedCommand {
+            executable: "/bin/sh".into(),
+            resolution: BinaryResolution {
+                requested_binary: "sh".into(),
+                resolved_path: Some("/bin/sh".into()),
+                canonical_path: None,
+                source: None,
+                attempts: vec![],
+                failure_kind: None,
+                exec_path: None,
+            },
+            args: vec!["-c".into(), "printf 'accepted\nfinished\n'".into()],
+            redacted_args: vec![],
+            current_dir: dir.path().into(),
+            env: vec![],
+            unset_env: vec![],
+            codec: Box::new(Codec(0)),
+        };
+        let (tx, _rx) = mpsc::channel();
+        let start = Instant::now();
+        let mut ticks = 0;
+        let result = run_prepared_with_clock(prepared, tx, Duration::ZERO, None, || {
+            ticks += 1;
+            start + Duration::from_secs(if ticks > 2 { 24 * 3600 } else { 0 })
+        });
+        assert!(
+            result.is_ok(),
+            "accepted provider was terminated: {result:?}"
+        );
+        assert!(ticks >= 4);
+    }
+
     use super::*;
 
     #[test]
@@ -268,24 +314,18 @@ mod tests {
     }
 
     #[test]
-    fn zero_timeout_keeps_liveness_watchdogs_for_unbounded_turns() {
+    fn zero_timeout_preserves_startup_handshake_budget() {
         assert_eq!(
-            no_output_watchdogs(Duration::ZERO),
-            (
-                Some(Duration::from_secs(90)),
-                Some(Duration::from_secs(300))
-            )
+            startup_output_timeout(Duration::ZERO),
+            Duration::from_secs(90)
         );
     }
 
     #[test]
-    fn nonzero_no_output_timeout_keeps_default_watchdogs() {
+    fn nonzero_timeout_preserves_startup_handshake_budget() {
         assert_eq!(
-            no_output_watchdogs(Duration::from_secs(1)),
-            (
-                Some(Duration::from_secs(60)),
-                Some(Duration::from_secs(120))
-            )
+            startup_output_timeout(Duration::from_secs(1)),
+            Duration::from_secs(60)
         );
     }
 
@@ -305,5 +345,84 @@ mod tests {
             mark_no_output_error(true, "provider exited".into()),
             "provider exited"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod child_exit_tests {
+    use super::*;
+    use crate::services::process::stream_child::test_fixture::{CASES, ProviderFixture};
+    #[test]
+    fn actual_provider_exit_drains_terminal_without_waiting_for_descendant_fds() {
+        run_cases(&CASES);
+    }
+
+    #[test]
+    fn published_terminal_survives_delayed_consumer_after_actual_exit() {
+        run_cases(&["delayed_normal"]);
+    }
+
+    fn run_cases(cases: &[&str]) {
+        for &mode in cases {
+            let fixture = ProviderFixture::new("grok", mode);
+            let normal = matches!(mode, "normal" | "quiet" | "delayed_normal");
+            let (tx, rx) = mpsc::channel();
+            let prepared = PreparedCommand {
+                executable: fixture.cli.clone(),
+                resolution: fixture.resolution(),
+                args: vec![],
+                redacted_args: vec![],
+                current_dir: fixture.path().into(),
+                env: vec![],
+                unset_env: vec![],
+                codec: Box::new(super::super::codec::MessagesJsonCodec::new()),
+            };
+            let completed = run_prepared(prepared, tx, Duration::ZERO, None);
+            assert!(
+                completed.is_ok(),
+                "queued terminal must reach real codec: {completed:?}"
+            );
+            let messages: Vec<_> = rx.try_iter().collect();
+            assert_eq!(
+                messages
+                    .iter()
+                    .any(|m| matches!(m, StreamMessage::Done { .. })),
+                normal,
+                "{mode}: {messages:?}"
+            );
+            if !normal {
+                assert!(messages.iter().any(|m| matches!(
+                    m,
+                    StreamMessage::Error {
+                        exit_code: Some(7),
+                        ..
+                    }
+                )));
+            }
+            fixture.verify_return(mode);
+        }
+    }
+
+    #[test]
+    fn actual_quiet_provider_observes_exact_token_manual_cancel() {
+        let fixture = ProviderFixture::new("grok", "cancel");
+        let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+        let cancel = fixture.cancel_after_accept(token.clone());
+        let (tx, _rx) = mpsc::channel();
+        let prepared = PreparedCommand {
+            executable: fixture.cli.clone(),
+            resolution: fixture.resolution(),
+            args: vec![],
+            redacted_args: vec![],
+            current_dir: fixture.path().into(),
+            env: vec![],
+            unset_env: vec![],
+            codec: Box::new(super::super::codec::MessagesJsonCodec::new()),
+        };
+        run_prepared(prepared, tx, Duration::ZERO, Some(token.clone())).unwrap();
+        cancel.join().unwrap();
+        assert_eq!(token.cancel_source().as_deref(), Some("manual_cancel"));
+        assert_eq!(token.child_pid_value(), None);
+        fixture.verify_return("cancel");
     }
 }

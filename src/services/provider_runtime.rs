@@ -1,5 +1,5 @@
+use crate::services::process::stream_child::stream_queue;
 use std::io::{BufRead, BufReader, Read};
-use std::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LineStreamEvent {
@@ -27,11 +27,11 @@ pub(crate) enum SharedAllowedToolKind {
 pub(crate) fn spawn_line_stream_reader<R>(
     reader: R,
     provider_label: &'static str,
-) -> mpsc::Receiver<LineStreamEvent>
+) -> stream_queue::Receiver<LineStreamEvent>
 where
     R: Read + Send + 'static,
 {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = stream_queue::channel();
     std::thread::spawn(move || {
         for line in BufReader::new(reader).lines() {
             match line {

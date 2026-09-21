@@ -894,7 +894,7 @@ async fn apply_runtime_hard_stop_cleanup(
         discord::saturating_decrement_global_active(shared);
     }
 
-    discord::turn_finalizer::cleanup::clear_watchdog_and_kick_thread_parents_after_turn_release(
+    discord::turn_finalizer::cleanup::kick_thread_parents_after_turn_release(
         shared, provider, channel_id,
     )
     .await;
@@ -944,7 +944,7 @@ async fn apply_runtime_hard_stop_finalizer_cleanup_pre_release(
     pinned_tmux_session_name: Option<&str>,
     stop_watcher: bool,
 ) -> bool {
-    discord::turn_finalizer::cleanup::clear_watchdog_and_kick_thread_parents_after_turn_release(
+    discord::turn_finalizer::cleanup::kick_thread_parents_after_turn_release(
         shared, provider, channel_id,
     )
     .await;
@@ -1915,20 +1915,9 @@ pub(crate) async fn run_stall_watchdog_pass(
             now_unix_secs,
             registry.started_at_unix(),
         );
-        // Alert eligibility is deliberately wider than the retired destructive
-        // cleanup gate. Advancing capture must always prevent cleanup, but once
-        // the restart-invariant raw turn age crosses the finite 4h ceiling it
-        // must no longer suppress an operator page.
-        let absolute_backstop_page_due = snapshot.attached
-            && snapshot.desynced
-            && !snapshot.inflight_terminal_delivery_committed
-            && judgment_basis
-                .turn_age_secs
-                .is_some_and(|age| age >= stall_liveness::STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS);
-        let should_evaluate_stall_alert = should_clean || absolute_backstop_page_due;
         let mut force_clean_inflight = None;
         let mut liveness_decision = None;
-        if should_evaluate_stall_alert {
+        if should_clean {
             force_clean_inflight =
                 discord::inflight::load_inflight_state(provider, channel_id.get());
             let decision = stall_liveness::evaluate_stall_watchdog_liveness(
@@ -1939,9 +1928,6 @@ pub(crate) async fn run_stall_watchdog_pass(
                 now_unix_secs,
                 stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
                 stall_liveness::STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
-                // #3671: backstop measures the turn's RAW age (restart-invariant),
-                // NOT the boot-floored age the threshold gate above uses.
-                judgment_basis.turn_age_secs,
             );
             if decision.should_defer() {
                 stall_liveness::log_stall_watchdog_liveness_deferred(
@@ -1960,7 +1946,7 @@ pub(crate) async fn run_stall_watchdog_pass(
                 provider, channel_id, &snapshot,
             );
         }
-        if !should_evaluate_stall_alert {
+        if !should_clean {
             // Detection-only sibling probe for "completed-stale" inflight
             // leaks: bridge handed off cleanup to the watcher (or the watcher
             // delivered the response itself), but the inflight file persisted
@@ -2105,7 +2091,7 @@ pub(crate) async fn run_stall_watchdog_pass(
         // bytes are fresh, so `shadow_verdict == producer_live` was unreachable
         // in this branch. Use the authoritative production liveness decision
         // instead: fresh producer evidence suppresses the page, while no
-        // evidence and the finite absolute backstop still page. No case cleans.
+        // evidence still pages. No case cleans.
         if !stall_alert::should_page_suspected_stall(liveness_decision.as_ref()) {
             continue;
         }
@@ -5219,11 +5205,9 @@ mod stall_watchdog_auto_heal_tests {
         );
     }
 
-    /// Fresh producer evidence suppresses paging only until the existing
-    /// restart-invariant absolute backstop. Once crossed, branch 4 pages but
-    /// still preserves every live-turn authority.
+    /// Productive long turns keep their authority without age-triggered paging.
     #[tokio::test(flavor = "current_thread")]
-    async fn branch4_absolute_backstop_pages_without_cleaning_live_turn_pg() {
+    async fn long_active_turn_preserves_authority_without_paging_pg() {
         // Lock hierarchy `E -> P`: the env lock precedes the postgres
         // lifecycle lock that `try_create` parks in `pg_db`.
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
@@ -5233,8 +5217,8 @@ mod stall_watchdog_auto_heal_tests {
             tempdir.path(),
         );
         let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
-            "agentdesk_stall_watchdog_absolute_backstop",
-            "stall watchdog absolute-backstop paging tests",
+            "agentdesk_stall_watchdog_long_active_turn",
+            "stall watchdog long-active-turn paging tests",
         )
         .await
         else {
@@ -5243,9 +5227,7 @@ mod stall_watchdog_auto_heal_tests {
         let pool = pg_db.connect_and_migrate().await;
         let provider = ProviderKind::Codex;
         let mut registry = HealthRegistry::new();
-        registry.started_at_unix = chrono::Utc::now().timestamp()
-            - super::stall_liveness::STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS as i64
-            - 60;
+        registry.started_at_unix = chrono::Utc::now().timestamp() - (8 * 3600) - 60;
         let shared =
             super::super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         registry
@@ -5254,7 +5236,7 @@ mod stall_watchdog_auto_heal_tests {
         let channel = ChannelId::new(1_479_662_682_909_966_493);
         let user_msg = MessageId::new(1_504_813_049_431_724_054);
         let tmux = "AgentDesk-codex-dm-343742347365974026";
-        let output = tempdir.path().join("absolute-backstop-live.jsonl");
+        let output = tempdir.path().join("long-active-turn-live.jsonl");
         std::fs::write(&output, "fresh producer output\n")
             .expect("write fresh producer output fixture");
         let token = seed_active_mailbox_and_session(&shared, channel, user_msg).await;
@@ -5265,14 +5247,11 @@ mod stall_watchdog_auto_heal_tests {
             tmux,
             &output,
             0,
-            "absolute-backstop-session",
+            "long-active-turn-session",
         );
-        let backstop_at = (chrono::Local::now()
-            - chrono::Duration::seconds(
-                super::stall_liveness::STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS as i64 + 60,
-            ))
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string();
+        let backstop_at = (chrono::Local::now() - chrono::Duration::seconds((8 * 3600) + 60))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
         state.started_at = backstop_at.clone();
         state.updated_at = backstop_at;
         state.request_owner_user_id = 343_742_347_365_974_026;
@@ -5284,7 +5263,7 @@ mod stall_watchdog_auto_heal_tests {
             ),
         );
         crate::services::discord::inflight::save_inflight_state(&state)
-            .expect("save absolute-backstop inflight");
+            .expect("save long-active-turn inflight");
         let watcher_cancel = Arc::new(AtomicBool::new(false));
         shared.tmux_watchers.insert(
             channel,
@@ -5299,7 +5278,7 @@ mod stall_watchdog_auto_heal_tests {
         let initial_snapshot = registry
             .snapshot_watcher_state_for_shared(&provider, shared.clone(), channel.get())
             .await
-            .expect("initial absolute-backstop watcher snapshot");
+            .expect("initial long-active-turn watcher snapshot");
         let observation_time = chrono::Utc::now().timestamp();
         assert!(
             !super::super::liveness_authority::observe_capture_coordinate(
@@ -5317,7 +5296,7 @@ mod stall_watchdog_auto_heal_tests {
         let advanced_snapshot = registry
             .snapshot_watcher_state_for_shared(&provider, shared.clone(), channel.get())
             .await
-            .expect("advanced absolute-backstop watcher snapshot");
+            .expect("advanced long-active-turn watcher snapshot");
         assert!(
             super::super::liveness_authority::observe_capture_coordinate(
                 &provider,
@@ -5351,19 +5330,8 @@ mod stall_watchdog_auto_heal_tests {
         )
         .fetch_all(&pool)
         .await
-        .expect("load absolute-backstop alert row");
-        assert_eq!(rows.len(), 1, "cooldown must dedupe the backstop page");
-        assert_eq!(rows[0].0, format!("channel:{}", channel.get()));
-        assert!(rows[0].2.contains("<@343742347365974026>"));
-        assert_eq!(
-            crate::services::message_outbox::delivery_bot_for_target_session(
-                &rows[0].0,
-                "notify",
-                Some(&rows[0].1),
-            )
-            .as_ref(),
-            "codex"
-        );
+        .expect("load long-active-turn alert row");
+        assert!(rows.is_empty(), "productive long turns must not be paged");
     }
 
     /// #4615: a pre-backstop genuine stall with flat, never-advanced capture

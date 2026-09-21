@@ -1,3 +1,5 @@
+use crate::services::process::stream_child::stream_queue;
+use crate::services::process::stream_child::{EXIT_POLL, StreamChild, finish_reader, spawn_reader};
 use serde_json::Value;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -26,8 +28,7 @@ const GEMINI_INVALID_RESUME_SELECTOR_MESSAGE: &str = "InvalidArgument: Gemini re
 const GEMINI_NO_PREVIOUS_SESSIONS_MESSAGE: &str = "No previous sessions found for this project.";
 const GEMINI_NO_SESSIONS_FOUND_MESSAGE: &str = "No sessions found for this project.";
 const GEMINI_DELETE_CURRENT_SESSION_MESSAGE: &str = "Cannot delete the current active session.";
-const GEMINI_STREAM_POLL_TIMEOUT: Duration = Duration::from_secs(5);
-const GEMINI_STREAM_IDLE_WATCHDOG: Duration = Duration::from_secs(120);
+const GEMINI_STREAM_POLL_TIMEOUT: Duration = EXIT_POLL;
 const GEMINI_STREAM_STARTUP_WATCHDOG: Duration = Duration::from_secs(60);
 const GEMINI_MAX_SESSION_RETRIES: usize = 1;
 const GEMINI_TRUSTED_FOLDERS_PATH: &str = ".gemini/trustedFolders.json";
@@ -408,9 +409,10 @@ fn execute_gemini_streaming_attempt(
         .map_err(|e| format!("Failed to start Gemini: {}", e))?;
 
     register_child_pid(cancel_token.as_deref(), child.id());
-    let _cancel_watchdog = spawn_cancel_watchdog(cancel_token.clone(), "gemini-direct-stream");
+    let watchdog = spawn_cancel_watchdog(cancel_token.clone(), "gemini-direct-stream");
+    let mut lifecycle = StreamChild::new(&child, cancel_token.clone(), watchdog);
     if cancel_requested(cancel_token.as_deref()) {
-        kill_child_tree(&mut child);
+        lifecycle.terminate(&mut child);
         return Ok(StreamAttemptResult::Cancelled);
     }
 
@@ -423,7 +425,7 @@ fn execute_gemini_streaming_attempt(
         .take()
         .ok_or_else(|| "Failed to capture Gemini stderr".to_string())?;
     let stdout_events = spawn_line_stream_reader(stdout, "Gemini");
-    let stderr_handle = std::thread::spawn(move || {
+    let stderr_handle = spawn_reader(move || {
         let mut buf = String::new();
         let mut reader = BufReader::new(stderr);
         let _ = reader.read_to_string(&mut buf);
@@ -431,9 +433,9 @@ fn execute_gemini_streaming_attempt(
     });
 
     if is_cancelled(cancel_token.as_deref()) {
-        kill_child_tree(&mut child);
+        lifecycle.terminate(&mut child);
         let _ = child.wait();
-        let _ = stderr_handle.join();
+        let _ = finish_reader(&stderr_handle);
         return Ok(StreamAttemptResult::Cancelled);
     }
 
@@ -444,25 +446,23 @@ fn execute_gemini_streaming_attempt(
         cancel_token.as_deref(),
         &mut state,
         GEMINI_STREAM_POLL_TIMEOUT,
-        GEMINI_STREAM_IDLE_WATCHDOG,
         GEMINI_STREAM_STARTUP_WATCHDOG,
         || {
-            child
-                .try_wait()
-                .map(|status| status.is_some())
-                .unwrap_or(true)
+            lifecycle
+                .observe_and_seal(&mut child, &stdout_events)
+                .map_err(|e| e.to_string())
         },
     ) {
         GeminiStreamLoopResult::Cancelled => {
-            kill_child_tree(&mut child);
+            lifecycle.terminate(&mut child);
             let _ = child.wait();
-            let _ = stderr_handle.join();
+            let _ = finish_reader(&stderr_handle);
             return Ok(StreamAttemptResult::Cancelled);
         }
         GeminiStreamLoopResult::RetrySession { message } => {
-            kill_child_tree(&mut child);
+            lifecycle.terminate(&mut child);
             let _ = child.wait();
-            let stderr = stderr_handle.join().unwrap_or_default();
+            let stderr = finish_reader(&stderr_handle);
             return Ok(StreamAttemptResult::RetrySession(StreamAttemptFailure {
                 message,
                 stdout: state.raw_stdout,
@@ -473,10 +473,10 @@ fn execute_gemini_streaming_attempt(
         GeminiStreamLoopResult::Eof => {}
     }
 
-    let status = child
-        .wait()
+    let status = lifecycle
+        .wait(&mut child)
         .map_err(|e| format!("Failed waiting for Gemini: {}", e))?;
-    let stderr = stderr_handle.join().unwrap_or_default();
+    let stderr = finish_reader(&stderr_handle);
 
     if is_cancelled(cancel_token.as_deref()) {
         return Ok(StreamAttemptResult::Cancelled);
@@ -512,19 +512,17 @@ fn send_gemini_stream_failure(sender: &Sender<StreamMessage>, failure: StreamAtt
 
 #[allow(clippy::too_many_arguments)]
 fn collect_gemini_stream_events<F>(
-    stdout_events: &mpsc::Receiver<GeminiStreamEvent>,
+    stdout_events: &stream_queue::Receiver<GeminiStreamEvent>,
     sender: &Sender<StreamMessage>,
     cancel_token: Option<&CancelToken>,
     state: &mut GeminiAttemptState,
     poll_timeout: Duration,
-    idle_watchdog: Duration,
     startup_watchdog: Duration,
-    mut definitive_failure_observed: F,
+    mut observe_exit: F,
 ) -> GeminiStreamLoopResult
 where
-    F: FnMut() -> bool,
+    F: FnMut() -> Result<(), String>,
 {
-    let mut silent_for = Duration::ZERO;
     let mut startup_silent_for = Duration::ZERO;
 
     loop {
@@ -532,9 +530,11 @@ where
             return GeminiStreamLoopResult::Cancelled;
         }
 
+        if let Err(message) = observe_exit() {
+            return GeminiStreamLoopResult::RetrySession { message };
+        }
         match stdout_events.recv_timeout(poll_timeout) {
             Ok(GeminiStreamEvent::Line(line)) => {
-                silent_for = Duration::ZERO;
                 startup_silent_for = Duration::ZERO;
                 process_gemini_stream_line(&line, state, sender);
             }
@@ -554,7 +554,6 @@ where
                 if !state.meaningful_progress_seen {
                     startup_silent_for += poll_timeout;
                     if startup_silent_for >= startup_watchdog {
-                        let _ = definitive_failure_observed();
                         return GeminiStreamLoopResult::RetrySession {
                             message: format!(
                                 "Gemini stream produced no output for {} seconds before first progress",
@@ -563,16 +562,6 @@ where
                         };
                     }
                     continue;
-                }
-                silent_for += poll_timeout;
-                if silent_for >= idle_watchdog {
-                    let _ = definitive_failure_observed();
-                    return GeminiStreamLoopResult::RetrySession {
-                        message: format!(
-                            "Gemini stream produced no output for {} seconds",
-                            idle_watchdog.as_secs()
-                        ),
-                    };
                 }
             }
         }
@@ -1387,5 +1376,164 @@ mod path_expansion_tests {
             expand_gemini_working_dir(r"~\agentdesk"),
             home.join("agentdesk")
         );
+    }
+}
+
+#[cfg(test)]
+mod accepted_turn_tests {
+    use super::*;
+
+    fn accepted_state() -> (GeminiAttemptState, Sender<StreamMessage>) {
+        let (sender, _receiver) = mpsc::channel();
+        let mut state = GeminiAttemptState::default();
+        process_gemini_stream_line(
+            r#"{"type":"message","role":"assistant","content":"working"}"#,
+            &mut state,
+            &sender,
+        );
+        assert!(state.meaningful_progress_seen);
+        (state, sender)
+    }
+
+    #[test]
+    fn quiet_accepted_stream_waits_for_real_eof() {
+        let (tx, rx) = stream_queue::channel();
+        let (mut state, sender) = accepted_state();
+        let mut polls = 0;
+        let outcome = collect_gemini_stream_events(
+            &rx,
+            &sender,
+            None,
+            &mut state,
+            Duration::ZERO,
+            Duration::from_secs(60),
+            || {
+                polls += 1;
+                if polls == 8 {
+                    tx.send(GeminiStreamEvent::Eof).unwrap();
+                }
+                Ok(())
+            },
+        );
+        assert!(matches!(outcome, GeminiStreamLoopResult::Eof));
+        assert_eq!(polls, 8);
+    }
+
+    #[test]
+    fn quiet_accepted_stream_observes_manual_cancel() {
+        let (_tx, rx) = stream_queue::channel();
+        let (mut state, sender) = accepted_state();
+        let token = CancelToken::new();
+        let outcome = collect_gemini_stream_events(
+            &rx,
+            &sender,
+            Some(&token),
+            &mut state,
+            Duration::ZERO,
+            Duration::from_secs(60),
+            || {
+                token.publish_cancel("manual_cancel");
+                Ok(())
+            },
+        );
+        assert!(matches!(outcome, GeminiStreamLoopResult::Cancelled));
+        assert_eq!(token.cancel_source().as_deref(), Some("manual_cancel"));
+    }
+
+    #[test]
+    fn quiet_accepted_stream_recovers_only_after_process_exit() {
+        let (_tx, rx) = stream_queue::channel();
+        let (mut state, sender) = accepted_state();
+        let outcome = collect_gemini_stream_events(
+            &rx,
+            &sender,
+            None,
+            &mut state,
+            Duration::ZERO,
+            Duration::from_secs(60),
+            || {
+                rx.seal();
+                Ok(())
+            },
+        );
+        assert!(matches!(outcome, GeminiStreamLoopResult::Eof));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod child_exit_tests {
+    use super::*;
+    use crate::services::process::stream_child::test_fixture::{CASES, ProviderFixture};
+    #[test]
+    fn actual_provider_exit_drains_terminal_without_waiting_for_descendant_fds() {
+        run_cases(&CASES);
+    }
+
+    #[test]
+    fn published_terminal_survives_delayed_consumer_after_actual_exit() {
+        run_cases(&["delayed_normal"]);
+    }
+
+    fn run_cases(cases: &[&str]) {
+        for &mode in cases {
+            let fixture = ProviderFixture::new("gemini", mode);
+            let normal = matches!(mode, "normal" | "quiet" | "delayed_normal");
+            let (tx, rx) = mpsc::channel();
+            execute_gemini_streaming_attempt(
+                fixture.cli.to_str().unwrap(),
+                &fixture.resolution(),
+                "test",
+                None,
+                None,
+                fixture.path(),
+                tx,
+                None,
+                false,
+            )
+            .unwrap();
+            let messages: Vec<_> = rx.try_iter().collect();
+            assert_eq!(
+                messages
+                    .iter()
+                    .any(|m| matches!(m, StreamMessage::Done { .. })),
+                normal,
+                "{mode}: {messages:?}"
+            );
+            if !normal {
+                assert!(messages.iter().any(|m| matches!(
+                    m,
+                    StreamMessage::Error {
+                        exit_code: Some(7),
+                        ..
+                    }
+                )));
+            }
+            fixture.verify_return(mode);
+        }
+    }
+
+    #[test]
+    fn actual_quiet_provider_observes_exact_token_manual_cancel() {
+        let fixture = ProviderFixture::new("gemini", "cancel");
+        let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+        let cancel = fixture.cancel_after_accept(token.clone());
+        let (tx, _rx) = mpsc::channel();
+        let result = execute_gemini_streaming_attempt(
+            fixture.cli.to_str().unwrap(),
+            &fixture.resolution(),
+            "test",
+            None,
+            None,
+            fixture.path(),
+            tx,
+            Some(token.clone()),
+            false,
+        )
+        .unwrap();
+        assert!(matches!(result, StreamAttemptResult::Cancelled));
+        cancel.join().unwrap();
+        assert_eq!(token.cancel_source().as_deref(), Some("manual_cancel"));
+        assert_eq!(token.child_pid_value(), None);
+        fixture.verify_return("cancel");
     }
 }

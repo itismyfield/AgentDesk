@@ -40,9 +40,9 @@ use super::relay_health::{
     DurableFrontierObservation, RelayActiveTurn, RelayHealthSnapshot, RelayStallState,
 };
 use super::{
-    SharedData, clear_watchdog_deadline_override, destructive_cancel_gate, health, inflight,
-    mailbox_clear_channel, mailbox_clear_recovery_marker, mailbox_finish_turn, mailbox_snapshot,
-    recovery, saturating_decrement_global_active, stall_recovery, turn_finalizer,
+    SharedData, destructive_cancel_gate, health, inflight, mailbox_clear_channel,
+    mailbox_clear_recovery_marker, mailbox_finish_turn, mailbox_snapshot, recovery,
+    saturating_decrement_global_active, stall_recovery, turn_finalizer,
 };
 use crate::services::provider::ProviderKind;
 

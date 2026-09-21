@@ -102,9 +102,7 @@ fn owner_mention(inflight: Option<&discord::inflight::InflightTurnState>) -> Str
         .unwrap_or_default()
 }
 
-/// Positive producer evidence is authoritative for page suppression until the
-/// existing finite absolute backstop. A genuinely stalled decision (no evidence)
-/// and a producer that crossed the backstop still page; neither path cleans.
+/// Positive producer evidence suppresses paging; absent evidence remains actionable.
 pub(super) fn should_page_suspected_stall(
     decision: Option<&stall_liveness::StallWatchdogLivenessDecision>,
 ) -> bool {
@@ -227,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn producer_liveness_suppresses_only_pre_backstop_page() {
+    fn producer_liveness_suppresses_stall_page() {
         let live = liveness_decision(
             StallWatchdogLivenessAction::Defer { deferral_count: 0 },
             true,
@@ -236,15 +234,6 @@ mod tests {
 
         let stalled = liveness_decision(StallWatchdogLivenessAction::ProceedNoEvidence, false);
         assert!(should_page_suspected_stall(Some(&stalled)));
-
-        let at_backstop = liveness_decision(
-            StallWatchdogLivenessAction::ProceedAfterAbsoluteBackstop {
-                age_secs: stall_liveness::STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS,
-                deferral_count: 0,
-            },
-            true,
-        );
-        assert!(should_page_suspected_stall(Some(&at_backstop)));
     }
 
     #[test]

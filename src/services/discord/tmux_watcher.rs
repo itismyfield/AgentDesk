@@ -555,13 +555,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             };
             let no_result_locals = NoResultExitLocals {
                 found_result,
-                was_paused,
                 epoch_snapshot,
                 full_response: &full_response,
                 turn_is_external_input_for_session,
                 finish_mailbox_on_completion,
-                startup_inflight_snapshot: startup_inflight_snapshot.clone(),
-                is_prompt_too_long,
                 prompt_too_long_killed,
                 terminal_delivery_observed,
                 active_read_state,

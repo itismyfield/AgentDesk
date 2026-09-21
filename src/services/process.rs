@@ -1,3 +1,5 @@
+pub(crate) mod stream_child;
+
 use std::process::{Command, Output};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

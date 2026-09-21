@@ -10,7 +10,7 @@ comment adjacent to that site (blank when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 90
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 85
 - Platform and third-party variables: 27
 
 ## AgentDesk variables
@@ -39,12 +39,10 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` | `src/services/claude.rs:74` (+1 more) | Default ON; set `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` to `0`, `false`, `off`, `no`, `disable`, or `disabled` for emergency opt-out. |
 | `AGENTDESK_CLUSTER_API_BASE_URL` | `src/services/cluster/session_routing.rs:19` |  |
 | `AGENTDESK_CODEX_DIRECT_TUI_HOOKS` | `src/services/codex.rs:439` |  |
-| `AGENTDESK_CODEX_FIRST_EVENT_TIMEOUT_SECS` | `src/services/codex_tmux_wrapper.rs:218` |  |
+| `AGENTDESK_CODEX_FIRST_EVENT_TIMEOUT_SECS` | `src/services/codex_tmux_wrapper.rs:194` |  |
 | `AGENTDESK_CODEX_REASONING_EFFORT` | `src/services/codex.rs:203` |  |
 | `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex.rs:1244` |  |
 | `AGENTDESK_CODEX_TUI_WARM_FOLLOWUP` | `src/services/codex_tui/warm_followup.rs:14` (+1 more) |  |
-| `AGENTDESK_CODEX_TURN_HARD_CEILING_SECS` | `src/services/codex_tmux_wrapper.rs:241` (+1 more) | Override via `AGENTDESK_CODEX_TURN_HARD_CEILING_SECS` (shared with the orchestrator-side auto-extend ceiling so a single knob bounds the Codex turn end to end). |
-| `AGENTDESK_CODEX_TURN_IDLE_RECV_SECS` | `src/services/codex_tmux_wrapper.rs:229` | Override via `AGENTDESK_CODEX_TURN_IDLE_RECV_SECS`. |
 | `AGENTDESK_CONFIG` | `src/config.rs:3327` (+5 more) | The on-disk config path the running server loaded from, resolved with the same precedence as [`load`] (`$AGENTDESK_CONFIG` → runtime root → cwd → home). |
 | `AGENTDESK_CSWAP_PATH` | `src/services/cswap.rs:22` (+1 more) |  |
 | `AGENTDESK_DCSERVER_LABEL` | `src/cli/dcserver.rs:18` (+2 more) |  |
@@ -102,9 +100,6 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/mod.rs:501` | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |
 | `AGENTDESK_TEST_POSTGRES_ACQUIRE_TIMEOUT_MS` | `src/db/postgres.rs:1172` (+1 more) | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
 | `AGENTDESK_TOKEN` | `src/cli/run.rs:143` |  |
-| `AGENTDESK_TURN_HARD_CEILING_SECS` | `src/services/discord/mod.rs:533` | Default 6h matches the current effective cap so this is non-destructive by default; lower it via `AGENTDESK_TURN_HARD_CEILING_SECS` to enforce a real backstop. |
-| `AGENTDESK_TURN_IDLE_TIMEOUT_SECS` | `src/services/discord/mod.rs:519` | AGENTDESK_TURN_IDLE_TIMEOUT_SECS. |
-| `AGENTDESK_TURN_TIMEOUT_SECS` | `src/services/discord/mod.rs:510` | AGENTDESK_TURN_TIMEOUT_SECS. |
 | `AGENTDESK_VOICE_REQUIRE_ALIASES` | `src/services/discord_config_audit.rs:206` | - On collision when `AGENTDESK_VOICE_REQUIRE_ALIASES=1`: return an `Err` describing the collision so callers can choose to fail fast. |
 | `AGENTDESK_WORKSPACE_ROOT` | `src/services/routines/migrated.rs:309` (+1 more) |  |
 
