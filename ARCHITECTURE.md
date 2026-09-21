@@ -11,7 +11,7 @@ High-signal navigation guide for contributors. The generated inventories under `
 - `docs/generated/route-inventory.md` — generated HTTP/WebSocket route inventory.
 - `docs/generated/worker-inventory.md` — generated supervised worker inventory.
 
-Worktree builds expect `sccache` on `PATH` via `.cargo/config.toml`; install it with `brew install sccache`, and override the documented `SCCACHE_CACHE_SIZE=10G` default only when a host needs a different local cache cap.
+Install `sccache` with `brew install sccache` for local build caching. AgentDesk build helpers default to `SCCACHE_CACHE_SIZE=40G` and `SCCACHE_IDLE_TIMEOUT=0` while preserving nonempty overrides; see the [sccache setup guide](docs/ci/sccache-setup.md#22-shell-env-release-deploy-and-installer-source-builds) for activation rules, manual-wrapper behavior, and existing-daemon limits.
 
 ## Generated `src/` Tree
 
