@@ -1893,6 +1893,84 @@ class InlineDirectoryContext(unittest.TestCase):
             "child": "src/owner.rs:5",
             "leaf_paren_wrapper": "src/owner/scope/moved.rs:1",
         }, ("decoy_paren_read_as_block",)),
+        # `!` in front of a block is not a macro header. The lexer drops
+        # the `&&`, so this arrives looking exactly like a call and only
+        # the source gap separates them. The block still drops the file's
+        # pending component, and the sibling behind it still gets it back.
+        "and_unary_not_block_is_not_a_macro_header": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                "const FLAG: bool = true;\n"
+                "const VALUE: bool = FLAG && !{\n"
+                "    mod scope {\n"
+                '        #[path = "moved.rs"]\n        mod child;\n    }\n'
+                "    false\n};\n"
+                'mod sibling {\n    #[path = "tail.rs"]\n    mod tail;\n}\n',
+            "src/scope/moved.rs": "mod leaf_and_unary_not {}\n",
+            "src/owner/sibling/tail.rs": "mod leaf_and_tail {}\n",
+            "src/owner/scope/moved.rs": "mod decoy_and_read_as_macro {}\n",
+        }, {
+            "child": "src/owner.rs:5",
+            "tail": "src/owner.rs:11",
+            "leaf_and_unary_not": "src/scope/moved.rs:1",
+            "leaf_and_tail": "src/owner/sibling/tail.rs:1",
+        }, ("decoy_and_read_as_macro",)),
+        # The same block with nothing dropped in front of it: `if` is an
+        # `ident` here, so only the name itself can reject this one.
+        "if_unary_not_block_is_not_a_macro_header": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                "const VALUE: bool = if !{\n    mod scope {\n"
+                '        #[path = "moved.rs"]\n        mod child;\n    }\n'
+                "    false\n} { true } else { false };\n"
+                'mod sibling {\n    #[path = "tail.rs"]\n    mod tail;\n}\n',
+            "src/scope/moved.rs": "mod leaf_if_unary_not {}\n",
+            "src/owner/sibling/tail.rs": "mod leaf_if_tail {}\n",
+            "src/owner/scope/moved.rs": "mod decoy_if_read_as_macro {}\n",
+        }, {
+            "child": "src/owner.rs:4",
+            "tail": "src/owner.rs:10",
+            "leaf_if_unary_not": "src/scope/moved.rs:1",
+            "leaf_if_tail": "src/owner/sibling/tail.rs:1",
+        }, ("decoy_if_read_as_macro",)),
+        # An inner `#![...]` is one attribute whatever its payload spells.
+        # A `#[path]` written inside a disabled `cfg_attr` token tree is not
+        # a redirect, and must not rename the inline module behind it.
+        "inner_attribute_payload_never_renames_a_later_scope": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                '#![cfg_attr(any(), opaque(#[path = "fake"]))]\n'
+                'mod scope {\n    #[path = "moved.rs"]\n    mod child;\n}\n',
+            "src/owner/scope/moved.rs": "mod leaf_inner_attr {}\n",
+            "src/fake/moved.rs": "mod decoy_inner_path_leaked {}\n",
+        }, {
+            "child": "src/owner.rs:4",
+            "leaf_inner_attr": "src/owner/scope/moved.rs:1",
+        }, ("decoy_inner_path_leaked",)),
+        # Shapes the header check has to keep accepting: a definition
+        # with a parenthesized transcriber (its `{` is still the
+        # definition's own delimiter) and a nested namespaced call.
+        "namespaced_and_nested_wrappers_keep_the_component": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                "macro_rules! define_tree {\n"
+                "    () => ( mod defined {\n        mod one;\n    } );\n}\n"
+                "define_tree!();\n#[macro_export]\n"
+                "macro_rules! passthrough { ($($t:tt)*) => ( $($t)* ); }\n"
+                "crate::passthrough! {\n    crate::passthrough! {\n"
+                "        mod scope {\n"
+                '            #[path = "moved.rs"]\n            mod child;\n'
+                "        }\n    }\n}\n",
+            "src/owner/defined/one.rs": "mod leaf_transcriber {}\n",
+            "src/owner/scope/moved.rs": "mod leaf_nested_wrapper {}\n",
+            "src/defined/one.rs": "mod decoy_transcriber_block {}\n",
+            "src/scope/moved.rs": "mod decoy_nested_read_as_block {}\n",
+        }, {
+            "one": "src/owner.rs:3",
+            "child": "src/owner.rs:13",
+            "leaf_transcriber": "src/owner/defined/one.rs:1",
+            "leaf_nested_wrapper": "src/owner/scope/moved.rs:1",
+        }, ("decoy_transcriber_block", "decoy_nested_read_as_block")),
     }
 
     def test_every_frame_resolves_the_way_rustc_does(self) -> None:
@@ -1948,6 +2026,18 @@ class InlineDirectoryContext(unittest.TestCase):
         "macro_delimiter_braces_are_not_a_block":
             ("leaf_macro_wrapper::case", "src/owner/scope/moved.rs",
              "src/scope/moved.rs"),
+        "and_unary_not_block_is_not_a_macro_header":
+            ("leaf_and_unary_not::case", "src/scope/moved.rs",
+             "src/owner/scope/moved.rs"),
+        "if_unary_not_block_is_not_a_macro_header":
+            ("leaf_if_unary_not::case", "src/scope/moved.rs",
+             "src/owner/scope/moved.rs"),
+        "inner_attribute_payload_never_renames_a_later_scope":
+            ("leaf_inner_attr::case", "src/owner/scope/moved.rs",
+             "src/fake/moved.rs"),
+        "namespaced_and_nested_wrappers_keep_the_component":
+            ("leaf_nested_wrapper::case", "src/owner/scope/moved.rs",
+             "src/scope/moved.rs"),
     }
 
     def test_boundary_layouts_reach_main_with_the_real_file(self) -> None:
@@ -1959,6 +2049,7 @@ class InlineDirectoryContext(unittest.TestCase):
                     tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 build_frame_repo(root, self.LAYOUTS[layout][0])
+                decoys = self.LAYOUTS[layout][2]
                 workflow = root / ".github/workflows/ci-fixture.yml"
                 write_files(root, {
                     str(integrity.LIB_INVENTORY_MANIFEST_REL):
@@ -1967,8 +2058,9 @@ class InlineDirectoryContext(unittest.TestCase):
                     "justfile": f"fixture:\n    cargo test --lib {filt}\n",
                     "allowlist.txt": "",
                     ".github/workflows/ci-fixture.yml":
-                        "jobs:\n  lane:\n    steps:\n"
-                        f'      - run: "cargo test --bin fixture {filt}"\n',
+                        "jobs:\n  lane:\n    steps:\n" + "".join(
+                            f'      - run: "cargo test --bin fixture {one}"\n'
+                            for one in (filt, *(f"{d}::case" for d in decoys))),
                 })
                 stdout, stderr = io.StringIO(), io.StringIO()
                 with record_reads() as opened, \
@@ -1987,6 +2079,12 @@ class InlineDirectoryContext(unittest.TestCase):
                 self.assertEqual(stderr.getvalue(), "")
                 self.assertNotIn(str(root / decoy), opened,
                                  f"{layout}: main must not read the decoy")
+                # A lost boundary inventories the decoy instead, so it
+                # names THAT as the real module while the real leaf goes
+                # unknown; both classifications are part of the oracle.
+                for name in decoys:
+                    self.assertIn("[unknown-module] module-path filter "
+                                  f"`{name}::case`", report)
 
     def test_custom_and_integration_roots_own_their_directory(self) -> None:
         for label, (root_rel, files, leaf, site, decoy) in self.ROOTS.items():
@@ -2164,6 +2262,63 @@ class RustConsistentCrateProof(unittest.TestCase):
             self.assertNotIn("decoy_only", modules)
             self.assertEqual(modules.get("deep_child"),
                              "src/outer/renamed.rs:1")
+
+
+class MacroHeaderPredicate(unittest.TestCase):
+    """`_macro_delimiter` proves a header; it does not guess one.
+
+    The lexer keeps only the punctuation this gate needs, so `FLAG && !{`
+    is handed over as `ident`, `!`, `{` and `if` arrives as an ordinary
+    `ident`. Only the recorded source positions tell the two apart.
+    """
+
+    # source -> is its last `{` a macro's token-tree delimiter?
+    HEADERS = {
+        "passthrough! { }": True,
+        "path::to::passthrough! { }": True,
+        "passthrough !\n{ }": True,
+        "passthrough /* moved */ ! // why\n{ }": True,
+        "r#match! { }": True,  # a raw identifier escapes the keyword rule
+        "macro_rules! passthrough { }": True,
+        "macro_rules /* c */ ! passthrough { }": True,
+        "FLAG && !{ }": False,  # the operators the lexer drops
+        "FLAG || !{ }": False,
+        "MASK & !{ }": False,
+        "if !{ }": False,  # keywords are idents to this lexer
+        "while !{ }": False,
+        "match !{ }": False,
+        "_ !{ }": False,
+        "!{ }": False,
+        "{ }": False,
+        '"passthrough" ! { }': False,  # a string is not a name
+        "macro_rules! if { }": False,
+    }
+
+    def last_brace(self, tokens: list) -> int:
+        return max(offset for offset, token in enumerate(tokens)
+                   if token.kind == "punct" and token.value == "{")
+
+    def test_only_a_real_lexical_header_delimits_a_macro(self) -> None:
+        for source, expected in self.HEADERS.items():
+            with self.subTest(source=source):
+                tokens = integrity._rust_tokens(source)
+                self.assertIs(
+                    integrity._macro_delimiter(
+                        tokens, self.last_brace(tokens), source),
+                    expected)
+
+    def test_an_unproven_gap_is_not_a_macro_header(self) -> None:
+        # Positions are deliberately not part of a token's identity, so an
+        # equal token may carry no source, or the wrong source. Both fail.
+        source = "passthrough! { }"
+        tokens = integrity._rust_tokens(source)
+        index = self.last_brace(tokens)
+        self.assertTrue(integrity._macro_delimiter(tokens, index, source))
+        spanless = [integrity.RustToken(token.value, token.line, token.kind)
+                    for token in tokens]
+        self.assertEqual(spanless, tokens, "spans must not change identity")
+        self.assertFalse(integrity._macro_delimiter(spanless, index, source))
+        self.assertFalse(integrity._macro_delimiter(tokens, index, ""))
 
 
 class StaticAttributeBoundaries(unittest.TestCase):

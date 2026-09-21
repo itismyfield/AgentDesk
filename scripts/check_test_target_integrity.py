@@ -29,7 +29,7 @@ import shlex
 import subprocess
 import sys
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -190,6 +190,13 @@ class RustToken:
     value: str
     line: int
     kind: str = "punct"
+    # Where the lexeme was written. The lexer drops the operators this gate
+    # does not need, so only the source can say whether two tokens were
+    # really adjacent. Positions are not part of a token's identity: equal
+    # tokens from different offsets stay equal, as every existing caller
+    # that builds a `RustToken` positionally expects.
+    start: int = field(default=-1, compare=False)
+    end: int = field(default=-1, compare=False)
 
 
 def _rust_tokens(text: str) -> list[RustToken]:
@@ -199,6 +206,7 @@ def _rust_tokens(text: str) -> list[RustToken]:
     line = 1
     while index < len(text):
         char = text[index]
+        origin = index
         if char.isspace():
             line += char == "\n"
             index += 1
@@ -234,7 +242,8 @@ def _rust_tokens(text: str) -> list[RustToken]:
                 index = end + len(marker)
             value = text[start:end]
             line += value.count("\n")
-            tokens.append(RustToken(value, start_line, "string"))
+            tokens.append(RustToken(value, start_line, "string",
+                                    origin, index))
             continue
         if char == '"':
             start_line = line
@@ -252,7 +261,8 @@ def _rust_tokens(text: str) -> list[RustToken]:
                     value.append(text[index])
                     line += text[index] == "\n"
                     index += 1
-            tokens.append(RustToken("".join(value), start_line, "string"))
+            tokens.append(RustToken("".join(value), start_line, "string",
+                                    origin, index))
             continue
         if char == "'":
             literal = re.match(r"'(?:\\.|[^\\'\n])'", text[index:])
@@ -261,11 +271,12 @@ def _rust_tokens(text: str) -> list[RustToken]:
                 continue
         ident = re.match(r"[A-Za-z_][A-Za-z0-9_]*", text[index:])
         if ident:
-            tokens.append(RustToken(ident.group(), line, "ident"))
+            tokens.append(RustToken(ident.group(), line, "ident",
+                                    origin, origin + ident.end()))
             index += ident.end()
             continue
         if char in "#![]{}();=:":
-            tokens.append(RustToken(char, line))
+            tokens.append(RustToken(char, line, "punct", origin, origin + 1))
         index += 1
     return tokens
 
@@ -531,21 +542,70 @@ class _ModuleFrame:
                 else self.directory)
 
 
-def _macro_delimiter(tokens: list[RustToken], index: int) -> bool:
+# Rust's strict and reserved keywords. A macro invocation cannot be named
+# with one of them unless it is written as a raw identifier.
+RUST_KEYWORDS = frozenset("""
+    as async await break const continue crate dyn else enum extern false fn
+    for if impl in let loop match mod move mut pub ref return self static
+    struct super trait true type unsafe use where while Self abstract become
+    box do final macro override priv typeof unsized virtual yield try
+""".split())
+
+
+def _only_trivia(source: str, start: int, end: int) -> bool:
+    """Is `source[start:end]` whitespace and comments only?
+
+    A token without a recorded span fails closed: an unknown gap is not a
+    proven one. Comment stripping preserves every other offset, so the
+    same text can be measured whether or not the caller stripped first.
+    """
+    return 0 <= start <= end <= len(source) \
+        and not _strip_rust_comments(source[start:end]).strip()
+
+
+def _macro_name(token: RustToken, source: str) -> bool:
+    """Is `token` a name a macro invocation can actually be written with?
+
+    A raw identifier escapes the keyword rule (`r#match! { ... }`), and the
+    shared lexer splits `r#match` into `r`, `#` and `match`, so the escape
+    is only visible in the source written in front of the name.
+    """
+    if token.kind != "ident" or token.value == "_":
+        return False
+    return token.value not in RUST_KEYWORDS \
+        or (token.start >= 2 and source[token.start - 2:token.start] == "r#")
+
+
+def _macro_delimiter(tokens: list[RustToken], index: int, source: str) -> bool:
     """Is the `{` at `index` a macro's token-tree delimiter, not a block?
 
     `mac! { ... }` and `macro_rules! mac { ... }` delimit token trees. An
     item a wrapper passes through stays an item of the file itself, so the
     file's pending relative component has to survive the delimiter.
+
+    Token values alone cannot tell the two apart. This lexer keeps only the
+    punctuation the gate needs, so `FLAG && !{` arrives as `ident`, `!`,
+    `{` exactly like a call does, and `if` arrives as an `ident`. A real
+    header is therefore proved from the source: a name a macro may actually
+    have, then `!`, then `{`, with nothing but trivia written between them.
+    `source` must be the text the tokens were produced from.
     """
-    cursor = index - 1
-    if cursor > 1 and tokens[cursor].kind == "ident" \
-            and tokens[cursor - 1].value == "!" \
-            and tokens[cursor - 2].value == "macro_rules":
-        cursor -= 1  # `macro_rules! NAME {` names the macro being defined
-    return cursor > 0 and tokens[cursor].kind == "punct" \
-        and tokens[cursor].value == "!" \
-        and tokens[cursor - 1].kind == "ident"
+    if tokens[index].kind != "punct" or tokens[index].value != "{":
+        return False
+    if index > 2 and tokens[index - 3].kind == "ident" \
+            and tokens[index - 3].value == "macro_rules" \
+            and tokens[index - 2].kind == "punct" \
+            and tokens[index - 2].value == "!":
+        head, name = index - 3, tokens[index - 1]  # `macro_rules! NAME {`
+    elif index > 1 and tokens[index - 1].kind == "punct" \
+            and tokens[index - 1].value == "!":
+        head, name = index - 2, tokens[index - 2]  # `path::to::NAME! {`
+    else:
+        return False
+    return _macro_name(name, source) \
+        and all(_only_trivia(source, tokens[cursor].end,
+                             tokens[cursor + 1].start)
+                for cursor in range(head, index))
 
 
 def _inline_frames(text: str, frame: _ModuleFrame) -> dict[int, _ModuleFrame]:
@@ -569,19 +629,13 @@ def _inline_frames(text: str, frame: _ModuleFrame) -> dict[int, _ModuleFrame]:
     index = 0
     while index < len(tokens):
         token = tokens[index]
-        bracket = _attribute_bracket(tokens, index)
-        if bracket is not None:
-            end = bracket + 1
-            attr_depth = 1
-            while end < len(tokens) and attr_depth:
-                # Only real punctuation closes the attribute. A `[` or `]`
-                # that is merely the value of a string token (`#[doc = "["]`)
-                # would otherwise swallow the item bodies written after it
-                # and leak the enclosing scope into the next `mod`.
-                if tokens[end].kind == "punct":
-                    attr_depth += tokens[end].value == "["
-                    attr_depth -= tokens[end].value == "]"
-                end += 1
+        span = _attribute_span(tokens, index)
+        if span is not None:
+            # The shared span is closed by real punctuation and swallows an
+            # inner `#![...]` whole, so neither a `[` written inside one of
+            # its strings nor a `#[path]` sitting in its payload can reach
+            # the items behind it.
+            bracket, end = span
             attr = tokens[bracket + 1:end - 1]
             head = next((item.value for item in attr
                          if item.kind == "ident"), "")
@@ -626,7 +680,7 @@ def _inline_frames(text: str, frame: _ModuleFrame) -> dict[int, _ModuleFrame]:
             # file, so the component survives it.
             enclosing = scopes[-1][1] if scopes else frame
             if enclosing.relative is not None \
-                    and not _macro_delimiter(tokens, index):
+                    and not _macro_delimiter(tokens, index, text):
                 scopes.append((depth, _ModuleFrame(enclosing.directory)))
         elif token.kind == "punct" and token.value == "}":
             depth -= 1
