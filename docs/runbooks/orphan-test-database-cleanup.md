@@ -31,10 +31,18 @@ loose enough to match something else.
 those names distinguishes a leftover fixture from an application database that
 someone created deliberately. Name shape alone is not evidence.
 
-The population is also not static. Only 2 of the 5035 came from the fixtures
-#5218 repairs; the rest come from fixtures that still build their own base URL
-and still fall back to a loopback address (see the follow-up in that issue).
-**Sweeping before those fallbacks are removed reclaims space that will refill.**
+The historical census does not establish the current cause or growth rate.
+Fixture connections now require an explicit `POSTGRES_TEST_DATABASE_URL_BASE`;
+the shared connection helper rejects a missing or mismatched target before
+network I/O. The fallback-removal premise was withdrawn in #5510. The fixture
+inventory and address guards were extended by #5737, #5747, and #5856.
+
+A configured target does not guarantee cleanup: database ownership is recorded
+in process-local memory, so a crash between CREATE and registration, or process
+exit after registration, can leave a database behind. The shared setup mutex
+serializes create/drop operations; holding a lifecycle mutex for longer does
+not make cleanup run after process death. Neither a name prefix nor the old
+census identifies a current orphan.
 
 ## Safeguards — all four are mandatory
 
@@ -91,11 +99,16 @@ the first unexpected error rather than continuing down the list.
 
 ## Ordering
 
-1. Land the fallback removal everywhere, not just the four modules in #5218.
-   While a fixture can still reach a server the lane did not configure, the
-   population regrows and a cleanup is a treadmill.
-2. Take the census read-only and keep it. It is the before-picture.
-3. Dry run. Review. Confirm. Drop, oldest first, in small batches.
+1. Verify the explicitly configured fixture target and the connection/inventory
+   guards. Do not reintroduce or assume a loopback fallback.
+2. Take a read-only census with server identity and observation time. Compare
+   the same server after representative fixture activity has finished, retaining
+   per-database ownership and activity evidence. A raw count increase alone
+   does not identify stale orphans; establish renewed orphan growth before
+   proposing new automated reclamation.
+3. For confirmed-stale candidates on an eligible server, follow every safeguard
+   above: dry run, review, human confirmation, then drop oldest first in small
+   batches. This ordering does not authorize operational-server deletion.
 4. Re-census. The delta must equal the number of names in the log, exactly. Any
    discrepancy means something else was writing to the server during the run,
    and the remaining batches do not proceed.
