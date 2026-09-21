@@ -2115,6 +2115,26 @@ class ConditionalAndUnsupportedPaths(unittest.TestCase):
             {"src/lib.rs": "mod gated;\n",
              "src/gated.rs":
                  '#![cfg(unix)]\n#[path = "gone.rs"]\nmod maybe;\n'}, 0),
+        # A `#[cfg]` spelled across lines is still a `#[cfg]`; only its
+        # head names the attribute, and its tail is not code.
+        "multiline_cfg_is_unjudged": (
+            {"src/lib.rs": '#[cfg(all(\n    unix,\n    feature = "x"\n))]\n'
+                           '#[path = "gone.rs"]\nmod maybe;\n'}, 0),
+        "multiline_harmless_attribute_stays_judged": (
+            {"src/lib.rs": '#[doc = concat!(\n    "a",\n    "b",\n)]\n'
+                           '#[path = "gone.rs"]\nmod maybe;\n'}, 1),
+        # An attribute is owned by the item it decorates: a closed `fn`,
+        # `struct` or `impl` ends that ownership, its own body does not.
+        "cfg_on_closed_items_does_not_gate_later_scopes": (
+            {"src/lib.rs": '#[cfg(unix)]\nfn helper() {}\n'
+                           '#[cfg(unix)]\nstruct Held { a: u8 }\n'
+                           '#[cfg(unix)]\nimpl Held { fn f() {} }\n'
+                           'mod scope {\n    #[path = "gone.rs"]\n'
+                           '    mod absent;\n}\n'}, 1),
+        "cfg_on_an_open_item_still_covers_its_body": (
+            {"src/lib.rs": '#[cfg(feature = "x")]\nfn helper() {\n'
+                           '    mod scope {\n        #[path = "gone.rs"]\n'
+                           '        mod absent;\n    }\n}\n'}, 0),
         "missing_plain_module_is_silent": (
             {"src/lib.rs": "#[cfg(windows)]\nmod absent_regular;\n"}, 0),
         "missing_unconditional_plain_module_is_silent": (
@@ -2133,6 +2153,18 @@ class ConditionalAndUnsupportedPaths(unittest.TestCase):
                                  f"{label}: {diagnostics}")
                 for diagnostic in diagnostics:
                     self.assertIn("module-path-unresolved", diagnostic)
+
+    def test_unbalanced_attribute_text_never_hides_a_declaration(self) -> None:
+        # A raw string may open what reads as an attribute. Reading that
+        # attribute across lines must not swallow the `mod` items after it:
+        # losing one would silently drop a target from the inventory.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lib = build_frame_repo(root, {
+                "src/lib.rs": 'const D: &str = r#"\n#[cfg(all(\n"#;\n'
+                              "mod maybe;\n",
+                "src/maybe.rs": "pub fn used() {}\n"})
+            self.assertIn("maybe", integrity.collect_modules(lib, root))
 
     def test_read_errors_propagate_and_never_become_missing(self) -> None:
         # An unreadable file that exists is not an absent module: the OS

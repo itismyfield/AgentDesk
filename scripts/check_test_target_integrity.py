@@ -609,6 +609,9 @@ def _inline_frames(text: str, frame: _ModuleFrame) -> dict[int, _ModuleFrame]:
             depth -= 1
             while scopes and scopes[-1][0] > depth:
                 scopes.pop()
+            # A braced item ends here, so an attribute still pending was its
+            # own: its uncertainty covered that body, not the items after it.
+            pending_path, unjudged = None, False
         elif token.kind == "punct" and token.value == ";":
             pending_path, unjudged = None, False
         index += 1
@@ -642,7 +645,7 @@ def collect_modules(root: Path, repo_root: Path, *,
             continue
         seen.add(identity)
         pending_path: str | None = None
-        pending_unjudged = False
+        pending_unjudged, attr_carry = False, ""
         # Comments are trivia: a `// why this moved` line between #[path] and
         # its `mod` must not detach the redirect.
         text = _strip_rust_comments(source.read_text("utf-8"))
@@ -664,12 +667,19 @@ def collect_modules(root: Path, repo_root: Path, *,
             # An attribute and the item it decorates may share one line
             # (`#[path = "x.rs"] mod x;`), so consume the attribute prefix
             # instead of skipping the rest of the line with it.
-            remainder = line
+            # A `mod` line is never an attribute tail, so an unbalanced
+            # `#[` in a literal can only suppress detachment.
+            remainder = (attr_carry + line if attr_carry
+                         and not MOD_DECL.match(line) else line)
+            attr_carry = ""
             while ATTR_LINE.match(remainder):
                 attr = ATTR_PATH.match(remainder)
                 end = attr.end() if attr else _attribute_end(remainder)
                 if end is None:
-                    break  # unbalanced: a multi-line attribute, handled below
+                    # An attribute may span lines. Carry it so its own head
+                    # is judged and its tail never reads as detaching code.
+                    attr_carry = remainder if len(remainder) < 2048 else ""
+                    break
                 if attr:
                     pending_path = attr.group(1)
                 else:
