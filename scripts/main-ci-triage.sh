@@ -582,7 +582,9 @@ nightly_triage() {
       echo 'incomplete canonical nightly identity; reconcile manually' >&2
       return 1
     fi
-    number="$(jq -r '.[0].number' <<<"$candidates")"
+    # Already validated as a positive integral number; render it the way gh parses issue
+    # arguments, so an integral decimal spelling such as 7.0 reaches the CLI as 7.
+    number="$(jq -r '.[0].number | floor' <<<"$candidates")"
     state="$(jq -r '.[0].state' <<<"$candidates")"
     body="$(jq -r '.[0].body' <<<"$candidates")"
     comments="$(gh api "/repos/$repo/issues/$number/comments?per_page=100" --paginate)"

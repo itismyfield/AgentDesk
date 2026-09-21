@@ -15,7 +15,7 @@ REPO = "itismyfield/AgentDesk"
 TITLE = "[ci-red] CI Nightly 실패(main)"
 NS = "<!-- agentdesk:ci-nightly:main -->"
 MOCK = r'''
-import json, os, pathlib, sys
+import json, os, pathlib, re, sys
 p = pathlib.Path(os.environ["FAKE_STATE"])
 s = json.loads(p.read_text())
 a = sys.argv[1:]
@@ -27,6 +27,10 @@ def finish(value=None, code=0):
 def write(kind):
     s["writes"].append(kind)
     finish(code=1 if s.get("fail_after") == kind else 0)
+def number_of(issue):
+    # "@@raw:<literal>" seeds a JSON number spelling Python cannot emit, such as 7e0.
+    try: return float(str(issue.get("number")).removeprefix("@@raw:"))
+    except ValueError: return None
 repo = "itismyfield/AgentDesk"
 if pathlib.Path(sys.argv[0]).name == "curl":
     assert a == ["--silent", "--show-error", "--output", "/dev/null", "--write-out", "%{http_code}",
@@ -39,15 +43,17 @@ if a[0] == "api":
     endpoint = a[1]
     if endpoint == f"/repos/{repo}/issues?state=all&per_page=100":
         kind, values = "issues", s["issues"]
-    elif re_match := __import__('re').fullmatch(f"/repos/{repo}/issues/(\\d+)/comments\\?per_page=100", endpoint):
-        kind = "comments"
-        values = next(i for i in s["issues"] if isinstance(i, dict) and i.get("number") == int(re_match[1]))["comments"]
+    elif re_match := re.fullmatch(f"/repos/{repo}/issues/([0-9][-+.0-9eE]*)/comments\\?per_page=100", endpoint):
+        kind = "comments"  # Unlike the CLI, REST resolves a decimal spelling of the number.
+        values = next(i for i in s["issues"]
+            if isinstance(i, dict) and number_of(i) == float(re_match[1]))["comments"]
     else: raise AssertionError(a)
     if s.get("fail_read") == kind: finish("[]", 1)
     if s.get("bad_json") == kind: finish("not-json")
     if s.get("bad_shape") == kind: finish('{}')
     # Deliberately emit multiple JSON pages; a marker may only exist on the last.
-    finish("\n".join(json.dumps(values[i:i+2]) for i in range(0, len(values), 2)) or "[]")
+    finish("\n".join(re.sub('"@@raw:(.*?)"', r"\1", json.dumps(values[i:i+2]))
+        for i in range(0, len(values), 2)) or "[]")
 if a[:2] == ["label", "create"]:
     expected = {"ci-red": ["B60205", "Main branch CI red triage issue"],
         "agent:project-agentdesk": ["1D76DB", "Assigned to project-agentdesk"]}
@@ -63,8 +69,11 @@ if kind == "create":
     assert a[6] == "--body-file" and a[8:] == ["--label", "ci-red", "--label", "agent:project-agentdesk"], a
     s["issues"].append(dict(number=7, state="open", title=a[5], body=pathlib.Path(a[7]).read_text(), comments=[]))
 else:
-    assert a[:5] == ["issue", kind, "7", "--repo", repo], a
-    issue = next(i for i in s["issues"] if isinstance(i, dict) and i.get("number") == 7)
+    assert a[3:5] == ["--repo", repo], a
+    if not re.fullmatch(r"#?\d+", a[2]):  # gh 2.97.0 ParseIssueFromArg rejects "7.0".
+        print(f'invalid issue format: "{a[2]}"', file=sys.stderr); finish(code=1)
+    issue = next(i for i in s["issues"]
+        if isinstance(i, dict) and number_of(i) == float(a[2].lstrip("#")))
     if kind == "reopen":
         assert len(a) == 5, a
         issue["state"] = "open"
@@ -207,7 +216,8 @@ class NightlyTriage(unittest.TestCase):
         for field in ("title", "body", "number", "state"):
             malformed.append({key: value for key, value in ordinary.items() if key != field})
         for field, value in [("title", None), ("body", 9), ("number", 0), ("number", -1),
-                ("number", 1.5), ("number", "8"), ("state", "unknown"), ("pull_request", True)]:
+                ("number", 1.5), ("number", "8"), ("number", True), ("state", "unknown"),
+                ("pull_request", True)]:
             malformed.append({**ordinary, field: value})
         for bad in malformed:
             for position in ("only", "early", "late"):
@@ -234,6 +244,38 @@ class NightlyTriage(unittest.TestCase):
             "body": NS, "pull_request": {"url": "https://github.example/pull/10"}})
         self.save(data)
         self.assertEqual(self.run_entry(), ["comment"])
+
+    def numeric_arguments(self):
+        """Issue numbers exactly as spelled in the recorded argv, independent of fake state."""
+        selected = []
+        for call in self.load()["calls"]:
+            if call[:2] == ["gh", "api"] and "/comments?" in call[2]:
+                selected.append(call[2].split("/issues/")[1].split("/")[0])
+            elif call[:2] == ["gh", "issue"] and call[2] != "create":
+                selected.append(call[3])
+        return selected
+
+    def test_validated_integral_decimal_number_reaches_the_cli_as_an_integer(self):
+        unrelated = {"number": 8, "state": "open", "title": "Ordinary issue", "body": None,
+            "comments": []}
+        for spelling in (7.0, "@@raw:7e0"):
+            for state, writes in (("open", ["comment"]), ("closed", ["reopen", "comment"])):
+                with self.subTest(number=spelling, state=state):
+                    self.save({"issues": [], "calls": [], "writes": []})
+                    self.seed(state=state)
+                    data = self.load()
+                    data["issues"][0]["number"] = spelling
+                    data["issues"].insert(0, dict(unrelated))
+                    self.save(data)
+                    self.assertEqual(self.run_entry(sync=True), writes + ["sync"])
+                    self.assertEqual(self.numeric_arguments(), ["7"] * (len(writes) + 1))
+                    self.assertEqual(self.load()["issues"][1]["state"], "open")
+        # An old exact marker still replays entirely write-free at the same spelling.
+        self.save({"issues": [], "calls": [], "writes": []})
+        self.seed(state="closed", comments=[{"body": marker()}])
+        data = self.load(); data["issues"][0]["number"] = 7.0; self.save(data)
+        self.assertEqual(self.run_entry(sync=True), [])
+        self.assertEqual(self.numeric_arguments(), ["7"])
 
     def test_mandatory_write_errors_propagate(self):
         for kind in ("label", "create", "comment", "reopen"):
