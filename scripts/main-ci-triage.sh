@@ -470,6 +470,10 @@ sync_issue_card_now() {
     curl_config+=(--header "Authorization: Bearer ${AGENTDESK_API_TOKEN}")
   fi
 
+  if [[ "${NIGHTLY_SYNC-}" == 1 ]]; then
+    curl_config+=(--connect-timeout 5 --max-time 15)
+  fi
+
   status="$(
     curl \
       "${curl_config[@]}" \
@@ -528,6 +532,81 @@ close_recovered_issue() {
   gh issue close "$number" --repo "$repo" >/dev/null
 }
 
+validate_triage_event() {
+  local event_path="$1"
+  jq -e '
+    .repository.full_name | type == "string" and length > 0
+  ' "$event_path" >/dev/null
+  jq -e '
+    def positive_integer: type == "number" and . > 0 and . == floor;
+    (.workflow_run.head_repository.full_name | type == "string" and length > 0) and
+    (.workflow_run.id | positive_integer) and
+    (.workflow_run.run_attempt | positive_integer) and
+    (.workflow_run.workflow_id | positive_integer) and
+    (.workflow_run.head_sha | type == "string" and test("^[0-9a-f]{40}$")) and
+    (.workflow_run.conclusion | type == "string" and length > 0)
+  ' "$event_path" >/dev/null
+}
+
+nightly_triage() {
+  local repo="$1" event_path="$2" issues candidates count number state body comments marker run_id attempt
+  local namespace='<!-- agentdesk:ci-nightly:main -->'
+  local title='[ci-red] CI Nightly 실패(main)'
+  run_id="$(jq -r '.workflow_run.id' "$event_path")"
+  attempt="$(jq -r '.workflow_run.run_attempt' "$event_path")"
+  marker="<!-- agentdesk:ci-nightly:main:${repo}:${run_id}:${attempt} -->"
+  # Capture every page before inspecting it: a partial/failed read must not create an issue.
+  issues="$(gh api "/repos/$repo/issues?state=all&per_page=100" --paginate)"
+  candidates="$(jq -sce --arg title "$title" --arg ns "$namespace" '
+    if all(.[]; type == "array") then add else error("invalid issue pages") end |
+    map(select(.pull_request == null) | select(.title == $title or
+      ((.body // "" | split("\n")) | index($ns)))) |
+    if all(.[]; (.number | type == "number") and (.state == "open" or .state == "closed")
+      and (.body | type == "string")) then . else error("invalid issue") end
+  ' <<<"$issues")"
+  count="$(jq length <<<"$candidates")"
+  if (( count > 1 )); then
+    echo 'ambiguous canonical nightly issues; reconcile manually' >&2
+    return 1
+  fi
+  if (( count == 1 )); then
+    number="$(jq -r '.[0].number' <<<"$candidates")"
+    state="$(jq -r '.[0].state' <<<"$candidates")"
+    body="$(jq -r '.[0].body' <<<"$candidates")"
+    comments="$(gh api "/repos/$repo/issues/$number/comments?per_page=100" --paginate)"
+    comments="$(jq -sce 'if length > 0 and all(.[]; type == "array") then add
+      else error("invalid comment pages") end |
+      if all(.[]; .body | type == "string") then . else error("invalid comment") end' <<<"$comments")"
+    if jq -e --arg body "$body" --arg marker "$marker" '
+      [$body, .[].body] | any(.[]; split("\n") | index($marker) != null)
+    ' <<<"$comments" >/dev/null; then
+      echo "nightly failure already recorded: $run_id/$attempt"
+      return 0
+    fi
+  fi
+  {
+    printf '%s\n%s\n\n' "$namespace" "$marker"
+    printf 'CI Nightly completed with failure on main. Runner shutdowns are included without a streak threshold.\n\n'
+    printf '%s\n' "- Run: https://github.com/$repo/actions/runs/$run_id/attempts/$attempt"
+    printf '%s\n' "- Event: $(jq -r '.workflow_run.event' "$event_path")"
+    printf '%s\n' "- Head: $(jq -r '.workflow_run.head_sha' "$event_path")"
+    printf '\nGitHub records the failure; AgentDesk immediate sync is best-effort.\n'
+  } >"$TMP_DIR/nightly-body.md"
+  if (( count == 0 )); then
+    # --force updates or creates known labels; errors are mandatory, unlike main's legacy helper.
+    gh label create ci-red --repo "$repo" --color B60205 --description 'Main branch CI red triage issue' --force >/dev/null
+    gh label create agent:project-agentdesk --repo "$repo" --color 1D76DB --description 'Assigned to project-agentdesk' --force >/dev/null
+    gh issue create --repo "$repo" --title "$title" --body-file "$TMP_DIR/nightly-body.md" \
+      --label ci-red --label agent:project-agentdesk >/dev/null
+  else
+    if [[ "$state" == closed ]]; then
+      gh issue reopen "$number" --repo "$repo" >/dev/null
+    fi
+    gh issue comment "$number" --repo "$repo" --body-file "$TMP_DIR/nightly-body.md" >/dev/null
+  fi
+  NIGHTLY_SYNC=1 sync_issue_card_now "$repo"
+}
+
 run_triage() {
   require_cmd gh
   require_cmd jq
@@ -545,6 +624,25 @@ run_triage() {
   if [[ -z "$repo" || -z "$event_path" ]]; then
     echo "GITHUB_REPOSITORY and GITHUB_EVENT_PATH are required" >&2
     exit 1
+  fi
+
+  validate_triage_event "$event_path"
+  if ! jq -e --arg repo "$repo" '
+    .repository.full_name == $repo and .workflow_run.head_repository.full_name == $repo and
+    .action == "completed" and .workflow_run.status == "completed" and
+    .workflow_run.head_branch == "main" and
+    ((.workflow_run.name == "CI Main" and .workflow_run.event == "push") or
+     (.workflow_run.name == "CI Nightly" and
+      (.workflow_run.event == "schedule" or .workflow_run.event == "workflow_dispatch")))
+  ' "$event_path" >/dev/null; then
+    echo 'skip: untrusted or ineligible workflow_run' >&2
+    return 0
+  fi
+  if [[ "$(jq -r '.workflow_run.name' "$event_path")" == 'CI Nightly' ]]; then
+    if [[ "$(jq -r '.workflow_run.conclusion' "$event_path")" == failure ]]; then
+      nightly_triage "$repo" "$event_path"
+    fi
+    return 0
   fi
 
   workflow_name="$(jq -r '.workflow_run.name // empty' "$event_path")"
@@ -797,14 +895,18 @@ write_event_payload() {
   local path="$1"
   cat >"$path" <<'EOF'
 {
+  "action": "completed",
+  "repository": {"full_name": "test/repo"},
   "workflow_run": {
+    "head_repository": {"full_name": "test/repo"},
+    "status": "completed", "event": "push", "run_attempt": 1,
     "name": "CI Main",
     "workflow_id": 1,
     "id": 200,
     "head_branch": "main",
     "conclusion": "failure",
     "html_url": "https://example.com/runs/200",
-    "head_sha": "deadbeef200"
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   }
 }
 EOF
@@ -814,14 +916,18 @@ write_success_event_payload() {
   local path="$1"
   cat >"$path" <<'EOF'
 {
+  "action": "completed",
+  "repository": {"full_name": "test/repo"},
   "workflow_run": {
+    "head_repository": {"full_name": "test/repo"},
+    "status": "completed", "event": "push", "run_attempt": 1,
     "name": "CI Main",
     "workflow_id": 1,
     "id": 200,
     "head_branch": "main",
     "conclusion": "success",
     "html_url": "https://example.com/runs/200",
-    "head_sha": "deadbeef200"
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   }
 }
 EOF
@@ -831,14 +937,18 @@ write_cancelled_event_payload() {
   local path="$1"
   cat >"$path" <<'EOF'
 {
+  "action": "completed",
+  "repository": {"full_name": "test/repo"},
   "workflow_run": {
+    "head_repository": {"full_name": "test/repo"},
+    "status": "completed", "event": "push", "run_attempt": 1,
     "name": "CI Main",
     "workflow_id": 1,
     "id": 200,
     "head_branch": "main",
     "conclusion": "cancelled",
     "html_url": "https://example.com/runs/200",
-    "head_sha": "deadbeef200"
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   }
 }
 EOF

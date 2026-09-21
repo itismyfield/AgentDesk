@@ -294,6 +294,10 @@ banner "PR infrastructure failure rerun classifier (#4392/#5207)"
 ./scripts/ci/infra-failure-rerun.sh --self-test
 bash scripts/main-ci-triage.sh --self-test
 
+# Nightly notification contract (#6006).
+"$PYTHON" -m unittest tests.test_nightly_ci_triage
+# End nightly notification contract.
+
 banner "CI timeout wrapper tests (#4413)"
 "$PYTHON" -m unittest tests.test_ci_timeout
 
