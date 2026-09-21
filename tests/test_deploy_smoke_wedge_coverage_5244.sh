@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# #5244 is a report-coverage test. It extracts only the sentinel region and
+# Extract production functions and the report sentinel without deployment; this test
 # never sources deploy-release.sh (which would execute a real deployment).
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEPLOY_SH="${DEPLOY_SH_OVERRIDE:-$ROOT_DIR/scripts/deploy-release.sh}"
@@ -43,12 +43,12 @@ sed -n "$((disposition_begin + 1)),$((disposition_end - 1))p" "$DEPLOY_SH" > "$D
 durable_clean_coverage=$(sed -n 's/^POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE="\([^"]*\)"$/\1/p' "$DEPLOY_SH" | head -1 || true)
 [ -n "$durable_clean_coverage" ] || fail 'durable clean coverage declaration is missing'
 
-runner_output=$(DURABLE_CLEAN_COVERAGE="$durable_clean_coverage" bash -s -- "$runner_source" "$TMP_ROOT" "$DISPOSITION" <<'CHILD'
+runner_output=$(DURABLE_CLEAN_COVERAGE="$durable_clean_coverage" bash -s -- "$runner_source" "$TMP_ROOT" "$DISPOSITION" "$REGION" <<'CHILD'
 set -euo pipefail
-runner_source="$1"; root="$2"; disposition_source="$3"; eval "$(<"$runner_source")"
+runner_source="$1"; root="$2"; disposition_source="$3"; eval "$(<"$4")"; eval "$(<"$runner_source")"
 ADK_REL="$root"; POST_DEPLOY_SMOKE_EVIDENCE="$root/runner.evidence"; POST_DEPLOY_SMOKE_TMP_DIR=""; POST_DEPLOY_SMOKE_FAILURES=(); POST_DEPLOY_SMOKE_STAMP=runner; REL_PORT=0; runner_wedge_called=0
 POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID=""; POST_DEPLOY_SMOKE_WEDGE_COVERAGE="clean-sentinel"; POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE="clean-sentinel"; POST_DEPLOY_SMOKE_DURABLE_COVERAGE="unevaluable: E-35 did not run"; POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE="$DURABLE_CLEAN_COVERAGE"
-_post_deploy_smoke_note() { :; }; _post_deploy_smoke_probe_apis() { return 0; }; _post_deploy_smoke_check_wedges() { runner_wedge_called=1; return 0; }; _post_deploy_smoke_check_fail_closed_warn_rate() { return 0; }
+_post_deploy_smoke_wait_for_startup_recovery() { return 0; }; _post_deploy_smoke_note() { :; }; _post_deploy_smoke_probe_apis() { return 0; }; _post_deploy_smoke_check_wedges() { runner_wedge_called=1; POST_DEPLOY_SMOKE_WEDGE_COVERAGE="$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE"; POST_DEPLOY_SMOKE_READY=true; return 0; }; _post_deploy_smoke_check_fail_closed_warn_rate() { return 0; }
 # E-1 rc-0 skip fixture: leave the channel unset, so the durable probe returns 0.
 _post_deploy_smoke_check_relay_round_trip() { POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID=""; return 0; }
 _post_deploy_smoke_check_durable_record() { [ -z "$POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID" ] || return 1; return 0; }
@@ -320,7 +320,168 @@ disposition_case failed_nonclean 0 clean-sentinel failed 'completed with coverag
 disposition_case coverage_gap 0 'not evaluated: startup recovery in progress' evaluated 'completed with coverage gap'
 disposition_case failed 1 'unevaluable: health/detail scan failed' failed 'REPORT_CALLED'
 
+# Exercise the real runner, wait, API probe, scanner and disposition together.
+# Only external effects are stubbed; file counters survive curl subshells.
+wait_source="$TMP_ROOT/wait.sh"
+sed -n '/^_post_deploy_smoke_wait_for_startup_recovery()/,/^_post_deploy_smoke_check_relay_round_trip()/p' "$DEPLOY_SH" | sed '$d' > "$wait_source"
+entry_cases=0
+run_entry_case() {
+    local mode="$1" invocation="${2:-runner}" output expected_requests
+    output=$(bash -s -- "$REGION" "$wait_source" "$runner_source" "$DISPOSITION" "$TMP_ROOT" "$mode" "$invocation" <<'CHILD'
+set -euo pipefail
+eval "$(<"$1")"; eval "$(<"$2")"; eval "$(<"$3")"
+disposition="$4"; root="$5/entry-$6-$7"; mode="$6"; invocation="$7"
+mkdir -p "$root"
+printf '0\n' > "$root/count"
+ADK_REL="$root"; ADK_DEFAULT_LOOPBACK=127.0.0.1; REL_PORT=0
+POST_DEPLOY_SMOKE_STAMP=fixture; POST_DEPLOY_SMOKE_EVIDENCE="$root/evidence"
+POST_DEPLOY_SMOKE_CORE_API_ENDPOINTS=(/api/health /api/health/detail /api/sessions)
+POST_DEPLOY_SMOKE_RECOVERY_GATE_S=10
+case "$mode" in (permanent|late|wait_http) POST_DEPLOY_SMOKE_RECOVERY_GATE_S=1 ;; esac
+POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE=evaluated
+# Seed obsolete success and a path: a new run cannot inherit either.
+POST_DEPLOY_SMOKE_READY=true; POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY="$root/stale.json"
+printf '{"fully_recovered":true,"mailboxes":[]}\n' > "$root/stale.json"
+POST_DEPLOY_SMOKE_WEDGE_COVERAGE=stale; POST_DEPLOY_SMOKE_FAILURES=()
+effects=0; warn_calls=0
+_post_deploy_smoke_check_fail_closed_warn_rate() { warn_calls=$((warn_calls + 1)); }
+_post_deploy_smoke_check_relay_round_trip() { effects=$((effects + 1)); }
+_post_deploy_smoke_check_durable_record() { effects=$((effects + 1)); POST_DEPLOY_SMOKE_DURABLE_COVERAGE=evaluated; }
+_report_post_deploy_smoke_failure() { printf 'REPORT_CALLED\n'; }
+sleep() { :; }
+curl() {
+    local out="" url="" code=200 body='{}' n max="" write_code=false
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            (-sS) shift ;;
+            (--connect-timeout|-H) shift 2 ;;
+            (--max-time) max="$2"; shift 2 ;;
+            (-o) out="$2"; shift 2 ;;
+            (-w) [ "$2" = '%{http_code}' ] || return 90; write_code=true; shift 2 ;;
+            (http://127.0.0.1:0/api/*) url="$1"; shift ;;
+            (*) printf 'unexpected curl option %s\n' "$1" >&2; return 90 ;;
+        esac
+    done
+    [ -n "$out" ] && [ -n "$max" ] || return 90
+    printf '%s max=%s\n' "$url" "$max" >> "$root/requests"
+    case "$url" in
+        (*/api/health) body='{"cluster_standby":false}' ;;
+        (*/api/sessions) body='[]' ;;
+        (*/api/health/detail)
+            n=$(cat "$root/count"); n=$((n + 1)); printf '%s\n' "$n" > "$root/count"
+            body='{"fully_recovered":true,"mailboxes":[]}'
+            if [ "$mode" = late ] && [ "$n" -eq 1 ]; then
+                command sleep 2
+            elif [ "$n" -eq 1 ]; then
+                body='{"fully_recovered":false,"mailboxes":[]}'
+            fi
+            if [ "$mode" = wait_http ] && [ "$n" -eq 1 ]; then
+                code=500; body='{"fully_recovered":true,"mailboxes":[]}'
+            fi
+            if [ "$n" -ge 3 ]; then
+                case "$mode" in
+                    (marker) body='{"fully_recovered":true,"mailboxes":[{"channel_id":5997003,"provider":"fixture","relay_stall_state":"orphan_pending_token"}]}' ;;
+                    (http) code=500 ;;
+                    (malformed) body='{broken' ;;
+                    (empty) body='' ;;
+                    (regressed) body='{"fully_recovered":false,"mailboxes":[]}' ;;
+                esac
+            fi ;;
+        (*) return 90 ;;
+    esac
+    printf '%s' "$body" > "$out"
+    if [ "$write_code" = true ]; then printf '%s' "$code"; fi
+}
+if [ "$mode" = reinvoke ]; then
+    if _run_post_deploy_functional_smoke; then first_rc=0; else first_rc=$?; fi
+    printf 'FIRST_RESULT rc=%s coverage=%s\n' "$first_rc" "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE"
+    rmdir "$ADK_REL/logs"
+    printf blocker > "$ADK_REL/logs"
+fi
+if [ "$invocation" = disposition ]; then
+    eval "$(<"$disposition")"
+    printf 'CONTINUED\n'
+else
+    if _run_post_deploy_functional_smoke; then rc=0; else rc=$?; fi
+    printf 'ENTRY_RESULT rc=%s coverage=%s effects=%s warns=%s\n' "$rc" "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE" "$effects" "$warn_calls"
+fi
+printf 'REQUEST_COUNT=%s\n' "$(cat "$root/count")"
+CHILD
+    )
+    entry_cases=$((entry_cases + 1))
+    printf '%s\n' "$output"
+    case "$mode" in
+        permanent|late|wait_http) expected_requests=2 ;;
+        *) expected_requests=3 ;;
+    esac
+    grep -q "^REQUEST_COUNT=$expected_requests$" <<< "$output" || fail "$mode-entry: wait and fresh probe request count differs"
+    if [ "$mode" = late ]; then
+        grep -qF 'startup recovery did not finish within 1s (fully_recovered=true arrived after recovery deadline)' <<< "$output" || fail 'late-entry: deadline observation reason is inaccurate'
+    fi
+    if [ "$invocation" = disposition ]; then
+        grep -q '^CONTINUED$' <<< "$output" || fail "$mode: disposition stopped deploy continuation"
+        case "$mode" in
+            marker) grep -q '^REPORT_CALLED$' <<< "$output" || fail 'marker: disposition omitted failure report' ;;
+            clean) grep -q 'functional smoke passed' <<< "$output" || fail 'clean: disposition did not pass' ;;
+            permanent) grep -q 'completed with coverage gap' <<< "$output" || fail 'permanent: disposition lost coverage gap' ;;
+        esac
+    else
+        case "$mode" in
+            reinvoke)
+                grep -q 'FIRST_RESULT rc=0 coverage=evaluated: 0 ' <<< "$output" || fail 'reinvoke-entry: first real run did not evaluate clean'
+                grep -q 'ENTRY_RESULT rc=1 coverage=not run: wedge check did not execute effects=2 warns=1' <<< "$output" || fail 'reinvoke-entry: setup failure retained prior wedge coverage' ;;
+            marker)
+                grep -q 'channel=5997003 state=orphan_pending_token' <<< "$output" || fail 'fresh-entry: third snapshot marker missing'
+                grep -q 'ENTRY_RESULT rc=1 coverage=evaluated: 1 .* effects=2 warns=1' <<< "$output" || fail 'fresh-entry: marker verdict or relay continuation missing' ;;
+            clean) grep -q 'ENTRY_RESULT rc=0 coverage=evaluated: 0 .* effects=2 warns=1' <<< "$output" || fail 'clean-entry: valid recovered snapshot not evaluated' ;;
+            permanent|late|wait_http)
+                grep -q 'ENTRY_RESULT rc=0 coverage=not evaluated: startup recovery did not finish .* effects=0 warns=1' <<< "$output" || fail "$mode-entry: unconfirmed recovery accepted or injected" ;;
+            regressed) grep -q 'ENTRY_RESULT rc=0 coverage=not evaluated: startup recovery in progress effects=0 warns=1' <<< "$output" || fail 'regressed-entry: old recovery success authorized injection' ;;
+            http|malformed|empty) grep -q 'ENTRY_RESULT rc=1 coverage=unevaluable: .* effects=0 warns=1' <<< "$output" || fail "$mode-entry: invalid fresh snapshot accepted" ;;
+        esac
+    fi
+    printf 'ENTRY_CASE_DONE %s %s\n' "$mode" "$invocation"
+}
+for mode in marker clean permanent late wait_http http malformed empty regressed reinvoke; do
+    run_entry_case "$mode"
+done
+for mode in marker clean permanent; do run_entry_case "$mode" disposition; done
+printf 'ENTRY_CASE_COUNT=%s\n' "$entry_cases"
+
 if [ -z "${MUTATION_CHILD:-}" ]; then
+    for mutation in wait_bypass fresh_snapshot_bypass wedge_bypass deadline_bypass; do
+        mut="$TMP_ROOT/mut-$mutation.sh"
+        python3 - "$DEPLOY_SH" "$mut" "$mutation" <<'PY'
+from pathlib import Path
+import sys
+source, output, mutation = sys.argv[1:]
+replacements = {
+    'wait_bypass': ('if recovery_gap=$(_post_deploy_smoke_wait_for_startup_recovery); then', 'if recovery_gap=""; then'),
+    'fresh_snapshot_bypass': ('if [ "$recovery_confirmed" = "true" ]; then', 'if [ "$recovery_confirmed" = "true" ]; then\n        POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY="$POST_DEPLOY_SMOKE_TMP_DIR/recovery-health-detail.json"'),
+    'wedge_bypass': ('if ! _post_deploy_smoke_check_wedges; then', 'if ! :; then'),
+    'deadline_bypass': ('[ "$((SECONDS - started))" -lt "$budget" ] || break', ':'),
+}
+before, after = replacements[mutation]
+text = Path(source).read_text()
+assert text.count(before) == 1, (mutation, text.count(before))
+Path(output).write_text(text.replace(before, after))
+print('MUTATION_REPLACEMENTS', mutation, 1)
+PY
+        case "$mutation" in
+            deadline_bypass) expected='late-entry: unconfirmed recovery accepted or injected' ;;
+            *) expected='fresh-entry: third snapshot marker missing' ;;
+        esac
+        if ! bash -n "$mut" > "$mut.bash-n" 2>&1; then
+            fail "$mutation was not syntactically valid"
+        elif MUTATION_CHILD=1 DEPLOY_SH_OVERRIDE="$mut" bash "$0" > "$mut.out" 2>&1; then
+            fail "$mutation survived the actual-entry fixture"
+        elif grep -q "$expected" "$mut.out"; then
+            printf 'MUTATION_CASE %s bash_n=0 fixture_rc=1 target=%s\n' "$mutation" "$expected"
+        else
+            cat "$mut.out" >&2
+            fail "$mutation died without its target fixture self-assertion"
+        fi
+    done
     for mutation in logical_and_removed unevaluable_as_clean; do
         mut="$TMP_ROOT/mut-$mutation.sh"
         if [ "$mutation" = logical_and_removed ]; then
