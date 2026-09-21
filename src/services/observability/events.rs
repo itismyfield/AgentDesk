@@ -14,6 +14,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+#[cfg(test)]
+mod capture_stress_tests;
+#[cfg(test)]
+mod capture_tests;
+#[cfg(test)]
+pub(crate) mod test_capture;
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -109,6 +116,15 @@ impl EventLog {
             );
         }
         inner.buffer.push_back(event);
+        #[cfg(test)]
+        if GLOBAL_EVENT_LOG
+            .get()
+            .is_some_and(|global| std::ptr::eq(global.as_ref(), self))
+        {
+            if let Some(event) = inner.buffer.back() {
+                test_capture::record(event);
+            }
+        }
         inner.next_logical_idx = inner.next_logical_idx.saturating_add(1);
     }
 

@@ -1562,6 +1562,10 @@ src/
 │   ├── message_outbox/
 │   │   └── identity.rs
 │   ├── observability/
+│   │   ├── events/
+│   │   │   ├── capture_stress_tests.rs
+│   │   │   ├── capture_tests.rs
+│   │   │   └── test_capture.rs
 │   │   ├── emit.rs
 │   │   ├── events.rs
 │   │   ├── helpers.rs
