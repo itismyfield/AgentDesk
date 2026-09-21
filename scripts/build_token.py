@@ -578,8 +578,8 @@ def apply_sccache_env(env: dict[str, str]) -> None:
         return  # An unusable cache directory costs the cache, never the build.
     env["PATH"] = path
     env["SCCACHE_DIR"] = cache_dir
-    # 40G, not sccache's own 10G: at the cap the cache evicts what the next
-    # worktree is about to ask for. The CI workflows keep 10G -- hosted runner disk.
+    # Adjustable local ceiling to reduce eviction risk; performance gain is unmeasured.
+    # Explicit caller limits, including CI-specific values, remain unchanged.
     env["SCCACHE_CACHE_SIZE"] = env.get("SCCACHE_CACHE_SIZE") or "40G"
     # 0 disables the idle exit. Campaign builds queue behind the token for tens of
     # minutes, so the 600s default reaps the daemon between them and its counters

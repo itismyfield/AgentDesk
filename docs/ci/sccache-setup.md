@@ -78,14 +78,15 @@ multi-GB `target/debug/incremental` per-worktree hit is pure waste.
 > process environment, not from Cargo's injected vars. Set it via shell scripts
 > (see §2.2) or the calling launcher.
 
-### 2.2 Shell env (release build path)
+### 2.2 Shell env (release, deploy and installer source builds)
 
 `scripts/_defaults.sh :: setup_sccache_env` exports:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `SCCACHE_DIR` | `$HOME/.cache/sccache` | Cache location |
-| `SCCACHE_CACHE_SIZE` | `10G` | Eviction ceiling |
+| `SCCACHE_CACHE_SIZE` | `40G` | Adjustable local disk-cache ceiling |
+| `SCCACHE_IDLE_TIMEOUT` | `0` | Disable idle daemon exit; retain counters between builds |
 | `RUSTC_WRAPPER` | resolved `sccache` binary | Signals Cargo to wrap rustc |
 
 Callers:
@@ -97,6 +98,19 @@ Callers:
 `scripts/build_token.py` also activates sccache, but it is **not** a caller of this
 helper — it carries an independent copy of the same defaults, with a deliberately
 different precedence rule. See §2.4.
+
+For cache size and idle timeout, unset or empty values use the defaults; nonempty
+caller values are passed through, including `10G`, `20G`, `900`, or idle `0`.
+These helpers do not validate nonempty values. The 40G ceiling allows up to 30G
+more local disk use than the previous 10G ceiling without preallocating it.
+It aims to reduce cache eviction; a build-speed or hit-rate improvement has not
+been measured for this change.
+
+Size and idle settings take effect when the daemon starts. Exporting them does
+not resize or reconfigure an already running daemon. A deliberate restart in a
+quiet build window is needed to apply changed settings to that daemon; merging
+this change alone does not restart it. Bare Cargo with a manually set wrapper
+uses inherited settings or sccache's own defaults (10G and 600s), not this helper.
 
 If sccache is not installed, both release scripts **print a warning and continue** with
 `RUSTC_WRAPPER=""` + `CARGO_BUILD_RUSTC_WRAPPER=""` explicitly cleared (so the
@@ -125,11 +139,12 @@ binary when installed.
 
 ### 2.4 Build token wrapper (campaign build path)
 
-Campaign lanes run `python3 scripts/build_token.py -- <cmd>`, which is on none of the
-paths above. `apply_sccache_env` in that file writes four keys, on the child
-environment only, on POSIX only (it is applied after the `win32` early return): the
-same three variables from the same defaults (resolved absolute `sccache`,
-`$HOME/.cache/sccache`, `10G`), plus `PATH`, which carries the `/opt/homebrew/bin`
+Campaign lanes can activate caching through `python3 scripts/build_token.py -- <cmd>`.
+On successful activation, `apply_sccache_env` writes five keys on
+the child environment only, on POSIX only (after the `win32` early return):
+`RUSTC_WRAPPER`, `SCCACHE_DIR`, `SCCACHE_CACHE_SIZE`, `SCCACHE_IDLE_TIMEOUT`, and
+`PATH`. The defaults match the shell helper: resolved absolute `sccache`,
+`$HOME/.cache/sccache`, `40G`, and `0`; `PATH` carries the `/opt/homebrew/bin`
 prepend of §1 under the same condition.
 
 Its precedence rule is deliberately **not** `setup_sccache_env`'s. That helper is
@@ -138,7 +153,8 @@ the point of the call. `apply_sccache_env` is ambient: every campaign child gets
 unasked, so an existing caller decision stands. If either `RUSTC_WRAPPER` or
 `CARGO_BUILD_RUSTC_WRAPPER` is present — **empty string included**, that being Cargo's
 own spelling of "no wrapper" and the pair §2.2 has the release scripts clear — it
-changes nothing. That also makes it a no-op on every CI lane, since the workflows set
+changes nothing: it does not fill missing size or idle settings for an existing
+wrapper, even `RUSTC_WRAPPER=sccache`. That also makes it a no-op on CI lanes whose workflows set
 `RUSTC_WRAPPER` at the `env:` level (§2.3).
 
 | Variable | Effect |
@@ -152,18 +168,25 @@ environment byte-identical: the cache is dropped, never the build.
 
 ## 3. Env Var Matrix
 
-| Scope | `RUSTC_WRAPPER` | Incremental | `SCCACHE_DIR` | `SCCACHE_CACHE_SIZE` | Source |
-|-------|-----------------|-------------|---------------|----------------------|--------|
-| Local dev (bare `cargo build`) | none by default | disabled | n/a | n/a | `.cargo/config.toml` |
-| Local dev (opt-in) | `sccache` | disabled | `$HOME/.cache/sccache` (sccache default) | sccache default (10G advised) | shell env |
-| Campaign worktree build (`build_token.py`) | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `10G` | `build_token.py :: apply_sccache_env` (§2.4) |
-| `scripts/build-release.sh` | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `10G` | `.cargo/config.toml` + `setup_sccache_env` |
-| `scripts/deploy-release.sh` | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `10G` | `.cargo/config.toml` + `setup_sccache_env` |
-| CI Linux/Windows (`ci-*.yml`) | `sccache` | disabled | provided by `sccache-action` | provided by `sccache-action` | `.cargo/config.toml` + workflow `env:` + action |
-| CI macOS hosted | none | disabled | n/a | n/a | workflow clears `RUSTC_WRAPPER` + `SCCACHE_GHA_ENABLED` |
-| CI macOS self-hosted trusted | resolved `sccache` path when installed | disabled | `$HOME/.cache/sccache` | `20G` | `ci-macos-trusted.yml` + runner launchd env |
+| Scope | `RUSTC_WRAPPER` | Incremental | `SCCACHE_DIR` | `SCCACHE_CACHE_SIZE` | `SCCACHE_IDLE_TIMEOUT` | Source |
+|-------|-----------------|-------------|---------------|----------------------|------------------------|--------|
+| Local dev (bare `cargo build`) | none by default | disabled | n/a | n/a | n/a | `.cargo/config.toml` |
+| Local dev (manual opt-in) | `sccache` | disabled | inherited or sccache platform default | inherited or upstream `10G` | inherited or upstream `600` | shell env |
+| Campaign worktree build (activation eligible) | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `40G` | `0` | `build_token.py :: apply_sccache_env` (§2.4) |
+| `scripts/build-release.sh` | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `40G` | `0` | `.cargo/config.toml` + `setup_sccache_env` |
+| `scripts/deploy-release.sh` | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `40G` | `0` | `.cargo/config.toml` + `setup_sccache_env` |
+| Installer source build (helper available) | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `40G` | `0` | `scripts/install.sh` + `setup_sccache_env` |
+| CI Linux/Windows (`ci-*.yml`) | `sccache` | disabled | provided by `sccache-action` | workflow `10G` | inherited/upstream | workflow env + action |
+| CI macOS hosted | none | disabled | n/a | n/a | n/a | workflow clears `RUSTC_WRAPPER` + `SCCACHE_GHA_ENABLED` |
+| CI macOS self-hosted trusted | resolved `sccache` path when installed | disabled | `$HOME/.cache/sccache` | `20G` | inherited/upstream | `ci-macos-trusted.yml` + runner launchd env |
 
-To override per-session: `SCCACHE_DIR=/path SCCACHE_CACHE_SIZE=20G cargo build`.
+Helper rows show defaults when sccache is available and size/idle values are unset
+or empty. Nonempty caller values override them. The campaign row also requires
+both wrapper keys to be absent and no activation opt-out (§2.4).
+
+For a manual opt-in build, set the wrapper and desired overrides explicitly:
+`RUSTC_WRAPPER=sccache SCCACHE_DIR=/path SCCACHE_CACHE_SIZE=20G SCCACHE_IDLE_TIMEOUT=900 cargo build`.
+The existing-daemon boundary in §2.2 still applies.
 
 ---
 
