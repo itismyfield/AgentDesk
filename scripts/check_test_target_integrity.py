@@ -342,7 +342,10 @@ def collect_static_tests(root: Path, repo_root: Path) -> StaticTestInventory:
                 pending_test = pending_test or attr_path in {
                     ("test",), ("tokio", "test"),
                 }
-                if attr_path == ("path",):
+                # Style decides ownership: only an OUTER `#[...]` is
+                # metadata for the item behind it. An inner `#![...]`
+                # belongs to the form it is written inside.
+                if attr_path == ("path",) and bracket == index + 1:
                     string = next((item.value for item in attr
                                    if item.kind == "string"), None)
                     pending_path = string or pending_path

@@ -144,7 +144,10 @@ def _module_count(source: Path, module: str) -> int:
             bracket, end = span
             attr = tuple(item.value for item in tokens[bracket + 1:end - 1]
                          if item.kind == "ident")
-            pending_path = pending_path or bool(attr and attr[0] == "path")
+            # Only an outer `#[path]` belongs to the module behind it.
+            pending_path = pending_path or (bracket == index + 1
+                                            and bool(attr)
+                                            and attr[0] == "path")
             index = end
             continue
         if token.value == "mod" and token.kind == "ident" and index + 2 < len(tokens):
