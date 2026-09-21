@@ -195,9 +195,8 @@ jobs:
               # Every file scripts/pg_test_lane_manifest.txt [files] names as holding a live PG
               # test, so a new PG test selects this lane on the PR that adds it. Run
               #   python3 scripts/check_pg_test_lane_membership.py --write-pg-db-paths
-              # which scripts/ci-script-checks.sh reruns, demanding an empty diff. Keep
-              # this region first: paths-filter is last-match-wins, and the gate refuses
-              # a manual '!' exclusion placed ahead of it. See docs/ci/release-gates.md.
+              # which scripts/ci-script-checks.sh reruns, demanding an empty diff. paths-
+              # filter ORs patterns, so a '!' excludes nothing (#5232): refused anywhere.
               - 'src/db/auto_queue/entries.rs'
               - 'src/db/auto_queue/entries/dispatch_failure.rs'
               - 'src/db/auto_queue/phase_gates.rs'

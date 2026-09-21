@@ -96,19 +96,16 @@ UNANALYZABLE_FINDINGS = frozenset({"pr-job-delegates-to-reusable-workflow", "unr
 # the manifest `[files]` into the filter removes that drift at its source.
 PG_DB_BEGIN_MARKER = "# BEGIN generated pg_db source paths"
 PG_DB_END_MARKER = "# END generated pg_db source paths"
-PG_DB_WRITE_COMMAND = (
-    "python3 scripts/check_pg_test_lane_membership.py --write-pg-db-paths"
-)
-# Rendered verbatim (re-indented) at the head of the region. The ordering rule
-# it states is enforced by `_negations_before_block`, not merely requested.
+PG_DB_WRITE_COMMAND = "python3 scripts/check_pg_test_lane_membership.py --write-pg-db-paths"
+# Rendered verbatim (re-indented) at the head of the region. The `!` rule it
+# states is enforced by `_negations_in_pg_db`, not merely requested.
 PG_DB_BLOCK_HEADER = (
     f"{PG_DB_BEGIN_MARKER} -- #6014. Do not edit by hand.",
     f"# Every file {MANIFEST_REL.as_posix()} [files] names as holding a live PG",
     "# test, so a new PG test selects this lane on the PR that adds it. Run",
     f"#   {PG_DB_WRITE_COMMAND}",
-    "# which scripts/ci-script-checks.sh reruns, demanding an empty diff. Keep",
-    "# this region first: paths-filter is last-match-wins, and the gate refuses",
-    "# a manual '!' exclusion placed ahead of it. See docs/ci/release-gates.md.",
+    "# which scripts/ci-script-checks.sh reruns, demanding an empty diff. paths-",
+    "# filter ORs patterns, so a '!' excludes nothing (#5232): refused anywhere.",
 )
 _PG_DB_ENTRY = re.compile(r"^-\s+['\"]([^'\"]+)['\"]\s*$")
 
@@ -1087,8 +1084,7 @@ def pg_db_section_bounds(lines: list[str], source: str) -> tuple[int, int, int]:
     """Locate the block-style dorny ``pg_db`` filter by relative indentation.
 
     Returns ``(body_start, section_indent, section_end)``, the last exclusive.
-    Comments never end the section: the region's markers are comments, and so
-    are the hand-written rationales between entries.
+    Comments never end it: the markers and the hand-written rationales are ones.
     """
     start = next(
         (
@@ -1127,12 +1123,9 @@ def parse_pg_db_patterns(path: Path) -> tuple[str, ...]:
 
 
 def load_manifest_files(text: str, source: str) -> tuple[str, ...]:
-    """Read the ``[files]`` section of the PG lane manifest.
-
-    The authoritative side of the pair: `check_analysis` already fails on drift
-    between this file and the live inventory, so a stale manifest cannot
-    quietly become a stale filter.
-    """
+    """Read the ``[files]`` section of the PG lane manifest: the authoritative
+    side of the pair, since `check_analysis` already fails when it drifts from
+    the live inventory, so a stale manifest cannot become a stale filter."""
     entries: list[str] = []
     current: str | None = None
     seen = False
@@ -1161,12 +1154,9 @@ def load_manifest_files(text: str, source: str) -> tuple[str, ...]:
 
 
 def render_pg_db_block(files: Iterable[str], indent: str) -> list[str]:
-    """Render the bracketed generated region, markers included.
-
-    Refuses any path that would not round-trip through `parse_pg_db_patterns`
-    as the same single positive pattern: a quote, a `#`, or a leading `!`/`-`
-    makes the region select something other than what the manifest says.
-    """
+    """Render the bracketed generated region, markers included. Refuses a path
+    that would not round-trip through `parse_pg_db_patterns` as the same single
+    positive pattern: a quote, a `#`, or a leading `!`/`-` changes what it selects."""
     rendered = [f"{indent}{line}" for line in PG_DB_BLOCK_HEADER]
     for path in files:
         if path != path.strip() or not path:
@@ -1182,25 +1172,22 @@ def render_pg_db_block(files: Iterable[str], indent: str) -> list[str]:
 
 
 class PgDbBlock(NamedTuple):
-    """Where the generated region sits inside ci-pr.yml.
-
-    `indent` is derived from the `pg_db:` key, never read off the markers: a
-    mis-indented region must not be able to declare itself correct.
-    """
+    """Where the generated region sits inside ci-pr.yml. `indent` comes from the
+    `pg_db:` key, never off the markers: a mis-indented region must not be able
+    to declare itself correct."""
 
     lines: list[str]
     body_start: int
     begin: int
     end: int
+    section_end: int
     indent: str
 
 
 def locate_pg_db_block(text: str, source: str) -> PgDbBlock:
     """Find the one generated region, or say exactly how the file is wrong.
-
-    Markers are searched file-wide, so a region that was moved, duplicated, or
-    half-deleted is reported as malformed rather than silently re-created.
-    """
+    Markers are searched file-wide, so a region that was moved, duplicated or
+    half-deleted is reported as malformed rather than silently re-created."""
     lines = text.splitlines()
     body_start, section_indent, section_end = pg_db_section_bounds(lines, source)
     begins = [i for i, line in enumerate(lines) if line.strip().startswith(PG_DB_BEGIN_MARKER)]
@@ -1219,13 +1206,13 @@ def locate_pg_db_block(text: str, source: str) -> PgDbBlock:
             f"pg_db filter (lines {body_start + 1}-{section_end}); found them on "
             f"lines {begin + 1} and {end + 1}."
         )
-    return PgDbBlock(lines, body_start, begin, end, " " * (section_indent + 2))
+    return PgDbBlock(lines, body_start, begin, end, section_end, " " * (section_indent + 2))
 
 
-def _negations_before_block(block: PgDbBlock) -> tuple[tuple[int, str], ...]:
-    """Manual `!` exclusions the generated region would silently overrule."""
+def _negations_in_pg_db(block: PgDbBlock) -> tuple[tuple[int, str], ...]:
+    """Manual `!` entries anywhere in the filter -- ahead of the region or behind it."""
     offenders: list[tuple[int, str]] = []
-    for index in range(block.body_start, block.begin):
+    for index in range(block.body_start, block.section_end):
         match = _PG_DB_ENTRY.match(block.lines[index].strip())
         if match and match.group(1).startswith("!"):
             offenders.append((index + 1, match.group(1)))
@@ -1235,14 +1222,15 @@ def _negations_before_block(block: PgDbBlock) -> tuple[tuple[int, str], ...]:
 def pg_db_block_plan(workflow_path: Path, manifest_path: Path) -> tuple[PgDbBlock, list[str]]:
     """The located region plus the lines it is required to contain."""
     block = locate_pg_db_block(workflow_path.read_text("utf-8"), str(workflow_path))
-    offenders = _negations_before_block(block)
+    offenders = _negations_in_pg_db(block)
     if offenders:
         detail = "; ".join(f"{workflow_path}:{lineno} {pattern!r}" for lineno, pattern in offenders)
         raise ValueError(
-            f"{workflow_path}: {len(offenders)} negative pattern(s) precede the "
-            f"generated region and would be overruled by it with no diagnostic "
-            f"({detail}). dorny/paths-filter is last-match-wins: move the "
-            f"exclusion after '{PG_DB_END_MARKER}', or drop it."
+            f"{workflow_path}: {len(offenders)} negative pattern(s) in the pg_db "
+            f"filter ({detail}). dorny/paths-filter ORs every pattern it compiles "
+            f"(`matchers.some`; no predicate-quantifier is set here), so a leading "
+            f"'!' is one more POSITIVE matcher for everything else and turns the "
+            f"lane permanently on -- the #5232 defect. Drop it; nowhere is safe."
         )
     files = load_manifest_files(manifest_path.read_text("utf-8"), str(manifest_path))
     return block, render_pg_db_block(files, block.indent)
@@ -1288,6 +1276,9 @@ def _atomic_write_text(path: Path, text: str) -> None:
     try:
         with os.fdopen(handle, "w", encoding="utf-8", newline="") as stream:
             stream.write(text)
+        # mkstemp is 0600 and `os.replace` carries that onto the target, so the
+        # regeneration docs tell developers to run would lock the workflow down.
+        os.chmod(temporary, path.stat().st_mode & 0o7777)
         os.replace(temporary, path)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -1310,6 +1301,9 @@ def write_pg_db_generated_block(workflow_path: Path, manifest_path: Path) -> int
 
 
 def path_selected(path: str, patterns: Iterable[str]) -> bool:
+    """Resolve rule3 in this repo's narrower dialect: `!` is last-match-wins here
+    and a positive "not this" matcher in dorny. Equivalent only while no filter
+    carries one -- which is why the guards above refuse to let one in."""
     selected = False
     for raw in patterns:
         negated = raw.startswith("!")
@@ -1782,8 +1776,7 @@ def check(repo_root: Path, baseline_path: Path, manifest_path: Path, baseline_re
         return contract_rc
     # Inside the default mode on purpose: the one unconditional CI call site
     # already runs it, so a new PG source path fails closed without anybody
-    # remembering a second invocation. A malformed region is fatal before
-    # `analyze` reads the same filter.
+    # remembering a second one. A malformed region is fatal before `analyze`.
     block_rc = check_pg_db_generated_block(repo_root / PR_WORKFLOW_REL, manifest_path)
     if block_rc == 2:
         return 2

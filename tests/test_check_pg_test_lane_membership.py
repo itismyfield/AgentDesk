@@ -8,6 +8,7 @@ import importlib.util
 import io
 import re
 import shlex
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -1556,11 +1557,10 @@ class MutationProof(FixtureCase):
                 self.assertEqual(set(membership.discover_pg_inventory(self.root).tests), expected)
 
 
-# #6014: the `pg_db` paths-filter is generated from the manifest `[files]`
-# section. These cases pin the three claims that makes worth anything: an
-# unselected PG source path is a hard failure, a new one is picked up by
-# regeneration alone, and everything in the filter that is NOT a PG source
-# path survives that regeneration untouched.
+# #6014: the `pg_db` paths-filter is generated from the manifest `[files]`.
+# These cases pin the three claims that makes worth anything: an unselected PG
+# source path fails hard, a new one is picked up by regeneration alone, and
+# every non-source pattern survives that regeneration untouched.
 
 MANIFEST_FILES = ("src/db/service.rs", "src/voice/turn_link.rs")
 FIXTURE_MANIFEST = (
@@ -1588,10 +1588,8 @@ class PgDbGeneratedRegion(unittest.TestCase):
 
     HEAD = "jobs:\n  changes:\n    steps:\n      - with:\n          filters: |\n"
 
-    def region(self, files: tuple[str, ...] | None = None) -> list[str]:
-        return membership.render_pg_db_block(
-            MANIFEST_FILES if files is None else files, INDENT
-        )
+    def region(self, files: tuple[str, ...] = MANIFEST_FILES) -> list[str]:
+        return membership.render_pg_db_block(files, INDENT)
 
     def write_workflow(self, body_lines: list[str]) -> None:
         self.workflow.write_text(
@@ -1616,8 +1614,11 @@ class PgDbGeneratedRegion(unittest.TestCase):
     def run_write(self) -> tuple[int, str, str]:
         return self._run(membership.write_pg_db_generated_block)
 
-    def assert_untouched(self, before: bytes) -> None:
-        self.assertEqual(self.workflow.read_bytes(), before)
+    def state(self) -> tuple[bytes, int]:
+        return self.workflow.read_bytes(), self.workflow.stat().st_mode
+
+    def assert_untouched(self, before: tuple[bytes, int]) -> None:
+        self.assertEqual(self.state(), before)
 
     def unselected(self, paths: tuple[str, ...]) -> list[str]:
         patterns = membership.parse_pg_db_patterns(self.workflow)
@@ -1632,31 +1633,61 @@ class PgDbGeneratedRegion(unittest.TestCase):
         self.assertIn("in sync", out)
         self.assertIn("2 entries", out)
         self.assertEqual(self.unselected(MANIFEST_FILES), [])
-        settled = self.workflow.read_bytes()
+        self.workflow.chmod(0o644)
+        settled = self.state()
         self.assertEqual(self.run_write()[0], 0)
-        self.assertEqual(self.workflow.read_bytes(), settled)
+        # Mode too: `os.replace` hands the target mkstemp's 0600 otherwise, and
+        # git tracks no mode bit that would notice.
+        self.assertEqual(self.state(), settled)
         self.assertEqual(self.run_check()[0], 0)
 
-    def test_every_shape_of_region_drift_is_a_real_failure(self) -> None:
+    def test_every_drifted_or_malformed_region_is_a_named_failure(self) -> None:
+        # One matrix, two verdicts. Drift is rc=1 and regeneration cures it. A
+        # region the reader cannot trust is rc=2, named, and never rewritten --
+        # and so is a `!`, which dorny ORs into "everything else" instead of
+        # subtracting (#5232), on either side of the region.
         region = self.region()
         reordered = list(region)
         reordered[-2], reordered[-3] = reordered[-3], reordered[-2]
         deleted = [line for line in region if "turn_link" not in line]
-        for expected, body in (
-            ("src/voice/turn_link.rs", deleted),
-            ("- - 'src/db/ghost.rs'", self.region(MANIFEST_FILES + ("src/db/ghost.rs",))),
-            ("order or indentation", reordered),
+        without = lambda marker: [line for line in region if marker not in line]
+        excluded = f"{INDENT}- '!src/voice/turn_link.rs'"
+        for want, expected, body in (
+            (1, "src/voice/turn_link.rs", deleted),
+            (1, "- - 'src/db/ghost.rs'", self.region(MANIFEST_FILES + ("src/db/ghost.rs",))),
+            (1, "order or indentation", reordered),
+            (2, "found 0 and 0", [f"{INDENT}- '{path}'" for path in MANIFEST_FILES]),
+            (2, "found 1 and 0", without(membership.PG_DB_END_MARKER)),
+            (2, "found 0 and 1", without(membership.PG_DB_BEGIN_MARKER)),
+            (2, "found 2 and 1", [region[0]] + region),
+            (2, "found 1 and 2", region + [region[-1]]),
+            (2, "must bracket a region", [region[-1]] + region[:-1]),
+            (2, "ORs every pattern", [excluded] + region),
+            (2, "ORs every pattern", region + [excluded]),
         ):
-            with self.subTest(case=expected):
+            with self.subTest(rc=want, case=expected, entries=len(body)):
                 self.write_workflow(body)
+                original = self.state()
                 rc, _, err = self.run_check()
-                self.assertEqual(rc, 1)
+                self.assertEqual(rc, want, err)
+                self.assertIn("FAIL: [pg-db-generated]", err)
                 self.assertIn(expected, err)
-                self.assertIn(membership.PG_DB_WRITE_COMMAND, err)
+                write_rc, _, write_err = self.run_write()
+                if want == 1:  # recoverable, and regeneration is the recovery
+                    self.assertIn(membership.PG_DB_WRITE_COMMAND, err)
+                    self.assertEqual((write_rc, self.run_check()[0]), (0, 0))
+                else:  # unreadable: named a second time, file left alone
+                    self.assertEqual((write_rc, expected in write_err), (2, True))
+                    self.assert_untouched(original)
         # The deleted entry is #6014 itself: it must also stop selecting.
         self.write_workflow(deleted)
         self.assertEqual(self.unselected(("src/voice/turn_link.rs",)),
                          ["src/voice/turn_link.rs"])
+        # Positive control: the same manual entry without the `!` is legal, is
+        # kept by regeneration, and selects.
+        self.write_in_sync(after=[f"{INDENT}- 'src/services/manual.rs'"])
+        self.assertEqual((self.run_write()[0], self.run_check()[0]), (0, 0))
+        self.assertEqual(self.unselected(("src/services/manual.rs",)), [])
 
     def test_a_new_manifest_file_is_picked_up_by_regeneration_alone(self) -> None:
         # (b) recurrence prevention: nobody edits ci-pr.yml. The manifest grows
@@ -1694,28 +1725,6 @@ class PgDbGeneratedRegion(unittest.TestCase):
             "utf-8",
         )
 
-    def test_malformed_regions_fail_loudly_and_never_rewrite_the_file(self) -> None:
-        region = self.region()
-        cases = {
-            "no markers": [f"{INDENT}- '{path}'" for path in MANIFEST_FILES],
-            "no end marker": [l for l in region if membership.PG_DB_END_MARKER not in l],
-            "no begin marker": [l for l in region if membership.PG_DB_BEGIN_MARKER not in l],
-            "duplicated begin": [region[0]] + region,
-            "duplicated end": region + [region[-1]],
-            "end before begin": [region[-1]] + region[:-1],
-        }
-        for label, body in cases.items():
-            with self.subTest(case=label):
-                self.write_workflow(body)
-                original = self.workflow.read_bytes()
-                rc, _, err = self.run_check()
-                self.assertEqual(rc, 2)
-                self.assertIn("FAIL: [pg-db-generated]", err)
-                write_rc, _, write_err = self.run_write()
-                self.assertEqual(write_rc, 2)
-                self.assertIn("FAIL: [pg-db-generated]", write_err)
-                self.assert_untouched(original)
-
     def test_a_relocated_region_and_a_missing_filter_are_malformed(self) -> None:
         for expected, build in (
             ("must bracket a region inside the", self.write_region_in_the_next_filter),
@@ -1724,30 +1733,12 @@ class PgDbGeneratedRegion(unittest.TestCase):
         ):
             with self.subTest(case=expected):
                 build()
-                original = self.workflow.read_bytes()
+                original = self.state()
                 rc, _, err = self.run_check()
                 self.assertEqual(rc, 2)
                 self.assertIn(expected, err)
                 self.assertEqual(self.run_write()[0], 2)
                 self.assert_untouched(original)
-
-    def test_a_negation_is_refused_before_the_region_and_honoured_after_it(self) -> None:
-        excluded = f"{INDENT}- '!src/voice/turn_link.rs'"
-        self.write_in_sync(before=[excluded])
-        original = self.workflow.read_bytes()
-        rc, _, err = self.run_check()
-        self.assertEqual(rc, 2)
-        self.assertIn("last-match-wins", err)
-        self.assertIn("!src/voice/turn_link.rs", err)
-        self.assertEqual(self.run_write()[0], 2)
-        self.assert_untouched(original)
-        # Not theoretical: last-match-wins means the region really would have
-        # reversed the exclusion with no diagnostic. After it, it is honoured.
-        self.assertEqual(self.unselected(("src/voice/turn_link.rs",)), [])
-        self.write_in_sync(after=[excluded])
-        self.assertEqual(self.run_check()[0], 0)
-        self.assertEqual(self.unselected(("src/voice/turn_link.rs",)),
-                         ["src/voice/turn_link.rs"])
 
     def test_manual_entries_comments_and_non_source_triggers_survive(self) -> None:
         before = [f"{INDENT}# hand-written rationale that must not be eaten"]
@@ -1919,6 +1910,22 @@ class PgDbCiWiring(unittest.TestCase):
             rc = membership.check_pg_db_generated_block(self.PR_WORKFLOW, manifest)
         self.assertEqual(rc, 0)
 
+    PG_BANNER = 'banner "PostgreSQL test-lane membership gate'
+
+    def run_pg_gate_section(self, py_rc: int = 0, git_rc: int = 0) -> tuple[int, list[str]]:
+        """Run this gate's shipped banner section with `$PYTHON` and `git` shadowed
+        by recording stubs: a comment, an `echo` or a disabled `if` reaches none."""
+        _, banner, rest = self.script_checks.partition(self.PG_BANNER)
+        self.assertTrue(banner, "the PG membership gate lost its banner")
+        done = subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", "banner() { :; }\n"
+             f"py() {{ echo \"py $*\"; return {py_rc}; }}\n"
+             f"git() {{ echo \"git $*\"; return {git_rc}; }}\n"
+             "PYTHON=py TEST_LANE_BASELINE_REF=fixture-ref\n"
+             + banner + rest.partition("\nbanner ")[0]],
+            cwd=tempfile.gettempdir(), capture_output=True, text=True)
+        return done.returncode, done.stdout.splitlines()
+
     def test_script_checks_runs_the_gate_and_demands_a_clean_regeneration(self) -> None:
         # Unconditional on purpose: were the job path-filtered, a PR adding a
         # PG test to an unselected file could skip the very check for it.
@@ -1928,12 +1935,19 @@ class PgDbCiWiring(unittest.TestCase):
             any("ci-script-checks.sh" in str(step.get("run", "")) for step in job["steps"]),
             "the scripts job must run scripts/ci-script-checks.sh",
         )
-        for command in (
-            'scripts/check_pg_test_lane_membership.py --baseline-ref "$TEST_LANE_BASELINE_REF"',
-            "scripts/check_pg_test_lane_membership.py --write-pg-db-paths",
+        checker = "py scripts/check_pg_test_lane_membership.py"
+        self.assertEqual(self.run_pg_gate_section(), (0, [
+            f"{checker} --baseline-ref fixture-ref",
+            f"{checker} --write-pg-db-paths",
             "git diff --exit-code HEAD -- .github/workflows/ci-pr.yml",
-        ):
-            self.assertIn(command, self.script_checks)
+            "py -m unittest tests.test_check_pg_test_lane_membership",
+        ]))
+        # Neither half is advisory: whichever goes red stops the job right
+        # there, so a dirty regeneration cannot be merged past a green check.
+        for rcs, ran in ((dict(py_rc=1), 1), (dict(git_rc=1), 3)):
+            with self.subTest(**rcs):
+                rc, calls = self.run_pg_gate_section(**rcs)
+                self.assertEqual((rc != 0, len(calls)), (True, ran))
 
     def test_the_pg_job_keys_off_pg_db_and_still_runs_the_pg_recipe(self) -> None:
         # paths-filter -> job condition -> recipe -> selector. The condition
