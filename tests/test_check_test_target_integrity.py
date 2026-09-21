@@ -1732,6 +1732,12 @@ class StaticAttributeBoundaries(unittest.TestCase):
             "inner_path_payload": ('#![cfg_attr(any(), opaque(#[path = "fake.rs"]))]\n'
                                    'mod child;\n',
                                    {"child::real_test": "src/child.rs:1"}),
+            # An inner attribute belongs to the form it is written in,
+            # so a function's own `#![path]` is not the next mod's.
+            "inner_path_on_a_function": ('fn helper() {\n'
+                                         '    #![path = "fake.rs"]\n}\n'
+                                         'mod child;\n',
+                                         {"child::real_test": "src/child.rs:1"}),
         }
         for label, (source, expected) in sources.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
