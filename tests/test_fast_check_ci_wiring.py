@@ -2200,6 +2200,25 @@ jobs:
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("linked.yaml must not be a symlink", result.stderr)
 
+    def test_nightly_notification_suite_is_executable_and_failure_is_fatal(self) -> None:
+        aggregate = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text()
+        start = aggregate.index("# Nightly notification contract (#6006).")
+        end = aggregate.index("# End nightly notification contract.", start)
+        block = aggregate[start:end]
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "python-probe"
+            journal = Path(tmp) / "argv"
+            probe.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$JOURNAL"\nexit "$PROBE_RC"\n')
+            probe.chmod(0o755)
+            for rc in (0, 17):
+                result = subprocess.run(["bash", "-c", "set -euo pipefail\n" + block],
+                    env={"PATH": os.environ["PATH"], "PYTHON": str(probe),
+                         "JOURNAL": str(journal), "PROBE_RC": str(rc)},
+                    capture_output=True, text=True)
+                self.assertEqual(result.returncode, rc, result.stderr)
+                self.assertEqual(journal.read_text().splitlines(),
+                                 ["-m", "unittest", "tests.test_nightly_ci_triage"])
+
     def test_ci_script_checks_runs_this_contract(self) -> None:
         script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(
             encoding="utf-8"
