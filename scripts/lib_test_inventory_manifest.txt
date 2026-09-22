@@ -1861,6 +1861,7 @@ services::claude_tui::tui_relay::tests::try_claim_registry_match_token_leaves_st
 services::claude_tui::tui_relay::tests::tui_send_holds_composer_lock_across_paste_and_enter
 services::claude_tui::tui_relay::tests::unrelated_event_does_not_match_stop
 services::claude_tui::tui_relay::tests::wait_request_not_before_defaults_to_none
+services::cluster::attachment_transfer::temporary::tests::attachment_cleanup_keeps_locked_execution_and_removes_only_expired_orphans
 services::cluster::attachment_transfer::tests::bundle_rejects_corrupted_bytes_and_unknown_version
 services::cluster::attachment_transfer::tests::bundle_rejects_cross_message_identity
 services::cluster::attachment_transfer::tests::bundle_rejects_partial_entry_set
