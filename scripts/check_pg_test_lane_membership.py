@@ -94,7 +94,14 @@ CONFIGURATION_ERROR_FINDINGS = frozenset({"jobs-empty"})
 # Findings that mean this gate could not fully analyse an input. They fail the
 # check rather than warning, because omitted scope is indistinguishable from a
 # clean result.
-UNANALYZABLE_FINDINGS = frozenset({"pr-job-delegates-to-reusable-workflow", "unresolved-external-test-module"})
+UNANALYZABLE_FINDINGS = frozenset({
+    "pr-job-delegates-to-reusable-workflow",
+    "unresolved-external-test-module",
+    "pg-reach-depth-exhausted",
+})
+# Helper-call hops followed from a test body. `seen` already bounds the walk;
+# the limit only turns an unexpectedly deep chain into an explicit failure.
+PG_REACH_MAX_DEPTH = 16
 # #6014: the hand-kept `pg_db` glob list and the computed manifest drifted,
 # rule3 deferred the difference, and a PR touching only a deferred file skipped
 # the PG lane while the required mirror recorded that skip as a pass. Rendering
@@ -397,12 +404,15 @@ def _transitive_closure(
         tuple[tuple[str, ...], str, str],
         set[tuple[tuple[str, ...], str, str]],
     ],
-    max_depth: int = 3,
-) -> bool:
-    """Whether a module-scoped helper reaches a PG seed within ``max_depth``."""
+    max_depth: int = PG_REACH_MAX_DEPTH,
+) -> bool | None:
+    """Whether a module-scoped helper reaches a PG seed within ``max_depth``.
+
+    ``None`` means call paths were left unexplored at the depth limit, which
+    is not evidence that the test needs no PG."""
     frontier = set(referenced)
     seen: set[tuple[tuple[str, ...], str, str]] = set()
-    for _depth in range(1, max_depth + 1):
+    for _depth in range(max_depth):
         if frontier & seeded:
             return True
         seen.update(frontier)
@@ -412,7 +422,9 @@ def _transitive_closure(
             for target in edges.get(caller, set())
             if target not in seen
         }
-    return False
+    if frontier & seeded:
+        return True
+    return None if frontier else False
 
 
 def _module_ranges(
@@ -760,6 +772,13 @@ def discover_pg_inventory(
         indirect = _transitive_closure(referenced, seeded, edges)
         if direct or indirect:
             tests[name] = path
+        elif indirect is None and findings is not None:
+            findings.append(Finding(
+                "pg-reach-depth-exhausted",
+                name,
+                f"{path}: helper calls continue past the call-depth limit, so "
+                "whether this test needs PG is undecided",
+            ))
     cache_info = _matching_brace_cached.cache_info()
     if findings is not None:
         findings.append(Finding(

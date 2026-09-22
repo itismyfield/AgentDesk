@@ -524,6 +524,39 @@ class DetectionMutation(FixtureCase):
             with self.assertRaises(AssertionError):
                 self.assertEqual(set(membership.discover_pg_inventory(self.root).tests), expected)
 
+    def test_helper_chain_past_depth_limit_fails_closed(self) -> None:
+        def chain(test: str, hops: int) -> str:
+            helpers = "".join(
+                f"fn {test}_h{i}() {{ {test}_h{i + 1}(); }} " for i in range(hops)
+            )
+            return (
+                f"{helpers}fn {test}_h{hops}() {{ create_test_database(); }} "
+                f"#[test] fn {test}() {{ {test}_h0(); }} "
+            )
+
+        limit = membership.PG_REACH_MAX_DEPTH
+        self.fx.write_source(
+            "src/deep.rs",
+            f"#[cfg(test)] mod tests {{ {chain('within', 5)}{chain('beyond', limit + 1)}}}\n",
+            "mod deep;\n",
+        )
+        analysis = self.fx.analysis()
+        self.assertEqual(set(analysis.inventory.tests), {"deep::tests::within"})
+        exhausted = [
+            finding.source for finding in analysis.findings
+            if finding.kind == "pg-reach-depth-exhausted"
+        ]
+        self.assertEqual(exhausted, ["deep::tests::beyond"])
+        empty = {section: set() for section in membership.SECTIONS}
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            rc = membership.check_analysis(
+                analysis, empty, empty, membership.render_manifest(analysis.inventory),
+                reference_label="fixture base", allowlist_label="fixture allowlist",
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL: [pg-reach-depth-exhausted] deep::tests::beyond", stderr.getvalue())
+
     def test_brace_aware_edges_do_not_capture_the_next_function(self) -> None:
         self.fx.write_source(
             "src/service.rs",
