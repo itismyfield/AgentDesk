@@ -35,6 +35,7 @@ extract_function() {
 . "$REPO_ROOT/scripts/_defaults.sh"
 
 for fn in _recover_or_preserve_past_migration_floor _preserve_staged_binary_for_recovery \
+    _migration_floor_artifact_path _old_runtime_pid_is_alive \
     _release_runtime_is_serving _migration_floor_may_advance; do
     body="$(extract_function "$fn")"
     if [ -z "$body" ]; then
@@ -52,7 +53,12 @@ curl() {
     for a in "$@"; do
         case "$a" in --fail) fail_on_http=1 ;; --*) ;; -*f*) fail_on_http=1 ;; esac
     done
-    [ "${STUB_CURL_RC:-0}" = 0 ] || return "${STUB_CURL_RC:-0}"
+    local rc="${STUB_CURL_RC:-0}"
+    if [ -n "${STUB_CURL_SEQ:-}" ]; then
+        rc="${STUB_CURL_SEQ%% *}"
+        case "$STUB_CURL_SEQ" in *" "*) STUB_CURL_SEQ="${STUB_CURL_SEQ#* }" ;; esac
+    fi
+    [ "$rc" = 0 ] || return "$rc"
     printf '%s' "${STUB_HTTP_CODE:-200}"
     if [ "$fail_on_http" = 1 ] && [ "${STUB_HTTP_CODE:-200}" -ge 400 ]; then
         return 22
@@ -63,6 +69,8 @@ launchctl() { echo "launchctl $*" >>"$TMP_ROOT/calls"; return 0; }
 chflags() { echo "chflags $*" >>"$TMP_ROOT/calls"; return 0; }
 tmux() { echo "tmux $*" >>"$TMP_ROOT/calls"; return 0; }
 xattr() { return 0; }
+kill() { case "$*" in "-0 "*) return "${STUB_PID_ALIVE:-1}" ;; esac; echo "kill $*" >>"$TMP_ROOT/calls"; return 0; }
+sleep() { return 0; }
 _launchd_domain() { echo "gui/501"; }
 start_release_tmux_fallback() { echo "tmux-fallback" >>"$TMP_ROOT/calls"; return 0; }
 wait_for_http_service_health() { echo "health $*" >>"$TMP_ROOT/calls"; return 0; }
@@ -94,8 +102,13 @@ reset_node() {
     printf 'OLD-UNBOOTABLE' >"$REL_BINARY"
     STAGED_BINARY="$ADK_REL/bin/agentdesk.deploy.test"
     printf 'STAGED-NEW' >"$STAGED_BINARY"
+    rm -f "$ADK_REL"/bin/agentdesk.migration-floor-recovery* "$ADK_REL"/bin/agentdesk.pre-migration-floor*
     : >"$TMP_ROOT/calls"
     STUB_MV_FAIL=0
+    STUB_CURL_SEQ=""
+    STUB_PID_ALIVE=1
+    # shellcheck disable=SC2034  # Read by the production function loaded through eval.
+    OLD_PID="4242"
 }
 
 echo "§1 nothing serving: promote the staged binary so launchd stops crash-looping"
@@ -135,6 +148,16 @@ if [ ! -e "$REL_BINARY_BACKUP" ]; then
 else
     fail ".prev was written with a binary that cannot boot"
 fi
+if ls "$ADK_REL"/bin/agentdesk.pre-migration-floor* >/dev/null 2>&1; then
+    pass "the replaced binary was kept, in case the database never actually advanced"
+else
+    fail "the replaced binary was destroyed — nothing can boot if the schema did not advance"
+fi
+if ! grep -q "^kill -9" "$TMP_ROOT/calls"; then
+    pass "no process was force-killed to reach the swap"
+else
+    fail "a process was SIGKILLed instead of being waited out"
+fi
 
 echo "§2 a serving runtime is left alone — the durability refusal is not undone"
 
@@ -164,14 +187,57 @@ else
     fail "cleanup would still delete the preserved binary at '$STAGED_BINARY'"
 fi
 
-echo "§3 a failed promote must not leave the node with no bootable binary"
+echo "§3 a process that stopped listening but has not exited is not stopped either"
 
+STUB_CURL_RC=7
+STUB_HTTP_CODE=000
+reset_node
+STUB_PID_ALIVE=0
+_recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
+if [ "$(cat "$REL_BINARY")" = "OLD-UNBOOTABLE" ]; then
+    pass "a draining runtime that still holds the pid is not swapped out from under"
+else
+    fail "the binary was swapped while the previous process was still alive"
+fi
+if ! grep -qE "bootout|^kill " "$TMP_ROOT/calls"; then
+    pass "the draining process was neither booted out nor killed"
+else
+    fail "a live process was stopped before its frontier could become durable"
+fi
+if ls "$ADK_REL"/bin/agentdesk.migration-floor-recovery* >/dev/null 2>&1; then
+    pass "the migration-capable binary was preserved for the redeploy"
+else
+    fail "the only bootable binary was not preserved"
+fi
+
+echo "§4 anything still answering after bootout blocks the swap"
+
+reset_node
+STUB_PID_ALIVE=1
+# not serving at the decision, serving again once the job was booted out
+STUB_CURL_SEQ="7 0"
+STUB_HTTP_CODE=200
+_recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
+if [ "$(cat "$REL_BINARY")" = "OLD-UNBOOTABLE" ]; then
+    pass "the swap is refused while something still owns the port"
+else
+    fail "the binary was swapped although the port was still owned — health could pass on the OLD executable"
+fi
+if ls "$ADK_REL"/bin/agentdesk.migration-floor-recovery* >/dev/null 2>&1; then
+    pass "the staged binary is preserved on that refusal"
+else
+    fail "the refusal lost the migration-capable binary"
+fi
+
+echo "§5 a failed promote must not leave the node with no bootable binary"
+
+STUB_CURL_SEQ=""
 STUB_CURL_RC=7
 STUB_HTTP_CODE=000
 reset_node
 STUB_MV_FAIL=1
 _recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
-if [ -e "$RECOVERY" ] && [ "$(cat "$RECOVERY")" = "STAGED-NEW" ]; then
+if ls "$ADK_REL"/bin/agentdesk.migration-floor-recovery* >/dev/null 2>&1; then
     pass "the staged binary survived a failed promote"
 else
     fail "a failed promote lost the only migration-capable binary"
@@ -182,7 +248,29 @@ else
     fail "cleanup would delete the last bootable binary at '$STAGED_BINARY'"
 fi
 
-echo "§4 no staged binary means no action at all"
+echo "§6 preserving twice never destroys the earlier recovery binary"
+
+reset_node
+STUB_CURL_RC=0
+STUB_HTTP_CODE=200
+_recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
+first="$RECOVERY"
+printf 'FIRST-KEPT' >"$first"
+STAGED_BINARY="$ADK_REL/bin/agentdesk.deploy.test2"
+printf 'SECOND-STAGED' >"$STAGED_BINARY"
+_recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
+if [ "$(cat "$first")" = "FIRST-KEPT" ]; then
+    pass "an earlier recovery binary is not overwritten by a later abort"
+else
+    fail "a later abort destroyed the binary proven to boot against the current schema"
+fi
+if [ -e "$first.1" ]; then
+    pass "the later binary is kept alongside it"
+else
+    fail "the later binary was dropped instead of kept alongside"
+fi
+
+echo "§7 no staged binary means no action at all"
 
 STUB_CURL_RC=7
 reset_node
@@ -197,7 +285,7 @@ else
     fail "the recovery acted with no staged binary"
 fi
 
-echo "§5 liveness: only a refused connection proves nothing owns the port"
+echo "§8 liveness: only a refused connection proves nothing owns the port"
 
 STUB_CURL_RC=0
 STUB_HTTP_CODE=200
@@ -237,7 +325,7 @@ else
     pass "liveness does not rely on pid existence"
 fi
 
-echo "§6 the floor detector answers a fact, not a rollback policy"
+echo "§9 the floor detector answers a fact, not a rollback policy"
 
 if extract_function _migration_floor_may_advance | grep -q "AGENTDESK_DEPLOY_FORCE_ROLLBACK"; then
     fail "a rollback policy override can disarm floor detection"
@@ -250,29 +338,29 @@ else
     fail "the migration comparison is duplicated between the guard and the detector"
 fi
 
-echo "§7 the deploy arms before the migration runs and recovers before cleanup"
+echo "§10 the deploy arms before the migration runs and recovers before cleanup"
 
 before_call="$(awk '/release-migrate-postgres; then/{exit} {print}' "$DEPLOY_SH" || true)"
-if printf '%s\n' "$before_call" | grep -q "MIGRATION_FLOOR_ARMED=1"; then
+if grep -q "MIGRATION_FLOOR_ARMED=1" <<<"$before_call"; then
     pass "the floor is armed before the migration is attempted"
 else
     fail "arming happens only after a successful rc — a partial apply would brick the node"
 fi
-if printf '%s\n' "$before_call" | tail -20 | grep -q "_migration_floor_may_advance"; then
+if tail -20 <<<"$before_call" | grep -q "_migration_floor_may_advance"; then
     pass "arming is gated on the factual detector"
 else
     fail "arming is not gated on the migration-floor detector"
 fi
 
 cleanup_body="$(awk '/^_cleanup_on_exit\(\) \{/{p=1} p{print} p&&/^\}$/{exit}' "$DEPLOY_SH")"
-recover_line=$(printf '%s\n' "$cleanup_body" | grep -n "_recover_or_preserve_past_migration_floor" | head -1 | cut -d: -f1 || true)
-rm_line=$(printf '%s\n' "$cleanup_body" | grep -n 'rm -f "\$STAGED_BINARY"' | head -1 | cut -d: -f1 || true)
+recover_line=$(grep -n "_recover_or_preserve_past_migration_floor" <<<"$cleanup_body" | head -1 | cut -d: -f1 || true)
+rm_line=$(grep -n 'rm -f "\$STAGED_BINARY"' <<<"$cleanup_body" | head -1 | cut -d: -f1 || true)
 if [ -n "$recover_line" ] && [ -n "$rm_line" ] && [ "$recover_line" -lt "$rm_line" ]; then
     pass "recovery runs before the staged binary is deleted"
 else
     fail "recovery is missing from the EXIT trap or runs after the staged binary is deleted (recover=${recover_line:-none} rm=${rm_line:-none})"
 fi
-if printf '%s\n' "$cleanup_body" | grep -q 'MIGRATION_FLOOR_ARMED:-0.*= 1'; then
+if grep -q 'MIGRATION_FLOOR_ARMED:-0.*= 1' <<<"$cleanup_body"; then
     pass "the EXIT trap gates recovery on the migration floor"
 else
     fail "the EXIT trap does not check MIGRATION_FLOOR_ARMED"

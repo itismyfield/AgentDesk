@@ -1107,31 +1107,48 @@ _release_runtime_is_serving() {
     [ "$rc" != "7" ]
 }
 
+_migration_floor_artifact_path() {
+    # Never clobber an earlier recovery artifact: the older one may be the only
+    # binary proven to boot against the schema the database actually has.
+    local base="$1" path="$1" n=0
+    while [ -e "$path" ]; do
+        n=$((n + 1))
+        path="$base.$n"
+    done
+    printf '%s' "$path"
+}
+
 _preserve_staged_binary_for_recovery() {
-    # The staged binary is the only one that can boot against the advanced
+    # The staged binary may be the only one that can boot against an advanced
     # schema, so it must outlive the generic staging cleanup. Clearing
     # STAGED_BINARY is what removes it from that cleanup's reach.
-    local recovery="$ADK_REL/bin/agentdesk.migration-floor-recovery"
+    local target
     [ -n "${STAGED_BINARY:-}" ] && [ -e "${STAGED_BINARY:-}" ] || return 1
-    if mv -f "$STAGED_BINARY" "$recovery"; then
+    target="$(_migration_floor_artifact_path "$ADK_REL/bin/agentdesk.migration-floor-recovery")"
+    if mv -f "$STAGED_BINARY" "$target"; then
         STAGED_BINARY=""
-        echo "   Migration-capable binary preserved at $recovery"
+        echo "   Migration-capable binary preserved at $target"
         return 0
     fi
-    echo "   ⚠ Could not preserve the staged binary at $recovery; leaving it at $STAGED_BINARY" >&2
+    echo "   ⚠ Could not preserve the staged binary at $target; it remains at $STAGED_BINARY" >&2
     STAGED_BINARY=""
     return 1
 }
 
+_old_runtime_pid_is_alive() {
+    [ -n "${OLD_PID:-}" ] && kill -0 "${OLD_PID}" 2>/dev/null
+}
+
 _recover_or_preserve_past_migration_floor() {
     # Postgres may now be ahead of the live binary, which would crash-loop under
-    # launchd. Promote forward only when nothing is serving: a live runtime still
-    # owns an in-flight delivery frontier, and the durability gate refused to stop
-    # it, so stopping it here would discard exactly what that refusal protected.
+    # launchd. Promote forward only once nothing is serving AND the previous
+    # process is gone: the durability gate refused to stop a runtime whose
+    # in-flight delivery frontier is not proven durable, and undoing that refusal
+    # here would discard exactly what it protected.
     local rel_binary="${REL_BINARY:-$ADK_REL/bin/agentdesk}"
     local plist="${PLIST_REL:-}"
     local rel_port="${REL_PORT:-${AGENTDESK_REL_PORT:-${ADK_DEFAULT_PORT:-8791}}}"
-    local domain waited=0
+    local domain keep waited=0
 
     [ -n "${STAGED_BINARY:-}" ] && [ -e "${STAGED_BINARY:-}" ] || return 0
     [ -n "$plist" ] || return 0
@@ -1139,33 +1156,55 @@ _recover_or_preserve_past_migration_floor() {
     echo ""
     echo "🛑 DEPLOY ABORTED PAST THE MIGRATION FLOOR"
     echo "   Postgres may already carry a migration that $rel_binary does not embed,"
-    echo "   so that binary would refuse to boot and launchd would crash-loop it."
+    echo "   so that binary could refuse to boot and launchd would crash-loop it."
 
     if _release_runtime_is_serving "$rel_port"; then
         echo "   The current runtime is still serving on :${rel_port}, so it still owns the"
-        echo "   in-flight delivery frontier. It is LEFT RUNNING and the binary is NOT swapped:"
-        echo "   stopping it here would lose the deliveries the durability gate refused to risk."
-        echo "   This node is serving but cannot survive a restart until it is redeployed."
+        echo "   in-flight delivery frontier. It is LEFT RUNNING and the binary is NOT swapped."
         _preserve_staged_binary_for_recovery || true
         echo "   Next: redeploy this node. Do not restart or reboot it first."
         return 0
     fi
 
-    echo "   Nothing is serving on :${rel_port}, so there is no in-flight frontier to lose."
-    echo "   Promoting the staged binary forward. The deploy still reports failure, and the"
-    echo "   unbootable binary is NOT recorded as last-known-good."
-    domain="$(_launchd_domain)" || domain="gui/$(id -u 2>/dev/null)"
-    launchctl bootout "$domain/$plist" 2>/dev/null || true
-    tmux kill-session -t "${AGENTDESK_RELEASE_TMUX_SESSION:-AgentDesk-dcserver-release-manual}" 2>/dev/null || true
-    while [ -n "${OLD_PID:-}" ] && kill -0 "${OLD_PID}" 2>/dev/null && [ "$waited" -lt 15 ]; do
+    # Not listening is not the same as gone: a draining runtime stops accepting
+    # before its frontier is durable. Give the recorded process time to leave.
+    while _old_runtime_pid_is_alive && [ "$waited" -lt 15 ]; do
         sleep 1
         waited=$((waited + 1))
     done
-    if [ -n "${OLD_PID:-}" ] && kill -0 "${OLD_PID}" 2>/dev/null; then
-        kill -9 "${OLD_PID}" 2>/dev/null || true
-        sleep 1
+    if _old_runtime_pid_is_alive; then
+        echo "   The previous runtime (pid ${OLD_PID}) is still alive although it stopped"
+        echo "   listening, so it may still be making its delivery frontier durable."
+        echo "   It is NOT killed and the binary is NOT swapped."
+        _preserve_staged_binary_for_recovery || true
+        echo "   Next: redeploy this node once that process has exited."
+        return 0
     fi
+
+    echo "   Nothing is serving on :${rel_port} and the previous process is gone, so there"
+    echo "   is no in-flight frontier to lose. Promoting the staged binary forward."
+    domain="$(_launchd_domain)" || domain="gui/$(id -u 2>/dev/null)"
+    launchctl bootout "$domain/$plist" 2>/dev/null || true
+    tmux kill-session -t "${AGENTDESK_RELEASE_TMUX_SESSION:-AgentDesk-dcserver-release-manual}" 2>/dev/null || true
+
+    # Re-prove both conditions after stopping the job: anything that answers now
+    # would also answer the health check below and fake a successful promote.
+    if _release_runtime_is_serving "$rel_port" || _old_runtime_pid_is_alive; then
+        echo "✗ Something still owns :${rel_port} after bootout — refusing to swap the binary" >&2
+        _preserve_staged_binary_for_recovery || true
+        return 0
+    fi
+
+    # Keep the binary being replaced. It is not last-known-good, so it must not
+    # become .prev, but it is the only executable that can boot if the database
+    # turns out not to have advanced after all.
     chflags nouchg "$rel_binary" 2>/dev/null || true
+    if [ -e "$rel_binary" ]; then
+        keep="$(_migration_floor_artifact_path "$ADK_REL/bin/agentdesk.pre-migration-floor")"
+        cp -p "$rel_binary" "$keep" 2>/dev/null \
+            && echo "   Replaced binary kept at $keep" \
+            || echo "   ⚠ Could not keep a copy of $rel_binary" >&2
+    fi
     if ! mv -f "$STAGED_BINARY" "$rel_binary"; then
         echo "✗ Fail-forward promote failed — the node is stopped on an unbootable binary" >&2
         _preserve_staged_binary_for_recovery || true
