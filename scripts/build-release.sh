@@ -1,15 +1,10 @@
 #!/usr/bin/env bash
-# ──────────────────────────────────────────────────────────────────────────────
-# build-release.sh — Build AgentDesk release artifact for GitHub Releases
-#
-# Usage:
-#   ./scripts/build-release.sh              # full build + package
-#   ./scripts/build-release.sh --skip-dashboard
-#
-# Output:
-#   dist/agentdesk-{os}-{arch}.tar.gz|zip  +  dist/checksums.txt
-#   Contents: agentdesk / agentdesk.exe, dashboard/dist/, policies/, skills/
-# ──────────────────────────────────────────────────────────────────────────────
+# Build the common native leader/worker artifact. Python >= 3.11 is required.
+# Usage: build-release.sh [--target <rust-target>]
+#        [--profile release|release-fast]
+#        [--skip-dashboard | --prebuilt-dashboard]
+# --skip-dashboard excludes UI assets; --prebuilt-dashboard packages an already
+# verified dashboard/dist. The default verifies/builds the dashboard once.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -18,212 +13,83 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/_defaults.sh"
 cd "$PROJECT_DIR"
 
-SKIP_DASHBOARD=false
-for arg in "$@"; do
-  case "$arg" in
-    --skip-dashboard) SKIP_DASHBOARD=true ;;
+DASHBOARD_MODE=build
+TARGET=""
+BUILD_PROFILE=release
+PYTHON="${AGENTDESK_PYTHON:-python3}"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --skip-dashboard|--prebuilt-dashboard)
+      if [ "$DASHBOARD_MODE" != build ]; then
+        echo "Error: choose exactly one dashboard mode" >&2
+        exit 2
+      fi
+      DASHBOARD_MODE="$1"
+      shift
+      ;;
+    --target)
+      if [ "$#" -lt 2 ] || [ -n "$TARGET" ]; then
+        echo "Error: --target requires one Rust target" >&2
+        exit 2
+      fi
+      TARGET="$2"
+      shift 2
+      ;;
+    --profile)
+      if [ "$#" -lt 2 ] || { [ "$2" != release ] && [ "$2" != release-fast ]; }; then
+        echo "Error: --profile requires release or release-fast" >&2
+        exit 2
+      fi
+      BUILD_PROFILE="$2"
+      shift 2
+      ;;
+    *) echo "Error: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
-RAW_OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-case "$RAW_OS" in
-  darwin)
-    OS="darwin"
-    PACKAGE_EXT="tar.gz"
-    BINARY_NAME="agentdesk"
-    ;;
-  linux)
-    OS="linux"
-    PACKAGE_EXT="tar.gz"
-    BINARY_NAME="agentdesk"
-    ;;
-  msys*|mingw*|cygwin*)
-    OS="windows"
-    PACKAGE_EXT="zip"
-    BINARY_NAME="agentdesk.exe"
-    ;;
-  *)
-    echo "Error: Unsupported operating system: $RAW_OS"
-    exit 1
-    ;;
+"$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else "Python >= 3.11 is required")'
+command -v cargo >/dev/null || { echo "Error: cargo is required" >&2; exit 1; }
+# SQLx embeds byte-exact migration checksums. Older Windows checkouts may still
+# contain CRLF after .gitattributes changed; reject them before compilation.
+"$PYTHON" "$SCRIPT_DIR/check_postgres_migration_checksums.py"
+HOST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
+TARGET_DIR="${CARGO_TARGET_DIR:-$PROJECT_DIR/target}"
+CARGO_TARGET_ARGS=()
+if [ -n "$TARGET" ]; then
+  CARGO_TARGET_ARGS+=(--target "$TARGET")
+  BINARY_DIR="$TARGET_DIR/$TARGET/$BUILD_PROFILE"
+else
+  TARGET="$HOST_TARGET"
+  BINARY_DIR="$TARGET_DIR/$BUILD_PROFILE"
+fi
+case "$TARGET" in
+  *-pc-windows-msvc) BINARY_NAME=agentdesk.exe ;;
+  *-apple-darwin|*-unknown-linux-gnu) BINARY_NAME=agentdesk ;;
+  *) echo "Error: unsupported release target: $TARGET" >&2; exit 2 ;;
 esac
-
-ARCH=$(uname -m)
-case "$ARCH" in
-  x86_64)        ARCH="x86_64" ;;
-  aarch64|arm64) ARCH="aarch64" ;;
-  *) echo "Error: Unsupported architecture: $ARCH"; exit 1 ;;
-esac
-
-VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-ARTIFACT_NAME="agentdesk-${OS}-${ARCH}"
-
-create_archive() {
-  local staging_name="$1"
-  local artifact_name="$2"
-
-  if [ "$OS" = "windows" ]; then
-    if command -v zip &>/dev/null; then
-      zip -rq "$artifact_name" "$staging_name"
-    else
-      echo "Error: zip is required to package Windows release artifacts"
-      exit 1
-    fi
-  else
-    tar czf "$artifact_name" "$staging_name"
-  fi
-}
-
-write_checksum() {
-  local artifact_name="$1"
-
-  if command -v shasum &>/dev/null; then
-    shasum -a 256 "$artifact_name" > checksums.txt
-  elif command -v sha256sum &>/dev/null; then
-    sha256sum "$artifact_name" > checksums.txt
-  elif command -v certutil &>/dev/null; then
-    local digest
-    digest=$(certutil -hashfile "$artifact_name" SHA256 | sed -n '2p' | tr -d '\r')
-    printf '%s  %s\n' "$digest" "$artifact_name" > checksums.txt
-  else
-    echo "Error: no SHA-256 checksum tool available"
-    exit 1
-  fi
-}
-
-echo "═══ Building AgentDesk v${VERSION} for ${OS}/${ARCH} ═══"
-echo ""
 
 export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-40G}"
-if setup_sccache_env; then
-  echo "▸ sccache cache: ${SCCACHE_DIR} (size ${SCCACHE_CACHE_SIZE})"
-else
-  echo "⚠ sccache not found in PATH; continuing without rustc wrapper"
-  echo "  Install it for faster release builds (for example: brew install sccache)"
-  echo "  See docs/ci/sccache-setup.md"
-  # Explicitly clear any rustc-wrapper coming from .cargo/config.toml so we
-  # don't fail the build when the binary is missing.
+if ! setup_sccache_env; then
   export RUSTC_WRAPPER=""
   export CARGO_BUILD_RUSTC_WRAPPER=""
 fi
 
-# ── 1. Build Rust binary ──────────────────────────────────────────────────────
-if ! command -v cargo &>/dev/null; then
-  echo "Error: cargo not found. Install Rust: https://rustup.rs/"
-  exit 1
+echo "[1/3] Building common AgentDesk binary for $TARGET ($BUILD_PROFILE)"
+# Keep the shared build-token contract and its separate contention diagnostics.
+ADK_BUILD_TOKEN_DIAG_FD=3 "$PYTHON" "$SCRIPT_DIR/build_token.py" -- \
+  cargo build --locked --profile "$BUILD_PROFILE" --bin agentdesk "${CARGO_TARGET_ARGS[@]}" 3>&2
+
+echo "[2/3] Dashboard ($DASHBOARD_MODE)"
+case "$DASHBOARD_MODE" in
+  build) bash "$SCRIPT_DIR/verify-dashboard.sh" ;;
+  --prebuilt-dashboard) test -f dashboard/dist/index.html || { echo "Missing prebuilt dashboard" >&2; exit 1; } ;;
+esac
+
+echo "[3/3] Packaging binary and common runtime assets"
+# package_release.py owns policies, routines, managed skills and entrypoints
+# (scripts/queue-stability-batch.sh and scripts/_defaults.sh), plus checksums.
+PACKAGE_ARGS=(--binary "$BINARY_DIR/$BINARY_NAME" --target "$TARGET" --profile "$BUILD_PROFILE")
+if [ "$DASHBOARD_MODE" = --skip-dashboard ]; then
+  PACKAGE_ARGS+=(--without-dashboard)
 fi
-
-echo "[1/3] Building Rust binary (release)..."
-# Serialized behind the build token so a concurrent release build cannot
-# interleave with this one (#5663). `tail -1` would swallow the wrapper's
-# contention notices, so fd 3 keeps them on stderr, outside the pipe.
-ADK_BUILD_TOKEN_DIAG_FD=3 python3 "$SCRIPT_DIR/build_token.py" -- \
-  cargo build --release 3>&2 2>&1 | tail -1
-
-BINARY="target/release/${BINARY_NAME}"
-if [ ! -f "$BINARY" ]; then
-  echo "Error: Binary not found at $BINARY"
-  exit 1
-fi
-echo "  Binary: $(ls -lh "$BINARY" | awk '{print $5}')"
-
-# ── 2. Verify + build dashboard ──────────────────────────────────────────────
-if [ "$SKIP_DASHBOARD" = true ]; then
-  echo "[2/3] Dashboard skipped (--skip-dashboard)"
-else
-  echo "[2/3] Verifying dashboard (install + build + test)..."
-  if [ -d "dashboard" ] && [ -f "dashboard/package.json" ]; then
-    "$PROJECT_DIR/scripts/verify-dashboard.sh"
-    echo "  Dashboard: $(du -sh dashboard/dist/ | cut -f1)"
-  else
-    echo "  [SKIP] No dashboard directory"
-  fi
-fi
-
-# ── 3. Package artifact ──────────────────────────────────────────────────────
-echo "[3/3] Packaging artifact..."
-
-DIST_DIR="$PROJECT_DIR/dist"
-STAGING="$DIST_DIR/$ARTIFACT_NAME"
-rm -rf "$STAGING"
-mkdir -p "$STAGING"
-
-# Binary
-cp "$BINARY" "$STAGING/"
-chmod +x "$STAGING/$BINARY_NAME"
-
-# Dashboard — rebuild to ensure dist matches current source
-if [ -d "dashboard" ] && command -v npm &>/dev/null; then
-  echo "▸ Building dashboard..."
-  (cd dashboard && npm run build --silent)
-fi
-if [ -d "dashboard/dist" ]; then
-  mkdir -p "$STAGING/dashboard"
-  cp -r dashboard/dist "$STAGING/dashboard/dist"
-fi
-
-# Policies
-if [ -d "policies" ]; then
-  mkdir -p "$STAGING/policies"
-  if command -v rsync &>/dev/null; then
-    rsync -a --delete "policies/" "$STAGING/policies/"
-  else
-    cp -R "policies/." "$STAGING/policies/"
-  fi
-fi
-
-# Routine scripts
-if [ -d "routines" ]; then
-  mkdir -p "$STAGING/routines"
-  if command -v rsync &>/dev/null; then
-    rsync -a --delete "routines/" "$STAGING/routines/"
-  else
-    cp -R "routines/." "$STAGING/routines/"
-  fi
-fi
-
-# Launchd-migrated shell entrypoints used by bundled routine prompts.
-if [ -d "scripts/launchd-migrated" ]; then
-  mkdir -p "$STAGING/scripts/launchd-migrated"
-  if command -v rsync &>/dev/null; then
-    rsync -a --delete "scripts/launchd-migrated/" "$STAGING/scripts/launchd-migrated/"
-  else
-    cp -R "scripts/launchd-migrated/." "$STAGING/scripts/launchd-migrated/"
-  fi
-fi
-
-# Root-level shell entrypoints referenced by bundled migrated routines.
-if [ -f "scripts/queue-stability-batch.sh" ]; then
-  mkdir -p "$STAGING/scripts"
-  cp "scripts/_defaults.sh" "$STAGING/scripts/_defaults.sh"
-  cp "scripts/queue-stability-batch.sh" "$STAGING/scripts/queue-stability-batch.sh"
-  chmod +x "$STAGING/scripts/queue-stability-batch.sh"
-fi
-
-# Managed skills
-if [ -d "skills" ]; then
-  mkdir -p "$STAGING/skills"
-  if command -v rsync &>/dev/null; then
-    rsync -a --delete "skills/" "$STAGING/skills/"
-  else
-    cp -R "skills/." "$STAGING/skills/"
-  fi
-fi
-
-# Version marker
-echo "$VERSION" > "$STAGING/VERSION"
-
-# Create tarball
-cd "$DIST_DIR"
-ARTIFACT_FILE="${ARTIFACT_NAME}.${PACKAGE_EXT}"
-create_archive "$ARTIFACT_NAME" "$ARTIFACT_FILE"
-rm -rf "$ARTIFACT_NAME"
-
-# Checksum
-write_checksum "$ARTIFACT_FILE"
-
-echo ""
-echo "═══ Build Complete ═══"
-echo "  Artifact: $DIST_DIR/${ARTIFACT_FILE}"
-echo "  Checksum: $(cat checksums.txt)"
-ls -lh "$DIST_DIR/${ARTIFACT_FILE}"
+"$PYTHON" "$SCRIPT_DIR/package_release.py" "${PACKAGE_ARGS[@]}"

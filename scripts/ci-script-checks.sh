@@ -503,6 +503,7 @@ banner "Session anchor CLI tests"
 "$PYTHON" -m unittest scripts.__tests__.test_session_anchor
 
 banner "Build token serialization tests (#5663)"
+"$PYTHON" -m unittest tests.test_package_release
 # scripts/build_token.py serializes the two release scripts' cargo sites; the
 # Makefile target and install.sh's source install stay outside it by design.
 # It is Python, so neither shellcheck nor cargo covers it; this unittest run is
