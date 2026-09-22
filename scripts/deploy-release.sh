@@ -2616,8 +2616,10 @@ if [ "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-0}" != "1" ]; then
             "release" "$ADK_REL" "$RESTART_REQUEST_NONCE" 30; then
             exit 1
         fi
+    elif _restart_persistence_proof_exists "$ADK_REL" "$RESTART_REQUEST_NONCE"; then
+        echo "▸ [gate] release persisted this request's frontier and exited; nothing left to wait for"
     else
-        echo "▸ [gate] release is not serving on :${REL_PORT:-} — no in-flight delivery frontier to persist; proceeding"
+        echo "▸ [gate] release is not serving on :${REL_PORT:-} and left no persistence proof — proceeding; a mid-stream turn may truncate (durable relay reattaches turns)"
     fi
 else
     echo "⚠ [gate] release restart durability gate=${AGENTDESK_RESTART_DRAIN_VERDICT}"

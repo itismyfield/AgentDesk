@@ -1429,6 +1429,15 @@ _restart_persistence_proof_class() {
   return 1
 }
 
+# The gate's proof check without its refusal, for callers that have already
+# decided to proceed and only need to report which situation they are in.
+_restart_persistence_proof_exists() {
+  local runtime_root="$1"
+  local expected_nonce="$2"
+  _set_restart_marker_root "$runtime_root" || return 1
+  _restart_persistence_proof_class "$RESTART_MARKER_ROOT" "$expected_nonce" >/dev/null 2>&1
+}
+
 clear_restart_drain_mode() {
   local runtime_root="$1"
   local nonce="${2:-${AGENTDESK_RESTART_REQUEST_NONCE:-}}"
