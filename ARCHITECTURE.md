@@ -92,6 +92,8 @@ src/
 │   ├── automation_candidates/
 │   │   └── verdict_tests.rs
 │   ├── calendar_sync/
+│   │   ├── execution.rs
+│   │   ├── postgres_tests.rs
 │   │   └── read.rs
 │   ├── campaigns/
 │   │   └── tests.rs

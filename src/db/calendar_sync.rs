@@ -4,6 +4,8 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
+mod execution;
+pub(crate) use execution::*;
 mod read;
 pub(crate) use read::*;
 
@@ -213,3 +215,6 @@ pub async fn mutate(pool: &PgPool, mutation: Mutation<'_>) -> Result<Receipt, Ca
         status: "accepted",
     })
 }
+
+#[cfg(test)]
+mod postgres_tests;
