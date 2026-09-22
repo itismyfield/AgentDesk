@@ -1744,7 +1744,7 @@ fn apply_db_import(
     runtime_root: &Path,
     warnings: &mut Vec<String>,
 ) -> Result<String, String> {
-    if !db::postgres::agent_roster_sync_enabled(config) {
+    if !db::postgres::shared_config_sync_enabled(config) {
         return Err(format!(
             "OpenClaw --write-db imports run the destructive config-to-DB agent roster sync; run this command only on a single-node deployment or the configured cluster leader (cluster.role={}).",
             config.cluster.role

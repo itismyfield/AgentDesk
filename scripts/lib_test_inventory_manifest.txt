@@ -555,6 +555,8 @@ db::postgres::tests::postgres_startup_reseed_migrates_legacy_openclaw_agent_ids
 db::postgres::tests::postgres_startup_reseed_preserves_configured_legacy_openclaw_agent_id
 db::postgres::tests::postgres_summary_uses_config_fields_when_enabled
 db::postgres::tests::postgres_test_sqlx_timeout_wrapper_fails_fast
+db::postgres::tests::postgres_worker_first_boot_requires_leader_without_seeding_shared_config
+db::postgres::tests::postgres_worker_reseed_preserves_all_leader_configuration_and_overrides
 db::postgres::tests::require_pg_guard_leaves_success_untouched_when_ci_lane_requires_postgres
 db::postgres::tests::require_pg_guard_panics_for_all_entrypoints_on_unreachable_database
 db::postgres::tests::require_pg_guard_preserves_errors_when_ci_lane_does_not_require_postgres
