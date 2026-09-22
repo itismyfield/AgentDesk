@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) mod kickoff;
+
 type DispatchLeaseHandle = Arc<crate::services::turn_orchestrator::DispatchLease>;
 
 pub(super) fn persistence_context(

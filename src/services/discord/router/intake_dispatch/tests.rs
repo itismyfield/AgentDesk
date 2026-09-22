@@ -4,6 +4,10 @@ fn intake_dispatch_invariant_direct_execution_body_has_no_external_producer_call
         ("intake_gate", include_str!("../intake_gate.rs")),
         ("gateway", include_str!("../../gateway.rs")),
         ("discord_mod", include_str!("../../mod.rs")),
+        (
+            "queue_kickoff",
+            include_str!("../../queue_dispatch/kickoff.rs"),
+        ),
         ("skill", include_str!("../../commands/skill.rs")),
         (
             "text_commands",
@@ -95,8 +99,8 @@ fn intake_dispatch_invariant_queued_entrypoints_promote_markers_after_admission_
             "drain_dispatched_queue_markers(",
         ),
         (
-            "discord_mod",
-            include_str!("../../mod.rs"),
+            "queue_kickoff",
+            include_str!("../../queue_dispatch/kickoff.rs"),
             "start_and_drain_kickoff_markers(",
         ),
     ] {

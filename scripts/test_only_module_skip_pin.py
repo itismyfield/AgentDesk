@@ -37,6 +37,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/cluster/attachment_transfer/storage_tests.rs",
         "src/services/cluster/intake_router_hook/attachment_tests.rs",
         "src/db/auto_queue/tests.rs",
+    "src/services/discord/queue_io/transport/tests.rs",
     "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rest_delivery_tests.rs",
         "src/db/automation_candidates/verdict_tests.rs",
         "src/db/campaigns/tests.rs",

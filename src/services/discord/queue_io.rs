@@ -1,5 +1,7 @@
 use super::*;
+mod transport;
 mod turn_admission;
+use transport::QueueTransport;
 pub(super) use turn_admission::{
     mailbox_recovery_kickoff, mailbox_try_start_turn_behind_queue,
     mailbox_try_start_turn_kinded_with_feedback,
@@ -388,15 +390,12 @@ pub(super) async fn kick_idle_queue_channel_if_context_available(
         return outcome;
     }
 
-    let (Some(ctx), Some(tok)) = (
-        shared.http.cached_serenity_ctx.get(),
-        shared.http.cached_bot_token.get(),
-    ) else {
+    let Some(transport) = QueueTransport::from_runtime(shared) else {
         tracing::debug!(
             provider = provider.as_str(),
             channel_id = channel_id.get(),
             reason,
-            "Deferred drain: cached Discord context/token unavailable; preserving queued work for the slow backstop"
+            "Deferred drain: Discord REST credentials unavailable; preserving queued work for the slow backstop"
         );
         return IdleQueueKickoffChannelOutcome::default();
     };
@@ -406,7 +405,7 @@ pub(super) async fn kick_idle_queue_channel_if_context_available(
         "  [{ts}] 🚀 Deferred drain: one-shot kick for channel {} ({reason})",
         channel_id
     );
-    super::kickoff_idle_queue_channel(ctx, shared, tok, provider, channel_id).await
+    super::kickoff_idle_queue_channel(&transport.intake_deps(shared), provider, channel_id).await
 }
 
 fn idle_queue_snapshot_blocked_by_real_turn(snapshot: &ChannelMailboxSnapshot) -> bool {
@@ -605,19 +604,16 @@ fn schedule_single_slow_idle_queue_backstop(
     true
 }
 
-async fn reconcile_all_ready_idle_queues(
+pub(super) async fn reconcile_all_ready_idle_queues(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     reason: &'static str,
 ) -> usize {
-    let (Some(ctx), Some(tok)) = (
-        shared.http.cached_serenity_ctx.get(),
-        shared.http.cached_bot_token.get(),
-    ) else {
+    let Some(transport) = QueueTransport::from_runtime(shared) else {
         tracing::debug!(
             provider = provider.as_str(),
             reason,
-            "Idle queue completion listener: cached Discord context/token unavailable; full reconcile deferred to slow backstop"
+            "Idle queue completion listener: Discord REST credentials unavailable; full reconcile deferred to slow backstop"
         );
         return 0;
     };
@@ -627,7 +623,7 @@ async fn reconcile_all_ready_idle_queues(
         reason,
         "Idle queue completion listener: reconciling all queued channels from mailbox snapshots"
     );
-    super::kickoff_idle_queues(ctx, shared, tok, provider).await
+    super::kickoff_idle_queues_with_deps(&transport.intake_deps(shared), provider).await
 }
 
 pub(in crate::services::discord) fn spawn_turn_completion_idle_queue_listener(
