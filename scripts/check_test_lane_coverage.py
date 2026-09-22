@@ -552,8 +552,9 @@ def load_manifest_section(text: str, section: str, source: str) -> tuple[str, ..
 def load_pg_manifest_tests(repo_root: Path) -> frozenset[str]:
     """The tests the source classifier found to need PostgreSQL."""
     path = repo_root / PG_MANIFEST_REL
+    # Absent PG facts would count PG-only coverage as non-PG coverage.
     if not path.is_file():
-        return frozenset()
+        raise ValueError(f"missing PG manifest: {PG_MANIFEST_REL}")
     text = path.read_text(encoding="utf-8")
     return frozenset(load_manifest_section(text, "tests", str(PG_MANIFEST_REL)))
 

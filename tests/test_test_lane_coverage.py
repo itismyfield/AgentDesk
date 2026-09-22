@@ -362,6 +362,9 @@ class RatchetTests(unittest.TestCase):
         (root / ".github/workflows/ci-pr.yml").write_text(
             "run: cargo test --lib targeted_tests\n", encoding="utf-8"
         )
+        (root / coverage.PG_MANIFEST_REL).write_text(
+            "[tests]\npg_tests::case\n", encoding="utf-8"
+        )
 
     def run_check(
         self,
@@ -381,6 +384,15 @@ class RatchetTests(unittest.TestCase):
                 emit_success=False,
             )
         return result, stderr.getvalue()
+
+    def test_missing_pg_manifest_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_repo(root, "covered_tests")
+            self.assertEqual(self.run_check(root, "", set()), (0, ""))
+            (root / coverage.PG_MANIFEST_REL).unlink()
+            with self.assertRaisesRegex(ValueError, "pg_test_lane_manifest"):
+                self.run_check(root, "", set())
 
     def test_new_uncovered_module_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
