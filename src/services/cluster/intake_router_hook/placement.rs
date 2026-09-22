@@ -222,7 +222,7 @@ pub(super) async fn route_node_override_without_owner(
 }
 
 #[derive(Clone, Copy)]
-enum ObserveTargetKind {
+pub(super) enum ObserveTargetKind {
     LiveForeignOwner,
     NodeOverride,
     PreferredLabels,
