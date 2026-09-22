@@ -77,6 +77,8 @@ SUMMARY_KEYS = {"invocations", "nonzero", "findings", "extraction_errors", "exec
 # tests are outside this parser. These exact, named differences are reviewed
 # data; any drift on either side fails --verify-lib-inventory.
 LIB_INVENTORY_STATIC_ONLY_BASE = frozenset({
+    "runtime_layout::windows_links::tests::windows_junction_paths_are_literal_and_removal_preserves_target",
+    "runtime_layout::windows_links::tests::windows_optional_file_alias_never_copies_or_hardlinks_content",
     "cli::discord_thread_create::tests::thread_create_lock_cancel_child_process",
     "cli::discord_thread_create::tests::windows_async_waiter_recovers_abandoned_owner",
     "cli::discord_thread_create::tests::windows_cancelled_async_holder_releases_before_runtime_exit",
