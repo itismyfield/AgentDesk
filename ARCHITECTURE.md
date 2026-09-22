@@ -1524,6 +1524,7 @@ src/
 │   │   └── auth_profiles.rs
 │   ├── dispatched_sessions/
 │   │   ├── canonical_identity.rs
+│   │   ├── output.rs
 │   │   └── tmux_cleanup.rs
 │   ├── dispatches/
 │   │   ├── discord_delivery/
@@ -1688,6 +1689,7 @@ src/
 │   │   └── timing.rs
 │   ├── session_backend/
 │   │   ├── auth_profiles.rs
+│   │   ├── output.rs
 │   │   ├── stream_line.rs
 │   │   └── terminal_usage.rs
 │   ├── session_forwarding/

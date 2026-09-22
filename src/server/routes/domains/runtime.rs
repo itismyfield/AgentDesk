@@ -95,6 +95,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 get(dispatched_sessions::tmux_output),
             )
             .route(
+                "/sessions/{id}/output",
+                get(dispatched_sessions::tmux_output),
+            )
+            .route(
                 "/session-termination-events",
                 get(termination_events::list_termination_events),
             )

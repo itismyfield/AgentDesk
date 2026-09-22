@@ -11,6 +11,7 @@ import type { WSEvent } from "../types";
 import { describeDegradedReason } from "./dashboard/HealthWidget";
 import { SurfaceEmptyState } from "./common/SurfacePrimitives";
 import OpsConnectionPanel from "./OpsConnectionPanel";
+import ClusterNodesPanel from "./cluster/ClusterNodesPanel";
 import {
   DISCONNECTED_POLL_BASE_MS,
   LIVE_POLL_INTERVAL_MS,
@@ -315,6 +316,8 @@ export default function OpsPageView({
             </button>
           </div>
         </div>
+
+        <ClusterNodesPanel isKo={isKo} />
 
         <div className="mb-4 flex flex-wrap items-center gap-2">
           <StatusBadge tone={opsToneToHealth(statusTone)} size="sm">

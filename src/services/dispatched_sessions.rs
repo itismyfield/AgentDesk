@@ -21,6 +21,7 @@ use serde_json::json;
 
 #[path = "dispatched_sessions/canonical_identity.rs"]
 mod canonical_identity;
+mod output;
 
 #[path = "dispatched_sessions/tmux_cleanup.rs"]
 mod tmux_cleanup;
@@ -944,13 +945,9 @@ const TMUX_OUTPUT_DEFAULT_LINES: i32 = 80;
 const TMUX_OUTPUT_MAX_LINES: i32 = 2000;
 const FORCE_KILL_RETRY_LIMIT: i64 = 5;
 
-/// GET /api/sessions/{id}/tmux-output?lines=N
-///
-/// #1067: Skill promotion for watch-agent-turn. Returns the latest N lines of
-/// the tmux pane bound to the session identified by the numeric session id
-/// (`sessions.id`). Reads the session row to derive the tmux name from a
-/// legacy or namespaced `session_key`, then shells out via
-/// [`crate::services::platform::tmux::capture_pane`].
+/// GET /api/sessions/{id}/output?lines=N (legacy alias: tmux-output).
+/// Resolves the authoritative owner before reading its bound process output
+/// or tmux pane. Native process handles cannot be reattached after a restart.
 pub async fn tmux_output(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1044,9 +1041,19 @@ pub async fn tmux_output(
         .map(|value| value.as_millis() as i64)
         .unwrap_or(0);
 
-    // capture_pane takes scroll_back as a negative offset from the pane bottom.
-    let recent_output = crate::services::platform::tmux::capture_pane(&tmux_name, -effective_lines);
-    let tmux_alive = recent_output.is_some();
+    let capture_name = tmux_name.clone();
+    let capture =
+        match tokio::task::spawn_blocking(move || output::capture(&capture_name, effective_lines))
+            .await
+        {
+            Ok(capture) => capture,
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error":"session output capture failed"})),
+                );
+            }
+        };
 
     (
         StatusCode::OK,
@@ -1054,13 +1061,19 @@ pub async fn tmux_output(
             "session_id": id,
             "session_key": session_key,
             "tmux_name": tmux_name,
-            "tmux_alive": tmux_alive,
+            "tmux_alive": capture.backend == "tmux" && capture.alive,
+            "backend": capture.backend,
+            "alive": capture.alive,
+            "available": capture.available,
+            "output_format": capture.format,
+            "unavailable_reason": capture.reason,
+            "truncated": capture.truncated,
             "agent_id": agent_id,
             "provider": provider,
             "status": status,
             "lines_requested": requested_lines,
             "lines_effective": effective_lines,
-            "recent_output": recent_output.unwrap_or_default(),
+            "recent_output": capture.text,
             "captured_at_ms": captured_at_ms,
         })),
     )

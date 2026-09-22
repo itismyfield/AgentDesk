@@ -1064,6 +1064,9 @@ async function mockOpsHealthApi(page: Page, getPayload: () => Record<string, unk
       body: JSON.stringify(getPayload()),
     });
   });
+  await page.route(/\/api\/cluster\/nodes$/, route => route.fulfill({
+    json: { cluster: { enabled: false, local_instance_id: "single-node" }, nodes: [] },
+  }));
 }
 
 async function mockDashboardBootstrap(page: Page) {
@@ -2269,6 +2272,63 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("ops-control-handoff")).toBeVisible();
     await expect(page.getByTestId("ops-handoff-agents")).toHaveAttribute("href", "/agents");
     await expect(page.getByTestId("ops-handoff-office")).toHaveAttribute("href", "/office");
+  });
+
+  test("ops: cluster controls distinguish readiness, bound output and stale state", async ({ page }, testInfo) => {
+    let failRefresh = false;
+    let stopCount = 0;
+    await page.route(/\/api\/cluster\/nodes$/, async route => {
+      if (failRefresh) return route.fulfill({ status: 503, json: { error: "fixture unavailable" } });
+      const now = Date.now();
+      await route.fulfill({ json: {
+        cluster: { enabled: true, local_instance_id: "mac-mini" },
+        nodes: ["windows-worker", "linux-worker"].map((id, index) => ({
+          instance_id: id, status: "online", effective_role: "worker", active_dispatch_count: 0,
+          capabilities: { execution_readiness: {
+            os: index ? "linux" : "windows", arch: "x86_64", runtime_profile: "worker",
+            observed_at_ms: now, expires_at_ms: now + 120_000, backends: ["process"],
+          } },
+          execution_readiness: { providers: { codex: { eligible: index === 0,
+            reasons: index ? ["provider_cli_unavailable"] : [],
+          } } },
+          forwarding_diagnostics: { advertised: true, configured: true, trust_validated: true,
+            reachability_verified: true, reachability_status: "verified", expires_at_ms: now + 45_000,
+          },
+        })),
+      } });
+    });
+    await page.route(/\/api\/dispatched-sessions$/, route => route.fulfill({ json: { sessions: [{
+      id: 17, session_key: "codex/token/windows:fixture", instance_id: "windows-worker",
+      name: "Windows build", provider: "codex", status: stopCount ? "disconnected" : "working",
+    }] } }));
+    await page.route(/\/api\/sessions\/17\/output\?lines=100$/, route => route.fulfill({ json: {
+      recent_output: `{"text":"worker output 한글 ${"a".repeat(200)}"}`, backend: "process",
+      available: true, unavailable_reason: null, output_format: "jsonl", captured_at_ms: Date.now(),
+    } }));
+    await page.route(/\/api\/sessions\/[^/]+\/force-kill$/, async route => {
+      expect(route.request().method()).toBe("POST");
+      expect(route.request().postDataJSON().retry).toBe(false);
+      stopCount++;
+      await route.fulfill({ json: { ok: true } });
+    });
+    await page.goto("/ops");
+    const panel = page.getByTestId("cluster-nodes-panel");
+    await expect(panel.getByText("windows / x86_64", { exact: false })).toBeVisible();
+    await expect(panel.getByText(/CLI 실행 불가|CLI unavailable/)).toBeVisible();
+    await panel.getByRole("button", { name: /출력 보기|View output/ }).click();
+    await expect(panel.getByText(/worker output 한글/)).toBeVisible();
+    await panel.getByRole("button", { name: /실행 중지|Stop execution/, exact: true }).click();
+    expect(stopCount).toBe(0);
+    await panel.getByRole("button", { name: /중지 확인|Confirm stop/ }).click();
+    await expect.poll(() => stopCount).toBe(1);
+    await expect(panel.getByText(/disconnected/, { exact: false })).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await page.screenshot({ path: testInfo.outputPath("cluster-nodes.png"), fullPage: true });
+    failRefresh = true;
+    await expect(panel.getByRole("button", { name: /실행 중지|Stop execution/, exact: true })).toBeDisabled({ timeout: 20_000 });
+    await expect(panel.getByText(/노드 갱신 실패|Node refresh failed/)).toBeVisible();
+    await expect(panel.getByText(/worker output 한글/)).toBeVisible();
+    await expectNoHorizontalOverflow(page);
   });
 
   test("ops: ws events resync the health snapshot", async ({ page }) => {

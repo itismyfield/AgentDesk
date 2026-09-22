@@ -1018,6 +1018,7 @@ mod tests {
                 child_stdin: std::sync::Arc::new(std::sync::Mutex::new(Some(child_stdin))),
                 child: std::sync::Arc::new(std::sync::Mutex::new(Some(child))),
                 pid: wrapper_pid,
+                output: std::sync::Arc::new(std::sync::Mutex::new(tempfile::tempfile().unwrap())),
             },
         );
         let token = std::sync::Arc::new(CancelToken::new());
