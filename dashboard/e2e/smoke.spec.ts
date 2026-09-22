@@ -1755,12 +1755,26 @@ test.describe("Dashboard smoke tests", () => {
     }));
     expect(shellStyles.marginBottom).toContain("env(safe-area-inset-bottom)");
 
-    const tabbarStyles = await bottomNav.evaluate((element) => ({
-      height: (element as HTMLElement).style.height,
-      paddingBottom: (element as HTMLElement).style.paddingBottom,
-      paddingLeft: (element as HTMLElement).style.paddingLeft,
-      paddingRight: (element as HTMLElement).style.paddingRight,
-    }));
+    const tabbarStyles = await bottomNav.evaluate((element) => {
+      // Padding lives in AppMobileNavigation.css, not in the inline style.
+      // Inspect active matching rules so moving a declaration between an
+      // inline style and a stylesheet does not turn this contract into a lie.
+      const declarations: CSSStyleDeclaration[] = [];
+      const visit = (rules: CSSRuleList) => {
+        for (const rule of Array.from(rules)) {
+          if (rule instanceof CSSMediaRule && !matchMedia(rule.conditionText).matches) continue;
+          if (rule instanceof CSSStyleRule && rule.selectorText.split(",").some((selector) => selector.trim() === ".adk-mobile-tabbar")) declarations.push(rule.style);
+          if ("cssRules" in rule) visit((rule as CSSGroupingRule).cssRules);
+        }
+      };
+      for (const sheet of Array.from(document.styleSheets)) {
+        if (sheet.href && new URL(sheet.href, location.href).origin !== location.origin) continue;
+        visit(sheet.cssRules);
+      }
+      declarations.push((element as HTMLElement).style);
+      const value = (name: string) => declarations.map((style) => style.getPropertyValue(name)).filter(Boolean).at(-1) ?? "";
+      return { height: value("height"), paddingBottom: value("padding-bottom"), paddingLeft: value("padding-left"), paddingRight: value("padding-right") };
+    });
     expect(tabbarStyles.height).toContain("env(safe-area-inset-bottom)");
     expect(tabbarStyles.paddingBottom).toContain("env(safe-area-inset-bottom)");
     expect(tabbarStyles.paddingLeft).toContain("env(safe-area-inset-left)");
