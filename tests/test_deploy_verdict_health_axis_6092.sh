@@ -170,6 +170,59 @@ else
     fail "expected 'db_unavailable', got '$named'"
 fi
 
+echo "§10b a list the matcher cannot read is blocking, not an absence of blockers"
+
+for recovered in true false; do
+    expect_blocked "an empty reason element blocks with fully_recovered=$recovered" \
+        "$(body '["relay_verdict_unknown_codex_c1",""]' "$recovered")"
+done
+named=$(_health_json_deploy_blocking_reasons \
+    "$(body '["relay_verdict_unknown_codex_c1",""]' false)" \
+    "$(_health_json_deploy_nonblocking_ere 1 1 0)")
+if [ "$named" = "unreadable_degraded_reasons" ]; then
+    pass "an unreadable list is named as the blocker ($named)"
+else
+    fail "an unreadable list produced '$named', so fully_recovered=false would wave it through"
+fi
+
+echo "§10c the timeout diagnostic uses the policy the verdict used"
+
+verdict_ere() {
+    local b="$1" standby=0
+    _health_json_field_is_true "$b" "cluster_standby" && standby=1
+    _health_json_deploy_nonblocking_ere 1 1 "$standby"
+}
+accepted=$(_health_json_deploy_blocking_reasons "$QUEUE" "$(verdict_ere "$QUEUE")")
+if [ -z "$accepted" ]; then
+    pass "a backlog the health axis accepted is not named as deploy-blocking"
+else
+    fail "the diagnostic named '$accepted', which the verdict had accepted"
+fi
+STANDBY_BODY="$(sb '["provider:codex:gateway_standby"]')"
+accepted=$(_health_json_deploy_blocking_reasons "$STANDBY_BODY" "$(verdict_ere "$STANDBY_BODY")")
+if [ -z "$accepted" ]; then
+    pass "a proven standby's gateway token is not named as deploy-blocking"
+else
+    fail "the diagnostic named '$accepted' on a standby the verdict accepted"
+fi
+
+echo "§10d the deploy script never rebuilds a partial policy at a call site"
+
+# The readiness decision and the diagnostic must not derive the accepted set
+# independently, or the diagnostic names causes the verdict just accepted.
+DEPLOY_SH="$REPO_ROOT/scripts/deploy-release.sh"
+partial=$(grep -nE '_health_json_deploy_nonblocking_ere( +"?[^ "]+"?){0,2} *\)' "$DEPLOY_SH" || true)
+if [ -z "$partial" ]; then
+    pass "every call passes all three authorizations"
+else
+    fail "a call site reconstructs a partial policy: $partial"
+fi
+if grep -q 'cluster_standby' <<<"$(grep -A3 -B3 '_health_json_deploy_nonblocking_ere' "$DEPLOY_SH")"; then
+    pass "the diagnostic derives standby proof from the body it is explaining"
+else
+    fail "the diagnostic does not read cluster_standby, so a proven standby is named as blocking"
+fi
+
 echo "§11 the jq and no-jq paths agree on every shape above"
 
 if ! command -v jq >/dev/null 2>&1; then

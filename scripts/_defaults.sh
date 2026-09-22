@@ -586,6 +586,13 @@ _health_json_names_a_provider_runtime() {
   return 1
 }
 
+_health_json_reasons_csv_is_well_formed() {
+  # jq rejects an empty reason element; bash word splitting would drop it,
+  # so reject the list shapes that produce one.
+  case "$1" in ''|,*|*,|*,,*) return 1 ;; esac
+  return 0
+}
+
 _health_json_degraded_reasons_all_match() {
   # Membership, not homogeneity: a body whose reasons span two accepted classes
   # must still pass. Requiring one class per predicate is what failed a landed
@@ -607,8 +614,7 @@ _health_json_degraded_reasons_all_match() {
   [ "$(_health_json_status "$health_json")" = "degraded" ] || return 1
   _health_json_field_is_true "$health_json" "db" || return 1
   reasons_csv=$(_health_json_reasons "$health_json" || true)
-  [ -n "$reasons_csv" ] || return 1
-  case "$reasons_csv" in ,*|*,|*,,*) return 1 ;; esac
+  _health_json_reasons_csv_is_well_formed "$reasons_csv" || return 1
   local IFS=','
   for reason in $reasons_csv; do
     [[ "$reason" =~ $ere ]] || return 1
@@ -634,6 +640,11 @@ _health_json_deploy_blocking_reasons() {
   local health_json="$1" ere="$2"
   local reasons_csv reason out=""
   reasons_csv=$(_health_json_reasons "$health_json" || true)
+  # A list this cannot read is itself blocking, not an absence of blockers.
+  if ! _health_json_reasons_csv_is_well_formed "$reasons_csv"; then
+    printf 'unreadable_degraded_reasons'
+    return 0
+  fi
   local IFS=','
   for reason in $reasons_csv; do
     [[ "$reason" =~ $ere ]] || out="${out:+$out,}$reason"
