@@ -26,7 +26,7 @@ use sqlx::PgPool;
 pub(crate) mod owner_record;
 mod placement;
 mod session_owner;
-use placement::{route_by_preferred_labels, route_node_override_without_owner};
+use placement::{ObserveTargetKind, route_by_preferred_labels, route_node_override_without_owner};
 
 use session_owner::SessionOwnerResolution;
 
