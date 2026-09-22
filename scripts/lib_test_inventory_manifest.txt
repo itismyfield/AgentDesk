@@ -4250,6 +4250,9 @@ services::discord::queue_io::presleep_tests::race_loss_requeue_idle_recheck_kick
 services::discord::queue_io::presleep_tests::single_backstop_profile_is_the_only_slow_cycle
 services::discord::queue_io::presleep_tests::slow_backstop_rearms_when_kick_defers_without_claiming_4270
 services::discord::queue_io::presleep_tests::transient_gate_backlog_counts_for_backstop
+services::discord::queue_io::transport::tests::rest_queue_rejected_by_changed_policy_keeps_durable_head_and_lease_free
+services::discord::queue_io::transport::tests::rest_queue_routing_preserves_thread_parent_and_dm_policy
+services::discord::queue_io::transport::tests::rest_worker_queue_transport_requires_credentials_but_not_gateway
 services::discord::queue_marker::tests::dispatch_drain_mailbox_marker_discards_persisted_queued_state
 services::discord::queue_marker::tests::merged_and_reconcile_markers_add_and_remove_through_reconciler
 services::discord::queue_marker::tests::persisted_v1_dispatch_promotion_clears_orphan_queue_marker
