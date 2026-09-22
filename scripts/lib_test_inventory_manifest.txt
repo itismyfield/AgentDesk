@@ -3646,6 +3646,7 @@ services::discord::outbound::delivery_record::tests::long_chunk_full_commit_reco
 services::discord::outbound::delivery_record::tests::long_chunk_partial_or_err_never_records_anchor_3610c
 services::discord::outbound::delivery_record::tests::malformed_record_reads_none_conservative
 services::discord::outbound::delivery_record::tests::missing_record_reads_none_conservative
+services::discord::outbound::delivery_record::tests::non_unix_generation_is_absent_so_durable_frontier_is_neither_written_nor_trusted
 services::discord::outbound::delivery_record::tests::not_delivered_never_settles_the_ledger_5154
 services::discord::outbound::delivery_record::tests::only_frontier_writer_advances_frontier
 services::discord::outbound::delivery_record::tests::ordered_jsonl_blocked_writer_revalidates_after_rotation_4911

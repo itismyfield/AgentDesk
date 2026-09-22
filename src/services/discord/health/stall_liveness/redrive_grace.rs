@@ -703,9 +703,10 @@ mod tests {
 
     const ENV_FIXTURES: &[fn()] = &[
         stale_clear_preserves_successor_episode_baseline_4181,
-        stale_identity_persist_cannot_overwrite_successor_baseline_4181,
         redrive_durable_gc_serializes_with_persist_and_ignores_staging_files_4181,
         redrive_durable_gc_removes_invalid_boot_malformed_and_stale_4181,
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        stale_identity_persist_cannot_overwrite_successor_baseline_4181,
     ];
 
     fn check_teardown(index: usize, present: bool) {
@@ -730,33 +731,33 @@ mod tests {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn stale_persist_teardown_present() {
-        check_teardown(1, true);
+        check_teardown(3, true);
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn stale_persist_teardown_absent() {
-        check_teardown(1, false);
+        check_teardown(3, false);
     }
 
     #[test]
     fn gc_serializes_teardown_present() {
-        check_teardown(2, true);
+        check_teardown(1, true);
     }
 
     #[test]
     fn gc_serializes_teardown_absent() {
-        check_teardown(2, false);
+        check_teardown(1, false);
     }
 
     #[test]
     fn gc_removes_teardown_present() {
-        check_teardown(3, true);
+        check_teardown(2, true);
     }
 
     #[test]
     fn gc_removes_teardown_absent() {
-        check_teardown(3, false);
+        check_teardown(2, false);
     }
 
     /// Deterministic monotonic clock for tests, injected through the same
@@ -1342,7 +1343,8 @@ mod tests {
         assert!(NO_PROGRESS_OBSERVATIONS.contains_key(&(successor_key, 0)));
     }
 
-    #[cfg_attr(any(target_os = "macos", target_os = "linux"), test)]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
     fn stale_identity_persist_cannot_overwrite_successor_baseline_4181() {
         let _root_guard = isolated_runtime_root();
         let provider = ProviderKind::Codex;

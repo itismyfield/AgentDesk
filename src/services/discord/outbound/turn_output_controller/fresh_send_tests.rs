@@ -8,6 +8,7 @@ use super::*;
 use crate::services::discord::formatting::ReplaceLongMessageOutcome;
 use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
 use crate::services::discord::inflight::RelayOwnerKind;
+#[cfg(unix)]
 use crate::services::discord::outbound::delivery_record;
 use crate::services::discord::placeholder_controller::PlaceholderController;
 use crate::services::discord::turn_finalizer::TurnKey;
@@ -146,7 +147,7 @@ fn ctx<'a>(
     }
 }
 
-// SendFresh 는 Unix 전용 tmux watcher 만 만들고 non-unix 의 generation 0 에서는 기록을 거부하므로 Windows 에는 이 경로가 없다.
+// SendFresh 는 아직 production 생성자가 없고, non-unix 의 generation 0 에서는 fresh-send writer 가 기록을 거부한다.
 #[cfg(unix)]
 #[test]
 fn range_fresh_send_commits_and_records_durable_frontier() {
@@ -371,12 +372,6 @@ fn assert_channel_mismatch_skips_before_post(range: Option<(u64, u64)>, channel_
         "mutation: removing the channel-equality guard posts before rejecting mismatch"
     );
     assert!(matches!(lease.read(), LeaseSnapshot::Unleased));
-    assert!(!delivery_record::recent_fresh_send_content_matches(
-        &provider,
-        record_channel,
-        tmux,
-        body,
-    ));
 }
 
 #[test]

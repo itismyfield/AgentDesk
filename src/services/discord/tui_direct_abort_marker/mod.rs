@@ -1515,17 +1515,12 @@ mod tests {
         );
     }
 
-    /// codex r2 finding 1 (RED ① — REVERSES the r1
-    /// `sweep_and_drain_cannot_both_react_to_one_marker` pin, which froze this
-    /// exact race as `FailureWarn`): a terminal commit by the recorded foreign
-    /// turn landing BETWEEN the sweep's claim and its verdict must end `✅`,
-    /// never `⚠` — the flock only serializes the reconcilers, it does not make
-    /// the RIGHT verdict win. The chokepoint's tombstone-before-clear write
-    /// plus the sweep's live-read-then-대조 ordering closes it: by the time the
-    /// sweep can observe "no live row", the commit's tombstone is durable.
-    /// Mutual exclusion stays intact (the racing drain still skips — exactly
-    /// ONE reaction lands, and it is the completion).
-    // marker claim 상호배제는 Unix flock 이고 경쟁 상대인 terminal-commit drain 은 Unix 전용 tmux watcher 에만 있어 Windows 에서는 이 경합이 없다.
+    /// A terminal commit by the recorded foreign turn landing BETWEEN the sweep's
+    /// claim and its verdict must end `✅`, never `⚠`: the flock only serializes
+    /// the reconcilers; the chokepoint's tombstone-before-clear write plus the
+    /// sweep's live-read-then-대조 ordering makes the right verdict win. Exactly
+    /// ONE reaction lands and it is the completion. Unix-only: the claim is a
+    /// flock and the racing drain lives in the Unix-only tmux watcher.
     #[cfg(unix)]
     #[test]
     fn sweep_claim_racing_terminal_commit_resolves_completion_not_warn() {

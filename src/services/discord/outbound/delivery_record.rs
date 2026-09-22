@@ -2736,7 +2736,7 @@ mod tests {
 
         let commit = DeliveredCommit {
             range: (0, 42),
-            generation_mtime_ns: 0,
+            generation_mtime_ns: 100,
             attempts: 1,
             panel_msg_id: Some(999),
             panel_channel_id: Some(channel),
