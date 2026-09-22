@@ -288,7 +288,8 @@ pub async fn mark_external_dispatch_started_pg(
              lease_expires_at = NOW() + ($3::bigint * INTERVAL '1 second'),
              updated_at = NOW()
          WHERE id = $1 AND claim_token = $2 AND status = 'processing'
-           AND dispatch_started_at IS NULL",
+           AND dispatch_started_at IS NULL
+           AND lease_expires_at > NOW() AND deliver_before > NOW()",
     )
     .bind(id)
     .bind(claim_token)
