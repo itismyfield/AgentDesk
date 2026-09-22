@@ -2,6 +2,7 @@ use super::*;
 use crate::services::discord::inflight::{
     GuardedSaveOutcome, load_inflight_state, save_inflight_state,
 };
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
 
 fn runtime_seed(provider: ProviderKind, channel_id: u64) -> InflightTurnState {
@@ -21,6 +22,7 @@ fn runtime_seed(provider: ProviderKind, channel_id: u64) -> InflightTurnState {
     )
 }
 
+#[cfg(unix)]
 fn live_watcher_handle(tmux_session_name: &str, output_path: &str) -> TmuxWatcherHandle {
     TmuxWatcherHandle {
         tmux_session_name: tmux_session_name.to_string(),
@@ -413,7 +415,6 @@ async fn direct_tmux_adoption_rejects_claim_evicted_before_publication() {
     assert_claim_eviction_fails_closed(42_592_610, RuntimeHandoffLoopMessage::TmuxReady { output_path: "/runtime/direct-claim-evicted.jsonl".into(), input_fifo_path: "/runtime/direct.input".into(), tmux_session_name: "AgentDesk-codex-direct-claim-evicted".into(), last_offset: 10_241 }).await;
 }
 
-// watcher claim 은 Unix 전용 tmux watcher 에만 있어 Windows 에서는 claim·owner stamp 경로가 없다.
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_adoption_pins_authoritative_incumbent_not_provisional_marker() {
@@ -486,7 +487,6 @@ async fn runtime_adoption_pins_authoritative_incumbent_not_provisional_marker() 
     ));
 }
 
-// watcher claim 은 Unix 전용 tmux watcher 에만 있어 Windows 에서는 claim·owner stamp 경로가 없다.
 #[cfg(unix)]
 #[tokio::test]
 async fn thread_follow_up_tmux_ready_claim_records_intended_classification_4984() {

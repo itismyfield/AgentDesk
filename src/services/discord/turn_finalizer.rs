@@ -3358,7 +3358,6 @@ pub(super) mod tests {
         /// Watcher/Delivered then a SECOND commit of the same range is idempotent
         /// on the offset (monotonic CAS): the second commit is a lease no-op (the
         /// cell is Committed, not Leased) and the offset does not double-advance.
-        // watcher confirmed-end 전진은 Unix 전용 tmux 모듈에만 있어 Windows 에서는 lease commit 이 offset 을 옮기지 않는다.
         #[cfg(unix)]
         #[tokio::test(flavor = "current_thread", start_paused = true)]
         async fn watcher_second_commit_is_idempotent_on_offset() {

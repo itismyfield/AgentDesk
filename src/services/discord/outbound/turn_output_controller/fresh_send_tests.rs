@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -95,6 +96,7 @@ impl TurnGateway for CountingGateway {
     }
 }
 
+#[cfg(unix)]
 fn seed_generation(tmux_session_name: &str) -> i64 {
     let path = crate::services::tmux_common::session_temp_path(tmux_session_name, "generation");
     std::fs::create_dir_all(Path::new(&path).parent().expect("generation parent"))
@@ -144,7 +146,7 @@ fn ctx<'a>(
     }
 }
 
-// durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+// SendFresh 는 Unix 전용 tmux watcher 만 만들고 non-unix 의 generation 0 에서는 기록을 거부하므로 Windows 에는 이 경로가 없다.
 #[cfg(unix)]
 #[test]
 fn range_fresh_send_commits_and_records_durable_frontier() {
@@ -196,7 +198,6 @@ fn range_fresh_send_commits_and_records_durable_frontier() {
     );
 }
 
-// durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
 #[cfg(unix)]
 #[test]
 fn no_range_fresh_send_records_fingerprint_and_retry_is_suppressed() {
@@ -263,7 +264,6 @@ fn no_range_fresh_send_records_fingerprint_and_retry_is_suppressed() {
     );
 }
 
-// durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
 #[cfg(unix)]
 #[test]
 fn no_range_pseudo_range_lease_closes_concurrent_dedup_gap() {
@@ -313,7 +313,6 @@ fn no_range_pseudo_range_lease_closes_concurrent_dedup_gap() {
     ));
 }
 
-// durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
 #[cfg(unix)]
 #[test]
 fn no_range_fresh_send_never_invokes_owner_advance() {
@@ -354,7 +353,6 @@ fn assert_channel_mismatch_skips_before_post(range: Option<(u64, u64)>, channel_
     let record_channel = ChannelId::new(channel_id + 1);
     let tmux = "AgentDesk-claude-4046-channel-mismatch";
     let body = "must not post to a mismatched channel";
-    seed_generation(tmux);
     let lease = DeliveryLeaseCell::new(channel);
     let controller = PlaceholderController::default();
     let gateway = CountingGateway::new();
@@ -381,15 +379,11 @@ fn assert_channel_mismatch_skips_before_post(range: Option<(u64, u64)>, channel_
     ));
 }
 
-// durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
-#[cfg(unix)]
 #[test]
 fn range_channel_mismatch_is_refused_before_post() {
     assert_channel_mismatch_skips_before_post(Some((10, 20)), 40_460_105);
 }
 
-// durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
-#[cfg(unix)]
 #[test]
 fn no_range_channel_mismatch_is_refused_before_lookup_or_post() {
     assert_channel_mismatch_skips_before_post(None, 40_460_107);
@@ -422,7 +416,6 @@ fn missing_generation_is_exposed_after_confirmed_no_range_post() {
     assert_eq!(gateway.sends.load(Ordering::SeqCst), 1);
 }
 
-// durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
 #[cfg(unix)]
 #[test]
 fn range_persistence_failure_is_not_hidden_as_delivered() {

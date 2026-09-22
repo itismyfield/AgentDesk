@@ -1833,18 +1833,14 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":\"{}\"}}}}\n{}",
-                id,
-                cwd.display(),
-                body
+                "{}\n{body}",
+                serde_json::json!({"type": "session_meta", "payload": {"id": id, "cwd": cwd}})
             ),
         )
         .unwrap();
         path
     }
 
-    // Codex TUI 세션 해석·rollout tail 은 tmux 호스팅(Unix 전용) 경로에서만 호출되고, 픽스처가 Windows 경로를 JSON 에 escape 없이 넣는다.
-    #[cfg(unix)]
     #[test]
     fn latest_unclaimed_rollout_skips_rollout_claimed_by_another_tui() {
         let _guard = super::super::rollout_index::lock_cache_for_tests();
@@ -2196,8 +2192,6 @@ mod tests {
         ));
     }
 
-    // Codex TUI 세션 해석·rollout tail 은 tmux 호스팅(Unix 전용) 경로에서만 호출되고, 픽스처가 Windows 경로를 JSON 에 escape 없이 넣는다.
-    #[cfg(unix)]
     #[test]
     fn resumed_tail_can_follow_new_rollout_for_same_session() {
         let dir = tempfile::tempdir().unwrap();

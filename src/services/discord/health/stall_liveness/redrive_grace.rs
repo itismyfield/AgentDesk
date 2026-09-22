@@ -733,7 +733,6 @@ mod tests {
         check_teardown(1, true);
     }
 
-    // durable redrive baseline 은 macOS/Linux boot id 로만 식별되고, redrive 자체가 살아있는 tmux 세션을 전제해 Windows 에는 이 경로가 없다.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn stale_persist_teardown_absent() {
@@ -1343,7 +1342,6 @@ mod tests {
         assert!(NO_PROGRESS_OBSERVATIONS.contains_key(&(successor_key, 0)));
     }
 
-    // durable redrive baseline 은 macOS/Linux boot id 로만 식별되고, redrive 자체가 살아있는 tmux 세션을 전제해 Windows 에는 이 경로가 없다.
     #[cfg_attr(any(target_os = "macos", target_os = "linux"), test)]
     fn stale_identity_persist_cannot_overwrite_successor_baseline_4181() {
         let _root_guard = isolated_runtime_root();

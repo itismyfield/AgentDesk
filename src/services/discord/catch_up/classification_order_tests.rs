@@ -2227,7 +2227,7 @@ fn aged_message_absent_from_the_ledger_is_too_old() {
 /// ONLY a completed-turn LEDGER append settles. This simulates a crash after the
 /// frontier write but before the ledger append: the consult set stays empty and
 /// the row still ages to TooOld/DLQ (no false suppression, no silent loss).
-// durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+// .generation marker 는 Unix 전용 tmux wrapper 만 쓰고 non-unix 의 generation 은 0(불신)이라 generation 에 묶인 durable frontier 경로가 Windows 에는 없다.
 #[cfg(unix)]
 #[test]
 fn delivery_frontier_without_ledger_append_is_not_settled() {

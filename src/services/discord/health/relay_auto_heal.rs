@@ -1692,6 +1692,7 @@ mod tests {
         capture_logs(tracing::Level::ERROR, run)
     }
 
+    #[cfg(unix)]
     fn seed_liveness_verdict(
         provider: &ProviderKind,
         channel_id: ChannelId,
@@ -2172,7 +2173,6 @@ mod tests {
         );
     }
 
-    // relay redrive 는 살아있는 tmux 세션(tmux_session_alive)을 전제하고 tmux 는 Unix 전용이라 Windows 에는 이 경로가 없다.
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn redrive_actions_and_cap_alarm_continue_while_producer_is_vouched_4615() {
@@ -2335,7 +2335,6 @@ mod tests {
     /// set, nothing relayed) and drives `redrive_undelivered_backlog_at`: the
     /// live watcher must be nudged — not refused as unrestored — and resumed at
     /// the birth offset, not at zero.
-    // relay redrive 는 살아있는 tmux 세션(tmux_session_alive)을 전제하고 tmux 는 Unix 전용이라 Windows 에는 이 경로가 없다.
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn redrive_entrypoint_resumes_a_freshly_born_turn_at_its_birth_offset_5943() {
