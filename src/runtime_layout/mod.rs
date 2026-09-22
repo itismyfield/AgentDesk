@@ -3,8 +3,6 @@ mod legacy_migration;
 mod paths;
 mod skill_refresh;
 mod skill_sync;
-#[cfg(windows)]
-mod windows_links;
 
 use config_merge::{
     merge_role_map_into_agentdesk_yaml, update_org_yaml_prompt_paths, update_role_map_prompt_paths,
@@ -494,13 +492,7 @@ fn create_symlink_entry(source: &Path, link_path: &Path, is_dir_link: bool) -> R
     #[cfg(windows)]
     {
         let result = if is_dir_link {
-            std::os::windows::fs::symlink_dir(&target, link_path).or_else(|error| {
-                if error.raw_os_error() == Some(1314) {
-                    windows_links::create_directory_junction(source, link_path)
-                } else {
-                    Err(error)
-                }
-            })
+            std::os::windows::fs::symlink_dir(&target, link_path)
         } else {
             std::os::windows::fs::symlink_file(&target, link_path)
         };

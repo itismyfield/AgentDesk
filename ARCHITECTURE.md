@@ -23,6 +23,8 @@ src/
 ├── cli/
 │   ├── client/
 │   │   └── runtime_config.rs
+│   ├── dcserver/
+│   │   └── startup.rs
 │   ├── doctor/
 │   │   ├── orchestrator/
 │   │   │   ├── config_dir_checks.rs
@@ -240,8 +242,7 @@ src/
 │   ├── mod.rs
 │   ├── paths.rs
 │   ├── skill_refresh.rs
-│   ├── skill_sync.rs
-│   └── windows_links.rs
+│   └── skill_sync.rs
 ├── server/
 │   ├── dto/
 │   │   ├── agents.rs
@@ -1592,6 +1593,7 @@ src/
 │   ├── platform/
 │   │   ├── binary_resolver/
 │   │   │   ├── grok.rs
+│   │   │   ├── resolution.rs
 │   │   │   └── windows_codex.rs
 │   │   ├── tmux/
 │   │   │   └── availability.rs
