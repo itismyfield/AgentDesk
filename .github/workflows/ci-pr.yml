@@ -264,6 +264,7 @@ jobs:
               - 'src/services/cluster/intake_preflight.rs'
               - 'src/services/cluster/intake_router_hook.rs'
               - 'src/services/cluster/intake_router_hook/attachment_tests.rs'
+              - 'src/services/cluster/intake_router_hook/capacity_tests.rs'
               - 'src/services/cluster/intake_router_hook/execution_requirement_tests.rs'
               - 'src/services/cluster/intake_router_hook/owner_record.rs'
               - 'src/services/cluster/intake_worker/dispatch_stamp_tests.rs'
