@@ -1028,6 +1028,54 @@ case "$run_out" in
     pass "the run path does not print a skip line" ;;
 esac
 
+# A runtime that exits(0) right after publishing its proof is gone by the time
+# the gate probes. That is not the same as never having had a frontier, and the
+# gate must not report it as such.
+gate_not_serving() {
+  REGION="$S1_TMP/durability-region.sh" PROOF="$1" bash -c '
+    set -euo pipefail
+    ADK_REL="/unused"
+    RESTART_REQUEST_NONCE="test-nonce"
+    AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=0
+    AGENTDESK_RESTART_DRAIN_VERDICT="fence-observed:nonce-unattributed"
+    clear_restart_drain_mode() { :; }
+    _release_runtime_is_serving() { return 1; }
+    _restart_persistence_proof_exists() { return "$PROOF"; }
+    wait_for_restart_persistence_or_fail() { echo phase-2-ran; }
+    eval "$(<"$REGION")"
+  '
+}
+
+proved_out=$(gate_not_serving 0); proved_rc=$?
+assert_eq "gate proceeds when the runtime exited after persisting" "0" "$proved_rc"
+case "$proved_out" in
+  *'persisted this request'"'"'s frontier and exited'*)
+    pass "a persisted-then-exited runtime is reported as persisted" ;;
+  *)
+    fail "a persisted-then-exited runtime is reported as persisted (got: $proved_out)" ;;
+esac
+case "$proved_out" in
+  *'no persistence proof'*|*'phase-2-ran'*)
+    fail "a persisted runtime is not reported as proofless and does not re-wait" ;;
+  *)
+    pass "a persisted runtime is not reported as proofless and does not re-wait" ;;
+esac
+
+unproved_out=$(gate_not_serving 1); unproved_rc=$?
+assert_eq "gate still proceeds when the runtime left no proof" "0" "$unproved_rc"
+case "$unproved_out" in
+  *'left no persistence proof'*)
+    pass "a proofless disappearance is named as such" ;;
+  *)
+    fail "a proofless disappearance is named as such (got: $unproved_out)" ;;
+esac
+case "$unproved_out" in
+  *'phase-2-ran'*)
+    fail "a proofless disappearance does not re-enter phase 2" ;;
+  *)
+    pass "a proofless disappearance does not re-enter phase 2" ;;
+esac
+
 echo "== Test 10: #5254 S3a — shell restart lifecycle primitives =="
 S3A_TMP=$(mktemp -d)
 trap 'rm -rf "$TMP_FIXTURE_DIR" "$TMP_RUNTIME" "$TMPDIR_TEST" "$TMP_RUNTIME2" "$TMP_RUNTIME3" "$TMP_D" "$S1_TMP" "$S3A_TMP"' EXIT
