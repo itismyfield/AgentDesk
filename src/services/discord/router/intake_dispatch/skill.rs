@@ -16,7 +16,7 @@ pub(crate) async fn dispatch_skill_intake(
     request_owner_name: String,
     prompt: String,
     origin: IntakeOrigin,
-    preloaded_uploads: Vec<String>,
+    preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     admitted_local: Option<LocalAdmissionPermit>,
 ) -> Result<(), super::super::super::Error> {
     let submission = IntakeSubmission {

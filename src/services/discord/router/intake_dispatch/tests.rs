@@ -252,7 +252,10 @@ fn request(channel_id: ChannelId, message_id: u64, text: &str) -> IntakeRequest 
     }
 }
 
-fn queued_intervention(message_id: u64, pending_uploads: Vec<String>) -> Intervention {
+fn queued_intervention(
+    message_id: u64,
+    pending_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
+) -> Intervention {
     let queued_generation = crate::services::discord::runtime_store::process_generation();
     Intervention {
         author_id: UserId::new(4350),
