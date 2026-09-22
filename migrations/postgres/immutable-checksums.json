@@ -625,6 +625,16 @@
       "path": "migrations/postgres/0122_campaign_revision_retention.sql",
       "sha256": "bcf2c2ded864d3404e89e3fd84a4fa202162a405433f466bb6b22ef7b06405fe",
       "version": 122
+    },
+    {
+      "path": "migrations/postgres/0127_kakao_calendar_sync.sql",
+      "sha256": "a1b2581cb55bb38f035a4bccc075d9bb0f89d50d19582ce3b851149f260b0e91",
+      "version": 127
+    },
+    {
+      "path": "migrations/postgres/0128_kakao_calendar_lease_expiry.sql",
+      "sha256": "24bfe53ba58f870d67d19e69d57a4e96ce65eaa7411367d0bc93edaf8df6388f",
+      "version": 128
     }
   ],
   "version": 1

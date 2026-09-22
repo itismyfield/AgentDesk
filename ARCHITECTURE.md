@@ -91,6 +91,8 @@ src/
 │   │   └── tests.rs
 │   ├── automation_candidates/
 │   │   └── verdict_tests.rs
+│   ├── calendar_sync/
+│   │   └── read.rs
 │   ├── campaigns/
 │   │   └── tests.rs
 │   ├── dispatched_sessions/
@@ -141,6 +143,7 @@ src/
 │   ├── agents.rs
 │   ├── automation_candidate_card_program.rs
 │   ├── automation_candidates.rs
+│   ├── calendar_sync.rs
 │   ├── campaigns.rs
 │   ├── cancel_tombstones.rs
 │   ├── dispatch_semaphores.rs

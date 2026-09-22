@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "fef1b67172d2463dfd18187b76ebff1a055319c7",
+  "measured_at_sha": "c9c8401af13fc72bb8ac87594fb08b1e50645393",
   "records": [
     {
       "root": "migrations/postgres",
@@ -1129,6 +1129,24 @@
     },
     {
       "root": "migrations/postgres",
+      "kind": "MIGRATION",
+      "path": "migrations/postgres/0127_kakao_calendar_sync.sql",
+      "api": "migration.file",
+      "symbol": "file",
+      "classification": "STATIC_FILE",
+      "fingerprint": "sha256:8fb9b9b725656296f09c2c2415171e9b2b4652f1ad39f46b0b8698332f69ecf1"
+    },
+    {
+      "root": "migrations/postgres",
+      "kind": "MIGRATION",
+      "path": "migrations/postgres/0128_kakao_calendar_lease_expiry.sql",
+      "api": "migration.file",
+      "symbol": "file",
+      "classification": "STATIC_FILE",
+      "fingerprint": "sha256:2ee20c7f66bdc156e9dd424e4516daeef1a5e5072dc17889ff95e0d76ff066bc"
+    },
+    {
+      "root": "migrations/postgres",
       "kind": "MIGRATION_METADATA",
       "path": "migrations/postgres/checksum-repair-allowlist.json",
       "api": "migration.non_sql_tracked",
@@ -1143,7 +1161,7 @@
       "api": "migration.non_sql_tracked",
       "symbol": "non_sql_tracked",
       "classification": "NON_SQL_TRACKED",
-      "fingerprint": "sha256:cd91e7880b0c96727e13e9344a08e7db4cc844bd244b7db65201a6b0e40cf8f3"
+      "fingerprint": "sha256:e418f71cdf1d4bd254664bb48960b81e4eae86f79757381e9b36961ba03ba528"
     },
     {
       "root": "policies",
@@ -5707,6 +5725,141 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:89a88f5ec05979aa340407d0fe9d8b0032315b42fa82d040a9aefd368d0cf96c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/calendar_sync.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:028531747bfa86836525d3e2ea369d719e391d6a16a9af3d5c8a958c1fde329d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/calendar_sync.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:090a460beaa7ca1ad0daaff1ea3ecba3aca00aad3553c15f751889aaa9ef5134"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/calendar_sync.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:1bf845000317252220254c8edc17ee142a444af9515c388098f464b1139a4ff2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/calendar_sync.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:589567ce655598f5f69316f5768b3a08cbbf2030941b519ca5c2092b417f2938"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/calendar_sync.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:9c8ee8002e3956e952d861fb9b00563e324d5e84e7a91b2556e150db4e63ebe7"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/calendar_sync.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:9e9fe01152af76a516b78f3fc0860414147c843501cc8cd6baaf076e5518899f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/calendar_sync.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:bc4b4d4ef77d8d9224477d2d186ccc5748c6c618a71e8789d7d4f0717fbac346"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/calendar_sync.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:bd84eb02f25cc5207fbd8761f4f1fa50cc3aba6585346894c2054982dd7c02a0"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/calendar_sync.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:bfdf2fef1d4a12347bb8423150d1b18680c63fd725c389d9b28291a1f2054ab6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/calendar_sync.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d542e6e7cc276e7ce4e8d32ab47120de0e955c1c1512701f85dae63c16df3d48"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/calendar_sync.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:670e4071baad1200bcd4376cd0f57d3e5d29ee4946475addc0fbb764a957e493"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/calendar_sync/read.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:73c6d6fc61bdc251b18aa2b5f33e87c6946ee14d10a442ac2aa31884b8326ffb"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/calendar_sync/read.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b2572f54738267ca5aa0312af70c7ca0fef0fd4e9768be8af578175795cf5a6c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/calendar_sync/read.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:bbba271db1b3de8bf4a3dc1a0b2c9727af6d72d109c1683324b63ac3d9523505"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/calendar_sync/read.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:199abfd51bcf61ecadcbe03d6a0e059659931917d4b30d73bd905d3c92d12cd0"
     },
     {
       "root": "src",
