@@ -898,6 +898,12 @@ fn raise_fd_soft_limit(desired: u64) {
 fn raise_fd_soft_limit(_desired: u64) {}
 
 pub fn handle_dcserver(token: Option<String>) {
+    #[cfg(windows)]
+    if let Err(error) = crate::services::platform::windows_job::own_runtime_children() {
+        eprintln!("Failed to establish Windows runtime process ownership: {error}");
+        std::process::exit(1);
+    }
+
     // Raise the file-descriptor soft limit before anything opens fds. A
     // tmux-launched dcserver otherwise inherits the tmux server's low default
     // (256 on macOS), which voice STT exhausts during WAV convert / transcript

@@ -118,7 +118,6 @@ fn command_supports_json(command: &Commands) -> bool {
         | Commands::ReleaseMigratePostgres
         | Commands::Show { .. } => false,
 
-        #[cfg(unix)]
         Commands::TmuxWrapper { .. }
         | Commands::CodexTmuxWrapper { .. }
         | Commands::QwenTmuxWrapper { .. } => false,
@@ -394,7 +393,6 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             branch,
             close_issue,
         } => exit_for_cli(super::direct::cmd_cherry_merge(&branch, close_issue)),
-        #[cfg(unix)]
         Commands::TmuxWrapper {
             output_file,
             input_fifo,
@@ -405,6 +403,7 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
         } => {
             let mode = match input_mode {
                 super::args::InputModeArg::Pipe => crate::services::tmux_wrapper::InputMode::Pipe,
+                #[cfg(unix)]
                 super::args::InputModeArg::Fifo => crate::services::tmux_wrapper::InputMode::Fifo,
             };
             crate::services::tmux_wrapper::run(
@@ -417,7 +416,6 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             );
             Ok(())
         }
-        #[cfg(unix)]
         Commands::CodexTmuxWrapper {
             output_file,
             input_fifo,
@@ -436,6 +434,7 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
         } => {
             let mode = match input_mode {
                 super::args::InputModeArg::Pipe => crate::services::tmux_wrapper::InputMode::Pipe,
+                #[cfg(unix)]
                 super::args::InputModeArg::Fifo => crate::services::tmux_wrapper::InputMode::Fifo,
             };
             let fast_mode_override = fast_mode_state.map(|state| match state {
@@ -464,7 +463,6 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             );
             Ok(())
         }
-        #[cfg(unix)]
         Commands::QwenTmuxWrapper {
             output_file,
             input_fifo,
@@ -479,6 +477,7 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
         } => {
             let mode = match input_mode {
                 super::args::InputModeArg::Pipe => crate::services::tmux_wrapper::InputMode::Pipe,
+                #[cfg(unix)]
                 super::args::InputModeArg::Fifo => crate::services::tmux_wrapper::InputMode::Fifo,
             };
             crate::services::qwen_tmux_wrapper::run(

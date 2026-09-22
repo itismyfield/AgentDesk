@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 use crate::runtime_layout::expand_user_path;
 
 mod grok;
+#[cfg(any(windows, test))]
+mod windows_codex;
 const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(3);
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION_PROBE_MAX_OUTPUT_BYTES: usize = 8 * 1024;
@@ -967,6 +969,20 @@ fn finalize_resolution(
     source: String,
     attempts: Vec<String>,
 ) -> BinaryResolution {
+    // The stock npm batch shim adds cmd.exe's 8191-character limit to every
+    // prompt. Resolve the executable from that same installation on Windows;
+    // explicit registry/env launchers retain their operator-defined semantics.
+    #[cfg(windows)]
+    let resolved_path = if requested_binary == "codex"
+        && matches!(
+            source.as_str(),
+            "current_path" | "login_shell_path" | "fallback_path"
+        ) {
+        windows_codex::native_from_npm_shim(&resolved_path, std::env::consts::ARCH)
+            .unwrap_or(resolved_path)
+    } else {
+        resolved_path
+    };
     let canonical_path = std::fs::canonicalize(&resolved_path).ok();
     BinaryResolution {
         requested_binary,

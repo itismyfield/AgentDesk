@@ -23,6 +23,7 @@ cli::args::tests::legacy_flat_discord_send_help_matches_routed_send_contract
 cli::args::tests::legacy_launchd_and_provider_value_aliases_still_parse
 cli::args::tests::legacy_queue_help_directs_users_to_query_without_changing_compatibility_contract
 cli::args::tests::provider_cli_status_coexists_with_global_json
+cli::args::tests::provider_wrappers_accept_process_backend_pipe_arguments
 cli::args::tests::send_to_agent_parses_expect_reply_false
 cli::args::tests::send_to_agent_parses_expect_reply_true
 cli::args::tests::send_to_agent_requires_expect_reply
@@ -901,6 +902,8 @@ runtime_layout::skill_sync::skill_cache_freshness_tests::refresh_is_concurrency_
 runtime_layout::skill_sync::skill_cache_freshness_tests::rewritten_skill_is_not_perpetually_stale
 runtime_layout::warn_once_tests::once_should_fire_fires_exactly_once_across_threads
 runtime_layout::warn_once_tests::once_should_fire_only_for_first_caller
+runtime_layout::windows_links::tests::windows_junction_paths_are_literal_and_removal_preserves_target
+runtime_layout::windows_links::tests::windows_optional_file_alias_never_copies_or_hardlinks_content
 server::claude_oauth_usage_tests::maps_fable_weekly_scoped_limit_without_synthesizing_missing_sonnet
 server::claude_oauth_usage_tests::omits_fable_bucket_when_percent_is_missing_null_or_non_numeric
 server::claude_oauth_usage_tests::selects_numeric_fable_from_multiple_scoped_limits
@@ -8001,6 +8004,9 @@ services::platform::binary_resolver::tests::generic_seam_seals_claude_while_seal
 services::platform::binary_resolver::tests::parses_codex_cli_semver_from_version_output
 services::platform::binary_resolver::tests::resolve_provider_binary_redacts_claude_paths_in_attempts
 services::platform::binary_resolver::tests::scrub_seals_only_claude_paths
+services::platform::binary_resolver::windows_codex::tests::preserves_unknown_custom_missing_and_mismatched_launchers
+services::platform::binary_resolver::windows_codex::tests::resolves_same_install_native_binary_and_preserves_architecture
+services::platform::network::tests::api_listener_is_not_inheritable_by_provider_processes
 services::platform::tmux::availability::availability_cache_tests::consecutive_probe_failures_demote_after_threshold
 services::platform::tmux::availability::availability_cache_tests::live_session_proof_marks_cache_available
 services::platform::tmux::availability::availability_cache_tests::missing_tmux_binary_demotes_immediately_and_resets_failures
@@ -8024,6 +8030,8 @@ services::platform::tmux::timeout_tests::probe_failure_widens_to_live_or_ambiguo
 services::platform::tmux::timeout_tests::send_keys_timeout_preserves_tmux_stderr_on_fast_failure
 services::platform::tmux::timeout_tests::send_keys_timeout_reports_hung_tmux
 services::platform::tmux::timeout_tests::session_presence_distinguishes_missing_from_probe_failure
+services::platform::windows_job::tests::forced_runtime_exit_terminates_grandchildren_and_releases_ports
+services::platform::windows_job::tests::runtime_job_descendant_fixture
 services::pr_summary::tests::cache_hit_on_repeated_lookup
 services::pr_summary::tests::closed_pr_uses_longer_ttl
 services::pr_summary::tests::eviction_caps_entries
