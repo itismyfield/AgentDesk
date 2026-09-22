@@ -69,6 +69,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn omitted_cluster_roles_keep_single_machine_full_runtime() {
+        let cluster: ClusterConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(!cluster.enabled);
+        assert_eq!(cluster.runtime_profile, RuntimeProfile::Full);
+        assert!(cluster.runtime_profile.modules().gateway);
+        assert!(cluster.runtime_profile.modules().admin_api);
+        assert!(cluster.runtime_profile.modules().dashboard);
+        assert!(!cluster.intake_routing.capacity_aware);
+        assert_eq!(cluster.execution_slots, None);
+        assert!(cluster.runtime_profile.validate(&cluster).is_ok());
+    }
+
+    #[test]
     fn worker_profile_is_explicit_validated_and_does_not_change_legacy_roles() {
         for role in ["leader", "auto", "worker"] {
             let legacy: ClusterConfig = serde_yaml::from_str(&format!("role: {role}")).unwrap();

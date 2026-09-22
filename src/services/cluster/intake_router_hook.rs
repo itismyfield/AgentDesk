@@ -22,6 +22,8 @@ use crate::db::intake_outbox_status::IntakeOutboxStatus;
 use sqlx::PgPool;
 
 #[cfg(test)]
+mod agent_execution_node_tests;
+#[cfg(test)]
 mod attachment_tests;
 #[cfg(test)]
 mod capacity_tests;

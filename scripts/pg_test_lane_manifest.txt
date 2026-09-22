@@ -66,6 +66,7 @@ src/services/cluster/attachment_transfer/storage_tests.rs
 src/services/cluster/execution_capacity/tests.rs
 src/services/cluster/intake_preflight.rs
 src/services/cluster/intake_router_hook.rs
+src/services/cluster/intake_router_hook/agent_execution_node_tests.rs
 src/services/cluster/intake_router_hook/attachment_tests.rs
 src/services/cluster/intake_router_hook/capacity_tests.rs
 src/services/cluster/intake_router_hook/execution_requirement_tests.rs
@@ -192,6 +193,7 @@ services::automation_candidate_materializer::iteration_result_tests
 services::cluster::attachment_transfer::storage_tests
 services::cluster::execution_capacity::tests
 services::cluster::intake_preflight::tests
+services::cluster::intake_router_hook::agent_execution_node_tests
 services::cluster::intake_router_hook::attachment_tests
 services::cluster::intake_router_hook::capacity_tests
 services::cluster::intake_router_hook::execution_requirement_tests
@@ -699,6 +701,9 @@ services::automation_candidate_materializer::iteration_result_tests::submit_iter
 services::cluster::attachment_transfer::storage_tests::attachment_bundle_store_restart_identity_integrity_expiry_and_cleanup_pg
 services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg
 services::cluster::intake_preflight::tests::evaluation_does_not_mutate_production_handoff_state_pg
+services::cluster::intake_router_hook::agent_execution_node_tests::agent_primary_inherits_into_thread_with_bounded_fallback_without_moving_owner_pg
+services::cluster::intake_router_hook::agent_execution_node_tests::preferred_leader_wins_but_unconfigured_agent_keeps_legacy_placement_pg
+services::cluster::intake_router_hook::agent_execution_node_tests::unavailable_primary_uses_only_ready_compatible_candidates_and_never_moves_stale_owner_pg
 services::cluster::intake_router_hook::attachment_tests::attachment_route_requires_consumer_and_preserves_bytes_through_retry_pg
 services::cluster::intake_router_hook::capacity_tests::execution_capacity_routes_concurrent_channels_without_overflow_pg
 services::cluster::intake_router_hook::execution_requirement_tests::execution_requirements_block_fallback_and_survive_recovery_pg

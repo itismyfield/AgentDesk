@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "55c43839f59aee458cd33646981314e2c9b8840c",
+  "measured_at_sha": "bf69591eab0ff9e3ce205f0c08dbd7654f4d4c7a",
   "records": [
     {
       "root": "migrations/postgres",
@@ -23635,6 +23635,87 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:ff8dc93daedac978ed224f81b87e662ee33d71f3639a228d71ccfb3cd8f162d2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_router_hook/agent_execution_node_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:3b8b8041ce460bc2da834805b97fcbe83ff01b3698dcfb78592de652aa1a558c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_router_hook/agent_execution_node_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:571f2f58b825bbb67683fe312028e52eda73f8b5e9b439e4e4e50c01c675fbc2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_router_hook/agent_execution_node_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:789d790f684f237041ff149c494ca1373f926884efaa485edaaba41addea8d2a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_router_hook/agent_execution_node_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:91e3e813a1c42a235c1382738b231bd629b4746a1ec7d83c989b1db9cefb9bab"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_router_hook/agent_execution_node_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a15aefc25eb23f67c339c02dccbe9fb5c1ee559634b42b3729dd87ec7b521f7c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_router_hook/agent_execution_node_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ab018992b1a18ac0dfd9c5bcd51184cb5aff8940b1db974bd7c54f0f9fcb4537"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_router_hook/agent_execution_node_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:0636c61c603087470c923cdc68999246db4b0c40e8b0902634001aa54f2f8bf2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_router_hook/agent_execution_node_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:6c903430f6b93e83ca1fb35fe69efb30a6feadaa9d58e75302948c9908edb5c6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_router_hook/agent_execution_node_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:776728917d2131eabe15c081f2d5f7e758e1cca12538e59eb86046b660462710"
     },
     {
       "root": "src",
