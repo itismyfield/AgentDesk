@@ -405,6 +405,9 @@ banner "Test ROOT file-reference policy"
 banner "Scheduled-message PG path-filter wiring contract"
 "$PYTHON" -m unittest tests.test_scheduled_messages_ci_wiring
 
+banner "macOS hosted-overflow routing contract"
+"$PYTHON" -m unittest tests.test_macos_runner_overflow_ci_wiring
+
 banner "High-risk recovery path-filter selection contract (#5232)"
 "$PYTHON" -m unittest tests.test_high_risk_recovery_path_filter
 

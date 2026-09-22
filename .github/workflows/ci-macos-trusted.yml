@@ -28,12 +28,20 @@ jobs:
       group: ${{ steps.resolve.outputs.group }}
       labels: ${{ steps.resolve.outputs.labels }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci/macos-runner-overflow.py
+          sparse-checkout-cone-mode: false
+
       - name: Validate self-hosted macOS routing
         id: resolve
         shell: bash
         env:
           MACOS_RUNNER: ${{ vars.MACOS_RUNNER }}
           MACOS_RUNNER_GROUP: ${{ vars.MACOS_RUNNER_GROUP }}
+          # Optional; listing runners needs administration:read, which
+          # `permissions:` cannot grant. Unset keeps routing on self-hosted.
+          RUNNER_QUERY_TOKEN: ${{ secrets.RUNNER_QUERY_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -44,6 +52,7 @@ jobs:
               echo 'labels=[]'
             } >> "$GITHUB_OUTPUT"
             echo "MACOS_RUNNER is unset; using GitHub-hosted macos-latest."
+            echo "macOS route: hosted (MACOS_RUNNER unset)" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
@@ -82,12 +91,25 @@ jobs:
           PY
           )"
 
+          # Overflow to the existing hosted job only when every self-hosted Mac is busy.
+          if [ -n "${RUNNER_QUERY_TOKEN:-}" ] \
+            && [ "$(python3 scripts/ci/macos-runner-overflow.py)" = "hosted" ]; then
+            {
+              echo "mode=hosted"
+              echo "group="
+              echo 'labels=["macos-latest"]'
+            } >> "$GITHUB_OUTPUT"
+            echo "macOS route: hosted (self-hosted runners saturated)" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           {
             echo "mode=self-hosted"
             echo "group=${MACOS_RUNNER_GROUP}"
             echo "labels=${labels}"
           } >> "$GITHUB_OUTPUT"
           echo "Validated self-hosted macOS labels for runner group '${MACOS_RUNNER_GROUP}'."
+          echo "macOS route: self-hosted ${labels}" | tee -a "$GITHUB_STEP_SUMMARY"
 
   macos_hosted:
     name: Trusted macOS check (hosted)
