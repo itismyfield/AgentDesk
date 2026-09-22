@@ -36,6 +36,7 @@ extract_function() {
 
 for fn in _recover_or_preserve_past_migration_floor _preserve_staged_binary_for_recovery \
     _migration_floor_artifact_path _old_runtime_pid_is_alive _release_job_is_quiescent \
+    _release_job_backing_pid \
     _release_runtime_is_serving _migration_floor_may_advance; do
     body="$(extract_function "$fn")"
     if [ -z "$body" ]; then
@@ -65,7 +66,15 @@ curl() {
     fi
     return 0
 }
-launchctl() { echo "launchctl $*" >>"$TMP_ROOT/calls"; return 0; }
+launchctl() {
+    if [ "${1:-}" = "print" ]; then
+        [ -n "${STUB_JOB_PID:-}" ] || return 1
+        printf '\tstate = running\n\tpid = %s\n\tlast exit code = 0\n' "$STUB_JOB_PID"
+        return 0
+    fi
+    echo "launchctl $*" >>"$TMP_ROOT/calls"
+    return 0
+}
 chflags() { echo "chflags $*" >>"$TMP_ROOT/calls"; return 0; }
 tmux() { echo "tmux $*" >>"$TMP_ROOT/calls"; return 0; }
 xattr() { return 0; }
@@ -117,9 +126,8 @@ reset_node() {
     STUB_MV_FAIL=0
     STUB_CURL_SEQ=""
     STUB_PID_ALIVE=1
-    STUB_LOCKPID_ALIVE=1
+    STUB_JOB_PID=""
     STUB_CP_FAIL=0
-    : >"$LOCK_FILE"
     # shellcheck disable=SC2034  # Read by the production function loaded through eval.
     OLD_PID="4242"
 }
@@ -289,9 +297,8 @@ reset_node
 STUB_CURL_RC=7
 STUB_HTTP_CODE=000
 STUB_PID_ALIVE=1
-# the captured pid is gone, but the lock file names a live replacement process
-printf '9931' >"$LOCK_FILE"
-STUB_LOCKPID_ALIVE=0
+# the captured pid is gone, but launchd still reports a backing process
+STUB_JOB_PID="9931"
 _recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
 if [ "$(cat "$REL_BINARY")" = "OLD-UNBOOTABLE" ]; then
     pass "a new launchd generation is not swapped out from under"
@@ -304,17 +311,24 @@ else
     fail "bootout was issued while a replacement process was live"
 fi
 
-echo "§8 a stale lock naming a dead pid does not block recovery"
+echo "§8 liveness asks launchd, so a recycled pid cannot block recovery forever"
 
 reset_node
 STUB_CURL_RC=7
-printf '9931' >"$LOCK_FILE"
-STUB_LOCKPID_ALIVE=1
+# a stale lock file naming a live unrelated process must not be consulted
+mkdir -p "$(dirname "$LOCK_FILE")" && printf '9931' >"$LOCK_FILE"
+STUB_LOCKPID_ALIVE=0
+STUB_JOB_PID=""
 _recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
 if [ "$(cat "$REL_BINARY")" = "STAGED-NEW" ]; then
-    pass "a crash-looped node still recovers when no process is actually alive"
+    pass "a crash-looped node recovers when launchd reports no backing process"
 else
-    fail "a stale lock file blocked automatic recovery"
+    fail "a stale or recycled pid blocked automatic recovery"
+fi
+if ! extract_function _old_runtime_pid_is_alive | grep -v "^[[:space:]]*#" | grep -q "LOCK_FILE\|dcserver.lock"; then
+    pass "liveness does not infer from the lock file at all"
+else
+    fail "liveness still reads a lock file whose pid can be recycled"
 fi
 
 echo "§9 the swap is refused when the replaced binary cannot be kept"

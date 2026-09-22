@@ -1135,18 +1135,30 @@ _preserve_staged_binary_for_recovery() {
     return 1
 }
 
+_release_job_backing_pid() {
+    # launchd owns whether the job has a live backing process right now. A lock
+    # file cannot answer that: its pid can be stale and recycled by an unrelated
+    # process, which would report the node as busy forever and block recovery.
+    local domain="$1" label="$2"
+    [ -n "$domain" ] && [ -n "$label" ] || return 1
+    launchctl print "$domain/$label" 2>/dev/null \
+        | awk -F'=' '/^[[:space:]]*pid[[:space:]]*=[[:space:]]*[0-9]+[[:space:]]*$/ {
+              gsub(/[^0-9]/, "", $2); print $2; exit
+          }'
+}
+
 _old_runtime_pid_is_alive() {
-    # launchd hands a crash loop a new pid and the runtime rewrites the lock file,
-    # so the pid captured before the drain proves nothing about the generation
-    # running now. Consider both the captured pid and whatever currently claims
-    # the lock; a stale lock naming a dead pid reads as not alive.
-    local current=""
+    # A crash loop gets a new pid from launchd, so the pid captured before the
+    # drain proves nothing about the generation running now. Ask launchd for the
+    # current one; a job it reports no pid for has no backing process.
+    local domain current
     [ -n "${OLD_PID:-}" ] && kill -0 "${OLD_PID}" 2>/dev/null && return 0
-    current="$(cat "${LOCK_FILE:-$ADK_REL/runtime/dcserver.lock}" 2>/dev/null || true)"
+    domain="$(_launchd_domain 2>/dev/null)" || domain="gui/$(id -u 2>/dev/null)"
+    current="$(_release_job_backing_pid "$domain" "${PLIST_REL:-}" || true)"
     case "$current" in
         '' | *[!0-9]*) return 1 ;;
     esac
-    kill -0 "$current" 2>/dev/null
+    return 0
 }
 
 _release_job_is_quiescent() {
