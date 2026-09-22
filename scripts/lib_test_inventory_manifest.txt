@@ -9204,6 +9204,8 @@ utils::redact::tests::single_quoted_secret_keys_are_masked
 utils::redact::tests::unquoted_cookie_header_values_accept_continuations_and_quoted_first_fragments
 utils::redact::tests::unquoted_value_with_comma_or_brace_is_fully_masked
 utils::redact::tests::wget_header_equals_arguments_share_cookie_redaction
+utils::secret_file::private_directory::tests::failed_writes_preserve_phase_and_remove_secret_temporaries
+utils::secret_file::private_directory::tests::symlink_permissions_and_second_owner_are_rejected
 utils::secret_file::tests::audit_or_harden_secret_file_corrects_existing_mode
 utils::secret_file::tests::audit_or_harden_secret_file_refuses_symlink_without_chmoding_target
 utils::secret_file::tests::write_secret_file_creates_owner_only_file

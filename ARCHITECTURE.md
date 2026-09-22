@@ -1833,6 +1833,8 @@ src/
 │   ├── ai_screen.rs
 │   └── mod.rs
 ├── utils/
+│   ├── secret_file/
+│   │   └── private_directory.rs
 │   ├── api.rs
 │   ├── async_bridge.rs
 │   ├── auth.rs
