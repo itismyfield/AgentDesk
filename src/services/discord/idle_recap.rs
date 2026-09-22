@@ -783,7 +783,7 @@ async fn mailbox_has_active_turn(channel_id: u64) -> bool {
     match crate::services::turn_orchestrator::ChannelMailboxRegistry::global_handle(
         serenity::ChannelId::new(channel_id),
     ) {
-        Some(handle) => handle.has_active_turn().await,
+        Some(handle) => handle.has_active_turn().await.unwrap_or(true),
         None => false,
     }
 }

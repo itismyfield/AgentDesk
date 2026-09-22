@@ -157,7 +157,11 @@ pub(crate) async fn channel_has_active_turn(
     let Some(shared) = shared_for_provider(registry, &provider, channel_id).await else {
         return false;
     };
-    discord::mailbox_has_blocking_active_turn(&shared, channel_id).await
+    shared
+        .mailbox(channel_id)
+        .has_blocking_active_turn()
+        .await
+        .unwrap_or(true)
 }
 
 async fn owning_runtime_http_for_channel(
@@ -321,7 +325,7 @@ async fn wait_for_turn_end(
     timeout: std::time::Duration,
 ) -> bool {
     let start = tokio::time::Instant::now();
-    while shared.mailbox(channel_id).has_active_turn().await {
+    while shared.mailbox(channel_id).has_active_turn().await != Ok(false) {
         if start.elapsed() >= timeout {
             return false;
         }

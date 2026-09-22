@@ -15,7 +15,7 @@ pub(super) async fn commit_watcher_direct_terminal_session_idle(
     data_start_offset: u64,
     current_offset: u64,
 ) -> bool {
-    if shared.mailbox(channel_id).cancel_token().await.is_some() {
+    if !matches!(shared.mailbox(channel_id).cancel_token().await, Ok(None)) {
         tracing::debug!(
             channel_id = channel_id.get(),
             tmux_session_name = %tmux_session_name,

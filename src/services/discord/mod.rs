@@ -1449,17 +1449,28 @@ pub(crate) async fn record_turn_stop_tombstone(
 ) {
 }
 
+/// Unreachable reads as idle: a dead actor admits no turn either way, the one
+/// reclaim caller (session idle cleanup) has independent liveness guards, and
+/// "busy" would permanently hold a live parent channel or voice path.
 async fn mailbox_has_active_turn(shared: &SharedData, channel_id: ChannelId) -> bool {
-    shared.mailbox(channel_id).has_active_turn().await
+    shared
+        .mailbox(channel_id)
+        .has_active_turn()
+        .await
+        .unwrap_or(false)
 }
 
 /// #3167 — true only when a *real* (non-background) active turn holds the
 /// slot. The external-input dequeue uses this instead of
 /// `mailbox_has_active_turn` so a continuously-cycling background turn
 /// (monitor relay / self-paced TUI loop) does not starve a queued user
-/// intervention.
+/// intervention. Unreachable reads as idle, as in `mailbox_has_active_turn`.
 async fn mailbox_has_blocking_active_turn(shared: &SharedData, channel_id: ChannelId) -> bool {
-    shared.mailbox(channel_id).has_blocking_active_turn().await
+    shared
+        .mailbox(channel_id)
+        .has_blocking_active_turn()
+        .await
+        .unwrap_or(false)
 }
 
 fn cleanup_retry_inflight_blocks_idle_kickoff(

@@ -2058,7 +2058,7 @@ mod tests {
                 assert_eq!(recorded_actions(&records).len(), 2);
                 assert!(records.iter().all(|record| record.message_id == old_tid));
                 assert!(records.iter().all(|record| record.message_id != newer_tid));
-                assert!(shared.mailbox(ch).has_active_turn().await);
+                assert!(shared.mailbox(ch).has_active_turn().await.unwrap());
 
                 begin_reaction_cleanup_recording();
                 let zero = fin

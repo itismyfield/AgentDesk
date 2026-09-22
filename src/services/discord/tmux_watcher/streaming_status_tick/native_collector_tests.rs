@@ -595,7 +595,7 @@ fn native_collector_case(test_name: &str, mode: u8) {
             )
             .await;
             assert!(
-                shared.mailbox(fx.channel).has_active_turn().await,
+                shared.mailbox(fx.channel).has_active_turn().await.unwrap(),
                 "no receipt: no actor release"
             );
         }
@@ -737,7 +737,7 @@ fn native_collector_case(test_name: &str, mode: u8) {
             )
             .await;
             assert!(
-                !shared.mailbox(fx.channel).has_active_turn().await,
+                !shared.mailbox(fx.channel).has_active_turn().await.unwrap(),
                 "exact receipt releases original actor"
             );
             let successor = Arc::new(crate::services::provider::CancelToken::new());
