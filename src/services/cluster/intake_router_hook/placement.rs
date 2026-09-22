@@ -1,4 +1,4 @@
-//! Ownerless intake placement by operator preference and explicit target.
+//! Ownerless placement constrained by hard execution policy.
 use super::*;
 
 fn preferred_label_dependency_fallback(detail: String) -> IntakeRouterDecision {
@@ -10,6 +10,7 @@ fn preferred_label_dependency_fallback(detail: String) -> IntakeRouterDecision {
 pub(super) async fn route_by_preferred_labels(
     pool: &PgPool,
     ctx: &IntakeRouterContext<'_>,
+    requirements: &ExecutionRequirements,
 ) -> IntakeRouterDecision {
     // Resolve agent + preference. NoAgentForChannel is NOT an error —
     // many channels (DMs, ad-hoc cross-bot) have no agent row.
@@ -22,6 +23,11 @@ pub(super) async fn route_by_preferred_labels(
         match agent_id_and_preferred_labels(pool, ctx.channel_id).await {
             Ok(Some((agent_id, provider, labels))) => (agent_id, provider, labels),
             Ok(None) => {
+                if !requirements.is_empty() {
+                    return required_block(
+                        "agent disappeared while validating execution requirements".into(),
+                    );
+                }
                 return apply_observe_mode(
                     ctx.mode,
                     IntakeRouterDecision::RanLocal {
@@ -30,6 +36,9 @@ pub(super) async fn route_by_preferred_labels(
                 );
             }
             Err(error) => {
+                if !requirements.is_empty() {
+                    return required_block(error.to_string());
+                }
                 return apply_observe_mode(
                     ctx.mode,
                     preferred_label_dependency_fallback(format!("agent lookup: {error}")),
@@ -37,7 +46,7 @@ pub(super) async fn route_by_preferred_labels(
             }
         };
 
-    if preferred_labels.is_empty() {
+    if preferred_labels.is_empty() && requirements.is_empty() {
         return apply_observe_mode(
             ctx.mode,
             IntakeRouterDecision::RanLocal {
@@ -71,11 +80,15 @@ pub(super) async fn route_by_preferred_labels(
                         &auth_profile,
                     )
                     .eligible
+                        && required_node_reasons(node, requirements).is_empty()
                 })
                 .collect();
             candidates_from_worker_nodes_json(&eligible_nodes)
         }
         Err(error) => {
+            if !requirements.is_empty() {
+                return required_block(error);
+            }
             return apply_observe_mode(
                 ctx.mode,
                 preferred_label_dependency_fallback(format!("list worker_nodes: {error}")),
@@ -83,9 +96,21 @@ pub(super) async fn route_by_preferred_labels(
         }
     };
 
-    let target = match pick_intake_target(&candidates, &preferred_labels, ctx.leader_instance_id) {
+    let selection = if requirements.is_empty() {
+        pick_intake_target(&candidates, &preferred_labels, ctx.leader_instance_id)
+    } else {
+        crate::services::cluster::intake_routing::pick_required_intake_target(
+            &candidates,
+            &preferred_labels,
+            ctx.leader_instance_id,
+        )
+    };
+    let target = match selection {
         IntakeRouteTarget::Worker { instance_id } => instance_id,
         IntakeRouteTarget::Local { reason } => {
+            if !requirements.is_empty() && reason == LocalRouteReason::NoEligibleWorker {
+                return required_block("no online worker satisfies the hard execution requirements; retry after a suitable worker is ready".into());
+            }
             return apply_observe_mode(
                 ctx.mode,
                 IntakeRouterDecision::RanLocal {
@@ -118,9 +143,14 @@ pub(super) async fn route_by_preferred_labels(
         pool,
         ctx,
         &target,
-        &preferred_labels,
+        if requirements.is_empty() {
+            &preferred_labels
+        } else {
+            &[]
+        },
         &agent_id,
         ObserveTargetKind::PreferredLabels,
+        requirements,
     )
     .await
 }
@@ -129,6 +159,7 @@ pub(super) async fn route_node_override_without_owner(
     pool: &PgPool,
     ctx: &IntakeRouterContext<'_>,
     target: &str,
+    requirements: &ExecutionRequirements,
 ) -> IntakeRouterDecision {
     // #4349: `agents.provider` is ignored here for the same reason as in
     // `try_route_intake` — the handling bot is `ctx.provider`.
@@ -148,6 +179,9 @@ pub(super) async fn route_node_override_without_owner(
             }
         };
 
+    if let Some(blocked) = check_required_target(pool, ctx, target, requirements).await {
+        return blocked;
+    }
     if target == ctx.leader_instance_id {
         return apply_observe_mode(
             ctx.mode,
@@ -217,6 +251,7 @@ pub(super) async fn route_node_override_without_owner(
         &required_labels,
         &agent_id,
         ObserveTargetKind::NodeOverride,
+        requirements,
     )
     .await
 }

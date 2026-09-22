@@ -114,6 +114,33 @@ pub(crate) fn pick_intake_target(
         };
     }
 
+    select_matching_intake_target(candidates, preferred_labels, leader_instance_id)
+}
+
+/// Every candidate has already passed hard requirements. Preferences may choose
+/// among them, but cannot authorize fallback to an incompatible local node.
+pub(crate) fn pick_required_intake_target(
+    candidates: &[CandidateNode],
+    preferred_labels: &[String],
+    leader_instance_id: &str,
+) -> IntakeRouteTarget {
+    let preferred = select_matching_intake_target(candidates, preferred_labels, leader_instance_id);
+    if preferred
+        == (IntakeRouteTarget::Local {
+            reason: LocalRouteReason::NoEligibleWorker,
+        })
+    {
+        select_matching_intake_target(candidates, &[], leader_instance_id)
+    } else {
+        preferred
+    }
+}
+
+fn select_matching_intake_target(
+    candidates: &[CandidateNode],
+    preferred_labels: &[String],
+    leader_instance_id: &str,
+) -> IntakeRouteTarget {
     let eligible: Vec<&CandidateNode> = candidates
         .iter()
         .filter(|c| c.status == "online" && labels_satisfy(&c.labels, preferred_labels))

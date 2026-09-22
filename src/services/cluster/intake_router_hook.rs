@@ -13,6 +13,7 @@
 //! observe / enforce mode. `ADK_INTAKE_ROUTING_MODE` remains as an
 //! emergency override and is surfaced in health.
 
+use super::execution_requirements::ExecutionRequirements;
 use crate::db::intake_outbox::{
     InsertPendingPayload, IntakeInsertConflict, classify_insert_pending_error, insert_pending,
 };
@@ -23,6 +24,8 @@ use crate::services::cluster::intake_routing::{
 };
 use sqlx::PgPool;
 
+#[cfg(test)]
+mod execution_requirement_tests;
 pub(crate) mod owner_record;
 mod placement;
 mod session_owner;
@@ -196,12 +199,77 @@ fn worker_heartbeat_lease_secs() -> u64 {
     crate::config::load_graceful().cluster.lease_ttl_secs.max(1)
 }
 
+fn required_block(detail: String) -> IntakeRouterDecision {
+    IntakeRouterDecision::Blocked {
+        reason: IntakeBlockedReason::RoutingDependencyFailed { detail },
+    }
+}
+
+fn required_node_reasons(
+    node: &serde_json::Value,
+    requirements: &ExecutionRequirements,
+) -> Vec<String> {
+    requirements.intake_reasons(node)
+}
+
+async fn check_required_target(
+    pool: &PgPool,
+    ctx: &IntakeRouterContext<'_>,
+    target: &str,
+    requirements: &ExecutionRequirements,
+) -> Option<IntakeRouterDecision> {
+    if requirements.is_empty() {
+        return None;
+    }
+    let nodes =
+        match super::node_registry::list_worker_nodes(pool, worker_heartbeat_lease_secs()).await {
+            Ok(nodes) => nodes,
+            Err(error) => return Some(required_block(error)),
+        };
+    let Some(node) = nodes.iter().find(|n| n["instance_id"] == target) else {
+        return Some(required_block(format!(
+            "required target {target} is not registered"
+        )));
+    };
+    let mut reasons = required_node_reasons(node, requirements);
+    let agent = match agent_id_and_preferred_labels(pool, ctx.channel_id).await {
+        Ok(Some((agent, _, _))) => agent,
+        Ok(None) => String::new(),
+        Err(error) => return Some(required_block(error.to_string())),
+    };
+    reasons.extend(
+        super::readiness::evaluate(
+            node,
+            ctx.provider,
+            &super::readiness::expected_auth_profile(ctx.provider, ctx.channel_id, &agent),
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .reasons,
+    );
+    if reasons.is_empty() {
+        None
+    } else {
+        Some(required_block(format!(
+            "target {target} does not satisfy execution requirements: {}",
+            reasons.join(", ")
+        )))
+    }
+}
+
 /// Run the leader-side placement hook. Enforce mode fails safe whenever a
 /// local execution could split an existing session or duplicate an open route.
 pub(crate) async fn try_route_intake(
     pool: &PgPool,
     ctx: &IntakeRouterContext<'_>,
 ) -> IntakeRouterDecision {
+    let requirements = match super::execution_requirements::for_channel(pool, ctx.channel_id).await
+    {
+        Ok(policy) => policy,
+        Err(error) => return required_block(format!("execution policy lookup failed: {error}")),
+    };
+    if !requirements.is_empty() && ctx.mode != IntakeRoutingMode::Enforce {
+        return required_block("hard execution requirements require enforce routing".into());
+    }
     let node_override = ctx
         .node_override_instance_id
         .map(str::trim)
@@ -305,6 +373,14 @@ pub(crate) async fn try_route_intake(
         | SessionOwnerResolution::LiveForeign { .. } => {}
     }
 
+    // The stale pending local-owner recovery exception must also retain hard
+    // requirements; a deferred route cannot grant permission to run elsewhere.
+    if let SessionOwnerResolution::LiveLocal { instance_id, .. } = &owner {
+        if let Some(blocked) = check_required_target(pool, ctx, instance_id, &requirements).await {
+            return blocked;
+        }
+    }
+
     // The durable single-open-route fence surrounds every placement branch,
     // including a local live owner and attachment-first placement. Preserve the
     // resolved owner classification, row identity, status, and age so the
@@ -396,6 +472,7 @@ pub(crate) async fn try_route_intake(
                 &[],
                 &agent_id,
                 ObserveTargetKind::LiveForeignOwner,
+                &requirements,
             )
             .await
         }
@@ -406,9 +483,9 @@ pub(crate) async fn try_route_intake(
         }
         SessionOwnerResolution::NoOwner => {
             if let Some(target) = node_override {
-                route_node_override_without_owner(pool, ctx, target).await
+                route_node_override_without_owner(pool, ctx, target, &requirements).await
             } else {
-                route_by_preferred_labels(pool, ctx).await
+                route_by_preferred_labels(pool, ctx, &requirements).await
             }
         }
     }
@@ -501,6 +578,7 @@ async fn route_to_instance(
     required_labels: &[String],
     agent_id: &str,
     observe_target_kind: ObserveTargetKind,
+    requirements: &ExecutionRequirements,
 ) -> IntakeRouterDecision {
     let resolved_owner = match observe_target_kind {
         ObserveTargetKind::LiveForeignOwner => ResolvedSessionOwner::LiveForeign,
@@ -603,7 +681,11 @@ async fn route_to_instance(
 
     // Live ingress is always attempt 1. Retry-family allocation belongs only
     // to the failed-pre-accept worker recovery path.
-    let payload = build_payload_for_insert(ctx, target, required_labels, agent_id);
+    if let Some(blocked) = check_required_target(pool, ctx, target, requirements).await {
+        return blocked;
+    }
+    let mut payload = build_payload_for_insert(ctx, target, required_labels, agent_id);
+    payload.execution_requirements = serde_json::json!(requirements);
     match insert_pending(pool, &payload, 1, None).await {
         Ok(outbox_id) => IntakeRouterDecision::Forwarded {
             target_instance_id: target.to_string(),
@@ -678,6 +760,7 @@ fn build_payload_for_insert(
     agent_id: &str,
 ) -> InsertPendingPayload {
     InsertPendingPayload {
+        execution_requirements: serde_json::json!({}),
         target_instance_id: target.to_string(),
         forwarded_by_instance_id: ctx.leader_instance_id.to_string(),
         provider: ctx.provider.to_string(),
@@ -758,7 +841,10 @@ mod pg_tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
 
-    fn ctx_for_channel<'a>(mode: IntakeRoutingMode, channel: &'a str) -> IntakeRouterContext<'a> {
+    pub(super) fn ctx_for_channel<'a>(
+        mode: IntakeRoutingMode,
+        channel: &'a str,
+    ) -> IntakeRouterContext<'a> {
         IntakeRouterContext {
             mode,
             leader_instance_id: "leader-1",
@@ -782,7 +868,7 @@ mod pg_tests {
         }
     }
 
-    async fn seed_agent_with_preference(
+    pub(super) async fn seed_agent_with_preference(
         pool: &PgPool,
         agent_id: &str,
         channel_id: &str,
@@ -823,7 +909,7 @@ mod pg_tests {
         .await;
     }
 
-    async fn seed_worker_node_with_capabilities(
+    pub(super) async fn seed_worker_node_with_capabilities(
         pool: &PgPool,
         instance_id: &str,
         labels: serde_json::Value,
@@ -844,7 +930,7 @@ mod pg_tests {
         .expect("seed worker_nodes");
     }
 
-    async fn seed_session_owner(
+    pub(super) async fn seed_session_owner(
         pool: &PgPool,
         session_key: &str,
         provider: &str,
@@ -2012,19 +2098,15 @@ mod pg_tests {
             &ctx_for_channel(IntakeRoutingMode::Observe, "ch-preference-error"),
         )
         .await;
-        let IntakeRouterDecision::RanLocal { reason } = enforce else {
-            panic!("expected enforce availability fallback, got {enforce:?}");
-        };
+        // A missing agent table also makes hard execution policy unknowable.
+        // Neither mode may execute locally without proving the requirements.
         assert!(matches!(
-            reason,
-            RanLocalReason::DbErrorFellBackToLocal { .. }
+            &enforce,
+            IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::RoutingDependencyFailed { detail }
+            } if detail.contains("execution policy lookup failed")
         ));
-        assert_eq!(
-            observe,
-            IntakeRouterDecision::Observed {
-                outcome: ObservedIntakeOutcome::WouldKeepNoOwnerLocal { reason }
-            }
-        );
+        assert_eq!(observe, enforce);
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = $1")
                 .bind("ch-preference-error")

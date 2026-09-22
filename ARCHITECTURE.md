@@ -342,6 +342,7 @@ src/
 │   │   ├── docs.rs
 │   │   ├── e2e_control.rs
 │   │   ├── escalation.rs
+│   │   ├── execution_requirements.rs
 │   │   ├── github.rs
 │   │   ├── github_dashboard.rs
 │   │   ├── health_api.rs
@@ -528,6 +529,7 @@ src/
 │   │   ├── execution_requirements/
 │   │   │   └── tests.rs
 │   │   ├── intake_router_hook/
+│   │   │   ├── execution_requirement_tests.rs
 │   │   │   ├── owner_record.rs
 │   │   │   ├── placement.rs
 │   │   │   └── session_owner.rs
