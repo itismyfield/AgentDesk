@@ -35,8 +35,7 @@ extract_function() {
 . "$REPO_ROOT/scripts/_defaults.sh"
 
 for fn in _recover_or_preserve_past_migration_floor _preserve_staged_binary_for_recovery \
-    _migration_floor_artifact_path _old_runtime_pid_is_alive _release_job_is_quiescent \
-    _release_job_backing_pid _migration_floor_may_advance; do
+    _migration_floor_artifact_path _migration_floor_may_advance; do
     body="$(extract_function "$fn")"
     if [ -z "$body" ]; then
         fail "$fn is not defined in $DEPLOY_SH"
@@ -119,6 +118,7 @@ REL_BINARY="$ADK_REL/bin/agentdesk"
 REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
 RECOVERY="$ADK_REL/bin/agentdesk.migration-floor-recovery"
 mkdir -p "$ADK_REL/runtime"
+# shellcheck disable=SC2034  # named by the forbidden-reference check in §4
 LOCK_FILE="$ADK_REL/runtime/dcserver.lock"
 
 reset_node() {
@@ -137,7 +137,7 @@ reset_node() {
     OLD_PID="4242"
 }
 
-echo "§1 nothing serving: promote the staged binary so launchd stops crash-looping"
+echo "§1 nothing serving: install the staged binary so the crash loop heals itself"
 
 STUB_CURL_RC=7
 STUB_HTTP_CODE=000
@@ -145,29 +145,19 @@ reset_node
 _recover_or_preserve_past_migration_floor >"$TMP_ROOT/out" 2>&1 || true
 
 if [ "$(cat "$REL_BINARY")" = "STAGED-NEW" ]; then
-    pass "the staged binary is now live"
+    pass "the staged binary is now the one a restart would load"
 else
     fail "live binary is still '$(cat "$REL_BINARY")' — the node stays bricked"
 fi
 if [ -z "${STAGED_BINARY:-}" ]; then
     pass "STAGED_BINARY was cleared so the EXIT cleanup cannot delete the live binary"
 else
-    fail "STAGED_BINARY still points at '$STAGED_BINARY' after promotion"
+    fail "STAGED_BINARY still points at '$STAGED_BINARY' after the install"
 fi
-if grep -q "bootout gui/501/com.agentdesk.test" "$TMP_ROOT/calls"; then
-    pass "the crash-looping job was booted out before the swap"
+if ! grep -qE "^(launchctl|tmux|kill)" "$TMP_ROOT/calls"; then
+    pass "no process was stopped or started to install it"
 else
-    fail "no bootout issued before the swap"
-fi
-if grep -q "^tmux kill-session" "$TMP_ROOT/calls"; then
-    pass "the manual tmux fallback was killed, so no old process can answer the health check"
-else
-    fail "the tmux fallback was left alive — health could pass on the OLD executable"
-fi
-if grep -q "^launchctl bootstrap " "$TMP_ROOT/calls"; then
-    pass "the service was restarted after the swap"
-else
-    fail "the service was never restarted"
+    fail "recovery issued process control: $(tr '\n' ';' <"$TMP_ROOT/calls")"
 fi
 if [ ! -e "$REL_BINARY_BACKUP" ]; then
     pass "the unbootable binary was not recorded as last-known-good"
@@ -179,162 +169,65 @@ if ls "$ADK_REL"/bin/agentdesk.pre-migration-floor* >/dev/null 2>&1; then
 else
     fail "the replaced binary was destroyed — nothing can boot if the schema did not advance"
 fi
-if ! grep -q "^kill -9" "$TMP_ROOT/calls"; then
-    pass "no process was force-killed to reach the swap"
-else
-    fail "a process was SIGKILLed instead of being waited out"
-fi
 
-echo "§2 a serving runtime is left alone — the durability refusal is not undone"
+echo "§2 a serving runtime keeps its own image, and still gets a bootable binary on disk"
 
 STUB_CURL_RC=0
 STUB_HTTP_CODE=200
 reset_node
 _recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
 
-if [ "$(cat "$REL_BINARY")" = "OLD-UNBOOTABLE" ]; then
-    pass "the live binary was not swapped under a serving runtime"
+if [ "$(cat "$REL_BINARY")" = "STAGED-NEW" ]; then
+    pass "installing under a serving runtime is allowed: a rename cannot disturb it"
 else
-    fail "the binary was swapped while a runtime was still serving"
+    fail "the node was left holding '$(cat "$REL_BINARY")', which cannot boot"
 fi
-if ! grep -q "bootout" "$TMP_ROOT/calls"; then
+if ! grep -qE "^(launchctl|tmux|kill)" "$TMP_ROOT/calls"; then
     pass "the serving runtime was not stopped, so its in-flight frontier survives"
 else
-    fail "a serving runtime was booted out — this is the loss the durability gate refused to risk"
+    fail "recovery touched a serving runtime: $(tr '\n' ';' <"$TMP_ROOT/calls")"
 fi
-if [ -e "$RECOVERY" ] && [ "$(cat "$RECOVERY")" = "STAGED-NEW" ]; then
-    pass "the migration-capable binary was preserved for the redeploy"
+if ls "$ADK_REL"/bin/agentdesk.pre-migration-floor* >/dev/null 2>&1; then
+    pass "the binary it replaced was kept"
 else
-    fail "the only bootable binary was not preserved"
-fi
-if [ -z "${STAGED_BINARY:-}" ]; then
-    pass "the preserved binary is out of the staging cleanup's reach"
-else
-    fail "cleanup would still delete the preserved binary at '$STAGED_BINARY'"
+    fail "the replaced binary was destroyed"
 fi
 
-echo "§3 a process that stopped listening but has not exited is not stopped either"
+echo "§3 a draining or replacement process changes nothing: still installed, still untouched"
 
-STUB_CURL_RC=7
-STUB_HTTP_CODE=000
-reset_node
-STUB_PID_ALIVE=0
-_recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
-if [ "$(cat "$REL_BINARY")" = "OLD-UNBOOTABLE" ]; then
-    pass "a draining runtime that still holds the pid is not swapped out from under"
-else
-    fail "the binary was swapped while the previous process was still alive"
-fi
-if ! grep -qE "bootout|^kill " "$TMP_ROOT/calls"; then
-    pass "the draining process was neither booted out nor killed"
-else
-    fail "a live process was stopped before its frontier could become durable"
-fi
-if ls "$ADK_REL"/bin/agentdesk.migration-floor-recovery* >/dev/null 2>&1; then
-    pass "the migration-capable binary was preserved for the redeploy"
-else
-    fail "the only bootable binary was not preserved"
-fi
-
-echo "§4 anything still answering after bootout blocks the swap"
-
-reset_node
-STUB_PID_ALIVE=1
-# not serving at the decision, serving again once the job was booted out
-STUB_CURL_SEQ="7 0"
-STUB_HTTP_CODE=200
-_recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
-if [ "$(cat "$REL_BINARY")" = "OLD-UNBOOTABLE" ]; then
-    pass "the swap is refused while something still owns the port"
-else
-    fail "the binary was swapped although the port was still owned — health could pass on the OLD executable"
-fi
-if ls "$ADK_REL"/bin/agentdesk.migration-floor-recovery* >/dev/null 2>&1; then
-    pass "the staged binary is preserved on that refusal"
-else
-    fail "the refusal lost the migration-capable binary"
-fi
-
-echo "§5 a failed promote must not leave the node with no bootable binary"
-
-STUB_CURL_SEQ=""
-STUB_CURL_RC=7
-STUB_HTTP_CODE=000
-reset_node
-STUB_MV_FAIL=1
-_recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
-if ls "$ADK_REL"/bin/agentdesk.migration-floor-recovery* >/dev/null 2>&1; then
-    pass "the staged binary survived a failed promote"
-else
-    fail "a failed promote lost the only migration-capable binary"
-fi
-if [ -z "${STAGED_BINARY:-}" ]; then
-    pass "cleanup cannot delete it afterwards"
-else
-    fail "cleanup would delete the last bootable binary at '$STAGED_BINARY'"
-fi
-
-echo "§6 preserving twice never destroys the earlier recovery binary"
-
-reset_node
-STUB_CURL_RC=0
-STUB_HTTP_CODE=200
-_recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
-first="$RECOVERY"
-printf 'FIRST-KEPT' >"$first"
-STAGED_BINARY="$ADK_REL/bin/agentdesk.deploy.test2"
-printf 'SECOND-STAGED' >"$STAGED_BINARY"
-_recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
-if [ "$(cat "$first")" = "FIRST-KEPT" ]; then
-    pass "an earlier recovery binary is not overwritten by a later abort"
-else
-    fail "a later abort destroyed the binary proven to boot against the current schema"
-fi
-if [ -e "$first.1" ]; then
-    pass "the later binary is kept alongside it"
-else
-    fail "the later binary was dropped instead of kept alongside"
-fi
-
-echo "§7 a replacement launchd generation is not stopped either"
-
-reset_node
-STUB_CURL_RC=7
-STUB_HTTP_CODE=000
-STUB_PID_ALIVE=1
-# the captured pid is gone, but launchd still reports a backing process
-STUB_JOB_PID="9931"
-_recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
-if [ "$(cat "$REL_BINARY")" = "OLD-UNBOOTABLE" ]; then
-    pass "a new launchd generation is not swapped out from under"
-else
-    fail "only the captured pid was checked — a replacement process was stopped without proving its frontier"
-fi
-if ! grep -q "bootout" "$TMP_ROOT/calls"; then
-    pass "the replacement generation was not booted out"
-else
-    fail "bootout was issued while a replacement process was live"
-fi
-
-echo "§8 liveness asks launchd, so a recycled pid cannot block recovery forever"
-
-reset_node
-STUB_CURL_RC=7
-# a stale lock file naming a live unrelated process must not be consulted
-mkdir -p "$(dirname "$LOCK_FILE")" && printf '9931' >"$LOCK_FILE"
-STUB_LOCKPID_ALIVE=0
+for scenario in draining replacement; do
+    reset_node
+    STUB_CURL_RC=7
+    STUB_HTTP_CODE=000
+    case "$scenario" in
+        draining) STUB_PID_ALIVE=0 ;;
+        replacement) STUB_PID_ALIVE=1; STUB_JOB_PID="9931" ;;
+    esac
+    _recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
+    if [ "$(cat "$REL_BINARY")" = "STAGED-NEW" ]; then
+        pass "$scenario: the binary on disk can boot"
+    else
+        fail "$scenario: the node was left on '$(cat "$REL_BINARY")'"
+    fi
+    if ! grep -qE "^(launchctl|tmux|kill)" "$TMP_ROOT/calls"; then
+        pass "$scenario: nothing was stopped"
+    else
+        fail "$scenario: a live process was acted on: $(tr '\n' ';' <"$TMP_ROOT/calls")"
+    fi
+done
 STUB_JOB_PID=""
-_recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
-if [ "$(cat "$REL_BINARY")" = "STAGED-NEW" ]; then
-    pass "a crash-looped node recovers when launchd reports no backing process"
-else
-    fail "a stale or recycled pid blocked automatic recovery"
-fi
-if ! extract_function _old_runtime_pid_is_alive | grep -v "^[[:space:]]*#" | grep -q "LOCK_FILE\|dcserver.lock"; then
-    pass "liveness does not infer from the lock file at all"
-else
-    fail "liveness still reads a lock file whose pid can be recycled"
-fi
+
+echo "§4 recovery has no destructive process control at all, whatever the stubs do"
+
+recovery_src="$(extract_function _recover_or_preserve_past_migration_floor | grep -v "^[[:space:]]*#")"
+for forbidden in bootout "kill-session" bootstrap "kill " LOCK_FILE dcserver.lock; do
+    if grep -qF -- "$forbidden" <<<"$recovery_src"; then
+        fail "recovery still references '$forbidden' — the sample-then-act window is back"
+    else
+        pass "recovery never references '$forbidden'"
+    fi
+done
+
 
 echo "§9 the swap is refused when the replaced binary cannot be kept"
 
@@ -363,7 +256,7 @@ STAGED_BINARY=""
 : >"$TMP_ROOT/calls"
 _recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
 if [ "$(cat "$REL_BINARY")" = "ONLY-BINARY" ] && [ ! -s "$TMP_ROOT/calls" ]; then
-    pass "no staged binary means no bootout and no swap"
+    pass "no staged binary means no action at all"
 else
     fail "the recovery acted with no staged binary"
 fi

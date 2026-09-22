@@ -1117,94 +1117,26 @@ _preserve_staged_binary_for_recovery() {
     return 1
 }
 
-_release_job_backing_pid() {
-    # launchd knows the current backing pid; a lock file's pid can be recycled
-    # and would report the node busy forever.
-    local domain="$1" label="$2"
-    launchctl print "$domain/$label" 2>/dev/null \
-        | awk -F'=' '/^[[:space:]]*pid[[:space:]]*=[[:space:]]*[0-9]+[[:space:]]*$/ {
-              gsub(/[^0-9]/, "", $2); print $2; exit
-          }'
-}
 
-_old_runtime_pid_is_alive() {
-    # The captured pid is one generation; ask launchd for the current one.
-    local domain current
-    [ -n "${OLD_PID:-}" ] && kill -0 "${OLD_PID}" 2>/dev/null && return 0
-    domain="$(_launchd_domain 2>/dev/null)" || domain="gui/$(id -u 2>/dev/null)"
-    current="$(_release_job_backing_pid "$domain" "${PLIST_REL:-}" || true)"
-    [ -n "$current" ]
-}
 
-_release_job_is_quiescent() {
-    # One sample can land between a process exiting and its replacement binding.
-    local port="$1" want="${2:-3}" seen=0
-    while [ "$seen" -lt "$want" ]; do
-        if _release_runtime_is_serving "$port" || _old_runtime_pid_is_alive; then
-            return 1
-        fi
-        seen=$((seen + 1))
-        [ "$seen" -lt "$want" ] && sleep 1
-    done
-    return 0
-}
 
 _recover_or_preserve_past_migration_floor() {
-    # Promote forward only once nothing is serving and the previous process is
-    # gone; stopping a live runtime loses the frontier the durability gate kept.
     local rel_binary="${REL_BINARY:-$ADK_REL/bin/agentdesk}"
-    local plist="${PLIST_REL:-}"
-    local rel_port="${REL_PORT:-${AGENTDESK_REL_PORT:-${ADK_DEFAULT_PORT:-8791}}}"
-    local domain keep waited=0
+    local keep
 
     [ -n "${STAGED_BINARY:-}" ] && [ -e "${STAGED_BINARY:-}" ] || return 0
-    [ -n "$plist" ] || return 0
 
     echo ""
     echo "🛑 DEPLOY ABORTED PAST THE MIGRATION FLOOR"
     echo "   Postgres may already carry a migration that $rel_binary does not embed,"
     echo "   so that binary could refuse to boot and launchd would crash-loop it."
 
-    if _release_runtime_is_serving "$rel_port"; then
-        echo "   The current runtime is still serving on :${rel_port}, so it still owns the"
-        echo "   in-flight delivery frontier. It is LEFT RUNNING and the binary is NOT swapped."
-        _preserve_staged_binary_for_recovery || true
-        echo "   Next: redeploy this node. Do not restart or reboot it first."
-        return 0
-    fi
-
-    # A draining runtime stops accepting before its frontier is durable.
-    while _old_runtime_pid_is_alive && [ "$waited" -lt 15 ]; do
-        sleep 1
-        waited=$((waited + 1))
-    done
-    if _old_runtime_pid_is_alive; then
-        echo "   The previous runtime (pid ${OLD_PID}) is still alive although it stopped"
-        echo "   listening, so it may still be making its delivery frontier durable."
-        echo "   It is NOT killed and the binary is NOT swapped."
-        _preserve_staged_binary_for_recovery || true
-        echo "   Next: redeploy this node once that process has exited."
-        return 0
-    fi
-
-    echo "   Nothing is serving on :${rel_port} and the previous process is gone, so there"
-    echo "   is no in-flight frontier to lose. Promoting the staged binary forward."
-    domain="$(_launchd_domain)" || domain="gui/$(id -u 2>/dev/null)"
-    launchctl bootout "$domain/$plist" 2>/dev/null || true
-    tmux kill-session -t "${AGENTDESK_RELEASE_TMUX_SESSION:-AgentDesk-dcserver-release-manual}" 2>/dev/null || true
-
-    # Anything answering now would also answer the health check and fake success.
-    if ! _release_job_is_quiescent "$rel_port" 3; then
-        echo "✗ Something still owns :${rel_port} after bootout — refusing to swap the binary" >&2
-        _preserve_staged_binary_for_recovery || true
-        return 0
-    fi
-
-    # Not last-known-good, so not .prev, but the only executable that boots if
-    # the schema never advanced.
+    # Staging happens in this directory, so installing is a same-filesystem
+    # rename: a running process keeps its own image and nothing is stopped.
+    # Whatever restarts next -- including a crash loop's own respawn -- gets a
+    # binary that boots.
     chflags nouchg "$rel_binary" 2>/dev/null || true
     if [ -e "$rel_binary" ]; then
-        # A full disk can fail the copy while the rename still succeeds.
         keep="$(_migration_floor_artifact_path "$ADK_REL/bin/agentdesk.pre-migration-floor")"
         if ! cp -p "$rel_binary" "$keep" 2>/dev/null; then
             rm -f "$keep" 2>/dev/null || true
@@ -1216,22 +1148,13 @@ _recover_or_preserve_past_migration_floor() {
         echo "   Replaced binary kept at $keep"
     fi
     if ! mv -f "$STAGED_BINARY" "$rel_binary"; then
-        echo "✗ Fail-forward promote failed — the node is stopped on an unbootable binary" >&2
+        echo "✗ Could not install the staged binary over $rel_binary" >&2
         _preserve_staged_binary_for_recovery || true
-        echo "   Restore it over $rel_binary by hand, then restart $plist." >&2
         return 0
     fi
     STAGED_BINARY=""
-    xattr -d com.apple.quarantine "$HOME/Library/LaunchAgents/$plist.plist" 2>/dev/null || true
-    if ! launchctl bootstrap "$domain" "$HOME/Library/LaunchAgents/$plist.plist"; then
-        echo "⚠ launchd bootstrap failed during fail-forward — using tmux fallback"
-        start_release_tmux_fallback || true
-    fi
-    if wait_for_http_service_health "$plist" "$rel_port" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1; then
-        echo "✓ Fail-forward promote succeeded — release healthy on :${rel_port} with the staged binary"
-    else
-        echo "⚠ Fail-forward promote did not reach health on :${rel_port} — inspect ${ADK_REL:-}/logs/"
-    fi
+    echo "✓ $rel_binary now boots against the migrated database."
+    echo "   The running process keeps its own image; the next restart picks this up."
 }
 
 _cleanup_on_exit() {
