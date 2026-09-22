@@ -710,6 +710,7 @@ pub fn api_router_with_pg_and_cluster(
 fn compose_api_router(state: AppState) -> ApiRouter {
     Router::new()
         .merge(domains::access::router())
+        .merge(domains::runtime::router(state.clone()))
         .merge(domains::onboarding::router(state.clone()))
         .merge(domains::agents::router(state.clone()))
         .merge(domains::analytics::router(state.clone()))

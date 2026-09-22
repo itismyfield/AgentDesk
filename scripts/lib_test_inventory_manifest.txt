@@ -2708,6 +2708,7 @@ services::discord::health::provider_probe::tests::stalled_reconcile_keeps_the_in
 services::discord::health::provider_probe::tests::standby_live_and_finalizing_evidence_remains_visible_for_fail_closed_restart
 services::discord::health::provider_probe::tests::standby_role_only_ignores_gateway_disconnect_and_masks_no_other_axis
 services::discord::health::provider_probe::tests::unfinished_reconcile_is_promoted_to_stalled_after_the_threshold
+services::discord::health::provider_probe::tests::worker_profile_health_does_not_require_gateway_or_hide_recovery_failure
 services::discord::health::reachability::composite::composite_tests::a_carried_over_incarnation_publishes_what_a_fully_covered_turn_publishes
 services::discord::health::reachability::composite::composite_tests::a_ledger_inside_its_ttl_is_not_expired
 services::discord::health::reachability::composite::composite_tests::a_live_executor_blocks_expiry_of_a_stale_ledger

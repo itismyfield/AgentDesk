@@ -4,8 +4,8 @@ use axum::{
 };
 
 use super::super::{
-    ApiRouter, AppState, claude_accounts_api, discord, dm_reply, github, github_dashboard, hooks,
-    meetings, pr_summary, protected_api_domain, provider_auth_profiles,
+    ApiRouter, AppState, claude_accounts_api, discord, github, github_dashboard, meetings,
+    pr_summary, protected_api_domain, provider_auth_profiles,
 };
 
 // Category: integrations
@@ -69,13 +69,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 get(discord::channel_messages),
             )
             .route("/discord/channels/{id}", get(discord::channel_info))
-            .route("/dm-reply/register", post(dm_reply::register_handler))
-            .route("/hook/reset-status", post(hooks::reset_status))
-            .route("/hook/skill-usage", post(hooks::skill_usage))
-            .route(
-                "/hook/session/{sessionKey}",
-                delete(hooks::disconnect_session),
-            )
             .route(
                 "/round-table-meetings",
                 get(meetings::list_meetings).post(meetings::upsert_meeting),

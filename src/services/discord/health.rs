@@ -119,10 +119,12 @@ pub(super) struct ProviderEntry {
     pub(super) role: ProviderRuntimeRole,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum ProviderRuntimeRole {
     Gateway,
     Standby,
+    Worker,
 }
 
 impl ProviderRuntimeRole {
@@ -374,6 +376,15 @@ impl HealthRegistry {
         shared: Arc<SharedData>,
     ) {
         self.register_with_role(name, shared, ProviderRuntimeRole::Standby)
+            .await;
+    }
+
+    pub(in crate::services::discord) async fn register_worker(
+        &self,
+        name: String,
+        shared: Arc<SharedData>,
+    ) {
+        self.register_with_role(name, shared, ProviderRuntimeRole::Worker)
             .await;
     }
 

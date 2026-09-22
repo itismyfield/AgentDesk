@@ -11,6 +11,7 @@ use crate::services::turn_orchestrator::ChannelMailboxSnapshot;
 #[derive(Debug, Serialize)]
 pub(super) struct ProviderHealthSnapshot {
     name: String,
+    runtime_role: ProviderRuntimeRole,
     connected: bool,
     active_turns: usize,
     runtime_state_complete: bool,
@@ -122,6 +123,7 @@ pub(super) async fn probe_provider(entry: &ProviderEntry) -> ProviderProbe {
         mailbox_snapshots,
         snapshot: ProviderHealthSnapshot {
             name: entry.name.clone(),
+            runtime_role: entry.role,
             connected,
             active_turns,
             runtime_state_complete: true,
@@ -340,6 +342,33 @@ mod tests {
         assert_eq!(
             json["degraded_reasons"],
             serde_json::json!(["provider:codex:gateway_standby"])
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_profile_health_does_not_require_gateway_or_hide_recovery_failure() {
+        let registry = HealthRegistry::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        registry
+            .register_worker("codex".to_string(), shared.clone())
+            .await;
+        assert!(!registry.all_providers_are_standby().await);
+        let snapshot = build_health_snapshot(&registry).await;
+        assert_eq!(snapshot.status(), HealthStatus::Healthy);
+        let json = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(json["providers"][0]["runtime_role"], "worker");
+        assert_eq!(json["providers"][0]["connected"], false);
+        shared
+            .restart
+            .restart_pending
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let snapshot = build_health_snapshot(&registry).await;
+        assert_eq!(snapshot.status(), HealthStatus::Unhealthy);
+        assert!(
+            serde_json::to_value(snapshot).unwrap()["degraded_reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("provider:codex:restart_pending"))
         );
     }
 
