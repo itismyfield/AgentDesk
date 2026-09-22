@@ -10,7 +10,7 @@ comment adjacent to that site (blank when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 85
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 88
 - Platform and third-party variables: 27
 
 ## AgentDesk variables
@@ -68,10 +68,13 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_HOOK_RELAY_TEST_MUTATION` | `src/services/claude_tui/hook_relay/ordered_queue.rs:41` (+1 more) |  |
 | `AGENTDESK_HOOK_RELAY_TEST_STDOUT_PATH` | `src/services/claude_tui/hook_relay.rs:50` |  |
 | `AGENTDESK_INSTANCE_ID` | `src/services/cluster/node_registry.rs:676` (+1 more) | Resolve the self instance_id, preferring the value the cluster bootstrap registered (config-driven if present), falling back to the env-var/hostname pair only… |
-| `AGENTDESK_KAKAO_ACCOUNTS` | `src/services/kakao.rs:28` (+1 more) |  |
-| `AGENTDESK_KAKAO_DEFAULT_ACCOUNT` | `src/services/kakao.rs:29` (+1 more) |  |
-| `AGENTDESK_KAKAO_ENABLED` | `src/services/kakao.rs:27` (+2 more) |  |
-| `AGENTDESK_KAKAO_LANDING_URL` | `src/services/kakao.rs:30` (+1 more) |  |
+| `AGENTDESK_KAKAO_ACCOUNTS` | `src/services/kakao.rs:34` (+1 more) |  |
+| `AGENTDESK_KAKAO_CALENDAR_ACCOUNTS` | `src/services/kakao/account.rs:21` | Separate allowlist: enabling calendar never implicitly grants all message accounts. |
+| `AGENTDESK_KAKAO_CALENDAR_ENABLED` | `src/services/kakao/account.rs:10` |  |
+| `AGENTDESK_KAKAO_DEFAULT_ACCOUNT` | `src/services/kakao.rs:35` (+1 more) |  |
+| `AGENTDESK_KAKAO_ENABLED` | `src/services/kakao.rs:33` (+2 more) |  |
+| `AGENTDESK_KAKAO_LANDING_URL` | `src/services/kakao.rs:36` (+1 more) |  |
+| `AGENTDESK_KAKAO_TOKEN_STORE_DIR` | `src/services/kakao.rs:156` (+1 more) | Offline settings probe. |
 | `AGENTDESK_MEETING_SELECTION_TIMEOUT_SECS` | `src/services/discord/meeting_orchestrator/selection_runtime.rs:58` |  |
 | `AGENTDESK_MEMENTO_HOOK` | `src/cli/utils.rs:152` | #2655: marker key that identifies AgentDesk-managed hook entries in a Claude Code `settings.json`. |
 | `AGENTDESK_MEMORY_MERGE_SKILL` | `src/services/routines/migrated.rs:221` |  |

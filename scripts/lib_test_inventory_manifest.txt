@@ -7765,6 +7765,10 @@ services::kakao::tests::configured_accounts_are_bounded_and_deduplicated
 services::kakao::tests::feature_is_disabled_by_default_and_parses_explicit_values
 services::kakao::tests::friend_response_must_partition_the_requested_recipients
 services::kakao::tests::recipients_require_one_to_five_unique_printable_ids
+services::kakao::transport_tests::concurrent_old_generation_401_refreshes_once_and_retains_refresh_token
+services::kakao::transport_tests::refresh_transient_failure_does_not_erase_credentials
+services::kakao::transport_tests::rotated_tokens_survive_store_reopen
+services::kakao::transport_tests::schedule_validation_requires_loaded_credentials_without_network
 services::kakao_message::tests::feed_template_uses_a_bounded_first_line_title
 services::kakao_message::tests::message_text_is_trimmed_for_validation_but_not_rewritten
 services::kakao_message::tests::text_template_contains_only_the_configured_public_link
@@ -8452,6 +8456,7 @@ services::scheduled_messages::context_snapshot::tests::inject_prepends_frozen_co
 services::scheduled_messages::context_snapshot::tests::per_message_truncation_and_total_cap_drop_oldest
 services::scheduled_messages::context_snapshot::tests::renders_pairs_oldest_first_with_pair_count
 services::scheduled_messages::context_snapshot::tests::snapshot_session_basis_never_equals_a_channel_name
+services::scheduled_messages::external_delivery::tests::complete_partial_zero_and_invalid_success_counts_are_distinct
 services::scheduled_messages::external_delivery::tests::delivery_unknown_is_never_classified_as_retryable
 services::scheduled_messages::external_delivery::tests::outbox_ids_are_stable_per_delivery_and_audience
 services::scheduled_messages::external_delivery::tests::retry_backoff_is_bounded

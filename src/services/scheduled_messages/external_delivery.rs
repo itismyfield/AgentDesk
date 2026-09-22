@@ -4,15 +4,13 @@
 //! worker after that fence produces `unknown`, never an automatic replay that
 //! could duplicate a user-visible message.
 
-use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
 use thiserror::Error;
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::db::scheduled_messages as db;
@@ -204,19 +202,8 @@ fn payload_matches_claim(claim: &ClaimedExternalDelivery, payload: &KakaoOutboxP
     }
 }
 
-fn kakao_clients() -> &'static Mutex<HashMap<String, Arc<KakaoClient>>> {
-    static CLIENTS: OnceLock<Mutex<HashMap<String, Arc<KakaoClient>>>> = OnceLock::new();
-    CLIENTS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 async fn kakao_client(account_id: &str) -> Result<Arc<KakaoClient>, KakaoError> {
-    let mut clients = kakao_clients().lock().await;
-    if let Some(client) = clients.get(account_id) {
-        return Ok(client.clone());
-    }
-    let client = Arc::new(KakaoClient::from_process(Some(account_id))?);
-    clients.insert(account_id.to_string(), client.clone());
-    Ok(client)
+    crate::services::kakao::account::shared_client(account_id, false).await
 }
 
 async fn retry_pre_dispatch(
@@ -263,7 +250,7 @@ async fn finish_summary(
     summary: KakaoDeliverySummary,
 ) {
     if summary.requested_count != claim.requested_count as usize
-        || summary.successful_count + summary.failed_count != summary.requested_count
+        || summary_status(&summary) == "unknown"
     {
         finish_unknown(pool, claim).await;
         return;
@@ -276,11 +263,7 @@ async fn finish_summary(
         finish_unknown(pool, claim).await;
         return;
     };
-    let status = if failed_count == 0 {
-        "success"
-    } else {
-        "partial_success"
-    };
+    let status = summary_status(&summary);
     finish(
         pool,
         claim,
@@ -288,10 +271,29 @@ async fn finish_summary(
             status,
             successful_count: Some(successful_count),
             failed_count: Some(failed_count),
-            error_code: (failed_count > 0).then_some("provider_partial"),
+            error_code: (failed_count > 0).then_some(if successful_count == 0 {
+                "provider_failed"
+            } else {
+                "provider_partial"
+            }),
         },
     )
     .await;
+}
+
+fn summary_status(summary: &KakaoDeliverySummary) -> &'static str {
+    if summary.requested_count == 0
+        || summary.successful_count.checked_add(summary.failed_count)
+            != Some(summary.requested_count)
+    {
+        "unknown"
+    } else if summary.successful_count == summary.requested_count {
+        "success"
+    } else if summary.successful_count == 0 {
+        "failed"
+    } else {
+        "partial_success"
+    }
 }
 
 async fn finish_failed(
@@ -364,12 +366,41 @@ fn kakao_error_code(error: &KakaoError) -> &'static str {
         KakaoError::ProviderRejected(_) | KakaoError::ProviderResult(_) => "provider_rejected",
         KakaoError::DeliveryUnknown => "delivery_result_unknown",
         KakaoError::TransportInitialization => "transport_unavailable",
+        KakaoError::TransientAuth => "auth_temporarily_unavailable",
+        KakaoError::CredentialPersistence => "credential_persistence_failed",
+        KakaoError::BindingChanged => "account_binding_changed",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn complete_partial_zero_and_invalid_success_counts_are_distinct() {
+        for (successful, failed, expected) in [
+            (2, 0, "success"),
+            (1, 1, "partial_success"),
+            (0, 2, "failed"),
+            (0, 1, "unknown"),
+        ] {
+            assert_eq!(
+                summary_status(&KakaoDeliverySummary {
+                    requested_count: 2,
+                    successful_count: successful,
+                    failed_count: failed
+                }),
+                expected
+            );
+        }
+        assert_eq!(
+            summary_status(&KakaoDeliverySummary {
+                requested_count: 0,
+                successful_count: 0,
+                failed_count: 0
+            }),
+            "unknown"
+        );
+    }
 
     #[test]
     fn outbox_ids_are_stable_per_delivery_and_audience() {
