@@ -34,16 +34,16 @@ async fn record_upload_history(
     if let Some(session) = data.sessions.get_mut(&channel_id) {
         session
             .history
-            .extend(upload_records.iter().cloned().map(|content| HistoryItem {
+            .extend(upload_records.iter().map(|upload| HistoryItem {
                 item_type: HistoryType::User,
-                content,
+                content: upload.history_record(),
             }));
     }
 }
 
 pub(crate) async fn prepare_admitted_live_attachments(
     deps: &super::super::message_handler::IntakeDeps<'_>,
-    _local_permit: &LocalAdmissionPermit,
+    local_permit: &LocalAdmissionPermit,
     channel_id: serenity::ChannelId,
     effective_channel_id: serenity::ChannelId,
     is_dm: bool,
@@ -54,6 +54,10 @@ pub(crate) async fn prepare_admitted_live_attachments(
 > {
     if attachments.is_empty() {
         return Ok(Vec::new());
+    }
+    if !local_permit.prepared_uploads.is_empty() {
+        record_upload_history(deps.shared, channel_id, &local_permit.prepared_uploads).await;
+        return Ok(local_permit.prepared_uploads.clone());
     }
     let ctx = deps.ctx_for_chained_dispatch.ok_or_else(|| {
         std::io::Error::other("live attachment preparation requires a gateway context")
@@ -108,6 +112,7 @@ mod tests {
             IntakeAdmission::SkippedDuplicate,
             IntakeAdmission::DeferredOpenRoute {
                 target_instance_id: "foreign".to_string(),
+                prepared_uploads: Vec::new(),
             },
             IntakeAdmission::Blocked {
                 reason: IntakeBlockedReason::RoutingDependencyFailed {
@@ -146,6 +151,7 @@ mod tests {
             IntakeAdmission::Local(LocalAdmissionPermit {
                 channel_id: serenity::ChannelId::new(1),
                 request_owner: serenity::UserId::new(2),
+                prepared_uploads: Vec::new(),
             }),
             |permit| {
                 local_sessions.push("session");

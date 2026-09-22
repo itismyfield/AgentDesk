@@ -38,6 +38,7 @@ impl IntakeOrigin {
                 reason,
                 IntakeBlockedReason::NonPortableAttachmentForeignOwner { .. }
                     | IntakeBlockedReason::NonPortableAttachmentRoutedTarget { .. }
+                    | IntakeBlockedReason::AttachmentUnavailable { .. }
             )
     }
 }
@@ -58,6 +59,7 @@ pub(crate) struct IntakeSubmission {
 pub(crate) struct LocalAdmissionPermit {
     channel_id: serenity::ChannelId,
     request_owner: serenity::UserId,
+    prepared_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
 }
 
 impl LocalAdmissionPermit {
@@ -65,6 +67,7 @@ impl LocalAdmissionPermit {
         Self {
             channel_id: submission.request.channel_id,
             request_owner: submission.request.request_owner,
+            prepared_uploads: Vec::new(),
         }
     }
 
@@ -84,6 +87,7 @@ pub(crate) enum IntakeAdmission {
     SkippedDuplicate,
     DeferredOpenRoute {
         target_instance_id: String,
+        prepared_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     },
     Blocked {
         reason: IntakeBlockedReason,
@@ -104,7 +108,8 @@ pub(crate) async fn admit_text_intake(
         let decision = if matches!(
             mode,
             crate::services::cluster::intake_router_hook::IntakeRoutingMode::Enforce
-        ) {
+        ) || crate::config::load_graceful().cluster.enabled
+        {
             IntakeRouterDecision::Blocked {
                 reason: IntakeBlockedReason::RoutingDependencyFailed {
                     detail: "Postgres pool unavailable for owner lookup".to_string(),
@@ -140,6 +145,56 @@ pub(crate) async fn admit_text_intake(
         };
     };
 
+    let mut prepared_uploads = Vec::new();
+    if !submission.attachments.is_empty() {
+        let identity = crate::services::cluster::attachment_transfer::AttachmentMessageIdentity {
+            provider: submission.provider.as_str().to_string(),
+            channel_id: channel_id.clone(),
+            user_msg_id: user_msg_id.clone(),
+        };
+        prepared_uploads = match message_handler::prepare_portable_attachments(
+            pool,
+            identity,
+            &submission.attachments,
+        )
+        .await
+        {
+            Ok(uploads) => uploads,
+            Err(detail) => {
+                return IntakeAdmission::Blocked {
+                    reason: IntakeBlockedReason::AttachmentUnavailable { detail },
+                };
+            }
+        };
+    }
+    let attachment_refs: Vec<_> = prepared_uploads
+        .iter()
+        .chain(&submission.preloaded_uploads)
+        .filter_map(|upload| match upload {
+            crate::services::cluster::attachment_transfer::uploads::Upload::Bundle(reference) => {
+                Some(reference.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    if let Err(error) = crate::services::cluster::attachment_transfer::store::validate_refs(
+        pool,
+        &attachment_refs,
+        submission.provider.as_str(),
+        &channel_id,
+    )
+    .await
+    {
+        let reason = match error {
+            crate::services::cluster::attachment_transfer::store::ReadError::Rejected(detail) => {
+                IntakeBlockedReason::AttachmentUnavailable { detail }
+            }
+            error => IntakeBlockedReason::RoutingDependencyFailed {
+                detail: error.to_string(),
+            },
+        };
+        return IntakeAdmission::Blocked { reason };
+    }
     let request = &submission.request;
     let self_instance_id =
         crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
@@ -170,8 +225,11 @@ pub(crate) async fn admit_text_intake(
         preserve_on_cancel: submission.preserve_on_cancel,
         node_override_instance_id: node_override.as_deref(),
         has_nonportable_uploads: submission.has_nonportable_uploads
-            || !submission.attachments.is_empty()
-            || !submission.preloaded_uploads.is_empty(),
+            || submission
+                .preloaded_uploads
+                .iter()
+                .any(|upload| upload.is_local()),
+        attachment_refs: &attachment_refs,
     };
 
     let decision = try_route_intake(pool, &ctx).await;
@@ -212,11 +270,14 @@ pub(crate) async fn admit_text_intake(
         }
         _ => true,
     };
-    let admission = if !stale_recovery {
+    let mut admission = if !stale_recovery {
         match decision {
             IntakeRouterDecision::DeferredOpenRoute {
                 target_instance_id, ..
-            } => IntakeAdmission::DeferredOpenRoute { target_instance_id },
+            } => IntakeAdmission::DeferredOpenRoute {
+                target_instance_id,
+                prepared_uploads: Vec::new(),
+            },
             other => admission_for_decision(
                 authority_channel_opt_in,
                 effective_config.forward_pre_claim_timeout_secs,
@@ -233,6 +294,14 @@ pub(crate) async fn admit_text_intake(
         )
     };
 
+    match &mut admission {
+        IntakeAdmission::Local(permit) => permit.prepared_uploads = prepared_uploads,
+        IntakeAdmission::DeferredOpenRoute {
+            prepared_uploads: uploads,
+            ..
+        } => *uploads = prepared_uploads,
+        _ => {}
+    }
     log_nonlocal_admission(&admission, &channel_id, &user_msg_id);
     admission
 }
@@ -284,7 +353,10 @@ fn admission_for_decision(
         }
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id, ..
-        } => IntakeAdmission::DeferredOpenRoute { target_instance_id },
+        } => IntakeAdmission::DeferredOpenRoute {
+            target_instance_id,
+            prepared_uploads: Vec::new(),
+        },
         IntakeRouterDecision::Blocked { reason } => IntakeAdmission::Blocked { reason },
     }
 }
@@ -303,21 +375,16 @@ pub(crate) async fn dispatch_text_intake(
 pub(crate) async fn finish_text_intake_admission(
     deps: &IntakeDeps<'_>,
     admission: IntakeAdmission,
-    submission: IntakeSubmission,
+    mut submission: IntakeSubmission,
 ) -> Result<(), super::super::Error> {
     match admission {
         IntakeAdmission::Local(permit) => {
             finish_admitted_local(deps, permit, submission).await?;
         }
         IntakeAdmission::DeferredOpenRoute {
-            ref target_instance_id,
-        } if matches!(submission.origin, IntakeOrigin::RawAttachment) => {
-            let reason = IntakeBlockedReason::NonPortableAttachmentRoutedTarget {
-                target_instance_id: target_instance_id.clone(),
-            };
-            notify_blocked_intake(deps, &submission, &reason).await;
-        }
-        IntakeAdmission::DeferredOpenRoute { .. } => {
+            prepared_uploads, ..
+        } => {
+            submission.preloaded_uploads.extend(prepared_uploads);
             defer_live_submission(deps, submission).await;
         }
         IntakeAdmission::Blocked { ref reason }
@@ -422,7 +489,9 @@ fn log_nonlocal_admission(admission: &IntakeAdmission, channel_id: &str, user_ms
             user_msg_id,
             "[intake_dispatch] duplicate skipped; local execution fenced"
         ),
-        IntakeAdmission::DeferredOpenRoute { target_instance_id } => tracing::info!(
+        IntakeAdmission::DeferredOpenRoute {
+            target_instance_id, ..
+        } => tracing::info!(
             %target_instance_id,
             channel_id,
             user_msg_id,

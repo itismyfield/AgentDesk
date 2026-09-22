@@ -679,7 +679,6 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     // General recall stays model-owned; session anchors use the native instruction layer.
     let memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
 
-    let mut context_chunks = Vec::new();
     let memory_injection_plan =
         build_memory_injection_plan(&provider, session_id.is_some(), dispatch_profile);
     let channel_recent_context = load_channel_recent_context(
@@ -694,31 +693,27 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         session_retry_context.as_ref(),
     )
     .await;
-    if !pending_uploads.is_empty() {
-        context_chunks.push(pending_uploads.join("\n"));
+    let materialized_uploads = crate::services::cluster::attachment_transfer::materialize::prepare(
+        &pending_uploads,
+        shared.pg_pool.as_ref(),
+    )
+    .await
+    .map_err(HeadlessTurnStartError::Internal)?;
+    let context_prompt = TurnContext {
+        provider: &provider,
+        session_id: session_id.as_deref(),
+        uploads: &materialized_uploads.records,
+        trigger: build_headless_trigger_context(source, metadata.as_ref()),
+        reply: reply_context.as_deref(),
+        recent: channel_recent_context.as_ref(),
+        knowledge: memory_injection_plan
+            .shared_knowledge_for_context
+            .as_deref(),
+        author_name: request_owner_name,
+        author_id: request_owner,
+        user_input: ai_screen::sanitize_user_input(&effective_prompt),
     }
-    if let Some(headless_context) = build_headless_trigger_context(source, metadata.as_ref()) {
-        context_chunks.push(headless_context);
-    }
-    if let Some(reply_context) = reply_context {
-        context_chunks.push(reply_context);
-    }
-    if let Some(ref recent_context) = channel_recent_context {
-        recent_context.append_rendered_context_to(&mut context_chunks);
-    }
-    if let Some(ref knowledge) = memory_injection_plan.shared_knowledge_for_context {
-        context_chunks.push(knowledge.to_string());
-    }
-    context_chunks.push(wrap_user_prompt_with_author(
-        request_owner_name,
-        request_owner,
-        ai_screen::sanitize_user_input(&effective_prompt),
-    ));
-    let context_prompt = crate::services::provider::compact_resumed_provider_turn_prompt(
-        &provider,
-        session_id.as_deref(),
-        context_chunks.join("\n\n"),
-    );
+    .build();
 
     let discord_context = build_system_discord_context(
         channel_name.as_deref(),
@@ -1003,6 +998,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     let prompt_owned = prompt.to_string();
     let provider_for_blocking = provider.clone();
     tokio::task::spawn_blocking(move || {
+        let _upload_lifetime = materialized_uploads;
         let result = crate::services::platform::with_provider_execution_context(
             provider_execution_context,
             || {

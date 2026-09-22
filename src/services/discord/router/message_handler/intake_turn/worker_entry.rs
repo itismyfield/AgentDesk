@@ -60,6 +60,7 @@ pub(crate) async fn execute_intake_turn_core(
     shared: &Arc<SharedData>,
     token: &str,
     request: IntakeRequest,
+    uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     super::handle_text_message(
         &IntakeDeps {
@@ -72,7 +73,7 @@ pub(crate) async fn execute_intake_turn_core(
         request.preserve_on_cancel,
         request,
         false,
-        Vec::new(),
+        uploads,
         // Worker dispatch has no in-process gate carry-forward; it re-resolves
         // the durable announcement row for its `user_msg_id` (#3905).
         None,
