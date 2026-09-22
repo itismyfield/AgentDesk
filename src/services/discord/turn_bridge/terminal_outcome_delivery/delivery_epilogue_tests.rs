@@ -244,7 +244,6 @@ async fn terminal_delivery_epilogue_routes_identity_mismatch_to_warn() {
             should_fail_dispatch_after_delivery: false,
             bridge_relay_delegated_to_watcher: false,
             watcher_delivery_pin: None,
-            can_chain_locally: false,
             inflight_generation: 0,
         },
         DeliveryEpilogueState {
@@ -347,6 +346,7 @@ impl Future for Yields {
 }
 
 struct DriverGateway {
+    chain_locally: bool,
     marker: Arc<AtomicBool>,
     observations: Arc<Mutex<Vec<DriverObservation>>>,
     /// Bumped only after a publishing call has RESOLVED to a success outcome —
@@ -498,6 +498,10 @@ impl TurnGateway for DriverGateway {
     }
 
     fn can_chain_locally(&self) -> bool {
+        self.chain_locally
+    }
+
+    fn can_deliver_directly(&self) -> bool {
         true
     }
 
@@ -591,6 +595,7 @@ impl TerminalDeliveryDriver {
         let completed_publications = Arc::new(AtomicUsize::new(0));
         let published_bodies = Arc::new(Mutex::new(Vec::new()));
         let gateway: Arc<dyn TurnGateway> = Arc::new(DriverGateway {
+            chain_locally: true,
             marker: Arc::clone(&marker),
             observations: Arc::clone(&observations),
             completed_publications: Arc::clone(&completed_publications),
@@ -681,7 +686,6 @@ impl TerminalDeliveryDriver {
                 bridge_output_owner: None,
                 should_complete_work_dispatch_after_delivery: false,
                 should_fail_dispatch_after_delivery: false,
-                can_chain_locally: true,
                 single_message_panel_footer_mode: false,
                 is_prompt_too_long: false,
                 claude_tui_followup_pre_submit_requeue_candidate: false,
@@ -1054,3 +1058,5 @@ async fn resume_pin_delivery_epilogue_stamps_only_current_incarnation() {
         assert_eq!(driver.marker(), case == "same", "{case}: captured A marker");
     }
 }
+
+mod rest_delivery_tests;
