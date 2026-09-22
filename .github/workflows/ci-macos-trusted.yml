@@ -27,8 +27,19 @@ jobs:
       mode: ${{ steps.resolve.outputs.mode }}
       group: ${{ steps.resolve.outputs.group }}
       labels: ${{ steps.resolve.outputs.labels }}
+    env:
+      MACOS_RUNNER: ${{ vars.MACOS_RUNNER }}
+      # Optional; listing runners needs administration:read, which
+      # `permissions:` cannot grant. Unset keeps routing on self-hosted.
+      RUNNER_QUERY_TOKEN: ${{ secrets.RUNNER_QUERY_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      # Overflow is optional: fetch its script only when it can run, and let a
+      # failed fetch fall back to the plain self-hosted route below.
+      - name: Fetch overflow script
+        id: overflow_checkout
+        if: env.MACOS_RUNNER != '' && env.RUNNER_QUERY_TOKEN != ''
+        continue-on-error: true
+        uses: actions/checkout@v4
         with:
           sparse-checkout: scripts/ci/macos-runner-overflow.py
           sparse-checkout-cone-mode: false
@@ -37,11 +48,8 @@ jobs:
         id: resolve
         shell: bash
         env:
-          MACOS_RUNNER: ${{ vars.MACOS_RUNNER }}
           MACOS_RUNNER_GROUP: ${{ vars.MACOS_RUNNER_GROUP }}
-          # Optional; listing runners needs administration:read, which
-          # `permissions:` cannot grant. Unset keeps routing on self-hosted.
-          RUNNER_QUERY_TOKEN: ${{ secrets.RUNNER_QUERY_TOKEN }}
+          OVERFLOW_CHECKOUT: ${{ steps.overflow_checkout.outcome }}
         run: |
           set -euo pipefail
 
@@ -92,7 +100,7 @@ jobs:
           )"
 
           # Overflow to the existing hosted job only when every self-hosted Mac is busy.
-          if [ -n "${RUNNER_QUERY_TOKEN:-}" ] \
+          if [ "${OVERFLOW_CHECKOUT:-}" = "success" ] \
             && [ "$(python3 scripts/ci/macos-runner-overflow.py)" = "hosted" ]; then
             {
               echo "mode=hosted"
