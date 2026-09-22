@@ -7,12 +7,6 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
     vec![
         ep("GET", "/api/internal/node-probe", "cluster",
             "Authenticated identity and session-forwarding protocol probe. Verifies the configured peer endpoint belongs to the advertised node; does not expose worker administration."),
-        ep("GET", "/api/agents/{id}/execution-requirements", "agents",
-            "Read central hard execution requirements. Constraints also apply to existing session owners.")
-            .with_params([("id", path_param("Agent ID."))]),
-        ep("PUT", "/api/agents/{id}/execution-requirements", "agents",
-            "Replace os, arch, nodes, tools, repositories and backends requirements. An empty object clears requirements. Unknown fields or invalid identifiers are rejected. Full runtime only.")
-            .with_params([("id", path_param("Agent ID."))]),
         ep(
             "POST",
             "/api/agents/{id}/turn/start",
