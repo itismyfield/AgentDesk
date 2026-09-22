@@ -9,8 +9,11 @@ proof that its old process remains alive: inspect its session and evidence befor
 resuming it. Session IDs are historical references and are not foreign keys to
 ephemeral runtime sessions.
 
-The `0121_campaigns.sql` migration creates the ledger and append-only revision
-history through the normal server migration workflow. Every member of a cluster
+The `0121_campaigns.sql` migration creates the ledger and its revision history
+through the normal server migration workflow. History is not append-only: each
+write keeps only the newest 10 revisions of a campaign and destroys the rest, so
+anything that must survive belongs in the current document or an external
+artifact, never in an older snapshot. Every member of a cluster
 must use its shared canonical PostgreSQL configuration. Database backups remain
 the durability boundary; no dashboard cache is authoritative.
 
@@ -25,7 +28,7 @@ All routes are under `/api` and use the same protected admin middleware as
 | POST | `/campaigns` | HTTP 201 `{campaign}`; optional client ID, otherwise UUID; existing ID returns 409 |
 | GET | `/campaigns/{id}` | `{campaign}`; missing ID returns 404 |
 | PUT | `/campaigns/{id}` | `{campaign}`; requires `expected_revision`, replaces complete aggregate |
-| GET | `/campaigns/{id}/history` | `{revisions: Campaign[]}`; newest 50 revisions, descending |
+| GET | `/campaigns/{id}/history` | `{revisions: Campaign[]}`; the retained newest 10 revisions, descending; older ones are deleted, not archived |
 
 Campaign fields: `id`, `title`, `description`, `status`, `round`, `revision`,
 `nodes`, `created_at`, `updated_at`. Status is `planned`, `active`, `paused`,

@@ -67,7 +67,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/campaigns/{id}/history",
             "campaigns",
-            "Read the latest 50 durable campaign revision snapshots, newest revision first.",
+            "Read the retained campaign revision snapshots, newest revision first. Each write prunes all but the newest 10, so older revisions are not recoverable from this endpoint.",
         )
         .with_params([("id", path_param("Campaign ID."))])
         .with_example(json!({"path": {"id": "release-a"}}), json!({"revisions": [{"id": "release-a", "title": "Release A", "description": "", "status": "planned", "round": 1, "revision": 1, "nodes": [], "created_at": "2026-09-20T00:00:00Z", "updated_at": "2026-09-20T00:00:00Z"}]}))

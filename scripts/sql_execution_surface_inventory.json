@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "68f7cb201af0f3c0ce3756074459328696099caf",
+  "measured_at_sha": "fef1b67172d2463dfd18187b76ebff1a055319c7",
   "records": [
     {
       "root": "migrations/postgres",
@@ -1120,6 +1120,15 @@
     },
     {
       "root": "migrations/postgres",
+      "kind": "MIGRATION",
+      "path": "migrations/postgres/0122_campaign_revision_retention.sql",
+      "api": "migration.file",
+      "symbol": "file",
+      "classification": "STATIC_FILE",
+      "fingerprint": "sha256:694050f799a83038e42b2830643729f6ddc347fa2584349f043f3a0a2702fa8d"
+    },
+    {
+      "root": "migrations/postgres",
       "kind": "MIGRATION_METADATA",
       "path": "migrations/postgres/checksum-repair-allowlist.json",
       "api": "migration.non_sql_tracked",
@@ -1134,7 +1143,7 @@
       "api": "migration.non_sql_tracked",
       "symbol": "non_sql_tracked",
       "classification": "NON_SQL_TRACKED",
-      "fingerprint": "sha256:63a5c53af4c6e26e7e880264e87dc0bfa15dbb9ad00390d6756b96770d1597b2"
+      "fingerprint": "sha256:cd91e7880b0c96727e13e9344a08e7db4cc844bd244b7db65201a6b0e40cf8f3"
     },
     {
       "root": "policies",
@@ -5724,6 +5733,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:cf67d3656a770341e9c75e248ad8916fcd70ecda9747014574db54c1c8d37b3c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/campaigns.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:d30db08a6031f818be517462cfbbed924b8e6cfa58f6a9c405f396aa07c0b287"
     },
     {
@@ -5769,7 +5787,43 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:ecf95fa88822a751643216515c2b83b67f1092bf7c1b77929aad94ee02a17d6f"
+      "fingerprint": "sha256:f221ba893b1932da3bf08a4a52d139f02ee45c2119c6e37b049811b12aa243fe"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/campaigns/tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f0449e6f2eb2358e5eab6dffb5a4c3a3e7290d58496db4121b5311984c76d168"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/campaigns/tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f780b747f06468566e9a85501d9f486e35445359b6e6bb9cca0c3ab45f5a7f02"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/campaigns/tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:4a665ab30363a9b12ea52f8c3e41e462cb50abe25165039f97a6b251bc0d17d6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/campaigns/tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:54bbae576be48f91a39858e7c3300fe449cd095f267f1f2b5f0cf362df12c80d"
     },
     {
       "root": "src",
