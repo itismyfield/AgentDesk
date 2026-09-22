@@ -640,6 +640,11 @@
       "path": "migrations/postgres/0125_execution_capacity.sql",
       "sha256": "454270eb193d7662599df8be3b93aa5e20016a33c1e3d7d4f439988112a63ae1",
       "version": 125
+    },
+    {
+      "path": "migrations/postgres/0126_agent_execution_node.sql",
+      "sha256": "30ffd17ef546b3a0d2552563b2b9966eebc8b98b825d830f6c9ef8d3aa88e040",
+      "version": 126
     }
   ],
   "version": 1

@@ -269,6 +269,7 @@ src/
 │   │   ├── docs/
 │   │   │   ├── inventory/
 │   │   │   │   └── endpoints/
+│   │   │   │       ├── cluster_execution.rs
 │   │   │   │       ├── mod.rs
 │   │   │   │       ├── part_01.rs
 │   │   │   │       ├── part_02.rs
@@ -554,6 +555,7 @@ src/
 │   │   │   ├── identity.rs
 │   │   │   ├── shutdown.rs
 │   │   │   └── terminal_resolution.rs
+│   │   ├── agent_execution_node.rs
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
 │   │   ├── execution_capacity.rs

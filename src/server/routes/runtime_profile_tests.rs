@@ -69,6 +69,8 @@ async fn worker_profile_routes_preserve_execution_auth_and_remove_admin_methods(
             ("PATCH", "/settings/config"),
             ("POST", "/agents"),
             ("POST", "/agents/setup"),
+            ("GET", "/agents/example/execution-node"),
+            ("PUT", "/agents/example/execution-node"),
             ("POST", "/onboarding/complete"),
             ("PUT", "/voice/config"),
             ("PATCH", "/v1/settings/example"),
