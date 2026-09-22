@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Decide whether a CI macOS Trusted push needs the heavy self-hosted steps.
+"""Decide whether a CI macOS Trusted push needs the heavy macOS steps.
 
 Prints exactly one line, `run=true` or `run=false`, for `$GITHUB_OUTPUT`.
 Changed paths are this branch's own commits: `git diff <merge-base> HEAD`
@@ -13,7 +13,7 @@ import re
 import subprocess
 import sys
 
-# Paths whose change can alter the result of the self-hosted job's
+# Paths whose change can alter the result of the macOS jobs'
 # `cargo check` / `cargo test` / fresh-user smoke steps.
 RUST_INPUTS = (
     "**/*.rs",
@@ -37,7 +37,7 @@ RUST_INPUTS = (
     "docs/relay-state-contract.md",
     # Executed by Rust tests (current_message_anchor, rowless_receipt_tests).
     "scripts/relay_authority_rollout_report.py",
-    # Invoked by the self-hosted job's own steps.
+    # Invoked by the macOS jobs' own steps.
     "scripts/ci-timeout.py",
     "scripts/ci-macos-fresh-user-smoke.sh",
     "scripts/operator-init-portable.py",
@@ -90,8 +90,9 @@ def _git(*args: str) -> str:
 
 def branch_changes(base_ref: str) -> list[str]:
     merge_base = _git("merge-base", base_ref, "HEAD").strip()
-    # --no-renames lists both sides of a rename.
-    return _git("diff", "--no-renames", "--name-only", merge_base, "HEAD").splitlines()
+    # --no-renames lists both sides of a rename; -z keeps git from quoting
+    # non-ASCII or special-character paths, which would hide their suffix.
+    return _git("diff", "-z", "--no-renames", "--name-only", merge_base, "HEAD").split("\0")
 
 
 def main(argv: list[str] | None = None) -> int:

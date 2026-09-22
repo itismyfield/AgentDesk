@@ -10,9 +10,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/ci/macos-trusted-rust-filter.py"
+WORKFLOW = ROOT / ".github/workflows/ci-macos-trusted.yml"
 
 spec = importlib.util.spec_from_file_location("macos_trusted_rust_filter", SCRIPT)
 assert spec is not None and spec.loader is not None
@@ -192,6 +195,33 @@ class GitMergeBaseTests(unittest.TestCase):
     def test_branch_equal_to_base_runs(self) -> None:
         self.git("checkout", "-q", "-b", "topic")
         self.assertEqual(self.decide(), "run=true\n")
+
+    def test_rust_path_git_would_quote_runs(self) -> None:
+        # `git diff --name-only` without -z quotes non-ASCII paths, hiding `.rs`.
+        for path in ("src/한글.rs", "src/my module.rs"):
+            with self.subTest(path=path):
+                self.git("checkout", "-q", "-B", "topic", "main")
+                self.commit("docs/a.md")
+                self.commit(path)
+                self.assertEqual(self.decide(), "run=true\n")
+
+    def test_both_macos_jobs_skip_docs_only_push(self) -> None:
+        # Overflow can send a docs-only push to the hosted job instead.
+        self.git("checkout", "-q", "-b", "topic")
+        self.commit("docs/a.md")
+        self.git("update-ref", "refs/remotes/origin/main", "main")
+        jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        for job in ("macos_hosted", "macos_self_hosted"):
+            with self.subTest(job=job):
+                step = next(s for s in jobs[job]["steps"] if s.get("id") == "rust_filter")
+                output = self.repo.parent / f"{self.repo.name}-{job}.out"
+                subprocess.run(
+                    ["bash", "-c", step["run"].replace("scripts/", f"{ROOT}/scripts/")],
+                    cwd=self.repo, check=True, capture_output=True, text=True,
+                    env={**self.env, **step["env"], "EVENT_NAME": "push", "GITHUB_OUTPUT": str(output)},
+                )
+                self.assertEqual(output.read_text(), "run=false\n")
+                output.unlink()
 
 
 if __name__ == "__main__":

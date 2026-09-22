@@ -95,9 +95,23 @@ jobs:
     if: needs.resolve_macos_runner.outputs.mode == 'hosted'
     runs-on: macos-latest
     steps:
+      # Overflow can route a docs-only push here, so gate the same heavy steps
+      # as the self-hosted job. A failed filter leaves `run` empty, which runs them.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Decide whether heavy steps are needed
+        id: rust_filter
+        continue-on-error: true
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: python3 scripts/ci/macos-trusted-rust-filter.py --event "$EVENT_NAME" --base-ref origin/main >> "$GITHUB_OUTPUT"
 
       - name: Install Rust toolchain
+        if: steps.rust_filter.outputs.run != 'false'
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
@@ -111,12 +125,14 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Install Opus on macOS
+        if: steps.rust_filter.outputs.run != 'false'
         shell: bash
         run: |
           brew install opus pkg-config tmux
           echo "PKG_CONFIG_PATH=$(brew --prefix opus)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Cache Cargo dependencies
+        if: steps.rust_filter.outputs.run != 'false'
         uses: Swatinem/rust-cache@v2
         with:
           # rust-cache derives the final key from OS/arch/toolchain and the
@@ -128,9 +144,11 @@ jobs:
           save-if: false
 
       - name: cargo check
+        if: steps.rust_filter.outputs.run != 'false'
         run: cargo check --all-targets
 
       - name: cargo test (non-PG, targeted subset)
+        if: steps.rust_filter.outputs.run != 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -149,6 +167,7 @@ jobs:
           cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
 
       - name: Fresh user portable smoke
+        if: steps.rust_filter.outputs.run != 'false'
         shell: bash
         run: bash scripts/ci-macos-fresh-user-smoke.sh
 

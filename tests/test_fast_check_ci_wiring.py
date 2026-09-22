@@ -1745,6 +1745,34 @@ class FastCheckCiWiringTests(unittest.TestCase):
             with self.subTest(step=step):
                 self.assertIn(gate, step_block(self_hosted, step))
 
+    def test_trusted_macos_hosted_job_gates_the_same_heavy_steps(self) -> None:
+        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
+        hosted = job_block(workflow, "macos_hosted")
+        header, steps = hosted.split("    steps:\n", 1)
+        self.assertNotIn("rust_filter", header)
+        checkout = steps.index("      - uses: actions/checkout@v4\n")
+        filter_step = step_block(hosted, "Decide whether heavy steps are needed")
+        self.assertLess(checkout, steps.index(filter_step))
+        self.assertIn("fetch-depth: 0", steps[checkout : steps.index(filter_step)])
+        self.assertEqual(
+            filter_step,
+            step_block(job_block(workflow, "macos_self_hosted"), "Decide whether heavy steps are needed"),
+        )
+        gate = "steps.rust_filter.outputs.run != 'false'"
+        for step in (
+            "Install Rust toolchain",
+            "Install Opus on macOS",
+            "Cache Cargo dependencies",
+            "cargo check",
+            "cargo test (non-PG, targeted subset)",
+            "Fresh user portable smoke",
+        ):
+            with self.subTest(step=step):
+                self.assertIn(gate, step_block(hosted, step))
+        # Hosted keeps its own sccache opt-out rather than the self-hosted local cache.
+        self.assertNotIn(gate, step_block(hosted, "Disable sccache on hosted macOS"))
+        self.assertNotIn("Configure local sccache", hosted)
+
     def test_test_lane_baseline_uses_candidate_snapshot_refs(self) -> None:
         pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         main_workflow = MAIN_WORKFLOW.read_text(encoding="utf-8")
