@@ -205,3 +205,40 @@ fn campaign_checkpoint_normalizes_optional_groups_without_inference() {
     assert_eq!(normalized.nodes[0].input.stage, "implement");
     assert_eq!(normalized.nodes[0].input.status, NodeStatus::Completed);
 }
+
+#[tokio::test]
+async fn postgres_campaign_revision_history_stays_bounded_by_retention_pg() {
+    let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    create(&pool, "bounded".into(), input())
+        .await
+        .expect("create");
+    let writes = REVISION_RETENTION + 5;
+    for revision in 1..=writes {
+        let mut next = input();
+        next.nodes[1].next_action = Some(format!("write {revision}"));
+        replace(&pool, "bounded", revision, next)
+            .await
+            .expect("replace");
+    }
+    // Counted straight from the table: `history` caps its own read, so it would
+    // look bounded even if nothing were pruned.
+    let stored: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM campaign_revisions WHERE campaign_id = $1")
+            .bind("bounded")
+            .fetch_one(&pool)
+            .await
+            .expect("stored revision count");
+    assert_eq!(stored, REVISION_RETENTION);
+    let retained = history(&pool, "bounded").await.expect("history");
+    assert_eq!(retained.len(), usize::try_from(REVISION_RETENTION).unwrap());
+    let newest = writes + 1;
+    let oldest_kept = newest - REVISION_RETENTION + 1;
+    assert_eq!(retained.first().expect("newest").revision, newest);
+    assert_eq!(retained.last().expect("oldest kept").revision, oldest_kept);
+
+    // Pruning must never reach the live checkpoint itself.
+    assert_eq!(get(&pool, "bounded").await.expect("live").revision, newest);
+    pool.close().await;
+    fixture.drop().await;
+}

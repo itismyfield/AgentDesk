@@ -1,5 +1,7 @@
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
+    middleware::map_response,
     routing::{delete, get, patch, post},
 };
 
@@ -10,15 +12,23 @@ use super::super::{
 
 // Category: admin
 
+/// The ledger PUT carries the whole DAG, so only these routes raise the body limit.
+fn campaign_router() -> ApiRouter {
+    Router::new()
+        .route("/campaigns", get(campaigns::list).post(campaigns::create))
+        .route(
+            "/campaigns/{id}",
+            get(campaigns::get).put(campaigns::replace),
+        )
+        .route("/campaigns/{id}/history", get(campaigns::history))
+        .layer(DefaultBodyLimit::max(campaigns::LEDGER_BODY_LIMIT_BYTES))
+        .layer(map_response(campaigns::body_limit_envelope))
+}
+
 pub(crate) fn router(state: AppState) -> ApiRouter {
     protected_api_domain(
         Router::new()
-            .route("/campaigns", get(campaigns::list).post(campaigns::create))
-            .route(
-                "/campaigns/{id}",
-                get(campaigns::get).put(campaigns::replace),
-            )
-            .route("/campaigns/{id}/history", get(campaigns::history))
+            .merge(campaign_router())
             .route(
                 "/offices",
                 get(offices::list_offices).post(offices::create_office),

@@ -270,12 +270,33 @@ pub async fn get(pool: &PgPool, id: &str) -> Result<Campaign, CampaignError> {
         .ok_or(CampaignError::NotFound)
 }
 
+/// Every revision snapshots the whole DAG, so long campaigns keep only the newest ones.
+pub const REVISION_RETENTION: i64 = 10;
+
 pub async fn history(pool: &PgPool, id: &str) -> Result<Vec<Campaign>, CampaignError> {
     get(pool, id).await?;
     let rows: Vec<Json<Campaign>> = sqlx::query_scalar(
-        "SELECT document FROM campaign_revisions WHERE campaign_id = $1 ORDER BY revision DESC LIMIT 50")
-        .bind(id).fetch_all(pool).await?;
+        "SELECT document FROM campaign_revisions WHERE campaign_id = $1 ORDER BY revision DESC LIMIT $2")
+        .bind(id).bind(REVISION_RETENTION).fetch_all(pool).await?;
     Ok(rows.into_iter().map(|v| v.0).collect())
+}
+
+/// Drops every snapshot outside the newest `REVISION_RETENTION` by rank, so a gap in
+/// revision numbers cannot widen the deletion.
+async fn prune_revisions(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: &str,
+) -> Result<u64, CampaignError> {
+    Ok(sqlx::query(
+        "DELETE FROM campaign_revisions WHERE campaign_id = $1 AND revision NOT IN \
+         (SELECT revision FROM campaign_revisions WHERE campaign_id = $1 \
+          ORDER BY revision DESC LIMIT $2)",
+    )
+    .bind(id)
+    .bind(REVISION_RETENTION)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected())
 }
 
 pub async fn create(
@@ -345,6 +366,7 @@ pub async fn replace(
     .bind(Json(&campaign))
     .execute(&mut *tx)
     .await?;
+    prune_revisions(&mut tx, id).await?;
     tx.commit().await?;
     Ok(campaign)
 }
