@@ -10,6 +10,7 @@
 
 pub(crate) mod attachment_transfer;
 pub(crate) mod capability_routing;
+pub(crate) mod execution_requirements;
 pub(crate) mod intake_preflight;
 pub(crate) mod intake_router_hook;
 pub(crate) mod intake_routing;

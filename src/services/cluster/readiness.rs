@@ -52,6 +52,30 @@ pub(crate) struct ReadinessReport {
     pub reasons: Vec<String>,
 }
 
+pub(crate) fn evidence(node: &Value, now: i64) -> Result<ExecutionProbe, &'static str> {
+    let probe: ExecutionProbe = node
+        .pointer("/capabilities/execution_readiness")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .ok_or("execution_evidence_missing")?;
+    if probe.schema != 1 || probe.boot_id.is_empty() {
+        return Err("execution_evidence_protocol");
+    }
+    if probe.observed_at_ms > now.saturating_add(5_000)
+        || probe.expires_at_ms <= now
+        || probe.expires_at_ms.saturating_sub(probe.observed_at_ms) > PROBE_TTL_MS
+    {
+        return Err("execution_evidence_stale");
+    }
+    Ok(probe)
+}
+
+pub(crate) fn local_node() -> Value {
+    let mut capabilities = serde_json::Map::new();
+    publish(&mut capabilities);
+    json!({"status":"online", "instance_id":super::node_registry::resolve_self_instance_id_without_config(),
+        "capabilities":capabilities})
+}
+
 pub(crate) fn evaluate(
     node: &Value,
     provider: &str,
@@ -62,31 +86,19 @@ pub(crate) fn evaluate(
     if node.get("status").and_then(Value::as_str) != Some("online") {
         reasons.push("node_offline".into());
     }
-    let evidence = node.pointer("/capabilities/execution_readiness");
-    match evidence.and_then(|v| serde_json::from_value::<ExecutionProbe>(v.clone()).ok()) {
-        None => reasons.push("execution_evidence_missing".into()),
-        Some(probe) => {
-            if probe.schema != 1 || probe.boot_id.is_empty() {
-                reasons.push("execution_evidence_protocol".into());
-            }
-            if probe.observed_at_ms > now.saturating_add(5_000)
-                || probe.expires_at_ms <= now
-                || probe.expires_at_ms.saturating_sub(probe.observed_at_ms) > PROBE_TTL_MS
-            {
-                reasons.push("execution_evidence_stale".into());
-            }
-            match probe.providers.get(provider) {
-                None => reasons.push("provider_not_probed".into()),
-                Some(p) => {
-                    if !p.cli_usable {
-                        reasons.push("provider_cli_unavailable".into());
-                    }
-                    if p.credential_profiles.get(auth_profile) != Some(&true) {
-                        reasons.push("provider_credentials_missing".into());
-                    }
+    match evidence(node, now) {
+        Err(reason) => reasons.push(reason.into()),
+        Ok(probe) => match probe.providers.get(provider) {
+            None => reasons.push("provider_not_probed".into()),
+            Some(p) => {
+                if !p.cli_usable {
+                    reasons.push("provider_cli_unavailable".into());
+                }
+                if p.credential_profiles.get(auth_profile) != Some(&true) {
+                    reasons.push("provider_credentials_missing".into());
                 }
             }
-        }
+        },
     }
     let poll = node
         .pointer("/capabilities/intake_poller")

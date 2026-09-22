@@ -525,6 +525,8 @@ src/
 │   ├── cluster/
 │   │   ├── attachment_transfer/
 │   │   │   └── tests.rs
+│   │   ├── execution_requirements/
+│   │   │   └── tests.rs
 │   │   ├── intake_router_hook/
 │   │   │   ├── owner_record.rs
 │   │   │   └── session_owner.rs
@@ -542,6 +544,7 @@ src/
 │   │   │   └── terminal_resolution.rs
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
+│   │   ├── execution_requirements.rs
 │   │   ├── intake_preflight.rs
 │   │   ├── intake_router_hook.rs
 │   │   ├── intake_routing.rs
