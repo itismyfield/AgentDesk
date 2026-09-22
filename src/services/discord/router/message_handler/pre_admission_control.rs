@@ -108,7 +108,10 @@ pub(super) fn may_complete_locally(user_text: &str) -> bool {
 pub(super) async fn take_channel_input_state(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
-) -> (Vec<String>, bool) {
+) -> (
+    crate::services::cluster::attachment_transfer::uploads::PendingUploads,
+    bool,
+) {
     let mut data = shared.core.lock().await;
     data.sessions
         .get_mut(&channel_id)
@@ -357,7 +360,7 @@ pub(super) mod pre_admission_control_tests {
             memento_reflected: false,
             current_path: None,
             history: Vec::new(),
-            pending_uploads: uploads.iter().map(|u| (*u).to_string()).collect(),
+            pending_uploads: uploads.iter().map(|u| (*u).into()).collect(),
             cleared,
             remote_profile_name: None,
             channel_id: None,
@@ -384,7 +387,7 @@ pub(super) mod pre_admission_control_tests {
     async fn deferred_take_reproduces_the_block_it_replaced() {
         let (shared, channel) = fixture(Some(session_with(&["U1", "U2"], false))).await;
         let taken = take_channel_input_state(&shared, channel).await;
-        assert_eq!(taken, (vec!["U1".to_string(), "U2".to_string()], false));
+        assert_eq!(taken, (vec!["U1".into(), "U2".into()], false));
         assert!(
             shared.core.lock().await.sessions[&channel]
                 .pending_uploads

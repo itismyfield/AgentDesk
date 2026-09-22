@@ -700,7 +700,7 @@ async fn queued_foreign_attachment_is_rejected_without_requeue_pg() {
     let http = Arc::new(serenity::Http::new("Bot intake-dispatch-test"));
     let deps = deps(&http, &shared);
     let local_path = "/private/tmp/gateway-local-attachment.txt".to_string();
-    let intervention = queued_intervention(4_350_311, vec![local_path.clone()]);
+    let intervention = queued_intervention(4_350_311, vec![local_path.clone().into()]);
 
     assert!(matches!(
         admit_queued_intake(

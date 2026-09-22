@@ -930,7 +930,14 @@ mod stall_recovery_tests {
             Some("quoted reply context".to_string()),
             true,
             true,
-            vec!["upload://a.png".to_string(), "upload://b.png".to_string()],
+            vec![
+                crate::services::cluster::attachment_transfer::uploads::Upload::from(
+                    "upload://a.png",
+                ),
+                crate::services::cluster::attachment_transfer::uploads::Upload::from(
+                    "upload://b.png",
+                ),
+            ],
             Some(announcement.clone()),
             true,
         );
@@ -946,7 +953,14 @@ mod stall_recovery_tests {
         assert!(loaded[0].followup_merge_consecutive);
         assert_eq!(
             loaded[0].followup_pending_uploads,
-            vec!["upload://a.png".to_string(), "upload://b.png".to_string()]
+            vec![
+                crate::services::cluster::attachment_transfer::uploads::Upload::from(
+                    "upload://a.png"
+                ),
+                crate::services::cluster::attachment_transfer::uploads::Upload::from(
+                    "upload://b.png"
+                )
+            ]
         );
         assert_eq!(loaded[0].followup_voice_announcement, Some(announcement));
         assert!(loaded[0].followup_preserve_on_cancel);

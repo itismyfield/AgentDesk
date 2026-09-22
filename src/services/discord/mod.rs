@@ -2392,7 +2392,14 @@ mod followup_retry_requeue_tests {
             Some("reply context".to_string()),
             true,
             false,
-            vec!["attachment-a".to_string(), "attachment-b".to_string()],
+            vec![
+                crate::services::cluster::attachment_transfer::uploads::Upload::from(
+                    "attachment-a",
+                ),
+                crate::services::cluster::attachment_transfer::uploads::Upload::from(
+                    "attachment-b",
+                ),
+            ],
             None,
             preserve_on_cancel,
         );
@@ -2448,7 +2455,14 @@ mod followup_retry_requeue_tests {
             assert!(!intervention.merge_consecutive);
             assert_eq!(
                 intervention.pending_uploads,
-                vec!["attachment-a".to_string(), "attachment-b".to_string()]
+                vec![
+                    crate::services::cluster::attachment_transfer::uploads::Upload::from(
+                        "attachment-a"
+                    ),
+                    crate::services::cluster::attachment_transfer::uploads::Upload::from(
+                        "attachment-b"
+                    )
+                ]
             );
             assert!(intervention.voice_announcement.is_none());
         });

@@ -36,7 +36,8 @@ pub(super) struct DiscordSession {
     pub(super) memento_reflected: bool,
     pub(super) current_path: Option<String>,
     pub(super) history: Vec<HistoryItem>,
-    pub(super) pending_uploads: Vec<String>,
+    pub(super) pending_uploads:
+        crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     pub(super) cleared: bool,
     /// Legacy remote profile name slot.
     ///

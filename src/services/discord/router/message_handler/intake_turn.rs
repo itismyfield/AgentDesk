@@ -163,7 +163,7 @@ pub(super) async fn handle_text_message(
     preserve_on_cancel: bool,
     request: IntakeRequest,
     _queued_drain: bool,
-    preloaded_uploads: Vec<String>,
+    preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Result<(), Error> {
     let IntakeDeps {

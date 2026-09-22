@@ -902,7 +902,7 @@ pub(super) async fn enqueue_busy_tui_followup_for_retry(
     reply_context: Option<String>,
     has_reply_boundary: bool,
     merge_consecutive: bool,
-    pending_uploads: Vec<String>,
+    pending_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> MailboxEnqueueOutcome {
     super::super::super::mailbox_requeue_intervention_front(
