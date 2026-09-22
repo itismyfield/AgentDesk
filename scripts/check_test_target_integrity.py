@@ -77,6 +77,7 @@ SUMMARY_KEYS = {"invocations", "nonzero", "findings", "extraction_errors", "exec
 # tests are outside this parser. These exact, named differences are reviewed
 # data; any drift on either side fails --verify-lib-inventory.
 LIB_INVENTORY_STATIC_ONLY_BASE = frozenset({
+    "services::platform::shell::hostname_tests::windows_native_hostname_matches_computer_name",
     "cli::discord_thread_create::tests::thread_create_lock_cancel_child_process",
     "cli::discord_thread_create::tests::windows_async_waiter_recovers_abandoned_owner",
     "cli::discord_thread_create::tests::windows_cancelled_async_holder_releases_before_runtime_exit",
