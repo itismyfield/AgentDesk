@@ -85,3 +85,15 @@ Windows 방화벽이 API 수신을 차단하면 관리자 PowerShell에서 패�
 
 포트는 worker의 `server.port`와 같아야 한다. leader의 고정 IP가 바뀌면 같은 명령을
 새 주소로 다시 실행한다. 네트워크 프로필 전체의 기본 수신 정책은 변경하지 않는다.
+
+## Deployment validation and local restart probes
+
+Set `AGENTDESK_POST_DEPLOY_SMOKE_SCOPE=api` to validate API contracts without
+sending provider turns or Discord test messages. The default `full` retains
+conversation roundtrips. The report explicitly marks omitted coverage.
+Account discovery for Qwen, Grok and AGY runs only for configured runtime IDs.
+
+Release deployment preserves existing launchd `StandardOutPath` and
+`StandardErrorPath`; missing values use the generated defaults. Local restart
+probes send an Origin containing the actual loopback listener port. These probes
+use the existing local maintenance authentication contract.

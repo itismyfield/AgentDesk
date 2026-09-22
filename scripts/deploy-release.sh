@@ -110,6 +110,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/_defaults.sh"
 
 ADK_REL="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"
+POST_DEPLOY_SMOKE_SCOPE="${AGENTDESK_POST_DEPLOY_SMOKE_SCOPE:-full}"
+case "$POST_DEPLOY_SMOKE_SCOPE" in
+    full|api) ;;
+    *) echo "AGENTDESK_POST_DEPLOY_SMOKE_SCOPE must be full or api" >&2; exit 2 ;;
+esac
 POST_DEPLOY_SMOKE_WEDGE_COVERAGE="not run: wedge check did not execute"
 # The Rust dcserver reads AGENTDESK_DCSERVER_LABEL for the plist Label; honor it first
 # so launchd Label and plist filename never diverge when the operator overrides one side.
@@ -1267,6 +1272,7 @@ _deploy_peer_env_prelude() {
         AGENTDESK_REPORT_CHANNEL_ID \
         AGENTDESK_REPORT_PROVIDER \
         AGENTDESK_SKIP_TURN_DRAIN \
+        AGENTDESK_POST_DEPLOY_SMOKE_SCOPE \
         AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS \
         AGENTDESK_BUNDLE_ID \
         AGENTDESK_DCSERVER_LABEL \
@@ -1783,6 +1789,7 @@ export AGENTDESK_DEPLOY_DETACHED_CHILD=1
 export AGENTDESK_DEPLOY_LOG_PATH=$(printf '%q' "$log_path")
 export AGENTDESK_DEPLOY_TEST_MODE=$(printf '%q' "$DEPLOY_TEST_MODE")
 export AGENTDESK_SKIP_TURN_DRAIN=$(printf '%q' "${AGENTDESK_SKIP_TURN_DRAIN:-1}")
+export AGENTDESK_POST_DEPLOY_SMOKE_SCOPE=$(printf '%q' "$POST_DEPLOY_SMOKE_SCOPE")
 export AGENTDESK_CODESIGN_IDENTITY=$(printf '%q' "${AGENTDESK_CODESIGN_IDENTITY:-}")
 export AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN=$(printf '%q' "${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-}")
 export AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE=$(printf '%q' "${AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE:-}")
@@ -2798,13 +2805,10 @@ ROLLBACK_ARMED=1
 
 if [ "$PLIST_REL" = "com.agentdesk.release" ]; then
     echo "▸ Regenerating release launchd plist..."
-    mkdir -p "$HOME/Library/LaunchAgents"
-    "$ADK_REL/bin/agentdesk" emit-launchd-plist \
-        --flavor release \
+    python3 "$SCRIPT_DIR/refresh_release_launchd_plist.py" \
+        --binary "$ADK_REL/bin/agentdesk" \
         --home "$HOME" \
-        --root-dir "$ADK_REL" \
-        --agentdesk-bin "$ADK_REL/bin/agentdesk" \
-        --output "$HOME/Library/LaunchAgents/$PLIST_REL.plist"
+        --root-dir "$ADK_REL"
 else
     echo "⚠ Skipping launchd plist regeneration for custom label: $PLIST_REL"
 fi
@@ -3136,6 +3140,19 @@ _post_deploy_smoke_fail() {
     return 1
 }
 
+_post_deploy_smoke_optional_accounts_absent() {
+    # Account discovery deliberately returns 503/not_installed on nodes that
+    # do not have Claude. Only accept that diagnostic when runtime health
+    # proves no Claude provider was configured; preserve the #4126 failure gate.
+    [ "$1" = "/api/claude-accounts" ] && [ "$2" = "503" ] || return 1
+    [ -n "${POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY:-}" ] || return 1
+    jq -e '.code == "not_installed"' "$3" >/dev/null 2>&1 || return 1
+    jq -e '.providers | (type == "array") and all(.[];
+        (type == "object") and (.name | type == "string")
+        and (.name | ascii_downcase != "claude"))' \
+        "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" >/dev/null 2>&1
+}
+
 _post_deploy_smoke_probe_apis() {
     local endpoint body_path http_code
     local failed=0
@@ -3156,6 +3173,10 @@ _post_deploy_smoke_probe_apis() {
             continue
         fi
         if [ "$http_code" != "200" ]; then
+            if _post_deploy_smoke_optional_accounts_absent "$endpoint" "$http_code" "$body_path"; then
+                _post_deploy_smoke_note "api endpoint=${endpoint} optional=not_installed; no Claude runtime configured" || return 1
+                continue
+            fi
             _post_deploy_smoke_fail "core API ${endpoint}: expected HTTP 200, got ${http_code}" || true
             failed=1
         elif [ ! -s "$body_path" ]; then
@@ -3742,7 +3763,10 @@ _run_post_deploy_functional_smoke() {
     if ! _post_deploy_smoke_check_fail_closed_warn_rate; then
         failed=1
     fi
-    if [ "$POST_DEPLOY_SMOKE_READY" = "true" ]; then
+    if [ "${POST_DEPLOY_SMOKE_SCOPE:-full}" = "api" ]; then
+        POST_DEPLOY_SMOKE_DURABLE_COVERAGE="not evaluated: operator selected API smoke scope"
+        _post_deploy_smoke_note "relay E-1/E-35=not evaluated: API smoke scope; no provider turns or Discord test messages" || failed=1
+    elif [ "$POST_DEPLOY_SMOKE_READY" = "true" ]; then
         if ! _post_deploy_smoke_check_relay_round_trip; then
             failed=1
         fi

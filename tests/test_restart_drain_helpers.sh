@@ -286,12 +286,11 @@ echo "== Test 5d: snapshot returns counters when present (auth-aware) =="
 mkdir -p "$TMP_FIXTURE_DIR/bin_full"
 cat >"$TMP_FIXTURE_DIR/bin_full/curl" <<'EOF'
 #!/usr/bin/env bash
-# Verify the Origin header the helper sends — auth_middleware accepts
-# same-origin requests on auth-enabled deployments. Fail if missing.
+# The local maintenance origin must include the listener's exact port.
 saw_origin=0
 for arg in "$@"; do
   case "$arg" in
-    Origin:*) saw_origin=1 ;;
+    'Origin: http://127.0.0.1:8791') saw_origin=1 ;;
   esac
 done
 if [ "$saw_origin" != "1" ]; then
@@ -302,7 +301,7 @@ printf '%s' '{"global_active":2,"global_finalizing":1,"queue_depth":3}'
 EOF
 chmod +x "$TMP_FIXTURE_DIR/bin_full/curl"
 set +e
-out=$(PATH="$TMP_FIXTURE_DIR/bin_full:$PATH" health_turn_snapshot 0 2>/dev/null)
+out=$(PATH="$TMP_FIXTURE_DIR/bin_full:$PATH" health_turn_snapshot 8791 2>/dev/null)
 rc=$?
 set -e
 assert_eq "snapshot returns 0 with counters present + Origin sent" "0" "$rc"
