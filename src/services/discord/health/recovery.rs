@@ -2611,14 +2611,12 @@ fn clear_recovered_leak_inflight_in_root(
     }
 }
 
-/// #3925 — hermetic tests pinning that the OOB deadlock-manager leak recovery
-/// finalizes the inflight turn-state after delivering the completed answer, so an
-/// idle session stops queueing new messages forever. Uses TempDir + the `_in_root`
-/// clear path (no env / SharedData), mirroring inflight.rs's own test convention.
 #[cfg(test)]
 mod mailbox_unreachable_tests {
     use super::wait_for_turn_end;
-    use crate::services::discord::{mailbox_has_active_turn, make_shared_data_for_tests};
+    use crate::services::discord::{
+        mailbox_has_active_turn, mailbox_has_blocking_active_turn, make_shared_data_for_tests,
+    };
     use poise::serenity_prelude::ChannelId;
 
     #[tokio::test]
@@ -2628,10 +2626,15 @@ mod mailbox_unreachable_tests {
         shared.mailboxes.insert_unreachable_for_test(channel_id);
 
         assert!(!mailbox_has_active_turn(&shared, channel_id).await);
+        assert!(!mailbox_has_blocking_active_turn(&shared, channel_id).await);
         assert!(!wait_for_turn_end(&shared, channel_id, std::time::Duration::ZERO).await);
     }
 }
 
+/// #3925 — hermetic tests pinning that the OOB deadlock-manager leak recovery
+/// finalizes the inflight turn-state after delivering the completed answer, so an
+/// idle session stops queueing new messages forever. Uses TempDir + the `_in_root`
+/// clear path (no env / SharedData), mirroring inflight.rs's own test convention.
 #[cfg(test)]
 mod leak_recovery_inflight_finalize_tests {
     use super::clear_recovered_leak_inflight_in_root;

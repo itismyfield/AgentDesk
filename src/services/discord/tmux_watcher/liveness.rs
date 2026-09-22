@@ -15,14 +15,27 @@ pub(super) async fn commit_watcher_direct_terminal_session_idle(
     data_start_offset: u64,
     current_offset: u64,
 ) -> bool {
-    if !matches!(shared.mailbox(channel_id).cancel_token().await, Ok(None)) {
-        tracing::debug!(
-            channel_id = channel_id.get(),
-            tmux_session_name = %tmux_session_name,
-            provider = %provider.as_str(),
-            "skipping watcher-direct terminal session-idle commit; mailbox turn is active or actor unreachable"
-        );
-        return false;
+    match shared.mailbox(channel_id).cancel_token().await {
+        Ok(None) => {}
+        Ok(Some(_)) => {
+            tracing::debug!(
+                channel_id = channel_id.get(),
+                tmux_session_name = %tmux_session_name,
+                provider = %provider.as_str(),
+                "skipping watcher-direct terminal session-idle commit; mailbox turn is active"
+            );
+            return false;
+        }
+        // Unlike an active turn this does not clear by itself: it lasts until the mailbox is purged.
+        Err(_) => {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                tmux_session_name = %tmux_session_name,
+                provider = %provider.as_str(),
+                "skipping watcher-direct terminal session-idle commit; mailbox actor unreachable until purged"
+            );
+            return false;
+        }
     }
 
     if crate::services::discord::inflight::load_inflight_state(provider, channel_id.get()).is_some()

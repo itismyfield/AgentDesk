@@ -1,9 +1,11 @@
 use tokio::sync::mpsc;
 
+use super::actor_hydrate_regression_tests::make_intervention;
 use super::{
-    ChannelMailboxHandle, ChannelMailboxRegistry, GLOBAL_CHANNEL_MAILBOXES, MailboxUnreachable,
-    spawn_channel_mailbox,
+    ChannelMailboxHandle, ChannelMailboxRegistry, EnqueueRefusalReason, GLOBAL_CHANNEL_MAILBOXES,
+    MailboxUnreachable, QueuePersistenceContext, spawn_channel_mailbox,
 };
+use crate::services::provider::ProviderKind;
 use poise::serenity_prelude::ChannelId;
 
 pub(crate) fn closed_handle() -> ChannelMailboxHandle {
@@ -51,4 +53,20 @@ async fn measured_idle_is_distinct_from_unreachable_actor() {
 
     assert_turn_queries_unreachable(&closed_handle()).await;
     assert_turn_queries_unreachable(&reply_dropping_handle()).await;
+}
+
+#[tokio::test]
+async fn requeue_front_to_unreachable_actor_names_the_refusal() {
+    let persistence = QueuePersistenceContext::new(&ProviderKind::Claude, "unreachable", None);
+    let intervention = make_intervention(6_046_002, "head", std::time::Instant::now());
+
+    let result = closed_handle()
+        .requeue_front(intervention, persistence)
+        .await;
+
+    assert!(!result.enqueued);
+    assert_eq!(
+        result.refusal_reason,
+        Some(EnqueueRefusalReason::ActorUnreachable)
+    );
 }
