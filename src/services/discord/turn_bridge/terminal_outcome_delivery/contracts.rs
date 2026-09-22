@@ -26,7 +26,6 @@ pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryCont
     pub(in crate::services::discord::turn_bridge) should_complete_work_dispatch_after_delivery:
         bool,
     pub(in crate::services::discord::turn_bridge) should_fail_dispatch_after_delivery: bool,
-    pub(in crate::services::discord::turn_bridge) can_chain_locally: bool,
     pub(in crate::services::discord::turn_bridge) single_message_panel_footer_mode: bool,
     pub(in crate::services::discord::turn_bridge) is_prompt_too_long: bool,
     pub(in crate::services::discord::turn_bridge) claude_tui_followup_pre_submit_requeue_candidate:
@@ -297,6 +296,5 @@ pub(super) struct DeliveryEpilogueContext<'a> {
     pub(super) should_fail_dispatch_after_delivery: bool,
     pub(super) bridge_relay_delegated_to_watcher: bool,
     pub(super) watcher_delivery_pin: Option<&'a WatcherClaimIncarnation>,
-    pub(super) can_chain_locally: bool,
     pub(super) inflight_generation: u64,
 }
