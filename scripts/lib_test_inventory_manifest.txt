@@ -4106,6 +4106,8 @@ services::discord::placeholder_live_events::turn_anchor::tests::missing_guild_om
 services::discord::placeholder_live_events::turn_anchor::tests::missing_user_msg_id_omits_link
 services::discord::placeholder_live_events::turn_anchor::tests::normal_turn_with_real_id_and_guild_renders_request_link
 services::discord::placeholder_live_events::turn_anchor::tests::prepend_inserts_anchor_first_and_skips_blank
+services::discord::placeholder_live_events::turn_anchor::tests::request_anchor_guild_survives_turn_cleanup_but_not_session_reset
+services::discord::placeholder_live_events::turn_anchor::tests::request_anchor_uses_each_channels_guild_and_clears_unresolved_identity
 services::discord::placeholder_live_events::turn_anchor::tests::synthetic_headless_id_omits_link
 services::discord::placeholder_live_events::turn_anchor::tests::synthetic_voice_id_omits_link
 services::discord::placeholder_sweeper::abandon_guard::tests::blocking_probe_join_failure_preserves_retry
