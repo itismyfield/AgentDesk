@@ -1861,6 +1861,8 @@ services::claude_tui::tui_relay::tests::try_claim_registry_match_token_leaves_st
 services::claude_tui::tui_relay::tests::tui_send_holds_composer_lock_across_paste_and_enter
 services::claude_tui::tui_relay::tests::unrelated_event_does_not_match_stop
 services::claude_tui::tui_relay::tests::wait_request_not_before_defaults_to_none
+services::cluster::attachment_transfer::storage_tests::attachment_bundle_store_restart_identity_integrity_expiry_and_cleanup_pg
+services::cluster::attachment_transfer::storage_tests::attachment_upload_reference_preserves_legacy_json_and_enforces_size_limits
 services::cluster::attachment_transfer::temporary::tests::attachment_cleanup_keeps_locked_execution_and_removes_only_expired_orphans
 services::cluster::attachment_transfer::tests::bundle_rejects_corrupted_bytes_and_unknown_version
 services::cluster::attachment_transfer::tests::bundle_rejects_cross_message_identity
@@ -1874,6 +1876,7 @@ services::cluster::intake_preflight::tests::missing_or_malformed_snapshot_fails_
 services::cluster::intake_preflight::tests::missing_source_expectations_fail_closed
 services::cluster::intake_preflight::tests::ready_target_requires_no_execution_callback
 services::cluster::intake_preflight::tests::unsupported_provider_fails_closed
+services::cluster::intake_router_hook::attachment_tests::attachment_route_requires_consumer_and_preserves_bytes_through_retry_pg
 services::cluster::intake_router_hook::execution_requirement_tests::execution_requirements_block_fallback_and_survive_recovery_pg
 services::cluster::intake_router_hook::execution_requirement_tests::execution_requirements_reject_incompatible_existing_owner_without_reassignment_pg
 services::cluster::intake_router_hook::owner_record::tests::acquire_covers_each_generation_rule

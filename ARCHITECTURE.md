@@ -526,6 +526,7 @@ src/
 │   ├── cluster/
 │   │   ├── attachment_transfer/
 │   │   │   ├── materialize.rs
+│   │   │   ├── storage_tests.rs
 │   │   │   ├── store.rs
 │   │   │   ├── temporary.rs
 │   │   │   ├── tests.rs
@@ -533,6 +534,7 @@ src/
 │   │   ├── execution_requirements/
 │   │   │   └── tests.rs
 │   │   ├── intake_router_hook/
+│   │   │   ├── attachment_tests.rs
 │   │   │   ├── execution_requirement_tests.rs
 │   │   │   ├── owner_record.rs
 │   │   │   ├── placement.rs

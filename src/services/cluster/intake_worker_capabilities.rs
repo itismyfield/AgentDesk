@@ -102,7 +102,7 @@ pub(super) fn capabilities_with_runtime_state(base: &Value) -> Value {
         json!({
             "enabled": !providers.is_empty(),
             "providers": providers,
-            "features": [PRESERVE_ON_CANCEL_V1, "execution_requirements_v1"],
+            "features": [PRESERVE_ON_CANCEL_V1, "execution_requirements_v1", super::attachment_transfer::CAPABILITY],
         }),
     );
     let gateway_waiters = active_gateway_waiter_providers();
