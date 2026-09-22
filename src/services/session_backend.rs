@@ -503,7 +503,11 @@ pub fn process_session_available_for_followup(session_name: &str) -> bool {
     process_session_is_alive(session_name)
 }
 
-pub fn send_process_session_input(session_name: &str, message: &str) -> Result<(), String> {
+pub fn send_process_session_input(
+    session_name: &str,
+    message: &str,
+    cancel_token: Option<&CancelToken>,
+) -> Result<(), String> {
     let registry = process_sessions();
     if registry.stopped.contains(session_name) {
         return Err(format!("Process session {session_name} was stopped"));
@@ -512,6 +516,12 @@ pub fn send_process_session_input(session_name: &str, message: &str) -> Result<(
         .handles
         .get(session_name)
         .ok_or_else(|| format!("No process handle found for session {}", session_name))?;
+    // Every follow-up has a new turn token even when the wrapper is reused.
+    // Bind under the registry lock, before input can start any provider work.
+    crate::services::provider::register_child_pid(cancel_token, handle.handle.pid());
+    if crate::services::provider::cancel_requested(cancel_token) {
+        return Err("Turn cancelled before process session input".into());
+    }
     ProcessBackend::new().send_input(&handle.handle, message)
 }
 
@@ -579,6 +589,32 @@ mod process_registry_stop_tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
+    fn every_process_followup_binds_its_current_turn_token_before_input() {
+        let session_name = format!("process-followup-token-{}", uuid::Uuid::new_v4());
+        insert_process_session(
+            session_name.clone(),
+            SessionHandle::TestProcess {
+                pid: 424_260,
+                alive: Arc::new(AtomicBool::new(true)),
+            },
+        );
+        for _ in 0..2 {
+            let token = CancelToken::new();
+            assert_eq!(token.child_pid_value(), None);
+            send_process_session_input(&session_name, "followup", Some(&token)).unwrap();
+            assert_eq!(token.child_pid_value(), Some(424_260));
+        }
+        let cancelled = CancelToken::new();
+        cancelled.cancelled.store(true, Ordering::Relaxed);
+        assert_eq!(
+            send_process_session_input(&session_name, "must not run", Some(&cancelled))
+                .unwrap_err(),
+            "Turn cancelled before process session input"
+        );
+        remove_process_session(&session_name);
+    }
+
+    #[test]
     fn issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup() {
         let session_name = format!("process-stop-{}", uuid::Uuid::new_v4());
         let alive = Arc::new(AtomicBool::new(true));
@@ -599,7 +635,7 @@ mod process_registry_stop_tests {
         assert!(process_session_was_stopped(&session_name));
         assert!(!process_session_is_alive(&session_name));
         assert_eq!(process_session_pid(&session_name), None);
-        assert!(send_process_session_input(&session_name, "{}").is_err());
+        assert!(send_process_session_input(&session_name, "{}", None).is_err());
 
         insert_process_session(
             session_name.clone(),
