@@ -1978,4 +1978,19 @@ mod tests {
             .await;
         assert!(!channel_has_active_turn(&ProviderKind::Codex, channel_id).await);
     }
+
+    #[tokio::test]
+    async fn channel_has_active_turn_true_for_unreachable_mailbox_without_inflight() {
+        let _guard = lock_active_turn_env_test();
+        let temp = tempfile::TempDir::new().unwrap();
+        let _env = RootEnvGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        let channel_id = 6_046_002u64;
+        crate::services::turn_orchestrator::ChannelMailboxRegistry::default()
+            .insert_unreachable_for_test(serenity::ChannelId::new(channel_id));
+
+        assert!(!inflight_has_active_turn(&ProviderKind::Codex, channel_id));
+        assert!(channel_has_active_turn(&ProviderKind::Codex, channel_id).await);
+    }
 }

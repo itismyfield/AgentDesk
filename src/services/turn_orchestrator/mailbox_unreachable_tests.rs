@@ -1,12 +1,23 @@
 use tokio::sync::mpsc;
 
-use super::{ChannelMailboxHandle, MailboxUnreachable, spawn_channel_mailbox};
+use super::{
+    ChannelMailboxHandle, ChannelMailboxRegistry, GLOBAL_CHANNEL_MAILBOXES, MailboxUnreachable,
+    spawn_channel_mailbox,
+};
 use poise::serenity_prelude::ChannelId;
 
-fn closed_handle() -> ChannelMailboxHandle {
+pub(crate) fn closed_handle() -> ChannelMailboxHandle {
     let (sender, receiver) = mpsc::unbounded_channel();
     drop(receiver);
     ChannelMailboxHandle { sender }
+}
+
+impl ChannelMailboxRegistry {
+    pub(crate) fn insert_unreachable_for_test(&self, channel_id: ChannelId) {
+        let handle = closed_handle();
+        self.handles.insert(channel_id, handle.clone());
+        GLOBAL_CHANNEL_MAILBOXES.insert(channel_id, handle);
+    }
 }
 
 fn reply_dropping_handle() -> ChannelMailboxHandle {

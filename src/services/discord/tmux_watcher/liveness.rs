@@ -20,7 +20,7 @@ pub(super) async fn commit_watcher_direct_terminal_session_idle(
             channel_id = channel_id.get(),
             tmux_session_name = %tmux_session_name,
             provider = %provider.as_str(),
-            "skipping watcher-direct terminal session-idle commit; mailbox turn is active"
+            "skipping watcher-direct terminal session-idle commit; mailbox turn is active or actor unreachable"
         );
         return false;
     }

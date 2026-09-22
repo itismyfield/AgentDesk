@@ -2616,6 +2616,23 @@ fn clear_recovered_leak_inflight_in_root(
 /// idle session stops queueing new messages forever. Uses TempDir + the `_in_root`
 /// clear path (no env / SharedData), mirroring inflight.rs's own test convention.
 #[cfg(test)]
+mod mailbox_unreachable_tests {
+    use super::wait_for_turn_end;
+    use crate::services::discord::{mailbox_has_active_turn, make_shared_data_for_tests};
+    use poise::serenity_prelude::ChannelId;
+
+    #[tokio::test]
+    async fn unreachable_actor_is_idle_to_wrapper_but_never_ends_the_turn_wait() {
+        let shared = make_shared_data_for_tests();
+        let channel_id = ChannelId::new(6_046_001);
+        shared.mailboxes.insert_unreachable_for_test(channel_id);
+
+        assert!(!mailbox_has_active_turn(&shared, channel_id).await);
+        assert!(!wait_for_turn_end(&shared, channel_id, std::time::Duration::ZERO).await);
+    }
+}
+
+#[cfg(test)]
 mod leak_recovery_inflight_finalize_tests {
     use super::clear_recovered_leak_inflight_in_root;
     use crate::services::discord::inflight::{GuardedClearOutcome, InflightTurnState};
