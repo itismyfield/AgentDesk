@@ -78,3 +78,35 @@ Require actual PG startup/readiness, compilation and selected per-target test
 results; legitimate zero-selected auxiliary targets are not themselves failure.
 Report PG separately from overall Nightly. B/C/E are outside N1, not dependent
 on one another; the old Windows residual is not current after #6081. #6006 stays OPEN.
+
+### Opt-in boundary-only diagnostics (reduced N1 observation objective)
+
+`resource_diagnostics` is a default-false boolean, enabled only by explicit
+workflow_dispatch. The PG step takes bounded foreground snapshots before Cargo
+and from its EXIT handler; there is no periodic sampler or long-lived child.
+Cargo stays direct and executes once. EXIT captures its status first and preserves
+0/101/130/143 even if directory publication or diagnostics fail. The separately
+gated, non-advisory verifier runs before service stop with a one-minute timeout.
+
+Each of the two snapshots is streamed and flushed independently to an owned file,
+with run/attempt/SHA, UTC/monotonic time, sequence/phase and final owner status.
+Host memory/swap, workspace/target and runner-temp filesystems, and narrow Docker
+stats for `POSTGRES_SERVICE_CONTAINER` (empty means `agentdesk-postgres`) are required.
+A non-cancellation failure also collects only the container's selected State fields.
+Probe capture and cleanup are bounded, and only each probe's own process group is
+terminated. Errors remain errors; the verifier never labels partial fields complete.
+Verification bounds: `State.Status` must belong to the documented `docker container ls`
+vocabulary; an unfamiliar label is still recorded verbatim but is never complete evidence.
+`State.ExitCode` deliberately keeps the nonnegative-integer policy, because its domain is
+the container's rather than the shell owner's; no `0..255` or other undocumented bound is
+imposed. `measured_path` must be `requested_path` or one of its lexical POSIX parents,
+reproducing the collector's nearest-existing-ancestor fallback without `resolve()`, `stat()`
+or the current runner environment, so exported evidence stays checkable after paths vanish.
+
+This cannot observe pressure during compilation, transient peaks, or the last
+minutes before a runner disappears. SIGKILL/host loss can remove the EXIT snapshot;
+a missing boundary is incomplete/unknown. Even two valid boundaries do not prove
+resources were adequate between them. Container OOMKilled concerns that container,
+not Cargo's host. This trades mid-run 143-investigation evidence for a smaller,
+coherent implementation while retaining profile mitigation and real PG execution.
+Root must accept this reduced objective before shipping and the one actual dispatch.
