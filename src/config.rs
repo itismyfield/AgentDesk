@@ -1935,6 +1935,13 @@ pub struct RuntimeSettingsConfig {
     /// Read live for each turn through `config_live_reload::current()`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_context_recent_pairs: Option<u64>,
+    /// Seconds StreamJson CLIs (Grok, AGY) may stay silent before the first
+    /// non-empty stdout line. Unset or zero keeps the compiled-in 60s default.
+    /// Read live via `config_live_reload::current()` on each launch; no restart needed.
+    /// Clamped to 24h. A caller that passes a zero timeout still uses the
+    /// separate 90s unset handshake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_json_startup_output_timeout_secs: Option<u64>,
     /// Follow-up TUI readiness timeout in seconds; unset or zero uses the Claude
     /// and Codex default of 45s (`FOLLOWUP_PROMPT_READY_TIMEOUT`).
     /// Read live via `config_live_reload::current()` each wait; no restart needed.
@@ -2076,6 +2083,7 @@ impl RuntimeSettingsConfig {
             && self.github_repo_cache_sec.is_none()
             && self.rate_limit_stale_sec.is_none()
             && self.session_context_recent_pairs.is_none()
+            && self.stream_json_startup_output_timeout_secs.is_none()
             && self.followup_prompt_ready_timeout_secs.is_none()
             && self.active_session_audit_enabled.is_none()
             && self.active_session_audit_stale_secs.is_none()

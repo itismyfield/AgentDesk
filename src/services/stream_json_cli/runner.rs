@@ -236,8 +236,37 @@ fn collect_stderr(mut reader: impl Read) -> String {
     String::from_utf8_lossy(&captured).into_owned()
 }
 
+const DEFAULT_STARTUP_OUTPUT_TIMEOUT_SECS: u64 = 60;
+const UNSET_CALLER_STARTUP_OUTPUT_TIMEOUT_SECS: u64 = 90;
+const MAX_STARTUP_OUTPUT_TIMEOUT_SECS: u64 = 86_400;
+
+/// Non-zero caller timeouts use `runtime.stream_json_startup_output_timeout_secs`
+/// (default 60s; operators can allow a longer wait before the first line).
+/// A zero caller timeout keeps the 90s unset handshake.
 fn startup_output_timeout(timeout: Duration) -> Duration {
-    Duration::from_secs(if timeout.is_zero() { 90 } else { 60 })
+    startup_output_timeout_with(timeout, configured_startup_output_timeout_secs())
+}
+
+fn startup_output_timeout_with(timeout: Duration, configured_secs: u64) -> Duration {
+    Duration::from_secs(if timeout.is_zero() {
+        UNSET_CALLER_STARTUP_OUTPUT_TIMEOUT_SECS
+    } else {
+        configured_secs
+    })
+}
+
+fn configured_startup_output_timeout_secs() -> u64 {
+    resolve_startup_output_timeout_secs(
+        crate::config_live_reload::current()
+            .and_then(|cfg| cfg.runtime.stream_json_startup_output_timeout_secs),
+    )
+}
+
+fn resolve_startup_output_timeout_secs(configured: Option<u64>) -> u64 {
+    configured
+        .filter(|secs| *secs > 0)
+        .map(|secs| secs.min(MAX_STARTUP_OUTPUT_TIMEOUT_SECS))
+        .unwrap_or(DEFAULT_STARTUP_OUTPUT_TIMEOUT_SECS)
 }
 
 #[cfg(test)]
@@ -323,10 +352,33 @@ mod tests {
 
     #[test]
     fn nonzero_timeout_preserves_startup_handshake_budget() {
+        assert_eq!(resolve_startup_output_timeout_secs(None), 60);
+        assert_eq!(resolve_startup_output_timeout_secs(Some(0)), 60);
+        assert_eq!(resolve_startup_output_timeout_secs(Some(60)), 60);
+        assert_eq!(resolve_startup_output_timeout_secs(Some(300)), 300);
         assert_eq!(
-            startup_output_timeout(Duration::from_secs(1)),
+            resolve_startup_output_timeout_secs(Some(u64::MAX)),
+            MAX_STARTUP_OUTPUT_TIMEOUT_SECS
+        );
+        assert_eq!(
+            startup_output_timeout_with(Duration::from_secs(1), 60),
             Duration::from_secs(60)
         );
+        assert_eq!(
+            startup_output_timeout_with(Duration::from_secs(1), 300),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            startup_output_timeout_with(Duration::ZERO, 300),
+            Duration::from_secs(90)
+        );
+        let parsed: crate::config::RuntimeSettingsConfig =
+            serde_yaml::from_str("stream_json_startup_output_timeout_secs: 300\n").unwrap();
+        assert_eq!(parsed.stream_json_startup_output_timeout_secs, Some(300));
+        assert!(!parsed.is_empty());
+        let absent: crate::config::RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(absent.stream_json_startup_output_timeout_secs, None);
+        assert!(absent.is_empty());
     }
 
     #[test]
