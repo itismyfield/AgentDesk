@@ -29,6 +29,11 @@ from typing import Iterable, NamedTuple
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_REL = Path("scripts/pg_test_lane_baseline.txt")
 MANIFEST_REL = Path("scripts/pg_test_lane_manifest.txt")
+NON_PG_SELECTION_BEGIN = "# BEGIN generated non-PG lane selection"
+NON_PG_SELECTION_END = "# END generated non-PG lane selection"
+# Kept because removing one could newly run a PG test whose module the manifest
+# does not name. The module skips below are what make the set honest.
+NON_PG_NAME_SKIPS = ("_pg", "pg_", "postgres")
 ALLOWLIST_REL = Path("scripts/pg_test_lane_allowlist.txt")
 NON_PG_FILTER_REL = Path("scripts/ci/non-pg-test-filter.sh")
 LIB_TEST_INVENTORY_REL = Path("scripts/lib_test_inventory_manifest.txt")
@@ -1335,51 +1340,18 @@ def load_allowlist(path: Path) -> tuple[set[str], set[str]]:
 
 
 def load_non_pg_skip_args(repo_root: Path) -> tuple[str, ...]:
-    """Read the one executable definition shared by PR and nightly lanes."""
-    path = repo_root / NON_PG_FILTER_REL
+    """Delegate to the coverage parser: two copies drifted once already."""
     try:
-        text = path.read_text("utf-8")
+        return _load_coverage_module(repo_root).load_non_pg_skip_args(repo_root)
     except FileNotFoundError as error:
-        raise ValueError(f"missing canonical non-PG filter: {path}") from error
-    match = re.search(r"^NON_PG_SKIP_ARGS=\(([^\n()]*)\)\s*$", text, re.MULTILINE)
-    if match is None:
         raise ValueError(
-            f"{path}: NON_PG_SKIP_ARGS must be one single-line shell array"
-        )
-    args = tuple(shlex.split(match.group(1)))
-    if not args or len(args) % 2 or any(
-        args[index] != "--skip" or not args[index + 1]
-        for index in range(0, len(args), 2)
-    ):
-        raise ValueError(
-            f"{path}: NON_PG_SKIP_ARGS must contain non-empty --skip/value pairs"
-        )
-    return args
+            f"missing canonical non-PG filter: {repo_root / NON_PG_FILTER_REL}"
+        ) from error
 
 
-def load_non_pg_false_positives(repo_root: Path) -> tuple[str, ...]:
-    """Read the replay ids and require a stable, reviewable shell-array form."""
-    path = repo_root / NON_PG_FILTER_REL
-    text = path.read_text("utf-8")
-    match = re.search(
-        r"^NON_PG_FILTER_FALSE_POSITIVES=\(\n(?P<body>(?:[ \t]+[^\n()]+\n)+)\)$",
-        text,
-        re.MULTILINE,
-    )
-    if match is None:
-        raise ValueError(
-            f"{path}: NON_PG_FILTER_FALSE_POSITIVES must be one multiline shell array"
-        )
-    entries = tuple(line.strip() for line in match.group("body").splitlines())
-    if (
-        not entries
-        or list(entries) != sorted(entries)
-        or len(entries) != len(set(entries))
-    ):
-        raise ValueError(
-            f"{path}: NON_PG_FILTER_FALSE_POSITIVES must be non-empty, sorted, and unique"
-        )
-    return entries
+def load_non_pg_filter_replay(repo_root: Path) -> tuple[str, ...]:
+    """Delegate to the coverage parser: two copies drifted once already."""
+    return _load_coverage_module(repo_root).load_non_pg_filter_replay(repo_root)
 
 
 def load_lib_test_inventory(repo_root: Path) -> set[str]:
@@ -1419,7 +1391,7 @@ def non_pg_filter_contract_errors(
     selection contains.
     """
     load_non_pg_skip_args(repo_root)
-    false_positives = load_non_pg_false_positives(repo_root)
+    replay_ids = load_non_pg_filter_replay(repo_root)
     errors: list[str] = []
     relevant = {
         job.key: job
@@ -1429,7 +1401,7 @@ def non_pg_filter_contract_errors(
     source_command = f"source {NON_PG_FILTER_REL.as_posix()}"
     variables = ("${NON_PG_SKIP_ARGS[@]}", "${PG_INCLUDE_ARGS[@]}")
 
-    missing_replays = sorted(set(false_positives) - load_lib_test_inventory(repo_root))
+    missing_replays = sorted(set(replay_ids) - load_lib_test_inventory(repo_root))
     for test_id in missing_replays:
         errors.append(
             f"{NON_PG_FILTER_REL}: replay id is absent from "
@@ -1475,7 +1447,7 @@ def non_pg_filter_contract_errors(
             errors.append(f"{key}: does not use the canonical {variable} array")
         if source_command not in job.code:
             errors.append(f"{key}: does not source {NON_PG_FILTER_REL}")
-        if "run_non_pg_filter_false_positives" not in job.code:
+        if "run_non_pg_filter_replay" not in job.code:
             errors.append(
                 f"{key}: does not restore the source-verified non-PG false positives"
             )
@@ -1490,6 +1462,103 @@ def non_pg_filter_contract_errors(
         if source_command not in job.code:
             errors.append(f"{key}: does not source {NON_PG_FILTER_REL}")
     return tuple(errors)
+
+
+def load_manifest_section(text: str, section: str, source: str) -> tuple[str, ...]:
+    rows: list[str] = []
+    active = False
+    for line in text.splitlines():
+        row = line.strip()
+        if not row or row.startswith("#"):
+            continue
+        if row.startswith("["):
+            active = row == f"[{section}]"
+            continue
+        if active:
+            rows.append(row)
+    if not rows:
+        raise ValueError(f"missing [{section}] entries: {source}")
+    return tuple(rows)
+
+
+def non_pg_selection(repo_root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The skip values, and the lib tests they take with them.
+
+    Needing a database is a property of a test's body, so the modules come from
+    the classifier's manifest rather than a naming convention. The PG lane runs
+    on ubuntu alone, so anything skipped here keeps no macOS/Windows coverage
+    unless the replay list names it."""
+    manifest_text = (repo_root / MANIFEST_REL).read_text("utf-8")
+    modules = load_manifest_section(manifest_text, "modules", str(MANIFEST_REL))
+    pg_tests = set(load_manifest_section(manifest_text, "tests", str(MANIFEST_REL)))
+    skips = tuple(NON_PG_NAME_SKIPS) + modules
+    inventory = load_lib_test_inventory(repo_root)
+    if not inventory:
+        raise ValueError(f"no library tests listed: {LIB_TEST_INVENTORY_REL}")
+    replay = [
+        test
+        for test in inventory
+        if test not in pg_tests and any(value in test for value in skips)
+    ]
+    return skips, tuple(sorted(replay))
+
+
+def render_non_pg_selection(skips: tuple[str, ...], replay: tuple[str, ...]) -> list[str]:
+    lines = [NON_PG_SELECTION_BEGIN, "NON_PG_SKIP_ARGS=("]
+    lines.extend(f"  --skip {value}" for value in skips)
+    lines.append(")")
+    lines.append("NON_PG_FILTER_REPLAY=(")
+    lines.extend(f"  {test}" for test in replay)
+    lines.append(")")
+    lines.append(NON_PG_SELECTION_END)
+    return lines
+
+
+def non_pg_selection_plan(repo_root: Path) -> tuple[list[str], int, int, list[str]]:
+    path = repo_root / NON_PG_FILTER_REL
+    lines = path.read_text("utf-8").splitlines()
+    try:
+        begin = lines.index(NON_PG_SELECTION_BEGIN)
+        end = lines.index(NON_PG_SELECTION_END)
+    except ValueError as error:
+        raise ValueError(
+            f"{NON_PG_FILTER_REL}: missing the generated selection region"
+        ) from error
+    if end < begin:
+        raise ValueError(f"{NON_PG_FILTER_REL}: selection region markers are inverted")
+    skips, replay = non_pg_selection(repo_root)
+    return lines, begin, end, render_non_pg_selection(skips, replay)
+
+
+def check_non_pg_selection_block(repo_root: Path) -> int:
+    try:
+        lines, begin, end, expected = non_pg_selection_plan(repo_root)
+    except (OSError, ValueError) as error:
+        print(f"FAIL: [non-pg-selection] {error}", file=sys.stderr)
+        return 2
+    if lines[begin : end + 1] != expected:
+        print(
+            f"FAIL: [non-pg-selection] {NON_PG_FILTER_REL} is stale; regenerate with "
+            "`python3 scripts/check_pg_test_lane_membership.py --write-non-pg-filter`",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"non-PG lane selection matches {MANIFEST_REL}")
+    return 0
+
+
+def write_non_pg_selection_block(repo_root: Path) -> int:
+    try:
+        lines, begin, end, expected = non_pg_selection_plan(repo_root)
+    except (OSError, ValueError) as error:
+        print(f"FAIL: [non-pg-selection] {error}", file=sys.stderr)
+        return 2
+    path = repo_root / NON_PG_FILTER_REL
+    _atomic_write_text(path, "\n".join(lines[:begin] + expected + lines[end + 1 :]) + "\n")
+    skips = sum(1 for line in expected if line.startswith("  --skip "))
+    replay = sum(1 for line in expected if line.startswith("  ") and not line.startswith("  --skip "))
+    print(f"wrote {skips} skip value(s) and {replay} replay test(s) into {path}")
+    return 0
 
 
 def check_non_pg_filter_contract(repo_root: Path) -> int:
@@ -1774,6 +1843,9 @@ def check(repo_root: Path, baseline_path: Path, manifest_path: Path, baseline_re
     contract_rc = check_non_pg_filter_contract(repo_root)
     if contract_rc:
         return contract_rc
+    selection_rc = check_non_pg_selection_block(repo_root)
+    if selection_rc == 2:
+        return 2
     # Inside the default mode on purpose: the one unconditional CI call site
     # already runs it, so a new PG source path fails closed without anybody
     # remembering a second one. A malformed region is fatal before `analyze`.
@@ -1792,7 +1864,7 @@ def check(repo_root: Path, baseline_path: Path, manifest_path: Path, baseline_re
         reference_label=f"commit {sha}" if reference is not None else "bootstrap snapshot",
         allowlist_label=str(allowlist),
     )
-    return max(analysis_rc, block_rc)
+    return max(analysis_rc, block_rc, selection_rc)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1817,6 +1889,11 @@ def main(argv: list[str] | None = None) -> int:
         help="with --write-snapshots, rewrite only the manifest and preserve the baseline",
     )
     parser.add_argument(
+        "--write-non-pg-filter",
+        action="store_true",
+        help="rewrite the generated selection region in scripts/ci/non-pg-test-filter.sh from the manifest",
+    )
+    parser.add_argument(
         "--write-pg-db-paths",
         action="store_true",
         help="rewrite the generated pg_db region in ci-pr.yml from the manifest [files] section",
@@ -1826,12 +1903,16 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--manifest-only requires --write-snapshots")
     if args.write_snapshots and args.write_pg_db_paths:
         parser.error("--write-snapshots cannot be combined with --write-pg-db-paths")
+    if sum((args.write_snapshots, args.write_pg_db_paths, args.write_non_pg_filter)) > 1:
+        parser.error("the --write-* modes are mutually exclusive")
     root = args.repo_root.resolve()
     baseline = args.baseline.resolve() if args.baseline else root / BASELINE_REL
     manifest = args.manifest.resolve() if args.manifest else root / MANIFEST_REL
     allowlist = args.allowlist.resolve() if args.allowlist else None
     workflow = root / PR_WORKFLOW_REL
     try:
+        if args.write_non_pg_filter:
+            return write_non_pg_selection_block(root)
         if args.write_pg_db_paths:
             return write_pg_db_generated_block(workflow, manifest)
         if args.write_snapshots:

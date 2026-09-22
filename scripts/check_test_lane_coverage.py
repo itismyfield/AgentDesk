@@ -99,6 +99,10 @@ class LaneFilter:
         positive_match = not self.positives or any(map(matches, self.positives))
         return positive_match and not any(map(matches, self.skips))
 
+    def selected_tests(self, test_names: Iterable[str]) -> set[str]:
+        """The discovered tests this one invocation actually runs."""
+        return {name for name in test_names if self.selects_test(name)}
+
     def fully_selects(self, module: str, test_names: Iterable[str]) -> bool:
         """Whether this command selects every discovered test in the module.
 
@@ -482,10 +486,14 @@ def load_non_pg_skip_args(repo_root: Path) -> tuple[str, ...]:
     """Read the shared workflow filter without duplicating its values here."""
     path = repo_root / NON_PG_FILTER_REL
     text = path.read_text(encoding="utf-8")
-    match = re.search(r"^NON_PG_SKIP_ARGS=\(([^\n()]*)\)\s*$", text, re.MULTILINE)
+    # The module skips are generated, so the array spans lines; one closing
+    # paren at the start of a line ends it.
+    match = re.search(
+        r"^NON_PG_SKIP_ARGS=\((.*?)^\)$", text, re.MULTILINE | re.DOTALL
+    )
     if match is None:
         raise ValueError(
-            f"{path}: NON_PG_SKIP_ARGS must be one single-line shell array"
+            f"{path}: NON_PG_SKIP_ARGS must be a shell array closed by `)` at line start"
         )
     args = tuple(shlex.split(match.group(1)))
     if not args or len(args) % 2 or any(
@@ -498,6 +506,55 @@ def load_non_pg_skip_args(repo_root: Path) -> tuple[str, ...]:
     return args
 
 
+def load_non_pg_filter_replay(repo_root: Path) -> tuple[str, ...]:
+    """Read the replay ids and require a stable, reviewable shell-array form."""
+    path = repo_root / NON_PG_FILTER_REL
+    text = path.read_text(encoding="utf-8")
+    match = re.search(
+        r"^NON_PG_FILTER_REPLAY=\(\n(?P<body>(?:[ \t]+[^\n()]+\n)+)\)$",
+        text,
+        re.MULTILINE,
+    )
+    if match is None:
+        raise ValueError(
+            f"{path}: NON_PG_FILTER_REPLAY must be one multiline shell array"
+        )
+    entries = tuple(line.strip() for line in match.group("body").splitlines())
+    if (
+        not entries
+        or list(entries) != sorted(entries)
+        or len(entries) != len(set(entries))
+    ):
+        raise ValueError(
+            f"{path}: NON_PG_FILTER_REPLAY must be non-empty, sorted, and unique"
+        )
+    return entries
+
+
+def expand_pg_include_args(command: str, args: tuple[str, ...]) -> str:
+    """The PG lane selects exactly what the non-PG lane skips; the shell derives
+    it from the same pairs, so this gate must read it from them too."""
+    values = [args[index] for index in range(1, len(args), 2)]
+    if not values:
+        return command
+    return re.sub(
+        r"[\"']?\$\{PG_INCLUDE_ARGS\[@\]\}[\"']?",
+        shlex.join(values),
+        command,
+    )
+
+
+def expand_non_pg_filter_replay(command: str, replay: tuple[str, ...]) -> str:
+    """The replay call is a selection this gate has to see: it is what runs the
+    tests the module skips take with them."""
+    if not replay or "run_non_pg_filter_replay" not in command:
+        return command
+    return command.replace(
+        "run_non_pg_filter_replay",
+        shlex.join(["cargo", "test", "--lib", "--", "--exact", *replay]),
+    )
+
+
 def expand_non_pg_skip_args(command: str, args: tuple[str, ...]) -> str:
     if not args:
         return command
@@ -505,6 +562,18 @@ def expand_non_pg_skip_args(command: str, args: tuple[str, ...]) -> str:
         r"[\"']?\$\{NON_PG_SKIP_ARGS\[@\]\}[\"']?",
         shlex.join(args),
         command,
+    )
+
+
+def expand_lane_command(
+    command: str, skip_args: tuple[str, ...], replay: tuple[str, ...]
+) -> str:
+    """Resolve the shared filter's expansions wherever a command comes from."""
+    return expand_non_pg_filter_replay(
+        expand_pg_include_args(
+            expand_non_pg_skip_args(command, skip_args), skip_args
+        ),
+        replay,
     )
 
 
@@ -519,17 +588,20 @@ def discover_lane_filters(repo_root: Path) -> tuple[LaneFilter, ...]:
     workflows = tuple(
         path.read_text(encoding="utf-8") for path in workflow_paths if path.is_file()
     )
-    non_pg_skip_args = (
-        load_non_pg_skip_args(repo_root)
-        if (repo_root / NON_PG_FILTER_REL).is_file()
-        else ()
-    )
+    filter_present = (repo_root / NON_PG_FILTER_REL).is_file()
+    non_pg_skip_args = load_non_pg_skip_args(repo_root) if filter_present else ()
+    non_pg_filter_replay = load_non_pg_filter_replay(repo_root) if filter_present else ()
 
-    commands = list(just_recipe_commands(just_text, "test-non-pg"))
+    commands = [
+        expand_lane_command(command, non_pg_skip_args, non_pg_filter_replay)
+        for command in just_recipe_commands(just_text, "test-non-pg")
+    ]
     for workflow in workflows:
         for line in workflow.splitlines():
             command = line.strip()
-            if "cargo test" not in command or command.startswith("#"):
+            if command.startswith("#"):
+                continue
+            if "cargo test" not in command and "run_non_pg_filter_replay" not in command:
                 continue
             if command.startswith("run:"):
                 command = command.removeprefix("run:").strip()
@@ -539,13 +611,20 @@ def discover_lane_filters(repo_root: Path) -> tuple[LaneFilter, ...]:
                     and command[0] in "\"'"
                 ):
                     command = command[1:-1]
-            commands.append(expand_non_pg_skip_args(command, non_pg_skip_args))
+            commands.append(
+                expand_lane_command(command, non_pg_skip_args, non_pg_filter_replay)
+            )
 
         for recipe in sorted(
             set(re.findall(r"\bjust\s+([A-Za-z0-9_-]+)", workflow))
         ):
             try:
-                commands.extend(just_recipe_commands(just_text, recipe))
+                commands.extend(
+                    expand_lane_command(
+                        recipe_command, non_pg_skip_args, non_pg_filter_replay
+                    )
+                    for recipe_command in just_recipe_commands(just_text, recipe)
+                )
             except ValueError:
                 continue
 
@@ -557,6 +636,25 @@ def discover_lane_filters(repo_root: Path) -> tuple[LaneFilter, ...]:
     return tuple(dict.fromkeys(lanes))
 
 
+def covered_by_lanes(
+    test_names: Iterable[str], lanes: Iterable[LaneFilter]
+) -> bool:
+    """Whether the lanes together run every discovered test in the module.
+
+    Splitting a module across lanes is what PG/non-PG separation does, so the
+    invariant is that each test reaches some lane -- not that one lane owns the
+    whole module. Computing it over discovered tests is what makes a stale
+    replay list fail here rather than silently drop a test.
+    """
+    required = set(test_names)
+    if not required:
+        return False
+    covered: set[str] = set()
+    for lane in lanes:
+        covered |= lane.selected_tests(required)
+    return required <= covered
+
+
 def uncovered_modules(
     modules: Iterable[str] | dict[str, set[str]], lanes: Iterable[LaneFilter]
 ) -> set[str]:
@@ -566,7 +664,11 @@ def uncovered_modules(
     return {
         module
         for module, test_names in inventory.items()
-        if not any(lane.fully_selects(module, test_names) for lane in active)
+        if not (
+            covered_by_lanes(test_names, active)
+            if test_names
+            else any(lane.fully_selects(module, test_names) for lane in active)
+        )
     }
 
 

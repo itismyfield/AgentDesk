@@ -197,13 +197,11 @@ test-non-pg:
 # The fixture server must be explicit; PG* variables alone are not authorization.
 test-postgres:
     @test -n "${POSTGRES_TEST_DATABASE_URL_BASE:-}" || (echo "POSTGRES_TEST_DATABASE_URL_BASE must name the dedicated PostgreSQL test server with an explicit host and port" >&2; exit 1)
-    cargo test --lib -- _pg pg_ postgres --nocapture --test-threads=1
-    # #5356 S0: the engine wrapper's PG regression module path
-    # (`engine::ops::auto_queue_ops::tests`) carries no pg-name marker, so the
-    # name-filtered invocation above cannot fully select it for the test-lane
-    # coverage ratchet. Select the module explicitly instead of adding it to
-    # the shrink-only debt baseline.
-    cargo test --lib engine::ops::auto_queue_ops::tests -- --nocapture --test-threads=1
+    # Selecting by name missed every PG module whose tests carry no pg marker,
+    # so this lane never ran them and the non-PG lane panicked on them. Both
+    # lanes now come from the classifier's manifest.
+    source scripts/ci/non-pg-test-filter.sh && cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1
+
     # #5071 T2-W S-W1: the dispatch-stamp PG regressions live in a module
     # named `tests` (hardening-audit region naming), so the path carries no
     # pg-name marker. Select the module explicitly for the coverage ratchet.

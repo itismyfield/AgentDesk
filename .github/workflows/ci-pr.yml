@@ -1464,7 +1464,7 @@ jobs:
         run: |
           source scripts/ci/non-pg-test-filter.sh
           python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 "${NON_PG_SKIP_ARGS[@]}" -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"
-          run_non_pg_filter_false_positives
+          run_non_pg_filter_replay
 
       - name: Stop PostgreSQL service
         if: always()
