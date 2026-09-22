@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "7e6bcc16ace163dbbd83ff9705bcb8b604f00137",
+  "measured_at_sha": "0f014678414145f433a3209074e9bc2b7a6657c2",
   "records": [
     {
       "root": "migrations/postgres",
@@ -1138,6 +1138,15 @@
     },
     {
       "root": "migrations/postgres",
+      "kind": "MIGRATION",
+      "path": "migrations/postgres/0124_attachment_bundles.sql",
+      "api": "migration.file",
+      "symbol": "file",
+      "classification": "STATIC_FILE",
+      "fingerprint": "sha256:c52b66332dd0a3cbcb32e7c918fa779be9ecd986a29d924320866aa3ea4b455a"
+    },
+    {
+      "root": "migrations/postgres",
       "kind": "MIGRATION_METADATA",
       "path": "migrations/postgres/checksum-repair-allowlist.json",
       "api": "migration.non_sql_tracked",
@@ -1152,7 +1161,7 @@
       "api": "migration.non_sql_tracked",
       "symbol": "non_sql_tracked",
       "classification": "NON_SQL_TRACKED",
-      "fingerprint": "sha256:4d9f62cb45bd08973e5198e523c7ecc4f12337721e1512c83293a64d64472b69"
+      "fingerprint": "sha256:d90b162d8d2b0d6444f40a8e4e49cd1f5c8f3d162cced020a6ac34cf6e32654d"
     },
     {
       "root": "policies",
@@ -22951,6 +22960,69 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:77e6ff9b69cf525af5fc60b25b5b001e4ed8ec8b5d886f4ac8fa15358f5ac8f0"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/attachment_transfer/store.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:2ba27b3a7a6403fe67940139ae4b06b6543d37839c1e5a9e015949603d652e7e"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/attachment_transfer/store.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:912f6f97e5071878b89c027a6f2bde5c49480e9f3bc501b9f298e3f47d776d86"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/attachment_transfer/store.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d89e2180306412f0febdede44269eb399312c3643cb255d92311e122ed38577d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/attachment_transfer/store.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:df9439d500e7dbdda3641ba28e690bb2dbc68bf588d379aaba6efc8316bee5bc"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/attachment_transfer/store.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:128bfe2261396788b61607a4dcdc88d8c761e2406369c38253662d9472536b43"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/attachment_transfer/store.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7a2c7bc3414051740972b32136bc4c7112165b374ea2849c3d98e23203921ff9"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/attachment_transfer/store.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7fc696aa1908bb2e48525bafeee0eb0c005115731cbdf34ff64d6468106130af"
     },
     {
       "root": "src",
