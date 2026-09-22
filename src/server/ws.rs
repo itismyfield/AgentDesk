@@ -6,6 +6,9 @@
 //! here for backward compatibility, so existing `crate::server::ws::*` call sites
 //! continue to resolve unchanged.
 
+use super::dashboard_auth::DashboardAccess;
+#[cfg(test)]
+use super::dashboard_auth::ws_token_authorized;
 use axum::{
     extract::{
         State,
@@ -22,34 +25,13 @@ pub use crate::eventbus::{
     BatchBuffer, BroadcastEvent, BroadcastTx, emit_event, new_broadcast, spawn_batch_flusher,
 };
 
-/// Whether a `/ws` upgrade may proceed for the configured token.
-///
-/// `/ws` is registered without `auth_middleware`, so this per-connection check
-/// is the only gate on the route and there is no boot-snapshot second line of
-/// defence behind it (#5750). The comparison therefore uses the same
-/// `constant_time_token_eq` helper as `routes/auth.rs`; the plain `!=` it
-/// replaced let a caller-controlled token short-circuit on the first mismatched
-/// byte. An unset or empty configured token leaves the route open, which is the
-/// pre-existing contract and is unchanged here.
-fn ws_token_authorized(expected: Option<&str>, supplied: &str) -> bool {
-    match expected {
-        Some(expected) if !expected.is_empty() => {
-            crate::utils::auth::constant_time_token_eq(expected, supplied)
-        }
-        _ => true,
-    }
-}
-
-pub async fn ws_handler(
+pub(crate) async fn ws_handler(
     ws: WebSocketUpgrade,
-    State(tx): State<BroadcastTx>,
+    State((tx, access)): State<(BroadcastTx, DashboardAccess)>,
     query: axum::extract::Query<std::collections::HashMap<String, String>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    // Check auth token if configured
-    let config = crate::config::load_graceful();
-    let supplied = query.get("token").map(|s| s.as_str()).unwrap_or("");
-    if !ws_token_authorized(config.server.auth_token.as_deref(), supplied) {
+    if !access.authorize_ws(&headers, query.get("ticket").map(String::as_str)) {
         return axum::response::Response::builder()
             .status(401)
             .body(axum::body::Body::from("unauthorized"))

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { WSEvent } from "../types";
+import { credentialScope, onCredentialChange } from "../api/authState";
+import { getDashboardSocketTicket } from "../api/dashboardAuth";
 
 type RawDashboardSocketEvent = Partial<WSEvent> & {
   type?: unknown;
@@ -36,6 +38,9 @@ export function normalizeDashboardSocketEvent(raw: unknown): WSEventWithId | nul
 }
 
 const LAST_EVENT_ID_STORAGE_KEY = "adk:ws:last-event-id";
+onCredentialChange(() => {
+  try { window.localStorage.removeItem(LAST_EVENT_ID_STORAGE_KEY); } catch { /* storage is optional */ }
+});
 
 function readPersistedLastEventId(): string | null {
   try {
@@ -72,19 +77,35 @@ export function useDashboardSocket(onEvent: (event: WSEvent) => void) {
 
   useEffect(() => {
     let destroyed = false;
+    const auth = credentialScope();
+    const ticketRequest = new AbortController();
 
     // Seed from localStorage so the very first connection after a full reload
     // can still replay events the server still has in its history window.
     lastEventIdRef.current = readPersistedLastEventId();
 
-    function connect() {
-      if (destroyed) return;
+    function scheduleReconnect() {
+      if (destroyed || auth.signal.aborted) return;
+      const delay = Math.min(1000 * 2 ** wsRetryRef.current, 30000);
+      wsRetryRef.current += 1;
+      wsTimerRef.current = setTimeout(() => { void connect(); }, delay);
+    }
+
+    async function connect() {
+      if (destroyed || auth.signal.aborted) return;
+      let ticket: string;
+      try {
+        ({ ticket } = await getDashboardSocketTicket(ticketRequest.signal));
+      } catch {
+        scheduleReconnect();
+        return;
+      }
+      if (destroyed || auth.signal.aborted) return;
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
       const since = lastEventIdRef.current;
-      const url =
-        since && since.length > 0
-          ? `${proto}//${location.host}/ws?since=${encodeURIComponent(since)}`
-          : `${proto}//${location.host}/ws`;
+      const params = new URLSearchParams({ ticket });
+      if (since) params.set("since", since);
+      const url = `${proto}//${location.host}/ws?${params}`;
       const ws = new WebSocket(url);
       wsRef.current = ws;
 
@@ -94,6 +115,7 @@ export function useDashboardSocket(onEvent: (event: WSEvent) => void) {
       };
 
       ws.onmessage = (ev) => {
+        if (destroyed || auth.signal.aborted) return;
         try {
           const event = normalizeDashboardSocketEvent(JSON.parse(ev.data));
           if (!event) return;
@@ -113,9 +135,7 @@ export function useDashboardSocket(onEvent: (event: WSEvent) => void) {
         setWsConnected(false);
         wsRef.current = null;
         if (destroyed) return;
-        const delay = Math.min(1000 * 2 ** wsRetryRef.current, 30000);
-        wsRetryRef.current += 1;
-        wsTimerRef.current = setTimeout(connect, delay);
+        scheduleReconnect();
       };
 
       ws.onerror = () => {
@@ -123,12 +143,18 @@ export function useDashboardSocket(onEvent: (event: WSEvent) => void) {
       };
     }
 
-    connect();
+    void connect();
 
-    return () => {
+    const shutdown = () => {
       destroyed = true;
+      ticketRequest.abort();
       if (wsTimerRef.current) clearTimeout(wsTimerRef.current);
       wsRef.current?.close();
+    };
+    auth.signal.addEventListener("abort", shutdown);
+    return () => {
+      auth.signal.removeEventListener("abort", shutdown);
+      shutdown();
     };
   }, []);
 

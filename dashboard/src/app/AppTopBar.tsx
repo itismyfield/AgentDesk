@@ -14,6 +14,7 @@ import type { Notification } from "../components/NotificationCenter";
 import type { ThemePreference } from "./themePreferences";
 import type { AppRouteEntry } from "./routes";
 import { formatRelativeTime, notificationColor } from "./shellFormatting";
+import { DashboardLogout } from "./DashboardAuthGate";
 
 interface AppTopBarProps {
   currentRoute: AppRouteEntry | null;
@@ -143,6 +144,7 @@ export function AppTopBar({
         </label>
 
         <div className="ml-auto flex shrink-0 items-center justify-end gap-2 sm:ml-0">
+          <DashboardLogout />
           <button
             type="button"
             onClick={toggleShellTheme}

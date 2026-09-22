@@ -1,6 +1,7 @@
 pub(crate) mod cluster;
 pub(crate) mod cluster_session_routing;
 pub(crate) mod cron_catalog;
+mod dashboard_auth;
 mod dashboard_provision;
 #[cfg(test)]
 mod database_fixture_invariant_tests;
@@ -398,18 +399,17 @@ pub(crate) async fn run(
         cluster_instance_id: Some(cluster_instance_id.clone()),
     };
 
+    let dashboard_access = dashboard_auth::DashboardAccess::new(&config);
     let mut app = Router::new()
-        .route("/ws", get(ws::ws_handler).with_state(broadcast_tx.clone()))
+        .route(
+            "/ws",
+            get(ws::ws_handler).with_state((broadcast_tx.clone(), dashboard_access.clone())),
+        )
         .nest(
             "/api",
-            routes::api_router_with_pg_and_cluster(
-                engine.clone(),
-                config.clone(),
-                broadcast_tx.clone(),
-                batch_buffer,
-                health_registry,
-                pg_pool,
-                Some(cluster_instance_id),
+            routes::api_router_with_dashboard_access(
+                control_plane_auth_state.clone(),
+                dashboard_access,
             ),
         );
     if _claude_tui_hook_endpoint.is_some() {

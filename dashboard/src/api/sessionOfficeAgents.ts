@@ -1,5 +1,6 @@
 import type { Agent, AuditLogEntry, Department, Office } from "../types";
 import { resolveAvatarSeed } from "../lib/pixel-avatar";
+import { getDashboardSession } from "./dashboardAuth";
 import { readCachedSnapshot, request, type CachedApiSnapshot, type RequestOptions } from "./httpClient";
 
 function normalizeAgent(agent: Agent): Agent {
@@ -18,7 +19,7 @@ export async function getSession(): Promise<{
   ok: boolean;
   csrf_token: string;
 }> {
-  return request("/api/auth/session");
+  return getDashboardSession();
 }
 
 // ── Offices ──

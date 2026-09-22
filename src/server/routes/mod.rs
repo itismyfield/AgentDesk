@@ -370,7 +370,7 @@ mod audit_explicit_auth_routes_tests {
                 cluster_instance_id: None,
             };
             let app = Router::new()
-                .merge(domains::access::router())
+                .merge(domains::access::router(state.clone()))
                 .merge(domains::kanban::router(state.clone()))
                 .merge(domains::ops::router(state.clone()))
                 .with_state(state);
@@ -699,17 +699,27 @@ pub fn api_router_with_pg_and_cluster(
         cluster_instance_id,
     };
 
+    let access = super::dashboard_auth::DashboardAccess::new(&state.config);
+    api_router_with_dashboard_access(state, access)
+}
+
+pub(super) fn api_router_with_dashboard_access(
+    state: AppState,
+    access: super::dashboard_auth::DashboardAccess,
+) -> Router {
     crate::services::discord::monitoring_status::spawn_expiry_sweeper(
         state::global_monitoring_store(),
         state.health_registry.clone(),
     );
 
-    compose_api_router(state.clone()).with_state(state)
+    compose_api_router(state.clone())
+        .with_state(state)
+        .layer(axum::Extension(access))
 }
 
 fn compose_api_router(state: AppState) -> ApiRouter {
     Router::new()
-        .merge(domains::access::router())
+        .merge(domains::access::router(state.clone()))
         .merge(domains::onboarding::router(state.clone()))
         .merge(domains::agents::router(state.clone()))
         .merge(domains::analytics::router(state.clone()))
