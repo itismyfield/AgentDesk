@@ -206,22 +206,47 @@ else
     fail "the diagnostic named '$accepted' on a standby the verdict accepted"
 fi
 
-echo "§10d the deploy script never rebuilds a partial policy at a call site"
+echo "§10d policy comes from the body, so no call site can rebuild a partial one"
 
-# The readiness decision and the diagnostic must not derive the accepted set
-# independently, or the diagnostic names causes the verdict just accepted.
-DEPLOY_SH="$REPO_ROOT/scripts/deploy-release.sh"
-partial=$(grep -nE '_health_json_deploy_nonblocking_ere( +"?[^ "]+"?){0,2} *\)' "$DEPLOY_SH" || true)
-if [ -z "$partial" ]; then
-    pass "every call passes all three authorizations"
+# Behaviour, not formatting: the wrapper is the only way to build the set, and
+# it reads the structural proof itself.
+standby_ere=$(_health_json_deploy_nonblocking_ere_for_body "$(sb '["gateway_standby"]')" 1 1)
+plain_ere=$(_health_json_deploy_nonblocking_ere_for_body "$(body '["gateway_standby"]' true)" 1 1)
+if grep -q "gateway_standby" <<<"$standby_ere"; then
+    pass "a proven standby body admits the gateway tokens"
 else
-    fail "a call site reconstructs a partial policy: $partial"
+    fail "a proven standby body did not admit them"
 fi
-if grep -q 'cluster_standby' <<<"$(grep -A3 -B3 '_health_json_deploy_nonblocking_ere' "$DEPLOY_SH")"; then
-    pass "the diagnostic derives standby proof from the body it is explaining"
+if grep -q "gateway_standby" <<<"$plain_ere"; then
+    fail "a body without cluster_standby admitted the gateway tokens anyway"
 else
-    fail "the diagnostic does not read cluster_standby, so a proven standby is named as blocking"
+    pass "a body without cluster_standby does not"
 fi
+if grep -q "pending_queue_depth" <<<"$(_health_json_deploy_nonblocking_ere_for_body "$QUEUE" 1 1)"; then
+    pass "the deploy authorization admits a backlog"
+else
+    fail "the deploy authorization did not admit a backlog"
+fi
+if grep -q "pending_queue_depth" <<<"$(_health_json_deploy_nonblocking_ere_for_body "$QUEUE" 1 0)"; then
+    fail "a backlog was admitted without the deploy authorization"
+else
+    pass "without the deploy authorization it is not admitted"
+fi
+if grep -q "reconcile_in_progress" <<<"$(_health_json_deploy_nonblocking_ere_for_body "$QUEUE" 0 1)"; then
+    fail "reconcile was admitted without its own authorization"
+else
+    pass "reconcile still needs its own authorization"
+fi
+# Nothing may build the set except through the wrapper, or a call site could
+# supply its own structural proof and drift from the body.
+for f in "$REPO_ROOT/scripts/deploy-release.sh" "$REPO_ROOT/scripts/deploy.sh"; do
+    [ -e "$f" ] || continue
+    if grep -q "_health_json_deploy_nonblocking_ere " "$f"; then
+        fail "$(basename "$f") builds the accepted set itself instead of deriving it from the body"
+    else
+        pass "$(basename "$f") only ever derives the set from a body"
+    fi
+done
 
 echo "§11 the jq and no-jq paths agree on every shape above"
 

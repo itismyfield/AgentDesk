@@ -636,6 +636,14 @@ _health_json_deploy_nonblocking_ere() {
   printf '%s)$' "$ere"
 }
 
+_health_json_deploy_nonblocking_ere_for_body() {
+  # The only way to build the accepted set: structural proof comes from the
+  # body itself, so no caller can reconstruct a policy that drifts.
+  local health_json="$1" standby=0
+  _health_json_field_is_true "$health_json" "cluster_standby" && standby=1
+  _health_json_deploy_nonblocking_ere "${2:-0}" "${3:-0}" "$standby"
+}
+
 _health_json_deploy_blocking_reasons() {
   local health_json="$1" ere="$2"
   local reasons_csv reason out=""
@@ -807,8 +815,8 @@ health_json_is_ready() {
     [ "$status" = "healthy" ] && return 0
     # Membership decides: every reason must be one a deploy cannot clear. An
     # unrecognised reason is not in that set, so a newly added one fails closed.
-    nonblocking_ere=$(_health_json_deploy_nonblocking_ere \
-      "$allow_reconcile_degraded" "$allow_deploy_nonblocking" "$standby_proven")
+    nonblocking_ere=$(_health_json_deploy_nonblocking_ere_for_body \
+      "$health_json" "$allow_reconcile_degraded" "$allow_deploy_nonblocking")
     if _health_json_degraded_reasons_all_match "$health_json" "$nonblocking_ere"; then
       echo "  ▸ degraded only for causes a deploy cannot clear ($(_health_json_reasons "$health_json")) — deploy proceeds; health still reports degraded"
       return 0
@@ -834,8 +842,8 @@ health_json_is_ready() {
     return 0
   fi
 
-  nonblocking_ere=$(_health_json_deploy_nonblocking_ere \
-    "$allow_reconcile_degraded" "$allow_deploy_nonblocking" "$standby_proven")
+  nonblocking_ere=$(_health_json_deploy_nonblocking_ere_for_body \
+    "$health_json" "$allow_reconcile_degraded" "$allow_deploy_nonblocking")
   _health_json_degraded_reasons_all_match "$health_json" "$nonblocking_ere"
 }
 

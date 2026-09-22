@@ -1563,15 +1563,12 @@ _wait_for_peer_deploy_verdict() {
         fi
 
         if [ "$SECONDS" -ge "$deadline" ]; then
-            # Same policy inputs the health axis just used, or the diagnostic
-            # names causes that verdict accepted.
-            local blocking="" standby_proven=0
-            if [ -n "$health_body" ]; then
-                _health_json_field_is_true "$health_body" "cluster_standby" \
-                    && standby_proven=1
-                blocking=$(_health_json_deploy_blocking_reasons "$health_body" \
-                    "$(_health_json_deploy_nonblocking_ere 1 1 "$standby_proven")")
-            fi
+            # The same flags the health axis was judged with, so the diagnostic
+            # cannot name a cause that verdict accepted.
+            local blocking=""
+            [ -n "$health_body" ] && blocking=$(_health_json_deploy_blocking_reasons \
+                "$health_body" \
+                "$(_health_json_deploy_nonblocking_ere_for_body "$health_body" 1 1)")
             _report_peer_verdict_failure "$peer" \
                 "timed out after ${timeout_secs}s${blocking:+ (deploy-blocking: $blocking)}" \
                 "$marker_status" "$marker_detail" "$expected_repo_head" \
