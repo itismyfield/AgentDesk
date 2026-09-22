@@ -14,6 +14,7 @@ mod intake_delivery_reconciler;
 mod intake_delivery_sweep;
 mod orphan_recovery;
 mod queued_placeholders;
+mod queued_recovery;
 mod recovery_flush;
 mod relay_dlq_redelivery;
 mod restored_state;
@@ -283,10 +284,12 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         health_registry
             .register_worker(provider.as_str().to_string(), shared.clone())
             .await;
-        mark_reconcile_complete(&shared);
         spawns::run_bot_spawn_deferred_restart_poller(&shared, &provider);
         #[cfg(unix)]
         spawns::run_bot_spawn_reachability_observation(&shared, &provider);
+        // REST workers persist the same mailbox state as Gateway runtimes.
+        // Restore it before polling new intake; never replay Discord history.
+        queued_recovery::restore_worker_queues(&shared, &provider).await;
         run_bot_maybe_spawn_intake_worker(&shared, &provider);
         run_startup_diagnostic_after_reconcile_barrier_for_provider(
             &provider,

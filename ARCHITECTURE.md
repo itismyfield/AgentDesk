@@ -1005,6 +1005,7 @@ src/
 │   │   │   ├── intake_delivery_sweep.rs
 │   │   │   ├── orphan_recovery.rs
 │   │   │   ├── queued_placeholders.rs
+│   │   │   ├── queued_recovery.rs
 │   │   │   ├── recovery_flush.rs
 │   │   │   ├── relay_dlq_redelivery.rs
 │   │   │   ├── restored_state.rs
