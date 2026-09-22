@@ -1161,6 +1161,9 @@ pub(crate) fn postgres_test_database_url_base() -> Option<String> {
 }
 
 #[cfg(test)]
+mod test_db_reclaim;
+
+#[cfg(test)]
 const TEST_POSTGRES_OP_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(test)]
 const TEST_POSTGRES_POOL_MAX_CONNECTIONS: u32 = 1;
@@ -1471,10 +1474,8 @@ pub(crate) async fn connect_test_pool(database_url: &str, label: &str) -> Result
 // PG-backed test DB create/drop so they cannot race. Dropping the guard before
 // the awaits would reintroduce the CI race this lock was added to fix. Test-only.
 #[allow(clippy::await_holding_lock)]
-/// Ownership tokens are process-local: a crash between `CREATE DATABASE` and
-/// registration, or process exit after registration, can leave an unowned
-/// `agentdesk_*` database. This limitation is accepted; inspect that prefix
-/// with `psql` and manually drop only confirmed-stale databases.
+/// Ownership tokens are process-local, so a killed process leaks its databases.
+/// Each created database is marked and later swept by `test_db_reclaim`.
 pub(crate) async fn create_test_database(
     admin_url: &str,
     database_name: &str,
@@ -1492,6 +1493,7 @@ pub(crate) async fn create_test_database(
             TEST_POSTGRES_ADMIN_POOL_MAX_CONNECTIONS,
         )
         .await?;
+        test_db_reclaim::reclaim_once_per_process(&admin_pool, label).await;
         let create_result = run_test_postgres_sqlx_op(
             &format!("{label} create postgres test db {database_name}"),
             sqlx::query(&format!("CREATE DATABASE \"{database_name}\"")).execute(&admin_pool),
@@ -1516,7 +1518,15 @@ pub(crate) async fn create_test_database(
         // later best-effort or explicit cleanup path must consume that token.
         register_test_database_ownership(&admin_options, admin_url, database_name);
 
-        if let Err(error) = close_test_pool(admin_pool, &format!("{label} admin")).await {
+        let mark_result = test_db_reclaim::mark_test_database(
+            &admin_pool,
+            database_name,
+            test_db_reclaim::now_unix(),
+            label,
+        )
+        .await;
+        let close_result = close_test_pool(admin_pool, &format!("{label} admin")).await;
+        if let Err(error) = mark_result.and(close_result) {
             best_effort_drop_owned_test_database(&admin_options, database_name, label).await;
             return Err(error);
         }
