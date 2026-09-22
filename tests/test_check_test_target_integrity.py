@@ -1621,7 +1621,391 @@ def build_frame_repo(root: Path, files: dict[str, str], *,
     return root / lib_path
 
 
+@contextlib.contextmanager
+def record_reads():
+    """Record every file path the walker actually opens."""
+    opened: list[str] = []
+    real = Path.read_text
+
+    def traced(self, *args, **kwargs):
+        opened.append(str(self))
+        return real(self, *args, **kwargs)
+
+    with mock.patch.object(Path, "read_text", traced):
+        yield opened
+
+
 class InlineDirectoryContext(unittest.TestCase):
+    """Compiler-backed directory ownership (#5008 item 8).
+
+    Unique no-test leaves identify actual reads versus decoys; even empty
+    modules distinguish target-mismatch from unknown-module.
+    """
+
+    # layout -> (files, {module: first declaration site}, forbidden modules)
+    LAYOUTS: dict[str, tuple[dict[str, str], dict[str, str],
+                             tuple[str, ...]]] = {
+        # `foo.rs` owns `foo/`; an inline scope appends its own name.
+        "non_mod_rs_inline": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs": "mod tests {\n    mod child;\n}\n",
+            "src/owner/tests/child.rs": "mod leaf_non_mod_rs {}\n",
+            "src/child.rs": "mod decoy_declaring_dir {}\n",
+            "src/tests/child.rs": "mod decoy_relative_dropped {}\n",
+        }, {
+            "owner": "src/lib.rs:1",
+            "tests": "src/owner.rs:1",
+            "child": "src/owner.rs:2",
+            "leaf_non_mod_rs": "src/owner/tests/child.rs:1",
+        }, ("decoy_declaring_dir", "decoy_relative_dropped")),
+        # `owner/mod.rs` owns `owner/` with nothing pending.
+        "mod_rs_inline": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner/mod.rs": "mod tests {\n    mod child;\n}\n",
+            "src/owner/tests/child.rs": "mod leaf_mod_rs {}\n",
+            "src/owner/child.rs": "mod decoy_mod_rs_flat {}\n",
+        }, {
+            "child": "src/owner/mod.rs:2",
+            "leaf_mod_rs": "src/owner/tests/child.rs:1",
+        }, ("decoy_mod_rs_flat",)),
+        # voice_barge_in: outlined #[path] resolves in its enclosing inline scope.
+        "outlined_path_inside_inline_scope": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                'mod tests {\n    #[path = "pcm.rs"]\n    mod pcm;\n}\n',
+            "src/owner/tests/pcm.rs": "mod leaf_in_scope {}\n",
+            "src/pcm.rs": "mod decoy_file_parent {}\n",
+        }, {
+            "pcm": "src/owner.rs:3",
+            "leaf_in_scope": "src/owner/tests/pcm.rs:1",
+        }, ("decoy_file_parent",)),
+        # Inline #[path] renames the directory without consuming relative.
+        "inline_path_directory_override": ({
+            "src/lib.rs": "mod layout;\n",
+            "src/layout.rs":
+                '#[path = "moved_dir"]\nmod scope {\n    mod child;\n}\n',
+            "src/moved_dir/child.rs": "mod leaf_inline_path {}\n",
+            "src/layout/scope/child.rs": "mod decoy_override_ignored {}\n",
+            "src/layout/moved_dir/child.rs": "mod decoy_relative_used {}\n",
+        }, {
+            "child": "src/layout.rs:3",
+            "leaf_inline_path": "src/moved_dir/child.rs:1",
+        }, ("decoy_override_ignored", "decoy_relative_used")),
+        # A `#[path]` file is mod.rs-like: its children are its siblings.
+        "redirect_child_is_a_sibling": ({
+            "src/lib.rs": '#[path = "renamed.rs"]\nmod alpha;\n',
+            "src/renamed.rs": "mod nested;\n",
+            "src/nested.rs": "mod leaf_sibling {}\n",
+            "src/renamed/nested.rs": "mod decoy_stem_reattached {}\n",
+        }, {
+            "nested": "src/renamed.rs:1",
+            "leaf_sibling": "src/nested.rs:1",
+        }, ("decoy_stem_reattached",)),
+        # Literal braces do not move scope; a closed inline scope cannot leak.
+        "nested_scopes_and_literal_braces": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                "mod outer {\n"
+                '    const BRACES: &str = "} mod fake { {";\n'
+                "    mod empty { }\n"
+                "    mod inner {\n"
+                "        mod deep;\n"
+                "    }\n"
+                "}\n"
+                "mod after_scopes;\n",
+            "src/owner/outer/inner/deep.rs": "mod leaf_deep {}\n",
+            "src/owner/after_scopes.rs": "mod leaf_after {}\n",
+            "src/owner/deep.rs": "mod decoy_scope_lost {}\n",
+            "src/owner/outer/after_scopes.rs": "mod decoy_scope_leaked {}\n",
+        }, {
+            "deep": "src/owner.rs:5",
+            "after_scopes": "src/owner.rs:8",
+            "leaf_deep": "src/owner/outer/inner/deep.rs:1",
+            "leaf_after": "src/owner/after_scopes.rs:1",
+        }, ("decoy_scope_lost", "decoy_scope_leaked", "fake")),
+        # rustc warns on the non-module attribute, but it cannot rename a sibling.
+        "path_on_a_closed_item_never_renames_a_later_scope": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                '#[path = "moved_dir"]\nstruct Marker { held: u8 }\n'
+                "mod scope {\n    mod child;\n}\n",
+            "src/owner/scope/child.rs": "mod leaf_after_closed_item {}\n",
+            "src/moved_dir/child.rs": "mod decoy_attr_leaked {}\n",
+        }, {
+            "child": "src/owner.rs:4",
+            "leaf_after_closed_item": "src/owner/scope/child.rs:1",
+        }, ("decoy_attr_leaked",)),
+        # Semicolon items consume their attributes just as braced items do.
+        "path_on_a_semicolon_item_never_renames_a_later_scope": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                '#[path = "moved_type"]\ntype Alias = u8;\n'
+                "mod scope {\n    mod child;\n}\n",
+            "src/owner/scope/child.rs": "mod leaf_after_alias {}\n",
+            "src/moved_type/child.rs": "mod decoy_alias_leaked {}\n",
+        }, {
+            "child": "src/owner.rs:4",
+            "leaf_after_alias": "src/owner/scope/child.rs:1",
+        }, ("decoy_alias_leaked",)),
+        # String brackets cannot extend an attribute over later item bodies.
+        "attribute_string_brackets_never_extend_the_attribute": ({
+            "src/lib.rs":
+                'mod outer {\n    #[doc = "["]\n    pub fn helper() {}\n}\n'
+                '#[doc = "]"]\nmod sibling;\n',
+            "src/sibling.rs": "mod leaf_real_sibling {}\n",
+            "src/outer/sibling.rs": "mod decoy_attr_swallowed_scope {}\n",
+        }, {
+            "sibling": "src/lib.rs:6",
+            "leaf_real_sibling": "src/sibling.rs:1",
+        }, ("decoy_attr_swallowed_scope",)),
+        # The string `]` names a directory; it does not close the attribute.
+        "inline_path_directory_named_with_a_bracket": ({
+            "src/lib.rs": '#[path = "]"]\nmod outer {\n    mod child;\n}\n',
+            "src/]/child.rs": "mod leaf_bracket_directory {}\n",
+            "src/outer/child.rs": "mod decoy_bracket_attr_lost {}\n",
+        }, {
+            "child": "src/lib.rs:3",
+            "leaf_bracket_directory": "src/]/child.rs:1",
+        }, ("decoy_bracket_attr_lost",)),
+        # Function blocks drop the file's pending relative component.
+        "block_drops_the_files_pending_relative": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                "fn helper() {\n    mod scope {\n"
+                '        #[path = "moved.rs"]\n        mod child;\n    }\n}\n',
+            "src/scope/moved.rs": "mod leaf_block_scope {}\n",
+            "src/owner/scope/moved.rs": "mod decoy_relative_kept {}\n",
+        }, {
+            "child": "src/owner.rs:4",
+            "leaf_block_scope": "src/scope/moved.rs:1",
+        }, ("decoy_relative_kept",)),
+        # Dropping relative is distinct from an inline #[path] directory rename.
+        "block_then_redirected_inline_scope": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                'fn helper() {\n    #[path = "renamed"]\n    mod scope {\n'
+                '        #[path = "moved.rs"]\n        mod child;\n    }\n}\n',
+            "src/renamed/moved.rs": "mod leaf_block_renamed {}\n",
+            "src/owner/renamed/moved.rs": "mod decoy_block_relative_kept {}\n",
+        }, {
+            "child": "src/owner.rs:5",
+            "leaf_block_renamed": "src/renamed/moved.rs:1",
+        }, ("decoy_block_relative_kept",)),
+        # Block-local #[path] resolves in the enclosing inline directory.
+        "block_level_path_resolves_against_its_inline_scope": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                "mod scope {\n    fn helper() {\n"
+                '        #[path = "moved.rs"]\n        mod inner;\n    }\n}\n',
+            "src/owner/scope/moved.rs": "mod leaf_block_path {}\n",
+            "src/owner/moved.rs": "mod decoy_block_at_file_dir {}\n",
+        }, {
+            "inner": "src/owner.rs:4",
+            "leaf_block_path": "src/owner/scope/moved.rs:1",
+        }, ("decoy_block_at_file_dir",)),
+        # A string `"#"` before an index expression is not attribute punctuation.
+        "string_hash_before_an_index_is_not_an_attribute": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                'fn helper() {\n    let _ = &"#"[{\n        mod scope {\n'
+                '            #[path = "moved.rs"]\n            mod child;\n'
+                "        }\n        0\n    }..];\n}\n",
+            "src/scope/moved.rs": "mod leaf_string_hash {}\n",
+            "src/moved.rs": "mod decoy_string_hash_opened_attr {}\n",
+        }, {
+            "child": "src/owner.rs:5",
+            "leaf_string_hash": "src/scope/moved.rs:1",
+        }, ("decoy_string_hash_opened_attr",)),
+        # A byte string is the same token with a `b` in front of it.
+        "byte_string_hash_before_an_index_is_not_an_attribute": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                'fn helper() {\n    let _ = b"#"[{\n        mod scope {\n'
+                '            #[path = "moved.rs"]\n            mod child;\n'
+                "        }\n        0\n    }];\n}\n",
+            "src/scope/moved.rs": "mod leaf_byte_hash {}\n",
+            "src/moved.rs": "mod decoy_byte_hash_opened_attr {}\n",
+        }, {
+            "child": "src/owner.rs:5",
+            "leaf_byte_hash": "src/scope/moved.rs:1",
+        }, ("decoy_byte_hash_opened_attr",)),
+        # Macro token-tree braces preserve the file's relative component.
+        "macro_delimiter_braces_are_not_a_block": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                "macro_rules! passthrough { ($($t:tt)*) => { $($t)* }; }\n"
+                "passthrough! {\n    mod scope {\n"
+                '        #[path = "moved.rs"]\n        mod child;\n    }\n}\n',
+            "src/owner/scope/moved.rs": "mod leaf_macro_wrapper {}\n",
+            "src/scope/moved.rs": "mod decoy_macro_read_as_block {}\n",
+        }, {
+            "child": "src/owner.rs:5",
+            "leaf_macro_wrapper": "src/owner/scope/moved.rs:1",
+        }, ("decoy_macro_read_as_block",)),
+        # Parenthesized wrappers retain the same directory ownership.
+        "parenthesized_macro_wrapper_keeps_the_component": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                "macro_rules! passthrough { ($($t:tt)*) => { $($t)* }; }\n"
+                "passthrough!(\n    mod scope {\n"
+                '        #[path = "moved.rs"]\n        mod child;\n    }\n);\n',
+            "src/owner/scope/moved.rs": "mod leaf_paren_wrapper {}\n",
+            "src/scope/moved.rs": "mod decoy_paren_read_as_block {}\n",
+        }, {
+            "child": "src/owner.rs:5",
+            "leaf_paren_wrapper": "src/owner/scope/moved.rs:1",
+        }, ("decoy_paren_read_as_block",)),
+        # R3: source gaps distinguish dropped &&; closing the block restores relative.
+        "and_unary_not_block_is_not_a_macro_header": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                "const FLAG: bool = true;\n"
+                "const VALUE: bool = FLAG && !{\n"
+                "    mod scope {\n"
+                '        #[path = "moved.rs"]\n        mod child;\n    }\n'
+                "    false\n};\n"
+                'mod sibling {\n    #[path = "tail.rs"]\n    mod tail;\n}\n',
+            "src/scope/moved.rs": "mod leaf_and_unary_not {}\n",
+            "src/owner/sibling/tail.rs": "mod leaf_and_tail {}\n",
+            "src/owner/scope/moved.rs": "mod decoy_and_read_as_macro {}\n",
+        }, {
+            "child": "src/owner.rs:5",
+            "tail": "src/owner.rs:11",
+            "leaf_and_unary_not": "src/scope/moved.rs:1",
+            "leaf_and_tail": "src/owner/sibling/tail.rs:1",
+        }, ("decoy_and_read_as_macro",)),
+        # R3: `if` lexes as an ident; its keyword status must reject the header.
+        "if_unary_not_block_is_not_a_macro_header": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                "const VALUE: bool = if !{\n    mod scope {\n"
+                '        #[path = "moved.rs"]\n        mod child;\n    }\n'
+                "    false\n} { true } else { false };\n"
+                'mod sibling {\n    #[path = "tail.rs"]\n    mod tail;\n}\n',
+            "src/scope/moved.rs": "mod leaf_if_unary_not {}\n",
+            "src/owner/sibling/tail.rs": "mod leaf_if_tail {}\n",
+            "src/owner/scope/moved.rs": "mod decoy_if_read_as_macro {}\n",
+        }, {
+            "child": "src/owner.rs:4",
+            "tail": "src/owner.rs:10",
+            "leaf_if_unary_not": "src/scope/moved.rs:1",
+            "leaf_if_tail": "src/owner/sibling/tail.rs:1",
+        }, ("decoy_if_read_as_macro",)),
+        # MB: skip the whole inner attribute, not just a nested #[path] payload.
+        "inner_attribute_payload_never_renames_a_later_scope": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                '#![cfg_attr(any(), opaque(#[path = "fake"]))]\n'
+                'mod scope {\n    #[path = "moved.rs"]\n    mod child;\n}\n',
+            "src/owner/scope/moved.rs": "mod leaf_inner_attr {}\n",
+            "src/fake/moved.rs": "mod decoy_inner_path_leaked {}\n",
+        }, {
+            "child": "src/owner.rs:4",
+            "leaf_inner_attr": "src/owner/scope/moved.rs:1",
+        }, ("decoy_inner_path_leaked",)),
+        # Preserve parenthesized transcribers and nested namespaced calls.
+        "namespaced_and_nested_wrappers_keep_the_component": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                "macro_rules! define_tree {\n"
+                "    () => ( mod defined {\n        mod one;\n    } );\n}\n"
+                "define_tree!();\n#[macro_export]\n"
+                "macro_rules! passthrough { ($($t:tt)*) => ( $($t)* ); }\n"
+                "crate::passthrough! {\n    crate::passthrough! {\n"
+                "        mod scope {\n"
+                '            #[path = "moved.rs"]\n            mod child;\n'
+                "        }\n    }\n}\n",
+            "src/owner/defined/one.rs": "mod leaf_transcriber {}\n",
+            "src/owner/scope/moved.rs": "mod leaf_nested_wrapper {}\n",
+            "src/defined/one.rs": "mod decoy_transcriber_block {}\n",
+            "src/scope/moved.rs": "mod decoy_nested_read_as_block {}\n",
+        }, {
+            "one": "src/owner.rs:3",
+            "child": "src/owner.rs:13",
+            "leaf_transcriber": "src/owner/defined/one.rs:1",
+            "leaf_nested_wrapper": "src/owner/scope/moved.rs:1",
+        }, ("decoy_transcriber_block", "decoy_nested_read_as_block")),
+        # R5: raw keyword and non-keyword definitions both have three-token names.
+        "raw_definition_names_keep_the_component": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                "macro_rules! r#match {\n    () => ( mod keyword_defined {\n"
+                "        mod one;\n    } );\n}\n"
+                "macro_rules! r#define_tree {\n"
+                "    () => ( mod ordinary_defined {\n"
+                "        mod two;\n    } );\n}\n"
+                "r#match!();\nr#define_tree!();\n"
+                'mod sibling {\n    #[path = "tail.rs"]\n    mod tail;\n}\n',
+            "src/owner/keyword_defined/one.rs": "mod leaf_raw_keyword {}\n",
+            "src/owner/ordinary_defined/two.rs": "mod leaf_raw_ordinary {}\n",
+            "src/owner/sibling/tail.rs": "mod leaf_raw_tail {}\n",
+            "src/keyword_defined/one.rs": "mod decoy_raw_keyword_block {}\n",
+            "src/ordinary_defined/two.rs": "mod decoy_raw_ordinary_block {}\n",
+        }, {
+            "one": "src/owner.rs:3",
+            "two": "src/owner.rs:8",
+            "tail": "src/owner.rs:15",
+            "leaf_raw_keyword": "src/owner/keyword_defined/one.rs:1",
+            "leaf_raw_ordinary": "src/owner/ordinary_defined/two.rs:1",
+            "leaf_raw_tail": "src/owner/sibling/tail.rs:1",
+        }, ("decoy_raw_keyword_block", "decoy_raw_ordinary_block")),
+        # R6: the function owns this inner path, not the next inline module.
+        "inner_path_on_a_function_never_renames_a_later_scope": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs":
+                'fn helper() {\n    #![path = "fake"]\n    mod scope {\n'
+                '        #[path = "moved.rs"]\n        mod child;\n    }\n}\n'
+                'mod sibling {\n    #[path = "tail.rs"]\n    mod tail;\n}\n',
+            "src/scope/moved.rs": "mod leaf_inner_owner {}\n",
+            "src/owner/sibling/tail.rs": "mod leaf_inner_tail {}\n",
+            "src/fake/moved.rs": "mod decoy_inner_path_to_next_item {}\n",
+        }, {
+            "child": "src/owner.rs:5",
+            "tail": "src/owner.rs:10",
+            "leaf_inner_owner": "src/scope/moved.rs:1",
+            "leaf_inner_tail": "src/owner/sibling/tail.rs:1",
+        }, ("decoy_inner_path_to_next_item",)),
+        # R7: a present `#[path]` joins the current directory whatever it
+        # spells, so `""` is presence, not absence.
+        "inline_empty_path_override_is_not_absence": ({
+            "src/lib.rs": "mod owner;\n",
+            "src/owner.rs": '#[path = ""]\nmod scope {\n    mod child;\n}\n'
+                            'mod sibling {\n    #[path = "tail.rs"]\n'
+                            "    mod tail;\n}\n",
+            "src/child.rs": "mod leaf_empty_override {}\n",
+            "src/owner/sibling/tail.rs": "mod leaf_empty_tail {}\n",
+            "src/owner/scope/child.rs": "mod decoy_empty_read_as_absent {}\n",
+        }, {
+            "child": "src/owner.rs:3",
+            "tail": "src/owner.rs:7",
+            "leaf_empty_override": "src/child.rs:1",
+            "leaf_empty_tail": "src/owner/sibling/tail.rs:1",
+        }, ("decoy_empty_read_as_absent",)),
+    }
+
+    def test_every_frame_resolves_the_way_rustc_does(self) -> None:
+        for layout, (files, expected, forbidden) in self.LAYOUTS.items():
+            with self.subTest(layout=layout), \
+                    tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                lib = build_frame_repo(root, files)
+                with record_reads() as opened:
+                    modules = integrity.collect_modules(lib, root)
+                for name, site in expected.items():
+                    self.assertEqual(modules.get(name), site,
+                                     f"{layout}: {name}")
+                for name in forbidden:
+                    self.assertNotIn(name, modules,
+                                     f"{layout}: decoy must not be recorded")
+                decoys = {str(root / rel) for rel, text in files.items()
+                          if "decoy" in text}
+                self.assertEqual(sorted(decoys & set(opened)), [],
+                                 f"{layout}: decoy file must never be read")
+                # Empty modules still participate in filter classification.
+                self.assertEqual(
+                    integrity.collect_static_tests(lib, root).tests, {},
+                    f"{layout}: fixture is a no-test marker layout")
+
     ROOTS = {
         # A crate root owns its own directory whatever it is called.
         "custom_lib_root": ("src/custom_root.rs", {
@@ -1635,6 +2019,108 @@ class InlineDirectoryContext(unittest.TestCase):
             "tests/smoke/helper.rs": "mod decoy_test_as_module {}\n",
         }, "leaf_integration", "tests/helper.rs:1", "decoy_test_as_module"),
     }
+
+    # layout -> (filter, actual file, decoy); rc=1 alone cannot distinguish them.
+    ENTRYPOINTS = {
+        "attribute_string_brackets_never_extend_the_attribute":
+            ("leaf_real_sibling::case", "src/sibling.rs",
+             "src/outer/sibling.rs"),
+        "block_drops_the_files_pending_relative":
+            ("leaf_block_scope::case", "src/scope/moved.rs",
+             "src/owner/scope/moved.rs"),
+        "string_hash_before_an_index_is_not_an_attribute":
+            ("leaf_string_hash::case", "src/scope/moved.rs",
+             "src/moved.rs"),
+        "macro_delimiter_braces_are_not_a_block":
+            ("leaf_macro_wrapper::case", "src/owner/scope/moved.rs",
+             "src/scope/moved.rs"),
+        "and_unary_not_block_is_not_a_macro_header":
+            ("leaf_and_unary_not::case", "src/scope/moved.rs",
+             "src/owner/scope/moved.rs"),
+        "if_unary_not_block_is_not_a_macro_header":
+            ("leaf_if_unary_not::case", "src/scope/moved.rs",
+             "src/owner/scope/moved.rs"),
+        "inner_attribute_payload_never_renames_a_later_scope":
+            ("leaf_inner_attr::case", "src/owner/scope/moved.rs",
+             "src/fake/moved.rs"),
+        "namespaced_and_nested_wrappers_keep_the_component":
+            ("leaf_nested_wrapper::case", "src/owner/scope/moved.rs",
+             "src/scope/moved.rs"),
+        "raw_definition_names_keep_the_component":
+            ("leaf_raw_keyword::case", "src/owner/keyword_defined/one.rs",
+             "src/keyword_defined/one.rs"),
+        "inner_path_on_a_function_never_renames_a_later_scope":
+            ("leaf_inner_owner::case", "src/scope/moved.rs",
+             "src/fake/moved.rs"),
+        "inline_empty_path_override_is_not_absence":
+            ("leaf_empty_override::case", "src/child.rs",
+             "src/owner/scope/child.rs"),
+    }
+
+    def test_boundary_layouts_reach_main_with_the_real_file(self) -> None:
+        # Assert classification, actual site and decoy non-read, not just rc=1.
+        for layout, (filt, site, decoy) in self.ENTRYPOINTS.items():
+            with self.subTest(layout=layout), \
+                    tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                build_frame_repo(root, self.LAYOUTS[layout][0])
+                decoys = self.LAYOUTS[layout][2]
+                workflow = root / ".github/workflows/ci-fixture.yml"
+                write_files(root, {
+                    str(integrity.LIB_INVENTORY_MANIFEST_REL):
+                        integrity.render_lib_inventory_manifest(set()),
+                    str(integrity.SOURCE_FLOOR_REL): "workflows=1\njustfile=1\n",
+                    "justfile": f"fixture:\n    cargo test --lib {filt}\n",
+                    "allowlist.txt": "",
+                    ".github/workflows/ci-fixture.yml":
+                        "jobs:\n  lane:\n    steps:\n" + "".join(
+                            f'      - run: "cargo test --bin fixture {one}"\n'
+                            for one in (filt, *(f"{d}::case" for d in decoys))),
+                })
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with record_reads() as opened, \
+                        contextlib.redirect_stdout(stdout), \
+                        contextlib.redirect_stderr(stderr):
+                    rc = integrity.main([
+                        "--repo-root", str(root), "--workflow", str(workflow),
+                        "--allowlist", str(root / "allowlist.txt"), "--enforce",
+                    ])
+                report = stdout.getvalue()
+                self.assertEqual(rc, 1, report)
+                self.assertIn(
+                    f"[target-mismatch] filter `{filt}` names module "
+                    f"`{filt.split('::')[0]}` declared in lib ({site}:1)",
+                    report)
+                self.assertEqual(stderr.getvalue(), "")
+                self.assertNotIn(str(root / decoy), opened,
+                                 f"{layout}: main must not read the decoy")
+                # Check the opposite direction too: decoys must be unknown.
+                for name in decoys:
+                    self.assertIn("[unknown-module] module-path filter "
+                                  f"`{name}::case`", report)
+
+    # spelling -> (actual leaf site, decoy site). Only an absent attribute
+    # consumes the file's relative component and appends the module's name.
+    PATH_SPELLINGS = {
+        '#[path = ""]\n': ("src/child.rs:1", None),
+        '#[path = "."]\n': ("src/child.rs:1", None),
+        '#[path = "moved"]\n': (None, None),
+        "": (None, "src/owner/scope/child.rs:1"),
+    }
+
+    def test_a_present_inline_path_is_not_an_absent_one(self) -> None:
+        files = self.LAYOUTS["inline_empty_path_override_is_not_absence"][0]
+        for spelling, (leaf, decoy) in self.PATH_SPELLINGS.items():
+            with self.subTest(path=spelling or "absent"), \
+                    tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                owner = files["src/owner.rs"].replace('#[path = ""]\n',
+                                                      spelling)
+                lib = build_frame_repo(root, {**files, "src/owner.rs": owner})
+                modules = integrity.collect_modules(lib, root)
+                self.assertEqual(modules.get("leaf_empty_override"), leaf)
+                self.assertEqual(modules.get("decoy_empty_read_as_absent"),
+                                 decoy)
 
     def test_custom_and_integration_roots_own_their_directory(self) -> None:
         for label, (root_rel, files, leaf, site, decoy) in self.ROOTS.items():
@@ -1716,6 +2202,155 @@ class InlineDirectoryContext(unittest.TestCase):
             (root / "src/owner/child.rs").write_bytes(b"mod leaf {\xff}\n")
             with self.assertRaises(UnicodeError):
                 integrity.collect_modules(lib, root)
+
+
+class RustConsistentCrateProof(unittest.TestCase):
+    """Compiler-backed main() oracle: real site, positive --enforce, no decoy.
+
+    Bin filtering stays invalid; the cited file, not rc=1, proves ownership.
+    """
+
+    LIB = 'mod outer {\n    #[path = "renamed.rs"]\n    mod alpha;\n}\n'
+    CHILD = "mod deep_child {\n    #[test]\n    fn case() {}\n}\n"
+    BAD_BIN = "cargo test --bin fixture deep_child::case"
+    GOOD_LIB = "cargo test --lib outer::alpha::deep_child::case"
+
+    def build(self, root: Path, commands: tuple[str, ...], *,
+              decoy: bool = False) -> Path:
+        files = {
+            "src/lib.rs": self.LIB,
+            "src/outer/renamed.rs": self.CHILD,
+            "src/main.rs": "#[test]\nfn bin_smoke() {}\nfn main() {}\n",
+        }
+        if decoy:
+            # Same file name one directory up: what the old walker read.
+            files["src/renamed.rs"] = "mod decoy_only {}\n"
+        build_frame_repo(root, files)
+        write_files(root, {
+            str(integrity.LIB_INVENTORY_MANIFEST_REL):
+                integrity.render_lib_inventory_manifest(
+                    {"outer::alpha::deep_child::case"}),
+            str(integrity.SOURCE_FLOOR_REL): "workflows=1\njustfile=1\n",
+            "justfile": f"fixture:\n    {self.GOOD_LIB}\n",
+            "allowlist.txt": "",
+            ".github/workflows/ci-fixture.yml":
+                "jobs:\n  lane:\n    steps:\n" + "".join(
+                    f'      - run: "{command}"\n' for command in commands),
+        })
+        return root / ".github/workflows/ci-fixture.yml"
+
+    def run_main(self, root: Path, workflow: Path, *args: str) \
+            -> tuple[int, str, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), \
+                contextlib.redirect_stderr(stderr):
+            rc = integrity.main([
+                "--repo-root", str(root), "--workflow", str(workflow),
+                "--allowlist", str(root / "allowlist.txt"), *args,
+            ])
+        return rc, stdout.getvalue(), stderr.getvalue()
+
+    def test_deep_child_is_named_with_its_real_declaration_site(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflow = self.build(root, (self.BAD_BIN,))
+            rc, report, errs = self.run_main(root, workflow, "--enforce")
+            self.assertEqual(rc, 1, report)
+            self.assertIn(
+                "[target-mismatch] filter `deep_child::case` names module "
+                "`deep_child` declared in lib (src/outer/renamed.rs:1)",
+                report)
+            self.assertNotIn("unknown-module", report)
+            self.assertNotIn("module-path-", report)
+            self.assertEqual(errs, "")
+
+    def test_corrected_lib_command_stays_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflow = self.build(root, (self.GOOD_LIB,))
+            rc, report, errs = self.run_main(root, workflow, "--enforce")
+            self.assertEqual(rc, 0, report)
+            self.assertIn("test-target integrity check passed", report)
+            self.assertNotIn("module-path-", report)
+            self.assertEqual(errs, "")
+
+    def test_same_named_parent_decoy_is_never_read(self) -> None:
+        decoy_command = "cargo test --bin fixture decoy_only::case"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflow = self.build(root, (self.BAD_BIN, decoy_command),
+                                  decoy=True)
+            with record_reads() as opened:
+                rc, report, _ = self.run_main(root, workflow, "--enforce")
+            self.assertEqual(rc, 1, report)
+            self.assertIn("[unknown-module] module-path filter "
+                          "`decoy_only::case`", report)
+            self.assertIn("declared in lib (src/outer/renamed.rs:1)", report)
+            self.assertNotIn(str(root / "src/renamed.rs"), opened,
+                             "the walker must not read the same-named file "
+                             "next to the declaring source")
+            modules = integrity.collect_modules(root / "src/lib.rs", root)
+            self.assertNotIn("decoy_only", modules)
+            self.assertEqual(modules.get("deep_child"),
+                             "src/outer/renamed.rs:1")
+
+
+class MacroHeaderPredicate(unittest.TestCase):
+    """Header predicate controls for spans, source gaps and keyword names."""
+
+    # source -> is its last `{` a macro's token-tree delimiter?
+    HEADERS = {
+        "passthrough! { }": True,
+        "path::to::passthrough! { }": True,
+        "passthrough !\n{ }": True,
+        "passthrough /* moved */ ! // why\n{ }": True,
+        "r#match! { }": True,  # a raw identifier escapes the keyword rule
+        "macro_rules! passthrough { }": True,
+        "macro_rules /* c */ ! passthrough { }": True,
+        "FLAG && !{ }": False,  # the operators the lexer drops
+        "FLAG || !{ }": False,
+        "MASK & !{ }": False,
+        "if !{ }": False,  # keywords are idents to this lexer
+        "while !{ }": False,
+        "match !{ }": False,
+        "_ !{ }": False,
+        "!{ }": False,
+        "{ }": False,
+        '"passthrough" ! { }': False,  # a string is not a name
+        "macro_rules! if { }": False,
+        "macro_rules! r#match { }": True,  # the name is three tokens wide
+        "macro_rules! r#define_tree { }": True,
+        "macro_rules /* c */ ! /* c */ r#match /* c */ { }": True,
+        "macro_rules! r #match { }": False,  # `r#NAME` must be contiguous
+        "macro_rules! r# match { }": False,
+        "macro_rules! r #plain { }": False,
+        "macro_rules! r# plain { }": False,
+    }
+
+    def last_brace(self, tokens: list) -> int:
+        return max(offset for offset, token in enumerate(tokens)
+                   if token.kind == "punct" and token.value == "{")
+
+    def test_only_a_real_lexical_header_delimits_a_macro(self) -> None:
+        for source, expected in self.HEADERS.items():
+            with self.subTest(source=source):
+                tokens = integrity._rust_tokens(source)
+                self.assertIs(
+                    integrity._macro_delimiter(
+                        tokens, self.last_brace(tokens), source),
+                    expected)
+
+    def test_an_unproven_gap_is_not_a_macro_header(self) -> None:
+        # Spanless tokens and empty source cannot prove a header.
+        source = "passthrough! { }"
+        tokens = integrity._rust_tokens(source)
+        index = self.last_brace(tokens)
+        self.assertTrue(integrity._macro_delimiter(tokens, index, source))
+        spanless = [integrity.RustToken(token.value, token.line, token.kind)
+                    for token in tokens]
+        self.assertEqual(spanless, tokens, "spans must not change identity")
+        self.assertFalse(integrity._macro_delimiter(spanless, index, source))
+        self.assertFalse(integrity._macro_delimiter(tokens, index, ""))
 
 
 class StaticAttributeBoundaries(unittest.TestCase):

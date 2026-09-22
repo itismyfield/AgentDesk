@@ -29,7 +29,7 @@ import shlex
 import subprocess
 import sys
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -38,6 +38,10 @@ MOD_DECL = re.compile(
 )
 ATTR_PATH = re.compile(r'^\s*#\[path\s*=\s*"([^"]+)"\s*\]')
 ATTR_LINE = re.compile(r"^\s*#\[")
+# Over-approximations of MOD_DECL's two terminators, used only to skip the
+# quadratic token pass on files where inline scopes cannot change a lookup.
+INLINE_MOD_HINT = re.compile(r"\bmod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{")
+OUTLINED_MOD_HINT = re.compile(r"\bmod\s+[A-Za-z_][A-Za-z0-9_]*\s*;")
 RAW_STRING_OPEN = re.compile(r'r(#{0,255})"')
 CHAR_LITERAL = re.compile(r"'(?:\\.|[^\\'\n])'")
 # Leftmost start of anything that changes how the rest of the text is read.
@@ -186,6 +190,10 @@ class RustToken:
     value: str
     line: int
     kind: str = "punct"
+    # Source offsets reveal operators the lexer drops; they are metadata,
+    # not token identity, preserving positional construction and equality.
+    start: int = field(default=-1, compare=False)
+    end: int = field(default=-1, compare=False)
 
 
 def _rust_tokens(text: str) -> list[RustToken]:
@@ -195,6 +203,7 @@ def _rust_tokens(text: str) -> list[RustToken]:
     line = 1
     while index < len(text):
         char = text[index]
+        origin = index
         if char.isspace():
             line += char == "\n"
             index += 1
@@ -230,7 +239,8 @@ def _rust_tokens(text: str) -> list[RustToken]:
                 index = end + len(marker)
             value = text[start:end]
             line += value.count("\n")
-            tokens.append(RustToken(value, start_line, "string"))
+            tokens.append(RustToken(value, start_line, "string",
+                                    origin, index))
             continue
         if char == '"':
             start_line = line
@@ -248,7 +258,8 @@ def _rust_tokens(text: str) -> list[RustToken]:
                     value.append(text[index])
                     line += text[index] == "\n"
                     index += 1
-            tokens.append(RustToken("".join(value), start_line, "string"))
+            tokens.append(RustToken("".join(value), start_line, "string",
+                                    origin, index))
             continue
         if char == "'":
             literal = re.match(r"'(?:\\.|[^\\'\n])'", text[index:])
@@ -257,11 +268,12 @@ def _rust_tokens(text: str) -> list[RustToken]:
                 continue
         ident = re.match(r"[A-Za-z_][A-Za-z0-9_]*", text[index:])
         if ident:
-            tokens.append(RustToken(ident.group(), line, "ident"))
+            tokens.append(RustToken(ident.group(), line, "ident",
+                                    origin, origin + ident.end()))
             index += ident.end()
             continue
         if char in "#![]{}();=:":
-            tokens.append(RustToken(char, line))
+            tokens.append(RustToken(char, line, "punct", origin, origin + 1))
         index += 1
     return tokens
 
@@ -530,14 +542,145 @@ class _ModuleFrame:
                 else self.directory)
 
 
+# Keyword names require raw spelling in the supported macro-header subset.
+RUST_KEYWORDS = frozenset("""
+    as async await break const continue crate dyn else enum extern false fn
+    for if impl in let loop match mod move mut pub ref return self static
+    struct super trait true type unsafe use where while Self abstract become
+    box do final macro override priv typeof unsized virtual yield try
+""".split())
+
+
+def _only_trivia(source: str, start: int, end: int) -> bool:
+    """Check a bounded, trivia-only gap; missing spans fail closed.
+
+    Comment stripping preserves offsets; source must match the tokens.
+    """
+    return 0 <= start <= end <= len(source) \
+        and not _strip_rust_comments(source[start:end]).strip()
+
+
+def _macro_name(tokens: list[RustToken], index: int, source: str) -> int | None:
+    """First token of the macro name ENDING at `index`, else None.
+
+    `r#NAME` is three adjacent tokens; its start locates the definition prefix.
+    Only raw spelling escapes the keyword gate.
+    """
+    token = tokens[index]
+    if token.kind != "ident" or token.value == "_":
+        return None
+    if token.start < 2 or source[token.start - 2:token.start] != "r#":
+        return None if token.value in RUST_KEYWORDS else index
+    if index < 2:
+        return None
+    raw, marker = tokens[index - 2], tokens[index - 1]
+    return index - 2 if raw.kind == "ident" and raw.value == "r" \
+        and marker.kind == "punct" and marker.value == "#" \
+        and raw.end == marker.start and marker.end == token.start else None
+
+
+def _macro_delimiter(tokens: list[RustToken], index: int, source: str) -> bool:
+    """Recognize a macro token-tree brace, preserving file ownership.
+
+    Prove NAME ! { or macro_rules ! NAME { from the logical name's start.
+    Gaps reject dropped operators (`FLAG && !{`); names reject keywords
+    (`if !{`). `source` must be the exact text used to produce the tokens.
+    """
+    if tokens[index].kind != "punct" or tokens[index].value != "{" \
+            or index < 2:
+        return False
+    if tokens[index - 1].kind == "punct" and tokens[index - 1].value == "!":
+        head = _macro_name(tokens, index - 2, source)  # `path::to::NAME! {`
+    else:
+        start = _macro_name(tokens, index - 1, source)
+        head = None if start is None or start < 2 else start - 2
+        if head is not None and (
+                tokens[head].kind, tokens[head].value,
+                tokens[head + 1].kind, tokens[head + 1].value) != (
+                "ident", "macro_rules", "punct", "!"):
+            head = None  # `macro_rules! NAME {` defines rather than calls
+    return head is not None and all(
+        _only_trivia(source, tokens[cursor].end, tokens[cursor + 1].start)
+        for cursor in range(head, index))
+
+
+def _inline_frames(text: str, frame: _ModuleFrame) -> dict[int, _ModuleFrame]:
+    """Map each `mod` line to its enclosing frame; the caller resolves it.
+
+    Only punctuation opens/closes scopes and attributes. Blocks drop the
+    file-relative component; macro delimiters preserve it (see below).
+    """
+    tokens = _rust_tokens(text)
+    frames: dict[int, _ModuleFrame] = {}
+    scopes: list[tuple[int, _ModuleFrame]] = []
+    depth = 0
+    pending_path: str | None = None
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        span = _attribute_span(tokens, index)
+        if span is not None:
+            # Skip the entire span, including inner attributes and opaque payloads.
+            bracket, end = span
+            attr = tokens[bracket + 1:end - 1]
+            head = next((item.value for item in attr
+                         if item.kind == "ident"), "")
+            # Outer # [ decorates the next item; inner # ! [ belongs to its owner.
+            if head == "path" and bracket == index + 1:
+                pending_path = next((item.value for item in attr
+                                     if item.kind == "string"), None)
+            index = end
+            continue
+        if token.value == "mod" and token.kind == "ident" \
+                and index + 1 < len(tokens) \
+                and tokens[index + 1].kind == "ident":
+            name = tokens[index + 1].value
+            cursor = index + 2
+            while cursor < len(tokens) \
+                    and tokens[cursor].value not in (";", "{"):
+                cursor += 1
+            current = scopes[-1][1] if scopes else frame
+            frames.setdefault(token.line, current)
+            if cursor < len(tokens) and tokens[cursor].value == "{":
+                # Inline #[path] renames the directory without consuming relative;
+                # a plain inline module consumes relative, then appends its name.
+                directory = (current.directory / pending_path if pending_path is not None
+                             else current.child_dir() / name)
+                depth += 1
+                scopes.append((depth, _ModuleFrame(directory)))
+                index = cursor + 1
+                pending_path = None
+                continue
+            pending_path = None
+        if token.kind == "punct" and token.value == "{":
+            # A braced item consumes its attributes; they cannot rename a sibling.
+            depth += 1
+            pending_path = None
+            # A block drops relative (owner.rs -> scope/, not owner/scope/).
+            # Popping its frame restores relative; macro token trees keep it.
+            enclosing = scopes[-1][1] if scopes else frame
+            if enclosing.relative is not None \
+                    and not _macro_delimiter(tokens, index, text):
+                scopes.append((depth, _ModuleFrame(enclosing.directory)))
+        elif token.kind == "punct" and token.value == "}":
+            depth -= 1
+            while scopes and scopes[-1][0] > depth:
+                scopes.pop()
+        elif token.kind == "punct" and token.value == ";":
+            pending_path = None
+        index += 1
+    return frames
+
+
 def collect_modules(root: Path, repo_root: Path) -> dict[str, str]:
     """Walk `mod` declarations from a crate root; name -> first decl site.
 
     Descent follows rustc's real directory ownership (confirmed against
     rustc 1.94.1 and 1.94.0): a root and a `mod.rs` own their directory
-    whatever the root file is called, a plain `foo.rs` owns `foo/`,
-    and an outlined `#[path]` picks a file whose own children are siblings.
-    Inline directory ownership is not modeled by this file-level walk.
+    whatever the root file is called, a plain `foo.rs` owns `foo/`, an
+    inline `mod x { ... }` nests one level deeper, an outlined `#[path]`
+    picks a file whose own children are siblings, and an inline `#[path]`
+    renames the directory.
     """
     modules: dict[str, str] = {}
     queue = [(root, _ModuleFrame(root.parent))]
@@ -556,6 +699,15 @@ def collect_modules(root: Path, repo_root: Path) -> dict[str, str]:
         # Comments are trivia: a `// why this moved` line between #[path] and
         # its `mod` must not detach the redirect.
         text = _strip_rust_comments(source.read_text("utf-8"))
+        # Avoid the quadratic lexer unless an outlined mod follows an inline
+        # opener. These hints over-approximate the line-oriented MOD_DECL;
+        # earlier outlined items still resolve in the file frame.
+        opener = INLINE_MOD_HINT.search(text)
+        inline_frames = (
+            _inline_frames(text, frame)
+            if opener and OUTLINED_MOD_HINT.search(text, opener.end())
+            else {}
+        )
         for lineno, line in enumerate(text.splitlines(), 1):
             # An attribute and the item it decorates may share one line
             # (`#[path = "x.rs"] mod x;`), so consume the attribute prefix
@@ -581,7 +733,7 @@ def collect_modules(root: Path, repo_root: Path) -> dict[str, str]:
             modules.setdefault(name, f"{source.relative_to(repo_root)}:{lineno}")
             if terminator != ";":
                 continue  # inline module: same-file lines are already scanned
-            current = frame
+            current = inline_frames.get(lineno, frame)
             if redirect is not None:
                 # An outlined `#[path]` resolves against the frame directory
                 # and never against its pending relative component.
