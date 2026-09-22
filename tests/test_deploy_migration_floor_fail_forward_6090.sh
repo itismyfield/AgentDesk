@@ -229,6 +229,58 @@ for forbidden in bootout "kill-session" bootstrap "kill " LOCK_FILE dcserver.loc
 done
 
 
+echo "§5 staging lives in the install directory, which is what makes the install a rename"
+
+eval "$(extract_function _staged_deploy_binary_path)"
+staged_probe="$(_staged_deploy_binary_path)"
+if [ "$(dirname "$staged_probe")" = "$(dirname "$REL_BINARY")" ]; then
+    pass "the staged binary is created beside the one it replaces"
+else
+    fail "staging is in $(dirname "$staged_probe") but the target is in $(dirname "$REL_BINARY") — the install would be a cross-device copy, not a rename"
+fi
+rm -f "$staged_probe"
+
+echo "§6 a failed install must not leave the node with no bootable binary"
+
+reset_node
+STUB_CURL_RC=7
+STUB_HTTP_CODE=000
+STUB_MV_FAIL=1
+_recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
+if ls "$ADK_REL"/bin/agentdesk.migration-floor-recovery* >/dev/null 2>&1; then
+    pass "the staged binary survived a failed install"
+else
+    fail "a failed install lost the only migration-capable binary"
+fi
+if [ -z "${STAGED_BINARY:-}" ]; then
+    pass "cleanup cannot delete it afterwards"
+else
+    fail "cleanup would delete the last bootable binary at '$STAGED_BINARY'"
+fi
+
+echo "§7 preserving twice never destroys the earlier recovery binary"
+
+reset_node
+STUB_MV_FAIL=1
+_recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
+first="$RECOVERY"
+printf 'FIRST-KEPT' >"$first"
+STAGED_BINARY="$ADK_REL/bin/agentdesk.deploy.test2"
+printf 'SECOND-STAGED' >"$STAGED_BINARY"
+STUB_MV_FAIL=1
+_recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
+if [ "$(cat "$first")" = "FIRST-KEPT" ]; then
+    pass "an earlier recovery binary is not overwritten by a later abort"
+else
+    fail "a later abort destroyed the binary proven to boot against the current schema"
+fi
+if [ -e "$first.1" ]; then
+    pass "the later binary is kept alongside it"
+else
+    fail "the later binary was dropped instead of kept alongside"
+fi
+rm -f "$ADK_REL/bin/agentdesk.deploy.test2"
+
 echo "§9 the swap is refused when the replaced binary cannot be kept"
 
 reset_node

@@ -1153,7 +1153,7 @@ _recover_or_preserve_past_migration_floor() {
         return 0
     fi
     STAGED_BINARY=""
-    echo "✓ $rel_binary now boots against the migrated database."
+    echo "✓ Installed the binary that ran the database migration at $rel_binary."
     echo "   The running process keeps its own image; the next restart picks this up."
 }
 
