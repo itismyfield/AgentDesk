@@ -820,10 +820,8 @@ PY
 }
 
 _migration_floor_may_advance() {
-    # Factual half of the rollback guard: does this source carry a Postgres
-    # migration the last successfully deployed binary does not embed? Answers
-    # only that question, so no rollback policy override may reach it. Fails
-    # closed (0 = may advance) whenever the comparison cannot be made.
+    # Whether this source carries a migration the last deployed binary lacks.
+    # Factual only, so no rollback override reaches it; fails closed.
     local new_path new_name old_name
     new_path="$(_latest_postgres_migration_path 2>/dev/null || true)"
     if [ -z "$new_path" ]; then
@@ -1094,11 +1092,8 @@ _rollback_pg_tunnel_migration() {
 }
 
 _release_runtime_is_serving() {
-    # A crash-looping runtime still gets a fresh pid from launchd but never binds
-    # the port, so liveness must be probed on the port rather than with kill -0.
-    # Only curl's "could not connect" (7) proves nothing owns the port: a 5xx or a
-    # wedged handler that times out is still a process holding an in-flight
-    # frontier, so every other outcome fails closed to "serving".
+    # A crash loop keeps a fresh pid but never binds, so probe the port. Only
+    # curl 7 means absent; a 5xx or a timeout still owns a frontier.
     local port="$1" rc=0
     [ -n "$port" ] || return 1
     curl -s -o /dev/null --max-time 3 \
@@ -1108,8 +1103,7 @@ _release_runtime_is_serving() {
 }
 
 _migration_floor_artifact_path() {
-    # Never clobber an earlier recovery artifact: the older one may be the only
-    # binary proven to boot against the schema the database actually has.
+    # An older artifact may be the only binary that boots against the live schema.
     local base="$1" path="$1" n=0
     while [ -e "$path" ]; do
         n=$((n + 1))
@@ -1119,9 +1113,7 @@ _migration_floor_artifact_path() {
 }
 
 _preserve_staged_binary_for_recovery() {
-    # The staged binary may be the only one that can boot against an advanced
-    # schema, so it must outlive the generic staging cleanup. Clearing
-    # STAGED_BINARY is what removes it from that cleanup's reach.
+    # Clearing STAGED_BINARY is what keeps the staging cleanup from deleting it.
     local target
     [ -n "${STAGED_BINARY:-}" ] && [ -e "${STAGED_BINARY:-}" ] || return 1
     target="$(_migration_floor_artifact_path "$ADK_REL/bin/agentdesk.migration-floor-recovery")"
@@ -1136,11 +1128,9 @@ _preserve_staged_binary_for_recovery() {
 }
 
 _release_job_backing_pid() {
-    # launchd owns whether the job has a live backing process right now. A lock
-    # file cannot answer that: its pid can be stale and recycled by an unrelated
-    # process, which would report the node as busy forever and block recovery.
+    # launchd knows the current backing pid; a lock file's pid can be recycled
+    # and would report the node busy forever.
     local domain="$1" label="$2"
-    [ -n "$domain" ] && [ -n "$label" ] || return 1
     launchctl print "$domain/$label" 2>/dev/null \
         | awk -F'=' '/^[[:space:]]*pid[[:space:]]*=[[:space:]]*[0-9]+[[:space:]]*$/ {
               gsub(/[^0-9]/, "", $2); print $2; exit
@@ -1148,23 +1138,16 @@ _release_job_backing_pid() {
 }
 
 _old_runtime_pid_is_alive() {
-    # A crash loop gets a new pid from launchd, so the pid captured before the
-    # drain proves nothing about the generation running now. Ask launchd for the
-    # current one; a job it reports no pid for has no backing process.
+    # The captured pid is one generation; ask launchd for the current one.
     local domain current
     [ -n "${OLD_PID:-}" ] && kill -0 "${OLD_PID}" 2>/dev/null && return 0
     domain="$(_launchd_domain 2>/dev/null)" || domain="gui/$(id -u 2>/dev/null)"
     current="$(_release_job_backing_pid "$domain" "${PLIST_REL:-}" || true)"
-    case "$current" in
-        '' | *[!0-9]*) return 1 ;;
-    esac
-    return 0
+    [ -n "$current" ]
 }
 
 _release_job_is_quiescent() {
-    # One clean sample can land between a process exiting and its replacement
-    # binding, so require consecutive clean observations before anything is
-    # stopped or swapped.
+    # One sample can land between a process exiting and its replacement binding.
     local port="$1" want="${2:-3}" seen=0
     while [ "$seen" -lt "$want" ]; do
         if _release_runtime_is_serving "$port" || _old_runtime_pid_is_alive; then
@@ -1177,11 +1160,8 @@ _release_job_is_quiescent() {
 }
 
 _recover_or_preserve_past_migration_floor() {
-    # Postgres may now be ahead of the live binary, which would crash-loop under
-    # launchd. Promote forward only once nothing is serving AND the previous
-    # process is gone: the durability gate refused to stop a runtime whose
-    # in-flight delivery frontier is not proven durable, and undoing that refusal
-    # here would discard exactly what it protected.
+    # Promote forward only once nothing is serving and the previous process is
+    # gone; stopping a live runtime loses the frontier the durability gate kept.
     local rel_binary="${REL_BINARY:-$ADK_REL/bin/agentdesk}"
     local plist="${PLIST_REL:-}"
     local rel_port="${REL_PORT:-${AGENTDESK_REL_PORT:-${ADK_DEFAULT_PORT:-8791}}}"
@@ -1203,8 +1183,7 @@ _recover_or_preserve_past_migration_floor() {
         return 0
     fi
 
-    # Not listening is not the same as gone: a draining runtime stops accepting
-    # before its frontier is durable. Give the recorded process time to leave.
+    # A draining runtime stops accepting before its frontier is durable.
     while _old_runtime_pid_is_alive && [ "$waited" -lt 15 ]; do
         sleep 1
         waited=$((waited + 1))
@@ -1224,22 +1203,18 @@ _recover_or_preserve_past_migration_floor() {
     launchctl bootout "$domain/$plist" 2>/dev/null || true
     tmux kill-session -t "${AGENTDESK_RELEASE_TMUX_SESSION:-AgentDesk-dcserver-release-manual}" 2>/dev/null || true
 
-    # Re-prove both conditions after stopping the job: anything that answers now
-    # would also answer the health check below and fake a successful promote.
+    # Anything answering now would also answer the health check and fake success.
     if ! _release_job_is_quiescent "$rel_port" 3; then
         echo "✗ Something still owns :${rel_port} after bootout — refusing to swap the binary" >&2
         _preserve_staged_binary_for_recovery || true
         return 0
     fi
 
-    # Keep the binary being replaced. It is not last-known-good, so it must not
-    # become .prev, but it is the only executable that can boot if the database
-    # turns out not to have advanced after all.
+    # Not last-known-good, so not .prev, but the only executable that boots if
+    # the schema never advanced.
     chflags nouchg "$rel_binary" 2>/dev/null || true
     if [ -e "$rel_binary" ]; then
-        # The copy must succeed before the swap. A full disk can fail the copy
-        # while the same-filesystem rename still succeeds, which would destroy
-        # the only executable that boots if the schema never advanced.
+        # A full disk can fail the copy while the rename still succeeds.
         keep="$(_migration_floor_artifact_path "$ADK_REL/bin/agentdesk.pre-migration-floor")"
         if ! cp -p "$rel_binary" "$keep" 2>/dev/null; then
             rm -f "$keep" 2>/dev/null || true
@@ -1286,8 +1261,7 @@ _cleanup_on_exit() {
     if [ "${ROLLBACK_ARMED:-0}" = 1 ] && [ "${DEPLOY_OK:-0}" != 1 ]; then
         _rollback_release_binary
     fi
-    # Aborted after the migration floor but before promotion: the live binary may
-    # no longer boot, so recover the node or preserve the one binary that can.
+    # Aborted past the floor without promoting: recover, or preserve what boots.
     if [ "${MIGRATION_FLOOR_ARMED:-0}" = 1 ] && [ "${ROLLBACK_ARMED:-0}" != 1 ] \
         && [ "${DEPLOY_OK:-0}" != 1 ]; then
         _recover_or_preserve_past_migration_floor
@@ -2675,9 +2649,8 @@ fi
 # drain marker or self-exit trigger may exist when candidate migration runs. The
 # tunnel migration above is a fail-closed, SQL-ready prerequisite; its EXIT trap
 # restores the previous tunnel state if that prerequisite itself fails.
-# A partial apply, or a commit whose advisory-lock release then fails, advances
-# Postgres even when the command reports failure. Arm before the attempt so the
-# exit code cannot lose the fact that the live binary may no longer boot.
+# A partial apply advances Postgres even when the command reports failure, so
+# arm before the attempt.
 if _migration_floor_may_advance; then
     MIGRATION_FLOOR_ARMED=1
 fi
