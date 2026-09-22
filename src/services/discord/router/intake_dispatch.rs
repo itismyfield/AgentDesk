@@ -10,6 +10,7 @@ use poise::serenity_prelude as serenity;
 
 mod attachment;
 mod notice;
+mod policy_channel;
 mod queued;
 mod skill;
 #[cfg(test)]
@@ -145,6 +146,21 @@ pub(crate) async fn admit_text_intake(
         };
     };
 
+    let policy_channel_id = match policy_channel::resolve(
+        deps,
+        pool,
+        submission.request.channel_id,
+        submission.request.dm_hint == Some(true),
+    )
+    .await
+    {
+        Ok(channel) => channel,
+        Err(detail) => {
+            return IntakeAdmission::Blocked {
+                reason: IntakeBlockedReason::RoutingDependencyFailed { detail },
+            };
+        }
+    };
     let mut prepared_uploads = Vec::new();
     if !submission.attachments.is_empty() {
         let identity = crate::services::cluster::attachment_transfer::AttachmentMessageIdentity {
@@ -210,6 +226,7 @@ pub(crate) async fn admit_text_intake(
         leader_instance_id: &self_instance_id,
         provider: submission.provider.as_str(),
         channel_id: &channel_id,
+        policy_channel_id: &policy_channel_id,
         user_msg_id: &user_msg_id,
         request_owner_id: &request_owner_id,
         request_owner_name: Some(&request.request_owner_name),

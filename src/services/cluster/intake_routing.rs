@@ -38,6 +38,8 @@ pub(crate) enum LocalRouteReason {
     /// The only eligible target IS the leader itself (e.g., leader's
     /// own labels happen to match the preference).
     LeaderIsOnlyEligible,
+    /// The eligible leader is the agent's explicitly preferred device.
+    PreferredNodeIsLeader,
 }
 
 /// Inputs needed by the routing decision. Decoupled from `worker_nodes`
@@ -135,6 +137,33 @@ pub(crate) fn pick_required_intake_target(
         select_matching_intake_target(candidates, &[], leader_instance_id)
     } else {
         preferred
+    }
+}
+
+/// The caller supplies only ready, compatible nodes with available capacity.
+/// A primary device takes precedence over labels, including a preferred leader.
+/// If absent from that set, reuse the normal compatible fallback selection.
+pub(crate) fn pick_preferred_node_target(
+    candidates: &[CandidateNode],
+    preferred_node: &str,
+    preferred_labels: &[String],
+    leader_instance_id: &str,
+) -> IntakeRouteTarget {
+    if candidates
+        .iter()
+        .any(|c| c.instance_id == preferred_node && c.status == "online")
+    {
+        if preferred_node == leader_instance_id {
+            IntakeRouteTarget::Local {
+                reason: LocalRouteReason::PreferredNodeIsLeader,
+            }
+        } else {
+            IntakeRouteTarget::Worker {
+                instance_id: preferred_node.to_owned(),
+            }
+        }
+    } else {
+        pick_required_intake_target(candidates, preferred_labels, leader_instance_id)
     }
 }
 

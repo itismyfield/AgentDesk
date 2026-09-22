@@ -1,5 +1,11 @@
-//! Ownerless placement constrained by hard execution policy.
+//! Ownerless placement: per-agent primary, compatible fallback, and bounded capacity.
 use super::*;
+use crate::services::cluster::intake_routing::{
+    IntakeRouteTarget, LocalRouteReason, candidates_from_worker_nodes_json, pick_intake_target,
+};
+use crate::services::cluster::{
+    attachment_transfer, execution_capacity, intake_routing, readiness,
+};
 
 fn preferred_label_dependency_fallback(detail: String) -> IntakeRouterDecision {
     IntakeRouterDecision::RanLocal {
@@ -7,12 +13,15 @@ fn preferred_label_dependency_fallback(detail: String) -> IntakeRouterDecision {
     }
 }
 
-pub(super) async fn route_by_preferred_labels(
+pub(super) async fn route_by_preference(
     pool: &PgPool,
     ctx: &IntakeRouterContext<'_>,
     requirements: &ExecutionRequirements,
+    preferred_node: Option<&str>,
 ) -> IntakeRouterDecision {
-    let capacity_aware = crate::services::cluster::execution_capacity::automatic_enabled();
+    // A per-agent primary opts only this agent into bounded compatible fallback.
+    // Agents without it retain the existing global/label routing policy.
+    let capacity_aware = preferred_node.is_some() || execution_capacity::automatic_enabled();
     // Resolve agent + preference. NoAgentForChannel is NOT an error —
     // many channels (DMs, ad-hoc cross-bot) have no agent row.
     //
@@ -21,10 +30,10 @@ pub(super) async fn route_by_preferred_labels(
     // channels, so on a paired agent it disagrees with the bot that is
     // actually handling this message. `ctx.provider` is that bot.
     let (agent_id, _agent_provider, preferred_labels) =
-        match agent_id_and_preferred_labels(pool, ctx.channel_id).await {
+        match agent_id_and_preferred_labels(pool, ctx.policy_channel_id).await {
             Ok(Some((agent_id, provider, labels))) => (agent_id, provider, labels),
             Ok(None) => {
-                if !requirements.is_empty() {
+                if !requirements.is_empty() || preferred_node.is_some() {
                     return required_block(
                         "agent disappeared while validating execution requirements".into(),
                     );
@@ -37,7 +46,7 @@ pub(super) async fn route_by_preferred_labels(
                 );
             }
             Err(error) => {
-                if !requirements.is_empty() {
+                if !requirements.is_empty() || preferred_node.is_some() {
                     return required_block(error.to_string());
                 }
                 return apply_observe_mode(
@@ -56,11 +65,7 @@ pub(super) async fn route_by_preferred_labels(
         );
     }
 
-    let auth_profile = crate::services::cluster::readiness::expected_auth_profile(
-        ctx.provider,
-        ctx.channel_id,
-        &agent_id,
-    );
+    let auth_profile = readiness::expected_auth_profile(ctx.provider, ctx.channel_id, &agent_id);
     let mut candidates = match crate::services::cluster::node_registry::list_worker_nodes(
         pool,
         worker_heartbeat_lease_secs(),
@@ -75,19 +80,21 @@ pub(super) async fn route_by_preferred_labels(
                         node,
                         ctx.provider,
                         ctx.preserve_on_cancel,
-                    ) && crate::services::cluster::readiness::evaluate_declared(
-                        node,
-                        ctx.provider,
-                        &auth_profile,
-                    )
-                    .eligible
+                    ) && readiness::evaluate_declared(node, ctx.provider, &auth_profile).eligible
                         && required_node_reasons(node, requirements).is_empty()
-                        && (ctx.attachment_refs.is_empty()
-                            || crate::services::cluster::attachment_transfer::supports(node))
+                        && (preferred_node.is_none()
+                            || readiness::evaluate(
+                                node,
+                                ctx.provider,
+                                &auth_profile,
+                                chrono::Utc::now().timestamp_millis(),
+                            )
+                            .eligible)
+                        && (ctx.attachment_refs.is_empty() || attachment_transfer::supports(node))
                 })
                 .collect();
             if capacity_aware {
-                crate::services::cluster::execution_capacity::rank(&mut eligible_nodes);
+                execution_capacity::rank(&mut eligible_nodes);
             }
             candidates_from_worker_nodes_json(&eligible_nodes)
         }
@@ -103,10 +110,17 @@ pub(super) async fn route_by_preferred_labels(
     };
 
     loop {
-        let selection = if requirements.is_empty() && !capacity_aware {
+        let selection = if let Some(primary) = preferred_node {
+            intake_routing::pick_preferred_node_target(
+                &candidates,
+                primary,
+                &preferred_labels,
+                ctx.leader_instance_id,
+            )
+        } else if requirements.is_empty() && !capacity_aware {
             pick_intake_target(&candidates, &preferred_labels, ctx.leader_instance_id)
         } else {
-            crate::services::cluster::intake_routing::pick_required_intake_target(
+            intake_routing::pick_required_intake_target(
                 &candidates,
                 &preferred_labels,
                 ctx.leader_instance_id,
@@ -127,6 +141,9 @@ pub(super) async fn route_by_preferred_labels(
                             LocalRouteReason::NoEligibleWorker => RanLocalReason::NoEligibleWorker,
                             LocalRouteReason::LeaderIsOnlyEligible => {
                                 RanLocalReason::LeaderIsOnlyEligible
+                            }
+                            LocalRouteReason::PreferredNodeIsLeader => {
+                                RanLocalReason::AgentDefaultIsLeader
                             }
                             LocalRouteReason::NoPreference => unreachable!(
                                 "pick_intake_target cannot return no-preference after non-empty preference gate"
@@ -158,126 +175,22 @@ pub(super) async fn route_by_preferred_labels(
                 &[]
             },
             &agent_id,
-            ObserveTargetKind::PreferredLabels,
+            if preferred_node.is_some() {
+                ObserveTargetKind::AgentDefault
+            } else {
+                ObserveTargetKind::PreferredLabels
+            },
             requirements,
         )
         .await;
         if capacity_aware
             && matches!(&decision, IntakeRouterDecision::Blocked {
         reason: IntakeBlockedReason::RoutingDependencyFailed { detail }
-    } if detail == crate::services::cluster::execution_capacity::EXHAUSTED)
+    } if detail == execution_capacity::EXHAUSTED)
         {
             candidates.retain(|candidate| candidate.instance_id != target);
             continue;
         }
         return decision;
     }
-}
-
-pub(super) async fn route_node_override_without_owner(
-    pool: &PgPool,
-    ctx: &IntakeRouterContext<'_>,
-    target: &str,
-    requirements: &ExecutionRequirements,
-) -> IntakeRouterDecision {
-    // #4349: `agents.provider` is ignored here for the same reason as in
-    // `try_route_intake` — the handling bot is `ctx.provider`.
-    let (agent_id, _agent_provider, _) =
-        match agent_id_and_preferred_labels(pool, ctx.channel_id).await {
-            Ok(Some((agent_id, provider, labels))) => (agent_id, provider, labels),
-            Ok(None) => (String::new(), String::new(), Vec::new()),
-            Err(error) => {
-                return apply_observe_mode(
-                    ctx.mode,
-                    IntakeRouterDecision::Blocked {
-                        reason: IntakeBlockedReason::RoutingDependencyFailed {
-                            detail: format!("agent lookup for node override: {error}"),
-                        },
-                    },
-                );
-            }
-        };
-
-    if let Some(blocked) = check_required_target(pool, ctx, target, requirements).await {
-        return blocked;
-    }
-    if target == ctx.leader_instance_id {
-        return apply_observe_mode(
-            ctx.mode,
-            IntakeRouterDecision::RanLocal {
-                reason: RanLocalReason::NodeOverrideIsLeader,
-            },
-        );
-    }
-
-    if ctx.has_nonportable_uploads {
-        return apply_observe_mode(
-            ctx.mode,
-            IntakeRouterDecision::Blocked {
-                reason: IntakeBlockedReason::NonPortableAttachmentRoutedTarget {
-                    target_instance_id: target.to_string(),
-                },
-            },
-        );
-    }
-
-    let nodes = match crate::services::cluster::node_registry::list_worker_nodes(
-        pool,
-        worker_heartbeat_lease_secs(),
-    )
-    .await
-    {
-        Ok(nodes) => nodes,
-        Err(_) => {
-            return apply_observe_mode(
-                ctx.mode,
-                IntakeRouterDecision::Blocked {
-                    reason: IntakeBlockedReason::OverrideUnavailable {
-                        target_instance_id: target.to_string(),
-                    },
-                },
-            );
-        }
-    };
-    let target_online = nodes.iter().any(|node| {
-        node.get("instance_id").and_then(|value| value.as_str()) == Some(target)
-            && node
-                .get("status")
-                .and_then(|value| value.as_str())
-                .is_some_and(|status| status.eq_ignore_ascii_case("online"))
-            && crate::services::cluster::node_registry::node_supports_intake_request(
-                node,
-                ctx.provider,
-                ctx.preserve_on_cancel,
-            )
-    });
-    if !target_online {
-        return apply_observe_mode(
-            ctx.mode,
-            IntakeRouterDecision::Blocked {
-                reason: IntakeBlockedReason::OverrideUnavailable {
-                    target_instance_id: target.to_string(),
-                },
-            },
-        );
-    }
-
-    let required_labels: Vec<String> = Vec::new();
-    route_to_instance(
-        pool,
-        ctx,
-        target,
-        &required_labels,
-        &agent_id,
-        ObserveTargetKind::NodeOverride,
-        requirements,
-    )
-    .await
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum ObserveTargetKind {
-    LiveForeignOwner,
-    NodeOverride,
-    PreferredLabels,
 }

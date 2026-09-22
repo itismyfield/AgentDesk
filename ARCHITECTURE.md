@@ -539,7 +539,9 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── intake_router_hook/
 │   │   │   ├── attachment_tests.rs
+│   │   │   ├── capacity_tests.rs
 │   │   │   ├── execution_requirement_tests.rs
+│   │   │   ├── model.rs
 │   │   │   ├── owner_record.rs
 │   │   │   ├── placement.rs
 │   │   │   └── session_owner.rs
@@ -918,6 +920,7 @@ src/
 │   │   │   ├── intake_dispatch/
 │   │   │   │   ├── attachment.rs
 │   │   │   │   ├── notice.rs
+│   │   │   │   ├── policy_channel.rs
 │   │   │   │   ├── queued.rs
 │   │   │   │   ├── skill.rs
 │   │   │   │   └── tests.rs

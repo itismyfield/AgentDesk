@@ -15,13 +15,10 @@
 
 use super::execution_requirements::ExecutionRequirements;
 use crate::db::intake_outbox::{
-    InsertPendingPayload, IntakeInsertConflict, classify_insert_pending_error, insert_pending,
+    IntakeInsertConflict, classify_insert_pending_error, insert_pending,
 };
 use crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
 use crate::db::intake_outbox_status::IntakeOutboxStatus;
-use crate::services::cluster::intake_routing::{
-    IntakeRouteTarget, LocalRouteReason, candidates_from_worker_nodes_json, pick_intake_target,
-};
 use sqlx::PgPool;
 
 #[cfg(test)]
@@ -31,9 +28,7 @@ mod capacity_tests;
 #[cfg(test)]
 mod execution_requirement_tests;
 pub(crate) mod owner_record;
-mod placement;
 mod session_owner;
-use placement::{ObserveTargetKind, route_by_preferred_labels, route_node_override_without_owner};
 
 use session_owner::SessionOwnerResolution;
 
@@ -42,164 +37,14 @@ pub(crate) use super::intake_routing_config::{
     intake_routing_status_json,
 };
 
-/// What the hook decided. The intake gate uses this to choose between
-/// "skip local execution; the worker has the row" and "fall through
-/// to `handle_text_message` as today".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IntakeRoutingBasis {
-    LiveForeignOwner,
-    NodeOverride,
-    PreferredLabels,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ResolvedSessionOwner {
-    NoOwner,
-    LiveLocal,
-    LiveForeign,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum IntakeRouterDecision {
-    /// No forwarding happened (Disabled mode, a confirmed ownerless channel
-    /// with no usable preference, or an availability fallback after that
-    /// ownerless state was proven). The caller MUST run the turn locally.
-    RanLocal { reason: RanLocalReason },
-    /// Observe mode evaluated the same owner-aware placement path as Enforce,
-    /// but did not mutate the outbox. The caller MUST still run locally.
-    Observed { outcome: ObservedIntakeOutcome },
-    /// The hook inserted a row for the worker. The caller MUST NOT
-    /// run the turn locally — that would double-emit the Discord turn.
-    /// `outbox_id` is the row's PK for log correlation.
-    Forwarded {
-        target_instance_id: String,
-        outbox_id: i64,
-        basis: IntakeRoutingBasis,
-    },
-    /// At-most-once skip: Discord redelivered the same
-    /// `(channel_id, user_msg_id)` and the 3-tuple unique constraint
-    /// rejected the attempt-1 INSERT. An earlier path already covers
-    /// the message. Caller MUST NOT run the turn locally — running it
-    /// would double-emit. Distinct from `RanLocal { DbErrorFellBack }`
-    /// because the gate's response differs (skip vs run-local).
-    SkippedDuplicate {
-        resolved_owner: ResolvedSessionOwner,
-    },
-    /// A different message already owns the channel's single open outbox
-    /// route. The producer must preserve/retry queued work and MUST NOT run it
-    /// locally while the predecessor is open. `open_route_status` is carried to
-    /// the admission boundary because only a still-pending local route can use
-    /// the narrowly scoped stale-route recovery exception.
-    DeferredOpenRoute {
-        target_instance_id: String,
-        open_route_status: Option<IntakeOutboxStatus>,
-        open_route_id: Option<i64>,
-        open_route_age_secs: Option<u64>,
-        resolved_owner: ResolvedSessionOwner,
-    },
-    /// Ownership or placement could not be proven safe. Caller MUST NOT run
-    /// the local execution body.
-    Blocked { reason: IntakeBlockedReason },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ObservedIntakeOutcome {
-    WouldKeepLocalExistingOwner,
-    WouldForwardLiveForeignOwner {
-        target_instance_id: String,
-    },
-    WouldAssignNoOwnerToTarget {
-        target_instance_id: String,
-    },
-    WouldKeepNoOwnerLocal {
-        reason: RanLocalReason,
-    },
-    WouldSkipDuplicate {
-        resolved_owner: ResolvedSessionOwner,
-    },
-    WouldDeferOpenRoute {
-        target_instance_id: String,
-        resolved_owner: ResolvedSessionOwner,
-    },
-    WouldBlock {
-        reason: IntakeBlockedReason,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum IntakeBlockedReason {
-    OwnerLookupFailed { detail: String },
-    StaleSessionOwners { instance_ids: Vec<String> },
-    ConflictingLiveSessionOwners { instance_ids: Vec<String> },
-    OwnerProtocolIncompatible { instance_id: String },
-    OverrideUnavailable { target_instance_id: String },
-    NonPortableAttachmentForeignOwner { owner_instance_id: String },
-    NonPortableAttachmentRoutedTarget { target_instance_id: String },
-    AttachmentUnavailable { detail: String },
-    RoutingDependencyFailed { detail: String },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RanLocalReason {
-    /// Mode is `Disabled` (Phase 1-4 default).
-    HookDisabled,
-    /// Agent opted out (`preferred_intake_node_labels` empty).
-    AgentHasNoPreference,
-    /// Agent opted in but no worker matches (offline, missing labels).
-    NoEligibleWorker,
-    /// Agent opted in and a worker matched, but the only eligible
-    /// candidate IS the leader.
-    LeaderIsOnlyEligible,
-    /// Some DB or schema error during the routing decision. Reported
-    /// so operators see WHY a forward turned into a local fallback.
-    DbErrorFellBackToLocal { detail: String },
-    /// `Disabled` mode looked up the agent and found a non-empty
-    /// preference; recorded for the eventual cutover (Phase 5 ops
-    /// uses this to find agents whose preferences are set but
-    /// not yet enforced).
-    DisabledButPreferenceSet,
-    /// Agent for this channel could not be looked up (channel not
-    /// mapped to an agent). Treated as no-preference.
-    NoAgentForChannel,
-    /// Channel has an explicit `/node` override to this leader, so the
-    /// leader should keep the turn local.
-    NodeOverrideIsLeader,
-    /// Channel has an explicit `/node` override, but the intake worker is only
-    /// spawned in `Enforce` mode. Running locally avoids pending-row loss.
-    NodeOverrideRoutingDisabled,
-    /// This instance is the durable live owner for the session.
-    LiveSessionOwnerIsLocal,
-}
-
-/// Inputs to the hook. Bundled into a struct so the intake gate can
-/// thread per-channel context cleanly without a 6-argument fn call.
-#[derive(Clone, Debug)]
-pub(crate) struct IntakeRouterContext<'a> {
-    pub mode: IntakeRoutingMode,
-    pub leader_instance_id: &'a str,
-    /// Provider of the bot handling this intake (#4349). Worker claim is
-    /// scoped on this, so it must be the forwarding bot's provider — never
-    /// `agents.provider`, which is a single column shared by an agent's
-    /// cc and cdx channels.
-    pub provider: &'a str,
-    pub channel_id: &'a str,
-    pub user_msg_id: &'a str,
-    pub request_owner_id: &'a str,
-    pub request_owner_name: Option<&'a str>,
-    pub user_text: &'a str,
-    pub reply_context: Option<&'a str>,
-    pub has_reply_boundary: bool,
-    pub dm_hint: Option<bool>,
-    pub turn_kind: &'a str,
-    pub merge_consecutive: bool,
-    pub reply_to_user_message: bool,
-    pub defer_watcher_resume: bool,
-    pub wait_for_completion: bool,
-    pub preserve_on_cancel: bool,
-    pub node_override_instance_id: Option<&'a str>,
-    pub has_nonportable_uploads: bool,
-    pub attachment_refs: &'a [super::attachment_transfer::uploads::BundleRef],
-}
+mod model;
+mod placement;
+use model::build_payload_for_insert;
+pub(crate) use model::{
+    IntakeBlockedReason, IntakeRouterContext, IntakeRouterDecision, IntakeRoutingBasis,
+    ObservedIntakeOutcome, RanLocalReason, ResolvedSessionOwner,
+};
+use placement::route_by_preference;
 
 fn worker_heartbeat_lease_secs() -> u64 {
     crate::config::load_graceful().cluster.lease_ttl_secs.max(1)
@@ -238,7 +83,7 @@ async fn check_required_target(
         )));
     };
     let mut reasons = required_node_reasons(node, requirements);
-    let agent = match agent_id_and_preferred_labels(pool, ctx.channel_id).await {
+    let agent = match agent_id_and_preferred_labels(pool, ctx.policy_channel_id).await {
         Ok(Some((agent, _, _))) => agent,
         Ok(None) => String::new(),
         Err(error) => return Some(required_block(error.to_string())),
@@ -268,7 +113,8 @@ pub(crate) async fn try_route_intake(
     pool: &PgPool,
     ctx: &IntakeRouterContext<'_>,
 ) -> IntakeRouterDecision {
-    let requirements = match super::execution_requirements::for_channel(pool, ctx.channel_id).await
+    let requirements = match super::execution_requirements::for_channel(pool, ctx.policy_channel_id)
+        .await
     {
         Ok(policy) => policy,
         Err(error) => return required_block(format!("execution policy lookup failed: {error}")),
@@ -276,10 +122,21 @@ pub(crate) async fn try_route_intake(
     if !requirements.is_empty() && ctx.mode != IntakeRoutingMode::Enforce {
         return required_block("hard execution requirements require enforce routing".into());
     }
-    let node_override = ctx
+    let agent_default =
+        match super::agent_execution_node::for_channel(pool, ctx.policy_channel_id).await {
+            Ok(node) => node,
+            Err(error) => {
+                return required_block(format!("agent execution node lookup failed: {error}"));
+            }
+        };
+    if agent_default.is_some() && ctx.mode != IntakeRoutingMode::Enforce {
+        return required_block("agent default execution node requires enforce routing".into());
+    }
+    let explicit_node_override = ctx
         .node_override_instance_id
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let node_override = explicit_node_override.or(agent_default.as_deref());
 
     if matches!(ctx.mode, IntakeRoutingMode::Disabled) {
         if node_override.is_some() {
@@ -290,10 +147,11 @@ pub(crate) async fn try_route_intake(
         // Disabled-but-preference-set is reported separately so Phase 5
         // operators can spot agents whose label preferences are set
         // but the global mode hasn't been flipped yet.
-        let preference_set = match agent_preferred_labels_for_channel(pool, ctx.channel_id).await {
-            Ok(Some(labels)) => !labels.is_empty(),
-            _ => false,
-        };
+        let preference_set =
+            match agent_preferred_labels_for_channel(pool, ctx.policy_channel_id).await {
+                Ok(Some(labels)) => !labels.is_empty(),
+                _ => false,
+            };
         return IntakeRouterDecision::RanLocal {
             reason: if preference_set {
                 RanLocalReason::DisabledButPreferenceSet
@@ -306,7 +164,7 @@ pub(crate) async fn try_route_intake(
     // Observe and Enforce share the owner/open-route/attachment/placement path.
     // Only the final outbox mutation is mode-dependent.
 
-    // Enforce precedence: live session owner -> explicit /node -> preferred
+    // Enforce precedence: live session owner -> explicit /node -> agent default -> preferred
     // labels. The owner lookup must complete before any placement fallback.
     let owner = match session_owner::resolve_session_owner(
         pool,
@@ -457,7 +315,7 @@ pub(crate) async fn try_route_intake(
             stale_instance_ids,
         } => {
             log_shadowed_owner_state(ctx, &instance_id, node_override, &stale_instance_ids);
-            let agent_id = match agent_id_and_preferred_labels(pool, ctx.channel_id).await {
+            let agent_id = match agent_id_and_preferred_labels(pool, ctx.policy_channel_id).await {
                 Ok(Some((agent_id, _, _))) => agent_id,
                 Ok(None) => String::new(),
                 Err(error) => {
@@ -488,10 +346,10 @@ pub(crate) async fn try_route_intake(
             unreachable!("owner fail-safe outcomes return before the open-route fence")
         }
         SessionOwnerResolution::NoOwner => {
-            if let Some(target) = node_override {
+            if let Some(target) = explicit_node_override {
                 route_node_override_without_owner(pool, ctx, target, &requirements).await
             } else {
-                route_by_preferred_labels(pool, ctx, &requirements).await
+                route_by_preference(pool, ctx, &requirements, agent_default.as_deref()).await
             }
         }
     }
@@ -521,6 +379,115 @@ fn log_shadowed_owner_state(
             "[intake_router] override_shadowed_by_live_owner"
         );
     }
+}
+
+async fn route_node_override_without_owner(
+    pool: &PgPool,
+    ctx: &IntakeRouterContext<'_>,
+    target: &str,
+    requirements: &ExecutionRequirements,
+) -> IntakeRouterDecision {
+    // #4349: `agents.provider` is ignored here for the same reason as in
+    // `try_route_intake` — the handling bot is `ctx.provider`.
+    let (agent_id, _agent_provider, _) =
+        match agent_id_and_preferred_labels(pool, ctx.policy_channel_id).await {
+            Ok(Some((agent_id, provider, labels))) => (agent_id, provider, labels),
+            Ok(None) => (String::new(), String::new(), Vec::new()),
+            Err(error) => {
+                return apply_observe_mode(
+                    ctx.mode,
+                    IntakeRouterDecision::Blocked {
+                        reason: IntakeBlockedReason::RoutingDependencyFailed {
+                            detail: format!("agent lookup for node override: {error}"),
+                        },
+                    },
+                );
+            }
+        };
+
+    if let Some(blocked) = check_required_target(pool, ctx, target, requirements).await {
+        return blocked;
+    }
+    if target == ctx.leader_instance_id {
+        return apply_observe_mode(
+            ctx.mode,
+            IntakeRouterDecision::RanLocal {
+                reason: RanLocalReason::NodeOverrideIsLeader,
+            },
+        );
+    }
+
+    if ctx.has_nonportable_uploads {
+        return apply_observe_mode(
+            ctx.mode,
+            IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::NonPortableAttachmentRoutedTarget {
+                    target_instance_id: target.to_string(),
+                },
+            },
+        );
+    }
+
+    let nodes = match crate::services::cluster::node_registry::list_worker_nodes(
+        pool,
+        worker_heartbeat_lease_secs(),
+    )
+    .await
+    {
+        Ok(nodes) => nodes,
+        Err(_) => {
+            return apply_observe_mode(
+                ctx.mode,
+                IntakeRouterDecision::Blocked {
+                    reason: IntakeBlockedReason::OverrideUnavailable {
+                        target_instance_id: target.to_string(),
+                    },
+                },
+            );
+        }
+    };
+    let target_online = nodes.iter().any(|node| {
+        node.get("instance_id").and_then(|value| value.as_str()) == Some(target)
+            && node
+                .get("status")
+                .and_then(|value| value.as_str())
+                .is_some_and(|status| status.eq_ignore_ascii_case("online"))
+            && crate::services::cluster::node_registry::node_supports_intake_request(
+                node,
+                ctx.provider,
+                ctx.preserve_on_cancel,
+            )
+    });
+    if !target_online {
+        return apply_observe_mode(
+            ctx.mode,
+            IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::OverrideUnavailable {
+                    target_instance_id: target.to_string(),
+                },
+            },
+        );
+    }
+
+    let required_labels: Vec<String> = Vec::new();
+    route_to_instance(
+        pool,
+        ctx,
+        target,
+        &required_labels,
+        &agent_id,
+        ObserveTargetKind::NodeOverride,
+        requirements,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum ObserveTargetKind {
+    LiveForeignOwner,
+    NodeOverride,
+    AgentDefault,
+    PreferredLabels,
 }
 
 fn apply_observe_mode(
@@ -588,9 +555,9 @@ async fn route_to_instance(
 ) -> IntakeRouterDecision {
     let resolved_owner = match observe_target_kind {
         ObserveTargetKind::LiveForeignOwner => ResolvedSessionOwner::LiveForeign,
-        ObserveTargetKind::NodeOverride | ObserveTargetKind::PreferredLabels => {
-            ResolvedSessionOwner::NoOwner
-        }
+        ObserveTargetKind::NodeOverride
+        | ObserveTargetKind::AgentDefault
+        | ObserveTargetKind::PreferredLabels => ResolvedSessionOwner::NoOwner,
     };
     match existing_open_route(pool, ctx.channel_id).await {
         Ok(Some((_, _, existing_user_msg_id, _, _))) if existing_user_msg_id == ctx.user_msg_id => {
@@ -642,6 +609,20 @@ async fn route_to_instance(
                             agent_id,
                         ),
                     );
+                    if matches!(observe_target_kind, ObserveTargetKind::AgentDefault) {
+                        let verified = super::readiness::evaluate(
+                            node,
+                            ctx.provider,
+                            &super::readiness::expected_auth_profile(
+                                ctx.provider,
+                                ctx.channel_id,
+                                agent_id,
+                            ),
+                            chrono::Utc::now().timestamp_millis(),
+                        );
+                        report.eligible &= verified.eligible;
+                        report.reasons.extend(verified.reasons);
+                    }
                     if !ctx.attachment_refs.is_empty()
                         && !super::attachment_transfer::supports(node)
                     {
@@ -678,7 +659,9 @@ async fn route_to_instance(
                     target_instance_id: target.to_string(),
                 }
             }
-            ObserveTargetKind::NodeOverride | ObserveTargetKind::PreferredLabels => {
+            ObserveTargetKind::NodeOverride
+            | ObserveTargetKind::AgentDefault
+            | ObserveTargetKind::PreferredLabels => {
                 ObservedIntakeOutcome::WouldAssignNoOwnerToTarget {
                     target_instance_id: target.to_string(),
                 }
@@ -708,6 +691,7 @@ async fn route_to_instance(
             basis: match observe_target_kind {
                 ObserveTargetKind::LiveForeignOwner => IntakeRoutingBasis::LiveForeignOwner,
                 ObserveTargetKind::NodeOverride => IntakeRoutingBasis::NodeOverride,
+                ObserveTargetKind::AgentDefault => IntakeRoutingBasis::AgentDefault,
                 ObserveTargetKind::PreferredLabels => IntakeRoutingBasis::PreferredLabels,
             },
         },
@@ -750,6 +734,7 @@ async fn route_to_instance(
                 let kind_str = match observe_target_kind {
                     ObserveTargetKind::LiveForeignOwner => "live foreign owner",
                     ObserveTargetKind::NodeOverride => "node override",
+                    ObserveTargetKind::AgentDefault => "agent default",
                     ObserveTargetKind::PreferredLabels => "preferred labels",
                 };
                 tracing::info!(
@@ -769,46 +754,6 @@ async fn route_to_instance(
                 },
             },
         },
-    }
-}
-
-fn build_payload_for_insert(
-    ctx: &IntakeRouterContext<'_>,
-    target: &str,
-    preferred_labels: &[String],
-    agent_id: &str,
-) -> InsertPendingPayload {
-    InsertPendingPayload {
-        execution_requirements: serde_json::json!({}),
-        attachment_refs: serde_json::json!(ctx.attachment_refs),
-        target_instance_id: target.to_string(),
-        forwarded_by_instance_id: ctx.leader_instance_id.to_string(),
-        provider: ctx.provider.to_string(),
-        required_labels: serde_json::Value::Array(
-            preferred_labels
-                .iter()
-                .map(|s| serde_json::Value::String(s.clone()))
-                .collect(),
-        ),
-        channel_id: ctx.channel_id.to_string(),
-        user_msg_id: ctx.user_msg_id.to_string(),
-        request_owner_id: ctx.request_owner_id.to_string(),
-        request_owner_name: ctx.request_owner_name.map(str::to_string),
-        user_text: ctx.user_text.to_string(),
-        reply_context: ctx.reply_context.map(str::to_string),
-        has_reply_boundary: ctx.has_reply_boundary,
-        dm_hint: ctx.dm_hint,
-        // Phase 4 codex follow-up: leader emits canonical "foreground"
-        // for `TurnKind::Foreground`; the worker's `parse_turn_kind`
-        // accepts both "foreground" and "standard" for backwards
-        // compatibility with rows already in the queue.
-        turn_kind: ctx.turn_kind.to_string(),
-        merge_consecutive: ctx.merge_consecutive,
-        reply_to_user_message: ctx.reply_to_user_message,
-        defer_watcher_resume: ctx.defer_watcher_resume,
-        wait_for_completion: ctx.wait_for_completion,
-        preserve_on_cancel: ctx.preserve_on_cancel,
-        agent_id: agent_id.to_string(),
     }
 }
 
@@ -870,6 +815,7 @@ mod pg_tests {
             leader_instance_id: "leader-1",
             provider: "claude",
             channel_id: channel,
+            policy_channel_id: channel,
             user_msg_id: "9999",
             request_owner_id: "100",
             request_owner_name: Some("Tester"),

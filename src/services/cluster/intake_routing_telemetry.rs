@@ -16,6 +16,7 @@ pub(crate) enum IntakeRoutingReasonCode {
     AgentHasNoPreference,
     NoEligibleWorker,
     LeaderIsOnlyEligible,
+    AgentDefaultIsLeader,
     DependencyFallback,
     NodeOverrideIsLeader,
     NodeOverrideRoutingDisabled,
@@ -44,6 +45,7 @@ impl IntakeRoutingReasonCode {
             Self::AgentHasNoPreference => "agent_has_no_preference",
             Self::NoEligibleWorker => "no_eligible_worker",
             Self::LeaderIsOnlyEligible => "leader_is_only_eligible",
+            Self::AgentDefaultIsLeader => "agent_default_is_leader",
             Self::DependencyFallback => "dependency_fallback",
             Self::NodeOverrideIsLeader => "node_override_is_leader",
             Self::NodeOverrideRoutingDisabled => "node_override_routing_disabled",
@@ -193,6 +195,11 @@ fn ran_local_telemetry(reason: &RanLocalReason) -> IntakeRoutingTelemetry<'stati
             OwnerResolutionCode::NoOwner,
             PreferredLabelMatchCode::LeaderOnly,
         ),
+        RanLocalReason::AgentDefaultIsLeader => (
+            IntakeRoutingReasonCode::AgentDefaultIsLeader,
+            OwnerResolutionCode::NoOwner,
+            PreferredLabelMatchCode::NotEvaluated,
+        ),
         RanLocalReason::DbErrorFellBackToLocal { .. } => (
             IntakeRoutingReasonCode::DependencyFallback,
             OwnerResolutionCode::NoOwner,
@@ -281,12 +288,14 @@ pub(crate) fn telemetry_for_decision(
                 owner_resolution: OwnerResolutionCode::LiveForeign,
                 preferred_label_match: PreferredLabelMatchCode::NotEvaluated,
             },
-            IntakeRoutingBasis::NodeOverride => IntakeRoutingTelemetry {
-                reason_code: IntakeRoutingReasonCode::NoOwnerTargetSelected,
-                would_assign_target: Some(target_instance_id),
-                owner_resolution: OwnerResolutionCode::NoOwner,
-                preferred_label_match: PreferredLabelMatchCode::NotEvaluated,
-            },
+            IntakeRoutingBasis::NodeOverride | IntakeRoutingBasis::AgentDefault => {
+                IntakeRoutingTelemetry {
+                    reason_code: IntakeRoutingReasonCode::NoOwnerTargetSelected,
+                    would_assign_target: Some(target_instance_id),
+                    owner_resolution: OwnerResolutionCode::NoOwner,
+                    preferred_label_match: PreferredLabelMatchCode::NotEvaluated,
+                }
+            }
             IntakeRoutingBasis::PreferredLabels => IntakeRoutingTelemetry {
                 reason_code: IntakeRoutingReasonCode::NoOwnerTargetSelected,
                 would_assign_target: Some(target_instance_id),
