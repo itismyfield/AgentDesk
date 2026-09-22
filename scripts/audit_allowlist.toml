@@ -79,7 +79,8 @@ direct_discord_sends = [
 
   # 2026-07-24 #4860 size-cap relief: the completion fallback send moved verbatim
   # from status_panel.rs to status_panel/fallback.rs (same call, same hash).
-  "src/services/discord/turn_bridge/status_panel/fallback.rs#direct_discord_sends:c4f1e0c4fddb4380",
+  # REST workers now use the same existing gateway send; no new send surface.
+  "src/services/discord/turn_bridge/status_panel/fallback.rs#direct_discord_sends:36db2b66f66a243c",
 ]
 
 # Footer view writes: #4049 S4-b1 intentionally centralizes only the completion
