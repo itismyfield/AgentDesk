@@ -935,7 +935,7 @@ _rollback_release_binary() {
         echo "⚠ launchd bootstrap failed during rollback — using tmux fallback"
         start_release_tmux_fallback || true
     fi
-    if wait_for_http_service_health "$plist" "$rel_port" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1; then
+    if wait_for_http_service_health "$plist" "$rel_port" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1 1; then
         echo "✓ Rollback succeeded — release healthy on :${rel_port} with previous binary"
     else
         echo "✗ Rollback restart did not reach healthy state — manual intervention required (logs: ${ADK_REL:-}/logs/)"
@@ -1532,14 +1532,17 @@ _wait_for_peer_deploy_verdict() {
         # be judged on an earlier one's body.
         health_ready="false"
         if [ -n "$health_body" ] \
-            && health_json_is_ready "$health_body" 1 1 1 >/dev/null 2>&1; then
+            && health_json_is_ready "$health_body" 1 1 1 1 >/dev/null 2>&1; then
             health_ready="true"
         fi
 
         if [ "$marker_status" = "success" ] \
             && [ "$observed_repo_head" = "$expected_repo_head" ] \
             && [ "$health_ready" = "true" ]; then
-            echo "✓ [peer:$peer] deploy verified: terminal marker, repo head, and health ready=true (ok=$health_status)"
+            echo "✓ [peer:$peer] deploy verified: terminal marker, repo head, health ready=true (ok=$health_status)"
+            if [ "$health_status" != "true" ]; then
+                echo "  [peer:$peer] NODE HEALTH: degraded ($(_health_json_reasons "$health_body")) — not caused by this deploy and not cleared by one"
+            fi
             return 0
         fi
 
@@ -1560,7 +1563,17 @@ _wait_for_peer_deploy_verdict() {
         fi
 
         if [ "$SECONDS" -ge "$deadline" ]; then
-            _report_peer_verdict_failure "$peer" "timed out after ${timeout_secs}s" \
+            # Only explain the health axis when it is what refused, and only a
+            # degraded body has reasons to explain. A marker or head timeout
+            # must not name reasons the health axis accepted.
+            local blocking=""
+            if [ "$health_ready" != "true" ] && [ -n "$health_body" ] \
+                && [ "$(_health_json_status "$health_body")" = "degraded" ]; then
+                blocking=$(_health_json_deploy_blocking_reasons "$health_body" \
+                    "$(_health_json_deploy_nonblocking_ere_for_body "$health_body" 1 1)")
+            fi
+            _report_peer_verdict_failure "$peer" \
+                "timed out after ${timeout_secs}s${blocking:+ (deploy-blocking: $blocking)}" \
                 "$marker_status" "$marker_detail" "$expected_repo_head" \
                 "$observed_repo_head" "$repo_detail" "$health_status" "$health_ready" "$health_detail" "$peer_health_port"
             return 1
@@ -2967,7 +2980,7 @@ REL_HEALTHY=false
 # serving node that is unhealthy SOLELY because no provider runtimes are
 # registered (leader-only / no-agent-session node) as deploy-ready. Runtime
 # /api/health keeps reporting unhealthy for monitoring; only this gate relaxes.
-if wait_for_http_service_health "$PLIST_REL" "$REL_PORT" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1; then
+if wait_for_http_service_health "$PLIST_REL" "$REL_PORT" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1 1; then
     REL_HEALTHY=true
 fi
 

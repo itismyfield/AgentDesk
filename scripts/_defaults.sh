@@ -466,90 +466,14 @@ _health_json_reasons() {
 
 _health_json_gateway_standby_only() {
   local health_json="$1"
-  local reasons_csv reason_element
-  [ -n "$health_json" ] || return 1
-
-  if _health_json_has_jq; then
-    printf '%s' "$health_json" | jq -e '
-      .status == "degraded"
-      and (.db == true)
-      and (.server_up == true)
-      and (.cluster_standby == true)
-      and ((.degraded_reasons // []) | length > 0)
-      and all((.degraded_reasons // [])[]; test("^(gateway_standby|provider:[^:]+:gateway_standby)$"))
-    ' >/dev/null 2>&1
-    return
-  fi
-
-  [ "$(_health_json_status "$health_json")" = "degraded" ] || return 1
-  _health_json_field_is_true "$health_json" "db" || return 1
   _health_json_field_is_true "$health_json" "server_up" || return 1
   _health_json_field_is_true "$health_json" "cluster_standby" || return 1
-  # #5071 S0b r2 F1: test the reasons ELEMENT-WISE across the whole CSV, the same
-  # correction S0 r3 made to `_health_json_has_reconcile_stalled` and
-  # `_health_json_names_a_provider_runtime`. `read` with a SINGLE target variable
-  # assigns the entire line whatever IFS says, so `while IFS=, read -r reason`
-  # ran exactly ONCE with the WHOLE CSV in `$reason`; the `$`-anchored alternation
-  # then could not match a body with more than one reason, because `[^:]+` cannot
-  # span the `,` joining them. The real settled-standby body carries one
-  # `provider:<name>:gateway_standby` PER REGISTERED PROVIDER, so every
-  # multi-provider node — the ordinary case — read as NOT standby-only here while
-  # jq (an `all` test over the array) read it as standby-only.
-  #
-  # S0 r3 left this predicate and `_health_json_reconcile_only` alone because
-  # their divergence pointed fail-CLOSED (deploy blocked) and neither was on the
-  # enumerated path. S0b dissolved that reservation: `health_json_is_ready` is now
-  # the peer deploy verdict's health axis (`_wait_for_peer_deploy_verdict`), so a
-  # controller without jq cannot go green on a correctly settled standby peer and
-  # burns the whole verdict timeout instead. Both ONLY-predicates are fixed here
-  # for that reason.
-  #
-  # The replacement keeps ONLY semantics exactly: the pattern spans the ENTIRE
-  # CSV as `<elem>(,<elem>)*`, so EVERY element must match — one non-standby
-  # reason anywhere fails the match, as it must. It is not an ANY test. An empty
-  # element (`a,,b`) fails too, preserving the old per-element `-n` guard.
-  #
-  # `[^:,]+` rather than jq's `[^:]+` for `<name>`: the CSV join is lossy for a
-  # name that itself contains a comma, and for an ALLOW test the safe way to
-  # resolve that ambiguity is NOT matching — deploy blocked — which excluding `,`
-  # from the name class gives. (The deny test in
-  # `_health_json_has_reconcile_stalled` resolves the same ambiguity the opposite
-  # way, toward matching, for the same fail-closed reason.)
-  reasons_csv=$(_health_json_reasons "$health_json" || true)
-  [ -n "$reasons_csv" ] || return 1
-  reason_element='(gateway_standby|provider:[^:,]+:gateway_standby)'
-  [[ "$reasons_csv" =~ ^${reason_element}(,${reason_element})*$ ]]
+  _health_json_degraded_reasons_all_match "$health_json" \
+    '^(gateway_standby|provider:[^:]+:gateway_standby)$'
 }
 
 _health_json_reconcile_only() {
-  local health_json="$1"
-  local reasons_csv reason_element
-  [ -n "$health_json" ] || return 1
-
-  if _health_json_has_jq; then
-    printf '%s' "$health_json" | jq -e '
-      .status == "degraded"
-      and (.db == true)
-      and ((.degraded_reasons // []) | length > 0)
-      and all((.degraded_reasons // [])[]; test("^provider:[^:]+:reconcile_in_progress$"))
-    ' >/dev/null 2>&1
-    return
-  fi
-
-  [ "$(_health_json_status "$health_json")" = "degraded" ] || return 1
-  _health_json_field_is_true "$health_json" "db" || return 1
-
-  # #5071 S0b r2 F1: same element-wise correction as
-  # `_health_json_gateway_standby_only` above, for the same single-variable `read`
-  # defect — see the long note there. A node reconciling more than one provider
-  # emits one `provider:<name>:reconcile_in_progress` per provider, and the old
-  # loop could not match past the first. ONLY semantics are preserved: the pattern
-  # covers the whole CSV, so every element must be a reconcile reason.
-  reasons_csv=$(_health_json_reasons "$health_json" || true)
-  [ -n "$reasons_csv" ] || return 1
-
-  reason_element='provider:[^:,]+:reconcile_in_progress'
-  [[ "$reasons_csv" =~ ^${reason_element}(,${reason_element})*$ ]]
+  _health_json_degraded_reasons_all_match "$1" '^provider:[^:]+:reconcile_in_progress$'
 }
 
 _health_json_has_reconcile_stalled() {
@@ -662,61 +586,84 @@ _health_json_names_a_provider_runtime() {
   return 1
 }
 
-_health_json_degraded_only_relay_verdict() {
-  # #5736 DEPLOY readiness allowance — NOT a runtime /health change.
-  #
-  # `snapshot::apply_relay_verdict_polarity` now answers the 4987 §5.1 relay
-  # verdict axis on the PUBLIC body too, which is the whole point of #5736: the
-  # summary used to report `healthy` from the same registry `/api/health/detail`
-  # called `degraded`. But `wait_for_http_service_health` polls exactly that
-  # public body (:879) and `health_json_is_ready` has no branch that tolerates a
-  # `relay_verdict_*` reason, so a node whose relay axis is merely UNOBSERVABLE —
-  # `relay_verdict_unknown_<provider>_<channel_id>`, which live nodes carry
-  # continuously — would fail the deploy and rollback gates
-  # (`deploy-release.sh:2868`, `:930`, `deploy.sh:654`) forever.
-  #
-  # The operational decision (#5795 r2): the summary stays HONEST — status is
-  # still `degraded`, the reasons are still published, monitoring still sees the
-  # axis — but the deploy gate does not BLOCK on the relay verdict alone. A relay
-  # verdict says a channel's relay is unobservable or degraded; it does not say
-  # the binary that is serving is bad, and blocking the deploy on it strands the
-  # very fix that would clear it. This mirrors the #4348 rescue's shape: prove
-  # the node is serving, then allow exactly one non-blocking axis.
-  #
-  # STRICTLY ONLY: every element must be a `relay_verdict_` reason. One other
-  # degraded cause anywhere and this returns 1 and the gate blocks, exactly as it
-  # does today. `status` must be `degraded`, never `unhealthy` — the polarity
-  # pass only ever calls `worsen(Degraded)`, so an `unhealthy` body is degraded
-  # by something else and stays blocked.
-  # Only the `server_up`-bearing branch of `health_json_is_ready` calls this:
-  # `public_health_json` projects `server_up` unconditionally (defaulting it to
-  # `db`), so every body that can carry a `relay_verdict_*` reason takes that
-  # branch. Wiring the legacy no-`server_up` branch too would be dead code.
-  local health_json="$1"
-  local reasons_csv
+_health_json_reasons_csv_is_well_formed() {
+  # jq rejects an empty reason element; bash word splitting would drop it,
+  # so reject the list shapes that produce one.
+  case "$1" in ''|,*|*,|*,,*) return 1 ;; esac
+  return 0
+}
+
+_health_json_degraded_reasons_all_match() {
+  # Membership, not homogeneity: a body whose reasons span two accepted classes
+  # must still pass. Requiring one class per predicate is what failed a landed
+  # deploy that reported relay and queue reasons together.
+  local health_json="$1" ere="$2"
+  local reasons_csv reason
   [ -n "$health_json" ] || return 1
 
   if _health_json_has_jq; then
-    printf '%s' "$health_json" | jq -e '
+    printf '%s' "$health_json" | jq -e --arg ere "$ere" '
       .status == "degraded"
       and (.db == true)
-      and (.server_up == true)
       and ((.degraded_reasons // []) | length > 0)
-      and all((.degraded_reasons // [])[]; type == "string" and startswith("relay_verdict_"))
+      and all((.degraded_reasons // [])[]; type == "string" and test($ere))
     ' >/dev/null 2>&1
     return
   fi
 
-  # jq-less fallback, element-wise across the whole CSV — the same shape (and the
-  # same reason) as `_health_json_gateway_standby_only`. `[^,]+` cannot span the
-  # join, so a reason carrying a literal comma fails to match and the gate
-  # BLOCKS: the safe direction for an ALLOW test.
   [ "$(_health_json_status "$health_json")" = "degraded" ] || return 1
   _health_json_field_is_true "$health_json" "db" || return 1
-  _health_json_field_is_true "$health_json" "server_up" || return 1
   reasons_csv=$(_health_json_reasons "$health_json" || true)
-  [ -n "$reasons_csv" ] || return 1
-  [[ "$reasons_csv" =~ ^relay_verdict_[^,]+(,relay_verdict_[^,]+)*$ ]]
+  _health_json_reasons_csv_is_well_formed "$reasons_csv" || return 1
+  local IFS=','
+  for reason in $reasons_csv; do
+    [[ "$reason" =~ $ere ]] || return 1
+  done
+  return 0
+}
+
+_health_json_deploy_nonblocking_ere() {
+  # $1 allow_reconcile_degraded, $2 deploy verdict, $3 cluster_standby proven.
+  # A relay verdict label cycles with placeholder state, so it cannot judge a
+  # deploy (2026-09-07 measurement). A queue depth is backlog, so it only stops
+  # counting for a deploy verdict. Standby tokens join the set only once the
+  # body proves the node is a standby. Everything else, including an
+  # unrecognised reason, blocks. No comma: the fallback splits on one.
+  local ere='^(relay_verdict_[^,]+'
+  [ "${1:-0}" = "1" ] && ere="$ere|provider:[^:,]+:reconcile_in_progress"
+  [ "${2:-0}" = "1" ] && ere="$ere|provider:[^:,]+:pending_queue_depth:[0-9]+"
+  [ "${3:-0}" = "1" ] && ere="$ere|gateway_standby|provider:[^:,]+:gateway_standby"
+  printf '%s)$' "$ere"
+}
+
+_health_json_deploy_nonblocking_ere_for_body() {
+  # The only way to build the accepted set: structural proof comes from the
+  # body itself, so no caller can reconstruct a policy that drifts.
+  local health_json="$1" standby=0
+  _health_json_field_is_true "$health_json" "cluster_standby" && standby=1
+  _health_json_deploy_nonblocking_ere "${2:-0}" "${3:-0}" "$standby"
+}
+
+_health_json_deploy_blocking_reasons() {
+  local health_json="$1" ere="$2"
+  local reasons_csv reason out=""
+  reasons_csv=$(_health_json_reasons "$health_json" || true)
+  # A list this cannot read is itself blocking, not an absence of blockers.
+  if ! _health_json_reasons_csv_is_well_formed "$reasons_csv"; then
+    printf 'unreadable_degraded_reasons'
+    return 0
+  fi
+  local IFS=','
+  for reason in $reasons_csv; do
+    [[ "$reason" =~ $ere ]] || out="${out:+$out,}$reason"
+  done
+  printf '%s' "$out"
+}
+
+_health_json_degraded_only_relay_verdict() {
+  local health_json="$1"
+  _health_json_field_is_true "$health_json" "server_up" || return 1
+  _health_json_degraded_reasons_all_match "$health_json" '^relay_verdict_[^,]+$'
 }
 
 _health_json_unhealthy_only_no_provider_runtimes() {
@@ -834,13 +781,13 @@ health_json_is_ready() {
   local health_json="$1"
   local require_dashboard="${2:-0}"
   local allow_reconcile_degraded="${3:-1}"
-  # #4348: when 1, treat a serving node whose only deploy-BLOCKING condition is
-  # no registered provider runtimes as DEPLOY-READY (co-existing degraded/
-  # non-blocking axes are permitted — see
-  # _health_json_unhealthy_only_no_provider_runtimes). Default 0 keeps every
-  # existing (non-deploy) caller's semantics unchanged.
+  # 1 accepts a serving node whose only blocking cause is no registered
+  # provider runtimes. 0 keeps every non-deploy caller unchanged.
   local allow_no_provider_runtimes="${4:-0}"
-  local status=""
+  # 1 additionally accepts causes that only a deploy verdict must not fail on,
+  # such as a provider backlog. Default 0 keeps every other caller unchanged.
+  local allow_deploy_nonblocking="${5:-0}"
+  local status="" nonblocking_ere="" blocking="" standby_proven=0
 
   [ -n "$health_json" ] || return 1
   _health_json_field_is_true "$health_json" "db" || return 1
@@ -854,74 +801,44 @@ health_json_is_ready() {
   if _health_json_field_exists "$health_json" "server_up"; then
     _health_json_field_is_true "$health_json" "server_up" || return 1
     if [ "$status" = "unhealthy" ]; then
-      # #4348: rescue a serving leader-only / no-session node whose only
-      # deploy-BLOCKING cause is no_provider_runtimes_registered (co-existing
-      # degraded/non-blocking axes are allowed — same as a provider-present
-      # degraded node that passes the gate). server_up is already confirmed true
-      # above, so db_unavailable can never take this branch.
+      # A serving leader-only node whose sole blocking cause is "no provider
+      # runtimes registered" is still deploy-ready.
       if [ "$allow_no_provider_runtimes" = "1" ] \
         && _health_json_unhealthy_only_no_provider_runtimes "$health_json"; then
         return 0
       fi
       return 1
     fi
-    if _health_json_field_is_true "$health_json" "cluster_standby"; then
-      _health_json_gateway_standby_only "$health_json"
-      return $?
-    fi
+    _health_json_field_is_true "$health_json" "cluster_standby" && standby_proven=1
+    # A standby is not the gateway, so a body claiming both is contradictory.
+    [ "$standby_proven" = 1 ] && [ "$status" != "degraded" ] && return 1
     [ "$status" = "healthy" ] && return 0
-    # #5071 S0 r2 F3: an explicit DENY, placed ahead of the generic
-    # `fully_recovered == false` allowance below. The S0 contract is a FINITE
-    # reconcile obligation: an unfinished reconcile is tolerated while it is
-    # `reconcile_in_progress`, and once it outlives `RECONCILE_STALL_AFTER` it is
-    # promoted to `reconcile_stalled` and must BLOCK the deploy — which is what
-    # `agentdesk doctor`'s next_step and the promotion WARN both already tell the
-    # operator. The allowance below never looks at the reasons, so it was passing
-    # stalled providers through while every message about them said otherwise.
-    #
-    # A deny here rather than a narrower allowance: it changes the verdict ONLY
-    # for bodies that carry a `reconcile_stalled` reason, it covers the
-    # reason-blind allowance and any allowance added after it from one place, and
-    # it leaves both earlier branches untouched — the `status == unhealthy` rescue
-    # above and the `cluster_standby` / `gateway_standby` branch above it (a
-    # standby node whose only reasons are `gateway_standby` still passes).
-    # `reconcile_in_progress` is unaffected: it is a different reason string.
-    if _health_json_has_reconcile_stalled "$health_json"; then
-      echo "  ▸ provider reconcile is stalled (reconcile_stalled) — deploy stays blocked"
+    # Membership decides: every reason must be one a deploy cannot clear. An
+    # unrecognised reason is not in that set, so a newly added one fails closed.
+    nonblocking_ere=$(_health_json_deploy_nonblocking_ere_for_body \
+      "$health_json" "$allow_reconcile_degraded" "$allow_deploy_nonblocking")
+    if _health_json_degraded_reasons_all_match "$health_json" "$nonblocking_ere"; then
+      echo "  ▸ degraded only for causes a deploy cannot clear ($(_health_json_reasons "$health_json")) — deploy proceeds; health still reports degraded"
+      return 0
+    fi
+    blocking=$(_health_json_deploy_blocking_reasons "$health_json" "$nonblocking_ere")
+    if [ -n "$blocking" ]; then
+      echo "  ▸ deploy-blocking degraded causes: $blocking"
       return 1
-    fi
-    # #5736: placed AFTER the reconcile_stalled deny so a body carrying both
-    # still blocks, and before the reason-blind `fully_recovered == false`
-    # allowance so the tolerance is logged rather than absorbed silently.
-    if _health_json_degraded_only_relay_verdict "$health_json"; then
-      echo "  ▸ relay verdict axis is the only degraded cause ($(_health_json_reasons "$health_json")) — deploy proceeds; health still reports degraded"
-      return 0
-    fi
-    if [ "$allow_reconcile_degraded" = "1" ] \
-      && _health_json_field_exists "$health_json" "fully_recovered" \
-      && _health_json_field_is_false "$health_json" "fully_recovered"; then
-      return 0
-    fi
-    if [ "$allow_reconcile_degraded" = "1" ] && _health_json_reconcile_only "$health_json"; then
-      return 0
     fi
     return 1
   fi
 
-  if _health_json_field_is_true "$health_json" "cluster_standby"; then
-    _health_json_gateway_standby_only "$health_json"
-    return $?
-  fi
+  _health_json_field_is_true "$health_json" "cluster_standby" && standby_proven=1
+  [ "$standby_proven" = 1 ] && [ "$status" != "degraded" ] && return 1
 
   if [ "$status" = "healthy" ]; then
     return 0
   fi
 
-  if [ "$allow_reconcile_degraded" = "1" ] && _health_json_reconcile_only "$health_json"; then
-    return 0
-  fi
-
-  return 1
+  nonblocking_ere=$(_health_json_deploy_nonblocking_ere_for_body \
+    "$health_json" "$allow_reconcile_degraded" "$allow_deploy_nonblocking")
+  _health_json_degraded_reasons_all_match "$health_json" "$nonblocking_ere"
 }
 
 wait_for_http_service_health() {
@@ -935,6 +852,7 @@ wait_for_http_service_health() {
   # is no registered provider runtimes (co-existing degraded/non-blocking axes
   # permitted). Default 0 preserves existing callers.
   local allow_no_provider_runtimes="${7:-0}"
+  local allow_deploy_nonblocking="${8:-0}"
 
   # shellcheck disable=SC2034 # Read by callers after the function returns.
   WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON=""
@@ -945,7 +863,8 @@ wait_for_http_service_health() {
     # shellcheck disable=SC2034 # Read by callers after the function returns.
     WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON="$health_json"
 
-    if health_json_is_ready "$health_json" "$require_dashboard" "$allow_reconcile_degraded" "$allow_no_provider_runtimes"; then
+    if health_json_is_ready "$health_json" "$require_dashboard" "$allow_reconcile_degraded" \
+      "$allow_no_provider_runtimes" "$allow_deploy_nonblocking"; then
       return 0
     fi
 
