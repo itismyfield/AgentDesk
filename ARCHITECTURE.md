@@ -482,7 +482,9 @@ src/
 │   │   ├── allowed_path_tests.rs
 │   │   └── iteration_result_tests.rs
 │   ├── calendar_sync/
-│   │   └── model.rs
+│   │   ├── model.rs
+│   │   ├── recovery.rs
+│   │   └── worker.rs
 │   ├── claude/
 │   │   ├── active_usage.rs
 │   │   ├── backend_routing.rs

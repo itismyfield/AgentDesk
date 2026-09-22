@@ -83,6 +83,155 @@ async fn managed_list_filters_all_accounts_and_preserves_status_pg() {
 }
 
 #[tokio::test]
+async fn two_account_crud_reaches_mock_provider_and_does_not_recreate_success_pg() {
+    use crate::services::{calendar_sync::execute_for_test, kakao::test_support};
+    use axum::{
+        Json, Router,
+        extract::{Form, Query},
+        routing::{delete, post},
+    };
+    use std::collections::HashMap;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let creates = Arc::new(AtomicUsize::new(0));
+    let updates = Arc::new(AtomicUsize::new(0));
+    let deletes = Arc::new(AtomicUsize::new(0));
+    let create_count = creates.clone();
+    let update_count = updates.clone();
+    let delete_count = deletes.clone();
+    let router = Router::new()
+        .route(
+            "/v2/api/calendar/create/event",
+            post(move |Form(form): Form<HashMap<String, String>>| {
+                let count = create_count.clone();
+                async move {
+                    assert_eq!(form["calendar_id"], "primary");
+                    let n = count.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({"event_id":format!("remote-{n}")}))
+                }
+            }),
+        )
+        .route(
+            "/v2/api/calendar/update/event/host",
+            post(move |Form(form): Form<HashMap<String, String>>| {
+                let count = update_count.clone();
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({"event_id":form["event_id"]}))
+                }
+            }),
+        )
+        .route(
+            "/v2/api/calendar/delete/event",
+            delete(move |Query(query): Query<HashMap<String, String>>| {
+                let count = delete_count.clone();
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({"event_id":query["event_id"]}))
+                }
+            }),
+        );
+    let (origin, task) = test_support::server(router).await;
+    let (db, pool, bindings) = fixture().await;
+    let receipt = create(&pool, "create", "fp", &content(), &bindings)
+        .await
+        .unwrap();
+    let failed = claim(&pool, &accounts()).await.unwrap().unwrap();
+    fail(&pool, &failed, "blocked", "consent_required")
+        .await
+        .unwrap();
+    {
+        let c = claim(&pool, &accounts()).await.unwrap().unwrap();
+        assert_ne!(c.target_id, failed.target_id);
+        assert!(dispatch(&pool, &c).await.unwrap());
+        execute_for_test(&pool, &c, &test_support::client(&origin, &c.account_id))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        get(&pool, receipt.event_id).await.unwrap()["status"],
+        "partial_success"
+    );
+    assert!(claim(&pool, &accounts()).await.unwrap().is_none());
+    recover(
+        &pool,
+        &failed,
+        RecoveryResolution::Retry,
+        None,
+        "Consent repaired and verified",
+    )
+    .await
+    .unwrap();
+    let retried = claim(&pool, &accounts()).await.unwrap().unwrap();
+    assert_eq!(retried.target_id, failed.target_id);
+    assert!(dispatch(&pool, &retried).await.unwrap());
+    execute_for_test(
+        &pool,
+        &retried,
+        &test_support::client(&origin, &retried.account_id),
+    )
+    .await
+    .unwrap();
+    create(&pool, "create", "fp", &content(), &bindings)
+        .await
+        .unwrap();
+    assert!(claim(&pool, &accounts()).await.unwrap().is_none());
+    let mut changed = content();
+    changed["title"] = json!("new title");
+    mutate(
+        &pool,
+        Mutation {
+            event: receipt.event_id,
+            key: "update",
+            fingerprint: "update",
+            expected_revision: 1,
+            content: &changed,
+            delete: false,
+        },
+    )
+    .await
+    .unwrap();
+    for _ in 0..2 {
+        let c = claim(&pool, &accounts()).await.unwrap().unwrap();
+        assert!(dispatch(&pool, &c).await.unwrap());
+        execute_for_test(&pool, &c, &test_support::client(&origin, &c.account_id))
+            .await
+            .unwrap();
+    }
+    mutate(
+        &pool,
+        Mutation {
+            event: receipt.event_id,
+            key: "delete",
+            fingerprint: "delete",
+            expected_revision: 2,
+            content: &changed,
+            delete: true,
+        },
+    )
+    .await
+    .unwrap();
+    for _ in 0..2 {
+        let c = claim(&pool, &accounts()).await.unwrap().unwrap();
+        assert!(dispatch(&pool, &c).await.unwrap());
+        execute_for_test(&pool, &c, &test_support::client(&origin, &c.account_id))
+            .await
+            .unwrap();
+    }
+    assert_eq!(creates.load(Ordering::SeqCst), 2);
+    assert_eq!(updates.load(Ordering::SeqCst), 2);
+    assert_eq!(deletes.load(Ordering::SeqCst), 2);
+    let event = get(&pool, receipt.event_id).await.unwrap();
+    assert_eq!(event["status"], "success");
+    assert_eq!(event["content"], json!({}));
+    task.abort();
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
 async fn durable_replay_two_account_crud_and_tombstone_pg() {
     let (db, pool, bindings) = fixture().await;
     let initial = content();
