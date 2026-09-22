@@ -169,6 +169,22 @@ async fn postgres_external_handoff_scrubs_targets_and_terminal_payload() {
         .pop()
         .expect("external delivery is claimable");
     assert_eq!(claim.id, outbox_id);
+    sqlx::query("UPDATE scheduled_external_delivery_outbox SET lease_expires_at=NOW()-INTERVAL '1 second' WHERE id=$1")
+        .bind(claim.id).execute(&pool).await.unwrap();
+    assert!(
+        !mark_external_dispatch_started_pg(&pool, claim.id, claim.claim_token, 60)
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE scheduled_external_delivery_outbox SET lease_expires_at=NOW()+INTERVAL '1 minute',created_at=NOW()-INTERVAL '1 minute',deliver_before=NOW()-INTERVAL '1 second' WHERE id=$1")
+        .bind(claim.id).execute(&pool).await.unwrap();
+    assert!(
+        !mark_external_dispatch_started_pg(&pool, claim.id, claim.claim_token, 60)
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE scheduled_external_delivery_outbox SET deliver_before=NOW()+INTERVAL '1 hour' WHERE id=$1")
+        .bind(claim.id).execute(&pool).await.unwrap();
     assert!(
         mark_external_dispatch_started_pg(&pool, claim.id, claim.claim_token, 60)
             .await

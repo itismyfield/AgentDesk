@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "f82d04801f5e841019db7aa5313a50e6c1532179",
+  "measured_at_sha": "710b2ab27d43e2ffcf50f78538fc8f38c084f32c",
   "records": [
     {
       "root": "migrations/postgres",
@@ -11448,7 +11448,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:2beedc4d1a0903b025bcf10c20e616b1aba90cb308f77f9d526df8b53c656dcf"
+      "fingerprint": "sha256:3ad2f89d3a5cc452e4a3d015da5bfc0b1de672329821f67665ef674e61a9be1f"
     },
     {
       "root": "src",
@@ -11457,7 +11457,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:3ad2f89d3a5cc452e4a3d015da5bfc0b1de672329821f67665ef674e61a9be1f"
+      "fingerprint": "sha256:7f551b3a93ec7ce42af56a320dfb0cc5f1bec0f2bf2ff70d7bfdfb9a9415a2df"
     },
     {
       "root": "src",
@@ -11628,6 +11628,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:409bb762e90433be98e0301e93f1fcf0aa4ecc14671fb90c7ffb0b5dd4fead44"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/scheduled_messages/postgres_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:5b4a6010eb5ffb801906c2445ab075b0bf219933c1a925aec0ee1c78666824ff"
     },
     {
@@ -11647,6 +11656,24 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:792027091df66905d6860251dfb4b8017d3b151e680307a6eaf5a2485caec393"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/scheduled_messages/postgres_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:84dd6ce573b289f97b680493f753a7768d2a9a6fd43f19b406618c8f93387eab"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/scheduled_messages/postgres_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:875690f75bbb260c2b61fa9a9d5d9ffd2b7926ba1919aed262e7a05e901e9898"
     },
     {
       "root": "src",
