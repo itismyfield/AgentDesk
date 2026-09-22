@@ -921,6 +921,9 @@ server::control_plane_auth_tests::tui_send_allows_loopback_without_bearer_when_p
 server::control_plane_auth_tests::tui_send_rejects_unauthenticated_non_loopback_when_protected
 server::control_plane_auth_tests::tui_send_rejects_unauthenticated_non_loopback_when_unconfigured
 server::control_plane_auth_tests::tui_send_valid_input_with_valid_auth_returns_success
+server::dashboard_auth::tests::dashboard_session_probe_and_ticket_route_require_real_credentials_for_remote_peers
+server::dashboard_auth::tests::dashboard_tickets_are_origin_bound_expiring_single_use_and_bounded
+server::dashboard_auth::tests::dashboard_websocket_handshake_uses_ticket_or_bearer_never_query_token
 server::dashboard_provision::tests::existing_dashboard_is_preserved_off_runtime
 server::database_fixture_invariant_tests::tests::a_missing_fixture_base_stays_fatal_for_lanes_that_require_a_database
 server::database_fixture_invariant_tests::tests::cluster_fixtures_do_not_substitute_a_value_for_a_missing_base
@@ -994,7 +997,6 @@ server::routes::audit_explicit_auth_routes_tests::route_inventory_is_non_empty_a
 server::routes::auth::tests::extract_bearer_strips_prefix_or_returns_none
 server::routes::auth::tests::is_internal_loopback_path_matches_known_prefixes
 server::routes::auth::tests::is_internal_loopback_path_rejects_unrelated_paths
-server::routes::auth::tests::is_websocket_upgrade_detects_handshake_header
 server::routes::auth::tests::loopback_peer_detection
 server::routes::auth::tests::peer_addr_from_request_reads_connect_info
 server::routes::auto_queue_lifecycle_pg_tests::tests::manual_rebind_accepts_every_canonical_live_status_pg

@@ -244,6 +244,8 @@ src/
 │   ├── skill_refresh.rs
 │   └── skill_sync.rs
 ├── server/
+│   ├── dashboard_auth/
+│   │   └── tests.rs
 │   ├── dto/
 │   │   ├── agents.rs
 │   │   ├── analytics.rs
@@ -384,6 +386,7 @@ src/
 │   ├── cluster.rs
 │   ├── cluster_session_routing.rs
 │   ├── cron_catalog.rs
+│   ├── dashboard_auth.rs
 │   ├── dashboard_provision.rs
 │   ├── database_fixture_invariant_tests.rs
 │   ├── issue_specs.rs

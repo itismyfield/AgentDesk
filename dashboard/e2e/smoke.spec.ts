@@ -1067,6 +1067,10 @@ async function mockOpsHealthApi(page: Page, getPayload: () => Record<string, unk
 }
 
 async function mockDashboardBootstrap(page: Page) {
+  // Fixture tests must never fall through Vite's proxy to a real operator API.
+  await page.route(/\/api\//, (route) => route.fulfill({
+    status: 404, json: { error: "API route is not configured in this browser fixture" },
+  }));
   await page.addInitScript(() => {
     const sockets: MockWebSocket[] = [];
     class MockWebSocket {

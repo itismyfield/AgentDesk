@@ -90,13 +90,6 @@ fn is_loopback_peer(peer: Option<SocketAddr>) -> bool {
     peer.is_some_and(|addr| addr.ip().is_loopback())
 }
 
-fn is_websocket_upgrade(headers: &axum::http::HeaderMap) -> bool {
-    headers
-        .get(axum::http::header::UPGRADE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
-}
-
 fn dashboard_auth_strength(
     config: &crate::config::Config,
     headers: &axum::http::HeaderMap,
@@ -204,24 +197,6 @@ pub async fn auth_middleware(
         return run_with_request_principal(req, next, strength).await;
     }
 
-    // Query-param token fallback (Finding 4): restricted to WebSocket upgrade
-    // handshakes since the browser WebSocket API cannot attach an
-    // Authorization header. Plain GET / POST requests must use the
-    // Authorization header instead so the secret never leaks into access logs
-    // or the Referer of downstream navigations.
-    if is_websocket_upgrade(&headers) {
-        if let Some(query) = req.uri().query() {
-            for pair in query.split('&') {
-                if let Some(token) = pair.strip_prefix("token=") {
-                    if crate::utils::auth::constant_time_token_eq(expected_token, token) {
-                        return run_with_request_principal(req, next, AuthStrength::ServerAdmin)
-                            .await;
-                    }
-                }
-            }
-        }
-    }
-
     unauthorized_response()
 }
 
@@ -299,21 +274,6 @@ mod tests {
             HeaderValue::from_static("Basic user:pass"),
         );
         assert_eq!(extract_bearer(&headers), None);
-    }
-
-    #[test]
-    fn is_websocket_upgrade_detects_handshake_header() {
-        let mut headers = axum::http::HeaderMap::new();
-        assert!(!is_websocket_upgrade(&headers));
-
-        headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
-        assert!(is_websocket_upgrade(&headers));
-
-        headers.insert(header::UPGRADE, HeaderValue::from_static("WebSocket"));
-        assert!(is_websocket_upgrade(&headers));
-
-        headers.insert(header::UPGRADE, HeaderValue::from_static("h2c"));
-        assert!(!is_websocket_upgrade(&headers));
     }
 
     #[test]

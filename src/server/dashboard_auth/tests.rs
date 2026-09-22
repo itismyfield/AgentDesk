@@ -88,6 +88,23 @@ async fn dashboard_session_probe_and_ticket_route_require_real_credentials_for_r
         )
         .with_state(state)
         .layer(Extension(access));
+    // An Upgrade header alone must not turn a regular API request into a
+    // bearer-authenticated call through the old query-token fallback.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/ws-ticket?token=synthetic-test-token")
+                .header(header::ORIGIN, "http://192.0.2.1:8791")
+                .header(header::HOST, "192.0.2.1:8791")
+                .header(header::UPGRADE, "websocket")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     for (peer, origin, bearer, expected) in [
         ("192.0.2.2:1000", "http://192.0.2.1:8791", None, false),
         ("192.0.2.2:1000", "http://127.0.0.1:8791", None, false),
