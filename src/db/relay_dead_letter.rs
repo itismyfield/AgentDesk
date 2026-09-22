@@ -182,7 +182,7 @@ pub(crate) struct ClaimedDeadLetter {
 /// exactly-once across concurrent sweeps and cluster nodes; the returned rows
 /// are already `CLAIMED`, so a second call cannot hand them out again.
 ///
-/// Fewest attempts first (#6047): rows sent back to `pending` keep their low id,
+/// Fewest attempts first: rows sent back to `pending` keep their low id,
 /// so id order alone lets them fill every batch until newer rows age out.
 ///
 /// `min_age_secs` leaves the normal delivery path time to settle the turn;
@@ -283,7 +283,7 @@ mod tests {
         ids
     }
 
-    /// #6047: a batch full of rows that keep settling back to `pending` must not
+    /// A batch full of rows that keep settling back to `pending` must not
     /// shut a never-tried row out of the claim until its age window closes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn deferred_rows_do_not_starve_a_never_tried_row_pg() {
@@ -342,6 +342,30 @@ mod tests {
         assert_eq!(
             stamped, None,
             "a row sent back to pending was not redelivered"
+        );
+
+        assert_eq!(
+            settle_redelivery(&pool, fresh, REDELIVERY_DELIVERED)
+                .await
+                .unwrap(),
+            1
+        );
+        let stamped: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT redelivered_at FROM relay_dead_letter WHERE id = $1")
+                .bind(fresh)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            stamped.is_some(),
+            "a row leaving the sweep is stamped redelivered"
+        );
+        assert_eq!(
+            settle_redelivery(&pool, fresh, REDELIVERY_DELIVERED)
+                .await
+                .unwrap(),
+            0,
+            "a repeated settle is guarded on the claim"
         );
 
         pool.close().await;
