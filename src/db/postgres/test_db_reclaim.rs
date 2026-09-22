@@ -112,7 +112,7 @@ pub(super) async fn reclaim_once_per_process(admin_pool: &PgPool, label: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        RECLAIM_MIN_AGE, mark_test_database, now_unix, reclaim_stale_test_databases,
+        MARKER_PREFIX, RECLAIM_MIN_AGE, mark_test_database, now_unix, reclaim_stale_test_databases,
         stale_test_databases,
     };
     use sqlx::PgPool;
@@ -168,6 +168,16 @@ mod tests {
             .expect("backdate marker");
     }
 
+    async fn marker(fx: &Fixture, name: &str) -> Option<String> {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = $1",
+        )
+        .bind(name)
+        .fetch_one(&fx.admin_pool)
+        .await
+        .expect("query marker")
+    }
+
     async fn exists(fx: &Fixture, name: &str) -> bool {
         sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)",
@@ -191,17 +201,25 @@ mod tests {
         let Some(fx) = fixture().await else { return };
         let name = create_marked(&fx, "orphan").await;
         forget_ownership(&fx, &name);
+        // The sweep can only find what the fixture itself marked.
+        let written = marker(&fx, &name).await;
+        let created_at: u64 = written
+            .as_deref()
+            .and_then(|comment| comment.strip_prefix(MARKER_PREFIX))
+            .and_then(|stamp| stamp.parse().ok())
+            .unwrap_or_else(|| panic!("fixture {name} left no marker: {written:?}"));
+        assert!(now_unix().abs_diff(created_at) <= 60, "marker {written:?}");
         backdate(&fx, &name).await;
 
         let dropped = reclaim_stale_test_databases(&fx.admin_pool, RECLAIM_MIN_AGE, LABEL)
             .await
             .expect("reclaim");
 
+        // Another process's first-fixture sweep may win the DROP, so pin the outcome only.
         assert!(
-            dropped.contains(&name),
+            !exists(&fx, &name).await,
             "orphan {name} not reclaimed: {dropped:?}"
         );
-        assert!(!exists(&fx, &name).await);
     }
 
     #[tokio::test]
@@ -209,7 +227,6 @@ mod tests {
         let _lifecycle = crate::db::postgres::lock_test_lifecycle();
         let Some(fx) = fixture().await else { return };
         let name = create_marked(&fx, "active").await;
-        backdate(&fx, &name).await;
         let session = crate::db::postgres::connect_test_pool(&format!("{}/{name}", fx.base), LABEL)
             .await
             .expect("connect fixture db");
@@ -217,7 +234,12 @@ mod tests {
             .execute(&session)
             .await
             .expect("open session");
+        backdate(&fx, &name).await;
 
+        let stale = stale_test_databases(&fx.admin_pool, RECLAIM_MIN_AGE)
+            .await
+            .expect("list stale");
+        assert!(!stale.contains(&name), "active {name} became a candidate");
         let dropped = reclaim_stale_test_databases(&fx.admin_pool, RECLAIM_MIN_AGE, LABEL)
             .await
             .expect("reclaim");
