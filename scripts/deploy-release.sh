@@ -150,6 +150,7 @@ RELEASE_ROOT_SCRIPTS_STAGED=""
 PG_TUNNEL_PREFLIGHT_PID=""
 PG_TUNNEL_PREFLIGHT_CONNINFO_DIR=""
 PG_TUNNEL_PREFLIGHT_PASSWORD_FILE=""
+MIGRATION_FLOOR_CROSSED=0
 PG_TUNNEL_ROLLBACK_ARMED=0
 PG_TUNNEL_ROLLBACK_DIR=""
 PG_TUNNEL_ROLLBACK_JOB_LOADED=0
@@ -1084,6 +1085,57 @@ _rollback_pg_tunnel_migration() {
     return 1
 }
 
+_release_runtime_is_serving() {
+    # A crash-looping runtime still gets a fresh pid from launchd but never binds
+    # the port, so liveness must be probed on the port rather than with kill -0.
+    # Any HTTP answer counts: a degraded runtime can still persist its frontier,
+    # so only a refused or timed-out connection means nothing can acknowledge.
+    local port="$1" code
+    [ -n "$port" ] || return 1
+    code="$(curl -s -o /dev/null --max-time 3 -w '%{http_code}' \
+        -H "$(_health_origin_header)" \
+        "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health" 2>/dev/null || true)"
+    [ -n "$code" ] && [ "$code" != "000" ]
+}
+
+_fail_forward_promote_staged_binary() {
+    # Mirror of _rollback_release_binary for the pre-promotion abort path: once
+    # Postgres is past the live binary's embedded manifest that binary cannot
+    # boot, so aborting without promoting bricks the node instead of sparing it.
+    local rel_binary="${REL_BINARY:-$ADK_REL/bin/agentdesk}"
+    local plist="${PLIST_REL:-}"
+    local rel_port="${REL_PORT:-${AGENTDESK_REL_PORT:-${ADK_DEFAULT_PORT:-8791}}}"
+    local domain
+
+    [ -n "${STAGED_BINARY:-}" ] && [ -e "${STAGED_BINARY:-}" ] || return 0
+    [ -n "$plist" ] || return 0
+
+    echo ""
+    echo "🛑 DEPLOY ABORTED PAST THE MIGRATION FLOOR — failing forward"
+    echo "   Postgres already carries a migration that $rel_binary does not embed, so that"
+    echo "   binary would crash-loop under launchd with 'migration N was previously applied"
+    echo "   but is missing in the resolved migrations'. Promoting the staged binary instead."
+    echo "   The deploy still reports failure; the unbootable binary is NOT kept as .prev."
+    domain="$(_launchd_domain)" || domain="gui/$(id -u 2>/dev/null)"
+    launchctl bootout "$domain/$plist" 2>/dev/null || true
+    chflags nouchg "$rel_binary" 2>/dev/null || true
+    if ! mv -f "$STAGED_BINARY" "$rel_binary"; then
+        echo "✗ Fail-forward promote failed — node left on an unbootable binary; manual intervention required"
+        return 0
+    fi
+    STAGED_BINARY=""
+    xattr -d com.apple.quarantine "$HOME/Library/LaunchAgents/$plist.plist" 2>/dev/null || true
+    if ! launchctl bootstrap "$domain" "$HOME/Library/LaunchAgents/$plist.plist"; then
+        echo "⚠ launchd bootstrap failed during fail-forward — using tmux fallback"
+        start_release_tmux_fallback || true
+    fi
+    if wait_for_http_service_health "$plist" "$rel_port" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1; then
+        echo "✓ Fail-forward promote succeeded — release healthy on :${rel_port} with the staged binary"
+    else
+        echo "⚠ Fail-forward promote did not reach health on :${rel_port} — inspect ${ADK_REL:-}/logs/"
+    fi
+}
+
 _cleanup_on_exit() {
     local status=${1:-$?}
     trap - EXIT
@@ -1100,6 +1152,12 @@ _cleanup_on_exit() {
     # health-check branch — so a crash-on-boot binary can never stay live (#3858).
     if [ "${ROLLBACK_ARMED:-0}" = 1 ] && [ "${DEPLOY_OK:-0}" != 1 ]; then
         _rollback_release_binary
+    fi
+    # Aborted after the migration floor but before promotion: the live binary is
+    # provably unbootable, so promote forward rather than leave the node bricked.
+    if [ "${MIGRATION_FLOOR_CROSSED:-0}" = 1 ] && [ "${ROLLBACK_ARMED:-0}" != 1 ] \
+        && [ "${DEPLOY_OK:-0}" != 1 ]; then
+        _fail_forward_promote_staged_binary
     fi
     if [ -n "${STAGED_BINARY:-}" ] && [ -e "$STAGED_BINARY" ]; then
         rm -f "$STAGED_BINARY" 2>/dev/null || true
@@ -2489,6 +2547,12 @@ if ! "$STAGED_BINARY" release-migrate-postgres; then
     echo "✗ Release PostgreSQL migration failed before restart was requested; the existing runtime remains active."
     exit 1
 fi
+# Arm the fail-forward promote only when Postgres actually moved past what the
+# live binary embeds — the same predicate the rollback guard uses, so a deploy
+# that ships no new migration still aborts onto its known-good binary.
+if _rollback_would_brick_on_migration; then
+    MIGRATION_FLOOR_CROSSED=1
+fi
 
 # Migration 0100 is now a forward-only binary floor: once it commits, a pre-0100
 # binary cannot restart because SQLx rejects a database migration newer than its
@@ -2515,9 +2579,13 @@ if [ "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-0}" != "1" ]; then
         clear_restart_drain_mode "$ADK_REL" || true
         exit 1
     fi
-    if ! wait_for_restart_persistence_or_fail \
-        "release" "$ADK_REL" "$RESTART_REQUEST_NONCE" 30; then
-        exit 1
+    if _release_runtime_is_serving "$REL_PORT"; then
+        if ! wait_for_restart_persistence_or_fail \
+            "release" "$ADK_REL" "$RESTART_REQUEST_NONCE" 30; then
+            exit 1
+        fi
+    else
+        echo "▸ [gate] release is not serving on :${REL_PORT} — no in-flight delivery frontier to persist; proceeding"
     fi
 else
     echo "⚠ [gate] release restart durability gate=${AGENTDESK_RESTART_DRAIN_VERDICT}"
