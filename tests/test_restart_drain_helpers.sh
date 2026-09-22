@@ -582,6 +582,26 @@ run_rc env AGENTDESK_RESTART_LEGACY_INDEX_COMPAT=0 bash -c \
   >"$TMP_D/legacy-disabled.out" 2>&1
 assert_eq "explicit compatibility kill switch rejects fixed index" "1" "$RUN_RC"
 
+# The gate's branch test stubs this wrapper, so bind its own discovery here: a
+# wrapper stuck at "no proof" would silently restore the blind report it fixed.
+rm -f "$CANONICAL_ROOT"/restart_persisted*
+printf 'nonce=exists-identity\n' >"$CANONICAL_ROOT/restart_persisted.exists-identity"
+run_rc _restart_persistence_proof_exists "$CANONICAL_ROOT" exists-identity
+assert_eq "proof predicate finds an identity artifact" "0" "$RUN_RC"
+run_rc _restart_persistence_proof_exists "$CANONICAL_ROOT" someone-else
+assert_eq "proof predicate rejects another request's artifact" "1" "$RUN_RC"
+
+rm -f "$CANONICAL_ROOT"/restart_persisted*
+printf 'nonce=exists-legacy\n' >"$CANONICAL_ROOT/restart_persisted"
+run_rc _restart_persistence_proof_exists "$CANONICAL_ROOT" exists-legacy
+assert_eq "proof predicate accepts the legacy fixed index" "0" "$RUN_RC"
+
+rm -f "$CANONICAL_ROOT"/restart_persisted*
+run_rc _restart_persistence_proof_exists "$CANONICAL_ROOT" exists-identity
+assert_eq "proof predicate reports absence when nothing was published" "1" "$RUN_RC"
+run_rc _restart_persistence_proof_exists "$CANONICAL_ROOT" 'a/b'
+assert_eq "proof predicate refuses an unsafe nonce" "1" "$RUN_RC"
+
 # A terminal witness unwedges the sole watched root through nonce CAS.
 rm -f "$CANONICAL_ROOT"/restart_*
 _restart_stage_and_link_marker "$CANONICAL_ROOT" witnessed src scope label

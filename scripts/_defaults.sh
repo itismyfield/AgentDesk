@@ -1434,8 +1434,6 @@ _restart_persistence_proof_class() {
 _restart_persistence_proof_exists() {
   local runtime_root="$1"
   local expected_nonce="$2"
-  [ -n "$expected_nonce" ] || return 1
-  _restart_nonce_is_path_safe "$expected_nonce" || return 1
   _set_restart_marker_root "$runtime_root" || return 1
   _restart_persistence_proof_class "$RESTART_MARKER_ROOT" "$expected_nonce" >/dev/null 2>&1
 }
