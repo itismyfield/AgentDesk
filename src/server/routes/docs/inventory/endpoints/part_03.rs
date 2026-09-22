@@ -5,6 +5,8 @@ use super::super::{EndpointDoc, ParamDoc, body_param, ep, header_param, path_par
 
 pub(super) fn endpoints() -> Vec<EndpointDoc> {
     vec![
+        ep("GET", "/api/internal/node-probe", "cluster",
+            "Authenticated identity and session-forwarding protocol probe. Verifies the configured peer endpoint belongs to the advertised node; does not expose worker administration."),
         ep(
             "POST",
             "/api/agents/{id}/turn/start",
