@@ -25,7 +25,7 @@ pub async fn body_limit_envelope(response: Response) -> Response {
         ErrorCode::Validation,
         format!(
             "campaign request body exceeds the {LEDGER_BODY_LIMIT_BYTES} byte ledger limit; \
-             split the campaign, or keep the bulky evidence in an external artifact and \
+             split the campaign, or keep the bulky evidence in a durable external artifact and \
              store only its reference. Revision history is pruned and cannot hold it."
         ),
     )

@@ -1,8 +1,11 @@
 -- Each revision stores a full copy of the DAG, so an active campaign grew the
 -- history unboundedly; 0121's "every accepted revision is retained" no longer
--- holds. Writes now keep only the newest few, and this reclaims the backlog that
+-- holds. Writes now keep only the newest few, and this removes the backlog that
 -- accumulated before that bound existed, including campaigns that never get
--- written again. The literal mirrors campaigns::REVISION_RETENTION.
+-- written again. It deletes rows, so the space returns to the table on vacuum
+-- rather than shrinking the files here, and one campaign with hundreds of large
+-- snapshots produces a single sizeable WAL burst. The literal mirrors
+-- campaigns::REVISION_RETENTION.
 DELETE FROM campaign_revisions AS victim
 USING (
     SELECT

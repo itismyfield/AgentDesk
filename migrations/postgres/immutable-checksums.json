@@ -623,7 +623,7 @@
     },
     {
       "path": "migrations/postgres/0122_campaign_revision_retention.sql",
-      "sha256": "fe19efea6d2c4d01cf248082e0eb126bdda351b3f3d7b2bc172f54adaa1de1c7",
+      "sha256": "bcf2c2ded864d3404e89e3fd84a4fa202162a405433f466bb6b22ef7b06405fe",
       "version": 122
     }
   ],

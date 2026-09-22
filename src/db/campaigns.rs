@@ -273,6 +273,10 @@ pub async fn get(pool: &PgPool, id: &str) -> Result<Campaign, CampaignError> {
 /// Every revision snapshots the whole DAG, so long campaigns keep only the newest ones.
 pub const REVISION_RETENTION: i64 = 10;
 
+/// A retention below one empties the keep-set, so the prune would delete the
+/// revision its own transaction just inserted. Refuse to build such a binary.
+const _: () = assert!(REVISION_RETENTION > 0);
+
 pub async fn history(pool: &PgPool, id: &str) -> Result<Vec<Campaign>, CampaignError> {
     get(pool, id).await?;
     let rows: Vec<Json<Campaign>> = sqlx::query_scalar(
@@ -287,12 +291,6 @@ async fn prune_revisions(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: &str,
 ) -> Result<u64, CampaignError> {
-    // A retention of zero would make the keep-set empty and delete the revision
-    // this transaction just inserted.
-    debug_assert!(
-        REVISION_RETENTION > 0,
-        "retention must keep at least one revision"
-    );
     Ok(sqlx::query(
         "DELETE FROM campaign_revisions WHERE campaign_id = $1 AND revision NOT IN \
          (SELECT revision FROM campaign_revisions WHERE campaign_id = $1 \
