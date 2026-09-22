@@ -927,7 +927,9 @@ pub(crate) fn fsync_parent_dir(path: &Path) -> std::io::Result<()> {
     fs::File::open(parent.unwrap_or_else(|| Path::new(".")))?.sync_all()
 }
 
-/// NTFS journals the rename itself and refuses to flush a directory handle.
+/// No directory flush on Windows. NTFS recovers each rename atomically and in
+/// log order, but flushes its log lazily, so a crash shortly after `Ok` may roll
+/// the rename back. Callers' "synced"/"durable" mean "ordered and atomic" here.
 #[cfg(windows)]
 pub(crate) fn fsync_parent_dir(_path: &Path) -> std::io::Result<()> {
     Ok(())

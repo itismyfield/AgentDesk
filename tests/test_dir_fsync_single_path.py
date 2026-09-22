@@ -27,9 +27,11 @@ class DirFsyncSinglePathTests(unittest.TestCase):
     def test_inline_copies_are_rejected(self):
         for text in (
             "        File::open(parent)?.sync_all()?;\n",
-            '        let directory =\n            std::fs::File::open(parent).map_err(|err| format!("{err}"))?;\n',
-            "    let d = File::open(&state_dir)?;\n",
-            "    File::open(root.join(\"x\"))?.sync_data()?;\n",
+            '        let directory =\n            std::fs::File::open(parent).map_err(|err| format!("{err}"))?;\n'
+            '        sync_atomic_file(&directory, label, "parent")\n',
+            "    let d = std::fs::File::open(\n        parent,\n    )?;\n    d.sync_all()?;\n",
+            "    let d = File::open(&root)?;\n    d.sync_data()?;\n",
+            "    OpenOptions::new().read(true).open(parent)?.sync_all()?;\n",
         ):
             with self.subTest(text=text):
                 findings = audit(tree({"src/server/drift.rs": text}))
@@ -44,7 +46,11 @@ class DirFsyncSinglePathTests(unittest.TestCase):
 
     def test_plain_file_opens_and_line_comments_pass(self):
         text = (
-            "    let bytes = File::open(&path)?;\n"
+            "    let bytes = File::open(&redirect_log)?;\n"
+            "    let entry = File::open(parent.join(\"x.json\"))?;\n"
+            "    entry.sync_all()?;\n"
+            "    let mut temp = OpenOptions::new().write(true).create_new(true).open(&temp)?;\n"
+            "    temp.write_all(bytes).and_then(|_| temp.sync_all())?;\n"
             "    // File::open(parent)?.sync_all()?;\n"
         )
         self.assertEqual(audit(tree({"src/server/ok.rs": text})), [])
