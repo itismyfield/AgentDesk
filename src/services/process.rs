@@ -579,7 +579,7 @@ fn kill_pid_tree_with_identity(pid: u32) -> bool {
     std::process::Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .output()
-        .is_ok()
+        .is_ok_and(|output| output.status.success())
 }
 
 /// Kill a child process and its entire process tree.

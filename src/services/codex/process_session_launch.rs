@@ -55,7 +55,7 @@ pub(super) fn execute_streaming_local_process_codex(
             TMUX_PROMPT_B64_PREFIX,
             BASE64_STANDARD.encode(prompt.as_bytes())
         );
-        send_process_session_input(session_name, &encoded)?;
+        send_process_session_input(session_name, &encoded, cancel_token.as_deref())?;
         let read_result = read_output_file_until_result(
             &output_path,
             start_offset,
