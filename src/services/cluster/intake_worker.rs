@@ -281,6 +281,7 @@ pub(crate) async fn run_intake_worker_tick(
     }
 
     let claimed = claim_pending_for_target(pool, target_instance_id, provider, claim_owner).await?;
+    super::readiness::record_poller_progress(provider);
     let Some(row) = claimed else {
         return Ok(TickOutcome::QueueEmpty);
     };

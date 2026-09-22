@@ -1985,6 +1985,7 @@ services::cluster::node_registry::tests::preferred_label_order_beats_newer_heart
 services::cluster::node_registry::tests::preferred_label_ranks_online_match_but_falls_back_to_online_candidate
 services::cluster::node_registry::tests::required_namespace_remains_hard_and_preferred_namespace_is_soft
 services::cluster::node_registry::tests::wait_until_leader_follows_late_leadership_transition
+services::cluster::readiness::tests::execution_readiness_separates_liveness_freshness_poller_and_credentials
 services::cluster::registry_adapter_sink::tests::deliver_counts_per_session
 services::cluster::registry_adapter_sink::tests::end_to_end_relay_through_sink_records_matched_channel_binding
 services::cluster::registry_adapter_sink::tests::registry_to_supervisor_to_sink_end_to_end
@@ -8535,6 +8536,8 @@ services::session_backend::stream_tail_guard_tests::tool_use_only_turn_forwards_
 services::session_backend::terminal_usage::tests::extract_turn_analytics_adopts_qwen_terminal_usage
 services::session_backend::terminal_usage::tests::extract_turn_analytics_backstop_rejects_millions_usage
 services::session_backend::terminal_usage::tests::extract_turn_analytics_suppresses_codex_wrapper_result_usage
+services::session_forwarding::probe::tests::reachability_checks_authenticated_response_identity_and_protocol
+services::session_forwarding::probe::tests::reachability_requires_trusted_origin_before_any_credentials_are_sent
 services::session_forwarding::tests::cancel_owner_does_not_fall_back_to_agent_binding_pg
 services::session_forwarding::tests::cancel_owner_ignores_disconnected_sessions_pg
 services::session_forwarding::tests::cancel_owner_matches_exact_channel_not_session_key_text_pg

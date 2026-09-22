@@ -32,6 +32,7 @@ pub(crate) fn cluster_capabilities_with_worker_api(config: &ClusterConfig) -> Va
         metadata.insert("base_url".to_string(), Value::String(api_base_url));
         metadata.insert("session_forwarding".to_string(), Value::Bool(true));
         metadata.insert("cancel_forwarding_v1".to_string(), Value::Bool(true));
+        metadata.insert("node_probe_v1".to_string(), Value::Bool(true));
         capabilities.insert("agentdesk_api".to_string(), Value::Object(metadata));
     }
     Value::Object(capabilities)

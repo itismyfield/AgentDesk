@@ -531,6 +531,8 @@ src/
 │   │   ├── intake_worker/
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   └── drain_tests.rs
+│   │   ├── readiness/
+│   │   │   └── tests.rs
 │   │   ├── stream_relay/
 │   │   │   ├── tests/
 │   │   │   │   └── shutdown_tests.rs
@@ -549,6 +551,7 @@ src/
 │   │   ├── intake_worker_capabilities.rs
 │   │   ├── mod.rs
 │   │   ├── node_registry.rs
+│   │   ├── readiness.rs
 │   │   ├── registry_adapter_sink.rs
 │   │   ├── relay_producer_registry.rs
 │   │   ├── session_discovery.rs
@@ -1688,6 +1691,9 @@ src/
 │   │   ├── stream_line.rs
 │   │   └── terminal_usage.rs
 │   ├── session_forwarding/
+│   │   ├── probe/
+│   │   │   └── tests.rs
+│   │   ├── probe.rs
 │   │   └── trusted_target.rs
 │   ├── settings/
 │   │   └── runtime_config_put.rs

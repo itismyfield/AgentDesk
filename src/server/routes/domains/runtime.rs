@@ -136,7 +136,8 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route(
                 "/hook/session/{sessionKey}",
                 delete(hooks::disconnect_session),
-            ),
+            )
+            .route("/internal/node-probe", get(cluster::node_probe)),
         state,
     )
 }

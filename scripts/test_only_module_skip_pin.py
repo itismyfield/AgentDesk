@@ -63,6 +63,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/cluster/attachment_transfer/tests.rs",
         "src/services/cluster/intake_worker/dispatch_stamp_tests.rs",
         "src/services/cluster/intake_worker/drain_tests.rs",
+        "src/services/cluster/readiness/tests.rs",
         "src/services/cluster/stream_relay/tests/shutdown_tests.rs",
         "src/services/discord/abandon_request_store/probe_contract_tests.rs",
         "src/services/discord/catch_up/classification_order_tests.rs",
@@ -169,6 +170,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/provider/provider_conformance_invariant_tests.rs",
         "src/services/provider_auth_profile/fallback/tests.rs",
         "src/services/provider_output_guard_tests.rs",
+        "src/services/session_forwarding/probe/tests.rs",
         "src/services/scheduled_messages/postgres_tests.rs",
         "src/services/tui_prompt_dedupe/tests.rs",
     }

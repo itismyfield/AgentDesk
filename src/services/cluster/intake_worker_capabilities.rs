@@ -34,7 +34,7 @@ pub(crate) fn register_intake_worker_provider(provider: &str) {
     }
 }
 
-fn active_intake_worker_providers() -> Vec<String> {
+pub(super) fn active_intake_worker_providers() -> Vec<String> {
     ACTIVE_INTAKE_WORKER_PROVIDERS
         .read()
         .map(|providers| providers.iter().cloned().collect())
@@ -95,6 +95,7 @@ pub(crate) fn node_awaits_gateway(node: &Value, provider: &str) -> bool {
 
 pub(super) fn capabilities_with_runtime_state(base: &Value) -> Value {
     let mut capabilities = base.as_object().cloned().unwrap_or_default();
+    super::readiness::publish(&mut capabilities);
     let providers = active_intake_worker_providers();
     capabilities.insert(
         "intake_worker".to_string(),

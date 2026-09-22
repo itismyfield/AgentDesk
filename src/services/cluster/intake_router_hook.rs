@@ -483,6 +483,8 @@ async fn route_by_preferred_labels(
         );
     }
 
+    let auth_profile =
+        super::readiness::expected_auth_profile(ctx.provider, ctx.channel_id, &agent_id);
     let candidates = match crate::services::cluster::node_registry::list_worker_nodes(
         pool,
         worker_heartbeat_lease_secs(),
@@ -497,7 +499,8 @@ async fn route_by_preferred_labels(
                         node,
                         ctx.provider,
                         ctx.preserve_on_cancel,
-                    )
+                    ) && super::readiness::evaluate_declared(node, ctx.provider, &auth_profile)
+                        .eligible
                 })
                 .collect();
             candidates_from_worker_nodes_json(&eligible_nodes)
@@ -753,6 +756,44 @@ async fn route_to_instance(
                 },
             );
         }
+    }
+
+    // Recheck immediately before creating work, including explicit overrides
+    // and sticky owners. A stalled owner stays the owner; it is never replaced
+    // by an incompatible local execution because its readiness expired.
+    let readiness =
+        match super::node_registry::list_worker_nodes(pool, worker_heartbeat_lease_secs()).await {
+            Ok(nodes) => nodes
+                .iter()
+                .find(|node| node["instance_id"].as_str() == Some(target))
+                .map(|node| {
+                    super::readiness::evaluate_declared(
+                        node,
+                        ctx.provider,
+                        &super::readiness::expected_auth_profile(
+                            ctx.provider,
+                            ctx.channel_id,
+                            agent_id,
+                        ),
+                    )
+                })
+                .ok_or_else(|| "target registry row missing".to_string()),
+            Err(error) => Err(error),
+        };
+    let blocked_detail = match readiness {
+        Ok(report) if !report.eligible => Some(report.reasons.join(", ")),
+        Ok(_) => None,
+        Err(error) => Some(error),
+    };
+    if let Some(detail) = blocked_detail {
+        return apply_observe_mode(
+            ctx.mode,
+            IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::RoutingDependencyFailed {
+                    detail: format!("target {target} execution readiness: {detail}"),
+                },
+            },
+        );
     }
 
     if matches!(ctx.mode, IntakeRoutingMode::Observe) {

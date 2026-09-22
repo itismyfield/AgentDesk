@@ -208,6 +208,12 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
             .collect(),
     );
     let base_capabilities = cluster_capabilities_with_worker_api(&config.cluster);
+    super::readiness::spawn_probe(config.clone());
+    crate::services::session_forwarding::probe::spawn(
+        config.clone(),
+        pool.clone(),
+        instance_id.clone(),
+    );
     let capabilities = capabilities_with_runtime_state(&base_capabilities);
     let pid = std::process::id() as i32;
 
