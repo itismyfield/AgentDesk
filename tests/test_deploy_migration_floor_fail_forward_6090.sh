@@ -36,8 +36,7 @@ extract_function() {
 
 for fn in _recover_or_preserve_past_migration_floor _preserve_staged_binary_for_recovery \
     _migration_floor_artifact_path _old_runtime_pid_is_alive _release_job_is_quiescent \
-    _release_job_backing_pid \
-    _release_runtime_is_serving _migration_floor_may_advance; do
+    _release_job_backing_pid _migration_floor_may_advance; do
     body="$(extract_function "$fn")"
     if [ -z "$body" ]; then
         fail "$fn is not defined in $DEPLOY_SH"
@@ -46,6 +45,12 @@ for fn in _recover_or_preserve_past_migration_floor _preserve_staged_binary_for_
     fi
     eval "$body"
 done
+
+if ! declare -F _release_runtime_is_serving >/dev/null; then
+    fail "_release_runtime_is_serving is not defined in scripts/_defaults.sh"
+    echo "$FAILURES failure(s)" >&2
+    exit 1
+fi
 
 # Emulates curl closely enough that -f/--fail and the exit code both matter: a
 # probe that only accepts rc 0 would look correct here and ship a live-runtime bug.
@@ -392,10 +397,11 @@ else
     pass "a refused connection counts as not serving"
 fi
 STUB_CURL_RC=0
+# An unresolved port proves nothing, so it must not license skipping the gate.
 if _release_runtime_is_serving ""; then
-    fail "an empty port was treated as serving"
+    pass "an unresolved port counts as serving, so the gate still runs"
 else
-    pass "an unresolved port counts as not serving"
+    fail "an unresolved port was read as absence — the durability gate would be skipped blind"
 fi
 if extract_function _release_runtime_is_serving | grep -v "^[[:space:]]*#" | grep -q "kill -0"; then
     fail "liveness uses kill -0, which a launchd-respawned crash loop always satisfies"

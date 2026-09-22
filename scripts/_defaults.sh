@@ -1583,6 +1583,17 @@ _restart_pending_acknowledged() {
   printf '%s' "$detail_json" | grep -q '"restart_pending":true'
 }
 
+_release_runtime_is_serving() {
+    # A crash loop keeps a fresh pid but never binds, so probe the port. Only
+    # curl 7 means absent; a 5xx, a timeout or an unknown port proves nothing.
+    local port="$1" rc=0
+    [ -n "$port" ] || return 0
+    curl -s -o /dev/null --max-time 3 \
+        -H "$(_health_origin_header)" \
+        "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health" >/dev/null 2>&1 || rc=$?
+    [ "$rc" != "7" ]
+}
+
 wait_for_restart_persistence_or_fail() {
   local scope="$1"
   local runtime_root="$2"

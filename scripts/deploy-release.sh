@@ -1091,16 +1091,6 @@ _rollback_pg_tunnel_migration() {
     return 1
 }
 
-_release_runtime_is_serving() {
-    # A crash loop keeps a fresh pid but never binds, so probe the port. Only
-    # curl 7 means absent; a 5xx or a timeout still owns a frontier.
-    local port="$1" rc=0
-    [ -n "$port" ] || return 1
-    curl -s -o /dev/null --max-time 3 \
-        -H "$(_health_origin_header)" \
-        "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health" >/dev/null 2>&1 || rc=$?
-    [ "$rc" != "7" ]
-}
 
 _migration_floor_artifact_path() {
     # An older artifact may be the only binary that boots against the live schema.
@@ -2685,13 +2675,13 @@ if [ "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-0}" != "1" ]; then
         clear_restart_drain_mode "$ADK_REL" || true
         exit 1
     fi
-    if _release_runtime_is_serving "$REL_PORT"; then
+    if _release_runtime_is_serving "${REL_PORT:-}"; then
         if ! wait_for_restart_persistence_or_fail \
             "release" "$ADK_REL" "$RESTART_REQUEST_NONCE" 30; then
             exit 1
         fi
     else
-        echo "▸ [gate] release is not serving on :${REL_PORT} — no in-flight delivery frontier to persist; proceeding"
+        echo "▸ [gate] release is not serving on :${REL_PORT:-} — no in-flight delivery frontier to persist; proceeding"
     fi
 else
     echo "⚠ [gate] release restart durability gate=${AGENTDESK_RESTART_DRAIN_VERDICT}"

@@ -1011,6 +1011,7 @@ run_out=$(REGION="$S1_TMP/durability-region.sh" bash -c '
   AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=0
   AGENTDESK_RESTART_DRAIN_VERDICT="fence-observed:nonce-unattributed"
   clear_restart_drain_mode() { :; }
+  _release_runtime_is_serving() { return 0; }
   wait_for_restart_persistence_or_fail() { echo phase-2-ran; }
   eval "$(<"$REGION")"
 ')
