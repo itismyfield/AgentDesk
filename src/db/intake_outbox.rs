@@ -27,6 +27,7 @@ pub(crate) struct IntakeOutboxRow {
     pub forwarded_by_instance_id: String,
     pub required_labels: Value,
     pub execution_requirements: Value,
+    pub attachment_refs: Value,
     pub channel_id: String,
     pub user_msg_id: String,
     pub request_owner_id: String,
@@ -70,6 +71,7 @@ pub(crate) struct InsertPendingPayload {
     pub forwarded_by_instance_id: String,
     pub required_labels: Value,
     pub execution_requirements: Value,
+    pub attachment_refs: Value,
     pub channel_id: String,
     pub user_msg_id: String,
     pub request_owner_id: String,
@@ -117,14 +119,14 @@ pub(crate) async fn insert_pending(
             user_text, reply_context, has_reply_boundary, dm_hint, turn_kind,
             merge_consecutive, reply_to_user_message, defer_watcher_resume,
             wait_for_completion, preserve_on_cancel, agent_id, provider,
-            status, attempt_no, parent_outbox_id, execution_requirements
+            status, attempt_no, parent_outbox_id, execution_requirements, attachment_refs
         ) VALUES (
             $1, $2, $3,
             $4, $5, $6, $7,
             $8, $9, $10, $11, $12,
             $13, $14, $15,
             $16, $17, $18, $19,
-            $20, $21, $22, $23
+            $20, $21, $22, $23, $24
         )
         RETURNING id
         "#,
@@ -152,6 +154,7 @@ pub(crate) async fn insert_pending(
     .bind(attempt_no)
     .bind(parent_outbox_id)
     .bind(&payload.execution_requirements)
+    .bind(&payload.attachment_refs)
     .fetch_one(pool)
     .await?;
     Ok(id)
@@ -472,6 +475,8 @@ pub(crate) async fn sweep_failed_pre_accept_once(
         .iter()
         .find(|node| {
             requirements.intake_reasons(node).is_empty()
+                && (source.attachment_refs.as_array().is_some_and(Vec::is_empty)
+                    || crate::services::cluster::attachment_transfer::supports(node))
                 && crate::services::cluster::readiness::evaluate_declared(
                     node,
                     &source.provider,
@@ -500,10 +505,10 @@ pub(crate) async fn sweep_failed_pre_accept_once(
             merge_consecutive, reply_to_user_message, defer_watcher_resume,
             wait_for_completion, preserve_on_cancel, agent_id, provider,
             owner_instance_id, owner_generation, admission_kind,
-            status, attempt_no, parent_outbox_id, execution_requirements
+            status, attempt_no, parent_outbox_id, execution_requirements, attachment_refs
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
                   $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
-                  $23, $24, $25, $26)
+                  $23, $24, $25, $26, $27)
         RETURNING id"#,
     )
     .bind(&target)
@@ -532,6 +537,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
     .bind(next_attempt)
     .bind(source.id)
     .bind(&source.execution_requirements)
+    .bind(&source.attachment_refs)
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -1581,6 +1587,7 @@ mod postgres_tests {
     fn payload(channel: &str, msg: &str) -> InsertPendingPayload {
         InsertPendingPayload {
             execution_requirements: json!({}),
+            attachment_refs: serde_json::json!([]),
             target_instance_id: "worker-1".to_string(),
             forwarded_by_instance_id: "leader-1".to_string(),
             provider: "claude".to_string(),

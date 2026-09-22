@@ -43,13 +43,17 @@ pub(super) async fn notify_blocked_intake(
             format!(
                 "기존 세션 owner `{owner_instance_id}`는 다른 노드에 있고 첨부파일 경로는 현재 노드 전용입니다."
             ),
-            "현재 mac-mini routed session은 파일 첨부를 지원하지 않습니다. text-only로 다시 보내세요.",
+            "원본 파일을 새 메시지로 다시 첨부하면 지원하는 노드에 전송할 수 있습니다.",
         ),
         IntakeBlockedReason::NonPortableAttachmentRoutedTarget { target_instance_id } => (
             format!(
                 "새 routed target `{target_instance_id}`는 현재 노드 전용 첨부파일 경로를 받을 수 없습니다."
             ),
-            "현재 mac-mini routed session은 파일 첨부를 지원하지 않습니다. text-only로 다시 보내세요.",
+            "원본 파일을 새 메시지로 다시 첨부하면 지원하는 노드에 전송할 수 있습니다.",
+        ),
+        IntakeBlockedReason::AttachmentUnavailable { detail } => (
+            format!("첨부파일을 완전하게 준비할 수 없습니다: {detail}"),
+            "보관 기한과 파일 크기를 확인하고 원본 파일을 새 메시지로 다시 첨부하세요.",
         ),
         IntakeBlockedReason::StaleSessionOwners { instance_ids } => (
             format!(
@@ -77,8 +81,11 @@ pub(super) async fn notify_blocked_intake(
             ),
             "기존 세션을 stop/clear한 뒤 다시 보내세요.",
         ),
-        IntakeBlockedReason::OwnerLookupFailed { .. }
-        | IntakeBlockedReason::RoutingDependencyFailed { .. } => (
+        IntakeBlockedReason::RoutingDependencyFailed { detail } => (
+            format!("실행 조건을 확인할 수 없습니다: {detail}"),
+            "대상 노드의 준비 상태와 설정을 확인한 뒤 다시 보내세요.",
+        ),
+        IntakeBlockedReason::OwnerLookupFailed { .. } => (
             "세션 owner를 안전하게 확인하지 못했습니다.".to_string(),
             "기존 세션을 stop/clear한 뒤 다시 보내세요.",
         ),

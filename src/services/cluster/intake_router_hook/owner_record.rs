@@ -523,7 +523,7 @@ INSERT INTO intake_outbox (
     merge_consecutive, reply_to_user_message, defer_watcher_resume,
     wait_for_completion, preserve_on_cancel, agent_id, provider,
     owner_instance_id, owner_generation, admission_kind, idempotency_key,
-    status, attempt_no, parent_outbox_id, execution_requirements
+    status, attempt_no, parent_outbox_id, execution_requirements, attachment_refs
 ) VALUES (
     $1, $2, $3,
     $4, $5, $6, $7,
@@ -531,7 +531,7 @@ INSERT INTO intake_outbox (
     $13, $14, $15,
     $16, $17, $18, $19,
     $20, $21, $22, $23,
-    $24, $25, $26, $27
+    $24, $25, $26, $27, $28
 )
 RETURNING id
 "#;
@@ -599,6 +599,7 @@ pub(crate) async fn insert_admission_savepoint(
         .bind(attempt_no)
         .bind(None::<i64>)
         .bind(&payload.execution_requirements)
+        .bind(&payload.attachment_refs)
         .fetch_one(&mut **tx)
         .await;
 
@@ -1058,6 +1059,7 @@ mod tests {
     fn admission_payload(channel: &str, msg: &str, provider: &str) -> InsertPendingPayload {
         InsertPendingPayload {
             execution_requirements: json!({}),
+            attachment_refs: serde_json::json!([]),
             target_instance_id: "worker-1".to_string(),
             forwarded_by_instance_id: "leader-1".to_string(),
             provider: provider.to_string(),

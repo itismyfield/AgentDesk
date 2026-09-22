@@ -7,6 +7,13 @@ pub(crate) mod store;
 pub(crate) mod temporary;
 pub(crate) mod uploads;
 
+pub(crate) const CAPABILITY: &str = "attachment_bundle_v1";
+pub(crate) fn supports(node: &serde_json::Value) -> bool {
+    node.pointer("/capabilities/intake_worker/features")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|features| features.iter().any(|feature| feature == CAPABILITY))
+}
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

@@ -591,6 +591,7 @@ mod tests {
     fn fake_row() -> IntakeOutboxRow {
         IntakeOutboxRow {
             execution_requirements: serde_json::json!({}),
+            attachment_refs: serde_json::json!([]),
             id: 42,
             target_instance_id: "worker-1".to_string(),
             forwarded_by_instance_id: "leader-1".to_string(),

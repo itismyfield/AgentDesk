@@ -31,6 +31,7 @@ pub(crate) enum IntakeRoutingReasonCode {
     OverrideUnavailable,
     NonPortableAttachmentForeignOwner,
     NonPortableAttachmentRoutedTarget,
+    AttachmentUnavailable,
     RoutingDependencyFailed,
 }
 
@@ -58,6 +59,7 @@ impl IntakeRoutingReasonCode {
             Self::OverrideUnavailable => "override_unavailable",
             Self::NonPortableAttachmentForeignOwner => "nonportable_attachment_foreign_owner",
             Self::NonPortableAttachmentRoutedTarget => "nonportable_attachment_routed_target",
+            Self::AttachmentUnavailable => "attachment_unavailable",
             Self::RoutingDependencyFailed => "routing_dependency_failed",
         }
     }
@@ -141,6 +143,9 @@ fn blocked_reason_code(reason: &IntakeBlockedReason) -> IntakeRoutingReasonCode 
         }
         IntakeBlockedReason::NonPortableAttachmentRoutedTarget { .. } => {
             IntakeRoutingReasonCode::NonPortableAttachmentRoutedTarget
+        }
+        IntakeBlockedReason::AttachmentUnavailable { .. } => {
+            IntakeRoutingReasonCode::AttachmentUnavailable
         }
         IntakeBlockedReason::RoutingDependencyFailed { .. } => {
             IntakeRoutingReasonCode::RoutingDependencyFailed
@@ -322,6 +327,7 @@ fn blocked_telemetry(reason: &IntakeBlockedReason) -> IntakeRoutingTelemetry<'_>
         }
         IntakeBlockedReason::OverrideUnavailable { .. }
         | IntakeBlockedReason::NonPortableAttachmentRoutedTarget { .. }
+        | IntakeBlockedReason::AttachmentUnavailable { .. }
         | IntakeBlockedReason::RoutingDependencyFailed { .. } => OwnerResolutionCode::NotEvaluated,
     };
     IntakeRoutingTelemetry {

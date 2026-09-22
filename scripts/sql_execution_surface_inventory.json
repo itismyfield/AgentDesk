@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "0f014678414145f433a3209074e9bc2b7a6657c2",
+  "measured_at_sha": "a6c570e0d6a584e00af75c978d990e30a28dd3e0",
   "records": [
     {
       "root": "migrations/postgres",
@@ -8883,6 +8883,15 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
+      "fingerprint": "sha256:02cdb2c3fd9bf285c94dc541c28e164c8bbce6fe1dd0fdc2ed3add743b2e6120"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
       "fingerprint": "sha256:0d3ec95c2e100f131237de23aac276b1a16a0df76326f57c1bc921d42641f1dd"
     },
     {
@@ -8955,15 +8964,6 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:50b032c7b6a4a43b2b7fe42f3740d16d74e36bc4669e8754175e82b0529ee6a6"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/intake_outbox.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
       "fingerprint": "sha256:5c128e94863e97e48c20fa40f87987b59a8aac5e5978d73fd241abf1cb5eb015"
     },
     {
@@ -8974,6 +8974,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:5d1d6bdb2701f7c13bceaf1ad90638516b8f53dd3a501d335ff9748548aff205"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:642312ce2a9234e44f40f949aa82947b88cb2420e2653e9f859be272d9a4b637"
     },
     {
       "root": "src",
@@ -9118,15 +9127,6 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:e51540ab1660fc4bbc4f490175141258b552e0cdc5d54960b792f0ddb0758701"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/intake_outbox.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:f2685fb5392284226da2c5fc2dcb616ca3087f3fa4128ba66c7a58c4a248d0b6"
     },
     {
       "root": "src",
@@ -9459,7 +9459,7 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:9d0896fa33fcd10a38e3faaf297a86b291af21e42ba3b72a90c6aca35362e5e7"
+      "fingerprint": "sha256:c840be77350087a863a3513ad2b98dd71636aa7fd59d0e8b6e42568a4df4e673"
     },
     {
       "root": "src",
