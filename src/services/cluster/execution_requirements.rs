@@ -148,5 +148,63 @@ impl ExecutionRequirements {
     }
 }
 
+pub(crate) async fn get(pool: &sqlx::PgPool, agent: &str) -> Result<Option<Value>, sqlx::Error> {
+    sqlx::query_scalar("SELECT execution_requirements FROM agents WHERE id=$1")
+        .bind(agent)
+        .fetch_optional(pool)
+        .await
+}
+
+pub(crate) async fn set(
+    pool: &sqlx::PgPool,
+    agent: &str,
+    value: &Value,
+) -> Result<bool, sqlx::Error> {
+    Ok(
+        sqlx::query("UPDATE agents SET execution_requirements=$2, updated_at=NOW() WHERE id=$1")
+            .bind(agent)
+            .bind(value)
+            .execute(pool)
+            .await?
+            .rows_affected()
+            > 0,
+    )
+}
+
+pub(crate) async fn for_channel(
+    pool: &sqlx::PgPool,
+    channel: &str,
+) -> Result<ExecutionRequirements, String> {
+    let value: Option<Value> = sqlx::query_scalar("SELECT execution_requirements FROM agents WHERE discord_channel_id=$1 OR discord_channel_alt=$1 OR discord_channel_cc=$1 OR discord_channel_cdx=$1 LIMIT 1")
+        .bind(channel).fetch_optional(pool).await.map_err(|e| e.to_string())?;
+    ExecutionRequirements::parse(value.unwrap_or_else(|| serde_json::json!({})))
+}
+
+pub(crate) fn validate_worker(
+    row: &crate::db::intake_outbox::IntakeOutboxRow,
+) -> Result<(), String> {
+    let requirements = ExecutionRequirements::parse(row.execution_requirements.clone())?;
+    if requirements.is_empty() {
+        return Ok(());
+    }
+    let node = super::readiness::local_node();
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut reasons = requirements.explain(&node, now);
+    reasons.extend(
+        super::readiness::evaluate(
+            &node,
+            &row.provider,
+            &super::readiness::expected_auth_profile(&row.provider, &row.channel_id, &row.agent_id),
+            now,
+        )
+        .reasons,
+    );
+    if reasons.is_empty() {
+        Ok(())
+    } else {
+        Err(reasons.join(", "))
+    }
+}
+
 #[cfg(test)]
 pub(super) mod tests;
