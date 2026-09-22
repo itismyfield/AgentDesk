@@ -36,6 +36,7 @@ pub mod dispatched_sessions;
 pub mod dispatches;
 // #3034: 1 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during dispatches_followup dead-code cleanup.
+pub(crate) mod calendar_sync;
 #[allow(dead_code)]
 pub mod dispatches_followup;
 pub mod escalation_settings;

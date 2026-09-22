@@ -476,6 +476,8 @@ src/
 │   ├── automation_candidate_materializer/
 │   │   ├── allowed_path_tests.rs
 │   │   └── iteration_result_tests.rs
+│   ├── calendar_sync/
+│   │   └── model.rs
 │   ├── claude/
 │   │   ├── active_usage.rs
 │   │   ├── backend_routing.rs
@@ -1542,6 +1544,7 @@ src/
 │   │   └── worktree_resolver.rs
 │   ├── kakao/
 │   │   ├── account.rs
+│   │   ├── calendar.rs
 │   │   ├── test_support.rs
 │   │   ├── token_store.rs
 │   │   └── transport_tests.rs
@@ -1745,6 +1748,7 @@ src/
 │   ├── auto_queue.rs
 │   ├── automation_candidate_contract.rs
 │   ├── automation_candidate_materializer.rs
+│   ├── calendar_sync.rs
 │   ├── claude.rs
 │   ├── claude_command.rs
 │   ├── claude_compact_context.rs

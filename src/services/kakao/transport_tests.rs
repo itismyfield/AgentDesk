@@ -1,9 +1,9 @@
 use super::*;
 use axum::{
     Json, Router,
-    extract::{Form, State},
+    extract::{Form, Query, State},
     http::{HeaderMap, StatusCode},
-    routing::post,
+    routing::{delete, get, post},
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -82,6 +82,83 @@ async fn refresh_transient_failure_does_not_erase_credentials() {
     task.abort();
 }
 
+#[tokio::test]
+async fn calendar_uses_fixed_methods_query_form_and_independent_success_contracts() {
+    async fn create(Form(form): Form<HashMap<String, String>>) -> Json<Value> {
+        assert_eq!(form["calendar_id"], "primary");
+        assert_eq!(
+            serde_json::from_str::<Value>(&form["event"]).unwrap()["title"],
+            "test"
+        );
+        Json(json!({"event_id":"remote"}))
+    }
+    async fn update(Form(form): Form<HashMap<String, String>>) -> Json<Value> {
+        assert_eq!(form["event_id"], "remote");
+        Json(json!({"event_id":"remote"}))
+    }
+    async fn remove(Query(query): Query<HashMap<String, String>>) -> Json<Value> {
+        assert_eq!(query["event_id"], "remote");
+        Json(json!({"event_id":"remote"}))
+    }
+    let (origin, task) = test_support::server(
+        Router::new()
+            .route("/v2/api/calendar/create/event", post(create))
+            .route("/v2/api/calendar/update/event/host", post(update))
+            .route("/v2/api/calendar/delete/event", delete(remove))
+            .route(
+                "/v1/user/access_token_info",
+                get(|| async { Json(json!({"id":100,"app_id":10,"expires_in":3600})) }),
+            )
+            .route(
+                "/v2/user/scopes",
+                get(|| async {
+                    Json(json!({"id":100,"scopes":[{"id":"talk_calendar","agreed":true}]}))
+                }),
+            ),
+    )
+    .await;
+    let client = test_support::client(&origin, "default");
+    let identity = client.calendar_identity().await.unwrap();
+    assert_eq!(identity.user_id, 100);
+    assert_eq!(
+        client
+            .calendar_create(&json!({"title":"test"}))
+            .await
+            .unwrap(),
+        "remote"
+    );
+    client
+        .calendar_update("remote", &json!({"title":"test"}))
+        .await
+        .unwrap();
+    client.calendar_delete("remote").await.unwrap();
+    task.abort();
+}
+
+#[tokio::test]
+async fn ambiguous_create_is_not_repeated_and_response_size_is_bounded() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let (origin, task) = test_support::server(Router::new().route(
+        "/v2/api/calendar/create/event",
+        post(move || {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                "x".repeat(RESPONSE_MAX_BYTES + 1)
+            }
+        }),
+    ))
+    .await;
+    let client = test_support::client(&origin, "default");
+    assert!(matches!(
+        client.calendar_create(&json!({})).await,
+        Err(KakaoError::DeliveryUnknown)
+    ));
+    assert_eq!(observed.load(Ordering::SeqCst), 1);
+    task.abort();
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn rotated_tokens_survive_store_reopen() {
@@ -140,5 +217,50 @@ async fn schedule_validation_requires_loaded_credentials_without_network() {
     assert!(matches!(
         client.validate_credentials().await,
         Err(KakaoError::MissingCredentials)
+    ));
+}
+
+#[test]
+fn calendar_adoption_requires_owned_complete_matching_content() {
+    let desired = json!({"title":"meeting","description":"details","location":{"name":"office"},"reminders":[5,10],"time":{"start_at":"2026-09-30T01:00:00Z","end_at":"2026-09-30T02:00:00Z","time_zone":"Asia/Seoul"}});
+    let mut remote = desired.clone();
+    remote["id"] = json!("remote");
+    remote["calendar_id"] = json!("primary");
+    remote["is_host"] = json!(true);
+    remote["time"]["is_all_day"] = json!(false);
+    remote["time"]["start_at"] = json!("2026-09-30T10:00:00+09:00");
+    assert!(calendar::matches_adoption(&remote, "remote", &desired));
+    assert!(!calendar::matches_adoption(&remote, "another", &desired));
+    for value in [json!(true), Value::Null, json!("false")] {
+        let mut altered = remote.clone();
+        altered["time"]["is_all_day"] = value;
+        assert!(!calendar::matches_adoption(&altered, "remote", &desired));
+    }
+    let mut incomplete = remote.clone();
+    incomplete["time"]
+        .as_object_mut()
+        .unwrap()
+        .remove("is_all_day");
+    assert!(!calendar::matches_adoption(&incomplete, "remote", &desired));
+    for (field, value) in [
+        ("is_host", json!(false)),
+        ("calendar_id", json!("other")),
+        ("title", json!("different")),
+        ("description", json!("different")),
+        ("location", json!({"name":"elsewhere"})),
+        ("reminders", json!([5])),
+        ("rrule", json!("daily")),
+    ] {
+        let mut altered = remote.clone();
+        altered[field] = value;
+        assert!(
+            !calendar::matches_adoption(&altered, "remote", &desired),
+            "accepted mismatching {field}"
+        );
+    }
+    assert!(!calendar::matches_adoption(
+        &json!({"time":remote["time"]}),
+        "remote",
+        &desired
     ));
 }
