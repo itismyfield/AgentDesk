@@ -42,7 +42,7 @@ pub(crate) async fn dispatch_skill_intake(
         },
         origin,
         preserve_on_cancel: false,
-        has_nonportable_uploads: !preloaded_uploads.is_empty(),
+        has_nonportable_uploads: preloaded_uploads.iter().any(|upload| upload.is_local()),
         attachments: Vec::new(),
         preloaded_uploads,
         voice_announcement: None,

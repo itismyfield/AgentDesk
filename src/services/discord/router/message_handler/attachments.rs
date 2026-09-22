@@ -1,5 +1,8 @@
 use super::*;
-use crate::services::cluster::attachment_transfer::{self, store, uploads::PendingUploads};
+use crate::services::cluster::attachment_transfer::{
+    self, store,
+    uploads::{PendingUploads, Upload},
+};
 
 pub(super) const DISCORD_ATTACHMENT_HOSTS: &[&str] =
     &["cdn.discordapp.com", "media.discordapp.net"];
@@ -53,6 +56,34 @@ pub(super) async fn download_discord_attachment(raw_url: &str) -> Result<Vec<u8>
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
+}
+
+pub(in crate::services::discord::router) async fn prepare_portable_attachments(
+    pool: &sqlx::PgPool,
+    identity: attachment_transfer::AttachmentMessageIdentity,
+    attachments: &[AttachmentDescriptor],
+) -> Result<PendingUploads, String> {
+    static DOWNLOADS: std::sync::LazyLock<tokio::sync::Semaphore> =
+        std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(4));
+    let _permit = DOWNLOADS
+        .acquire()
+        .await
+        .map_err(|_| "attachment downloader unavailable")?;
+    let entries = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        download_all(attachments),
+    )
+    .await
+    .map_err(|_| "attachment bundle download timed out")??;
+    let bundle = attachment_transfer::AttachmentBundleV1 {
+        version: attachment_transfer::ATTACHMENT_BUNDLE_V1,
+        identity: identity.clone(),
+        source_attachment_count: attachments.len() as u32,
+        entries,
+    };
+    let validated = attachment_transfer::validate_attachment_bundle_v1(bundle, &identity)
+        .map_err(|e| format!("attachment validation failed: {e:?}"))?;
+    Ok(vec![Upload::Bundle(store::put(pool, &validated).await?)])
 }
 
 async fn download_all(

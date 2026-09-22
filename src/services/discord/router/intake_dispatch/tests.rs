@@ -364,6 +364,7 @@ fn telemetry_only_unopted_live_foreign_owner_stays_fenced_5040() {
             admission,
             IntakeAdmission::DeferredOpenRoute {
                 ref target_instance_id,
+                ..
             } if target_instance_id == "foreign-instance"
         ),
         "a live foreign owner must retain the open-route fence"
@@ -389,7 +390,7 @@ fn telemetry_only_unopted_unknown_owner_authority_keeps_local_fence_5040() {
     assert!(matches!(
         admission,
         IntakeAdmission::DeferredOpenRoute {
-            ref target_instance_id,
+            ref target_instance_id, ..
         } if target_instance_id == "local-instance"
     ));
 }
@@ -413,7 +414,7 @@ fn telemetry_only_unopted_local_accepted_route_stays_fenced_5040() {
     assert!(matches!(
         admission,
         IntakeAdmission::DeferredOpenRoute {
-            ref target_instance_id,
+            ref target_instance_id, ..
         } if target_instance_id == "local-instance"
     ));
 
@@ -903,6 +904,7 @@ async fn dispatched_open_route_never_uses_stale_local_recovery_pg() {
         preserve_on_cancel: false,
         node_override_instance_id: None,
         has_nonportable_uploads: false,
+        attachment_refs: &[],
     };
     let decision = try_route_intake(&pool, &ctx).await;
     assert!(matches!(

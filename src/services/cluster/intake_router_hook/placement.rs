@@ -81,6 +81,8 @@ pub(super) async fn route_by_preferred_labels(
                     )
                     .eligible
                         && required_node_reasons(node, requirements).is_empty()
+                        && (ctx.attachment_refs.is_empty()
+                            || crate::services::cluster::attachment_transfer::supports(node))
                 })
                 .collect();
             candidates_from_worker_nodes_json(&eligible_nodes)

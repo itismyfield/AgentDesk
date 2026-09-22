@@ -525,6 +525,7 @@ src/
 │   │   └── tui_relay.rs
 │   ├── cluster/
 │   │   ├── attachment_transfer/
+│   │   │   ├── materialize.rs
 │   │   │   ├── store.rs
 │   │   │   ├── temporary.rs
 │   │   │   ├── tests.rs
@@ -955,6 +956,7 @@ src/
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
+│   │   │   │   ├── turn_context.rs
 │   │   │   │   ├── turn_lifecycle.rs
 │   │   │   │   ├── typing_indicator.rs
 │   │   │   │   ├── voice_announcement_route.rs
