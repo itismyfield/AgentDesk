@@ -4,8 +4,8 @@ use axum::{
 };
 
 use super::super::{
-    ApiRouter, AppState, agents, agents_crud, agents_setup, cron_api, execution_requirements,
-    memory_api, protected_api_domain,
+    ApiRouter, AppState, agents, agents_crud, agents_setup, cron_api, memory_api,
+    protected_api_domain,
 };
 
 // Category: agents
@@ -30,10 +30,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                     .delete(agents_crud::delete_agent),
             )
             .route("/agents/{id}/quality", get(agents::agent_quality))
-            .route(
-                "/agents/{id}/execution-requirements",
-                get(execution_requirements::get).put(execution_requirements::put),
-            )
             .route("/agents/{id}/duplicate", post(agents_crud::duplicate_agent))
             .route("/agents/{id}/offices", get(agents::agent_offices))
             .route("/agents/{id}/signal", post(agents::agent_signal))
