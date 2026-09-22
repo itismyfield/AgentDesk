@@ -27,6 +27,8 @@ use sqlx::PgPool;
 #[cfg(test)]
 mod attachment_tests;
 #[cfg(test)]
+mod capacity_tests;
+#[cfg(test)]
 mod execution_requirement_tests;
 pub(crate) mod owner_record;
 mod placement;
@@ -759,7 +761,11 @@ async fn route_to_instance(
             }
             None => IntakeRouterDecision::Blocked {
                 reason: IntakeBlockedReason::RoutingDependencyFailed {
-                    detail: format!("insert_pending: {error}"),
+                    detail: if super::execution_capacity::is_exhausted(&error) {
+                        super::execution_capacity::EXHAUSTED.into()
+                    } else {
+                        format!("insert_pending: {error}")
+                    },
                 },
             },
         },

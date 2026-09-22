@@ -44,6 +44,7 @@ pub(crate) enum LocalRouteReason {
 /// JSON shape so the routing fn can be unit-tested without DB fixtures.
 #[derive(Clone, Debug)]
 pub(crate) struct CandidateNode {
+    pub capacity_rank: Option<u64>,
     pub instance_id: String,
     pub labels: Vec<String>,
     /// "online" / "offline" / "stale" — strings used by the existing
@@ -81,6 +82,7 @@ pub(crate) fn candidates_from_worker_nodes_json(nodes: &[Value]) -> Vec<Candidat
                 })
                 .unwrap_or_default();
             Some(CandidateNode {
+                capacity_rank: node.get("capacity_rank").and_then(Value::as_u64),
                 instance_id,
                 labels,
                 status,
@@ -155,7 +157,11 @@ fn select_matching_intake_target(
     let chosen = eligible
         .into_iter()
         .filter(|c| c.instance_id != leader_instance_id)
-        .min_by(|a, b| a.instance_id.cmp(&b.instance_id));
+        .min_by(|a, b| {
+            a.capacity_rank
+                .cmp(&b.capacity_rank)
+                .then_with(|| a.instance_id.cmp(&b.instance_id))
+        });
 
     if let Some(chosen) = chosen {
         IntakeRouteTarget::Worker {
@@ -181,6 +187,7 @@ mod tests {
 
     fn node(instance: &str, status: &str, labels: &[&str]) -> CandidateNode {
         CandidateNode {
+            capacity_rank: None,
             instance_id: instance.to_string(),
             labels: labels.iter().map(|s| s.to_string()).collect(),
             status: status.to_string(),

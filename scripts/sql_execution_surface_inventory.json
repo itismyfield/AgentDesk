@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "630e1d5b437108f2f10883527c9c4e6b6595da49",
+  "measured_at_sha": "35b5509b0ed0be04f5547479d834de2522b17e33",
   "records": [
     {
       "root": "migrations/postgres",
@@ -23590,6 +23590,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:e977b332dbf29c6e8386426c5108880749afea6826b0bbbaa52cf71532c5fb46"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_router_hook/capacity_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:1e29a92d75138dcc2fc07f619f90e8e6f672e2763ff80cb3524dd9618de7bff3"
     },
     {
       "root": "src",

@@ -187,3 +187,37 @@ async fn execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg()
     pool.close().await;
     fixture.drop().await;
 }
+
+#[test]
+fn execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector() {
+    let node = |id: &str, used: u64, slots: u64, last: Option<&str>| {
+        json!({
+            "instance_id":id,"status":"online","labels":["worker"],
+            "execution_occupied":used,"last_execution_assignment_at":last,
+            "capabilities":{"execution_capacity":{"version":1,"slots":slots}}
+        })
+    };
+    let mut nodes = vec![
+        node("a", 1, 2, Some("2026-09-20")),
+        node("z", 1, 4, None),
+        node("full", 2, 2, None),
+        json!({"instance_id":"legacy"}),
+    ];
+    rank(&mut nodes);
+    assert_eq!(nodes.len(), 2);
+    let candidates = super::super::intake_routing::candidates_from_worker_nodes_json(&nodes);
+    let selection =
+        super::super::intake_routing::pick_intake_target(&candidates, &["worker".into()], "leader");
+    assert_eq!(
+        selection,
+        super::super::intake_routing::IntakeRouteTarget::Worker {
+            instance_id: "z".into()
+        }
+    );
+    let mut tied = vec![node("a", 0, 2, Some("2026-09-20")), node("z", 0, 2, None)];
+    rank(&mut tied);
+    assert_eq!(
+        tied[0]["instance_id"], "z",
+        "never assigned wins a utilization tie"
+    );
+}

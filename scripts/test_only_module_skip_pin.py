@@ -38,6 +38,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/cluster/intake_router_hook/attachment_tests.rs",
         "src/services/cluster/execution_capacity/tests.rs",
         "src/db/auto_queue/tests.rs",
+    "src/services/cluster/intake_router_hook/capacity_tests.rs",
         "src/db/automation_candidates/verdict_tests.rs",
         "src/db/campaigns/tests.rs",
         "src/db/dispatched_sessions/canonical_identity_pg_tests.rs",

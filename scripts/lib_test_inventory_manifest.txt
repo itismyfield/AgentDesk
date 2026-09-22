@@ -1869,6 +1869,7 @@ services::cluster::attachment_transfer::tests::bundle_rejects_cross_message_iden
 services::cluster::attachment_transfer::tests::bundle_rejects_partial_entry_set
 services::cluster::attachment_transfer::tests::bundle_roundtrip_preserves_order_and_binary
 services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg
+services::cluster::execution_capacity::tests::execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector
 services::cluster::execution_requirements::tests::execution_requirements_are_strict_and_share_dispatch_matching
 services::cluster::intake_preflight::tests::claude_and_codex_emit_structured_pass_and_fail_evidence
 services::cluster::intake_preflight::tests::each_required_failure_is_independently_fail_closed
@@ -1878,6 +1879,7 @@ services::cluster::intake_preflight::tests::missing_source_expectations_fail_clo
 services::cluster::intake_preflight::tests::ready_target_requires_no_execution_callback
 services::cluster::intake_preflight::tests::unsupported_provider_fails_closed
 services::cluster::intake_router_hook::attachment_tests::attachment_route_requires_consumer_and_preserves_bytes_through_retry_pg
+services::cluster::intake_router_hook::capacity_tests::execution_capacity_routes_concurrent_channels_without_overflow_pg
 services::cluster::intake_router_hook::execution_requirement_tests::execution_requirements_block_fallback_and_survive_recovery_pg
 services::cluster::intake_router_hook::execution_requirement_tests::execution_requirements_reject_incompatible_existing_owner_without_reassignment_pg
 services::cluster::intake_router_hook::owner_record::tests::acquire_covers_each_generation_rule
