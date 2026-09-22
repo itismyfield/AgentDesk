@@ -114,7 +114,8 @@ pub(crate) struct Intervention {
     pub(crate) reply_context: Option<String>,
     pub(crate) has_reply_boundary: bool,
     pub(crate) merge_consecutive: bool,
-    pub(crate) pending_uploads: Vec<String>,
+    pub(crate) pending_uploads:
+        crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     /// #2266: when a voice-transcript announcement loses the
     /// `mailbox_try_start_turn` race and is enqueued for later dispatch, the
     /// per-process `voice::announce_meta` store entry is consumed by the
@@ -5364,11 +5365,9 @@ mod enqueue_refusal_reason_tests {
     fn upload_bearing_interventions_are_not_deduped_by_empty_text() {
         let now = Instant::now();
         let mut first = intervention(1, "", now);
-        first.pending_uploads =
-            vec!["[File uploaded] one.png → /tmp/one.png (1 bytes)".to_string()];
+        first.pending_uploads = vec!["[File uploaded] one.png → /tmp/one.png (1 bytes)".into()];
         let mut second = intervention(2, "", now);
-        second.pending_uploads =
-            vec!["[File uploaded] two.png → /tmp/two.png (2 bytes)".to_string()];
+        second.pending_uploads = vec!["[File uploaded] two.png → /tmp/two.png (2 bytes)".into()];
         let mut queue = vec![first];
 
         let result = enqueue_intervention(&mut queue, second, None);
@@ -6918,8 +6917,7 @@ mod persistence_tests {
         let channel_id = ChannelId::new(2_840_001);
         let mut intervention = make_intervention(2_840_002, "", None);
         intervention.pending_uploads = vec![
-            "[File uploaded] report.pdf → /runtime/discord_uploads/1/report.pdf (123 bytes)"
-                .to_string(),
+            "[File uploaded] report.pdf → /runtime/discord_uploads/1/report.pdf (123 bytes)".into(),
         ];
 
         save_channel_queue(
