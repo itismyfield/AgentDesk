@@ -25,7 +25,8 @@ pub async fn body_limit_envelope(response: Response) -> Response {
         ErrorCode::Validation,
         format!(
             "campaign request body exceeds the {LEDGER_BODY_LIMIT_BYTES} byte ledger limit; \
-             move older evidence_records to history or split the campaign before retrying"
+             split the campaign, or keep the bulky evidence in an external artifact and \
+             store only its reference. Revision history is pruned and cannot hold it."
         ),
     )
     .with_context("limit_bytes", LEDGER_BODY_LIMIT_BYTES)
@@ -300,8 +301,69 @@ mod tests {
         );
         let message = payload["error"].as_str().unwrap_or_default();
         assert!(
-            message.contains(&LEDGER_BODY_LIMIT_BYTES.to_string()) && message.contains("history"),
-            "the rejection must name the limit and the remedy, got {message}"
+            message.contains(&LEDGER_BODY_LIMIT_BYTES.to_string()) && message.contains("split"),
+            "the rejection must name the limit and a non-lossy remedy, got {message}"
         );
+        assert!(
+            !message.contains("to history"),
+            "pruned history cannot be offered as somewhere to move evidence, got {message}"
+        );
+    }
+
+    /// Pinned to the literal so a later reduction cannot reintroduce the 413 wall
+    /// while the limit-expressed tests still pass.
+    #[test]
+    fn ledger_body_limit_stays_at_sixteen_mebibytes() {
+        assert_eq!(LEDGER_BODY_LIMIT_BYTES, 16 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn postgres_ledger_round_trips_a_document_past_the_axum_default_limit_pg() {
+        let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = fixture.connect_and_migrate().await;
+        let app = router_with_pool(Some(pool.clone()));
+        let created = json!({"id": "oversize", "title": "Oversize ledger", "status": "active",
+                             "round": 1, "nodes": []});
+        assert_eq!(
+            request(&app, Method::POST, "/campaigns", Some(created), true)
+                .await
+                .0,
+            StatusCode::CREATED
+        );
+
+        // Past axum's 2 MiB default, so a pass here proves the raised limit carries a
+        // real document through parse, validation and persistence, not merely past the layer.
+        let bulk = "d".repeat(3 * 1024 * 1024);
+        let update = json!({"expected_revision": 1, "title": "Oversize ledger", "status": "active",
+                            "round": 1,
+                            "nodes": [{"id": "bulky", "title": "Bulky node", "status": "pending",
+                                       "stage": "implement", "round": 1, "details": bulk.clone()}]});
+        let body = serde_json::to_vec(&update).expect("serialize oversize body");
+        assert!(
+            body.len() > 2 * 1024 * 1024,
+            "probe must exceed the axum default"
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/campaigns/oversize")
+                    .header(header::AUTHORIZATION, "Bearer campaign-test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let stored = crate::db::campaigns::get(&pool, "oversize")
+            .await
+            .expect("stored oversize campaign");
+        assert_eq!(stored.revision, 2);
+        assert_eq!(stored.nodes[0].input.details, bulk);
+        pool.close().await;
+        fixture.drop().await;
     }
 }

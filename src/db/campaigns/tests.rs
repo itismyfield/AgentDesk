@@ -230,6 +230,9 @@ async fn postgres_campaign_revision_history_stays_bounded_by_retention_pg() {
             .await
             .expect("stored revision count");
     assert_eq!(stored, REVISION_RETENTION);
+    // Pinned to the literal: the assertions above are expressed in terms of the
+    // constant, so raising it would otherwise reintroduce unbounded growth green.
+    assert_eq!(REVISION_RETENTION, 10);
     let retained = history(&pool, "bounded").await.expect("history");
     assert_eq!(retained.len(), usize::try_from(REVISION_RETENTION).unwrap());
     let newest = writes + 1;
@@ -239,6 +242,69 @@ async fn postgres_campaign_revision_history_stays_bounded_by_retention_pg() {
 
     // Pruning must never reach the live checkpoint itself.
     assert_eq!(get(&pool, "bounded").await.expect("live").revision, newest);
+    pool.close().await;
+    fixture.drop().await;
+}
+
+#[tokio::test]
+async fn postgres_campaign_revision_prune_keeps_newest_by_rank_across_gaps_pg() {
+    let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    create(&pool, "gapped".into(), input())
+        .await
+        .expect("create");
+    let live = REVISION_RETENTION * 4;
+    for revision in 1..live {
+        replace(&pool, "gapped", revision, input())
+            .await
+            .expect("replace");
+    }
+
+    // Leave only the top two, then refill with sparse low revisions. Numbering is
+    // now far from contiguous, which is the case an offset-from-MAX prune gets wrong.
+    sqlx::query("DELETE FROM campaign_revisions WHERE campaign_id = $1 AND revision < $2")
+        .bind("gapped")
+        .bind(live - 1)
+        .execute(&pool)
+        .await
+        .expect("clear the dense tail");
+    let sparse: Vec<i64> = (2..=18).step_by(2).collect();
+    for revision in &sparse {
+        sqlx::query(
+            "INSERT INTO campaign_revisions (campaign_id, revision, document) \
+             SELECT campaign_id, $2, document FROM campaign_revisions \
+             WHERE campaign_id = $1 AND revision = $3",
+        )
+        .bind("gapped")
+        .bind(revision)
+        .bind(live)
+        .execute(&pool)
+        .await
+        .expect("insert a sparse revision");
+    }
+
+    replace(&pool, "gapped", live, input())
+        .await
+        .expect("replace across gaps");
+
+    let kept: Vec<i64> = sqlx::query_scalar(
+        "SELECT revision FROM campaign_revisions WHERE campaign_id = $1 ORDER BY revision DESC",
+    )
+    .bind("gapped")
+    .fetch_all(&pool)
+    .await
+    .expect("kept revisions");
+    let mut expected: Vec<i64> = vec![live + 1, live, live - 1];
+    expected.extend(
+        sparse
+            .iter()
+            .rev()
+            .take(usize::try_from(REVISION_RETENTION).unwrap() - 3),
+    );
+    assert_eq!(
+        kept, expected,
+        "prune must keep the newest by rank, not by offset from MAX"
+    );
     pool.close().await;
     fixture.drop().await;
 }

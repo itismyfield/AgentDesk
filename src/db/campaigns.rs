@@ -287,6 +287,12 @@ async fn prune_revisions(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: &str,
 ) -> Result<u64, CampaignError> {
+    // A retention of zero would make the keep-set empty and delete the revision
+    // this transaction just inserted.
+    debug_assert!(
+        REVISION_RETENTION > 0,
+        "retention must keep at least one revision"
+    );
     Ok(sqlx::query(
         "DELETE FROM campaign_revisions WHERE campaign_id = $1 AND revision NOT IN \
          (SELECT revision FROM campaign_revisions WHERE campaign_id = $1 \

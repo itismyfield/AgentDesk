@@ -378,6 +378,7 @@ db::campaigns::tests::campaign_validation_rejects_false_completion_and_bad_ident
 db::campaigns::tests::campaign_validation_rejects_missing_duplicate_and_cyclic_dependencies
 db::campaigns::tests::postgres_campaign_concurrent_cas_and_reconnect_preserve_canonical_history_pg
 db::campaigns::tests::postgres_campaign_revision_history_stays_bounded_by_retention_pg
+db::campaigns::tests::postgres_campaign_revision_prune_keeps_newest_by_rank_across_gaps_pg
 db::dispatch_semaphores::tests::required_semaphore_names_accepts_object_and_singular_forms
 db::dispatch_semaphores::tests::required_semaphore_names_reads_required_namespace
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_actor_pin_missing_insert_and_retry_pg
@@ -1002,9 +1003,11 @@ server::routes::bind_security_tests::loopback_host_is_never_downgraded
 server::routes::bind_security_tests::loopback_notation_edges_are_not_force_downgraded
 server::routes::bind_security_tests::nonloopback_with_token_binds_requested_host
 server::routes::bind_security_tests::nonloopback_without_token_is_forced_to_loopback
+server::routes::campaigns::tests::ledger_body_limit_stays_at_sixteen_mebibytes
 server::routes::campaigns::tests::ledger_put_accepts_a_document_larger_than_the_axum_default_limit
 server::routes::campaigns::tests::ledger_put_over_the_limit_reports_the_limit_and_the_remedy
 server::routes::campaigns::tests::postgres_campaign_http_auth_conflict_and_history_pg
+server::routes::campaigns::tests::postgres_ledger_round_trips_a_document_past_the_axum_default_limit_pg
 server::routes::cluster::idle_kill_config_tests::idle_kill_owner_config_requires_explicit_nonempty_trusted_origin
 server::routes::departments::tests::db_error_preserves_500_and_verbatim_message
 server::routes::departments::tests::department_not_found_preserves_404_and_message
