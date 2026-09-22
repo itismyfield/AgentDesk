@@ -929,24 +929,13 @@ pub(crate) enum ReportProvider {
     Qwen,
 }
 
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, Default, ValueEnum)]
 pub(crate) enum InputModeArg {
     #[cfg(unix)]
+    #[default]
     Fifo,
+    #[cfg_attr(not(unix), default)]
     Pipe,
-}
-
-impl Default for InputModeArg {
-    fn default() -> Self {
-        #[cfg(unix)]
-        {
-            Self::Fifo
-        }
-        #[cfg(not(unix))]
-        {
-            Self::Pipe
-        }
-    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]

@@ -240,7 +240,8 @@ src/
 │   ├── mod.rs
 │   ├── paths.rs
 │   ├── skill_refresh.rs
-│   └── skill_sync.rs
+│   ├── skill_sync.rs
+│   └── windows_links.rs
 ├── server/
 │   ├── dto/
 │   │   ├── agents.rs
@@ -1590,14 +1591,17 @@ src/
 │   │   └── streaming_entry.rs
 │   ├── platform/
 │   │   ├── binary_resolver/
-│   │   │   └── grok.rs
+│   │   │   ├── grok.rs
+│   │   │   └── windows_codex.rs
 │   │   ├── tmux/
 │   │   │   └── availability.rs
 │   │   ├── binary_resolver.rs
 │   │   ├── dump_tool.rs
 │   │   ├── mod.rs
+│   │   ├── network.rs
 │   │   ├── shell.rs
-│   │   └── tmux.rs
+│   │   ├── tmux.rs
+│   │   └── windows_job.rs
 │   ├── process/
 │   │   ├── stream_child/
 │   │   │   ├── stream_queue/
