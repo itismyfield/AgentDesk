@@ -237,6 +237,24 @@ class LaneFilterTests(unittest.TestCase):
                 lanes,
             )
 
+    def test_a_non_pg_test_reached_only_by_the_pg_lane_is_uncovered(self) -> None:
+        skip_args = ("--skip", "_pg", "--skip", "alpha::tests")
+        lanes = (
+            coverage.LaneFilter(tuple(skip_args[1::2]), ()),
+            coverage.LaneFilter((), tuple(skip_args[1::2])),
+        )
+        pg_only = coverage.pg_lanes(lanes, skip_args)
+        self.assertEqual(pg_only, {lanes[0]})
+        inventory = {"alpha::tests": {"alpha::tests::needs_no_db"}}
+        self.assertEqual(
+            coverage.uncovered_modules(inventory, lanes, frozenset(), pg_only),
+            {"alpha::tests"},
+        )
+        pg_tests = frozenset({"alpha::tests::needs_no_db"})
+        self.assertEqual(
+            coverage.uncovered_modules(inventory, lanes, pg_tests, pg_only), set()
+        )
+
     def test_module_filter_covers_nested_module(self) -> None:
         modules = {"service::tests", "other::tests"}
         lanes = (coverage.LaneFilter(("service",), ()),)

@@ -1464,23 +1464,6 @@ def non_pg_filter_contract_errors(
     return tuple(errors)
 
 
-def load_manifest_section(text: str, section: str, source: str) -> tuple[str, ...]:
-    rows: list[str] = []
-    active = False
-    for line in text.splitlines():
-        row = line.strip()
-        if not row or row.startswith("#"):
-            continue
-        if row.startswith("["):
-            active = row == f"[{section}]"
-            continue
-        if active:
-            rows.append(row)
-    if not rows:
-        raise ValueError(f"missing [{section}] entries: {source}")
-    return tuple(rows)
-
-
 def non_pg_selection(repo_root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """The skip values, and the lib tests they take with them.
 
@@ -1489,8 +1472,9 @@ def non_pg_selection(repo_root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]
     on ubuntu alone, so anything skipped here keeps no macOS/Windows coverage
     unless the replay list names it."""
     manifest_text = (repo_root / MANIFEST_REL).read_text("utf-8")
-    modules = load_manifest_section(manifest_text, "modules", str(MANIFEST_REL))
-    pg_tests = set(load_manifest_section(manifest_text, "tests", str(MANIFEST_REL)))
+    coverage = _load_coverage_module(repo_root)
+    modules = coverage.load_manifest_section(manifest_text, "modules", str(MANIFEST_REL))
+    pg_tests = coverage.load_pg_manifest_tests(repo_root)
     skips = tuple(NON_PG_NAME_SKIPS) + modules
     inventory = load_lib_test_inventory(repo_root)
     if not inventory:

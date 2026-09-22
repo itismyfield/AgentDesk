@@ -124,16 +124,14 @@ class NonPgFilterContract(unittest.TestCase):
         (self.root / membership.NON_PG_FILTER_REL).write_text(
             (REPO_ROOT / membership.NON_PG_FILTER_REL).read_text("utf-8"), "utf-8"
         )
-        (self.root / membership.LIB_TEST_INVENTORY_REL).write_text(
-            (REPO_ROOT / membership.LIB_TEST_INVENTORY_REL).read_text("utf-8"),
-            "utf-8",
-        )
+        for rel in (membership.LIB_TEST_INVENTORY_REL, Path("scripts/check_test_lane_coverage.py")):
+            (self.root / rel).write_text((REPO_ROOT / rel).read_text("utf-8"), "utf-8")
         consumer = (
             "    steps:\n"
             "      - run: |\n"
             "          source scripts/ci/non-pg-test-filter.sh\n"
             "          cargo test --all-targets -- \"${NON_PG_SKIP_ARGS[@]}\"\n"
-            "          run_non_pg_filter_false_positives\n"
+            "          run_non_pg_filter_replay\n"
         )
         (self.root / ".github/workflows/ci-pr.yml").write_text(
             "jobs:\n  library_sweep:\n" + consumer, "utf-8"
@@ -208,7 +206,7 @@ class NonPgFilterContract(unittest.TestCase):
 
     def test_replay_id_must_exist_in_libtest_inventory(self) -> None:
         path = self.root / membership.NON_PG_FILTER_REL
-        first = membership.load_non_pg_false_positives(self.root)[0]
+        first = membership.load_non_pg_filter_replay(self.root)[0]
         path.write_text(
             path.read_text("utf-8").replace(first, first + "_renamed"), "utf-8"
         )
@@ -1814,6 +1812,7 @@ class PgDbGateWiring(FixtureCase):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
                 mock.patch.object(membership, "check_non_pg_filter_contract", return_value=0), \
+                mock.patch.object(membership, "check_non_pg_selection_block", return_value=0), \
                 mock.patch.object(membership, "reference_baseline", return_value=("fixture", None)):
             rc = membership.check(self.root, self.baseline, self.manifest, "HEAD")
         return rc, out.getvalue(), err.getvalue()
@@ -1960,7 +1959,7 @@ class PgDbCiWiring(unittest.TestCase):
             "the pg_db-gated job must invoke `just test-postgres`",
         )
         recipe = self.justfile.partition("\ntest-postgres:")[2].partition("\n\n")[0]
-        for marker in ("cargo test", "_pg", "pg_", "postgres"):
+        for marker in ("source scripts/ci/non-pg-test-filter.sh", "cargo test", '"${PG_INCLUDE_ARGS[@]}"'):
             self.assertIn(marker, recipe, f"just test-postgres must select {marker}")
 
 

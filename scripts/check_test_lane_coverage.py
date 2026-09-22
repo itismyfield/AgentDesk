@@ -27,6 +27,7 @@ from typing import Iterable
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_REL = Path("scripts/test_lane_coverage_baseline.txt")
 NON_PG_FILTER_REL = Path("scripts/ci/non-pg-test-filter.sh")
+PG_MANIFEST_REL = Path("scripts/pg_test_lane_manifest.txt")
 
 # Attributes do not contain a closing square bracket in the forms used by this
 # repository. Strings and comments are blanked without changing offsets, so the
@@ -531,6 +532,43 @@ def load_non_pg_filter_replay(repo_root: Path) -> tuple[str, ...]:
     return entries
 
 
+def load_manifest_section(text: str, section: str, source: str) -> tuple[str, ...]:
+    rows: list[str] = []
+    active = False
+    for line in text.splitlines():
+        row = line.strip()
+        if not row or row.startswith("#"):
+            continue
+        if row.startswith("["):
+            active = row == f"[{section}]"
+            continue
+        if active:
+            rows.append(row)
+    if not rows:
+        raise ValueError(f"missing [{section}] entries: {source}")
+    return tuple(rows)
+
+
+def load_pg_manifest_tests(repo_root: Path) -> frozenset[str]:
+    """The tests the source classifier found to need PostgreSQL."""
+    path = repo_root / PG_MANIFEST_REL
+    if not path.is_file():
+        return frozenset()
+    text = path.read_text(encoding="utf-8")
+    return frozenset(load_manifest_section(text, "tests", str(PG_MANIFEST_REL)))
+
+
+def pg_lanes(
+    lanes: Iterable[LaneFilter], skip_args: tuple[str, ...]
+) -> frozenset[LaneFilter]:
+    """Lanes selecting exactly what the non-PG filter skips: the PG lane, which
+    runs on ubuntu alone, however many call sites spell it."""
+    include = set(skip_args[1::2])
+    return frozenset(
+        lane for lane in lanes if include and set(lane.positives) == include
+    )
+
+
 def expand_pg_include_args(command: str, args: tuple[str, ...]) -> str:
     """The PG lane selects exactly what the non-PG lane skips; the shell derives
     it from the same pairs, so this gate must read it from them too."""
@@ -637,35 +675,43 @@ def discover_lane_filters(repo_root: Path) -> tuple[LaneFilter, ...]:
 
 
 def covered_by_lanes(
-    test_names: Iterable[str], lanes: Iterable[LaneFilter]
+    test_names: Iterable[str],
+    lanes: Iterable[LaneFilter],
+    pg_tests: frozenset[str] = frozenset(),
+    pg_only: frozenset[LaneFilter] = frozenset(),
 ) -> bool:
     """Whether the lanes together run every discovered test in the module.
 
-    Splitting a module across lanes is what PG/non-PG separation does, so the
-    invariant is that each test reaches some lane -- not that one lane owns the
-    whole module. Computing it over discovered tests is what makes a stale
-    replay list fail here rather than silently drop a test.
-    """
+    Splitting a module across lanes is what PG/non-PG separation does, so each
+    test must reach some lane rather than one lane owning the module. A test
+    the manifest does not name as PG must reach a lane other than the PG lane:
+    running only on ubuntu is not coverage, and that is how a stale replay list
+    would drop it."""
     required = set(test_names)
     if not required:
         return False
-    covered: set[str] = set()
-    for lane in lanes:
-        covered |= lane.selected_tests(required)
-    return required <= covered
+    active = tuple(lanes)
+    non_pg = tuple(lane for lane in active if lane not in pg_only)
+    return all(
+        any(lane.selects_test(name) for lane in (active if name in pg_tests else non_pg))
+        for name in required
+    )
 
 
 def uncovered_modules(
-    modules: Iterable[str] | dict[str, set[str]], lanes: Iterable[LaneFilter]
+    modules: Iterable[str] | dict[str, set[str]],
+    lanes: Iterable[LaneFilter],
+    pg_tests: frozenset[str] = frozenset(),
+    pg_only: frozenset[LaneFilter] = frozenset(),
 ) -> set[str]:
-    """Return modules not fully selected by any single curated invocation."""
+    """Return modules whose discovered tests the curated invocations miss."""
     inventory = modules if isinstance(modules, dict) else {module: set() for module in modules}
     active = tuple(lanes)
     return {
         module
         for module, test_names in inventory.items()
         if not (
-            covered_by_lanes(test_names, active)
+            covered_by_lanes(test_names, active, pg_tests, pg_only)
             if test_names
             else any(lane.fully_selects(module, test_names) for lane in active)
         )
@@ -751,7 +797,14 @@ def check(
 ) -> int:
     inventory = discover_test_inventory(repo_root)
     lanes = discover_lane_filters(repo_root)
-    current = uncovered_modules(inventory, lanes)
+    skip_args = (
+        load_non_pg_skip_args(repo_root)
+        if (repo_root / NON_PG_FILTER_REL).is_file()
+        else ()
+    )
+    current = uncovered_modules(
+        inventory, lanes, load_pg_manifest_tests(repo_root), pg_lanes(lanes, skip_args)
+    )
     baseline = load_baseline(baseline_path)
 
     growth = baseline_growth(baseline, reference_baseline)
