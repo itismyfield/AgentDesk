@@ -1541,6 +1541,8 @@ mod tests {
         (event, payload)
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn ordered_worker_preserves_search_feedback_stop_session_start_producer_sequence() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1661,6 +1663,8 @@ mod tests {
         );
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn claude_non_wait_hanging_transport_returns_after_stdout_within_750ms() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1740,6 +1744,8 @@ mod tests {
         crate::run_from_args().expect("non-wait relay worker delivers event or durable marker");
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[test]
     #[ignore = "helper subprocess that exits after ordered non-wait handoff"]
     fn non_wait_relay_parent_subprocess_entry() {

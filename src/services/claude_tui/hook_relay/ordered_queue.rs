@@ -1315,6 +1315,8 @@ mod tests {
         assert!(queue_dir.join("ingress/pending.ingress.json").exists());
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn gc_removes_stale_idle_queue() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1331,6 +1333,8 @@ mod tests {
         assert!(!queue_dir.exists());
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn gc_adopts_legacy_idle_queue_before_later_retirement() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1374,6 +1378,8 @@ mod tests {
         assert!(queue_dir.exists());
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn artifact_pruning_does_not_hold_the_producer_lock() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1416,6 +1422,8 @@ mod tests {
         );
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn corrupt_counter_recovers_without_reusing_completed_high_water() {
         atomic_publication_preserves_all_five_consumers_on_sync_failure();
@@ -1511,6 +1519,8 @@ mod tests {
         );
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn corrupt_completed_high_water_is_quarantined_without_stalling_promotion() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1541,6 +1551,8 @@ mod tests {
         assert!(recursively_contains(&queue_dir, "completed-high-water"));
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn corrupt_oldest_request_is_quarantined_and_later_request_drains() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1592,6 +1604,8 @@ mod tests {
         );
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn recovery_scan_reports_idle_queue_cardinality_with_bounded_latency() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1646,6 +1660,8 @@ mod tests {
         );
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn published_request_is_drained_by_receiver_owner_without_producer_restart() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1676,6 +1692,8 @@ mod tests {
         assert_eq!(receiver.join().unwrap(), 1);
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn producer_waits_for_retention_lock_and_preserves_event() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1737,6 +1755,8 @@ mod tests {
         assert_eq!(delivered["ordinal"].as_u64(), Some(1));
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn concurrent_ingress_is_promoted_in_published_nanos_uuid_order() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1786,6 +1806,8 @@ mod tests {
         assert_eq!(observed, expected);
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn expired_ingress_is_quarantined_before_transport() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1824,6 +1846,8 @@ mod tests {
         assert!(recursively_contains(&queue_dir, "delivery expired"));
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn double_recovery_scanner_delivers_one_effect() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1864,6 +1888,8 @@ mod tests {
         drop(first);
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn receiver_pin_mismatch_is_quarantined_and_later_request_continues() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1911,6 +1937,8 @@ mod tests {
         );
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn receiver_in_flight_response_retries_same_request_until_receipt_is_cached() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -2050,6 +2078,8 @@ mod tests {
         }
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn worker_crash_after_actual_stop_acceptance_replays_cached_receipt_once() {
         check_worker_acceptance_replay(false).await;

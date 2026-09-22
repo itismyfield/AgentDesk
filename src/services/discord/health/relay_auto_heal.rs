@@ -1810,6 +1810,8 @@ mod tests {
     /// The fixture pauses the incumbent watcher so the nudge arm declines and
     /// the pass takes the reattach arm this test is about; the recovery lane
     /// itself is the production one.
+    // relay redrive 는 살아있는 tmux 세션(tmux_session_alive)을 전제하고 tmux 는 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn redrive_planner_refused_reattach_response_cools_down_instead_of_committing() {
         let _env_lock = crate::config::shared_test_env_lock()
@@ -2170,6 +2172,8 @@ mod tests {
         );
     }
 
+    // relay redrive 는 살아있는 tmux 세션(tmux_session_alive)을 전제하고 tmux 는 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn redrive_actions_and_cap_alarm_continue_while_producer_is_vouched_4615() {
         let _env_lock = crate::config::shared_test_env_lock()
@@ -2331,6 +2335,8 @@ mod tests {
     /// set, nothing relayed) and drives `redrive_undelivered_backlog_at`: the
     /// live watcher must be nudged — not refused as unrestored — and resumed at
     /// the birth offset, not at zero.
+    // relay redrive 는 살아있는 tmux 세션(tmux_session_alive)을 전제하고 tmux 는 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn redrive_entrypoint_resumes_a_freshly_born_turn_at_its_birth_offset_5943() {
         let _env_lock = crate::config::shared_test_env_lock()

@@ -2724,6 +2724,8 @@ mod tests {
         )
     }
 
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn codex_admitted_range_receipt_is_exact_and_idempotent_5264() {
         let _root = IsolatedRoot::new();
@@ -2803,6 +2805,8 @@ mod tests {
     /// DIFFERENT destination channel, which is precisely the restored-seed
     /// consumption decision the doc comment promises fails closed. Both
     /// deletions were silent against the whole suite before this test.
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn confirmed_receipt_identity_guards_gate_the_historical_fast_path_5264() {
         let _root = IsolatedRoot::new();
@@ -2848,6 +2852,8 @@ mod tests {
             "message id 0 is not a delivery"
         );
     }
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn ordered_jsonl_commit_is_generation_scoped_and_monotonic() {
         let _root = IsolatedRoot::new();
@@ -4249,6 +4255,8 @@ mod tests {
         assert!(!should_shadow_mirror(false, true)); // not delivered → no anchor write (I2)
     }
 
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn shadow_off_confirmed_delivery_writes_exact_split_channel_authority_4911() {
         let root = IsolatedRoot::new();
@@ -4321,6 +4329,8 @@ mod tests {
         );
     }
 
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn confirmed_receipts_reverse_order_merge_without_frontier_regression_4911() {
         let _root = IsolatedRoot::new();
@@ -4381,6 +4391,8 @@ mod tests {
         );
     }
 
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn receiptless_confirmed_frontiers_reverse_order_keep_winner_identity_4911() {
         let _root = IsolatedRoot::new();
@@ -4452,6 +4464,8 @@ mod tests {
         assert!(record.confirmed_deliveries.is_empty());
     }
 
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn cleared_inflight_current_generation_persists_frontier_without_receipt_4911() {
         let _root = IsolatedRoot::new();
@@ -4499,6 +4513,8 @@ mod tests {
         );
     }
 
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn cleared_inflight_stale_caller_generation_rejects_frontier_4911() {
         let _root = IsolatedRoot::new();
@@ -4534,6 +4550,8 @@ mod tests {
         );
     }
 
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn legacy_frontier_reverse_order_split_channel_keeps_winner_whole_4911() {
         let _root = IsolatedRoot::new();
@@ -4580,6 +4598,8 @@ mod tests {
         );
     }
 
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn ordered_jsonl_reverse_order_preserves_split_channel_anchor_4911() {
         let _root = IsolatedRoot::new();
@@ -4613,6 +4633,8 @@ mod tests {
         );
     }
 
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn legacy_frontier_blocked_writer_revalidates_after_rotation_4911() {
         let _root = IsolatedRoot::new();
@@ -4663,6 +4685,8 @@ mod tests {
         assert_eq!(read_record_at(&path), Some(current_record));
     }
 
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn proven_gone_reanchor_blocked_writer_preserves_concurrent_anchor_swap_4911() {
         let _root = IsolatedRoot::new();
@@ -4737,6 +4761,8 @@ mod tests {
         );
     }
 
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn proven_gone_reanchor_missing_frontier_is_conservative_noop_4911() {
         let _root = IsolatedRoot::new();
@@ -4765,6 +4791,8 @@ mod tests {
         assert_eq!(read_record_at(&path), Some(record_without_frontier));
     }
 
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn ordered_jsonl_blocked_writer_revalidates_after_rotation_4911() {
         let _root = IsolatedRoot::new();
@@ -4813,6 +4841,8 @@ mod tests {
         assert_eq!(read_record_at(&path), Some(current_record));
     }
 
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn receiptless_blocked_writer_revalidates_after_rotation_4911() {
         let _root = IsolatedRoot::new();
@@ -4877,6 +4907,8 @@ mod tests {
         assert_eq!(read_record_at(&path), Some(current_record));
     }
 
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn rotate_after_receipt_validation_preserves_current_incarnation_4911() {
         let _root = IsolatedRoot::new();
@@ -5514,6 +5546,8 @@ mod tests {
     /// while authority-OFF returns the in-memory value verbatim (deploy no-op).
     /// This proves the flag actually gates the wiring — not just the pure `fuse`
     /// arithmetic already covered above.
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn effective_committed_offset_authority_on_fuses_durable_3933() {
         let _root = IsolatedRoot::new();
@@ -5574,6 +5608,8 @@ mod tests {
     /// the rollover ends ABOVE the floor → NOT suppressed → relayed. The floor is
     /// `max(durable, in_memory)`, so raising it to the known-delivered watermark
     /// never over-suppresses fresh output. Rides the in-memory=0 restart hazard.
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn committed_floor_authority_on_does_not_oversuppress_rollover_resend_3871() {
         let _root = IsolatedRoot::new();
@@ -5609,6 +5645,8 @@ mod tests {
     /// range as delivered (`range_already_committed == true`) → the watchdog
     /// re-relay is suppressed (no duplicate) even though the in-memory offset was
     /// reset. The boundary (range_end == floor) is inclusive.
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn committed_floor_authority_on_suppresses_watchdog_rerelay_3885() {
         let _root = IsolatedRoot::new();
@@ -5633,6 +5671,8 @@ mod tests {
         assert!(range_already_committed(durable_end, floor)); // inclusive boundary
     }
 
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn edit_failure_recheck_suppresses_only_stable_fresh_bounded_commit_4508() {
         let root = IsolatedRoot::new();
@@ -5669,6 +5709,8 @@ mod tests {
         ));
     }
 
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn edit_failure_recheck_distrusts_prior_generation_4508() {
         let root = IsolatedRoot::new();
@@ -5699,6 +5741,8 @@ mod tests {
         ));
     }
 
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn edit_failure_recheck_requires_durable_proof_despite_high_memory_floor_4508() {
         let root = IsolatedRoot::new();
@@ -5730,6 +5774,8 @@ mod tests {
         ));
     }
 
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn edit_failure_recheck_detects_rotate_between_eof_and_frontier_4508() {
         let root = IsolatedRoot::new();
@@ -5783,6 +5829,8 @@ mod tests {
     /// within the pre-truncate EOF, so ONLY the post-read file-identity check
     /// can detect the race. Mutation-sensitive for the second snapshot
     /// comparison in `stable_edit_failure_frontier_at`.
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn edit_failure_recheck_detects_same_generation_truncate_during_snapshot_4508() {
         let root = IsolatedRoot::new();
@@ -5818,6 +5866,8 @@ mod tests {
     /// answer after a pane reset / same-named respawn is never over-suppressed.
     /// Proves the generation gate is honored through the ENV-RESOLVED wiring, not
     /// only in the pure helper.
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn effective_committed_offset_authority_on_distrusts_stale_generation_3933() {
         let _root = IsolatedRoot::new();

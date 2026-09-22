@@ -1525,6 +1525,8 @@ mod tests {
     /// sweep can observe "no live row", the commit's tombstone is durable.
     /// Mutual exclusion stays intact (the racing drain still skips — exactly
     /// ONE reaction lands, and it is the completion).
+    // marker claim 상호배제는 Unix flock 이고 경쟁 상대인 terminal-commit drain 은 Unix 전용 tmux watcher 에만 있어 Windows 에서는 이 경합이 없다.
+    #[cfg(unix)]
     #[test]
     fn sweep_claim_racing_terminal_commit_resolves_completion_not_warn() {
         let _root = test_root();
@@ -1568,6 +1570,8 @@ mod tests {
     /// #3296 verify r1 fix #2 (claim semantics): a marker claimed by one
     /// reconciler is SKIPPED by the other — and processed normally once the
     /// claim is released.
+    // marker claim 상호배제는 Unix flock 이고 경쟁 상대인 terminal-commit drain 은 Unix 전용 tmux watcher 에만 있어 Windows 에서는 이 경합이 없다.
+    #[cfg(unix)]
     #[test]
     fn claimed_marker_is_skipped_until_released() {
         let _root = test_root();
@@ -2984,6 +2988,8 @@ mod tests {
     /// concurrent reconciler the resolver must SKIP the discard but still
     /// persist the tombstone — the later sweep then 대조s ✅ (Complete), never
     /// the hard-cap ⚠ it would otherwise deliver.
+    // marker claim 상호배제는 Unix flock 이고 경쟁 상대인 terminal-commit drain 은 Unix 전용 tmux watcher 에만 있어 Windows 에서는 이 경합이 없다.
+    #[cfg(unix)]
     #[test]
     fn claim_contended_lease_gated_resolution_converges_to_sweep_completion() {
         let _root = test_root();

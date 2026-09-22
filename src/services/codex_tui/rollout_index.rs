@@ -722,6 +722,8 @@ mod tests {
     // exactly matches the on-disk file but whose cached `meta` carries a sentinel
     // id. If the scan reused the cache (no header re-read) it returns the
     // sentinel; if it re-read the file it would return the real on-disk id.
+    // Codex TUI 세션 해석·rollout tail 은 tmux 호스팅(Unix 전용) 경로에서만 호출되고, 픽스처가 Windows 경로를 JSON 에 escape 없이 넣는다.
+    #[cfg(unix)]
     #[test]
     fn warm_scan_reuses_cached_header_without_reread() {
         let _guard = lock_test();
@@ -783,6 +785,8 @@ mod tests {
         );
     }
 
+    // Codex TUI 세션 해석·rollout tail 은 tmux 호스팅(Unix 전용) 경로에서만 호출되고, 픽스처가 Windows 경로를 JSON 에 escape 없이 넣는다.
+    #[cfg(unix)]
     #[test]
     fn session_meta_without_id_preserves_cwd_for_cwd_only_discovery() {
         let _guard = lock_test();
@@ -801,6 +805,8 @@ mod tests {
     // unchanged tree reuses the cached header end-to-end (full warm-cache path),
     // proven by corrupting the file to unparseable AFTER priming while leaving
     // mtime/len untouched via an in-place same-length overwrite.
+    // Codex TUI 세션 해석·rollout tail 은 tmux 호스팅(Unix 전용) 경로에서만 호출되고, 픽스처가 Windows 경로를 JSON 에 escape 없이 넣는다.
+    #[cfg(unix)]
     #[test]
     fn warm_lookup_end_to_end_reuses_cache() {
         let _guard = lock_test();
@@ -843,6 +849,8 @@ mod tests {
     // same leaf must invalidate that file's cached header even if the directory
     // signature were somehow unchanged — the per-file (mtime, len) guard catches
     // it. Here we also change content length so the header is re-parsed.
+    // Codex TUI 세션 해석·rollout tail 은 tmux 호스팅(Unix 전용) 경로에서만 호출되고, 픽스처가 Windows 경로를 JSON 에 escape 없이 넣는다.
+    #[cfg(unix)]
     #[test]
     fn same_leaf_content_rewrite_reparses_header() {
         let _guard = lock_test();
@@ -885,6 +893,8 @@ mod tests {
     // same candidate set (correctness preserved) but populate NO cache state, so
     // there is no stale-hit surface. This is the behavioural rollback proven
     // without mutating the process-global live config.
+    // Codex TUI 세션 해석·rollout tail 은 tmux 호스팅(Unix 전용) 경로에서만 호출되고, 픽스처가 Windows 경로를 JSON 에 escape 없이 넣는다.
+    #[cfg(unix)]
     #[test]
     fn disabled_cache_returns_results_but_caches_nothing() {
         let _guard = lock_test();
@@ -1040,6 +1050,8 @@ mod tests {
     // an in-place content rewrite that DOES change `(mtime, len)` (e.g. a Codex
     // append) must be re-read — the warm path re-`stat`s each cached path, so the
     // append is not served stale despite the unchanged directory signature.
+    // Codex TUI 세션 해석·rollout tail 은 tmux 호스팅(Unix 전용) 경로에서만 호출되고, 픽스처가 Windows 경로를 JSON 에 escape 없이 넣는다.
+    #[cfg(unix)]
     #[test]
     fn signature_hit_still_rereads_on_mtime_len_change() {
         let _guard = lock_test();

@@ -620,6 +620,8 @@ pub(in crate::services::discord) mod tests {
         state
     }
 
+    // durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn controller_fallback_records_replacement_anchor() {
         let _lock = crate::config::shared_test_env_lock()

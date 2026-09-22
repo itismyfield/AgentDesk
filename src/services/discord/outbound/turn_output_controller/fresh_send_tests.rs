@@ -144,6 +144,8 @@ fn ctx<'a>(
     }
 }
 
+// durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+#[cfg(unix)]
 #[test]
 fn range_fresh_send_commits_and_records_durable_frontier() {
     let temp = tempfile::tempdir().expect("temp runtime root");
@@ -194,6 +196,8 @@ fn range_fresh_send_commits_and_records_durable_frontier() {
     );
 }
 
+// durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+#[cfg(unix)]
 #[test]
 fn no_range_fresh_send_records_fingerprint_and_retry_is_suppressed() {
     let temp = tempfile::tempdir().expect("temp runtime root");
@@ -259,6 +263,8 @@ fn no_range_fresh_send_records_fingerprint_and_retry_is_suppressed() {
     );
 }
 
+// durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+#[cfg(unix)]
 #[test]
 fn no_range_pseudo_range_lease_closes_concurrent_dedup_gap() {
     let temp = tempfile::tempdir().expect("temp runtime root");
@@ -307,6 +313,8 @@ fn no_range_pseudo_range_lease_closes_concurrent_dedup_gap() {
     ));
 }
 
+// durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+#[cfg(unix)]
 #[test]
 fn no_range_fresh_send_never_invokes_owner_advance() {
     let temp = tempfile::tempdir().expect("temp runtime root");
@@ -373,11 +381,15 @@ fn assert_channel_mismatch_skips_before_post(range: Option<(u64, u64)>, channel_
     ));
 }
 
+// durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+#[cfg(unix)]
 #[test]
 fn range_channel_mismatch_is_refused_before_post() {
     assert_channel_mismatch_skips_before_post(Some((10, 20)), 40_460_105);
 }
 
+// durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+#[cfg(unix)]
 #[test]
 fn no_range_channel_mismatch_is_refused_before_lookup_or_post() {
     assert_channel_mismatch_skips_before_post(None, 40_460_107);
@@ -410,6 +422,8 @@ fn missing_generation_is_exposed_after_confirmed_no_range_post() {
     assert_eq!(gateway.sends.load(Ordering::SeqCst), 1);
 }
 
+// durable frontier 는 tmux wrapper 의 .generation marker 에 묶여 있고 그 marker 를 쓰는 tmux 모듈이 Unix 전용이라 Windows 에는 이 경로가 없다.
+#[cfg(unix)]
 #[test]
 fn range_persistence_failure_is_not_hidden_as_delivered() {
     let temp = tempfile::tempdir().expect("temp runtime root");

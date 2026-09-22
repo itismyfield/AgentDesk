@@ -930,6 +930,8 @@ mod tests {
         assert!(selection.rollout_path.is_none());
     }
 
+    // Codex TUI 세션 해석·rollout tail 은 tmux 호스팅(Unix 전용) 경로에서만 호출되고, 픽스처가 Windows 경로를 JSON 에 escape 없이 넣는다.
+    #[cfg(unix)]
     #[test]
     fn requested_session_with_matching_rollout_resumes() {
         let _cache = lock_cache_test();
@@ -1014,6 +1016,8 @@ mod tests {
         assert_eq!(selection.candidate_count, 0);
     }
 
+    // Codex TUI 세션 해석·rollout tail 은 tmux 호스팅(Unix 전용) 경로에서만 호출되고, 픽스처가 Windows 경로를 JSON 에 escape 없이 넣는다.
+    #[cfg(unix)]
     #[test]
     fn multiple_candidates_select_newest_then_path_deterministically() {
         let _cache = lock_cache_test();
@@ -1035,6 +1039,8 @@ mod tests {
     // a warm-cache lookup the second time; a newer rollout created in between must
     // still be selected (the directory mtime bumps the tree signature). This pins
     // the high-severity "stale cache resumes an older rollout" risk.
+    // Codex TUI 세션 해석·rollout tail 은 tmux 호스팅(Unix 전용) 경로에서만 호출되고, 픽스처가 Windows 경로를 JSON 에 escape 없이 넣는다.
+    #[cfg(unix)]
     #[test]
     fn warm_lookup_picks_up_newer_rollout_after_first_resolve() {
         let _cache = lock_cache_test();
@@ -1105,6 +1111,8 @@ mod tests {
     // TEST-003 (REQ-003): a non-TUI (codex_exec) rollout discovered by the index
     // is still excluded by the resolver filters, so the cache change does not
     // alter selection semantics.
+    // Codex TUI 세션 해석·rollout tail 은 tmux 호스팅(Unix 전용) 경로에서만 호출되고, 픽스처가 Windows 경로를 JSON 에 escape 없이 넣는다.
+    #[cfg(unix)]
     #[test]
     fn indexed_lookup_still_excludes_codex_exec_rollouts() {
         let _cache = lock_cache_test();

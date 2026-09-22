@@ -239,6 +239,8 @@ async fn transient_runtime_stamp_io_error_restores_local_and_requeues_exact_hand
     );
 }
 
+// watcher claim 은 Unix 전용 tmux watcher 에만 있어 Windows 에서는 claim·owner stamp 경로가 없다.
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoint() {
     let _lock = crate::config::shared_test_env_lock()
@@ -411,6 +413,8 @@ async fn direct_tmux_adoption_rejects_claim_evicted_before_publication() {
     assert_claim_eviction_fails_closed(42_592_610, RuntimeHandoffLoopMessage::TmuxReady { output_path: "/runtime/direct-claim-evicted.jsonl".into(), input_fifo_path: "/runtime/direct.input".into(), tmux_session_name: "AgentDesk-codex-direct-claim-evicted".into(), last_offset: 10_241 }).await;
 }
 
+// watcher claim 은 Unix 전용 tmux watcher 에만 있어 Windows 에서는 claim·owner stamp 경로가 없다.
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_adoption_pins_authoritative_incumbent_not_provisional_marker() {
     let _lock = crate::config::shared_test_env_lock()
@@ -482,6 +486,8 @@ async fn runtime_adoption_pins_authoritative_incumbent_not_provisional_marker() 
     ));
 }
 
+// watcher claim 은 Unix 전용 tmux watcher 에만 있어 Windows 에서는 claim·owner stamp 경로가 없다.
+#[cfg(unix)]
 #[tokio::test]
 async fn thread_follow_up_tmux_ready_claim_records_intended_classification_4984() {
     let _locks = crate::services::observability::lock_env_then_runtime();
