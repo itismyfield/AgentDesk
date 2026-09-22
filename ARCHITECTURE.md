@@ -240,7 +240,8 @@ src/
 │   ├── mod.rs
 │   ├── paths.rs
 │   ├── skill_refresh.rs
-│   └── skill_sync.rs
+│   ├── skill_sync.rs
+│   └── windows_links.rs
 ├── server/
 │   ├── dto/
 │   │   ├── agents.rs
