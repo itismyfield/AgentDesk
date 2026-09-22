@@ -150,6 +150,7 @@ RELEASE_ROOT_SCRIPTS_STAGED=""
 PG_TUNNEL_PREFLIGHT_PID=""
 PG_TUNNEL_PREFLIGHT_CONNINFO_DIR=""
 PG_TUNNEL_PREFLIGHT_PASSWORD_FILE=""
+MIGRATION_FLOOR_ARMED=0
 PG_TUNNEL_ROLLBACK_ARMED=0
 PG_TUNNEL_ROLLBACK_DIR=""
 PG_TUNNEL_ROLLBACK_JOB_LOADED=0
@@ -818,6 +819,24 @@ print(value)
 PY
 }
 
+_migration_floor_may_advance() {
+    # Whether this source carries a migration the last deployed binary lacks.
+    # Factual only, so no rollback override reaches it; fails closed.
+    local new_path new_name old_name
+    new_path="$(_latest_postgres_migration_path 2>/dev/null || true)"
+    if [ -z "$new_path" ]; then
+        echo "  ⚠ [migration-floor] cannot resolve the latest migration under $REPO/migrations/postgres — assuming it may advance" >&2
+        return 0
+    fi
+    new_name="$(basename "$new_path")"
+    old_name="$(_manifest_latest_migration_name || true)"
+    if [ -z "$old_name" ]; then
+        echo "  ⚠ [migration-floor] no previous-deploy migration record ($ADK_REL/runtime/release-source.json) — assuming ${new_name} may advance" >&2
+        return 0
+    fi
+    _migration_advanced "$new_name" "$old_name"
+}
+
 _rollback_would_brick_on_migration() {
     # #4348 Defect 2: refuse a rollback that would strand the previous binary
     # behind a migration the new binary already applied to the SHARED Postgres.
@@ -830,23 +849,11 @@ _rollback_would_brick_on_migration() {
         echo "  ▸ [rollback-guard] AGENTDESK_DEPLOY_FORCE_ROLLBACK=1 — skipping migration-advance guard" >&2
         return 1
     fi
-    local new_path new_name old_name
-    new_path="$(_latest_postgres_migration_path 2>/dev/null || true)"
-    if [ -z "$new_path" ]; then
-        echo "  ⚠ [rollback-guard] cannot resolve the new binary's latest migration ($REPO/migrations/postgres) — treating rollback as unsafe" >&2
+    if _migration_floor_may_advance; then
+        echo "  ▸ [rollback-guard] the new source's migration is ahead of the rollback target — unsafe to roll back" >&2
         return 0
     fi
-    new_name="$(basename "$new_path")"
-    old_name="$(_manifest_latest_migration_name || true)"
-    if [ -z "$old_name" ]; then
-        echo "  ⚠ [rollback-guard] no previous-deploy migration record ($ADK_REL/runtime/release-source.json) — cannot prove the rollback binary handles ${new_name}; treating rollback as unsafe" >&2
-        return 0
-    fi
-    if _migration_advanced "$new_name" "$old_name"; then
-        echo "  ▸ [rollback-guard] new migration ${new_name} is ahead of rollback target ${old_name}" >&2
-        return 0
-    fi
-    echo "  ▸ [rollback-guard] rollback target ${old_name} is at/ahead of new migration ${new_name} — safe to roll back" >&2
+    echo "  ▸ [rollback-guard] the rollback target is at/ahead of the new migration — safe to roll back" >&2
     return 1
 }
 
@@ -1084,6 +1091,72 @@ _rollback_pg_tunnel_migration() {
     return 1
 }
 
+
+_migration_floor_artifact_path() {
+    # An older artifact may be the only binary that boots against the live schema.
+    local base="$1" path="$1" n=0
+    while [ -e "$path" ]; do
+        n=$((n + 1))
+        path="$base.$n"
+    done
+    printf '%s' "$path"
+}
+
+_preserve_staged_binary_for_recovery() {
+    # Clearing STAGED_BINARY is what keeps the staging cleanup from deleting it.
+    local target
+    [ -n "${STAGED_BINARY:-}" ] && [ -e "${STAGED_BINARY:-}" ] || return 1
+    target="$(_migration_floor_artifact_path "$ADK_REL/bin/agentdesk.migration-floor-recovery")"
+    if mv -f "$STAGED_BINARY" "$target"; then
+        STAGED_BINARY=""
+        echo "   Migration-capable binary preserved at $target"
+        return 0
+    fi
+    echo "   ⚠ Could not preserve the staged binary at $target; it remains at $STAGED_BINARY" >&2
+    STAGED_BINARY=""
+    return 1
+}
+
+
+
+
+_recover_or_preserve_past_migration_floor() {
+    local rel_binary="${REL_BINARY:-$ADK_REL/bin/agentdesk}"
+    local keep
+
+    [ -n "${STAGED_BINARY:-}" ] && [ -e "${STAGED_BINARY:-}" ] || return 0
+
+    echo ""
+    echo "🛑 DEPLOY ABORTED PAST THE MIGRATION FLOOR"
+    echo "   Postgres may already carry a migration that $rel_binary does not embed,"
+    echo "   so that binary could refuse to boot and launchd would crash-loop it."
+
+    # Staging happens in this directory, so installing is a same-filesystem
+    # rename: a running process keeps its own image and nothing is stopped.
+    # Whatever restarts next -- including a crash loop's own respawn -- gets a
+    # binary that boots.
+    chflags nouchg "$rel_binary" 2>/dev/null || true
+    if [ -e "$rel_binary" ]; then
+        keep="$(_migration_floor_artifact_path "$ADK_REL/bin/agentdesk.pre-migration-floor")"
+        if ! cp -p "$rel_binary" "$keep" 2>/dev/null; then
+            rm -f "$keep" 2>/dev/null || true
+            echo "✗ Could not keep a copy of $rel_binary — refusing to overwrite it" >&2
+            _preserve_staged_binary_for_recovery || true
+            echo "   Free space under $ADK_REL/bin, then redeploy." >&2
+            return 0
+        fi
+        echo "   Replaced binary kept at $keep"
+    fi
+    if ! mv -f "$STAGED_BINARY" "$rel_binary"; then
+        echo "✗ Could not install the staged binary over $rel_binary" >&2
+        _preserve_staged_binary_for_recovery || true
+        return 0
+    fi
+    STAGED_BINARY=""
+    echo "✓ Installed the binary that ran the database migration at $rel_binary."
+    echo "   The running process keeps its own image; the next restart picks this up."
+}
+
 _cleanup_on_exit() {
     local status=${1:-$?}
     trap - EXIT
@@ -1100,6 +1173,11 @@ _cleanup_on_exit() {
     # health-check branch — so a crash-on-boot binary can never stay live (#3858).
     if [ "${ROLLBACK_ARMED:-0}" = 1 ] && [ "${DEPLOY_OK:-0}" != 1 ]; then
         _rollback_release_binary
+    fi
+    # Aborted past the floor without promoting: recover, or preserve what boots.
+    if [ "${MIGRATION_FLOOR_ARMED:-0}" = 1 ] && [ "${ROLLBACK_ARMED:-0}" != 1 ] \
+        && [ "${DEPLOY_OK:-0}" != 1 ]; then
+        _recover_or_preserve_past_migration_floor
     fi
     if [ -n "${STAGED_BINARY:-}" ] && [ -e "$STAGED_BINARY" ]; then
         rm -f "$STAGED_BINARY" 2>/dev/null || true
@@ -2484,6 +2562,11 @@ fi
 # drain marker or self-exit trigger may exist when candidate migration runs. The
 # tunnel migration above is a fail-closed, SQL-ready prerequisite; its EXIT trap
 # restores the previous tunnel state if that prerequisite itself fails.
+# A partial apply advances Postgres even when the command reports failure, so
+# arm before the attempt.
+if _migration_floor_may_advance; then
+    MIGRATION_FLOOR_ARMED=1
+fi
 echo "▸ Applying release PostgreSQL migrations before restart drain..."
 if ! "$STAGED_BINARY" release-migrate-postgres; then
     echo "✗ Release PostgreSQL migration failed before restart was requested; the existing runtime remains active."
@@ -2515,9 +2598,13 @@ if [ "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-0}" != "1" ]; then
         clear_restart_drain_mode "$ADK_REL" || true
         exit 1
     fi
-    if ! wait_for_restart_persistence_or_fail \
-        "release" "$ADK_REL" "$RESTART_REQUEST_NONCE" 30; then
-        exit 1
+    if _release_runtime_is_serving "${REL_PORT:-}"; then
+        if ! wait_for_restart_persistence_or_fail \
+            "release" "$ADK_REL" "$RESTART_REQUEST_NONCE" 30; then
+            exit 1
+        fi
+    else
+        echo "▸ [gate] release is not serving on :${REL_PORT:-} — no in-flight delivery frontier to persist; proceeding"
     fi
 else
     echo "⚠ [gate] release restart durability gate=${AGENTDESK_RESTART_DRAIN_VERDICT}"
