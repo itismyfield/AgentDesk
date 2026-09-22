@@ -22,12 +22,14 @@ This block is generated from the filesystem and is checked in CI for drift.
 src/
 ├── cli/
 │   ├── client/
-│   │   └── runtime_config.rs
+│   │   ├── runtime_config.rs
+│   │   └── transport.rs
 │   ├── dcserver/
 │   │   └── startup.rs
 │   ├── doctor/
 │   │   ├── orchestrator/
 │   │   │   ├── config_dir_checks.rs
+│   │   │   ├── health_snapshot.rs
 │   │   │   ├── provider_credentials.rs
 │   │   │   └── relay_notifications.rs
 │   │   ├── contract.rs

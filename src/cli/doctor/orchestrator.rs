@@ -1,3 +1,5 @@
+mod health_snapshot;
+use health_snapshot::fetch_health_snapshot;
 mod provider_credentials;
 use provider_credentials::{check_claude_cswap_global_conflict, check_credential_permissions};
 
@@ -403,48 +405,6 @@ struct HealthSnapshot {
     base: String,
     body: Option<Value>,
     error: Option<String>,
-}
-
-fn fetch_health_snapshot(options: &DoctorOptions) -> HealthSnapshot {
-    let base = crate::cli::client::api_base();
-    let cfg = config::load_graceful();
-    if cfg
-        .server
-        .auth_token
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|token| !token.is_empty())
-        && !options.allow_remote
-        && !health::is_loopback_base_url(&base)
-    {
-        return HealthSnapshot {
-            base,
-            body: None,
-            error: Some(
-                "non-loopback AGENTDESK_API_URL with configured auth token requires --allow-remote"
-                    .to_string(),
-            ),
-        };
-    }
-
-    match crate::cli::client::get_json("/api/health/detail").or_else(|detail_error| {
-        if detail_error.contains("(404)") {
-            crate::cli::client::get_json("/api/health")
-        } else {
-            Err(detail_error)
-        }
-    }) {
-        Ok(body) => HealthSnapshot {
-            base,
-            body: Some(body),
-            error: None,
-        },
-        Err(e) => HealthSnapshot {
-            base,
-            body: None,
-            error: Some(e.to_string()),
-        },
-    }
 }
 
 fn health_providers(snapshot: &HealthSnapshot) -> Option<&Vec<Value>> {

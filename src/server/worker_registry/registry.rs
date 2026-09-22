@@ -337,6 +337,10 @@ impl SupervisedWorkerRegistry {
                 Ok(Some(buffer))
             }
             ServerWorkerId::SessionDiscovery => {
+                if !cfg!(unix) {
+                    self.log_skip(spec, "tmux session discovery requires Unix; native process sessions use their owned registry");
+                    return Ok(None);
+                }
                 let Some(discovery_pg_pool) = self.pg_pool.clone() else {
                     self.log_skip(spec, "postgres pool unavailable");
                     return Ok(None);

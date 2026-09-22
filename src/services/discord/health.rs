@@ -102,9 +102,9 @@ pub(crate) use recovery::{
     resume_runtime_for_channel, retain_resume_runtime_owner_before_teardown,
     stop_provider_channel_runtime_with_policy,
 };
-pub(crate) use runtime_resolve::resolve_utility_bot_http;
 pub use runtime_resolve::{fetch_channel_name, resolve_bot_http};
 use runtime_resolve::{resolve_direct_meeting_runtime, resolve_direct_meeting_shared};
+pub(crate) use runtime_resolve::{resolve_intake_worker_runtime, resolve_utility_bot_http};
 #[allow(unused_imports)]
 pub use snapshot::{
     DiscordHealthSnapshot, HealthStatus, WatcherStateSnapshot, active_request_owner_for_channel,
