@@ -31,7 +31,7 @@ use stale_turn::{
 async fn append_pending_uploads(
     shared: &std::sync::Arc<SharedData>,
     channel_id: serenity::ChannelId,
-    upload_records: &[String],
+    upload_records: &[crate::services::cluster::attachment_transfer::uploads::Upload],
 ) -> bool {
     if upload_records.is_empty() {
         return true;

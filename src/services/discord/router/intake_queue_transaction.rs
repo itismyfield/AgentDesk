@@ -112,7 +112,8 @@ pub(super) struct SoftInterventionSpec {
     pub(super) reply_context: Option<String>,
     pub(super) has_reply_boundary: bool,
     pub(super) merge_consecutive: bool,
-    pub(super) pending_uploads: Vec<String>,
+    pub(super) pending_uploads:
+        crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     pub(super) voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 }
 

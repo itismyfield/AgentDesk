@@ -92,7 +92,7 @@ pub(in crate::services::discord::router) async fn prepare_admitted_local_attachm
     attachments: &[AttachmentDescriptor],
     shared: &Arc<SharedData>,
     _permit: &LocalAttachmentPreparationPermit,
-) -> Result<Vec<String>, Error> {
+) -> Result<crate::services::cluster::attachment_transfer::uploads::PendingUploads, Error> {
     // Always use the runtime uploads directory (works without session)
     let Some(save_dir) = channel_upload_dir(channel_id) else {
         rate_limit_wait(shared, channel_id).await;

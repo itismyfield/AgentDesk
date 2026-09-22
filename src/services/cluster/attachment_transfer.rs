@@ -3,6 +3,8 @@
 //! only; S2 (durable storage, worker consumption) and S3 (live download, router
 //! unblock) own all I/O, so nothing here has a production caller yet.
 
+pub(crate) mod uploads;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

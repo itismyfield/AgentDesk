@@ -25,7 +25,7 @@ pub(crate) fn resolve_attachment_admission(admission: IntakeAdmission) -> Attach
 async fn record_upload_history(
     shared: &std::sync::Arc<crate::services::discord::SharedData>,
     channel_id: serenity::ChannelId,
-    upload_records: &[String],
+    upload_records: &[crate::services::cluster::attachment_transfer::uploads::Upload],
 ) {
     if upload_records.is_empty() {
         return;
@@ -48,7 +48,10 @@ pub(crate) async fn prepare_admitted_live_attachments(
     effective_channel_id: serenity::ChannelId,
     is_dm: bool,
     attachments: &[super::super::message_handler::AttachmentDescriptor],
-) -> Result<Vec<String>, super::super::super::Error> {
+) -> Result<
+    crate::services::cluster::attachment_transfer::uploads::PendingUploads,
+    super::super::super::Error,
+> {
     if attachments.is_empty() {
         return Ok(Vec::new());
     }
