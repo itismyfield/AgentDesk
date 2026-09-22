@@ -2948,11 +2948,17 @@ services::discord::health::relay_dead_reattach::tests::relay_dead_watcher_reatta
 services::discord::health::relay_dead_reattach::tests::reuse_no_op_keeps_the_relay_dead_tick_short_circuit
 services::discord::health::relay_progress::tests::backlog_grace_is_observation_not_producer_or_delivery_progress
 services::discord::health::relay_progress::tests::composite_progress_distinguishes_backpressure_and_delivery_only
+services::discord::health::runtime_resolve::direct_meeting_candidate_tests::duplicate_explicit_owners_fail_without_live_probes
+services::discord::health::runtime_resolve::direct_meeting_candidate_tests::explicit_owner_does_not_wait_for_unrelated_live_probes
 services::discord::health::runtime_resolve::direct_meeting_candidate_tests::multiple_explicit_matches_are_ambiguous
 services::discord::health::runtime_resolve::direct_meeting_candidate_tests::multiple_live_matches_are_ambiguous
 services::discord::health::runtime_resolve::direct_meeting_candidate_tests::no_candidates_resolves_to_none
+services::discord::health::runtime_resolve::direct_meeting_candidate_tests::restricted_worker_cannot_take_an_unbound_channel_during_startup
 services::discord::health::runtime_resolve::direct_meeting_candidate_tests::single_explicit_match_wins_over_live_matches
 services::discord::health::runtime_resolve::direct_meeting_candidate_tests::single_live_match_is_selected_without_explicit_match
+services::discord::health::runtime_resolve::direct_meeting_candidate_tests::unconfigured_channel_still_checks_all_live_candidates
+services::discord::health::runtime_resolve::direct_meeting_candidate_tests::worker_claimant_uses_channel_owner_credentials_without_gateway
+services::discord::health::runtime_resolve::direct_meeting_candidate_tests::worker_owner_without_rest_credentials_is_rejected
 services::discord::health::session_enrichment::tests::a_channel_with_no_coordinate_entry_polls_as_absent
 services::discord::health::session_enrichment::tests::a_generation_stamp_moving_under_the_offset_read_witnesses_nothing
 services::discord::health::session_enrichment::tests::a_probe_fault_withholds_the_executor_witness_instead_of_claiming_absence
@@ -8013,6 +8019,9 @@ services::platform::binary_resolver::tests::generic_seam_seals_claude_while_seal
 services::platform::binary_resolver::tests::parses_codex_cli_semver_from_version_output
 services::platform::binary_resolver::tests::resolve_provider_binary_redacts_claude_paths_in_attempts
 services::platform::binary_resolver::tests::scrub_seals_only_claude_paths
+services::platform::shell::hostname_tests::accepts_native_and_fully_qualified_hostnames
+services::platform::shell::hostname_tests::rejects_failed_empty_or_invalid_hostname_output
+services::platform::shell::hostname_tests::windows_native_hostname_matches_computer_name
 services::platform::tmux::availability::availability_cache_tests::consecutive_probe_failures_demote_after_threshold
 services::platform::tmux::availability::availability_cache_tests::live_session_proof_marks_cache_available
 services::platform::tmux::availability::availability_cache_tests::missing_tmux_binary_demotes_immediately_and_resets_failures
