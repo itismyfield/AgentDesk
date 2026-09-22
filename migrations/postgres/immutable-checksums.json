@@ -635,6 +635,11 @@
       "path": "migrations/postgres/0124_attachment_bundles.sql",
       "sha256": "b46cda7a34e49cca3c6de65f7107c2e05c863e25baafb81877acee009f35a9c0",
       "version": 124
+    },
+    {
+      "path": "migrations/postgres/0125_execution_capacity.sql",
+      "sha256": "454270eb193d7662599df8be3b93aa5e20016a33c1e3d7d4f439988112a63ae1",
+      "version": 125
     }
   ],
   "version": 1

@@ -531,6 +531,9 @@ src/
 │   │   │   ├── temporary.rs
 │   │   │   ├── tests.rs
 │   │   │   └── uploads.rs
+│   │   ├── execution_capacity/
+│   │   │   ├── store.rs
+│   │   │   └── tests.rs
 │   │   ├── execution_requirements/
 │   │   │   └── tests.rs
 │   │   ├── intake_router_hook/
@@ -553,6 +556,7 @@ src/
 │   │   │   └── terminal_resolution.rs
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
+│   │   ├── execution_capacity.rs
 │   │   ├── execution_requirements.rs
 │   │   ├── intake_preflight.rs
 │   │   ├── intake_router_hook.rs

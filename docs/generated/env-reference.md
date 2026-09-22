@@ -43,7 +43,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_CODEX_REASONING_EFFORT` | `src/services/codex.rs:203` |  |
 | `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex.rs:1244` |  |
 | `AGENTDESK_CODEX_TUI_WARM_FOLLOWUP` | `src/services/codex_tui/warm_followup.rs:14` (+1 more) |  |
-| `AGENTDESK_CONFIG` | `src/config.rs:3238` (+5 more) | The on-disk config path the running server loaded from, resolved with the same precedence as [`load`] (`$AGENTDESK_CONFIG` → runtime root → cwd → home). |
+| `AGENTDESK_CONFIG` | `src/config.rs:3201` (+5 more) | The on-disk config path the running server loaded from, resolved with the same precedence as [`load`] (`$AGENTDESK_CONFIG` → runtime root → cwd → home). |
 | `AGENTDESK_CSWAP_PATH` | `src/services/cswap.rs:22` (+1 more) |  |
 | `AGENTDESK_DCSERVER_LABEL` | `src/cli/dcserver.rs:18` (+2 more) |  |
 | `AGENTDESK_DCSERVER_LOG_MAX_BYTES` | `src/logging.rs:225` |  |
@@ -67,7 +67,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_HOOK_RELAY_TEST_ENDPOINT` | `src/services/claude_tui/hook_relay.rs:46` |  |
 | `AGENTDESK_HOOK_RELAY_TEST_MUTATION` | `src/services/claude_tui/hook_relay/ordered_queue.rs:41` (+1 more) |  |
 | `AGENTDESK_HOOK_RELAY_TEST_STDOUT_PATH` | `src/services/claude_tui/hook_relay.rs:50` |  |
-| `AGENTDESK_INSTANCE_ID` | `src/services/cluster/node_registry.rs:676` (+1 more) | Resolve the self instance_id, preferring the value the cluster bootstrap registered (config-driven if present), falling back to the env-var/hostname pair only… |
+| `AGENTDESK_INSTANCE_ID` | `src/services/cluster/node_registry.rs:686` (+1 more) | Resolve the self instance_id, preferring the value the cluster bootstrap registered (config-driven if present), falling back to the env-var/hostname pair only… |
 | `AGENTDESK_KAKAO_ACCOUNTS` | `src/services/kakao.rs:28` (+1 more) |  |
 | `AGENTDESK_KAKAO_DEFAULT_ACCOUNT` | `src/services/kakao.rs:29` (+1 more) |  |
 | `AGENTDESK_KAKAO_ENABLED` | `src/services/kakao.rs:27` (+2 more) |  |

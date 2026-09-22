@@ -1868,6 +1868,7 @@ services::cluster::attachment_transfer::tests::bundle_rejects_corrupted_bytes_an
 services::cluster::attachment_transfer::tests::bundle_rejects_cross_message_identity
 services::cluster::attachment_transfer::tests::bundle_rejects_partial_entry_set
 services::cluster::attachment_transfer::tests::bundle_roundtrip_preserves_order_and_binary
+services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg
 services::cluster::execution_requirements::tests::execution_requirements_are_strict_and_share_dispatch_matching
 services::cluster::intake_preflight::tests::claude_and_codex_emit_structured_pass_and_fail_evidence
 services::cluster::intake_preflight::tests::each_required_failure_is_independently_fail_closed

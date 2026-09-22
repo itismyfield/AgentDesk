@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 mod agent_channels;
 pub use agent_channels::AgentChannels;
 mod runtime_profile;
-pub use runtime_profile::{ClusterConfig, RuntimeProfile};
+pub use runtime_profile::{ClusterConfig, ClusterIntakeRoutingConfig, RuntimeProfile};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -989,43 +989,6 @@ fn default_dispatch_routing_wake_interval_secs() -> u64 {
 
 fn is_default_dispatch_routing_wake_interval_secs(value: &u64) -> bool {
     *value == default_dispatch_routing_wake_interval_secs()
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
-pub struct ClusterIntakeRoutingConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default, skip_serializing_if = "ClusterIntakeRoutingMode::is_default")]
-    pub mode: ClusterIntakeRoutingMode,
-    /// Raw top-level Discord channel IDs opted into owner-authority planning.
-    /// A valid loaded config with an empty list is an explicit known-empty
-    /// opt-out scope; a config that failed to load is represented as unknown by
-    /// the effective routing snapshot instead of by this field.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub owner_authority_channel_ids: Vec<String>,
-    #[serde(default = "default_intake_forward_pre_claim_timeout_secs")]
-    pub forward_pre_claim_timeout_secs: u64,
-    #[serde(default = "default_intake_stale_claim_recovery_secs")]
-    pub stale_claim_recovery_secs: u64,
-    #[serde(default = "default_intake_max_attempts_per_message")]
-    pub max_attempts_per_message: u32,
-    #[serde(default = "default_intake_retry_authorization_secs")]
-    pub retry_authorization_secs: u64,
-}
-
-impl Default for ClusterIntakeRoutingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            mode: ClusterIntakeRoutingMode::default(),
-            owner_authority_channel_ids: Vec::new(),
-            forward_pre_claim_timeout_secs: default_intake_forward_pre_claim_timeout_secs(),
-            stale_claim_recovery_secs: default_intake_stale_claim_recovery_secs(),
-            max_attempts_per_message: default_intake_max_attempts_per_message(),
-            retry_authorization_secs: default_intake_retry_authorization_secs(),
-        }
-    }
 }
 
 impl ClusterIntakeRoutingConfig {

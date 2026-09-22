@@ -744,7 +744,7 @@ pub(crate) async fn list_worker_nodes(
     let rows = sqlx::query(
         r#"
         SELECT
-            instance_id,
+            worker_nodes.instance_id,
             hostname,
             process_id,
             role,
@@ -756,10 +756,14 @@ pub(crate) async fn list_worker_nodes(
             labels,
             capabilities,
             COALESCE(active_dispatches.active_dispatch_count, 0)::BIGINT AS active_dispatch_count,
+            execution_assignments.last_execution_assignment_at,
+            (SELECT count(*) FROM node_execution_occupancy(worker_nodes.instance_id)) AS execution_occupied,
+            (SELECT count(*) FROM node_execution_leases l WHERE l.instance_id=worker_nodes.instance_id AND l.expires_at>NOW()) AS execution_active,
             last_heartbeat_at,
             started_at,
             updated_at
         FROM worker_nodes
+        LEFT JOIN node_execution_assignments execution_assignments ON execution_assignments.instance_id=worker_nodes.instance_id
         LEFT JOIN (
             SELECT claim_owner, COUNT(*)::BIGINT AS active_dispatch_count
               FROM dispatch_outbox
@@ -767,7 +771,7 @@ pub(crate) async fn list_worker_nodes(
                AND claim_owner IS NOT NULL
              GROUP BY claim_owner
         ) active_dispatches ON active_dispatches.claim_owner = worker_nodes.instance_id
-        ORDER BY last_heartbeat_at DESC, instance_id ASC
+        ORDER BY last_heartbeat_at DESC, worker_nodes.instance_id ASC
         "#,
     )
     .bind(lease_ttl_secs.max(1) as i64)
@@ -803,6 +807,9 @@ pub(crate) async fn list_worker_nodes(
                     .ok()
                     .flatten()
                     .unwrap_or(0),
+                "execution_occupied": row.try_get::<i64,_>("execution_occupied").ok(),
+                "execution_active": row.try_get::<i64,_>("execution_active").ok(),
+                "last_execution_assignment_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("last_execution_assignment_at").ok().flatten(),
                 "api_base_url": api_base_url,
                 "session_api_routable": session_api_routable,
                 "last_heartbeat_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_heartbeat_at").ok().flatten(),

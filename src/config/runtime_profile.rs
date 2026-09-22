@@ -37,6 +37,18 @@ impl RuntimeProfile {
     }
 
     pub(super) fn validate(self, cluster: &ClusterConfig) -> anyhow::Result<()> {
+        if let Some(slots) = cluster.execution_slots {
+            anyhow::ensure!(
+                cluster.enabled && (1..=1024).contains(&slots),
+                "execution_slots requires enabled cluster and a value from 1 to 1024"
+            );
+        }
+        if cluster.intake_routing.capacity_aware {
+            anyhow::ensure!(
+                cluster.enabled && cluster.intake_routing.enabled,
+                "capacity_aware requires cluster and intake routing"
+            );
+        }
         if self == Self::Worker {
             anyhow::ensure!(
                 cluster.enabled && cluster.role.trim().eq_ignore_ascii_case("worker"),
@@ -97,6 +109,9 @@ pub struct ClusterConfig {
     pub role: String,
     #[serde(default, skip_serializing_if = "RuntimeProfile::is_full")]
     pub runtime_profile: RuntimeProfile,
+    /// Maximum simultaneous provider turns on this node; restart to change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_slots: Option<u32>,
     #[serde(default = "default_cluster_heartbeat_interval_secs")]
     pub heartbeat_interval_secs: u64,
     #[serde(default = "default_cluster_lease_ttl_secs")]
@@ -157,6 +172,7 @@ impl Default for ClusterConfig {
             instance_id: None,
             role: default_cluster_role(),
             runtime_profile: RuntimeProfile::default(),
+            execution_slots: None,
             heartbeat_interval_secs: default_cluster_heartbeat_interval_secs(),
             lease_ttl_secs: default_cluster_lease_ttl_secs(),
             api_base_url: None,
@@ -177,5 +193,45 @@ impl Default for ClusterConfig {
 impl ClusterConfig {
     pub fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClusterIntakeRoutingConfig {
+    #[serde(default)]
+    pub capacity_aware: bool,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "ClusterIntakeRoutingMode::is_default")]
+    pub mode: ClusterIntakeRoutingMode,
+    /// Raw top-level Discord channel IDs opted into owner-authority planning.
+    /// A valid loaded config with an empty list is an explicit known-empty
+    /// opt-out scope; a config that failed to load is represented as unknown by
+    /// the effective routing snapshot instead of by this field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_authority_channel_ids: Vec<String>,
+    #[serde(default = "default_intake_forward_pre_claim_timeout_secs")]
+    pub forward_pre_claim_timeout_secs: u64,
+    #[serde(default = "default_intake_stale_claim_recovery_secs")]
+    pub stale_claim_recovery_secs: u64,
+    #[serde(default = "default_intake_max_attempts_per_message")]
+    pub max_attempts_per_message: u32,
+    #[serde(default = "default_intake_retry_authorization_secs")]
+    pub retry_authorization_secs: u64,
+}
+
+impl Default for ClusterIntakeRoutingConfig {
+    fn default() -> Self {
+        Self {
+            capacity_aware: false,
+            enabled: false,
+            mode: ClusterIntakeRoutingMode::default(),
+            owner_authority_channel_ids: Vec::new(),
+            forward_pre_claim_timeout_secs: default_intake_forward_pre_claim_timeout_secs(),
+            stale_claim_recovery_secs: default_intake_stale_claim_recovery_secs(),
+            max_attempts_per_message: default_intake_max_attempts_per_message(),
+            retry_authorization_secs: default_intake_retry_authorization_secs(),
+        }
     }
 }

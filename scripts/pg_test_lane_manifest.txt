@@ -63,6 +63,7 @@ src/services/auto_queue/route_generate.rs
 src/services/auto_queue/runtime/clear_slot_sessions_pg_tests.rs
 src/services/automation_candidate_materializer/iteration_result_tests.rs
 src/services/cluster/attachment_transfer/storage_tests.rs
+src/services/cluster/execution_capacity/tests.rs
 src/services/cluster/intake_preflight.rs
 src/services/cluster/intake_router_hook.rs
 src/services/cluster/intake_router_hook/attachment_tests.rs
@@ -188,6 +189,7 @@ services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests
 services::auto_queue::tests
 services::automation_candidate_materializer::iteration_result_tests
 services::cluster::attachment_transfer::storage_tests
+services::cluster::execution_capacity::tests
 services::cluster::intake_preflight::tests
 services::cluster::intake_router_hook::attachment_tests
 services::cluster::intake_router_hook::execution_requirement_tests
@@ -693,6 +695,7 @@ services::automation_candidate_materializer::iteration_result_tests::prepare_wor
 services::automation_candidate_materializer::iteration_result_tests::prepare_worktree_rejects_future_iterations_before_touching_git_pg
 services::automation_candidate_materializer::iteration_result_tests::submit_iteration_result_rejects_cards_outside_active_loop_state_pg
 services::cluster::attachment_transfer::storage_tests::attachment_bundle_store_restart_identity_integrity_expiry_and_cleanup_pg
+services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg
 services::cluster::intake_preflight::tests::evaluation_does_not_mutate_production_handoff_state_pg
 services::cluster::intake_router_hook::attachment_tests::attachment_route_requires_consumer_and_preserves_bytes_through_retry_pg
 services::cluster::intake_router_hook::execution_requirement_tests::execution_requirements_block_fallback_and_survive_recovery_pg
