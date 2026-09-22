@@ -54,6 +54,15 @@ pub(crate) fn explain_capability_match(
         }
     }
 
+    if let Some(required) = hard_required.get("execution") {
+        match super::execution_requirements::ExecutionRequirements::parse(required.clone()) {
+            Ok(policy) => {
+                reasons.extend(policy.explain(node, chrono::Utc::now().timestamp_millis()))
+            }
+            Err(reason) => reasons.push(reason),
+        }
+    }
+
     let capabilities = node.get("capabilities").unwrap_or(&Value::Null);
     let providers = capabilities
         .get("providers")
