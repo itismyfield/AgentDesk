@@ -120,6 +120,8 @@ src/
 │   │   ├── metadata.rs
 │   │   ├── mod.rs
 │   │   └── transitions.rs
+│   ├── postgres/
+│   │   └── shared_config.rs
 │   ├── prompt_manifests/
 │   │   ├── builder.rs
 │   │   ├── mod.rs
