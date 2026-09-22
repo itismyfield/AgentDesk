@@ -492,6 +492,9 @@ banner "Portable deployable path lint"
   tests.test_script_python_policy \
   tests.test_analyze_prs
 
+banner "CI macOS Trusted Rust path filter"
+"$PYTHON" -m unittest tests.test_macos_trusted_rust_filter
+
 banner "Relay watchdog + PG tunnel supervisor tests (#4381/#4378)"
 # The out-of-band relay watchdog is a deployable Python script; it is not
 # covered by shellcheck (only *.sh) nor by cargo, so this unittest run is its

@@ -89,6 +89,32 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Validated self-hosted macOS labels for runner group '${MACOS_RUNNER_GROUP}'."
 
+  # The self-hosted job's name is the required context, so it must always
+  # report; this output only lets it skip its heavy steps. Changed paths are
+  # the branch's commits since its merge-base with main, not the previous push.
+  rust_changes:
+    name: Detect Rust changes
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Decide whether heavy macOS steps are needed
+        id: filter
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -uo pipefail
+          if ! out="$(python3 scripts/ci/macos-trusted-rust-filter.py --event "$EVENT_NAME" --base-ref origin/main)"; then
+            out="run=true"
+          fi
+          echo "$out" >> "$GITHUB_OUTPUT"
+
   macos_hosted:
     name: Trusted macOS check (hosted)
     needs: resolve_macos_runner
@@ -154,8 +180,12 @@ jobs:
 
   macos_self_hosted:
     name: Trusted macOS check (self-hosted)
-    needs: resolve_macos_runner
-    if: needs.resolve_macos_runner.outputs.mode == 'self-hosted'
+    needs:
+      - resolve_macos_runner
+      - rust_changes
+    # `!cancelled()` keeps a failed rust_changes from skipping this job; its
+    # empty output then reads as "run" in the step conditions below.
+    if: ${{ !cancelled() && needs.resolve_macos_runner.outputs.mode == 'self-hosted' }}
     # Repo-level self-hosted runners (personal-account repos) select purely by
     # label — runner groups are an organization-only feature. If this repo is
     # ever moved under an org, switch back to the `group:`+`labels:` form and
@@ -205,14 +235,21 @@ jobs:
             exit 1
           fi
 
+      - name: Report skipped heavy steps
+        if: needs.rust_changes.outputs.run == 'false'
+        run: echo "No Rust inputs changed since the merge-base with main; skipping build and test steps."
+
       - uses: actions/checkout@v4
+        if: needs.rust_changes.outputs.run != 'false'
 
       - name: Install Rust toolchain
+        if: needs.rust_changes.outputs.run != 'false'
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
 
       - name: Configure local sccache
+        if: needs.rust_changes.outputs.run != 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -238,6 +275,7 @@ jobs:
           fi
 
       - name: Install Opus on macOS
+        if: needs.rust_changes.outputs.run != 'false'
         shell: bash
         run: |
           brew install opus pkg-config tmux
@@ -250,9 +288,11 @@ jobs:
       # the co-located production Postgres preempts CI under contention (#3658,
       # Option B). `nice` only de-prioritizes; it cannot fail the build.
       - name: cargo check
+        if: needs.rust_changes.outputs.run != 'false'
         run: nice -n 10 cargo check --all-targets
 
       - name: cargo test (non-PG, targeted subset)
+        if: needs.rust_changes.outputs.run != 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -271,6 +311,7 @@ jobs:
           nice -n 10 cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
 
       - name: Fresh user portable smoke
+        if: needs.rust_changes.outputs.run != 'false'
         shell: bash
         run: nice -n 10 bash scripts/ci-macos-fresh-user-smoke.sh
 

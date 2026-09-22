@@ -1718,6 +1718,27 @@ class FastCheckCiWiringTests(unittest.TestCase):
             self_hosted.count(f"nice -n 10 {BUSY_RETRY_4888_TEST_COMMAND}"), 1
         )
 
+    def test_trusted_macos_path_filter_skips_steps_not_the_required_job(self) -> None:
+        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
+        self_hosted = job_block(workflow, "macos_self_hosted")
+        header = self_hosted.split("    steps:\n", 1)[0]
+        # The job name is the required context; skipping the job would leave
+        # it "skipped", so the filter may only gate steps.
+        self.assertIn("!cancelled()", header)
+        self.assertNotIn("rust_changes.outputs", header)
+        gate = "        if: needs.rust_changes.outputs.run != 'false'\n"
+        for step in (
+            "Install Rust toolchain",
+            "Configure local sccache",
+            "Install Opus on macOS",
+            "cargo check",
+            "cargo test (non-PG, targeted subset)",
+            "Fresh user portable smoke",
+        ):
+            with self.subTest(step=step):
+                self.assertIn(gate, step_block(self_hosted, step))
+        self.assertIn("      - uses: actions/checkout@v4\n" + gate, self_hosted)
+
     def test_test_lane_baseline_uses_candidate_snapshot_refs(self) -> None:
         pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         main_workflow = MAIN_WORKFLOW.read_text(encoding="utf-8")
