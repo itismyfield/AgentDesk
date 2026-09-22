@@ -18,6 +18,7 @@ pub mod docs;
 mod domains;
 pub(crate) mod e2e_control;
 pub mod escalation;
+mod execution_requirements;
 pub mod github;
 pub mod github_dashboard;
 pub mod health_api;
