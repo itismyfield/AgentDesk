@@ -35,7 +35,7 @@ extract_function() {
 . "$REPO_ROOT/scripts/_defaults.sh"
 
 for fn in _recover_or_preserve_past_migration_floor _preserve_staged_binary_for_recovery \
-    _migration_floor_artifact_path _old_runtime_pid_is_alive \
+    _migration_floor_artifact_path _old_runtime_pid_is_alive _release_job_is_quiescent \
     _release_runtime_is_serving _migration_floor_may_advance; do
     body="$(extract_function "$fn")"
     if [ -z "$body" ]; then
@@ -69,7 +69,15 @@ launchctl() { echo "launchctl $*" >>"$TMP_ROOT/calls"; return 0; }
 chflags() { echo "chflags $*" >>"$TMP_ROOT/calls"; return 0; }
 tmux() { echo "tmux $*" >>"$TMP_ROOT/calls"; return 0; }
 xattr() { return 0; }
-kill() { case "$*" in "-0 "*) return "${STUB_PID_ALIVE:-1}" ;; esac; echo "kill $*" >>"$TMP_ROOT/calls"; return 0; }
+kill() {
+    case "$*" in
+        "-0 4242") return "${STUB_PID_ALIVE:-1}" ;;
+        "-0 "*) return "${STUB_LOCKPID_ALIVE:-1}" ;;
+    esac
+    echo "kill $*" >>"$TMP_ROOT/calls"
+    return 0
+}
+cp() { [ "${STUB_CP_FAIL:-0}" = 1 ] && return 1; command cp "$@"; }
 sleep() { return 0; }
 _launchd_domain() { echo "gui/501"; }
 start_release_tmux_fallback() { echo "tmux-fallback" >>"$TMP_ROOT/calls"; return 0; }
@@ -96,6 +104,8 @@ mkdir -p "$ADK_REL/bin"
 REL_BINARY="$ADK_REL/bin/agentdesk"
 REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
 RECOVERY="$ADK_REL/bin/agentdesk.migration-floor-recovery"
+mkdir -p "$ADK_REL/runtime"
+LOCK_FILE="$ADK_REL/runtime/dcserver.lock"
 
 reset_node() {
     rm -f "$REL_BINARY" "$REL_BINARY_BACKUP" "$RECOVERY" "$ADK_REL/bin/agentdesk.deploy.test"
@@ -107,6 +117,9 @@ reset_node() {
     STUB_MV_FAIL=0
     STUB_CURL_SEQ=""
     STUB_PID_ALIVE=1
+    STUB_LOCKPID_ALIVE=1
+    STUB_CP_FAIL=0
+    : >"$LOCK_FILE"
     # shellcheck disable=SC2034  # Read by the production function loaded through eval.
     OLD_PID="4242"
 }
@@ -270,7 +283,58 @@ else
     fail "the later binary was dropped instead of kept alongside"
 fi
 
-echo "§7 no staged binary means no action at all"
+echo "§7 a replacement launchd generation is not stopped either"
+
+reset_node
+STUB_CURL_RC=7
+STUB_HTTP_CODE=000
+STUB_PID_ALIVE=1
+# the captured pid is gone, but the lock file names a live replacement process
+printf '9931' >"$LOCK_FILE"
+STUB_LOCKPID_ALIVE=0
+_recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
+if [ "$(cat "$REL_BINARY")" = "OLD-UNBOOTABLE" ]; then
+    pass "a new launchd generation is not swapped out from under"
+else
+    fail "only the captured pid was checked — a replacement process was stopped without proving its frontier"
+fi
+if ! grep -q "bootout" "$TMP_ROOT/calls"; then
+    pass "the replacement generation was not booted out"
+else
+    fail "bootout was issued while a replacement process was live"
+fi
+
+echo "§8 a stale lock naming a dead pid does not block recovery"
+
+reset_node
+STUB_CURL_RC=7
+printf '9931' >"$LOCK_FILE"
+STUB_LOCKPID_ALIVE=1
+_recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
+if [ "$(cat "$REL_BINARY")" = "STAGED-NEW" ]; then
+    pass "a crash-looped node still recovers when no process is actually alive"
+else
+    fail "a stale lock file blocked automatic recovery"
+fi
+
+echo "§9 the swap is refused when the replaced binary cannot be kept"
+
+reset_node
+STUB_CURL_RC=7
+STUB_CP_FAIL=1
+_recover_or_preserve_past_migration_floor >>"$TMP_ROOT/out" 2>&1 || true
+if [ "$(cat "$REL_BINARY")" = "OLD-UNBOOTABLE" ]; then
+    pass "a failed backup blocks the swap instead of destroying the old binary"
+else
+    fail "the old binary was destroyed although the backup failed"
+fi
+if ls "$ADK_REL"/bin/agentdesk.migration-floor-recovery* >/dev/null 2>&1; then
+    pass "the staged binary is preserved on that refusal"
+else
+    fail "the refusal lost the migration-capable binary"
+fi
+
+echo "§10 no staged binary means no action at all"
 
 STUB_CURL_RC=7
 reset_node
@@ -285,7 +349,7 @@ else
     fail "the recovery acted with no staged binary"
 fi
 
-echo "§8 liveness: only a refused connection proves nothing owns the port"
+echo "§11 liveness: only a refused connection proves nothing owns the port"
 
 STUB_CURL_RC=0
 STUB_HTTP_CODE=200
@@ -325,7 +389,7 @@ else
     pass "liveness does not rely on pid existence"
 fi
 
-echo "§9 the floor detector answers a fact, not a rollback policy"
+echo "§12 the floor detector answers a fact, not a rollback policy"
 
 if extract_function _migration_floor_may_advance | grep -q "AGENTDESK_DEPLOY_FORCE_ROLLBACK"; then
     fail "a rollback policy override can disarm floor detection"
@@ -338,7 +402,7 @@ else
     fail "the migration comparison is duplicated between the guard and the detector"
 fi
 
-echo "§10 the deploy arms before the migration runs and recovers before cleanup"
+echo "§13 the deploy arms before the migration runs and recovers before cleanup"
 
 before_call="$(awk '/release-migrate-postgres; then/{exit} {print}' "$DEPLOY_SH" || true)"
 if grep -q "MIGRATION_FLOOR_ARMED=1" <<<"$before_call"; then

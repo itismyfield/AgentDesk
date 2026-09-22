@@ -1136,7 +1136,32 @@ _preserve_staged_binary_for_recovery() {
 }
 
 _old_runtime_pid_is_alive() {
-    [ -n "${OLD_PID:-}" ] && kill -0 "${OLD_PID}" 2>/dev/null
+    # launchd hands a crash loop a new pid and the runtime rewrites the lock file,
+    # so the pid captured before the drain proves nothing about the generation
+    # running now. Consider both the captured pid and whatever currently claims
+    # the lock; a stale lock naming a dead pid reads as not alive.
+    local current=""
+    [ -n "${OLD_PID:-}" ] && kill -0 "${OLD_PID}" 2>/dev/null && return 0
+    current="$(cat "${LOCK_FILE:-$ADK_REL/runtime/dcserver.lock}" 2>/dev/null || true)"
+    case "$current" in
+        '' | *[!0-9]*) return 1 ;;
+    esac
+    kill -0 "$current" 2>/dev/null
+}
+
+_release_job_is_quiescent() {
+    # One clean sample can land between a process exiting and its replacement
+    # binding, so require consecutive clean observations before anything is
+    # stopped or swapped.
+    local port="$1" want="${2:-3}" seen=0
+    while [ "$seen" -lt "$want" ]; do
+        if _release_runtime_is_serving "$port" || _old_runtime_pid_is_alive; then
+            return 1
+        fi
+        seen=$((seen + 1))
+        [ "$seen" -lt "$want" ] && sleep 1
+    done
+    return 0
 }
 
 _recover_or_preserve_past_migration_floor() {
@@ -1189,7 +1214,7 @@ _recover_or_preserve_past_migration_floor() {
 
     # Re-prove both conditions after stopping the job: anything that answers now
     # would also answer the health check below and fake a successful promote.
-    if _release_runtime_is_serving "$rel_port" || _old_runtime_pid_is_alive; then
+    if ! _release_job_is_quiescent "$rel_port" 3; then
         echo "✗ Something still owns :${rel_port} after bootout — refusing to swap the binary" >&2
         _preserve_staged_binary_for_recovery || true
         return 0
@@ -1200,10 +1225,18 @@ _recover_or_preserve_past_migration_floor() {
     # turns out not to have advanced after all.
     chflags nouchg "$rel_binary" 2>/dev/null || true
     if [ -e "$rel_binary" ]; then
+        # The copy must succeed before the swap. A full disk can fail the copy
+        # while the same-filesystem rename still succeeds, which would destroy
+        # the only executable that boots if the schema never advanced.
         keep="$(_migration_floor_artifact_path "$ADK_REL/bin/agentdesk.pre-migration-floor")"
-        cp -p "$rel_binary" "$keep" 2>/dev/null \
-            && echo "   Replaced binary kept at $keep" \
-            || echo "   ⚠ Could not keep a copy of $rel_binary" >&2
+        if ! cp -p "$rel_binary" "$keep" 2>/dev/null; then
+            rm -f "$keep" 2>/dev/null || true
+            echo "✗ Could not keep a copy of $rel_binary — refusing to overwrite it" >&2
+            _preserve_staged_binary_for_recovery || true
+            echo "   Free space under $ADK_REL/bin, then redeploy." >&2
+            return 0
+        fi
+        echo "   Replaced binary kept at $keep"
     fi
     if ! mv -f "$STAGED_BINARY" "$rel_binary"; then
         echo "✗ Fail-forward promote failed — the node is stopped on an unbootable binary" >&2
