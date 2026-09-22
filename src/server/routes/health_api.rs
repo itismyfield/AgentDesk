@@ -169,7 +169,7 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
     let release_source = crate::services::release_source::health_json(detailed);
 
     // Check if dashboard dist is available
-    let dashboard_ok = {
+    let dashboard_ok = state.config.cluster.runtime_profile.modules().dashboard && {
         let dashboard_dir = crate::cli::agentdesk_runtime_root()
             .map(|r| r.join("dashboard/dist"))
             .unwrap_or_else(|| std::path::PathBuf::from("dashboard/dist"));
@@ -405,6 +405,7 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             .unwrap_or_else(|_| serde_json::json!({}));
         json["delivery_record_rollout"] = delivery_record_rollout_health_json();
         json["release_source"] = release_source;
+        attach_runtime_profile(&mut json, &state.config);
         json["intake_routing"] =
             crate::services::cluster::intake_router_hook::intake_routing_status_json();
 
@@ -530,6 +531,7 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         }
         json["delivery_record_rollout"] = delivery_record_rollout_health_json();
         json["release_source"] = release_source;
+        attach_runtime_profile(&mut json, &state.config);
         json["intake_routing"] =
             crate::services::cluster::intake_router_hook::intake_routing_status_json();
         let json = if detailed {
@@ -743,6 +745,9 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
         "server_up": server_up,
         "fully_recovered": fully_recovered,
         "cluster_standby": cluster_standby,
+        "runtime_profile": json.get("runtime_profile"),
+        "modules": json.get("modules"),
+        "dashboard_required": json.get("dashboard_required"),
         "degraded": degraded,
         "degraded_reasons": degraded_reasons,
         "expired_relay_ledgers": expired_relay_ledgers,
@@ -774,12 +779,22 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     public
 }
 
+fn attach_runtime_profile(json: &mut serde_json::Value, config: &crate::config::Config) {
+    json["runtime_profile"] = serde_json::json!(config.cluster.runtime_profile);
+    json["modules"] = serde_json::json!(config.cluster.runtime_profile.modules());
+    json["dashboard_required"] =
+        serde_json::json!(config.cluster.runtime_profile.modules().dashboard);
+}
+
 async fn cluster_standby_without_gateway(
     state: &AppState,
     server_up: bool,
     degraded_reasons: &[serde_json::Value],
 ) -> bool {
-    if !server_up || !state.config.cluster.enabled {
+    if !server_up
+        || !state.config.cluster.enabled
+        || !state.config.cluster.runtime_profile.modules().gateway
+    {
         return false;
     }
     if !degraded_reasons

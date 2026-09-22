@@ -45,6 +45,8 @@ pub mod resume;
 pub mod review_verdict;
 pub mod reviews;
 pub mod routines;
+#[cfg(test)]
+mod runtime_profile_tests;
 pub mod scheduled_messages;
 pub(crate) mod session_activity;
 pub mod settings;
@@ -708,9 +710,13 @@ pub fn api_router_with_pg_and_cluster(
 }
 
 fn compose_api_router(state: AppState) -> ApiRouter {
-    Router::new()
+    let runtime = Router::new()
         .merge(domains::access::router())
-        .merge(domains::runtime::router(state.clone()))
+        .merge(domains::runtime::router(state.clone()));
+    if !state.config.cluster.runtime_profile.modules().admin_api {
+        return runtime;
+    }
+    runtime
         .merge(domains::onboarding::router(state.clone()))
         .merge(domains::agents::router(state.clone()))
         .merge(domains::analytics::router(state.clone()))

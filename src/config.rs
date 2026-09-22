@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 mod agent_channels;
 pub use agent_channels::AgentChannels;
+mod runtime_profile;
+pub use runtime_profile::RuntimeProfile;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -906,6 +908,8 @@ pub struct ClusterConfig {
     pub instance_id: Option<String>,
     #[serde(default = "default_cluster_role")]
     pub role: String,
+    #[serde(default, skip_serializing_if = "RuntimeProfile::is_full")]
+    pub runtime_profile: RuntimeProfile,
     #[serde(default = "default_cluster_heartbeat_interval_secs")]
     pub heartbeat_interval_secs: u64,
     #[serde(default = "default_cluster_lease_ttl_secs")]
@@ -965,6 +969,7 @@ impl Default for ClusterConfig {
             enabled: false,
             instance_id: None,
             role: default_cluster_role(),
+            runtime_profile: RuntimeProfile::default(),
             heartbeat_interval_secs: default_cluster_heartbeat_interval_secs(),
             lease_ttl_secs: default_cluster_lease_ttl_secs(),
             api_base_url: None,
@@ -3385,6 +3390,7 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
 }
 
 pub(crate) fn validate_config(config: &Config) -> Result<()> {
+    config.cluster.runtime_profile.validate(&config.cluster)?;
     config.onboarding.warn_invalid_rules();
     validate_escalation_schedule(&config.escalation.schedule)?;
     validate_scheduled_message_required_mentions(

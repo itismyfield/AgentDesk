@@ -1147,6 +1147,10 @@ pub fn handle_dcserver(token: Option<String>) {
         } else {
             launch_configs.len()
         };
+        if !ad_config.cluster.runtime_profile.is_full() && startup_provider_count == 0 {
+            eprintln!("  ✖ Worker profile requires a configured provider bot for intake execution");
+            std::process::exit(1);
+        }
         let startup_reconcile_remaining =
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(startup_provider_count));
         let startup_doctor_started =
@@ -1351,7 +1355,8 @@ pub fn handle_dcserver(token: Option<String>) {
                 .await;
                 if ad_config.cluster.enabled {
                     eprintln!(
-                        "  ▸ Cluster standby : Discord gateway lease unavailable; keeping HTTP and worker heartbeat online"
+                        "  ▸ Cluster runtime {:?}: keeping HTTP and worker heartbeat online",
+                        ad_config.cluster.runtime_profile
                     );
                     loop {
                         tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
@@ -1456,7 +1461,8 @@ pub fn handle_dcserver(token: Option<String>) {
                 }
                 if ad_config.cluster.enabled {
                     eprintln!(
-                        "  ▸ Cluster standby : Discord gateway leases unavailable; keeping HTTP and worker heartbeat online"
+                        "  ▸ Cluster runtime {:?}: keeping HTTP and worker heartbeat online",
+                        ad_config.cluster.runtime_profile
                     );
                     loop {
                         tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;

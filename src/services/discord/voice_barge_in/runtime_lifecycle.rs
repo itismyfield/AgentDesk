@@ -41,7 +41,6 @@ impl VoiceBargeInRuntime {
         }
     }
 
-    #[allow(dead_code)] // #3034: test-only runtime constructor; no production caller
     pub(in crate::services::discord) fn disabled() -> Self {
         let (progress_tx, _) = broadcast::channel(128);
         Self {

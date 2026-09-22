@@ -23,6 +23,16 @@ impl SupervisedWorkerRegistry {
 
     pub(crate) async fn run_boot_only_steps(&self) -> Result<()> {
         for step in BOOT_ONLY_STEPS {
+            if step.id == BootStepId::DrainStartupHooks
+                && !self
+                    .config
+                    .cluster
+                    .runtime_profile
+                    .modules()
+                    .leader_services
+            {
+                continue;
+            }
             tracing::info!(
                 boot_step = step.name,
                 order = step.order,
@@ -89,6 +99,17 @@ impl SupervisedWorkerRegistry {
         spec: WorkerSpec,
         broadcast_tx: Option<BroadcastTx>,
     ) -> Result<Option<BatchBuffer>> {
+        if spec.execution_scope == WorkerExecutionScope::LeaderOnly
+            && !self
+                .config
+                .cluster
+                .runtime_profile
+                .modules()
+                .leader_services
+        {
+            self.log_skip(spec, "disabled by worker runtime profile");
+            return Ok(None);
+        }
         match spec.id {
             ServerWorkerId::GithubSync => {
                 let sync_interval = self.config.github.sync_interval_minutes;
