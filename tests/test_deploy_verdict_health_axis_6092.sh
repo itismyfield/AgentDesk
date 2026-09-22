@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# #6092: a landed deploy must not be failed by degradation it cannot cause or clear.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=/dev/null
+. "$REPO_ROOT/scripts/_defaults.sh"
+
+FAILURES=0
+pass() { echo "  ✓ $1"; }
+fail() { echo "  ✗ $1" >&2; FAILURES=$((FAILURES + 1)); }
+
+# $1 reasons JSON array, $2 fully_recovered, $3.. extra top-level JSON pairs
+body() {
+    local reasons="$1" recovered="$2"
+    shift 2
+    printf '{"db":true,"dashboard":true,"server_up":true,"status":"degraded",'
+    printf '"ok":false,"fully_recovered":%s,"degraded_reasons":%s%s}' \
+        "$recovered" "$reasons" "${1:+,$1}"
+}
+
+ready() { health_json_is_ready "$1" 1 1 1 >/dev/null 2>&1; }
+
+expect_ready() {
+    if ready "$2"; then pass "$1"; else fail "$1 — a landed deploy would be failed"; fi
+}
+expect_blocked() {
+    if ready "$2"; then fail "$1 — a broken node would be reported as a good deploy"; else pass "$1"; fi
+}
+
+echo "§1 the measured incident: two relay reasons and a queue depth together"
+
+INCIDENT='["relay_verdict_transport_unknown_claude_1479671298497183835","relay_verdict_unknown_codex_1479671301387059200","provider:codex:pending_queue_depth:4"]'
+expect_ready "the exact 2026-09-22 payload verifies instead of polling to the deadline" \
+    "$(body "$INCIDENT" true)"
+
+echo "§2 membership, not homogeneity: mixing two accepted classes stays accepted"
+
+for mix in \
+    '["relay_verdict_unknown_codex_c1","provider:codex:pending_queue_depth:1"]' \
+    '["relay_verdict_expired_claude_c1","relay_verdict_degraded_codex_c2"]' \
+    '["relay_verdict_unknown_codex_c1","provider:codex:reconcile_in_progress"]' \
+    '["provider:codex:pending_queue_depth:0","provider:claude:reconcile_in_progress"]'; do
+    expect_ready "accepted mix: $mix" "$(body "$mix" true)"
+done
+
+echo "§3 reordering or combining accepted reasons never turns them into a refusal"
+
+a='["relay_verdict_unknown_codex_c1","provider:codex:pending_queue_depth:4"]'
+b='["provider:codex:pending_queue_depth:4","relay_verdict_unknown_codex_c1"]'
+if ready "$(body "$a" true)" && ready "$(body "$b" true)"; then
+    pass "reason order does not change the verdict"
+else
+    fail "reason order changes the verdict"
+fi
+
+echo "§4 any depth is a backlog, never evidence that a promotion failed"
+
+for depth in 0 4 97 100000; do
+    expect_ready "pending_queue_depth:$depth does not block a deploy" \
+        "$(body "[\"provider:codex:pending_queue_depth:$depth\"]" true)"
+done
+
+echo "§5 a structural reason blocks even when mixed with accepted ones"
+
+for blocker in db_unavailable doctor_missing latest_postgres_migration_missing \
+    manifest_missing registry_unavailable repo_head_missing repo_dirty_missing \
+    runtime_root_unavailable provider:codex:reconcile_stalled; do
+    expect_blocked "$blocker blocks alongside an accepted reason" \
+        "$(body "[\"relay_verdict_unknown_codex_c1\",\"$blocker\"]" true)"
+done
+
+echo "§6 an unrecognised reason fails closed, so a newly added one cannot slip through"
+
+expect_blocked "an unknown reason blocks" \
+    "$(body '["relay_verdict_unknown_codex_c1","a_reason_this_script_has_never_seen"]' true)"
+
+echo "§7 fully_recovered=false no longer waves reasons through unread"
+
+expect_blocked "a blocking reason is not rescued by fully_recovered=false" \
+    "$(body '["provider:codex:reconcile_stalled"]' false)"
+expect_blocked "an unknown reason is not rescued by fully_recovered=false" \
+    "$(body '["a_reason_this_script_has_never_seen"]' false)"
+
+echo "§8 reconcile is accepted only while the caller allows it"
+
+RECONCILE="$(body '["provider:codex:reconcile_in_progress"]' true)"
+if health_json_is_ready "$RECONCILE" 1 1 1 >/dev/null 2>&1; then
+    pass "allow_reconcile_degraded=1 accepts reconcile_in_progress"
+else
+    fail "allow_reconcile_degraded=1 rejected reconcile_in_progress"
+fi
+if health_json_is_ready "$RECONCILE" 1 0 1 >/dev/null 2>&1; then
+    fail "allow_reconcile_degraded=0 accepted reconcile_in_progress anyway"
+else
+    pass "allow_reconcile_degraded=0 still refuses it"
+fi
+
+echo "§9 class preconditions survive the move to one matcher"
+
+expect_blocked "gateway_standby without cluster_standby is not a free pass" \
+    "$(body '["gateway_standby"]' true)"
+STANDBY='{"db":true,"dashboard":true,"server_up":true,"cluster_standby":true,"status":"degraded","ok":false,"degraded_reasons":["gateway_standby","provider:codex:gateway_standby"]}'
+expect_ready "a settled standby peer still verifies" "$STANDBY"
+
+echo "§10 the blocking reasons are named, so a timeout says what it waited on"
+
+named=$(_health_json_deploy_blocking_reasons \
+    "$(body '["relay_verdict_unknown_codex_c1","db_unavailable","provider:codex:pending_queue_depth:4"]' true)" \
+    "$(_health_json_deploy_nonblocking_ere 1)")
+if [ "$named" = "db_unavailable" ]; then
+    pass "only the blocking reason is named ($named)"
+else
+    fail "expected 'db_unavailable', got '$named'"
+fi
+
+echo "§11 the jq and no-jq paths agree on every shape above"
+
+if ! command -v jq >/dev/null 2>&1; then
+    fail "jq is absent, so this comparison would prove nothing"
+else
+    for shape in "$INCIDENT" '["relay_verdict_unknown_codex_c1","db_unavailable"]' \
+        '["a_reason_this_script_has_never_seen"]' '["provider:codex:pending_queue_depth:4"]' \
+        '["relay_verdict_unknown_codex_c1","provider:codex:reconcile_in_progress"]'; do
+        b="$(body "$shape" true)"
+        with_jq=0; ready "$b" || with_jq=1
+        # Force the fallback by making the detector answer no, not by breaking PATH.
+        without_jq=0
+        (
+            _health_json_has_jq() { return 1; }
+            health_json_is_ready "$b" 1 1 1 >/dev/null 2>&1
+        ) || without_jq=1
+        if [ "$with_jq" = "$without_jq" ]; then
+            pass "jq and fallback agree on $shape (both $([ "$with_jq" = 0 ] && echo ready || echo blocked))"
+        else
+            fail "jq said $with_jq but the fallback said $without_jq for $shape"
+        fi
+    done
+fi
+
+if [ "$FAILURES" -gt 0 ]; then
+    echo "$FAILURES failure(s)" >&2
+    exit 1
+fi
+echo "all migration-independent verdict health-axis checks passed"

@@ -1539,7 +1539,10 @@ _wait_for_peer_deploy_verdict() {
         if [ "$marker_status" = "success" ] \
             && [ "$observed_repo_head" = "$expected_repo_head" ] \
             && [ "$health_ready" = "true" ]; then
-            echo "✓ [peer:$peer] deploy verified: terminal marker, repo head, and health ready=true (ok=$health_status)"
+            echo "✓ [peer:$peer] deploy verified: terminal marker, repo head, health ready=true (ok=$health_status)"
+            if [ "$health_status" != "true" ]; then
+                echo "  [peer:$peer] NODE HEALTH: degraded ($(_health_json_reasons "$health_body")) — not caused by this deploy and not cleared by one"
+            fi
             return 0
         fi
 
@@ -1560,7 +1563,11 @@ _wait_for_peer_deploy_verdict() {
         fi
 
         if [ "$SECONDS" -ge "$deadline" ]; then
-            _report_peer_verdict_failure "$peer" "timed out after ${timeout_secs}s" \
+            local blocking=""
+            [ -n "$health_body" ] && blocking=$(_health_json_deploy_blocking_reasons \
+                "$health_body" "$(_health_json_deploy_nonblocking_ere 1)")
+            _report_peer_verdict_failure "$peer" \
+                "timed out after ${timeout_secs}s${blocking:+ (deploy-blocking: $blocking)}" \
                 "$marker_status" "$marker_detail" "$expected_repo_head" \
                 "$observed_repo_head" "$repo_detail" "$health_status" "$health_ready" "$health_detail" "$peer_health_port"
             return 1

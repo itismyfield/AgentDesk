@@ -284,6 +284,9 @@ bash tests/test_cluster_deploy_peer_verdict_5189.sh
 banner "Deploy migration-floor fail-forward contract (#6090)"
 bash tests/test_deploy_migration_floor_fail_forward_6090.sh
 
+banner "Deploy verdict health axis (#6092)"
+bash tests/test_deploy_verdict_health_axis_6092.sh
+
 banner "CI runner hardening guard"
 ./scripts/check-ci-runner-hardening.sh
 "$PYTHON" -m unittest tests.test_discord_thread_create_ci_wiring
