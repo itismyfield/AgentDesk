@@ -7,6 +7,9 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
     vec![
         ep("GET", "/api/internal/node-probe", "cluster",
             "Authenticated identity and session-forwarding protocol probe. Verifies the configured peer endpoint belongs to the advertised node; does not expose worker administration."),
+        ep("GET", "/api/sessions/{id}/output", "sessions",
+            "Read the bounded output tail from the session owner, including a remote worker. Returns availability information when output cannot be read.")
+            .with_params([("id", path_param("Session ID."))]),
         ep(
             "POST",
             "/api/agents/{id}/turn/start",
