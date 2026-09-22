@@ -29,6 +29,7 @@ import { getAgentLevel, getAgentTitle } from "./agentProgress";
 import { AgentInfoOperationsSections } from "./AgentInfoOperationsSections";
 import { AgentInfoProfileSections } from "./AgentInfoProfileSections";
 import { AgentInfoRoutingSections } from "./AgentInfoRoutingSections";
+import { AgentExecutionNodeSelect } from "./AgentExecutionNodeSelect";
 import { inferBindingSource } from "./AgentInfoCardModel";
 import { isDiscordSnowflake } from "./discord-routing";
 import { catalogLabel, getProviderAuthProfiles, useProviderCatalog } from "../../api/providers";
@@ -616,6 +617,9 @@ export default function AgentInfoCard({
               discordBindings={discordBindings}
               warnings={warnings}
             />
+
+            <AgentExecutionNodeSelect key={agent.id} agentId={agent.id} provider={selectedProvider}
+              tr={tr} onSaved={onAgentUpdated} />
 
             <AgentInfoRoutingSections
               tr={tr}

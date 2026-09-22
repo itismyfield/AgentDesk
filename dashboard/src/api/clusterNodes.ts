@@ -4,8 +4,11 @@ import { request } from "./httpClient";
 const readinessReport = z.object({ eligible: z.boolean(), reasons: z.array(z.string()) });
 const nodeSchema = z.object({
   instance_id: z.string(), status: z.string().nullish(), effective_role: z.string().nullish(),
+  hostname: z.string().nullish(),
   active_session_count: z.number().nullish(), active_dispatch_count: z.number().nullish(),
+  execution_active: z.number().nullish(), execution_occupied: z.number().nullish(),
   capabilities: z.object({
+    execution_capacity: z.object({ version: z.literal(1), slots: z.number().int().positive() }).nullish(),
     execution_readiness: z.object({
       os: z.string(), arch: z.string(), runtime_profile: z.string(),
       observed_at_ms: z.number(), expires_at_ms: z.number(), backends: z.array(z.string()),
