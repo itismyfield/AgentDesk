@@ -150,10 +150,11 @@ pub(crate) fn record_detached_reporting(
     }))
 }
 
-/// Settled `redelivery_state` values (#5941 Step B, migration 0120). A row starts
-/// `'pending'`; [`claim_pending_redeliveries`] moves it to `'claimed'` exactly
-/// once, and only a settle leaves that state. A claim lost to a crash therefore
-/// stays `'claimed'` until an operator or #6009 recovers it.
+/// Settled `redelivery_state` values (migration 0120). A row starts `'pending'`;
+/// [`claim_pending_redeliveries`] moves it to `'claimed'` and only a settle leaves
+/// that state. Settling back to `'pending'` makes the row claimable again, so a
+/// claim is once per attempt, not once per row. A claim lost to a crash stays
+/// `'claimed'` until an operator recovers it.
 ///
 /// The body was posted to the channel.
 pub(crate) const REDELIVERY_DELIVERED: &str = "delivered";
