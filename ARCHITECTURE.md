@@ -23,6 +23,8 @@ src/
 ├── cli/
 │   ├── client/
 │   │   └── runtime_config.rs
+│   ├── dcserver/
+│   │   └── startup.rs
 │   ├── doctor/
 │   │   ├── orchestrator/
 │   │   │   ├── config_dir_checks.rs
@@ -295,7 +297,8 @@ src/
 │   │   │   ├── reviews.rs
 │   │   │   └── runtime.rs
 │   │   ├── health_api/
-│   │   │   └── public_projection.rs
+│   │   │   ├── public_projection.rs
+│   │   │   └── runtime_profile.rs
 │   │   ├── review_verdict/
 │   │   │   ├── decision_route.rs
 │   │   │   ├── mod.rs

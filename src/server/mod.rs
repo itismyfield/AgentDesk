@@ -36,7 +36,6 @@ use sqlx::{PgPool, Row};
 use crate::db::postgres::AdvisoryLockLease;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tower_http::services::{ServeDir, ServeFile};
 
 use crate::config::Config;
 use crate::engine::PolicyEngine;
@@ -380,21 +379,10 @@ pub(crate) async fn run(
         routes::receipt::spawn_token_analytics_cache_prewarm();
     }
 
-    // Resolve dashboard dist path relative to runtime root or binary location
-    let dashboard_dir = crate::cli::agentdesk_runtime_root()
-        .map(|r| r.join("dashboard/dist"))
-        .unwrap_or_else(|| std::path::PathBuf::from("dashboard/dist"));
-
-    if modules.dashboard {
-        dashboard_provision::provision_off_runtime(dashboard_dir.clone()).await;
-        tracing::info!("Serving dashboard from {:?}", dashboard_dir);
-    }
+    let dashboard_dir = dashboard_provision::prepare_dashboard(modules.dashboard).await;
 
     let broadcast_tx = ws::new_broadcast();
     let batch_buffer = worker_registry.start_after_websocket_broadcast(broadcast_tx.clone())?;
-    let dashboard_service = ServeDir::new(&dashboard_dir)
-        .append_index_html_on_directories(true)
-        .fallback(ServeFile::new(dashboard_dir.join("index.html")));
     let control_plane_auth_state = routes::AppState {
         pg_pool: pg_pool.clone(),
         engine: engine.clone(),
@@ -441,11 +429,7 @@ pub(crate) async fn run(
             routes::auth::auth_middleware,
         ),
     ));
-    let app = if modules.dashboard {
-        app.fallback_service(dashboard_service)
-    } else {
-        app
-    };
+    let app = dashboard_provision::serve_dashboard(app, &dashboard_dir, modules.dashboard);
 
     // #3870 — fail closed on the dangerous combination of a non-loopback bind
     // host with no `server.auth_token`. The control-plane auth middleware is
