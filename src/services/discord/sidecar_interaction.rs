@@ -196,13 +196,13 @@ async fn ephemeral_reply(
     Ok(())
 }
 
-/// Quote and escape an argument for POSIX shell execution (`'...'`).
-/// Any embedded single quotes are safely closed and re-opened as `'\''`.
-/// Inside single quotes in POSIX shell, no expansions (variable, command, arithmetic)
-/// can occur, preventing remote command injection while preserving all Unicode,
-/// spaces, and special characters.
-pub(crate) fn escape_posix_shell_arg(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
+fn sidecar_remote_command(action: &str, device: &str) -> String {
+    use crate::services::process::shell_escape;
+    format!(
+        "~/bin/SidecarLauncher {} {}",
+        shell_escape(action),
+        shell_escape(device)
+    )
 }
 
 /// Run `SidecarLauncher <action> "<device>"` on the chosen Mac.
@@ -210,9 +210,7 @@ pub(crate) fn escape_posix_shell_arg(s: &str) -> String {
 /// Returns `(success, detail)` where detail is trimmed stdout/stderr.
 async fn run_sidecar_action(mac: &str, action: &str, device: &str) -> (bool, String) {
     let mut cmd = if mac == "mac-mini" {
-        let escaped_action = escape_posix_shell_arg(action);
-        let escaped_device = escape_posix_shell_arg(device);
-        let remote = format!("~/bin/SidecarLauncher {escaped_action} {escaped_device}");
+        let remote = sidecar_remote_command(action, device);
         let mut c = tokio::process::Command::new("/usr/bin/ssh");
         c.args([
             "-o",
@@ -406,29 +404,41 @@ mod tests {
 
     #[test]
     fn test_escape_posix_shell_arg_plain() {
-        assert_eq!(escape_posix_shell_arg("iPad"), "'iPad'");
-        assert_eq!(escape_posix_shell_arg("iPad Pro"), "'iPad Pro'");
+        assert_eq!(
+            sidecar_remote_command("start", "iPad"),
+            "~/bin/SidecarLauncher 'start' 'iPad'"
+        );
+        assert_eq!(
+            sidecar_remote_command("start", "iPad Pro"),
+            "~/bin/SidecarLauncher 'start' 'iPad Pro'"
+        );
     }
 
     #[test]
     fn test_escape_posix_shell_arg_with_quotes() {
         assert_eq!(
-            escape_posix_shell_arg("Kunkun's iPad"),
-            "'Kunkun'\\''s iPad'"
+            sidecar_remote_command("start", "Kunkun's iPad"),
+            "~/bin/SidecarLauncher 'start' 'Kunkun'\\''s iPad'"
         );
     }
 
     #[test]
     fn test_escape_posix_shell_arg_unicode() {
-        assert_eq!(escape_posix_shell_arg("홍길동의 iPad"), "'홍길동의 iPad'");
+        assert_eq!(
+            sidecar_remote_command("start", "홍길동의 iPad"),
+            "~/bin/SidecarLauncher 'start' '홍길동의 iPad'"
+        );
     }
 
     #[test]
     fn test_escape_posix_shell_arg_command_injection_attempt() {
         assert_eq!(
-            escape_posix_shell_arg("iPad\"; rm -rf / ; #"),
-            "'iPad\"; rm -rf / ; #'"
+            sidecar_remote_command("start", "iPad\"; rm -rf / ; #"),
+            "~/bin/SidecarLauncher 'start' 'iPad\"; rm -rf / ; #'"
         );
-        assert_eq!(escape_posix_shell_arg("`whoami`$(id)"), "'`whoami`$(id)'");
+        assert_eq!(
+            sidecar_remote_command("`whoami`$(id)", "iPad"),
+            "~/bin/SidecarLauncher '`whoami`$(id)' 'iPad'"
+        );
     }
 }
