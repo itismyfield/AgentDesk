@@ -1563,12 +1563,15 @@ _wait_for_peer_deploy_verdict() {
         fi
 
         if [ "$SECONDS" -ge "$deadline" ]; then
-            # The same flags the health axis was judged with, so the diagnostic
-            # cannot name a cause that verdict accepted.
+            # Only explain the health axis when it is what refused, and only a
+            # degraded body has reasons to explain. A marker or head timeout
+            # must not name reasons the health axis accepted.
             local blocking=""
-            [ -n "$health_body" ] && blocking=$(_health_json_deploy_blocking_reasons \
-                "$health_body" \
-                "$(_health_json_deploy_nonblocking_ere_for_body "$health_body" 1 1)")
+            if [ "$health_ready" != "true" ] && [ -n "$health_body" ] \
+                && [ "$(_health_json_status "$health_body")" = "degraded" ]; then
+                blocking=$(_health_json_deploy_blocking_reasons "$health_body" \
+                    "$(_health_json_deploy_nonblocking_ere_for_body "$health_body" 1 1)")
+            fi
             _report_peer_verdict_failure "$peer" \
                 "timed out after ${timeout_secs}s${blocking:+ (deploy-blocking: $blocking)}" \
                 "$marker_status" "$marker_detail" "$expected_repo_head" \

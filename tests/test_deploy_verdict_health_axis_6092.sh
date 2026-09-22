@@ -239,14 +239,42 @@ else
 fi
 # Nothing may build the set except through the wrapper, or a call site could
 # supply its own structural proof and drift from the body.
-for f in "$REPO_ROOT/scripts/deploy-release.sh" "$REPO_ROOT/scripts/deploy.sh"; do
+for f in "$REPO_ROOT/scripts/deploy-release.sh" "$REPO_ROOT/scripts/deploy.sh" \
+    "$REPO_ROOT/scripts/_defaults.sh"; do
     [ -e "$f" ] || continue
-    if grep -q "_health_json_deploy_nonblocking_ere " "$f"; then
-        fail "$(basename "$f") builds the accepted set itself instead of deriving it from the body"
-    else
+    builders=$(grep -n "_health_json_deploy_nonblocking_ere " "$f" \
+        | grep -v "_health_json_deploy_nonblocking_ere_for_body" || true)
+    if [ "$(basename "$f")" = "_defaults.sh" ]; then
+        # Exactly one: the wrapper's own call.
+        if [ "$(grep -c . <<<"${builders:-}")" = "1" ] && [ -n "$builders" ]; then
+            pass "_defaults.sh builds the set in exactly one place"
+        else
+            fail "_defaults.sh builds the set in $(grep -c . <<<"${builders:-}") places, not one"
+        fi
+    elif [ -z "$builders" ]; then
         pass "$(basename "$f") only ever derives the set from a body"
+    else
+        fail "$(basename "$f") builds the accepted set itself: $builders"
     fi
 done
+
+echo "§10e a status outside the contract blocks, and a healthy body explains nothing"
+
+for recovered in true false; do
+    expect_blocked "an unrecognised status blocks with fully_recovered=$recovered" \
+        "{\"db\":true,\"dashboard\":true,\"server_up\":true,\"status\":\"something_new\",\"fully_recovered\":$recovered,\"degraded_reasons\":[\"relay_verdict_unknown_codex_c1\"]}"
+done
+
+HEALTHY_WITH_STALE='{"db":true,"dashboard":true,"server_up":true,"status":"healthy","ok":true,"degraded_reasons":["some_stale_reason"]}'
+expect_ready "a healthy body is ready whatever stale reasons it carries" "$HEALTHY_WITH_STALE"
+# The diagnostic must not classify reasons the health axis never refused.
+DEPLOY_SH="$REPO_ROOT/scripts/deploy-release.sh"
+diag=$(grep -n -B4 '_health_json_deploy_blocking_reasons' "$DEPLOY_SH" || true)
+if grep -q 'health_ready' <<<"$diag" && grep -q 'degraded' <<<"$diag"; then
+    pass "the timeout diagnostic runs only when the health axis refused a degraded body"
+else
+    fail "the timeout diagnostic runs unconditionally, so a marker or head timeout names health reasons"
+fi
 
 echo "§11 the jq and no-jq paths agree on every shape above"
 

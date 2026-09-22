@@ -826,12 +826,6 @@ health_json_is_ready() {
       echo "  ▸ deploy-blocking degraded causes: $blocking"
       return 1
     fi
-    # Nothing to judge, so fall back to the recovery signal.
-    if [ "$allow_reconcile_degraded" = "1" ] \
-      && _health_json_field_exists "$health_json" "fully_recovered" \
-      && _health_json_field_is_false "$health_json" "fully_recovered"; then
-      return 0
-    fi
     return 1
   fi
 
