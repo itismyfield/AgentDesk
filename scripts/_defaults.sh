@@ -608,6 +608,7 @@ _health_json_degraded_reasons_all_match() {
   _health_json_field_is_true "$health_json" "db" || return 1
   reasons_csv=$(_health_json_reasons "$health_json" || true)
   [ -n "$reasons_csv" ] || return 1
+  case "$reasons_csv" in ,*|*,|*,,*) return 1 ;; esac
   local IFS=','
   for reason in $reasons_csv; do
     [[ "$reason" =~ $ere ]] || return 1
@@ -616,11 +617,16 @@ _health_json_degraded_reasons_all_match() {
 }
 
 _health_json_deploy_nonblocking_ere() {
+  # $1 allow_reconcile_degraded, $2 deploy verdict, $3 cluster_standby proven.
   # A relay verdict label cycles with placeholder state, so it cannot judge a
-  # deploy (2026-09-07 measurement); a queue depth is backlog, not a failed
-  # promotion. Everything else, including an unknown reason, blocks.
-  local ere='^(relay_verdict_[^,]+|provider:[^:]+:pending_queue_depth:[0-9]+'
-  [ "${1:-0}" = "1" ] && ere="$ere|provider:[^:]+:reconcile_in_progress"
+  # deploy (2026-09-07 measurement). A queue depth is backlog, so it only stops
+  # counting for a deploy verdict. Standby tokens join the set only once the
+  # body proves the node is a standby. Everything else, including an
+  # unrecognised reason, blocks. No comma: the fallback splits on one.
+  local ere='^(relay_verdict_[^,]+'
+  [ "${1:-0}" = "1" ] && ere="$ere|provider:[^:,]+:reconcile_in_progress"
+  [ "${2:-0}" = "1" ] && ere="$ere|provider:[^:,]+:pending_queue_depth:[0-9]+"
+  [ "${3:-0}" = "1" ] && ere="$ere|gateway_standby|provider:[^:,]+:gateway_standby"
   printf '%s)$' "$ere"
 }
 
@@ -759,7 +765,10 @@ health_json_is_ready() {
   # 1 accepts a serving node whose only blocking cause is no registered
   # provider runtimes. 0 keeps every non-deploy caller unchanged.
   local allow_no_provider_runtimes="${4:-0}"
-  local status="" nonblocking_ere="" blocking=""
+  # 1 additionally accepts causes that only a deploy verdict must not fail on,
+  # such as a provider backlog. Default 0 keeps every other caller unchanged.
+  local allow_deploy_nonblocking="${5:-0}"
+  local status="" nonblocking_ere="" blocking="" standby_proven=0
 
   [ -n "$health_json" ] || return 1
   _health_json_field_is_true "$health_json" "db" || return 1
@@ -781,14 +790,14 @@ health_json_is_ready() {
       fi
       return 1
     fi
-    if _health_json_field_is_true "$health_json" "cluster_standby"; then
-      _health_json_gateway_standby_only "$health_json"
-      return $?
-    fi
+    _health_json_field_is_true "$health_json" "cluster_standby" && standby_proven=1
+    # A standby is not the gateway, so a body claiming both is contradictory.
+    [ "$standby_proven" = 1 ] && [ "$status" != "degraded" ] && return 1
     [ "$status" = "healthy" ] && return 0
     # Membership decides: every reason must be one a deploy cannot clear. An
     # unrecognised reason is not in that set, so a newly added one fails closed.
-    nonblocking_ere=$(_health_json_deploy_nonblocking_ere "$allow_reconcile_degraded")
+    nonblocking_ere=$(_health_json_deploy_nonblocking_ere \
+      "$allow_reconcile_degraded" "$allow_deploy_nonblocking" "$standby_proven")
     if _health_json_degraded_reasons_all_match "$health_json" "$nonblocking_ere"; then
       echo "  ▸ degraded only for causes a deploy cannot clear ($(_health_json_reasons "$health_json")) — deploy proceeds; health still reports degraded"
       return 0
@@ -807,20 +816,16 @@ health_json_is_ready() {
     return 1
   fi
 
-  if _health_json_field_is_true "$health_json" "cluster_standby"; then
-    _health_json_gateway_standby_only "$health_json"
-    return $?
-  fi
+  _health_json_field_is_true "$health_json" "cluster_standby" && standby_proven=1
+  [ "$standby_proven" = 1 ] && [ "$status" != "degraded" ] && return 1
 
   if [ "$status" = "healthy" ]; then
     return 0
   fi
 
-  if [ "$allow_reconcile_degraded" = "1" ] && _health_json_reconcile_only "$health_json"; then
-    return 0
-  fi
-
-  return 1
+  nonblocking_ere=$(_health_json_deploy_nonblocking_ere \
+    "$allow_reconcile_degraded" "$allow_deploy_nonblocking" "$standby_proven")
+  _health_json_degraded_reasons_all_match "$health_json" "$nonblocking_ere"
 }
 
 wait_for_http_service_health() {
@@ -834,6 +839,7 @@ wait_for_http_service_health() {
   # is no registered provider runtimes (co-existing degraded/non-blocking axes
   # permitted). Default 0 preserves existing callers.
   local allow_no_provider_runtimes="${7:-0}"
+  local allow_deploy_nonblocking="${8:-0}"
 
   # shellcheck disable=SC2034 # Read by callers after the function returns.
   WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON=""
@@ -844,7 +850,8 @@ wait_for_http_service_health() {
     # shellcheck disable=SC2034 # Read by callers after the function returns.
     WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON="$health_json"
 
-    if health_json_is_ready "$health_json" "$require_dashboard" "$allow_reconcile_degraded" "$allow_no_provider_runtimes"; then
+    if health_json_is_ready "$health_json" "$require_dashboard" "$allow_reconcile_degraded" \
+      "$allow_no_provider_runtimes" "$allow_deploy_nonblocking"; then
       return 0
     fi
 

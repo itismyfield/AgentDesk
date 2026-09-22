@@ -935,7 +935,7 @@ _rollback_release_binary() {
         echo "⚠ launchd bootstrap failed during rollback — using tmux fallback"
         start_release_tmux_fallback || true
     fi
-    if wait_for_http_service_health "$plist" "$rel_port" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1; then
+    if wait_for_http_service_health "$plist" "$rel_port" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1 1; then
         echo "✓ Rollback succeeded — release healthy on :${rel_port} with previous binary"
     else
         echo "✗ Rollback restart did not reach healthy state — manual intervention required (logs: ${ADK_REL:-}/logs/)"
@@ -1532,7 +1532,7 @@ _wait_for_peer_deploy_verdict() {
         # be judged on an earlier one's body.
         health_ready="false"
         if [ -n "$health_body" ] \
-            && health_json_is_ready "$health_body" 1 1 1 >/dev/null 2>&1; then
+            && health_json_is_ready "$health_body" 1 1 1 1 >/dev/null 2>&1; then
             health_ready="true"
         fi
 
@@ -2974,7 +2974,7 @@ REL_HEALTHY=false
 # serving node that is unhealthy SOLELY because no provider runtimes are
 # registered (leader-only / no-agent-session node) as deploy-ready. Runtime
 # /api/health keeps reporting unhealthy for monitoring; only this gate relaxes.
-if wait_for_http_service_health "$PLIST_REL" "$REL_PORT" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1; then
+if wait_for_http_service_health "$PLIST_REL" "$REL_PORT" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1 1; then
     REL_HEALTHY=true
 fi
 

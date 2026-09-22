@@ -19,7 +19,7 @@ body() {
         "$recovered" "$reasons" "${1:+,$1}"
 }
 
-ready() { health_json_is_ready "$1" 1 1 1 >/dev/null 2>&1; }
+ready() { health_json_is_ready "$1" 1 1 1 1 >/dev/null 2>&1; }
 
 expect_ready() {
     if ready "$2"; then pass "$1"; else fail "$1 — a landed deploy would be failed"; fi
@@ -85,12 +85,12 @@ expect_blocked "an unknown reason is not rescued by fully_recovered=false" \
 echo "§8 reconcile is accepted only while the caller allows it"
 
 RECONCILE="$(body '["provider:codex:reconcile_in_progress"]' true)"
-if health_json_is_ready "$RECONCILE" 1 1 1 >/dev/null 2>&1; then
+if health_json_is_ready "$RECONCILE" 1 1 1 1 >/dev/null 2>&1; then
     pass "allow_reconcile_degraded=1 accepts reconcile_in_progress"
 else
     fail "allow_reconcile_degraded=1 rejected reconcile_in_progress"
 fi
-if health_json_is_ready "$RECONCILE" 1 0 1 >/dev/null 2>&1; then
+if health_json_is_ready "$RECONCILE" 1 0 1 1 >/dev/null 2>&1; then
     fail "allow_reconcile_degraded=0 accepted reconcile_in_progress anyway"
 else
     pass "allow_reconcile_degraded=0 still refuses it"
@@ -103,11 +103,67 @@ expect_blocked "gateway_standby without cluster_standby is not a free pass" \
 STANDBY='{"db":true,"dashboard":true,"server_up":true,"cluster_standby":true,"status":"degraded","ok":false,"degraded_reasons":["gateway_standby","provider:codex:gateway_standby"]}'
 expect_ready "a settled standby peer still verifies" "$STANDBY"
 
+echo "§9b standby tokens join the set only once the body proves it is a standby"
+
+sb() { printf '{"db":true,"dashboard":true,"server_up":true,"cluster_standby":true,"status":"degraded","ok":false,"degraded_reasons":%s}' "$1"; }
+expect_ready "standby mixes gateway with a relay verdict" \
+    "$(sb '["gateway_standby","relay_verdict_unknown_codex_c1"]')"
+expect_ready "standby mixes a provider gateway token with a queue depth" \
+    "$(sb '["provider:codex:gateway_standby","provider:codex:pending_queue_depth:4"]')"
+expect_blocked "the same mix without cluster_standby is refused" \
+    "$(body '["gateway_standby","relay_verdict_unknown_codex_c1"]' true)"
+expect_blocked "a standby claiming healthy is contradictory" \
+    '{"db":true,"dashboard":true,"server_up":true,"cluster_standby":true,"status":"healthy","ok":true,"degraded_reasons":[]}'
+
+echo "§9c a queue depth stops counting only for a deploy verdict"
+
+QUEUE="$(body '["provider:codex:pending_queue_depth:4"]' true)"
+if health_json_is_ready "$QUEUE" 1 1 1 1 >/dev/null 2>&1; then
+    pass "the deploy verdict accepts a backlog"
+else
+    fail "the deploy verdict refused a backlog"
+fi
+if health_json_is_ready "$QUEUE" 1 1 1 >/dev/null 2>&1; then
+    fail "a non-deploy caller accepted it — the deploy policy leaked into the shared predicate"
+else
+    pass "a non-deploy caller still refuses it"
+fi
+if health_json_is_ready "$(body '["relay_verdict_unknown_codex_c1"]' true)" 1 0 0 >/dev/null 2>&1; then
+    pass "a relay verdict stays acceptable to every caller, as it was before"
+else
+    fail "a relay verdict became blocking for non-deploy callers"
+fi
+
+echo "§9d the other flags keep their meaning"
+
+NO_DASH='{"db":true,"dashboard":false,"server_up":true,"status":"degraded","ok":false,"fully_recovered":true,"degraded_reasons":["relay_verdict_unknown_codex_c1"]}'
+if health_json_is_ready "$NO_DASH" 1 1 1 1 >/dev/null 2>&1; then
+    fail "require_dashboard=1 accepted a body with dashboard=false"
+else
+    pass "require_dashboard=1 still refuses dashboard=false"
+fi
+if health_json_is_ready "$NO_DASH" 0 1 1 1 >/dev/null 2>&1; then
+    pass "require_dashboard=0 still ignores the dashboard"
+else
+    fail "require_dashboard=0 refused a body it used to accept"
+fi
+UNHEALTHY='{"ok":false,"status":"unhealthy","version":"x","db":true,"dashboard":true,"server_up":true,"fully_recovered":false,"cluster_standby":false,"degraded":true,"startup_status":"doctor_skipped","startup_degraded":false,"startup_degraded_reasons":[],"latest_startup_doctor":{"available":true,"doctor_status":"skipped","skipped":true,"skipped_reason":"no_provider_runtimes_registered"}}'
+if health_json_is_ready "$UNHEALTHY" 1 1 1 1 >/dev/null 2>&1; then
+    pass "allow_no_provider_runtimes=1 still rescues the unhealthy leader-only node"
+else
+    fail "allow_no_provider_runtimes=1 stopped rescuing it"
+fi
+if health_json_is_ready "$UNHEALTHY" 1 1 0 1 >/dev/null 2>&1; then
+    fail "allow_no_provider_runtimes=0 rescued it anyway"
+else
+    pass "allow_no_provider_runtimes=0 still refuses it"
+fi
+
 echo "§10 the blocking reasons are named, so a timeout says what it waited on"
 
 named=$(_health_json_deploy_blocking_reasons \
     "$(body '["relay_verdict_unknown_codex_c1","db_unavailable","provider:codex:pending_queue_depth:4"]' true)" \
-    "$(_health_json_deploy_nonblocking_ere 1)")
+    "$(_health_json_deploy_nonblocking_ere 1 1 0)")
 if [ "$named" = "db_unavailable" ]; then
     pass "only the blocking reason is named ($named)"
 else
@@ -121,14 +177,15 @@ if ! command -v jq >/dev/null 2>&1; then
 else
     for shape in "$INCIDENT" '["relay_verdict_unknown_codex_c1","db_unavailable"]' \
         '["a_reason_this_script_has_never_seen"]' '["provider:codex:pending_queue_depth:4"]' \
-        '["relay_verdict_unknown_codex_c1","provider:codex:reconcile_in_progress"]'; do
+        '["relay_verdict_unknown_codex_c1","provider:codex:reconcile_in_progress"]' \
+        '["relay_verdict_unknown_codex_c1",""]' '["provider:a,b:pending_queue_depth:4"]'; do
         b="$(body "$shape" true)"
         with_jq=0; ready "$b" || with_jq=1
         # Force the fallback by making the detector answer no, not by breaking PATH.
         without_jq=0
         (
             _health_json_has_jq() { return 1; }
-            health_json_is_ready "$b" 1 1 1 >/dev/null 2>&1
+            health_json_is_ready "$b" 1 1 1 1 >/dev/null 2>&1
         ) || without_jq=1
         if [ "$with_jq" = "$without_jq" ]; then
             pass "jq and fallback agree on $shape (both $([ "$with_jq" = 0 ] && echo ready || echo blocked))"
