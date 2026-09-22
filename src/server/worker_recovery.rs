@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::future::Future;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -622,7 +622,7 @@ fn save_fatal_ledger(path: &Path, entries: &[FatalExitLedgerEntry]) -> io::Resul
         temp.write_all(&serialized)?;
         temp.sync_all()?;
         std::fs::rename(&temp_path, path)?;
-        File::open(parent)?.sync_all()?;
+        crate::services::discord::runtime_store::fsync_parent_dir(path)?;
         Ok(())
     })();
     if write_result.is_err() {
@@ -1122,6 +1122,20 @@ mod tests {
                 recent_fatal_exits: 2
             }
         );
+    }
+
+    #[test]
+    fn first_fatal_exit_persists_ledger_and_exits() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(FATAL_EXIT_LEDGER_FILE);
+
+        assert_eq!(
+            record_and_check_cross_process_fatal_at(&path, "dispatch_outbox", 1_000),
+            CrossProcessDecision::Exit
+        );
+        let persisted = load_fatal_ledger(&path);
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].worker, "dispatch_outbox");
     }
 
     #[test]

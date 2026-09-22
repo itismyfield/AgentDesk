@@ -919,11 +919,18 @@ pub(crate) fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
 /// on failure; generation allocation records a non-advanced route after its
 /// rename. The directory is opened read-only because opening one for writing
 /// fails with `EISDIR`.
+#[cfg(not(windows))]
 pub(crate) fn fsync_parent_dir(path: &Path) -> std::io::Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty());
     fs::File::open(parent.unwrap_or_else(|| Path::new(".")))?.sync_all()
+}
+
+/// NTFS journals the rename itself and refuses to flush a directory handle.
+#[cfg(windows)]
+pub(crate) fn fsync_parent_dir(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1591,6 +1598,7 @@ mod parent_dir_fsync_tests {
     /// The caller gates the derived index on this result, which is only safe if
     /// failure is reported rather than raised: this must be an `Err`, never a
     /// panic.
+    #[cfg(not(windows))]
     #[test]
     fn missing_parent_dir_is_reported_not_panicked() {
         let root = tempfile::tempdir().expect("runtime root");
