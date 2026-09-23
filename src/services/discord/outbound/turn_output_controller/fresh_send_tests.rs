@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -95,6 +96,7 @@ impl TurnGateway for CountingGateway {
     }
 }
 
+#[cfg(unix)]
 fn seed_generation(tmux_session_name: &str) -> i64 {
     let path = crate::services::tmux_common::session_temp_path(tmux_session_name, "generation");
     std::fs::create_dir_all(Path::new(&path).parent().expect("generation parent"))
@@ -144,6 +146,8 @@ fn ctx<'a>(
     }
 }
 
+// SendFresh 는 아직 production 생성자가 없고, non-unix 의 generation 0 에서는 fresh-send writer 가 기록을 거부한다.
+#[cfg(unix)]
 #[test]
 fn range_fresh_send_commits_and_records_durable_frontier() {
     let temp = tempfile::tempdir().expect("temp runtime root");
@@ -194,6 +198,7 @@ fn range_fresh_send_commits_and_records_durable_frontier() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn no_range_fresh_send_records_fingerprint_and_retry_is_suppressed() {
     let temp = tempfile::tempdir().expect("temp runtime root");
@@ -259,6 +264,7 @@ fn no_range_fresh_send_records_fingerprint_and_retry_is_suppressed() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn no_range_pseudo_range_lease_closes_concurrent_dedup_gap() {
     let temp = tempfile::tempdir().expect("temp runtime root");
@@ -307,6 +313,7 @@ fn no_range_pseudo_range_lease_closes_concurrent_dedup_gap() {
     ));
 }
 
+#[cfg(unix)]
 #[test]
 fn no_range_fresh_send_never_invokes_owner_advance() {
     let temp = tempfile::tempdir().expect("temp runtime root");
@@ -346,7 +353,6 @@ fn assert_channel_mismatch_skips_before_post(range: Option<(u64, u64)>, channel_
     let record_channel = ChannelId::new(channel_id + 1);
     let tmux = "AgentDesk-claude-4046-channel-mismatch";
     let body = "must not post to a mismatched channel";
-    seed_generation(tmux);
     let lease = DeliveryLeaseCell::new(channel);
     let controller = PlaceholderController::default();
     let gateway = CountingGateway::new();
@@ -410,6 +416,7 @@ fn missing_generation_is_exposed_after_confirmed_no_range_post() {
     assert_eq!(gateway.sends.load(Ordering::SeqCst), 1);
 }
 
+#[cfg(unix)]
 #[test]
 fn range_persistence_failure_is_not_hidden_as_delivered() {
     let temp = tempfile::tempdir().expect("temp runtime root");
