@@ -61,6 +61,12 @@ export function SettingsProvidersPanel({
             `System default homes stay untouched; extra accounts accumulate. ${extras} extra.`,
           )}
         </div>
+        <p className="basis-full text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
+          {tr(
+            "이 화면에는 추가 계정 로그인을 지원하는 프로바이더만 표시됩니다. Antigravity는 추가 계정 로그인을 지원하지 않아 목록에서 제외됩니다.",
+            "This view shows providers that support extra-account login. Antigravity is excluded because it does not support that feature.",
+          )}
+        </p>
         <div className="basis-full text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
           {tr(
             "같은 Codex 계정을 기본 홈과 extra 홈에 동시에 로그인하면 공급자 토큰이 서로 무효화될 수 있습니다. extra에는 별도 계정을 사용하세요.",

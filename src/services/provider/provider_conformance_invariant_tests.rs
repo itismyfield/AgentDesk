@@ -280,6 +280,14 @@ fn provider_exec_registry_conformance_invariant() {
 }
 
 #[test]
+fn antigravity_runtime_probe_resolves_its_cli_name() {
+    let probe = ProviderKind::Antigravity
+        .probe_runtime()
+        .expect("Antigravity is a registered provider");
+    assert_eq!(probe.resolution.requested_binary, "agy");
+}
+
+#[test]
 fn unsupported_provider_preserves_generic_readiness_fallback() {
     let provider = ProviderKind::Unsupported("future-provider".to_string());
     let wrapper_marker =
