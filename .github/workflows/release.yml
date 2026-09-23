@@ -1,0 +1,191 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'scripts/build-release.sh'
+      - 'scripts/package_release.py'
+      - 'scripts/verify_release_artifacts.py'
+      - 'tests/test_package_release.py'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the existing version tag after all native builds pass
+        type: boolean
+        default: false
+      tag:
+        description: Existing tag pointing at the selected commit (required to publish)
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: '2'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      publish: ${{ steps.release.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate release identity and packaging
+        id: release
+        shell: bash
+        env:
+          REQUEST_PUBLISH: ${{ inputs.publish }}
+          REQUEST_TAG: ${{ inputs.tag }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, re, subprocess, tomllib
+          version = tomllib.loads(pathlib.Path('Cargo.toml').read_text())['package']['version']
+          is_tag = os.environ['GITHUB_EVENT_NAME'] == 'push' and os.environ['GITHUB_REF_TYPE'] == 'tag'
+          publish = is_tag or os.environ.get('REQUEST_PUBLISH') == 'true'
+          tag = os.environ['GITHUB_REF_NAME'] if is_tag else os.environ.get('REQUEST_TAG', '')
+          if publish:
+              if not re.fullmatch(r'v' + re.escape(version) + r'(?:-[0-9A-Za-z.-]+)?', tag):
+                  raise SystemExit('Release tag must match Cargo.toml version (vVERSION or vVERSION-prerelease)')
+              actual = subprocess.check_output(['git', 'rev-parse', f'refs/tags/{tag}^{{commit}}'], text=True).strip()
+              if actual != os.environ['GITHUB_SHA']:
+                  raise SystemExit('Release tag must point at the selected workflow commit')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'version={version}\ntag={tag}\npublish={str(publish).lower()}\n')
+          PY
+          bash -n scripts/build-release.sh
+          python -m unittest tests.test_package_release
+
+  dashboard:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - name: Verify and build shared dashboard
+        run: bash scripts/verify-dashboard.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-dashboard
+          path: dashboard/dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  native:
+    needs: [validate, dashboard]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.94.1'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+      - name: Verify native Rust target
+        shell: bash
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "$EXPECTED_TARGET"
+      - name: Install macOS build libraries
+        if: runner.os == 'macOS'
+        run: |
+          brew install opus pkg-config
+          echo "PKG_CONFIG_PATH=$(brew --prefix opus)/lib/pkgconfig" >> "$GITHUB_ENV"
+      - name: Install Linux build libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev libopus-dev pkg-config
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-dashboard
+          path: dashboard/dist/
+      - name: Package native release with the shared build script
+        shell: bash
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          python -m unittest tests.test_package_release
+          bash scripts/build-release.sh --target "$RELEASE_TARGET" --profile release-fast --prebuilt-dashboard
+          binary="target/$RELEASE_TARGET/release-fast/agentdesk"
+          if [ "$RUNNER_OS" = Windows ]; then binary="$binary.exe"; fi
+          "$binary" --version
+          python scripts/verify_release_artifacts.py dist --commit "$GITHUB_SHA" --version "$RELEASE_VERSION" --target "$RELEASE_TARGET" --profile release-fast
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentdesk-${{ matrix.target }}
+          path: |
+            dist/agentdesk-*.tar.gz
+            dist/agentdesk-*.zip
+            dist/agentdesk-*.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: [validate, native]
+    if: needs.validate.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: agentdesk-*
+          path: dist/
+          merge-multiple: true
+      - name: Verify the complete matrix and publish an immutable release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          python scripts/verify_release_artifacts.py dist --commit "$GITHUB_SHA" --version "$RELEASE_VERSION" --profile release-fast \
+            --target aarch64-apple-darwin --target x86_64-pc-windows-msvc --target x86_64-unknown-linux-gnu
+          prerelease=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then prerelease+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" dist/agentdesk-*.tar.gz dist/agentdesk-*.zip dist/agentdesk-*.sha256 dist/checksums.txt \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "AgentDesk $RELEASE_TAG" --generate-notes "${prerelease[@]}"
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false

@@ -277,6 +277,8 @@ banner "Inflight blind-save ratchet guard (#4259)"
 
 # #4511 post-deploy smoke WARN post-restart scoping
 bash tests/test_deploy_smoke_warn_scope_4511.sh
+bash tests/test_deploy_smoke_scope.sh
+"$PYTHON" -m unittest tests.test_refresh_release_launchd_plist
 
 banner "Cluster deploy peer verdict + terminal marker contract (#5189)"
 bash tests/test_cluster_deploy_peer_verdict_5189.sh
@@ -509,6 +511,7 @@ banner "Session anchor CLI tests"
 "$PYTHON" -m unittest scripts.__tests__.test_session_anchor
 
 banner "Build token serialization tests (#5663)"
+"$PYTHON" -m unittest tests.test_package_release
 # scripts/build_token.py serializes the two release scripts' cargo sites; the
 # Makefile target and install.sh's source install stay outside it by design.
 # It is Python, so neither shellcheck nor cargo covers it; this unittest run is
