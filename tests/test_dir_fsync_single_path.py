@@ -55,6 +55,40 @@ class DirFsyncSinglePathTests(unittest.TestCase):
         )
         self.assertEqual(audit(tree({"src/server/ok.rs": text})), [])
 
+    def test_builder_set_to_write_in_an_earlier_statement_passes(self):
+        # #6157 shapes: a write-mode builder opened later, and a read followed by
+        # a function whose name contains `sync`.
+        text = (
+            "fn publish(dir: &Path) -> io::Result<()> {\n"
+            "    let mut options = OpenOptions::new();\n"
+            "    options.read(true).write(true).create(true);\n"
+            "    let mut file = options.open(&temporary)?;\n"
+            "    file.write_all(b\"x\").and_then(|()| file.sync_all())?;\n"
+            "    Ok(())\n"
+            "}\n"
+            "fn read_receipt(path: &Path) -> io::Result<String> {\n"
+            "    options.open(path)?.take(65).read_to_string(&mut result)?;\n"
+            "    Ok(result)\n"
+            "}\n"
+            "fn sync_receipt_directory(dir: &Path) {}\n"
+        )
+        self.assertEqual(audit(tree({"src/server/ok.rs": text})), [])
+
+    def test_write_builder_does_not_exempt_a_later_function(self):
+        for text in (
+            "fn a() {\n    options.write(true);\n}\n"
+            "fn b(dir: &Path) {\n    let d = options.open(dir)?;\n    d.sync_all()?;\n}\n",
+            "fn a() {\n    options.write(true);\n}\n"
+            "fn b(dir: &Path) -> Result<(), String> {\n"
+            "    for path in std::iter::once(dir).chain(dir.parent()) {\n"
+            "        fs::File::open(path)\n"
+            "            .and_then(|file| file.sync_all())\n"
+            "            .map_err(|e| e.to_string())?;\n"
+            "    }\n    Ok(())\n}\n",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(len(audit(tree({"src/server/drift.rs": text}))), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

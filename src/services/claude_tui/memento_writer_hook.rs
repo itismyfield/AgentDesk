@@ -210,7 +210,7 @@ fn process(
                 file.write_all(owner.as_bytes())
                     .and_then(|_| file.sync_all())
                     .map_err(|e| e.to_string())?;
-                sync_receipt_directory(dir)?;
+                sync_receipt_directory(&pending)?;
                 Ok(None)
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
@@ -247,7 +247,7 @@ fn confirm_receipt(dir: &Path, confirmed: &Path, owner: &str) -> Result<(), Stri
         .and_then(|()| file.sync_all())
         .and_then(|()| fs::rename(&temporary, confirmed))
         .map_err(|error| error.to_string())
-        .and_then(|()| sync_receipt_directory(dir));
+        .and_then(|()| sync_receipt_directory(confirmed));
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
@@ -282,11 +282,11 @@ fn read_receipt(path: &Path) -> std::io::Result<String> {
     Ok(result)
 }
 
-fn sync_receipt_directory(dir: &Path) -> Result<(), String> {
+/// Persists `entry` in the receipt directory, and that directory in its parent.
+fn sync_receipt_directory(entry: &Path) -> Result<(), String> {
     #[cfg(unix)]
-    for path in std::iter::once(dir).chain(dir.parent()) {
-        fs::File::open(path)
-            .and_then(|file| file.sync_all())
+    for child in std::iter::once(entry).chain(entry.parent()) {
+        crate::services::discord::runtime_store::fsync_parent_dir(child)
             .map_err(|e| e.to_string())?;
     }
     Ok(())

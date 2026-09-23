@@ -5,8 +5,10 @@ Windows cannot open a directory with `File::open`, so an inline copy fails on
 every call there. Lexical scan over `;`-terminated statements: a read-only
 `File::open(..)` / `.open(..)` whose handle is synced in the same or the next
 statement. Write-mode opens are files (a directory cannot be opened for write)
-and `.join(..)` arguments name an entry inside a directory, so both are skipped.
-Only the `//` suffix of each line is ignored.
+and `.join(..)` arguments name an entry inside a directory, so both are skipped;
+that includes `options.open(..)` when the same function set `options.write(true)`
+in an earlier statement. Neither the open nor its sync is followed past a `fn`
+header. Only the `//` suffix of each line is ignored.
 """
 
 from __future__ import annotations
@@ -18,6 +20,12 @@ from pathlib import Path
 OPEN = re.compile(r"(?:File::open|\.open)\(")
 WRITE_MODE = re.compile(r"\.(?:write|append|create|create_new|truncate)\(\s*true\s*\)")
 SYNC = re.compile(r"\w*sync\w*\(")
+WRITE_BUILDER = re.compile(
+    r"\b(\w+)\s*(?:\.\s*\w+\([^()]*\)\s*)*"
+    r"\.\s*(?:write|append|create|create_new|truncate)\(\s*true\s*\)"
+)
+RECEIVER = re.compile(r"(\w+)\s*$")
+FN_HEADER = re.compile(r"\bfn\s+\w+")
 CANONICAL = {Path("src/services/discord/runtime_store.rs"): 1}
 
 
@@ -30,14 +38,24 @@ def open_argument(text: str, start: int) -> str:
     return text[start:]
 
 
-def directory_opens(statement: str) -> list[int]:
+def directory_opens(statement: str, write_builders: set[str]) -> list[int]:
     if WRITE_MODE.search(statement):
         return []
-    return [
-        match.start()
-        for match in OPEN.finditer(statement)
-        if ".join(" not in open_argument(statement, match.end())
-    ]
+    opens = []
+    for match in OPEN.finditer(statement):
+        if ".join(" in open_argument(statement, match.end()):
+            continue
+        receiver = RECEIVER.search(statement, 0, match.start())
+        if match.group().startswith(".") and receiver and receiver.group(1) in write_builders:
+            continue
+        opens.append(match.start())
+    return opens
+
+
+def within_fn(text: str) -> str:
+    """Cut `text` at the next `fn` header: a later function is not this handle's sync."""
+    header = FN_HEADER.search(text)
+    return text[: header.start()] if header else text
 
 
 def directory_syncs(text: str) -> list[int]:
@@ -46,12 +64,26 @@ def directory_syncs(text: str) -> list[int]:
     for statement in code.split(";"):
         statements.append((offset, statement))
         offset += len(statement) + 1
-    lines = []
+    lines: list[int] = []
+    write_builders: set[str] = set()
     for index, (start, statement) in enumerate(statements):
+        header = None
+        for header in FN_HEADER.finditer(statement):
+            pass
+        # Builders are per function: opens before the last header keep the old set.
+        split = header.start() if header else len(statement)
+        opens = [o for o in directory_opens(statement, write_builders) if o < split]
+        if header:
+            write_builders.clear()
+            opens += [o for o in directory_opens(statement, set()) if o >= split]
+        body = statement[split:] if header else statement
         following = statements[index + 1][1] if index + 1 < len(statements) else ""
-        for opened in directory_opens(statement):
-            if SYNC.search(statement, opened) or SYNC.search(following):
+        for opened in opens:
+            rest = statement[opened:]
+            same = within_fn(rest)
+            if SYNC.search(same) or (same == rest and SYNC.search(within_fn(following))):
                 lines.append(code.count("\n", 0, start + opened) + 1)
+        write_builders.update(match.group(1) for match in WRITE_BUILDER.finditer(body))
     return lines
 
 
