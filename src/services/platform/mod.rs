@@ -5,8 +5,11 @@
 
 pub mod binary_resolver;
 mod dump_tool;
+pub(crate) mod network;
 pub mod shell;
 pub mod tmux;
+#[cfg(windows)]
+pub(crate) mod windows_job;
 
 pub(crate) use binary_resolver::active_provider_context;
 pub use binary_resolver::{

@@ -15,6 +15,10 @@ use std::time::{Duration, Instant};
 use crate::runtime_layout::expand_user_path;
 
 mod grok;
+mod resolution;
+use resolution::finalize_resolution;
+#[cfg(any(windows, test))]
+mod windows_codex;
 const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(3);
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION_PROBE_MAX_OUTPUT_BYTES: usize = 8 * 1024;
@@ -959,26 +963,6 @@ pub async fn async_resolve_binary_with_login_shell(name: &str) -> Option<String>
         .await
         .ok()
         .flatten()
-}
-
-fn finalize_resolution(
-    requested_binary: String,
-    resolved_path: PathBuf,
-    source: String,
-    attempts: Vec<String>,
-) -> BinaryResolution {
-    let canonical_path = std::fs::canonicalize(&resolved_path).ok();
-    BinaryResolution {
-        requested_binary,
-        resolved_path: Some(resolved_path.to_string_lossy().to_string()),
-        canonical_path: canonical_path
-            .as_ref()
-            .map(|path| path.to_string_lossy().to_string()),
-        source: Some(source),
-        attempts,
-        failure_kind: None,
-        exec_path: build_exec_path(&resolved_path, canonical_path.as_deref()),
-    }
 }
 
 fn resolve_in_paths(

@@ -139,6 +139,21 @@ pub(super) fn synchronize_shared_prompt(root: &Path) -> Result<(), String> {
         if path_exists(&alias) {
             remove_link_or_path(&alias)?;
         }
+        // Runtime readers use shared_prompt_path. These historical file names
+        // are compatibility conveniences, not a reason to require elevated
+        // privileges for a new Windows runtime. Never substitute stale copies
+        // or hard links that detach when the canonical file is atomically saved.
+        #[cfg(windows)]
+        {
+            if !windows_links::create_optional_file_alias(&canonical, &alias)
+                .map_err(|error| format!("Failed to link '{}': {error}", alias.display()))?
+            {
+                tracing::warn!(canonical = %canonical.display(), alias = %alias.display(),
+                    "Legacy shared-prompt alias unavailable without Windows symlink privilege; use the canonical path");
+            }
+            continue;
+        }
+        #[cfg(not(windows))]
         if let Err(error) = create_symlink_entry(&canonical, &alias, false) {
             if path_exists(&alias) {
                 remove_link_or_path(&alias)?;

@@ -134,9 +134,7 @@ mod turn_completion_events;
 pub(in crate::services::discord) mod turn_end_wip_warning;
 #[cfg(unix)]
 pub(crate) use tmux::{stamp_spawn_markers, write_spawn_nonce};
-#[cfg(unix)]
 mod tmux_error_detect;
-#[cfg(unix)]
 pub(crate) use tmux_error_detect::{ProviderProseDiagnostic, classify_provider_prose_diagnostic};
 #[cfg(unix)]
 mod tmux_lifecycle;

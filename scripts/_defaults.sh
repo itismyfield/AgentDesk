@@ -898,7 +898,7 @@ health_turn_snapshot() {
   # is armed — public_health_json strips the counters from the redacted
   # /api/health body (#1447 review iteration 4 P2). We also drop `-f` so the
   # 503 body served while restart_pending is armed remains observable.
-  health_json=$(curl -s --max-time 3 -H "$(_health_origin_header)" \
+  health_json=$(curl -s --max-time 3 -H "$(_health_origin_header "$port")" \
     "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health/detail" 2>/dev/null) || return 1
   [ -n "$health_json" ] || return 1
 
@@ -1465,17 +1465,15 @@ clear_restart_drain_mode() {
 }
 
 _health_origin_header() {
-  # auth_middleware (src/server/routes/auth.rs) treats requests with a
-  # same-origin Origin header as authenticated even when server.auth_token
-  # is configured. The restart skill runs on the same host as dcserver so
-  # this is always true; otherwise the helper would be locked out of
-  # /api/health/detail on auth-enabled deployments (#1447 review iter 4 P2).
-  printf 'Origin: http://%s' "${ADK_DEFAULT_LOOPBACK}"
+  # Local maintenance requests use a genuine loopback socket and an Origin
+  # matching the API listener port. Remote requests still require a bearer.
+  local port="$1"
+  printf 'Origin: http://%s:%s' "${ADK_DEFAULT_LOOPBACK}" "$port"
 }
 
 _restart_pending_snapshot() {
   local port="$1"
-  curl -s --max-time 3 -H "$(_health_origin_header)" \
+  curl -s --max-time 3 -H "$(_health_origin_header "$port")" \
     "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health/detail" 2>/dev/null
 }
 
@@ -1574,7 +1572,7 @@ _foreign_active_turns_or_empty() {
   local port="$1"
   local exempt_csv="$2"
   local origin
-  origin="$(_health_origin_header)"
+  origin="$(_health_origin_header "$port")"
   curl -fsS --max-time 5 -H "$origin" "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/sessions" 2>/dev/null \
     | python3 -c '
 import json, os, sys

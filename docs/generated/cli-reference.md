@@ -67,9 +67,9 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk card create`](#agentdesk-card-create) | Create a card from a GitHub issue |  |
 | [`agentdesk card status`](#agentdesk-card-status) | Inspect a card and connected lifecycle state |  |
 | [`agentdesk cherry-merge`](#agentdesk-cherry-merge) | Cherry-pick a worktree branch into main and optionally close its issue |  |
-| [`agentdesk tmux-wrapper`](#agentdesk-tmux-wrapper) | tmux + Claude CLI integration wrapper (Unix only) | `#[cfg(unix)]` |
-| [`agentdesk codex-tmux-wrapper`](#agentdesk-codex-tmux-wrapper) | tmux + Codex CLI integration wrapper (Unix only) | `#[cfg(unix)]` |
-| [`agentdesk qwen-tmux-wrapper`](#agentdesk-qwen-tmux-wrapper) | tmux + Qwen CLI integration wrapper (Unix only) | `#[cfg(unix)]` |
+| [`agentdesk tmux-wrapper`](#agentdesk-tmux-wrapper) | Claude session wrapper (tmux FIFO on Unix, process pipe on all platforms) |  |
+| [`agentdesk codex-tmux-wrapper`](#agentdesk-codex-tmux-wrapper) | Codex session wrapper (tmux FIFO on Unix, process pipe on all platforms) |  |
+| [`agentdesk qwen-tmux-wrapper`](#agentdesk-qwen-tmux-wrapper) | Qwen session wrapper (tmux FIFO on Unix, process pipe on all platforms) |  |
 | [`agentdesk claude-hook-relay`](#agentdesk-claude-hook-relay) | Relay Claude Code hook stdin JSON to the AgentDesk TUI hook receiver |  |
 | [`agentdesk codex-hook-relay`](#agentdesk-codex-hook-relay) | Relay Codex hook stdin JSON to the AgentDesk TUI hook receiver |  |
 | [`agentdesk reset-tmux`](#agentdesk-reset-tmux) | Kill all AgentDesk-* tmux sessions and clean temp files |  |
@@ -621,9 +621,7 @@ Usage: `agentdesk cherry-merge [OPTIONS] <BRANCH>`
 
 ## `agentdesk tmux-wrapper`
 
-tmux + Claude CLI integration wrapper (Unix only)
-
-Notes: `#[cfg(unix)]`.
+Claude session wrapper (tmux FIFO on Unix, process pipe on all platforms)
 
 Usage: `agentdesk tmux-wrapper [OPTIONS] [CLAUDE_CMD]...`
 
@@ -633,14 +631,12 @@ Usage: `agentdesk tmux-wrapper [OPTIONS] [CLAUDE_CMD]...`
 | `--input-fifo <INPUT_FIFO>` (required) | `String` |  | Path to the input FIFO |
 | `--prompt-file <PROMPT_FILE>` (required) | `String` |  | Path to the prompt file |
 | `--cwd <CWD>` | `String` | `.` | Working directory (defaults to ".") |
-| `--input-mode <INPUT_MODE>` | `fifo`, `pipe` | `fifo` | Input mode: fifo (default) or pipe |
+| `--input-mode <INPUT_MODE>` | `fifo`, `pipe` | `default` | Input mode: fifo on Unix or pipe on all platforms |
 | `[CLAUDE_CMD]...` | `String` (repeatable) |  | Claude command and arguments (after --) (after `--`) |
 
 ## `agentdesk codex-tmux-wrapper`
 
-tmux + Codex CLI integration wrapper (Unix only)
-
-Notes: `#[cfg(unix)]`.
+Codex session wrapper (tmux FIFO on Unix, process pipe on all platforms)
 
 Usage: `agentdesk codex-tmux-wrapper [OPTIONS]`
 
@@ -658,14 +654,12 @@ Usage: `agentdesk codex-tmux-wrapper [OPTIONS]`
 | `--goals-state <GOALS_STATE>` | `enabled`, `disabled` |  | Override Codex goals feature flag for every turn in this wrapper session |
 | `--cwd <CWD>` | `String` | `.` | Working directory (defaults to ".") |
 | `--add-dir <ADD_DIRS>...` | `String` (repeatable) |  | Additional directory writable alongside the primary workspace |
-| `--input-mode <INPUT_MODE>` | `fifo`, `pipe` | `fifo` | Input mode: fifo (default) or pipe |
+| `--input-mode <INPUT_MODE>` | `fifo`, `pipe` | `default` | Input mode: fifo on Unix or pipe on all platforms |
 | `--compact-token-limit <COMPACT_TOKEN_LIMIT>` | `u64` |  | Auto-compact token limit (absolute token count) |
 
 ## `agentdesk qwen-tmux-wrapper`
 
-tmux + Qwen CLI integration wrapper (Unix only)
-
-Notes: `#[cfg(unix)]`.
+Qwen session wrapper (tmux FIFO on Unix, process pipe on all platforms)
 
 Usage: `agentdesk qwen-tmux-wrapper [OPTIONS]`
 
@@ -680,7 +674,7 @@ Usage: `agentdesk qwen-tmux-wrapper [OPTIONS]`
 | `--resume-session-id <RESUME_SESSION_ID>` | `String` |  | Optional resume session id for the first turn |
 | `--fresh-session` | flag |  | Force the first turn to start without reusing provider session state |
 | `--cwd <CWD>` | `String` | `.` | Working directory (defaults to ".") |
-| `--input-mode <INPUT_MODE>` | `fifo`, `pipe` | `fifo` | Input mode: fifo (default) or pipe |
+| `--input-mode <INPUT_MODE>` | `fifo`, `pipe` | `default` | Input mode: fifo on Unix or pipe on all platforms |
 
 ## `agentdesk claude-hook-relay`
 

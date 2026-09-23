@@ -455,7 +455,7 @@ pub(crate) async fn run(
         );
     }
     let addr = format!("{}:{}", bind_host, config.server.port);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let listener = crate::services::platform::network::bind_tcp_listener(&addr).await?;
     tracing::info!("HTTP server listening on {addr}");
     routes::audit_explicit_auth_routes_on_boot(&config);
     axum::serve(
