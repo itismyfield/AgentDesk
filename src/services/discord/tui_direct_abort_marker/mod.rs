@@ -1515,16 +1515,13 @@ mod tests {
         );
     }
 
-    /// codex r2 finding 1 (RED ① — REVERSES the r1
-    /// `sweep_and_drain_cannot_both_react_to_one_marker` pin, which froze this
-    /// exact race as `FailureWarn`): a terminal commit by the recorded foreign
-    /// turn landing BETWEEN the sweep's claim and its verdict must end `✅`,
-    /// never `⚠` — the flock only serializes the reconcilers, it does not make
-    /// the RIGHT verdict win. The chokepoint's tombstone-before-clear write
-    /// plus the sweep's live-read-then-대조 ordering closes it: by the time the
-    /// sweep can observe "no live row", the commit's tombstone is durable.
-    /// Mutual exclusion stays intact (the racing drain still skips — exactly
-    /// ONE reaction lands, and it is the completion).
+    /// A terminal commit by the recorded foreign turn landing BETWEEN the sweep's
+    /// claim and its verdict must end `✅`, never `⚠`: the flock only serializes
+    /// the reconcilers; the chokepoint's tombstone-before-clear write plus the
+    /// sweep's live-read-then-대조 ordering makes the right verdict win. Exactly
+    /// ONE reaction lands and it is the completion. Unix-only: the claim is a
+    /// flock and the racing drain lives in the Unix-only tmux watcher.
+    #[cfg(unix)]
     #[test]
     fn sweep_claim_racing_terminal_commit_resolves_completion_not_warn() {
         let _root = test_root();
@@ -1568,6 +1565,7 @@ mod tests {
     /// #3296 verify r1 fix #2 (claim semantics): a marker claimed by one
     /// reconciler is SKIPPED by the other — and processed normally once the
     /// claim is released.
+    #[cfg(unix)]
     #[test]
     fn claimed_marker_is_skipped_until_released() {
         let _root = test_root();
@@ -2984,6 +2982,7 @@ mod tests {
     /// concurrent reconciler the resolver must SKIP the discard but still
     /// persist the tombstone — the later sweep then 대조s ✅ (Complete), never
     /// the hard-cap ⚠ it would otherwise deliver.
+    #[cfg(unix)]
     #[test]
     fn claim_contended_lease_gated_resolution_converges_to_sweep_completion() {
         let _root = test_root();

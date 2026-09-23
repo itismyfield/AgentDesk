@@ -512,6 +512,7 @@ src/
 │   │   ├── hook_server_memento_tests.rs
 │   │   ├── input.rs
 │   │   ├── memento_feedback.rs
+│   │   ├── memento_writer_hook.rs
 │   │   ├── mod.rs
 │   │   ├── prompt_readiness.rs
 │   │   ├── session.rs
@@ -1559,6 +1560,9 @@ src/
 │   │   ├── memento_anchor.rs
 │   │   ├── memento_endpoint.rs
 │   │   ├── memento_throttle.rs
+│   │   ├── memento_transport.rs
+│   │   ├── memento_writer_guard.rs
+│   │   ├── memento_writer_tests.rs
 │   │   ├── mod.rs
 │   │   └── runtime_state.rs
 │   ├── message_outbox/

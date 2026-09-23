@@ -59,7 +59,7 @@ recall로 자기 스코프 파편을 조회하고 아래 기준에 해당하면 
 - decision: topic=session_reflect & content에 숫자(이슈/포트/버전)·파일경로·도구명이 하나도 없는 추상 문장 & importance<=0.7 & age>1d
 - fact: topic=session_reflect & importance<=0.5; 또는 content에 현황/status/상태 포함 & age>3d
 보존(삭제 금지): isAnchor=true, importance>=0.8, 현재 스코프 밖 파편.
-삭제 전 "원인→해결" 패턴이 명확한 error는 procedure 파편으로 remember한 뒤 삭제.
+"원인→해결" 패턴이 명확한 error는 원본을 보존하고 검토 후보로만 보고한다. 기존 내용을 procedure로 바꾸어 remember하거나 재서술해 새 파편으로 저장하지 않는다. 위생 점검 결과·진행 상황도 새 지식이 아니므로 저장하지 않는다.
 
 ## 3단계: 저장소 건강 모니터 (읽기 전용)
 - memory_stats 호출 → 총 파편수, type별 분포(특히 episode 비중), avg_importance 확인.
