@@ -1,7 +1,31 @@
 //! `AttachmentBundleV1` — the byte contract for forwarding one Discord message's
-//! attachments to another cluster node (#5713 S1). Types and the pure validator
-//! only; S2 (durable storage, worker consumption) and S3 (live download, router
-//! unblock) own all I/O, so nothing here has a production caller yet.
+//! attachments to another cluster node. Storage and materialization share the
+//! same validator; durable queue references contain no node-local path or URL.
+
+pub(crate) mod materialize;
+pub(crate) mod store;
+pub(crate) mod temporary;
+pub(crate) mod uploads;
+
+pub(crate) const CAPABILITY: &str = "attachment_bundle_v1";
+
+pub(crate) fn supports(node: &serde_json::Value) -> bool {
+    node.pointer("/capabilities/intake_worker/features")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|features| features.iter().any(|feature| feature == CAPABILITY))
+}
+
+pub(crate) async fn worker_uploads(
+    pool: &sqlx::PgPool,
+    row: &crate::db::intake_outbox::IntakeOutboxRow,
+) -> Result<uploads::PendingUploads, String> {
+    let refs: Vec<uploads::BundleRef> =
+        serde_json::from_value(row.attachment_refs.clone()).map_err(|e| e.to_string())?;
+    store::validate_refs(pool, &refs, &row.provider, &row.channel_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(refs.into_iter().map(uploads::Upload::Bundle).collect())
+}
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -96,3 +120,6 @@ pub(crate) fn validate_attachment_bundle_v1(
 #[cfg(test)]
 #[path = "attachment_transfer/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod storage_tests;

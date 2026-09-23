@@ -25,7 +25,7 @@ pub(in crate::services::discord::router) async fn handle_text_command(
     data: &Data,
     channel_id: serenity::ChannelId,
     text: &str,
-    preloaded_uploads: &[String],
+    preloaded_uploads: &[crate::services::cluster::attachment_transfer::uploads::Upload],
     admitted_attachment_permit: &mut Option<super::super::LocalAdmissionPermit>,
 ) -> Result<bool, Error> {
     let handled = super::super::super::commands::handle_text_command_with_uploads(

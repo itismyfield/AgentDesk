@@ -87,7 +87,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     let should_complete_work_dispatch_after_delivery =
         ctx.should_complete_work_dispatch_after_delivery;
     let should_fail_dispatch_after_delivery = ctx.should_fail_dispatch_after_delivery;
-    let can_chain_locally = ctx.can_chain_locally;
+    let can_deliver_directly = state.gateway.can_deliver_directly();
     let single_message_panel_footer_mode = ctx.single_message_panel_footer_mode;
     let is_prompt_too_long = ctx.is_prompt_too_long;
     let claude_tui_followup_pre_submit_requeue_candidate =
@@ -396,7 +396,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 inflight_state.turn_start_offset,
             )
             .format_and_prefix(response_sent_offset == 0, &delivery_response);
-            if can_chain_locally {
+            if can_deliver_directly {
                 // #5264 PR-B: the admitted latch narrows the PINNED receipt/frontier end
                 // only. The legacy #3041 exclusion lease keeps the observed tmux end;
                 // narrowing it made a non-admitted CodexTui turn shadow a real
@@ -412,8 +412,10 @@ pub(super) async fn run_terminal_outcome_delivery(
                 // exclusion-lease end must be read first. Swapping the two stops compiling.
                 let tmux_last_offset = range_ends.exclusion_lease();
                 let pinned_range_end = range_ends.into_pinned();
-                let long =
-                    terminal_delivery_should_send_new_chunks(can_chain_locally, &delivery_response);
+                let long = terminal_delivery_should_send_new_chunks(
+                    can_deliver_directly,
+                    &delivery_response,
+                );
                 let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                 let mut pinned_handled = false;
                 #[cfg(unix)]
@@ -422,7 +424,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                     let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                     let bridge_end = tmux_last_offset.unwrap_or(0);
                     if terminal_controller_cutover::bridge_long_chunks_cutover_decision(
-                        can_chain_locally,
+                        can_deliver_directly,
                         &delivery_response,
                         bridge_end > bridge_start,
                         true,
@@ -523,7 +525,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                     let ordered_range = tmux_last_offset.is_some_and(|e| e > bridge_start);
                     let cutover_short_replace =
                         terminal_controller_cutover::bridge_short_replace_cutover_decision(
-                            can_chain_locally,
+                            can_deliver_directly,
                             &delivery_response,
                             ordered_range,
                             true,
@@ -746,7 +748,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             channel_id,
                             surfaced_error
                         );
-                        // Symmetric with the can_chain_locally failure arm: the answer was NOT confirmed delivered → do NOT let finalization clear inflight (it is the only persisted full_response). Preserving routes disposition through save_inflight_state so recovery can re-deliver.
+                        // Symmetric with the can_deliver_directly failure arm: the answer was NOT confirmed delivered → do NOT let finalization clear inflight (it is the only persisted full_response). Preserving routes disposition through save_inflight_state so recovery can re-deliver.
                     }
                 }
             }
@@ -790,7 +792,6 @@ pub(super) async fn run_terminal_outcome_delivery(
                 should_fail_dispatch_after_delivery,
                 bridge_relay_delegated_to_watcher,
                 watcher_delivery_pin: ctx.watcher_delivery_pin.as_ref(),
-                can_chain_locally,
                 inflight_generation,
             },
             DeliveryEpilogueState {

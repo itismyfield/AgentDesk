@@ -120,7 +120,7 @@ pub(super) async fn handle_race_loss_enqueue(
     reply_context: &Option<String>,
     has_reply_boundary: bool,
     merge_consecutive: bool,
-    pending_uploads: &[String],
+    pending_uploads: &[crate::services::cluster::attachment_transfer::uploads::Upload],
     voice_announcement: &Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
     reply_to_user_message: bool,
     dispatch_id_for_thread: &Option<String>,

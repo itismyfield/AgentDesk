@@ -135,3 +135,37 @@ mod tests {
         );
     }
 }
+
+/// Locate and provision assets only for profiles exposing the dashboard.
+pub(super) async fn prepare_dashboard(enabled: bool) -> std::path::PathBuf {
+    // Resolve dashboard dist path relative to runtime root or binary location
+    let dashboard_dir = crate::cli::agentdesk_runtime_root()
+        .map(|r| r.join("dashboard/dist"))
+        .unwrap_or_else(|| std::path::PathBuf::from("dashboard/dist"));
+
+    if enabled {
+        provision_off_runtime(dashboard_dir.clone()).await;
+        tracing::info!("Serving dashboard from {:?}", dashboard_dir);
+    }
+
+    dashboard_dir
+}
+
+/// Attach the SPA fallback only when this profile serves dashboard requests.
+pub(super) fn serve_dashboard(
+    app: axum::Router,
+    directory: &std::path::Path,
+    enabled: bool,
+) -> axum::Router {
+    if enabled {
+        app.fallback_service(
+            tower_http::services::ServeDir::new(directory)
+                .append_index_html_on_directories(true)
+                .fallback(tower_http::services::ServeFile::new(
+                    directory.join("index.html"),
+                )),
+        )
+    } else {
+        app
+    }
+}

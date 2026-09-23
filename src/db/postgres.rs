@@ -11,7 +11,10 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgConnection, PgPool, Row};
 
 use crate::config::{AgentChannel, AgentDef, Config};
-use crate::services::settings::{KvSeedAction, config_default_seed_actions};
+
+mod shared_config;
+pub(crate) use shared_config::shared_config_sync_enabled;
+pub use shared_config::{startup_reseed, startup_reseed_with_warmup_pool};
 
 static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("./migrations/postgres");
 const LEGACY_AGENT_PREFIX: &str = "openclaw-";
@@ -538,74 +541,6 @@ where
     }
 }
 
-pub async fn startup_reseed(pool: &PgPool, config: &Config) -> Result<(), String> {
-    apply_kv_seed_actions(pool, &config_default_seed_actions(config)).await?;
-    upsert_kv_meta(pool, "server_port", &config.server.port.to_string()).await?;
-    crate::services::settings::seed_runtime_config_defaults_pg(pool, config).await?;
-    crate::server::routes::escalation::seed_escalation_defaults_pg(pool, config).await?;
-    let pipeline_path = config.policies.dir.join("default-pipeline.yaml");
-    crate::db::table_metadata::sync_pipeline_stages_from_yaml_pg(pool, &pipeline_path)
-        .await
-        .map_err(|error| {
-            format!(
-                "sync pipeline_stages from {}: {error}",
-                pipeline_path.display()
-            )
-        })?;
-
-    for repo_id in normalized_repo_ids(&config.github.repos) {
-        register_repo(pool, &repo_id).await?;
-    }
-
-    // #3692: in a cluster, the shared `agents` table is owned by the leader.
-    // `sync_agents_from_config_pg` is destructive (it DELETEs agents absent from
-    // the local config), so if a worker/auto node ran it at boot it would
-    // clobber the leader's roster — each node's startup would fight over the
-    // shared table and the roster would flip-flop per deploy order. Reseed runs
-    // before cluster leadership election, so gate on the configured role: only a
-    // single-node deployment (cluster disabled) or the explicitly-configured
-    // leader owns the roster sync. Workers/auto nodes trust the shared roster.
-    if agent_roster_sync_enabled(config) {
-        sync_agents_from_config_pg(pool, &config.agents).await?;
-    } else {
-        tracing::info!(
-            "[agent-sync] skipping config→DB agent roster sync on non-leader node \
-             (cluster.role={}); the cluster leader owns the shared agents table (#3692)",
-            config.cluster.role
-        );
-    }
-    Ok(())
-}
-
-pub async fn startup_reseed_with_warmup_pool(
-    runtime_pool: &PgPool,
-    config: &Config,
-) -> Result<(), String> {
-    let startup_pg_pool = match connect_for_startup(config).await {
-        Ok(pool) => pool,
-        Err(error) => {
-            tracing::warn!(
-                "[startup] postgres warmup pool unavailable; falling back to runtime pool: {error}"
-            );
-            None
-        }
-    };
-    let startup_pool = startup_pg_pool.as_ref().unwrap_or(runtime_pool);
-    startup_reseed(startup_pool, config).await?;
-    drop(startup_pg_pool);
-    Ok(())
-}
-
-/// Whether this node should run the destructive config→DB agent roster sync.
-/// True for single-node deployments (cluster disabled) and for the node
-/// explicitly configured as `cluster.role: leader`. Worker/auto nodes return
-/// false so they never clobber the leader-owned shared roster (#3692). Shared
-/// with the config-audit path (`discord_config_audit`), which reaches the same
-/// destructive sync before `startup_reseed` runs.
-pub(crate) fn agent_roster_sync_enabled(config: &Config) -> bool {
-    !config.cluster.enabled || config.cluster.role.trim().eq_ignore_ascii_case("leader")
-}
-
 pub async fn health_check(pool: &PgPool) -> Result<(), String> {
     run_health_check(pool)
         .await
@@ -748,70 +683,6 @@ fn checksum_hex(bytes: &[u8]) -> String {
         output.push(HEX[(byte & 0x0f) as usize] as char);
     }
     output
-}
-
-async fn apply_kv_seed_actions(pool: &PgPool, actions: &[KvSeedAction]) -> Result<(), String> {
-    for action in actions {
-        match action {
-            KvSeedAction::Put { key, value } => {
-                upsert_kv_meta(pool, key, value).await?;
-            }
-            KvSeedAction::PutIfAbsent { key, value } => {
-                sqlx::query(
-                    "INSERT INTO kv_meta (key, value)
-                     VALUES ($1, $2)
-                     ON CONFLICT (key) DO NOTHING",
-                )
-                .bind(key)
-                .bind(value)
-                .execute(pool)
-                .await
-                .map_err(|error| format!("seed kv_meta {key}: {error}"))?;
-            }
-            KvSeedAction::Delete { key } => {
-                sqlx::query("DELETE FROM kv_meta WHERE key = $1")
-                    .bind(key)
-                    .execute(pool)
-                    .await
-                    .map_err(|error| format!("delete retired kv_meta {key}: {error}"))?;
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn upsert_kv_meta(pool: &PgPool, key: &str, value: &str) -> Result<(), String> {
-    sqlx::query(
-        "INSERT INTO kv_meta (key, value)
-         VALUES ($1, $2)
-         ON CONFLICT (key) DO UPDATE
-         SET value = EXCLUDED.value",
-    )
-    .bind(key)
-    .bind(value)
-    .execute(pool)
-    .await
-    .map_err(|error| format!("upsert kv_meta {key}: {error}"))?;
-    Ok(())
-}
-
-fn normalized_repo_ids(repo_ids: &[String]) -> Vec<String> {
-    let mut deduped = BTreeSet::new();
-    for raw_repo_id in repo_ids {
-        let repo_id = raw_repo_id.trim();
-        if repo_id.is_empty() {
-            continue;
-        }
-        if !repo_id.contains('/') {
-            tracing::warn!(
-                "[startup] skipping invalid github.repos entry {:?}: expected owner/repo",
-                raw_repo_id
-            );
-            continue;
-        }
-        deduped.insert(repo_id.to_string());
-    }
-    deduped.into_iter().collect()
 }
 
 pub async fn register_repo(pool: &PgPool, repo_id: &str) -> Result<(), String> {
@@ -1904,13 +1775,13 @@ pub(crate) async fn close_test_pool(pool: PgPool, label: &str) -> Result<(), Str
 mod tests {
     use super::{
         AGENTDESK_REQUIRE_PG_ENV, AdvisoryLockLease, POSTGRES_MIGRATOR,
-        STARTUP_PG_ACQUIRE_TIMEOUT_SECS, agent_roster_sync_enabled, bootstrap_pool_settings,
-        checksum_hex, clamp_foreground_reserve, close_test_pool, config_database_summary,
-        connect_options, connect_test_pool, connect_test_pool_and_migrate,
-        connect_test_pool_and_migrate_config, connect_test_pool_with_max_connections,
-        connect_test_pool_with_max_connections_and_migrate, create_test_database, database_enabled,
-        database_summary, health_check, require_pg_guard, run_test_postgres_sqlx_op_with_timeout,
-        runtime_pool_settings, should_yield_for_counters, startup_pool_settings, startup_reseed,
+        STARTUP_PG_ACQUIRE_TIMEOUT_SECS, bootstrap_pool_settings, checksum_hex,
+        clamp_foreground_reserve, close_test_pool, config_database_summary, connect_options,
+        connect_test_pool, connect_test_pool_and_migrate, connect_test_pool_and_migrate_config,
+        connect_test_pool_with_max_connections, connect_test_pool_with_max_connections_and_migrate,
+        create_test_database, database_enabled, database_summary, health_check, require_pg_guard,
+        run_test_postgres_sqlx_op_with_timeout, runtime_pool_settings, shared_config_sync_enabled,
+        should_yield_for_counters, startup_pool_settings, startup_reseed,
         sync_agents_from_config_pg, with_startup_advisory_lock,
     };
     use sqlx::postgres::PgConnectOptions;
@@ -2859,8 +2730,8 @@ mod tests {
         let mut config = crate::config::Config::default();
 
         config.cluster.enabled = false; // single-node: always owns the roster
-        config.cluster.role = "auto".to_string();
-        assert!(agent_roster_sync_enabled(&config));
+        config.cluster.role = crate::config::ClusterRole::Auto;
+        assert!(shared_config_sync_enabled(&config));
 
         config.cluster.enabled = true;
         for (role, expected) in [
@@ -2869,15 +2740,139 @@ mod tests {
             ("  leader  ", true),
             ("worker", false),
             ("auto", false),
-            ("", false),
+            ("runner", false),
+            ("hub", true),
         ] {
-            config.cluster.role = role.to_string();
+            config.cluster.role = role.parse().unwrap();
             assert_eq!(
-                agent_roster_sync_enabled(&config),
+                shared_config_sync_enabled(&config),
                 expected,
                 "cluster.role={role:?}"
             );
         }
+    }
+
+    async fn shared_configuration_snapshot(pool: &PgPool) -> BTreeMap<String, serde_json::Value> {
+        let mut snapshot = BTreeMap::new();
+        for table in [
+            "kv_meta",
+            "agents",
+            "github_repos",
+            "pipeline_stages",
+            "db_table_metadata",
+        ] {
+            let sql = format!(
+                "SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]'::jsonb) FROM {table} t"
+            );
+            let rows = sqlx::query_scalar(&sql)
+                .fetch_one(pool)
+                .await
+                .expect("snapshot shared configuration");
+            snapshot.insert(table.to_string(), rows);
+        }
+        snapshot
+    }
+
+    #[tokio::test]
+    async fn postgres_worker_reseed_preserves_all_leader_configuration_and_overrides() {
+        let test_db = TestDatabase::create().await;
+        let mut leader = postgres_test_config(&test_db);
+        leader.cluster.enabled = true;
+        leader.cluster.role = crate::config::ClusterRole::Hub;
+        let pool = connect_test_pool_and_migrate_config(&leader, "shared config ownership")
+            .await
+            .expect("migrate")
+            .expect("pool");
+        startup_reseed(&pool, &leader).await.expect("seed leader");
+        for (key, value) in [
+            ("runtime-config", r#"{"dispatchPollSec":83}"#),
+            ("escalation-settings-override", r#"{"enabled":false}"#),
+            ("workspace_root", "/leader/workspaces"),
+        ] {
+            super::shared_config::upsert_kv_meta(&pool, key, value)
+                .await
+                .expect("live override");
+        }
+        let before = shared_configuration_snapshot(&pool).await;
+        let mut worker = leader.clone();
+        worker.server.port = 12345;
+        worker.policies.dir = std::path::PathBuf::from("missing-worker-local-policy-directory");
+        worker.github.repos = vec!["worker/local-only".to_string()];
+        worker.agents.clear();
+        worker.runtime.dispatch_poll_sec = Some(7);
+        worker.runtime.reset_overrides_on_restart = true;
+        for role in ["runner", "worker", "auto"] {
+            worker.cluster.role = role.parse().unwrap();
+            with_startup_advisory_lock(&pool, || startup_reseed(&pool, &worker))
+                .await
+                .expect("read shared configuration");
+            assert_eq!(
+                shared_configuration_snapshot(&pool).await,
+                before,
+                "role={role}"
+            );
+        }
+
+        // The same reset flag remains effective for the configured owner.
+        leader.runtime.reset_overrides_on_restart = true;
+        leader.runtime.dispatch_poll_sec = Some(47);
+        startup_reseed(&pool, &leader).await.expect("leader reset");
+        let raw: String =
+            sqlx::query_scalar("SELECT value FROM kv_meta WHERE key = 'runtime-config'")
+                .fetch_one(&pool)
+                .await
+                .expect("runtime config");
+        let runtime: serde_json::Value = serde_json::from_str(&raw).expect("runtime JSON");
+        assert_eq!(runtime["dispatchPollSec"], 47);
+        let overrides: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM kv_meta WHERE key = 'escalation-settings-override'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("override count");
+        assert_eq!(overrides, 0);
+        close_test_pool(pool, "shared config ownership")
+            .await
+            .expect("close");
+        test_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_worker_first_boot_requires_leader_without_seeding_shared_config() {
+        let test_db = TestDatabase::create().await;
+        let mut config = postgres_test_config(&test_db);
+        config.cluster.enabled = true;
+        config.cluster.role = crate::config::ClusterRole::Runner;
+        let pool = connect_test_pool_and_migrate_config(&config, "worker first boot")
+            .await
+            .expect("schema migrations still run")
+            .expect("pool");
+        let before = shared_configuration_snapshot(&pool).await;
+        let error = startup_reseed(&pool, &config)
+            .await
+            .expect_err("leader is absent");
+        assert!(error.contains("cluster.role=hub"), "{error}");
+        assert_eq!(shared_configuration_snapshot(&pool).await, before);
+
+        let mut leader = config.clone();
+        leader.cluster.role = crate::config::ClusterRole::Hub;
+        // Both paths use the same startup lock. A worker that wins the race may
+        // refuse startup, but it must never become the configuration writer.
+        let (leader_result, worker_result) = tokio::join!(
+            with_startup_advisory_lock(&pool, || startup_reseed(&pool, &leader)),
+            with_startup_advisory_lock(&pool, || startup_reseed(&pool, &config)),
+        );
+        leader_result.expect("leader initializes shared configuration");
+        if let Err(error) = worker_result {
+            assert!(error.contains("cluster.role=hub"), "{error}");
+        }
+        startup_reseed(&pool, &config)
+            .await
+            .expect("worker retry after leader boot");
+        close_test_pool(pool, "worker first boot")
+            .await
+            .expect("close");
+        test_db.drop().await;
     }
 
     #[tokio::test]
@@ -2896,6 +2891,12 @@ mod tests {
         .expect("connect and migrate postgres")
         .expect("postgres pool");
 
+        startup_reseed(&pool, &config).await.expect("leader reseed");
+        sqlx::query("DELETE FROM agents WHERE id = 'pg-agent'")
+            .execute(&pool)
+            .await
+            .expect("remove fixture agent");
+
         // Simulate a leader-owned agent already present in the shared table.
         sqlx::query("INSERT INTO agents (id, name, provider) VALUES ($1, $2, $3)")
             .bind("leader-owned")
@@ -2907,7 +2908,7 @@ mod tests {
 
         // This node is a cluster worker: reseed must skip the agent sync.
         config.cluster.enabled = true;
-        config.cluster.role = "worker".to_string();
+        config.cluster.role = crate::config::ClusterRole::Runner;
         startup_reseed(&pool, &config).await.expect("worker reseed");
 
         let leader_owned: i64 =

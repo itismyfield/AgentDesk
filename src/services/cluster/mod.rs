@@ -8,8 +8,11 @@
 //! `preferred_intake_node_labels` and the live `worker_nodes` snapshot.
 //! Phase 3 will add the worker-side polling loop in a sibling submodule.
 
+pub(crate) mod agent_execution_node;
 pub(crate) mod attachment_transfer;
 pub(crate) mod capability_routing;
+pub(crate) mod execution_capacity;
+pub(crate) mod execution_requirements;
 pub(crate) mod intake_preflight;
 pub(crate) mod intake_router_hook;
 pub(crate) mod intake_routing;
@@ -17,12 +20,14 @@ pub(crate) mod intake_routing_config;
 pub(crate) mod intake_routing_telemetry;
 pub(crate) mod intake_worker;
 pub(crate) mod intake_worker_capabilities;
-/// Worker-node registry + capability routing infrastructure. Relocated from
+pub(crate) mod machine_resources;
+/// Runner-node registry + capability routing infrastructure. Relocated from
 /// `server::cluster` (#3037 bucket 3): it is pure cluster coordination
 /// (config + db + serde) with no route/axum dependency, so it belongs beside
 /// the rest of the cluster services. `server::cluster` re-exports it for the
 /// route layer.
 pub(crate) mod node_registry;
+pub(crate) mod readiness;
 pub mod registry_adapter_sink;
 pub mod relay_producer_registry;
 pub mod session_discovery;

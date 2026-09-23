@@ -53,10 +53,10 @@ fn replace_outcome_commits_terminal_delivery(outcome: &ReplaceLongMessageOutcome
 }
 
 pub(super) fn terminal_delivery_should_send_new_chunks(
-    can_chain_locally: bool,
+    can_deliver_directly: bool,
     formatted_response: &str,
 ) -> bool {
-    can_chain_locally && super::super::formatting::needs_multiple_messages(formatted_response)
+    can_deliver_directly && super::super::formatting::needs_multiple_messages(formatted_response)
 }
 
 pub(super) fn record_stopped_turn_terminal_replace_delivery(
@@ -2138,9 +2138,9 @@ mod tests {
     // #3089 A0 — characterization of the terminal-delivery
     // should-send-new-chunks predicate (design §5 A0 item 1, surface:
     // turn_bridge terminal delivery). `terminal_delivery_should_send_new_chunks
-    // (can_chain_locally, body)` is one of the FOUR per-surface "does this fit
+    // (can_deliver_directly, body)` is one of the FOUR per-surface "does this fit
     // one Discord message" predicates the #3089 controller unifies. Its gate is
-    // now `can_chain_locally && needs_multiple_messages(body)`, i.e. a CHARACTER
+    // now `can_deliver_directly && needs_multiple_messages(body)`, i.e. a CHARACTER
     // count — it read `body.len() > DISCORD_MSG_LIMIT` (UTF-8 BYTES) until the
     // byte/character fix, which tripped Korean bodies at ~667 characters. The
     // assertions below still use an ASCII fixture, where the two agree. Pinned
@@ -2155,7 +2155,7 @@ mod tests {
             let over = "x".repeat(DISCORD_MSG_LIMIT + 1); // 2001 bytes
             let under = "x".repeat(DISCORD_MSG_LIMIT); // exactly 2000 bytes
 
-            // Both conditions required: can_chain_locally AND len > 2000.
+            // Both conditions required: can_deliver_directly AND len > 2000.
             assert!(
                 should_send(true, &over),
                 "chainable AND over-limit => send new chunks"

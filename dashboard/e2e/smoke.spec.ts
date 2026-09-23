@@ -975,6 +975,25 @@ async function mockMeetingsHubApis(page: Page) {
 }
 
 async function mockAgentsHubApis(page: Page) {
+  await page.route(/\/api\/agents\/[^/]+\/execution-node$/, async (route) => {
+    await route.fulfill({ json: { default_node_id: null, routing_enforced: true } });
+  });
+  await page.route(/\/api\/cluster\/nodes$/, async (route) => {
+    await route.fulfill({ json: {
+      cluster: { enabled: true, local_instance_id: "fixture-hub" },
+      nodes: [
+        { instance_id: "fixture-hub", hostname: "Hub fixture", effective_role: "hub", status: "online", os: "macos" },
+        { instance_id: "windows-1", hostname: "Windows PC", effective_role: "worker", status: "online", os: "windows" },
+        { instance_id: "linux-2", hostname: "Linux PC", effective_role: "runner", status: "offline", os: "linux" },
+      ].map(({ os, ...node }) => ({ ...node,
+        capabilities: { execution_readiness: {
+          os, arch: "x86_64", runtime_profile: "full", observed_at_ms: Date.now(),
+          expires_at_ms: Date.now() + 60_000, backends: ["process"],
+        } },
+        execution_readiness: { providers: { codex: { eligible: true, reasons: [] } } },
+      })),
+    } });
+  });
   await page.route(/\/api\/agents\/[^/]+\/cron$/, async (route) => {
     await route.fulfill({
       status: 200,
@@ -1064,6 +1083,9 @@ async function mockOpsHealthApi(page: Page, getPayload: () => Record<string, unk
       body: JSON.stringify(getPayload()),
     });
   });
+  await page.route(/\/api\/cluster\/nodes$/, route => route.fulfill({
+    json: { cluster: { enabled: false, local_instance_id: "single-node" }, nodes: [] },
+  }));
 }
 
 async function mockDashboardBootstrap(page: Page) {
@@ -2293,6 +2315,51 @@ test.describe("Dashboard smoke tests", () => {
     ).toBeVisible();
   });
 
+  test("agents: default execution device requires save and survives reopening", async ({ page }, testInfo) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await mockAgentsHubApis(page);
+    let saved: string | null = null;
+    const writes: unknown[] = [];
+    await page.route(/\/api\/agents\/agent-ada\/execution-node$/, async (route) => {
+      if (route.request().method() === "PUT") {
+        const body = route.request().postDataJSON() as { default_node_id: string | null };
+        writes.push(body);
+        saved = body.default_node_id;
+      }
+      await route.fulfill({ json: { default_node_id: saved, routing_enforced: true } });
+    });
+    await page.goto("/agents");
+    await page.getByRole("button", { name: /리스트|List/ }).click();
+    await page.getByTestId("agents-card-agent-ada").click();
+    const dialog = page.getByRole("dialog", { name: /직원 상세|Agent Details/ });
+    const device = dialog.getByLabel(/우선 실행 장비|Preferred execution device/);
+    const save = dialog.getByRole("button", { name: /^(저장|Save)$/ });
+    await expect(device).toBeEnabled();
+    await expect(device).toHaveValue("");
+    await expect(device.locator('option[value="fixture-hub"]')).toContainText(/(?:허브|Hub) · macOS/);
+    await expect(device.locator('option[value="windows-1"]')).toContainText(/(?:실행 노드|Runner) · Windows/);
+    await device.selectOption("windows-1");
+    expect(writes).toEqual([]);
+    await save.click();
+    await expect(dialog.getByRole("status")).toContainText(/새 세션부터|new sessions/);
+    expect(writes).toEqual([{ default_node_id: "windows-1" }]);
+    await page.getByRole("button", { name: /닫기|Close/ }).click();
+    await page.getByTestId("agents-card-agent-ada").click();
+    await expect(device).toHaveValue("windows-1");
+    await expect(save).toBeDisabled();
+    await device.selectOption("linux-2");
+    await expect(dialog.getByText(/선택한 장비의 실행 준비|The selected device is not ready/)).toBeVisible();
+    expect(writes).toHaveLength(1);
+    await device.selectOption("");
+    await save.click();
+    await expect(dialog.getByRole("status")).toContainText(/새 세션부터|new sessions/);
+    expect(writes).toEqual([{ default_node_id: "windows-1" }, { default_node_id: null }]);
+    await expectNoHorizontalOverflow(page);
+    expect(pageErrors).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath("agent-execution-device.png"), fullPage: true });
+  });
+
   test("agents: desktop hub preserves 3-tab drill-ins", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "mobile", "Desktop-only test");
     await mockAgentsHubApis(page);
@@ -2370,6 +2437,83 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("ops-control-handoff")).toBeVisible();
     await expect(page.getByTestId("ops-handoff-agents")).toHaveAttribute("href", "/agents");
     await expect(page.getByTestId("ops-handoff-office")).toHaveAttribute("href", "/office");
+  });
+
+  test("ops: cluster controls distinguish readiness, bound output and stale state", async ({ page }, testInfo) => {
+    await page.route(/\/api\/settings$/, route => route.fulfill({ json: {
+      language: testInfo.project.name === "desktop" ? "en" : "ko", theme: "dark",
+    } }));
+    await page.route(/\/api\/prompt-manifest\/retention$/, route => route.fulfill({ json: {
+      total_stored_bytes: 0, total_original_bytes: 0, truncated_count: 0,
+      manifest_count: 0, layer_count: 0, oldest_full_content_at: null, retention_horizon_at: null,
+      retention_days: 30, per_layer_max_bytes_adk_provided: 65536, per_layer_max_bytes_user_derived: 8192,
+      enabled: true, restart_required_for_config_changes: true, config_applied_at: "2026-09-22T00:00:00Z",
+      config_source: "fixture", hot_reload: false,
+    } }));
+    let failRefresh = false;
+    let clusterEnabled = true;
+    let stopCount = 0;
+    await page.route(/\/api\/cluster\/nodes$/, async route => {
+      if (failRefresh) return route.fulfill({ status: 503, json: { error: "fixture unavailable" } });
+      const now = Date.now();
+      await route.fulfill({ json: {
+        cluster: { enabled: clusterEnabled, local_instance_id: "fixture-hub" },
+        nodes: ["windows-worker", "linux-worker"].map((id, index) => ({
+          instance_id: id, status: "online", effective_role: index ? "worker" : "runner", active_dispatch_count: 0,
+          execution_active: 1, execution_occupied: 2,
+          capabilities: { execution_capacity: { version: 1, slots: 2 }, execution_readiness: {
+            os: index ? "linux" : "windows", arch: "x86_64", runtime_profile: index ? "full" : "runner",
+            observed_at_ms: now, expires_at_ms: now + 120_000, backends: ["process"],
+          } },
+          execution_readiness: { providers: { codex: { eligible: index === 0,
+            reasons: index ? ["provider_cli_unavailable"] : [],
+          } } },
+          forwarding_diagnostics: { advertised: true, configured: true, trust_validated: true,
+            reachability_verified: true, reachability_status: "verified", expires_at_ms: now + 45_000,
+          },
+        })),
+      } });
+    });
+    await page.route(/\/api\/dispatched-sessions$/, route => route.fulfill({ json: { sessions: [{
+      id: 17, session_key: "codex/token/windows:fixture", instance_id: "windows-worker",
+      name: "Windows build", provider: "codex", status: stopCount ? "disconnected" : "working",
+    }] } }));
+    await page.route(/\/api\/sessions\/17\/output\?lines=100$/, route => route.fulfill({ json: {
+      recent_output: `{"text":"worker output 한글 ${"a".repeat(200)}"}`, backend: "process",
+      available: true, unavailable_reason: null, output_format: "jsonl", captured_at_ms: Date.now(),
+    } }));
+    await page.route(/\/api\/sessions\/[^/]+\/force-kill$/, async route => {
+      expect(route.request().method()).toBe("POST");
+      expect(route.request().postDataJSON().retry).toBe(false);
+      stopCount++;
+      await route.fulfill({ json: { ok: true } });
+    });
+    await page.goto("/ops");
+    const panel = page.getByTestId("cluster-nodes-panel");
+    await expect(panel.getByText("Windows / x86_64", { exact: false })).toBeVisible();
+    await expect(panel.getByText(/(?:실행 노드.*실행 전용|Runner.*Execution only)/)).toBeVisible();
+    await expect(panel.getByText(/(?:실행 노드.*전체 기능|Runner.*Full features)/)).toBeVisible();
+    await expect(panel.getByText(/실행 용량 대기|Waiting for capacity/)).toBeVisible();
+    await expect(panel.getByText(/CLI 실행 불가|CLI unavailable/)).toBeVisible();
+    await panel.getByRole("button", { name: /출력 보기|View output/ }).click();
+    await expect(panel.getByText(/worker output 한글/)).toBeVisible();
+    await panel.getByRole("button", { name: /실행 중지|Stop execution/, exact: true }).click();
+    expect(stopCount).toBe(0);
+    await panel.getByRole("button", { name: /중지 확인|Confirm stop/ }).click();
+    await expect.poll(() => stopCount).toBe(1);
+    await expect(panel.getByText(/disconnected/, { exact: false })).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await page.screenshot({ path: testInfo.outputPath("cluster-nodes.png"), fullPage: true });
+    failRefresh = true;
+    await expect(panel.getByRole("button", { name: /실행 중지|Stop execution/, exact: true })).toBeDisabled({ timeout: 20_000 });
+    await expect(panel.getByText(/노드 갱신 실패|Node refresh failed/)).toBeVisible();
+    await expect(panel.getByText(/worker output 한글/)).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    failRefresh = false;
+    clusterEnabled = false;
+    await expect(panel.getByText(/이 컴퓨터 · 단독 운영|This computer · Standalone/)).toBeVisible({ timeout: 15_000 });
+    await expect(panel.locator("article")).toHaveCount(0);
+    await expect(panel.getByRole("button", { name: /실행 중지|Stop execution/, exact: true })).toHaveCount(0);
   });
 
   test("ops: ws events resync the health snapshot", async ({ page }) => {
@@ -2598,6 +2742,96 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByText(/audit 노트|Audit notes/)).toHaveCount(0);
     await expect(page.getByText("kv_meta")).toHaveCount(0);
     await expect(page.getByTestId("pipeline-refresh-indicator")).toBeHidden({ timeout: 3000 });
+  });
+
+  test("settings: machines show Hub and Runner details and honest connection states", async ({ page }, testInfo) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", error => pageErrors.push(error.message));
+    await page.route(/\/api\/settings\/runtime-config$/, route => route.fulfill({ json: { current: {}, defaults: {} } }));
+    await page.route(/\/api\/settings$/, route => route.fulfill({ json: {
+      language: testInfo.project.name === "desktop" ? "en" : "ko", theme: "dark",
+    } }));
+    let fail = false;
+    let enabled = true;
+    let offline = false;
+    let cpuUsage = 37.5;
+    let includeRunner = true;
+    await page.route(/\/api\/cluster\/nodes$/, route => {
+      if (fail) return route.fulfill({ status: 503, json: { error: "fixture unavailable" } });
+      const now = Date.now();
+      return route.fulfill({ json: {
+        cluster: { enabled, local_instance_id: "hub-example", lease_ttl_secs: 30, heartbeat_interval_secs: 5 },
+        nodes: (includeRunner ? ["hub-example", "runner-example"] : ["hub-example"]).map((id, index) => ({
+          instance_id: id, hostname: index ? "Build runner" : "Control hub",
+          status: index && offline ? "offline" : "online", role: index ? "runner" : "hub",
+          effective_role: index ? "worker" : "leader", process_id: 100 + index,
+          last_heartbeat_at: new Date(now).toISOString(), started_at: new Date(now - 60_000).toISOString(),
+          api_base_url: `https://${id}.example.invalid`, labels: [index ? "build" : "control"],
+          execution_active: 1, execution_occupied: 1, active_session_count: 1, active_dispatch_count: 0,
+          capabilities: { machine_resources: {
+            schema: 1, observed_at_ms: now, expires_at_ms: now + 30_000, sample_interval_ms: 5_000,
+            cpu: { model: "Example CPU", physical_cores: 8, logical_cores: 16, usage_percent: cpuUsage },
+            memory: { total_bytes: 32 * 1024 ** 3, used_bytes: 16 * 1024 ** 3, available_bytes: 16 * 1024 ** 3 },
+            disks: [{ name: "Data", mount_point: index ? "C:\\" : "/", kind: "SSD", total_bytes: 1024 ** 4, used_bytes: 512 * 1024 ** 3, available_bytes: 512 * 1024 ** 3 }],
+            gpus: [{ name: "Example GPU", usage_percent: 25, memory_used_bytes: 4 * 1024 ** 3, memory_total_bytes: 16 * 1024 ** 3, shared_memory: false }],
+          }, execution_capacity: { version: 1, slots: 2 }, execution_readiness: {
+            os: index ? "windows" : "linux", arch: "x86_64", runtime_profile: index ? "runner" : "full",
+            observed_at_ms: now, expires_at_ms: now + 60_000, backends: ["process"],
+            providers: { codex: { cli_installed: true, cli_usable: true }, antigravity: { cli_installed: false, cli_usable: false } },
+          } },
+          execution_readiness: { providers: { codex: { eligible: true, reasons: [] } } },
+          forwarding_diagnostics: { advertised: true, configured: true, trust_validated: true,
+            reachability_verified: true, expires_at_ms: now + 30_000 },
+        })),
+      } });
+    });
+    await page.goto("/settings?settingsPanel=machine");
+    const panel = page.getByTestId("settings-machine-panel");
+    await expect(panel).toBeVisible();
+    await expect(page.locator("#settings-tab-machine")).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator("#settings-tab-machine").getByText("2", { exact: true })).toBeVisible();
+    const order = await page.getByRole("tablist", { name: /설정 패널|Settings panels/ }).getByRole("tab").evaluateAll(tabs => tabs.map(tab => tab.id));
+    expect(order[order.indexOf("settings-tab-general") + 1]).toBe("settings-tab-machine");
+    const runner = page.getByTestId("machine-node-runner-example");
+    await expect(runner.getByText("Runner", { exact: true }).first()).toBeVisible();
+    await expect(runner.getByText(/Windows \/ x86_64/)).toBeVisible();
+    await expect(runner.getByText(/연결 확인됨|Connection verified/, { exact: true })).toBeVisible();
+    await expect(runner.getByText(/신규 실행 가능|Ready for new work/, { exact: true })).toBeVisible();
+    await expect(runner.getByText("Example CPU", { exact: true })).toBeVisible();
+    await expect(runner.getByText("Example GPU", { exact: true })).toBeVisible();
+    await expect(runner.getByRole("meter", { name: /CPU 사용률|CPU utilization/ })).toHaveAttribute("aria-valuenow", "37.5");
+    await expect(runner.getByText("antigravity", { exact: true })).toHaveCount(0);
+    await expect(runner.getByText(/설정된 역할|Configured role/, { exact: true })).toHaveCount(0);
+    cpuUsage = 62.5;
+    await panel.getByRole("button", { name: /상태 새로고침|Refresh status/ }).click();
+    await expect(runner.getByRole("meter", { name: /CPU 사용률|CPU utilization/ })).toHaveAttribute("aria-valuenow", "62.5");
+    await expectNoHorizontalOverflow(page);
+    await page.screenshot({ path: testInfo.outputPath("machine-settings.png"), fullPage: true });
+    await page.locator("#settings-tab-general").click();
+    await expect(panel).toHaveCount(0);
+    await page.goBack();
+    await expect(panel).toBeVisible();
+    await page.reload();
+    await expect(panel).toBeVisible();
+    fail = true;
+    await panel.getByRole("button", { name: /상태 새로고침|Refresh status/ }).click();
+    await expect(panel.getByRole("alert")).toContainText(/마지막 조회|last snapshot/);
+    await expect(runner.getByText(/연결 확인됨|Connection verified/, { exact: true })).toHaveCount(0);
+    await expect(runner.getByText(/신규 실행 가능|Ready for new work/, { exact: true })).toHaveCount(0);
+    await expect(runner.getByRole("meter", { name: /CPU 사용률|CPU utilization/ })).toHaveCount(0);
+    fail = false;
+    offline = true;
+    await panel.getByRole("button", { name: /상태 새로고침|Refresh status/ }).click();
+    await expect(runner.getByText(/오프라인|Offline/, { exact: true })).toBeVisible();
+    includeRunner = false;
+    await panel.getByRole("button", { name: /상태 새로고침|Refresh status/ }).click();
+    await expect(page.locator("#settings-tab-machine").getByText("1", { exact: true })).toBeVisible();
+    enabled = false;
+    await panel.getByRole("button", { name: /상태 새로고침|Refresh status/ }).click();
+    await expect(panel.getByText(/단독 운영 중|runs standalone/)).toBeVisible();
+    await expect(panel.locator("article")).toHaveCount(0);
+    await expectNoHorizontalOverflow(page);
+    expect(pageErrors).toEqual([]);
   });
 
   test("all app shell routes are directly reachable", async ({ page }) => {

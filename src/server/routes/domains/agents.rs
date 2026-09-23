@@ -4,8 +4,8 @@ use axum::{
 };
 
 use super::super::{
-    ApiRouter, AppState, agents, agents_crud, agents_setup, cron_api, memory_api,
-    protected_api_domain,
+    ApiRouter, AppState, agents, agents_crud, agents_setup, cron_api, execution_requirements,
+    memory_api, protected_api_domain,
 };
 
 // Category: agents
@@ -30,6 +30,14 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                     .delete(agents_crud::delete_agent),
             )
             .route("/agents/{id}/quality", get(agents::agent_quality))
+            .route(
+                "/agents/{id}/execution-requirements",
+                get(execution_requirements::get).put(execution_requirements::put),
+            )
+            .route(
+                "/agents/{id}/execution-node",
+                get(execution_requirements::get_node).put(execution_requirements::put_node),
+            )
             .route("/agents/{id}/duplicate", post(agents_crud::duplicate_agent))
             .route("/agents/{id}/offices", get(agents::agent_offices))
             .route("/agents/{id}/signal", post(agents::agent_signal))
@@ -37,16 +45,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/agents/{id}/handoff", post(agents::agent_handoff))
             .route("/agents/{id}/cron", get(cron_api::agent_cron_jobs))
             .route("/agents/{id}/skills", get(agents::agent_skills))
-            .route(
-                "/agents/{id}/dispatched-sessions",
-                get(agents::agent_dispatched_sessions),
-            )
-            .route("/agents/{id}/turn", get(agents::agent_turn))
-            .route("/agents/{id}/turn/start", post(agents::start_agent_turn))
-            .route("/agents/{id}/turn/stop", post(agents::stop_agent_turn))
-            .route("/agents/{id}/transcripts", get(agents::agent_transcripts))
-            .route("/agents/{id}/timeline", get(agents::agent_timeline))
-            .route("/sessions", get(agents_crud::list_sessions))
             .route("/policies", get(agents_crud::list_policies))
             // #1066 /api/memory dual-mode (memento-or-local)
             .route("/memory/recall", post(memory_api::memory_recall))

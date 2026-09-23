@@ -220,7 +220,7 @@ async fn restore_waits_for_channel_lock_and_keeps_other_channel() {
 #[test]
 fn recovery_consumer_routes_uninstalled_candidates_to_cleanup() {
     // Lexical auxiliary only: this is not an HTTP execution proof.
-    let source = include_str!("../recovery_flush.rs");
+    let source = include_str!("../queued_recovery.rs");
     let region =
         &source[source.find("let filter_outcome =").unwrap()..source.find("// P1-2:").unwrap()];
     assert!(region.contains("install_restored_queued_placeholders("));

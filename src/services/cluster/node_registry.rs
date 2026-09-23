@@ -2,11 +2,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 
-use crate::config::{ClusterConfig, Config};
+use crate::config::{ClusterConfig, ClusterRole, Config};
 use crate::db::postgres::AdvisoryLockLease;
 use crate::services::cluster::session_routing::{
     cluster_capabilities_with_worker_api, worker_api_base_url_from_capabilities,
@@ -25,32 +24,6 @@ pub(crate) use super::intake_worker_capabilities::{
     register_gateway_waiter, register_intake_worker_provider,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ClusterRole {
-    Leader,
-    Worker,
-    Auto,
-}
-
-impl ClusterRole {
-    pub(crate) fn parse(raw: &str) -> Self {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "leader" => Self::Leader,
-            "worker" => Self::Worker,
-            _ => Self::Auto,
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Leader => "leader",
-            Self::Worker => "worker",
-            Self::Auto => "auto",
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct ClusterRuntime {
     enabled: bool,
@@ -68,8 +41,8 @@ impl ClusterRuntime {
         Self {
             enabled: false,
             instance_id: "single-node".to_string(),
-            configured_role: ClusterRole::Leader,
-            effective_role: ClusterRole::Leader,
+            configured_role: ClusterRole::Hub,
+            effective_role: ClusterRole::Hub,
             leader_active: Arc::new(AtomicBool::new(true)),
         }
     }
@@ -88,7 +61,7 @@ impl ClusterRuntime {
             enabled: true,
             instance_id: "test-node".to_string(),
             configured_role: ClusterRole::Auto,
-            effective_role: ClusterRole::Worker,
+            effective_role: ClusterRole::Runner,
             leader_active,
         }
     }
@@ -148,7 +121,7 @@ fn auto_node_can_attempt_leadership(config: &Config) -> bool {
 
 pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> ClusterRuntime {
     if !config.cluster.enabled {
-        tracing::info!("[cluster] disabled; running in single-node leader-compatible mode");
+        tracing::info!("[cluster] disabled; running in standalone hub mode");
         return ClusterRuntime::single_node();
     }
 
@@ -165,19 +138,19 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
     // the first wins.
     let _ = SELF_INSTANCE_ID.set(instance_id.clone());
     let hostname = crate::services::platform::hostname_short();
-    let configured_role = ClusterRole::parse(&config.cluster.role);
+    let configured_role = config.cluster.role;
     let auto_leader_eligible =
         configured_role != ClusterRole::Auto || auto_node_can_attempt_leadership(config);
     let mut leader_lease = match configured_role {
-        ClusterRole::Worker => None,
+        ClusterRole::Runner => None,
         ClusterRole::Auto if !auto_leader_eligible => {
             tracing::info!(
                 instance_id,
-                "[cluster] auto node has no configured Discord gateway token; registering as worker standby"
+                "[cluster] auto node has no configured Discord gateway token; registering as runner standby"
             );
             None
         }
-        ClusterRole::Leader | ClusterRole::Auto => {
+        ClusterRole::Hub | ClusterRole::Auto => {
             match AdvisoryLockLease::try_acquire(
                 &pool,
                 CLUSTER_LEADER_ADVISORY_LOCK_ID,
@@ -194,9 +167,9 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
         }
     };
     let effective_role = if leader_lease.is_some() {
-        ClusterRole::Leader
+        ClusterRole::Hub
     } else {
-        ClusterRole::Worker
+        ClusterRole::Runner
     };
     let leader_active = Arc::new(AtomicBool::new(leader_lease.is_some()));
     let labels = serde_json::Value::Array(
@@ -208,6 +181,14 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
             .collect(),
     );
     let base_capabilities = cluster_capabilities_with_worker_api(&config.cluster);
+    super::readiness::spawn_probe(config.clone());
+    super::machine_resources::spawn(config.cluster.heartbeat_interval_secs);
+    crate::services::session_forwarding::probe::spawn(
+        config.clone(),
+        pool.clone(),
+        instance_id.clone(),
+    );
+    super::attachment_transfer::temporary::spawn_cleanup();
     let capabilities = capabilities_with_runtime_state(&base_capabilities);
     let pid = std::process::id() as i32;
 
@@ -284,6 +265,9 @@ pub(crate) async fn run_leader_intake_retry_maintenance_once(
     retry: impl FnOnce() -> Option<(u32, u64)>,
 ) -> Result<Option<crate::db::intake_outbox::FailedPreAcceptSweepOutcome>, String> {
     mark_stale_worker_nodes_offline(pool, stale_threshold_secs, instance_id).await?;
+    super::attachment_transfer::store::cleanup(pool)
+        .await
+        .map_err(|e| format!("attachment cleanup: {e}"))?;
     let Some((max_attempts, retry_authorization_secs)) = retry() else {
         return Ok(None);
     };
@@ -327,7 +311,7 @@ fn spawn_heartbeat_loop(
     let interval_secs = heartbeat_interval_secs.max(1);
     let stale_threshold_secs = lease_ttl_secs.max(interval_secs * 3);
     let leader_eligible =
-        leader_eligible && matches!(configured_role, ClusterRole::Leader | ClusterRole::Auto);
+        leader_eligible && matches!(configured_role, ClusterRole::Hub | ClusterRole::Auto);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         interval.tick().await;
@@ -369,9 +353,9 @@ fn spawn_heartbeat_loop(
                 }
             }
             let current_effective_role = if leader_active.load(Ordering::Acquire) {
-                ClusterRole::Leader
+                ClusterRole::Hub
             } else {
-                ClusterRole::Worker
+                ClusterRole::Runner
             };
             let capabilities = capabilities_with_runtime_state(&base_capabilities);
             if let Err(error) = upsert_worker_node(
@@ -551,8 +535,8 @@ async fn upsert_worker_node(
     .bind(instance_id)
     .bind(hostname)
     .bind(pid)
-    .bind(configured_role.as_str())
-    .bind(effective_role.as_str())
+    .bind(configured_role.registry_value())
+    .bind(effective_role.registry_value())
     .bind(labels)
     .bind(capabilities)
     .execute(pool)
@@ -734,7 +718,7 @@ pub(crate) async fn list_worker_nodes(
     let rows = sqlx::query(
         r#"
         SELECT
-            instance_id,
+            worker_nodes.instance_id,
             hostname,
             process_id,
             role,
@@ -746,10 +730,14 @@ pub(crate) async fn list_worker_nodes(
             labels,
             capabilities,
             COALESCE(active_dispatches.active_dispatch_count, 0)::BIGINT AS active_dispatch_count,
+            execution_assignments.last_execution_assignment_at,
+            (SELECT count(*) FROM node_execution_occupancy(worker_nodes.instance_id)) AS execution_occupied,
+            (SELECT count(*) FROM node_execution_leases l WHERE l.instance_id=worker_nodes.instance_id AND l.expires_at>NOW()) AS execution_active,
             last_heartbeat_at,
             started_at,
             updated_at
         FROM worker_nodes
+        LEFT JOIN node_execution_assignments execution_assignments ON execution_assignments.instance_id=worker_nodes.instance_id
         LEFT JOIN (
             SELECT claim_owner, COUNT(*)::BIGINT AS active_dispatch_count
               FROM dispatch_outbox
@@ -757,7 +745,7 @@ pub(crate) async fn list_worker_nodes(
                AND claim_owner IS NOT NULL
              GROUP BY claim_owner
         ) active_dispatches ON active_dispatches.claim_owner = worker_nodes.instance_id
-        ORDER BY last_heartbeat_at DESC, instance_id ASC
+        ORDER BY last_heartbeat_at DESC, worker_nodes.instance_id ASC
         "#,
     )
     .bind(lease_ttl_secs.max(1) as i64)
@@ -793,6 +781,9 @@ pub(crate) async fn list_worker_nodes(
                     .ok()
                     .flatten()
                     .unwrap_or(0),
+                "execution_occupied": row.try_get::<i64,_>("execution_occupied").ok(),
+                "execution_active": row.try_get::<i64,_>("execution_active").ok(),
+                "last_execution_assignment_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("last_execution_assignment_at").ok().flatten(),
                 "api_base_url": api_base_url,
                 "session_api_routable": session_api_routable,
                 "last_heartbeat_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_heartbeat_at").ok().flatten(),
@@ -814,13 +805,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
-
-    #[test]
-    fn cluster_role_parses_known_values_and_defaults_to_auto() {
-        assert_eq!(ClusterRole::parse("leader"), ClusterRole::Leader);
-        assert_eq!(ClusterRole::parse("WORKER"), ClusterRole::Worker);
-        assert_eq!(ClusterRole::parse("anything-else"), ClusterRole::Auto);
-    }
 
     #[test]
     fn intake_retry_tick_reads_each_hot_reload_snapshot() {
@@ -860,7 +844,7 @@ mod tests {
     fn auto_node_leadership_requires_configured_gateway_token() {
         let mut config = Config::default();
         config.cluster.enabled = true;
-        config.cluster.role = "auto".to_string();
+        config.cluster.role = ClusterRole::Auto;
         config.discord.bots.clear();
 
         assert!(!auto_node_can_attempt_leadership(&config));
@@ -886,7 +870,7 @@ mod tests {
             enabled: true,
             instance_id: "test-node".to_string(),
             configured_role: ClusterRole::Auto,
-            effective_role: ClusterRole::Worker,
+            effective_role: ClusterRole::Runner,
             leader_active: leader_active.clone(),
         };
         let wait = tokio::spawn({

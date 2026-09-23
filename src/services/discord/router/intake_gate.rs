@@ -31,7 +31,7 @@ use stale_turn::{
 async fn append_pending_uploads(
     shared: &std::sync::Arc<SharedData>,
     channel_id: serenity::ChannelId,
-    upload_records: &[String],
+    upload_records: &[crate::services::cluster::attachment_transfer::uploads::Upload],
 ) -> bool {
     if upload_records.is_empty() {
         return true;
@@ -843,7 +843,7 @@ pub(in crate::services::discord) async fn handle_event(
                     },
                     origin: super::IntakeOrigin::RawAttachment,
                     preserve_on_cancel,
-                    has_nonportable_uploads: true,
+                    has_nonportable_uploads: false,
                     attachments: attachments.clone(),
                     preloaded_uploads: Vec::new(),
                     voice_announcement: resolved_voice_announcement.clone(),

@@ -85,7 +85,14 @@ NON_PG_SKIP_ARGS=(
   --skip services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests
   --skip services::auto_queue::tests
   --skip services::automation_candidate_materializer::iteration_result_tests
+  --skip services::cluster::attachment_transfer::storage_tests
+  --skip services::cluster::execution_capacity::tests
   --skip services::cluster::intake_preflight::tests
+  --skip services::cluster::intake_router_hook::agent_execution_node_tests
+  --skip services::cluster::intake_router_hook::attachment_tests
+  --skip services::cluster::intake_router_hook::capacity_tests
+  --skip services::cluster::intake_router_hook::edge_case_tests
+  --skip services::cluster::intake_router_hook::execution_requirement_tests
   --skip services::cluster::intake_router_hook::owner_record::tests
   --skip services::cluster::intake_router_hook::pg_tests
   --skip services::cluster::intake_worker::dispatch_stamp_tests
@@ -283,6 +290,8 @@ NON_PG_FILTER_REPLAY=(
   services::auto_queue::tests::auto_queue_status_reports_delivery_split_brain_and_timeout
   services::auto_queue::tests::auto_queue_status_surfaces_review_cycle_clock
   services::auto_queue::tests::thread_link_view_only_builds_url_for_discord_snowflakes
+  services::cluster::attachment_transfer::storage_tests::attachment_upload_reference_preserves_legacy_json_and_enforces_size_limits
+  services::cluster::execution_capacity::tests::execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector
   services::cluster::intake_preflight::tests::claude_and_codex_emit_structured_pass_and_fail_evidence
   services::cluster::intake_preflight::tests::each_required_failure_is_independently_fail_closed
   services::cluster::intake_preflight::tests::missing_or_malformed_snapshot_fails_closed

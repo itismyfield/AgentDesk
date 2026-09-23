@@ -27,6 +27,15 @@ pub async fn list_nodes(
     let lease_ttl_secs = state.config.cluster.lease_ttl_secs.max(1);
     match crate::server::cluster::list_worker_nodes(pool, lease_ttl_secs).await {
         Ok(mut nodes) => {
+            for node in &mut nodes {
+                crate::services::cluster::readiness::attach_diagnostics(node);
+                node["forwarding_diagnostics"] =
+                    crate::services::session_forwarding::probe::diagnostics(
+                        &state.config.cluster,
+                        node,
+                        state.cluster_instance_id.as_deref(),
+                    );
+            }
             let (session_owners, session_owner_error) =
                 match crate::db::dispatched_sessions::list_dispatched_sessions_pg(pool, false).await
                 {
@@ -84,6 +93,10 @@ pub async fn list_nodes(
         }
         Err(error) => Err(AppError::internal(error)),
     }
+}
+
+pub async fn node_probe(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({"protocol":1,"instance_id":state.cluster_instance_id}))
 }
 
 fn configured_forward_owner_ids(cluster: &crate::config::ClusterConfig) -> Vec<&str> {

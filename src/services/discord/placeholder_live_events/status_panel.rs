@@ -88,6 +88,7 @@ pub(super) struct StatusPanelState {
     // #3811: intake-set original-request user_msg_id; drives the `요청:` deeplink
     // (`None` for headless/synthetic/voice/id-0 — no real Discord message).
     pub(super) request_user_msg_id: Option<u64>,
+    pub(super) request_guild_id: Option<String>,
     // #3983/#4147/#4451: session one-shot + sticky winning-turn prefix ledger.
     // Bookkeeping only; excluded from session snapshot equality.
     session_banner_claims: SessionBannerClaims,
@@ -114,6 +115,7 @@ impl StatusPanelState {
         self.completed_at = None; // #3477 item 3: drop the stale freshness gate.
         self.background_agent_pending = false;
         self.request_user_msg_id = None; // #3811: new session = new request context.
+        self.request_guild_id = None;
     }
 
     /// #3983 item4: atomically claim the one-shot session banner for the CURRENT
@@ -197,6 +199,7 @@ impl StatusPanelState {
             // #3391: carry the ordinal counter across the state rebuild.
             next_slot_ordinal: self.next_slot_ordinal,
             request_user_msg_id: self.request_user_msg_id, // #3811: survive turn reset
+            request_guild_id: self.request_guild_id.clone(),
             // #4451: this claim is session-scoped, not turn-scoped. The health
             // redrive path can run ordinary turn cleanup every 30 seconds while
             // the same tmux/provider session remains alive. Dropping the claim

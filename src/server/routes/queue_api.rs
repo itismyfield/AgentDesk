@@ -407,7 +407,7 @@ mod cancel_queue_preserve_pg_tests {
 
     fn test_router(pool: sqlx::PgPool) -> Router {
         let state = test_state(pool);
-        domains::ops::router(state.clone()).with_state(state)
+        domains::runtime::router(state.clone()).with_state(state)
     }
 
     async fn post_cancel(app: &Router, channel_id: u64, force: bool) -> (StatusCode, Value) {

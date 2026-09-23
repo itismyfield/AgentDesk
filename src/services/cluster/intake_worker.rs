@@ -257,9 +257,7 @@ pub(crate) enum TickOutcome {
 /// drive single-tick scenarios without spawning a long-running task.
 pub(crate) async fn run_intake_worker_tick(
     pool: &PgPool,
-    http: &Arc<serenity::http::Http>,
     shared: &Arc<SharedData>,
-    token: &str,
     target_instance_id: &str,
     provider: &str,
     claim_owner: &str,
@@ -281,6 +279,7 @@ pub(crate) async fn run_intake_worker_tick(
     }
 
     let claimed = claim_pending_for_target(pool, target_instance_id, provider, claim_owner).await?;
+    super::readiness::record_poller_progress(provider);
     let Some(row) = claimed else {
         return Ok(TickOutcome::QueueEmpty);
     };
@@ -314,12 +313,67 @@ pub(crate) async fn run_intake_worker_tick(
         }
     };
 
+    let runtime = match crate::services::discord::health::resolve_intake_worker_runtime(
+        shared,
+        request.channel_id,
+    )
+    .await
+    {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            mark_failed_pre_accept(
+                pool,
+                row.id,
+                claim_owner,
+                &format!("runtime ownership: {reason}"),
+            )
+            .await?;
+            return Ok(TickOutcome::Processed);
+        }
+    };
+    // Both the queue poller and selected channel owner must drain on restart.
+    let Some(_owner_tick) = runtime
+        .shared
+        .restart
+        .intake_worker_lifecycle
+        .try_begin_tick()
+    else {
+        release_cancelled_claim(pool, &row, claim_owner).await?;
+        return Ok(TickOutcome::Cancelled);
+    };
+    let owner_shutdown = runtime.shared.restart.shutdown_reader();
+    let owner_cancelled = || {
+        cancelled()
+            || shared.restart.intake_worker_lifecycle.admission_is_fenced()
+            || owner_shutdown.load(Ordering::Acquire)
+    };
+
+    if let Err(reason) = super::execution_requirements::validate_worker(&row) {
+        mark_failed_pre_accept(
+            pool,
+            row.id,
+            claim_owner,
+            &format!("execution requirements: {reason}"),
+        )
+        .await?;
+        return Ok(TickOutcome::Processed);
+    }
+
+    let uploads = match super::attachment_transfer::worker_uploads(pool, &row).await {
+        Ok(uploads) => uploads,
+        Err(reason) => {
+            mark_failed_pre_accept(pool, row.id, claim_owner, &format!("attachments: {reason}"))
+                .await?;
+            return Ok(TickOutcome::Processed);
+        }
+    };
+
     // Payload conversion can race the marker too. Recheck at the final
     // pre-accept boundary; after acceptance the lifecycle guard makes marker
     // acknowledgement wait for execute/final DB transition to drain.
     if admission_action(
-        cancelled,
-        &shared.restart.intake_worker_lifecycle,
+        &owner_cancelled,
+        &runtime.shared.restart.intake_worker_lifecycle,
         AdmissionCheckpoint::AfterClaim,
     ) == AdmissionAction::ReleaseClaim
     {
@@ -354,7 +408,14 @@ pub(crate) async fn run_intake_worker_tick(
         return Ok(TickOutcome::Processed);
     }
 
-    let result = execute_intake_turn_core(http, shared, token, request).await;
+    let result = execute_intake_turn_core(
+        &runtime.http,
+        &runtime.shared,
+        &runtime.token,
+        request,
+        uploads,
+    )
+    .await;
 
     match result {
         Ok(()) => {
@@ -433,9 +494,7 @@ async fn release_cancelled_claim(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_intake_worker_loop(
     pool: PgPool,
-    http: Arc<serenity::http::Http>,
     shared: Arc<SharedData>,
-    token: String,
     target_instance_id: String,
     provider: String,
     claim_owner: String,
@@ -462,9 +521,7 @@ pub(crate) async fn run_intake_worker_loop(
 
         let tick = run_intake_worker_tick(
             &pool,
-            &http,
             &shared,
-            &token,
             &target_instance_id,
             &provider,
             &claim_owner,
@@ -578,6 +635,8 @@ mod tests {
 
     fn fake_row() -> IntakeOutboxRow {
         IntakeOutboxRow {
+            execution_requirements: serde_json::json!({}),
+            attachment_refs: serde_json::json!([]),
             id: 42,
             target_instance_id: "worker-1".to_string(),
             forwarded_by_instance_id: "leader-1".to_string(),

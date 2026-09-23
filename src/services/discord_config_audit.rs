@@ -667,7 +667,7 @@ fn audit_db_agents(
     // worker/auto node reports drift (without warnings — divergence from the
     // leader-owned roster is expected on a worker) and must not mutate the shared
     // agents table, otherwise it clobbers the leader's roster.
-    if !crate::db::postgres::agent_roster_sync_enabled(config) {
+    if !crate::db::postgres::shared_config_sync_enabled(config) {
         report.actions.push(
             "skipped DB agent sync on non-leader cluster node; the leader owns the shared agents roster (#3692)"
                 .to_string(),

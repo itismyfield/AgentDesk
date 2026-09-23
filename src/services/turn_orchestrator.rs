@@ -17,6 +17,7 @@ mod dispatch_reservation;
 mod episode_identity;
 mod front_requeue;
 mod inbound_order;
+mod intervention;
 mod lease_release;
 #[cfg(test)]
 mod mailbox_unreachable_tests;
@@ -48,6 +49,7 @@ use front_requeue::requeue_intervention_front;
 use inbound_order::INBOUND_ORDER_FAIL_OPEN_AFTER;
 pub(crate) use inbound_order::TurnAdmissionOrder;
 use inbound_order::{claim_yields, pause_inbound_stall_for_turn};
+pub(crate) use intervention::{Intervention, InterventionMode, SourceMessageTextSegment};
 use lease_release::release_active_turn_anchor;
 pub(crate) use overflow::SoftInterventionProbe;
 use overflow::drain_head_overflow;
@@ -80,113 +82,6 @@ use turn_finished_signal::{
 
 pub(crate) const MAX_INTERVENTIONS_PER_CHANNEL: usize = 30;
 pub(crate) const INTERVENTION_DEDUP_WINDOW: Duration = Duration::from_secs(10);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum InterventionMode {
-    Soft,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct SourceMessageTextSegment {
-    pub(crate) message_id: MessageId,
-    pub(crate) text: String,
-}
-
-impl SourceMessageTextSegment {
-    pub(crate) fn new(message_id: MessageId, text: impl Into<String>) -> Self {
-        Self {
-            message_id,
-            text: text.into(),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct Intervention {
-    pub(crate) author_id: UserId,
-    pub(crate) author_is_bot: bool,
-    pub(crate) message_id: MessageId,
-    pub(crate) queued_generation: u64,
-    pub(crate) source_message_ids: Vec<MessageId>,
-    pub(crate) source_message_queued_generations: Vec<SourceMessageQueuedGeneration>,
-    pub(crate) source_text_segments: Vec<SourceMessageTextSegment>,
-    pub(crate) text: String,
-    pub(crate) mode: InterventionMode,
-    pub(crate) created_at: Instant,
-    pub(crate) reply_context: Option<String>,
-    pub(crate) has_reply_boundary: bool,
-    pub(crate) merge_consecutive: bool,
-    pub(crate) pending_uploads: Vec<String>,
-    /// #2266: when a voice-transcript announcement loses the
-    /// `mailbox_try_start_turn` race and is enqueued for later dispatch, the
-    /// per-process `voice::announce_meta` store entry is consumed by the
-    /// original `handle_text_message` call before the race-loss branch runs.
-    /// Embedding the full announcement here keeps the queued payload
-    /// self-contained so the dispatch path (which reinserts the entry into
-    /// the store before re-entering `handle_text_message`) can reconstruct
-    /// the voice-transcript framing instead of falling back to plain text.
-    /// `None` for non-voice paths.
-    pub(crate) voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
-}
-
-impl Intervention {
-    pub(crate) fn preserve_on_cancel(&self) -> bool {
-        self.source_message_queued_generations
-            .iter()
-            .any(|source| source.preserve_on_cancel)
-    }
-
-    pub(crate) fn source_message_queued_generations(&self) -> Vec<SourceMessageQueuedGeneration> {
-        let source_message_ids = if self.source_message_ids.is_empty() {
-            vec![self.message_id]
-        } else {
-            self.source_message_ids.clone()
-        };
-        if self.source_message_queued_generations.is_empty() {
-            return source_message_ids
-                .into_iter()
-                .map(|message_id| {
-                    SourceMessageQueuedGeneration::new(message_id, self.queued_generation)
-                })
-                .collect();
-        }
-        let mut owners = self.source_message_queued_generations.clone();
-        for message_id in source_message_ids {
-            if !owners.iter().any(|owner| owner.message_id == message_id) {
-                owners.push(SourceMessageQueuedGeneration::new(
-                    message_id,
-                    self.queued_generation,
-                ));
-            }
-        }
-        owners
-    }
-
-    pub(crate) fn source_text_segments(&self) -> Vec<SourceMessageTextSegment> {
-        let source_message_ids = if self.source_message_ids.is_empty() {
-            vec![self.message_id]
-        } else {
-            self.source_message_ids.clone()
-        };
-        if self.source_text_segments.is_empty() {
-            return split_text_segments_for_sources(&source_message_ids, &self.text);
-        }
-
-        let mut segments = Vec::new();
-        for message_id in source_message_ids {
-            if let Some(segment) = self
-                .source_text_segments
-                .iter()
-                .find(|segment| segment.message_id == message_id)
-            {
-                segments.push(segment.clone());
-            } else {
-                segments.push(SourceMessageTextSegment::new(message_id, String::new()));
-            }
-        }
-        segments
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum QueueExitKind {
@@ -235,38 +130,6 @@ fn intervention_age_since(last: &Intervention, current: &Intervention) -> Durati
         .created_at
         .checked_duration_since(last.created_at)
         .unwrap_or_default()
-}
-
-fn split_text_segments_for_sources(
-    source_message_ids: &[MessageId],
-    text: &str,
-) -> Vec<SourceMessageTextSegment> {
-    if source_message_ids.is_empty() {
-        return Vec::new();
-    }
-    if source_message_ids.len() == 1 {
-        return vec![SourceMessageTextSegment::new(source_message_ids[0], text)];
-    }
-
-    if text.matches('\n').count() + 1 != source_message_ids.len() {
-        return source_message_ids
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, message_id)| {
-                SourceMessageTextSegment::new(message_id, if index == 0 { text } else { "" })
-            })
-            .collect();
-    }
-
-    let mut pieces = text.splitn(source_message_ids.len(), '\n');
-    source_message_ids
-        .iter()
-        .copied()
-        .map(|message_id| {
-            SourceMessageTextSegment::new(message_id, pieces.next().unwrap_or_default())
-        })
-        .collect()
 }
 
 fn join_source_text_segments(segments: &[SourceMessageTextSegment]) -> String {
@@ -5315,11 +5178,9 @@ mod enqueue_refusal_reason_tests {
     fn upload_bearing_interventions_are_not_deduped_by_empty_text() {
         let now = Instant::now();
         let mut first = intervention(1, "", now);
-        first.pending_uploads =
-            vec!["[File uploaded] one.png → /tmp/one.png (1 bytes)".to_string()];
+        first.pending_uploads = vec!["[File uploaded] one.png → /tmp/one.png (1 bytes)".into()];
         let mut second = intervention(2, "", now);
-        second.pending_uploads =
-            vec!["[File uploaded] two.png → /tmp/two.png (2 bytes)".to_string()];
+        second.pending_uploads = vec!["[File uploaded] two.png → /tmp/two.png (2 bytes)".into()];
         let mut queue = vec![first];
 
         let result = enqueue_intervention(&mut queue, second, None);
@@ -6869,8 +6730,7 @@ mod persistence_tests {
         let channel_id = ChannelId::new(2_840_001);
         let mut intervention = make_intervention(2_840_002, "", None);
         intervention.pending_uploads = vec![
-            "[File uploaded] report.pdf → /runtime/discord_uploads/1/report.pdf (123 bytes)"
-                .to_string(),
+            "[File uploaded] report.pdf → /runtime/discord_uploads/1/report.pdf (123 bytes)".into(),
         ];
 
         save_channel_queue(

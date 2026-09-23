@@ -37,7 +37,6 @@ use sqlx::{PgPool, Row};
 use crate::db::postgres::AdvisoryLockLease;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tower_http::services::{ServeDir, ServeFile};
 
 use crate::config::Config;
 use crate::engine::PolicyEngine;
@@ -274,6 +273,8 @@ pub(crate) async fn run(
     health_registry: Option<Arc<HealthRegistry>>,
     pg_pool: Option<PgPool>,
 ) -> Result<()> {
+    crate::config::validate_config(&config)?;
+    let modules = config.cluster.runtime_profile.modules();
     crate::services::dispatches::wait_queue::set_runtime_cluster_config(config.cluster.clone());
     // Publish the boot config as the shared live snapshot and (when enabled)
     // start the config-file watcher so hot-swappable settings reload without a
@@ -342,7 +343,9 @@ pub(crate) async fn run(
     startup_preflight::run();
     let cluster_runtime = cluster::bootstrap(&config, pg_pool.clone()).await;
     let cluster_instance_id = cluster_runtime.instance_id().to_string();
-    if let Some(pool) = pg_pool.clone() {
+    if modules.hub_services
+        && let Some(pool) = pg_pool.clone()
+    {
         crate::services::dispatch_watchdog::spawn(pool);
     }
     crate::pipeline::refresh_override_health_report(pg_pool.as_ref()).await;
@@ -373,22 +376,14 @@ pub(crate) async fn run(
     );
     worker_registry.run_boot_only_steps().await?;
     worker_registry.start_after_boot_reconcile()?;
-    routes::receipt::spawn_token_analytics_cache_prewarm();
+    if modules.dashboard {
+        routes::receipt::spawn_token_analytics_cache_prewarm();
+    }
 
-    // Resolve dashboard dist path relative to runtime root or binary location
-    let dashboard_dir = crate::cli::agentdesk_runtime_root()
-        .map(|r| r.join("dashboard/dist"))
-        .unwrap_or_else(|| std::path::PathBuf::from("dashboard/dist"));
-
-    dashboard_provision::provision_off_runtime(dashboard_dir.clone()).await;
-
-    tracing::info!("Serving dashboard from {:?}", dashboard_dir);
+    let dashboard_dir = dashboard_provision::prepare_dashboard(modules.dashboard).await;
 
     let broadcast_tx = ws::new_broadcast();
     let batch_buffer = worker_registry.start_after_websocket_broadcast(broadcast_tx.clone())?;
-    let dashboard_service = ServeDir::new(&dashboard_dir)
-        .append_index_html_on_directories(true)
-        .fallback(ServeFile::new(dashboard_dir.join("index.html")));
     let control_plane_auth_state = routes::AppState {
         pg_pool: pg_pool.clone(),
         engine: engine.clone(),
@@ -400,18 +395,20 @@ pub(crate) async fn run(
     };
 
     let dashboard_access = dashboard_auth::DashboardAccess::new(&config);
-    let mut app = Router::new()
-        .route(
+    let mut app = Router::new();
+    if modules.dashboard {
+        app = app.route(
             "/ws",
             get(ws::ws_handler).with_state((broadcast_tx.clone(), dashboard_access.clone())),
-        )
-        .nest(
-            "/api",
-            routes::api_router_with_dashboard_access(
-                control_plane_auth_state.clone(),
-                dashboard_access,
-            ),
         );
+    }
+    app = app.nest(
+        "/api",
+        routes::api_router_with_dashboard_access(
+            control_plane_auth_state.clone(),
+            dashboard_access,
+        ),
+    );
     if _claude_tui_hook_endpoint.is_some() {
         app = app.merge(
             crate::services::claude_tui::hook_server::hook_receiver_router().layer(
@@ -432,7 +429,7 @@ pub(crate) async fn run(
             routes::auth::auth_middleware,
         ),
     ));
-    let app = app.fallback_service(dashboard_service);
+    let app = dashboard_provision::serve_dashboard(app, &dashboard_dir, modules.dashboard);
 
     // #3870 — fail closed on the dangerous combination of a non-loopback bind
     // host with no `server.auth_token`. The control-plane auth middleware is

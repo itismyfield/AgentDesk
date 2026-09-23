@@ -3,10 +3,16 @@ server:
   host: "0.0.0.0"
 
 cluster:
+  # Roles: hub = Hub, runner = Runner, auto = Automatic.
+  # Feature mode: runtime_profile full = Full features, runner = Execution only.
+  # Legacy role leader/worker and runtime_profile worker remain accepted aliases.
+  # With clustering disabled, the dashboard shows This computer / Standalone.
   enabled: false
-  # Optional operator-owned settings per node. Keys match worker `instance_id`
+  role: auto
+  runtime_profile: full
+  # Optional operator-owned settings per node. Keys match runner `instance_id`
   # first, then hostname for dispatch caps. Authenticated session forwarding is
-  # fail-closed: `trusted_forward_origin` must exactly match the worker's
+  # fail-closed: `trusted_forward_origin` must exactly match the runner's
   # advertised `cluster.api_base_url`; advertisements never become a trust root.
   # Configure every node before enabling forwarding capabilities. Origins use
   # HTTPS by default, have path `/`, and contain no userinfo, query, or fragment.
@@ -35,7 +41,7 @@ cluster:
   dispatch_routing:
     wait_timeout_secs: 600
     wake_interval_secs: 30
-  # Intake routing is opt-in. Keep disabled until worker nodes advertise
+  # Intake routing is opt-in. Keep disabled until runners advertise
   # intake_worker capability and the operator is ready to test observe/enforce.
   intake_routing:
     enabled: false

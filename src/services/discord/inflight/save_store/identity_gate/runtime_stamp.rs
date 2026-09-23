@@ -64,7 +64,7 @@ impl InflightTurnState {
         &mut self,
         persisted_baseline: &mut InflightTurnState,
         expected: &InflightTurnIdentity,
-        can_chain_locally: bool,
+        can_deliver_directly: bool,
         message: StreamMessage,
     ) -> (StreamMessage, Option<CodexRange>, bool) {
         let StreamMessage::CodexTuiTerminalDone {
@@ -91,7 +91,7 @@ impl InflightTurnState {
             &root,
             (self, persisted_baseline),
             expected,
-            can_chain_locally,
+            can_deliver_directly,
             (&result, session_id.as_deref(), &rollout_path),
             (&tmux_session_name, &turn_nonce),
             (source_start, complete_record_end),
@@ -103,7 +103,7 @@ fn admit_codex_terminal_range_in_root(
     root: &Path,
     states: (&mut InflightTurnState, &mut InflightTurnState),
     expected: &InflightTurnIdentity,
-    can_chain_locally: bool,
+    can_deliver_directly: bool,
     frame: (&str, Option<&str>, &str),
     authority: (&str, &str),
     range: (u64, u64),
@@ -115,7 +115,7 @@ fn admit_codex_terminal_range_in_root(
     let session = nonempty(session).ok_or(GuardedSaveOutcome::Unnameable)?;
     let tmux = nonempty(Some(tmux)).ok_or(GuardedSaveOutcome::Unnameable)?;
     let nonce = nonempty(Some(nonce)).ok_or(GuardedSaveOutcome::Unnameable)?;
-    if !can_chain_locally
+    if !can_deliver_directly
         || local.provider_kind() != Some(ProviderKind::Codex)
         || local.runtime_kind != Some(RuntimeHandoffKind::CodexTui)
         || !StreamRelayAuthority::from_state(local).bridge_owns_relay()
@@ -1260,7 +1260,7 @@ impl InflightTurnState {
         &mut self,
         baseline: &mut InflightTurnState,
         expected: &InflightTurnIdentity,
-        can_chain_locally: bool,
+        can_deliver_directly: bool,
         actor_authority: (
             &crate::services::discord::SharedData,
             &std::sync::Arc<crate::services::provider::CancelToken>,
@@ -1317,7 +1317,7 @@ impl InflightTurnState {
             return Ok(self.admit_codex_tui_terminal_frame(
                 baseline,
                 expected,
-                can_chain_locally,
+                can_deliver_directly,
                 message,
             ));
         };
@@ -1379,7 +1379,7 @@ impl InflightTurnState {
                 return Err(mismatch);
             }
             binding.session_id = nonempty(Some(&session)).map(str::to_owned);
-            if !can_chain_locally
+            if !can_deliver_directly
                 || self.provider_kind() != Some(provider.clone())
                 || self.runtime_kind != Some(runtime)
                 || self.turn_start_offset != Some(source_start)

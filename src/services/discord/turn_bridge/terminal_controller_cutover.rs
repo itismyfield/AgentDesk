@@ -38,9 +38,9 @@ pub(super) fn begin_pinned_terminal(
 /// lease-acquire site (mod.rs ~6134).
 ///
 /// Terms (mirroring the legacy short-replace branch arm at mod.rs:6126-6245):
-/// - `will_short_replace` — we are in the `can_chain_locally` short-replace arm
+/// - `will_short_replace` — we are in the `can_deliver_directly` short-replace arm
 ///   (NOT the long-chunk send-new-chunks arm; mod.rs:6023/6024). I.e.
-///   `can_chain_locally && !should_send_new_chunks`. The long-chunk arm is routed
+///   `can_deliver_directly && !should_send_new_chunks`. The long-chunk arm is routed
 ///   by [`bridge_long_chunks_cutover_decision`] when the A5 flag is ON.
 /// - `ordered_range` — `tmux_last_offset > turn_start_offset` (a real `[start,end)`).
 ///   The legacy `NoRange` arm (deliver-without-advance) is NOT expressible (the
@@ -55,17 +55,17 @@ pub(super) fn begin_pinned_terminal(
 ///   legacy short-replace edits even an (already non-empty, since we are in the
 ///   non-empty `else` at mod.rs:6011) body; the non-empty branch guarantees this,
 ///   but we pin it so empty bodies (should one ever reach here) stay legacy.
-/// - `can_chain_locally` — the bridge will direct-edit (NOT headless enqueue;
+/// - `can_deliver_directly` — the bridge will direct-edit (NOT headless enqueue;
 ///   mod.rs:6023). The headless arm (mod.rs:6247) is EXCLUDED.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn bridge_short_replace_cutover(
-    can_chain_locally: bool,
+    can_deliver_directly: bool,
     will_short_replace: bool,
     ordered_range: bool,
     has_placeholder: bool,
     body_non_empty: bool,
 ) -> bool {
-    can_chain_locally && will_short_replace && ordered_range && has_placeholder && body_non_empty
+    can_deliver_directly && will_short_replace && ordered_range && has_placeholder && body_non_empty
 }
 
 /// #3089 A5: the full short-replace cut-over decision at the site-5 lease-acquire
@@ -75,18 +75,18 @@ pub(super) fn bridge_short_replace_cutover(
 /// `mod.rs` call site stays a single line.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn bridge_short_replace_cutover_decision(
-    can_chain_locally: bool,
+    can_deliver_directly: bool,
     formatted_response: &str,
     ordered_range: bool,
     has_placeholder: bool,
 ) -> bool {
     // The send arm is the short-replace arm IFF it does NOT send new chunks.
     let will_short_replace = !super::terminal_delivery::terminal_delivery_should_send_new_chunks(
-        can_chain_locally,
+        can_deliver_directly,
         formatted_response,
     );
     bridge_short_replace_cutover(
-        can_chain_locally,
+        can_deliver_directly,
         will_short_replace,
         ordered_range,
         has_placeholder,
@@ -101,14 +101,14 @@ pub(super) fn bridge_short_replace_cutover_decision(
 /// Retained exclusions: `NoRange` (no advance authority; #4048), headless (no
 /// direct Discord POST), and empty body (consistent with A2b/A3 skip parity).
 pub(super) fn bridge_long_chunks_cutover_decision(
-    can_chain_locally: bool,
+    can_deliver_directly: bool,
     formatted_response: &str,
     ordered_range: bool,
     has_placeholder: bool,
 ) -> bool {
-    can_chain_locally
+    can_deliver_directly
         && super::terminal_delivery::terminal_delivery_should_send_new_chunks(
-            can_chain_locally,
+            can_deliver_directly,
             formatted_response,
         )
         && ordered_range

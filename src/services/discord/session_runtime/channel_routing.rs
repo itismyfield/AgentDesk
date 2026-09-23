@@ -107,21 +107,41 @@ pub(in crate::services::discord) async fn validate_live_channel_routing_with_dm_
     channel_id: serenity::model::id::ChannelId,
     is_dm_hint: Option<bool>,
 ) -> Result<(), settings::BotChannelRoutingGuardFailure> {
+    validate_rest_channel_routing(
+        &ctx.http,
+        Some(&ctx.cache),
+        provider,
+        settings,
+        channel_id,
+        is_dm_hint,
+    )
+    .await
+}
+
+/// Queue execution needs current channel policy, not a Gateway shard. Keep
+/// the same thread inheritance, DM and bot allowlist checks on REST workers.
+pub(in crate::services::discord) async fn validate_rest_channel_routing(
+    http: &Arc<serenity::Http>,
+    cache: Option<&Arc<serenity::cache::Cache>>,
+    provider: &ProviderKind,
+    settings: &DiscordBotSettings,
+    channel_id: ChannelId,
+    is_dm_hint: Option<bool>,
+) -> Result<(), settings::BotChannelRoutingGuardFailure> {
     let is_dm = match is_dm_hint {
         Some(is_dm) => is_dm,
         None => matches!(
-            channel_id.to_channel(&ctx.http).await,
+            channel_id.to_channel(http).await,
             Ok(serenity::model::channel::Channel::Private(_))
         ),
     };
-    let (channel_name, _) = resolve_channel_category(&ctx.http, Some(&ctx.cache), channel_id).await;
-    let (allowlist_channel_id, provider_channel_name) = if let Some((parent_id, parent_name)) =
-        resolve_thread_parent(&ctx.http, channel_id).await
-    {
-        (parent_id, parent_name.or(channel_name.clone()))
-    } else {
-        (channel_id, channel_name.clone())
-    };
+    let (channel_name, _) = resolve_channel_category(http, cache, channel_id).await;
+    let (allowlist_channel_id, provider_channel_name) =
+        if let Some((parent_id, parent_name)) = resolve_thread_parent(http, channel_id).await {
+            (parent_id, parent_name.or(channel_name.clone()))
+        } else {
+            (channel_id, channel_name.clone())
+        };
     validate_bot_channel_routing_with_provider_channel(
         settings,
         provider,

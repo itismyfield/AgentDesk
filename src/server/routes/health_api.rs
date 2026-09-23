@@ -20,6 +20,8 @@ use super::AppState;
 /// #5942 r4: the unauthenticated-body disclosure rules, split out of this file
 /// because it is a registered `shrink` giant (#4710).
 mod public_projection;
+mod runtime_profile;
+use runtime_profile::{attach_runtime_profile, cluster_standby_without_gateway};
 
 const X_AGENTDESK_SOURCE: &str = "x-agentdesk-source";
 
@@ -169,7 +171,7 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
     let release_source = crate::services::release_source::health_json(detailed);
 
     // Check if dashboard dist is available
-    let dashboard_ok = {
+    let dashboard_ok = state.config.cluster.runtime_profile.modules().dashboard && {
         let dashboard_dir = crate::cli::agentdesk_runtime_root()
             .map(|r| r.join("dashboard/dist"))
             .unwrap_or_else(|| std::path::PathBuf::from("dashboard/dist"));
@@ -405,6 +407,7 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             .unwrap_or_else(|_| serde_json::json!({}));
         json["delivery_record_rollout"] = delivery_record_rollout_health_json();
         json["release_source"] = release_source;
+        attach_runtime_profile(&mut json, &state.config);
         json["intake_routing"] =
             crate::services::cluster::intake_router_hook::intake_routing_status_json();
 
@@ -530,6 +533,7 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         }
         json["delivery_record_rollout"] = delivery_record_rollout_health_json();
         json["release_source"] = release_source;
+        attach_runtime_profile(&mut json, &state.config);
         json["intake_routing"] =
             crate::services::cluster::intake_router_hook::intake_routing_status_json();
         let json = if detailed {
@@ -743,6 +747,9 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
         "server_up": server_up,
         "fully_recovered": fully_recovered,
         "cluster_standby": cluster_standby,
+        "runtime_profile": json.get("runtime_profile"),
+        "modules": json.get("modules"),
+        "dashboard_required": json.get("dashboard_required"),
         "degraded": degraded,
         "degraded_reasons": degraded_reasons,
         "expired_relay_ledgers": expired_relay_ledgers,
@@ -772,38 +779,6 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
         public["auto_queue_cleanup"] = auto_queue_cleanup;
     }
     public
-}
-
-async fn cluster_standby_without_gateway(
-    state: &AppState,
-    server_up: bool,
-    degraded_reasons: &[serde_json::Value],
-) -> bool {
-    if !server_up || !state.config.cluster.enabled {
-        return false;
-    }
-    if !degraded_reasons
-        .iter()
-        .any(|reason| reason.as_str() == Some("no_providers_registered"))
-    {
-        return false;
-    }
-    let instance_id = state
-        .config
-        .cluster
-        .instance_id
-        .as_deref()
-        .unwrap_or("")
-        .trim();
-    if instance_id.is_empty() {
-        return false;
-    }
-    health_diagnostics::is_recent_cluster_worker(
-        state.pg_pool_ref(),
-        instance_id,
-        state.config.cluster.lease_ttl_secs,
-    )
-    .await
 }
 
 fn stale_mailbox_repair_applied(

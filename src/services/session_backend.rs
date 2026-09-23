@@ -6,6 +6,8 @@
 //! - normalized output-file tailing/parsing for wrapper JSONL streams
 
 pub(crate) mod auth_profiles;
+mod output;
+pub(crate) use output::capture_process_output;
 
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::{
@@ -78,6 +80,8 @@ pub enum SessionHandle {
         child_stdin: Arc<Mutex<Option<ChildStdin>>>,
         child: Arc<Mutex<Option<Child>>>,
         pid: u32,
+        /// Bound at creation so output APIs never reopen an arbitrary pathname.
+        output: Arc<Mutex<std::fs::File>>,
     },
     #[cfg(test)]
     TestProcess {
@@ -172,8 +176,9 @@ impl ProcessBackend {
         apply_command_env: impl FnOnce(&mut Command),
     ) -> Result<SessionHandle, String> {
         // 1. Ensure output file exists (empty)
-        std::fs::OpenOptions::new()
+        let output = std::fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&config.output_path)
             .map_err(|e| format!("Failed to create output file: {}", e))?;
@@ -256,6 +261,7 @@ impl ProcessBackend {
             child_stdin: Arc::new(Mutex::new(Some(stdin))),
             child: Arc::new(Mutex::new(Some(child))),
             pid,
+            output: Arc::new(Mutex::new(output)),
         })
     }
 }
@@ -560,6 +566,7 @@ fn reap_stopped_process_handle(handle: SessionHandle) {
             child_stdin,
             child,
             pid,
+            ..
         } => {
             let _ = std::thread::Builder::new()
                 .name(format!("process-session-reaper-{pid}"))

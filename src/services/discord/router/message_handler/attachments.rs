@@ -1,4 +1,12 @@
 use super::*;
+use crate::services::cluster::attachment_transfer::{
+    self, store,
+    uploads::{PendingUploads, Upload},
+};
+
+const FILE_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const BUNDLE_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+const MAX_CONCURRENT_BUNDLE_DOWNLOADS: usize = 4;
 
 pub(super) const DISCORD_ATTACHMENT_HOSTS: &[&str] =
     &["cdn.discordapp.com", "media.discordapp.net"];
@@ -6,7 +14,11 @@ pub(super) fn is_allowed_discord_attachment_url(raw_url: &str) -> bool {
     let Ok(url) = Url::parse(raw_url) else {
         return false;
     };
-    if url.scheme() != "https" {
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some_and(|port| port != 443)
+    {
         return false;
     }
     url.host_str()
@@ -17,16 +29,85 @@ pub(super) async fn download_discord_attachment(raw_url: &str) -> Result<Vec<u8>
     if !is_allowed_discord_attachment_url(raw_url) {
         return Err("attachment URL host is not allowed".to_string());
     }
-    let response = reqwest::get(raw_url)
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(FILE_DOWNLOAD_TIMEOUT)
+        .build()
+        .map_err(|_| "attachment client initialization failed")?;
+    let mut response = client
+        .get(raw_url)
+        .send()
         .await
-        .map_err(|error| format!("Download failed: {error}"))?
+        .map_err(|_| "attachment download failed")?
         .error_for_status()
-        .map_err(|error| format!("Download failed: {error}"))?;
-    response
-        .bytes()
+        .map_err(|_| "attachment server returned an error")?;
+    if !response.status().is_success()
+        || response
+            .content_length()
+            .is_some_and(|len| len > store::MAX_FILE_BYTES as u64)
+    {
+        return Err("attachment redirect or file size limit exceeded".into());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map(|bytes| bytes.to_vec())
-        .map_err(|error| format!("Download failed: {error}"))
+        .map_err(|_| "attachment body read failed")?
+    {
+        if bytes.len() + chunk.len() > store::MAX_FILE_BYTES {
+            return Err("attachment exceeds 8 MiB".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+pub(in crate::services::discord::router) async fn prepare_portable_attachments(
+    pool: &sqlx::PgPool,
+    identity: attachment_transfer::AttachmentMessageIdentity,
+    attachments: &[AttachmentDescriptor],
+) -> Result<PendingUploads, String> {
+    static DOWNLOADS: std::sync::LazyLock<tokio::sync::Semaphore> =
+        std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_BUNDLE_DOWNLOADS));
+    let _permit = DOWNLOADS
+        .acquire()
+        .await
+        .map_err(|_| "attachment downloader unavailable")?;
+    let entries = tokio::time::timeout(BUNDLE_DOWNLOAD_TIMEOUT, download_all(attachments))
+        .await
+        .map_err(|_| "attachment bundle download timed out")??;
+    let bundle = attachment_transfer::AttachmentBundleV1 {
+        version: attachment_transfer::ATTACHMENT_BUNDLE_V1,
+        identity: identity.clone(),
+        source_attachment_count: attachments.len() as u32,
+        entries,
+    };
+    let validated = attachment_transfer::validate_attachment_bundle_v1(bundle, &identity)
+        .map_err(|e| format!("attachment validation failed: {e:?}"))?;
+    Ok(vec![Upload::Bundle(store::put(pool, &validated).await?)])
+}
+
+async fn download_all(
+    attachments: &[AttachmentDescriptor],
+) -> Result<Vec<attachment_transfer::AttachmentEntryV1>, String> {
+    if attachments.is_empty() || attachments.len() > store::MAX_FILES {
+        return Err("attachment count must be between 1 and 10".into());
+    }
+    let mut entries = Vec::new();
+    let mut total = 0;
+    for attachment in attachments {
+        let bytes = download_discord_attachment(&attachment.url).await?;
+        total += bytes.len();
+        if total > store::MAX_BUNDLE_BYTES {
+            return Err("attachments exceed 24 MiB".into());
+        }
+        entries.push(attachment_transfer::AttachmentEntryV1 {
+            filename: attachment.filename.clone(),
+            sha256: attachment_transfer::attachment_sha256_hex(&bytes),
+            bytes,
+        });
+    }
+    Ok(entries)
 }
 
 /// Side-effect-free attachment metadata captured at Discord intake.
@@ -92,14 +173,14 @@ pub(in crate::services::discord::router) async fn prepare_admitted_local_attachm
     attachments: &[AttachmentDescriptor],
     shared: &Arc<SharedData>,
     _permit: &LocalAttachmentPreparationPermit,
-) -> Result<Vec<String>, Error> {
+) -> Result<PendingUploads, Error> {
     // Always use the runtime uploads directory (works without session)
     let Some(save_dir) = channel_upload_dir(channel_id) else {
         rate_limit_wait(shared, channel_id).await;
         let _ = channel_id
             .say(http, "Cannot resolve upload directory.")
             .await;
-        return Ok(Vec::new());
+        return Err("cannot resolve upload directory".into());
     };
 
     if let Err(e) = fs::create_dir_all(&save_dir) {
@@ -107,27 +188,16 @@ pub(in crate::services::discord::router) async fn prepare_admitted_local_attachm
         let _ = channel_id
             .say(http, format!("Failed to prepare upload directory: {}", e))
             .await;
-        return Ok(Vec::new());
+        return Err(e.into());
     }
 
+    // Download every member before writing or returning any upload record.
+    let downloaded =
+        tokio::time::timeout(BUNDLE_DOWNLOAD_TIMEOUT, download_all(attachments)).await??;
     let mut upload_records = Vec::new();
-    for attachment in attachments {
+    for (attachment, entry) in attachments.iter().zip(downloaded) {
+        let buf = entry.bytes;
         let file_name = &attachment.filename;
-
-        // Download only from Discord-owned attachment hosts.
-        let buf = match download_discord_attachment(&attachment.url).await {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                tracing::warn!(
-                    channel_id = channel_id.get(),
-                    attachment_url = %attachment.url,
-                    "skipping Discord attachment download: {e}"
-                );
-                rate_limit_wait(shared, channel_id).await;
-                let _ = channel_id.say(http, format!("Download failed: {e}")).await;
-                continue;
-            }
-        };
 
         let file_size = buf.len();
         let ts = chrono::Utc::now().timestamp_millis();
@@ -138,7 +208,7 @@ pub(in crate::services::discord::router) async fn prepare_admitted_local_attachm
                 let _ = channel_id
                     .say(http, format!("Failed to save file: {}", e))
                     .await;
-                continue;
+                return Err(e.into());
             }
         };
 
@@ -146,7 +216,7 @@ pub(in crate::services::discord::router) async fn prepare_admitted_local_attachm
         rate_limit_wait(shared, channel_id).await;
         let _ = channel_id.say(http, &msg_text).await;
         debug_assert!(upload_record.starts_with(&format!("[File uploaded] {file_name} → ")));
-        upload_records.push(upload_record);
+        upload_records.push(upload_record.into());
     }
 
     Ok(upload_records)

@@ -167,7 +167,7 @@ impl<G: TurnGateway + ?Sized> StatusPanelSurface<'_, G> {
 
     async fn edit(&self, channel_id: ChannelId, id: MessageId, text: &str) -> Result<(), String> {
         match self {
-            Self::Gateway(_, gateway) if gateway.can_chain_locally() => {
+            Self::Gateway(_, gateway) if gateway.can_deliver_directly() => {
                 TurnGateway::edit_message(*gateway, channel_id, id, text).await
             }
             Self::Gateway(shared, _) => match shared.serenity_http_or_token_fallback() {

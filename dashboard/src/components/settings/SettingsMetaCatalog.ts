@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from "react";
+import { useMachineNodes } from "./useMachineNodes";
 import type { RuntimeConfigMap } from "../../api";
 import type { CompanySettings, VoiceConfigResponse } from "../../types";
 import {
@@ -52,6 +53,8 @@ export function useSettingsMetaCatalog({
   voiceConfig,
   voiceDraft,
 }: UseSettingsMetaCatalogArgs) {
+  const machines = useMachineNodes();
+  const machineCount = machines.data ? String(machines.data.nodes.length) : "—";
   const voiceAliasConflict = useMemo(() => findVoiceAliasConflict(voiceDraft), [voiceDraft]);
   const voiceDirty = useMemo(
     () => JSON.stringify(voiceConfigComparable(voiceConfig)) !== JSON.stringify(voiceConfigComparable(voiceDraft)),
@@ -485,9 +488,9 @@ export function useSettingsMetaCatalog({
         id: group.id,
         title: tr(group.nameKo, group.nameEn),
         detail: tr(group.descKo, group.descEn),
-        count: String(groupCounts[group.id] ?? 0),
+        count: group.id === "machine" ? machineCount : String(groupCounts[group.id] ?? 0),
       })),
-    [groupCounts, tr],
+    [groupCounts, machineCount, tr],
   );
   const panelQueryNormalized = panelQuery.trim().toLowerCase();
   const filteredNavItems = useMemo(

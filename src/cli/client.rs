@@ -3,6 +3,9 @@
 use crate::config;
 use serde_json::Value;
 
+mod transport;
+pub(crate) use transport::get_json_at;
+use transport::request_json;
 mod runtime_config;
 pub(crate) use runtime_config::payload as runtime_config_payload;
 
@@ -60,54 +63,6 @@ fn encode_path_segment(value: &str) -> String {
         }
     }
     encoded
-}
-
-fn request_json(method: &str, path: &str, body: Option<&str>) -> Result<Value, String> {
-    let url = if path.starts_with('/') {
-        format!("{}{}", api_base(), path)
-    } else {
-        format!("{}/{}", api_base(), path)
-    };
-
-    let a = agent();
-    let mut req = match method.to_uppercase().as_str() {
-        "GET" => a.get(&url),
-        "POST" => a.post(&url),
-        "PATCH" => a.patch(&url),
-        "PUT" => a.put(&url),
-        "DELETE" => a.delete(&url),
-        other => return Err(format!("Unsupported method: {other}")),
-    };
-    if let Some(token) = auth_token() {
-        req = req.set("Authorization", &format!("Bearer {token}"));
-    }
-
-    let method_upper = method.to_ascii_uppercase();
-    let resp = if let Some(b) = body {
-        req.set("Content-Type", "application/json").send_string(b)
-    } else if matches!(method_upper.as_str(), "POST" | "PATCH" | "PUT") {
-        req.set("Content-Type", "application/json")
-            .send_string("{}")
-    } else {
-        req.call()
-    };
-
-    let resp = match resp {
-        Ok(resp) => resp,
-        Err(ureq::Error::Status(code, resp)) => {
-            let body = resp.into_string().unwrap_or_default();
-            return Err(status_error_message(code, &body));
-        }
-        Err(ureq::Error::Transport(err)) => {
-            return Err(connection_error_hint(
-                &format!("Request failed: {err}"),
-                &api_base(),
-                "AGENTDESK_API_URL",
-            ));
-        }
-    };
-
-    resp.into_json().map_err(|e| format!("Parse error: {e}"))
 }
 
 /// Assemble the error message for an HTTP *status* failure — the server
@@ -1035,17 +990,12 @@ fn collect_agentdesk_events(
                     .and_then(Value::as_str)
                     .unwrap_or("-")
                     .to_string();
-                let role = node
-                    .get("effective_role")
-                    .and_then(Value::as_str)
-                    .or_else(|| node.get("role").and_then(Value::as_str))
-                    .unwrap_or("-")
-                    .to_string();
+                let role = node_role_name(node).to_string();
                 out.push(ActivityEntry {
                     kind: "deploy",
                     timestamp: started,
                     ref_label: instance.clone(),
-                    summary: format!("worker node restarted (role={role})"),
+                    summary: format!("execution node restarted (role={role})"),
                     actor: instance,
                 });
             }
@@ -1532,11 +1482,7 @@ pub fn cmd_health(json_output: bool) -> Result<(), String> {
         .get("instance_id")
         .and_then(Value::as_str)
         .unwrap_or("-");
-    let role = local
-        .get("effective_role")
-        .and_then(Value::as_str)
-        .or_else(|| local.get("role").and_then(Value::as_str))
-        .unwrap_or("-");
+    let role = node_role_name(&local);
     let active_dispatches = local
         .get("active_dispatch_count")
         .and_then(Value::as_i64)
@@ -1584,6 +1530,18 @@ pub fn cmd_health(json_output: bool) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Display canonical roles while accepting both registry generations.
+fn node_role_name(node: &Value) -> &str {
+    let raw = node
+        .get("effective_role")
+        .and_then(Value::as_str)
+        .or_else(|| node.get("role").and_then(Value::as_str))
+        .unwrap_or("-");
+    raw.parse::<crate::config::ClusterRole>()
+        .map(crate::config::ClusterRole::as_str)
+        .unwrap_or(raw)
 }
 
 /// Per-machine row used by `cmd_machine_compare`.
@@ -1647,12 +1605,7 @@ fn machine_row_from_node(node: &Value) -> MachineRow {
             .and_then(Value::as_str)
             .unwrap_or("-")
             .to_string(),
-        role: node
-            .get("effective_role")
-            .and_then(Value::as_str)
-            .or_else(|| node.get("role").and_then(Value::as_str))
-            .unwrap_or("-")
-            .to_string(),
+        role: node_role_name(node).to_string(),
         status: node
             .get("status")
             .and_then(Value::as_str)
@@ -2680,6 +2633,25 @@ mod health_compare_tests {
         assert_eq!(classify_machine_label(&node), "linux-build-01");
         let node = json!({"instance_id": "worker-x"});
         assert_eq!(classify_machine_label(&node), "worker-x");
+    }
+
+    #[test]
+    fn machine_role_display_uses_effective_role_and_accepts_legacy_names() {
+        for (raw, expected) in [
+            ("leader", "hub"),
+            ("hub", "hub"),
+            ("worker", "runner"),
+            ("runner", "runner"),
+            ("standby", "standby"),
+        ] {
+            let node = serde_json::json!({"role":"hub", "effective_role":raw});
+            assert_eq!(node_role_name(&node), expected);
+        }
+        assert_eq!(
+            node_role_name(&serde_json::json!({"role":"worker"})),
+            "runner"
+        );
+        assert_eq!(node_role_name(&serde_json::json!({})), "-");
     }
 
     #[test]

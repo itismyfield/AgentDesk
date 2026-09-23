@@ -39,11 +39,64 @@ pub fn shell_command_builder(cmd: &str) -> Command {
 ///
 /// Equivalent to `hostname -s` on Unix. Falls back to "localhost" on failure.
 pub fn hostname_short() -> String {
-    Command::new("hostname")
-        .arg("-s")
+    let mut command = Command::new("hostname");
+    #[cfg(unix)]
+    command.arg("-s");
+    command
         .output()
         .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
+        .and_then(|output| parse_short_hostname(output.status.success(), &output.stdout))
         .unwrap_or_else(|| "localhost".to_string())
+}
+
+fn parse_short_hostname(success: bool, stdout: &[u8]) -> Option<String> {
+    if !success {
+        return None;
+    }
+    let hostname = std::str::from_utf8(stdout).ok()?.trim();
+    if hostname.is_empty() || hostname.chars().any(char::is_whitespace) {
+        return None;
+    }
+    hostname
+        .split('.')
+        .next()
+        .filter(|short| !short.is_empty())
+        .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod hostname_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_native_and_fully_qualified_hostnames() {
+        assert_eq!(
+            parse_short_hostname(true, b"worker-1\r\n").as_deref(),
+            Some("worker-1")
+        );
+        assert_eq!(
+            parse_short_hostname(true, b"fixture-host.local\n").as_deref(),
+            Some("fixture-host")
+        );
+    }
+
+    #[test]
+    fn rejects_failed_empty_or_invalid_hostname_output() {
+        for (success, output) in [
+            (false, b"worker-1".as_slice()),
+            (true, b" \r\n"),
+            (true, b"usage: hostname"),
+            (true, b".local"),
+            (true, b"\xff"),
+        ] {
+            assert_eq!(parse_short_hostname(success, output), None);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_native_hostname_matches_computer_name() {
+        let expected = std::env::var("COMPUTERNAME").expect("Windows defines COMPUTERNAME");
+        assert!(hostname_short().eq_ignore_ascii_case(&expected));
+    }
 }

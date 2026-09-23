@@ -142,10 +142,10 @@ function refreshReasonLabel(reason: string | null | undefined, t: TFunction): st
       });
     case "rate_limit_sync_not_active_on_this_node":
       return t({
-        ko: "사용량 새로고침은 리더 노드에서 실행됩니다",
-        en: "Usage refresh runs on the leader node",
-        ja: "使用量更新はリーダーノードで実行されます",
-        zh: "用量刷新在主节点执行",
+        ko: "사용량 새로고침은 허브에서 실행됩니다",
+        en: "Usage refresh runs on the hub",
+        ja: "使用量更新はハブで実行されます",
+        zh: "用量刷新在枢纽节点执行",
       });
     case "postgres_pool_unavailable":
       return t({

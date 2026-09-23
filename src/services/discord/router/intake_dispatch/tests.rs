@@ -4,6 +4,10 @@ fn intake_dispatch_invariant_direct_execution_body_has_no_external_producer_call
         ("intake_gate", include_str!("../intake_gate.rs")),
         ("gateway", include_str!("../../gateway.rs")),
         ("discord_mod", include_str!("../../mod.rs")),
+        (
+            "queue_kickoff",
+            include_str!("../../queue_dispatch/kickoff.rs"),
+        ),
         ("skill", include_str!("../../commands/skill.rs")),
         (
             "text_commands",
@@ -95,8 +99,8 @@ fn intake_dispatch_invariant_queued_entrypoints_promote_markers_after_admission_
             "drain_dispatched_queue_markers(",
         ),
         (
-            "discord_mod",
-            include_str!("../../mod.rs"),
+            "queue_kickoff",
+            include_str!("../../queue_dispatch/kickoff.rs"),
             "start_and_drain_kickoff_markers(",
         ),
     ] {
@@ -252,7 +256,10 @@ fn request(channel_id: ChannelId, message_id: u64, text: &str) -> IntakeRequest 
     }
 }
 
-fn queued_intervention(message_id: u64, pending_uploads: Vec<String>) -> Intervention {
+fn queued_intervention(
+    message_id: u64,
+    pending_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
+) -> Intervention {
     let queued_generation = crate::services::discord::runtime_store::process_generation();
     Intervention {
         author_id: UserId::new(4350),
@@ -361,6 +368,7 @@ fn telemetry_only_unopted_live_foreign_owner_stays_fenced_5040() {
             admission,
             IntakeAdmission::DeferredOpenRoute {
                 ref target_instance_id,
+                ..
             } if target_instance_id == "foreign-instance"
         ),
         "a live foreign owner must retain the open-route fence"
@@ -386,7 +394,7 @@ fn telemetry_only_unopted_unknown_owner_authority_keeps_local_fence_5040() {
     assert!(matches!(
         admission,
         IntakeAdmission::DeferredOpenRoute {
-            ref target_instance_id,
+            ref target_instance_id, ..
         } if target_instance_id == "local-instance"
     ));
 }
@@ -410,7 +418,7 @@ fn telemetry_only_unopted_local_accepted_route_stays_fenced_5040() {
     assert!(matches!(
         admission,
         IntakeAdmission::DeferredOpenRoute {
-            ref target_instance_id,
+            ref target_instance_id, ..
         } if target_instance_id == "local-instance"
     ));
 
@@ -590,7 +598,7 @@ async fn raw_attachment_foreign_owner_blocks_before_outbox_or_local_state_pg() {
         has_nonportable_uploads: false,
         attachments: vec![super::super::message_handler::AttachmentDescriptor {
             filename: "report.txt".to_string(),
-            url: "https://cdn.discordapp.com/attachments/1/2/report.txt".to_string(),
+            url: "https://example.invalid/report.txt".to_string(),
         }],
         preloaded_uploads: Vec::new(),
         voice_announcement: None,
@@ -599,7 +607,7 @@ async fn raw_attachment_foreign_owner_blocks_before_outbox_or_local_state_pg() {
     assert!(matches!(
         super::admit_text_intake(&deps, &submission).await,
         super::IntakeAdmission::Blocked {
-            reason: crate::services::cluster::intake_router_hook::IntakeBlockedReason::NonPortableAttachmentForeignOwner { .. }
+            reason: crate::services::cluster::intake_router_hook::IntakeBlockedReason::AttachmentUnavailable { .. }
         }
     ));
     let outbox_count: i64 =
@@ -697,7 +705,7 @@ async fn queued_foreign_attachment_is_rejected_without_requeue_pg() {
     let http = Arc::new(serenity::Http::new("Bot intake-dispatch-test"));
     let deps = deps(&http, &shared);
     let local_path = "/private/tmp/gateway-local-attachment.txt".to_string();
-    let intervention = queued_intervention(4_350_311, vec![local_path.clone()]);
+    let intervention = queued_intervention(4_350_311, vec![local_path.clone().into()]);
 
     assert!(matches!(
         admit_queued_intake(
@@ -885,6 +893,7 @@ async fn dispatched_open_route_never_uses_stale_local_recovery_pg() {
         leader_instance_id: &self_instance,
         provider: "claude",
         channel_id: &channel,
+        policy_channel_id: &channel,
         user_msg_id: "4350452",
         request_owner_id: &request_owner_id,
         request_owner_name: Some(&submission.request.request_owner_name),
@@ -900,6 +909,7 @@ async fn dispatched_open_route_never_uses_stale_local_recovery_pg() {
         preserve_on_cancel: false,
         node_override_instance_id: None,
         has_nonportable_uploads: false,
+        attachment_refs: &[],
     };
     let decision = try_route_intake(&pool, &ctx).await;
     assert!(matches!(

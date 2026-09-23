@@ -38,12 +38,15 @@ pub(crate) enum LocalRouteReason {
     /// The only eligible target IS the leader itself (e.g., leader's
     /// own labels happen to match the preference).
     LeaderIsOnlyEligible,
+    /// The eligible leader is the agent's explicitly preferred device.
+    PreferredNodeIsLeader,
 }
 
 /// Inputs needed by the routing decision. Decoupled from `worker_nodes`
 /// JSON shape so the routing fn can be unit-tested without DB fixtures.
 #[derive(Clone, Debug)]
 pub(crate) struct CandidateNode {
+    pub capacity_rank: Option<u64>,
     pub instance_id: String,
     pub labels: Vec<String>,
     /// "online" / "offline" / "stale" — strings used by the existing
@@ -81,6 +84,7 @@ pub(crate) fn candidates_from_worker_nodes_json(nodes: &[Value]) -> Vec<Candidat
                 })
                 .unwrap_or_default();
             Some(CandidateNode {
+                capacity_rank: node.get("capacity_rank").and_then(Value::as_u64),
                 instance_id,
                 labels,
                 status,
@@ -114,6 +118,60 @@ pub(crate) fn pick_intake_target(
         };
     }
 
+    select_matching_intake_target(candidates, preferred_labels, leader_instance_id)
+}
+
+/// Every candidate has already passed hard requirements. Preferences may choose
+/// among them, but cannot authorize fallback to an incompatible local node.
+pub(crate) fn pick_required_intake_target(
+    candidates: &[CandidateNode],
+    preferred_labels: &[String],
+    leader_instance_id: &str,
+) -> IntakeRouteTarget {
+    let preferred = select_matching_intake_target(candidates, preferred_labels, leader_instance_id);
+    if preferred
+        == (IntakeRouteTarget::Local {
+            reason: LocalRouteReason::NoEligibleWorker,
+        })
+    {
+        select_matching_intake_target(candidates, &[], leader_instance_id)
+    } else {
+        preferred
+    }
+}
+
+/// The caller supplies only ready, compatible nodes with available capacity.
+/// A primary device takes precedence over labels, including a preferred leader.
+/// If absent from that set, reuse the normal compatible fallback selection.
+pub(crate) fn pick_preferred_node_target(
+    candidates: &[CandidateNode],
+    preferred_node: &str,
+    preferred_labels: &[String],
+    leader_instance_id: &str,
+) -> IntakeRouteTarget {
+    if candidates
+        .iter()
+        .any(|c| c.instance_id == preferred_node && c.status == "online")
+    {
+        if preferred_node == leader_instance_id {
+            IntakeRouteTarget::Local {
+                reason: LocalRouteReason::PreferredNodeIsLeader,
+            }
+        } else {
+            IntakeRouteTarget::Worker {
+                instance_id: preferred_node.to_owned(),
+            }
+        }
+    } else {
+        pick_required_intake_target(candidates, preferred_labels, leader_instance_id)
+    }
+}
+
+fn select_matching_intake_target(
+    candidates: &[CandidateNode],
+    preferred_labels: &[String],
+    leader_instance_id: &str,
+) -> IntakeRouteTarget {
     let eligible: Vec<&CandidateNode> = candidates
         .iter()
         .filter(|c| c.status == "online" && labels_satisfy(&c.labels, preferred_labels))
@@ -128,7 +186,11 @@ pub(crate) fn pick_intake_target(
     let chosen = eligible
         .into_iter()
         .filter(|c| c.instance_id != leader_instance_id)
-        .min_by(|a, b| a.instance_id.cmp(&b.instance_id));
+        .min_by(|a, b| {
+            a.capacity_rank
+                .cmp(&b.capacity_rank)
+                .then_with(|| a.instance_id.cmp(&b.instance_id))
+        });
 
     if let Some(chosen) = chosen {
         IntakeRouteTarget::Worker {
@@ -154,6 +216,7 @@ mod tests {
 
     fn node(instance: &str, status: &str, labels: &[&str]) -> CandidateNode {
         CandidateNode {
+            capacity_rank: None,
             instance_id: instance.to_string(),
             labels: labels.iter().map(|s| s.to_string()).collect(),
             status: status.to_string(),

@@ -86,6 +86,8 @@ thiserror = "2"
 dirs = "6.0.0"
 glob = "0.3"
 which = "8.0.2"
+# 0.37 supports the project's Rust 1.94 toolchain; collect only host resources.
+sysinfo = { version = "0.37", default-features = false, features = ["system", "disk"] }
 
 # From RCC — text/formatting
 unicode-width = "0.2"
@@ -115,14 +117,17 @@ subtle = "2"
 rand = "0.8"
 libc = "0.2"
 croner = "3.0.1"
+tempfile = "3"
 
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+plist = "1.8"
+
 [dev-dependencies]
 filetime = "0.2"
-tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 
