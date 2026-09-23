@@ -34,7 +34,8 @@ pub(in crate::services::discord) async fn mailbox_has_blocking_active_turn(
 }
 
 /// Unreachable reads as busy: for callers that must not act on a channel
-/// whose turn they cannot rule out.
+/// whose turn they cannot rule out. Unix-only: its sole caller is the tmux module.
+#[cfg(unix)]
 pub(in crate::services::discord) async fn mailbox_has_active_turn_or_unreachable(
     shared: &SharedData,
     channel_id: ChannelId,
@@ -76,7 +77,12 @@ pub(in crate::services::discord) async fn wait_for_turn_end(
 
 #[cfg(test)]
 mod mailbox_unreachable_tests {
-    use super::{mailbox_has_active_turn, mailbox_has_blocking_active_turn, wait_for_turn_end};
+    #[cfg(unix)]
+    use super::mailbox_has_active_turn_or_unreachable;
+    use super::{
+        mailbox_has_active_turn, mailbox_has_blocking_active_turn,
+        mailbox_has_blocking_active_turn_or_unreachable, wait_for_turn_end,
+    };
     use crate::services::discord::make_shared_data_for_tests;
     use poise::serenity_prelude::ChannelId;
 
@@ -89,5 +95,8 @@ mod mailbox_unreachable_tests {
         assert!(!mailbox_has_active_turn(&shared, channel_id).await);
         assert!(!mailbox_has_blocking_active_turn(&shared, channel_id).await);
         assert!(!wait_for_turn_end(&shared, channel_id, std::time::Duration::ZERO).await);
+        #[cfg(unix)]
+        assert!(mailbox_has_active_turn_or_unreachable(&shared, channel_id).await);
+        assert!(mailbox_has_blocking_active_turn_or_unreachable(&shared, channel_id).await);
     }
 }

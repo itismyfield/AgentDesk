@@ -202,9 +202,11 @@ pub(in crate::services::discord) use mailbox_finish::{
     mailbox_finish_cancelled_turn, mailbox_finish_owned_turn, mailbox_finish_turn,
     mailbox_finish_turn_if_matches, mailbox_finish_turn_if_matches_episode_started_before,
 };
+#[cfg(unix)]
+pub(in crate::services::discord) use mailbox_probe::mailbox_has_active_turn_or_unreachable;
 pub(in crate::services::discord) use mailbox_probe::{
-    mailbox_has_active_turn, mailbox_has_active_turn_or_unreachable,
-    mailbox_has_blocking_active_turn, mailbox_has_blocking_active_turn_or_unreachable,
+    mailbox_has_active_turn, mailbox_has_blocking_active_turn,
+    mailbox_has_blocking_active_turn_or_unreachable,
 };
 pub(in crate::services::discord) use recovery_engine as recovery;
 // #3038 S1: re-export the extracted cluster type so the `SharedData` field
