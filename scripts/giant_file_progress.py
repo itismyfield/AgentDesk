@@ -91,18 +91,22 @@ def archive(ref: str, destination: Path) -> None:
         if unsafe:
             raise RuntimeError("snapshot contains a non-regular or unsafe path")
         bundle.extractall(destination)
+def git_z(*args: str) -> list[str]:
+    """NUL-terminated fields of a `git ... -z` call; git quotes paths otherwise."""
+    return str(git(*args)).split("\0")[:-1]
 def diff_facts(base: str, candidate: str) -> dict[str, object]:
-    changed = set(str(git("diff", "--name-only", "-z", base, candidate)).split("\0")) - {""}
+    changed = set(git_z("diff", "--name-only", "-z", base, candidate))
     additions, numstat, binary = 0, {}, set()
-    for row in str(git("diff", "--numstat", "--no-renames", base, candidate)).splitlines():
+    for row in git_z("diff", "--numstat", "--no-renames", "-z", base, candidate):
         added, deleted, path = row.split("\t", 2)
         if not added.isdigit() or not deleted.isdigit():
             binary.add(path)
             continue
         numstat[path] = (int(added), int(deleted))
         additions += int(added)
-    status_rows = str(git("diff", "--name-status", "--no-renames", base, candidate)).splitlines()
-    statuses = {row.split("\t", 1)[1]: row.split("\t", 1)[0] for row in status_rows}
+    # -z emits `status NUL path NUL` pairs instead of `status TAB path` lines.
+    status_fields = git_z("diff", "--name-status", "--no-renames", "-z", base, candidate)
+    statuses = dict(zip(status_fields[1::2], status_fields[0::2]))
     rename_copy = str(git("diff", "--name-status", "--find-renames", "--find-copies", base, candidate))
     return {"changed": changed, "additions": additions, "numstat": numstat,
             "binary": binary, "statuses": statuses,

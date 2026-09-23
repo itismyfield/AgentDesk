@@ -106,25 +106,30 @@ class CliTests(unittest.TestCase):
     def run_cli(self, *args: str, stdin: str = "", cwd: Path | None = None) -> str:
         result = subprocess.run(
             [sys.executable, str(SCRIPT), *args],
-            input=stdin,
+            input=stdin.encode(),
             cwd=cwd,
             capture_output=True,
-            text=True,
             check=True,
         )
-        return result.stdout
+        return result.stdout.decode()
 
     def test_non_push_events_always_run(self) -> None:
         for event in ("merge_group", "workflow_dispatch"):
             with self.subTest(event=event):
-                out = self.run_cli("--event", event, "--paths-from-stdin", stdin="README.md\n")
+                out = self.run_cli("--event", event, "--paths-from-stdin0", stdin="README.md\0")
                 self.assertEqual(out, "run=true\n")
 
     def test_stdin_paths(self) -> None:
         self.assertEqual(
-            self.run_cli("--event", "push", "--paths-from-stdin", stdin="\n".join(PR_6109_PATHS)),
+            self.run_cli("--event", "push", "--paths-from-stdin0", stdin="\0".join(PR_6109_PATHS)),
             "run=false\n",
         )
+
+    def test_stdin_takes_nul_separated_git_paths(self) -> None:
+        stdin = "docs/a.md\0src/한글.rs\0migrations/a\nb.sql\0"
+        self.assertEqual(self.run_cli("--event", "push", "--paths-from-stdin0", stdin=stdin), "run=true\n")
+        stdin = "docs/a.md\0docs/b\nc.md\0"
+        self.assertEqual(self.run_cli("--event", "push", "--paths-from-stdin0", stdin=stdin), "run=false\n")
 
     def test_git_failure_runs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -196,14 +201,24 @@ class GitMergeBaseTests(unittest.TestCase):
         self.git("checkout", "-q", "-b", "topic")
         self.assertEqual(self.decide(), "run=true\n")
 
-    def test_rust_path_git_would_quote_runs(self) -> None:
-        # `git diff --name-only` without -z quotes non-ASCII paths, hiding `.rs`.
-        for path in ("src/한글.rs", "src/my module.rs"):
-            with self.subTest(path=path):
-                self.git("checkout", "-q", "-B", "topic", "main")
-                self.commit("docs/a.md")
-                self.commit(path)
-                self.assertEqual(self.decide(), "run=true\n")
+    def assert_branch_change_runs(self, path: str) -> None:
+        self.git("checkout", "-q", "-b", "topic")
+        self.commit("docs/a.md")
+        self.commit(path)
+        self.assertEqual(self.decide(), "run=true\n")
+
+    def test_non_ascii_rust_path_runs(self) -> None:
+        # Without -z git quotes non-ASCII paths, hiding the `.rs` suffix.
+        self.assert_branch_change_runs("src/한글.rs")
+
+    def test_rust_path_with_space_runs(self) -> None:
+        self.assert_branch_change_runs("src/my module.rs")
+
+    def test_rust_path_with_newline_in_directory_runs(self) -> None:
+        self.assert_branch_change_runs("src/dir\nname/lib.rs")
+
+    def test_migration_with_newline_in_name_runs(self) -> None:
+        self.assert_branch_change_runs("migrations/a\nb.sql")
 
     def test_both_macos_jobs_skip_docs_only_push(self) -> None:
         # Overflow can send a docs-only push to the hosted job instead.

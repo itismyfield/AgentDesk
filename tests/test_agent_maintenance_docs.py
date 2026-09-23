@@ -259,6 +259,27 @@ class DocTouchRulesTest(unittest.TestCase):
         self.assertEqual(findings, [])
 
 
+class ChangedFilesFromGitTest(unittest.TestCase):
+    def test_paths_git_would_quote_are_returned_verbatim(self) -> None:
+        paths = {"docs/한글.md", "docs/my file.md", "src/a\nb.rs"}
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def git(*args: str) -> None:
+                subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+
+            git("init", "-q", "-b", "main")
+            git("-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                "commit", "-q", "--allow-empty", "-m", "base")
+            git("checkout", "-q", "-b", "topic")
+            for rel in paths:
+                _write(root, rel, "x\n")
+            git("add", "-A")
+            git("-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                "commit", "-q", "-m", "topic")
+            self.assertEqual(CHECKER.changed_files_from_git(root, "main"), (paths, None))
+
+
 class Migration0093RolloutContractTest(unittest.TestCase):
     _DOC_PATH = "docs/agent-maintenance/multinode-transition.md"
 

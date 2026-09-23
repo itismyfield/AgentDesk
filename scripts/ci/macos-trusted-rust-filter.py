@@ -9,6 +9,7 @@ against the base ref. Anything this script cannot establish prints
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -62,7 +63,8 @@ def _glob_to_regex(pattern: str) -> re.Pattern[str]:
         else:
             out.append(re.escape(pattern[i]))
             i += 1
-    return re.compile("".join(out) + r"\Z")
+    # DOTALL: a path may contain a newline, and `**` must still span it.
+    return re.compile("".join(out) + r"\Z", re.DOTALL)
 
 
 _RUST_INPUT_RES = tuple(_glob_to_regex(p) for p in RUST_INPUTS)
@@ -82,17 +84,21 @@ def decide(paths: list[str]) -> tuple[bool, str]:
     return False, f"none of {len(paths)} changed paths are Rust inputs"
 
 
-def _git(*args: str) -> str:
-    return subprocess.run(
-        ["git", *args], check=True, capture_output=True, text=True
-    ).stdout
+def split_nul_paths(raw: bytes) -> list[str]:
+    """Split NUL-terminated paths, the only form git leaves unquoted."""
+    return [os.fsdecode(p) for p in raw.split(b"\0") if p]
+
+
+def _git(*args: str) -> bytes:
+    return subprocess.run(["git", *args], check=True, capture_output=True).stdout
 
 
 def branch_changes(base_ref: str) -> list[str]:
-    merge_base = _git("merge-base", base_ref, "HEAD").strip()
-    # --no-renames lists both sides of a rename; -z keeps git from quoting
-    # non-ASCII or special-character paths, which would hide their suffix.
-    return _git("diff", "-z", "--no-renames", "--name-only", merge_base, "HEAD").split("\0")
+    merge_base = _git("merge-base", base_ref, "HEAD").strip().decode()
+    # --no-renames lists both sides of a rename.
+    return split_nul_paths(
+        _git("diff", "-z", "--no-renames", "--name-only", merge_base, "HEAD")
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -100,9 +106,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--event", required=True)
     parser.add_argument("--base-ref", default="origin/main")
     parser.add_argument(
-        "--paths-from-stdin",
+        "--paths-from-stdin0",
         action="store_true",
-        help="read newline-separated changed paths instead of diffing git",
+        help="read NUL-separated changed paths (git diff -z) instead of diffing git",
     )
     args = parser.parse_args(argv)
 
@@ -111,8 +117,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         try:
             paths = (
-                sys.stdin.read().splitlines()
-                if args.paths_from_stdin
+                split_nul_paths(sys.stdin.buffer.read())
+                if args.paths_from_stdin0
                 else branch_changes(args.base_ref)
             )
         except (OSError, subprocess.CalledProcessError) as exc:

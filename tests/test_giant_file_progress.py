@@ -444,6 +444,12 @@ class GuardRepinTest(unittest.TestCase):
             path = next(iter(changes))
             expected = [f"guard repin is not a pure root→child path substitution: {path}", self.C]
         self.assertEqual(PROGRESS.pr_evaluation(base, candidate, facts), ("pr_strict_progress", expected))
+    def test_diff_facts_keys_quoted_paths_like_changed(self):
+        for path in ("docs/한글.md", "docs/my file.md", "docs/a\nb.md"):
+            with self.subTest(path=path):
+                _, facts = self._patch(path, b"x\n", b"y\n")
+                self.assertEqual((facts["changed"], facts["numstat"], facts["statuses"]),
+                                 ({path}, {path: (1, 1)}, {path: "M"}))
     def _line(self, root, child, prefix=b'X="', suffix=b'"\n'):
         return (prefix + root + suffix, prefix + child + suffix)
     def test_guard_repin_accepts_giant2_normalized_replay(self):
