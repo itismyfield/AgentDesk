@@ -208,7 +208,6 @@ impl ProviderKind {
     pub(crate) fn resolve_runtime_path(&self) -> Option<String> {
         registry::resolve_kind_runtime_path(self)
     }
-
     pub fn probe_runtime(&self) -> Option<ProviderRuntimeProbe> {
         let entry = self.registry_entry()?;
         let capabilities = entry.capabilities;
