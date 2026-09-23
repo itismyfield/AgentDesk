@@ -682,11 +682,11 @@ Numbered I17 for the same reason I16 is not I13: `docs/design/4987-relay-reachab
   exists. Verified at `5f10fd4291`: `relay_dead_letter` exposes `insert`,
   `prune_expired`, `record_detached`, `record_detached_reporting`,
   `claim_pending_redeliveries` and `settle_redelivery`. The last two landed as
-  accessors ahead of any consumer and have NO caller anywhere, in tests or out —
-  the only occurrences of either name in the tree are its own definition and one
+  accessors ahead of any consumer and have NO caller outside tests — the only
+  non-test occurrences of either name in the tree are its own definition and one
   doc comment. So although the module now holds a claiming
   `SELECT ... FOR UPDATE SKIP LOCKED` and a settling `UPDATE`, nothing at this
-  commit executes either one.
+  commit executes either one outside a test.
   Outside that module `redelivery_state` appears only in the migration that
   declares the column, `0120_relay_dead_letter_redelivery.sql`, which adds it and
   indexes it without reading a row back — no CLI, no operator surface anywhere.
