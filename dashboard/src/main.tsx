@@ -3,6 +3,9 @@ import ReactDOM from "react-dom/client";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router";
 import App from "./App";
+import { DashboardAuthGate } from "./app/DashboardAuthGate";
+import { onCredentialChange } from "./api/authState";
+import { clearDashboardResponseStorage } from "./app/responseStorage";
 import { queryClient } from "./app/queryClient";
 import { OverlayProvider } from "./components/common/overlay";
 import {
@@ -18,6 +21,12 @@ import "./styles/main.components.css";
 const prefersDarkScheme = window.matchMedia("(prefers-color-scheme: dark)").matches;
 const initialThemePreference = readStoredThemePreference(window.localStorage, "dark");
 const initialAccentPreset = readStoredAccentPreset(window.localStorage, DEFAULT_ACCENT_PRESET);
+
+onCredentialChange(() => {
+  clearDashboardResponseStorage();
+  void queryClient.cancelQueries();
+  queryClient.clear();
+});
 
 applyThemeAccentDataset(
   document.documentElement,
@@ -45,7 +54,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <OverlayProvider>
-          <App />
+          <DashboardAuthGate><App /></DashboardAuthGate>
         </OverlayProvider>
       </BrowserRouter>
     </QueryClientProvider>

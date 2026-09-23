@@ -176,12 +176,12 @@ fn publish_atomic_file(path: &Path, bytes: &[u8], label: &str) -> Result<(), Str
             .map_err(|err| format!("create {label} temp: {err}"))?;
         temp.write_all(bytes)
             .map_err(|err| format!("write {label} temp: {err}"))?;
-        sync_atomic_file(&temp, label, "temp")?;
+        sync_atomic_stage(label, "temp", || temp.sync_all())?;
         std::fs::rename(&temp_path, path)
             .map_err(|err| format!("publish {label} {}: {err}", path.display()))?;
-        let directory =
-            std::fs::File::open(parent).map_err(|err| format!("open {label} parent: {err}"))?;
-        sync_atomic_file(&directory, label, "parent")
+        sync_atomic_stage(label, "parent", || {
+            crate::services::discord::runtime_store::fsync_parent_dir(path)
+        })
     })();
     if result.is_err() {
         // After rename only the temporary name may be cleaned up, never the destination.
@@ -190,11 +190,14 @@ fn publish_atomic_file(path: &Path, bytes: &[u8], label: &str) -> Result<(), Str
     result
 }
 
-fn sync_atomic_file(file: &std::fs::File, label: &str, stage: &str) -> Result<(), String> {
+fn sync_atomic_stage(
+    label: &str,
+    stage: &str,
+    sync: impl FnOnce() -> std::io::Result<()>,
+) -> Result<(), String> {
     #[cfg(test)]
     tests::atomic_sync_fault(label, stage)?;
-    file.sync_all()
-        .map_err(|err| format!("sync {label} {stage}: {err}"))
+    sync().map_err(|err| format!("sync {label} {stage}: {err}"))
 }
 
 fn queue_request_paths(queue_dir: &Path) -> Result<Vec<PathBuf>, String> {
@@ -992,19 +995,25 @@ mod tests {
 
     #[cfg(unix)]
     fn atomic_publication_preserves_all_five_consumers_on_sync_failure() {
-        // Fault injection proves error handling; this source oracle separately pins the syscall.
+        // Fault injection proves error handling; this source oracle separately pins the syscalls.
         let source = include_str!("ordered_queue.rs");
-        let sync = source
-            .split("fn sync_atomic_file(")
+        let publish = source
+            .split("fn publish_atomic_file(")
             .nth(1)
             .unwrap()
             .split("fn queue_request_paths(")
             .next()
             .unwrap();
-        assert!(
-            sync.contains("file.sync_all()"),
-            "atomic publication must invoke fsync"
-        );
+        for call in [
+            "|| temp.sync_all()",
+            "runtime_store::fsync_parent_dir(path)",
+            "    sync().map_err(",
+        ] {
+            assert!(
+                publish.contains(call),
+                "atomic publication must invoke {call}"
+            );
+        }
         for label in [
             "hook relay quarantine evidence",
             "hook relay queue sequence",

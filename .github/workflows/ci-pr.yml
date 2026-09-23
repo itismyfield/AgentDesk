@@ -215,6 +215,7 @@ jobs:
               - 'src/db/intake_outbox_dispatch_stamp/tests.rs'
               - 'src/db/intake_outbox_dispatched_audit.rs'
               - 'src/db/postgres.rs'
+              - 'src/db/postgres/test_db_reclaim.rs'
               - 'src/db/prompt_manifests/tests.rs'
               - 'src/db/relay_dead_letter.rs'
               - 'src/db/scheduled_messages/postgres_tests.rs'

@@ -196,12 +196,21 @@ async fn ephemeral_reply(
     Ok(())
 }
 
+fn sidecar_remote_command(action: &str, device: &str) -> String {
+    use crate::services::process::shell_escape;
+    format!(
+        "~/bin/SidecarLauncher {} {}",
+        shell_escape(action),
+        shell_escape(device)
+    )
+}
+
 /// Run `SidecarLauncher <action> "<device>"` on the chosen Mac.
 /// `mac-book` → local binary; `mac-mini` → over SSH (key/agent auth).
 /// Returns `(success, detail)` where detail is trimmed stdout/stderr.
 async fn run_sidecar_action(mac: &str, action: &str, device: &str) -> (bool, String) {
     let mut cmd = if mac == "mac-mini" {
-        let remote = format!("~/bin/SidecarLauncher {action} \"{device}\"");
+        let remote = sidecar_remote_command(action, device);
         let mut c = tokio::process::Command::new("/usr/bin/ssh");
         c.args([
             "-o",
@@ -386,5 +395,50 @@ pub(super) async fn handle_sidecar_interaction(
             Ok(())
         }
         _ => ephemeral_reply(ctx, component, "알 수 없는 Sidecar 동작입니다.").await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_escape_posix_shell_arg_plain() {
+        assert_eq!(
+            sidecar_remote_command("start", "iPad"),
+            "~/bin/SidecarLauncher 'start' 'iPad'"
+        );
+        assert_eq!(
+            sidecar_remote_command("start", "iPad Pro"),
+            "~/bin/SidecarLauncher 'start' 'iPad Pro'"
+        );
+    }
+
+    #[test]
+    fn test_escape_posix_shell_arg_with_quotes() {
+        assert_eq!(
+            sidecar_remote_command("start", "Owner's iPad"),
+            "~/bin/SidecarLauncher 'start' 'Owner'\\''s iPad'"
+        );
+    }
+
+    #[test]
+    fn test_escape_posix_shell_arg_unicode() {
+        assert_eq!(
+            sidecar_remote_command("start", "홍길동의 iPad"),
+            "~/bin/SidecarLauncher 'start' '홍길동의 iPad'"
+        );
+    }
+
+    #[test]
+    fn test_escape_posix_shell_arg_command_injection_attempt() {
+        assert_eq!(
+            sidecar_remote_command("start", "iPad\"; rm -rf / ; #"),
+            "~/bin/SidecarLauncher 'start' 'iPad\"; rm -rf / ; #'"
+        );
+        assert_eq!(
+            sidecar_remote_command("`whoami`$(id)", "iPad"),
+            "~/bin/SidecarLauncher '`whoami`$(id)' 'iPad'"
+        );
     }
 }

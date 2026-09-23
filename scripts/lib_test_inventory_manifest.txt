@@ -528,6 +528,15 @@ db::intake_outbox_status::tests::open_classification_matches_shared_sql_list
 db::intake_outbox_status::tests::operator_retry_classifies_every_status
 db::intake_outbox_status::tests::status_strings_round_trip
 db::intake_outbox_status::tests::unknown_status_preserves_rejected_spelling
+db::postgres::test_db_reclaim::tests::pg_reclaim_drops_old_database_created_but_never_marked
+db::postgres::test_db_reclaim::tests::pg_reclaim_drops_orphaned_fixture_database
+db::postgres::test_db_reclaim::tests::pg_reclaim_dry_run
+db::postgres::test_db_reclaim::tests::pg_reclaim_finds_database_killed_before_marker
+db::postgres::test_db_reclaim::tests::pg_reclaim_fresh_process_child
+db::postgres::test_db_reclaim::tests::pg_reclaim_never_targets_unmarked_databases
+db::postgres::test_db_reclaim::tests::pg_reclaim_runs_on_first_fixture_of_fresh_process
+db::postgres::test_db_reclaim::tests::pg_reclaim_skips_database_with_active_session
+db::postgres::test_db_reclaim::tests::pg_reclaim_skips_database_younger_than_min_age
 db::postgres::tests::agent_roster_sync_gated_to_leader_or_single_node
 db::postgres::tests::background_backpressure_disabled_when_reserve_zero
 db::postgres::tests::background_backpressure_saturating_boundaries
@@ -912,6 +921,9 @@ server::control_plane_auth_tests::tui_send_allows_loopback_without_bearer_when_p
 server::control_plane_auth_tests::tui_send_rejects_unauthenticated_non_loopback_when_protected
 server::control_plane_auth_tests::tui_send_rejects_unauthenticated_non_loopback_when_unconfigured
 server::control_plane_auth_tests::tui_send_valid_input_with_valid_auth_returns_success
+server::dashboard_auth::tests::dashboard_session_probe_and_ticket_route_require_real_credentials_for_remote_peers
+server::dashboard_auth::tests::dashboard_tickets_are_origin_bound_expiring_single_use_and_bounded
+server::dashboard_auth::tests::dashboard_websocket_handshake_uses_ticket_or_bearer_never_query_token
 server::dashboard_provision::tests::existing_dashboard_is_preserved_off_runtime
 server::database_fixture_invariant_tests::tests::a_missing_fixture_base_stays_fatal_for_lanes_that_require_a_database
 server::database_fixture_invariant_tests::tests::cluster_fixtures_do_not_substitute_a_value_for_a_missing_base
@@ -985,7 +997,6 @@ server::routes::audit_explicit_auth_routes_tests::route_inventory_is_non_empty_a
 server::routes::auth::tests::extract_bearer_strips_prefix_or_returns_none
 server::routes::auth::tests::is_internal_loopback_path_matches_known_prefixes
 server::routes::auth::tests::is_internal_loopback_path_rejects_unrelated_paths
-server::routes::auth::tests::is_websocket_upgrade_detects_handshake_header
 server::routes::auth::tests::loopback_peer_detection
 server::routes::auth::tests::peer_addr_from_request_reads_connect_info
 server::routes::auto_queue_lifecycle_pg_tests::tests::manual_rebind_accepts_every_canonical_live_status_pg
@@ -1233,6 +1244,7 @@ server::worker_recovery::tests::restarts_after_unexpected_return
 server::worker_recovery::tests::shutdown_waits_for_inner_cleanup
 server::worker_recovery::tests::simultaneous_return_and_shutdown_is_expected_without_budget_use
 server::worker_recovery::tests::stable_run_resets_backoff
+server::worker_recovery::windows_contract::tests::first_fatal_exit_persists_ledger_and_exits
 server::worker_registry::leader_takeover_tests::policy_tick_thread_captures_the_process_health_registry
 server::worker_registry::leader_takeover_tests::supervisor_respawns_worker_after_lease_takeover
 server::ws::ws_auth_gate_tests::configured_token_accepts_only_the_exact_token
@@ -5063,6 +5075,7 @@ services::discord::runtime_bootstrap::spawns::tests::a_commit_under_another_nonc
 services::discord::runtime_bootstrap::spawns::tests::a_committed_restart_survives_late_cancellation_in_a_dedicated_process
 services::discord::runtime_bootstrap::spawns::tests::a_failed_restore_keeps_the_disposed_marker_as_residue
 services::discord::runtime_bootstrap::spawns::tests::an_absent_latch_defers_to_the_identity_artifact_before_rolling_back
+services::discord::runtime_bootstrap::spawns::tests::an_unflushed_parent_sync_publishes_the_identity_without_an_index
 services::discord::runtime_bootstrap::spawns::tests::an_unsafe_nonce_publishes_nothing_and_refuses_the_commit
 services::discord::runtime_bootstrap::spawns::tests::cancellation_before_any_staging_publishes_nothing_and_rolls_back
 services::discord::runtime_bootstrap::spawns::tests::cancellation_before_durable_commit_rolls_back_but_after_commit_stays_committed
@@ -5089,6 +5102,7 @@ services::discord::runtime_store::atomic_write_logging_tests::critical_atomic_wr
 services::discord::runtime_store::generation_allocation_tests::core_truth_table_routes_and_side_effects_are_exact
 services::discord::runtime_store::generation_allocation_tests::counter_read_failure_preserves_copy_detail
 services::discord::runtime_store::generation_allocation_tests::epoch_provenance_surface_makes_no_survival_claim
+services::discord::runtime_store::generation_allocation_tests::injected_flush_capability_selects_the_advanced_route
 services::discord::runtime_store::generation_allocation_tests::production_binding_lexically_returns_the_stored_allocation_whole
 services::discord::runtime_store::generation_allocation_tests::production_composer_advances_with_synced_parent
 services::discord::runtime_store::generation_allocation_tests::production_shaped_once_cell_publishes_generation_and_route_together
@@ -5101,6 +5115,7 @@ services::discord::runtime_store::runtime_root_tests::concurrent_provider_alloca
 services::discord::runtime_store::runtime_root_tests::live_release_override_falls_back_to_isolated_tempdir
 services::discord::runtime_store::runtime_root_tests::process_epoch_does_not_follow_overlapping_process_counter_advance
 services::discord::runtime_store::runtime_root_tests::process_generation_allocation_is_monotonic_and_request_preview_is_read_only
+services::discord::runtime_store::windows_contract::tests::windows_parent_dir_sync_succeeds_without_flushing
 services::discord::session_banner::tests::banner_is_top_and_sticky_across_streaming_then_terminal
 services::discord::session_banner::tests::later_turn_same_session_is_not_bannered_but_new_session_rearms
 services::discord::session_banner::tests::non_first_empty_disabled_and_missing_snapshot_paths_do_not_claim
@@ -5318,6 +5333,10 @@ services::discord::settings::write::yaml_write_back_secret_tests::typed_gate_rej
 services::discord::shared_state::restart_lifecycle_tests::check_deferred_restart_fresh_token_decrements_once_without_exit
 services::discord::shared_state::restart_lifecycle_tests::legacy_actor_store_matrix_preserves_unwritten_flags
 services::discord::shared_state::restart_lifecycle_tests::shutdown_reader_observes_live_writer_and_clone
+services::discord::sidecar_interaction::tests::test_escape_posix_shell_arg_command_injection_attempt
+services::discord::sidecar_interaction::tests::test_escape_posix_shell_arg_plain
+services::discord::sidecar_interaction::tests::test_escape_posix_shell_arg_unicode
+services::discord::sidecar_interaction::tests::test_escape_posix_shell_arg_with_quotes
 services::discord::single_message_panel::tests::carried_entry_notification_updates_latest_target_not_superseded_text
 services::discord::single_message_panel::tests::completion_footer_below_ttl_keeps_animating_registered_target
 services::discord::single_message_panel::tests::completion_footer_consecutive_edit_failures_evict_registered_target
@@ -6383,6 +6402,9 @@ services::discord::tui_prompt_relay::rehydration::tests::codex_tui_rehydrate_pla
 services::discord::tui_prompt_relay::rehydration::tests::codex_tui_rehydrate_plan_reserves_marker_paths_before_markerless_fallback
 services::discord::tui_prompt_relay::rehydration::tests::markerless_codex_tui_fallback_allows_unambiguous_cwd_sessions
 services::discord::tui_prompt_relay::rehydration::tests::markerless_codex_tui_fallback_rejects_ambiguous_same_cwd_sessions
+services::discord::tui_prompt_relay::relay_e2e::catch_up_pagination_e2e::checkpointed_catch_up_reads_the_page_just_past_the_cursor
+services::discord::tui_prompt_relay::relay_e2e::catch_up_pagination_e2e::recent_catch_up_pages_back_to_a_buried_user_message_and_stops
+services::discord::tui_prompt_relay::relay_e2e::discord_mock::history_page_returns_the_ids_nearest_the_cursor_newest_first
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_committed_terminal_settles_even_with_bytes_left_over
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_fully_drained_frozen_transcript_settles_its_unfinalizable_inflight
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_hook_adopted_binding_outranks_the_stale_launch_script
@@ -8546,6 +8568,7 @@ services::session_activity::tests::parse_session_key_preserves_legacy_host_alias
 services::session_activity::tests::resolve_db_only_unknown_heartbeat_is_not_working
 services::session_activity::tests::resolve_db_only_uses_heartbeat_not_tmux_for_local_keys
 services::session_backend::auth_profiles::tests::account_switch_fences_warm_process_and_retains_old_resume_identity_until_launch
+services::session_backend::process_registry_stop_tests::every_process_followup_binds_its_current_turn_token_before_input
 services::session_backend::process_registry_stop_tests::issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup
 services::session_backend::process_registry_stop_tests::issue_4112_stopped_process_session_followup_guard_forces_fresh_session
 services::session_backend::process_registry_stop_tests::issue_4113_process_session_cleanup_terminates_registered_wrapper
@@ -8673,6 +8696,9 @@ services::stale_turn_reconciler::tests::unreadable_inflight_provider_maps_unknow
 services::stream_json_cli::codec::tests::agy_codec_does_not_duplicate_aggregate_after_delta
 services::stream_json_cli::codec::tests::agy_codec_failure_wins_over_partial_text_and_process_status
 services::stream_json_cli::codec::tests::agy_codec_keeps_step_failure_alongside_unrelated_stderr
+services::stream_json_cli::codec::tests::agy_codec_nested_errors_and_identity_are_preserved
+services::stream_json_cli::codec::tests::agy_codec_nested_result_without_deltas_and_failure_guards
+services::stream_json_cli::codec::tests::agy_codec_nested_stream_emits_text_and_finishes_once
 services::stream_json_cli::codec::tests::agy_codec_preserves_diagnostics_without_terminal_result
 services::stream_json_cli::codec::tests::agy_codec_preserves_step_failure_when_stderr_is_empty
 services::stream_json_cli::codec::tests::agy_codec_rejects_blank_success_with_or_without_session_identity

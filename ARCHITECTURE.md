@@ -71,6 +71,7 @@ src/
 │   ├── test_env/
 │   │   └── teardown_probe.rs
 │   ├── agent_channels.rs
+│   ├── runtime_settings.rs
 │   └── test_env.rs
 ├── db/
 │   ├── auto_queue/
@@ -120,6 +121,8 @@ src/
 │   │   ├── metadata.rs
 │   │   ├── mod.rs
 │   │   └── transitions.rs
+│   ├── postgres/
+│   │   └── test_db_reclaim.rs
 │   ├── prompt_manifests/
 │   │   ├── builder.rs
 │   │   ├── mod.rs
@@ -242,6 +245,8 @@ src/
 │   ├── skill_refresh.rs
 │   └── skill_sync.rs
 ├── server/
+│   ├── dashboard_auth/
+│   │   └── tests.rs
 │   ├── dto/
 │   │   ├── agents.rs
 │   │   ├── analytics.rs
@@ -382,6 +387,7 @@ src/
 │   ├── cluster.rs
 │   ├── cluster_session_routing.rs
 │   ├── cron_catalog.rs
+│   ├── dashboard_auth.rs
 │   ├── dashboard_provision.rs
 │   ├── database_fixture_invariant_tests.rs
 │   ├── issue_specs.rs
@@ -1154,6 +1160,7 @@ src/
 │   │   │   ├── rehydration/
 │   │   │   │   └── idempotency_tests.rs
 │   │   │   ├── relay_e2e/
+│   │   │   │   ├── catch_up_pagination_e2e.rs
 │   │   │   │   ├── discord_mock.rs
 │   │   │   │   └── mod.rs
 │   │   │   ├── synthetic_start/

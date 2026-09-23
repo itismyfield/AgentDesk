@@ -184,6 +184,12 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "auth",
             "Get current auth session",
         ),
+        ep(
+            "POST",
+            "/api/auth/ws-ticket",
+            "auth",
+            "Issue a single-use WebSocket ticket bound to the current Bearer credential; expires after 15 seconds",
+        ),
         ep("GET", "/api/kanban-cards", "kanban", "List kanban cards")
             .with_params([
                 (

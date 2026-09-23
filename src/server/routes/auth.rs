@@ -1,4 +1,4 @@
-use axum::{Json, extract::State};
+use axum::{Json, extract::State, response::IntoResponse};
 use serde_json::json;
 use std::net::SocketAddr;
 
@@ -6,15 +6,50 @@ use super::AppState;
 use crate::api_caller_observability::{AuthStrength, RequestPrincipal};
 
 /// GET /api/auth/session
-/// Returns session status. If auth_token is configured, validates the request.
-/// The actual auth check is done by the middleware — if this handler runs, the request is authenticated.
-pub async fn get_session(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let auth_enabled = state.config.server.auth_token.is_some();
-    Json(json!({
-        "ok": true,
-        "auth_enabled": auth_enabled,
-        "csrf_token": "",
-    }))
+/// Public authentication probe; never treats reaching this handler as proof.
+pub async fn get_session(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+) -> impl IntoResponse {
+    let auth_enabled = state
+        .config
+        .server
+        .auth_token
+        .as_deref()
+        .is_some_and(|s| !s.is_empty());
+    let authenticated =
+        dashboard_auth_strength(&state.config, req.headers(), peer_addr_from_request(&req))
+            .is_some();
+    (
+        [
+            ("cache-control", "no-store"),
+            ("vary", "Authorization, Origin, Referer"),
+        ],
+        Json(json!({
+            "ok": true,
+            "auth_enabled": auth_enabled,
+            "authenticated": authenticated,
+            "csrf_token": "",
+        })),
+    )
+}
+
+pub(crate) async fn issue_ws_ticket(
+    axum::Extension(access): axum::Extension<crate::server::dashboard_auth::DashboardAccess>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    match access.issue(&headers) {
+        Ok((ticket, expires_in)) => (
+            [("cache-control", "no-store")],
+            Json(json!({"ticket": ticket, "expires_in": expires_in})),
+        )
+            .into_response(),
+        Err(status) => (
+            status,
+            Json(json!({"error": "websocket ticket unavailable for this origin"})),
+        )
+            .into_response(),
+    }
 }
 
 /// Internal / in-process webhook paths that are invoked by this same dcserver
@@ -38,7 +73,7 @@ fn is_internal_loopback_path(path: &str) -> bool {
         || path.starts_with("/internal/")
 }
 
-fn extract_bearer<'a>(headers: &'a axum::http::HeaderMap) -> Option<&'a str> {
+pub(in crate::server) fn extract_bearer(headers: &axum::http::HeaderMap) -> Option<&str> {
     headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -55,11 +90,36 @@ fn is_loopback_peer(peer: Option<SocketAddr>) -> bool {
     peer.is_some_and(|addr| addr.ip().is_loopback())
 }
 
-fn is_websocket_upgrade(headers: &axum::http::HeaderMap) -> bool {
-    headers
-        .get(axum::http::header::UPGRADE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+fn dashboard_auth_strength(
+    config: &crate::config::Config,
+    headers: &axum::http::HeaderMap,
+    peer: Option<SocketAddr>,
+) -> Option<AuthStrength> {
+    let Some(expected) = config
+        .server
+        .auth_token
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    else {
+        return Some(AuthStrength::None);
+    };
+    if extract_bearer(headers)
+        .is_some_and(|token| crate::utils::auth::constant_time_token_eq(expected, token))
+    {
+        return Some(AuthStrength::ServerAdmin);
+    }
+    if is_loopback_peer(peer)
+        && headers
+            .get(axum::http::header::ORIGIN)
+            .or_else(|| headers.get(axum::http::header::REFERER))
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| {
+                crate::utils::loopback_url::is_loopback_url(v, Some(config.server.port))
+            })
+    {
+        return Some(AuthStrength::Loopback);
+    }
+    None
 }
 
 fn unauthorized_response() -> axum::response::Response {
@@ -133,44 +193,8 @@ pub async fn auth_middleware(
         return run_with_request_principal(req, next, AuthStrength::None).await;
     }
 
-    // Same-origin bypass (dashboard SPA served from this server). #2047
-    // Finding 3 — require the peer address itself to be loopback before
-    // trusting the (forgeable) Origin/Referer header.
-    if is_loopback_peer(peer) {
-        let is_same_origin = headers
-            .get(axum::http::header::ORIGIN)
-            .or_else(|| headers.get(axum::http::header::REFERER))
-            .and_then(|v| v.to_str().ok())
-            .map(|v| crate::utils::loopback_url::is_loopback_url(v, Some(state.config.server.port)))
-            .unwrap_or(false);
-        if is_same_origin {
-            return run_with_request_principal(req, next, AuthStrength::Loopback).await;
-        }
-    }
-
-    // Check Authorization header
-    if let Some(token) = extract_bearer(&headers) {
-        if crate::utils::auth::constant_time_token_eq(expected_token, token) {
-            return run_with_request_principal(req, next, AuthStrength::ServerAdmin).await;
-        }
-    }
-
-    // Query-param token fallback (Finding 4): restricted to WebSocket upgrade
-    // handshakes since the browser WebSocket API cannot attach an
-    // Authorization header. Plain GET / POST requests must use the
-    // Authorization header instead so the secret never leaks into access logs
-    // or the Referer of downstream navigations.
-    if is_websocket_upgrade(&headers) {
-        if let Some(query) = req.uri().query() {
-            for pair in query.split('&') {
-                if let Some(token) = pair.strip_prefix("token=") {
-                    if crate::utils::auth::constant_time_token_eq(expected_token, token) {
-                        return run_with_request_principal(req, next, AuthStrength::ServerAdmin)
-                            .await;
-                    }
-                }
-            }
-        }
+    if let Some(strength) = dashboard_auth_strength(&state.config, &headers, peer) {
+        return run_with_request_principal(req, next, strength).await;
     }
 
     unauthorized_response()
@@ -250,21 +274,6 @@ mod tests {
             HeaderValue::from_static("Basic user:pass"),
         );
         assert_eq!(extract_bearer(&headers), None);
-    }
-
-    #[test]
-    fn is_websocket_upgrade_detects_handshake_header() {
-        let mut headers = axum::http::HeaderMap::new();
-        assert!(!is_websocket_upgrade(&headers));
-
-        headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
-        assert!(is_websocket_upgrade(&headers));
-
-        headers.insert(header::UPGRADE, HeaderValue::from_static("WebSocket"));
-        assert!(is_websocket_upgrade(&headers));
-
-        headers.insert(header::UPGRADE, HeaderValue::from_static("h2c"));
-        assert!(!is_websocket_upgrade(&headers));
     }
 
     #[test]

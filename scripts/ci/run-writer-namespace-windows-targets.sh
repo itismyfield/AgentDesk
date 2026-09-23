@@ -49,4 +49,22 @@ done
 for id in "${catalog_ids[@]}"; do
   argv+=(--owner-id catalog "$id")
 done
-exec "${argv[@]}"
+"${argv[@]}" || exit
+# Windows `fsync_parent_dir` contract: one gate per engine run, so one run per owner.
+readonly worker_recovery="src/server/worker_recovery.rs"
+readonly runtime_store="src/services/discord/runtime_store.rs"
+"$interpreter" "$engine" run --repo-root "$root" --manifest "$manifest" \
+  --pass-prefix DIR_FSYNC_WINDOWS_TARGET \
+  --gate server src/lib.rs server src/server/mod.rs optional \
+  --owner worker_recovery server src/server/mod.rs worker_recovery "$worker_recovery" \
+    server::worker_recovery::windows_contract::tests required \
+  --owner-id worker_recovery \
+    server::worker_recovery::windows_contract::tests::first_fatal_exit_persists_ledger_and_exits \
+  || exit
+exec "$interpreter" "$engine" run --repo-root "$root" --manifest "$manifest" \
+  --pass-prefix DIR_FSYNC_WINDOWS_TARGET \
+  --gate discord src/services/mod.rs discord src/services/discord/mod.rs optional \
+  --owner runtime_store discord src/services/discord/mod.rs runtime_store "$runtime_store" \
+    services::discord::runtime_store::windows_contract::tests required \
+  --owner-id runtime_store \
+    services::discord::runtime_store::windows_contract::tests::windows_parent_dir_sync_succeeds_without_flushing

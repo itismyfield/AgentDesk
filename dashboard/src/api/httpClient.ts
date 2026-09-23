@@ -1,3 +1,5 @@
+import { credentialScope, onCredentialChange, requireAuthentication } from "./authState";
+
 const BASE = "";
 const REQUEST_TIMEOUT_MS = 15_000;
 export const TOKEN_ANALYTICS_TIMEOUT_MS = 60_000;
@@ -24,6 +26,10 @@ export interface CachedGetEntry<T = unknown> {
 const CACHED_GET_MAX_ENTRIES = 200;
 const CACHED_GET_TTL_MS = 60_000;
 const cachedGets = new Map<string, CachedGetEntry>();
+onCredentialChange(() => {
+  inflightGets.clear();
+  cachedGets.clear();
+});
 
 // #2050 P3 finding 17 — strip `fresh=1` from cache key so forceRefresh
 // updates the same slot non-fresh callers look up.
@@ -83,8 +89,9 @@ export interface RequestOptions extends RequestInit {
 function composeRequestSignal(
   timeoutSignal: AbortSignal,
   externalSignal?: AbortSignal,
+  authSignal?: AbortSignal,
 ): { signal: AbortSignal; cleanup: () => void } {
-  if (!externalSignal) {
+  if (!externalSignal && !authSignal) {
     return {
       signal: timeoutSignal,
       cleanup: () => {},
@@ -93,23 +100,22 @@ function composeRequestSignal(
 
   const controller = new AbortController();
 
+  const sources = [timeoutSignal, externalSignal, authSignal].filter((source): source is AbortSignal => !!source);
   const abortFromSource = () => {
     if (controller.signal.aborted) return;
-    controller.abort(externalSignal.reason ?? timeoutSignal.reason);
+    controller.abort(sources.find((source) => source.aborted)?.reason);
   };
 
-  if (timeoutSignal.aborted || externalSignal.aborted) {
+  if (sources.some((source) => source.aborted)) {
     abortFromSource();
   }
 
-  timeoutSignal.addEventListener("abort", abortFromSource);
-  externalSignal.addEventListener("abort", abortFromSource);
+  sources.forEach((source) => source.addEventListener("abort", abortFromSource));
 
   return {
     signal: controller.signal,
     cleanup: () => {
-      timeoutSignal.removeEventListener("abort", abortFromSource);
-      externalSignal.removeEventListener("abort", abortFromSource);
+      sources.forEach((source) => source.removeEventListener("abort", abortFromSource));
     },
   };
 }
@@ -153,6 +159,7 @@ export async function request<T>(
   opts?: RequestOptions,
   parser?: Parser<T>,
 ): Promise<T> {
+  const auth = credentialScope();
   const method = opts?.method?.toUpperCase() ?? "GET";
   const isGet = method === "GET";
   const shouldDedupe = isGet && !opts?.signal;
@@ -167,14 +174,16 @@ export async function request<T>(
   const execute = async (): Promise<T> => {
     let lastError: Error | null = null;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      auth.signal.throwIfAborted();
       if (attempt > 0) {
         const delay = INITIAL_BACKOFF_MS * 2 ** (attempt - 1);
         await new Promise((resolve) => setTimeout(resolve, delay));
+        auth.signal.throwIfAborted();
       }
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       const externalSignal = opts?.signal ?? undefined;
-      const { signal, cleanup } = composeRequestSignal(controller.signal, externalSignal);
+      const { signal, cleanup } = composeRequestSignal(controller.signal, externalSignal, auth.signal);
       try {
         const {
           timeoutMs: _timeoutMs,
@@ -183,19 +192,24 @@ export async function request<T>(
           suppressErrorToast: _suppressErrorToast,
           ...fetchOpts
         } = opts ?? {};
+        const headers = new Headers(fetchOpts.headers);
+        if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+        if (auth.token) {
+          if (!url.startsWith("/") || url.startsWith("//")) throw new Error("Authenticated API requests must use same-origin paths");
+          headers.set("Authorization", `Bearer ${auth.token}`);
+        }
         const res = await fetch(`${BASE}${url}`, {
           credentials: "include",
           ...fetchOpts,
+          cache: auth.token || auth.authEnabled ? "no-store" : fetchOpts.cache,
           signal,
-          headers: {
-            "Content-Type": "application/json",
-            ...fetchOpts.headers,
-          },
+          headers,
         });
-        clearTimeout(timer);
-        cleanup();
+        auth.signal.throwIfAborted();
         if (!res.ok) {
           const err = await res.json().catch(() => ({ error: "unknown" }));
+          auth.signal.throwIfAborted();
+          if (res.status === 401) requireAuthentication("인증이 만료되었거나 토큰이 변경되었습니다. 다시 로그인해 주세요.");
           // #2050 P2 finding 9 — throw typed ApiRequestError with status +
           // server-supplied code so isApiRequestError has a real field.
           const serverCode =
@@ -215,6 +229,7 @@ export async function request<T>(
           throw error;
         }
         const rawPayload: unknown = await res.json();
+        auth.signal.throwIfAborted();
         const payload = parser ? parser.parse(rawPayload) : (rawPayload as T);
         if (isGet) {
           // Only validated payloads reach this cache when a parser is supplied.
@@ -222,8 +237,7 @@ export async function request<T>(
         }
         return payload;
       } catch (error) {
-        clearTimeout(timer);
-        cleanup();
+        auth.signal.throwIfAborted();
         const resolvedError =
           error instanceof Error ? error : new Error(String(error));
         if (resolvedError.name === "AbortError") {
@@ -233,12 +247,16 @@ export async function request<T>(
         } else if (
           isGet &&
           attempt < maxRetries &&
+          !(resolvedError instanceof ApiRequestError) &&
           !resolvedError.message.startsWith("HTTP ")
         ) {
           lastError = resolvedError;
           continue;
         }
         throw lastError ?? resolvedError;
+      } finally {
+        clearTimeout(timer);
+        cleanup();
       }
     }
     throw lastError ?? new Error(`Request failed: ${url}`);
@@ -258,7 +276,7 @@ export async function request<T>(
       throw resolvedError;
     })
     .finally(() => {
-      if (shouldDedupe) inflightGets.delete(url);
+      if (shouldDedupe && inflightGets.get(url) === decorated) inflightGets.delete(url);
     });
 
   if (shouldDedupe) inflightGets.set(url, decorated);
