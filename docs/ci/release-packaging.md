@@ -56,11 +56,12 @@ replace the three native CI builds.
 
 ```powershell
 # 파일과 기존 작업 소유권 확인 후 변경 내용을 미리 보기
-.\scripts\install-windows-runtime-task.ps1 -DatabaseSshAlias agentdesk-mac-mini -WhatIf
+.\scripts\install-windows-runtime-task.ps1 -DatabaseSshAlias agentdesk-db -WhatIf
 # 설치된 설정·DB migration 검증 이후 등록하고 시작
-.\scripts\install-windows-runtime-task.ps1 -DatabaseSshAlias agentdesk-mac-mini -Start
+.\scripts\install-windows-runtime-task.ps1 -DatabaseSshAlias agentdesk-db -Start
 ```
 
+`agentdesk-db`는 예시 이름이며 사용자의 SSH 설정에 등록한 별칭으로 바꾼다.
 SSH alias를 지정하면 PostgreSQL 터널도 별도 작업으로 등록한다. 기본값은 Windows의
 `127.0.0.1:15433`에서 SSH 서버의 `127.0.0.1:5432`로 전달하는 연결이다. SSH는 기존
 사용자 설정과 고정된 host key를 사용하며, 비대화식 인증 실패와 포트 충돌 시 종료한다.
@@ -79,8 +80,12 @@ Windows 방화벽이 API 수신을 차단하면 관리자 PowerShell에서 패�
 제한한다. 다른 관리자 계정에서 실행할 수 있으므로 runtime 경로를 명시한다.
 
 ```powershell
-.\scripts\install-windows-worker-firewall.ps1 -RuntimeRoot 'C:\Users\worker\.adk\release' -HubAddress '192.168.1.147' -WhatIf
-.\scripts\install-windows-worker-firewall.ps1 -RuntimeRoot 'C:\Users\worker\.adk\release' -HubAddress '192.168.1.147'
+# Runner 실행 사용자로 연 PowerShell에서 설치 경로를 확인한다.
+$runtimeRoot = Join-Path $env:USERPROFILE '.adk\release'
+# 다른 관리자 계정에서 실행한다면 위에서 확인한 경로를 전달한다.
+$hubAddress = [System.Net.IPAddress](Read-Host 'Hub IP address')
+.\scripts\install-windows-worker-firewall.ps1 -RuntimeRoot $runtimeRoot -HubAddress $hubAddress -WhatIf
+.\scripts\install-windows-worker-firewall.ps1 -RuntimeRoot $runtimeRoot -HubAddress $hubAddress
 ```
 
 포트는 실행 노드의 `server.port`와 같아야 한다. 허브의 고정 IP가 바뀌면 같은 명령을

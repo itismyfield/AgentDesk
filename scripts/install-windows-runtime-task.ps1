@@ -34,8 +34,11 @@ foreach ($scope in @('User', 'Machine')) {
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 999 `
-    -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) `
+# Cap consecutive failures at roughly sixteen hours of one-minute retries.
+$restartAttemptLimit = 999
+$restartInterval = New-TimeSpan -Minutes 1
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount $restartAttemptLimit `
+    -RestartInterval $restartInterval -ExecutionTimeLimit ([TimeSpan]::Zero) `
     -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 
 function Install-OwnedTask {
@@ -60,7 +63,10 @@ function Install-OwnedTask {
 if ($DatabaseSshAlias) {
     $ssh = (Get-Command ssh.exe -ErrorAction Stop).Source
     $tunnelName = "$TaskName-DatabaseTunnel"
-    $arguments = "-N -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 127.0.0.1:${DatabaseLocalPort}:127.0.0.1:${DatabaseRemotePort} $DatabaseSshAlias"
+    # Three unanswered probes detect a dead tunnel within about 45 seconds.
+    $keepAliveIntervalSeconds = 15
+    $keepAliveMissLimit = 3
+    $arguments = "-N -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=$keepAliveIntervalSeconds -o ServerAliveCountMax=$keepAliveMissLimit -L 127.0.0.1:${DatabaseLocalPort}:127.0.0.1:${DatabaseRemotePort} $DatabaseSshAlias"
     $action = New-ScheduledTaskAction -Execute $ssh -Argument $arguments -WorkingDirectory $env:USERPROFILE
     Install-OwnedTask $tunnelName $action 'AgentDesk PostgreSQL tunnel; uses the current user SSH config and pinned known host.'
     if ($Start -and $PSCmdlet.ShouldProcess($tunnelName, 'Start database tunnel')) { Start-ScheduledTask -TaskName $tunnelName }
