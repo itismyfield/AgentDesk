@@ -380,7 +380,46 @@ async fn rebind_inflight_for_channel_inner(
     let session_id_for_state = runtime_state.session_id;
     let mut force_initial_offset = runtime_state.force_initial_offset;
     let mut forced_adopted_transcript_rebase_offset = None;
-    if force_initial_offset.is_none()
+    let mut minimum_initial_offset = minimum_initial_offset;
+    let latest_lease_turn_id = crate::services::tui_prompt_dedupe::external_input_relay_lease(
+        provider.as_str(),
+        &tmux_session_name,
+        channel_id,
+    )
+    .and_then(|lease| lease.turn_id);
+    let tui_direct_adopt = existing_inflight.as_ref().and_then(|existing| {
+        adoption::tui_direct_adopt_offsets(
+            runtime_kind_for_state,
+            existing,
+            &output_path,
+            latest_lease_turn_id.as_deref(),
+        )
+    });
+    let mut pending_fence_forward = None;
+    if force_initial_offset.is_none() && tui_direct_adopt.is_some() {
+        match tui_direct_adopt {
+            Some(adoption::TuiDirectAdoptOffsets::FenceForward(cause)) => {
+                force_initial_offset = Some(synthetic_initial_offset);
+                forced_adopted_transcript_rebase_offset = Some(synthetic_initial_offset);
+                pending_fence_forward = Some(cause);
+            }
+            _ => {
+                // Same coordinate space: resume from the row, but never below what an idle
+                // tail/bridge already committed for this transcript.
+                let committed =
+                    crate::services::discord::tui_prompt_relay::claude_transcript_committed_offset(
+                        shared,
+                        discord_channel_id,
+                        &tmux_session_name,
+                        std::fs::metadata(&output_path)
+                            .ok()
+                            .map(|metadata| metadata.len()),
+                        "tui_direct_adopt",
+                    );
+                minimum_initial_offset = minimum_initial_offset.max(Some(committed));
+            }
+        }
+    } else if force_initial_offset.is_none()
         && let Some(offset) = claude_tui_force_initial_offset_for_adopted_transcript(
             runtime_kind_for_state,
             existing_inflight.as_ref(),
@@ -873,6 +912,22 @@ async fn rebind_inflight_for_channel_inner(
         }
     };
     drop(locked_episode);
+
+    if let (Some(cause), Some(existing)) = (pending_fence_forward, existing_inflight.as_ref()) {
+        adoption::record_adopt_fence_forward(
+            shared,
+            provider,
+            channel_id,
+            &adoption::AdoptFenceForward {
+                cause,
+                existing,
+                tmux_session_name: &tmux_session_name,
+                output_path: &output_path,
+                initial_offset,
+                latest_lease_turn_id: latest_lease_turn_id.as_deref(),
+            },
+        );
+    }
 
     Ok(RebindOutcome {
         tmux_session: tmux_session_name,

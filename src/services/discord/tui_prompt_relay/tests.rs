@@ -2540,7 +2540,7 @@ fn claude_bridge_lease_clears_when_tail_dedup_skips_spawn() {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         active.remove(tmux);
-        active.insert(tmux.to_string());
+        active.insert(tmux.to_string(), channel_id);
     }
     let lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
         ProviderKind::Claude.as_str(),
@@ -3102,6 +3102,7 @@ async fn s3_completion_fixture_body(
                 0,
                 &lease,
             ),
+            _lifetime_guard: None,
         };
         spawn_fixture_bridge(
             shared.clone(),

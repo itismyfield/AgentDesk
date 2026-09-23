@@ -572,7 +572,7 @@ async fn capture_dormant(
         || CLAUDE_IDLE_RESPONSE_TAILS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .contains(tmux)
+            .contains_key(tmux)
         || tui_direct_watcher_can_own_output(&shared.tmux_watchers, tmux, Some(output))
         || crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
             .get_live_producer(tmux)

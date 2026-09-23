@@ -46,6 +46,9 @@ pub(crate) const KIND_READOPT_RELAY_STUCK: &str = "readopt_relay_stuck";
 /// soft-terminal authority denied). Sole writer is `#[cfg(unix)]`.
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) const KIND_TERMINAL_NO_DELIVERY_OWNER: &str = "terminal_no_delivery_owner";
+/// A rebind adopted a TUI-direct row whose saved offsets were not valid for the live
+/// transcript, so the watcher restarted at EOF; the row keeps the unread range's body.
+pub(crate) const KIND_ADOPT_FENCE_FORWARD: &str = "adopt_fence_forward";
 
 /// Self-maintenance horizon: rows older than this are pruned opportunistically
 /// after each successful insert.

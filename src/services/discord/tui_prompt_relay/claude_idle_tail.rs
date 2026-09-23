@@ -231,27 +231,13 @@ pub(super) fn spawn_claude_idle_response_tail_once(
     let transcript_eof = std::fs::metadata(&transcript_path)
         .ok()
         .map(|meta| meta.len());
-    let transcript_len = transcript_eof.unwrap_or(0);
-    super::super::tmux::reset_stale_relay_watermark_if_output_regressed(
-        shared.as_ref(),
-        channel_id,
-        &tmux_session_name,
-        transcript_len,
-        "idle_response_tail",
-    );
-    super::super::tmux::reset_relay_watermark_on_generation_change(
-        shared.as_ref(),
-        channel_id,
-        &tmux_session_name,
-        "idle_response_tail",
-    );
     // #3089 B2c (#3235): durable-frontier dedup clamp (flag OFF → in-memory) survives restart.
-    let committed_offset = dr::effective_committed_offset(
+    let committed_offset = claude_transcript_committed_offset(
         &shared,
-        &ProviderKind::Claude,
         channel_id,
         &tmux_session_name,
         transcript_eof,
+        "idle_response_tail",
     );
     let start_offset = clamp_idle_tail_start_offset_to_committed(start_offset, committed_offset);
     if committed_offset > 0 {
@@ -267,9 +253,10 @@ pub(super) fn spawn_claude_idle_response_tail_once(
         let mut active = CLAUDE_IDLE_RESPONSE_TAILS
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if !active.insert(tmux_session_name.clone()) {
+        if active.contains_key(&tmux_session_name) {
             return false;
         }
+        active.insert(tmux_session_name.clone(), channel_id);
     }
 
     let span = tracing::info_span!(
@@ -285,9 +272,6 @@ pub(super) fn spawn_claude_idle_response_tail_once(
     super::super::task_supervisor::spawn_observed(
         "claude_idle_response_tail",
         async move {
-            let _tail_guard = ClaudeIdleTailGuard {
-                tmux_session_name: tmux_session_name.clone(),
-            };
             run_claude_idle_response_tail(
                 shared,
                 tmux_session_name.clone(),
@@ -314,6 +298,10 @@ pub(super) async fn run_claude_idle_response_tail(
     prompt_text: String,
     lease: ExternalInputRelayLease,
 ) {
+    // The bridge holds a clone, so the registration survives this task's 180s wait.
+    let tail_guard: Arc<dyn std::any::Any + Send + Sync> = Arc::new(ClaudeIdleTailGuard {
+        tmux_session_name: tmux_session_name.clone(),
+    });
     let _lease_guard = TuiDirectExternalInputLeaseGuard::new(
         ProviderKind::Claude,
         &tmux_session_name,
@@ -426,6 +414,7 @@ pub(super) async fn run_claude_idle_response_tail(
         reader_rx,
         Some(offset_rx),
         &lease,
+        Some(Arc::clone(&tail_guard)),
     )
     .await;
     if delivery_result.is_err() {

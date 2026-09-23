@@ -271,32 +271,7 @@ fn actual_postlude_runtime_proof(response: Option<&str>, case: &str) {
         let _mailbox = shared.mailbox(owner);
         let durable = InflightTurnState::new(ProviderKind::Codex, owner.get(), None, 1, 2, 0, String::new(), None, None, None, None, 0);
         let gateway: Arc<dyn TurnGateway> = Arc::new(super::super::gateway::HeadlessGateway);
-        let mut bridge = TurnBridgeContext { provider: ProviderKind::Codex,
-gateway: gateway.clone(),
-channel_id: owner,
-user_msg_id: None,
-user_text_owned: String::new(),
-request_owner_name: String::new(),
-role_binding: None,
-adk_session_key: None,
-adk_session_name: None,
-adk_session_info: None,
-adk_cwd: None,
-dispatch_id: None,
-dispatch_kind: None,
-memory_recall_usage: TokenUsage::default(),
-context_window_tokens: 0,
-context_compact_percent: 0,
-current_msg_id: None,
-response_sent_offset: 0,
-full_response: String::new(),
-tmux_last_offset: None,
-new_session_id: None,
-defer_watcher_resume: false,
-reuse_status_panel_message: false,
-completion_tx: None,
-is_external_input_tui_direct: false,
-inflight_state: durable.clone(), };
+        let mut bridge = bare_bridge_context(owner, durable.clone(), gateway.clone());
         if case.starts_with("bridge_") {
 
             bridge.user_msg_id = Some(MessageId::new(9001));
@@ -446,6 +421,113 @@ inflight_state: durable.clone(), };
         assert_eq!(*h.resume_offset.lock().unwrap(), Some(580899), "actual completion caller must carry source pin");
         assert!(!h.paused.load(Ordering::Acquire));
         assert!(h.turn_delivered.load(Ordering::Acquire));
+    });
+}
+
+fn bare_bridge_context(
+    owner: ChannelId,
+    durable: InflightTurnState,
+    gateway: Arc<dyn TurnGateway>,
+) -> TurnBridgeContext {
+    TurnBridgeContext {
+        provider: ProviderKind::Codex,
+        gateway,
+        channel_id: owner,
+        user_msg_id: None,
+        user_text_owned: String::new(),
+        request_owner_name: String::new(),
+        role_binding: None,
+        adk_session_key: None,
+        adk_session_name: None,
+        adk_session_info: None,
+        adk_cwd: None,
+        dispatch_id: None,
+        dispatch_kind: None,
+        memory_recall_usage: TokenUsage::default(),
+        context_window_tokens: 0,
+        context_compact_percent: 0,
+        current_msg_id: None,
+        response_sent_offset: 0,
+        full_response: String::new(),
+        tmux_last_offset: None,
+        new_session_id: None,
+        defer_watcher_resume: false,
+        reuse_status_panel_message: false,
+        completion_tx: None,
+        is_external_input_tui_direct: false,
+        inflight_state: durable,
+        _lifetime_guard: None,
+    }
+}
+
+#[test]
+fn bridge_keeps_the_idle_tail_registration_until_its_task_exits() {
+    use crate::services::discord::tui_prompt_relay::{
+        claude_idle_response_tail_active_for_channel as tail_active,
+        register_claude_idle_tail_for_tests,
+    };
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        root.path(),
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let shared = super::super::make_shared_data_for_tests();
+        let owner = ChannelId::new(580_897);
+        let tail = register_claude_idle_tail_for_tests("AgentDesk-claude-bridge-lifetime", owner);
+        let (codex, text) = (ProviderKind::Codex, String::new());
+        let durable = InflightTurnState::new(
+            codex,
+            owner.get(),
+            None,
+            1,
+            2,
+            0,
+            text,
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        let gateway: Arc<dyn TurnGateway> = Arc::new(super::super::gateway::HeadlessGateway);
+        let mut bridge = bare_bridge_context(owner, durable, gateway);
+        bridge._lifetime_guard = Some(Arc::clone(&tail));
+        let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        *BRIDGE_CAPTURE_PROBE.lock().unwrap() = Some((owner, captured_tx, resume_rx));
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(CancelToken::new());
+        super::spawn_turn_bridge_with_pin(shared.clone(), cancel, rx, bridge, None);
+        let ten_secs = std::time::Duration::from_secs(10);
+        tokio::time::timeout(ten_secs, captured_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        // The idle tail gave up waiting (its 180s completion timeout) while the bridge runs.
+        drop(tail);
+        assert!(tail_active(owner), "a live bridge keeps the tail");
+        resume_tx.send(()).unwrap();
+        let done = StreamMessage::Done {
+            result: "NO_REPLY".into(),
+            session_id: None,
+        };
+        tx.send(done).unwrap();
+        drop(tx);
+        let released = async {
+            while tail_active(owner) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        let exited = tokio::time::timeout(ten_secs, released).await;
+        exited.expect("the registration is released once the bridge task exits");
     });
 }
 

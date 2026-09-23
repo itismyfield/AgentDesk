@@ -55,6 +55,9 @@ pub(in crate::services::discord) struct TurnBridgeContext {
     /// the origin without a `request_owner_name` string compare.
     pub(in crate::services::discord) is_external_input_tui_direct: bool,
     pub(in crate::services::discord) inflight_state: InflightTurnState,
+    /// Dropped only when the bridge task ends, so a caller that stops waiting (the idle
+    /// tail's 180s completion timeout) cannot retire a registration the bridge still needs.
+    pub(in crate::services::discord) _lifetime_guard: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 #[cfg(test)]

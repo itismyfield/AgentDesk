@@ -3102,7 +3102,9 @@ services::discord::health::watcher_respawn::tests::force_clean_respawn_offset_fl
 services::discord::health::watcher_respawn::tests::relay_work_terms_cannot_qualify_a_channel_the_arming_gate_rejects
 services::discord::health::watcher_respawn::tests::release_is_noop_when_mailbox_already_idle
 services::discord::health::watcher_respawn::tests::release_is_noop_when_snapshot_had_no_owner
+services::discord::health::watcher_respawn::tests::release_skips_a_token_resumed_after_the_repair_started
 services::discord::health::watcher_respawn::tests::release_skips_same_message_id_successor_with_new_episode
+services::discord::health::watcher_respawn::tests::release_skips_token_owned_by_a_live_claude_idle_tail
 services::discord::health::watcher_respawn::tests::release_stale_mailbox_ownership_unjams_next_synthetic_inflight
 services::discord::health::watcher_respawn::tests::remembered_absence_offset_floor_survives_snapshotless_retry
 services::discord::health::watcher_respawn::tests::respawn_backoff_doubles_then_holds_at_the_ceiling
@@ -4310,7 +4312,11 @@ services::discord::recovery_engine::manual_rebind::adoption::tests::claude_tui_a
 services::discord::recovery_engine::manual_rebind::adoption::tests::claude_tui_rebind_reregister_requires_transcript_output_path
 services::discord::recovery_engine::manual_rebind::adoption::tests::claude_tui_same_transcript_without_durable_runtime_stamp_forces_eof
 services::discord::recovery_engine::manual_rebind::adoption::tests::codex_tui_truncate_rebind_force_initial_offset_skips_floor
+services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_fences_a_tui_direct_row_forward_past_a_newer_turn_and_records_it
 services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_initial_offset_floor_uses_committed_frontier_within_output_len
+services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_never_rebases_an_unstamped_tui_direct_row_to_eof_without_a_record
+services::discord::recovery_engine::manual_rebind::adoption::tests::rebind_preserves_a_tui_direct_row_but_never_below_the_committed_offset
+services::discord::recovery_engine::manual_rebind::adoption::tests::tui_direct_adopt_keeps_offsets_only_in_their_own_coordinate_space
 services::discord::recovery_engine::manual_rebind::codex_tui_replay::tests::codex_tui_existing_normalized_relay_replay_events_disabled_without_turn_offset
 services::discord::recovery_engine::manual_rebind::codex_tui_replay::tests::codex_tui_existing_normalized_relay_replay_events_start_at_turn_offset
 services::discord::recovery_engine::manual_rebind::codex_tui_replay::tests::codex_tui_rebind_does_not_reuse_empty_normalized_relay_file
@@ -6862,6 +6868,7 @@ services::discord::turn_bridge::response_delivery::tests::long_authoritative_don
 services::discord::turn_bridge::response_delivery::tests::prompt_too_long_guidance_round_trips_folded_provider_detail
 services::discord::turn_bridge::response_delivery::tests::terminal_delivery_after_rollover_includes_authoritative_tail
 services::discord::turn_bridge::response_delivery::tests::terminal_error_after_rollover_delivers_error_text_not_recovery_notice
+services::discord::turn_bridge::resume_pin_tests::bridge_keeps_the_idle_tail_registration_until_its_task_exits
 services::discord::turn_bridge::resume_pin_tests::c1_actual_postlude_resume_pin_runtime_proof
 services::discord::turn_bridge::resume_pin_tests::c1_both_late_writers_consume_pin_without_registry_backfill
 services::discord::turn_bridge::resume_pin_tests::c1_cancelled_registered_pin_leaves_all_effects_untouched

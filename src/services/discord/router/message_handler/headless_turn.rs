@@ -1110,6 +1110,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             completion_tx: None,
             is_external_input_tui_direct: false, // #3089 A6b: Discord-origin (not external-input)
             inflight_state,
+            _lifetime_guard: None,
         },
     );
 

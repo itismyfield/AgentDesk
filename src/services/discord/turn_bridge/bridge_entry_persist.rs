@@ -544,6 +544,7 @@ mod tests {
             completion_tx: None,
             is_external_input_tui_direct: false,
             inflight_state: row,
+            _lifetime_guard: None,
         }
     }
 

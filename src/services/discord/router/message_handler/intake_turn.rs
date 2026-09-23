@@ -2505,6 +2505,7 @@ pub(super) async fn handle_text_message(
             completion_tx,
             is_external_input_tui_direct: false, // #3089 A6b: Discord-origin intake turn
             inflight_state,
+            _lifetime_guard: None,
         },
     );
 

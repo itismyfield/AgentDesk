@@ -246,7 +246,7 @@ fn synthetic_bridge_handoff_fixture(
                     synthetic_start::restore_pending_starts(&shared, &provider);
                     tokio::time::timeout(Duration::from_secs(5), async {
                         while pending::load_all().iter().any(|record| record.channel_id == channel.get())
-                            || CLAUDE_IDLE_RESPONSE_TAILS.lock().unwrap().contains(tmux)
+                            || CLAUDE_IDLE_RESPONSE_TAILS.lock().unwrap().contains_key(tmux)
                         {
                             tokio::time::sleep(Duration::from_millis(25)).await;
                         }
@@ -381,6 +381,7 @@ fn synthetic_bridge_handoff_fixture(
                         claude_idle_bridge::IdleBridgeSource {
                             tmux_session_name: tmux, output_path: &output, start_offset: source_start,
                             prompt_text: "handoff prompt", lease: &lease,
+                            lifetime_guard: None,
                         },
                         (Vec::new(), rx, Some(end_rx)), gateway.clone(), 0,
                     )).await.expect("empty/error reader settles within the reader bound");
@@ -540,6 +541,7 @@ fn synthetic_bridge_handoff_fixture(
                 claude_idle_bridge::IdleBridgeSource {
                     tmux_session_name: tmux, output_path: &output, start_offset: original_start,
                     prompt_text: "handoff prompt", lease: &resumed,
+                    lifetime_guard: None,
                 },
                 (first, rx, Some(end_rx)), gateway.clone(), 0,
             ).await;
@@ -655,6 +657,7 @@ fn synthetic_bridge_handoff_fixture(
                     claude_idle_bridge::IdleBridgeSource {
                         tmux_session_name: tmux, output_path: &output, start_offset: retained.last_offset,
                         prompt_text: "handoff prompt", lease: &renewed,
+                        lifetime_guard: None,
                     },
                     (Vec::new(), rx, Some(end_rx)), gateway.clone(), 0,
                 )).await.expect("resumed adapter finishes").expect("the original saved prefix and later terminal remain deliverable");

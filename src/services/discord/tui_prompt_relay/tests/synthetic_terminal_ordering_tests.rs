@@ -112,11 +112,14 @@ fn terminal_ordering_fixture(
             let reader = super::synthetic_bridge_handoff_pg_tests::spawn_handoff_reader(
                 &output, 0, tmux, tx, reader_end_tx,
             );
+            let bridge_guard: Arc<dyn std::any::Any + Send + Sync> = Arc::new(());
+            let bridge_guard_probe = Arc::downgrade(&bridge_guard);
             let delivery = claude_idle_bridge::stream_tui_idle_response_with_gateway(
                 &shared, provider.clone(), channel,
                 claude_idle_bridge::IdleBridgeSource {
                     tmux_session_name: tmux, output_path: &output, start_offset: 0,
                     prompt_text: "terminal ordering prompt", lease: &lease,
+                    lifetime_guard: Some(bridge_guard),
                 },
                 (Vec::new(), rx, Some(reader_end_rx)), gateway.clone(), 0,
             );
@@ -133,6 +136,7 @@ fn terminal_ordering_fixture(
                 // enough to make the edit appear, which is why measuring the terminal
                 // transport against zero was load-dependent. Measure against this boundary.
                 let streamed_before_terminal = gateway.bodies.lock().unwrap().len();
+                assert!(bridge_guard_probe.upgrade().is_some(), "the adapter hands its lifetime guard to the bridge");
                 let before = crate::services::discord::mailbox_snapshot(&shared, channel).await;
                 assert!(before.cancel_token.as_ref().is_some_and(|token| Arc::ptr_eq(token, &original_actor)),
                     "the original synthetic actor must still own the turn DURING terminal transport");
@@ -340,7 +344,7 @@ fn terminal_ordering_fixture(
                     // source mismatch in the fields above, so name the gate instead
                     // of leaving the next sweep failure to guess which one fired.
                     let idle_tail_registered = CLAUDE_IDLE_RESPONSE_TAILS
-                        .lock().unwrap_or_else(|error| error.into_inner()).contains(tmux);
+                        .lock().unwrap_or_else(|error| error.into_inner()).contains_key(tmux);
                     let live_producer = crate::services::cluster::relay_producer_registry
                         ::global_relay_producer_registry().get_live_producer(tmux).is_some();
                     let watcher_can_own = synthetic_start::tui_direct_watcher_can_own_output(

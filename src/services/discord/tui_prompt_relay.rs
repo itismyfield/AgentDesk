@@ -144,6 +144,13 @@ use self::synthetic_start::{
     release_stale_ownerless_tui_direct_mailbox_if_current, tui_direct_watcher_can_own_output,
 };
 
+mod idle_tail_registry;
+#[cfg(test)]
+pub(in crate::services::discord) use self::idle_tail_registry::register_claude_idle_tail_for_tests;
+use self::idle_tail_registry::{CLAUDE_IDLE_RESPONSE_TAILS, ClaudeIdleTailGuard};
+pub(in crate::services::discord) use self::idle_tail_registry::{
+    claude_idle_response_tail_active_for_channel, claude_transcript_committed_offset,
+};
 #[cfg(unix)]
 mod claude_idle_bridge;
 #[cfg(unix)]
@@ -209,9 +216,6 @@ const TUI_DIRECT_SYNTHETIC_CLAIM_POLL: Duration = Duration::from_millis(100);
 pub(in crate::services::discord) const TUI_DIRECT_SYNTHETIC_OWNER_USER_ID: u64 = 1;
 static CODEX_IDLE_ROLLOUT_RELAY_STARTED: AtomicBool = AtomicBool::new(false);
 static CLAUDE_IDLE_TRANSCRIPT_RELAY_STARTED: AtomicBool = AtomicBool::new(false);
-static CLAUDE_IDLE_RESPONSE_TAILS: LazyLock<Mutex<HashSet<String>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
-
 /// #3178: dedupe window for the machine slash-command control turn. The #3153
 /// `/loop` double-post arrives as TWO independent observed prompts — the raw
 /// `/loop …` ScheduleWakeup echo AND the Claude Code expanded `<command-*>`
@@ -232,19 +236,6 @@ const SLASH_COMMAND_CONTROL_DEDUPE_WINDOW: Duration = Duration::from_secs(2);
 static SLASH_COMMAND_CONTROL_LAST_POSTED: LazyLock<
     Mutex<std::collections::HashMap<String, std::time::Instant>>,
 > = LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
-
-struct ClaudeIdleTailGuard {
-    tmux_session_name: String,
-}
-
-impl Drop for ClaudeIdleTailGuard {
-    fn drop(&mut self) {
-        CLAUDE_IDLE_RESPONSE_TAILS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(&self.tmux_session_name);
-    }
-}
 
 struct CodexIdleTailDoneGuard {
     tmux_session_name: Option<String>,
