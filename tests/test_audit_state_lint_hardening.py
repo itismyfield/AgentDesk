@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -138,6 +142,68 @@ class MigrationIntegerAuditTests(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertIn("retry_count INTEGER", findings[0])
         self.assertIn("use BIGINT", findings[0])
+
+
+class ChangedPathAuditTests(unittest.TestCase):
+    NAMES = ("child.rs", "한글.rs", "my module.rs", "a\nb.rs", 'a"b.rs')
+
+    def setUp(self) -> None:
+        AUDIT._TEST_REGION_CACHE.clear()
+
+    @contextlib.contextmanager
+    def repository(self, base_files: dict[str, str]):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+
+            def git(*args: str) -> str:
+                return subprocess.run(["git", *args], cwd=repo, check=True,
+                                      capture_output=True, text=True).stdout.strip()
+
+            git("init", "-q")
+            git("config", "user.email", "audit@example.invalid")
+            git("config", "user.name", "Audit Test")
+            git("config", "diff.renames", "true")
+            for path, text in base_files.items():
+                (repo / path).parent.mkdir(parents=True, exist_ok=True)
+                (repo / path).write_text(text, encoding="utf-8")
+            git("add", "-A")
+            git("commit", "-qm", "base")
+            base = git("rev-parse", "HEAD")
+            with contextlib.chdir(repo), mock.patch.dict(os.environ, {"AGENTDESK_AUDIT_BASE": base}):
+                yield repo, git
+
+    def assert_unwrap_findings(self, expected: list[str]) -> None:
+        findings = AUDIT.audit_unwrap_panic(AUDIT.collect_added_lines())
+        for location in expected:
+            with self.subTest(location=location):
+                self.assertTrue(any(finding.startswith(f"{location}: new production unwrap")
+                                    for finding in findings), findings)
+        self.assertEqual(len(findings), len(expected), findings)
+
+    def write_git_quoted_children(self, repo: Path) -> None:
+        for name in self.NAMES:
+            (repo / "src/db" / name).write_text("fn f() {}\nfn g() { x.unwrap(); }\n", encoding="utf-8")
+
+    def test_committed_git_quoted_paths_keep_their_added_lines(self) -> None:
+        with self.repository({"src/db/base.rs": "fn base() {}\n"}) as (repo, git):
+            self.write_git_quoted_children(repo)
+            git("add", "-A")
+            git("commit", "-qm", "candidate")
+            self.assert_unwrap_findings([f"src/db/{name}:2" for name in self.NAMES])
+
+    def test_untracked_git_quoted_paths_keep_their_added_lines(self) -> None:
+        with self.repository({"src/db/base.rs": "fn base() {}\n"}) as (repo, _git):
+            self.write_git_quoted_children(repo)
+            self.assert_unwrap_findings([f"src/db/{name}:2" for name in self.NAMES])
+
+    def test_renamed_path_reports_only_lines_added_after_the_rename(self) -> None:
+        legacy = "".join(f"fn legacy_{index}() {{ x.unwrap(); }}\n" for index in range(20))
+        with self.repository({"src/db/old name.rs": legacy}) as (repo, git):
+            git("mv", "src/db/old name.rs", "src/db/new name.rs")
+            with (repo / "src/db/new name.rs").open("a", encoding="utf-8") as handle:
+                handle.write("fn added() { y.unwrap(); }\n")
+            git("commit", "-qam", "candidate")
+            self.assert_unwrap_findings(["src/db/new name.rs:21"])
 
 
 if __name__ == "__main__":

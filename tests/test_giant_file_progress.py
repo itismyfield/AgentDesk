@@ -278,6 +278,33 @@ class GiantFileProgressTest(unittest.TestCase):
         self.assertIn("800 non-moved additions", errors)
         self.assertIn("moved production code", errors)
 
+    def test_movement_ledger_credits_git_quoted_child_paths(self):
+        root = "src/root.rs"
+        production = [f"pub fn production_{line}() {{}}" for line in range(1200)]
+        for name in ("child.rs", "한글.rs", "my module.rs", "a\nb.rs", 'a"b.rs'):
+            child = f"src/root/{name}"
+            with self.subTest(child=child), self.movement_repository(
+                    {root: "\n".join(production) + "\n"},
+                    {root: "\n".join(production[:800]) + "\n",
+                     child: "\n".join(production[800:]) + "\n"}) as (base_ref, candidate_ref):
+                self.assertEqual(PROGRESS.movement_ledger(
+                    base_ref, candidate_ref, {root}, {root: [child]},
+                    {root: 1200}, {root: 800, child: 400}),
+                    {root: occurrences(child, 400)})
+
+    def test_movement_ledger_reads_child_pathspecs_literally(self):
+        root, glob, literal = "src/root.rs", "src/root/[c]hild.rs", "src/root/child.rs"
+        production = [f"pub fn production_{line}() {{}}" for line in range(1200)]
+        with self.movement_repository(
+                {root: "\n".join(production) + "\n"},
+                {root: "\n".join(production[:800]) + "\n",
+                 glob: "pub fn unrelated() {}\n",
+                 literal: "\n".join(production[800:]) + "\n"}) as (base_ref, candidate_ref):
+            ledger = PROGRESS.movement_ledger(
+                base_ref, candidate_ref, {root}, {root: [glob, literal]},
+                {root: 1200}, {root: 800, glob: 1, literal: 400})
+        self.assertEqual(ledger, {root: occurrences(literal, 400)})
+
     def test_pin_rederivation_paths_are_narrow(self):
         base, candidate, facts = self.fixture()
         facts.update(bootstrap=False,
