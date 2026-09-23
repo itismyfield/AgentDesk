@@ -279,3 +279,115 @@ fn incomplete_session_metadata_does_not_reset_a_valid_rollout_cursor() {
         );
     });
 }
+
+#[derive(Clone, Default)]
+struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+    type Writer = LogSink;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+struct TmuxFixture(String);
+
+impl Drop for TmuxFixture {
+    fn drop(&mut self) {
+        crate::services::platform::tmux::kill_session(&self.0, "rehydration entry fixture");
+    }
+}
+
+/// Runs one production periodic pass and counts its success logs.
+fn entry_pass_recoveries(shared: &Arc<SharedData>) -> usize {
+    let sink = LogSink::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(sink.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, || rehydrate_existing_codex_tui_bindings(shared));
+    String::from_utf8(sink.0.lock().unwrap().clone())
+        .unwrap()
+        .matches("rehydrated Codex TUI direct relay binding from live rollout")
+        .count()
+}
+
+#[test]
+fn periodic_entry_pass_reports_one_recovery_then_settles() {
+    if !std::process::Command::new("tmux")
+        .arg("-V")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping: tmux unavailable");
+        return;
+    }
+    fixture(|root| {
+        let session = format!("adk-rehydrate-entry-{}", std::process::id());
+        crate::services::platform::tmux::kill_session(&session, "rehydration entry fixture");
+        assert!(
+            crate::services::platform::tmux::create_session(&session, None, "sleep 120")
+                .expect("start tmux fixture")
+                .status
+                .success()
+        );
+        let _tmux = TmuxFixture(session.clone());
+        crate::services::tmux_common::write_tmux_runtime_kind_marker(
+            &session,
+            RuntimeHandoffKind::CodexTui,
+        )
+        .unwrap();
+        let path = root.join("entry.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"entry\"}}\n",
+        )
+        .unwrap();
+        crate::services::codex_tui::session::write_codex_tui_rollout_marker(
+            &session,
+            &path,
+            Some("entry"),
+        )
+        .unwrap();
+        dedupe::register_tmux_channel(&session, CHANNEL);
+        let shared = crate::services::discord::make_shared_data_for_tests();
+
+        assert_eq!(
+            entry_pass_recoveries(&shared),
+            1,
+            "missing binding restores"
+        );
+        let mut progressed =
+            dedupe::runtime_binding_for_tmux_session(&session).expect("restored binding");
+        assert_eq!(progressed.output_path, path.display().to_string());
+        progressed.last_offset = 17;
+        progressed.relay_last_offset = Some(11);
+        dedupe::register_tmux_runtime_binding(&session, progressed.clone());
+
+        for _ in 0..3 {
+            assert_eq!(
+                entry_pass_recoveries(&shared),
+                0,
+                "a valid binding must not be reported as rehydrated again"
+            );
+        }
+        assert_eq!(
+            dedupe::runtime_binding_for_tmux_session(&session),
+            Some(progressed)
+        );
+    });
+}
