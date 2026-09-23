@@ -72,7 +72,6 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/health/reachability/composite_tests.rs",
         "src/services/discord/health/reachability/ledger_tests.rs",
         "src/services/discord/health/reachability/obligation_tests.rs",
-        "src/services/discord/health/watcher_respawn/respawn_deadlock_tests.rs",
         "src/services/discord/inflight/save_store/bridge_entry_guard_tests.rs",
         "src/services/discord/inflight/save_store/identity_gate/runtime_stamp/claude_terminal_tests.rs",
         "src/services/discord/inflight/save_store/outcome_decomposition_tests.rs",

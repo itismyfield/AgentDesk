@@ -493,7 +493,6 @@ async fn run_codex_idle_response_tail(
         reader_rx,
         Some(offset_rx),
         &lease,
-        None,
     )
     .await;
     if delivery_result.is_err() {

@@ -2286,7 +2286,6 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 completion_tx: None,
                 is_external_input_tui_direct: false, // #3089 A6b: recovery is not external-input
                 inflight_state: state,
-                _lifetime_guard: None,
             },
         );
     }

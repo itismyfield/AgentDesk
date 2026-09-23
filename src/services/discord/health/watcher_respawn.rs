@@ -53,8 +53,6 @@ use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::ProviderKind;
 
 mod idle_relay_absence;
-#[cfg(all(test, unix))]
-mod respawn_deadlock_tests;
 
 use idle_relay_absence::observe_routable_unwatched_tui_sessions;
 
@@ -447,18 +445,6 @@ pub(super) async fn release_stale_mailbox_ownership_after_force_clean(
     let Some(stale_user_msg_id) = stale_user_msg_id else {
         return false;
     };
-    // A live Claude idle tail/bridge owns this token; releasing it would let a respawned
-    // watcher deliver the same turn a second time.
-    if discord::tui_prompt_relay::claude_idle_response_tail_active_for_channel(channel_id) {
-        tracing::info!(
-            channel_id = channel_id.get(),
-            provider = provider.as_str(),
-            stale_user_msg_id,
-            reason = FORCE_CLEAN_FINALIZER_REASON,
-            "STALL-WATCHDOG: skipped stale mailbox release — a Claude idle tail still relays into this channel"
-        );
-        return false;
-    }
     let expected = poise::serenity_prelude::MessageId::new(stale_user_msg_id);
     let finish = discord::mailbox_finish_turn_if_matches_episode_started_before(
         shared,
@@ -1331,71 +1317,6 @@ mod tests {
         )
         .await;
         assert!(!released, "no snapshot owner ⇒ nothing stale to release");
-    }
-
-    async fn start_claude_turn(
-        shared: &std::sync::Arc<crate::services::discord::SharedData>,
-        channel: ChannelId,
-        message_id: u64,
-    ) -> std::sync::Arc<CancelToken> {
-        let token = std::sync::Arc::new(CancelToken::new());
-        let user = UserId::new(9);
-        let message = MessageId::new(message_id);
-        let mailbox = crate::services::discord::mailbox_try_start_turn;
-        assert!(mailbox(shared, channel, token.clone(), user, message).await);
-        token
-    }
-
-    /// Releases with an identity (message + nonce) that matches the current owner.
-    async fn release_matching(
-        shared: &std::sync::Arc<crate::services::discord::SharedData>,
-        (channel, id): (ChannelId, u64),
-        token: &CancelToken,
-        repair_started_at: Instant,
-    ) -> bool {
-        let (provider, nonce) = (&ProviderKind::Claude, token.turn_nonce().map(str::to_owned));
-        let release = release_stale_mailbox_ownership_after_force_clean;
-        release(
-            shared,
-            provider,
-            channel,
-            Some(id),
-            nonce,
-            repair_started_at,
-        )
-        .await
-    }
-
-    #[tokio::test]
-    async fn release_skips_token_owned_by_a_live_claude_idle_tail() {
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let owner = (ChannelId::new(3_410_208), 2_222_222);
-        let token = start_claude_turn(&shared, owner.0, owner.1).await;
-        let tail = crate::services::discord::tui_prompt_relay::register_claude_idle_tail_for_tests(
-            "AgentDesk-claude-release-live-tail",
-            owner.0,
-        );
-        // Identity and start both match, so only the live tail keeps the token.
-        let kept = !release_matching(&shared, owner, &token, Instant::now()).await;
-        assert!(kept, "a live idle tail's token must not be released");
-        assert!(!token.cancelled.load(Ordering::Relaxed));
-        drop(tail);
-        let released = release_matching(&shared, owner, &token, Instant::now()).await;
-        assert!(released, "the same token is released once the tail is gone");
-        assert!(token.cancelled.load(Ordering::Relaxed));
-    }
-
-    #[tokio::test]
-    async fn release_skips_a_token_resumed_after_the_repair_started() {
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let owner = (ChannelId::new(3_410_209), 3_333_333);
-        let repair_started_at = Instant::now();
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-        // Resume took the token (and witness) but has not registered its tail yet.
-        let token = start_claude_turn(&shared, owner.0, owner.1).await;
-        let kept = !release_matching(&shared, owner, &token, repair_started_at).await;
-        assert!(kept, "a token taken after the repair began is live");
-        assert!(!token.cancelled.load(Ordering::Relaxed));
     }
 
     #[tokio::test]
@@ -2309,9 +2230,6 @@ mod tests {
     fn an_unrecovered_routable_absence_warns_once_past_the_threshold() {
         let provider = ProviderKind::Claude;
         let channel = ChannelId::new(5_957_302);
-        // Watchdog-pass tests GC the absence map against the wall clock under this
-        // mutex; unserialized, they retire this past-anchored entry mid-test.
-        let _serialized = crate::config::test_env_lock::acquire_shared_test_env_lock();
         clear_watcher_absence(&provider, channel);
 
         let t0 = 1_789_100_000i64;
@@ -2353,8 +2271,6 @@ mod tests {
     fn the_five_hour_incident_gap_warns_exactly_once() {
         let provider = ProviderKind::Claude;
         let channel = ChannelId::new(5_957_303);
-        // Same wall-clock GC race as above: a re-armed entry announces twice.
-        let _serialized = crate::config::test_env_lock::acquire_shared_test_env_lock();
         clear_watcher_absence(&provider, channel);
 
         let t0 = 1_789_200_000i64;

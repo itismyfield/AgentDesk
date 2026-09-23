@@ -173,7 +173,6 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
     reader_rx: mpsc::Receiver<StreamMessage>,
     reader_end: Option<IdleReaderEnd>,
     lease: &ExternalInputRelayLease,
-    lifetime_guard: Option<Arc<dyn std::any::Any + Send + Sync>>,
 ) -> Result<Option<u64>, String> {
     let _lease_guard = TuiDirectExternalInputLeaseGuard::new(
         provider.clone(),
@@ -218,7 +217,6 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
             start_offset,
             prompt_text,
             lease,
-            lifetime_guard,
         },
         (prefix, reader_rx, reader_end),
         gateway,
@@ -234,8 +232,6 @@ pub(super) struct IdleBridgeSource<'a> {
     pub(super) start_offset: u64,
     pub(super) prompt_text: &'a str,
     pub(super) lease: &'a ExternalInputRelayLease,
-    /// Moved into the bridge context so it is released only when the bridge task ends.
-    pub(super) lifetime_guard: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 #[cfg(unix)]
@@ -258,7 +254,6 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
         start_offset,
         prompt_text,
         lease,
-        lifetime_guard,
     } = source;
     let (prefix, reader_rx, reader_end) = reader;
     let claim = super::synthetic_start::bridge_handoff::capture(
@@ -334,7 +329,6 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
         completion_tx: Some(completion_tx),
         is_external_input_tui_direct: true, // #3959: suppress mirror chrome footer
         inflight_state,
-        _lifetime_guard: lifetime_guard,
     };
 
     // EXACTLY ONE spawn_turn_bridge_with_pin per external turn.

@@ -2540,7 +2540,7 @@ fn claude_bridge_lease_clears_when_tail_dedup_skips_spawn() {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         active.remove(tmux);
-        active.insert(tmux.to_string(), channel_id);
+        active.insert(tmux.to_string());
     }
     let lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
         ProviderKind::Claude.as_str(),
@@ -3102,7 +3102,6 @@ async fn s3_completion_fixture_body(
                 0,
                 &lease,
             ),
-            _lifetime_guard: None,
         };
         spawn_fixture_bridge(
             shared.clone(),
@@ -3214,40 +3213,6 @@ fn s3t2_delivery_failure_never_cancels_successor_or_commits_cursor() {
         );
     }
     s3_completion_fixture(true, Some(false), Some(880003), Some(880005));
-}
-
-/// The tail builds its gateway from live Discord HTTP and its bridge outlives it only past a
-/// 180s completion timeout, so this hop is pinned by source; the bridge side runs behaviorally.
-#[cfg(unix)]
-#[test]
-fn claude_idle_tail_hands_its_registration_guard_to_the_bridge() {
-    let squash = |source: &str| source.split_whitespace().collect::<String>();
-    let tail = squash(include_str!("claude_idle_tail.rs"));
-    let body = tail
-        .split("pub(super)asyncfnrun_claude_idle_response_tail(")
-        .nth(1)
-        .expect("tail entry point");
-    assert!(
-        body.contains(
-            "lettail_guard:Arc<dynstd::any::Any+Send+Sync>=Arc::new(ClaudeIdleTailGuard{"
-        )
-    );
-    let call = body
-        .split("stream_tui_idle_response_through_bridge(")
-        .nth(1)
-        .expect("tail enters the bridge adapter");
-    let args = &call[..call.find(").await").expect("adapter call is awaited")];
-    assert!(
-        args.ends_with("Some(Arc::clone(&tail_guard)),"),
-        "the tail must hand its registration guard to the bridge, got: {args}"
-    );
-    let bridge = squash(include_str!("claude_idle_bridge.rs"));
-    let adapter = bridge
-        .split("pub(super)asyncfnstream_tui_idle_response_through_bridge(")
-        .nth(1)
-        .and_then(|rest| rest.split("pub(super)structIdleBridgeSource").next())
-        .expect("bridge adapter body");
-    assert!(adapter.contains("lifetime_guard,},"));
 }
 
 #[cfg(unix)]
