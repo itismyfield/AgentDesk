@@ -450,9 +450,13 @@ db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_includ
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_marks_empty_provider_false_pg
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_returns_empty_when_no_rows_pg
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_returns_only_dispatched_rows_pg
+db::postgres::test_db_reclaim::tests::pg_reclaim_drops_old_database_created_but_never_marked
 db::postgres::test_db_reclaim::tests::pg_reclaim_drops_orphaned_fixture_database
 db::postgres::test_db_reclaim::tests::pg_reclaim_dry_run
+db::postgres::test_db_reclaim::tests::pg_reclaim_finds_database_killed_before_marker
+db::postgres::test_db_reclaim::tests::pg_reclaim_fresh_process_child
 db::postgres::test_db_reclaim::tests::pg_reclaim_never_targets_unmarked_databases
+db::postgres::test_db_reclaim::tests::pg_reclaim_runs_on_first_fixture_of_fresh_process
 db::postgres::test_db_reclaim::tests::pg_reclaim_skips_database_with_active_session
 db::postgres::test_db_reclaim::tests::pg_reclaim_skips_database_younger_than_min_age
 db::postgres::tests::core_status_constraints_reject_invalid_values_and_allow_valid_states
