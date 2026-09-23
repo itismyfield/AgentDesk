@@ -97,13 +97,18 @@ pub(in crate::services::discord) fn readopt_marker_eligible_real_user(
         && state.user_msg_id != 0
 }
 
-/// Only an epoch this process provably advanced can prove authorship; any other
-/// route may still carry the prior process's generation, so it stays fail-open.
-pub(in crate::services::discord) fn row_authored_by_running_process(
-    state: &inflight::InflightTurnState,
-    allocation: super::runtime_store::ProcessGenerationAllocation,
+/// Only the mailbox's own record of releasing this exact episode proves the turn
+/// already ended here; without it (e.g. a prior process's row) re-registering stays open.
+fn mailbox_released_this_episode(
+    snapshot: &crate::services::turn_orchestrator::ChannelMailboxSnapshot,
+    user_msg_id: serenity::model::id::MessageId,
+    turn_nonce: Option<&str>,
 ) -> bool {
-    allocation.epoch_advanced() && inflight::row_is_current_generation(state, allocation.generation)
+    matches!(
+        (snapshot.released_episode.as_ref(), turn_nonce),
+        (Some((released_id, released_nonce)), Some(nonce))
+            if *released_id == user_msg_id && released_nonce == nonce
+    )
 }
 
 /// #4370: mark this mailbox slot as re-adopted-from-inflight so the TUI-direct
@@ -317,15 +322,12 @@ async fn reregister_active_turn_from_inflight_inner(
         return false;
     }
 
-    let allocation = super::runtime_store::process_generation_binding();
-    if row_authored_by_running_process(state, allocation) {
+    if mailbox_released_this_episode(&snapshot, finalizer_msg_id, state.turn_nonce.as_deref()) {
         tracing::warn!(
             provider = %provider.as_str(),
             channel_id = state.channel_id,
             finalizer_turn_id,
-            born_generation = state.born_generation,
-            epoch_route = allocation.epoch_route(),
-            "inflight reregister refused to mint: the running process authored this row and its mailbox is already released"
+            "inflight reregister refused to mint: this mailbox already released this exact episode"
         );
         return false;
     }
@@ -963,30 +965,21 @@ mod readopted_ledger_record_gate_tests {
     }
 }
 
-/// A row the running process authored belongs to a turn this process's own
-/// finalizer owns; re-registering it from disk after that finalizer released
-/// the mailbox must not mint a second token for the finished turn.
+/// Re-registering an episode whose token this mailbox already released would
+/// re-open a finished turn; any other empty-mailbox row is recovery's to mint.
 #[cfg(test)]
-mod running_process_row_mint_fence_tests {
+mod released_episode_mint_fence_tests {
     use super::inflight::InflightTurnState;
     use crate::services::discord::runtime_store::{
-        ADVANCED_ROUTE_FOR_TESTS, GenerationAllocationRoute, ProcessGenerationAllocation,
-        process_generation_allocation_for_tests, publish_process_generation_allocation_for_tests,
+        ADVANCED_ROUTE_FOR_TESTS, process_generation_allocation_for_tests,
+        publish_process_generation_allocation_for_tests,
     };
     use crate::services::provider::ProviderKind;
-    use serenity::model::id::ChannelId;
+    use serenity::model::id::{ChannelId, MessageId};
 
     const RUNNING_GENERATION: u64 = 524_200;
 
-    fn run_async<F: std::future::Future>(fut: F) -> F::Output {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("current-thread runtime")
-            .block_on(fut)
-    }
-
-    fn row(channel_id: u64, born_generation: u64) -> InflightTurnState {
+    fn row(channel_id: u64) -> InflightTurnState {
         let mut state = InflightTurnState::new(
             ProviderKind::Claude,
             channel_id,
@@ -1001,16 +994,15 @@ mod running_process_row_mint_fence_tests {
             None,
             0,
         );
-        state.born_generation = born_generation;
+        state.born_generation = RUNNING_GENERATION;
         state
     }
 
-    /// Re-registers `state` into an empty mailbox under `allocation` and returns
-    /// (reregister verdict, whether the mailbox now holds a token).
-    fn reregister_into_empty_mailbox(
-        state: &InflightTurnState,
-        allocation: ProcessGenerationAllocation,
-    ) -> (bool, bool) {
+    /// Runs `body` against a fresh runtime whose epoch is `RUNNING_GENERATION`
+    /// and provably advanced, so generation alone would call every row "ours".
+    fn with_running_process<T>(
+        body: impl AsyncFnOnce(&std::sync::Arc<crate::services::discord::SharedData>) -> T,
+    ) -> T {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1019,59 +1011,127 @@ mod running_process_row_mint_fence_tests {
             "AGENTDESK_ROOT_DIR",
             root.path(),
         );
-        let _publication = publish_process_generation_allocation_for_tests(allocation);
-        run_async(async {
-            let shared = super::super::make_shared_data_for_tests_with_storage(None);
-            let channel_id = ChannelId::new(state.channel_id);
-            let restored = super::reregister_active_turn_from_inflight(&shared, state).await;
-            let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
-            (restored, snapshot.cancel_token.is_some())
-        })
+        let _publication = publish_process_generation_allocation_for_tests(
+            process_generation_allocation_for_tests(RUNNING_GENERATION, ADVANCED_ROUTE_FOR_TESTS),
+        );
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime")
+            .block_on(async {
+                let shared = super::super::make_shared_data_for_tests_with_storage(None);
+                body(&shared).await
+            })
+    }
+
+    /// Mints `minted` and releases it the way the finalizer does, then
+    /// re-registers `reloaded`; returns (reregister verdict, token present).
+    async fn reregister_after_release(
+        shared: &std::sync::Arc<crate::services::discord::SharedData>,
+        minted: &InflightTurnState,
+        reloaded: &InflightTurnState,
+    ) -> (bool, bool) {
+        let channel_id = ChannelId::new(minted.channel_id);
+        assert!(super::reregister_active_turn_from_inflight(shared, minted).await);
+        let finish = crate::services::discord::mailbox_finish_turn_if_matches(
+            shared,
+            &ProviderKind::Claude,
+            channel_id,
+            MessageId::new(minted.effective_finalizer_turn_id()),
+        )
+        .await;
+        assert!(
+            finish.removed_token.is_some(),
+            "the finalizer released the token"
+        );
+        let restored = super::reregister_active_turn_from_inflight(shared, reloaded).await;
+        let snapshot = crate::services::discord::mailbox_snapshot(shared, channel_id).await;
+        (restored, snapshot.cancel_token.is_some())
     }
 
     #[test]
-    fn running_process_row_does_not_remint_a_released_mailbox() {
-        let state = row(524_201, RUNNING_GENERATION);
-        let (restored, token_present) = reregister_into_empty_mailbox(
-            &state,
-            process_generation_allocation_for_tests(RUNNING_GENERATION, ADVANCED_ROUTE_FOR_TESTS),
-        );
+    fn a_released_episode_is_not_reminted() {
+        let state = row(524_201);
+        let (restored, token_present) = with_running_process(async |shared| {
+            reregister_after_release(shared, &state, &state).await
+        });
         assert!(
             !restored,
-            "a running-process row must not be reported as restored"
+            "a finished episode must not be reported as restored"
         );
         assert!(
             !token_present,
-            "a running-process row must not re-occupy the mailbox its finalizer released"
+            "a finished episode must not re-occupy the mailbox its finalizer released"
+        );
+    }
+
+    /// A prior process's crash row can carry the running generation after the
+    /// counter rename rolled back; with no release witness it must still mint.
+    #[test]
+    fn a_generation_colliding_crash_row_still_reattaches() {
+        let state = row(524_202);
+        let (restored, token_present) = with_running_process(async |shared| {
+            let restored = super::reregister_active_turn_from_inflight(shared, &state).await;
+            let snapshot = crate::services::discord::mailbox_snapshot(
+                shared,
+                ChannelId::new(state.channel_id),
+            )
+            .await;
+            (restored, snapshot.cancel_token.is_some())
+        });
+        assert!(
+            restored && token_present,
+            "generation equality is not a release witness, so the crash row is recovery's"
         );
     }
 
     #[test]
-    fn prior_process_row_still_reattaches() {
-        let state = row(524_202, RUNNING_GENERATION - 1);
-        let (restored, token_present) = reregister_into_empty_mailbox(
-            &state,
-            process_generation_allocation_for_tests(RUNNING_GENERATION, ADVANCED_ROUTE_FOR_TESTS),
-        );
+    fn another_episode_of_the_same_message_still_reattaches() {
+        let released = row(524_203);
+        let mut successor = released.clone();
+        successor.turn_nonce = Some("successor-episode".to_string());
+        let (restored, token_present) = with_running_process(async |shared| {
+            reregister_after_release(shared, &released, &successor).await
+        });
         assert!(
             restored && token_present,
-            "a prior-process row is recovery's to reattach"
+            "the witness names one exact episode, not every episode of its message"
         );
     }
 
     #[test]
-    fn unadvanced_epoch_cannot_prove_authorship_and_still_reattaches() {
-        let state = row(524_203, RUNNING_GENERATION);
-        let (restored, token_present) = reregister_into_empty_mailbox(
-            &state,
-            process_generation_allocation_for_tests(
-                RUNNING_GENERATION,
-                GenerationAllocationRoute::ParentSyncFailed,
-            ),
-        );
+    fn a_row_without_a_nonce_never_matches_a_witness() {
+        let snapshot = crate::services::turn_orchestrator::ChannelMailboxSnapshot {
+            released_episode: Some((MessageId::new(7), "episode-a".to_string())),
+            ..Default::default()
+        };
+        assert!(super::mailbox_released_this_episode(
+            &snapshot,
+            MessageId::new(7),
+            Some("episode-a")
+        ));
+        assert!(!super::mailbox_released_this_episode(
+            &snapshot,
+            MessageId::new(7),
+            None
+        ));
+        assert!(!super::mailbox_released_this_episode(
+            &snapshot,
+            MessageId::new(8),
+            Some("episode-a")
+        ));
+    }
+
+    #[test]
+    fn a_nonce_less_row_is_not_proven_released() {
+        let mut state = row(524_204);
+        state.turn_nonce = None;
+        let (restored, token_present) = with_running_process(async |shared| {
+            reregister_after_release(shared, &state, &state).await
+        });
         assert!(
             restored && token_present,
-            "an epoch that did not advance may be the prior process's, so the row is not provably ours"
+            "without a nonce the row cannot name the released episode, so the fence stays open"
         );
     }
 }

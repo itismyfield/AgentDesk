@@ -109,16 +109,6 @@ pub(in crate::services::discord) fn readopt_relay_black_hole_dead_letter_require
     crash_readopt_real_user_live_turn(state) && !state.readopted_from_inflight
 }
 
-/// Reregister never marks a row the running process authored, so its absent
-/// marker is by design and its bridge is alive, not a black hole.
-fn readopt_relay_dead_letter_required_under(
-    state: &InflightTurnState,
-    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,
-) -> bool {
-    !super::runtime::row_authored_by_running_process(state, allocation)
-        && readopt_relay_black_hole_dead_letter_required(state)
-}
-
 /// #4380 backstop: WARN + durable dead-letter for a re-adopted real-user live turn
 /// whose relay-resume guard could NOT be armed (the `readopted_from_inflight`
 /// marker did not durably persist), so the recovered watcher will yield to the dead
@@ -164,28 +154,24 @@ pub(in crate::services::discord) fn record_readopt_relay_black_hole_dead_letter(
 /// the durable row and, iff it is still an at-risk re-adopted real-user live turn
 /// that LACKS the `readopted_from_inflight` marker (marker write failed), records a
 /// dead letter. On the normal path the marker is present, so this is a no-op.
-/// Returns whether a dead letter was recorded.
 pub(in crate::services::discord) fn guard_readopt_relay_resume_or_dead_letter(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
-) -> bool {
+) {
     let Some(reloaded) =
         crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
     else {
-        return false;
+        return;
     };
-    let allocation = crate::services::discord::runtime_store::process_generation_binding();
-    if readopt_relay_dead_letter_required_under(&reloaded, allocation) {
+    if readopt_relay_black_hole_dead_letter_required(&reloaded) {
         record_readopt_relay_black_hole_dead_letter(
             shared.pg_pool.as_ref(),
             channel_id,
             &reloaded,
             "readopted_from_inflight marker did not persist; recovered watcher will yield to the dead bridge (#4380)",
         );
-        return true;
     }
-    false
 }
 
 #[cfg(test)]
@@ -377,69 +363,6 @@ mod tests {
             assert!(
                 readopt_relay_black_hole_dead_letter_required(&state),
                 "a crash re-adopt whose marker failed to persist is the real black-hole → must DLQ"
-            );
-        });
-    }
-
-    /// Reregister leaves a running-process row unmarked on purpose; its bridge is
-    /// alive, so only a row the running process cannot prove it authored is DLQ'd.
-    #[test]
-    fn running_process_row_missing_marker_does_not_dead_letter() {
-        use crate::services::discord::runtime_store::{
-            ADVANCED_ROUTE_FOR_TESTS, GenerationAllocationRoute,
-            process_generation_allocation_for_tests as allocation,
-        };
-        with_readopted_crash_turn(|mut state, _root| {
-            state.readopted_from_inflight = false;
-            state.born_generation = 524_300;
-            assert!(!readopt_relay_dead_letter_required_under(
-                &state,
-                allocation(524_300, ADVANCED_ROUTE_FOR_TESTS)
-            ));
-            assert!(readopt_relay_dead_letter_required_under(
-                &state,
-                allocation(524_301, ADVANCED_ROUTE_FOR_TESTS)
-            ));
-            assert!(readopt_relay_dead_letter_required_under(
-                &state,
-                allocation(524_300, GenerationAllocationRoute::ParentSyncFailed)
-            ));
-        });
-    }
-
-    #[test]
-    fn guard_does_not_dead_letter_a_reloaded_running_process_row() {
-        use crate::services::discord::runtime_store::{
-            ADVANCED_ROUTE_FOR_TESTS, process_generation_allocation_for_tests as allocation,
-            publish_process_generation_allocation_for_tests as publish,
-        };
-        with_readopted_crash_turn(|mut state, _root| {
-            state.readopted_from_inflight = false;
-            state.born_generation = 524_300;
-            crate::services::discord::inflight::save_inflight_state(&state).expect("seed row");
-            let channel_id = ChannelId::new(state.channel_id);
-            let guard_under = |generation| {
-                let _publication = publish(allocation(generation, ADVANCED_ROUTE_FOR_TESTS));
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("current-thread runtime")
-                    .block_on(async {
-                        let shared = super::super::make_shared_data_for_tests_with_storage(None);
-                        guard_readopt_relay_resume_or_dead_letter(
-                            &shared,
-                            &ProviderKind::Claude,
-                            channel_id,
-                        )
-                    })
-            };
-            assert!(
-                !guard_under(524_300),
-                "a running-process row is not a black hole"
-            );
-            assert!(
-                guard_under(524_301),
-                "a prior-process row still dead-letters"
             );
         });
     }

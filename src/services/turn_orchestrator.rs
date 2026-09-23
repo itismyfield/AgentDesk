@@ -399,6 +399,8 @@ pub(crate) struct ChannelMailboxSnapshot {
     /// freshness anchor so the banner doesn't fire within the first poll of
     /// a brand-new turn.
     pub(crate) turn_started_at: Option<DateTime<Utc>>,
+    /// The (user message id, turn nonce) whose token this mailbox last released.
+    pub(crate) released_episode: Option<(MessageId, String)>,
 }
 
 pub(crate) struct FinishTurnResult {
@@ -1743,6 +1745,8 @@ struct ChannelMailboxState {
     /// Monotonic companion to `turn_started_at`, for in-process race guards
     /// that must distinguish a stale active claim from a fresh same-id claim.
     turn_started_instant: Option<Instant>,
+    /// In-memory only, so it never speaks for an episode a prior process released.
+    released_episode: Option<(MessageId, String)>,
 }
 
 fn persist_queue(

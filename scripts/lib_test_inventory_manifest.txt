@@ -4378,7 +4378,6 @@ services::discord::recovery_engine::completion_delivery::recovery_dispatch_gate_
 services::discord::recovery_engine::crash_resume_guard::tests::committed_turn_is_not_a_black_hole_risk
 services::discord::recovery_engine::crash_resume_guard::tests::crash_readopt_real_user_live_turn_matches_the_black_hole_shape
 services::discord::recovery_engine::crash_resume_guard::tests::crash_real_user_missing_marker_dead_letters
-services::discord::recovery_engine::crash_resume_guard::tests::guard_does_not_dead_letter_a_reloaded_running_process_row
 services::discord::recovery_engine::crash_resume_guard::tests::marker_present_is_a_no_op
 services::discord::recovery_engine::crash_resume_guard::tests::planned_restart_missing_marker_does_not_dead_letter
 services::discord::recovery_engine::crash_resume_guard::tests::readopted_crash_turn_restores_env_after_panic_absent
@@ -4387,7 +4386,6 @@ services::discord::recovery_engine::crash_resume_guard::tests::real_owner_id0_mi
 services::discord::recovery_engine::crash_resume_guard::tests::rebind_origin_turn_is_owned_by_the_rebind_api
 services::discord::recovery_engine::crash_resume_guard::tests::resume_required_holds_for_the_readopted_crash_turn
 services::discord::recovery_engine::crash_resume_guard::tests::resume_required_needs_the_readopted_marker
-services::discord::recovery_engine::crash_resume_guard::tests::running_process_row_missing_marker_does_not_dead_letter
 services::discord::recovery_engine::crash_resume_guard::tests::session_bound_relay_turn_is_not_a_black_hole_risk
 services::discord::recovery_engine::crash_resume_guard::tests::synthetic_owner_turn_is_not_a_real_user_black_hole
 services::discord::recovery_engine::crash_resume_guard::tests::watcher_owned_turn_is_not_a_black_hole_risk
@@ -4546,15 +4544,17 @@ services::discord::recovery_engine::routing_orphan::tests::probe_error_is_treate
 services::discord::recovery_engine::runtime::delivered_inflight_reregister_tests::committed_terminal_delivery_is_not_recoverable_active_turn
 services::discord::recovery_engine::runtime::delivered_inflight_reregister_tests::ordinary_inflight_still_recoverable_even_with_relayed_prefix
 services::discord::recovery_engine::runtime::readopted_ledger_record_gate_tests::only_real_owner_with_real_message_id_is_recorded
+services::discord::recovery_engine::runtime::released_episode_mint_fence_tests::a_generation_colliding_crash_row_still_reattaches
+services::discord::recovery_engine::runtime::released_episode_mint_fence_tests::a_nonce_less_row_is_not_proven_released
+services::discord::recovery_engine::runtime::released_episode_mint_fence_tests::a_released_episode_is_not_reminted
+services::discord::recovery_engine::runtime::released_episode_mint_fence_tests::a_row_without_a_nonce_never_matches_a_witness
+services::discord::recovery_engine::runtime::released_episode_mint_fence_tests::another_episode_of_the_same_message_still_reattaches
 services::discord::recovery_engine::runtime::reregister_ledger_reseed_tests::a0_characterization_tests::a0_recovery_completion_proceeds_with_cleanup
 services::discord::recovery_engine::runtime::reregister_ledger_reseed_tests::adopted_zero_owner_orphan_row_does_not_seize_the_mailbox
 services::discord::recovery_engine::runtime::reregister_ledger_reseed_tests::non_watcher_recovery_does_not_fabricate_watcher_projection_barrier_4906
 services::discord::recovery_engine::runtime::reregister_ledger_reseed_tests::reattach_reseeds_watcher_owned_ledger_entry
 services::discord::recovery_engine::runtime::reregister_ledger_reseed_tests::repeated_reattach_is_idempotent_single_watcher_entry
 services::discord::recovery_engine::runtime::reregister_ledger_reseed_tests::zero_user_msg_id_reseeds_with_finalizer_turn_id
-services::discord::recovery_engine::runtime::running_process_row_mint_fence_tests::prior_process_row_still_reattaches
-services::discord::recovery_engine::runtime::running_process_row_mint_fence_tests::running_process_row_does_not_remint_a_released_mailbox
-services::discord::recovery_engine::runtime::running_process_row_mint_fence_tests::unadvanced_epoch_cannot_prove_authorship_and_still_reattaches
 services::discord::recovery_engine::runtime::terminal_committed_reconcile_clear_tests::a_newer_turns_legacy_row_survives_the_committed_clear
 services::discord::recovery_engine::runtime::terminal_committed_reconcile_clear_tests::a_prior_generations_matching_row_is_still_reclaimed
 services::discord::recovery_engine::runtime::terminal_committed_reconcile_clear_tests::a_row_the_running_process_authored_survives_the_committed_clear
@@ -9232,6 +9232,7 @@ services::turn_orchestrator::lease_release::lease_release_identity_tests::force_
 services::turn_orchestrator::lease_release::lease_release_identity_tests::hard_stop_after_a_persistence_carrying_claim_still_names_the_provider_unmeasured
 services::turn_orchestrator::lease_release::lease_release_identity_tests::hard_stop_release_without_persistence_names_the_provider_unmeasured
 services::turn_orchestrator::lease_release::lease_release_identity_tests::release_clears_the_same_anchor_whether_or_not_a_provider_is_carried
+services::turn_orchestrator::lease_release::lease_release_identity_tests::release_witnesses_only_the_episode_whose_token_it_took
 services::turn_orchestrator::lease_release::lease_release_identity_tests::the_unmeasured_label_is_the_literal_these_tests_pin
 services::turn_orchestrator::mailbox_unreachable_tests::measured_idle_is_distinct_from_unreachable_actor
 services::turn_orchestrator::mailbox_unreachable_tests::requeue_front_to_unreachable_actor_names_the_refusal

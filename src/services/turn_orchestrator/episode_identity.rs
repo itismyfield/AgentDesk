@@ -247,6 +247,7 @@ impl ChannelMailboxState {
             recently_valve_cleared_dispatch: self.recently_valve_cleared_dispatch,
             recovery_started_at: self.recovery_started_at,
             turn_started_at: self.turn_started_at,
+            released_episode: self.released_episode.clone(),
         }
     }
 }
