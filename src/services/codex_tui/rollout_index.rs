@@ -631,9 +631,8 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":\"{}\"}}}}\n",
-                id,
-                cwd.display()
+                "{}\n",
+                serde_json::json!({"type": "session_meta", "payload": {"id": id, "cwd": cwd}})
             ),
         )
         .unwrap();
@@ -646,8 +645,8 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"{}\"}}}}\n",
-                cwd.display()
+                "{}\n",
+                serde_json::json!({"type": "session_meta", "payload": {"cwd": cwd}})
             ),
         )
         .unwrap();
@@ -857,11 +856,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         std::fs::write(
             &path,
-            format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":\"{}\"}}}}\n",
-                "new-longer-id",
-                cwd.path().display()
-            ),
+            serde_json::json!({"type": "session_meta", "payload": {"id": "new-longer-id", "cwd": cwd.path()}}).to_string() + "\n",
         )
         .unwrap();
 
@@ -1055,11 +1050,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         std::fs::write(
             &path,
-            format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":\"{}\"}}}}\n",
-                "after-longer-id",
-                cwd.path().display()
-            ),
+            serde_json::json!({"type": "session_meta", "payload": {"id": "after-longer-id", "cwd": cwd.path()}}).to_string() + "\n",
         )
         .unwrap();
 

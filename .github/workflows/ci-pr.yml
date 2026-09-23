@@ -560,6 +560,7 @@ jobs:
               # compiles them, so they cannot break the lane. This block also
               # covers the inflight std::fs::File advisory-lock owners and the
               # restart-v2 per-platform fs backend, listed by hand until now.
+              - 'src/services/discord/catch_up/**'
               - 'src/services/discord/commands/**'
               - 'src/services/discord/delivery_lease_cell.rs'
               - 'src/services/discord/destructive_cancel_gate.rs'
@@ -570,6 +571,7 @@ jobs:
               - 'src/services/discord/idle_relay_drift.rs'
               - 'src/services/discord/inflight.rs'
               - 'src/services/discord/inflight/**'
+              - 'src/services/discord/jsonl_watcher.rs'
               - 'src/services/discord/mod.rs'
               - 'src/services/discord/model_catalog/**'
               - 'src/services/discord/outbound/**'
@@ -1465,7 +1467,7 @@ jobs:
         run: |
           source scripts/ci/non-pg-test-filter.sh
           python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 "${NON_PG_SKIP_ARGS[@]}" -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"
-          run_non_pg_filter_false_positives
+          run_non_pg_filter_replay
 
       - name: Stop PostgreSQL service
         if: always()
@@ -1741,7 +1743,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=53e57a6749cd5ff0cb422320b9db1d2d7b3b01028d863428c9280fed968db2b7
+          expected=ab468365bb018e90a26ac73dc6b3cf8427d6e49dd33a7bc027f647c7690f955e
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -1899,7 +1901,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=53e57a6749cd5ff0cb422320b9db1d2d7b3b01028d863428c9280fed968db2b7
+          expected=ab468365bb018e90a26ac73dc6b3cf8427d6e49dd33a7bc027f647c7690f955e
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

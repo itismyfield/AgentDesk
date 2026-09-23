@@ -19,7 +19,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "53e57a6749cd5ff0cb422320b9db1d2d7b3b01028d863428c9280fed968db2b7"
+    "ab468365bb018e90a26ac73dc6b3cf8427d6e49dd33a7bc027f647c7690f955e"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 FILTER_BLOCK_HEADER = re.compile(r"^            \w+:$", re.M)
@@ -713,7 +713,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 self.assertIn(
                     'cargo test --all-targets -- "${NON_PG_SKIP_ARGS[@]}"', job
                 )
-                self.assertIn("run_non_pg_filter_false_positives", job)
+                self.assertIn("run_non_pg_filter_replay", job)
         self.assertIn(
             "cargo test --lib discord_thread_create -- --test-threads=1",
             job_block(nightly, "full_windows"),

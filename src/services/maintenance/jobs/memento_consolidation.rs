@@ -22,12 +22,13 @@
 //! Recall-size A/B comparison happens out-of-band — see
 //! `docs/reports/cost-efficiency-908.md` for the report template.
 
-use std::time::Duration;
+use std::{future::Future, path::PathBuf, time::Duration};
 
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 
 use crate::runtime_layout;
+use crate::services::memory::memento_writer_guard::invalidate_writer_receipts;
 
 /// Weekly cadence: 7 days.
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -127,7 +128,10 @@ pub async fn run_inner(config: Config) -> Result<ConsolidationReport> {
 
     let client = reqwest::Client::new();
     let session_id = initialize_session(&client, &runtime).await?;
-    let payload = call_memory_consolidate(&client, &runtime, &session_id, &workspace).await?;
+    let payload = with_receipt_invalidation(&runtime, || {
+        call_memory_consolidate(&client, &runtime, &session_id, &workspace)
+    })
+    .await?;
 
     let before = extract_count(
         &payload,
@@ -150,6 +154,24 @@ pub async fn run_inner(config: Config) -> Result<ConsolidationReport> {
 struct RuntimeConfig {
     endpoint: String,
     access_key: String,
+    receipt_dir: PathBuf,
+}
+
+/// Consolidation can remove or merge facts under other client credentials.
+/// Invalidate before dispatch and after every outcome, including a lost reply.
+/// A failed pre-invalidation stops maintenance before it can mutate the store.
+async fn with_receipt_invalidation<F, Fut>(runtime: &RuntimeConfig, operation: F) -> Result<Value>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Value>>,
+{
+    let directory = &runtime.receipt_dir;
+    invalidate_writer_receipts(directory, &runtime.endpoint, &runtime.access_key)
+        .map_err(|error| anyhow!("memory_consolidate pre-invalidation failed: {error}"))?;
+    let result = operation().await;
+    invalidate_writer_receipts(directory, &runtime.endpoint, &runtime.access_key)
+        .map_err(|error| anyhow!("memory_consolidate post-invalidation failed: {error}"))?;
+    result
 }
 
 fn resolve_runtime() -> Option<RuntimeConfig> {
@@ -167,6 +189,7 @@ fn resolve_runtime() -> Option<RuntimeConfig> {
     Some(RuntimeConfig {
         endpoint,
         access_key,
+        receipt_dir: root.join("state/memento-writer"),
     })
 }
 
@@ -298,4 +321,85 @@ fn extract_count(payload: &Value, keys: &[&str]) -> Option<u64> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+    use crate::services::memory::memento_writer_guard::{WriterClaim, writer_fingerprint};
+
+    #[tokio::test]
+    async fn maintenance_invalidates_other_credentials_before_and_after_success_or_lost_reply() {
+        for lost_reply in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let runtime = RuntimeConfig {
+                endpoint: "https://memento.test/mcp".into(),
+                access_key: "maintenance-master-key".into(),
+                receipt_dir: dir.path().to_path_buf(),
+            };
+            let args =
+                json!({"content":"Confirmed family fact", "type":"fact", "workspace":"family"});
+            let fingerprint = || {
+                writer_fingerprint(
+                    dir.path(),
+                    "https://memento.test",
+                    "ordinary-client-key",
+                    &args,
+                )
+                .unwrap()
+            };
+            let original = fingerprint();
+            WriterClaim::acquire(dir.path(), &original)
+                .unwrap()
+                .unwrap()
+                .complete()
+                .unwrap();
+            let mut during_key = String::new();
+            let result = with_receipt_invalidation(&runtime, || async {
+                during_key = fingerprint();
+                assert_ne!(
+                    original, during_key,
+                    "pre-invalidation must precede dispatch"
+                );
+                WriterClaim::acquire(dir.path(), &during_key)
+                    .unwrap()
+                    .unwrap()
+                    .complete()
+                    .unwrap();
+                if lost_reply {
+                    Err(anyhow!("fake lost reply after server mutation"))
+                } else {
+                    Ok(json!({"merged_count":1}))
+                }
+            })
+            .await;
+            assert_eq!(result.is_err(), lost_reply);
+            let after = fingerprint();
+            assert_ne!(
+                after, during_key,
+                "post-invalidation must run even after response loss"
+            );
+            assert!(WriterClaim::acquire(dir.path(), &after).unwrap().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn maintenance_receipt_failure_stops_before_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let receipt_dir = dir.path().join("file");
+        std::fs::write(&receipt_dir, "not a directory").unwrap();
+        let runtime = RuntimeConfig {
+            endpoint: "https://memento.test/mcp".into(),
+            access_key: "test-only-key".into(),
+            receipt_dir,
+        };
+        let called = std::cell::Cell::new(false);
+        let result = with_receipt_invalidation(&runtime, || async {
+            called.set(true);
+            Ok(json!({}))
+        })
+        .await;
+        assert!(result.unwrap_err().to_string().contains("pre-invalidation"));
+        assert!(!called.get());
+    }
 }
