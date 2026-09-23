@@ -887,13 +887,15 @@ targets = {
     # hash by `[rule5]` in scripts/check_pg_test_lane_membership.py.
     # #5230 re-pins after sourcing the shared filter and replaying its 15
     # source-verified non-PG false positives after the adjudicated sweep.
-    "job_sha256" => "1e8147f0eb1a23e3b49336953e8c0cd5d1214e94dd3d517444d4e35f1ef98ed8",
+    # #6104 re-pins after renaming the replay call; its list is now generated
+    # from the PG manifest instead of hand-kept.
+    "job_sha256" => "2bb3b9c8cc7881f855226b5659b69199508d4dde2cb41d8b2f502d57cf3fbdb9",
     "cargo_steps" => {
       "Library sweep (selection-set gated)" => {
         "commands" => [
           "source scripts/ci/non-pg-test-filter.sh",
           'python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 "${NON_PG_SKIP_ARGS[@]}" -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"',
-          "run_non_pg_filter_false_positives",
+          "run_non_pg_filter_replay",
         ],
         "timeout_minutes" => 45,
       },

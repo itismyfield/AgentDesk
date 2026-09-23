@@ -197,45 +197,15 @@ test-non-pg:
 # The fixture server must be explicit; PG* variables alone are not authorization.
 test-postgres:
     @test -n "${POSTGRES_TEST_DATABASE_URL_BASE:-}" || (echo "POSTGRES_TEST_DATABASE_URL_BASE must name the dedicated PostgreSQL test server with an explicit host and port" >&2; exit 1)
-    cargo test --lib -- _pg pg_ postgres --nocapture --test-threads=1
-    # #5356 S0: the engine wrapper's PG regression module path
-    # (`engine::ops::auto_queue_ops::tests`) carries no pg-name marker, so the
-    # name-filtered invocation above cannot fully select it for the test-lane
-    # coverage ratchet. Select the module explicitly instead of adding it to
-    # the shrink-only debt baseline.
-    cargo test --lib engine::ops::auto_queue_ops::tests -- --nocapture --test-threads=1
-    # #5071 T2-W S-W1: the dispatch-stamp PG regressions live in a module
-    # named `tests` (hardening-audit region naming), so the path carries no
-    # pg-name marker. Select the module explicitly for the coverage ratchet.
-    cargo test --lib db::intake_outbox_dispatch_stamp::tests -- --nocapture --test-threads=1
-    # #5356 S1: the choke-gate PG regressions live in modules named `tests`
-    # (the hardening audit only recognizes that module name as a test
-    # region), so their paths carry no pg-name marker either. Select each
-    # module explicitly for the same coverage-ratchet reason as above.
-    cargo test --lib db::auto_queue::entries::tests -- --nocapture --test-threads=1
-    # #5356 S2: the cross-path advisory-order regression is PG-only and also
-    # lives in a plain `tests` module, so select that module explicitly.
-    cargo test --lib services::auto_queue::route::command::tests -- --nocapture --test-threads=1
-    cargo test --lib services::auto_queue::route::fsm::tests -- --nocapture --test-threads=1
-    cargo test --lib services::auto_queue::route::phase_gate::tests -- --nocapture --test-threads=1
-    # #5356 S3: the ownership suite is a PostgreSQL-only out-of-line module;
-    # keep its full module selected explicitly for the coverage ratchet.
-    cargo test --lib db::dispatched_sessions::tests -- --nocapture --test-threads=1
-    # #5464 T5 S6b: the operator conflict contract is PG-only and lives in a
-    # plain `tests` module, so select the complete module for the same ratchet.
-    cargo test --lib server::routes::dispatched_sessions::tests -- --nocapture --test-threads=1
-    # #5071 T2-W S-W2: settlement regressions use the hardening-audit `tests`
-    # module name, so select both no-marker modules explicitly in the PG lane.
-    cargo test --lib db::intake_outbox_delivery_proof::tests -- --nocapture --test-threads=1
-    cargo test --lib services::discord::turn_bridge::intake_settlement::tests -- --nocapture --test-threads=1
-    cargo test --lib services::discord::runtime_bootstrap::intake_delivery_sweep::tests -- --nocapture --test-threads=1
+    # Selecting by name missed every PG module whose tests carry no pg marker,
+    # so this lane never ran them and the non-PG lane panicked on them. Both
+    # lanes now come from the classifier's manifest.
+    source scripts/ci/non-pg-test-filter.sh && cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1
     # Session continuity must run on PRs through test_fast, not only main's
-    # non-PG sweep. Campaigns includes both canonical-PG and pure DAG tests.
-    cargo test --lib campaigns:: -- --nocapture --test-threads=1
+    # non-PG sweep; these name tests the manifest does not already select.
     cargo test --lib services::memory::memento::anchor::tests -- --nocapture --test-threads=1
     cargo test --lib services::discord::prompt_builder::session_anchors::tests -- --nocapture --test-threads=1
     cargo test --lib tmux_turn_liveness::idle_cleanup_tests -- --nocapture --test-threads=1
-    cargo test --lib tmux_turn_liveness::tests_pg -- --nocapture --test-threads=1
     cargo test --lib frozen_busy_jsonl -- --nocapture --test-threads=1
     cargo test --lib idle_tmux_snapshot_missing_output_path -- --nocapture --test-threads=1
     cargo test --lib dispatched_sessions::kill_tmux_resume_tests -- --nocapture --test-threads=1
