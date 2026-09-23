@@ -41,14 +41,16 @@ impl WriterClaim {
             options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
         let receipt = directory.join(format!("{}.receipt", key.to_ascii_lowercase()));
-        let mut file = options
+        let file = options
             .open(&receipt)
             .map_err(|error| format!("memento writer receipt open: {error}"))?;
         file.try_lock().map_err(|error| {
             format!("memento remember is in flight or its receipt cannot be locked: {error}")
         })?;
+        // Own the lock at once so every early return below unlocks via Drop.
+        let mut claim = Self { file };
         let mut state = Vec::new();
-        (&mut file)
+        (&mut claim.file)
             .take(2)
             .read_to_end(&mut state)
             .map_err(|error| format!("memento writer receipt read: {error}"))?;
@@ -63,7 +65,6 @@ impl WriterClaim {
             }
         }
 
-        let mut claim = Self { file };
         claim.write_state(PENDING)?;
         // Persist the directory entry before the request is allowed to leave.
         // Also persist creation of the receipt directory itself on first use.
@@ -346,8 +347,14 @@ mod tests {
             let claim = WriterClaim::acquire(dir.path(), &key).unwrap().unwrap();
             if round % 2 == 0 {
                 claim.complete().unwrap();
-                let reopened = WriterClaim::acquire(dir.path(), &key);
-                assert!(matches!(reopened, Ok(None)), "round {round}: {reopened:?}");
+                // A confirmed lookup must also release, or the next lookup sees "in flight".
+                for lookup in 0..4 {
+                    let reopened = WriterClaim::acquire(dir.path(), &key);
+                    assert!(
+                        matches!(reopened, Ok(None)),
+                        "round {round} lookup {lookup}: {reopened:?}"
+                    );
+                }
             } else {
                 claim.release_before_send().unwrap();
                 let retried = WriterClaim::acquire(dir.path(), &key);
