@@ -17,7 +17,6 @@ pub mod claude_tui;
 pub mod cluster;
 pub mod codex;
 pub mod codex_remote_policy;
-#[cfg(unix)]
 pub mod codex_tmux_wrapper;
 pub mod codex_tui;
 pub mod cswap;
@@ -103,7 +102,6 @@ pub(crate) mod provider_output_guard;
 pub mod provider_runtime;
 pub mod queue;
 pub mod qwen;
-#[cfg(unix)]
 pub mod qwen_tmux_wrapper;
 pub(crate) mod release_source;
 // #3034: 2 residual dead-code items; scoped here so the lint stays
@@ -138,7 +136,6 @@ pub mod termination_audit;
 pub mod tmux_common;
 pub mod tmux_diagnostics;
 pub(crate) mod tmux_turn_liveness;
-#[cfg(unix)]
 pub mod tmux_wrapper;
 pub mod tool_output_guard;
 #[allow(dead_code)]
