@@ -2781,7 +2781,11 @@ mod stall_recovery_tests {
         let original_identity = InflightTurnIdentity::from_state(&original);
 
         // A NEWER turn (distinct user_msg_id) now owns the row on disk.
-        let newer = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 200);
+        let mut newer = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 200);
+        // Pin nonce + started_at so user_msg_id is the ONLY differing axis; otherwise the
+        // completion_preserve nonce check (or a 1s started_at tick) rejects first and masks it.
+        newer.turn_nonce = original.turn_nonce.clone();
+        newer.started_at = original.started_at.clone();
         save_inflight_state_in_root(temp.path(), &newer).unwrap();
 
         // Stale write under the OLD identity → must be rejected, leaving the newer
@@ -3887,7 +3891,11 @@ mod stall_recovery_tests {
 
         // The preserving bridge is still holding the PREVIOUS turn (user_msg_id
         // 777). Its identity no longer matches the on-disk newer turn.
-        let preserved = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 777);
+        let mut preserved = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 777);
+        // Pin nonce + started_at so user_msg_id is the ONLY differing axis; otherwise the
+        // completion_preserve nonce check (or a 1s started_at tick) rejects first and masks it.
+        preserved.turn_nonce = newer.turn_nonce.clone();
+        preserved.started_at = newer.started_at.clone();
         let expected = InflightTurnIdentity::from_state(&preserved);
 
         let outcome = save_inflight_state_if_matches_identity_in_root(
