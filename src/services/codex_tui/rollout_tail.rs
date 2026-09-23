@@ -1833,10 +1833,8 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":\"{}\"}}}}\n{}",
-                id,
-                cwd.display(),
-                body
+                "{}\n{body}",
+                serde_json::json!({"type": "session_meta", "payload": {"id": id, "cwd": cwd}})
             ),
         )
         .unwrap();
@@ -2513,10 +2511,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
-        let prefix = format!(
-            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"cancel-suppress\",\"cwd\":\"{}\"}}}}\n",
-            cwd.path().display()
-        );
+        let prefix = serde_json::json!({"type": "session_meta", "payload": {"id": "cancel-suppress", "cwd": cwd.path()}}).to_string() + "\n";
         let rollout = dir.path().join("rollout-cancel.jsonl");
         std::fs::write(&rollout, &prefix).unwrap();
 
@@ -2605,10 +2600,7 @@ mod tests {
         // still land in the same turn after a 1s pause.
         let dir = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
-        let prefix = format!(
-            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"two-seg\",\"cwd\":\"{}\"}}}}\n",
-            cwd.path().display()
-        );
+        let prefix = serde_json::json!({"type": "session_meta", "payload": {"id": "two-seg", "cwd": cwd.path()}}).to_string() + "\n";
         let rollout = dir.path().join("rollout-two-seg.jsonl");
         std::fs::write(&rollout, &prefix).unwrap();
         // First segment is present from the start so the tail picks it up
@@ -2692,10 +2684,7 @@ mod tests {
         // segment2 (post-tool) still lands in the same turn.
         let dir = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
-        let prefix = format!(
-            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"tool-pause\",\"cwd\":\"{}\"}}}}\n",
-            cwd.path().display()
-        );
+        let prefix = serde_json::json!({"type": "session_meta", "payload": {"id": "tool-pause", "cwd": cwd.path()}}).to_string() + "\n";
         let rollout = dir.path().join("rollout-tool-pause.jsonl");
         std::fs::write(&rollout, &prefix).unwrap();
         // Pre-write: segment1 + function_call (no output yet). The drain
@@ -2772,10 +2761,7 @@ mod tests {
     fn tool_search_pause_does_not_emit_premature_done() {
         let dir = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
-        let prefix = format!(
-            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"tool-search-pause\",\"cwd\":\"{}\"}}}}\n",
-            cwd.path().display()
-        );
+        let prefix = serde_json::json!({"type": "session_meta", "payload": {"id": "tool-search-pause", "cwd": cwd.path()}}).to_string() + "\n";
         let rollout = dir.path().join("rollout-tool-search-pause.jsonl");
         std::fs::write(&rollout, &prefix).unwrap();
         let mut file = std::fs::OpenOptions::new()
@@ -2850,10 +2836,7 @@ mod tests {
         // EOF + drain elapsed would emit Done before segment2.
         let dir = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
-        let prefix = format!(
-            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"two-tool\",\"cwd\":\"{}\"}}}}\n",
-            cwd.path().display()
-        );
+        let prefix = serde_json::json!({"type": "session_meta", "payload": {"id": "two-tool", "cwd": cwd.path()}}).to_string() + "\n";
         let rollout = dir.path().join("rollout-two-tool.jsonl");
         std::fs::write(&rollout, &prefix).unwrap();
         let mut file = std::fs::OpenOptions::new()
@@ -2935,10 +2918,7 @@ mod tests {
         // output and segment2 still lands in the same turn.
         let dir = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
-        let prefix = format!(
-            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"empty-out\",\"cwd\":\"{}\"}}}}\n",
-            cwd.path().display()
-        );
+        let prefix = serde_json::json!({"type": "session_meta", "payload": {"id": "empty-out", "cwd": cwd.path()}}).to_string() + "\n";
         let rollout = dir.path().join("rollout-empty-out.jsonl");
         std::fs::write(&rollout, &prefix).unwrap();
 
@@ -3034,10 +3014,7 @@ mod tests {
         // they must refresh the drain clock between assistant bursts.
         let dir = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
-        let prefix = format!(
-            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"progress-pause\",\"cwd\":\"{}\"}}}}\n",
-            cwd.path().display()
-        );
+        let prefix = serde_json::json!({"type": "session_meta", "payload": {"id": "progress-pause", "cwd": cwd.path()}}).to_string() + "\n";
         let rollout = dir.path().join("rollout-progress-pause.jsonl");
         std::fs::write(&rollout, &prefix).unwrap();
         let mut file = std::fs::OpenOptions::new()
@@ -3430,10 +3407,7 @@ mod tests {
         // Done with a warning so the bridge advances.
         let dir = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
-        let prefix = format!(
-            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"stuck-tool\",\"cwd\":\"{}\"}}}}\n",
-            cwd.path().display()
-        );
+        let prefix = serde_json::json!({"type": "session_meta", "payload": {"id": "stuck-tool", "cwd": cwd.path()}}).to_string() + "\n";
         let rollout = dir.path().join("rollout-stuck.jsonl");
         std::fs::write(&rollout, &prefix).unwrap();
         let mut file = std::fs::OpenOptions::new()
@@ -4151,10 +4125,7 @@ mod tests {
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
-        let prefix = format!(
-            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"legacy-burst\",\"cwd\":\"{}\"}}}}\n",
-            cwd.path().display()
-        );
+        let prefix = serde_json::json!({"type": "session_meta", "payload": {"id": "legacy-burst", "cwd": cwd.path()}}).to_string() + "\n";
         let rollout = dir.path().join("rollout-legacy-burst.jsonl");
         std::fs::write(&rollout, &prefix).unwrap();
         let mut file = std::fs::OpenOptions::new()
