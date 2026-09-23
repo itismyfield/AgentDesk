@@ -1398,63 +1398,38 @@ fn explicit_finalize_path(
 }
 
 fn promote_task_complete_fallback_text(state: &mut RolloutParseState) {
-    let Some(text) = state.task_complete_fallback_text.as_deref() else {
+    let Some(text) = state.task_complete_fallback_text.take() else {
         return;
     };
 
-    // Recover the assistant text from `last_agent_message` when the turn
-    // produced no `response_item/message` (tool-only turns or rollouts where
-    // the assistant text is only carried on `task_complete`).
-    //
-    // #3343 r2 review P2: commentary-only turns now MIRROR commentary into
-    // `final_text` without setting `saw_assistant_text`, and `last_agent_message`
-    // typically carries that same commentary body — a blind append here would
-    // duplicate it. The fallback is ALWAYS consumed and `saw_assistant_text`
-    // set (the turn has an assistant-visible body; finalize must not time out),
-    // but the text lands at most once: empty `final_text` appends, a superset
-    // replaces the mirrored commentary, an already-mirrored body (equal or a
-    // message-boundary suffix) is dropped, and anything else appends
-    // boundary-joined. #3343 r3: arbitrary substring containment is NOT a
-    // drop — a short canonical terminal body embedded mid-sentence in
-    // commentary is a genuinely new body.
-    if !state.saw_assistant_text {
-        let text = state
-            .task_complete_fallback_text
-            .take()
-            .expect("task_complete fallback checked above");
-        if state.final_text.is_empty() {
-            // #3343: route the fallback body through the same shared boundary
-            // writer so `final_text` follows the suppress-on-existing-newline
-            // rule here too.
-            state.push_message_text(&text);
-        } else if task_complete_fallback_supersedes_final_text(&state.final_text, &text) {
-            state.final_text = text;
-        } else if !task_complete_fallback_already_mirrored(&state.final_text, &text) {
-            state.push_message_text(&text);
-        }
-        state.saw_assistant_text = true;
-        return;
-    }
-
-    // Codex TUI rollout can stream only the visible tail through
-    // response_item/message while task_complete.last_agent_message carries the
-    // full provider terminal body. Promote that authoritative body before
-    // Done.result is emitted so turn_bridge and session-bound relay receive the
-    // same complete BEGIN/MID/END response.
-    if task_complete_fallback_supersedes_final_text(&state.final_text, text) {
-        let previous_final_text_len = state.final_text.len();
-        let text = state
-            .task_complete_fallback_text
-            .take()
-            .expect("task_complete fallback checked above");
+    // `last_agent_message` is the authoritative terminal body and is always
+    // consumed, landing at most once: empty `final_text` appends, a superset
+    // replaces a streamed tail or mirrored commentary, an already-mirrored body
+    // (equal or a message-boundary suffix) is dropped, and anything else
+    // appends boundary-joined. Arbitrary substring containment is NOT a drop —
+    // a short terminal body quoted mid-sentence is still a new body.
+    if state.final_text.is_empty() {
+        state.push_message_text(&text);
+    } else if task_complete_fallback_supersedes_final_text(&state.final_text, &text) {
         tracing::info!(
             target: "agentdesk::codex_rollout_handoff",
-            previous_final_text_len,
+            previous_final_text_len = state.final_text.len(),
             task_complete_fallback_len = text.len(),
-            "codex rollout promoted task_complete last_agent_message over streamed tail"
+            "codex rollout promoted task_complete last_agent_message over streamed text"
         );
         state.final_text = text;
+    } else if !task_complete_fallback_already_mirrored(&state.final_text, &text) {
+        // Real Codex rollouts end the stream with this body; a divergent one is
+        // delivered rather than dropped, and surfaced because it is unexpected.
+        tracing::warn!(
+            target: "agentdesk::codex_rollout_handoff",
+            streamed_len = state.final_text.len(),
+            task_complete_fallback_len = text.len(),
+            "codex rollout task_complete last_agent_message diverges from streamed text; appending it"
+        );
+        state.push_message_text(&text);
     }
+    state.saw_assistant_text = true;
 }
 
 // The fallback counts as already mirrored only when it IS the final text or
