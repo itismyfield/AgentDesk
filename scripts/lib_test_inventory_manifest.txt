@@ -528,6 +528,11 @@ db::intake_outbox_status::tests::open_classification_matches_shared_sql_list
 db::intake_outbox_status::tests::operator_retry_classifies_every_status
 db::intake_outbox_status::tests::status_strings_round_trip
 db::intake_outbox_status::tests::unknown_status_preserves_rejected_spelling
+db::postgres::test_db_reclaim::tests::pg_reclaim_drops_orphaned_fixture_database
+db::postgres::test_db_reclaim::tests::pg_reclaim_dry_run
+db::postgres::test_db_reclaim::tests::pg_reclaim_never_targets_unmarked_databases
+db::postgres::test_db_reclaim::tests::pg_reclaim_skips_database_with_active_session
+db::postgres::test_db_reclaim::tests::pg_reclaim_skips_database_younger_than_min_age
 db::postgres::tests::agent_roster_sync_gated_to_leader_or_single_node
 db::postgres::tests::background_backpressure_disabled_when_reserve_zero
 db::postgres::tests::background_backpressure_saturating_boundaries
