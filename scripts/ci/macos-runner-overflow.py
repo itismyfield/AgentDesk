@@ -47,7 +47,12 @@ def fetch_runners(repo: str, token: str) -> list[dict]:
         },
     )
     with urllib.request.urlopen(request, timeout=10) as response:
-        return json.load(response)["runners"]
+        body = json.load(response)
+    # A partial list (more pages, truncation) leaves unlisted runners unknown, not busy.
+    runners, total = body.get("runners"), body.get("total_count")
+    if not isinstance(runners, list) or type(total) is not int or total != len(runners):
+        raise ValueError(f"incomplete runner list (total_count={total!r})")
+    return runners
 
 
 def main() -> int:
@@ -55,7 +60,7 @@ def main() -> int:
     try:
         runners = fetch_runners(os.environ["GITHUB_REPOSITORY"], os.environ["RUNNER_QUERY_TOKEN"])
         mode, reason = decide(runners, wanted)
-    except Exception as exc:  # network, auth, rate limit, malformed body or runner entry
+    except Exception as exc:  # network, auth, rate limit, malformed or incomplete body, bad runner entry
         mode, reason = "self-hosted", f"runner query failed ({type(exc).__name__}: {exc}); keeping self-hosted"
     print(reason, file=sys.stderr)
     print(mode)

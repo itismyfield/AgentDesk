@@ -120,9 +120,17 @@ class DecideTests(unittest.TestCase):
                 body = io.BytesIO(json.dumps({"total_count": 2, "runners": runners}).encode())
                 self.assertEqual(self.main_with_response(return_value=body), "self-hosted")
 
-    def test_well_formed_saturated_response_routes_hosted(self) -> None:
-        body = io.BytesIO(json.dumps({"runners": [runner("mini", busy=True), runner("book", busy=True)]}).encode())
+    def test_complete_saturated_response_routes_hosted(self) -> None:
+        runners = [runner("mini", busy=True), runner("book", busy=True)]
+        body = io.BytesIO(json.dumps({"total_count": 2, "runners": runners}).encode())
         self.assertEqual(self.main_with_response(return_value=body), "hosted")
+
+    def test_incomplete_runner_list_keeps_self_hosted(self) -> None:
+        # Only the listed runner is known busy; the unlisted one may be idle.
+        for case, extra in (("total_count exceeds listed", {"total_count": 2}), ("total_count missing", {})):
+            with self.subTest(case=case):
+                body = io.BytesIO(json.dumps({**extra, "runners": [runner("mini", busy=True)]}).encode())
+                self.assertEqual(self.main_with_response(return_value=body), "self-hosted")
 
 
 class ResolveStepTests(unittest.TestCase):
