@@ -7915,6 +7915,7 @@ services::memory::memento_writer_guard::tests::confirmed_receipt_survives_reopen
 services::memory::memento_writer_guard::tests::corrupt_receipt_fails_closed_and_invalid_key_cannot_escape_directory
 services::memory::memento_writer_guard::tests::endpoint_and_authentication_identity_isolate_receipts
 services::memory::memento_writer_guard::tests::fingerprint_is_canonical_and_has_no_delimiter_collisions
+services::memory::memento_writer_guard::tests::finished_claim_is_released_while_other_threads_spawn_children
 services::memory::memento_writer_guard::tests::mutation_generation_invalidates_completed_and_in_flight_receipts
 services::memory::memento_writer_guard::tests::new_knowledge_scope_and_fact_metadata_are_never_discarded
 services::memory::memento_writer_guard::tests::no_send_release_allows_a_safe_retry

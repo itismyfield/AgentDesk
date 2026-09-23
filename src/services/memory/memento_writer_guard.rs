@@ -41,14 +41,16 @@ impl WriterClaim {
             options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
         let receipt = directory.join(format!("{}.receipt", key.to_ascii_lowercase()));
-        let mut file = options
+        let file = options
             .open(&receipt)
             .map_err(|error| format!("memento writer receipt open: {error}"))?;
         file.try_lock().map_err(|error| {
             format!("memento remember is in flight or its receipt cannot be locked: {error}")
         })?;
+        // Own the lock at once so every early return below unlocks via Drop.
+        let mut claim = Self { file };
         let mut state = Vec::new();
-        (&mut file)
+        (&mut claim.file)
             .take(2)
             .read_to_end(&mut state)
             .map_err(|error| format!("memento writer receipt read: {error}"))?;
@@ -63,7 +65,6 @@ impl WriterClaim {
             }
         }
 
-        let mut claim = Self { file };
         claim.write_state(PENDING)?;
         // Persist the directory entry before the request is allowed to leave.
         // Also persist creation of the receipt directory itself on first use.
@@ -101,6 +102,14 @@ impl WriterClaim {
             .and_then(|_| self.file.write_all(&[state]))
             .and_then(|()| self.file.sync_all())
             .map_err(|error| format!("memento writer receipt persist: {error}"))
+    }
+}
+
+impl Drop for WriterClaim {
+    /// A child spawned while the claim was open shares its lock until it execs,
+    /// so closing alone can leave the lock held; unlocking releases it for every holder.
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
     }
 }
 
@@ -306,6 +315,54 @@ mod tests {
         assert!(error.contains("in flight"));
         claim.complete().unwrap();
         assert!(WriterClaim::acquire(dir.path(), &key).unwrap().is_none());
+    }
+
+    #[test]
+    fn finished_claim_is_released_while_other_threads_spawn_children() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        struct StopOnDrop(Arc<AtomicBool>);
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+        let stop = StopOnDrop(Arc::new(AtomicBool::new(false)));
+        let spawning = stop.0.clone();
+        let (program, args): (&str, &[&str]) = if cfg!(windows) {
+            ("cmd", &["/C", "exit"])
+        } else {
+            ("true", &[])
+        };
+        let spawner = std::thread::spawn(move || {
+            while !spawning.load(Ordering::Relaxed) {
+                let _ = std::process::Command::new(program).args(args).status();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        for round in 0..300 {
+            let key = fingerprint(json!({"content": round}));
+            let claim = WriterClaim::acquire(dir.path(), &key).unwrap().unwrap();
+            if round % 2 == 0 {
+                claim.complete().unwrap();
+                // A confirmed lookup must also release, or the next lookup sees "in flight".
+                for lookup in 0..4 {
+                    let reopened = WriterClaim::acquire(dir.path(), &key);
+                    assert!(
+                        matches!(reopened, Ok(None)),
+                        "round {round} lookup {lookup}: {reopened:?}"
+                    );
+                }
+            } else {
+                claim.release_before_send().unwrap();
+                let retried = WriterClaim::acquire(dir.path(), &key);
+                assert!(matches!(retried, Ok(Some(_))), "round {round}: {retried:?}");
+            }
+        }
+        drop(stop);
+        spawner.join().unwrap();
     }
 
     #[test]
