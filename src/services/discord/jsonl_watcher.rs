@@ -256,6 +256,8 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
+    // JsonlWatcher 의 유일한 프로덕션 호출자는 Unix 전용 tmux watcher 라 Windows 에는 이 경로가 없다.
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn jsonl_watcher_notifies_on_dead_marker_create() {
         let tmp = tempfile::tempdir().unwrap();

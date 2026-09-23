@@ -21,7 +21,7 @@ use crate::services::claude_tui::hook_server::relay_receipts::{DELIVERY_TTL, LED
 
 #[path = "queue_retention.rs"]
 mod queue_retention;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use crate::services::claude_tui::hook_server::relay_receipts::{
     RELAY_DEADLINE_HEADER, RELAY_PUBLISHED_AT_HEADER, RELAY_REQUEST_ID_HEADER,
 };
@@ -948,16 +948,18 @@ fn file_is_older_than(path: &Path, age: Duration) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
-    use std::process::{Child, Command, Stdio};
-    use std::sync::{Arc, mpsc};
-
-    use axum::Router;
-    use axum::body::{Body, to_bytes};
-    use axum::http::{Method, Request};
-    use serde_json::json;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tower::ServiceExt;
+    #[cfg(unix)]
+    use {
+        axum::Router,
+        axum::body::{Body, to_bytes},
+        axum::http::{Method, Request},
+        serde_json::json,
+        std::io::{Read, Write},
+        std::process::{Child, Command, Stdio},
+        std::sync::{Arc, mpsc},
+        tokio::io::{AsyncReadExt, AsyncWriteExt},
+        tower::ServiceExt,
+    };
 
     use super::*;
 
@@ -978,6 +980,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     fn with_sync_fault<T>(label: &'static str, stage: &'static str, run: impl FnOnce() -> T) -> T {
         struct Reset;
         impl Drop for Reset {
@@ -990,6 +993,7 @@ mod tests {
         run()
     }
 
+    #[cfg(unix)]
     fn atomic_publication_preserves_all_five_consumers_on_sync_failure() {
         // Fault injection proves error handling; this source oracle separately pins the syscalls.
         let source = include_str!("ordered_queue.rs");
@@ -1033,6 +1037,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn atomic_queue_evidence_and_high_water_survive_publication_error() {
         let dir = tempfile::tempdir().unwrap();
         let queue = dir.path();
@@ -1088,6 +1093,7 @@ mod tests {
     const LOCK_HOLDER_READY_ENV: &str = "AGENTDESK_RELAY_TEST_LOCK_HOLDER_READY";
     const LOCK_HOLDER_RELEASE_ENV: &str = "AGENTDESK_RELAY_TEST_LOCK_HOLDER_RELEASE";
 
+    #[cfg(unix)]
     fn request_body(request: &[u8]) -> Value {
         let request = std::str::from_utf8(request).expect("HTTP request is UTF-8");
         let (_, body) = request
@@ -1096,6 +1102,7 @@ mod tests {
         serde_json::from_str(body).expect("HTTP request JSON body")
     }
 
+    #[cfg(unix)]
     fn http_body_bounds(request: &[u8]) -> Option<(usize, usize)> {
         let headers_end = request
             .windows(4)
@@ -1111,6 +1118,7 @@ mod tests {
         Some((body_start, content_length))
     }
 
+    #[cfg(unix)]
     fn spawn_test_receiver(
         expected: usize,
     ) -> (
@@ -1179,6 +1187,7 @@ mod tests {
         (endpoint, request_rx, receiver)
     }
 
+    #[cfg(unix)]
     fn spawn_status_receiver(
         statuses: Vec<u16>,
     ) -> (
@@ -1229,6 +1238,7 @@ mod tests {
         (endpoint, request_rx, receiver)
     }
 
+    #[cfg(unix)]
     fn wait_until(mut predicate: impl FnMut() -> bool, label: &str) {
         let deadline = Instant::now() + Duration::from_secs(3);
         while !predicate() && Instant::now() < deadline {
@@ -1237,6 +1247,7 @@ mod tests {
         assert!(predicate(), "timed out waiting for {label}");
     }
 
+    #[cfg(unix)]
     fn recursively_contains(root: &Path, needle: &str) -> bool {
         let Ok(entries) = std::fs::read_dir(root) else {
             return false;
@@ -1265,6 +1276,7 @@ mod tests {
         false
     }
 
+    #[cfg(unix)]
     fn spawn_worker_process(queue_dir: &Path) -> Child {
         let encoded = serde_json::to_string(&OrderedHookRelayWorkerRequest {
             queue_dir: queue_dir.to_path_buf(),
@@ -1324,6 +1336,8 @@ mod tests {
         assert!(queue_dir.join("ingress/pending.ingress.json").exists());
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn gc_removes_stale_idle_queue() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1340,6 +1354,7 @@ mod tests {
         assert!(!queue_dir.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn gc_adopts_legacy_idle_queue_before_later_retirement() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1383,6 +1398,7 @@ mod tests {
         assert!(queue_dir.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn artifact_pruning_does_not_hold_the_producer_lock() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1425,6 +1441,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn corrupt_counter_recovers_without_reusing_completed_high_water() {
         atomic_publication_preserves_all_five_consumers_on_sync_failure();
@@ -1520,6 +1537,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn corrupt_completed_high_water_is_quarantined_without_stalling_promotion() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1550,6 +1568,7 @@ mod tests {
         assert!(recursively_contains(&queue_dir, "completed-high-water"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn corrupt_oldest_request_is_quarantined_and_later_request_drains() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1601,6 +1620,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn recovery_scan_reports_idle_queue_cardinality_with_bounded_latency() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1655,6 +1675,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn published_request_is_drained_by_receiver_owner_without_producer_restart() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1685,6 +1706,7 @@ mod tests {
         assert_eq!(receiver.join().unwrap(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn producer_waits_for_retention_lock_and_preserves_event() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1746,6 +1768,7 @@ mod tests {
         assert_eq!(delivered["ordinal"].as_u64(), Some(1));
     }
 
+    #[cfg(unix)]
     #[test]
     fn concurrent_ingress_is_promoted_in_published_nanos_uuid_order() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1795,6 +1818,7 @@ mod tests {
         assert_eq!(observed, expected);
     }
 
+    #[cfg(unix)]
     #[test]
     fn expired_ingress_is_quarantined_before_transport() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1833,6 +1857,7 @@ mod tests {
         assert!(recursively_contains(&queue_dir, "delivery expired"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn double_recovery_scanner_delivers_one_effect() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1873,6 +1898,7 @@ mod tests {
         drop(first);
     }
 
+    #[cfg(unix)]
     #[test]
     fn receiver_pin_mismatch_is_quarantined_and_later_request_continues() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1920,6 +1946,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn receiver_in_flight_response_retries_same_request_until_receipt_is_cached() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1971,6 +1998,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     async fn read_async_http_request(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
         let mut encoded = Vec::new();
         let mut buffer = [0u8; 4096];
@@ -1986,6 +2014,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn request_path(request: &[u8]) -> String {
         std::str::from_utf8(request)
             .unwrap()
@@ -1996,6 +2025,7 @@ mod tests {
             .to_string()
     }
 
+    #[cfg(unix)]
     fn request_header(request: &[u8], expected: &str) -> Option<String> {
         let request = std::str::from_utf8(request).ok()?;
         request.lines().find_map(|line| {
@@ -2005,6 +2035,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     async fn spawn_actual_receiver_proxy(
         listener: tokio::net::TcpListener,
         router: Arc<tokio::sync::RwLock<Router>>,
@@ -2059,12 +2090,14 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn worker_crash_after_actual_stop_acceptance_replays_cached_receipt_once() {
         check_worker_acceptance_replay(false).await;
         check_worker_acceptance_replay(true).await;
     }
 
+    #[cfg(unix)]
     async fn check_worker_acceptance_replay(sync_failure: bool) {
         let temp_dir = tempfile::tempdir().unwrap();
         let _root = crate::config::set_agentdesk_root_for_test(temp_dir.path());
