@@ -31,6 +31,7 @@ mod inflight_heartbeat_sweeper;
 pub(crate) mod internal_api;
 mod jsonl_watcher;
 mod mailbox_finish;
+mod mailbox_probe;
 mod mcp_credential_watcher;
 pub(crate) mod meeting_artifact_store;
 pub(crate) mod meeting_orchestrator;
@@ -200,6 +201,10 @@ pub(in crate::services::discord) use catch_up::{
 pub(in crate::services::discord) use mailbox_finish::{
     mailbox_finish_cancelled_turn, mailbox_finish_owned_turn, mailbox_finish_turn,
     mailbox_finish_turn_if_matches, mailbox_finish_turn_if_matches_episode_started_before,
+};
+pub(in crate::services::discord) use mailbox_probe::{
+    mailbox_has_active_turn, mailbox_has_active_turn_or_unreachable,
+    mailbox_has_blocking_active_turn, mailbox_has_blocking_active_turn_or_unreachable,
 };
 pub(in crate::services::discord) use recovery_engine as recovery;
 // #3038 S1: re-export the extracted cluster type so the `SharedData` field
@@ -1448,14 +1453,6 @@ pub(crate) async fn record_turn_stop_tombstone(
     _reason: &str,
 ) {
 }
-
-// #6046: the mailbox probes moved out of this file; declared at their former
-// site so the lines above (and the generated env reference) do not shift.
-mod mailbox_probe;
-pub(in crate::services::discord) use mailbox_probe::{
-    mailbox_has_active_turn, mailbox_has_active_turn_or_unreachable,
-    mailbox_has_blocking_active_turn, mailbox_has_blocking_active_turn_or_unreachable,
-};
 
 fn cleanup_retry_inflight_blocks_idle_kickoff(
     shared: &SharedData,
