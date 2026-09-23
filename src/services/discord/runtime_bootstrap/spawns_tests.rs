@@ -789,6 +789,15 @@ fn nothing_between_the_point_of_no_return_and_the_exit_can_undo_it() {
         !commit_body.contains("remove_file"),
         "#5254 D4③: a published acknowledgement is never withdrawn by its publisher"
     );
+    assert_eq!(
+        commit_body
+            .matches(
+                "publish_restart_terminal(root, nonce, &body, runtime_store::PARENT_DIR_FSYNC_FLUSHES)"
+            )
+            .count(),
+        1,
+        "§E8.2: production passes the platform flush capability, never a literal"
+    );
 
     // The point of no return itself now lives in `publish_restart_terminal`, so
     // the two slices above would miss a retraction reintroduced beside the
@@ -808,18 +817,18 @@ fn nothing_between_the_point_of_no_return_and_the_exit_can_undo_it() {
         "#5254 D4③: every remove_file in this function is spelled (&staged)"
     );
 
-    // ERRATUM §E8.2: the derived index is gated on the first parent-dir fsync,
-    // so the fsync-failure return has to stand ahead of the `hard_link` that
-    // makes the second name. Deleting it brings the index-only producer back.
-    let fsync_gate = publisher_body
-        .find("return Ok(())")
-        .expect("the fsync failure path still returns before the index");
+    // ERRATUM §E8.2: both the fsync-failure and the unflushed arm must return
+    // ahead of the `hard_link`; a count, because a first-match scan lets either
+    // return stand in for the other.
     let derived_index = publisher_body
         .find("hard_link")
         .expect("the index is still a hard link of the identity");
-    assert!(
-        fsync_gate < derived_index,
-        "#5254 §E8.2: the index must never be derived from an unfsynced identity"
+    assert_eq!(
+        publisher_body[..derived_index]
+            .matches("return Ok(())")
+            .count(),
+        2,
+        "#5254 §E8.2: both the fsync-failure and the unflushed arm return before the index"
     );
 }
 
