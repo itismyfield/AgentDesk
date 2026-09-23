@@ -1,7 +1,7 @@
 //! Phase-1 `catch_up` over the relay e2e mock: one unanswered user message in a
 //! channel of bot posts is only recovered if the mock pages from the cursor.
 
-use super::relay_e2e::{HistoryQuery, RelayE2eHarness};
+use super::{HistoryQuery, RelayE2eHarness};
 
 /// A snowflake base minted 30s ago, inside `catch_up`'s five-minute age window;
 /// the low 22 bits are free for a per-message sequence.

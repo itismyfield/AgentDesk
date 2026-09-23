@@ -162,9 +162,11 @@ fn history_message_id(message: &Value) -> u64 {
 }
 
 /// Discord's page shape: the `limit` messages nearest the cursor (the newest
-/// without one), always newest first. `None` when both cursors are set.
+/// without one), always newest first. `None` for both cursors or a `limit`
+/// outside Discord's documented 1..=100, whose real answer is unmeasured.
 fn history_page(history: &[Value], query: &HistoryQuery) -> Option<Vec<Value>> {
-    if query.before.is_some() && query.after.is_some() {
+    let limit = query.limit.unwrap_or(50);
+    if (query.before.is_some() && query.after.is_some()) || !(1..=100).contains(&limit) {
         return None;
     }
     let mut page: Vec<Value> = history
@@ -177,7 +179,7 @@ fn history_page(history: &[Value], query: &HistoryQuery) -> Option<Vec<Value>> {
         .cloned()
         .collect();
     page.sort_by_key(|message| std::cmp::Reverse(history_message_id(message)));
-    let keep = page.len().min(query.limit.unwrap_or(50));
+    let keep = page.len().min(limit);
     // `after` pages forward from the cursor, so it keeps the oldest end.
     if query.after.is_some() {
         page.drain(..page.len() - keep);
@@ -185,6 +187,54 @@ fn history_page(history: &[Value], query: &HistoryQuery) -> Option<Vec<Value>> {
         page.truncate(keep);
     }
     Some(page)
+}
+
+/// Pins the page contract `catch_up` and `recovery_text` read: which ids, and
+/// newest first, since both index into the page assuming that order.
+#[test]
+fn history_page_returns_the_ids_nearest_the_cursor_newest_first() {
+    // Seeded out of order so the page order comes from the mock, not the seed.
+    let history: Vec<Value> = [3, 1, 4, 10, 5, 9, 2, 6, 8, 7]
+        .into_iter()
+        .map(|id| history_message_json(id, "m", true))
+        .collect();
+    let page = |limit, before, after| {
+        history_page(
+            &history,
+            &HistoryQuery {
+                limit,
+                before,
+                after,
+            },
+        )
+        .map(|page| page.iter().map(history_message_id).collect::<Vec<u64>>())
+    };
+    let cases: [(Option<usize>, Option<u64>, Option<u64>, Option<Vec<u64>>); 12] = [
+        (Some(3), None, None, Some(vec![10, 9, 8])),
+        (None, None, None, Some(vec![10, 9, 8, 7, 6, 5, 4, 3, 2, 1])),
+        (Some(2), Some(5), None, Some(vec![4, 3])),
+        (Some(5), Some(3), None, Some(vec![2, 1])),
+        (Some(5), Some(1), None, Some(vec![])),
+        (Some(2), None, Some(5), Some(vec![7, 6])),
+        (Some(5), None, Some(8), Some(vec![10, 9])),
+        (Some(5), None, Some(10), Some(vec![])),
+        (
+            Some(100),
+            None,
+            None,
+            Some(vec![10, 9, 8, 7, 6, 5, 4, 3, 2, 1]),
+        ),
+        (Some(2), Some(9), Some(3), None),
+        (Some(0), None, None, None),
+        (Some(101), None, None, None),
+    ];
+    for (limit, before, after, expected) in cases {
+        assert_eq!(
+            page(limit, before, after),
+            expected,
+            "limit={limit:?} before={before:?} after={after:?}"
+        );
+    }
 }
 
 async fn get_channel(Path(_channel_id): Path<u64>) -> Json<Value> {

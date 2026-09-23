@@ -12,6 +12,7 @@
 //! CI pins these to `env -u AGENTDESK_ROOT_DIR ... -- --test-threads=1`; a new
 //! scenario module inherits that only once it is named in the same invocation.
 
+mod catch_up_pagination_e2e;
 mod discord_mock;
 
 use std::path::PathBuf;
@@ -34,8 +35,8 @@ use crate::services::discord::{
 use crate::services::tui_prompt_dedupe as dedupe;
 use crate::services::turn_orchestrator as orchestrator;
 
-pub(super) use discord_mock::{CHANNEL_ID, HistoryQuery};
-use discord_mock::{USER_ID, history_message_json, user_message};
+pub(super) use discord_mock::CHANNEL_ID;
+use discord_mock::{HistoryQuery, USER_ID, history_message_json, user_message};
 
 /// Dedupe and lease tables key on the provider's wire name, not [`ProviderKind`].
 pub(super) const PROVIDER_KEY: &str = "claude";
