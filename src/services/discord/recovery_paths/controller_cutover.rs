@@ -285,8 +285,10 @@ pub(in crate::services::discord) mod tests {
     use super::*;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
+    #[cfg(unix)]
     use crate::services::discord::inflight::{self, opt_channel_id, opt_message_id};
     use crate::services::discord::make_shared_data_for_tests;
+    #[cfg(unix)]
     use crate::services::discord::outbound::delivery_frontier_probe;
     use crate::services::discord::recovery_paths::shared::ChannelProbeVerdict;
     use crate::services::provider::ProviderKind;
@@ -573,8 +575,10 @@ pub(in crate::services::discord) mod tests {
         assert_eq!(replace_calls, 1, "the single POST was attempted and failed");
     }
 
+    #[cfg(unix)]
     struct EnvReset(Option<std::ffi::OsString>);
 
+    #[cfg(unix)]
     impl Drop for EnvReset {
         fn drop(&mut self) {
             match self.0.take() {
@@ -584,6 +588,7 @@ pub(in crate::services::discord) mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn set_runtime_root() -> (tempfile::TempDir, EnvReset) {
         let reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let temp = tempfile::TempDir::new().expect("runtime root");
@@ -591,6 +596,7 @@ pub(in crate::services::discord) mod tests {
         (temp, reset)
     }
 
+    #[cfg(unix)]
     fn write_generation_marker(tmux_session_name: &str) {
         let path = crate::services::tmux_common::session_temp_path(tmux_session_name, "generation");
         if let Some(parent) = std::path::Path::new(&path).parent() {
@@ -599,6 +605,7 @@ pub(in crate::services::discord) mod tests {
         std::fs::write(path, "1").expect("generation marker");
     }
 
+    #[cfg(unix)]
     fn state(provider: ProviderKind, channel_id: u64) -> inflight::InflightTurnState {
         let mut state = inflight::InflightTurnState::new(
             provider,
@@ -620,6 +627,8 @@ pub(in crate::services::discord) mod tests {
         state
     }
 
+    // .generation marker 는 Unix 전용 tmux wrapper 만 쓰고 non-unix 의 generation 은 0(불신)이라 generation 에 묶인 durable frontier 경로가 Windows 에는 없다.
+    #[cfg(unix)]
     #[test]
     fn controller_fallback_records_replacement_anchor() {
         let _lock = crate::config::shared_test_env_lock()

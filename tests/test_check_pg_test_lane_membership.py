@@ -124,16 +124,14 @@ class NonPgFilterContract(unittest.TestCase):
         (self.root / membership.NON_PG_FILTER_REL).write_text(
             (REPO_ROOT / membership.NON_PG_FILTER_REL).read_text("utf-8"), "utf-8"
         )
-        (self.root / membership.LIB_TEST_INVENTORY_REL).write_text(
-            (REPO_ROOT / membership.LIB_TEST_INVENTORY_REL).read_text("utf-8"),
-            "utf-8",
-        )
+        for rel in (membership.LIB_TEST_INVENTORY_REL, Path("scripts/check_test_lane_coverage.py")):
+            (self.root / rel).write_text((REPO_ROOT / rel).read_text("utf-8"), "utf-8")
         consumer = (
             "    steps:\n"
             "      - run: |\n"
             "          source scripts/ci/non-pg-test-filter.sh\n"
             "          cargo test --all-targets -- \"${NON_PG_SKIP_ARGS[@]}\"\n"
-            "          run_non_pg_filter_false_positives\n"
+            "          run_non_pg_filter_replay\n"
         )
         (self.root / ".github/workflows/ci-pr.yml").write_text(
             "jobs:\n  library_sweep:\n" + consumer, "utf-8"
@@ -208,7 +206,7 @@ class NonPgFilterContract(unittest.TestCase):
 
     def test_replay_id_must_exist_in_libtest_inventory(self) -> None:
         path = self.root / membership.NON_PG_FILTER_REL
-        first = membership.load_non_pg_false_positives(self.root)[0]
+        first = membership.load_non_pg_filter_replay(self.root)[0]
         path.write_text(
             path.read_text("utf-8").replace(first, first + "_renamed"), "utf-8"
         )
@@ -525,6 +523,42 @@ class DetectionMutation(FixtureCase):
         with mock.patch.object(membership, "_transitive_closure", return_value=False):
             with self.assertRaises(AssertionError):
                 self.assertEqual(set(membership.discover_pg_inventory(self.root).tests), expected)
+
+    def test_helper_chain_past_depth_limit_fails_closed(self) -> None:
+        def chain(test: str, hops: int) -> str:
+            helpers = "".join(
+                f"fn {test}_h{i}() {{ {test}_h{i + 1}(); }} " for i in range(hops)
+            )
+            return (
+                f"{helpers}fn {test}_h{hops}() {{ create_test_database(); }} "
+                f"#[test] fn {test}() {{ {test}_h0(); }} "
+            )
+
+        limit = membership.PG_REACH_MAX_DEPTH
+        self.fx.write_source(
+            "src/deep.rs",
+            f"#[cfg(test)] mod tests {{ {chain('within', 5)}{chain('beyond', limit + 1)}}}\n",
+            "mod deep;\n",
+        )
+        analysis = self.fx.analysis()
+        self.assertEqual(set(analysis.inventory.tests), {"deep::tests::within"})
+        exhausted = [
+            finding.source for finding in analysis.findings
+            if finding.kind == "pg-reach-depth-exhausted"
+        ]
+        self.assertEqual(exhausted, ["deep::tests::beyond"])
+        # Absorb the fixture's rule1-rule4 debt and rule out rule5 so that
+        # depth exhaustion is the only thing that can make rc=1.
+        baseline = {section: set(analysis.debts[section]) for section in membership.SECTIONS}
+        self.assertFalse(analysis.debts["rule5"])
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            rc = membership.check_analysis(
+                analysis, baseline, baseline, membership.render_manifest(analysis.inventory),
+                reference_label="fixture base", allowlist_label="fixture allowlist",
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL: [pg-reach-depth-exhausted] deep::tests::beyond", stderr.getvalue())
 
     def test_brace_aware_edges_do_not_capture_the_next_function(self) -> None:
         self.fx.write_source(
@@ -1814,6 +1848,7 @@ class PgDbGateWiring(FixtureCase):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
                 mock.patch.object(membership, "check_non_pg_filter_contract", return_value=0), \
+                mock.patch.object(membership, "check_non_pg_selection_block", return_value=0), \
                 mock.patch.object(membership, "reference_baseline", return_value=("fixture", None)):
             rc = membership.check(self.root, self.baseline, self.manifest, "HEAD")
         return rc, out.getvalue(), err.getvalue()
@@ -1960,7 +1995,7 @@ class PgDbCiWiring(unittest.TestCase):
             "the pg_db-gated job must invoke `just test-postgres`",
         )
         recipe = self.justfile.partition("\ntest-postgres:")[2].partition("\n\n")[0]
-        for marker in ("cargo test", "_pg", "pg_", "postgres"):
+        for marker in ("source scripts/ci/non-pg-test-filter.sh", "cargo test", '"${PG_INCLUDE_ARGS[@]}"'):
             self.assertIn(marker, recipe, f"just test-postgres must select {marker}")
 
 

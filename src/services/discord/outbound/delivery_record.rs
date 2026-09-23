@@ -695,7 +695,7 @@ pub(in crate::services::discord) fn write_delivered_frontier(
 /// — but it is `#[cfg(test)]` so that "no production caller" is held by the
 /// compiler and not only by
 /// `scripts/check_durable_frontier_writer_call_sites.py`.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(in crate::services::discord) fn write_proven_gone_equal_range_frontier(
     provider: &ProviderKind,
     channel_id: u64,
@@ -712,7 +712,7 @@ pub(in crate::services::discord) fn write_proven_gone_equal_range_frontier(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn write_proven_gone_equal_range_frontier_at_with_before_lock(
     path: &Path,
     tmux_session_name: &str,
@@ -2724,6 +2724,40 @@ mod tests {
         )
     }
 
+    #[cfg(not(unix))]
+    #[test]
+    fn non_unix_generation_is_absent_so_durable_frontier_is_neither_written_nor_trusted() {
+        let _root = IsolatedRoot::new();
+        let (provider, channel, tmux) = (ProviderKind::Claude, 6_105_001, "AgentDesk-claude-6105");
+        let marker = crate::services::tmux_common::session_temp_path(tmux, "generation");
+        std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
+        std::fs::write(&marker, b"1").unwrap();
+        assert_eq!(current_generation_mtime_ns(tmux), 0);
+
+        let commit = DeliveredCommit {
+            range: (0, 42),
+            generation_mtime_ns: 100,
+            attempts: 1,
+            panel_msg_id: Some(999),
+            panel_channel_id: Some(channel),
+        };
+        assert!(write_delivered_frontier(&provider, channel, tmux, commit.clone()).is_err());
+
+        let path = record_path_or_err(&provider, channel).unwrap();
+        mutate_record_at(&path, |record| record.delivered_frontier = Some(commit)).unwrap();
+        assert_eq!(
+            delivered_frontier_end_current_generation(
+                &provider,
+                ChannelId::new(channel),
+                tmux,
+                Some(100)
+            ),
+            0
+        );
+    }
+
+    // .generation marker 는 Unix 전용 tmux wrapper 만 쓰고 non-unix 의 generation 은 0(불신)이라 generation 에 묶인 durable frontier 경로가 Windows 에는 없다.
+    #[cfg(unix)]
     #[test]
     fn codex_admitted_range_receipt_is_exact_and_idempotent_5264() {
         let _root = IsolatedRoot::new();
@@ -2803,6 +2837,7 @@ mod tests {
     /// DIFFERENT destination channel, which is precisely the restored-seed
     /// consumption decision the doc comment promises fails closed. Both
     /// deletions were silent against the whole suite before this test.
+    #[cfg(unix)]
     #[test]
     fn confirmed_receipt_identity_guards_gate_the_historical_fast_path_5264() {
         let _root = IsolatedRoot::new();
@@ -2848,6 +2883,7 @@ mod tests {
             "message id 0 is not a delivery"
         );
     }
+    #[cfg(unix)]
     #[test]
     fn ordered_jsonl_commit_is_generation_scoped_and_monotonic() {
         let _root = IsolatedRoot::new();
@@ -4249,6 +4285,7 @@ mod tests {
         assert!(!should_shadow_mirror(false, true)); // not delivered → no anchor write (I2)
     }
 
+    #[cfg(unix)]
     #[test]
     fn shadow_off_confirmed_delivery_writes_exact_split_channel_authority_4911() {
         let root = IsolatedRoot::new();
@@ -4321,6 +4358,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn confirmed_receipts_reverse_order_merge_without_frontier_regression_4911() {
         let _root = IsolatedRoot::new();
@@ -4381,6 +4419,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn receiptless_confirmed_frontiers_reverse_order_keep_winner_identity_4911() {
         let _root = IsolatedRoot::new();
@@ -4452,6 +4491,7 @@ mod tests {
         assert!(record.confirmed_deliveries.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn cleared_inflight_current_generation_persists_frontier_without_receipt_4911() {
         let _root = IsolatedRoot::new();
@@ -4499,6 +4539,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn cleared_inflight_stale_caller_generation_rejects_frontier_4911() {
         let _root = IsolatedRoot::new();
@@ -4534,6 +4575,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn legacy_frontier_reverse_order_split_channel_keeps_winner_whole_4911() {
         let _root = IsolatedRoot::new();
@@ -4580,6 +4622,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn ordered_jsonl_reverse_order_preserves_split_channel_anchor_4911() {
         let _root = IsolatedRoot::new();
@@ -4613,6 +4656,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn legacy_frontier_blocked_writer_revalidates_after_rotation_4911() {
         let _root = IsolatedRoot::new();
@@ -4663,6 +4707,7 @@ mod tests {
         assert_eq!(read_record_at(&path), Some(current_record));
     }
 
+    #[cfg(unix)]
     #[test]
     fn proven_gone_reanchor_blocked_writer_preserves_concurrent_anchor_swap_4911() {
         let _root = IsolatedRoot::new();
@@ -4737,6 +4782,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn proven_gone_reanchor_missing_frontier_is_conservative_noop_4911() {
         let _root = IsolatedRoot::new();
@@ -4765,6 +4811,7 @@ mod tests {
         assert_eq!(read_record_at(&path), Some(record_without_frontier));
     }
 
+    #[cfg(unix)]
     #[test]
     fn ordered_jsonl_blocked_writer_revalidates_after_rotation_4911() {
         let _root = IsolatedRoot::new();
@@ -4813,6 +4860,7 @@ mod tests {
         assert_eq!(read_record_at(&path), Some(current_record));
     }
 
+    #[cfg(unix)]
     #[test]
     fn receiptless_blocked_writer_revalidates_after_rotation_4911() {
         let _root = IsolatedRoot::new();
@@ -4877,6 +4925,7 @@ mod tests {
         assert_eq!(read_record_at(&path), Some(current_record));
     }
 
+    #[cfg(unix)]
     #[test]
     fn rotate_after_receipt_validation_preserves_current_incarnation_4911() {
         let _root = IsolatedRoot::new();
@@ -5429,6 +5478,7 @@ mod tests {
     /// generation mtime the record was stamped with. The record's
     /// `generation_mtime_ns` is set to the marker's REAL on-disk mtime so the #1270
     /// generation gate TRUSTS it — mirroring the production write/read parity.
+    #[cfg(unix)]
     fn seed_current_generation_frontier(
         provider: &ProviderKind,
         channel: ChannelId,
@@ -5462,6 +5512,7 @@ mod tests {
         gen_ns
     }
 
+    #[cfg(unix)]
     fn seed_edit_failure_transcript(
         root: &IsolatedRoot,
         tmux_session_name: &str,
@@ -5476,6 +5527,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn stable_edit_failure_committed_at(
         provider: &ProviderKind,
         channel: ChannelId,
@@ -5497,6 +5549,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     fn shared_with_committed(
         channel: ChannelId,
         in_memory: u64,
@@ -5514,6 +5567,7 @@ mod tests {
     /// while authority-OFF returns the in-memory value verbatim (deploy no-op).
     /// This proves the flag actually gates the wiring — not just the pure `fuse`
     /// arithmetic already covered above.
+    #[cfg(unix)]
     #[test]
     fn effective_committed_offset_authority_on_fuses_durable_3933() {
         let _root = IsolatedRoot::new();
@@ -5574,6 +5628,7 @@ mod tests {
     /// the rollover ends ABOVE the floor → NOT suppressed → relayed. The floor is
     /// `max(durable, in_memory)`, so raising it to the known-delivered watermark
     /// never over-suppresses fresh output. Rides the in-memory=0 restart hazard.
+    #[cfg(unix)]
     #[test]
     fn committed_floor_authority_on_does_not_oversuppress_rollover_resend_3871() {
         let _root = IsolatedRoot::new();
@@ -5609,6 +5664,7 @@ mod tests {
     /// range as delivered (`range_already_committed == true`) → the watchdog
     /// re-relay is suppressed (no duplicate) even though the in-memory offset was
     /// reset. The boundary (range_end == floor) is inclusive.
+    #[cfg(unix)]
     #[test]
     fn committed_floor_authority_on_suppresses_watchdog_rerelay_3885() {
         let _root = IsolatedRoot::new();
@@ -5633,6 +5689,7 @@ mod tests {
         assert!(range_already_committed(durable_end, floor)); // inclusive boundary
     }
 
+    #[cfg(unix)]
     #[test]
     fn edit_failure_recheck_suppresses_only_stable_fresh_bounded_commit_4508() {
         let root = IsolatedRoot::new();
@@ -5669,6 +5726,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn edit_failure_recheck_distrusts_prior_generation_4508() {
         let root = IsolatedRoot::new();
@@ -5699,6 +5757,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn edit_failure_recheck_requires_durable_proof_despite_high_memory_floor_4508() {
         let root = IsolatedRoot::new();
@@ -5730,6 +5789,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn edit_failure_recheck_detects_rotate_between_eof_and_frontier_4508() {
         let root = IsolatedRoot::new();
@@ -5783,6 +5843,7 @@ mod tests {
     /// within the pre-truncate EOF, so ONLY the post-read file-identity check
     /// can detect the race. Mutation-sensitive for the second snapshot
     /// comparison in `stable_edit_failure_frontier_at`.
+    #[cfg(unix)]
     #[test]
     fn edit_failure_recheck_detects_same_generation_truncate_during_snapshot_4508() {
         let root = IsolatedRoot::new();
@@ -5818,6 +5879,7 @@ mod tests {
     /// answer after a pane reset / same-named respawn is never over-suppressed.
     /// Proves the generation gate is honored through the ENV-RESOLVED wiring, not
     /// only in the pure helper.
+    #[cfg(unix)]
     #[test]
     fn effective_committed_offset_authority_on_distrusts_stale_generation_3933() {
         let _root = IsolatedRoot::new();

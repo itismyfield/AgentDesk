@@ -15,7 +15,7 @@ use crate::services::claude_tui::memento_feedback;
 
 mod ordered_queue;
 pub(crate) use ordered_queue::OrderedHookRelayRecoveryOwner;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use ordered_queue::relay_queue_dir;
 use ordered_queue::{
     handoff_non_wait_hook_event, handoff_ordered_hook_event_response_with_timeout,
@@ -40,13 +40,13 @@ const FAILURE_MARKER_TEST_ELAPSED_PATH_ENV: &str =
 #[cfg(test)]
 const FAILURE_MARKER_TEST_RELEASE_PATH_ENV: &str =
     "AGENTDESK_HOOK_RELAY_FAILURE_MARKER_TEST_RELEASE_PATH";
-#[cfg(test)]
+#[cfg(all(test, unix))]
 const NON_WAIT_RELAY_PARENT_TEST_ENV: &str = "AGENTDESK_HOOK_RELAY_NON_WAIT_PARENT_TEST";
-#[cfg(test)]
+#[cfg(all(test, unix))]
 const NON_WAIT_RELAY_TEST_ENDPOINT_ENV: &str = "AGENTDESK_HOOK_RELAY_TEST_ENDPOINT";
-#[cfg(test)]
+#[cfg(all(test, unix))]
 const NON_WAIT_RELAY_TEST_ELAPSED_PATH_ENV: &str = "AGENTDESK_HOOK_RELAY_TEST_ELAPSED_PATH";
-#[cfg(test)]
+#[cfg(all(test, unix))]
 const NON_WAIT_RELAY_TEST_STDOUT_PATH_ENV: &str = "AGENTDESK_HOOK_RELAY_TEST_STDOUT_PATH";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -811,6 +811,7 @@ mod tests {
     use std::ffi::OsString;
     use std::io::Cursor;
     use std::sync::{Arc, Mutex, MutexGuard, mpsc};
+    #[cfg(unix)]
     use std::time::Instant;
 
     #[derive(Debug, Default)]
@@ -902,6 +903,7 @@ mod tests {
         (endpoint, request_rx, receiver)
     }
 
+    #[cfg(unix)]
     fn spawn_hanging_hook_receiver() -> (
         String,
         mpsc::Receiver<Vec<u8>>,
@@ -943,6 +945,7 @@ mod tests {
         (endpoint, request_rx, receiver)
     }
 
+    #[cfg(unix)]
     fn spawn_ordered_hook_receiver(
         expected: usize,
     ) -> (
@@ -1524,6 +1527,7 @@ mod tests {
         assert_hook_command_hands_off_marker_within_latency_ceiling("PostToolUse", false);
     }
 
+    #[cfg(unix)]
     fn request_event_and_payload(request: &[u8]) -> (String, Value) {
         let request = std::str::from_utf8(request).expect("hook request is UTF-8");
         let event = request
@@ -1541,6 +1545,8 @@ mod tests {
         (event, payload)
     }
 
+    // 순서 보장 hook relay 는 flock 기반이고 tmux 호스팅 TUI(Unix 전용) 런치만 설치하므로 Windows 에는 실행 경로가 없다.
+    #[cfg(unix)]
     #[test]
     fn ordered_worker_preserves_search_feedback_stop_session_start_producer_sequence() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1661,6 +1667,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn claude_non_wait_hanging_transport_returns_after_stdout_within_750ms() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1740,6 +1747,7 @@ mod tests {
         crate::run_from_args().expect("non-wait relay worker delivers event or durable marker");
     }
 
+    #[cfg(unix)]
     #[test]
     #[ignore = "helper subprocess that exits after ordered non-wait handoff"]
     fn non_wait_relay_parent_subprocess_entry() {
