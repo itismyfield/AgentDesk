@@ -64,6 +64,10 @@ mod tests {
         ),
         ("db::postgres", include_str!("../db/postgres.rs")),
         (
+            "db::postgres::test_db_reclaim",
+            include_str!("../db/postgres/test_db_reclaim.rs"),
+        ),
+        (
             "db::prompt_manifests::tests",
             include_str!("../db/prompt_manifests/tests.rs"),
         ),
