@@ -132,78 +132,53 @@ def diff_specs() -> list[list[str]]:
     return specs
 
 
-def parse_added_lines(diff_text: str, path: str) -> list[AddedLine]:
-    """Added lines of a one-path patch; file headers before each hunk are skipped."""
+def parse_added_lines(diff_text: str) -> list[AddedLine]:
     added: list[AddedLine] = []
+    path: str | None = None
     new_line: int | None = None
     for raw in diff_text.splitlines():
-        if raw.startswith("diff --git "):
-            new_line = None
+        if raw.startswith("+++ b/"):
+            path = raw[6:]
+            continue
+        if raw.startswith("+++ /dev/null"):
+            path = None
             continue
         if raw.startswith("@@"):
             match = re.search(r"\+(\d+)(?:,(\d+))?", raw)
             new_line = int(match.group(1)) if match else None
             continue
-        if new_line is None:
+        if path is None or new_line is None:
             continue
-        if raw.startswith("+"):
+        if raw.startswith("+") and not raw.startswith("+++"):
             added.append(AddedLine(path, new_line, raw[1:]))
             new_line += 1
             continue
-        if raw.startswith("-"):
+        if raw.startswith("-") and not raw.startswith("---"):
             continue
         new_line += 1
     return added
-
-
-def run_git_or_exit(args: list[str]) -> str:
-    result = run_git(args)
-    if result.returncode not in (0, 1):
-        print(result.stderr, file=sys.stderr)
-        sys.exit(result.returncode)
-    return result.stdout
-
-
-def is_audited_path(path: str) -> bool:
-    return is_selected_production_path(path) or (
-        path.startswith("migrations/postgres/") and path.endswith(".sql")
-    )
-
-
-def audited_changes(spec: list[str]) -> list[tuple[str, list[str]]]:
-    """(new path, pathspecs) per audited change, read NUL-separated so paths stay exact."""
-    fields = run_git_or_exit(["diff", "--name-status", "-z", "--no-ext-diff", *spec]).split("\0")[:-1]
-    changes: list[tuple[str, list[str]]] = []
-    index = 0
-    while index < len(fields):
-        status = fields[index]
-        # Renames and copies carry the source path too; keep both so git still pairs them.
-        width = 2 if status[:1] in ("R", "C") else 1
-        paths = fields[index + 1 : index + 1 + width]
-        index += 1 + width
-        if status[:1] != "D" and is_audited_path(paths[-1]):
-            changes.append((paths[-1], paths))
-    return changes
 
 
 def collect_added_lines() -> list[AddedLine]:
     seen: set[tuple[str, int, str]] = set()
     lines: list[AddedLine] = []
     for spec in diff_specs():
-        for path, pathspecs in audited_changes(spec):
-            # Attribute hunks to the NUL-read path, not the C-quoted patch header.
-            patch = run_git_or_exit(
-                ["--literal-pathspecs", "diff", "--unified=0", "--no-ext-diff", *spec, "--", *pathspecs]
-            )
-            for added in parse_added_lines(patch, path):
-                key = (added.path, added.line_no, added.text)
-                if key not in seen:
-                    seen.add(key)
-                    lines.append(added)
-    untracked = run_git(["ls-files", "-z", "--others", "--exclude-standard"])
+        result = run_git(["diff", "--unified=0", "--no-ext-diff", *spec])
+        if result.returncode not in (0, 1):
+            print(result.stderr, file=sys.stderr)
+            sys.exit(result.returncode)
+        for added in parse_added_lines(result.stdout):
+            key = (added.path, added.line_no, added.text)
+            if key not in seen:
+                seen.add(key)
+                lines.append(added)
+    untracked = run_git(["ls-files", "--others", "--exclude-standard"])
     if untracked.returncode == 0:
-        for path in untracked.stdout.split("\0")[:-1]:
-            if not is_audited_path(path):
+        for path in untracked.stdout.splitlines():
+            if not (
+                is_selected_production_path(path)
+                or (path.startswith("migrations/postgres/") and path.endswith(".sql"))
+            ):
                 continue
             try:
                 file_lines = Path(path).read_text(encoding="utf-8").splitlines()

@@ -321,10 +321,9 @@ def default_base_ref(repo_root: Path) -> str:
 
 
 def changed_files_from_git(repo_root: Path, base_ref: str) -> tuple[set[str], Finding | None]:
-    # -z: without it git quotes non-ASCII paths, so they never match a rule.
-    diff = run_git(repo_root, ["diff", "--name-only", "-z", f"{base_ref}...HEAD"])
+    diff = run_git(repo_root, ["diff", "--name-only", f"{base_ref}...HEAD"])
     if diff.returncode == 0:
-        return {path for path in diff.stdout.split("\0") if path}, None
+        return {line.strip() for line in diff.stdout.splitlines() if line.strip()}, None
 
     message = diff.stderr.strip() or diff.stdout.strip() or "git diff failed"
     return (

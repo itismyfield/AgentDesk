@@ -91,22 +91,18 @@ def archive(ref: str, destination: Path) -> None:
         if unsafe:
             raise RuntimeError("snapshot contains a non-regular or unsafe path")
         bundle.extractall(destination)
-def git_z(*args: str) -> list[str]:
-    """NUL-terminated fields of a `git ... -z` call; git quotes paths otherwise."""
-    return str(git(*args)).split("\0")[:-1]
 def diff_facts(base: str, candidate: str) -> dict[str, object]:
-    changed = set(git_z("diff", "--name-only", "-z", base, candidate))
+    changed = set(str(git("diff", "--name-only", "-z", base, candidate)).split("\0")) - {""}
     additions, numstat, binary = 0, {}, set()
-    for row in git_z("diff", "--numstat", "--no-renames", "-z", base, candidate):
+    for row in str(git("diff", "--numstat", "--no-renames", base, candidate)).splitlines():
         added, deleted, path = row.split("\t", 2)
         if not added.isdigit() or not deleted.isdigit():
             binary.add(path)
             continue
         numstat[path] = (int(added), int(deleted))
         additions += int(added)
-    # -z emits `status NUL path NUL` pairs instead of `status TAB path` lines.
-    status_fields = git_z("diff", "--name-status", "--no-renames", "-z", base, candidate)
-    statuses = dict(zip(status_fields[1::2], status_fields[0::2]))
+    status_rows = str(git("diff", "--name-status", "--no-renames", base, candidate)).splitlines()
+    statuses = {row.split("\t", 1)[1]: row.split("\t", 1)[0] for row in status_rows}
     rename_copy = str(git("diff", "--name-status", "--find-renames", "--find-copies", base, candidate))
     return {"changed": changed, "additions": additions, "numstat": numstat,
             "binary": binary, "statuses": statuses,
@@ -244,6 +240,8 @@ def movement_ledger(base: str, candidate: str, progress_roots: set[str],
     if not roots:
         return {}
     paths = sorted(set(roots) | {child for root in roots for child in children.get(root, ())})
+    patch = str(git("diff", "--unified=0", "--no-renames", base, candidate,
+                    "--", *paths))
     production: dict[tuple[str, str], set[int]] = {}
     for ref, locations, selected in ((base, base_loc, roots),
                                      (candidate, candidate_loc, paths)):
@@ -257,36 +255,30 @@ def movement_ledger(base: str, candidate: str, progress_roots: set[str],
 
     deleted = {root: Counter() for root in roots}
     added: list[tuple[str, int, str]] = []
-    for path in paths:
-        # Key hunks by the requested path, never the patch header: git C-quotes
-        # unusual names there. Literal pathspecs keep glob characters exact.
-        patch = str(git("--literal-pathspecs", "diff", "--unified=0", "--no-renames",
-                        base, candidate, "--", path))
-        in_header = True
-        old_line = new_line = 0
-        for line in patch.splitlines():
-            if line.startswith("diff --git "):
-                in_header = True
-            elif match := _HUNK_RE.match(line):
-                in_header = False
-                old_line, new_line = int(match.group(1)), int(match.group(2))
-            elif in_header:
-                continue
-            elif line.startswith("-"):
-                value = line[1:].strip()
-                if (path in deleted and old_line in production[(base, path)]
-                        and value and not value.startswith(("//", "/*", "*"))):
-                    deleted[path][value] += 1
-                old_line += 1
-            elif line.startswith("+"):
-                value = line[1:].strip()
-                if (new_line in production[(candidate, path)]
-                        and value and not value.startswith(("//", "/*", "*"))):
-                    added.append((path, new_line, value))
-                new_line += 1
-            elif line.startswith(" "):
-                old_line += 1
-                new_line += 1
+    old_path = new_path = ""
+    old_line = new_line = 0
+    for line in patch.splitlines():
+        if line.startswith("--- "):
+            old_path = "" if line == "--- /dev/null" else line[6:]
+        elif line.startswith("+++ "):
+            new_path = "" if line == "+++ /dev/null" else line[6:]
+        elif match := _HUNK_RE.match(line):
+            old_line, new_line = int(match.group(1)), int(match.group(2))
+        elif line.startswith("-") and old_path:
+            value = line[1:].strip()
+            if (old_path in deleted and old_line in production[(base, old_path)]
+                    and value and not value.startswith(("//", "/*", "*"))):
+                deleted[old_path][value] += 1
+            old_line += 1
+        elif line.startswith("+") and new_path:
+            value = line[1:].strip()
+            if (new_line in production[(candidate, new_path)]
+                    and value and not value.startswith(("//", "/*", "*"))):
+                added.append((new_path, new_line, value))
+            new_line += 1
+        elif line.startswith(" "):
+            old_line += 1
+            new_line += 1
 
     ledger: dict[str, list[tuple[str, int]]] = {root: [] for root in roots}
     for path, line, value in sorted(added):
