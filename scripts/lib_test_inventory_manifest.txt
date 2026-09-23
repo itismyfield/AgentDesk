@@ -2852,7 +2852,6 @@ services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_
 services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_leak_recovery_clears_zero_id_owned_inflight
 services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_leak_recovery_preserves_a_newer_turns_inflight
 services::discord::health::recovery::live_agent_recovery::tests::recovery_metadata_is_a_role_bound_persistent_routine_when_requested
-services::discord::health::recovery::mailbox_unreachable_tests::unreachable_actor_is_idle_to_wrapper_but_never_ends_the_turn_wait
 services::discord::health::recovery::owning_runtime_http_tests::owning_runtime_http_uses_channel_matched_runtime
 services::discord::health::recovery::rebind_error_status_tests::runtime_binding_unavailable_maps_to_conflict
 services::discord::health::recovery::rebind_error_status_tests::zero_channel_id_maps_to_bad_request
@@ -3524,6 +3523,7 @@ services::discord::jsonl_watcher::tests::notify_fires_when_file_modified
 services::discord::jsonl_watcher::tests::notify_is_inert_when_parent_missing_but_does_not_panic
 services::discord::last_message_checkpoint_tests::advance_last_message_checkpoint_interleaved_advances_keep_max
 services::discord::mailbox_finish::relay_state_contract_refs::contract_symbols_exist
+services::discord::mailbox_probe::mailbox_unreachable_tests::unreachable_actor_is_idle_to_wrapper_but_never_ends_the_turn_wait
 services::discord::mcp_credential_watcher::tests::added_mcp_server_is_reported
 services::discord::mcp_credential_watcher::tests::changed_mcp_server_config_is_reported
 services::discord::mcp_credential_watcher::tests::claude_config_dir_override_reroots_watched_paths

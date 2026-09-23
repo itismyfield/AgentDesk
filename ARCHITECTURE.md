@@ -1403,6 +1403,7 @@ src/
 │   │   ├── internal_api.rs
 │   │   ├── jsonl_watcher.rs
 │   │   ├── mailbox_finish.rs
+│   │   ├── mailbox_probe.rs
 │   │   ├── mcp_credential_watcher.rs
 │   │   ├── meeting_artifact_store.rs
 │   │   ├── meeting_orchestrator.rs
@@ -1722,6 +1723,7 @@ src/
 │   │   ├── front_requeue.rs
 │   │   ├── inbound_order.rs
 │   │   ├── lease_release.rs
+│   │   ├── mailbox_unreachable_tests.rs
 │   │   ├── overflow.rs
 │   │   ├── pending_queue_persistence.rs
 │   │   ├── queue_cancellation.rs
