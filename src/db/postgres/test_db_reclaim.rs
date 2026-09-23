@@ -43,6 +43,17 @@ pub(super) async fn mark_test_database(
     .map(|_| ())
 }
 
+/// Marks a just-created fixture, then closes the admin pool even if marking failed.
+pub(super) async fn mark_created(
+    admin_pool: PgPool,
+    database_name: &str,
+    label: &str,
+) -> Result<(), String> {
+    let marked = mark_test_database(&admin_pool, database_name, now_unix(), label).await;
+    let closed = super::close_test_pool(admin_pool, &format!("{label} admin")).await;
+    marked.and(closed)
+}
+
 /// Marked fixture databases older than `min_age` with no connected session.
 pub(super) async fn stale_test_databases(
     admin_pool: &PgPool,

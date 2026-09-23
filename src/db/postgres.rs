@@ -1162,7 +1162,6 @@ pub(crate) fn postgres_test_database_url_base() -> Option<String> {
 
 #[cfg(test)]
 mod test_db_reclaim;
-
 #[cfg(test)]
 const TEST_POSTGRES_OP_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(test)]
@@ -1474,8 +1473,7 @@ pub(crate) async fn connect_test_pool(database_url: &str, label: &str) -> Result
 // PG-backed test DB create/drop so they cannot race. Dropping the guard before
 // the awaits would reintroduce the CI race this lock was added to fix. Test-only.
 #[allow(clippy::await_holding_lock)]
-/// Ownership tokens are process-local, so a killed process leaks its databases.
-/// Each created database is marked and later swept by `test_db_reclaim`.
+/// Databases a killed process leaks are marked here and swept by `test_db_reclaim`.
 pub(crate) async fn create_test_database(
     admin_url: &str,
     database_name: &str,
@@ -1518,15 +1516,7 @@ pub(crate) async fn create_test_database(
         // later best-effort or explicit cleanup path must consume that token.
         register_test_database_ownership(&admin_options, admin_url, database_name);
 
-        let mark_result = test_db_reclaim::mark_test_database(
-            &admin_pool,
-            database_name,
-            test_db_reclaim::now_unix(),
-            label,
-        )
-        .await;
-        let close_result = close_test_pool(admin_pool, &format!("{label} admin")).await;
-        if let Err(error) = mark_result.and(close_result) {
+        if let Err(error) = test_db_reclaim::mark_created(admin_pool, database_name, label).await {
             best_effort_drop_owned_test_database(&admin_options, database_name, label).await;
             return Err(error);
         }
