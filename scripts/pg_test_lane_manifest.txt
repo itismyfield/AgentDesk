@@ -472,6 +472,7 @@ db::prompt_manifests::tests::manifest_storage_stats_counts_utf8_bytes_not_chars_
 db::prompt_manifests::tests::prompt_manifest_apply_retention_trims_old_full_content_pg
 db::prompt_manifests::tests::prompt_manifest_save_applies_write_time_cap_via_global_pg
 db::prompt_manifests::tests::prompt_manifest_save_fetch_round_trip_pg
+db::relay_dead_letter::tests::deferred_rows_do_not_starve_a_never_tried_row_pg
 db::relay_dead_letter::tests::insert_read_back_detached_and_retention_roundtrip_pg
 db::scheduled_messages::postgres_tests::postgres_agent_claim_waits_for_runtime_and_cancel_fences_turn_start
 db::scheduled_messages::postgres_tests::postgres_agent_launch_intent_crash_rearms_without_phantom_lease_renewal
