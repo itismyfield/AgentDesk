@@ -417,8 +417,8 @@ mod tests {
     #[test]
     fn test_escape_posix_shell_arg_with_quotes() {
         assert_eq!(
-            sidecar_remote_command("start", "Kunkun's iPad"),
-            "~/bin/SidecarLauncher 'start' 'Kunkun'\\''s iPad'"
+            sidecar_remote_command("start", "Owner's iPad"),
+            "~/bin/SidecarLauncher 'start' 'Owner'\\''s iPad'"
         );
     }
 
