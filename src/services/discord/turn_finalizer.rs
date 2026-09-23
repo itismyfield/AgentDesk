@@ -3251,9 +3251,9 @@ pub(super) mod tests {
             DeliveryLeaseKey::from_turn_key(TurnKey::new(ch, user_msg_id, 0))
         }
 
-        /// Watcher/Delivered: a freshly-acquired lease committed `Delivered`
-        /// advances `confirmed_end_offset` to the leased `end` EXACTLY ONCE, and
-        /// no duplicate occurs.
+        /// Watcher/Delivered advances `confirmed_end_offset` to the leased `end`
+        /// EXACTLY ONCE. Unix-only: that advance lives in the Unix-only tmux module.
+        #[cfg(unix)]
         #[tokio::test(flavor = "current_thread", start_paused = true)]
         async fn watcher_delivered_advances_offset_once() {
             with_isolated_runtime_root(|| async move {
@@ -3353,9 +3353,9 @@ pub(super) mod tests {
             .await;
         }
 
-        /// Watcher/Delivered then a SECOND commit of the same range is idempotent
-        /// on the offset (monotonic CAS): the second commit is a lease no-op (the
-        /// cell is Committed, not Leased) and the offset does not double-advance.
+        /// A SECOND commit of the same range is a lease no-op (cell Committed, not
+        /// Leased) and the offset does not double-advance (monotonic CAS).
+        #[cfg(unix)]
         #[tokio::test(flavor = "current_thread", start_paused = true)]
         async fn watcher_second_commit_is_idempotent_on_offset() {
             with_isolated_runtime_root(|| async move {

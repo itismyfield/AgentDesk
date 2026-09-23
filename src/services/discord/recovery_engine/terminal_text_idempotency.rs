@@ -1094,6 +1094,8 @@ mod tests {
         );
     }
 
+    // .generation marker 는 Unix 전용 tmux wrapper 만 쓰고 non-unix 의 generation 은 0(불신)이라 generation 에 묶인 durable frontier 경로가 Windows 에는 없다.
+    #[cfg(unix)]
     #[tokio::test]
     async fn bind_missing_row_allows_durable_frontier_write() {
         let _lock = crate::config::shared_test_env_lock()
@@ -1127,6 +1129,7 @@ mod tests {
         assert_eq!(anchor.range, (128, 256));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn durable_matched_reuse_returns_delivered_without_discord_post() {
         let _lock = crate::config::shared_test_env_lock()
@@ -1197,6 +1200,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn gone_anchor_repost_context_records_replacement_to_matched_record_channel() {
         let _lock = crate::config::shared_test_env_lock()
@@ -1264,6 +1268,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn gone_anchor_repost_context_does_not_reuse_old_anchor_but_records_replacement() {
         let _lock = crate::config::shared_test_env_lock()
@@ -1328,6 +1333,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn anchored_fallback_fresh_send_records_replacement_anchor() {
         let _lock = crate::config::shared_test_env_lock()
@@ -1421,6 +1427,7 @@ mod tests {
     ///
     /// It says the fingerprint EXISTS for this body under this generation. It
     /// says nothing about whether any reader consults it on a recovery path.
+    #[cfg(unix)]
     #[tokio::test]
     async fn joined_funnel_records_the_delivered_content_fingerprint() {
         let _lock = crate::config::shared_test_env_lock()
@@ -1473,6 +1480,7 @@ mod tests {
     /// delivery-record directory has to be, so the writer's `create_dir_all`
     /// cannot succeed. The generation marker is present and the range is valid,
     /// so nothing else refuses first.
+    #[cfg(unix)]
     #[tokio::test]
     async fn joined_funnel_does_not_settle_the_ledger_when_the_frontier_write_fails() {
         let _lock = crate::config::shared_test_env_lock()
@@ -1606,6 +1614,7 @@ mod tests {
 
     /// The control for the test above: with NO reset, the same shapes write the
     /// frontier. Without this, a guard that always refused would pass.
+    #[cfg(unix)]
     #[tokio::test]
     async fn unreset_frontier_still_records_the_durable_write() {
         let _lock = crate::config::shared_test_env_lock()

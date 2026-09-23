@@ -493,10 +493,8 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":\"{}\"}}}}\n{}",
-                id,
-                cwd.display(),
-                suffix
+                "{}\n{suffix}",
+                serde_json::json!({"type": "session_meta", "payload": {"id": id, "cwd": cwd}})
             ),
         )
         .unwrap();
@@ -516,11 +514,11 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":\"{}\",\"source\":\"{}\",\"originator\":\"{}\"}}}}\n",
-                id,
-                cwd.display(),
-                source,
-                originator
+                "{}\n",
+                serde_json::json!({
+                    "type": "session_meta",
+                    "payload": {"id": id, "cwd": cwd, "source": source, "originator": originator},
+                })
             ),
         )
         .unwrap();

@@ -169,6 +169,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/observability/events/capture_tests.rs",
         "src/services/message_outbox_circuit_authority_tests.rs",
         "src/services/message_outbox_recovery_tests.rs",
+        "src/services/memory/memento_writer_tests.rs",
         "src/services/dispatch_gate/auth_profiles/selection_tests.rs",
         "src/services/process/stream_child/stream_queue/tests.rs",
         "src/services/provider/provider_conformance_invariant_tests.rs",

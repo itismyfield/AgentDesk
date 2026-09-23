@@ -95,8 +95,8 @@ def nightly_contract_problems(text: str) -> list[str]:
         run = (step_of(jobs, name, "cargo test (non-PG)") or {}).get("run", "")
         need(FILTER_SOURCE in run and NON_PG_CARGO in run,
              f"{name} changed its canonical non-PG sweep")
-        need("run_non_pg_filter_false_positives" in run,
-             f"{name} stopped replaying the non-PG false positives")
+        need("run_non_pg_filter_replay" in run,
+             f"{name} stopped replaying the tests the non-PG skips take with them")
 
     pg = step_of(jobs, "postgres_full", PG_STEP) or {}
     lines = [line.strip() for line in pg.get("run", "").splitlines()]
@@ -154,8 +154,8 @@ STRUCTURAL_MUTANTS = (
      lambda t: t.replace(PG_CARGO, PG_CARGO.replace("--all-targets", "--lib"))),
     ("shortens the PostgreSQL step budget",
      lambda t: t.replace("        timeout-minutes: 30", "        timeout-minutes: 20")),
-    ("drops the non-PG false-positive replay",
-     lambda t: t.replace("          run_non_pg_filter_false_positives\n", "", 1)),
+    ("drops the non-PG replay",
+     lambda t: t.replace("          run_non_pg_filter_replay\n", "", 1)),
 )
 
 WRAPPER_MUTANTS = (
@@ -184,8 +184,10 @@ class NightlyRepairWiringTests(unittest.TestCase):
     def test_both_extractors_still_see_the_direct_cargo_command(self) -> None:
         rendered = "cargo test --all-targets -- ${PG_INCLUDE_ARGS[@]} --nocapture --test-threads=1"
         self.assertIn(rendered, integrity_commands(self.text))
+        includes = MEMBERSHIP.load_non_pg_skip_args(ROOT)[1::2]
         self.assertIn(
-            "cargo test --all-targets -- _pg pg_ postgres --nocapture --test-threads=1",
+            " ".join(("cargo test --all-targets --", *includes,
+                      "--nocapture --test-threads=1")),
             membership_commands(self.text))
 
     def test_wrapping_cargo_silently_loses_target_integrity_coverage(self) -> None:

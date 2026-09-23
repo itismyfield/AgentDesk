@@ -7,14 +7,14 @@ use std::{
 use poise::serenity_prelude::ChannelId;
 use serde_json::{Map, Value, json};
 
+use super::memento_writer_guard::{WriterClaim, writer_fingerprint};
 use super::{
     CaptureRequest, CaptureResult, LocalMemoryBackend, MemoryBackend, MemoryFuture, RecallRequest,
     RecallResponse, ReflectRequest, TokenUsage, UNBOUND_MEMORY_ROLE_ID, extract_token_usage,
     memento_throttle::{
         cached_recall_response, note_memento_dedup_hit, note_memento_remote_call,
         note_memento_tool_feedback_trigger, note_memento_tool_request,
-        record_static_slice_emission, should_dedup_remember, store_recall_response,
-        store_remember_fingerprint,
+        record_static_slice_emission, store_recall_response,
     },
 };
 use crate::runtime_layout;
@@ -34,6 +34,8 @@ mod anchor;
 pub(crate) use anchor::{SessionAnchorRequest, load_session_anchor_prompt};
 #[path = "memento_endpoint.rs"]
 mod endpoint;
+#[path = "memento_transport.rs"]
+mod transport;
 use endpoint::{mcp_url, normalize_memento_endpoint};
 
 #[derive(Clone, Debug)]
@@ -295,76 +297,6 @@ impl MementoBackend {
         self.initialize_session(config).await
     }
 
-    async fn call_tool(
-        &self,
-        config: &MementoRuntimeConfig,
-        tool_name: &str,
-        arguments: Value,
-    ) -> Result<ToolCallResult, String> {
-        let mut session_id = self.ensure_session(config).await?;
-
-        for attempt in 0..2 {
-            let response = self
-                .auth_request(self.client.post(mcp_url(&config.endpoint)), config)
-                .header("MCP-Session-Id", session_id.as_str())
-                .json(&json!({
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/call",
-                    "params": {
-                        "name": tool_name,
-                        "arguments": arguments.clone(),
-                    }
-                }))
-                .send()
-                .await
-                .map_err(|err| format!("memento {tool_name} request failed: {err}"))?;
-
-            self.capture_session_id(config, &response);
-
-            let status = response.status();
-            let text = response
-                .text()
-                .await
-                .map_err(|err| format!("memento {tool_name} response read failed: {err}"))?;
-
-            if !status.is_success() {
-                if attempt == 0
-                    && (status == reqwest::StatusCode::UNAUTHORIZED || is_session_error(&text))
-                {
-                    self.clear_session_id(&config.endpoint);
-                    session_id = self.initialize_session(config).await?;
-                    continue;
-                }
-                // #2049 Finding 12: redact bearer-like substrings from error
-                // bubbling so any memento-side echo cannot expose credentials.
-                let safe = redact_memento_secret(&text, &config.access_key);
-                return Err(format!("memento {tool_name} failed with {status}: {safe}"));
-            }
-
-            let payload: Value = serde_json::from_str(&text).map_err(|err| {
-                let safe = redact_memento_secret(&text, &config.access_key);
-                format!("memento {tool_name} response decode failed: {err}; body={safe}")
-            })?;
-
-            if let Some(error) = payload.get("error") {
-                let detail = render_rpc_error(error);
-                if attempt == 0 && is_session_error(&detail) {
-                    self.clear_session_id(&config.endpoint);
-                    session_id = self.initialize_session(config).await?;
-                    continue;
-                }
-                return Err(format!("memento {tool_name} rpc failed: {detail}"));
-            }
-
-            return extract_tool_result(&payload, tool_name);
-        }
-
-        Err(format!(
-            "memento {tool_name} failed after retrying session initialization"
-        ))
-    }
-
     async fn fetch_context(
         &self,
         request: &RecallRequest,
@@ -471,19 +403,7 @@ impl MementoBackend {
                     .or_else(|| config.workspace_override.clone())
             })
         };
-        let dedup_key = build_remember_dedup_key(
-            &normalized_content,
-            &normalized_topic,
-            &normalized_kind,
-            resolved_workspace.as_deref(),
-            agent_id.as_deref(),
-            case_id.as_deref(),
-        );
         note_memento_tool_request("remember");
-        if should_dedup_remember(&dedup_key, importance) {
-            note_memento_dedup_hit("remember");
-            return Ok(TokenUsage::default());
-        }
 
         let mut args = Map::new();
         args.insert("content".to_string(), json!(normalized_content));
@@ -513,13 +433,9 @@ impl MementoBackend {
         insert_optional_arg(&mut args, "assertionStatus", assertion_status);
         insert_optional_arg(&mut args, "contextSummary", context_summary);
 
-        note_memento_remote_call("remember");
         self.call_tool(&config, "remember", Value::Object(args))
             .await
-            .map(|result| {
-                store_remember_fingerprint(dedup_key, importance);
-                result.token_usage
-            })
+            .map(|result| result.token_usage)
     }
 
     pub(crate) async fn tool_feedback(
@@ -636,25 +552,6 @@ fn build_recall_dedup_key(
         session_id.trim(),
         profile,
         user_text.trim(),
-    ]
-    .join("\u{1f}")
-}
-
-fn build_remember_dedup_key(
-    content: &str,
-    topic: &str,
-    kind: &str,
-    workspace: Option<&str>,
-    agent_id: Option<&str>,
-    case_id: Option<&str>,
-) -> String {
-    [
-        content.trim(),
-        topic.trim(),
-        kind.trim(),
-        workspace.unwrap_or("").trim(),
-        agent_id.unwrap_or("").trim(),
-        case_id.unwrap_or("").trim(),
     ]
     .join("\u{1f}")
 }
@@ -1791,3 +1688,7 @@ mod static_slice_cache_tests {
         assert!(second.contains("Static memory from Memento: see prior turn"));
     }
 }
+
+#[cfg(test)]
+#[path = "memento_writer_tests.rs"]
+mod writer_tests;
