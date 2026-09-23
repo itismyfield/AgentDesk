@@ -96,7 +96,7 @@ jobs:
     runs-on: macos-latest
     steps:
       # Overflow can route a docs-only push here, so gate the same heavy steps
-      # as the self-hosted job. A failed filter leaves `run` empty, which runs them.
+      # as the self-hosted job. They skip only when the filter succeeded with run=false.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -111,7 +111,7 @@ jobs:
         run: python3 scripts/ci/macos-trusted-rust-filter.py --event "$EVENT_NAME" --base-ref origin/main >> "$GITHUB_OUTPUT"
 
       - name: Install Rust toolchain
-        if: steps.rust_filter.outputs.run != 'false'
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
@@ -125,14 +125,14 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Install Opus on macOS
-        if: steps.rust_filter.outputs.run != 'false'
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         shell: bash
         run: |
           brew install opus pkg-config tmux
           echo "PKG_CONFIG_PATH=$(brew --prefix opus)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Cache Cargo dependencies
-        if: steps.rust_filter.outputs.run != 'false'
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         uses: Swatinem/rust-cache@v2
         with:
           # rust-cache derives the final key from OS/arch/toolchain and the
@@ -144,11 +144,11 @@ jobs:
           save-if: false
 
       - name: cargo check
-        if: steps.rust_filter.outputs.run != 'false'
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         run: cargo check --all-targets
 
       - name: cargo test (non-PG, targeted subset)
-        if: steps.rust_filter.outputs.run != 'false'
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -167,7 +167,7 @@ jobs:
           cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
 
       - name: Fresh user portable smoke
-        if: steps.rust_filter.outputs.run != 'false'
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         shell: bash
         run: bash scripts/ci-macos-fresh-user-smoke.sh
 
@@ -225,7 +225,7 @@ jobs:
           fi
 
       # The job name is the required context, so the job always runs and only
-      # heavy steps are gated. A failed filter leaves `run` empty, which runs them.
+      # heavy steps are gated. They skip only when the filter succeeded with run=false.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -240,13 +240,13 @@ jobs:
         run: python3 scripts/ci/macos-trusted-rust-filter.py --event "$EVENT_NAME" --base-ref origin/main >> "$GITHUB_OUTPUT"
 
       - name: Install Rust toolchain
-        if: steps.rust_filter.outputs.run != 'false'
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
 
       - name: Configure local sccache
-        if: steps.rust_filter.outputs.run != 'false'
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -272,7 +272,7 @@ jobs:
           fi
 
       - name: Install Opus on macOS
-        if: steps.rust_filter.outputs.run != 'false'
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         shell: bash
         run: |
           brew install opus pkg-config tmux
@@ -285,11 +285,11 @@ jobs:
       # the co-located production Postgres preempts CI under contention (#3658,
       # Option B). `nice` only de-prioritizes; it cannot fail the build.
       - name: cargo check
-        if: steps.rust_filter.outputs.run != 'false'
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         run: nice -n 10 cargo check --all-targets
 
       - name: cargo test (non-PG, targeted subset)
-        if: steps.rust_filter.outputs.run != 'false'
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -308,11 +308,11 @@ jobs:
           nice -n 10 cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
 
       - name: Fresh user portable smoke
-        if: steps.rust_filter.outputs.run != 'false'
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         shell: bash
         run: nice -n 10 bash scripts/ci-macos-fresh-user-smoke.sh
 
       - name: sccache stats
-        if: always() && steps.rust_filter.outputs.run != 'false'
+        if: always() && (steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false')
         shell: bash
         run: sccache --show-stats || true

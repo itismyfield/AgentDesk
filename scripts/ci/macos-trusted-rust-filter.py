@@ -21,6 +21,8 @@ RUST_INPUTS = (
     "**/Cargo.toml",
     "**/Cargo.lock",
     "rust-toolchain*",
+    # `text`/`eol`/`working-tree-encoding` change the checked-out bytes.
+    "**/.gitattributes",
     ".cargo/**",
     "sqlx-data.json",
     ".sqlx/**",

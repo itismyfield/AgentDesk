@@ -214,6 +214,53 @@ def step_block(job: str, step_name: str) -> str:
     return job[match.start() : next_step.start() if next_step else len(job)]
 
 
+_STEP_IF_TOKEN = re.compile(
+    r"\s*(?:('(?:[^']|'')*')|(&&|\|\||==|!=|!|\(|\))|([A-Za-z_][\w.-]*(?:\(\))?))"
+)
+
+
+def eval_step_if(condition: object, context: dict[str, str]) -> bool:
+    """Evaluate a step `if:` built from literals, ==/!=, !/&&/|| and `context` paths.
+
+    Status functions are true because the steps before the gate succeeded.
+    """
+    if condition is None or isinstance(condition, bool):
+        return condition is not False
+    expr = str(condition).strip()
+    if expr.startswith("${{") and expr.endswith("}}"):
+        expr = expr[3:-2].strip()
+    python, pos = [], 0
+    while pos < len(expr):
+        match = _STEP_IF_TOKEN.match(expr, pos)
+        if match is None:
+            raise AssertionError(f"unsupported step condition: {condition!r}")
+        literal, op, name = match.groups()
+        if literal is not None:
+            python.append(repr(literal[1:-1].replace("''", "'")))
+        elif op is not None:
+            python.append({"&&": " and ", "||": " or ", "!": " not "}.get(op, op))
+        elif name in ("true", "false"):
+            python.append(str(name == "true"))
+        elif name in ("always()", "success()"):
+            python.append("True")
+        elif name in context:
+            python.append(repr(context[name]))
+        else:
+            raise AssertionError(f"unknown name {name!r} in step condition: {condition!r}")
+        pos = match.end()
+    return bool(eval("".join(python), {"__builtins__": {}}))
+
+
+# (filter outcome, filter `run` output, whether gated steps run)
+MACOS_FILTER_SCENARIOS = (
+    ("success", "false", False),
+    ("success", "true", True),
+    ("success", "", True),
+    ("failure", "false", True),
+    ("failure", "", True),
+)
+
+
 def replace_last(source: str, old: str, new: str) -> str:
     head, separator, tail = source.rpartition(old)
     if not separator:
@@ -1730,20 +1777,38 @@ class FastCheckCiWiringTests(unittest.TestCase):
         filter_step = step_block(self_hosted, "Decide whether heavy steps are needed")
         self.assertLess(checkout, steps.index(filter_step))
         self.assertIn("fetch-depth: 0", steps[checkout : steps.index(filter_step)])
-        # Fail-open: a failed filter must not skip the gated steps.
+        # A failed filter must not fail the job; the gated steps run instead.
         self.assertIn("continue-on-error: true", filter_step)
-        gate = "steps.rust_filter.outputs.run != 'false'"
-        for step in (
-            "Install Rust toolchain",
-            "Configure local sccache",
-            "Install Opus on macOS",
-            "cargo check",
-            "cargo test (non-PG, targeted subset)",
-            "Fresh user portable smoke",
-            "sccache stats",
-        ):
-            with self.subTest(step=step):
-                self.assertIn(gate, step_block(self_hosted, step))
+        self.assert_filter_gates_exactly(
+            "macos_self_hosted",
+            {
+                "Install Rust toolchain",
+                "Configure local sccache",
+                "Install Opus on macOS",
+                "cargo check",
+                "cargo test (non-PG, targeted subset)",
+                "Fresh user portable smoke",
+                "sccache stats",
+            },
+        )
+
+    def assert_filter_gates_exactly(self, job_name: str, gated: set[str]) -> None:
+        """`gated` skips only on a successful run=false; other steps never skip."""
+        workflow = yaml.safe_load(MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8"))
+        steps = workflow["jobs"][job_name]["steps"]
+        start = next(i for i, step in enumerate(steps) if step.get("id") == "rust_filter")
+        conditions = {step["name"]: step.get("if") for step in steps[start + 1 :]}
+        self.assertLessEqual(gated, set(conditions))
+        for outcome, run, gated_runs in MACOS_FILTER_SCENARIOS:
+            context = {
+                "steps.rust_filter.outcome": outcome,
+                "steps.rust_filter.outputs.run": run,
+            }
+            for name, condition in conditions.items():
+                with self.subTest(job=job_name, step=name, outcome=outcome, run=run):
+                    self.assertEqual(
+                        eval_step_if(condition, context), gated_runs or name not in gated
+                    )
 
     def test_trusted_macos_hosted_job_gates_the_same_heavy_steps(self) -> None:
         workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
@@ -1758,19 +1823,19 @@ class FastCheckCiWiringTests(unittest.TestCase):
             filter_step,
             step_block(job_block(workflow, "macos_self_hosted"), "Decide whether heavy steps are needed"),
         )
-        gate = "steps.rust_filter.outputs.run != 'false'"
-        for step in (
-            "Install Rust toolchain",
-            "Install Opus on macOS",
-            "Cache Cargo dependencies",
-            "cargo check",
-            "cargo test (non-PG, targeted subset)",
-            "Fresh user portable smoke",
-        ):
-            with self.subTest(step=step):
-                self.assertIn(gate, step_block(hosted, step))
-        # Hosted keeps its own sccache opt-out rather than the self-hosted local cache.
-        self.assertNotIn(gate, step_block(hosted, "Disable sccache on hosted macOS"))
+        # Hosted keeps its own ungated sccache opt-out, not the self-hosted local cache.
+        self.assert_filter_gates_exactly(
+            "macos_hosted",
+            {
+                "Install Rust toolchain",
+                "Install Opus on macOS",
+                "Cache Cargo dependencies",
+                "cargo check",
+                "cargo test (non-PG, targeted subset)",
+                "Fresh user portable smoke",
+            },
+        )
+        self.assertIn("Disable sccache on hosted macOS", hosted)
         self.assertNotIn("Configure local sccache", hosted)
 
     def test_test_lane_baseline_uses_candidate_snapshot_refs(self) -> None:

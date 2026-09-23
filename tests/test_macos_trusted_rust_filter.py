@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import resource
 import subprocess
 import sys
 import tempfile
@@ -29,6 +30,7 @@ PATTERN_SAMPLES = {
     "**/Cargo.toml": "Cargo.toml",
     "**/Cargo.lock": "Cargo.lock",
     "rust-toolchain*": "rust-toolchain.toml",
+    "**/.gitattributes": ".gitattributes",
     ".cargo/**": ".cargo/config.toml",
     "sqlx-data.json": "sqlx-data.json",
     ".sqlx/**": ".sqlx/query-abc.json",
@@ -77,7 +79,12 @@ class PatternTests(unittest.TestCase):
                 self.assertTrue(flt.is_rust_input(path), path)
 
     def test_nested_rust_files_run(self) -> None:
-        for path in ("build.rs", "tests/fixtures/crate/src/lib.rs", "tools/x/Cargo.toml"):
+        for path in (
+            "build.rs",
+            "tests/fixtures/crate/src/lib.rs",
+            "tools/x/Cargo.toml",
+            "src/.gitattributes",
+        ):
             with self.subTest(path=path):
                 self.assertTrue(flt.is_rust_input(path))
 
@@ -130,6 +137,18 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.run_cli("--event", "push", "--paths-from-stdin0", stdin=stdin), "run=true\n")
         stdin = "docs/a.md\0docs/b\nc.md\0"
         self.assertEqual(self.run_cli("--event", "push", "--paths-from-stdin0", stdin=stdin), "run=false\n")
+
+    def test_truncated_output_fails_the_step(self) -> None:
+        # The workflow trusts `run=false` only from a successful step.
+        with tempfile.TemporaryFile() as out:
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--event", "push", "--paths-from-stdin0"],
+                input=b"README.md\0", stdout=out, stderr=subprocess.PIPE,
+                preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_FSIZE, (9, 9)),
+            )
+            out.seek(0)
+            self.assertEqual(out.read(), b"run=false")
+        self.assertNotEqual(result.returncode, 0)
 
     def test_git_failure_runs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -195,6 +214,14 @@ class GitMergeBaseTests(unittest.TestCase):
         (self.repo / "notes").mkdir()
         self.git("mv", "src/old.rs", "notes/old.txt")
         self.git("commit", "-q", "-m", "mv")
+        self.assertEqual(self.decide(), "run=true\n")
+
+    def test_gitattributes_only_change_runs(self) -> None:
+        self.commit("src/lib.rs")
+        self.git("checkout", "-q", "-b", "topic")
+        (self.repo / ".gitattributes").write_text("*.rs working-tree-encoding=UTF-16\n")
+        self.git("add", ".gitattributes")
+        self.git("commit", "-q", "-m", "attrs")
         self.assertEqual(self.decide(), "run=true\n")
 
     def test_branch_equal_to_base_runs(self) -> None:
