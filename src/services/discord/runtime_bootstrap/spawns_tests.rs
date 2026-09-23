@@ -361,6 +361,10 @@ fn commit_publishes_the_identity_and_derives_the_index_from_it() {
     let index = root.path().join("restart_persisted");
     let published = std::fs::read_to_string(&identity).expect("identity artifact");
     assert!(published.contains(&format!("nonce={nonce}\n")));
+    if !crate::services::discord::runtime_store::PARENT_DIR_FSYNC_FLUSHES {
+        assert!(!index.exists(), "no index without a parent directory flush");
+        return;
+    }
     assert_eq!(
         std::fs::read_to_string(&index).expect("fixed-name index"),
         published,

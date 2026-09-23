@@ -282,7 +282,8 @@ fn read_receipt(path: &Path) -> std::io::Result<String> {
     Ok(result)
 }
 
-/// Persists `entry` in the receipt directory, and that directory in its parent.
+/// On Unix, flushes the directory holding `entry` and that directory's parent;
+/// elsewhere nothing is flushed.
 fn sync_receipt_directory(entry: &Path) -> Result<(), String> {
     #[cfg(unix)]
     for child in std::iter::once(entry).chain(entry.parent()) {

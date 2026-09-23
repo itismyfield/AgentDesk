@@ -104,7 +104,7 @@ impl WriterClaim {
     }
 }
 
-/// Flushes the directory holding `entry` through the single cross-platform helper.
+/// Flushes the directory holding `entry` through `fsync_parent_dir`.
 #[cfg(unix)]
 fn sync_parent_directory(entry: &Path) -> Result<(), String> {
     crate::services::discord::runtime_store::fsync_parent_dir(entry)

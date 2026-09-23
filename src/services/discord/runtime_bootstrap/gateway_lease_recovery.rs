@@ -336,9 +336,14 @@ pub(super) fn publish_restart_terminal(
     };
     runtime_store::atomic_write(&identity, body).map_err(std::io::Error::other)?;
     latch_commit(nonce);
-    if let Err(error) = runtime_store::fsync_parent_dir(&identity) {
-        tracing::warn!(%error, "restart persisted parent dir fsync failed; commit proceeds");
-        return Ok(());
+    match runtime_store::fsync_parent_dir(&identity) {
+        Err(error) => {
+            tracing::warn!(%error, "restart persisted parent dir fsync failed; commit proceeds");
+            return Ok(());
+        }
+        // Without a parent flush the identity entry is never known to be durable.
+        Ok(()) if !runtime_store::PARENT_DIR_FSYNC_FLUSHES => return Ok(()),
+        Ok(()) => {}
     }
     let staged = root.join(format!(".restart_persisted.idx.{}", uuid::Uuid::new_v4()));
     if let Err(error) = std::fs::hard_link(&identity, &staged)

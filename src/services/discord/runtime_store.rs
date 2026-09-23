@@ -205,8 +205,12 @@ pub fn generation_path() -> Option<PathBuf> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum GenerationAllocationRoute {
     /// `read_generation_counter` returned `Parsed` or `Absent`, `atomic_write`
-    /// returned `Ok`, `next != current`, and `fsync_parent_dir` returned `Ok`.
+    /// returned `Ok`, `next != current`, and `fsync_parent_dir` returned `Ok`
+    /// after flushing the parent directory.
     AdvancedWithSyncedRename,
+    /// As `AdvancedWithSyncedRename`, but `fsync_parent_dir` returned `Ok`
+    /// without flushing (`PARENT_DIR_FSYNC_FLUSHES` is false).
+    AdvancedWithUnflushedRename,
     /// `atomic_write` returned `Ok`, but `fsync_parent_dir` returned `Err`.
     ParentSyncFailed,
     /// `atomic_write` and `fsync_parent_dir` returned `Ok`, but
@@ -292,6 +296,7 @@ impl GenerationAllocationRoute {
     fn as_str(self) -> &'static str {
         match self {
             Self::AdvancedWithSyncedRename => "advanced_with_synced_rename",
+            Self::AdvancedWithUnflushedRename => "advanced_with_unflushed_rename",
             Self::ParentSyncFailed => "parent_sync_failed",
             Self::CounterReadFailed => "counter_read_failed",
             Self::Saturated => "saturated",
@@ -659,6 +664,22 @@ where
                     route: Route::CounterReadFailed,
                 }
             }
+            Ok(()) if !PARENT_DIR_FSYNC_FLUSHES => {
+                tracing::info!(
+                    path = %path.display(),
+                    current,
+                    next,
+                    counter_read = read.as_str(),
+                    counter_detail = read.failure().map_or("none", CounterReadFailure::as_str),
+                    route = Route::AdvancedWithUnflushedRename.as_str(),
+                    epoch_advanced = false,
+                    "allocated runtime process generation without a parent directory flush"
+                );
+                ProcessGenerationAllocation {
+                    generation: next,
+                    route: Route::AdvancedWithUnflushedRename,
+                }
+            }
             Ok(()) => {
                 tracing::info!(
                     path = %path.display(),
@@ -927,13 +948,16 @@ pub(crate) fn fsync_parent_dir(path: &Path) -> std::io::Result<()> {
     fs::File::open(parent.unwrap_or_else(|| Path::new(".")))?.sync_all()
 }
 
-/// No directory flush on Windows. NTFS recovers each rename atomically and in
-/// log order, but flushes its log lazily, so a crash shortly after `Ok` may roll
-/// the rename back. Callers' "synced"/"durable" mean "ordered and atomic" here.
+/// No directory flush on Windows: `Ok` means only that the rename is visible,
+/// and a crash shortly after may roll it back. See `PARENT_DIR_FSYNC_FLUSHES`.
 #[cfg(windows)]
 pub(crate) fn fsync_parent_dir(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
+
+/// Whether an `Ok` from `fsync_parent_dir` flushed the parent directory. Callers
+/// that decide on crash durability must consult this, not the `Ok` alone.
+pub(crate) const PARENT_DIR_FSYNC_FLUSHES: bool = cfg!(not(windows));
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AtomicWriteContext<'a> {
@@ -1063,6 +1087,13 @@ mod generation_allocation_tests {
         }
     }
 
+    /// The route a successful advance takes on this platform.
+    const ADVANCED: GenerationAllocationRoute = if PARENT_DIR_FSYNC_FLUSHES {
+        GenerationAllocationRoute::AdvancedWithSyncedRename
+    } else {
+        GenerationAllocationRoute::AdvancedWithUnflushedRename
+    };
+
     fn expect(
         binding: ProcessGenerationAllocation,
         generation: u64,
@@ -1121,7 +1152,7 @@ mod generation_allocation_tests {
         expect(
             allocate_generation_epoch_with_io(io(seeded("parsed", "7"), |_| Ok(()))),
             8,
-            GenerationAllocationRoute::AdvancedWithSyncedRename,
+            ADVANCED,
         );
         expect(
             allocate_generation_epoch_with_io(io(
@@ -1129,7 +1160,7 @@ mod generation_allocation_tests {
                 |_| Ok(()),
             )),
             1,
-            GenerationAllocationRoute::AdvancedWithSyncedRename,
+            ADVANCED,
         );
         let path = seeded("unreadable", "nan");
         expect(
@@ -1318,11 +1349,7 @@ mod generation_allocation_tests {
         set_process_generation_for_tests(None);
 
         std::fs::write(&path, "7").unwrap();
-        expect(
-            allocate_process_generation_binding(),
-            8,
-            GenerationAllocationRoute::AdvancedWithSyncedRename,
-        );
+        expect(allocate_process_generation_binding(), 8, ADVANCED);
         std::fs::write(&path, "19").unwrap();
         expect(
             process_generation_binding(),
@@ -1350,11 +1377,7 @@ mod generation_allocation_tests {
             40,
             GenerationAllocationRoute::Unwitnessed,
         );
-        expect(
-            allocate_process_generation_binding(),
-            41,
-            GenerationAllocationRoute::AdvancedWithSyncedRename,
-        );
+        expect(allocate_process_generation_binding(), 41, ADVANCED);
         set_process_generation_for_tests(None);
     }
 
@@ -1370,11 +1393,7 @@ mod generation_allocation_tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "7").unwrap();
 
-        expect(
-            allocate_generation_epoch(),
-            8,
-            GenerationAllocationRoute::AdvancedWithSyncedRename,
-        );
+        expect(allocate_generation_epoch(), 8, ADVANCED);
         assert_eq!(std::fs::read_to_string(path).unwrap(), "8");
 
         let source = include_str!("runtime_store.rs");
@@ -1609,6 +1628,27 @@ mod parent_dir_fsync_tests {
         let error = fsync_parent_dir(&orphan).expect_err("absent parent directory");
 
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+}
+
+/// Its own `tests` family so the Windows PR lane can run exactly this set.
+#[cfg(test)]
+mod windows_contract {
+    #[cfg(windows)]
+    mod tests {
+        use super::super::*;
+
+        /// Windows `File::open` cannot open a directory, so a directory open
+        /// here would fail every caller; the helper must return `Ok` unflushed.
+        #[test]
+        fn windows_parent_dir_sync_succeeds_without_flushing() {
+            let root = tempfile::tempdir().expect("runtime root");
+            let published = root.path().join("restart_persisted.nonce-w");
+            atomic_write(&published, "nonce=nonce-w\n").expect("publish");
+
+            fsync_parent_dir(&published).expect("Windows parent directory sync");
+            assert!(!PARENT_DIR_FSYNC_FLUSHES);
+        }
     }
 }
 

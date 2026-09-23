@@ -89,6 +89,38 @@ class DirFsyncSinglePathTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(len(audit(tree({"src/server/drift.rs": text}))), 1)
 
+    def test_unrelated_statement_between_open_and_sync_is_rejected(self):
+        text = (
+            "fn persist(parent: &Path) -> io::Result<()> {\n"
+            "    let directory = std::fs::File::open(parent)?;\n"
+            "    let _keep_alive = &directory;\n"
+            "    directory.sync_all()?;\n"
+            "    Ok(())\n"
+            "}\n"
+        )
+        findings = audit(tree({"src/server/drift.rs": text}))
+        self.assertEqual(len(findings), 1)
+        self.assertIn("src/server/drift.rs:2", findings[0])
+
+    def test_raw_fsync_outside_the_reviewed_protocol_is_rejected(self):
+        text = (
+            "fn sync_parent(parent_fd: RawFd) -> libc::c_int {\n"
+            "    unsafe { libc::fsync(parent_fd) }\n"
+            "}\n"
+        )
+        findings = audit(tree({"src/server/drift.rs": text}))
+        self.assertEqual(len(findings), 1)
+        self.assertIn("src/server/drift.rs:2", findings[0])
+
+    def test_reviewed_raw_fsync_is_pinned_to_its_functions(self):
+        protocol = "src/services/discord/restart_mode/protocol_v2/fs/unix.rs"
+        reviewed = "fn fsync_fd(fd: RawFd) -> libc::c_int {\n    unsafe { libc::fsync(fd) }\n}\n"
+        self.assertEqual(audit(tree({protocol: reviewed})), [])
+        extra = "fn sync_again(fd: RawFd) {\n    unsafe { libc::fsync(fd) };\n}\n"
+        findings = audit(tree({protocol: reviewed + extra}))
+        self.assertEqual(len(findings), 1)
+        self.assertIn(f"{protocol}:5", findings[0])
+
 
 if __name__ == "__main__":
     unittest.main()

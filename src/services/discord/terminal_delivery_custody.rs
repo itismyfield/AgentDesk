@@ -151,8 +151,8 @@ async fn lock(path: &Path) -> Result<DeliveryRecordLock, String> {
         .map_err(|error| error.to_string())?
 }
 
-/// A successful return means the exact retry payload reached a file and its
-/// parent-directory fsync. The initial snapshot cannot be replaced on retry;
+/// A successful return means the exact retry payload reached a file and
+/// `fsync_parent_dir` returned `Ok` (no flush on Windows). The initial snapshot cannot be replaced on retry;
 /// receipt/cleanup progress recorded by the terminal adapter is preserved.
 pub(in crate::services::discord) async fn persist(
     key: &str,

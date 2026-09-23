@@ -577,6 +577,9 @@ fn record_and_check_cross_process_fatal_at(
         // state whenever the cross-process guard cannot persist its evidence.
         return CrossProcessDecision::HoldWithoutExit { recent_fatal_exits };
     }
+    // The next process only needs the renamed record to be visible, which holds
+    // even when `PARENT_DIR_FSYNC_FLUSHES` is false; there an OS crash may drop
+    // the newest entries, which resets the guard's count but cannot loop it.
     CrossProcessDecision::Exit
 }
 
@@ -1125,20 +1128,6 @@ mod tests {
     }
 
     #[test]
-    fn first_fatal_exit_persists_ledger_and_exits() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join(FATAL_EXIT_LEDGER_FILE);
-
-        assert_eq!(
-            record_and_check_cross_process_fatal_at(&path, "dispatch_outbox", 1_000),
-            CrossProcessDecision::Exit
-        );
-        let persisted = load_fatal_ledger(&path);
-        assert_eq!(persisted.len(), 1);
-        assert_eq!(persisted[0].worker, "dispatch_outbox");
-    }
-
-    #[test]
     fn cross_process_guard_holds_when_ledger_persistence_fails() {
         let dir = tempfile::tempdir().expect("temp dir");
         let blocking_parent = dir.path().join("not-a-directory");
@@ -1229,5 +1218,27 @@ mod tests {
             record_and_check_cross_process_fatal_at(&path, "session_discovery", base + 2),
             CrossProcessDecision::Exit
         );
+    }
+}
+
+/// Its own `tests` family so the Windows PR lane can run exactly this set.
+#[cfg(test)]
+mod windows_contract {
+    mod tests {
+        use super::super::*;
+
+        #[test]
+        fn first_fatal_exit_persists_ledger_and_exits() {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join(FATAL_EXIT_LEDGER_FILE);
+
+            assert_eq!(
+                record_and_check_cross_process_fatal_at(&path, "dispatch_outbox", 1_000),
+                CrossProcessDecision::Exit
+            );
+            let persisted = load_fatal_ledger(&path);
+            assert_eq!(persisted.len(), 1);
+            assert_eq!(persisted[0].worker, "dispatch_outbox");
+        }
     }
 }

@@ -1224,7 +1224,6 @@ server::worker_recovery::tests::cross_process_guard_ignores_future_entries_after
 server::worker_recovery::tests::cross_process_guard_is_per_worker
 server::worker_recovery::tests::cross_process_guard_resets_after_window
 server::worker_recovery::tests::fatal_ledger_atomic_write_preserves_target_when_temp_write_fails
-server::worker_recovery::tests::first_fatal_exit_persists_ledger_and_exits
 server::worker_recovery::tests::flapping_is_info_only_and_not_a_health_reason
 server::worker_recovery::tests::loop_owned_unexpected_exit_exposes_terminated_reason
 server::worker_recovery::tests::loop_owned_worker_remains_non_restartable
@@ -1234,6 +1233,7 @@ server::worker_recovery::tests::restarts_after_unexpected_return
 server::worker_recovery::tests::shutdown_waits_for_inner_cleanup
 server::worker_recovery::tests::simultaneous_return_and_shutdown_is_expected_without_budget_use
 server::worker_recovery::tests::stable_run_resets_backoff
+server::worker_recovery::windows_contract::tests::first_fatal_exit_persists_ledger_and_exits
 server::worker_registry::leader_takeover_tests::policy_tick_thread_captures_the_process_health_registry
 server::worker_registry::leader_takeover_tests::supervisor_respawns_worker_after_lease_takeover
 server::ws::ws_auth_gate_tests::configured_token_accepts_only_the_exact_token
@@ -5100,6 +5100,7 @@ services::discord::runtime_store::runtime_root_tests::concurrent_provider_alloca
 services::discord::runtime_store::runtime_root_tests::live_release_override_falls_back_to_isolated_tempdir
 services::discord::runtime_store::runtime_root_tests::process_epoch_does_not_follow_overlapping_process_counter_advance
 services::discord::runtime_store::runtime_root_tests::process_generation_allocation_is_monotonic_and_request_preview_is_read_only
+services::discord::runtime_store::windows_contract::tests::windows_parent_dir_sync_succeeds_without_flushing
 services::discord::session_banner::tests::banner_is_top_and_sticky_across_streaming_then_terminal
 services::discord::session_banner::tests::later_turn_same_session_is_not_bannered_but_new_session_rearms
 services::discord::session_banner::tests::non_first_empty_disabled_and_missing_snapshot_paths_do_not_claim
