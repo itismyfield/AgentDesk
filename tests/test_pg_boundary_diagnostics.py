@@ -19,13 +19,14 @@ from unittest import mock
 
 import yaml
 from tests.test_nightly_repair import ROOT, NIGHTLY, PG_STEP, PG_CARGO, FILTER_SOURCE
-from tests.test_nightly_repair import load_module, step_of, workflow_triggers
+from tests.test_nightly_repair import MEMBERSHIP, load_module, step_of, workflow_triggers
 
 HELPER = ROOT / "scripts/ci/pg-resource-diagnostics.py"
 M = load_module("pg_boundary_diagnostics", HELPER)
 GATE = "github.event_name == 'workflow_dispatch' && inputs.resource_diagnostics == true"
 VERIFY = "Verify PostgreSQL resource diagnostics"
-ARGV = "test --all-targets -- _pg pg_ postgres --nocapture --test-threads=1"
+ARGV = " ".join(("test --all-targets --", *MEMBERSHIP.load_non_pg_skip_args(ROOT)[1::2],
+                 "--nocapture --test-threads=1"))
 MEM = dict(zip(M.MEMORY_KEYS, (16000, 9000, 4000, 3900)))
 META = {"run_id": "9001", "run_attempt": "1", "commit_sha": "c" * 40, "container": "agentdesk-postgres"}
 IDENTITY = ["--run-id", "9001", "--run-attempt", "1", "--commit-sha", "c" * 40]

@@ -419,6 +419,49 @@ fn load_runtime_mcp_servers(dispatch_type: Option<&str>) -> BTreeMap<String, Res
         .unwrap_or_default()
 }
 
+/// Identity of the actual managed provider MCP, which can differ from the
+/// backend memory adapter endpoint. Do not merge unknown/global MCP tenants.
+pub(crate) fn managed_memento_hook_identity() -> Option<(String, String)> {
+    let server = load_runtime_mcp_servers(None).remove(MEMENTO_SERVER_NAME)?;
+    memento_hook_identity(server, |name| std::env::var(name).ok())
+}
+
+fn memento_hook_identity(
+    server: ResolvedMcpServer,
+    lookup: impl FnOnce(&str) -> Option<String>,
+) -> Option<(String, String)> {
+    let identity = match server.bearer_token_env_var {
+        Some(name) => lookup(&name).filter(|value| !value.trim().is_empty())?,
+        // Provider-managed OAuth identities cannot be inferred from the URL.
+        None => return None,
+    };
+    Some((server.url, identity))
+}
+
+#[test]
+fn memento_writer_hook_identity_uses_managed_url_and_requires_configured_auth() {
+    let server = ResolvedMcpServer {
+        name: "memento".into(),
+        url: "http://provider-specific.test/mcp".into(),
+        bearer_token_env_var: Some("PROVIDER_TENANT_TOKEN".into()),
+    };
+    assert!(memento_hook_identity(server.clone(), |_| None).is_none());
+    assert!(memento_hook_identity(server.clone(), |_| Some(String::new())).is_none());
+    let mut oauth = server.clone();
+    oauth.bearer_token_env_var = None;
+    assert!(memento_hook_identity(oauth, |_| None).is_none());
+    assert_eq!(
+        memento_hook_identity(server, |name| {
+            assert_eq!(name, "PROVIDER_TENANT_TOKEN");
+            Some("provider-tenant".into())
+        }),
+        Some((
+            "http://provider-specific.test/mcp".into(),
+            "provider-tenant".into()
+        ))
+    );
+}
+
 fn runtime_config_contains_server(server_name: &str) -> bool {
     load_runtime_mcp_servers(None).contains_key(server_name)
 }
