@@ -2,34 +2,55 @@
 //!
 //! Drop-based fixture cleanup cannot run after SIGKILL, so the first fixture
 //! CREATE of every test process sweeps what earlier processes left behind.
-//! Provenance comes from a COMMENT marker that only `create_test_database`
-//! writes; fixture names are free-form and PostgreSQL truncates them at 63
-//! bytes, so a name pattern alone cannot prove a database is a fixture.
+//! A fixture is created under a reserved pending name, marked by COMMENT, then
+//! renamed, so a kill between any two steps leaves an identifiable database.
+//! Caller-chosen names prove nothing on their own: they are free-form and
+//! PostgreSQL truncates them at 63 bytes.
+//!
+//! Liveness is not proven: a candidate only has to be `RECLAIM_MIN_AGE` old by
+//! the server clock and have no session, so no live fixture may outlive that age.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use sqlx::PgPool;
 
 /// Contains no regex metacharacters, so it is also used verbatim in the SQL pattern.
 const MARKER_PREFIX: &str = "agentdesk-test-fixture created_at_unix=";
+/// Reserved for in-flight creates; the name carries the server epoch of the CREATE.
+const PENDING_PREFIX: &str = "agentdesk_pending_";
 
-/// Far beyond any single test's lifetime, so live runs in other processes are never swept.
+/// Operating assumption, not a guarantee: no live fixture is older than this.
 pub(super) const RECLAIM_MIN_AGE: Duration = Duration::from_secs(6 * 60 * 60);
 
 static SWEPT_THIS_PROCESS: AtomicBool = AtomicBool::new(false);
 
-pub(super) fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0)
+thread_local! {
+    /// Stops `create_marked` right after CREATE, the state a SIGKILL there leaves.
+    static KILL_AFTER_CREATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Server clock, so hosts sharing one test server agree on every database's age.
+async fn server_now_unix(admin_pool: &PgPool) -> Result<i64, String> {
+    super::run_test_postgres_sqlx_op(
+        "read postgres server clock",
+        sqlx::query_scalar::<_, i64>("SELECT extract(epoch FROM clock_timestamp())::bigint")
+            .fetch_one(admin_pool),
+    )
+    .await
+}
+
+fn pending_database_name(created_at_unix: i64) -> String {
+    format!(
+        "{PENDING_PREFIX}{created_at_unix}_{}",
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
 pub(super) async fn mark_test_database(
     admin_pool: &PgPool,
     database_name: &str,
-    created_at_unix: u64,
+    created_at_unix: i64,
     label: &str,
 ) -> Result<(), String> {
     super::run_test_postgres_sqlx_op(
@@ -43,34 +64,69 @@ pub(super) async fn mark_test_database(
     .map(|_| ())
 }
 
-/// Marks a just-created fixture, then closes the admin pool even if marking failed.
-pub(super) async fn mark_created(
-    admin_pool: PgPool,
+/// CREATE never runs under `database_name`, so no step leaves an unmarked fixture.
+pub(super) async fn create_marked(
+    admin_pool: &PgPool,
     database_name: &str,
     label: &str,
 ) -> Result<(), String> {
-    let marked = mark_test_database(&admin_pool, database_name, now_unix(), label).await;
-    let closed = super::close_test_pool(admin_pool, &format!("{label} admin")).await;
-    marked.and(closed)
+    let created_at = server_now_unix(admin_pool).await?;
+    let pending = pending_database_name(created_at);
+    super::run_test_postgres_sqlx_op(
+        &format!("{label} create postgres test db {database_name}"),
+        sqlx::query(&format!("CREATE DATABASE \"{pending}\"")).execute(admin_pool),
+    )
+    .await?;
+    if KILL_AFTER_CREATE.with(std::cell::Cell::get) {
+        return Err(format!("simulated kill after CREATE DATABASE {pending}"));
+    }
+    let finished = async {
+        mark_test_database(admin_pool, &pending, created_at, label).await?;
+        super::run_test_postgres_sqlx_op(
+            &format!("{label} rename postgres test db {database_name}"),
+            sqlx::query(&format!(
+                "ALTER DATABASE \"{pending}\" RENAME TO \"{database_name}\""
+            ))
+            .execute(admin_pool),
+        )
+        .await
+        .map(|_| ())
+    }
+    .await;
+    if finished.is_err() {
+        // Only the pending name is ours; a RENAME collision must not touch `database_name`.
+        let dropped = super::run_test_postgres_sqlx_op(
+            &format!("{label} drop pending postgres test db {pending}"),
+            sqlx::query(&format!("DROP DATABASE IF EXISTS \"{pending}\"")).execute(admin_pool),
+        )
+        .await;
+        if let Err(error) = dropped {
+            tracing::warn!(label, error, "left pending postgres test db for the sweep");
+        }
+    }
+    finished
 }
 
-/// Marked fixture databases older than `min_age` with no connected session.
+/// Fixture databases at least `min_age` old by the server clock with no connected session.
 pub(super) async fn stale_test_databases(
     admin_pool: &PgPool,
     min_age: Duration,
 ) -> Result<Vec<String>, String> {
-    let cutoff = now_unix().saturating_sub(min_age.as_secs());
     super::run_test_postgres_sqlx_op(
         "list stale postgres test dbs",
         sqlx::query_scalar::<_, String>(
             "SELECT d.datname::text
              FROM pg_database d
-             WHERE substring(shobj_description(d.oid, 'pg_database') FROM $1)::bigint < $2
+             WHERE coalesce(
+                     substring(shobj_description(d.oid, 'pg_database') FROM $1),
+                     substring(d.datname FROM $2)
+                   )::bigint <= extract(epoch FROM clock_timestamp())::bigint - $3
                AND NOT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname)
              ORDER BY d.datname",
         )
         .bind(format!("^{MARKER_PREFIX}([0-9]{{1,12}})$"))
-        .bind(i64::try_from(cutoff).unwrap_or(0))
+        .bind(format!("^{PENDING_PREFIX}([0-9]{{1,12}})_[0-9a-f]{{32}}$"))
+        .bind(i64::try_from(min_age.as_secs()).unwrap_or(i64::MAX))
         .fetch_all(admin_pool),
     )
     .await
@@ -123,12 +179,15 @@ pub(super) async fn reclaim_once_per_process(admin_pool: &PgPool, label: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        MARKER_PREFIX, RECLAIM_MIN_AGE, mark_test_database, now_unix, reclaim_stale_test_databases,
+        KILL_AFTER_CREATE, MARKER_PREFIX, PENDING_PREFIX, RECLAIM_MIN_AGE, create_marked,
+        mark_test_database, pending_database_name, reclaim_stale_test_databases, server_now_unix,
         stale_test_databases,
     };
     use sqlx::PgPool;
 
     const LABEL: &str = "db::postgres reclaim tests";
+    const CHILD_ENV: &str = "AGENTDESK_TEST_RECLAIM_FRESH_PROCESS_CHILD";
+    const CHILD_TEST: &str = "db::postgres::test_db_reclaim::tests::pg_reclaim_fresh_process_child";
 
     struct Fixture {
         admin_url: String,
@@ -157,7 +216,7 @@ mod tests {
         format!("agentdesk_reclaim_{tag}_{}", uuid::Uuid::new_v4().simple())
     }
 
-    async fn create_marked(fx: &Fixture, tag: &str) -> String {
+    async fn create_fixture(fx: &Fixture, tag: &str) -> String {
         let name = fresh_name(tag);
         crate::db::postgres::create_test_database(&fx.admin_url, &name, LABEL)
             .await
@@ -172,8 +231,16 @@ mod tests {
         assert!(crate::db::postgres::take_test_database_ownership(&options, name).is_some());
     }
 
+    async fn server_now(fx: &Fixture) -> i64 {
+        server_now_unix(&fx.admin_pool).await.expect("server clock")
+    }
+
+    async fn old_stamp(fx: &Fixture) -> i64 {
+        server_now(fx).await - i64::try_from(RECLAIM_MIN_AGE.as_secs()).expect("min age fits i64") - 60
+    }
+
     async fn backdate(fx: &Fixture, name: &str) {
-        let created = now_unix() - RECLAIM_MIN_AGE.as_secs() - 60;
+        let created = old_stamp(fx).await;
         mark_test_database(&fx.admin_pool, name, created, LABEL)
             .await
             .expect("backdate marker");
@@ -210,16 +277,19 @@ mod tests {
     async fn pg_reclaim_drops_orphaned_fixture_database() {
         let _lifecycle = crate::db::postgres::lock_test_lifecycle();
         let Some(fx) = fixture().await else { return };
-        let name = create_marked(&fx, "orphan").await;
+        let name = create_fixture(&fx, "orphan").await;
         forget_ownership(&fx, &name);
         // The sweep can only find what the fixture itself marked.
         let written = marker(&fx, &name).await;
-        let created_at: u64 = written
+        let created_at: i64 = written
             .as_deref()
             .and_then(|comment| comment.strip_prefix(MARKER_PREFIX))
             .and_then(|stamp| stamp.parse().ok())
             .unwrap_or_else(|| panic!("fixture {name} left no marker: {written:?}"));
-        assert!(now_unix().abs_diff(created_at) <= 60, "marker {written:?}");
+        assert!(
+            server_now(&fx).await.abs_diff(created_at) <= 60,
+            "marker {written:?}"
+        );
         backdate(&fx, &name).await;
 
         let dropped = reclaim_stale_test_databases(&fx.admin_pool, RECLAIM_MIN_AGE, LABEL)
@@ -237,7 +307,7 @@ mod tests {
     async fn pg_reclaim_skips_database_with_active_session() {
         let _lifecycle = crate::db::postgres::lock_test_lifecycle();
         let Some(fx) = fixture().await else { return };
-        let name = create_marked(&fx, "active").await;
+        let name = create_fixture(&fx, "active").await;
         let session = crate::db::postgres::connect_test_pool(&format!("{}/{name}", fx.base), LABEL)
             .await
             .expect("connect fixture db");
@@ -267,7 +337,7 @@ mod tests {
     async fn pg_reclaim_skips_database_younger_than_min_age() {
         let _lifecycle = crate::db::postgres::lock_test_lifecycle();
         let Some(fx) = fixture().await else { return };
-        let name = create_marked(&fx, "young").await;
+        let name = create_fixture(&fx, "young").await;
         forget_ownership(&fx, &name);
 
         let dropped = reclaim_stale_test_databases(&fx.admin_pool, RECLAIM_MIN_AGE, LABEL)
@@ -284,9 +354,10 @@ mod tests {
         let _lifecycle = crate::db::postgres::lock_test_lifecycle();
         let Some(fx) = fixture().await else { return };
         // Fixture-shaped names whose comments are absent, foreign, or malformed.
-        let old = now_unix() - RECLAIM_MIN_AGE.as_secs() - 60;
+        let old = old_stamp(&fx).await;
         let cases = [
             (fresh_name("unmarked"), None),
+            (format!("{PENDING_PREFIX}{old}_notuuid"), None),
             (fresh_name("foreign"), Some("production data".to_string())),
             (
                 fresh_name("malformed"),
@@ -320,6 +391,108 @@ mod tests {
             assert!(!stale.contains(name), "unmarked {name} became a candidate");
             raw_drop(&fx, name).await;
         }
+    }
+
+    #[tokio::test]
+    async fn pg_reclaim_finds_database_killed_before_marker() {
+        let _lifecycle = crate::db::postgres::lock_test_lifecycle();
+        let Some(fx) = fixture().await else { return };
+        KILL_AFTER_CREATE.with(|kill| kill.set(true));
+        let killed = create_marked(&fx.admin_pool, &fresh_name("killed"), LABEL).await;
+        KILL_AFTER_CREATE.with(|kill| kill.set(false));
+        let error = killed.expect_err("create must stop after CREATE");
+        let left = error.rsplit(' ').next().unwrap_or_default().to_string();
+        let comment = marker(&fx, &left).await;
+
+        // Listing only: a zero age would also list other processes' live fixtures.
+        let stale = stale_test_databases(&fx.admin_pool, std::time::Duration::ZERO)
+            .await
+            .expect("list stale");
+        raw_drop(&fx, &left).await;
+
+        assert_eq!(comment, None, "{error}");
+        assert!(
+            stale.contains(&left),
+            "unmarked {left} is invisible to the sweep"
+        );
+    }
+
+    #[tokio::test]
+    async fn pg_reclaim_drops_old_database_created_but_never_marked() {
+        let _lifecycle = crate::db::postgres::lock_test_lifecycle();
+        let Some(fx) = fixture().await else { return };
+        let name = pending_database_name(old_stamp(&fx).await);
+        sqlx::query(&format!("CREATE DATABASE \"{name}\""))
+            .execute(&fx.admin_pool)
+            .await
+            .expect("create unmarked db");
+
+        let dropped = reclaim_stale_test_databases(&fx.admin_pool, RECLAIM_MIN_AGE, LABEL)
+            .await
+            .expect("reclaim");
+
+        let leaked = exists(&fx, &name).await;
+        raw_drop(&fx, &name).await;
+        assert!(!leaked, "unmarked {name} not reclaimed: {dropped:?}");
+    }
+
+    /// The sweep must run from `create_test_database` itself in every new process.
+    #[tokio::test]
+    async fn pg_reclaim_runs_on_first_fixture_of_fresh_process() {
+        let _lifecycle = crate::db::postgres::lock_test_lifecycle();
+        let Some(fx) = fixture().await else { return };
+        let marked = create_fixture(&fx, "wired").await;
+        forget_ownership(&fx, &marked);
+        backdate(&fx, &marked).await;
+        let unmarked = pending_database_name(old_stamp(&fx).await);
+        sqlx::query(&format!("CREATE DATABASE \"{unmarked}\""))
+            .execute(&fx.admin_pool)
+            .await
+            .expect("create unmarked db");
+
+        // Captured, so the child's libtest summary never reaches this lane's stdout.
+        let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--ignored", "--exact", CHILD_TEST, "--test-threads=1"])
+            .env(CHILD_ENV, "1")
+            .output()
+            .expect("run fresh test process");
+        let mut leaked = Vec::new();
+        for name in [&marked, &unmarked] {
+            if exists(&fx, name).await {
+                raw_drop(&fx, name).await;
+                leaked.push(name.clone());
+            }
+        }
+
+        let output =
+            String::from_utf8_lossy(&child.stdout) + String::from_utf8_lossy(&child.stderr);
+        let transcript = output
+            .lines()
+            .filter(|line| !line.starts_with("test result:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            child.status.success(),
+            "fresh process failed:\n{transcript}"
+        );
+        assert!(
+            transcript.contains(&format!("test {CHILD_TEST} ... ok")),
+            "child test did not run:\n{transcript}"
+        );
+        assert!(leaked.is_empty(), "fresh process left orphans {leaked:?}");
+    }
+
+    #[tokio::test]
+    #[ignore = "helper subprocess: one fixture create in a fresh process"]
+    async fn pg_reclaim_fresh_process_child() {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            return;
+        }
+        let fx = fixture().await.expect("fixture base reaches the child");
+        let name = create_fixture(&fx, "child").await;
+        crate::db::postgres::drop_test_database(&fx.admin_url, &name, LABEL)
+            .await
+            .expect("drop child fixture");
     }
 
     /// Lists what the sweep would reclaim on the configured fixture server; drops nothing.

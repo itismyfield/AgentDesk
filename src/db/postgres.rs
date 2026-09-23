@@ -1473,7 +1473,7 @@ pub(crate) async fn connect_test_pool(database_url: &str, label: &str) -> Result
 // PG-backed test DB create/drop so they cannot race. Dropping the guard before
 // the awaits would reintroduce the CI race this lock was added to fix. Test-only.
 #[allow(clippy::await_holding_lock)]
-/// Databases a killed process leaks are marked here and swept by `test_db_reclaim`.
+/// Created through `test_db_reclaim`, which sweeps what killed processes leaked.
 pub(crate) async fn create_test_database(
     admin_url: &str,
     database_name: &str,
@@ -1492,11 +1492,7 @@ pub(crate) async fn create_test_database(
         )
         .await?;
         test_db_reclaim::reclaim_once_per_process(&admin_pool, label).await;
-        let create_result = run_test_postgres_sqlx_op(
-            &format!("{label} create postgres test db {database_name}"),
-            sqlx::query(&format!("CREATE DATABASE \"{database_name}\"")).execute(&admin_pool),
-        )
-        .await;
+        let create_result = test_db_reclaim::create_marked(&admin_pool, database_name, label).await;
 
         if let Err(error) = create_result {
             if let Err(close_error) = close_test_pool(admin_pool, &format!("{label} admin")).await {
@@ -1516,7 +1512,7 @@ pub(crate) async fn create_test_database(
         // later best-effort or explicit cleanup path must consume that token.
         register_test_database_ownership(&admin_options, admin_url, database_name);
 
-        if let Err(error) = test_db_reclaim::mark_created(admin_pool, database_name, label).await {
+        if let Err(error) = close_test_pool(admin_pool, &format!("{label} admin")).await {
             best_effort_drop_owned_test_database(&admin_options, database_name, label).await;
             return Err(error);
         }
