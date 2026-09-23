@@ -41,9 +41,9 @@ use crate::services::session_backend::{
     ReadHarvestStats, StreamLineState, emit_status_events_from_stream_json,
     insert_process_session_and_mark_active_turn, mark_process_session_active_turn,
     observe_stream_context, parse_assistant_extra_tool_uses, parse_stream_message_with_state,
-    process_session_available_for_followup, process_session_pid, process_session_probe,
-    read_output_file_until_result, read_output_file_until_result_with_harvest,
-    remove_process_session, send_process_session_input, terminate_process_handle,
+    process_session_available_for_followup, process_session_probe, read_output_file_until_result,
+    read_output_file_until_result_with_harvest, remove_process_session, send_process_session_input,
+    terminate_process_handle,
 };
 mod active_usage;
 #[cfg(unix)]
@@ -2958,7 +2958,9 @@ fn send_followup_to_process(
     });
 
     let active_turn = mark_process_session_active_turn(session_name);
-    if let Err(e) = send_process_session_input(session_name, &msg.to_string()) {
+    if let Err(e) =
+        send_process_session_input(session_name, &msg.to_string(), cancel_token.as_deref())
+    {
         if should_recreate_session_after_stdin_error(&e) {
             debug_log(&format!(
                 "stdin pipe error triggers session recreation: {}",
@@ -2967,13 +2969,6 @@ fn send_followup_to_process(
             return Ok(ClaudeFollowupResult::RecreateSession { error: e });
         }
         return Err(e);
-    }
-
-    // Store session in cancel token
-    if let Some(ref token) = cancel_token {
-        if let Some(pid) = process_session_pid(session_name) {
-            token.store_child_pid(pid);
-        }
     }
 
     let read_result = read_output_file_until_result(
