@@ -5,10 +5,10 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 eval "$(awk '/^_run_post_deploy_functional_smoke\(\) \{$/ {copy=1} copy {print} copy && /^}$/ {exit}' "$root/scripts/deploy-release.sh")"
-ADK_REL="$scratch/runtime"
-POST_DEPLOY_SMOKE_STAMP=fixture
+export ADK_REL="$scratch/runtime"
+export POST_DEPLOY_SMOKE_STAMP=fixture
 POST_DEPLOY_SMOKE_EVIDENCE="$scratch/evidence"
-REL_PORT=1
+export REL_PORT=1
 relay_calls=0
 durable_calls=0
 api_calls=0
@@ -20,12 +20,12 @@ _post_deploy_smoke_check_wedges() { :; }
 _post_deploy_smoke_check_fail_closed_warn_rate() { :; }
 _post_deploy_smoke_probe_apis() {
     api_calls=$((api_calls + 1))
-    POST_DEPLOY_SMOKE_READY=true
+    export POST_DEPLOY_SMOKE_READY=true
     return "$probe_fail"
 }
 _post_deploy_smoke_check_relay_round_trip() { relay_calls=$((relay_calls + 1)); }
 _post_deploy_smoke_check_durable_record() { durable_calls=$((durable_calls + 1)); }
-POST_DEPLOY_SMOKE_SCOPE=api
+export POST_DEPLOY_SMOKE_SCOPE=api
 _run_post_deploy_functional_smoke
 test "$api_calls:$relay_calls:$durable_calls" = 1:0:0
 test "$POST_DEPLOY_SMOKE_DURABLE_COVERAGE" = 'not evaluated: operator selected API smoke scope'
@@ -36,7 +36,7 @@ if _run_post_deploy_functional_smoke; then
 fi
 test "$api_calls:$relay_calls:$durable_calls" = 2:0:0
 probe_fail=0
-POST_DEPLOY_SMOKE_SCOPE=full
+export POST_DEPLOY_SMOKE_SCOPE=full
 _run_post_deploy_functional_smoke
 test "$api_calls:$relay_calls:$durable_calls" = 3:1:1
 unset POST_DEPLOY_SMOKE_SCOPE
