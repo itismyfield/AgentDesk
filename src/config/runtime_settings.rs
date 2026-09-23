@@ -21,10 +21,8 @@ pub struct RuntimeSettingsConfig {
     /// #5464 T5 S1: rollout stage for the AC2-R relay-authority warrant.
     #[serde(default, skip_serializing_if = "is_legacy_relay_authority_mode")]
     pub relay_authority_mode: RelayAuthorityMode,
-    /// #5464 T5 S1: percentage of channels admitted to the relay-authority
-    /// cohort. `0` (the shipped default) admits none and `100` admits all;
-    /// larger values clamp at the admission site rather than here, so a typo
-    /// widens the cohort to everyone instead of wrapping to a narrow one.
+    /// Channel cohort percentage: 0 admits none, 100 admits all.
+    /// Values above 100 clamp at admission rather than wrapping.
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub relay_authority_cohort_percent: u8,
     /// Heartbeat-absence TTL for stale dispatched debt; unset defaults to 1800 seconds.
@@ -48,9 +46,8 @@ pub struct RuntimeSettingsConfig {
     pub context_compact_percent_codex: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compact_percent_claude: Option<u64>,
-    /// YAML-only absolute window for new Claude TUI launches, independent of model.
-    /// Unset exports nothing (#5935); a set value clamps to 100_000..=1_000_000 at launch.
-    /// Raw numeric values are preserved here; zero clamps to the minimum, not off.
+    /// YAML-only Claude TUI window. Unset exports nothing; all set values,
+    /// including zero, clamp to 100_000..=1_000_000 at launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compact_window_claude: Option<u64>,
     /// Provider-neutral minimum token occupancy for requesting context compaction.
@@ -93,113 +90,51 @@ pub struct RuntimeSettingsConfig {
     pub github_repo_cache_sec: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit_stale_sec: Option<u64>,
-    /// Number of completed user/assistant pairs from the same Discord channel
-    /// added as background context when a fresh provider session starts.
-    /// Unset defaults to 3, `0` disables the layer, and values are clamped to 10.
-    /// Read live for each turn through `config_live_reload::current()`.
+    /// Completed same-channel pairs supplied to fresh sessions.
+    /// Read live per turn; defaults to 3, zero disables, maximum 10.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_context_recent_pairs: Option<u64>,
-    /// Seconds StreamJson CLIs (Grok, AGY) may stay silent before the first
-    /// non-empty stdout line. Unset or zero keeps the compiled-in 60s default.
-    /// Read live via `config_live_reload::current()` on each launch; no restart needed.
-    /// Clamped to 24h. A caller that passes a zero timeout still uses the
-    /// separate 90s unset handshake.
+    /// First non-empty stdout deadline for Grok/AGY, read live per launch.
+    /// Unset/zero uses 60s; maximum 24h. A caller-supplied zero timeout
+    /// still uses the separate 90s unset handshake.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_json_startup_output_timeout_secs: Option<u64>,
-    /// Follow-up TUI readiness timeout in seconds; unset or zero uses the Claude
-    /// and Codex default of 45s (`FOLLOWUP_PROMPT_READY_TIMEOUT`).
-    /// Read live via `config_live_reload::current()` each wait; no restart needed.
-    ///
-    /// Claude's wait also has an independent 900s busy-turn ceiling
-    /// (`PROMPT_READY_ACTIVE_TURN_WAIT_CEILING`). Codex has no such ceiling:
-    /// a long prior turn can block its follow-up for the full configured duration.
+    /// Live follow-up readiness timeout; unset/zero defaults to 45s.
+    /// Claude additionally caps busy-turn waits at 900s; Codex does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub followup_prompt_ready_timeout_secs: Option<u64>,
-    /// Master rollback flag for the read-only DB active-session mismatch audit
-    /// surfaced on `/api/health/detail` (`active_session_audit` block). When
-    /// unset it defaults to ON; `Some(false)` makes the audit report
-    /// `enabled:false` with empty candidates and skips the DB query entirely.
-    /// Read live via `config_live_reload::current()` so an `agentdesk.yaml` edit
-    /// applies on the next `/api/health/detail` call without a restart.
+    /// Live read-only DB mismatch audit switch; defaults on.
+    /// False skips the query and reports disabled with no candidates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_session_audit_enabled: Option<bool>,
-    /// Minimum seconds since `last_heartbeat` before a raw-active session can be
-    /// flagged by the active-session mismatch audit (post-restart/long-turn
-    /// grace). Unset (or `0`) falls back to the compiled-in 120s default.
+    /// Heartbeat grace before mismatch auditing; unset/zero uses 120s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_session_audit_stale_secs: Option<u64>,
-    /// Hard cap on audit candidate rows AND the SQL `LIMIT`. Unset falls back to
-    /// the compiled-in 50 default; clamped to `1..=500` when set.
+    /// Audit row and SQL LIMIT cap; unset uses 50, otherwise clamps to 1..=500.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_session_audit_max_candidates: Option<u64>,
-    /// TTL (seconds) for the in-memory TUI hook registry buffer. A hook that has
-    /// been buffered longer than this is swept and never replayed to a claiming
-    /// listener, so a stale Stop from a previous turn cannot wake a fresh turn.
-    /// When unset (or `0`) the compiled-in 30s default
-    /// (`hook_registry::DEFAULT_HOOK_BUFFER_TTL`) is used.
-    ///
-    /// NOT hot-reloadable: this value is captured ONCE when the process-global
-    /// `hook_registry::GLOBAL` is first accessed (effectively at process start)
-    /// and stored on the immutable `HookRegistry.ttl`. Editing it in
-    /// `agentdesk.yaml` takes effect only on the next process start (restart
-    /// required). Only `tui_hook_registry_enabled` is read live per-hook.
+    /// Buffered hook TTL; unset/zero uses 30s. Expired hooks are not replayed.
+    /// Captured on first GLOBAL access; changes require a process restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tui_hook_buffer_ttl_secs: Option<u64>,
-    /// Diagnostic delay (milliseconds) before an unclaimed Stop in the TUI hook
-    /// registry is considered "elapsed". Diagnostic-only in P0 — it never
-    /// triggers a transcript sync or finalization. When unset (or `0`) the
-    /// compiled-in 2000ms default (`hook_registry::DEFAULT_UNCLAIMED_STOP_DELAY`)
-    /// is used.
-    ///
-    /// NOT hot-reloadable: like `tui_hook_buffer_ttl_secs`, this is captured ONCE
-    /// when `hook_registry::GLOBAL` is first accessed (process start) and stored
-    /// on the immutable `HookRegistry.unclaimed_stop_delay`. Editing it in
-    /// `agentdesk.yaml` takes effect only on the next process start (restart
-    /// required). Only `tui_hook_registry_enabled` is genuinely hot-reloadable.
+    /// Diagnostic-only unclaimed Stop delay; unset/zero uses 2000ms.
+    /// Does not sync/finalize. Captured on first GLOBAL access; restart required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tui_unclaimed_stop_delay_ms: Option<u64>,
-    /// Rollback switch for the TUI hook registry buffering layer. Defaults to ON
-    /// (`None` => enabled). Set to `false` in `agentdesk.yaml` to stop feeding
-    /// the registry from the hook receiver, leaving the legacy broadcast +
-    /// polling path exactly as before. Genuinely hot-reloadable (no restart
-    /// required): `registry_enabled()` reads it live per-hook. This is the ONLY
-    /// live-reloadable key of the three TUI hook registry settings.
+    /// Live per-hook buffering switch; defaults on. False preserves the
+    /// legacy broadcast/polling path. Unlike TTL/delay, no restart is needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tui_hook_registry_enabled: Option<bool>,
-    /// Enable the in-process Codex rollout discovery index cache used by the
-    /// Codex TUI resume / follow-up readiness paths
-    /// (`codex_tui::rollout_index`). The cache avoids re-walking
-    /// `~/.codex/sessions` and re-reading rollout headers on every lookup.
-    ///
-    /// Defaults ON when unset (`None`). Set to `false` to force the legacy
-    /// per-lookup recursive scan + header read — the built-in rollback for the
-    /// `codex-rollout-index-cache` feature. Read live via
-    /// `config_live_reload::current()` so an `agentdesk.yaml` edit applies on the
-    /// next lookup without a restart; not part of the restart-required set.
+    /// Live Codex rollout-index cache switch; defaults on. False restores
+    /// recursive scanning and header reads on every resume/follow-up lookup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_rollout_index_cache_enabled: Option<bool>,
-    /// Rate-limit-aware dispatch gate toggle (feature:
-    /// rate-limit-aware-dispatch-gate). When `Some(true)` or unset (`None` —
-    /// the safe default is ON), auto-queue activation defers a pending entry
-    /// whose target provider is at/above `rate_limit_danger_pct` utilization in
-    /// the live in-memory rate-limit snapshot, instead of creating a doomed
-    /// dispatch. The entry stays `pending` (never `skipped`) and resumes
-    /// automatically once pressure clears. Read live via
-    /// `config_live_reload::current()` so an `agentdesk.yaml` edit applies on
-    /// the next activation without a restart. Set to `false` to disable the
-    /// gate cleanly (every activation then falls through to normal dispatch).
+    /// Live dispatch pressure gate; defaults on. Entries remain pending
+    /// until provider utilization clears the threshold. False bypasses the gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_rate_limit_gate_enabled: Option<bool>,
-    /// Gate-specific danger threshold (utilization %) for the rate-limit-aware
-    /// dispatch gate (feature: rate-limit-aware-dispatch-gate). This is a
-    /// SEPARATE knob from `rate_limit_danger_pct` (which drives the dashboard's
-    /// "danger" coloring at 95): the operator wants the dispatch gate to defer
-    /// ONLY when a provider is fully rate-limited (utilization at/above 100),
-    /// so the gate defaults to 100 here and never touches `rate_limit_danger_pct`
-    /// — other consumers of `rate_limit_danger_pct` are unaffected. When unset
-    /// (`None`), the gate uses the compiled-in default of 100. Read live (via
-    /// the persisted runtime-config / `config_live_reload::current()`) so an
-    /// edit applies on the next activation without a restart.
+    /// Live dispatch-only utilization threshold; defaults to 100.
+    /// Independent of rate_limit_danger_pct used by dashboard coloring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_rate_limit_gate_danger_pct: Option<u8>,
     #[serde(default, skip_serializing_if = "is_false")]
