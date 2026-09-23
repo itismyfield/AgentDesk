@@ -3,12 +3,8 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use std::future::Future;
 
-use crate::services::discord::settings::{
-    MemoryBackendKind, ResolvedMemorySettings, resolve_memory_settings,
-};
-use crate::services::memory::{
-    MementoBackend, MementoRememberRequest, sanitize_memento_workspace_segment,
-};
+use crate::services::discord::settings::{MemoryBackendKind, resolve_memory_settings};
+use crate::services::memory::sanitize_memento_workspace_segment;
 
 const MAX_SUMMARY_CHARS: usize = 220;
 const MAX_FEEDBACK_CHARS: usize = 240;
@@ -99,13 +95,8 @@ async fn record_card_retrospective_pg(
     terminal_status: &str,
 ) -> Result<Value, String> {
     let sync_settings = resolve_memory_settings(None, None);
-    let has_runtime = tokio::runtime::Handle::try_current().is_ok();
     let sync_backend = Some(sync_settings.backend.as_str());
-    let sync_status = match sync_settings.backend {
-        MemoryBackendKind::Memento if has_runtime => "queued",
-        MemoryBackendKind::Memento => "skipped_no_runtime",
-        _ => "skipped_backend",
-    };
+    let sync_status = automatic_memory_sync_status(sync_settings.backend);
 
     let Some(draft) = build_retrospective_draft_pg(pg_pool, card_id, terminal_status).await? else {
         return Ok(json!({
@@ -163,42 +154,10 @@ async fn record_card_retrospective_pg(
         }));
     }
 
-    if sync_settings.backend == MemoryBackendKind::Memento && has_runtime {
-        let pg_pool_clone = pg_pool.clone();
-        let retrospective_id_clone = retrospective_id.clone();
-        let remember_request = MementoRememberRequest {
-            content: draft.memory_payload.content.clone(),
-            topic: draft.memory_payload.topic.clone(),
-            kind: draft.memory_payload.kind.clone(),
-            importance: None,
-            keywords: draft.memory_payload.keywords.clone(),
-            source: Some(draft.memory_payload.source.clone()),
-            workspace: Some(draft.memory_payload.workspace.clone()),
-            global: false,
-            channel_id: None,
-            channel_name: None,
-            agent_id: Some(draft.memory_payload.agent_id.clone()),
-            case_id: Some(draft.memory_payload.case_id.clone()),
-            goal: Some(draft.memory_payload.goal.clone()),
-            outcome: Some(draft.memory_payload.outcome.clone()),
-            phase: Some(draft.memory_payload.phase.clone()),
-            resolution_status: Some(draft.memory_payload.resolution_status.clone()),
-            assertion_status: Some(draft.memory_payload.assertion_status.clone()),
-            context_summary: Some(draft.memory_payload.context_summary.clone()),
-        };
-
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                sync_retrospective_to_memento(
-                    pg_pool_clone,
-                    retrospective_id_clone,
-                    sync_settings,
-                    remember_request,
-                )
-                .await;
-            });
-        }
-    }
+    // Keep the operational retrospective in PostgreSQL, but never turn its
+    // mechanically assembled summary into a Memento episode. A new dispatch,
+    // duration, or review round is not evidence of new durable knowledge.
+    // Agents can still explicitly remember/amend facts or lessons they learned.
 
     Ok(json!({
         "ok": true,
@@ -210,32 +169,10 @@ async fn record_card_retrospective_pg(
     }))
 }
 
-async fn sync_retrospective_to_memento(
-    pg_pool: PgPool,
-    retrospective_id: String,
-    settings: ResolvedMemorySettings,
-    request: MementoRememberRequest,
-) {
-    let backend = MementoBackend::new(settings);
-    let result = backend.remember(request).await;
-
-    let query = match result {
-        Ok(_) => sqlx::query(
-            "UPDATE card_retrospectives
-             SET sync_status = 'stored', sync_error = NULL, updated_at = NOW()
-             WHERE id = $1",
-        )
-        .bind(&retrospective_id),
-        Err(error) => sqlx::query(
-            "UPDATE card_retrospectives
-             SET sync_status = 'failed', sync_error = $1, updated_at = NOW()
-             WHERE id = $2",
-        )
-        .bind(error)
-        .bind(&retrospective_id),
-    };
-    if let Err(error) = query.execute(&pg_pool).await {
-        tracing::warn!("failed to update PG retrospective sync status: {error}");
+fn automatic_memory_sync_status(backend: MemoryBackendKind) -> &'static str {
+    match backend {
+        MemoryBackendKind::Memento => "skipped_no_new_knowledge",
+        _ => "skipped_backend",
     }
 }
 
@@ -561,5 +498,59 @@ fn format_duration(duration_seconds: Option<i64>) -> Option<String> {
         Some(format!("{hours}시간"))
     } else {
         Some(format!("{hours}시간 {minutes}분"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_summary_without_new_knowledge_never_queues_memory_sync() {
+        // An identical outcome can receive a different dispatch id, elapsed
+        // duration, or review count. None should trigger a new memory episode.
+        let original = build_retrospective_content(
+            "#42",
+            "Fix writer",
+            "No new findings",
+            1,
+            None,
+            Some(60),
+            "성공",
+        );
+        let repeated = build_retrospective_content(
+            "#42",
+            "Fix writer",
+            "No new findings",
+            2,
+            None,
+            Some(180),
+            "성공",
+        );
+        assert_ne!(original, repeated);
+        assert_eq!(
+            automatic_memory_sync_status(MemoryBackendKind::Memento),
+            "skipped_no_new_knowledge",
+        );
+    }
+
+    #[test]
+    fn retrospective_content_remains_available_for_local_audit() {
+        let content = build_retrospective_content(
+            "#42",
+            "Fix writer",
+            "Receipt persisted before retry",
+            1,
+            Some("Verified family facts remain writable"),
+            Some(60),
+            "성공",
+        );
+        assert!(content.contains("Receipt persisted before retry"));
+        assert!(content.contains("Verified family facts remain writable"));
+        assert!(content.contains("1분"));
+        assert_eq!(
+            automatic_memory_sync_status(MemoryBackendKind::File),
+            "skipped_backend",
+        );
     }
 }
