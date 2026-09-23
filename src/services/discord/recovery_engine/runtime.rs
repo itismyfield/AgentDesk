@@ -97,6 +97,15 @@ pub(in crate::services::discord) fn readopt_marker_eligible_real_user(
         && state.user_msg_id != 0
 }
 
+/// Only an epoch this process provably advanced can prove authorship; any other
+/// route may still carry the prior process's generation, so it stays fail-open.
+pub(in crate::services::discord) fn row_authored_by_running_process(
+    state: &inflight::InflightTurnState,
+    allocation: super::runtime_store::ProcessGenerationAllocation,
+) -> bool {
+    allocation.epoch_advanced() && inflight::row_is_current_generation(state, allocation.generation)
+}
+
 /// #4370: mark this mailbox slot as re-adopted-from-inflight so the TUI-direct
 /// synthetic `stale_reclaim` path recognises this real-user mailbox owner as
 /// reclaimable-when-stale (generalising #4018's synthetic-owner-only reclaim to
@@ -304,6 +313,19 @@ async fn reregister_active_turn_from_inflight_inner(
             &provider,
             state.effective_relay_owner_kind(),
             state.turn_nonce.as_deref(),
+        );
+        return false;
+    }
+
+    let allocation = super::runtime_store::process_generation_binding();
+    if row_authored_by_running_process(state, allocation) {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = state.channel_id,
+            finalizer_turn_id,
+            born_generation = state.born_generation,
+            epoch_route = allocation.epoch_route(),
+            "inflight reregister refused to mint: the running process authored this row and its mailbox is already released"
         );
         return false;
     }
@@ -937,6 +959,119 @@ mod readopted_ledger_record_gate_tests {
         assert!(
             !readopted_ledger_record_allowed(&row(343_742_347_365_974_026, 0)),
             "an id-0 (injected / task-notification) row would misfire OwnerInflightReplaced on a live turn"
+        );
+    }
+}
+
+/// A row the running process authored belongs to a turn this process's own
+/// finalizer owns; re-registering it from disk after that finalizer released
+/// the mailbox must not mint a second token for the finished turn.
+#[cfg(test)]
+mod running_process_row_mint_fence_tests {
+    use super::inflight::InflightTurnState;
+    use crate::services::discord::runtime_store::{
+        ADVANCED_ROUTE_FOR_TESTS, GenerationAllocationRoute, ProcessGenerationAllocation,
+        process_generation_allocation_for_tests, publish_process_generation_allocation_for_tests,
+    };
+    use crate::services::provider::ProviderKind;
+    use serenity::model::id::ChannelId;
+
+    const RUNNING_GENERATION: u64 = 524_200;
+
+    fn run_async<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime")
+            .block_on(fut)
+    }
+
+    fn row(channel_id: u64, born_generation: u64) -> InflightTurnState {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            channel_id,
+            Some("adk-cc".to_string()),
+            343_742_347_365_974_026,
+            9_100_088_143_992_270_773,
+            9_100_088_143_992_270_774,
+            "restored session prompt".to_string(),
+            Some("session-5242".to_string()),
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/claude-transcript.jsonl".to_string()),
+            None,
+            0,
+        );
+        state.born_generation = born_generation;
+        state
+    }
+
+    /// Re-registers `state` into an empty mailbox under `allocation` and returns
+    /// (reregister verdict, whether the mailbox now holds a token).
+    fn reregister_into_empty_mailbox(
+        state: &InflightTurnState,
+        allocation: ProcessGenerationAllocation,
+    ) -> (bool, bool) {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let _publication = publish_process_generation_allocation_for_tests(allocation);
+        run_async(async {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None);
+            let channel_id = ChannelId::new(state.channel_id);
+            let restored = super::reregister_active_turn_from_inflight(&shared, state).await;
+            let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+            (restored, snapshot.cancel_token.is_some())
+        })
+    }
+
+    #[test]
+    fn running_process_row_does_not_remint_a_released_mailbox() {
+        let state = row(524_201, RUNNING_GENERATION);
+        let (restored, token_present) = reregister_into_empty_mailbox(
+            &state,
+            process_generation_allocation_for_tests(RUNNING_GENERATION, ADVANCED_ROUTE_FOR_TESTS),
+        );
+        assert!(
+            !restored,
+            "a running-process row must not be reported as restored"
+        );
+        assert!(
+            !token_present,
+            "a running-process row must not re-occupy the mailbox its finalizer released"
+        );
+    }
+
+    #[test]
+    fn prior_process_row_still_reattaches() {
+        let state = row(524_202, RUNNING_GENERATION - 1);
+        let (restored, token_present) = reregister_into_empty_mailbox(
+            &state,
+            process_generation_allocation_for_tests(RUNNING_GENERATION, ADVANCED_ROUTE_FOR_TESTS),
+        );
+        assert!(
+            restored && token_present,
+            "a prior-process row is recovery's to reattach"
+        );
+    }
+
+    #[test]
+    fn unadvanced_epoch_cannot_prove_authorship_and_still_reattaches() {
+        let state = row(524_203, RUNNING_GENERATION);
+        let (restored, token_present) = reregister_into_empty_mailbox(
+            &state,
+            process_generation_allocation_for_tests(
+                RUNNING_GENERATION,
+                GenerationAllocationRoute::ParentSyncFailed,
+            ),
+        );
+        assert!(
+            restored && token_present,
+            "an epoch that did not advance may be the prior process's, so the row is not provably ours"
         );
     }
 }
