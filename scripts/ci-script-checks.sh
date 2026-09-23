@@ -409,6 +409,9 @@ banner "Test ROOT file-reference policy"
 banner "Scheduled-message PG path-filter wiring contract"
 "$PYTHON" -m unittest tests.test_scheduled_messages_ci_wiring
 
+banner "macOS hosted-overflow routing contract"
+"$PYTHON" -m unittest tests.test_macos_runner_overflow_ci_wiring
+
 banner "High-risk recovery path-filter selection contract (#5232)"
 "$PYTHON" -m unittest tests.test_high_risk_recovery_path_filter
 
@@ -495,6 +498,9 @@ banner "Portable deployable path lint"
   tests.test_install_bootstrap_portable \
   tests.test_script_python_policy \
   tests.test_analyze_prs
+
+banner "CI macOS Trusted Rust path filter"
+"$PYTHON" -m unittest tests.test_macos_trusted_rust_filter
 
 banner "Relay watchdog + PG tunnel supervisor tests (#4381/#4378)"
 # The out-of-band relay watchdog is a deployable Python script; it is not

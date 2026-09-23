@@ -198,9 +198,12 @@ where
         return stdout_result;
     }
 
-    // Provider hooks are fail-open: publish and flush the model-visible stdout
-    // before even handing the observational event to its surviving worker.
-    let rendered_stdout = hook_stdout(provider, event, &payload);
+    // The narrow Memento remember gate runs locally before publishing stdout;
+    // relay availability cannot bypass its durable duplicate-write receipts.
+    // All other hooks retain their observational fail-open behavior.
+    let rendered_stdout =
+        super::memento_writer_hook::observe(provider, event, &effective_session_id, &payload)
+            .unwrap_or_else(|| hook_stdout(provider, event, &payload));
     let stdout_result = write_hook_stdout(output, &rendered_stdout);
     stdout_result?;
     let relay_result = relay(endpoint, provider, event, &effective_session_id, payload);
