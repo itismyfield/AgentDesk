@@ -782,10 +782,11 @@ mod loader_gate_observation_tests {
     }
 
     #[rustfmt::skip]
-    fn route_cases() -> [(crate::services::discord::runtime_store::GenerationAllocationRoute, u64, u64, &'static str, bool); 8] {
+    fn route_cases() -> [(crate::services::discord::runtime_store::GenerationAllocationRoute, u64, u64, &'static str, bool); 9] {
         use crate::services::discord::runtime_store::GenerationAllocationRoute as R;
         [
             (R::AdvancedWithSyncedRename, 5462, 5461, "advanced_with_synced_rename", true),
+            (R::AdvancedWithUnflushedRename, 5462, 5461, "advanced_with_unflushed_rename", false),
             (R::ParentSyncFailed, 5462, 5461, "parent_sync_failed", false),
             (R::CounterReadFailed, 1, 0, "counter_read_failed", false),
             (R::Saturated, u64::MAX, u64::MAX - 1, "saturated", false),
@@ -991,9 +992,12 @@ mod loader_gate_observation_tests {
         crate::services::discord::runtime_store::set_process_generation_for_tests(None);
         set_test_tmux_alive_override(Some(&[]));
         let _tmux_override = TmuxAliveOverrideReset;
+        use crate::services::discord::runtime_store::{
+            ADVANCED_ROUTE_FOR_TESTS, GenerationAllocationRoute as R,
+        };
         for (sync, expected) in [
-            (false, "parent_sync_failed"),
-            (true, "advanced_with_synced_rename"),
+            (false, R::ParentSyncFailed),
+            (true, ADVANCED_ROUTE_FOR_TESTS),
         ] {
             let root = tempfile::tempdir().unwrap();
             let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -1004,8 +1008,8 @@ mod loader_gate_observation_tests {
             let _publication =
                 crate::services::discord::runtime_store::allocate_and_publish_process_generation_for_tests(sync);
             assert_eq!(
-                crate::services::discord::runtime_store::process_generation_binding().epoch_route(),
-                expected
+                crate::services::discord::runtime_store::process_generation_binding(),
+                allocation(54_62, expected)
             );
         }
         let root = tempfile::tempdir().unwrap();

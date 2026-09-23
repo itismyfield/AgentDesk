@@ -1242,6 +1242,7 @@ server::worker_recovery::tests::restarts_after_unexpected_return
 server::worker_recovery::tests::shutdown_waits_for_inner_cleanup
 server::worker_recovery::tests::simultaneous_return_and_shutdown_is_expected_without_budget_use
 server::worker_recovery::tests::stable_run_resets_backoff
+server::worker_recovery::windows_contract::tests::first_fatal_exit_persists_ledger_and_exits
 server::worker_registry::leader_takeover_tests::policy_tick_thread_captures_the_process_health_registry
 server::worker_registry::leader_takeover_tests::supervisor_respawns_worker_after_lease_takeover
 server::ws::ws_auth_gate_tests::configured_token_accepts_only_the_exact_token
@@ -5070,6 +5071,7 @@ services::discord::runtime_bootstrap::spawns::tests::a_commit_under_another_nonc
 services::discord::runtime_bootstrap::spawns::tests::a_committed_restart_survives_late_cancellation_in_a_dedicated_process
 services::discord::runtime_bootstrap::spawns::tests::a_failed_restore_keeps_the_disposed_marker_as_residue
 services::discord::runtime_bootstrap::spawns::tests::an_absent_latch_defers_to_the_identity_artifact_before_rolling_back
+services::discord::runtime_bootstrap::spawns::tests::an_unflushed_parent_sync_publishes_the_identity_without_an_index
 services::discord::runtime_bootstrap::spawns::tests::an_unsafe_nonce_publishes_nothing_and_refuses_the_commit
 services::discord::runtime_bootstrap::spawns::tests::cancellation_before_any_staging_publishes_nothing_and_rolls_back
 services::discord::runtime_bootstrap::spawns::tests::cancellation_before_durable_commit_rolls_back_but_after_commit_stays_committed
@@ -5096,6 +5098,7 @@ services::discord::runtime_store::atomic_write_logging_tests::critical_atomic_wr
 services::discord::runtime_store::generation_allocation_tests::core_truth_table_routes_and_side_effects_are_exact
 services::discord::runtime_store::generation_allocation_tests::counter_read_failure_preserves_copy_detail
 services::discord::runtime_store::generation_allocation_tests::epoch_provenance_surface_makes_no_survival_claim
+services::discord::runtime_store::generation_allocation_tests::injected_flush_capability_selects_the_advanced_route
 services::discord::runtime_store::generation_allocation_tests::production_binding_lexically_returns_the_stored_allocation_whole
 services::discord::runtime_store::generation_allocation_tests::production_composer_advances_with_synced_parent
 services::discord::runtime_store::generation_allocation_tests::production_shaped_once_cell_publishes_generation_and_route_together
@@ -5108,6 +5111,7 @@ services::discord::runtime_store::runtime_root_tests::concurrent_provider_alloca
 services::discord::runtime_store::runtime_root_tests::live_release_override_falls_back_to_isolated_tempdir
 services::discord::runtime_store::runtime_root_tests::process_epoch_does_not_follow_overlapping_process_counter_advance
 services::discord::runtime_store::runtime_root_tests::process_generation_allocation_is_monotonic_and_request_preview_is_read_only
+services::discord::runtime_store::windows_contract::tests::windows_parent_dir_sync_succeeds_without_flushing
 services::discord::session_banner::tests::banner_is_top_and_sticky_across_streaming_then_terminal
 services::discord::session_banner::tests::later_turn_same_session_is_not_bannered_but_new_session_rearms
 services::discord::session_banner::tests::non_first_empty_disabled_and_missing_snapshot_paths_do_not_claim

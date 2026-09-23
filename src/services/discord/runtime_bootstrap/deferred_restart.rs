@@ -151,7 +151,7 @@ pub(super) fn commit_deferred_restart_sentinel(
         provider.as_str(),
         chrono::Utc::now().to_rfc3339()
     );
-    publish_restart_terminal(root, nonce, &body)?;
+    publish_restart_terminal(root, nonce, &body, runtime_store::PARENT_DIR_FSYNC_FLUSHES)?;
     Ok(true)
 }
 
