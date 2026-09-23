@@ -73,7 +73,11 @@ pub(super) fn build_relay_health_snapshot(input: RelayHealthBuildInput) -> Relay
         unread_bytes: input.unread_bytes,
         desynced: input.desynced,
         stale_thread_proof: input.thread_proof.stale_thread_proof,
-        unpaired_active_token_reconfirmed: input.unpaired_active_token_reconfirmed,
+        // Readers take a reconfirmation to mean token-without-row; hold that
+        // here rather than trust every caller to pass matching operands.
+        unpaired_active_token_reconfirmed: input.unpaired_active_token_reconfirmed
+            && input.mailbox_has_cancel_token
+            && !input.bridge_inflight_present,
     }
 }
 
@@ -150,6 +154,57 @@ mod tests {
             nonce: Some("turn-a".to_string()),
             message_id: Some(42),
             started_at: Some(DateTime::from_timestamp_millis(1_000_000).unwrap()),
+        }
+    }
+
+    fn build_input(
+        has_token: bool,
+        inflight_present: bool,
+        reconfirmed: bool,
+    ) -> RelayHealthBuildInput {
+        RelayHealthBuildInput {
+            provider: "claude".to_string(),
+            channel_id: 42,
+            mailbox_has_cancel_token: has_token,
+            mailbox_active_user_msg_id: Some(7),
+            mailbox_turn_started_at_ms: Some(1_000_000),
+            unpaired_active_token_reconfirmed: reconfirmed,
+            queue_depth: 0,
+            watcher_attached: true,
+            watcher_attached_stale: false,
+            watcher_owner_channel_id: None,
+            tmux_session: None,
+            tmux_alive: Some(true),
+            bridge_inflight_present: inflight_present,
+            bridge_current_msg_id: None,
+            watcher_owns_live_relay: false,
+            last_relay_ts_ms: 0,
+            last_relay_offset: 0,
+            last_capture_offset: None,
+            unread_bytes: None,
+            desynced: false,
+            thread_proof: RelayThreadProofSnapshot::default(),
+            active_turn: RelayActiveTurn::Foreground,
+            last_outbound_activity_ms: None,
+        }
+    }
+
+    #[test]
+    fn a_built_snapshot_is_reconfirmed_only_for_a_token_without_a_row() {
+        for has_token in [false, true] {
+            for inflight_present in [false, true] {
+                let snapshot =
+                    build_relay_health_snapshot(build_input(has_token, inflight_present, true));
+                assert_eq!(
+                    snapshot.unpaired_active_token_reconfirmed,
+                    has_token && !inflight_present,
+                    "token={has_token} inflight={inflight_present}"
+                );
+                assert!(
+                    !build_relay_health_snapshot(build_input(has_token, inflight_present, false))
+                        .unpaired_active_token_reconfirmed
+                );
+            }
         }
     }
 

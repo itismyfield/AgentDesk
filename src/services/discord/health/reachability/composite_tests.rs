@@ -27,7 +27,7 @@ use crate::services::discord::outbound::delivery_record::{
 };
 use crate::services::discord::outbound::receipt_index::ReceiptIndexUnknownReason;
 use crate::services::discord::relay_health::{
-    CoordFrontierObservation, DurableFrontierObservation, FrontierProvenance,
+    CoordFrontierObservation, DurableFrontierObservation, FrontierProvenance, RelayHealthSnapshot,
 };
 
 const NOW_MS: u64 = 10_000_000;
@@ -2023,14 +2023,88 @@ fn reachability_unreachable_when_inflight_row_absent_during_live_turn() {
         Vec::new(),
         RowlessTurn::OutlivedGrace,
     );
-    assert!(
-        matches!(
-            stuck.in_band().unknown_reason(),
-            Some(ReachabilityUnknownReason::RowlessActiveTurn { .. })
-        ),
-        "a stuck rowless turn must keep naming itself; got {:?}",
-        stuck.in_band()
+    assert_eq!(
+        stuck.in_band(),
+        within_grace.in_band(),
+        "`Unreachable` outranks `rowless_active_turn`; a stuck turn must not mask it"
     );
+}
+
+/// One rowless turn aging on the production clock. Its own prose is framed
+/// after the turn started, so the obligation reaches `fail_bound` only once the
+/// turn is long past its grace — which is exactly when `Unreachable` must
+/// surface instead of `rowless_active_turn`.
+#[test]
+fn a_rowless_turn_whose_own_prose_ages_past_fail_bound_reads_unreachable() {
+    const FRAMED_AFTER_TURN_START_SECS: u64 = 5;
+    let rowless = |obligation_age: u64| ReachabilityVerdict::Unknown {
+        reason: ReachabilityUnknownReason::RowlessActiveTurn {
+            incarnation_live_obligations: 1,
+            uncovered_ranges: 1,
+            unproven_ranges: 0,
+        },
+        since_secs: obligation_age,
+    };
+    let unreachable = |obligation_age: u64| ReachabilityVerdict::Unreachable {
+        oldest_unsatisfied_age_secs: obligation_age,
+        uncovered_ranges: 1,
+    };
+    let mut mismatches = Vec::new();
+    for turn_age in [30, 59, 60, 300, 604, 605, 900] {
+        let obligation_age = turn_age - FRAMED_AFTER_TURN_START_SECS;
+        let health = RelayHealthSnapshot {
+            mailbox_has_cancel_token: true,
+            mailbox_turn_age_secs: Some(turn_age),
+            unpaired_active_token_reconfirmed: true,
+            ..RelayHealthSnapshot::test_snapshot()
+        };
+        let expected = match turn_age {
+            ..60 => ReachabilityVerdict::Reachable,
+            ..605 => rowless(obligation_age),
+            _ => unreachable(obligation_age),
+        };
+        let verdict = Case {
+            ledger: Some(ledger_with(
+                vec![obligation(4_000, 4_400, obligation_age)],
+                proven_incarnation(),
+            )),
+            rowless_turn: RowlessTurn::of(&health),
+            ..Case::default()
+        }
+        .classify();
+        if verdict != expected {
+            mismatches.push(format!(
+                "turn age {turn_age}s: expected {expected:?}, got {verdict:?}"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// Only a STRICTLY stronger ladder verdict displaces a stuck rowless turn: a
+/// transport trace shares its rank, so the turn keeps naming itself.
+#[test]
+fn a_stuck_rowless_turn_keeps_its_reason_over_an_equal_rank_transport_trace() {
+    let past_fail = |rowless_turn| {
+        Case {
+            ledger: Some(ledger_with(
+                vec![obligation(4_000, 4_400, OBLIGATION_FAIL_BOUND_SECS + 30)],
+                proven_incarnation(),
+            )),
+            placeholder_present: true,
+            rowless_turn,
+            ..Case::default()
+        }
+        .classify()
+    };
+    assert!(matches!(
+        past_fail(RowlessTurn::WithinGrace),
+        ReachabilityVerdict::TransportUnknown { .. }
+    ));
+    assert!(matches!(
+        past_fail(RowlessTurn::OutlivedGrace).unknown_reason(),
+        Some(ReachabilityUnknownReason::RowlessActiveTurn { .. })
+    ));
 }
 
 /// Inside the row-acquisition grace a rowless turn is the normal turn-boundary

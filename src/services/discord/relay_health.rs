@@ -569,18 +569,6 @@ impl RelayHealthSnapshot {
         }
         self.unread_bytes == Some(0)
     }
-
-    /// A reconfirmed token-without-row that kept its token past the grace a new
-    /// token gets to write its row. The stall classifier and the reachability
-    /// verdict both read this, so they cannot disagree on which turn is stuck.
-    pub(in crate::services::discord) fn unpaired_active_token_outlived_grace(&self) -> bool {
-        self.mailbox_has_cancel_token
-            && !self.bridge_inflight_present
-            && self.unpaired_active_token_reconfirmed
-            && self
-                .mailbox_turn_age_secs
-                .is_some_and(|age| age >= UNPAIRED_ACTIVE_TOKEN_GRACE_SECS)
-    }
 }
 
 /// Time allowed for a newly minted mailbox token to acquire its durable
@@ -623,7 +611,13 @@ impl RelayStallClassifier {
             return RelayStallState::OrphanPendingToken;
         }
 
-        if snapshot.unpaired_active_token_outlived_grace() {
+        if snapshot.mailbox_has_cancel_token
+            && !snapshot.bridge_inflight_present
+            && snapshot.unpaired_active_token_reconfirmed
+            && snapshot
+                .mailbox_turn_age_secs
+                .is_some_and(|age| age >= UNPAIRED_ACTIVE_TOKEN_GRACE_SECS)
+        {
             return RelayStallState::UnpairedActiveToken;
         }
 

@@ -59,13 +59,7 @@ pub(super) fn relay_verdict_probe_operands(
         pane_idle_confirmed: pane_alive
             && matches!(relay_health.active_turn, RelayActiveTurn::None)
             && relay_health.idle_witness_tail_is_not_waiting(),
-        rowless_turn: if relay_health.unpaired_active_token_outlived_grace() {
-            RowlessTurn::OutlivedGrace
-        } else if relay_health.unpaired_active_token_reconfirmed {
-            RowlessTurn::WithinGrace
-        } else {
-            RowlessTurn::None
-        },
+        rowless_turn: RowlessTurn::of(relay_health),
         executor,
         placeholder_present: relay_health.pending_discord_callback_msg_id.is_some(),
         now_epoch_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
@@ -123,13 +117,11 @@ pub(super) fn detail_executor_witness(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::discord::relay_health::{
-        RelayStallClassifier, RelayStallState, UNPAIRED_ACTIVE_TOKEN_GRACE_SECS,
-    };
+    use crate::services::discord::relay_health::{RelayStallClassifier, RelayStallState};
 
     /// The 2026-09-18 adk-dash-cc capture: token held, no inflight row, the
     /// pairing reconfirmed, three messages queued behind it.
-    fn rowless_capture(turn_age_secs: u64) -> RelayHealthSnapshot {
+    fn rowless_capture(turn_age_secs: Option<u64>) -> RelayHealthSnapshot {
         RelayHealthSnapshot {
             active_turn: RelayActiveTurn::Foreground,
             tmux_alive: Some(true),
@@ -137,46 +129,50 @@ mod tests {
             mailbox_has_cancel_token: true,
             mailbox_active_user_msg_id: Some(1_550_401_623_417_950_271),
             mailbox_turn_started_at_ms: Some(1_000_000),
-            mailbox_turn_age_secs: Some(turn_age_secs),
+            mailbox_turn_age_secs: turn_age_secs,
             queue_depth: 3,
             unpaired_active_token_reconfirmed: true,
             ..RelayHealthSnapshot::test_snapshot()
         }
     }
 
-    /// The reachability verdict reports a rowless turn as stuck exactly where
-    /// the stall classifier calls it `UnpairedActiveToken`, so a token still
-    /// inside its row-acquisition grace no longer pins the node degraded.
+    /// Health stops vouching for a rowless turn at 60 s while the stall
+    /// classifier still waits 600 s to call it stuck. Literal ages, so moving
+    /// either threshold — or re-tying one to the other — turns this red.
     #[test]
-    fn a_rowless_turn_is_stuck_only_where_the_stall_classifier_calls_it_unpaired() {
-        for (age, expected) in [
-            (0, RowlessTurn::WithinGrace),
-            (
-                UNPAIRED_ACTIVE_TOKEN_GRACE_SECS - 1,
-                RowlessTurn::WithinGrace,
-            ),
-            (UNPAIRED_ACTIVE_TOKEN_GRACE_SECS, RowlessTurn::OutlivedGrace),
-            (738, RowlessTurn::OutlivedGrace),
+    fn health_grace_and_stall_threshold_for_a_rowless_turn_move_independently() {
+        for (age, reachability, stalled) in [
+            (0, RowlessTurn::WithinGrace, false),
+            (59, RowlessTurn::WithinGrace, false),
+            (60, RowlessTurn::OutlivedGrace, false),
+            (599, RowlessTurn::OutlivedGrace, false),
+            (600, RowlessTurn::OutlivedGrace, true),
+            (738, RowlessTurn::OutlivedGrace, true),
         ] {
-            let capture = rowless_capture(age);
+            let capture = rowless_capture(Some(age));
             assert_eq!(
                 relay_verdict_probe_operands(ExecutorWitness::Present, &capture, 1).rowless_turn,
-                expected,
+                reachability,
                 "turn age {age}s"
             );
             assert_eq!(
                 RelayStallClassifier::classify(&capture) == RelayStallState::UnpairedActiveToken,
-                expected == RowlessTurn::OutlivedGrace,
-                "the stall classifier disagrees at turn age {age}s"
+                stalled,
+                "stall classification at turn age {age}s"
             );
         }
 
+        assert_eq!(
+            RowlessTurn::of(&rowless_capture(None)),
+            RowlessTurn::OutlivedGrace,
+            "an unreadable turn age must not be read as inside the grace"
+        );
         let unconfirmed = RelayHealthSnapshot {
             unpaired_active_token_reconfirmed: false,
-            ..rowless_capture(738)
+            ..rowless_capture(Some(738))
         };
         assert_eq!(
-            relay_verdict_probe_operands(ExecutorWitness::Present, &unconfirmed, 1).rowless_turn,
+            RowlessTurn::of(&unconfirmed),
             RowlessTurn::None,
             "an unreconfirmed pairing is not a rowless turn at any age"
         );
