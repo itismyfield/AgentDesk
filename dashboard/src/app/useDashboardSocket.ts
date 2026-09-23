@@ -38,6 +38,9 @@ export function normalizeDashboardSocketEvent(raw: unknown): WSEventWithId | nul
 }
 
 const LAST_EVENT_ID_STORAGE_KEY = "adk:ws:last-event-id";
+// Back off from one second to thirty seconds while the server is unavailable.
+const RECONNECT_INITIAL_DELAY_MS = 1_000;
+const RECONNECT_MAX_DELAY_MS = 30_000;
 onCredentialChange(() => {
   try { window.localStorage.removeItem(LAST_EVENT_ID_STORAGE_KEY); } catch { /* storage is optional */ }
 });
@@ -86,7 +89,7 @@ export function useDashboardSocket(onEvent: (event: WSEvent) => void) {
 
     function scheduleReconnect() {
       if (destroyed || auth.signal.aborted) return;
-      const delay = Math.min(1000 * 2 ** wsRetryRef.current, 30000);
+      const delay = Math.min(RECONNECT_INITIAL_DELAY_MS * 2 ** wsRetryRef.current, RECONNECT_MAX_DELAY_MS);
       wsRetryRef.current += 1;
       wsTimerRef.current = setTimeout(() => { void connect(); }, delay);
     }
