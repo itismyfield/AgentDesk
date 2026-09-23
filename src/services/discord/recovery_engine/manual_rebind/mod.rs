@@ -395,13 +395,11 @@ async fn rebind_inflight_for_channel_inner(
             latest_lease_turn_id.as_deref(),
         )
     });
-    let mut pending_fence_forward = None;
     if force_initial_offset.is_none() && tui_direct_adopt.is_some() {
         match tui_direct_adopt {
-            Some(adoption::TuiDirectAdoptOffsets::FenceForward(cause)) => {
+            Some(adoption::TuiDirectAdoptOffsets::FenceForward(_)) => {
                 force_initial_offset = Some(synthetic_initial_offset);
                 forced_adopted_transcript_rebase_offset = Some(synthetic_initial_offset);
-                pending_fence_forward = Some(cause);
             }
             _ => {
                 // Same coordinate space: resume from the row, but never below what an idle
@@ -608,7 +606,7 @@ async fn rebind_inflight_for_channel_inner(
                 .unwrap_or(0),
         )
     };
-    let initial_offset = rebind_initial_offset_with_floor_unless_forced(
+    let mut initial_offset = rebind_initial_offset_with_floor_unless_forced(
         initial_offset_without_floor,
         minimum_initial_offset,
         output_len_for_floor,
@@ -625,7 +623,14 @@ async fn rebind_inflight_for_channel_inner(
     }
 
     // Custody before the fence: the adoption below overwrites the only cursor into the range.
-    let fence_forward_custody = match (pending_fence_forward, existing_inflight.as_ref()) {
+    // A Codex relay rebuild is exempt: it replays from a start derived from the row's cursor.
+    let fence_cause = adoption::tui_direct_fence_cause(
+        existing_inflight.as_ref(),
+        tui_direct_adopt,
+        existing_offset_rebase_to_output.filter(|_| pending_codex_tui_rebind_relay.is_none()),
+        runtime_state.rebase_existing_offsets_to_output,
+    );
+    let fence_forward_custody = match (fence_cause, existing_inflight.as_ref()) {
         (Some(cause), Some(existing)) => {
             let facts = adoption::AdoptFenceForward {
                 cause,
@@ -656,6 +661,10 @@ async fn rebind_inflight_for_channel_inner(
         }
         _ => None,
     };
+    if let Some(fence) = fence_forward_custody.as_ref().and_then(|c| c.fenced_at) {
+        initial_offset = fence;
+        existing_offset_rebase_to_output = Some(fence);
+    }
 
     let mut inflight_rollback_on_relay_setup_failure: Option<PendingRebindInflightRollback>;
     let mut locked_episode_from_adoption: Option<super::inflight::LockedInflightEpisode> = None;

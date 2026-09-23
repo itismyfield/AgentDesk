@@ -87,6 +87,8 @@ pub(crate) enum AdoptFenceForwardCause {
     /// No live lease names the running turn (a restart, or a turn past the lease TTL), so the
     /// unread range may already hold a newer turn.
     TurnIdentityUnknown,
+    /// An operator `output_path` override rebased the row to the output's EOF.
+    OperatorOverride,
 }
 
 impl AdoptFenceForwardCause {
@@ -96,6 +98,7 @@ impl AdoptFenceForwardCause {
             Self::CoordinateSpaceMismatch => "coordinate_space_mismatch",
             Self::NewerTurnMixed => "newer_turn_mixed",
             Self::TurnIdentityUnknown => "turn_identity_unknown",
+            Self::OperatorOverride => "operator_override",
         }
     }
 }
@@ -147,6 +150,25 @@ pub(crate) fn tui_direct_adopt_offsets(
         TuiDirectAdoptOffsets::Preserve,
         TuiDirectAdoptOffsets::FenceForward,
     ))
+}
+
+/// A TUI-direct row needs custody whenever the rebase that will land overwrites its only cursor,
+/// whether the adoption or an operator override asked for that rebase.
+pub(crate) fn tui_direct_fence_cause(
+    existing: Option<&inflight::InflightTurnState>,
+    adopt: Option<TuiDirectAdoptOffsets>,
+    rebase: Option<u64>,
+    operator_override: bool,
+) -> Option<AdoptFenceForwardCause> {
+    let owner = existing?.request_owner_user_id;
+    rebase.filter(|_| {
+        owner == crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
+    })?;
+    Some(match adopt {
+        _ if operator_override => AdoptFenceForwardCause::OperatorOverride,
+        Some(TuiDirectAdoptOffsets::FenceForward(cause)) => cause,
+        _ => AdoptFenceForwardCause::CoordinateSpaceMismatch,
+    })
 }
 
 /// Committed delivery offset for a Claude transcript, after the same generation/regression
@@ -209,10 +231,8 @@ pub(crate) static ADOPT_FENCE_FORWARD_DISPATCHES: std::sync::Mutex<
 /// What a fence-forward can keep of the unread range `[range_start, old EOF)`.
 #[derive(Debug, PartialEq, Eq)]
 enum UnreadRange {
-    Body {
-        old_eof: u64,
-        text: String,
-    },
+    /// `[range_start, old_eof)` exactly as one read saw it, so what is kept is what is skipped.
+    Bytes { old_eof: u64, bytes: Vec<u8> },
     /// The saved coordinates no longer address any bytes, so only the range itself is kept.
     Unaddressable(&'static str),
 }
@@ -225,7 +245,7 @@ fn snapshot_unread_range(old_path: Option<&str>, range_start: u64) -> Result<Unr
             "row has no saved transcript path",
         ));
     };
-    let bytes = match std::fs::read(path) {
+    let mut bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(UnreadRange::Unaddressable(
@@ -234,22 +254,21 @@ fn snapshot_unread_range(old_path: Option<&str>, range_start: u64) -> Result<Unr
         }
         Err(error) => return Err(format!("read saved transcript {path}: {error}")),
     };
-    let unread = usize::try_from(range_start)
-        .ok()
-        .and_then(|start| bytes.get(start..));
-    let Some(unread) = unread else {
+    let start = usize::try_from(range_start).ok();
+    let Some(start) = start.filter(|start| *start <= bytes.len()) else {
         return Ok(UnreadRange::Unaddressable(
             "saved offset lies past the saved transcript's end",
         ));
     };
-    Ok(UnreadRange::Body {
-        old_eof: bytes.len() as u64,
-        text: super::super::jsonl_extract::extract_response_from_jsonl_bytes(unread),
-    })
+    let old_eof = bytes.len() as u64;
+    let bytes = bytes.split_off(start);
+    Ok(UnreadRange::Bytes { old_eof, bytes })
 }
 
 /// Proof that the unread range is in dead-letter custody; only this lets a rebind fence past it.
 pub(crate) struct AdoptFenceForwardCustody {
+    /// The kept range's end when the fence lands in the same file, so the fence skips exactly it.
+    pub(crate) fenced_at: Option<u64>,
     cause: AdoptFenceForwardCause,
     turn_id: Option<String>,
     record: crate::db::relay_dead_letter::RelayDeadLetterRecord,
@@ -274,7 +293,7 @@ async fn insert_custody(
 }
 
 /// Puts the row's unread range `[turn_start_offset, old EOF)` in dead-letter custody before the
-/// caller overwrites the only cursor into it: the body when readable, else the range and why.
+/// caller overwrites the only cursor into it: its raw bytes when readable, else the range and why.
 /// `Err` means nothing was recorded, so the caller must keep the row's offsets.
 pub(crate) async fn take_adopt_fence_forward_custody(
     pool: Option<&sqlx::PgPool>,
@@ -284,12 +303,27 @@ pub(crate) async fn take_adopt_fence_forward_custody(
     let existing = facts.existing;
     let range_start = existing.turn_start_offset.unwrap_or(existing.last_offset);
     let old_path = (existing.output_path.as_deref().map(str::trim)).filter(|path| !path.is_empty());
+    let same_file = old_path.is_some_and(|old| rebind_output_paths_same(old, facts.output_path));
+    let mut fenced_at = None;
     let (custody, content, notice) = match snapshot_unread_range(old_path, range_start)? {
-        UnreadRange::Body { old_eof, text } => {
-            let dropped = old_eof - range_start;
-            let custody = format!("custody=body dropped_bytes={dropped} old_eof={old_eof}");
+        UnreadRange::Bytes { old_eof, bytes } => {
+            fenced_at = same_file.then_some(old_eof);
+            let dropped = bytes.len();
+            // Raw bytes, not a parse: a record cut mid-write is kept whole. TEXT takes no NUL.
+            use base64::Engine as _;
+            let (encoding, content) = match String::from_utf8(bytes) {
+                Ok(text) if !text.contains('\0') => ("utf8", text),
+                Ok(text) => ("base64", base64::prelude::BASE64_STANDARD.encode(text)),
+                Err(error) => (
+                    "base64",
+                    base64::prelude::BASE64_STANDARD.encode(error.as_bytes()),
+                ),
+            };
+            let custody = format!(
+                "custody=raw encoding={encoding} dropped_bytes={dropped} old_eof={old_eof}"
+            );
             let notice = format!("이전 응답 {dropped}바이트를 이어서 전달하지 못해 보관했습니다");
-            (custody, text, notice)
+            (custody, content, notice)
         }
         UnreadRange::Unaddressable(why) => {
             let custody = format!("custody=unrecoverable why=\"{why}\"");
@@ -311,7 +345,7 @@ pub(crate) async fn take_adopt_fence_forward_custody(
             facts.cause.as_str(),
             old_path.unwrap_or("-"),
             facts.output_path,
-            facts.initial_offset,
+            fenced_at.unwrap_or(facts.initial_offset),
             facts.tmux_session_name,
             existing.external_turn_id.as_deref().unwrap_or("-"),
             facts.latest_lease_turn_id.unwrap_or("-"),
@@ -319,6 +353,7 @@ pub(crate) async fn take_adopt_fence_forward_custody(
     };
     insert_custody(pool, &record).await?;
     Ok(AdoptFenceForwardCustody {
+        fenced_at,
         cause: facts.cause,
         turn_id: existing.external_turn_id.clone(),
         record,
@@ -343,6 +378,7 @@ pub(crate) fn announce_adopt_fence_forward(
         turn_id,
         record,
         notice,
+        ..
     } = custody;
     crate::services::observability::record_invariant_check(
         false,
@@ -708,6 +744,8 @@ mod tests {
         assert_eq!(violations.count(), 1);
     }
 
+    const SESSION_FILE: &str = "61590000-0000-4000-8000-000000000000.jsonl";
+
     /// Writes filler up to `turn_start`, then an assistant line holding `body` with no newline.
     fn write_transcript(path: &std::path::Path, body: &str) -> u64 {
         let mut bytes = vec![b'x'; 4_095];
@@ -725,11 +763,11 @@ mod tests {
         let eof = write_transcript(&transcript, "KEPT_BODY_6159");
         let path = transcript.to_str().unwrap();
         match snapshot_unread_range(Some(path), 4_096) {
-            Ok(UnreadRange::Body { old_eof, text }) => {
+            Ok(UnreadRange::Bytes { old_eof, bytes }) => {
                 assert_eq!(old_eof, eof);
-                assert!(text.contains("KEPT_BODY_6159"), "{text}");
+                assert_eq!(bytes, std::fs::read(&transcript).unwrap()[4_096..]);
             }
-            other => panic!("a readable range keeps its body: {other:?}"),
+            other => panic!("a readable range keeps its bytes: {other:?}"),
         }
         let gone = tmp.path().join("gone.jsonl");
         let unaddressable = [
@@ -745,6 +783,74 @@ mod tests {
         }
         // Present but unreadable is not "gone": a retry may still keep the body.
         assert!(snapshot_unread_range(tmp.path().to_str(), 0).is_err());
+    }
+
+    /// A record still being written is normal mid-turn: custody keeps its bytes, not a parse.
+    #[tokio::test]
+    async fn custody_keeps_a_record_cut_mid_write_byte_for_byte_and_fences_at_its_end() {
+        let channel_id = 6_159_009_u64;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let transcript = tmp.path().join(SESSION_FILE);
+        let complete = write_transcript(&transcript, "WHOLE_6159");
+        let partial = r#"
+{"type":"assistant","message":{"content":[{"type":"text","text":"CUT_6159 한"#;
+        let mut bytes = std::fs::read(&transcript).unwrap();
+        bytes.extend_from_slice(&partial.as_bytes()[..partial.len() - 1]);
+        std::fs::write(&transcript, &bytes).unwrap();
+        let path = transcript.to_str().unwrap();
+        let row = tui_direct_row(channel_id, "tmux-6159", path);
+        let facts = AdoptFenceForward {
+            cause: AdoptFenceForwardCause::NewerTurnMixed,
+            existing: &row,
+            tmux_session_name: "tmux-6159",
+            output_path: path,
+            initial_offset: complete,
+            latest_lease_turn_id: Some("turn-b"),
+        };
+        ADOPT_FENCE_FORWARD_TEST_CUSTODY
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(channel_id.to_string());
+        let custody = take_adopt_fence_forward_custody(None, channel_id, &facts)
+            .await
+            .expect("custody");
+        let eof = bytes.len() as u64;
+        assert_eq!(
+            custody.fenced_at,
+            Some(eof),
+            "the fence skips exactly the kept range"
+        );
+        let reason = &custody.record.reason;
+        assert!(reason.contains("custody=raw encoding=base64"), "{reason}");
+        let kept = format!("dropped_bytes={} old_eof={eof}", eof - 4_096);
+        assert!(reason.contains(&kept) && reason.contains(&format!("new_offset={eof}")));
+        use base64::Engine as _;
+        let content = base64::prelude::BASE64_STANDARD.decode(&custody.record.content);
+        assert_eq!(content.expect("base64"), bytes[4_096..], "{reason}");
+    }
+
+    #[test]
+    fn any_rebase_of_a_tui_direct_row_needs_custody_whoever_asked_for_it() {
+        use AdoptFenceForwardCause::*;
+        let row = tui_direct_row(6_159_010, "tmux-6159", "/tmp/not-a-transcript.jsonl");
+        let preserve = Some(TuiDirectAdoptOffsets::Preserve);
+        let rotated = Some(TuiDirectAdoptOffsets::FenceForward(TranscriptRotated));
+        let cause =
+            |adopt, rebase, operator| tui_direct_fence_cause(Some(&row), adopt, rebase, operator);
+        assert_eq!(cause(None, Some(7), true), Some(OperatorOverride));
+        assert_eq!(cause(preserve, Some(7), true), Some(OperatorOverride));
+        assert_eq!(cause(rotated, Some(7), false), Some(TranscriptRotated));
+        assert_eq!(
+            cause(preserve, None, true),
+            None,
+            "no rebase, nothing to keep"
+        );
+        let mut owned = row.clone();
+        owned.request_owner_user_id = 456;
+        assert_eq!(
+            tui_direct_fence_cause(Some(&owned), None, Some(7), true),
+            None
+        );
     }
 
     #[tokio::test]
@@ -781,8 +887,6 @@ mod tests {
 
     #[cfg(unix)]
     use crate::services::observability::events::{StructuredEvent, test_capture::capture_sync};
-    #[cfg(unix)]
-    const SESSION_FILE: &str = "61590000-0000-4000-8000-000000000000.jsonl";
 
     #[cfg(unix)]
     struct Rebind {
@@ -795,7 +899,8 @@ mod tests {
 
     /// Drives `rebind_inflight_for_channel` for a TUI-direct row resting at `turn_start_offset`
     /// 4096, with an optional newer lease turn and an in-memory committed offset. Without
-    /// `custody` the dead-letter INSERT fails (no pool).
+    /// `custody` the dead-letter INSERT fails (no pool). `operator` passes the transcript as an
+    /// operator `output_path` override.
     #[cfg(unix)]
     fn rebind_tui_direct_row(
         channel_id: u64,
@@ -804,6 +909,7 @@ mod tests {
         committed: u64,
         row_runtime_kind: Option<RuntimeHandoffKind>,
         custody: bool,
+        operator: bool,
     ) -> Option<Rebind> {
         use crate::services::platform::tmux;
         use crate::services::tui_prompt_dedupe as dedupe;
@@ -828,7 +934,12 @@ mod tests {
             RuntimeHandoffKind::ClaudeTui,
         )
         .expect("write runtime-kind marker");
-        let transcript = tmp.path().join(SESSION_FILE);
+        let _claude_dir = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "CLAUDE_CONFIG_DIR",
+            tmp.path(),
+        );
+        let transcript = tmp.path().join("projects").join(SESSION_FILE);
+        std::fs::create_dir_all(transcript.parent().unwrap()).expect("projects dir");
         let eof = write_transcript(&transcript, &"BACKLOG_BODY_6159 ".repeat(512));
         let mut row = tui_direct_row(channel_id, &session, transcript.to_str().unwrap());
         row.runtime_kind = row_runtime_kind;
@@ -849,6 +960,10 @@ mod tests {
         let coord = shared.tmux_relay_coord(channel);
         coord.confirmed_end_offset.store(committed, SeqCst);
         let http = std::sync::Arc::new(poise::serenity_prelude::Http::new("Bot test-token"));
+        let output = operator.then(|| transcript.to_str().unwrap());
+        let overrides =
+            super::super::ManualRebindOverrides::validated(&ProviderKind::Claude, output, None)
+                .expect("operator override");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -860,7 +975,7 @@ mod tests {
                 &ProviderKind::Claude,
                 channel_id,
                 Some(session.clone()),
-                super::super::ManualRebindOverrides::default(),
+                overrides,
                 None,
             ))
         });
@@ -884,7 +999,7 @@ mod tests {
         let channel_id = 6_159_003_u64;
         let claude = Some(RuntimeHandoffKind::ClaudeTui);
         let Some(rebind) =
-            rebind_tui_direct_row(channel_id, "mixed", Some("turn-b"), 0, claude, true)
+            rebind_tui_direct_row(channel_id, "mixed", Some("turn-b"), 0, claude, true, false)
         else {
             return;
         };
@@ -910,9 +1025,15 @@ mod tests {
     fn rebind_preserves_a_tui_direct_row_but_never_below_the_committed_offset() {
         let channel_id = 6_159_004_u64;
         let claude = Some(RuntimeHandoffKind::ClaudeTui);
-        let Some(rebind) =
-            rebind_tui_direct_row(channel_id, "keep", Some("turn-a"), 8_192, claude, true)
-        else {
+        let Some(rebind) = rebind_tui_direct_row(
+            channel_id,
+            "keep",
+            Some("turn-a"),
+            8_192,
+            claude,
+            true,
+            false,
+        ) else {
             return;
         };
         assert!(rebind.eof > 8_192);
@@ -936,7 +1057,8 @@ mod tests {
     fn rebind_fences_a_tui_direct_row_whose_turn_identity_is_unknown() {
         let channel_id = 6_159_006_u64;
         let claude = Some(RuntimeHandoffKind::ClaudeTui);
-        let Some(rebind) = rebind_tui_direct_row(channel_id, "nolease", None, 0, claude, true)
+        let Some(rebind) =
+            rebind_tui_direct_row(channel_id, "nolease", None, 0, claude, true, false)
         else {
             return;
         };
@@ -954,9 +1076,15 @@ mod tests {
     fn rebind_keeps_the_row_offsets_when_the_unread_range_is_not_in_custody() {
         let channel_id = 6_159_007_u64;
         let claude = Some(RuntimeHandoffKind::ClaudeTui);
-        let Some(rebind) =
-            rebind_tui_direct_row(channel_id, "nocustody", Some("turn-b"), 0, claude, false)
-        else {
+        let Some(rebind) = rebind_tui_direct_row(
+            channel_id,
+            "nocustody",
+            Some("turn-b"),
+            0,
+            claude,
+            false,
+            false,
+        ) else {
             return;
         };
         assert!(rebind.eof > 4_096, "the unread range is not empty");
@@ -981,12 +1109,64 @@ mod tests {
     #[test]
     fn rebind_never_rebases_an_unstamped_tui_direct_row_to_eof_without_a_record() {
         let channel_id = 6_159_005_u64;
-        let Some(rebind) = rebind_tui_direct_row(channel_id, "unstamped", None, 0, None, true)
+        let Some(rebind) =
+            rebind_tui_direct_row(channel_id, "unstamped", None, 0, None, true, false)
         else {
             return;
         };
         assert_eq!(rebind.initial.ok(), Some(rebind.eof));
         let needles = ["cause=coordinate_space_mismatch"];
+        assert_one_fence_forward(&rebind.events, channel_id, &needles);
+    }
+
+    /// An operator `output_path` override rebases to EOF too, so it passes the same custody gate.
+    #[cfg(unix)]
+    #[test]
+    fn rebind_with_an_output_path_override_keeps_the_row_offsets_without_custody() {
+        let channel_id = 6_159_011_u64;
+        let claude = Some(RuntimeHandoffKind::ClaudeTui);
+        let Some(rebind) = rebind_tui_direct_row(
+            channel_id,
+            "opnocustody",
+            Some("turn-a"),
+            0,
+            claude,
+            false,
+            true,
+        ) else {
+            return;
+        };
+        assert!(
+            rebind.initial.is_err(),
+            "rebind must fail: {:?}",
+            rebind.initial
+        );
+        let row = rebind.row.expect("row survives a failed rebind");
+        let cursor = (row.turn_start_offset, row.last_offset);
+        assert_eq!(cursor, (Some(4_096), 4_096), "cursor must not move to EOF");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rebind_with_an_output_path_override_rebases_to_eof_only_after_custody() {
+        let channel_id = 6_159_012_u64;
+        let claude = Some(RuntimeHandoffKind::ClaudeTui);
+        let Some(rebind) = rebind_tui_direct_row(
+            channel_id,
+            "opcustody",
+            Some("turn-a"),
+            0,
+            claude,
+            true,
+            true,
+        ) else {
+            return;
+        };
+        let eof = rebind.eof;
+        assert_eq!(rebind.initial.ok(), Some(eof));
+        let row = rebind.row.expect("adopted row");
+        assert_eq!((row.turn_start_offset, row.last_offset), (Some(eof), eof));
+        let needles = ["cause=operator_override", "BACKLOG_BODY_6159"];
         assert_one_fence_forward(&rebind.events, channel_id, &needles);
     }
 }
