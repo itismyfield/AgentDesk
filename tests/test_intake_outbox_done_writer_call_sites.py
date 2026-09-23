@@ -395,7 +395,8 @@ class TransportLegacyInventoryTests(unittest.TestCase):
     READER_DECL = re.compile(r"struct ShutdownReader\((?P<field>.*)\);")
     RAW_HANDLE = re.compile(r"self\.0(?!\.load\()")
     CHECKPOINT = re.compile(
-        r"admission_action\(\s*cancelled,\s*&shared\.restart\.intake_worker_lifecycle,"
+        r"admission_action\(\s*(cancelled|&owner_cancelled),\s*&"
+        r"(shared|runtime\.shared)\.restart\.intake_worker_lifecycle,"
         r"\s*AdmissionCheckpoint::(\w+),"
     )
     # "<adapter> <caller basename> <field>=<value>..." in exact store order.
@@ -420,10 +421,18 @@ class TransportLegacyInventoryTests(unittest.TestCase):
         tick = self.item(worker, "pub(crate) async fn run_intake_worker_tick(")
         self.assertIn("cancelled: &(dyn Fn() -> bool + Sync),", tick)
         self.assertEqual(
-            self.CHECKPOINT.findall(tick), ["BeforeClaim", "AfterClaim", "AfterClaim"]
+            self.CHECKPOINT.findall(tick),
+            [
+                ("cancelled", "shared", "BeforeClaim"),
+                ("cancelled", "shared", "AfterClaim"),
+                ("&owner_cancelled", "runtime.shared", "AfterClaim"),
+            ],
         )
         self.assertEqual(tick.count("admission_action("), 3)
-        self.assertEqual(tick.count("release_cancelled_claim(pool, &row, claim_owner)"), 2)
+        self.assertEqual(tick.count("release_cancelled_claim(pool, &row, claim_owner)"), 3)
+        self.assertIn("let owner_shutdown = runtime.shared.restart.shutdown_reader();", tick)
+        self.assertIn("shared.restart.intake_worker_lifecycle.admission_is_fenced()", tick)
+        self.assertIn("owner_shutdown.load(Ordering::Acquire)", tick)
 
         loop_body = self.item(worker, "pub(crate) async fn run_intake_worker_loop(")
         self.assertNotIn("cancel: Arc<AtomicBool>", loop_body)

@@ -472,7 +472,10 @@ mod direct_meeting_candidate_tests {
 
     use poise::serenity_prelude::ChannelId;
 
-    use super::{DirectMeetingRuntimeCandidate, select_direct_meeting_runtime_candidate};
+    use super::{
+        DirectMeetingRuntimeCandidate, select_candidate_with_live_probe,
+        select_direct_meeting_runtime_candidate,
+    };
 
     fn candidate(index: usize, explicit: bool, live: bool) -> DirectMeetingRuntimeCandidate {
         DirectMeetingRuntimeCandidate {
