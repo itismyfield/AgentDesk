@@ -83,6 +83,7 @@ LIB_INVENTORY_STATIC_ONLY_BASE = frozenset({
     "cli::discord_thread_create::tests::windows_cancelled_async_holder_releases_before_runtime_exit",
     "cli::discord_thread_create::tests::windows_lock_uses_global_current_sid_named_mutex",
     "cli::discord_thread_create_lock::windows::tests::wait_status_accepts_normal_and_abandoned_but_reports_errors",
+    "services::discord::outbound::delivery_record::tests::non_unix_generation_is_absent_so_durable_frontier_is_neither_written_nor_trusted",
     "services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_process_cleanup_is_fail_closed_without_unix_probe",
 })
 LIB_INVENTORY_STATIC_ONLY_BY_PLATFORM = {

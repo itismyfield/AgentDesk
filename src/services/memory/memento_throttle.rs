@@ -7,7 +7,6 @@ use std::{
 };
 
 const RECALL_DEDUP_WINDOW: Duration = Duration::from_secs(60);
-const REMEMBER_DEDUP_WINDOW: Duration = Duration::from_secs(5 * 60);
 /// #2660 — TTL for the static-slice tracker that records when the
 /// `Ranked context from Memento` + `Core memory from Memento` blob was last
 /// emitted to a given (workspace, agent, session) lane. Within this
@@ -23,7 +22,6 @@ const KST_OFFSET_SECONDS: i32 = 9 * 60 * 60;
 /// between prune ticks. Combined with the amortized `prune_if_due` (which
 /// replaces the per-call O(N) retain scan), the hot path stays O(1).
 const MAX_RECALL_CACHE_ENTRIES: usize = 4_096;
-const MAX_REMEMBER_CACHE_ENTRIES: usize = 4_096;
 /// #2049 Finding 15: hard cap on the metric event ring + feedback ring so
 /// they can't inflate to hundreds of MB on a high-traffic deployment.
 const MAX_METRIC_EVENTS: usize = 100_000;
@@ -37,12 +35,6 @@ const HOT_PATH_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 #[derive(Clone, Debug)]
 struct CachedRecallEntry {
     external_recall: Option<String>,
-    expires_at: Instant,
-}
-
-#[derive(Clone, Debug)]
-struct CachedRememberEntry {
-    importance: Option<f64>,
     expires_at: Instant,
 }
 
@@ -121,7 +113,6 @@ struct HourBucket {
 
 struct MementoThrottleState {
     recall_cache: HashMap<String, CachedRecallEntry>,
-    remember_cache: HashMap<String, CachedRememberEntry>,
     /// #2660 — per-(workspace,agent,session) tracker that records when
     /// the static Memento dump (Ranked context + Core memory) was last
     /// emitted. Keyed independently from `recall_cache` so per-turn `user_text`
@@ -138,7 +129,6 @@ impl Default for MementoThrottleState {
     fn default() -> Self {
         Self {
             recall_cache: HashMap::new(),
-            remember_cache: HashMap::new(),
             static_slice_cache: HashMap::new(),
             metrics: VecDeque::new(),
             feedback_triggers: VecDeque::new(),
@@ -155,8 +145,6 @@ impl MementoThrottleState {
     fn prune(&mut self) {
         let now = Instant::now();
         self.recall_cache.retain(|_, entry| entry.expires_at > now);
-        self.remember_cache
-            .retain(|_, entry| entry.expires_at > now);
         self.static_slice_cache
             .retain(|_, entry| entry.expires_at > now);
 
@@ -209,25 +197,8 @@ impl MementoThrottleState {
         }
     }
 
-    /// #2049 Finding 15: same cap-enforcement story for the remember cache.
-    fn enforce_remember_cache_cap(&mut self) {
-        if self.remember_cache.len() <= MAX_REMEMBER_CACHE_ENTRIES {
-            return;
-        }
-        let mut by_expiry: Vec<(String, Instant)> = self
-            .remember_cache
-            .iter()
-            .map(|(k, v)| (k.clone(), v.expires_at))
-            .collect();
-        by_expiry.sort_by_key(|(_, t)| *t);
-        let drop = self.remember_cache.len() - MAX_REMEMBER_CACHE_ENTRIES;
-        for (key, _) in by_expiry.into_iter().take(drop) {
-            self.remember_cache.remove(&key);
-        }
-    }
-
     /// #2660 — cap enforcement for the static-slice tracker. Mirrors the
-    /// recall/remember LRU-ish drop strategy: when over the cap, evict the
+    /// recall LRU-ish drop strategy: when over the cap, evict the
     /// oldest-expiring entries first.
     fn enforce_static_slice_cap(&mut self) {
         if self.static_slice_cache.len() <= MAX_STATIC_SLICE_ENTRIES {
@@ -333,39 +304,6 @@ pub(crate) fn store_recall_response(key: String, external_recall: Option<String>
             },
         );
         state.enforce_recall_cache_cap();
-    });
-}
-
-pub(crate) fn should_dedup_remember(key: &str, importance: Option<f64>) -> bool {
-    with_state(|state| {
-        // #2049 Finding 15: strict expiry check; the amortized prune may not
-        // have run yet.
-        let now = Instant::now();
-        state
-            .remember_cache
-            .get(key)
-            .filter(|entry| entry.expires_at > now)
-            .map(|entry| match importance {
-                Some(current) => entry
-                    .importance
-                    .map(|previous| current <= previous + f64::EPSILON)
-                    .unwrap_or(false),
-                None => true,
-            })
-            .unwrap_or(false)
-    })
-}
-
-pub(crate) fn store_remember_fingerprint(key: String, importance: Option<f64>) {
-    with_state(|state| {
-        state.remember_cache.insert(
-            key,
-            CachedRememberEntry {
-                importance,
-                expires_at: Instant::now() + REMEMBER_DEDUP_WINDOW,
-            },
-        );
-        state.enforce_remember_cache_cap();
     });
 }
 

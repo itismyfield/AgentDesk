@@ -6918,18 +6918,6 @@ mod persistence_tests {
         let mut intervention = make_intervention(2_840_002, "", None);
         intervention.pending_uploads = vec![
             "[File uploaded] report.pdf → /runtime/discord_uploads/1/report.pdf (123 bytes)".into(),
-            crate::services::cluster::attachment_transfer::uploads::Upload::Bundle(
-                crate::services::cluster::attachment_transfer::uploads::BundleRef {
-                    bundle_id: uuid::Uuid::new_v4(),
-                    identity:
-                        crate::services::cluster::attachment_transfer::AttachmentMessageIdentity {
-                            provider: provider.as_str().into(),
-                            channel_id: channel_id.to_string(),
-                            user_msg_id: "2840002".into(),
-                        },
-                    source_count: 2,
-                },
-            ),
         ];
 
         save_channel_queue(

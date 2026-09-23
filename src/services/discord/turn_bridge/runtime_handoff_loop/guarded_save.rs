@@ -11,17 +11,17 @@ std::thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) struct AtomicStampFailureGuard;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl Drop for AtomicStampFailureGuard {
     fn drop(&mut self) {
         TEST_ATOMIC_STAMP_FAILURE_COUNTDOWN.set(None);
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) fn fail_guarded_runtime_atomic_stamp_on_call(call: usize) -> AtomicStampFailureGuard {
     assert!(call > 0, "fault-injected stamp call is one-based");
     TEST_ATOMIC_STAMP_FAILURE_COUNTDOWN.set(Some(call));
