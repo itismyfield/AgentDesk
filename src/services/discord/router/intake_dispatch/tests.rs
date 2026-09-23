@@ -598,7 +598,7 @@ async fn raw_attachment_foreign_owner_blocks_before_outbox_or_local_state_pg() {
         has_nonportable_uploads: false,
         attachments: vec![super::super::message_handler::AttachmentDescriptor {
             filename: "report.txt".to_string(),
-            url: "https://cdn.discordapp.com/attachments/1/2/report.txt".to_string(),
+            url: "https://example.invalid/report.txt".to_string(),
         }],
         preloaded_uploads: Vec::new(),
         voice_announcement: None,
@@ -607,7 +607,7 @@ async fn raw_attachment_foreign_owner_blocks_before_outbox_or_local_state_pg() {
     assert!(matches!(
         super::admit_text_intake(&deps, &submission).await,
         super::IntakeAdmission::Blocked {
-            reason: crate::services::cluster::intake_router_hook::IntakeBlockedReason::NonPortableAttachmentForeignOwner { .. }
+            reason: crate::services::cluster::intake_router_hook::IntakeBlockedReason::AttachmentUnavailable { .. }
         }
     ));
     let outbox_count: i64 =
