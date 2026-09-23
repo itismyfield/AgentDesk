@@ -45,6 +45,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/github/sync/warning_tests.rs",
         "src/github/triage/warning_tests.rs",
         "src/server/database_fixture_invariant_tests.rs",
+        "src/server/dashboard_auth/tests.rs",
         "src/server/routes/auto_queue_lifecycle_pg_tests.rs",
         "src/server/routes/dispatched_sessions_tests.rs",
         "src/server/routes/scheduled_messages/postgres_tests.rs",

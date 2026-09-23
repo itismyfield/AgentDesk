@@ -1067,7 +1067,12 @@ async function mockOpsHealthApi(page: Page, getPayload: () => Record<string, unk
 }
 
 async function mockDashboardBootstrap(page: Page) {
+  // Fixture tests must never fall through Vite's proxy to a real operator API.
+  await page.route(/\/api\//, (route) => route.fulfill({
+    status: 404, json: { error: "API route is not configured in this browser fixture" },
+  }));
   await page.addInitScript(() => {
+    const sockets: MockWebSocket[] = [];
     class MockWebSocket {
       static readonly CONNECTING = 0;
       static readonly OPEN = 1;
@@ -1083,7 +1088,9 @@ async function mockDashboardBootstrap(page: Page) {
 
       constructor(url: string) {
         this.url = url;
+        sockets.push(this);
         setTimeout(() => {
+          if (this.readyState === MockWebSocket.CLOSED) return;
           this.readyState = MockWebSocket.OPEN;
           this.onopen?.(new Event("open"));
         }, 0);
@@ -1103,14 +1110,18 @@ async function mockDashboardBootstrap(page: Page) {
       writable: true,
       value: MockWebSocket,
     });
+    Object.defineProperty(window, "__dashboardTestSockets", { value: sockets });
   });
 
   await page.route(/\/api\/auth\/session$/, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ ok: true, csrf_token: "smoke-csrf-token" }),
+      body: JSON.stringify({ ok: true, authenticated: true, auth_enabled: false, csrf_token: "" }),
     });
+  });
+  await page.route(/\/api\/auth\/ws-ticket$/, async (route) => {
+    await route.fulfill({ json: { ticket: "s".repeat(64), expires_in: 15 } });
   });
 
   await page.route(/\/api\/offices$/, async (route) => {
@@ -1511,6 +1522,82 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("topbar")).toBeVisible();
   });
 
+  test("authentication: login, reconnect, logout and reload clear credentials", async ({ page }, testInfo) => {
+    let acceptedToken = "synthetic-browser-credential";
+    let ticketCount = 0;
+    let rejectedTickets = 0;
+    let protectedRequests = 0;
+    await page.addInitScript(() => {
+      sessionStorage.setItem("stats:token-analytics:7d", '{"previous":"private"}');
+      localStorage.setItem("agentdesk.settings.pipeline.repo-cache.v1", '{"previous":"private"}');
+    });
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname === "/api/offices") protectedRequests++;
+    });
+    await page.route(/\/api\/auth\/session$/, async (route) => {
+      await route.fulfill({ json: {
+        ok: true, auth_enabled: true, csrf_token: "",
+        authenticated: route.request().headers().authorization === `Bearer ${acceptedToken}`,
+      } });
+    });
+    await page.route(/\/api\/auth\/ws-ticket$/, async (route) => {
+      if (route.request().headers().authorization !== `Bearer ${acceptedToken}`) {
+        rejectedTickets++;
+        await route.fulfill({ status: 401, json: { error: "unauthorized" } });
+        return;
+      }
+      ticketCount++;
+      await route.fulfill({ json: { ticket: String(ticketCount).padStart(64, "t"), expires_in: 15 } });
+    });
+    await page.goto("/home");
+    await expect(page.getByRole("heading", { name: "AgentDesk 로그인" })).toBeVisible();
+    await expect(page.getByLabel("서버 토큰")).toBeEnabled();
+    expect(protectedRequests).toBe(0);
+    expect(await page.evaluate(() => sessionStorage.getItem("stats:token-analytics:7d"))).toBeNull();
+    expect(await page.evaluate(() => localStorage.getItem("agentdesk.settings.pipeline.repo-cache.v1"))).toBeNull();
+    await expectNoHorizontalOverflow(page);
+    await page.screenshot({ path: testInfo.outputPath("login.png"), fullPage: true });
+    await page.getByLabel("서버 토큰").fill("invalid");
+    await page.getByRole("button", { name: "로그인", exact: true }).click();
+    await expect(page.getByLabel("서버 토큰")).toBeEnabled();
+    await expect(page.getByTestId("topbar")).toHaveCount(0);
+    await page.getByLabel("서버 토큰").fill(acceptedToken);
+    await page.getByRole("button", { name: "로그인", exact: true }).click();
+    await expect(page.getByTestId("topbar")).toBeVisible();
+    await expect.poll(() => ticketCount).toBe(1);
+    await expectNoHorizontalOverflow(page);
+    const inspectSockets = () => page.evaluate(() => {
+      const sockets = (window as unknown as { __dashboardTestSockets: WebSocket[] }).__dashboardTestSockets;
+      return sockets.map((socket) => ({ url: socket.url, readyState: socket.readyState }));
+    });
+    expect(JSON.stringify(await inspectSockets())).not.toContain(acceptedToken);
+    expect(await page.evaluate(() => JSON.stringify([localStorage, sessionStorage]))).not.toContain(acceptedToken);
+    await page.evaluate(() => {
+      (window as unknown as { __dashboardTestSockets: WebSocket[] }).__dashboardTestSockets.at(-1)!.close();
+    });
+    await expect.poll(() => ticketCount).toBe(2);
+    const sockets = await inspectSockets();
+    expect(sockets[0].url).not.toBe(sockets[1].url);
+    acceptedToken = "rotated-synthetic-browser-credential";
+    await page.evaluate(() => {
+      (window as unknown as { __dashboardTestSockets: WebSocket[] }).__dashboardTestSockets.at(-1)!.close();
+    });
+    await expect(page.getByRole("heading", { name: "AgentDesk 로그인" })).toBeVisible();
+    expect(rejectedTickets).toBe(1);
+    await page.getByLabel("서버 토큰").fill(acceptedToken);
+    await page.getByRole("button", { name: "로그인", exact: true }).click();
+    await expect(page.getByTestId("topbar")).toBeVisible();
+    await page.getByRole("button", { name: "로그아웃", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "AgentDesk 로그인" })).toBeVisible();
+    expect((await inspectSockets()).every((socket) => socket.readyState === 3)).toBe(true);
+    await page.getByLabel("서버 토큰").fill(acceptedToken);
+    await page.getByRole("button", { name: "로그인", exact: true }).click();
+    await expect(page.getByTestId("topbar")).toBeVisible();
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "AgentDesk 로그인" })).toBeVisible();
+    await expect(page.getByTestId("topbar")).toHaveCount(0);
+  });
+
   test("theme: dark/light toggle changes CSS variables", async ({ page }) => {
     await page.goto("/");
     await page
@@ -1668,12 +1755,26 @@ test.describe("Dashboard smoke tests", () => {
     }));
     expect(shellStyles.marginBottom).toContain("env(safe-area-inset-bottom)");
 
-    const tabbarStyles = await bottomNav.evaluate((element) => ({
-      height: (element as HTMLElement).style.height,
-      paddingBottom: (element as HTMLElement).style.paddingBottom,
-      paddingLeft: (element as HTMLElement).style.paddingLeft,
-      paddingRight: (element as HTMLElement).style.paddingRight,
-    }));
+    const tabbarStyles = await bottomNav.evaluate((element) => {
+      // Padding lives in AppMobileNavigation.css, not in the inline style.
+      // Inspect active matching rules so moving a declaration between an
+      // inline style and a stylesheet does not turn this contract into a lie.
+      const declarations: CSSStyleDeclaration[] = [];
+      const visit = (rules: CSSRuleList) => {
+        for (const rule of Array.from(rules)) {
+          if (rule instanceof CSSMediaRule && !matchMedia(rule.conditionText).matches) continue;
+          if (rule instanceof CSSStyleRule && rule.selectorText.split(",").some((selector) => selector.trim() === ".adk-mobile-tabbar")) declarations.push(rule.style);
+          if ("cssRules" in rule) visit((rule as CSSGroupingRule).cssRules);
+        }
+      };
+      for (const sheet of Array.from(document.styleSheets)) {
+        if (sheet.href && new URL(sheet.href, location.href).origin !== location.origin) continue;
+        visit(sheet.cssRules);
+      }
+      declarations.push((element as HTMLElement).style);
+      const value = (name: string) => declarations.map((style) => style.getPropertyValue(name)).filter(Boolean).at(-1) ?? "";
+      return { height: value("height"), paddingBottom: value("padding-bottom"), paddingLeft: value("padding-left"), paddingRight: value("padding-right") };
+    });
     expect(tabbarStyles.height).toContain("env(safe-area-inset-bottom)");
     expect(tabbarStyles.paddingBottom).toContain("env(safe-area-inset-bottom)");
     expect(tabbarStyles.paddingLeft).toContain("env(safe-area-inset-left)");
