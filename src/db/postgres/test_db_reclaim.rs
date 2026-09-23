@@ -236,7 +236,9 @@ mod tests {
     }
 
     async fn old_stamp(fx: &Fixture) -> i64 {
-        server_now(fx).await - i64::try_from(RECLAIM_MIN_AGE.as_secs()).expect("min age fits i64") - 60
+        server_now(fx).await
+            - i64::try_from(RECLAIM_MIN_AGE.as_secs()).expect("min age fits i64")
+            - 60
     }
 
     async fn backdate(fx: &Fixture, name: &str) {
