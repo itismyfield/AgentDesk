@@ -150,10 +150,11 @@ pub(crate) fn record_detached_reporting(
     }))
 }
 
-/// Settled `redelivery_state` values (#5941 Step B, migration 0120). A row starts
-/// `'pending'`; [`claim_pending_redeliveries`] moves it to `'claimed'` exactly
-/// once, and only a settle leaves that state. A claim lost to a crash therefore
-/// stays `'claimed'` until an operator or #6009 recovers it.
+/// Settled `redelivery_state` values (migration 0120). A row starts `'pending'`;
+/// [`claim_pending_redeliveries`] moves it to `'claimed'` and only a settle leaves
+/// that state. Settling back to `'pending'` makes the row claimable again, so a
+/// claim is once per attempt, not once per row. A claim lost to a crash stays
+/// `'claimed'` until an operator recovers it.
 ///
 /// The body was posted to the channel.
 pub(crate) const REDELIVERY_DELIVERED: &str = "delivered";
@@ -181,6 +182,9 @@ pub(crate) struct ClaimedDeadLetter {
 /// exactly-once across concurrent sweeps and cluster nodes; the returned rows
 /// are already `CLAIMED`, so a second call cannot hand them out again.
 ///
+/// Fewest attempts first: rows sent back to `pending` keep their low id,
+/// so id order alone lets them fill every batch until newer rows age out.
+///
 /// `min_age_secs` leaves the normal delivery path time to settle the turn;
 /// `max_age_secs` bounds the window to one in which the consumer's
 /// already-delivered witnesses can still answer.
@@ -193,7 +197,8 @@ pub(crate) async fn claim_pending_redeliveries(
 ) -> Result<Vec<ClaimedDeadLetter>, sqlx::Error> {
     let rows: Vec<(i64, String, Option<String>, String, String)> = sqlx::query_as(
         "UPDATE relay_dead_letter
-            SET redelivery_state = 'claimed'
+            SET redelivery_state = 'claimed',
+                redelivery_attempts = redelivery_attempts + 1
           WHERE id IN (
                 SELECT id
                   FROM relay_dead_letter
@@ -201,7 +206,7 @@ pub(crate) async fn claim_pending_redeliveries(
                    AND redelivery_state = 'pending'
                    AND created_at <= NOW() - ($2::BIGINT * INTERVAL '1 second')
                    AND created_at >= NOW() - ($3::BIGINT * INTERVAL '1 second')
-                 ORDER BY id
+                 ORDER BY redelivery_attempts, id
                  LIMIT $4
                  FOR UPDATE SKIP LOCKED
           )
@@ -227,8 +232,9 @@ pub(crate) async fn claim_pending_redeliveries(
         .collect())
 }
 
-/// Settle a claimed row into a terminal `redelivery_state`. Guarded on the
-/// claim, so a repeated settle writes nothing and returns 0.
+/// Settle a claimed row into its next `redelivery_state`. Guarded on the claim,
+/// so a repeated settle writes nothing and returns 0. `redelivered_at` is stamped
+/// only when the row leaves the sweep; a row back in `pending` was not redelivered.
 pub(crate) async fn settle_redelivery(
     pool: &PgPool,
     id: i64,
@@ -236,11 +242,13 @@ pub(crate) async fn settle_redelivery(
 ) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
         "UPDATE relay_dead_letter
-            SET redelivery_state = $2, redelivered_at = NOW()
+            SET redelivery_state = $2,
+                redelivered_at = CASE WHEN $2 = $3 THEN NULL ELSE NOW() END
           WHERE id = $1 AND redelivery_state = 'claimed'",
     )
     .bind(id)
     .bind(state)
+    .bind(REDELIVERY_PENDING)
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
@@ -250,6 +258,119 @@ pub(crate) async fn settle_redelivery(
 mod tests {
     use super::*;
     use sqlx::Row;
+
+    fn terminal_row(content: &str) -> RelayDeadLetterRecord {
+        RelayDeadLetterRecord {
+            kind: KIND_TERMINAL_NO_DELIVERY_OWNER.to_string(),
+            channel_id: "5551".to_string(),
+            author_id: None,
+            message_id: Some("7001".to_string()),
+            content: content.to_string(),
+            reason: "r".to_string(),
+        }
+    }
+
+    /// Claimed ids, sorted: `UPDATE ... RETURNING` does not keep the claim order.
+    async fn claim_ids(pool: &PgPool, limit: i64) -> Vec<i64> {
+        let mut ids: Vec<i64> =
+            claim_pending_redeliveries(pool, KIND_TERMINAL_NO_DELIVERY_OWNER, 0, 3600, limit)
+                .await
+                .expect("claim")
+                .into_iter()
+                .map(|row| row.id)
+                .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// A batch full of rows that keep settling back to `pending` must not
+    /// shut a never-tried row out of the claim until its age window closes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deferred_rows_do_not_starve_a_never_tried_row_pg() {
+        let pg_db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_relay_dlq_starvation",
+            "relay dead letter redelivery starvation",
+        )
+        .await;
+        let pool = pg_db.connect_and_migrate().await;
+        const BATCH: i64 = 2;
+
+        let mut deferred = Vec::new();
+        for n in 0..BATCH {
+            deferred.push(
+                insert(&pool, &terminal_row(&format!("stuck {n}")))
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert_eq!(claim_ids(&pool, BATCH).await, deferred);
+        for id in &deferred {
+            assert_eq!(
+                settle_redelivery(&pool, *id, REDELIVERY_PENDING)
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+        let fresh = insert(&pool, &terminal_row("never tried")).await.unwrap();
+        // Premise: the fresh row loses on id, which is the order being replaced.
+        assert!(deferred.iter().all(|id| *id < fresh));
+
+        let claimed = claim_ids(&pool, BATCH).await;
+        assert_eq!(
+            claimed,
+            vec![deferred[0], fresh],
+            "a never-tried row takes a slot ahead of rows already tried; the rest fill in id order"
+        );
+        for id in &claimed {
+            settle_redelivery(&pool, *id, REDELIVERY_PENDING)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            claim_ids(&pool, BATCH).await,
+            vec![deferred[1], fresh],
+            "least-tried rows go next, so retried rows rotate instead of pinning the head"
+        );
+
+        let stamped: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT redelivered_at FROM relay_dead_letter WHERE id = $1")
+                .bind(fresh)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            stamped, None,
+            "a row sent back to pending was not redelivered"
+        );
+
+        assert_eq!(
+            settle_redelivery(&pool, fresh, REDELIVERY_DELIVERED)
+                .await
+                .unwrap(),
+            1
+        );
+        let stamped: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT redelivered_at FROM relay_dead_letter WHERE id = $1")
+                .bind(fresh)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            stamped.is_some(),
+            "a row leaving the sweep is stamped redelivered"
+        );
+        assert_eq!(
+            settle_redelivery(&pool, fresh, REDELIVERY_DELIVERED)
+                .await
+                .unwrap(),
+            0,
+            "a repeated settle is guarded on the claim"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn insert_read_back_detached_and_retention_roundtrip_pg() {
