@@ -122,6 +122,8 @@ src/
 │   │   ├── metadata.rs
 │   │   ├── mod.rs
 │   │   └── transitions.rs
+│   ├── postgres/
+│   │   └── test_db_reclaim.rs
 │   ├── prompt_manifests/
 │   │   ├── builder.rs
 │   │   ├── mod.rs
@@ -1157,6 +1159,7 @@ src/
 │   │   │   ├── rehydration/
 │   │   │   │   └── idempotency_tests.rs
 │   │   │   ├── relay_e2e/
+│   │   │   │   ├── catch_up_pagination_e2e.rs
 │   │   │   │   ├── discord_mock.rs
 │   │   │   │   └── mod.rs
 │   │   │   ├── synthetic_start/

@@ -361,6 +361,10 @@ fn commit_publishes_the_identity_and_derives_the_index_from_it() {
     let index = root.path().join("restart_persisted");
     let published = std::fs::read_to_string(&identity).expect("identity artifact");
     assert!(published.contains(&format!("nonce={nonce}\n")));
+    if !crate::services::discord::runtime_store::PARENT_DIR_FSYNC_FLUSHES {
+        assert!(!index.exists(), "no index without a parent directory flush");
+        return;
+    }
     assert_eq!(
         std::fs::read_to_string(&index).expect("fixed-name index"),
         published,
@@ -375,6 +379,29 @@ fn commit_publishes_the_identity_and_derives_the_index_from_it() {
             "the index must be a hard link of the identity inode"
         );
     }
+}
+
+/// ERRATUM §E8.2 on every host: an `Ok` parent sync that did not flush leaves the
+/// identity entry not known durable, so the index must not be derived from it.
+#[test]
+fn an_unflushed_parent_sync_publishes_the_identity_without_an_index() {
+    let root = tempfile::tempdir().expect("runtime root");
+    let nonce = "identity-unflushed";
+    let body = format!("nonce={nonce}\n");
+
+    super::gateway_lease_recovery::publish_restart_terminal(root.path(), nonce, &body, false)
+        .expect("the commit proceeds without a flush");
+
+    assert_eq!(
+        std::fs::read_to_string(root.path().join(format!("restart_persisted.{nonce}")))
+            .expect("identity artifact"),
+        body
+    );
+    assert!(
+        !root.path().join("restart_persisted").exists(),
+        "no index without a parent directory flush"
+    );
+    assert_eq!(committed_nonce().as_deref(), Some(nonce));
 }
 
 /// ERRATUM §E5.2 corollary: a nonce that cannot spell an identity name fails the
@@ -762,6 +789,15 @@ fn nothing_between_the_point_of_no_return_and_the_exit_can_undo_it() {
         !commit_body.contains("remove_file"),
         "#5254 D4③: a published acknowledgement is never withdrawn by its publisher"
     );
+    assert_eq!(
+        commit_body
+            .matches(
+                "publish_restart_terminal(root, nonce, &body, runtime_store::PARENT_DIR_FSYNC_FLUSHES)"
+            )
+            .count(),
+        1,
+        "§E8.2: production passes the platform flush capability, never a literal"
+    );
 
     // The point of no return itself now lives in `publish_restart_terminal`, so
     // the two slices above would miss a retraction reintroduced beside the
@@ -781,18 +817,18 @@ fn nothing_between_the_point_of_no_return_and_the_exit_can_undo_it() {
         "#5254 D4③: every remove_file in this function is spelled (&staged)"
     );
 
-    // ERRATUM §E8.2: the derived index is gated on the first parent-dir fsync,
-    // so the fsync-failure return has to stand ahead of the `hard_link` that
-    // makes the second name. Deleting it brings the index-only producer back.
-    let fsync_gate = publisher_body
-        .find("return Ok(())")
-        .expect("the fsync failure path still returns before the index");
+    // ERRATUM §E8.2: both the fsync-failure and the unflushed arm must return
+    // ahead of the `hard_link`; a count, because a first-match scan lets either
+    // return stand in for the other.
     let derived_index = publisher_body
         .find("hard_link")
         .expect("the index is still a hard link of the identity");
-    assert!(
-        fsync_gate < derived_index,
-        "#5254 §E8.2: the index must never be derived from an unfsynced identity"
+    assert_eq!(
+        publisher_body[..derived_index]
+            .matches("return Ok(())")
+            .count(),
+        2,
+        "#5254 §E8.2: both the fsync-failure and the unflushed arm return before the index"
     );
 }
 

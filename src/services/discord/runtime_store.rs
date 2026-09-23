@@ -205,8 +205,12 @@ pub fn generation_path() -> Option<PathBuf> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum GenerationAllocationRoute {
     /// `read_generation_counter` returned `Parsed` or `Absent`, `atomic_write`
-    /// returned `Ok`, `next != current`, and `fsync_parent_dir` returned `Ok`.
+    /// returned `Ok`, `next != current`, and `fsync_parent_dir` returned `Ok`
+    /// after flushing the parent directory.
     AdvancedWithSyncedRename,
+    /// As `AdvancedWithSyncedRename`, but `fsync_parent_dir` returned `Ok`
+    /// without flushing (`PARENT_DIR_FSYNC_FLUSHES` is false).
+    AdvancedWithUnflushedRename,
     /// `atomic_write` returned `Ok`, but `fsync_parent_dir` returned `Err`.
     ParentSyncFailed,
     /// `atomic_write` and `fsync_parent_dir` returned `Ok`, but
@@ -292,6 +296,7 @@ impl GenerationAllocationRoute {
     fn as_str(self) -> &'static str {
         match self {
             Self::AdvancedWithSyncedRename => "advanced_with_synced_rename",
+            Self::AdvancedWithUnflushedRename => "advanced_with_unflushed_rename",
             Self::ParentSyncFailed => "parent_sync_failed",
             Self::CounterReadFailed => "counter_read_failed",
             Self::Saturated => "saturated",
@@ -336,6 +341,14 @@ mod test_generation_publication {
         BINDING.get()
     }
 
+    /// The route a successful advance takes on this platform.
+    pub(in crate::services::discord) const ADVANCED: GenerationAllocationRoute =
+        if PARENT_DIR_FSYNC_FLUSHES {
+            GenerationAllocationRoute::AdvancedWithSyncedRename
+        } else {
+            GenerationAllocationRoute::AdvancedWithUnflushedRename
+        };
+
     pub(in crate::services::discord) fn allocation(
         generation: u64,
         route: GenerationAllocationRoute,
@@ -369,6 +382,7 @@ mod test_generation_publication {
             } else {
                 parent_sync_failure
             },
+            flushes: PARENT_DIR_FSYNC_FLUSHES,
         });
         let previous_binding = BINDING.replace(Some(allocated));
         Publication { previous_binding }
@@ -377,6 +391,7 @@ mod test_generation_publication {
 
 #[cfg(test)]
 pub(in crate::services::discord) use test_generation_publication::{
+    ADVANCED as ADVANCED_ROUTE_FOR_TESTS,
     allocate_and_publish as allocate_and_publish_process_generation_for_tests,
     allocation as process_generation_allocation_for_tests,
     publish as publish_process_generation_allocation_for_tests,
@@ -472,6 +487,9 @@ struct GenerationIo<L, R, W, F> {
     read: R,
     write: W,
     fsync: F,
+    /// Whether an `Ok` from `fsync` flushed the parent; injected so both
+    /// advanced routes run on every host.
+    flushes: bool,
 }
 
 /// Allocate once, publishing generation and route together.
@@ -523,6 +541,7 @@ fn allocate_generation_epoch() -> ProcessGenerationAllocation {
         read: read_generation_counter,
         write: atomic_write,
         fsync: fsync_parent_dir,
+        flushes: PARENT_DIR_FSYNC_FLUSHES,
     })
 }
 
@@ -657,6 +676,22 @@ where
                 ProcessGenerationAllocation {
                     generation: next,
                     route: Route::CounterReadFailed,
+                }
+            }
+            Ok(()) if !io.flushes => {
+                tracing::info!(
+                    path = %path.display(),
+                    current,
+                    next,
+                    counter_read = read.as_str(),
+                    counter_detail = read.failure().map_or("none", CounterReadFailure::as_str),
+                    route = Route::AdvancedWithUnflushedRename.as_str(),
+                    epoch_advanced = false,
+                    "allocated runtime process generation without a parent directory flush"
+                );
+                ProcessGenerationAllocation {
+                    generation: next,
+                    route: Route::AdvancedWithUnflushedRename,
                 }
             }
             Ok(()) => {
@@ -919,12 +954,24 @@ pub(crate) fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
 /// on failure; generation allocation records a non-advanced route after its
 /// rename. The directory is opened read-only because opening one for writing
 /// fails with `EISDIR`.
+#[cfg(not(windows))]
 pub(crate) fn fsync_parent_dir(path: &Path) -> std::io::Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty());
     fs::File::open(parent.unwrap_or_else(|| Path::new(".")))?.sync_all()
 }
+
+/// No directory flush on Windows: `Ok` means only that the rename is visible,
+/// and a crash shortly after may roll it back. See `PARENT_DIR_FSYNC_FLUSHES`.
+#[cfg(windows)]
+pub(crate) fn fsync_parent_dir(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Whether an `Ok` from `fsync_parent_dir` flushed the parent directory. Callers
+/// that decide on crash durability must consult this, not the `Ok` alone.
+pub(crate) const PARENT_DIR_FSYNC_FLUSHES: bool = cfg!(not(windows));
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AtomicWriteContext<'a> {
@@ -1051,8 +1098,11 @@ mod generation_allocation_tests {
             read: read_generation_counter,
             write: atomic_write,
             fsync,
+            flushes: PARENT_DIR_FSYNC_FLUSHES,
         }
     }
+
+    use super::ADVANCED_ROUTE_FOR_TESTS as ADVANCED;
 
     fn expect(
         binding: ProcessGenerationAllocation,
@@ -1112,7 +1162,7 @@ mod generation_allocation_tests {
         expect(
             allocate_generation_epoch_with_io(io(seeded("parsed", "7"), |_| Ok(()))),
             8,
-            GenerationAllocationRoute::AdvancedWithSyncedRename,
+            ADVANCED,
         );
         expect(
             allocate_generation_epoch_with_io(io(
@@ -1120,7 +1170,7 @@ mod generation_allocation_tests {
                 |_| Ok(()),
             )),
             1,
-            GenerationAllocationRoute::AdvancedWithSyncedRename,
+            ADVANCED,
         );
         let path = seeded("unreadable", "nan");
         expect(
@@ -1145,6 +1195,7 @@ mod generation_allocation_tests {
                 read: read_generation_counter,
                 write: panic_write,
                 fsync: panic_fsync,
+                flushes: PARENT_DIR_FSYNC_FLUSHES,
             }),
             7,
             GenerationAllocationRoute::LockFailed,
@@ -1158,6 +1209,7 @@ mod generation_allocation_tests {
                 read: read_generation_counter,
                 write: fail_write,
                 fsync: panic_fsync,
+                flushes: PARENT_DIR_FSYNC_FLUSHES,
             }),
             7,
             GenerationAllocationRoute::WriteFailed,
@@ -1177,10 +1229,70 @@ mod generation_allocation_tests {
                 read: panic_read,
                 write: panic_write,
                 fsync: panic_fsync,
+                flushes: PARENT_DIR_FSYNC_FLUSHES,
             }),
             0,
             GenerationAllocationRoute::PathUnavailable,
         );
+    }
+
+    /// Both advanced routes run on every host: only the injected flush
+    /// capability decides between them, and it never outranks a sync or read failure.
+    #[test]
+    fn injected_flush_capability_selects_the_advanced_route() {
+        let root = tempfile::tempdir().unwrap();
+        let seeded = |name: &str, value: &str| {
+            let path = root.path().join(name).join("generation");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, value).unwrap();
+            path
+        };
+        let with = |path: PathBuf, fsync_ok: bool, flushes: bool| {
+            allocate_generation_epoch_with_io(GenerationIo {
+                flushes,
+                ..io(path, move |_: &Path| {
+                    if fsync_ok {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::from(std::io::ErrorKind::Other))
+                    }
+                })
+            })
+        };
+        use GenerationAllocationRoute as R;
+        for (name, value, fsync_ok, flushes, generation, route) in [
+            ("flushed", "7", true, true, 8, R::AdvancedWithSyncedRename),
+            (
+                "unflushed",
+                "7",
+                true,
+                false,
+                8,
+                R::AdvancedWithUnflushedRename,
+            ),
+            (
+                "unflushed-failed",
+                "7",
+                false,
+                false,
+                8,
+                R::ParentSyncFailed,
+            ),
+            (
+                "unflushed-unread",
+                "nan",
+                true,
+                false,
+                1,
+                R::CounterReadFailed,
+            ),
+        ] {
+            expect(
+                with(seeded(name, value), fsync_ok, flushes),
+                generation,
+                route,
+            );
+        }
     }
 
     #[test]
@@ -1291,7 +1403,7 @@ mod generation_allocation_tests {
             .0;
         assert_eq!(
             composer.trim(),
-            "allocate_generation_epoch_with_io(GenerationIo {\n        path: generation_path(),\n        lock: lock_generation_path,\n        read: read_generation_counter,\n        write: atomic_write,\n        fsync: fsync_parent_dir,\n    })\n}",
+            "allocate_generation_epoch_with_io(GenerationIo {\n        path: generation_path(),\n        lock: lock_generation_path,\n        read: read_generation_counter,\n        write: atomic_write,\n        fsync: fsync_parent_dir,\n        flushes: PARENT_DIR_FSYNC_FLUSHES,\n    })\n}",
             "the production composer must be exactly the canonical allocation tail expression"
         );
     }
@@ -1309,11 +1421,7 @@ mod generation_allocation_tests {
         set_process_generation_for_tests(None);
 
         std::fs::write(&path, "7").unwrap();
-        expect(
-            allocate_process_generation_binding(),
-            8,
-            GenerationAllocationRoute::AdvancedWithSyncedRename,
-        );
+        expect(allocate_process_generation_binding(), 8, ADVANCED);
         std::fs::write(&path, "19").unwrap();
         expect(
             process_generation_binding(),
@@ -1341,11 +1449,7 @@ mod generation_allocation_tests {
             40,
             GenerationAllocationRoute::Unwitnessed,
         );
-        expect(
-            allocate_process_generation_binding(),
-            41,
-            GenerationAllocationRoute::AdvancedWithSyncedRename,
-        );
+        expect(allocate_process_generation_binding(), 41, ADVANCED);
         set_process_generation_for_tests(None);
     }
 
@@ -1361,11 +1465,7 @@ mod generation_allocation_tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "7").unwrap();
 
-        expect(
-            allocate_generation_epoch(),
-            8,
-            GenerationAllocationRoute::AdvancedWithSyncedRename,
-        );
+        expect(allocate_generation_epoch(), 8, ADVANCED);
         assert_eq!(std::fs::read_to_string(path).unwrap(), "8");
 
         let source = include_str!("runtime_store.rs");
@@ -1382,6 +1482,7 @@ mod generation_allocation_tests {
             "read: read_generation_counter",
             "write: atomic_write",
             "fsync: fsync_parent_dir",
+            "flushes: PARENT_DIR_FSYNC_FLUSHES",
         ] {
             assert_eq!(composer.matches(binding).count(), 1, "binding={binding}");
         }
@@ -1591,6 +1692,7 @@ mod parent_dir_fsync_tests {
     /// The caller gates the derived index on this result, which is only safe if
     /// failure is reported rather than raised: this must be an `Err`, never a
     /// panic.
+    #[cfg(not(windows))]
     #[test]
     fn missing_parent_dir_is_reported_not_panicked() {
         let root = tempfile::tempdir().expect("runtime root");
@@ -1599,6 +1701,27 @@ mod parent_dir_fsync_tests {
         let error = fsync_parent_dir(&orphan).expect_err("absent parent directory");
 
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+}
+
+/// Its own `tests` family so the Windows PR lane can run exactly this set.
+#[cfg(test)]
+mod windows_contract {
+    #[cfg(windows)]
+    mod tests {
+        use super::super::*;
+
+        /// Windows `File::open` cannot open a directory, so a directory open
+        /// here would fail every caller; the helper must return `Ok` unflushed.
+        #[test]
+        fn windows_parent_dir_sync_succeeds_without_flushing() {
+            let root = tempfile::tempdir().expect("runtime root");
+            let published = root.path().join("restart_persisted.nonce-w");
+            atomic_write(&published, "nonce=nonce-w\n").expect("publish");
+
+            fsync_parent_dir(&published).expect("Windows parent directory sync");
+            assert!(!PARENT_DIR_FSYNC_FLUSHES);
+        }
     }
 }
 

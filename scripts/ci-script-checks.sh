@@ -158,6 +158,10 @@ banner "message_outbox validated-insert guard (#4424)"
 "$PYTHON" scripts/check_message_outbox_inserts.py
 "$PYTHON" -m unittest tests.test_message_outbox_inserts
 
+banner "Directory fsync single-path guard"
+"$PYTHON" scripts/check_dir_fsync_single_path.py
+"$PYTHON" -m unittest tests.test_dir_fsync_single_path
+
 banner "Alert dedupe/authority/routing wiring contract (#4448/#4449)"
 "$PYTHON" -m unittest tests.test_alert_dedupe_4448 tests.test_auto_queue_monitor tests.test_actionable_ops_alert_routing
 

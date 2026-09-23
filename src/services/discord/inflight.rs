@@ -2702,9 +2702,9 @@ mod stall_recovery_tests {
             provider,
             channel_id,
             Some("adk".to_string()),
-            42,
-            100,
-            user_msg_id,
+            42,          // request_owner_user_id
+            user_msg_id, // user_msg_id
+            user_msg_id, // current_msg_id — only needs to be a stable placeholder id
             "user prompt".to_string(),
             None,
             Some("AgentDesk-claude-adk".to_string()),
@@ -2714,44 +2714,14 @@ mod stall_recovery_tests {
         )
     }
 
-    /// #5464 B3 / #5880 — `build_inflight_for_guard_tests` above misplaces its
-    /// arguments: the value it names `user_msg_id` is passed to
-    /// `InflightTurnState::new`'s SIXTH parameter (`current_msg_id`), and the
-    /// real `user_msg_id` is the hardcoded `100` in position five. Every row it
-    /// builds is therefore id-100. Correcting that helper would change the
-    /// meaning of all 51 call expressions at once, so it is tracked separately in
-    /// #5880 and deliberately left alone here.
-    ///
-    /// The rebind-origin guards need id-0 rows specifically: a rebind origin is
-    /// `user_msg_id == 0` BY CONSTRUCTION (`build_external_adopted_inflight_state`
-    /// forces it, and the creation site passes a literal `0`). Building those
-    /// fixtures through the broken helper meant the only tests covering
-    /// `clear_rebind_origin_*` ran against id-100 rows and could not observe the
-    /// id-0 behaviour at all. This fixture spells the positions out and asserts
-    /// the invariant so the same trap is not dug twice.
+    /// Rebind-origin guards need genuine id-0 rows: a rebind origin is
+    /// `user_msg_id == 0` by construction (`build_external_adopted_inflight_state`).
     fn build_rebind_guard_row(
         provider: ProviderKind,
         channel_id: u64,
         rebind_origin: bool,
     ) -> InflightTurnState {
-        let mut state = InflightTurnState::new(
-            provider,
-            channel_id,
-            Some("adk".to_string()),
-            42, // request_owner_user_id
-            0,  // user_msg_id — a rebind origin never anchors a Discord message
-            0,  // current_msg_id
-            "user prompt".to_string(),
-            None,                                     // session_id
-            Some("AgentDesk-claude-adk".to_string()), // tmux_session_name
-            Some("/tmp/out.jsonl".to_string()),       // output_path
-            Some("/tmp/in.fifo".to_string()),         // input_fifo_path
-            0,                                        // last_offset
-        );
-        assert_eq!(
-            state.user_msg_id, 0,
-            "rebind guard fixtures must be genuine id-0 rows (see #5880)"
-        );
+        let mut state = build_inflight_for_guard_tests(provider, channel_id, 0);
         state.rebind_origin = rebind_origin;
         state.turn_start_offset = Some(0);
         state.set_relay_owner_kind(RelayOwnerKind::Watcher);
@@ -2807,13 +2777,15 @@ mod stall_recovery_tests {
     fn identity_guarded_save_rejects_stale_write_against_newer_turn() {
         let temp = TempDir::new().unwrap();
         // The original turn (user_msg_id = 100).
-        let mut original = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
-        original.user_msg_id = 100;
+        let original = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
         let original_identity = InflightTurnIdentity::from_state(&original);
 
         // A NEWER turn (distinct user_msg_id) now owns the row on disk.
         let mut newer = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 200);
-        newer.user_msg_id = 200;
+        // Pin nonce + started_at so user_msg_id is the ONLY differing axis; otherwise the
+        // completion_preserve nonce check (or a 1s started_at tick) rejects first and masks it.
+        newer.turn_nonce = original.turn_nonce.clone();
+        newer.started_at = original.started_at.clone();
         save_inflight_state_in_root(temp.path(), &newer).unwrap();
 
         // Stale write under the OLD identity → must be rejected, leaving the newer
@@ -2878,7 +2850,6 @@ mod stall_recovery_tests {
     fn tmux_response_guard_preserves_new_turn_with_different_response() {
         let temp = TempDir::new().unwrap();
         let mut state = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 101);
-        state.user_msg_id = 101;
         state.full_response = String::new();
         save_inflight_state_in_root(temp.path(), &state).unwrap();
 
@@ -2904,7 +2875,8 @@ mod stall_recovery_tests {
         save_inflight_state_in_root(temp.path(), &old_turn).unwrap();
         let old_identity = InflightTurnIdentity::from_state(&old_turn);
 
-        let mut fresh_turn = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 101);
+        // Same user_msg_id on purpose: only started_at tells the respawned turn apart.
+        let mut fresh_turn = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
         fresh_turn.started_at = "2026-05-17 10:00:05".to_string();
         fresh_turn.user_text = "fresh prompt".to_string();
         save_inflight_state_in_root(temp.path(), &fresh_turn).unwrap();
@@ -3015,7 +2987,8 @@ mod stall_recovery_tests {
         save_inflight_state_in_root(temp.path(), &old_turn).unwrap();
         let old_identity = InflightTurnIdentity::from_state(&old_turn);
 
-        let mut fresh_turn = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 101);
+        // Same user_msg_id on purpose: only started_at tells the fresh turn apart.
+        let mut fresh_turn = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
         fresh_turn.started_at = "2026-05-17 10:00:05".to_string();
         fresh_turn.user_text = "fresh prompt".to_string();
         save_inflight_state_in_root(temp.path(), &fresh_turn).unwrap();
@@ -3105,7 +3078,6 @@ mod stall_recovery_tests {
 
         let mut fresh_turn = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 101);
         fresh_turn.current_msg_id = 0;
-        fresh_turn.user_msg_id = 101;
         fresh_turn.started_at = "2026-05-17 10:00:05".to_string();
         fresh_turn.output_path = Some(output_path.clone());
         fresh_turn.last_offset = 20;
@@ -3348,7 +3320,6 @@ mod stall_recovery_tests {
         let temp = TempDir::new().unwrap();
         let mut old_turn = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
         old_turn.current_msg_id = 0;
-        old_turn.user_msg_id = 100;
         old_turn.started_at = "2026-05-17 10:00:00".to_string();
         old_turn.last_offset = 500;
         old_turn.turn_start_offset = Some(0);
@@ -3360,7 +3331,6 @@ mod stall_recovery_tests {
         // legitimately resets the watermark to a smaller value.
         let mut fresh_turn = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 101);
         fresh_turn.current_msg_id = 0;
-        fresh_turn.user_msg_id = 101;
         fresh_turn.started_at = "2026-05-17 10:00:05".to_string();
         fresh_turn.output_path = Some(output_path.clone());
         fresh_turn.last_offset = 10;
@@ -3456,7 +3426,6 @@ mod stall_recovery_tests {
         let path = inflight_state_path(temp.path(), &provider, 321);
 
         let mut fresh = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 101);
-        fresh.user_msg_id = 101;
         fresh.last_offset = 10;
 
         // No panic — different identity is exempt from the monotonic clamp.
@@ -3530,7 +3499,6 @@ mod stall_recovery_tests {
         // A fresh turn: new user_msg_id AND a new turn_start_offset, with
         // response_sent_offset reset to 0 (the InflightTurnState::new default).
         let mut fresh = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 101);
-        fresh.user_msg_id = 101;
         fresh.turn_start_offset = Some(99);
         assert_eq!(fresh.response_sent_offset, 0);
 
@@ -3554,7 +3522,6 @@ mod stall_recovery_tests {
 
         // Prior USER turn with response_sent_offset > 0.
         let mut user_turn = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 555);
-        user_turn.user_msg_id = 555;
         user_turn.turn_start_offset = Some(0);
         user_turn.full_response = "user turn response body".to_string();
         user_turn.response_sent_offset = 15;
@@ -3657,7 +3624,8 @@ mod stall_recovery_tests {
             save_inflight_state_in_root(root.as_ref(), &old_turn).unwrap();
             let old_identity = InflightTurnIdentity::from_state(&old_turn);
 
-            let mut fresh_turn = build_inflight_for_guard_tests(ProviderKind::Codex, 777, 101);
+            // Same user_msg_id on purpose: only started_at tells the fresh turn apart.
+            let mut fresh_turn = build_inflight_for_guard_tests(ProviderKind::Codex, 777, 100);
             fresh_turn.started_at = format!("2026-05-17 10:01:{iteration:02}");
             fresh_turn.user_text = "fresh prompt".to_string();
 
@@ -3764,8 +3732,7 @@ mod stall_recovery_tests {
     #[test]
     fn clear_inflight_state_if_matches_zero_owned_clears_zero_id_row() {
         let temp = TempDir::new().unwrap();
-        let mut state = build_inflight_for_guard_tests(ProviderKind::Claude, 9, 0);
-        state.user_msg_id = 0;
+        let state = build_inflight_for_guard_tests(ProviderKind::Claude, 9, 0);
         save_inflight_state_in_root(temp.path(), &state).unwrap();
 
         let outcome = clear_inflight_state_if_matches_zero_owned_in_root(
@@ -3783,8 +3750,7 @@ mod stall_recovery_tests {
     #[test]
     fn clear_inflight_state_if_matches_zero_owned_preserves_nonzero_owner() {
         let temp = TempDir::new().unwrap();
-        let mut state = build_inflight_for_guard_tests(ProviderKind::Claude, 9, 4242);
-        state.user_msg_id = 4242;
+        let state = build_inflight_for_guard_tests(ProviderKind::Claude, 9, 4242);
         save_inflight_state_in_root(temp.path(), &state).unwrap();
 
         let outcome = clear_inflight_state_if_matches_zero_owned_in_root(
@@ -3919,17 +3885,17 @@ mod stall_recovery_tests {
     #[test]
     fn skip_save_does_not_clobber_newer_turn() {
         let temp = TempDir::new().unwrap();
-        // Newer turn currently owns the row on disk. (NB: the guard-test helper's
-        // 3rd arg feeds `current_msg_id`; set the real `user_msg_id` explicitly so
-        // the two turns differ on the identity field the guard actually checks.)
-        let mut newer = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 0);
-        newer.user_msg_id = 999;
+        // Newer turn currently owns the row on disk.
+        let newer = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 999);
         save_inflight_state_in_root(temp.path(), &newer).unwrap();
 
         // The preserving bridge is still holding the PREVIOUS turn (user_msg_id
         // 777). Its identity no longer matches the on-disk newer turn.
-        let mut preserved = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 0);
-        preserved.user_msg_id = 777;
+        let mut preserved = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 777);
+        // Pin nonce + started_at so user_msg_id is the ONLY differing axis; otherwise the
+        // completion_preserve nonce check (or a 1s started_at tick) rejects first and masks it.
+        preserved.turn_nonce = newer.turn_nonce.clone();
+        preserved.started_at = newer.started_at.clone();
         let expected = InflightTurnIdentity::from_state(&preserved);
 
         let outcome = save_inflight_state_if_matches_identity_in_root(
@@ -3986,7 +3952,6 @@ mod stall_recovery_tests {
         let temp = TempDir::new().unwrap();
         let _env_reset = set_agentdesk_root_for_test(temp.path());
         let mut on_disk = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 777);
-        on_disk.user_msg_id = 777;
         on_disk.current_msg_id = 778;
         on_disk.set_restart_mode(InflightRestartMode::DrainRestart);
         save_inflight_state_in_root(temp.path(), &on_disk).unwrap();
@@ -4038,7 +4003,6 @@ mod stall_recovery_tests {
         let temp = TempDir::new().unwrap();
         let _env_reset = set_agentdesk_root_for_test(temp.path());
         let mut on_disk = build_inflight_for_guard_tests(ProviderKind::Claude, 323, 777);
-        on_disk.user_msg_id = 777;
         on_disk.current_msg_id = 778;
         save_inflight_state_in_root(temp.path(), &on_disk).unwrap();
 
@@ -4094,7 +4058,6 @@ mod stall_recovery_tests {
         let temp = TempDir::new().unwrap();
         let _env_reset = set_agentdesk_root_for_test(temp.path());
         let mut on_disk = build_inflight_for_guard_tests(ProviderKind::Codex, 324, 777);
-        on_disk.user_msg_id = 777;
         on_disk.current_msg_id = 778;
         on_disk.set_restart_mode(InflightRestartMode::DrainRestart);
         on_disk.output_path = Some("/tmp/raw-rollout.jsonl".to_string());
@@ -4155,7 +4118,6 @@ mod stall_recovery_tests {
         let temp = TempDir::new().unwrap();
         let _env_reset = set_agentdesk_root_for_test(temp.path());
         let mut on_disk = build_inflight_for_guard_tests(ProviderKind::Codex, 325, 777);
-        on_disk.user_msg_id = 777;
         on_disk.current_msg_id = 778;
         on_disk.output_path = Some("/tmp/raw-rollout.jsonl".to_string());
         on_disk.last_offset = 4096;
@@ -4289,7 +4251,6 @@ mod stall_recovery_tests {
         let temp = TempDir::new().unwrap();
         let _env_reset = set_agentdesk_root_for_test(temp.path());
         let mut on_disk = build_inflight_for_guard_tests(ProviderKind::Claude, 322, 777);
-        on_disk.user_msg_id = 777;
         on_disk.current_msg_id = 778;
         on_disk.rebind_origin = true;
         save_inflight_state_in_root(temp.path(), &on_disk).unwrap();
@@ -4330,8 +4291,7 @@ mod stall_recovery_tests {
             std::thread::spawn(move || load_inflight_states_from_root(&root, &ProviderKind::Codex));
 
         std::thread::sleep(std::time::Duration::from_millis(100));
-        let mut fresh = build_inflight_for_guard_tests(ProviderKind::Codex, 18_001, 88_001);
-        fresh.user_msg_id = 88_001;
+        let fresh = build_inflight_for_guard_tests(ProviderKind::Codex, 18_001, 88_001);
         std::fs::write(&path, serde_json::to_string_pretty(&fresh).unwrap()).unwrap();
         drop(lock);
 

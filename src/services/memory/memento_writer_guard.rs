@@ -40,8 +40,9 @@ impl WriterClaim {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
+        let receipt = directory.join(format!("{}.receipt", key.to_ascii_lowercase()));
         let mut file = options
-            .open(directory.join(format!("{}.receipt", key.to_ascii_lowercase())))
+            .open(&receipt)
             .map_err(|error| format!("memento writer receipt open: {error}"))?;
         file.try_lock().map_err(|error| {
             format!("memento remember is in flight or its receipt cannot be locked: {error}")
@@ -68,12 +69,12 @@ impl WriterClaim {
         // Also persist creation of the receipt directory itself on first use.
         #[cfg(unix)]
         {
-            sync_directory(directory)?;
-            if let Some(parent) = directory
+            sync_parent_directory(&receipt)?;
+            if directory
                 .parent()
-                .filter(|path| !path.as_os_str().is_empty())
+                .is_some_and(|path| !path.as_os_str().is_empty())
             {
-                sync_directory(parent)?;
+                sync_parent_directory(directory)?;
             }
         }
         Ok(Some(claim))
@@ -103,10 +104,10 @@ impl WriterClaim {
     }
 }
 
+/// Flushes the directory holding `entry` through `fsync_parent_dir`.
 #[cfg(unix)]
-fn sync_directory(directory: &Path) -> Result<(), String> {
-    File::open(directory)
-        .and_then(|file| file.sync_all())
+fn sync_parent_directory(entry: &Path) -> Result<(), String> {
+    crate::services::discord::runtime_store::fsync_parent_dir(entry)
         .map_err(|error| format!("memento writer receipt directory persist: {error}"))
 }
 
@@ -213,7 +214,7 @@ pub(crate) fn invalidate_writer_receipts(
     }
     result?;
     #[cfg(unix)]
-    sync_directory(directory)?;
+    sync_parent_directory(&generation_path(directory, endpoint))?;
     Ok(())
 }
 

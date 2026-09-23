@@ -1161,6 +1161,8 @@ pub(crate) fn postgres_test_database_url_base() -> Option<String> {
 }
 
 #[cfg(test)]
+mod test_db_reclaim;
+#[cfg(test)]
 const TEST_POSTGRES_OP_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(test)]
 const TEST_POSTGRES_POOL_MAX_CONNECTIONS: u32 = 1;
@@ -1471,10 +1473,7 @@ pub(crate) async fn connect_test_pool(database_url: &str, label: &str) -> Result
 // PG-backed test DB create/drop so they cannot race. Dropping the guard before
 // the awaits would reintroduce the CI race this lock was added to fix. Test-only.
 #[allow(clippy::await_holding_lock)]
-/// Ownership tokens are process-local: a crash between `CREATE DATABASE` and
-/// registration, or process exit after registration, can leave an unowned
-/// `agentdesk_*` database. This limitation is accepted; inspect that prefix
-/// with `psql` and manually drop only confirmed-stale databases.
+/// Created through `test_db_reclaim`, which sweeps what killed processes leaked.
 pub(crate) async fn create_test_database(
     admin_url: &str,
     database_name: &str,
@@ -1492,11 +1491,8 @@ pub(crate) async fn create_test_database(
             TEST_POSTGRES_ADMIN_POOL_MAX_CONNECTIONS,
         )
         .await?;
-        let create_result = run_test_postgres_sqlx_op(
-            &format!("{label} create postgres test db {database_name}"),
-            sqlx::query(&format!("CREATE DATABASE \"{database_name}\"")).execute(&admin_pool),
-        )
-        .await;
+        test_db_reclaim::reclaim_once_per_process(&admin_pool, label).await;
+        let create_result = test_db_reclaim::create_marked(&admin_pool, database_name, label).await;
 
         if let Err(error) = create_result {
             if let Err(close_error) = close_test_pool(admin_pool, &format!("{label} admin")).await {

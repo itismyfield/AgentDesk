@@ -92,13 +92,13 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_REPORT_CHANNEL_ID` | `src/services/discord/restart_report.rs:14` (+1 more) |  |
 | `AGENTDESK_REPORT_PROVIDER` | `src/services/discord/restart_report.rs:15` (+1 more) |  |
 | `AGENTDESK_REPO_DIR` | `src/services/git/repo_resolver.rs:32` | Priority: `AGENTDESK_REPO_DIR` env -> scan all known roots for a git workspace -> `~/AgentDesk`. |
-| `AGENTDESK_REQUIRE_PG` | `src/db/postgres.rs:1170` (+2 more) | Every fixture that creates a database must use this authority; callers that can skip return `None`, while required lanes still get the hard failure below when… |
+| `AGENTDESK_REQUIRE_PG` | `src/db/postgres.rs:1172` (+2 more) | Every fixture that creates a database must use this authority; callers that can skip return `None`, while required lanes still get the hard failure below when… |
 | `AGENTDESK_REVIEW_MCP_ALLOWLIST` | `src/services/mcp_config.rs:16` (+1 more) |  |
 | `AGENTDESK_ROOT_DIR` | `src/cli/dcserver.rs:20` (+21 more) | Canonical runtime root: $AGENTDESK_ROOT_DIR → ~/.adk/release All code that needs the AgentDesk root directory MUST call this function instead of reimplementing… |
 | `AGENTDESK_SINGLE_MESSAGE_PANEL` | `src/services/discord/single_message_panel.rs:33` | The rollout gate previously short-circuited a missing env var to `false`, so any environment without an explicit `AGENTDESK_SINGLE_MESSAGE_PANEL=1` silently fe… |
 | `AGENTDESK_SOURCE_ZPROFILE` | `src/services/routines/migrated.rs:619` |  |
 | `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/mod.rs:499` | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |
-| `AGENTDESK_TEST_POSTGRES_ACQUIRE_TIMEOUT_MS` | `src/db/postgres.rs:1172` (+1 more) | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
+| `AGENTDESK_TEST_POSTGRES_ACQUIRE_TIMEOUT_MS` | `src/db/postgres.rs:1174` (+1 more) | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
 | `AGENTDESK_TOKEN` | `src/cli/run.rs:142` |  |
 | `AGENTDESK_VOICE_REQUIRE_ALIASES` | `src/services/discord_config_audit.rs:206` | - On collision when `AGENTDESK_VOICE_REQUIRE_ALIASES=1`: return an `Err` describing the collision so callers can choose to fail fast. |
 | `AGENTDESK_WORKSPACE_ROOT` | `src/services/routines/migrated.rs:309` (+1 more) |  |
