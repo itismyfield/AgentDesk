@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the common native leader/worker artifact. Python >= 3.11 is required.
+# Build the common native hub/runner artifact. Python >= 3.11 is required.
 # Usage: build-release.sh [--target <rust-target>]
 #        [--profile release|release-fast]
 #        [--skip-dashboard | --prebuilt-dashboard]
