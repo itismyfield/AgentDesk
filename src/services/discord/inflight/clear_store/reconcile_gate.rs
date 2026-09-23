@@ -623,6 +623,13 @@ mod tests {
                 "advanced_with_synced_rename",
                 true,
             ),
+            (
+                R::AdvancedWithUnflushedRename,
+                5462,
+                5461,
+                "advanced_with_unflushed_rename",
+                false,
+            ),
             (R::ParentSyncFailed, 5462, 5461, "parent_sync_failed", false),
             (R::CounterReadFailed, 1, 0, "counter_read_failed", false),
             (R::Saturated, u64::MAX, u64::MAX - 1, "saturated", false),
@@ -709,13 +716,18 @@ mod tests {
 
     #[test]
     fn public_reconcile_observes_production_shaped_published_routes() {
-        for (index, (parent_sync_succeeds, expected_route)) in [
-            (false, "parent_sync_failed"),
-            (true, "advanced_with_synced_rename"),
+        use crate::services::discord::runtime_store::{
+            ADVANCED_ROUTE_FOR_TESTS, GenerationAllocationRoute as R, PARENT_DIR_FSYNC_FLUSHES,
+        };
+        for (index, (parent_sync_succeeds, route)) in [
+            (false, R::ParentSyncFailed),
+            (true, ADVANCED_ROUTE_FOR_TESTS),
         ]
         .into_iter()
         .enumerate()
         {
+            let expected_route = allocation(54_62, route).epoch_route();
+            let expected_advanced = parent_sync_succeeds && PARENT_DIR_FSYNC_FLUSHES;
             let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
             let root = TempDir::new().expect("temp root");
             let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -750,7 +762,7 @@ mod tests {
             let refusal = emitted_refusal_payload(matching.channel_id);
             assert_eq!(refusal["current_generation"], 54_62);
             assert_eq!(refusal["epoch_route"], expected_route);
-            assert_eq!(refusal["epoch_advanced"], parent_sync_succeeds);
+            assert_eq!(refusal["epoch_advanced"], expected_advanced);
 
             let nonmatching = row(62_001 + index as u64 * 2, 54_61);
             seed(
@@ -771,7 +783,7 @@ mod tests {
             let allowed = emitted_allow_payload(nonmatching.channel_id);
             assert_eq!(allowed["current_generation"], 54_62);
             assert_eq!(allowed["epoch_route"], expected_route);
-            assert_eq!(allowed["epoch_advanced"], parent_sync_succeeds);
+            assert_eq!(allowed["epoch_advanced"], expected_advanced);
         }
     }
 

@@ -341,6 +341,14 @@ mod test_generation_publication {
         BINDING.get()
     }
 
+    /// The route a successful advance takes on this platform.
+    pub(in crate::services::discord) const ADVANCED: GenerationAllocationRoute =
+        if PARENT_DIR_FSYNC_FLUSHES {
+            GenerationAllocationRoute::AdvancedWithSyncedRename
+        } else {
+            GenerationAllocationRoute::AdvancedWithUnflushedRename
+        };
+
     pub(in crate::services::discord) fn allocation(
         generation: u64,
         route: GenerationAllocationRoute,
@@ -374,6 +382,7 @@ mod test_generation_publication {
             } else {
                 parent_sync_failure
             },
+            flushes: PARENT_DIR_FSYNC_FLUSHES,
         });
         let previous_binding = BINDING.replace(Some(allocated));
         Publication { previous_binding }
@@ -382,6 +391,7 @@ mod test_generation_publication {
 
 #[cfg(test)]
 pub(in crate::services::discord) use test_generation_publication::{
+    ADVANCED as ADVANCED_ROUTE_FOR_TESTS,
     allocate_and_publish as allocate_and_publish_process_generation_for_tests,
     allocation as process_generation_allocation_for_tests,
     publish as publish_process_generation_allocation_for_tests,
@@ -477,6 +487,9 @@ struct GenerationIo<L, R, W, F> {
     read: R,
     write: W,
     fsync: F,
+    /// Whether an `Ok` from `fsync` flushed the parent; injected so both
+    /// advanced routes run on every host.
+    flushes: bool,
 }
 
 /// Allocate once, publishing generation and route together.
@@ -528,6 +541,7 @@ fn allocate_generation_epoch() -> ProcessGenerationAllocation {
         read: read_generation_counter,
         write: atomic_write,
         fsync: fsync_parent_dir,
+        flushes: PARENT_DIR_FSYNC_FLUSHES,
     })
 }
 
@@ -664,7 +678,7 @@ where
                     route: Route::CounterReadFailed,
                 }
             }
-            Ok(()) if !PARENT_DIR_FSYNC_FLUSHES => {
+            Ok(()) if !io.flushes => {
                 tracing::info!(
                     path = %path.display(),
                     current,
@@ -1084,15 +1098,11 @@ mod generation_allocation_tests {
             read: read_generation_counter,
             write: atomic_write,
             fsync,
+            flushes: PARENT_DIR_FSYNC_FLUSHES,
         }
     }
 
-    /// The route a successful advance takes on this platform.
-    const ADVANCED: GenerationAllocationRoute = if PARENT_DIR_FSYNC_FLUSHES {
-        GenerationAllocationRoute::AdvancedWithSyncedRename
-    } else {
-        GenerationAllocationRoute::AdvancedWithUnflushedRename
-    };
+    use super::ADVANCED_ROUTE_FOR_TESTS as ADVANCED;
 
     fn expect(
         binding: ProcessGenerationAllocation,
@@ -1185,6 +1195,7 @@ mod generation_allocation_tests {
                 read: read_generation_counter,
                 write: panic_write,
                 fsync: panic_fsync,
+                flushes: PARENT_DIR_FSYNC_FLUSHES,
             }),
             7,
             GenerationAllocationRoute::LockFailed,
@@ -1198,6 +1209,7 @@ mod generation_allocation_tests {
                 read: read_generation_counter,
                 write: fail_write,
                 fsync: panic_fsync,
+                flushes: PARENT_DIR_FSYNC_FLUSHES,
             }),
             7,
             GenerationAllocationRoute::WriteFailed,
@@ -1217,10 +1229,70 @@ mod generation_allocation_tests {
                 read: panic_read,
                 write: panic_write,
                 fsync: panic_fsync,
+                flushes: PARENT_DIR_FSYNC_FLUSHES,
             }),
             0,
             GenerationAllocationRoute::PathUnavailable,
         );
+    }
+
+    /// Both advanced routes run on every host: only the injected flush
+    /// capability decides between them, and it never outranks a sync or read failure.
+    #[test]
+    fn injected_flush_capability_selects_the_advanced_route() {
+        let root = tempfile::tempdir().unwrap();
+        let seeded = |name: &str, value: &str| {
+            let path = root.path().join(name).join("generation");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, value).unwrap();
+            path
+        };
+        let with = |path: PathBuf, fsync_ok: bool, flushes: bool| {
+            allocate_generation_epoch_with_io(GenerationIo {
+                flushes,
+                ..io(path, move |_: &Path| {
+                    if fsync_ok {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::from(std::io::ErrorKind::Other))
+                    }
+                })
+            })
+        };
+        use GenerationAllocationRoute as R;
+        for (name, value, fsync_ok, flushes, generation, route) in [
+            ("flushed", "7", true, true, 8, R::AdvancedWithSyncedRename),
+            (
+                "unflushed",
+                "7",
+                true,
+                false,
+                8,
+                R::AdvancedWithUnflushedRename,
+            ),
+            (
+                "unflushed-failed",
+                "7",
+                false,
+                false,
+                8,
+                R::ParentSyncFailed,
+            ),
+            (
+                "unflushed-unread",
+                "nan",
+                true,
+                false,
+                1,
+                R::CounterReadFailed,
+            ),
+        ] {
+            expect(
+                with(seeded(name, value), fsync_ok, flushes),
+                generation,
+                route,
+            );
+        }
     }
 
     #[test]
@@ -1331,7 +1403,7 @@ mod generation_allocation_tests {
             .0;
         assert_eq!(
             composer.trim(),
-            "allocate_generation_epoch_with_io(GenerationIo {\n        path: generation_path(),\n        lock: lock_generation_path,\n        read: read_generation_counter,\n        write: atomic_write,\n        fsync: fsync_parent_dir,\n    })\n}",
+            "allocate_generation_epoch_with_io(GenerationIo {\n        path: generation_path(),\n        lock: lock_generation_path,\n        read: read_generation_counter,\n        write: atomic_write,\n        fsync: fsync_parent_dir,\n        flushes: PARENT_DIR_FSYNC_FLUSHES,\n    })\n}",
             "the production composer must be exactly the canonical allocation tail expression"
         );
     }
@@ -1410,6 +1482,7 @@ mod generation_allocation_tests {
             "read: read_generation_counter",
             "write: atomic_write",
             "fsync: fsync_parent_dir",
+            "flushes: PARENT_DIR_FSYNC_FLUSHES",
         ] {
             assert_eq!(composer.matches(binding).count(), 1, "binding={binding}");
         }

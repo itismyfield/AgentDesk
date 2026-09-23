@@ -5062,6 +5062,7 @@ services::discord::runtime_bootstrap::spawns::tests::a_commit_under_another_nonc
 services::discord::runtime_bootstrap::spawns::tests::a_committed_restart_survives_late_cancellation_in_a_dedicated_process
 services::discord::runtime_bootstrap::spawns::tests::a_failed_restore_keeps_the_disposed_marker_as_residue
 services::discord::runtime_bootstrap::spawns::tests::an_absent_latch_defers_to_the_identity_artifact_before_rolling_back
+services::discord::runtime_bootstrap::spawns::tests::an_unflushed_parent_sync_publishes_the_identity_without_an_index
 services::discord::runtime_bootstrap::spawns::tests::an_unsafe_nonce_publishes_nothing_and_refuses_the_commit
 services::discord::runtime_bootstrap::spawns::tests::cancellation_before_any_staging_publishes_nothing_and_rolls_back
 services::discord::runtime_bootstrap::spawns::tests::cancellation_before_durable_commit_rolls_back_but_after_commit_stays_committed
@@ -5088,6 +5089,7 @@ services::discord::runtime_store::atomic_write_logging_tests::critical_atomic_wr
 services::discord::runtime_store::generation_allocation_tests::core_truth_table_routes_and_side_effects_are_exact
 services::discord::runtime_store::generation_allocation_tests::counter_read_failure_preserves_copy_detail
 services::discord::runtime_store::generation_allocation_tests::epoch_provenance_surface_makes_no_survival_claim
+services::discord::runtime_store::generation_allocation_tests::injected_flush_capability_selects_the_advanced_route
 services::discord::runtime_store::generation_allocation_tests::production_binding_lexically_returns_the_stored_allocation_whole
 services::discord::runtime_store::generation_allocation_tests::production_composer_advances_with_synced_parent
 services::discord::runtime_store::generation_allocation_tests::production_shaped_once_cell_publishes_generation_and_route_together

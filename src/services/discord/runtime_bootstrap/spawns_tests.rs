@@ -381,6 +381,29 @@ fn commit_publishes_the_identity_and_derives_the_index_from_it() {
     }
 }
 
+/// ERRATUM §E8.2 on every host: an `Ok` parent sync that did not flush leaves the
+/// identity entry not known durable, so the index must not be derived from it.
+#[test]
+fn an_unflushed_parent_sync_publishes_the_identity_without_an_index() {
+    let root = tempfile::tempdir().expect("runtime root");
+    let nonce = "identity-unflushed";
+    let body = format!("nonce={nonce}\n");
+
+    super::gateway_lease_recovery::publish_restart_terminal(root.path(), nonce, &body, false)
+        .expect("the commit proceeds without a flush");
+
+    assert_eq!(
+        std::fs::read_to_string(root.path().join(format!("restart_persisted.{nonce}")))
+            .expect("identity artifact"),
+        body
+    );
+    assert!(
+        !root.path().join("restart_persisted").exists(),
+        "no index without a parent directory flush"
+    );
+    assert_eq!(committed_nonce().as_deref(), Some(nonce));
+}
+
 /// ERRATUM §E5.2 corollary: a nonce that cannot spell an identity name fails the
 /// commit. Publishing the index alone would be the one shape that breaks the
 /// inference above, so this path publishes nothing at all.

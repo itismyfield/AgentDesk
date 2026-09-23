@@ -323,10 +323,16 @@ pub(super) fn try_create_restart_marker(
 /// before any other call can fail, and everything after it is log-only or
 /// skipped, because the outcome is already decided and I2c owes the caller an
 /// exit.
+///
+/// `parent_dir_flushes` is `PARENT_DIR_FSYNC_FLUSHES` in production. On targets
+/// where `PARENT_DIR_FSYNC_FLUSHES` is false the entry is never known durable, so
+/// the index is never derived there; readers get `Proven` from the identity name
+/// alone.
 pub(super) fn publish_restart_terminal(
     root: &std::path::Path,
     nonce: &str,
     body: &str,
+    parent_dir_flushes: bool,
 ) -> std::io::Result<()> {
     let Some(identity) = restart_request_artifact_path(root, "restart_persisted", nonce) else {
         return Err(std::io::Error::new(
@@ -342,7 +348,7 @@ pub(super) fn publish_restart_terminal(
             return Ok(());
         }
         // Without a parent flush the identity entry is never known to be durable.
-        Ok(()) if !runtime_store::PARENT_DIR_FSYNC_FLUSHES => return Ok(()),
+        Ok(()) if !parent_dir_flushes => return Ok(()),
         Ok(()) => {}
     }
     let staged = root.join(format!(".restart_persisted.idx.{}", uuid::Uuid::new_v4()));
