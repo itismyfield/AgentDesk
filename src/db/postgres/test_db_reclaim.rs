@@ -64,7 +64,8 @@ pub(super) async fn mark_test_database(
     .map(|_| ())
 }
 
-/// CREATE never runs under `database_name`, so no step leaves an unmarked fixture.
+/// CREATE first uses a reserved pending name. Before COMMENT, that name
+/// identifies the fixture; after COMMENT, the marker survives the RENAME.
 pub(super) async fn create_marked(
     admin_pool: &PgPool,
     database_name: &str,
@@ -179,11 +180,12 @@ pub(super) async fn reclaim_once_per_process(admin_pool: &PgPool, label: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        KILL_AFTER_CREATE, MARKER_PREFIX, PENDING_PREFIX, RECLAIM_MIN_AGE, create_marked,
-        mark_test_database, pending_database_name, reclaim_stale_test_databases, server_now_unix,
-        stale_test_databases,
+        KILL_AFTER_CREATE, MARKER_PREFIX, PENDING_PREFIX, RECLAIM_MIN_AGE, SWEPT_THIS_PROCESS,
+        create_marked, mark_test_database, pending_database_name, reclaim_stale_test_databases,
+        server_now_unix, stale_test_databases,
     };
     use sqlx::PgPool;
+    use std::sync::atomic::Ordering;
 
     const LABEL: &str = "db::postgres reclaim tests";
     const CHILD_ENV: &str = "AGENTDESK_TEST_RECLAIM_FRESH_PROCESS_CHILD";
@@ -491,7 +493,16 @@ mod tests {
             return;
         }
         let fx = fixture().await.expect("fixture base reaches the child");
+        // Pins this process's own sweep; orphans alone could vanish to another process's sweep.
+        assert!(
+            !SWEPT_THIS_PROCESS.load(Ordering::SeqCst),
+            "fresh child already swept before fixture create"
+        );
         let name = create_fixture(&fx, "child").await;
+        assert!(
+            SWEPT_THIS_PROCESS.load(Ordering::SeqCst),
+            "fixture create did not run the process sweep"
+        );
         crate::db::postgres::drop_test_database(&fx.admin_url, &name, LABEL)
             .await
             .expect("drop child fixture");
