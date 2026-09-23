@@ -1223,6 +1223,7 @@ server::worker_recovery::tests::cross_process_guard_ignores_future_entries_after
 server::worker_recovery::tests::cross_process_guard_is_per_worker
 server::worker_recovery::tests::cross_process_guard_resets_after_window
 server::worker_recovery::tests::fatal_ledger_atomic_write_preserves_target_when_temp_write_fails
+server::worker_recovery::tests::first_fatal_exit_persists_ledger_and_exits
 server::worker_recovery::tests::flapping_is_info_only_and_not_a_health_reason
 server::worker_recovery::tests::loop_owned_unexpected_exit_exposes_terminated_reason
 server::worker_recovery::tests::loop_owned_worker_remains_non_restartable
