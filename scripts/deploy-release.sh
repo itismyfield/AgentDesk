@@ -1239,13 +1239,14 @@ _resolve_deploy_peers() {
 _deploy_peer_env_prelude() {
     printf 'AGENTDESK_DEPLOY_PEER_INVOCATION=1'
     local name value
+    # AGENTDESK_DEPLOY_BINARY is deliberately absent: it names a host-local path, so
+    # each peer builds from its own verified source with the provenance gates enabled.
     for name in \
         AGENTDESK_CODESIGN_IDENTITY \
         AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN \
         AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE \
         AGENTDESK_CODESIGN_KEYCHAIN_NAME \
         AGENTDESK_DEPLOY_ALL_NODES \
-        AGENTDESK_DEPLOY_BINARY \
         AGENTDESK_DEPLOY_DELAY_SECS \
         AGENTDESK_DEPLOY_FAST \
         AGENTDESK_DEPLOY_HEALTH_DELAY_SECS \
