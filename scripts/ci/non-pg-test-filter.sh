@@ -35,6 +35,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::intake_outbox_delivery_proof::tests
   --skip db::intake_outbox_dispatch_stamp::tests
   --skip db::intake_outbox_dispatched_audit::postgres_tests
+  --skip db::postgres::test_db_reclaim::tests
   --skip db::postgres::tests
   --skip db::prompt_manifests::tests
   --skip db::relay_dead_letter::tests
