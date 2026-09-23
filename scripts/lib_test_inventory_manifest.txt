@@ -2852,6 +2852,7 @@ services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_
 services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_leak_recovery_clears_zero_id_owned_inflight
 services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_leak_recovery_preserves_a_newer_turns_inflight
 services::discord::health::recovery::live_agent_recovery::tests::recovery_metadata_is_a_role_bound_persistent_routine_when_requested
+services::discord::health::recovery::mailbox_unreachable_tests::unreachable_actor_is_idle_to_wrapper_but_never_ends_the_turn_wait
 services::discord::health::recovery::owning_runtime_http_tests::owning_runtime_http_uses_channel_matched_runtime
 services::discord::health::recovery::rebind_error_status_tests::runtime_binding_unavailable_maps_to_conflict
 services::discord::health::recovery::rebind_error_status_tests::zero_channel_id_maps_to_bad_request
@@ -3135,6 +3136,7 @@ services::discord::idle_recap::tests::channel_has_active_turn_false_for_stale_in
 services::discord::idle_recap::tests::channel_has_active_turn_false_when_no_inflight
 services::discord::idle_recap::tests::channel_has_active_turn_true_for_fresh_inflight
 services::discord::idle_recap::tests::channel_has_active_turn_true_for_mailbox_active_without_inflight
+services::discord::idle_recap::tests::channel_has_active_turn_true_for_unreachable_mailbox_without_inflight
 services::discord::idle_recap::tests::clear_specific_card_clears_when_pointer_still_matches_captured_id
 services::discord::idle_recap::tests::clear_specific_card_targets_captured_id_and_cas_is_noop_when_pointer_advanced
 services::discord::idle_recap::tests::concurrent_same_session_recap_persist_keeps_newer_card_when_older_persists_later
@@ -9044,6 +9046,8 @@ services::turn_orchestrator::lease_release::lease_release_identity_tests::hard_s
 services::turn_orchestrator::lease_release::lease_release_identity_tests::hard_stop_release_without_persistence_names_the_provider_unmeasured
 services::turn_orchestrator::lease_release::lease_release_identity_tests::release_clears_the_same_anchor_whether_or_not_a_provider_is_carried
 services::turn_orchestrator::lease_release::lease_release_identity_tests::the_unmeasured_label_is_the_literal_these_tests_pin
+services::turn_orchestrator::mailbox_unreachable_tests::measured_idle_is_distinct_from_unreachable_actor
+services::turn_orchestrator::mailbox_unreachable_tests::requeue_front_to_unreachable_actor_names_the_refusal
 services::turn_orchestrator::no_ttl_evict_tests::overflow_cap_still_evicts_oldest_as_overflow
 services::turn_orchestrator::no_ttl_evict_tests::requeue_tail_drain_is_overflow_and_cancel_is_not
 services::turn_orchestrator::no_ttl_evict_tests::soft_probe_surfaces_overflow_exit_events
