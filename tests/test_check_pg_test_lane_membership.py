@@ -547,11 +547,14 @@ class DetectionMutation(FixtureCase):
             if finding.kind == "pg-reach-depth-exhausted"
         ]
         self.assertEqual(exhausted, ["deep::tests::beyond"])
-        empty = {section: set() for section in membership.SECTIONS}
+        # Absorb the fixture's rule1-rule4 debt and rule out rule5 so that
+        # depth exhaustion is the only thing that can make rc=1.
+        baseline = {section: set(analysis.debts[section]) for section in membership.SECTIONS}
+        self.assertFalse(analysis.debts["rule5"])
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             rc = membership.check_analysis(
-                analysis, empty, empty, membership.render_manifest(analysis.inventory),
+                analysis, baseline, baseline, membership.render_manifest(analysis.inventory),
                 reference_label="fixture base", allowlist_label="fixture allowlist",
             )
         self.assertEqual(rc, 1)
