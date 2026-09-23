@@ -65,6 +65,7 @@ enum ServerWorkerId {
     MaintenanceScheduler,
     MessageOutbox,
     ScheduledMessages,
+    KakaoCalendar,
     DispatchOutbox,
     DmReplyRetry,
     WsBatchFlusher,
@@ -190,7 +191,7 @@ pub(crate) struct WorkerSpec {
     pub(crate) notes: &'static str,
 }
 
-pub(crate) const WORKER_SPECS: [WorkerSpec; 12] = [
+pub(crate) const WORKER_SPECS: [WorkerSpec; 13] = [
     WorkerSpec {
         id: ServerWorkerId::GithubSync,
         name: "github_sync_loop",
@@ -280,6 +281,21 @@ pub(crate) const WORKER_SPECS: [WorkerSpec; 12] = [
         execution_scope: WorkerExecutionScope::LeaderOnly,
         health_owner: "scheduled_messages/scheduled_message_deliveries row state and tracing logs",
         notes: "Waits three seconds for Discord runtime readiness before polling with adaptive backoff; lease-based delivery claims keep firing at-most-once per slot",
+    },
+    WorkerSpec {
+        id: ServerWorkerId::KakaoCalendar,
+        name: "kakao_calendar_loop",
+        kind: WorkerKind::TokioTask,
+        target: "services::calendar_sync::calendar_loop",
+        responsibility: "Apply managed calendar intent to independently consenting Kakao accounts",
+        owner: "server::worker_registry",
+        start_stage: WorkerStartStage::AfterBootReconcile,
+        start_order: 46,
+        restart_policy: WorkerRestartPolicy::LoopOwned,
+        shutdown_policy: WorkerShutdownPolicy::RuntimeShutdown,
+        execution_scope: WorkerExecutionScope::LeaderOnly,
+        health_owner: "kakao_calendar_operations status, revision and redacted error codes",
+        notes: "Opt-in single-node credential owner; interrupted dispatch requires reconciliation",
     },
     WorkerSpec {
         id: ServerWorkerId::DispatchOutbox,

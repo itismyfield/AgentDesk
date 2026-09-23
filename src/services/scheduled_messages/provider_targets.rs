@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use thiserror::Error;
 
-use crate::services::kakao::{KakaoClient, KakaoError, validate_recipients};
+use crate::services::kakao::{KakaoEnvironment, KakaoError, account, validate_recipients};
 use crate::services::kakao_message::{KakaoMessage, validate_message};
 
 #[derive(Deserialize)]
@@ -89,7 +89,7 @@ pub(crate) struct StoredKakaoTarget {
     pub image_url: Option<String>,
 }
 
-pub(crate) fn validate_for_process(
+pub(crate) async fn validate_for_process(
     body: &ScheduledProviderTargetsBody,
     content: &str,
 ) -> Result<ValidatedProviderTargets, ProviderTargetError> {
@@ -99,9 +99,17 @@ pub(crate) fn validate_for_process(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let client = KakaoClient::from_process(requested_account)
+    let environment = KakaoEnvironment::from_process(requested_account)
         .map_err(ProviderTargetError::KakaoUnavailable)?;
-    validate_resolved(body, content, client.account_id())
+    let validated = validate_resolved(body, content, &environment.account_id)?;
+    let client = account::shared_client(&environment.account_id, false)
+        .await
+        .map_err(ProviderTargetError::KakaoUnavailable)?;
+    client
+        .validate_credentials()
+        .await
+        .map_err(ProviderTargetError::KakaoUnavailable)?;
+    Ok(validated)
 }
 
 fn validate_resolved(

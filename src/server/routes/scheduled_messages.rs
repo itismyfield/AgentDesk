@@ -182,7 +182,8 @@ async fn validate_create(
         required_discord_mention_user_ids,
     )?;
     let validated_provider_targets =
-        provider_targets::prepare_create(body.provider_targets.as_ref(), content, &delivery_kind)?;
+        provider_targets::prepare_create(body.provider_targets.as_ref(), content, &delivery_kind)
+            .await?;
     let on_agent_failure = body
         .on_agent_failure
         .as_deref()
@@ -756,7 +757,7 @@ async fn build_patch(
         .agent_instruction
         .clone()
         .unwrap_or_else(|| existing.agent_instruction.clone());
-    let has_provider_targets = provider_targets::apply_patch(body, &mut patch, existing)?;
+    let has_provider_targets = provider_targets::apply_patch(body, &mut patch, existing).await?;
     let mention_source = requested_discord_mentions
         .as_deref()
         .unwrap_or(&existing.discord_mention_user_ids);
