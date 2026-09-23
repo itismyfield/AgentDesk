@@ -8671,6 +8671,9 @@ services::stale_turn_reconciler::tests::unreadable_inflight_provider_maps_unknow
 services::stream_json_cli::codec::tests::agy_codec_does_not_duplicate_aggregate_after_delta
 services::stream_json_cli::codec::tests::agy_codec_failure_wins_over_partial_text_and_process_status
 services::stream_json_cli::codec::tests::agy_codec_keeps_step_failure_alongside_unrelated_stderr
+services::stream_json_cli::codec::tests::agy_codec_nested_errors_and_identity_are_preserved
+services::stream_json_cli::codec::tests::agy_codec_nested_result_without_deltas_and_failure_guards
+services::stream_json_cli::codec::tests::agy_codec_nested_stream_emits_text_and_finishes_once
 services::stream_json_cli::codec::tests::agy_codec_preserves_diagnostics_without_terminal_result
 services::stream_json_cli::codec::tests::agy_codec_preserves_step_failure_when_stderr_is_empty
 services::stream_json_cli::codec::tests::agy_codec_rejects_blank_success_with_or_without_session_identity
