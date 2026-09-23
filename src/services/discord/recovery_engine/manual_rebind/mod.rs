@@ -406,16 +406,14 @@ async fn rebind_inflight_for_channel_inner(
             _ => {
                 // Same coordinate space: resume from the row, but never below what an idle
                 // tail/bridge already committed for this transcript.
-                let committed =
-                    crate::services::discord::tui_prompt_relay::claude_transcript_committed_offset(
-                        shared,
-                        discord_channel_id,
-                        &tmux_session_name,
-                        std::fs::metadata(&output_path)
-                            .ok()
-                            .map(|metadata| metadata.len()),
-                        "tui_direct_adopt",
-                    );
+                let committed = adoption::claude_transcript_committed_offset(
+                    shared,
+                    discord_channel_id,
+                    &tmux_session_name,
+                    std::fs::metadata(&output_path)
+                        .ok()
+                        .map(|metadata| metadata.len()),
+                );
                 minimum_initial_offset = minimum_initial_offset.max(Some(committed));
             }
         }

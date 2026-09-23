@@ -84,6 +84,9 @@ pub(crate) enum AdoptFenceForwardCause {
     TranscriptRotated,
     CoordinateSpaceMismatch,
     NewerTurnMixed,
+    /// No live lease names the running turn (a restart, or a turn past the lease TTL), so the
+    /// unread range may already hold a newer turn.
+    TurnIdentityUnknown,
 }
 
 impl AdoptFenceForwardCause {
@@ -92,6 +95,7 @@ impl AdoptFenceForwardCause {
             Self::TranscriptRotated => "transcript_rotated",
             Self::CoordinateSpaceMismatch => "coordinate_space_mismatch",
             Self::NewerTurnMixed => "newer_turn_mixed",
+            Self::TurnIdentityUnknown => "turn_identity_unknown",
         }
     }
 }
@@ -147,6 +151,39 @@ pub(crate) fn tui_direct_adopt_offsets(
     ))
 }
 
+/// Committed delivery offset for a Claude transcript, after the same generation/regression
+/// watermark resets the watcher runs, so a stale prior-wrapper watermark never clamps forward.
+pub(crate) fn claude_transcript_committed_offset(
+    shared: &crate::services::discord::SharedData,
+    channel_id: poise::serenity_prelude::ChannelId,
+    tmux_session_name: &str,
+    transcript_eof: Option<u64>,
+) -> u64 {
+    use crate::services::discord::tmux;
+    #[cfg(unix)]
+    tmux::reset_stale_relay_watermark_if_output_regressed(
+        shared,
+        channel_id,
+        tmux_session_name,
+        transcript_eof.unwrap_or(0),
+        "tui_direct_adopt",
+    );
+    #[cfg(unix)]
+    tmux::reset_relay_watermark_on_generation_change(
+        shared,
+        channel_id,
+        tmux_session_name,
+        "tui_direct_adopt",
+    );
+    crate::services::discord::outbound::delivery_record::effective_committed_offset(
+        shared,
+        &crate::services::provider::ProviderKind::Claude,
+        channel_id,
+        tmux_session_name,
+        transcript_eof,
+    )
+}
+
 pub(crate) const ADOPT_FENCE_FORWARD_INVARIANT: &str = "tui_direct_adopt_keeps_its_turn_offsets";
 
 pub(crate) struct AdoptFenceForward<'a> {
@@ -158,6 +195,13 @@ pub(crate) struct AdoptFenceForward<'a> {
     pub initial_offset: u64,
     pub latest_lease_turn_id: Option<&'a str>,
 }
+
+/// Channels whose custody INSERT a test accepts in place of PG; any other channel takes the
+/// production path.
+#[cfg(test)]
+pub(crate) static ADOPT_FENCE_FORWARD_TEST_CUSTODY: std::sync::Mutex<
+    std::collections::BTreeSet<String>,
+> = std::sync::Mutex::new(std::collections::BTreeSet::new());
 
 #[cfg(test)]
 pub(crate) static ADOPT_FENCE_FORWARD_DISPATCHES: std::sync::Mutex<
@@ -512,7 +556,7 @@ mod tests {
         const ROTATED: &str = "/tmp/71590000-0000-4000-8000-000000000000.jsonl";
         let mismatch = Some(FenceForward(CoordinateSpaceMismatch));
         let cases: [(Edit, Option<&str>, Option<TuiDirectAdoptOffsets>); 8] = [
-            (|_| {}, None, Some(Preserve)),
+            (|_| {}, None, Some(FenceForward(TurnIdentityUnknown))),
             (|_| {}, Some("turn-a"), Some(Preserve)),
             (|_| {}, Some("turn-b"), Some(FenceForward(NewerTurnMixed))),
             (
@@ -587,8 +631,18 @@ mod tests {
     #[cfg(unix)]
     const SESSION_FILE: &str = "61590000-0000-4000-8000-000000000000.jsonl";
 
+    #[cfg(unix)]
+    struct Rebind {
+        initial: Result<u64, super::super::RebindError>,
+        eof: u64,
+        events: Vec<StructuredEvent>,
+        /// The row as persisted after the rebind returned.
+        row: Option<inflight::InflightTurnState>,
+    }
+
     /// Drives `rebind_inflight_for_channel` for a TUI-direct row resting at `turn_start_offset`
-    /// 4096, with an optional newer lease turn and an in-memory committed offset.
+    /// 4096, with an optional newer lease turn and an in-memory committed offset. Without
+    /// `custody` the dead-letter INSERT fails (no pool).
     #[cfg(unix)]
     fn rebind_tui_direct_row(
         channel_id: u64,
@@ -596,7 +650,8 @@ mod tests {
         lease_turn_id: Option<&str>,
         committed: u64,
         row_runtime_kind: Option<RuntimeHandoffKind>,
-    ) -> Option<(u64, u64, Vec<StructuredEvent>)> {
+        custody: bool,
+    ) -> Option<Rebind> {
         use crate::services::platform::tmux;
         use crate::services::tui_prompt_dedupe as dedupe;
         use std::sync::atomic::Ordering::SeqCst;
@@ -630,6 +685,12 @@ mod tests {
             lease.turn_id = Some(turn_id.to_string());
             dedupe::record_external_input_turn_lease("claude", &session, lease);
         }
+        if custody {
+            ADOPT_FENCE_FORWARD_TEST_CUSTODY
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(channel_id.to_string());
+        }
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = poise::serenity_prelude::ChannelId::new(channel_id);
         let coord = shared.tmux_relay_coord(channel);
@@ -652,10 +713,16 @@ mod tests {
         });
         // Dropping the runtime cancels the adopted watcher's tasks.
         drop(runtime);
+        let row = inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel_id);
         dedupe::clear_external_input_relay_lease("claude", &session, channel_id);
         let _ = crate::services::platform::tmux::kill_session(&session, "rebind test cleanup");
-        let outcome = result.expect("TUI-direct row is adopted");
-        Some((outcome.initial_offset, eof, events))
+        let initial = result.map(|outcome| outcome.initial_offset);
+        Some(Rebind {
+            initial,
+            eof,
+            events,
+            row,
+        })
     }
 
     #[cfg(unix)]
@@ -663,12 +730,17 @@ mod tests {
     fn rebind_fences_a_tui_direct_row_forward_past_a_newer_turn_and_records_it() {
         let channel_id = 6_159_003_u64;
         let claude = Some(RuntimeHandoffKind::ClaudeTui);
-        let Some((initial, eof, events)) =
-            rebind_tui_direct_row(channel_id, "mixed", Some("turn-b"), 0, claude)
+        let Some(rebind) =
+            rebind_tui_direct_row(channel_id, "mixed", Some("turn-b"), 0, claude, true)
         else {
             return;
         };
-        assert_eq!(initial, eof, "the newer turn must not replay here");
+        let eof = rebind.eof;
+        assert_eq!(
+            rebind.initial.ok(),
+            Some(eof),
+            "the newer turn must not replay here"
+        );
         // The dead-letter keeps the dropped range's body; the notice names its size.
         let dropped = eof - 4_096;
         let needles = [
@@ -677,7 +749,7 @@ mod tests {
             &format!("dropped_bytes={dropped}"),
             &format!("{dropped}바이트"),
         ];
-        assert_one_fence_forward(&events, channel_id, &needles);
+        assert_one_fence_forward(&rebind.events, channel_id, &needles);
     }
 
     #[cfg(unix)]
@@ -685,13 +757,17 @@ mod tests {
     fn rebind_preserves_a_tui_direct_row_but_never_below_the_committed_offset() {
         let channel_id = 6_159_004_u64;
         let claude = Some(RuntimeHandoffKind::ClaudeTui);
-        let Some((initial, eof, _)) =
-            rebind_tui_direct_row(channel_id, "keep", None, 8_192, claude)
+        let Some(rebind) =
+            rebind_tui_direct_row(channel_id, "keep", Some("turn-a"), 8_192, claude, true)
         else {
             return;
         };
-        assert!(eof > 8_192);
-        assert_eq!(initial, 8_192, "resume, clamped to committed");
+        assert!(rebind.eof > 8_192);
+        assert_eq!(
+            rebind.initial.ok(),
+            Some(8_192),
+            "resume, clamped to committed"
+        );
         let dispatches = ADOPT_FENCE_FORWARD_DISPATCHES
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -701,16 +777,63 @@ mod tests {
         assert!(!fenced, "preserve is not a fence-forward");
     }
 
+    /// Without a live lease naming the row's turn, the range may hold a newer turn.
+    #[cfg(unix)]
+    #[test]
+    fn rebind_fences_a_tui_direct_row_whose_turn_identity_is_unknown() {
+        let channel_id = 6_159_006_u64;
+        let claude = Some(RuntimeHandoffKind::ClaudeTui);
+        let Some(rebind) = rebind_tui_direct_row(channel_id, "nolease", None, 0, claude, true)
+        else {
+            return;
+        };
+        assert_eq!(
+            rebind.initial.ok(),
+            Some(rebind.eof),
+            "unknown is not same-turn"
+        );
+        let needles = ["cause=turn_identity_unknown", "BACKLOG_BODY_6159"];
+        assert_one_fence_forward(&rebind.events, channel_id, &needles);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rebind_keeps_the_row_offsets_when_the_unread_range_is_not_in_custody() {
+        let channel_id = 6_159_007_u64;
+        let claude = Some(RuntimeHandoffKind::ClaudeTui);
+        let Some(rebind) =
+            rebind_tui_direct_row(channel_id, "nocustody", Some("turn-b"), 0, claude, false)
+        else {
+            return;
+        };
+        assert!(rebind.eof > 4_096, "the unread range is not empty");
+        assert!(
+            rebind.initial.is_err(),
+            "rebind must fail: {:?}",
+            rebind.initial
+        );
+        let row = rebind.row.expect("row survives a failed rebind");
+        let cursor = (row.turn_start_offset, row.last_offset);
+        assert_eq!(cursor, (Some(4_096), 4_096), "cursor must not move to EOF");
+        let dispatches = ADOPT_FENCE_FORWARD_DISPATCHES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let announced = dispatches
+            .iter()
+            .any(|(record, _)| record.channel_id == channel_id.to_string());
+        assert!(!announced, "nothing was fenced, so nothing is announced");
+    }
+
     #[cfg(unix)]
     #[test]
     fn rebind_never_rebases_an_unstamped_tui_direct_row_to_eof_without_a_record() {
         let channel_id = 6_159_005_u64;
-        let Some((initial, eof, events)) =
-            rebind_tui_direct_row(channel_id, "unstamped", None, 0, None)
+        let Some(rebind) = rebind_tui_direct_row(channel_id, "unstamped", None, 0, None, true)
         else {
             return;
         };
-        assert_eq!(initial, eof);
-        assert_one_fence_forward(&events, channel_id, &["cause=coordinate_space_mismatch"]);
+        assert_eq!(rebind.initial.ok(), Some(rebind.eof));
+        let needles = ["cause=coordinate_space_mismatch"];
+        assert_one_fence_forward(&rebind.events, channel_id, &needles);
     }
 }
