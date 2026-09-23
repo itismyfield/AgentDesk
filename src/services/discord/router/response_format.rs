@@ -203,7 +203,7 @@ pub(super) fn build_race_requeued_intervention(
     reply_context: Option<String>,
     has_reply_boundary: bool,
     merge_consecutive: bool,
-    pending_uploads: Vec<String>,
+    pending_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     // #2266: when the race-lost message is a voice-transcript announcement,
     // the per-process `voice::announce_meta` store entry was already consumed
     // by the active `handle_text_message` call before the race-loss branch

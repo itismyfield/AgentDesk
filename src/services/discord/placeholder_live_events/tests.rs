@@ -9990,7 +9990,11 @@ fn turn_request_anchor_survives_turn_reset() {
     // before the turn renders its request link.
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(38111);
-    events.set_turn_request_anchor(channel_id, Some(ANCHOR_TEST_USER_MSG_ID));
+    events.set_turn_request_anchor(
+        channel_id,
+        Some(ANCHOR_TEST_USER_MSG_ID),
+        Some("1469870512812462284".into()),
+    );
     events.clear_channel_preserving_footer_residuals(channel_id);
     assert_eq!(
         events.request_user_msg_id_for_test(channel_id),
@@ -10015,7 +10019,11 @@ fn turn_request_anchor_not_bled_by_queued_message_before_promotion() {
 
     // Turn A wins the claim (started == true) and records its anchor; the bridge
     // then runs A's same-turn reset, which preserves it.
-    events.set_turn_request_anchor(channel_id, Some(turn_a_msg));
+    events.set_turn_request_anchor(
+        channel_id,
+        Some(turn_a_msg),
+        Some("1469870512812462284".into()),
+    );
     events.clear_channel_preserving_footer_residuals(channel_id);
     assert_eq!(
         events.request_user_msg_id_for_test(channel_id),
@@ -10031,7 +10039,11 @@ fn turn_request_anchor_not_bled_by_queued_message_before_promotion() {
     );
 
     // B is later dequeued/promoted (started == true) and records its own anchor.
-    events.set_turn_request_anchor(channel_id, Some(turn_b_msg));
+    events.set_turn_request_anchor(
+        channel_id,
+        Some(turn_b_msg),
+        Some("1469870512812462284".into()),
+    );
     assert_eq!(
         events.request_user_msg_id_for_test(channel_id),
         Some(turn_b_msg),
@@ -10045,8 +10057,12 @@ fn turn_request_anchor_cleared_on_tui_direct() {
     // onto a later id-0 synthetic turn.
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(38112);
-    events.set_turn_request_anchor(channel_id, Some(ANCHOR_TEST_USER_MSG_ID));
-    events.set_turn_request_anchor(channel_id, None);
+    events.set_turn_request_anchor(
+        channel_id,
+        Some(ANCHOR_TEST_USER_MSG_ID),
+        Some("1469870512812462284".into()),
+    );
+    events.set_turn_request_anchor(channel_id, None, None);
     assert_eq!(events.request_user_msg_id_for_test(channel_id), None);
 }
 
@@ -10062,7 +10078,11 @@ fn turn_request_anchor_cleared_on_session_reset() {
         "session_resumed",
         &json!({ "provider_session_id": "session-A", "tmux_reused": true }),
     ));
-    events.set_turn_request_anchor(channel_id, Some(ANCHOR_TEST_USER_MSG_ID));
+    events.set_turn_request_anchor(
+        channel_id,
+        Some(ANCHOR_TEST_USER_MSG_ID),
+        Some("1469870512812462284".into()),
+    );
     assert_eq!(
         events.request_user_msg_id_for_test(channel_id),
         Some(ANCHOR_TEST_USER_MSG_ID)

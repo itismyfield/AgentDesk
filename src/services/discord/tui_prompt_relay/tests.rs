@@ -839,10 +839,11 @@ async fn task_notification_status_only_preserves_existing_turn_request_anchor() 
     shared
         .tmux_watchers
         .restore_owner_channel_for_tmux_session(tmux, channel_id);
-    shared
-        .ui
-        .placeholder_live_events
-        .set_turn_request_anchor(channel_id, Some(existing_anchor));
+    shared.ui.placeholder_live_events.set_turn_request_anchor(
+        channel_id,
+        Some(existing_anchor),
+        Some("1469870512812462284".into()),
+    );
     let prompt = ObservedTuiPrompt {
         provider: ProviderKind::Claude.as_str().to_string(),
         tmux_session_name: tmux.to_string(),

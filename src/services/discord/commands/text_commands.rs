@@ -140,7 +140,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
     data: &Data,
     channel_id: serenity::ChannelId,
     text: &str,
-    preloaded_uploads: &[String],
+    preloaded_uploads: &[crate::services::cluster::attachment_transfer::uploads::Upload],
     admitted_attachment_permit: &mut Option<LocalAdmissionPermit>,
 ) -> Result<bool, Error> {
     let parts: Vec<&str> = text.splitn(3, char::is_whitespace).collect();

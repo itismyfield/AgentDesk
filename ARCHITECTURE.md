@@ -22,12 +22,14 @@ This block is generated from the filesystem and is checked in CI for drift.
 src/
 ├── cli/
 │   ├── client/
-│   │   └── runtime_config.rs
+│   │   ├── runtime_config.rs
+│   │   └── transport.rs
 │   ├── dcserver/
 │   │   └── startup.rs
 │   ├── doctor/
 │   │   ├── orchestrator/
 │   │   │   ├── config_dir_checks.rs
+│   │   │   ├── health_snapshot.rs
 │   │   │   ├── provider_credentials.rs
 │   │   │   └── relay_notifications.rs
 │   │   ├── contract.rs
@@ -73,6 +75,8 @@ src/
 │   ├── test_env/
 │   │   └── teardown_probe.rs
 │   ├── agent_channels.rs
+│   ├── cluster_role.rs
+│   ├── runtime_profile.rs
 │   ├── runtime_settings.rs
 │   └── test_env.rs
 ├── db/
@@ -128,6 +132,7 @@ src/
 │   │   ├── mod.rs
 │   │   └── transitions.rs
 │   ├── postgres/
+│   │   ├── shared_config.rs
 │   │   └── test_db_reclaim.rs
 │   ├── prompt_manifests/
 │   │   ├── builder.rs
@@ -279,6 +284,7 @@ src/
 │   │   ├── docs/
 │   │   │   ├── inventory/
 │   │   │   │   └── endpoints/
+│   │   │   │       ├── cluster_execution.rs
 │   │   │   │       ├── kakao_calendar.rs
 │   │   │   │       ├── mod.rs
 │   │   │   │       ├── part_01.rs
@@ -305,9 +311,11 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── onboarding.rs
 │   │   │   ├── ops.rs
-│   │   │   └── reviews.rs
+│   │   │   ├── reviews.rs
+│   │   │   └── runtime.rs
 │   │   ├── health_api/
-│   │   │   └── public_projection.rs
+│   │   │   ├── public_projection.rs
+│   │   │   └── runtime_profile.rs
 │   │   ├── review_verdict/
 │   │   │   ├── decision_route.rs
 │   │   │   ├── mod.rs
@@ -351,6 +359,7 @@ src/
 │   │   ├── docs.rs
 │   │   ├── e2e_control.rs
 │   │   ├── escalation.rs
+│   │   ├── execution_requirements.rs
 │   │   ├── github.rs
 │   │   ├── github_dashboard.rs
 │   │   ├── health_api.rs
@@ -379,6 +388,7 @@ src/
 │   │   ├── resume.rs
 │   │   ├── reviews.rs
 │   │   ├── routines.rs
+│   │   ├── runtime_profile_tests.rs
 │   │   ├── scheduled_messages.rs
 │   │   ├── session_activity.rs
 │   │   ├── settings.rs
@@ -539,13 +549,39 @@ src/
 │   │   └── tui_relay.rs
 │   ├── cluster/
 │   │   ├── attachment_transfer/
+│   │   │   ├── materialize.rs
+│   │   │   ├── storage_tests.rs
+│   │   │   ├── store.rs
+│   │   │   ├── temporary.rs
+│   │   │   ├── tests.rs
+│   │   │   └── uploads.rs
+│   │   ├── execution_capacity/
+│   │   │   ├── store.rs
+│   │   │   └── tests.rs
+│   │   ├── execution_requirements/
 │   │   │   └── tests.rs
 │   │   ├── intake_router_hook/
+│   │   │   ├── agent_execution_node_tests.rs
+│   │   │   ├── attachment_tests.rs
+│   │   │   ├── capacity_tests.rs
+│   │   │   ├── edge_case_tests.rs
+│   │   │   ├── execution_requirement_tests.rs
+│   │   │   ├── model.rs
 │   │   │   ├── owner_record.rs
+│   │   │   ├── placement.rs
 │   │   │   └── session_owner.rs
 │   │   ├── intake_worker/
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   └── drain_tests.rs
+│   │   ├── machine_resources/
+│   │   │   ├── gpu/
+│   │   │   │   ├── macos.rs
+│   │   │   │   └── other.rs
+│   │   │   ├── gpu.rs
+│   │   │   ├── sampler.rs
+│   │   │   └── tests.rs
+│   │   ├── readiness/
+│   │   │   └── tests.rs
 │   │   ├── stream_relay/
 │   │   │   ├── tests/
 │   │   │   │   └── shutdown_tests.rs
@@ -553,8 +589,11 @@ src/
 │   │   │   ├── identity.rs
 │   │   │   ├── shutdown.rs
 │   │   │   └── terminal_resolution.rs
+│   │   ├── agent_execution_node.rs
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
+│   │   ├── execution_capacity.rs
+│   │   ├── execution_requirements.rs
 │   │   ├── intake_preflight.rs
 │   │   ├── intake_router_hook.rs
 │   │   ├── intake_routing.rs
@@ -562,8 +601,10 @@ src/
 │   │   ├── intake_routing_telemetry.rs
 │   │   ├── intake_worker.rs
 │   │   ├── intake_worker_capabilities.rs
+│   │   ├── machine_resources.rs
 │   │   ├── mod.rs
 │   │   ├── node_registry.rs
+│   │   ├── readiness.rs
 │   │   ├── registry_adapter_sink.rs
 │   │   ├── relay_producer_registry.rs
 │   │   ├── session_discovery.rs
@@ -835,7 +876,12 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── section_dedupe.rs
 │   │   │   └── session_anchors.rs
+│   │   ├── queue_dispatch/
+│   │   │   └── kickoff.rs
 │   │   ├── queue_io/
+│   │   │   ├── transport/
+│   │   │   │   └── tests.rs
+│   │   │   ├── transport.rs
 │   │   │   └── turn_admission.rs
 │   │   ├── recovery_engine/
 │   │   │   ├── manual_rebind/
@@ -912,6 +958,7 @@ src/
 │   │   │   ├── intake_dispatch/
 │   │   │   │   ├── attachment.rs
 │   │   │   │   ├── notice.rs
+│   │   │   │   ├── policy_channel.rs
 │   │   │   │   ├── queued.rs
 │   │   │   │   ├── skill.rs
 │   │   │   │   └── tests.rs
@@ -958,6 +1005,7 @@ src/
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
+│   │   │   │   ├── turn_context.rs
 │   │   │   │   ├── turn_lifecycle.rs
 │   │   │   │   ├── typing_indicator.rs
 │   │   │   │   ├── voice_announcement_route.rs
@@ -997,6 +1045,7 @@ src/
 │   │   │   ├── intake_delivery_sweep.rs
 │   │   │   ├── orphan_recovery.rs
 │   │   │   ├── queued_placeholders.rs
+│   │   │   ├── queued_recovery.rs
 │   │   │   ├── recovery_flush.rs
 │   │   │   ├── relay_dlq_redelivery.rs
 │   │   │   ├── restored_state.rs
@@ -1259,6 +1308,7 @@ src/
 │   │   │   │   │   ├── rowless_receipt_tests/
 │   │   │   │   │   │   ├── pg_tests.rs
 │   │   │   │   │   │   └── preloop_cleanup_tests.rs
+│   │   │   │   │   ├── rest_delivery_tests.rs
 │   │   │   │   │   └── rowless_receipt_tests.rs
 │   │   │   │   ├── empty_response_recovery/
 │   │   │   │   │   ├── guidance.rs
@@ -1538,6 +1588,7 @@ src/
 │   │   └── auth_profiles.rs
 │   ├── dispatched_sessions/
 │   │   ├── canonical_identity.rs
+│   │   ├── output.rs
 │   │   └── tmux_cleanup.rs
 │   ├── dispatches/
 │   │   ├── discord_delivery/
@@ -1715,9 +1766,13 @@ src/
 │   │   └── timing.rs
 │   ├── session_backend/
 │   │   ├── auth_profiles.rs
+│   │   ├── output.rs
 │   │   ├── stream_line.rs
 │   │   └── terminal_usage.rs
 │   ├── session_forwarding/
+│   │   ├── probe/
+│   │   │   └── tests.rs
+│   │   ├── probe.rs
 │   │   └── trusted_target.rs
 │   ├── settings/
 │   │   └── runtime_config_put.rs
@@ -1757,6 +1812,7 @@ src/
 │   │   ├── episode_identity.rs
 │   │   ├── front_requeue.rs
 │   │   ├── inbound_order.rs
+│   │   ├── intervention.rs
 │   │   ├── lease_release.rs
 │   │   ├── mailbox_unreachable_tests.rs
 │   │   ├── overflow.rs

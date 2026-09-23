@@ -102,9 +102,9 @@ pub(crate) use recovery::{
     resume_runtime_for_channel, retain_resume_runtime_owner_before_teardown,
     stop_provider_channel_runtime_with_policy,
 };
-pub(crate) use runtime_resolve::resolve_utility_bot_http;
 pub use runtime_resolve::{fetch_channel_name, resolve_bot_http};
 use runtime_resolve::{resolve_direct_meeting_runtime, resolve_direct_meeting_shared};
+pub(crate) use runtime_resolve::{resolve_intake_worker_runtime, resolve_utility_bot_http};
 #[allow(unused_imports)]
 pub use snapshot::{
     DiscordHealthSnapshot, HealthStatus, WatcherStateSnapshot, active_request_owner_for_channel,
@@ -119,10 +119,12 @@ pub(super) struct ProviderEntry {
     pub(super) role: ProviderRuntimeRole,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum ProviderRuntimeRole {
     Gateway,
     Standby,
+    Worker,
 }
 
 impl ProviderRuntimeRole {
@@ -374,6 +376,15 @@ impl HealthRegistry {
         shared: Arc<SharedData>,
     ) {
         self.register_with_role(name, shared, ProviderRuntimeRole::Standby)
+            .await;
+    }
+
+    pub(in crate::services::discord) async fn register_worker(
+        &self,
+        name: String,
+        shared: Arc<SharedData>,
+    ) {
+        self.register_with_role(name, shared, ProviderRuntimeRole::Worker)
             .await;
     }
 

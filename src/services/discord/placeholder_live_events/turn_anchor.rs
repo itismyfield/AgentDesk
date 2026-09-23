@@ -12,14 +12,16 @@
 
 use std::sync::Mutex;
 
-use poise::serenity_prelude::ChannelId;
+use poise::serenity_prelude::{Channel, ChannelId, Http};
 
 use super::status_panel::StatusPanelState;
 use crate::services::discord::is_synthetic_headless_message_id_raw;
 
+const CHANNEL_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Builds the `턴 트리거:` original-request deeplink, or `None` when no real
 /// Discord user message backs the turn (headless / synthetic / voice / id-0) or
-/// the process has no configured guild id.
+/// the request's channel could not be resolved.
 ///
 /// Gating: id `0` is the id-less sentinel; the synthetic-headless floor
 /// (`SYNTHETIC_HEADLESS_MESSAGE_ID_FLOOR`, 8e18) sits BELOW both the voice
@@ -68,6 +70,7 @@ impl super::PlaceholderLiveEvents {
         &self,
         channel_id: ChannelId,
         user_msg_id: Option<u64>,
+        guild_id: Option<String>,
     ) {
         let entry = self
             .status_by_channel
@@ -77,22 +80,41 @@ impl super::PlaceholderLiveEvents {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.request_user_msg_id = user_msg_id;
+        guard.request_guild_id = guild_id;
     }
 
-    /// #3811: builds the `요청:` line for a channel's snapshot, reading the
-    /// process-global guild id at render time — the same `load_graceful()` layer
-    /// `render_status_panel` already uses for `cluster`. `None` for headless /
-    /// synthetic / voice / id-0 turns or when no guild id is configured.
+    /// Capture the channel's actual guild once per admitted turn. A process can
+    /// serve several guilds; its default guild is not this request's identity.
+    pub(in crate::services::discord) async fn resolve_turn_request_anchor(
+        &self,
+        http: &Http,
+        channel_id: ChannelId,
+        user_msg_id: Option<u64>,
+    ) {
+        let real_id =
+            user_msg_id.filter(|id| *id != 0 && !is_synthetic_headless_message_id_raw(*id));
+        let guild_id = if real_id.is_some() {
+            match tokio::time::timeout(CHANNEL_LOOKUP_TIMEOUT, channel_id.to_channel(http)).await {
+                Ok(Ok(Channel::Guild(channel))) => Some(channel.guild_id.to_string()),
+                Ok(Ok(Channel::Private(_))) => Some("@me".into()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        self.set_turn_request_anchor(channel_id, real_id, guild_id);
+    }
+
+    /// Only a verified channel identity can produce the original request link.
     pub(super) fn request_anchor_line(
         &self,
         channel_id: ChannelId,
         snapshot: &StatusPanelState,
     ) -> Option<String> {
-        let config = crate::config::load_graceful();
         render_request_anchor_line(
             snapshot.request_user_msg_id,
             channel_id,
-            config.discord.guild_id.as_deref(),
+            snapshot.request_guild_id.as_deref(),
         )
     }
 
@@ -121,6 +143,59 @@ mod tests {
     const REAL_USER_MSG_ID: u64 = 1_520_312_799_245_504_542;
     const GUILD: &str = "1469870512812462284";
     const CHANNEL: u64 = 1475086789696946196;
+
+    #[test]
+    fn request_anchor_uses_each_channels_guild_and_clears_unresolved_identity() {
+        let events = super::super::PlaceholderLiveEvents::default();
+        let channel = ChannelId::new(CHANNEL);
+        let other = ChannelId::new(CHANNEL + 1);
+        events.set_turn_request_anchor(channel, Some(REAL_USER_MSG_ID), Some(GUILD.into()));
+        events.set_turn_request_anchor(other, Some(REAL_USER_MSG_ID), Some("other-guild".into()));
+        let snapshot = |id| {
+            events
+                .status_by_channel
+                .get(&id)
+                .unwrap()
+                .lock()
+                .unwrap()
+                .clone()
+        };
+        assert!(
+            events
+                .request_anchor_line(channel, &snapshot(channel))
+                .unwrap()
+                .contains(GUILD)
+        );
+        assert!(
+            events
+                .request_anchor_line(other, &snapshot(other))
+                .unwrap()
+                .contains("other-guild")
+        );
+        events.set_turn_request_anchor(channel, Some(REAL_USER_MSG_ID + 1), None);
+        assert!(
+            events
+                .request_anchor_line(channel, &snapshot(channel))
+                .is_none()
+        );
+        events.set_turn_request_anchor(other, None, None);
+        assert!(
+            events
+                .request_anchor_line(other, &snapshot(other))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn request_anchor_guild_survives_turn_cleanup_but_not_session_reset() {
+        let mut state = StatusPanelState::default();
+        state.request_user_msg_id = Some(REAL_USER_MSG_ID);
+        state.request_guild_id = Some(GUILD.into());
+        state.reset_turn_content_preserving_unfinished_footer_residuals();
+        assert_eq!(state.request_guild_id.as_deref(), Some(GUILD));
+        state.reset_session_content();
+        assert_eq!(state.request_guild_id, None);
+    }
 
     #[test]
     fn normal_turn_with_real_id_and_guild_renders_request_link() {

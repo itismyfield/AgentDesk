@@ -640,7 +640,7 @@ mod tests {
             .push(single_source_intervention(text_id, "already queued text"));
         let mut legacy_merged =
             make_intervention(image_id, &[text_id, image_id], "already queued text\n");
-        legacy_merged.pending_uploads = vec![image_upload.clone()];
+        legacy_merged.pending_uploads = vec![image_upload.clone().into()];
 
         let result = hydrate_pending_queue_into_state(
             &mut state,

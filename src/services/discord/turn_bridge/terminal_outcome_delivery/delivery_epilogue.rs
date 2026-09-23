@@ -58,7 +58,7 @@ pub(super) async fn handle_delivery_epilogue(
     let should_fail_dispatch_after_delivery = ctx.should_fail_dispatch_after_delivery;
     let bridge_relay_delegated_to_watcher = ctx.bridge_relay_delegated_to_watcher;
     let watcher_delivery_pin = ctx.watcher_delivery_pin;
-    let can_chain_locally = ctx.can_chain_locally;
+    let can_deliver_directly = gateway.can_deliver_directly();
     let inflight_generation = ctx.inflight_generation;
 
     let mut response_sent_offset = *state.response_sent_offset;
@@ -330,7 +330,7 @@ pub(super) async fn handle_delivery_epilogue(
             });
         }
 
-        if !ctx.already_receipted && can_chain_locally
+        if !ctx.already_receipted && can_deliver_directly
             && !preserve_inflight_for_cleanup_retry
             && !delivery_response.trim().is_empty()
             && let Some(user_msg_id) = user_msg_id

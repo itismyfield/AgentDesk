@@ -5,9 +5,9 @@ use axum::{
 
 use super::super::{
     ApiRouter, AppState, auto_queue, cluster, cron_api, dispatched_sessions, dispatches, docs,
-    e2e_control, health_api, idle_recap, maintenance, message_outbox, messages, monitoring,
-    pipeline, prompt_manifest_retention, protected_api_domain, provider_cli_api, queue_api,
-    routines, scheduled_messages, skills_api, termination_events, turn_lease,
+    e2e_control, health_api, maintenance, message_outbox, messages, pipeline,
+    prompt_manifest_retention, protected_api_domain, provider_cli_api, queue_api, routines,
+    scheduled_messages, skills_api,
 };
 
 // Category: dispatches, queue, and ops
@@ -16,15 +16,9 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
     let router = protected_api_domain(
         Router::new()
             .route(
-                "/turn-lease/{provider}/{channel_id}",
-                get(turn_lease::inspect),
-            )
-            .route("/turn-lease/release", post(turn_lease::release))
-            .route(
                 "/dispatches",
                 get(dispatches::list_dispatches).post(dispatches::create_dispatch),
             )
-            .route("/health/detail", get(health_api::health_detail_handler))
             .route(
                 "/dispatch-outbox/failed",
                 get(health_api::list_dispatch_outbox_failures_handler)
@@ -39,10 +33,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/message-outbox/failed/redrive",
                 post(message_outbox::redrive_failed),
             )
-            .route(
-                "/doctor/startup/latest",
-                get(health_api::startup_doctor_latest_handler),
-            )
             .route("/discord/send", post(health_api::send_handler))
             .route(
                 "/discord/bot-tokens/reload",
@@ -54,16 +44,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 post(health_api::send_to_agent_handler),
             )
             .route("/discord/send-dm", post(health_api::senddm_handler))
-            .route(
-                "/inflight/rebind",
-                post(health_api::rebind_inflight_handler),
-            )
-            .route("/cluster/nodes", get(cluster::list_nodes))
-            .route("/cluster/sessions", get(cluster::list_sessions))
-            .route(
-                "/cluster/routing-diagnostics",
-                get(cluster::routing_diagnostics),
-            )
             .route("/cluster/resource-locks", get(cluster::list_resource_locks))
             .route(
                 "/cluster/resource-locks/acquire",
@@ -111,10 +91,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 post(cluster::upsert_issue_spec),
             )
             .route(
-                "/doctor/stale-mailbox/repair",
-                post(health_api::stale_mailbox_repair_handler),
-            )
-            .route(
                 "/dispatches/delivery-events/reconcile-stats",
                 get(dispatches::get_dispatch_delivery_reconcile_stats),
             )
@@ -125,15 +101,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route(
                 "/dispatches/{id}/events",
                 get(dispatches::get_dispatch_delivery_events),
-            )
-            .route(
-                "/internal/link-dispatch-thread",
-                post(dispatches::link_dispatch_thread),
-            )
-            .route("/internal/card-thread", get(dispatches::get_card_thread))
-            .route(
-                "/internal/pending-dispatch-for-thread",
-                get(dispatches::get_pending_dispatch_for_thread),
             )
             .route(
                 "/pipeline/stages",
@@ -171,10 +138,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             )
             .route("/pipeline/config/graph", get(pipeline::get_pipeline_graph))
             .route(
-                "/dispatched-sessions",
-                get(dispatched_sessions::list_dispatched_sessions),
-            )
-            .route(
                 "/dispatched-sessions/cleanup",
                 delete(dispatched_sessions::cleanup_sessions),
             )
@@ -182,56 +145,8 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/dispatched-sessions/gc-threads",
                 delete(dispatched_sessions::gc_thread_sessions),
             )
-            .route(
-                "/dispatched-sessions/{id}",
-                patch(dispatched_sessions::update_dispatched_session),
-            )
-            .route(
-                "/dispatched-sessions/webhook",
-                post(dispatched_sessions::hook_session).delete(dispatched_sessions::delete_session),
-            )
-            .route(
-                "/dispatched-sessions/claude-session-id",
-                get(dispatched_sessions::get_claude_session_id),
-            )
-            .route(
-                "/dispatched-sessions/clear-stale-session-id",
-                post(dispatched_sessions::clear_stale_session_id),
-            )
-            .route(
-                "/dispatched-sessions/clear-session-id",
-                post(dispatched_sessions::clear_session_id_by_key),
-            )
-            .route(
-                "/sessions/{session_key}/force-kill",
-                post(dispatched_sessions::force_kill_session),
-            )
-            .route(
-                "/sessions/{session_key}/kill-tmux",
-                post(dispatched_sessions::kill_tmux_session),
-            )
-            .route(
-                "/sessions/{session_key}/reconcile-stale-turn",
-                post(dispatched_sessions::reconcile_stale_turn),
-            )
-            .route(
-                "/sessions/{session_key}/resume-previous",
-                post(dispatched_sessions::resume_previous_session),
-            )
-            .route(
-                "/sessions/{session_key}/idle-recap",
-                post(idle_recap::post_idle_recap),
-            )
             // #1067: watch-agent-turn skill promotion — capture the last N lines
             // of the tmux pane bound to a session id.
-            .route(
-                "/sessions/{id}/tmux-output",
-                get(dispatched_sessions::tmux_output),
-            )
-            .route(
-                "/session-termination-events",
-                get(termination_events::list_termination_events),
-            )
             .route(
                 "/messages",
                 get(messages::list_messages).post(messages::create_message),
@@ -338,23 +253,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/queue/resume", post(auto_queue::resume_run))
             .route("/queue/cancel", post(auto_queue::cancel))
             .route("/queue/runs/{id}/order", post(auto_queue::submit_order))
-            .route("/channels/{id}/queue", get(queue_api::list_channel_queue))
-            .route(
-                "/channels/{id}/watcher-state",
-                get(queue_api::get_watcher_state),
-            )
-            .route(
-                "/channels/{id}/relay-recovery",
-                post(health_api::relay_recovery_handler),
-            )
-            .route(
-                "/channels/{channel_id}/monitoring",
-                post(monitoring::upsert_monitoring).get(monitoring::list_monitoring),
-            )
-            .route(
-                "/channels/{channel_id}/monitoring/{key}",
-                delete(monitoring::remove_monitoring),
-            )
             .route(
                 "/dispatches/pending",
                 get(queue_api::list_pending_dispatches),
@@ -364,17 +262,12 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/dispatches/cancel-all",
                 post(queue_api::cancel_all_dispatches),
             )
-            .route("/turns/{channel_id}/cancel", post(queue_api::cancel_turn))
             .route("/help", get(docs::api_help))
             .route("/docs", get(docs::api_docs))
             .route("/docs/{segment}", get(docs::api_docs_group_or_category))
             .route(
                 "/docs/{group}/{category}",
                 get(docs::api_docs_group_category),
-            )
-            .route(
-                "/provider-cli",
-                get(provider_cli_api::get_provider_cli_status),
             )
             .route(
                 "/provider-cli/{provider}",

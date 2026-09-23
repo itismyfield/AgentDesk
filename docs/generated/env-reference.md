@@ -33,7 +33,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_THREAD_LOCK_WAIT_STARTED` | `src/cli/discord_thread_create_lock.rs:549` |  |
 | `ADK_VOICE_KEEP_WAV` | `src/voice/config.rs:135` | `keep_recordings` 또는 환경변수 `ADK_VOICE_KEEP_WAV` 에 따라 utterance wav / segment / transcript sidecar 를 보존할지 결정한다 (#2156). |
 | `ADK_VOICE_SILENCE` | `src/services/discord/voice_barge_in/foreground_decision.rs:3` |  |
-| `AGENTDESK_API_URL` | `src/cli/client.rs:11` (+1 more) | `env_hint` names the environment variable(s) the *caller's* `api_base()` actually honors — client.rs resolves `AGENTDESK_API_URL` only, while monitoring.rs pre… |
+| `AGENTDESK_API_URL` | `src/cli/client.rs:14` (+1 more) | `env_hint` names the environment variable(s) the *caller's* `api_base()` actually honors — client.rs resolves `AGENTDESK_API_URL` only, while monitoring.rs pre… |
 | `AGENTDESK_CATCH_UP_POLL_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs:414` |  |
 | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` | `src/services/discord/catch_up.rs:713` | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` overrides the gap (0 disables — used by tests and by operators who want the old unthrottled behaviour). |
 | `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` | `src/services/claude.rs:74` (+1 more) | Default ON; set `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` to `0`, `false`, `off`, `no`, `disable`, or `disabled` for emergency opt-out. |
@@ -43,7 +43,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_CODEX_REASONING_EFFORT` | `src/services/codex.rs:203` |  |
 | `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex.rs:1244` |  |
 | `AGENTDESK_CODEX_TUI_WARM_FOLLOWUP` | `src/services/codex_tui/warm_followup.rs:14` (+1 more) |  |
-| `AGENTDESK_CONFIG` | `src/config.rs:3063` (+5 more) | The on-disk config path the running server loaded from, resolved with the same precedence as [`load`] (`$AGENTDESK_CONFIG` → runtime root → cwd → home). |
+| `AGENTDESK_CONFIG` | `src/config.rs:2936` (+5 more) | The on-disk config path the running server loaded from, resolved with the same precedence as [`load`] (`$AGENTDESK_CONFIG` → runtime root → cwd → home). |
 | `AGENTDESK_CSWAP_PATH` | `src/services/cswap.rs:22` (+1 more) |  |
 | `AGENTDESK_DCSERVER_LABEL` | `src/cli/dcserver.rs:18` (+2 more) |  |
 | `AGENTDESK_DCSERVER_LOG_MAX_BYTES` | `src/logging.rs:225` |  |
@@ -67,7 +67,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_HOOK_RELAY_TEST_ENDPOINT` | `src/services/claude_tui/hook_relay.rs:46` |  |
 | `AGENTDESK_HOOK_RELAY_TEST_MUTATION` | `src/services/claude_tui/hook_relay/ordered_queue.rs:41` (+1 more) |  |
 | `AGENTDESK_HOOK_RELAY_TEST_STDOUT_PATH` | `src/services/claude_tui/hook_relay.rs:50` |  |
-| `AGENTDESK_INSTANCE_ID` | `src/services/cluster/node_registry.rs:676` (+1 more) | Resolve the self instance_id, preferring the value the cluster bootstrap registered (config-driven if present), falling back to the env-var/hostname pair only… |
+| `AGENTDESK_INSTANCE_ID` | `src/services/cluster/node_registry.rs:660` (+1 more) | Resolve the self instance_id, preferring the value the cluster bootstrap registered (config-driven if present), falling back to the env-var/hostname pair only… |
 | `AGENTDESK_KAKAO_ACCOUNTS` | `src/services/kakao.rs:35` (+1 more) |  |
 | `AGENTDESK_KAKAO_CALENDAR_ACCOUNTS` | `src/services/kakao/account.rs:21` | Separate allowlist: enabling calendar never implicitly grants all message accounts. |
 | `AGENTDESK_KAKAO_CALENDAR_ENABLED` | `src/services/kakao/account.rs:10` |  |
@@ -84,7 +84,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_POLICY_HARDENING` | `src/engine/loader.rs:67` (+1 more) |  |
 | `AGENTDESK_POLICY_TRUST_ENFORCE` | `src/engine/loader.rs:61` |  |
 | `AGENTDESK_POLICY_TRUST_OVERRIDE` | `src/engine/loader.rs:55` |  |
-| `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES` | `src/config.rs:616` | `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES` accepts `5` or `60`; anything else (including the variable being unset) returns `None`. |
+| `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES` | `src/config.rs:620` | `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES` accepts `5` or `60`; anything else (including the variable being unset) returns `None`. |
 | `AGENTDESK_PRUNE_GLOBAL_SLASH_COMMANDS` | `src/services/discord/runtime_bootstrap/framework_setup.rs:284` |  |
 | `AGENTDESK_PYTHON3_PATH` | `src/engine/ops/runtime_ops.rs:18` |  |
 | `AGENTDESK_QUEUE_EXIT_CLEAR_RETRY_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs:492` |  |
@@ -95,13 +95,13 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_REPORT_CHANNEL_ID` | `src/services/discord/restart_report.rs:14` (+1 more) |  |
 | `AGENTDESK_REPORT_PROVIDER` | `src/services/discord/restart_report.rs:15` (+1 more) |  |
 | `AGENTDESK_REPO_DIR` | `src/services/git/repo_resolver.rs:32` | Priority: `AGENTDESK_REPO_DIR` env -> scan all known roots for a git workspace -> `~/AgentDesk`. |
-| `AGENTDESK_REQUIRE_PG` | `src/db/postgres.rs:1172` (+2 more) | Every fixture that creates a database must use this authority; callers that can skip return `None`, while required lanes still get the hard failure below when… |
+| `AGENTDESK_REQUIRE_PG` | `src/db/postgres.rs:1043` (+2 more) | Every fixture that creates a database must use this authority; callers that can skip return `None`, while required lanes still get the hard failure below when… |
 | `AGENTDESK_REVIEW_MCP_ALLOWLIST` | `src/services/mcp_config.rs:16` (+1 more) |  |
 | `AGENTDESK_ROOT_DIR` | `src/cli/dcserver.rs:20` (+21 more) | Canonical runtime root: $AGENTDESK_ROOT_DIR → ~/.adk/release All code that needs the AgentDesk root directory MUST call this function instead of reimplementing… |
 | `AGENTDESK_SINGLE_MESSAGE_PANEL` | `src/services/discord/single_message_panel.rs:33` | The rollout gate previously short-circuited a missing env var to `false`, so any environment without an explicit `AGENTDESK_SINGLE_MESSAGE_PANEL=1` silently fe… |
 | `AGENTDESK_SOURCE_ZPROFILE` | `src/services/routines/migrated.rs:619` |  |
 | `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/mod.rs:508` | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |
-| `AGENTDESK_TEST_POSTGRES_ACQUIRE_TIMEOUT_MS` | `src/db/postgres.rs:1174` (+1 more) | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
+| `AGENTDESK_TEST_POSTGRES_ACQUIRE_TIMEOUT_MS` | `src/db/postgres.rs:1045` (+1 more) | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
 | `AGENTDESK_TOKEN` | `src/cli/run.rs:142` |  |
 | `AGENTDESK_VOICE_REQUIRE_ALIASES` | `src/services/discord_config_audit.rs:206` | - On collision when `AGENTDESK_VOICE_REQUIRE_ALIASES=1`: return an `Err` describing the collision so callers can choose to fail fast. |
 | `AGENTDESK_WORKSPACE_ROOT` | `src/services/routines/migrated.rs:309` (+1 more) |  |
@@ -117,23 +117,23 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `CODEX_HOME` | `src/services/codex_tui/rollout_tail.rs:173` | The Codex home this host reads rollouts under, honouring the `CODEX_HOME` override. |
 | `COKACDIR_DEBUG` | `src/services/claude.rs:251` | Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var. |
 | `COMPUTERNAME` | `src/services/tmux_common.rs:1142` |  |
-| `DATABASE_URL` | `src/db/postgres.rs:1138` |  |
-| `GEMINI_CLIENT_ID` | `src/server/mod.rs:1474` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
-| `GEMINI_CLIENT_SECRET` | `src/server/mod.rs:1475` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
+| `DATABASE_URL` | `src/db/postgres.rs:1009` |  |
+| `GEMINI_CLIENT_ID` | `src/server/mod.rs:1471` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
+| `GEMINI_CLIENT_SECRET` | `src/server/mod.rs:1472` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
 | `GEMINI_CLI_HOME` | `src/services/mcp_config.rs:708` |  |
-| `HOME` | `src/cli/doctor/orchestrator.rs:503` (+9 more) | #2655: handler for the `install-memento-session-hook` CLI surface. |
+| `HOME` | `src/cli/doctor/orchestrator.rs:463` (+9 more) | #2655: handler for the `install-memento-session-hook` CLI surface. |
 | `HOSTNAME` | `src/server/outbox_worker.rs:24` (+5 more) | Opens this turn's buffer and evicts whatever predecessor was left on this channel by a bridge exit that never reached post-loop finalize. |
 | `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs:1098` (+2 more) |  |
 | `MEMENTO_WORKSPACE` | `src/server/routes/memory_api.rs:200` (+1 more) |  |
 | `OPENAI_API_KEY` | `src/server/rate_limit_sync.rs:115` | --- Codex: ~/.codex/auth.json (CLI subscription), else OPENAI_API_KEY --- |
-| `PATH` | `src/cli/doctor/orchestrator.rs:1587` (+5 more) | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
+| `PATH` | `src/cli/doctor/orchestrator.rs:1547` (+5 more) | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
 | `POSTGRES_TEST_ADMIN_DB` | `src/db/auto_queue/test_support.rs:16` (+4 more) |  |
-| `POSTGRES_TEST_DATABASE_URL_BASE` | `src/db/postgres.rs:1152` | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
-| `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs:519` (+1 more) |  |
-| `QWEN_CODE_SYSTEM_SETTINGS_PATH` | `src/cli/doctor/orchestrator.rs:525` (+1 more) |  |
-| `QWEN_HOME` | `src/cli/doctor/orchestrator.rs:497` (+2 more) |  |
+| `POSTGRES_TEST_DATABASE_URL_BASE` | `src/db/postgres.rs:1023` | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
+| `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs:479` (+1 more) |  |
+| `QWEN_CODE_SYSTEM_SETTINGS_PATH` | `src/cli/doctor/orchestrator.rs:485` (+1 more) |  |
+| `QWEN_HOME` | `src/cli/doctor/orchestrator.rs:457` (+2 more) |  |
 | `REQUIRE_WAKE_WORD` | `src/voice/config.rs:103` | A live yaml with `wake_words: []` plus `REQUIRE_WAKE_WORD=1` would otherwise make EVERY utterance fail the (impossible-to-satisfy) gate and be silently dropped. |
 | `RUST_LOG` | `src/logging.rs:29` | The directive every shipped dcserver process adds on top of `RUST_LOG`. |
 | `SHELL` | `src/services/platform/binary_resolver.rs:1277` |  |
-| `USERPROFILE` | `src/cli/doctor/orchestrator.rs:507` (+6 more) |  |
+| `USERPROFILE` | `src/cli/doctor/orchestrator.rs:467` (+6 more) |  |
 | `VOICE_AUDIO_DEBUG_DIR` | `src/voice/receiver.rs:72` |  |

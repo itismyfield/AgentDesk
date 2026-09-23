@@ -130,7 +130,6 @@ async fn run_from_postloop_with_source_advance(
     ctx.should_complete_work_dispatch_after_delivery =
         output.should_complete_work_dispatch_after_delivery;
     ctx.should_fail_dispatch_after_delivery = output.should_fail_dispatch_after_delivery;
-    ctx.can_chain_locally = output.can_chain_locally;
     ctx.is_prompt_too_long = output.is_prompt_too_long;
     ctx.claude_tui_followup_pre_submit_requeue_candidate =
         output.claude_tui_followup_pre_submit_requeue_candidate;

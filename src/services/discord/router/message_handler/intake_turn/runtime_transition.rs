@@ -12,7 +12,7 @@ pub(super) async fn acquire_after_redirect_or_requeue(
     request: (TurnKind, UserId, MessageId, &str),
     reply: (&Option<String>, bool, bool),
     uploads: (
-        &[String],
+        &[crate::services::cluster::attachment_transfer::uploads::Upload],
         &Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
     ),
     requeue: (

@@ -539,7 +539,7 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// FIX #6: originating `Intervention::pending_uploads` (attachment refs).
     /// Empty for legacy rows / turns without uploads.
     #[serde(default)]
-    pub followup_pending_uploads: Vec<String>,
+    pub followup_pending_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     /// FIX #6: originating `Intervention::voice_announcement` projection.
     /// `VoiceTranscriptAnnouncement` is already serde-persisted in the durable
     /// intervention queue, so it round-trips directly here. `None` for
@@ -1366,7 +1366,7 @@ impl InflightTurnState {
         reply_context: Option<String>,
         has_reply_boundary: bool,
         merge_consecutive: bool,
-        pending_uploads: Vec<String>,
+        pending_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
         voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
         // #4247 FIX 2: the genuine-human intake's preserve decision, carried
         // forward so a PRE-submit busy-timeout requeue can reconstruct a

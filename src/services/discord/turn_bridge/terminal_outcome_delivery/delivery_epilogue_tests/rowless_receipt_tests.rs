@@ -295,7 +295,9 @@ async fn exact_receipt_rowless_terminal_dominates_all_publication_branches_5521(
         ctx.cancelled = case == "cancel";
         ctx.is_prompt_too_long = case == "ptl";
         ctx.recovery_retry = case == "recovery";
-        ctx.can_chain_locally = case != "headless";
+        if case == "headless" {
+            state.gateway = Arc::new(crate::services::discord::gateway::HeadlessGateway);
+        }
         let output = run(ctx, state).await;
         assert!(
             driver.observations().is_empty(),

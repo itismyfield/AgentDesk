@@ -26,6 +26,8 @@ pub(crate) struct IntakeOutboxRow {
     pub target_instance_id: String,
     pub forwarded_by_instance_id: String,
     pub required_labels: Value,
+    pub execution_requirements: Value,
+    pub attachment_refs: Value,
     pub channel_id: String,
     pub user_msg_id: String,
     pub request_owner_id: String,
@@ -68,6 +70,8 @@ pub(crate) struct InsertPendingPayload {
     pub target_instance_id: String,
     pub forwarded_by_instance_id: String,
     pub required_labels: Value,
+    pub execution_requirements: Value,
+    pub attachment_refs: Value,
     pub channel_id: String,
     pub user_msg_id: String,
     pub request_owner_id: String,
@@ -115,14 +119,14 @@ pub(crate) async fn insert_pending(
             user_text, reply_context, has_reply_boundary, dm_hint, turn_kind,
             merge_consecutive, reply_to_user_message, defer_watcher_resume,
             wait_for_completion, preserve_on_cancel, agent_id, provider,
-            status, attempt_no, parent_outbox_id
+            status, attempt_no, parent_outbox_id, execution_requirements, attachment_refs
         ) VALUES (
             $1, $2, $3,
             $4, $5, $6, $7,
             $8, $9, $10, $11, $12,
             $13, $14, $15,
             $16, $17, $18, $19,
-            $20, $21, $22
+            $20, $21, $22, $23, $24
         )
         RETURNING id
         "#,
@@ -149,6 +153,8 @@ pub(crate) async fn insert_pending(
     .bind(IntakeOutboxStatus::Pending)
     .bind(attempt_no)
     .bind(parent_outbox_id)
+    .bind(&payload.execution_requirements)
+    .bind(&payload.attachment_refs)
     .fetch_one(pool)
     .await?;
     Ok(id)
@@ -395,9 +401,9 @@ pub(crate) async fn sweep_failed_pre_accept_once(
 
     // Re-check the capability snapshot after the source lock. A worker may
     // have heartbeated a new snapshot between candidate selection and here.
-    let target: Option<String> = sqlx::query_scalar(
+    let targets: Vec<Value> = sqlx::query_scalar(
         r#"
-        SELECT worker.instance_id
+        SELECT to_jsonb(worker) || jsonb_build_object('api_base_url', worker.capabilities->'agentdesk_api'->>'base_url')
           FROM worker_nodes worker
          WHERE worker.status = 'online'
            AND worker.last_heartbeat_at >= NOW() - ($1::BIGINT * INTERVAL '1 second')
@@ -442,7 +448,6 @@ pub(crate) async fn sweep_failed_pre_accept_once(
                        AND owner.generation = $6
                 )))
          ORDER BY worker.last_heartbeat_at DESC, worker.instance_id ASC
-         LIMIT 1
          FOR SHARE
         "#,
     )
@@ -454,8 +459,32 @@ pub(crate) async fn sweep_failed_pre_accept_once(
     .bind(source.owner_generation)
     .bind(&source.channel_id)
     .bind(&source.required_labels)
-    .fetch_optional(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
+    let requirements =
+        crate::services::cluster::execution_requirements::ExecutionRequirements::parse(
+            source.execution_requirements.clone(),
+        )
+        .map_err(sqlx::Error::Protocol)?;
+    let auth_profile = crate::services::cluster::readiness::expected_auth_profile(
+        &source.provider,
+        &source.channel_id,
+        &source.agent_id,
+    );
+    let target = targets
+        .iter()
+        .find(|node| {
+            requirements.intake_reasons(node).is_empty()
+                && (source.attachment_refs.as_array().is_some_and(Vec::is_empty)
+                    || crate::services::cluster::attachment_transfer::supports(node))
+                && crate::services::cluster::readiness::evaluate_declared(
+                    node,
+                    &source.provider,
+                    &auth_profile,
+                )
+                .eligible
+        })
+        .and_then(|node| node["instance_id"].as_str());
     let Some(target) = target else {
         sqlx::query("UPDATE intake_outbox SET updated_at = NOW() WHERE id = $1")
             .bind(source.id)
@@ -476,10 +505,10 @@ pub(crate) async fn sweep_failed_pre_accept_once(
             merge_consecutive, reply_to_user_message, defer_watcher_resume,
             wait_for_completion, preserve_on_cancel, agent_id, provider,
             owner_instance_id, owner_generation, admission_kind,
-            status, attempt_no, parent_outbox_id
+            status, attempt_no, parent_outbox_id, execution_requirements, attachment_refs
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
                   $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
-                  $23, $24, $25)
+                  $23, $24, $25, $26, $27)
         RETURNING id"#,
     )
     .bind(&target)
@@ -507,6 +536,8 @@ pub(crate) async fn sweep_failed_pre_accept_once(
     .bind(IntakeOutboxStatus::Pending)
     .bind(next_attempt)
     .bind(source.id)
+    .bind(&source.execution_requirements)
+    .bind(&source.attachment_refs)
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -1555,6 +1586,8 @@ mod postgres_tests {
 
     fn payload(channel: &str, msg: &str) -> InsertPendingPayload {
         InsertPendingPayload {
+            execution_requirements: json!({}),
+            attachment_refs: serde_json::json!([]),
             target_instance_id: "worker-1".to_string(),
             forwarded_by_instance_id: "leader-1".to_string(),
             provider: "claude".to_string(),

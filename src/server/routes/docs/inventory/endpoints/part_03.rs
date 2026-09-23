@@ -5,6 +5,17 @@ use super::super::{EndpointDoc, ParamDoc, body_param, ep, header_param, path_par
 
 pub(super) fn endpoints() -> Vec<EndpointDoc> {
     vec![
+        ep("GET", "/api/internal/node-probe", "cluster",
+            "Authenticated identity and session-forwarding protocol probe. Verifies the configured peer endpoint belongs to the advertised node; does not expose runner administration."),
+        ep("GET", "/api/agents/{id}/execution-requirements", "agents",
+            "Read central hard execution requirements. Constraints also apply to existing session owners.")
+            .with_params([("id", path_param("Agent ID."))]),
+        ep("PUT", "/api/agents/{id}/execution-requirements", "agents",
+            "Replace os, arch, nodes, tools, repositories and backends requirements. An empty object clears requirements. Unknown fields or invalid identifiers are rejected. Full runtime only.")
+            .with_params([("id", path_param("Agent ID."))]),
+        ep("GET", "/api/sessions/{id}/output", "sessions",
+            "Read the bounded output tail from the session owner, including a remote runner. Returns availability information when output cannot be read.")
+            .with_params([("id", path_param("Session ID."))]),
         ep(
             "POST",
             "/api/agents/{id}/turn/start",

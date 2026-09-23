@@ -789,7 +789,6 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                     bridge_output_owner,
                     should_complete_work_dispatch_after_delivery,
                     should_fail_dispatch_after_delivery,
-                    can_chain_locally,
                     single_message_panel_footer_mode,
                     is_prompt_too_long,
                     claude_tui_followup_pre_submit_requeue_candidate,

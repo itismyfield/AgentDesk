@@ -23,6 +23,11 @@ impl SupervisedWorkerRegistry {
 
     pub(crate) async fn run_boot_only_steps(&self) -> Result<()> {
         for step in BOOT_ONLY_STEPS {
+            if step.id == BootStepId::DrainStartupHooks
+                && !self.config.cluster.runtime_profile.modules().hub_services
+            {
+                continue;
+            }
             tracing::info!(
                 boot_step = step.name,
                 order = step.order,
@@ -89,6 +94,12 @@ impl SupervisedWorkerRegistry {
         spec: WorkerSpec,
         broadcast_tx: Option<BroadcastTx>,
     ) -> Result<Option<BatchBuffer>> {
+        if spec.execution_scope == WorkerExecutionScope::LeaderOnly
+            && !self.config.cluster.runtime_profile.modules().hub_services
+        {
+            self.log_skip(spec, "disabled by runner runtime profile");
+            return Ok(None);
+        }
         match spec.id {
             ServerWorkerId::GithubSync => {
                 let sync_interval = self.config.github.sync_interval_minutes;
@@ -343,6 +354,10 @@ impl SupervisedWorkerRegistry {
                 Ok(Some(buffer))
             }
             ServerWorkerId::SessionDiscovery => {
+                if !cfg!(unix) {
+                    self.log_skip(spec, "tmux session discovery requires Unix; native process sessions use their owned registry");
+                    return Ok(None);
+                }
                 let Some(discovery_pg_pool) = self.pg_pool.clone() else {
                     self.log_skip(spec, "postgres pool unavailable");
                     return Ok(None);

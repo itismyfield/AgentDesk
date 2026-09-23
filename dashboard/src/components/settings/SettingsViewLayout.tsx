@@ -2,6 +2,7 @@ import { Check, RefreshCw } from "lucide-react";
 import { Modal } from "../common/overlay/Modal";
 import { SurfaceCard as SettingsCard } from "../common/SurfacePrimitives";
 import { SettingsGeneralPanel } from "./SettingsGeneralPanel";
+import { SettingsMachinePanel } from "./SettingsMachinePanel";
 import { SettingsNavigation } from "./SettingsNavigation";
 import { SettingsOnboardingOverlay } from "./SettingsOnboardingOverlay";
 import { SettingsOnboardingPanel } from "./SettingsOnboardingPanel";
@@ -98,6 +99,8 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
 
   const renderActivePanel = () => {
     switch (activePanel) {
+      case "machine":
+        return <SettingsMachinePanel tr={tr} />;
       case "runtime":
         return (
           <SettingsRuntimePanel
@@ -230,6 +233,7 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
   };
 
   const renderHeaderActions = () => {
+    if (activePanel === "machine") return null;
     if (activePanel === "onboarding") {
       return (
         <button

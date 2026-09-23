@@ -218,8 +218,8 @@ fn caller_supplied_delivery_bot(delivery_bot: Option<&str>) -> Option<&str> {
 /// #5159: which bot identity a headless terminal delivery posts under.
 ///
 /// `enqueue_headless_delivery` receives the turn's answer body from the
-/// `can_chain_locally == false` arm of `terminal_outcome_delivery`. A false
-/// `can_chain_locally` only says "this turn has no live Discord context to edit
+/// `can_deliver_directly == false` arm of `terminal_outcome_delivery`. A false
+/// `can_deliver_directly` only says "this turn has no Discord REST transport to edit
 /// its placeholder through"; it says nothing about the content being an
 /// operational notice. Delivery-path selection and identity selection are
 /// therefore decided separately here.
@@ -227,7 +227,7 @@ fn caller_supplied_delivery_bot(delivery_bot: Option<&str>) -> Option<&str> {
 /// Precedence:
 /// 1. a caller-supplied identity — the routine runtime targets an explicit bot;
 /// 2. otherwise the turn's own provider alias, which is exactly the identity the
-///    `can_chain_locally == true` arm posts under (`DiscordGateway` edits the
+///    `can_deliver_directly == true` arm posts under (`DiscordGateway` edits the
 ///    placeholder with that provider's `serenity::Http`, registered under
 ///    `ProviderKind::as_str` by `runtime_bootstrap::framework_setup`), and the
 ///    same alias `message_outbox::delivery_bot_for_target_session` already

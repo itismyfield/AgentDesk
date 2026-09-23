@@ -48,7 +48,8 @@ pub(crate) struct PendingQueueItem {
     pub(crate) merge_consecutive: bool,
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(crate) pending_uploads: Vec<String>,
+    pub(crate) pending_uploads:
+        crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     /// Channel this item belongs to (routing snapshot - used by the kickoff guard).
     #[serde(default)]
     pub(crate) channel_id: Option<u64>,

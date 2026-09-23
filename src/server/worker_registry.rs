@@ -508,6 +508,47 @@ mod leader_takeover_tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
+    #[tokio::test]
+    async fn worker_profile_starts_local_workers_without_spawning_leader_waiters() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.cluster.runtime_profile = crate::config::RuntimeProfile::Runner;
+        config.policies.dir = dir.path().join("policies");
+        config.policies.hot_reload = false;
+        config.data.dir = dir.path().join("data");
+        std::fs::create_dir_all(&config.policies.dir).unwrap();
+        let engine = crate::engine::PolicyEngine::new_with_pg(&config, None).unwrap();
+        let pool = sqlx::PgPool::connect_lazy("postgres://fixture@127.0.0.1:1/unused").unwrap();
+        let mut registry = SupervisedWorkerRegistry::new(
+            config,
+            engine,
+            None,
+            Some(Arc::new(pool)),
+            ClusterRuntime::for_test_with_leader(Arc::new(AtomicBool::new(true))),
+        );
+        for spec in WORKER_SPECS
+            .into_iter()
+            .filter(|s| s.execution_scope == WorkerExecutionScope::LeaderOnly)
+        {
+            assert!(registry.start_worker(spec, None).unwrap().is_none());
+        }
+        assert!(
+            registry.running.is_empty(),
+            "no leader tasks or threads, even if leadership flips"
+        );
+        let spec = WORKER_SPECS
+            .into_iter()
+            .find(|s| s.id == super::ServerWorkerId::WsBatchFlusher)
+            .unwrap();
+        assert!(
+            registry
+                .start_worker(spec, Some(crate::eventbus::new_broadcast()))
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(registry.running.len(), 1);
+    }
+
     /// **#5142 D-4 regression, verified on the spawned thread.**
     ///
     /// The policy tick must be started with the process `HealthRegistry`. With

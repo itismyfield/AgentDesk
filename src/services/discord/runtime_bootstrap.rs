@@ -14,6 +14,7 @@ mod intake_delivery_reconciler;
 mod intake_delivery_sweep;
 mod orphan_recovery;
 mod queued_placeholders;
+mod queued_recovery;
 mod recovery_flush;
 mod relay_dlq_redelivery;
 mod restored_state;
@@ -183,12 +184,15 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         skill_count
     );
 
-    let voice_config = crate::config::load_graceful().voice;
-    let voice_barge_in = Arc::new(voice_barge_in::VoiceBargeInRuntime::from_voice_config(
-        &voice_config,
-    ));
-
-    run_bot_rehydrate_voice_handoffs(&pg_pool).await;
+    let boot_config = crate::config::load_graceful();
+    let modules = boot_config.cluster.runtime_profile.modules();
+    let voice_config = boot_config.voice;
+    let voice_barge_in = Arc::new(if modules.voice {
+        run_bot_rehydrate_voice_handoffs(&pg_pool).await;
+        voice_barge_in::VoiceBargeInRuntime::from_voice_config(&voice_config)
+    } else {
+        voice_barge_in::VoiceBargeInRuntime::disabled()
+    });
 
     // Cleanup stale Discord uploads on process start
     cleanup_old_uploads(UPLOAD_MAX_AGE);
@@ -276,6 +280,30 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // semantics.
     let _ = shared.http.cached_bot_token.set(token.to_string());
 
+    if !modules.gateway {
+        health_registry
+            .register_worker(provider.as_str().to_string(), shared.clone())
+            .await;
+        spawns::run_bot_spawn_deferred_restart_poller(&shared, &provider);
+        #[cfg(unix)]
+        spawns::run_bot_spawn_reachability_observation(&shared, &provider);
+        // REST workers persist the same mailbox state as Gateway runtimes.
+        // Restore it before polling new intake; never replay Discord history.
+        queued_recovery::restore_worker_queues(&shared, &provider).await;
+        run_bot_maybe_spawn_intake_worker(&shared, &provider);
+        run_startup_diagnostic_after_reconcile_barrier_for_provider(
+            &provider,
+            startup_reconcile_remaining,
+            startup_doctor_started,
+            health_registry,
+            api_port,
+        )
+        .await;
+        // The existing restart poller owns this provider's shutdown slot.
+        // Dedicated workers never acquire, retry or promote a gateway lease.
+        return;
+    }
+
     let voice_receiver =
         run_bot_init_voice_workers(&voice_config, &voice_barge_in, &shared, &provider);
 
@@ -319,7 +347,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             spawns::run_bot_spawn_deferred_restart_poller(&shared, &provider);
             #[cfg(unix)]
             spawns::run_bot_spawn_reachability_observation(&shared, &provider);
-            run_bot_maybe_spawn_intake_worker(&shared, token, &provider);
+            run_bot_maybe_spawn_intake_worker(&shared, &provider);
             spawn_standby_gateway_retry(shared.clone(), token_hash.clone(), provider.clone()).await;
             // Keep this provider's shutdown-barrier slot: the marker poller
             // consumes it exactly once after fencing and persisting state.
@@ -338,7 +366,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     spawns::run_bot_spawn_deferred_restart_poller(&shared, &provider);
     #[cfg(unix)]
     spawns::run_bot_spawn_reachability_observation(&shared, &provider);
-    run_bot_maybe_spawn_intake_worker(&shared, token, &provider);
+    run_bot_maybe_spawn_intake_worker(&shared, &provider);
 
     run_bot_start_gateway_runtime(
         token,

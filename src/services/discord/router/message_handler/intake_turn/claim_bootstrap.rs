@@ -21,11 +21,18 @@ pub(super) async fn bootstrap_claimed_turn(
     // Discord message → `None` (no fake link); headless turns never reach this
     // interactive intake path.
     if started {
-        shared.ui.placeholder_live_events.set_turn_request_anchor(
-            channel_id,
-            (!crate::services::discord::voice_barge_in::is_synthetic_voice_message_id(user_msg_id))
+        shared
+            .ui
+            .placeholder_live_events
+            .resolve_turn_request_anchor(
+                http,
+                channel_id,
+                (!crate::services::discord::voice_barge_in::is_synthetic_voice_message_id(
+                    user_msg_id,
+                ))
                 .then(|| user_msg_id.get()),
-        );
+            )
+            .await;
     }
 
     // #3148: this runs right after the claim succeeds and only for the winner,

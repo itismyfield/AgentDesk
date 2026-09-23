@@ -6,11 +6,7 @@ use super::*;
 /// `cluster::bootstrap`). Observe mode keeps the consumer warm so a later
 /// observe→enforce config reload does not strand forwarded rows. The caller
 /// invokes this only after a gateway or confirmed-standby role is registered.
-pub(super) fn run_bot_maybe_spawn_intake_worker(
-    shared: &Arc<SharedData>,
-    token: &str,
-    provider: &ProviderKind,
-) {
+pub(super) fn run_bot_maybe_spawn_intake_worker(shared: &Arc<SharedData>, provider: &ProviderKind) {
     let intake_routing =
         crate::services::cluster::intake_router_hook::effective_intake_routing_config();
     if intake_routing.worker_consumer_should_spawn() {
@@ -18,9 +14,7 @@ pub(super) fn run_bot_maybe_spawn_intake_worker(
             crate::services::cluster::node_registry::register_intake_worker_provider(
                 provider.as_str(),
             );
-            let intake_worker_http = std::sync::Arc::new(serenity::http::Http::new(token));
             let intake_worker_shared = shared.clone();
-            let intake_worker_token = token.to_string();
             let intake_worker_provider = provider.as_str().to_string();
             // The intake_worker spawn runs concurrently with `cluster::bootstrap`
             // which is the writer of `SELF_INSTANCE_ID`. Resolving
@@ -47,16 +41,14 @@ pub(super) fn run_bot_maybe_spawn_intake_worker(
                 {
                     tracing::warn!("[intake_worker] runtime capability refresh failed: {error}");
                 }
-                // claim_owner appends provider so multi-bot deployments
-                // surface which token's worker holds a row in
-                // observability dashboards.
-                let resolved_claim_owner =
-                    format!("{}:{}", resolved_target_id, intake_worker_provider);
+                // Distinguish same-provider claimants without storing credentials.
+                let resolved_claim_owner = format!(
+                    "{}:{}:{}",
+                    resolved_target_id, intake_worker_provider, intake_worker_shared.token_hash
+                );
                 crate::services::cluster::intake_worker::run_intake_worker_loop(
                     pool_for_intake_worker,
-                    intake_worker_http,
                     intake_worker_shared,
-                    intake_worker_token,
                     resolved_target_id,
                     intake_worker_provider,
                     resolved_claim_owner,

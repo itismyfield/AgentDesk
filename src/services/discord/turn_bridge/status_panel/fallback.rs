@@ -68,7 +68,7 @@ pub(super) async fn send_status_panel_v2_completion_fallback<G: TurnGateway + ?S
     channel_id: ChannelId,
     panel_text: &str,
 ) -> Result<MessageId, String> {
-    if gateway.can_chain_locally() {
+    if gateway.can_deliver_directly() {
         return gateway.send_message(channel_id, panel_text).await;
     }
     let Some(http) = shared.serenity_http_or_token_fallback() else {
