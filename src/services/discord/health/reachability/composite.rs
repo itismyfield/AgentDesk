@@ -363,6 +363,17 @@ pub(in crate::services::discord) enum TranscriptLiveness {
     Resolved { eof: u64, alive: bool },
 }
 
+/// A mailbox turn with no inflight row, split at the grace a new token gets to
+/// write its row (`UNPAIRED_ACTIVE_TOKEN_GRACE_SECS`). Inside it the rowless
+/// shape is the normal turn-boundary window of 4987 §6.3 row 1, so only a turn
+/// that outlived it is reported as stuck; the rest take the obligation ladder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum RowlessTurn {
+    None,
+    WithinGrace,
+    OutlivedGrace,
+}
+
 /// The Tier A materials one composition consumes. Every field is a fact some
 /// earlier slice already produces; nothing here opens a file.
 pub(in crate::services::discord) struct ReachabilityInputs<'a> {
@@ -386,7 +397,7 @@ pub(in crate::services::discord) struct ReachabilityInputs<'a> {
     /// The bounded per-tick read did not see the whole tail.
     pub read_truncated: bool,
     /// The mailbox reports an active turn with no in-flight row.
-    pub rowless_active_turn: bool,
+    pub rowless_turn: RowlessTurn,
     /// A placeholder exists for the turn while its terminal receipt does not.
     pub placeholder_present: bool,
     pub now_epoch_ms: u64,
@@ -544,7 +555,11 @@ pub(in crate::services::discord) fn classify_reachability(
     // What this still cannot do: `live_obligations()` is the INCARNATION's set
     // (covered obligations are never subtracted), so these counts do not
     // isolate the current turn. See `ReachabilityUnknownReason::RowlessActiveTurn`.
-    if inputs.rowless_active_turn {
+    //
+    // A turn still inside its row-acquisition grace falls through to the ladder
+    // like a row-backed one. A stuck turn stays non-GREEN: this observer holds no
+    // authority to release its token, which is the turn lifecycle's job.
+    if inputs.rowless_turn == RowlessTurn::OutlivedGrace {
         return ReachabilityVerdict::unknown(
             ReachabilityUnknownReason::RowlessActiveTurn {
                 incarnation_live_obligations: ledger.live_obligations().len() as u32,
@@ -650,7 +665,7 @@ pub(in crate::services::discord) struct RelayVerdictProbe<'a> {
     /// 4987 §-1.4's second alive witness: pane up with nothing pending, so a
     /// non-growing transcript is idle rather than dead.
     pub pane_idle_confirmed: bool,
-    pub rowless_active_turn: bool,
+    pub rowless_turn: RowlessTurn,
     /// A placeholder message is outstanding for this channel.
     pub placeholder_present: bool,
     /// #5942: caller-owned since establishing it costs a tmux round trip
@@ -719,7 +734,7 @@ pub(in crate::services::discord) fn observe_relay_verdict(
         // The observation task records its own truncation in the ledger it
         // writes; this reader doesn't tail, so it has none of its own.
         read_truncated: false,
-        rowless_active_turn: probe.rowless_active_turn,
+        rowless_turn: probe.rowless_turn,
         placeholder_present: probe.placeholder_present,
         now_epoch_ms: probe.now_epoch_ms,
         process_started_at_epoch_ms: probe.process_started_at_epoch_ms,

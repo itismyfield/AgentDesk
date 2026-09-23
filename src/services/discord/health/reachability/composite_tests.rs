@@ -121,7 +121,7 @@ struct Case {
     receipts: ReceiptIndexRead,
     transcript: TranscriptLiveness,
     read_truncated: bool,
-    rowless_active_turn: bool,
+    rowless_turn: RowlessTurn,
     placeholder_present: bool,
 }
 
@@ -141,7 +141,7 @@ impl Default for Case {
                 alive: true,
             },
             read_truncated: false,
-            rowless_active_turn: false,
+            rowless_turn: RowlessTurn::None,
             placeholder_present: false,
         }
     }
@@ -167,7 +167,7 @@ impl Case {
             receipts: &self.receipts,
             transcript: self.transcript,
             read_truncated: self.read_truncated,
-            rowless_active_turn: self.rowless_active_turn,
+            rowless_turn: self.rowless_turn,
             placeholder_present: self.placeholder_present,
             now_epoch_ms,
             process_started_at_epoch_ms: PROCESS_STARTED_MS,
@@ -906,7 +906,7 @@ fn provider_absent_reason() -> &'static str {
         row_output_path: None,
         registry_output_path: None,
         pane_idle_confirmed: false,
-        rowless_active_turn: false,
+        rowless_turn: RowlessTurn::None,
         placeholder_present: false,
         executor: ExecutorWitness::Unwitnessed,
         now_epoch_ms: NOW_MS,
@@ -1199,15 +1199,19 @@ fn a_live_placeholder_or_rowless_active_turn_blocks_expiry() {
         "an outstanding placeholder must not be expired away"
     );
 
-    let with_active_turn = Case {
-        rowless_active_turn: true,
-        ..abandoned_ledger_case()
-    };
-    assert_eq!(
-        with_active_turn.classify(),
-        unexpired_verdict(),
-        "a mailbox-reported active turn must not be expired away"
-    );
+    // Any rowless turn blocks expiry, stuck or not: the grace splits the
+    // verdict, never this guard.
+    for rowless_turn in [RowlessTurn::WithinGrace, RowlessTurn::OutlivedGrace] {
+        let with_active_turn = Case {
+            rowless_turn,
+            ..abandoned_ledger_case()
+        };
+        assert_eq!(
+            with_active_turn.classify(),
+            unexpired_verdict(),
+            "a mailbox-reported active turn ({rowless_turn:?}) must not be expired away"
+        );
+    }
 }
 
 /// Over-expiry guard 6 — an undated ledger. A clock that could not be read is
@@ -1568,7 +1572,7 @@ fn observe_relay_verdict_expires_a_backdated_ledger_it_located_itself() {
             row_output_path: None,
             registry_output_path: None,
             pane_idle_confirmed: false,
-            rowless_active_turn: false,
+            rowless_turn: RowlessTurn::None,
             placeholder_present: false,
             executor,
             now_epoch_ms: now_ms,
@@ -1673,14 +1677,14 @@ fn unproven_incarnation() -> LedgerIncarnation {
 /// hand through [`Case`], which calls `classify_reachability` directly and
 /// therefore cannot notice if the production wiring stops forwarding the flag
 /// or stops locating the receipt record. This reads both off disk instead, so
-/// deleting `rowless_active_turn: probe.rowless_active_turn` or the
+/// deleting `rowless_turn: probe.rowless_turn` or the
 /// `delivery_record_path(...)` read turns these tests red.
 fn observe_rowless_channel(
     channel_id: u64,
     obligations: Vec<LedgerObligation>,
     incarnation: LedgerIncarnation,
     confirmed_deliveries: Vec<ConfirmedDeliveryReceipt>,
-    rowless_active_turn: bool,
+    rowless_turn: RowlessTurn,
 ) -> RelayVerdict {
     let root = tempdir().expect("temp runtime root");
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
@@ -1720,7 +1724,7 @@ fn observe_rowless_channel(
         row_output_path: None,
         registry_output_path: Some(transcript.to_str().expect("utf-8 transcript path")),
         pane_idle_confirmed: false,
-        rowless_active_turn,
+        rowless_turn,
         placeholder_present: false,
         // Present: conjunct (1) of the #5942 TTL gate fails, so nothing below
         // is answered by an expiry instead.
@@ -1759,7 +1763,7 @@ fn a_rowless_active_turn_publishes_the_coverage_the_sweep_computed() {
         one_covered_one_uncovered(),
         proven_incarnation(),
         vec![receipt((4_000, 4_400), GENERATION)],
-        true,
+        RowlessTurn::OutlivedGrace,
     );
 
     assert_eq!(
@@ -1798,7 +1802,7 @@ fn a_rowless_active_turn_publishes_the_coverage_the_sweep_computed() {
         one_covered_one_uncovered(),
         proven_incarnation(),
         vec![receipt((4_000, 4_400), GENERATION)],
-        false,
+        RowlessTurn::None,
     );
     assert_eq!(
         *control.in_band(),
@@ -1838,7 +1842,7 @@ fn a_carried_over_incarnation_publishes_what_a_fully_covered_turn_publishes() {
             receipt((4_000, 4_400), GENERATION),
             receipt((4_400, 4_800), GENERATION),
         ],
-        true,
+        RowlessTurn::OutlivedGrace,
     );
     let report = RelayVerdictReport::of(&carried_over, true);
 
@@ -1866,7 +1870,7 @@ fn a_carried_over_incarnation_publishes_what_a_fully_covered_turn_publishes() {
         Vec::new(),
         proven_incarnation(),
         Vec::new(),
-        true,
+        RowlessTurn::OutlivedGrace,
     );
     let first_report = RelayVerdictReport::of(&first_turn, true);
     assert_eq!(
@@ -1899,7 +1903,7 @@ fn the_unproven_count_is_an_incarnation_switch_not_a_per_range_property() {
         one_covered_one_uncovered(),
         proven_incarnation(),
         covered(),
-        true,
+        RowlessTurn::OutlivedGrace,
     );
     assert_eq!(
         proven.in_band().unknown_reason(),
@@ -1917,7 +1921,7 @@ fn the_unproven_count_is_an_incarnation_switch_not_a_per_range_property() {
         one_covered_one_uncovered(),
         unproven_incarnation(),
         covered(),
-        true,
+        RowlessTurn::OutlivedGrace,
     );
     assert_eq!(
         unproven.in_band().unknown_reason(),
@@ -1963,7 +1967,7 @@ fn a_rowless_turn_carrying_coverage_still_grants_no_authority() {
             obligations,
             proven_incarnation(),
             confirmed,
-            true,
+            RowlessTurn::OutlivedGrace,
         );
         assert!(
             !verdict.permits_health(),
@@ -1986,4 +1990,109 @@ fn a_rowless_turn_carrying_coverage_still_grants_no_authority() {
             verdict.in_band()
         );
     }
+}
+
+/// 4987 §6.3's falsification test, unwritable while every rowless turn
+/// short-circuited to `Unknown`: a live turn with no inflight row whose prose
+/// no receipt covers past `fail_bound` is caught by the obligation ladder alone.
+#[test]
+fn reachability_unreachable_when_inflight_row_absent_during_live_turn() {
+    let uncovered_past_fail = || vec![obligation(4_000, 4_400, OBLIGATION_FAIL_BOUND_SECS + 100)];
+
+    let within_grace = observe_rowless_channel(
+        5_946_000_000_000_000_008,
+        uncovered_past_fail(),
+        proven_incarnation(),
+        Vec::new(),
+        RowlessTurn::WithinGrace,
+    );
+    assert_eq!(
+        *within_grace.in_band(),
+        ReachabilityVerdict::Unreachable {
+            oldest_unsatisfied_age_secs: OBLIGATION_FAIL_BOUND_SECS + 100,
+            uncovered_ranges: 1,
+        },
+        "the ladder must answer for a rowless turn inside its grace; got {:?}",
+        within_grace.in_band()
+    );
+
+    let stuck = observe_rowless_channel(
+        5_946_000_000_000_000_009,
+        uncovered_past_fail(),
+        proven_incarnation(),
+        Vec::new(),
+        RowlessTurn::OutlivedGrace,
+    );
+    assert!(
+        matches!(
+            stuck.in_band().unknown_reason(),
+            Some(ReachabilityUnknownReason::RowlessActiveTurn { .. })
+        ),
+        "a stuck rowless turn must keep naming itself; got {:?}",
+        stuck.in_band()
+    );
+}
+
+/// Inside the row-acquisition grace a rowless turn is the normal turn-boundary
+/// window, so it gets exactly the verdict a row-backed turn with the same files
+/// gets — including `Reachable` on positive alive evidence with nothing held.
+/// Only a turn that outlived the grace is reported as `rowless_active_turn`.
+#[test]
+fn a_rowless_turn_inside_its_grace_takes_the_ladder_a_row_backed_turn_takes() {
+    let shapes: [(Vec<LedgerObligation>, Vec<ConfirmedDeliveryReceipt>); 3] = [
+        (Vec::new(), Vec::new()),
+        (
+            one_covered_one_uncovered(),
+            vec![receipt((4_000, 4_400), GENERATION)],
+        ),
+        (
+            one_covered_one_uncovered(),
+            vec![
+                receipt((4_000, 4_400), GENERATION),
+                receipt((4_400, 4_800), GENERATION),
+            ],
+        ),
+    ];
+    for (index, (obligations, confirmed)) in shapes.into_iter().enumerate() {
+        let channel = 5_946_000_000_000_000_010 + 3 * index as u64;
+        let observe = |channel_id: u64, rowless_turn: RowlessTurn| {
+            observe_rowless_channel(
+                channel_id,
+                obligations.clone(),
+                proven_incarnation(),
+                confirmed.clone(),
+                rowless_turn,
+            )
+        };
+        let row_backed = observe(channel, RowlessTurn::None);
+        let within_grace = observe(channel + 1, RowlessTurn::WithinGrace);
+        assert_eq!(
+            within_grace.in_band(),
+            row_backed.in_band(),
+            "shape {index}: a rowless turn inside its grace must not diverge from the ladder"
+        );
+
+        let stuck = observe(channel + 2, RowlessTurn::OutlivedGrace);
+        assert!(
+            matches!(
+                stuck.in_band().unknown_reason(),
+                Some(ReachabilityUnknownReason::RowlessActiveTurn { .. })
+            ),
+            "shape {index}: a stuck rowless turn must stay `rowless_active_turn`; got {:?}",
+            stuck.in_band()
+        );
+        assert!(!stuck.permits_health(), "shape {index}");
+    }
+    assert_eq!(
+        *observe_rowless_channel(
+            5_946_000_000_000_000_019,
+            Vec::new(),
+            proven_incarnation(),
+            Vec::new(),
+            RowlessTurn::WithinGrace,
+        )
+        .in_band(),
+        ReachabilityVerdict::Reachable,
+        "an empty ledger with a growing transcript is the transition window, not a stall"
+    );
 }

@@ -773,7 +773,7 @@ enum ReachabilityUnknownReason {
 | `/api/health` 집계 | `degraded` 플래그에 릴레이 도달 항 없음 | `reachability` 필드 추가. `Unreachable`이면 전체 `degraded=true` |
 | `/api/health/detail` | `relay_stall_state`, `stall_shadow_verdict` | `reachability { verdict, oldest_unsatisfied_age_secs, uncovered_ranges, reason }` 추가. `stall_shadow_verdict` 제거. **#4974가 요구한 `last_successful_prose_relay_age_secs`가 여기서 충족된다** |
 
-#5946 이 `verdict=unknown / reason=rowless_active_turn` 에 한해 위 객체에 두 키를 더 싣는다 — `incarnation_live_obligations`, `unproven_ranges`. **둘 다 incarnation 스코프의 관측치이고 턴 스코프가 아니다.** `ObligationExtinction::ReceiptCovered` 에 생산자가 없어 covered 의무가 live set 에서 차감되지 않으므로, 두 번째 턴부터는 "아직 아무것도 프레임하지 않은 라이브 턴"과 "의무가 전부 covered 인 턴"이 동일한 값을 낸다. `uncovered_ranges == 0` 을 은퇴 인가로 읽으면 안 된다. 턴 스코프 판별자는 미구현이다.
+#5946 이 `verdict=unknown / reason=rowless_active_turn` 에 한해 위 객체에 두 키를 더 싣는다 — `incarnation_live_obligations`, `unproven_ranges`. **둘 다 incarnation 스코프의 관측치이고 턴 스코프가 아니다.** `ObligationExtinction::ReceiptCovered` 에 생산자가 없어 covered 의무가 live set 에서 차감되지 않으므로, 두 번째 턴부터는 "아직 아무것도 프레임하지 않은 라이브 턴"과 "의무가 전부 covered 인 턴"이 동일한 값을 낸다. `uncovered_ranges == 0` 을 은퇴 인가로 읽으면 안 된다. 턴 스코프 판별자는 미구현이다. 이 사유는 행 없는 턴이 `UNPAIRED_ACTIVE_TOKEN_GRACE_SECS`(600s, stall 분류기의 `unpaired_active_token` 과 같은 술어) 를 넘겼을 때만 난다. 유예 안의 행 없는 턴은 행이 있는 턴과 같은 의무 사다리를 탄다. 유예를 넘긴 턴은 non-GREEN 으로 남는다 — reachability 는 관측자라 토큰을 해제할 권한이 없고, 고착 해소는 턴 수명(#5996) 의 몫이다.
 | `plan_relay_recovery` (`relay_recovery/decision.rs:314`) | `RelayStallState` 단독 입력 | `(RelayStallState, ReachabilityVerdict)` 입력. `ActiveForegroundStream + Unreachable` 조합에 대해 **비파괴 행동** 신설 (§7.1) |
 | 워치독 `evaluate_active_foreground_coverage` (`relay_watchdog.py:1973`) | `relay_stall_state=="active_foreground_stream"` 을 coverage 근거로 씀 | `reachability != Reachable`이면 coverage를 **부여하지 않는다**. 즉 현재 "활성 스트림이니 desync는 정상"이라는 면죄부가 도달 신호에 종속된다 |
 
@@ -946,7 +946,7 @@ tests: reachability_detects_row_path_vs_resolved_transcript_divergence
 
 | # | 검출 항 | 지연 | 메커니즘 |
 |---|---|---|---|
-| 1 | **`RowlessActiveTurn`** | 짧은 bound (60s [제안]) | mailbox `has_cancel_token=True` + `active_user_message_id` 존재 + `inflight_state_present=False` 가 bound 이상 지속. **워터마크를 기록할 행이 없다 = 배달 불가능의 구조적 증명**. 턴 승인~행 생성 사이 정상 창을 덮기 위해 즉시가 아닌 bound |
+| 1 | **`RowlessActiveTurn`** | `UNPAIRED_ACTIVE_TOKEN_GRACE_SECS` (600s, 구현값) | mailbox `has_cancel_token=True` + `active_user_message_id` 존재 + `inflight_state_present=False` 가 bound 이상 지속. **워터마크를 기록할 행이 없다 = 배달 불가능의 구조적 증명**. 턴 승인~행 생성 사이 정상 창을 덮기 위해 즉시가 아닌 bound |
 | 2 | **Tier A 의무 누적** | fail_bound | **의무 산출이 행을 필요로 하지 않는다.** tmux session → 런타임 바인딩 → 트랜스크립트 독립 해결. 행이 0개여도 의무는 정상 산출됨 → 영수증 0 → `Unreachable` |
 
 **결정적 성질**: #2가 이 형상의 진짜 답이다. 현재 모델은 `desynced`가

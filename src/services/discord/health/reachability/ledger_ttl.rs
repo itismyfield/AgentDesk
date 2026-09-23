@@ -14,7 +14,7 @@
 use std::path::Path;
 
 use super::super::session_enrichment::ExecutorWitness;
-use super::composite::{ReachabilityInputs, TranscriptLiveness, age_secs};
+use super::composite::{ReachabilityInputs, RowlessTurn, TranscriptLiveness, age_secs};
 use super::ledger::ReachabilityLedger;
 use super::observation::REACHABILITY_OBSERVATION_INTERVAL_SECS;
 
@@ -91,7 +91,7 @@ pub(in crate::services::discord) fn expired_without_a_producer(
     if !ledger.live_obligations().is_empty() {
         return None;
     }
-    if inputs.placeholder_present || inputs.rowless_active_turn {
+    if inputs.placeholder_present || inputs.rowless_turn != RowlessTurn::None {
         return None;
     }
     if matches!(

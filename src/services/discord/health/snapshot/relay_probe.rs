@@ -16,12 +16,13 @@
 use crate::services::discord::relay_health::{RelayActiveTurn, RelayHealthSnapshot};
 use crate::services::provider::ProviderKind;
 
+use super::super::reachability::composite::RowlessTurn;
 use super::super::reachability::ledger::{ledger_file_exists, ledger_path};
 use super::super::session_enrichment::ExecutorWitness;
 
 pub(super) struct RelayVerdictProbeOperands {
     pub(super) pane_idle_confirmed: bool,
-    pub(super) rowless_active_turn: bool,
+    pub(super) rowless_turn: RowlessTurn,
     pub(super) placeholder_present: bool,
     /// #5942: three-valued execution-owner witness for the ledger TTL. Derived
     /// from the SAME observation `pane_idle_confirmed` is, so the two cannot
@@ -45,7 +46,6 @@ pub(super) fn reachability_ledger_operand_exists(provider: &ProviderKind, channe
 pub(super) fn relay_verdict_probe_operands(
     executor: ExecutorWitness,
     relay_health: &RelayHealthSnapshot,
-    rowless_active_turn: bool,
     process_started_at_unix: i64,
 ) -> RelayVerdictProbeOperands {
     // #5942 r3 (P1-B): `Present` ONLY. `pane_idle_confirmed` is 4987 §-1.4's
@@ -59,7 +59,13 @@ pub(super) fn relay_verdict_probe_operands(
         pane_idle_confirmed: pane_alive
             && matches!(relay_health.active_turn, RelayActiveTurn::None)
             && relay_health.idle_witness_tail_is_not_waiting(),
-        rowless_active_turn,
+        rowless_turn: if relay_health.unpaired_active_token_outlived_grace() {
+            RowlessTurn::OutlivedGrace
+        } else if relay_health.unpaired_active_token_reconfirmed {
+            RowlessTurn::WithinGrace
+        } else {
+            RowlessTurn::None
+        },
         executor,
         placeholder_present: relay_health.pending_discord_callback_msg_id.is_some(),
         now_epoch_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
@@ -111,5 +117,68 @@ pub(super) fn detail_executor_witness(
         (Some(true), _) => ExecutorWitness::Present,
         (Some(false), _) | (None, None) => ExecutorWitness::Absent,
         (None, Some(_)) => ExecutorWitness::Unwitnessed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::discord::relay_health::{
+        RelayStallClassifier, RelayStallState, UNPAIRED_ACTIVE_TOKEN_GRACE_SECS,
+    };
+
+    /// The 2026-09-18 adk-dash-cc capture: token held, no inflight row, the
+    /// pairing reconfirmed, three messages queued behind it.
+    fn rowless_capture(turn_age_secs: u64) -> RelayHealthSnapshot {
+        RelayHealthSnapshot {
+            active_turn: RelayActiveTurn::Foreground,
+            tmux_alive: Some(true),
+            watcher_attached: true,
+            mailbox_has_cancel_token: true,
+            mailbox_active_user_msg_id: Some(1_550_401_623_417_950_271),
+            mailbox_turn_started_at_ms: Some(1_000_000),
+            mailbox_turn_age_secs: Some(turn_age_secs),
+            queue_depth: 3,
+            unpaired_active_token_reconfirmed: true,
+            ..RelayHealthSnapshot::test_snapshot()
+        }
+    }
+
+    /// The reachability verdict reports a rowless turn as stuck exactly where
+    /// the stall classifier calls it `UnpairedActiveToken`, so a token still
+    /// inside its row-acquisition grace no longer pins the node degraded.
+    #[test]
+    fn a_rowless_turn_is_stuck_only_where_the_stall_classifier_calls_it_unpaired() {
+        for (age, expected) in [
+            (0, RowlessTurn::WithinGrace),
+            (
+                UNPAIRED_ACTIVE_TOKEN_GRACE_SECS - 1,
+                RowlessTurn::WithinGrace,
+            ),
+            (UNPAIRED_ACTIVE_TOKEN_GRACE_SECS, RowlessTurn::OutlivedGrace),
+            (738, RowlessTurn::OutlivedGrace),
+        ] {
+            let capture = rowless_capture(age);
+            assert_eq!(
+                relay_verdict_probe_operands(ExecutorWitness::Present, &capture, 1).rowless_turn,
+                expected,
+                "turn age {age}s"
+            );
+            assert_eq!(
+                RelayStallClassifier::classify(&capture) == RelayStallState::UnpairedActiveToken,
+                expected == RowlessTurn::OutlivedGrace,
+                "the stall classifier disagrees at turn age {age}s"
+            );
+        }
+
+        let unconfirmed = RelayHealthSnapshot {
+            unpaired_active_token_reconfirmed: false,
+            ..rowless_capture(738)
+        };
+        assert_eq!(
+            relay_verdict_probe_operands(ExecutorWitness::Present, &unconfirmed, 1).rowless_turn,
+            RowlessTurn::None,
+            "an unreconfirmed pairing is not a rowless turn at any age"
+        );
     }
 }
