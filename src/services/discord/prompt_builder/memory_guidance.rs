@@ -117,9 +117,15 @@ pub(super) fn proactive_memory_guidance_with(
         }
     };
 
+    let write_rule = match settings.backend {
+        MemoryBackendKind::Memento => {
+            "only for confirmed, previously unstored knowledge, including user preferences, personal or family facts, decision rationale, and reusable lessons. Amend existing facts for corrections; store nothing when there is no new knowledge. Do not copy canonical configuration or policy text"
+        }
+        MemoryBackendKind::File => "only for confirmed decisions, root causes, or config changes",
+    };
     Some(format!(
         "\n\n[Proactive Memory Guidance]\n\
-         `{backend_name}` memory is available. Use {read_tool} for explicit past-context/error/config lookups; use {write_tool} only for confirmed decisions, root causes, or config changes.{extra_note}"
+         `{backend_name}` memory is available. Use {read_tool} for explicit past-context/error/config lookups; use {write_tool} {write_rule}.{extra_note}"
     ))
 }
 
@@ -357,5 +363,30 @@ mod tests {
             )
             .is_none()
         );
+    }
+    #[test]
+    fn family_memento_guidance_preserves_confirmed_facts_without_repeated_writes() {
+        let settings = ResolvedMemorySettings {
+            backend: MemoryBackendKind::Memento,
+            ..ResolvedMemorySettings::default()
+        };
+        let guidance = proactive_memory_guidance_with(
+            Some(&settings),
+            "/tmp/family-counsel",
+            ChannelId::new(1),
+            None,
+            DispatchProfile::Full,
+            true,
+            true,
+            |_| false,
+        )
+        .unwrap();
+        assert!(guidance.contains("personal or family facts"));
+        assert!(guidance.contains("user preferences"));
+        assert!(guidance.contains("previously unstored knowledge"));
+        assert!(guidance.contains("Amend existing facts for corrections"));
+        assert!(guidance.contains("store nothing when there is no new knowledge"));
+        assert!(guidance.contains("Do not copy canonical configuration or policy text"));
+        assert!(!guidance.contains("only for confirmed decisions, root causes, or config changes"));
     }
 }

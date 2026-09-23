@@ -12,6 +12,7 @@ mod hook_server_memento_tests;
 pub(crate) mod hosting;
 pub mod input;
 pub(crate) mod memento_feedback;
+pub(crate) mod memento_writer_hook;
 pub(super) mod prompt_readiness;
 pub mod session;
 pub(crate) mod startup_dialog;
