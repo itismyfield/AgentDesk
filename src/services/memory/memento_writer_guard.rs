@@ -104,6 +104,14 @@ impl WriterClaim {
     }
 }
 
+impl Drop for WriterClaim {
+    /// A child spawned while the claim was open shares its lock until it execs,
+    /// so closing alone can leave the lock held; unlocking releases it for every holder.
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
 /// Flushes the directory holding `entry` through `fsync_parent_dir`.
 #[cfg(unix)]
 fn sync_parent_directory(entry: &Path) -> Result<(), String> {
@@ -306,6 +314,48 @@ mod tests {
         assert!(error.contains("in flight"));
         claim.complete().unwrap();
         assert!(WriterClaim::acquire(dir.path(), &key).unwrap().is_none());
+    }
+
+    #[test]
+    fn finished_claim_is_released_while_other_threads_spawn_children() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        struct StopOnDrop(Arc<AtomicBool>);
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+        let stop = StopOnDrop(Arc::new(AtomicBool::new(false)));
+        let spawning = stop.0.clone();
+        let (program, args): (&str, &[&str]) = if cfg!(windows) {
+            ("cmd", &["/C", "exit"])
+        } else {
+            ("true", &[])
+        };
+        let spawner = std::thread::spawn(move || {
+            while !spawning.load(Ordering::Relaxed) {
+                let _ = std::process::Command::new(program).args(args).status();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        for round in 0..300 {
+            let key = fingerprint(json!({"content": round}));
+            let claim = WriterClaim::acquire(dir.path(), &key).unwrap().unwrap();
+            if round % 2 == 0 {
+                claim.complete().unwrap();
+                let reopened = WriterClaim::acquire(dir.path(), &key);
+                assert!(matches!(reopened, Ok(None)), "round {round}: {reopened:?}");
+            } else {
+                claim.release_before_send().unwrap();
+                let retried = WriterClaim::acquire(dir.path(), &key);
+                assert!(matches!(retried, Ok(Some(_))), "round {round}: {retried:?}");
+            }
+        }
+        drop(stop);
+        spawner.join().unwrap();
     }
 
     #[test]
