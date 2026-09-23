@@ -6461,6 +6461,7 @@ services::discord::tui_prompt_relay::tests::claude_idle_prompt_tails_only_new_ss
 services::discord::tui_prompt_relay::tests::claude_idle_response_start_offset_prefers_timestamp_boundary
 services::discord::tui_prompt_relay::tests::claude_idle_response_start_offset_resets_stale_fallback_after_shrink
 services::discord::tui_prompt_relay::tests::claude_idle_safe_reanchor_handles_exact_backward_chunk_boundaries
+services::discord::tui_prompt_relay::tests::claude_idle_tail_hands_its_registration_guard_to_the_bridge
 services::discord::tui_prompt_relay::tests::claude_idle_transcript_rotation_lookback_still_observes_new_file_prompt
 services::discord::tui_prompt_relay::tests::claude_idle_transcript_scan_fast_forwards_when_compaction_shrinks_file
 services::discord::tui_prompt_relay::tests::claude_idle_transcript_scan_finds_user_prompt_and_stops_at_prompt_end

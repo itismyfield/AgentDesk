@@ -505,7 +505,8 @@ fn bridge_keeps_the_idle_tail_registration_until_its_task_exits() {
         *BRIDGE_CAPTURE_PROBE.lock().unwrap() = Some((owner, captured_tx, resume_rx));
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(CancelToken::new());
-        super::spawn_turn_bridge_with_pin(shared.clone(), cancel, rx, bridge, None);
+        let start_bridge = super::spawn_turn_bridge_with_pin;
+        start_bridge(shared.clone(), cancel, rx, bridge, None);
         let ten_secs = std::time::Duration::from_secs(10);
         tokio::time::timeout(ten_secs, captured_rx)
             .await

@@ -2309,6 +2309,9 @@ mod tests {
     fn an_unrecovered_routable_absence_warns_once_past_the_threshold() {
         let provider = ProviderKind::Claude;
         let channel = ChannelId::new(5_957_302);
+        // Watchdog-pass tests GC the absence map against the wall clock under this
+        // mutex; unserialized, they retire this past-anchored entry mid-test.
+        let _serialized = crate::config::test_env_lock::acquire_shared_test_env_lock();
         clear_watcher_absence(&provider, channel);
 
         let t0 = 1_789_100_000i64;
@@ -2350,6 +2353,8 @@ mod tests {
     fn the_five_hour_incident_gap_warns_exactly_once() {
         let provider = ProviderKind::Claude;
         let channel = ChannelId::new(5_957_303);
+        // Same wall-clock GC race as above: a re-armed entry announces twice.
+        let _serialized = crate::config::test_env_lock::acquire_shared_test_env_lock();
         clear_watcher_absence(&provider, channel);
 
         let t0 = 1_789_200_000i64;
