@@ -3086,6 +3086,9 @@ services::discord::health::watcher_respawn::idle_relay_absence::tests::live_sess
 services::discord::health::watcher_respawn::idle_relay_absence::tests::the_incident_gap_would_have_announced_itself
 services::discord::health::watcher_respawn::idle_relay_absence::tests::the_warn_waits_for_the_threshold_then_fires_once
 services::discord::health::watcher_respawn::idle_relay_absence::tests::two_sessions_mapping_to_one_channel_arm_it_once
+services::discord::health::watcher_respawn::respawn_deadlock_tests::a_watcherless_row_is_not_kept_alive_while_respawn_is_refused
+services::discord::health::watcher_respawn::respawn_deadlock_tests::force_clean_removes_everything_the_rebind_guard_refuses_on
+services::discord::health::watcher_respawn::respawn_deadlock_tests::force_clean_respawn_makes_progress_against_a_watcherless_tui_direct_row
 services::discord::health::watcher_respawn::tests::a_channel_observed_on_this_tick_is_left_to_the_relay_work_sweep
 services::discord::health::watcher_respawn::tests::a_recovered_channel_can_announce_a_later_gap_again
 services::discord::health::watcher_respawn::tests::a_routable_unwatched_session_reaches_the_respawn_queue_within_one_minute

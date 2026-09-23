@@ -53,6 +53,8 @@ use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::ProviderKind;
 
 mod idle_relay_absence;
+#[cfg(all(test, unix))]
+mod respawn_deadlock_tests;
 
 use idle_relay_absence::observe_routable_unwatched_tui_sessions;
 
