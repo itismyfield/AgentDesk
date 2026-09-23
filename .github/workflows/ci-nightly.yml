@@ -140,7 +140,7 @@ jobs:
         run: |
           source scripts/ci/non-pg-test-filter.sh
           cargo test --all-targets -- "${NON_PG_SKIP_ARGS[@]}"
-          run_non_pg_filter_false_positives
+          run_non_pg_filter_replay
         env:
           RUST_BACKTRACE: 1
 
@@ -192,7 +192,7 @@ jobs:
         run: |
           source scripts/ci/non-pg-test-filter.sh
           cargo test --all-targets -- "${NON_PG_SKIP_ARGS[@]}"
-          run_non_pg_filter_false_positives
+          run_non_pg_filter_replay
         env:
           RUST_BACKTRACE: 1
 

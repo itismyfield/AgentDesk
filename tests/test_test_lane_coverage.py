@@ -237,6 +237,24 @@ class LaneFilterTests(unittest.TestCase):
                 lanes,
             )
 
+    def test_a_non_pg_test_reached_only_by_the_pg_lane_is_uncovered(self) -> None:
+        skip_args = ("--skip", "_pg", "--skip", "alpha::tests")
+        lanes = (
+            coverage.LaneFilter(tuple(skip_args[1::2]), ()),
+            coverage.LaneFilter((), tuple(skip_args[1::2])),
+        )
+        pg_only = coverage.pg_lanes(lanes, skip_args)
+        self.assertEqual(pg_only, {lanes[0]})
+        inventory = {"alpha::tests": {"alpha::tests::needs_no_db"}}
+        self.assertEqual(
+            coverage.uncovered_modules(inventory, lanes, frozenset(), pg_only),
+            {"alpha::tests"},
+        )
+        pg_tests = frozenset({"alpha::tests::needs_no_db"})
+        self.assertEqual(
+            coverage.uncovered_modules(inventory, lanes, pg_tests, pg_only), set()
+        )
+
     def test_module_filter_covers_nested_module(self) -> None:
         modules = {"service::tests", "other::tests"}
         lanes = (coverage.LaneFilter(("service",), ()),)
@@ -344,6 +362,9 @@ class RatchetTests(unittest.TestCase):
         (root / ".github/workflows/ci-pr.yml").write_text(
             "run: cargo test --lib targeted_tests\n", encoding="utf-8"
         )
+        (root / coverage.PG_MANIFEST_REL).write_text(
+            "[tests]\npg_tests::case\n", encoding="utf-8"
+        )
 
     def run_check(
         self,
@@ -363,6 +384,15 @@ class RatchetTests(unittest.TestCase):
                 emit_success=False,
             )
         return result, stderr.getvalue()
+
+    def test_missing_pg_manifest_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_repo(root, "covered_tests")
+            self.assertEqual(self.run_check(root, "", set()), (0, ""))
+            (root / coverage.PG_MANIFEST_REL).unlink()
+            with self.assertRaisesRegex(ValueError, "pg_test_lane_manifest"):
+                self.run_check(root, "", set())
 
     def test_new_uncovered_module_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

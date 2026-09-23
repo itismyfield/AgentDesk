@@ -18,6 +18,8 @@ ZSHRC = Path(os.environ.get("SESSION_ANCHOR_TEST_ZSHRC", str(SCRIPT.with_suffix(
 spec = importlib.util.spec_from_file_location("session_anchor", SCRIPT)
 anchor = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(anchor)
+# Launch-window inputs the wrappers read; a Claude Code parent shell exports the first.
+COMPACT_ENV = ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "CC_COMPACT_WINDOW")
 ANCHOR = "[ANCHOR MEMORY]\n- Global 'quoted' $(touch BAD) `false` $HOME\n- 작업 기준"
 
 
@@ -87,7 +89,8 @@ class AnchorTests(unittest.TestCase):
         self.codex_home.mkdir()
         self.server.calls = []
         self.server.mode = "ok"
-        self.env = dict(os.environ, HOME=str(self.root), CODEX_HOME=str(self.codex_home),
+        inherited = {k: v for k, v in os.environ.items() if k not in COMPACT_ENV}
+        self.env = dict(inherited, HOME=str(self.root), CODEX_HOME=str(self.codex_home),
                         PATH=str(self.bin) + ":" + os.environ["PATH"],
                         MEMENTO_ACCESS_KEY="DO_NOT_LEAK_SECRET", MEMENTO_WORKSPACE="test-project",
                         MEMENTO_MCP_URL="http://127.0.0.1:" + str(self.server.server_port) + "/mcp",
@@ -233,6 +236,13 @@ class AnchorTests(unittest.TestCase):
         data, _ = self.run_wrapper("cct", ["350k", "hello"])
         self.assertEqual(data["compact"], "350000")
         self.assertNotIn("350k", data["args"])
+
+    def test_compact_window_sources_per_launch_path(self):
+        self.env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "123"
+        self.assertEqual(self.run_wrapper("cc")[0]["compact"], "123")
+        self.assertEqual(self.run_wrapper("cct")[0]["compact"], self.compact_default)
+        self.env["CC_COMPACT_WINDOW"] = "456"
+        self.assertEqual(self.run_wrapper("cct")[0]["compact"], "456")
 
     def test_malformed_and_oversize_anchor_rejected(self):
         for payload in ({}, {"anchorCount": 1, "injectionText": "[ANCHOR MEMORY]\n"},
