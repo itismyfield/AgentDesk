@@ -1,6 +1,7 @@
 //! #3038 S1 tmux watcher liveness and stream decision helpers.
 
 use super::*;
+use crate::services::discord::mailbox_blocks_session_idle_commit;
 
 mod streaming_session_banner;
 pub(super) use streaming_session_banner::*;
@@ -15,13 +16,7 @@ pub(super) async fn commit_watcher_direct_terminal_session_idle(
     data_start_offset: u64,
     current_offset: u64,
 ) -> bool {
-    if shared.mailbox(channel_id).cancel_token().await.is_some() {
-        tracing::debug!(
-            channel_id = channel_id.get(),
-            tmux_session_name = %tmux_session_name,
-            provider = %provider.as_str(),
-            "skipping watcher-direct terminal session-idle commit; mailbox turn is active"
-        );
+    if mailbox_blocks_session_idle_commit(shared, channel_id, tmux_session_name, provider).await {
         return false;
     }
 

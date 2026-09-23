@@ -213,7 +213,11 @@ pub(in crate::services::discord) async fn assert_committed_preflight_reaches_set
         "confirmed cancelled episode must reach the existing settlement epilogue"
     );
     assert!(
-        ctx.shared.mailbox(ctx.channel_id).has_active_turn().await,
+        ctx.shared
+            .mailbox(ctx.channel_id)
+            .has_active_turn()
+            .await
+            .unwrap(),
         "preflight alone must not release the actor"
     );
 }

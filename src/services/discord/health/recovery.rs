@@ -7,6 +7,7 @@ use serde::Serialize;
 use serenity::{ChannelId, MessageId};
 
 use crate::services::discord::inflight::opt_message_id;
+use crate::services::discord::mailbox_probe::wait_for_turn_end;
 use crate::services::discord::relay_recovery::AxisBSite;
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::discord::turn_view_reconciler::note_intake_turn_cleared_via_shared as tv_clear;
@@ -157,7 +158,7 @@ pub(crate) async fn channel_has_active_turn(
     let Some(shared) = shared_for_provider(registry, &provider, channel_id).await else {
         return false;
     };
-    discord::mailbox_has_blocking_active_turn(&shared, channel_id).await
+    discord::mailbox_has_blocking_active_turn_or_unreachable(&shared, channel_id).await
 }
 
 async fn owning_runtime_http_for_channel(
@@ -313,21 +314,6 @@ fn preserve_cancel_can_skip_provider_interrupt_for_idle_tui(
         tmux_ready_for_input,
         inflight_safe_to_clear,
     )
-}
-
-async fn wait_for_turn_end(
-    shared: &SharedData,
-    channel_id: ChannelId,
-    timeout: std::time::Duration,
-) -> bool {
-    let start = tokio::time::Instant::now();
-    while shared.mailbox(channel_id).has_active_turn().await {
-        if start.elapsed() >= timeout {
-            return false;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    true
 }
 
 fn runtime_stop_wait_timeout() -> std::time::Duration {

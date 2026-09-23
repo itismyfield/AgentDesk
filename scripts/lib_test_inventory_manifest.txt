@@ -3160,6 +3160,7 @@ services::discord::idle_recap::tests::channel_has_active_turn_false_for_stale_in
 services::discord::idle_recap::tests::channel_has_active_turn_false_when_no_inflight
 services::discord::idle_recap::tests::channel_has_active_turn_true_for_fresh_inflight
 services::discord::idle_recap::tests::channel_has_active_turn_true_for_mailbox_active_without_inflight
+services::discord::idle_recap::tests::channel_has_active_turn_true_for_unreachable_mailbox_without_inflight
 services::discord::idle_recap::tests::clear_specific_card_clears_when_pointer_still_matches_captured_id
 services::discord::idle_recap::tests::clear_specific_card_targets_captured_id_and_cas_is_noop_when_pointer_advanced
 services::discord::idle_recap::tests::concurrent_same_session_recap_persist_keeps_newer_card_when_older_persists_later
@@ -3547,6 +3548,8 @@ services::discord::jsonl_watcher::tests::notify_fires_when_file_modified
 services::discord::jsonl_watcher::tests::notify_is_inert_when_parent_missing_but_does_not_panic
 services::discord::last_message_checkpoint_tests::advance_last_message_checkpoint_interleaved_advances_keep_max
 services::discord::mailbox_finish::relay_state_contract_refs::contract_symbols_exist
+services::discord::mailbox_probe::mailbox_unreachable_tests::unreachable_actor_is_idle_to_wrapper_but_never_ends_the_turn_wait
+services::discord::mailbox_probe::mailbox_unreachable_tests::watcher_direct_idle_commit_blocks_on_turn_quietly_and_on_unreachable_loudly
 services::discord::mcp_credential_watcher::tests::added_mcp_server_is_reported
 services::discord::mcp_credential_watcher::tests::changed_mcp_server_config_is_reported
 services::discord::mcp_credential_watcher::tests::claude_config_dir_override_reroots_watched_paths
@@ -5892,6 +5895,7 @@ services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::rowless_cancelled_native_body_reaches_exact_receipt_without_append
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::rowless_cancelled_native_split_utf8_preserves_original_decoder
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::rowless_cancelled_native_terminal_preserves_exact_ack_at_eof
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::watcher_direct_idle_commit_passes_mailbox_gate_only_when_idle
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::progress_caller_uses_actual_terminal_outcome
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::progress_short_body_and_ioerror_stay_nonterminal
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::recovered_session_bound_codex_stream_tick_reaches_http
@@ -9116,6 +9120,8 @@ services::turn_orchestrator::lease_release::lease_release_identity_tests::hard_s
 services::turn_orchestrator::lease_release::lease_release_identity_tests::hard_stop_release_without_persistence_names_the_provider_unmeasured
 services::turn_orchestrator::lease_release::lease_release_identity_tests::release_clears_the_same_anchor_whether_or_not_a_provider_is_carried
 services::turn_orchestrator::lease_release::lease_release_identity_tests::the_unmeasured_label_is_the_literal_these_tests_pin
+services::turn_orchestrator::mailbox_unreachable_tests::measured_idle_is_distinct_from_unreachable_actor
+services::turn_orchestrator::mailbox_unreachable_tests::requeue_front_to_unreachable_actor_names_the_refusal
 services::turn_orchestrator::no_ttl_evict_tests::overflow_cap_still_evicts_oldest_as_overflow
 services::turn_orchestrator::no_ttl_evict_tests::requeue_tail_drain_is_overflow_and_cancel_is_not
 services::turn_orchestrator::no_ttl_evict_tests::soft_probe_surfaces_overflow_exit_events

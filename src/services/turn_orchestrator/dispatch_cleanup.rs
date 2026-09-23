@@ -10,17 +10,15 @@ impl ChannelMailboxHandle {
         user_message_id: MessageId,
         persistence: QueuePersistenceContext,
     ) -> bool {
-        self.request(
-            |reply| ChannelMailboxMsg::AbandonPendingDispatch {
-                user_message_id,
-                dispatch_lease: None,
-                persistence,
-                consume_marker: true,
-                reply,
-            },
-            false,
-        )
+        self.request(|reply| ChannelMailboxMsg::AbandonPendingDispatch {
+            user_message_id,
+            dispatch_lease: None,
+            persistence,
+            consume_marker: true,
+            reply,
+        })
         .await
+        .unwrap_or(false)
     }
 
     pub(crate) async fn abandon_pending_dispatch_if_lease_matches(
@@ -29,17 +27,15 @@ impl ChannelMailboxHandle {
         dispatch_lease: Arc<DispatchLease>,
         persistence: QueuePersistenceContext,
     ) -> bool {
-        self.request(
-            |reply| ChannelMailboxMsg::AbandonPendingDispatch {
-                user_message_id,
-                dispatch_lease: Some(dispatch_lease),
-                persistence,
-                consume_marker: true,
-                reply,
-            },
-            false,
-        )
+        self.request(|reply| ChannelMailboxMsg::AbandonPendingDispatch {
+            user_message_id,
+            dispatch_lease: Some(dispatch_lease),
+            persistence,
+            consume_marker: true,
+            reply,
+        })
         .await
+        .unwrap_or(false)
     }
 
     pub(crate) async fn clear_pending_dispatch_reservation(
@@ -47,16 +43,14 @@ impl ChannelMailboxHandle {
         user_message_id: MessageId,
         persistence: QueuePersistenceContext,
     ) -> bool {
-        self.request(
-            |reply| ChannelMailboxMsg::AbandonPendingDispatch {
-                user_message_id,
-                dispatch_lease: None,
-                persistence,
-                consume_marker: false,
-                reply,
-            },
-            false,
-        )
+        self.request(|reply| ChannelMailboxMsg::AbandonPendingDispatch {
+            user_message_id,
+            dispatch_lease: None,
+            persistence,
+            consume_marker: false,
+            reply,
+        })
         .await
+        .unwrap_or(false)
     }
 }

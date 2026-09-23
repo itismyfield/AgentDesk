@@ -32,14 +32,12 @@ impl ChannelMailboxHandle {
         &self,
         commit: CapturedReadyDeliveryCommit,
     ) -> Option<CapturedReadyDeliveryCommit> {
-        self.request(
-            |reply| ChannelMailboxMsg::CommitCapturedReadyDelivery {
-                commit: Box::new(commit),
-                reply,
-            },
-            None,
-        )
+        self.request(|reply| ChannelMailboxMsg::CommitCapturedReadyDelivery {
+            commit: Box::new(commit),
+            reply,
+        })
         .await
+        .unwrap_or(None)
         .map(|committed| *committed)
     }
 
@@ -51,25 +49,23 @@ impl ChannelMailboxHandle {
         active_started_before: Instant,
         persistence: QueuePersistenceContext,
     ) -> FinishTurnResult {
-        self.request(
-            |reply| ChannelMailboxMsg::FinishTurnIfMatches {
-                expected_actor: None,
-                expected_user_message_id,
-                active_started_before: Some(active_started_before),
-                turn_nonce_guard: TurnNonceGuard::exact(Some(expected_turn_nonce)),
-                preserve_queue: true,
-                persistence,
-                reply,
-            },
-            FinishTurnResult {
-                removed_token: None,
-                has_pending: false,
-                mailbox_online: false,
-                queue_exit_events: Vec::new(),
-                persistence_error: None,
-            },
-        )
+        self.request(|reply| ChannelMailboxMsg::FinishTurnIfMatches {
+            expected_actor: None,
+            expected_user_message_id,
+            active_started_before: Some(active_started_before),
+            turn_nonce_guard: TurnNonceGuard::exact(Some(expected_turn_nonce)),
+            preserve_queue: true,
+            persistence,
+            reply,
+        })
         .await
+        .unwrap_or(FinishTurnResult {
+            removed_token: None,
+            has_pending: false,
+            mailbox_online: false,
+            queue_exit_events: Vec::new(),
+            persistence_error: None,
+        })
     }
     /// Episode-identity + monotonic-start guarded finish for durable repair.
     /// The actor compares both axes before taking the active token, so a stale
@@ -99,25 +95,23 @@ impl ChannelMailboxHandle {
         expected_actor: Option<Arc<CancelToken>>,
         persistence: QueuePersistenceContext,
     ) -> FinishTurnResult {
-        self.request(
-            |reply| ChannelMailboxMsg::FinishTurnIfMatches {
-                expected_actor,
-                expected_user_message_id,
-                active_started_before: Some(active_started_before),
-                turn_nonce_guard: TurnNonceGuard::exact(expected_turn_nonce),
-                preserve_queue: false,
-                persistence,
-                reply,
-            },
-            FinishTurnResult {
-                removed_token: None,
-                has_pending: false,
-                mailbox_online: false,
-                queue_exit_events: Vec::new(),
-                persistence_error: None,
-            },
-        )
+        self.request(|reply| ChannelMailboxMsg::FinishTurnIfMatches {
+            expected_actor,
+            expected_user_message_id,
+            active_started_before: Some(active_started_before),
+            turn_nonce_guard: TurnNonceGuard::exact(expected_turn_nonce),
+            preserve_queue: false,
+            persistence,
+            reply,
+        })
         .await
+        .unwrap_or(FinishTurnResult {
+            removed_token: None,
+            has_pending: false,
+            mailbox_online: false,
+            queue_exit_events: Vec::new(),
+            persistence_error: None,
+        })
     }
 
     /// #3016 — identity-guarded finish. Finalizes the active turn ONLY when
@@ -130,25 +124,23 @@ impl ChannelMailboxHandle {
         expected_user_message_id: MessageId,
         persistence: QueuePersistenceContext,
     ) -> FinishTurnResult {
-        self.request(
-            |reply| ChannelMailboxMsg::FinishTurnIfMatches {
-                expected_actor: None,
-                expected_user_message_id,
-                active_started_before: None,
-                turn_nonce_guard: TurnNonceGuard::Ignore,
-                preserve_queue: false,
-                persistence,
-                reply,
-            },
-            FinishTurnResult {
-                removed_token: None,
-                has_pending: false,
-                mailbox_online: false,
-                queue_exit_events: Vec::new(),
-                persistence_error: None,
-            },
-        )
+        self.request(|reply| ChannelMailboxMsg::FinishTurnIfMatches {
+            expected_actor: None,
+            expected_user_message_id,
+            active_started_before: None,
+            turn_nonce_guard: TurnNonceGuard::Ignore,
+            preserve_queue: false,
+            persistence,
+            reply,
+        })
         .await
+        .unwrap_or(FinishTurnResult {
+            removed_token: None,
+            has_pending: false,
+            mailbox_online: false,
+            queue_exit_events: Vec::new(),
+            persistence_error: None,
+        })
     }
 
     /// Identity + monotonic-start guarded finish (nonce-agnostic base predicate).
@@ -164,25 +156,23 @@ impl ChannelMailboxHandle {
         active_started_before: Instant,
         persistence: QueuePersistenceContext,
     ) -> FinishTurnResult {
-        self.request(
-            |reply| ChannelMailboxMsg::FinishTurnIfMatches {
-                expected_actor: None,
-                expected_user_message_id,
-                active_started_before: Some(active_started_before),
-                turn_nonce_guard: TurnNonceGuard::Ignore,
-                preserve_queue: false,
-                persistence,
-                reply,
-            },
-            FinishTurnResult {
-                removed_token: None,
-                has_pending: false,
-                mailbox_online: false,
-                queue_exit_events: Vec::new(),
-                persistence_error: None,
-            },
-        )
+        self.request(|reply| ChannelMailboxMsg::FinishTurnIfMatches {
+            expected_actor: None,
+            expected_user_message_id,
+            active_started_before: Some(active_started_before),
+            turn_nonce_guard: TurnNonceGuard::Ignore,
+            preserve_queue: false,
+            persistence,
+            reply,
+        })
         .await
+        .unwrap_or(FinishTurnResult {
+            removed_token: None,
+            has_pending: false,
+            mailbox_online: false,
+            queue_exit_events: Vec::new(),
+            persistence_error: None,
+        })
     }
 }
 
@@ -296,7 +286,7 @@ mod tests {
                 .try_start_turn(old.clone(), UserId::new(51), MessageId::new(51))
                 .await
         );
-        let captured = handle.cancel_token().await.unwrap();
+        let captured = handle.cancel_token().await.unwrap().unwrap();
         assert!(Arc::ptr_eq(&captured, &old));
         old.cancelled.store(true, Relaxed);
         assert!(Arc::ptr_eq(

@@ -31,6 +31,7 @@ mod inflight_heartbeat_sweeper;
 pub(crate) mod internal_api;
 mod jsonl_watcher;
 mod mailbox_finish;
+mod mailbox_probe;
 mod mcp_credential_watcher;
 pub(crate) mod meeting_artifact_store;
 pub(crate) mod meeting_orchestrator;
@@ -198,6 +199,14 @@ pub(in crate::services::discord) use catch_up::{
 pub(in crate::services::discord) use mailbox_finish::{
     mailbox_finish_cancelled_turn, mailbox_finish_owned_turn, mailbox_finish_turn,
     mailbox_finish_turn_if_matches, mailbox_finish_turn_if_matches_episode_started_before,
+};
+#[cfg(unix)]
+pub(in crate::services::discord) use mailbox_probe::{
+    mailbox_blocks_session_idle_commit, mailbox_has_active_turn_or_unreachable,
+};
+pub(in crate::services::discord) use mailbox_probe::{
+    mailbox_has_active_turn, mailbox_has_blocking_active_turn,
+    mailbox_has_blocking_active_turn_or_unreachable,
 };
 pub(in crate::services::discord) use recovery_engine as recovery;
 // #3038 S1: re-export the extracted cluster type so the `SharedData` field
@@ -1445,19 +1454,6 @@ pub(crate) async fn record_turn_stop_tombstone(
     _tmux_session_name: Option<&str>,
     _reason: &str,
 ) {
-}
-
-async fn mailbox_has_active_turn(shared: &SharedData, channel_id: ChannelId) -> bool {
-    shared.mailbox(channel_id).has_active_turn().await
-}
-
-/// #3167 — true only when a *real* (non-background) active turn holds the
-/// slot. The external-input dequeue uses this instead of
-/// `mailbox_has_active_turn` so a continuously-cycling background turn
-/// (monitor relay / self-paced TUI loop) does not starve a queued user
-/// intervention.
-async fn mailbox_has_blocking_active_turn(shared: &SharedData, channel_id: ChannelId) -> bool {
-    shared.mailbox(channel_id).has_blocking_active_turn().await
 }
 
 fn cleanup_retry_inflight_blocks_idle_kickoff(

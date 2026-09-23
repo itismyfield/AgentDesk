@@ -2084,7 +2084,7 @@ async fn reconcile_orphan_suppressed_placeholder_for_restored_watcher(
     channel_id: ChannelId,
     tmux_session_name: &str,
 ) {
-    let has_active_turn = shared.mailbox(channel_id).has_active_turn().await;
+    let has_active_turn = super::mailbox_has_active_turn_or_unreachable(shared, channel_id).await;
     let Some(state) = super::inflight::load_inflight_state(provider, channel_id.get()) else {
         return;
     };

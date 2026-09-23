@@ -161,7 +161,11 @@ pub(super) async fn consume_codex_goal_lifecycle_command(
     command: GoalLifecycleCommand,
     stale_session_id: Option<String>,
 ) {
-    let active_turn = super::super::super::mailbox_has_active_turn(shared, channel_id).await;
+    let active_turn = shared
+        .mailbox(channel_id)
+        .has_active_turn()
+        .await
+        .unwrap_or(true);
     if matches!(command, GoalLifecycleCommand::Clear) && !active_turn {
         super::super::super::commands::reset_channel_provider_state(
             http,

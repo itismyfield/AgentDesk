@@ -447,7 +447,7 @@ pub(super) async fn run_terminal_commit_epilogue(
             .await;
         }
         let mailbox = shared.mailbox(channel_id);
-        let has_active_turn = mailbox.has_active_turn().await;
+        let has_active_turn = mailbox.has_active_turn().await.unwrap_or(true);
         // #3016 (codex R1) / phase-5b2: couple the post-finalize lifecycle to
         // the ACTUAL finalize. `watcher_drove_finalize` is true whenever the
         // helper ran the finalizer (here always, via `normal_completion = true`),

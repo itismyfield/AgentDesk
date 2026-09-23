@@ -2125,7 +2125,7 @@ pub(super) mod tests {
                 "turn-2 must not be cancelled by a stale turn-1 terminal"
             );
             assert!(
-                shared.mailbox(ch).has_active_turn().await,
+                shared.mailbox(ch).has_active_turn().await.unwrap(),
                 "turn-2 must remain the live active turn"
             );
             assert_eq!(
@@ -2321,7 +2321,7 @@ pub(super) mod tests {
             "the newer live turn must not be cancelled"
         );
         assert!(
-            shared.mailbox(ch).has_active_turn().await,
+            shared.mailbox(ch).has_active_turn().await.unwrap(),
             "the newer live turn must remain active"
         );
         assert_eq!(
@@ -2474,7 +2474,7 @@ pub(super) mod tests {
                 "the released token must be marked cancelled"
             );
             assert!(
-                !shared.mailbox(ch).has_active_turn().await,
+                !shared.mailbox(ch).has_active_turn().await.unwrap(),
                 "the relay-miss finalize must clear the active turn"
             );
 
@@ -2663,7 +2663,7 @@ pub(super) mod tests {
                 "the deferred turn's token must not be released before the backstop fires"
             );
             assert!(
-                shared.mailbox(ch).has_active_turn().await,
+                shared.mailbox(ch).has_active_turn().await.unwrap(),
                 "the active turn must persist while the gate-timeout is only deferred"
             );
 
@@ -2681,7 +2681,7 @@ pub(super) mod tests {
                 "the reconciler backstop must release (cancel) the active turn's token"
             );
             assert!(
-                !shared.mailbox(ch).has_active_turn().await,
+                !shared.mailbox(ch).has_active_turn().await.unwrap(),
                 "the reconciler backstop must clear the active turn"
             );
             assert_eq!(
@@ -2818,7 +2818,7 @@ pub(super) mod tests {
                 "GateTimeout{{None}} via bridge must mark the released token cancelled"
             );
             assert!(
-                !shared.mailbox(ch).has_active_turn().await,
+                !shared.mailbox(ch).has_active_turn().await.unwrap(),
                 "GateTimeout{{None}} via bridge must clear the active turn"
             );
             assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
@@ -2889,7 +2889,7 @@ pub(super) mod tests {
             }
             assert!(token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
             assert!(
-                !shared.mailbox(ch).has_active_turn().await,
+                !shared.mailbox(ch).has_active_turn().await.unwrap(),
                 "the orphan finalize must clear the active turn"
             );
             assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
@@ -3012,7 +3012,7 @@ pub(super) mod tests {
                 "cancel must set the released token's cancelled flag"
             );
             assert!(
-                !shared.mailbox(ch).has_active_turn().await,
+                !shared.mailbox(ch).has_active_turn().await.unwrap(),
                 "the first cancel must clear the active turn"
             );
 

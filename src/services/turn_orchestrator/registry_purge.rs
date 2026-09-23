@@ -199,8 +199,9 @@ impl ChannelMailboxHandle {
     /// A dead actor (mailbox closed / reply dropped) can never start work
     /// again, so the request fallback treats it as trivially purgeable.
     async fn close_if_idle(&self) -> Result<(), &'static str> {
-        self.request(|reply| ChannelMailboxMsg::CloseIfIdle { reply }, Ok(()))
+        self.request(|reply| ChannelMailboxMsg::CloseIfIdle { reply })
             .await
+            .unwrap_or(Ok(()))
     }
 }
 
@@ -520,7 +521,7 @@ mod tests {
              (pre-fix it activated a turn on the unlinked actor)"
         );
         assert!(
-            !stale_handle.has_active_turn().await,
+            !stale_handle.has_active_turn().await.unwrap(),
             "the tombstoned actor must remain idle"
         );
 
@@ -620,7 +621,7 @@ mod tests {
              (pre-fix this incremented global_active for an unreachable actor)"
         );
         assert!(
-            !stale_handle.has_active_turn().await,
+            !stale_handle.has_active_turn().await.unwrap(),
             "the tombstoned actor must remain idle"
         );
         let snapshot = stale_handle.snapshot().await;
@@ -762,7 +763,7 @@ mod tests {
             .await;
         assert!(kickoff.refused_closed);
         assert!(!kickoff.activated_turn);
-        assert!(!handle.has_active_turn().await);
+        assert!(!handle.has_active_turn().await.unwrap());
         GLOBAL_CHANNEL_MAILBOXES.remove(&channel);
     }
 
@@ -791,7 +792,7 @@ mod tests {
         assert!(!result.refused_closed);
         assert!(result.activated_turn);
         let fresh_handle = registry.handle(channel);
-        assert!(fresh_handle.has_active_turn().await);
+        assert!(fresh_handle.has_active_turn().await.unwrap());
 
         let _ = fresh_handle.hard_stop().await;
         GLOBAL_CHANNEL_MAILBOXES.remove(&channel);
