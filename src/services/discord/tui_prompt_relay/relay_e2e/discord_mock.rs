@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use axum::Json;
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{Path, State, WebSocketUpgrade};
+use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::{Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -37,9 +37,10 @@ pub(super) struct DiscordMockState {
     pub(super) first_placeholder_arrived: Arc<Notify>,
     pub(super) release_first_placeholder: Arc<Notify>,
     pub(super) unhandled: Arc<Mutex<Vec<String>>>,
-    /// Channel history `catch_up` phase 2 reads, newest first. Empty until a
-    /// scenario seeds it, which is the "nothing to catch up" answer.
+    /// Channel history `GET /messages` pages over. Empty until a scenario
+    /// seeds it, which is the "nothing to catch up" answer.
     pub(super) history: Arc<Mutex<Vec<Value>>>,
+    pub(super) history_queries: Arc<Mutex<Vec<HistoryQuery>>>,
     next_response_id: Arc<AtomicU64>,
 }
 
@@ -52,9 +53,20 @@ impl DiscordMockState {
             release_first_placeholder: Arc::new(Notify::new()),
             unhandled: Arc::new(Mutex::new(Vec::new())),
             history: Arc::new(Mutex::new(Vec::new())),
+            history_queries: Arc::new(Mutex::new(Vec::new())),
             next_response_id: Arc::new(AtomicU64::new(FIRST_RESPONSE_MESSAGE_ID)),
         }
     }
+}
+
+/// A `GET /messages` query. Serenity sends at most one cursor; `around` does
+/// not deserialize, so a query the mock cannot page reaches the 404 fallback.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::services::discord::tui_prompt_relay) struct HistoryQuery {
+    pub(in crate::services::discord::tui_prompt_relay) limit: Option<usize>,
+    pub(in crate::services::discord::tui_prompt_relay) before: Option<u64>,
+    pub(in crate::services::discord::tui_prompt_relay) after: Option<u64>,
 }
 
 fn discord_user_json(id: u64, name: &str, bot: bool) -> Value {
@@ -142,6 +154,39 @@ pub(super) fn history_message_json(id: u64, content: &str, bot: bool) -> Value {
     message
 }
 
+fn history_message_id(message: &Value) -> u64 {
+    message["id"]
+        .as_str()
+        .and_then(|id| id.parse().ok())
+        .expect("history message id")
+}
+
+/// Discord's page shape: the `limit` messages nearest the cursor (the newest
+/// without one), always newest first. `None` when both cursors are set.
+fn history_page(history: &[Value], query: &HistoryQuery) -> Option<Vec<Value>> {
+    if query.before.is_some() && query.after.is_some() {
+        return None;
+    }
+    let mut page: Vec<Value> = history
+        .iter()
+        .filter(|message| {
+            let id = history_message_id(message);
+            query.before.is_none_or(|before| id < before)
+                && query.after.is_none_or(|after| id > after)
+        })
+        .cloned()
+        .collect();
+    page.sort_by_key(|message| std::cmp::Reverse(history_message_id(message)));
+    let keep = page.len().min(query.limit.unwrap_or(50));
+    // `after` pages forward from the cursor, so it keeps the oldest end.
+    if query.after.is_some() {
+        page.drain(..page.len() - keep);
+    } else {
+        page.truncate(keep);
+    }
+    Some(page)
+}
+
 async fn get_channel(Path(_channel_id): Path<u64>) -> Json<Value> {
     Json(private_channel_json())
 }
@@ -187,11 +232,20 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
         return (StatusCode::OK, Json(discord_message_json(id, &content))).into_response();
     }
 
-    // `catch_up` phase 2 reads this before it can reach its dedup branch; an
-    // unseeded channel answers "nothing to catch up" rather than an error.
+    // `catch_up` reads this before it can reach its dedup branch; an unseeded
+    // channel answers "nothing to catch up" rather than an error.
     if method == Method::GET && path == format!("/api/v10/channels/{CHANNEL_ID}/messages") {
-        let history = state.history.lock().expect("mock history").clone();
-        return Json(Value::Array(history)).into_response();
+        if let Ok(Query(query)) = Query::<HistoryQuery>::try_from_uri(request.uri()) {
+            state
+                .history_queries
+                .lock()
+                .expect("history queries")
+                .push(query.clone());
+            let history = state.history.lock().expect("mock history");
+            if let Some(page) = history_page(&history, &query) {
+                return Json(Value::Array(page)).into_response();
+            }
+        }
     }
     if method == Method::PATCH
         && path.starts_with(&format!("/api/v10/channels/{CHANNEL_ID}/messages/"))

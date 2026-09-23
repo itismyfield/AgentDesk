@@ -6344,6 +6344,8 @@ services::discord::tui_prompt_relay::anchor_completion::tests::relay_drain_decis
 services::discord::tui_prompt_relay::bridge_completion::tests::foreign_durable_row_is_contracted_as_no_evidence_not_failure
 services::discord::tui_prompt_relay::bridge_completion::tests::missing_durable_row_is_contracted_as_no_evidence_not_failure
 services::discord::tui_prompt_relay::bridge_completion::tests::tui_direct_bridge_completion_rejects_uncommitted_matching_inflight
+services::discord::tui_prompt_relay::catch_up_pagination_e2e::checkpointed_catch_up_reads_the_page_just_past_the_cursor
+services::discord::tui_prompt_relay::catch_up_pagination_e2e::recent_catch_up_pages_back_to_a_buried_user_message_and_stops
 services::discord::tui_prompt_relay::claude_idle_runtime::tests::continuation_adoption_requires_every_safety_fact
 services::discord::tui_prompt_relay::claude_idle_runtime::tests::continuation_candidate_requires_growth_across_two_samples
 services::discord::tui_prompt_relay::claude_idle_runtime::tests::the_idle_tick_settles_session_rotations_before_relaying_bindings

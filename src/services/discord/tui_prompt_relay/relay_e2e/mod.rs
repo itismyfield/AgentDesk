@@ -34,7 +34,7 @@ use crate::services::discord::{
 use crate::services::tui_prompt_dedupe as dedupe;
 use crate::services::turn_orchestrator as orchestrator;
 
-pub(super) use discord_mock::CHANNEL_ID;
+pub(super) use discord_mock::{CHANNEL_ID, HistoryQuery};
 use discord_mock::{USER_ID, history_message_json, user_message};
 
 /// Dedupe and lease tables key on the provider's wire name, not [`ProviderKind`].
@@ -275,15 +275,45 @@ impl RelayE2eHarness {
         self.mock.unhandled.lock().expect("unhandled log").clone()
     }
 
-    /// Seeds the history `catch_up` phase 2 reads, newest first, as
+    /// Seeds the history `catch_up` reads, in any order, as
     /// `(message_id, content, is_bot)`.
-    // Consumed by the queue-reclaim scenario, which lands in a later lane.
-    #[allow(dead_code)]
     pub(super) fn seed_channel_history(&self, entries: &[(u64, &str, bool)]) {
         *self.mock.history.lock().expect("mock history") = entries
             .iter()
             .map(|(id, content, bot)| history_message_json(*id, content, *bot))
             .collect();
+    }
+
+    /// Every `GET /messages` query the mock answered, in arrival order.
+    pub(super) fn history_queries(&self) -> Vec<HistoryQuery> {
+        self.mock
+            .history_queries
+            .lock()
+            .expect("history queries")
+            .clone()
+    }
+
+    /// Registers the channel in the role map with no checkpoint, which is what
+    /// makes `catch_up` scan it in `Recent` mode.
+    pub(super) fn register_channel_in_role_map(&self) {
+        let path = crate::runtime_layout::role_map_path(self.root.path());
+        std::fs::create_dir_all(path.parent().expect("role map dir")).expect("role map dir");
+        let role_map = serde_json::json!({
+            "byChannelId": {
+                CHANNEL_ID.to_string(): {"roleId": "adk-cc", "promptFile": "prompt.md", "provider": PROVIDER_KEY}
+            }
+        });
+        std::fs::write(path, role_map.to_string()).expect("write role map");
+    }
+
+    /// One production catch-up sweep, both phases, over the mock transport.
+    pub(super) async fn run_catch_up(&self) {
+        crate::services::discord::catch_up::catch_up_missed_messages(
+            &self.ctx.http,
+            &self.shared,
+            &self.data.provider,
+        )
+        .await;
     }
 
     /// Level-triggered: safe to call after the POST has already landed.

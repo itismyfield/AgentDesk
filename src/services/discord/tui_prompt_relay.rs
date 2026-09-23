@@ -892,6 +892,8 @@ fn slash_command_control_turn_is_duplicate_external_replay(
 }
 
 #[cfg(all(test, unix))]
+mod catch_up_pagination_e2e;
+#[cfg(all(test, unix))]
 mod local_model_queue_wake_e2e;
 #[cfg(all(test, unix))]
 mod relay_e2e;
