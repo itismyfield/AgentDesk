@@ -624,6 +624,39 @@ async fn rebind_inflight_for_channel_inner(
         );
     }
 
+    // Custody before the fence: the adoption below overwrites the only cursor into the range.
+    let fence_forward_custody = match (pending_fence_forward, existing_inflight.as_ref()) {
+        (Some(cause), Some(existing)) => {
+            let facts = adoption::AdoptFenceForward {
+                cause,
+                existing,
+                tmux_session_name: &tmux_session_name,
+                output_path: &output_path,
+                initial_offset,
+                latest_lease_turn_id: latest_lease_turn_id.as_deref(),
+            };
+            let custody = adoption::take_adopt_fence_forward_custody(
+                shared.pg_pool.as_ref(),
+                channel_id,
+                &facts,
+            )
+            .await;
+            Some(custody.map_err(|error| {
+                tracing::warn!(
+                    channel_id,
+                    tmux_session = %tmux_session_name,
+                    cause = cause.as_str(),
+                    %error,
+                    "rebind kept a TUI-direct row's offsets: its unread range is not in custody",
+                );
+                RebindError::Internal(format!(
+                    "adopt fence-forward custody for channel {channel_id}: {error}"
+                ))
+            })?)
+        }
+        _ => None,
+    };
+
     let mut inflight_rollback_on_relay_setup_failure: Option<PendingRebindInflightRollback>;
     let mut locked_episode_from_adoption: Option<super::inflight::LockedInflightEpisode> = None;
     #[cfg(test)]
@@ -911,19 +944,13 @@ async fn rebind_inflight_for_channel_inner(
     };
     drop(locked_episode);
 
-    if let (Some(cause), Some(existing)) = (pending_fence_forward, existing_inflight.as_ref()) {
-        adoption::record_adopt_fence_forward(
+    if let Some(custody) = fence_forward_custody {
+        adoption::announce_adopt_fence_forward(
             shared,
             provider,
             channel_id,
-            &adoption::AdoptFenceForward {
-                cause,
-                existing,
-                tmux_session_name: &tmux_session_name,
-                output_path: &output_path,
-                initial_offset,
-                latest_lease_turn_id: latest_lease_turn_id.as_deref(),
-            },
+            &tmux_session_name,
+            custody,
         );
     }
 

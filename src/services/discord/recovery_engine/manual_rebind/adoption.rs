@@ -135,15 +135,13 @@ pub(crate) fn tui_direct_adopt_offsets(
         {
             Some(AdoptFenceForwardCause::CoordinateSpaceMismatch)
         }
-        // A newer external turn on this tmux means `[turn_start_offset, EOF)` holds its output too.
-        Some(_)
-            if non_empty(latest_lease_turn_id).is_some_and(|latest| {
-                non_empty(existing.external_turn_id.as_deref()) != Some(latest)
-            }) =>
-        {
-            Some(AdoptFenceForwardCause::NewerTurnMixed)
-        }
-        Some(_) => None,
+        // Only a live lease naming the row's own turn proves `[turn_start_offset, EOF)` is its
+        // output alone; a different lease is a newer turn, and no lease proves nothing.
+        Some(_) => match non_empty(latest_lease_turn_id) {
+            Some(latest) if non_empty(existing.external_turn_id.as_deref()) == Some(latest) => None,
+            Some(_) => Some(AdoptFenceForwardCause::NewerTurnMixed),
+            None => Some(AdoptFenceForwardCause::TurnIdentityUnknown),
+        },
     };
     Some(cause.map_or(
         TuiDirectAdoptOffsets::Preserve,
@@ -208,36 +206,108 @@ pub(crate) static ADOPT_FENCE_FORWARD_DISPATCHES: std::sync::Mutex<
     Vec<(crate::db::relay_dead_letter::RelayDeadLetterRecord, String)>,
 > = std::sync::Mutex::new(Vec::new());
 
-/// Fence-forward drops the row's unread range `[turn_start_offset, old EOF)`, so it is never
-/// silent: its body goes to the dead-letter table, the loss to the invariant log, and one line
-/// to the channel.
-pub(crate) fn record_adopt_fence_forward(
-    shared: &crate::services::discord::SharedData,
-    provider: &crate::services::provider::ProviderKind,
+/// What a fence-forward can keep of the unread range `[range_start, old EOF)`.
+#[derive(Debug, PartialEq, Eq)]
+enum UnreadRange {
+    Body {
+        old_eof: u64,
+        text: String,
+    },
+    /// The saved coordinates no longer address any bytes, so only the range itself is kept.
+    Unaddressable(&'static str),
+}
+
+/// `Err` means the bytes exist but could not be read; fencing then would drop a body a retry
+/// can still keep.
+fn snapshot_unread_range(old_path: Option<&str>, range_start: u64) -> Result<UnreadRange, String> {
+    let Some(path) = old_path else {
+        return Ok(UnreadRange::Unaddressable(
+            "row has no saved transcript path",
+        ));
+    };
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(UnreadRange::Unaddressable(
+                "saved transcript no longer exists",
+            ));
+        }
+        Err(error) => return Err(format!("read saved transcript {path}: {error}")),
+    };
+    let unread = usize::try_from(range_start)
+        .ok()
+        .and_then(|start| bytes.get(start..));
+    let Some(unread) = unread else {
+        return Ok(UnreadRange::Unaddressable(
+            "saved offset lies past the saved transcript's end",
+        ));
+    };
+    Ok(UnreadRange::Body {
+        old_eof: bytes.len() as u64,
+        text: super::super::jsonl_extract::extract_response_from_jsonl_bytes(unread),
+    })
+}
+
+/// Proof that the unread range is in dead-letter custody; only this lets a rebind fence past it.
+pub(crate) struct AdoptFenceForwardCustody {
+    cause: AdoptFenceForwardCause,
+    turn_id: Option<String>,
+    record: crate::db::relay_dead_letter::RelayDeadLetterRecord,
+    notice: String,
+}
+
+async fn insert_custody(
+    pool: Option<&sqlx::PgPool>,
+    record: &crate::db::relay_dead_letter::RelayDeadLetterRecord,
+) -> Result<(), String> {
+    #[cfg(test)]
+    if ADOPT_FENCE_FORWARD_TEST_CUSTODY
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains(&record.channel_id)
+    {
+        return Ok(());
+    }
+    let pool = pool.ok_or("no dead-letter pool")?;
+    let inserted = crate::db::relay_dead_letter::insert(pool, record).await;
+    inserted.map(drop).map_err(|error| error.to_string())
+}
+
+/// Puts the row's unread range `[turn_start_offset, old EOF)` in dead-letter custody before the
+/// caller overwrites the only cursor into it: the body when readable, else the range and why.
+/// `Err` means nothing was recorded, so the caller must keep the row's offsets.
+pub(crate) async fn take_adopt_fence_forward_custody(
+    pool: Option<&sqlx::PgPool>,
     channel_id: u64,
     facts: &AdoptFenceForward<'_>,
-) {
+) -> Result<AdoptFenceForwardCustody, String> {
     let existing = facts.existing;
     let range_start = existing.turn_start_offset.unwrap_or(existing.last_offset);
     let old_path = (existing.output_path.as_deref().map(str::trim)).filter(|path| !path.is_empty());
-    let old_eof = old_path
-        .and_then(|path| std::fs::metadata(path).ok())
-        .map_or(0, |metadata| metadata.len().max(range_start));
-    let dropped_bytes = old_eof.saturating_sub(range_start);
+    let (custody, content, notice) = match snapshot_unread_range(old_path, range_start)? {
+        UnreadRange::Body { old_eof, text } => {
+            let dropped = old_eof - range_start;
+            let custody = format!("custody=body dropped_bytes={dropped} old_eof={old_eof}");
+            let notice = format!("이전 응답 {dropped}바이트를 이어서 전달하지 못해 보관했습니다");
+            (custody, text, notice)
+        }
+        UnreadRange::Unaddressable(why) => {
+            let custody = format!("custody=unrecoverable why=\"{why}\"");
+            let notice =
+                "이전 응답을 이어서 전달하지 못했고 원본을 읽을 수 없어 범위만 기록했습니다"
+                    .to_string();
+            (custody, String::new(), notice)
+        }
+    };
     let message_id = (existing.user_msg_id != 0).then(|| existing.user_msg_id.to_string());
     let record = crate::db::relay_dead_letter::RelayDeadLetterRecord {
         kind: crate::db::relay_dead_letter::KIND_ADOPT_FENCE_FORWARD.to_string(),
         channel_id: channel_id.to_string(),
         author_id: message_id.clone(),
         message_id,
-        content: old_path.map_or_else(String::new, |path| {
-            crate::services::discord::recovery_engine::extract_response_from_output_pub(
-                path,
-                range_start,
-            )
-        }),
+        content,
         reason: format!(
-            "cause={} dropped_bytes={dropped_bytes} range_start={range_start} old_eof={old_eof} old_path={} new_path={} new_offset={} tmux={} row_turn_id={} lease_turn_id={}",
+            "cause={} {custody} range_start={range_start} old_path={} new_path={} new_offset={} tmux={} row_turn_id={} lease_turn_id={}",
             facts.cause.as_str(),
             old_path.unwrap_or("-"),
             facts.output_path,
@@ -247,30 +317,52 @@ pub(crate) fn record_adopt_fence_forward(
             facts.latest_lease_turn_id.unwrap_or("-"),
         ),
     };
-    let notice = format!(
-        "⚠️ **응답 이어받기 실패** — 세션 복구 중 이전 응답 {dropped_bytes}바이트를 이어서 전달하지 못해 보관했습니다 (relay dead-letter `{}`).",
-        crate::db::relay_dead_letter::KIND_ADOPT_FENCE_FORWARD
-    );
+    insert_custody(pool, &record).await?;
+    Ok(AdoptFenceForwardCustody {
+        cause: facts.cause,
+        turn_id: existing.external_turn_id.clone(),
+        record,
+        notice: format!(
+            "⚠️ **응답 이어받기 실패** — 세션 복구 중 {notice} (relay dead-letter `{}`).",
+            crate::db::relay_dead_letter::KIND_ADOPT_FENCE_FORWARD
+        ),
+    })
+}
+
+/// After the fence landed: the loss to the invariant log and one line to the channel. Both are
+/// best-effort because the range is already in custody.
+pub(crate) fn announce_adopt_fence_forward(
+    shared: &crate::services::discord::SharedData,
+    provider: &crate::services::provider::ProviderKind,
+    channel_id: u64,
+    tmux_session_name: &str,
+    custody: AdoptFenceForwardCustody,
+) {
+    let AdoptFenceForwardCustody {
+        cause,
+        turn_id,
+        record,
+        notice,
+    } = custody;
     crate::services::observability::record_invariant_check(
         false,
         crate::services::observability::InvariantViolation {
             provider: Some(provider.as_str()),
             channel_id: Some(channel_id),
             dispatch_id: None,
-            session_key: Some(facts.tmux_session_name),
-            turn_id: existing.external_turn_id.as_deref(),
+            session_key: Some(tmux_session_name),
+            turn_id: turn_id.as_deref(),
             invariant: ADOPT_FENCE_FORWARD_INVARIANT,
-            code_location: "src/services/discord/recovery_engine/manual_rebind/adoption.rs:record_adopt_fence_forward",
+            code_location: "src/services/discord/recovery_engine/manual_rebind/adoption.rs:announce_adopt_fence_forward",
             message: "rebind could not keep a TUI-direct row's offsets and restarted the watcher at transcript EOF",
-            details: serde_json::json!({ "cause": facts.cause.as_str(), "reason": record.reason }),
+            details: serde_json::json!({ "cause": cause.as_str(), "reason": record.reason }),
         },
     );
     #[cfg(test)]
     ADOPT_FENCE_FORWARD_DISPATCHES
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .push((record.clone(), notice.clone()));
-    crate::db::relay_dead_letter::record_detached(shared.pg_pool.as_ref(), record);
+        .push((record, notice.clone()));
 
     let Some(pool) = shared.pg_pool.clone() else {
         tracing::warn!(
@@ -624,6 +716,67 @@ mod tests {
         bytes.extend_from_slice(line.to_string().as_bytes());
         std::fs::write(path, &bytes).expect("write transcript");
         bytes.len() as u64
+    }
+
+    #[test]
+    fn unread_range_snapshot_keeps_the_body_or_says_why_it_cannot() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let transcript = tmp.path().join("unread.jsonl");
+        let eof = write_transcript(&transcript, "KEPT_BODY_6159");
+        let path = transcript.to_str().unwrap();
+        match snapshot_unread_range(Some(path), 4_096) {
+            Ok(UnreadRange::Body { old_eof, text }) => {
+                assert_eq!(old_eof, eof);
+                assert!(text.contains("KEPT_BODY_6159"), "{text}");
+            }
+            other => panic!("a readable range keeps its body: {other:?}"),
+        }
+        let gone = tmp.path().join("gone.jsonl");
+        let unaddressable = [
+            snapshot_unread_range(None, 0),
+            snapshot_unread_range(Some(gone.to_str().unwrap()), 0),
+            snapshot_unread_range(Some(path), eof + 1),
+        ];
+        for snapshot in unaddressable {
+            assert!(
+                matches!(snapshot, Ok(UnreadRange::Unaddressable(_))),
+                "{snapshot:?}"
+            );
+        }
+        // Present but unreadable is not "gone": a retry may still keep the body.
+        assert!(snapshot_unread_range(tmp.path().to_str(), 0).is_err());
+    }
+
+    #[tokio::test]
+    async fn an_unaddressable_range_is_recorded_before_it_may_be_fenced() {
+        let channel_id = 6_159_008_u64;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let gone = tmp
+            .path()
+            .join("71590000-0000-4000-8000-000000000000.jsonl");
+        let row = tui_direct_row(channel_id, "tmux-6159", gone.to_str().unwrap());
+        let facts = AdoptFenceForward {
+            cause: AdoptFenceForwardCause::TranscriptRotated,
+            existing: &row,
+            tmux_session_name: "tmux-6159",
+            output_path: "/tmp/61590000-0000-4000-8000-000000000000.jsonl",
+            initial_offset: 99,
+            latest_lease_turn_id: None,
+        };
+        let refused = take_adopt_fence_forward_custody(None, channel_id, &facts).await;
+        assert!(refused.is_err(), "no record, no custody");
+        ADOPT_FENCE_FORWARD_TEST_CUSTODY
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(channel_id.to_string());
+        let custody = take_adopt_fence_forward_custody(None, channel_id, &facts)
+            .await
+            .expect("the range itself is recorded");
+        let reason = &custody.record.reason;
+        assert!(reason.contains("cause=transcript_rotated"), "{reason}");
+        assert!(reason.contains("custody=unrecoverable"), "{reason}");
+        assert!(reason.contains("range_start=4096"), "{reason}");
+        assert!(custody.record.content.is_empty());
     }
 
     #[cfg(unix)]

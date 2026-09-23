@@ -109,7 +109,7 @@ pub(in crate::services::discord) fn extract_response_from_output_range(
     Ok(extract_response_from_jsonl_bytes(&bytes))
 }
 
-fn extract_response_from_jsonl_bytes(bytes: &[u8]) -> String {
+pub(super) fn extract_response_from_jsonl_bytes(bytes: &[u8]) -> String {
     let mut response = String::new();
     let mut any_tool_used = false;
     let mut has_post_tool_text = false;
