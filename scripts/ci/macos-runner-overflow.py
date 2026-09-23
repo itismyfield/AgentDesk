@@ -37,9 +37,13 @@ def decide(runners: list[dict], wanted: list[str]) -> tuple[str, str]:
     return "self-hosted", f"{len(idle)}/{len(eligible)} matching self-hosted runner(s) idle"
 
 
-def fetch_runners(repo: str, token: str) -> list[dict]:
+PER_PAGE = 100  # GitHub's maximum for this endpoint
+MAX_PAGES = 10  # 1,000 runners; each page is a sequential request inside the routing step
+
+
+def _fetch_page(repo: str, token: str, page: int) -> tuple[list, int]:
     request = urllib.request.Request(
-        f"https://api.github.com/repos/{repo}/actions/runners?per_page=100",
+        f"https://api.github.com/repos/{repo}/actions/runners?per_page={PER_PAGE}&page={page}",
         headers={
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
@@ -48,10 +52,27 @@ def fetch_runners(repo: str, token: str) -> list[dict]:
     )
     with urllib.request.urlopen(request, timeout=10) as response:
         body = json.load(response)
-    # A partial list (more pages, truncation) leaves unlisted runners unknown, not busy.
     runners, total = body.get("runners"), body.get("total_count")
-    if not isinstance(runners, list) or type(total) is not int or total != len(runners):
-        raise ValueError(f"incomplete runner list (total_count={total!r})")
+    if not isinstance(runners, list) or type(total) is not int:
+        raise ValueError(f"malformed runner page {page} (total_count={total!r})")
+    return runners, total
+
+
+def fetch_runners(repo: str, token: str) -> list[dict]:
+    # A partial list (unread pages, truncation, churn between pages) leaves unlisted runners unknown, not busy.
+    runners: list = []
+    total = None
+    for page in range(1, MAX_PAGES + 1):
+        batch, page_total = _fetch_page(repo, token, page)
+        total = page_total if total is None else total
+        if page_total != total or total > PER_PAGE * MAX_PAGES:
+            raise ValueError(f"runner list changed or exceeds {MAX_PAGES} pages (total_count={page_total})")
+        runners += batch
+        if len(runners) >= total or not batch:
+            break
+    ids = [runner["id"] for runner in runners]
+    if len(runners) != total or len(set(ids)) != len(ids):
+        raise ValueError(f"incomplete or duplicated runner list ({len(runners)} listed, total_count={total})")
     return runners
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import itertools
 import json
 import os
 import subprocess
@@ -24,10 +25,31 @@ LABELS_JSON = '["self-hosted","macOS","agentdesk-macos"]'
 spec = importlib.util.spec_from_file_location("macos_runner_overflow", SCRIPT)
 overflow = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(overflow)
+runner_ids = itertools.count(1)
 
 
 def runner(name: str, *, busy: bool, status: str = "online", labels=LABELS) -> dict:
-    return {"name": name, "status": status, "busy": busy, "labels": [{"name": label} for label in labels]}
+    return {
+        "id": next(runner_ids),
+        "name": name,
+        "status": status,
+        "busy": busy,
+        "labels": [{"name": label} for label in labels],
+    }
+
+
+def page(total: int, runners: list) -> io.BytesIO:
+    return io.BytesIO(json.dumps({"total_count": total, "runners": runners}).encode())
+
+
+def run_main(**urlopen_kwargs) -> tuple[str, mock.Mock]:
+    """Run main() against a mocked urlopen; return the printed mode and the mock."""
+    env = {"MACOS_RUNNER": LABELS_JSON, "GITHUB_REPOSITORY": "o/r", "RUNNER_QUERY_TOKEN": "t"}
+    with mock.patch.dict(os.environ, env), mock.patch.object(
+        overflow.urllib.request, "urlopen", **urlopen_kwargs
+    ) as urlopen, mock.patch("builtins.print") as printed:
+        overflow.main()
+    return printed.call_args_list[-1].args[0], urlopen
 
 
 def jobs() -> dict:
@@ -100,12 +122,7 @@ class DecideTests(unittest.TestCase):
         self.assertEqual(mode, "self-hosted")
 
     def main_with_response(self, **kwargs) -> str:
-        env = {"MACOS_RUNNER": LABELS_JSON, "GITHUB_REPOSITORY": "o/r", "RUNNER_QUERY_TOKEN": "t"}
-        with mock.patch.dict(os.environ, env), mock.patch.object(
-            overflow.urllib.request, "urlopen", **kwargs
-        ), mock.patch("builtins.print") as printed:
-            overflow.main()
-        return printed.call_args_list[-1].args[0]
+        return run_main(**kwargs)[0]
 
     def test_query_failure_keeps_self_hosted(self) -> None:
         self.assertEqual(self.main_with_response(side_effect=OSError("403 rate limited")), "self-hosted")
@@ -120,6 +137,17 @@ class DecideTests(unittest.TestCase):
                 body = io.BytesIO(json.dumps({"total_count": 2, "runners": runners}).encode())
                 self.assertEqual(self.main_with_response(return_value=body), "self-hosted")
 
+    def test_malformed_runner_entry_keeps_self_hosted(self) -> None:
+        bad_labels = {**runner("book", busy=True), "labels": "macOS"}
+        for case, entry in (("labels not a list", bad_labels), ("entry not an object", "book")):
+            with self.subTest(case=case):
+                body = page(2, [runner("mini", busy=True), entry])
+                self.assertEqual(self.main_with_response(return_value=body), "self-hosted")
+
+    def test_complete_page_with_an_idle_runner_keeps_self_hosted(self) -> None:
+        body = page(2, [runner("mini", busy=True), runner("book", busy=False)])
+        self.assertEqual(self.main_with_response(return_value=body), "self-hosted")
+
     def test_complete_saturated_response_routes_hosted(self) -> None:
         runners = [runner("mini", busy=True), runner("book", busy=True)]
         body = io.BytesIO(json.dumps({"total_count": 2, "runners": runners}).encode())
@@ -127,10 +155,65 @@ class DecideTests(unittest.TestCase):
 
     def test_incomplete_runner_list_keeps_self_hosted(self) -> None:
         # Only the listed runner is known busy; the unlisted one may be idle.
-        for case, extra in (("total_count exceeds listed", {"total_count": 2}), ("total_count missing", {})):
+        cases = (
+            ("total_count exceeds listed", {"total_count": 2}),
+            ("total_count below listed", {"total_count": 0}),
+            ("total_count missing", {}),
+            ("total_count as string", {"total_count": "1"}),
+        )
+        for case, extra in cases:
             with self.subTest(case=case):
                 body = io.BytesIO(json.dumps({**extra, "runners": [runner("mini", busy=True)]}).encode())
-                self.assertEqual(self.main_with_response(return_value=body), "self-hosted")
+                self.assertEqual(self.main_with_response(side_effect=[body, page(2, [])]), "self-hosted")
+
+
+class PaginationTests(unittest.TestCase):
+    @staticmethod
+    def two_pages(*, last_busy: bool = True) -> tuple[list, list]:
+        first = [runner(f"mac-{i}", busy=True) for i in range(overflow.PER_PAGE)]
+        return first, [runner("mac-last", busy=last_busy)]
+
+    def test_two_complete_saturated_pages_route_hosted(self) -> None:
+        first, second = self.two_pages()
+        mode, urlopen = run_main(side_effect=[page(101, first), page(101, second)])
+        self.assertEqual(mode, "hosted")
+        self.assertEqual(urlopen.call_count, 2)
+        urls = [call.args[0].full_url for call in urlopen.call_args_list]
+        self.assertEqual(
+            urls,
+            [f"https://api.github.com/repos/o/r/actions/runners?per_page=100&page={n}" for n in (1, 2)],
+        )
+
+    def test_idle_runner_on_second_page_keeps_self_hosted(self) -> None:
+        first, second = self.two_pages(last_busy=False)
+        mode, urlopen = run_main(side_effect=[page(101, first), page(101, second)])
+        self.assertEqual((mode, urlopen.call_count), ("self-hosted", 2))
+
+    def test_second_page_network_error_keeps_self_hosted(self) -> None:
+        first, _ = self.two_pages()
+        mode, urlopen = run_main(side_effect=[page(101, first), OSError("connection reset")])
+        self.assertEqual((mode, urlopen.call_count), ("self-hosted", 2))
+
+    def test_total_count_changing_between_pages_keeps_self_hosted(self) -> None:
+        first, second = self.two_pages()
+        mode, _ = run_main(side_effect=[page(101, first), page(102, second)])
+        self.assertEqual(mode, "self-hosted")
+
+    def test_runner_repeated_across_pages_keeps_self_hosted(self) -> None:
+        # Churn can shift a runner onto the next page while another slips out unseen.
+        first, _ = self.two_pages()
+        mode, _ = run_main(side_effect=[page(101, first), page(101, [first[-1]])])
+        self.assertEqual(mode, "self-hosted")
+
+    def test_short_second_page_keeps_self_hosted(self) -> None:
+        first, _ = self.two_pages()
+        mode, urlopen = run_main(side_effect=[page(102, first), page(102, []), page(102, [])])
+        self.assertEqual((mode, urlopen.call_count), ("self-hosted", 2))
+
+    def test_runner_list_beyond_page_limit_keeps_self_hosted_without_more_requests(self) -> None:
+        first, _ = self.two_pages()
+        mode, urlopen = run_main(side_effect=[page(overflow.PER_PAGE * overflow.MAX_PAGES + 1, first)])
+        self.assertEqual((mode, urlopen.call_count), ("self-hosted", 1))
 
 
 class ResolveStepTests(unittest.TestCase):
