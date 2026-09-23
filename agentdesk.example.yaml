@@ -422,6 +422,10 @@ runtime:
   rate_limit_danger_pct: 95
   github_repo_cache_sec: 300
   rate_limit_stale_sec: 600
+  # StreamJson (Grok/AGY) silence before the first non-empty stdout line.
+  # Unset or zero retains the 60s default. This example explicitly allows
+  # 300s for a slow model to emit its first line.
+  stream_json_startup_output_timeout_secs: 300
   reset_overrides_on_restart: false
 
 # Prompt-manifest retention policy + per-layer max full-content size (#1699).
