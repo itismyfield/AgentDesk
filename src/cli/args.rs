@@ -239,8 +239,7 @@ pub(crate) enum Commands {
         #[arg(long)]
         close_issue: bool,
     },
-    /// tmux + Claude CLI integration wrapper (Unix only)
-    #[cfg(unix)]
+    /// Claude session wrapper (tmux FIFO on Unix, process pipe on all platforms)
     TmuxWrapper {
         /// Path to the output capture file
         #[arg(long)]
@@ -254,15 +253,14 @@ pub(crate) enum Commands {
         /// Working directory (defaults to ".")
         #[arg(long, default_value = ".")]
         cwd: String,
-        /// Input mode: fifo (default) or pipe
-        #[arg(long, value_enum, default_value_t = InputModeArg::Fifo)]
+        /// Input mode: fifo on Unix or pipe on all platforms
+        #[arg(long, value_enum, default_value_t = InputModeArg::default())]
         input_mode: InputModeArg,
         /// Claude command and arguments (after --)
         #[arg(last = true)]
         claude_cmd: Vec<String>,
     },
-    /// tmux + Codex CLI integration wrapper (Unix only)
-    #[cfg(unix)]
+    /// Codex session wrapper (tmux FIFO on Unix, process pipe on all platforms)
     CodexTmuxWrapper {
         /// Path to the output capture file
         #[arg(long)]
@@ -300,15 +298,14 @@ pub(crate) enum Commands {
         /// Additional directory writable alongside the primary workspace
         #[arg(long = "add-dir")]
         add_dirs: Vec<String>,
-        /// Input mode: fifo (default) or pipe
-        #[arg(long, value_enum, default_value_t = InputModeArg::Fifo)]
+        /// Input mode: fifo on Unix or pipe on all platforms
+        #[arg(long, value_enum, default_value_t = InputModeArg::default())]
         input_mode: InputModeArg,
         /// Auto-compact token limit (absolute token count)
         #[arg(long)]
         compact_token_limit: Option<u64>,
     },
-    /// tmux + Qwen CLI integration wrapper (Unix only)
-    #[cfg(unix)]
+    /// Qwen session wrapper (tmux FIFO on Unix, process pipe on all platforms)
     QwenTmuxWrapper {
         /// Path to the output capture file
         #[arg(long)]
@@ -337,8 +334,8 @@ pub(crate) enum Commands {
         /// Working directory (defaults to ".")
         #[arg(long, default_value = ".")]
         cwd: String,
-        /// Input mode: fifo (default) or pipe
-        #[arg(long, value_enum, default_value_t = InputModeArg::Fifo)]
+        /// Input mode: fifo on Unix or pipe on all platforms
+        #[arg(long, value_enum, default_value_t = InputModeArg::default())]
         input_mode: InputModeArg,
     },
     /// Relay Claude Code hook stdin JSON to the AgentDesk TUI hook receiver
@@ -932,22 +929,22 @@ pub(crate) enum ReportProvider {
     Qwen,
 }
 
-#[derive(Clone, ValueEnum)]
-#[cfg(unix)]
+#[derive(Clone, Default, ValueEnum)]
 pub(crate) enum InputModeArg {
+    #[cfg(unix)]
+    #[default]
     Fifo,
+    #[cfg_attr(not(unix), default)]
     Pipe,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
-#[cfg(unix)]
 pub(crate) enum FastModeStateArg {
     Enabled,
     Disabled,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
-#[cfg(unix)]
 pub(crate) enum FeatureStateArg {
     Enabled,
     Disabled,
@@ -1054,6 +1051,32 @@ mod tests {
     }
 
     #[test]
+    fn provider_wrappers_accept_process_backend_pipe_arguments() {
+        for (wrapper, provider_args) in [
+            ("tmux-wrapper", vec!["--", "claude"]),
+            ("codex-tmux-wrapper", vec!["--codex-bin", "codex"]),
+            ("qwen-tmux-wrapper", vec!["--qwen-bin", "qwen"]),
+        ] {
+            let mut args = vec![
+                "agentdesk",
+                wrapper,
+                "--output-file",
+                "output.jsonl",
+                "--input-fifo",
+                "unused-fifo",
+                "--prompt-file",
+                "prompt.txt",
+                "--cwd",
+                ".",
+                "--input-mode",
+                "pipe",
+            ];
+            args.extend(provider_args);
+            Cli::try_parse_from(args).expect("ProcessBackend command is available on every OS");
+        }
+    }
+
+    #[test]
     fn top_level_command_name_snapshot_preserves_public_cli_surface() {
         let mut command = Cli::command();
         command.build();
@@ -1085,11 +1108,8 @@ mod tests {
             "discord",
             "card",
             "cherry-merge",
-            #[cfg(unix)]
             "tmux-wrapper",
-            #[cfg(unix)]
             "codex-tmux-wrapper",
-            #[cfg(unix)]
             "qwen-tmux-wrapper",
             "claude-hook-relay",
             "codex-hook-relay",

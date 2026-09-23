@@ -23,6 +23,8 @@ src/
 ├── cli/
 │   ├── client/
 │   │   └── runtime_config.rs
+│   ├── dcserver/
+│   │   └── startup.rs
 │   ├── doctor/
 │   │   ├── orchestrator/
 │   │   │   ├── config_dir_checks.rs
@@ -1591,14 +1593,18 @@ src/
 │   │   └── streaming_entry.rs
 │   ├── platform/
 │   │   ├── binary_resolver/
-│   │   │   └── grok.rs
+│   │   │   ├── grok.rs
+│   │   │   ├── resolution.rs
+│   │   │   └── windows_codex.rs
 │   │   ├── tmux/
 │   │   │   └── availability.rs
 │   │   ├── binary_resolver.rs
 │   │   ├── dump_tool.rs
 │   │   ├── mod.rs
+│   │   ├── network.rs
 │   │   ├── shell.rs
-│   │   └── tmux.rs
+│   │   ├── tmux.rs
+│   │   └── windows_job.rs
 │   ├── process/
 │   │   ├── stream_child/
 │   │   │   ├── stream_queue/
