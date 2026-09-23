@@ -36,6 +36,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
     {
         "src/db/auto_queue/tests.rs",
         "src/db/automation_candidates/verdict_tests.rs",
+        "src/db/calendar_sync/postgres_tests.rs",
         "src/db/campaigns/tests.rs",
         "src/db/dispatched_sessions/canonical_identity_pg_tests.rs",
         "src/db/dispatched_sessions/tests.rs",
@@ -60,6 +61,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/claude_tui/hook_output_guard_tests.rs",
         "src/services/claude_tui/hook_server_memento_tests.rs",
         "src/services/claude_tui/session/auto_compact_launch_tests.rs",
+        "src/services/kakao/transport_tests.rs",
         "src/services/cluster/attachment_transfer/tests.rs",
         "src/services/cluster/intake_worker/dispatch_stamp_tests.rs",
         "src/services/cluster/intake_worker/drain_tests.rs",
@@ -179,6 +181,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/kakao/test_support.rs",
         "src/config/test_env.rs",
         "src/config/test_env/teardown_probe.rs",
         "src/db/auto_queue/test_support.rs",

@@ -5,7 +5,7 @@ use axum::{
 
 use super::super::{
     ApiRouter, AppState, claude_accounts_api, discord, dm_reply, github, github_dashboard, hooks,
-    meetings, pr_summary, protected_api_domain, provider_auth_profiles,
+    kakao_calendar, meetings, pr_summary, protected_api_domain, provider_auth_profiles,
 };
 
 // Category: integrations
@@ -13,6 +13,32 @@ use super::super::{
 pub(crate) fn router(state: AppState) -> ApiRouter {
     protected_api_domain(
         Router::new()
+            .route("/kakao/calendar/accounts", get(kakao_calendar::accounts))
+            .route(
+                "/kakao/calendar/accounts/{accountId}/check",
+                post(kakao_calendar::check_account),
+            )
+            .route(
+                "/kakao/calendar/events",
+                get(kakao_calendar::list)
+                    .post(kakao_calendar::create)
+                    .layer(axum::extract::DefaultBodyLimit::max(32 * 1024)),
+            )
+            .route(
+                "/kakao/calendar/events/{eventId}",
+                get(kakao_calendar::get)
+                    .patch(kakao_calendar::patch)
+                    .delete(kakao_calendar::delete)
+                    .layer(axum::extract::DefaultBodyLimit::max(32 * 1024)),
+            )
+            .route(
+                "/kakao/calendar/events/{eventId}/operations",
+                get(kakao_calendar::operations),
+            )
+            .route(
+                "/kakao/calendar/events/{eventId}/operations/{operationId}/recover",
+                post(kakao_calendar::recover).layer(axum::extract::DefaultBodyLimit::max(8 * 1024)),
+            )
             .route(
                 "/claude-accounts",
                 get(claude_accounts_api::get_claude_accounts),

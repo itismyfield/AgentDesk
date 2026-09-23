@@ -178,16 +178,16 @@ fn kakao_scheduled_delivery_status() -> OptionalConnectorStatus {
     const ENABLED_ENV: &str = "AGENTDESK_KAKAO_ENABLED";
     const CAPABILITIES: &[&str] = &["kakao_friend_message", "kakao_self_message"];
 
-    match KakaoClient::from_process(None) {
-        Ok(client) => OptionalConnectorStatus {
+    match KakaoClient::configured_account(None) {
+        Ok(account_id) => OptionalConnectorStatus {
             id: KAKAO_SCHEDULED_DELIVERY_CONNECTOR,
             name: "Kakao default-account delivery",
             state: OptionalConnectorState::Ready,
             optional: true,
             env_var: ENABLED_ENV,
-            source: Some(format!("account={}", client.account_id())),
+            source: Some(format!("account={account_id}")),
             reason: None,
-            detail: format!("state=ready account={}", client.account_id()),
+            detail: format!("state=ready account={account_id}; offline configuration only"),
             setup_actions: Vec::new(),
             capabilities: CAPABILITIES.to_vec(),
         },
@@ -260,6 +260,9 @@ fn kakao_configuration_reason(error: &crate::services::kakao::KakaoError) -> &'s
         KakaoError::DeliveryUnknown => "delivery_unknown",
         KakaoError::Disabled => "disabled",
         KakaoError::MissingCredentials => "missing_credentials",
+        KakaoError::TransientAuth => "auth_temporarily_unavailable",
+        KakaoError::CredentialPersistence => "credential_persistence_failed",
+        KakaoError::BindingChanged => "account_binding_changed",
     }
 }
 

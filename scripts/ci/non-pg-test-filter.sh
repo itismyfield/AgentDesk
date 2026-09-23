@@ -22,6 +22,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::auto_queue::tests::dispatch_terminal_sync_pg_tests
   --skip db::auto_queue::tests::grouped_card_count_pg_tests
   --skip db::automation_candidates::verdict_tests
+  --skip db::calendar_sync::postgres_tests
   --skip db::campaigns::tests
   --skip db::dispatched_session_canonical_identity::pg_tests
   --skip db::dispatched_session_rebind_override::tests

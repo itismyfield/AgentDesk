@@ -40,7 +40,7 @@ pub(super) fn canonical_category(category: &str) -> &'static str {
         "routines" => "routines",
         "analytics" | "auth" | "cluster" | "docs" | "health" | "monitoring" | "stats" | "v1"
         | "provider-cli" | "claude-accounts" => "ops",
-        "discord" | "github" | "github-dashboard" | "meetings" => "integrations",
+        "discord" | "github" | "github-dashboard" | "meetings" | "kakao-calendar" => "integrations",
         "departments" | "memory" | "offices" | "onboarding" | "policies" | "settings"
         | "skills" => "admin",
         _ => "ops",
@@ -87,7 +87,7 @@ pub(super) fn category_to_group(category: &str) -> &'static str {
         // agents — agents, agent-setup, agent-quality, roles
         "agents" => "agents",
         // integrations — discord, github, meetings, provider, mcp
-        "discord" | "github" | "github-dashboard" | "meetings" => "integrations",
+        "discord" | "github" | "github-dashboard" | "meetings" | "kakao-calendar" => "integrations",
         // automation — auto-queue, policies, scheduler, cron, maintenance
         "auto-queue"
         | "automation-candidates"

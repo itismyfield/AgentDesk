@@ -318,6 +318,31 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_handles_do_not_extend_a_finished_claim_lock() {
+        for outcome in ["confirmed", "not_sent", "ambiguous"] {
+            let dir = tempfile::tempdir().unwrap();
+            let key = fingerprint(fact());
+            let claim = WriterClaim::acquire(dir.path(), &key).unwrap().unwrap();
+            // Like a descriptor inherited by a concurrent process spawn, this
+            // handle shares the locked file description but does not own the claim.
+            let retained_handle = claim.file.try_clone().unwrap();
+            assert!(WriterClaim::acquire(dir.path(), &key).is_err());
+            match outcome {
+                "confirmed" => claim.complete().unwrap(),
+                "not_sent" => claim.release_before_send().unwrap(),
+                _ => drop(claim),
+            }
+            let reopened = WriterClaim::acquire(dir.path(), &key);
+            match outcome {
+                "confirmed" => assert!(reopened.unwrap().is_none()),
+                "not_sent" => assert!(reopened.unwrap().is_some()),
+                _ => assert!(reopened.unwrap_err().contains("unresolved prior write")),
+            }
+            drop(retained_handle);
+        }
+    }
+
+    #[test]
     fn finished_claim_is_released_while_other_threads_spawn_children() {
         use std::sync::{
             Arc,

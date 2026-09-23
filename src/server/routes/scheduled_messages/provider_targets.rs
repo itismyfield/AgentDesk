@@ -12,7 +12,7 @@ use crate::services::scheduled_messages::provider_targets::{
 
 use super::app_error;
 
-pub(super) fn prepare_create(
+pub(super) async fn prepare_create(
     body: Option<&JsonValue>,
     content: &str,
     delivery_kind: &str,
@@ -34,11 +34,12 @@ pub(super) fn prepare_create(
             )
         })?;
     validate_for_process(&body, content)
+        .await
         .map(Some)
         .map_err(map_provider_error)
 }
 
-pub(super) fn apply_patch(
+pub(super) async fn apply_patch(
     body: &Map<String, JsonValue>,
     patch: &mut ScheduledMessagePatch,
     existing: &ScheduledMessageRow,
@@ -66,8 +67,9 @@ pub(super) fn apply_patch(
                         format!("providerTargets must be a valid object or null: {error}"),
                     )
                 })?;
-            let validated =
-                validate_for_process(&parsed, &effective_content).map_err(map_provider_error)?;
+            let validated = validate_for_process(&parsed, &effective_content)
+                .await
+                .map_err(map_provider_error)?;
             patch.provider_targets = Some(Some(validated.stored));
             patch.provider_target_summary = Some(Some(validated.summary));
         }

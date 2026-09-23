@@ -263,6 +263,33 @@ impl SupervisedWorkerRegistry {
                 });
                 Ok(None)
             }
+            ServerWorkerId::KakaoCalendar => {
+                // Parse errors still need lease recovery after a restart. The
+                // worker uses an empty claim allowlist when configuration is invalid.
+                if self.config.cluster.enabled
+                    || matches!(
+                        crate::services::kakao::account::calendar_enabled(),
+                        Ok(false)
+                    )
+                {
+                    self.log_skip(
+                        spec,
+                        "calendar disabled or unsupported multi-node credential boundary",
+                    );
+                    return Ok(None);
+                }
+                let Some(pool) = self.pg_pool.clone() else {
+                    self.log_skip(spec, "postgres pool unavailable");
+                    return Ok(None);
+                };
+                self.register_leader_tokio(spec, move || {
+                    let pool = pool.clone();
+                    async move {
+                        crate::services::calendar_sync::calendar_loop(pool).await;
+                    }
+                });
+                Ok(None)
+            }
             ServerWorkerId::DispatchOutbox => {
                 let Some(dispatch_outbox_pg_pool) = self.pg_pool.clone() else {
                     self.log_skip(spec, "postgres pool unavailable");

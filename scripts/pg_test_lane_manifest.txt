@@ -5,6 +5,7 @@ src/db/auto_queue/entries/dispatch_failure.rs
 src/db/auto_queue/phase_gates.rs
 src/db/auto_queue/tests.rs
 src/db/automation_candidates/verdict_tests.rs
+src/db/calendar_sync/postgres_tests.rs
 src/db/campaigns/tests.rs
 src/db/dispatched_sessions.rs
 src/db/dispatched_sessions/canonical_identity_pg_tests.rs
@@ -124,6 +125,7 @@ db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests
 db::auto_queue::tests::grouped_card_count_pg_tests
 db::automation_candidates::verdict_tests
+db::calendar_sync::postgres_tests
 db::campaigns::tests
 db::dispatched_session_canonical_identity::pg_tests
 db::dispatched_session_rebind_override::tests
@@ -339,6 +341,11 @@ db::auto_queue::tests::grouped_card_count_pg_tests::grouped_counts_use_one_statu
 db::automation_candidates::verdict_tests::materialize_dedupe_prefers_ready_child_over_review_parent_pg
 db::automation_candidates::verdict_tests::persist_iteration_outcome_pg_rolls_back_when_card_is_inactive
 db::automation_candidates::verdict_tests::persist_iteration_outcome_pg_rolls_back_when_card_update_matches_zero_rows
+db::calendar_sync::postgres_tests::dispatch_checks_lease_revision_and_binding_and_enqueue_rolls_back_pg
+db::calendar_sync::postgres_tests::durable_replay_two_account_crud_and_tombstone_pg
+db::calendar_sync::postgres_tests::managed_list_filters_all_accounts_and_preserves_status_pg
+db::calendar_sync::postgres_tests::two_account_crud_reaches_mock_provider_and_does_not_recreate_success_pg
+db::calendar_sync::postgres_tests::unknown_create_blocks_only_its_target_and_accepts_late_evidence_pg
 db::campaigns::tests::postgres_campaign_concurrent_cas_and_reconnect_preserve_canonical_history_pg
 db::campaigns::tests::postgres_campaign_revision_history_stays_bounded_by_retention_pg
 db::campaigns::tests::postgres_campaign_revision_prune_keeps_newest_by_rank_across_gaps_pg

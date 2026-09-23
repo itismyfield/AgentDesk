@@ -1,8 +1,7 @@
-//! Kakao Talk delivery client with fail-closed environment configuration.
+//! Shared Kakao account transport with fail-closed environment configuration.
 //!
-//! This module deliberately owns only provider transport. Reservation,
-//! idempotency, and retry policy belong to the scheduled external-delivery
-//! outbox so other message providers can reuse those guarantees.
+//! Account credentials and authentication retries are shared by messages and calendar.
+//! Durable intent, idempotency and recovery policy remain with each feature's store.
 
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
@@ -11,6 +10,14 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use tokio::sync::Mutex;
+
+pub(crate) mod account;
+pub(crate) mod calendar;
+#[cfg(test)]
+pub(crate) mod test_support;
+mod token_store;
+#[cfg(test)]
+mod transport_tests;
 
 use super::kakao_message::{
     KakaoMessage, KakaoMessageValidationError, default_template, validate_message,
@@ -55,6 +62,12 @@ pub enum KakaoError {
     DeliveryUnknown,
     #[error("failed to initialize Kakao HTTP transport")]
     TransportInitialization,
+    #[error("Kakao authentication service is temporarily unavailable")]
+    TransientAuth,
+    #[error("Kakao credential persistence failed; operator action required")]
+    CredentialPersistence,
+    #[error("Kakao account binding changed")]
+    BindingChanged,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,6 +82,15 @@ impl KakaoEnvironment {
         if !parse_enabled(std::env::var(ENABLED_ENV).ok().as_deref())? {
             return Err(KakaoError::Disabled);
         }
+        let mut environment = Self::auth_from_process(account_id)?;
+        let landing_url = std::env::var(LANDING_URL_ENV)
+            .map_err(|_| KakaoError::InvalidConfiguration("landing URL is missing"))?;
+        validate_public_https_url(&landing_url, "landing_url")?;
+        environment.landing_url = landing_url;
+        Ok(environment)
+    }
+
+    fn auth_from_process(account_id: Option<&str>) -> Result<Self, KakaoError> {
         let accounts = configured_accounts(std::env::var(ACCOUNTS_ENV).ok().as_deref())?;
         let default_account = std::env::var(DEFAULT_ACCOUNT_ENV)
             .ok()
@@ -80,12 +102,9 @@ impl KakaoEnvironment {
         if !accounts.contains(account_id) {
             return Err(KakaoError::UnknownAccount);
         }
-        let landing_url = std::env::var(LANDING_URL_ENV)
-            .map_err(|_| KakaoError::InvalidConfiguration("landing URL is missing"))?;
-        validate_public_https_url(&landing_url, "landing_url")?;
         Ok(Self {
             account_id: account_id.to_string(),
-            landing_url,
+            landing_url: String::new(),
             env_prefix: account_env_prefix(account_id),
         })
     }
@@ -113,6 +132,8 @@ struct TokenState {
     refresh_token: Option<String>,
     access_expires_at: Option<Instant>,
     refreshed_once: bool,
+    generation: u64,
+    persistence_failed: bool,
 }
 
 pub struct KakaoClient {
@@ -121,15 +142,46 @@ pub struct KakaoClient {
     rest_api_key: Option<String>,
     client_secret: Option<String>,
     tokens: Mutex<TokenState>,
+    store: Option<token_store::TokenStore>,
+    #[cfg(test)]
+    test_origin: Option<String>,
 }
 
 impl KakaoClient {
+    /// Offline settings probe. Does not claim the credential-store lock or read secrets from disk.
+    pub(crate) fn configured_account(account: Option<&str>) -> Result<String, KakaoError> {
+        let environment = KakaoEnvironment::from_process(account)?;
+        if environment.credential("ACCESS_TOKEN").is_none()
+            && (environment.credential("REFRESH_TOKEN").is_none()
+                || environment.credential("REST_API_KEY").is_none())
+            && std::env::var_os("AGENTDESK_KAKAO_TOKEN_STORE_DIR").is_none()
+        {
+            return Err(KakaoError::MissingCredentials);
+        }
+        Ok(environment.account_id)
+    }
     pub fn from_process(account_id: Option<&str>) -> Result<Self, KakaoError> {
         let environment = KakaoEnvironment::from_process(account_id)?;
+        Self::from_environment(environment)
+    }
+
+    fn from_environment(environment: KakaoEnvironment) -> Result<Self, KakaoError> {
         let rest_api_key = environment.credential("REST_API_KEY");
         let client_secret = environment.credential("CLIENT_SECRET");
-        let access_token = environment.credential("ACCESS_TOKEN");
-        let refresh_token = environment.credential("REFRESH_TOKEN");
+        let mut access_token = environment.credential("ACCESS_TOKEN");
+        let mut refresh_token = environment.credential("REFRESH_TOKEN");
+        let store = token_store::TokenStore::from_process(&environment.account_id)?;
+        let mut generation = 0;
+        if let Some(saved) = store
+            .as_ref()
+            .map(|store| store.load())
+            .transpose()?
+            .flatten()
+        {
+            access_token = saved.access_token;
+            refresh_token = saved.refresh_token;
+            generation = saved.generation;
+        }
         if access_token.is_none() && (refresh_token.is_none() || rest_api_key.is_none()) {
             return Err(KakaoError::MissingCredentials);
         }
@@ -148,12 +200,50 @@ impl KakaoClient {
                 refresh_token,
                 access_expires_at: None,
                 refreshed_once: false,
+                generation,
+                persistence_failed: false,
             }),
+            store,
+            #[cfg(test)]
+            test_origin: None,
         })
     }
 
     pub fn account_id(&self) -> &str {
         &self.environment.account_id
+    }
+
+    pub(crate) async fn require_durable_credentials(&self) -> Result<(), KakaoError> {
+        if self.store.is_none() {
+            return Err(KakaoError::InvalidConfiguration(
+                "operation requires opt-in durable token storage",
+            ));
+        }
+        let mut tokens = self.tokens.lock().await;
+        // Retry saving already-rotated tokens before allowing any new claim.
+        // Storage outages must not drain queued work into manual recovery.
+        if tokens.persistence_failed {
+            self.persist(&mut tokens)?;
+        }
+        if self.rest_api_key.is_none() || tokens.refresh_token.as_deref().is_none_or(str::is_empty)
+        {
+            return Err(KakaoError::MissingCredentials);
+        }
+        Ok(())
+    }
+
+    /// Validate the loaded credential owner without sending or refreshing tokens.
+    pub(crate) async fn validate_credentials(&self) -> Result<(), KakaoError> {
+        let tokens = self.tokens.lock().await;
+        if tokens.persistence_failed {
+            return Err(KakaoError::CredentialPersistence);
+        }
+        if tokens.access_token.is_none()
+            && (tokens.refresh_token.is_none() || self.rest_api_key.is_none())
+        {
+            return Err(KakaoError::MissingCredentials);
+        }
+        Ok(())
     }
 
     /// Refresh or validate credentials before a caller crosses its durable
@@ -167,6 +257,7 @@ impl KakaoClient {
         receiver_uuids: &[String],
         message: &KakaoMessage,
     ) -> Result<KakaoDeliverySummary, KakaoError> {
+        let environment = KakaoEnvironment::from_process(Some(self.account_id()))?;
         validate_recipients(receiver_uuids)?;
         validate_message(message)?;
         let receiver_uuids_json =
@@ -175,7 +266,7 @@ impl KakaoClient {
             ("receiver_uuids", receiver_uuids_json),
             (
                 "template_object",
-                default_template(message, &self.environment.landing_url),
+                default_template(message, &environment.landing_url),
             ),
         ];
         let response: FriendSendResponse = self.authorized_form(FRIEND_SEND_URL, &form).await?;
@@ -186,10 +277,11 @@ impl KakaoClient {
         &self,
         message: &KakaoMessage,
     ) -> Result<KakaoDeliverySummary, KakaoError> {
+        let environment = KakaoEnvironment::from_process(Some(self.account_id()))?;
         validate_message(message)?;
         let form = vec![(
             "template_object",
-            default_template(message, &self.environment.landing_url),
+            default_template(message, &environment.landing_url),
         )];
         let response: SelfSendResponse = self.authorized_form(SELF_SEND_URL, &form).await?;
         if response.result_code != 0 {
@@ -207,26 +299,9 @@ impl KakaoClient {
         url: &'static str,
         form: &[(&'static str, String)],
     ) -> Result<T, KakaoError> {
-        let token = self.access_token(false).await?;
-        let mut response = self
-            .http
-            .post(url)
-            .bearer_auth(&token)
-            .form(form)
-            .send()
-            .await
-            .map_err(|_| KakaoError::DeliveryUnknown)?;
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            let token = self.access_token(true).await?;
-            response = self
-                .http
-                .post(url)
-                .bearer_auth(&token)
-                .form(form)
-                .send()
-                .await
-                .map_err(|_| KakaoError::DeliveryUnknown)?;
-        }
+        let response = self
+            .authorized_response(reqwest::Method::POST, url, form)
+            .await?;
         match response.status() {
             reqwest::StatusCode::UNAUTHORIZED => Err(KakaoError::ReauthorizationRequired),
             reqwest::StatusCode::FORBIDDEN => Err(KakaoError::ConsentRequired),
@@ -238,20 +313,79 @@ impl KakaoClient {
         }
     }
 
+    async fn authorized_response(
+        &self,
+        method: reqwest::Method,
+        url: &'static str,
+        fields: &[(&'static str, String)],
+    ) -> Result<reqwest::Response, KakaoError> {
+        let (mut token, generation) = self.access_token_generation(None).await?;
+        for attempt in 0..2 {
+            let request = self
+                .http
+                .request(method.clone(), self.endpoint(url))
+                .bearer_auth(&token);
+            let request = if method == reqwest::Method::POST {
+                request.form(fields)
+            } else {
+                request.query(fields)
+            };
+            let response = request
+                .send()
+                .await
+                .map_err(|_| KakaoError::DeliveryUnknown)?;
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
+                token = self.access_token_generation(Some(generation)).await?.0;
+            } else {
+                return Ok(response);
+            }
+        }
+        Err(KakaoError::ReauthorizationRequired)
+    }
+
     async fn access_token(&self, force_refresh: bool) -> Result<String, KakaoError> {
+        let generation = if force_refresh {
+            Some(self.tokens.lock().await.generation)
+        } else {
+            None
+        };
+        self.access_token_generation(generation)
+            .await
+            .map(|(token, _)| token)
+    }
+
+    fn endpoint(&self, url: &'static str) -> String {
+        #[cfg(test)]
+        if let Some(origin) = &self.test_origin {
+            let parsed = reqwest::Url::parse(url).expect("fixed Kakao URL");
+            return format!("{}{}", origin, parsed.path());
+        }
+        url.to_string()
+    }
+
+    async fn access_token_generation(
+        &self,
+        rejected_generation: Option<u64>,
+    ) -> Result<(String, u64), KakaoError> {
         let mut tokens = self.tokens.lock().await;
+        if tokens.persistence_failed {
+            self.persist(&mut tokens)?;
+        }
         let refresh_due = tokens.refresh_token.is_some()
             && self.rest_api_key.is_some()
             && (!tokens.refreshed_once
                 || tokens
                     .access_expires_at
                     .is_some_and(|expires_at| expires_at <= Instant::now()));
-        if force_refresh || refresh_due {
+        if rejected_generation == Some(tokens.generation)
+            || (rejected_generation.is_none() && refresh_due)
+        {
             self.refresh_locked(&mut tokens).await?;
         }
         tokens
             .access_token
             .clone()
+            .map(|token| (token, tokens.generation))
             .ok_or(KakaoError::MissingCredentials)
     }
 
@@ -274,30 +408,59 @@ impl KakaoClient {
         }
         let response = self
             .http
-            .post(TOKEN_URL)
+            .post(self.endpoint(TOKEN_URL))
             .form(&form)
             .send()
             .await
-            .map_err(|_| KakaoError::ReauthorizationRequired)?;
+            .map_err(|_| KakaoError::TransientAuth)?;
+        if response.status().is_server_error() || response.status().as_u16() == 429 {
+            return Err(KakaoError::TransientAuth);
+        }
         if !response.status().is_success() {
             return Err(KakaoError::ReauthorizationRequired);
         }
         let refreshed: RefreshResponse = read_bounded_json(response)
             .await
-            .map_err(|_| KakaoError::ReauthorizationRequired)?;
+            .map_err(|_| KakaoError::TransientAuth)?;
+        if refreshed.access_token.is_empty()
+            || refreshed.expires_in == 0
+            || refreshed
+                .refresh_token
+                .as_deref()
+                .is_some_and(str::is_empty)
+        {
+            return Err(KakaoError::TransientAuth);
+        }
+        let expires_at = Instant::now()
+            .checked_add(
+                Duration::from_secs(refreshed.expires_in).saturating_sub(TOKEN_REFRESH_SKEW),
+            )
+            .ok_or(KakaoError::TransientAuth)?;
         tokens.access_token = Some(refreshed.access_token);
         if let Some(refresh_token) = refreshed.refresh_token {
             tokens.refresh_token = Some(refresh_token);
         }
-        let lifetime = Duration::from_secs(refreshed.expires_in);
-        tokens.access_expires_at =
-            Some(Instant::now() + lifetime.saturating_sub(TOKEN_REFRESH_SKEW));
+        tokens.access_expires_at = Some(expires_at);
         tokens.refreshed_once = true;
+        tokens.generation = tokens.generation.saturating_add(1);
+        self.persist(tokens)
+    }
+
+    fn persist(&self, tokens: &mut TokenState) -> Result<(), KakaoError> {
+        if let Some(store) = &self.store {
+            tokens.persistence_failed = true;
+            store.save(&token_store::StoredTokens {
+                access_token: tokens.access_token.clone(),
+                refresh_token: tokens.refresh_token.clone(),
+                generation: tokens.generation,
+            })?;
+        }
+        tokens.persistence_failed = false;
         Ok(())
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct RefreshResponse {
     access_token: String,
     expires_in: u64,
@@ -360,6 +523,8 @@ fn configured_accounts(raw: Option<&str>) -> Result<BTreeSet<String>, KakaoError
 fn validate_account_id(account_id: &str) -> Result<(), KakaoError> {
     if account_id.is_empty()
         || account_id.len() > 32
+        || !(account_id.as_bytes()[0].is_ascii_lowercase()
+            || account_id.as_bytes()[0].is_ascii_digit())
         || !account_id
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
@@ -468,6 +633,8 @@ mod tests {
         assert_eq!(account_env_prefix("work-bot"), "KAKAO_WORK_BOT");
         assert!(validate_account_id("work_bot").is_err());
         assert!(validate_account_id("Work").is_err());
+        assert!(validate_account_id("1friend").is_ok());
+        assert!(validate_account_id("-friend").is_err());
     }
 
     #[test]

@@ -630,6 +630,16 @@
       "path": "migrations/postgres/0123_relay_dead_letter_redelivery_attempts.sql",
       "sha256": "de5a5c2cf7ff88fa38dc638e3472e21b478572eef77cecfe8182df9736be9e9e",
       "version": 123
+    },
+    {
+      "path": "migrations/postgres/0128_kakao_calendar_sync.sql",
+      "sha256": "a1b2581cb55bb38f035a4bccc075d9bb0f89d50d19582ce3b851149f260b0e91",
+      "version": 128
+    },
+    {
+      "path": "migrations/postgres/0129_kakao_calendar_lease_expiry.sql",
+      "sha256": "24bfe53ba58f870d67d19e69d57a4e96ce65eaa7411367d0bc93edaf8df6388f",
+      "version": 129
     }
   ],
   "version": 1
