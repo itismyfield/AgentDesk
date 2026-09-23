@@ -8,7 +8,6 @@ use super::*;
 use crate::services::discord::formatting::ReplaceLongMessageOutcome;
 use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
 use crate::services::discord::inflight::RelayOwnerKind;
-#[cfg(unix)]
 use crate::services::discord::outbound::delivery_record;
 use crate::services::discord::placeholder_controller::PlaceholderController;
 use crate::services::discord::turn_finalizer::TurnKey;
@@ -372,6 +371,12 @@ fn assert_channel_mismatch_skips_before_post(range: Option<(u64, u64)>, channel_
         "mutation: removing the channel-equality guard posts before rejecting mismatch"
     );
     assert!(matches!(lease.read(), LeaseSnapshot::Unleased));
+    assert!(!delivery_record::recent_fresh_send_content_matches(
+        &provider,
+        record_channel,
+        tmux,
+        body,
+    ));
 }
 
 #[test]
