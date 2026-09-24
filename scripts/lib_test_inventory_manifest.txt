@@ -2753,6 +2753,7 @@ services::discord::formatting::status_panel_v2_formatter_tests::rollover_seed_st
 services::discord::formatting::status_panel_v2_formatter_tests::single_message_panel_s0_streaming_footer_present_and_final_body_absent
 services::discord::formatting::status_panel_v2_formatter_tests::status_panel_disabled_codex_formatter_keeps_legacy_tool_markers
 services::discord::formatting::status_panel_v2_formatter_tests::text_ends_with_streaming_footer_detects_korean_footer
+services::discord::formatting::tool_markdown::assignment_redaction_tests::summaries_mask_quoted_and_spaced_assignments_before_display
 services::discord::gateway::answer_flush_gate_tests::active_turn_placeholder_does_not_wait_on_barrier
 services::discord::gateway::answer_flush_gate_tests::queued_notice_placeholder_waits_for_flush
 services::discord::gateway::answer_flush_gate_tests::queued_notice_returns_immediately_when_no_flush
