@@ -1261,6 +1261,9 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 let outcome = match retained {
+                    Some(retained) if retained.exhausted => {
+                        format!("exhausted at barrier {}", retained.barrier)
+                    }
                     Some(retained) => format!("retained at barrier {}", retained.barrier),
                     None => "completed".to_owned(),
                 };

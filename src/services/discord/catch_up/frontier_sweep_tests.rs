@@ -884,6 +884,42 @@ async fn t11_exhausted_budget_is_not_reset_by_the_barrier_arm() {
     assert_eq!(fx.surfaces(channel_id), expected);
 }
 
+/// T11b: with a settled predecessor A, a Deferred M that spends the last budget
+/// advances to A and is logged as exhausted, never as a retained retry.
+#[tokio::test(flavor = "current_thread")]
+async fn t11b_exhausted_barrier_after_a_settled_predecessor_is_not_logged_as_retained() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(4_603_523);
+    let (checkpoint, a, m) = (id(1, 600), id(2, 300), id(3, 120));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    let mut last_budget = CatchUpRetryState::new(checkpoint.get());
+    last_budget.deferred_rearms = super::CATCH_UP_RETRY_DEFERRED_REARM_LIMIT;
+    (fx.shared.catch_up_retry_pending).insert(channel_id, last_budget);
+    let history = vec![
+        own_reply(channel_id, checkpoint),
+        foreign_bot(channel_id, a),
+        human(channel_id, m),
+    ];
+    let api = StrictApi::new(&fx.shared)
+        .with_history(channel_id, history)
+        .with_hooks(m, &[Hook::Defer, Hook::Defer]);
+
+    let logs = LogWriter::capture();
+    fx.retry_sweep(&api, channel_id).await;
+    let logs = logs.finish();
+
+    assert_phase1_read(&api, after(checkpoint), &[a, m]);
+    assert_eq!(fx.surfaces(channel_id), (Some(a.get()), Some(a.get())));
+    assert_eq!(
+        fx.pending(channel_id),
+        None,
+        "the spent budget arms nothing"
+    );
+    let exhausted = format!("retry exhausted at barrier {m} for channel {channel_id}");
+    assert!(logs.contains(&exhausted), "{logs}");
+    assert!(!logs.contains("retry retained at barrier"), "{logs}");
+}
+
 struct LogWriter(Arc<Mutex<Vec<u8>>>);
 
 struct CapturedLogs {
