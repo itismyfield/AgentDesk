@@ -1,7 +1,10 @@
 //! Which persisted episodes a recovery re-mint may still re-open.
 
+use std::sync::{Arc, Mutex, PoisonError};
+
+use super::ChannelMailboxRegistry;
 use crate::services::provider::CancelToken;
-use poise::serenity_prelude::MessageId;
+use poise::serenity_prelude::{ChannelId, MessageId};
 
 /// The mailbox holds one episode at a time, so an episode that did not start
 /// after its last exact-nonce release has already ended. Two fields, never a
@@ -53,6 +56,68 @@ impl RemintFence {
         self.latest_started.as_ref().is_some_and(|(id, nonce)| {
             *id == Some(user_message_id) && nonce.as_deref() == turn_nonce
         })
+    }
+}
+
+/// The channel's fence, shared by every actor incarnation the registry spawns
+/// for it, so a purge that recreates the actor does not forget a release. Only
+/// the live actor writes: a purged actor holds no token and refuses starts.
+#[derive(Clone, Debug, Default)]
+pub(super) struct FenceCell(Arc<Mutex<RemintFence>>);
+
+impl FenceCell {
+    fn with<T>(&self, f: impl FnOnce(&mut RemintFence) -> T) -> T {
+        f(&mut self.0.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    pub(super) fn note_started(
+        &self,
+        user_message_id: Option<MessageId>,
+        turn_nonce: Option<&str>,
+    ) {
+        self.with(|fence| fence.note_started(user_message_id, turn_nonce));
+    }
+
+    pub(super) fn note_kickoff(
+        &self,
+        claimed_empty_slot: bool,
+        user_message_id: Option<MessageId>,
+        token: &CancelToken,
+    ) {
+        self.with(|fence| fence.note_kickoff(claimed_empty_slot, user_message_id, token));
+    }
+
+    pub(super) fn note_exact_release(&self, user_message_id: MessageId, turn_nonce: &str) {
+        self.with(|fence| fence.note_exact_release(user_message_id, turn_nonce));
+    }
+
+    pub(super) fn refuses(&self, user_message_id: MessageId, turn_nonce: Option<&str>) -> bool {
+        self.with(|fence| fence.refuses(user_message_id, turn_nonce))
+    }
+
+    #[cfg(test)]
+    fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl ChannelMailboxRegistry {
+    /// Cells are never removed: pruning one would let a successor start from a
+    /// fresh fence while an older incarnation still holds the old cell.
+    pub(super) fn fence_cell(&self, channel_id: ChannelId) -> FenceCell {
+        self.remint_fences.entry(channel_id).or_default().clone()
+    }
+
+    /// Distinct channels this registry has served; grows for the process life.
+    pub(crate) fn remint_fence_cells(&self) -> usize {
+        self.remint_fences.len()
+    }
+
+    #[cfg(test)]
+    fn fence_cell_for_test(&self, channel_id: ChannelId) -> Option<FenceCell> {
+        self.remint_fences
+            .get(&channel_id)
+            .map(|cell| cell.value().clone())
     }
 }
 
@@ -198,17 +263,31 @@ mod remint_fence_tests {
         let registry = ChannelMailboxRegistry::default();
         let channel = ChannelId::new(5_951_002);
         let first = registry.handle(channel);
+        let cell = registry
+            .fence_cell_for_test(channel)
+            .expect("spawn mints the cell");
         assert_eq!(
             registry.remove_idle_entry(channel).await,
             registry_purge::MailboxPurgeOutcome::Removed
         );
         let second = registry.handle(channel);
+        assert!(
+            registry
+                .fence_cell_for_test(channel)
+                .is_some_and(|c| c.ptr_eq(&cell)),
+            "a pristine cell survives the purge and passes to the successor"
+        );
         release_exactly(&second, 9, "episode-b").await;
         assert_eq!(
             registry.remove_idle_entry(channel).await,
             registry_purge::MailboxPurgeOutcome::Removed
         );
         let third = registry.handle(channel);
+        assert!(
+            registry
+                .fence_cell_for_test(channel)
+                .is_some_and(|c| c.ptr_eq(&cell))
+        );
         assert!(remint_refused(&third, 9, "episode-b").await);
 
         let stale = first
@@ -222,6 +301,44 @@ mod remint_fence_tests {
         assert!(stale.removed_token.is_none());
         assert!(remint_refused(&third, 9, "episode-b").await);
         forget_globals(channel);
+    }
+
+    /// T-F2 — the fence is per channel: a release on one channel never refuses
+    /// the same episode identity on another.
+    #[tokio::test]
+    async fn a_release_on_one_channel_never_fences_another() {
+        let registry = ChannelMailboxRegistry::default();
+        let (x, y) = (ChannelId::new(5_951_003), ChannelId::new(5_951_004));
+        let on_x = registry.handle(x);
+        release_exactly(&on_x, 11, "episode-x").await;
+        assert!(remint_refused(&on_x, 11, "episode-x").await);
+        assert!(!remint_refused(&registry.handle(y), 11, "episode-x").await);
+        forget_globals(x);
+        forget_globals(y);
+    }
+
+    /// T-F4 — cells are never pruned, so the gauge counts distinct channels
+    /// served, not live actors, and a successor reuses its channel's cell.
+    #[tokio::test]
+    async fn fence_cells_outlive_purges_and_pass_to_successors() {
+        let registry = ChannelMailboxRegistry::default();
+        let channels = [5_951_005, 5_951_006, 5_951_007].map(ChannelId::new);
+        for channel in channels {
+            let _ = registry.handle(channel);
+        }
+        assert_eq!(registry.remint_fence_cells(), 3);
+        for channel in channels {
+            assert_eq!(
+                registry.remove_idle_entry(channel).await,
+                registry_purge::MailboxPurgeOutcome::Removed
+            );
+        }
+        assert_eq!(registry.remint_fence_cells(), 3, "a purge keeps the cell");
+        for channel in channels {
+            let _ = registry.handle(channel);
+            forget_globals(channel);
+        }
+        assert_eq!(registry.remint_fence_cells(), 3, "successors reuse cells");
     }
 
     #[test]

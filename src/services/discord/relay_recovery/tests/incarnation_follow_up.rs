@@ -138,6 +138,10 @@ async fn accepted_wrapper_follow_up_never_latches_a_successor_recovery() {
         assert!(!latched(&successor_signal));
 
         wrapper.await;
+        assert!(
+            latched(old.recovery_done()),
+            "{case:?}: the accepting actor's own signal is marked"
+        );
         let successor = shared.mailbox(channel).snapshot().await;
         assert!(
             successor.recovery_started_at.is_some(),
@@ -200,4 +204,44 @@ async fn force_purge_finish_never_reaches_a_successor_actor() {
         "the post-purge finish released the successor's turn"
     );
     crate::services::discord::mailbox_finish_cancelled_turn(&shared, channel).await;
+}
+
+/// T-E3q — `expected_actor` finishes the registered actor only when it is the
+/// incarnation the caller expects.
+#[tokio::test]
+async fn cancelled_finish_is_bound_to_the_expected_actor() {
+    let (_root_guard, _root_dir) = isolated_agentdesk_root();
+    let provider = ProviderKind::Claude;
+    let (registry, shared) = registry_with_shared(provider.clone()).await;
+    let channel = ChannelId::new(5_951_722);
+    let purged = shared.mailbox(channel);
+    assert_eq!(
+        shared.mailboxes.remove_idle_entry(channel).await,
+        MailboxPurgeOutcome::Removed
+    );
+    let live = shared.mailbox(channel);
+    let token = start_test_turn(&shared, channel, MessageId::new(5_951_823)).await;
+    token.cancelled.store(true, Ordering::Relaxed);
+
+    let skipped = crate::services::discord::health::finish_cancelled_provider_channel_mailbox(
+        Some(&registry),
+        Some(provider.as_str()),
+        Some(channel.get()),
+        "incarnation_bound_finish_test",
+        Some(&purged),
+    )
+    .await;
+    assert!(!skipped.cleared_active_turn);
+    assert!(live.snapshot().await.cancel_token.is_some());
+
+    let finished = crate::services::discord::health::finish_cancelled_provider_channel_mailbox(
+        Some(&registry),
+        Some(provider.as_str()),
+        Some(channel.get()),
+        "incarnation_bound_finish_test",
+        Some(&live),
+    )
+    .await;
+    assert!(finished.cleared_active_turn);
+    assert!(live.snapshot().await.cancel_token.is_none());
 }

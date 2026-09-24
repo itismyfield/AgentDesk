@@ -118,6 +118,7 @@ pub(super) async fn force_purge_channel_mailbox(
         Some(provider.as_str()),
         Some(channel_id.get()),
         "queue_api_force_cancel_post_purge",
+        Some(&handle),
     )
     .await;
     if finish.cleared_active_turn {

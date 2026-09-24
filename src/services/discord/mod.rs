@@ -197,8 +197,9 @@ pub(in crate::services::discord) use catch_up::{
     should_trigger_catch_up_retry, take_catch_up_retry_checkpoint_after_queue_drain,
 };
 pub(in crate::services::discord) use mailbox_finish::{
-    mailbox_finish_cancelled_turn, mailbox_finish_owned_turn, mailbox_finish_turn,
-    mailbox_finish_turn_if_matches, mailbox_finish_turn_if_matches_episode_started_before,
+    mailbox_clear_recovery_marker, mailbox_finish_cancelled_turn, mailbox_finish_cancelled_turn_on,
+    mailbox_finish_owned_turn, mailbox_finish_turn, mailbox_finish_turn_if_matches,
+    mailbox_finish_turn_if_matches_episode_started_before,
 };
 #[cfg(unix)]
 pub(in crate::services::discord) use mailbox_probe::{
@@ -1640,17 +1641,6 @@ fn ensure_cancel_token_bound_from_inflight(
     ensure_cancel_token_bound_from_inflight_state(provider, &state, cancel_token, reason)
 }
 
-async fn mailbox_clear_recovery_marker(shared: &SharedData, channel_id: ChannelId) {
-    shared.mailbox(channel_id).clear_recovery_marker().await;
-    // #2443 — graduate the 60s `recovery_started_at < 60s` skip via a
-    // deterministic wake-up. Every exit path of the recovery engine
-    // (success / failure / cancel / stale-cleanup) funnels through this
-    // helper, so a single `mark_done()` here covers all of them. Watchers
-    // selecting on `recovery_done.wait()` proceed immediately; the 60s
-    // timeout remains as a hook-miss safety net.
-    shared.mailboxes.recovery_done(channel_id).mark_done();
-}
-
 async fn mailbox_enqueue_intervention(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -2591,15 +2581,15 @@ async fn mailbox_clear_channel(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> ClearChannelResult {
-    let result = shared
-        .mailbox(channel_id)
+    let handle = shared.mailbox(channel_id);
+    let result = handle
         .clear(queue_persistence_context(shared, provider, channel_id))
         .await;
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
     // #2443 — `Clear` is the cancel/teardown exit path. Mark recovery_done so
     // a watcher that subscribed to the recovery latch is freed even when
     // recovery is aborted rather than completed.
-    shared.mailboxes.recovery_done(channel_id).mark_done();
+    handle.recovery_done().mark_done();
     result
 }
 

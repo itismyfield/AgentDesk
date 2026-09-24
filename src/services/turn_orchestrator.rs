@@ -18,6 +18,7 @@ mod dispatch_reservation;
 mod episode_identity;
 mod front_requeue;
 mod inbound_order;
+mod incarnation;
 mod intervention;
 mod lease_release;
 #[cfg(test)]
@@ -541,6 +542,9 @@ static GLOBAL_CHANNEL_MAILBOXES: LazyLock<dashmap::DashMap<ChannelId, ChannelMai
 #[derive(Clone)]
 pub(crate) struct ChannelMailboxHandle {
     sender: mpsc::UnboundedSender<ChannelMailboxMsg>,
+    /// This incarnation's own signal, so follow-up to an accepted request never
+    /// reaches a successor minted by a purge.
+    recovery_done: Arc<RecoveryDoneSignal>,
 }
 
 impl ChannelMailboxHandle {
@@ -1243,52 +1247,15 @@ pub(crate) struct ChannelMailboxRegistry {
     /// deferred monitor auto-turn. Stored beside `recovery_done` so callers
     /// can clone the signal without actor round-trips.
     turn_finished: Arc<dashmap::DashMap<ChannelId, Arc<TurnFinishedSignal>>>,
+    /// #5951 — one re-mint fence per channel, never removed (`remint_fence.rs`).
+    remint_fences: Arc<dashmap::DashMap<ChannelId, remint_fence::FenceCell>>,
 }
 
 impl ChannelMailboxRegistry {
-    pub(crate) fn handle(&self, channel_id: ChannelId) -> ChannelMailboxHandle {
-        if let Some(existing) = self.handles.get(&channel_id) {
-            return existing.clone();
-        }
-
-        let handle = spawn_channel_mailbox(channel_id);
-        let resolved = match self.handles.entry(channel_id) {
-            dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(handle.clone());
-                handle
-            }
-        };
-        GLOBAL_CHANNEL_MAILBOXES.insert(channel_id, resolved.clone());
-        resolved
-    }
-
     pub(crate) fn global_handle(channel_id: ChannelId) -> Option<ChannelMailboxHandle> {
         GLOBAL_CHANNEL_MAILBOXES
             .get(&channel_id)
             .map(|entry| entry.value().clone())
-    }
-
-    /// #2443 — fetch or create the recovery-done signal for this channel.
-    /// Cloning the `Arc` is cheap; the signal lives for the lifetime of the
-    /// registry. The same `Arc` is mirrored into `GLOBAL_RECOVERY_DONE_SIGNALS`
-    /// so callers that only have a `ChannelId` (no registry handle, e.g.
-    /// helper free functions outside `SharedData`) can resolve via
-    /// `global_recovery_done`.
-    pub(crate) fn recovery_done(&self, channel_id: ChannelId) -> Arc<RecoveryDoneSignal> {
-        if let Some(existing) = self.recovery_done.get(&channel_id) {
-            return existing.clone();
-        }
-        let signal = Arc::new(RecoveryDoneSignal::new());
-        let resolved = match self.recovery_done.entry(channel_id) {
-            dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(signal.clone());
-                signal
-            }
-        };
-        GLOBAL_RECOVERY_DONE_SIGNALS.insert(channel_id, resolved.clone());
-        resolved
     }
 
     /// #2443 — globally resolvable variant. Returns `None` only when no
@@ -1720,7 +1687,7 @@ struct ChannelMailboxState {
     /// that must distinguish a stale active claim from a fresh same-id claim.
     turn_started_instant: Option<Instant>,
     /// Which persisted episode a recovery re-mint may still re-open.
-    remint_fence: remint_fence::RemintFence,
+    remint_fence: remint_fence::FenceCell,
 }
 
 fn persist_queue(
@@ -1883,10 +1850,17 @@ mod turn_finished_signal_tests {
     }
 }
 
-fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
+fn spawn_channel_mailbox(
+    channel_id: ChannelId,
+    fence: remint_fence::FenceCell,
+    recovery_done: Arc<RecoveryDoneSignal>,
+) -> ChannelMailboxHandle {
     let (tx, mut rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
-        let mut state = ChannelMailboxState::default();
+        let mut state = ChannelMailboxState {
+            remint_fence: fence,
+            ..Default::default()
+        };
         while let Some(msg) = rx.recv().await {
             // #3297 r3 — tombstoned actor refuses start-like arms (enum docs).
             let Some(msg) = registry_purge::gate_closed_arm(&state, msg) else {
@@ -2851,7 +2825,10 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
             }
         }
     });
-    ChannelMailboxHandle { sender: tx }
+    ChannelMailboxHandle {
+        sender: tx,
+        recovery_done,
+    }
 }
 
 // #3167 BLOCKER-3 — a SINGLE process-wide lock shared by EVERY test in this
