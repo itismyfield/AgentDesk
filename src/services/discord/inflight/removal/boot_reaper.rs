@@ -19,11 +19,12 @@ pub(crate) struct BootReapReport {
     pub(super) max_reaped_age_secs: Option<u64>,
 }
 
-/// Per-provider completion gate: the first caller runs the reaper and every
+/// Per-provider completion gate: the first caller starts the reaper and every
 /// later caller waits for that run, so none reaches a mint surface before it.
+/// The pass is spawned outside any caller, so a cancelled caller cannot restart it.
 #[derive(Default)]
 pub(super) struct BootReapOnce {
-    cells: std::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::OnceCell<BootReapReport>>>>,
+    passes: std::sync::Mutex<HashMap<String, tokio::sync::watch::Receiver<Option<BootReapReport>>>>,
 }
 
 impl BootReapOnce {
@@ -32,25 +33,25 @@ impl BootReapOnce {
         provider: &ProviderKind,
         reap: impl FnOnce() -> BootReapReport + Send + 'static,
     ) -> BootReapReport {
-        let key = provider.as_str().to_string();
-        let cell = {
-            let mut cells = self.cells.lock().unwrap_or_else(|p| p.into_inner());
-            cells.entry(key).or_default().clone()
+        let (mut pass, already_ran) = {
+            let mut passes = self.passes.lock().unwrap_or_else(|p| p.into_inner());
+            match passes.entry(provider.as_str().to_string()) {
+                std::collections::hash_map::Entry::Occupied(pass) => (pass.get().clone(), true),
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    let (done, pass) = tokio::sync::watch::channel(None);
+                    tokio::task::spawn_blocking(move || done.send_replace(Some(reap())));
+                    (slot.insert(pass).clone(), false)
+                }
+            }
         };
-        let ran = &std::sync::atomic::AtomicBool::new(false);
-        let mut report = cell
-            .get_or_init(|| async move {
-                ran.store(true, std::sync::atomic::Ordering::Relaxed);
-                tokio::task::spawn_blocking(reap)
-                    .await
-                    .unwrap_or_else(|error| {
-                        tracing::warn!(%error, "inflight boot reaper failed; rows left in place");
-                        BootReapReport::default()
-                    })
-            })
-            .await
-            .clone();
-        report.already_ran = !ran.load(std::sync::atomic::Ordering::Relaxed);
+        let mut report = match pass.wait_for(Option::is_some).await {
+            Ok(report) => report.clone().unwrap_or_default(),
+            Err(_) => {
+                tracing::warn!("inflight boot reaper failed; rows left in place");
+                BootReapReport::default()
+            }
+        };
+        report.already_ran = already_ran;
         report
     }
 }

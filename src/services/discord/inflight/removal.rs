@@ -1407,6 +1407,45 @@ mod nondestructive_loader_tests {
         );
     }
 
+    // W4: a cancelled first caller does not reopen the gate; the next caller
+    // waits for the pass already running instead of starting a second one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn boot_reap_once_survives_a_cancelled_first_caller() {
+        let guard = std::sync::Arc::new(BootReapOnce::default());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let first = tokio::spawn({
+            let guard = guard.clone();
+            async move {
+                let reap = move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    BootReapReport {
+                        kept: 7,
+                        ..BootReapReport::default()
+                    }
+                };
+                guard.run_once(&CLAUDE, reap).await
+            }
+        });
+        started_rx.await.unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let second = tokio::spawn({
+            let guard = guard.clone();
+            async move {
+                guard
+                    .run_once(&CLAUDE, || -> BootReapReport { panic!("second pass") })
+                    .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!second.is_finished(), "the running pass must be awaited");
+        release_tx.send(()).unwrap();
+        let second = second.await.unwrap();
+        assert_eq!((second.already_ran, second.kept), (true, 7));
+    }
+
     // The env-root wrapper reaches `_in_root` through the guard, once.
     #[tokio::test]
     async fn boot_reaper_wrapper_reaps_the_env_root_once() {

@@ -267,6 +267,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     );
     // Sole boot owner of loader-verdict row retirement: every runtime shape
     // passes here after the generation is allocated and before any mint surface.
+    // Only the utility branch above leaves earlier: that bot builds no runtime and
+    // touches no inflight row; its provider's rows wait for an agent bot's boot.
     super::inflight::reap_inflight_rows_at_boot_blocking(&provider).await;
     super::tui_prompt_relay::spawn_tui_prompt_relay(shared.clone(), provider.clone());
 
@@ -886,7 +888,8 @@ agents:
     }
 
     // The boot reaper runs once in `run_bot`, after the generation is allocated
-    // and before every runtime branch and mint surface.
+    // and before every runtime branch and mint surface; only the runtime-less
+    // utility branch may return before it.
     #[test]
     fn run_bot_reaps_inflight_rows_once_before_every_runtime_branch() {
         let source = include_str!("runtime_bootstrap.rs");
@@ -905,6 +908,15 @@ agents:
             .find(call)
             .expect("the reaper call must be awaited in run_bot");
         assert!(body.find("run_bot_build_shared_data(").unwrap() < at);
+        // The only exit allowed before the reaper is the utility branch.
+        let utility = "if let Some(bot_name) = should_skip_agent_runtime_launch(token) {";
+        let mut prefix = body[..at].to_string();
+        if let Some((before, rest)) = body[..at].split_once(utility) {
+            let (branch, after) = rest.split_once("\n    }\n").unwrap();
+            assert_eq!(branch.matches("return").count(), 1, "utility branch");
+            prefix = format!("{before}{after}");
+        }
+        assert!(!prefix.contains("return"), "no exit may precede the reaper");
         for later in [
             "spawn_tui_prompt_relay(",
             "if !modules.gateway",
