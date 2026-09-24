@@ -1415,19 +1415,33 @@ async fn requeue_auto_queue_pending_delivery_orphan_notify_pg(
     Ok(changed)
 }
 
+type ReviewDispatchCandidate = (String, String, Option<String>, Option<String>);
+
+async fn missing_review_dispatch_candidates_pg(
+    pool: &PgPool,
+) -> Result<Vec<ReviewDispatchCandidate>> {
+    sqlx::query_as(
+        "SELECT c.id, c.status, c.repo_id, c.assigned_agent_id
+         FROM kanban_cards c
+         WHERE c.status NOT IN ('done', 'backlog', 'ready')
+           AND NOT EXISTS (
+               SELECT 1 FROM task_dispatches td
+               WHERE td.kanban_card_id = c.id
+                 AND td.dispatch_type IN ('review', 'review-decision')
+                 AND td.status IN ('pending', 'dispatched')
+           )",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(anyhow::Error::from)
+}
+
 async fn refire_missing_review_dispatches_pg(
     pool: &PgPool,
     engine: &PolicyEngine,
 ) -> Result<usize> {
     crate::pipeline::ensure_loaded();
-
-    let cards: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT id, status, repo_id, assigned_agent_id
-         FROM kanban_cards
-         WHERE status NOT IN ('done', 'backlog', 'ready')",
-    )
-    .fetch_all(pool)
-    .await?;
+    let cards = missing_review_dispatch_candidates_pg(pool).await?;
 
     let mut candidates = Vec::new();
     for (card_id, status, repo_id, agent_id) in cards {
@@ -1437,23 +1451,7 @@ async fn refire_missing_review_dispatches_pg(
         let is_review_state = effective.hooks_for_state(&status).map_or(false, |hooks| {
             hooks.on_enter.iter().any(|name| name == "OnReviewEnter")
         });
-        if !is_review_state {
-            continue;
-        }
-
-        let has_review_dispatch = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(
-                SELECT 1 FROM task_dispatches
-                WHERE kanban_card_id = $1
-                  AND dispatch_type IN ('review', 'review-decision')
-                  AND status IN ('pending', 'dispatched')
-            )",
-        )
-        .bind(&card_id)
-        .fetch_one(pool)
-        .await
-        .unwrap_or(false);
-        if !has_review_dispatch {
+        if is_review_state {
             candidates.push(card_id);
         }
     }
@@ -1786,6 +1784,60 @@ mod dispatch_delivery_reconcile_tests {
             .await
             .unwrap()
             > 0
+    }
+
+    #[tokio::test]
+    async fn review_candidates_exclude_only_active_review_dispatches_pg() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "review_candidates",
+            "review dispatch candidate query",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        for (id, status) in [
+            ("no-dispatch", "review"),
+            ("pending-review", "review"),
+            ("dispatched-decision", "review"),
+            ("completed-review", "review"),
+            ("pending-build", "review"),
+            ("done-card", "done"),
+            ("backlog-card", "backlog"),
+            ("ready-card", "ready"),
+        ] {
+            sqlx::query("INSERT INTO kanban_cards (id, title, status) VALUES ($1, $1, $2)")
+                .bind(id)
+                .bind(status)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for (card, kind, status) in [
+            ("pending-review", "review", "pending"),
+            ("dispatched-decision", "review-decision", "dispatched"),
+            ("completed-review", "review", "completed"),
+            ("pending-build", "build", "pending"),
+        ] {
+            sqlx::query(
+                "INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status)
+                 VALUES ($1, $1, $2, $3)",
+            )
+            .bind(card)
+            .bind(kind)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let mut ids: Vec<_> = missing_review_dispatch_candidates_pg(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.0)
+            .collect();
+        ids.sort();
+        assert_eq!(ids, ["completed-review", "no-dispatch", "pending-build"]);
+        pool.close().await;
+        db.drop().await;
     }
 
     #[tokio::test]
