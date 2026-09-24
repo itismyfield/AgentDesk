@@ -267,8 +267,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     );
     // Sole boot owner of loader-verdict row retirement: every runtime shape
     // passes here after the generation is allocated and before any mint surface.
-    // Only the utility branch above leaves earlier: that bot builds no runtime and
-    // touches no inflight row; its provider's rows wait for an agent bot's boot.
+    // Only the utility branch leaves earlier: it builds no runtime or mint surface. Its
+    // doctor handles only health-registered runtimes, which register after their reaper.
     super::inflight::reap_inflight_rows_at_boot_blocking(&provider).await;
     super::tui_prompt_relay::spawn_tui_prompt_relay(shared.clone(), provider.clone());
 
@@ -887,11 +887,11 @@ agents:
         assert_eq!(registry.registration_generation(), after_first);
     }
 
-    // The boot reaper runs once in `run_bot`, after the generation is allocated
-    // and before every runtime branch and mint surface; only the runtime-less
-    // utility branch may return before it.
+    // Lexical pin, not a control-flow proof: one awaited reaper call after generation
+    // allocation and before the runtime markers; the only literal `return` before it is
+    // the utility one. `?`, break, process::exit or a diverging helper slip past it.
     #[test]
-    fn run_bot_reaps_inflight_rows_once_before_every_runtime_branch() {
+    fn run_bot_reaper_precedes_runtime_branches_and_only_utility_returns_literally() {
         let source = include_str!("runtime_bootstrap.rs");
         let production = source
             .split_once("#[cfg(test)]\nmod bootstrap_tests")
@@ -908,7 +908,7 @@ agents:
             .find(call)
             .expect("the reaper call must be awaited in run_bot");
         assert!(body.find("run_bot_build_shared_data(").unwrap() < at);
-        // The only exit allowed before the reaper is the utility branch.
+        // The only literal `return` allowed before the reaper is the utility one.
         let utility = "if let Some(bot_name) = should_skip_agent_runtime_launch(token) {";
         let mut prefix = body[..at].to_string();
         if let Some((before, rest)) = body[..at].split_once(utility) {
