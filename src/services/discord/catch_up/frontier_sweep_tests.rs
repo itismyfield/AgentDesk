@@ -329,9 +329,8 @@ fn f3_a_durable_candidate_at_or_past_the_barrier_is_dropped_not_lowered() {
     assert_eq!(safe_durable_candidate(Some(200), None), Some(200));
 }
 
-/// T1 + T8: a message present only in `intervention_queue` moves neither
-/// checkpoint surface, and the retry the sweep leaves keeps the consumed
-/// state's origin and budgets.
+/// T1 + T8: a queue-only message moves neither checkpoint surface, and the
+/// retry left behind keeps the consumed state's origin and budgets.
 #[tokio::test(flavor = "current_thread")]
 async fn t1_t8_queue_only_message_holds_both_surfaces_and_keeps_retry_origin() {
     let fx = Fixture::new().await;
@@ -463,9 +462,8 @@ async fn t4_queued_race_refusal_seals_the_frontier() {
     assert_eq!(fx.surfaces(channel_id), expected);
 }
 
-/// T5: Recent mode with no checkpoint. M seals, N defers; the retry N arms
-/// must already sit before M when it is published (the end-of-sweep merge
-/// would otherwise hide it), and the next `After` read must return M.
+/// T5: Recent mode, no checkpoint, M seals, N defers: N's retry is published
+/// before M (the end-of-sweep merge would hide it) so the next `After` returns M.
 #[tokio::test(flavor = "current_thread")]
 async fn t5_recent_mode_defer_retry_stays_before_m_and_rereads_it() {
     let fx = Fixture::new().await;
@@ -550,9 +548,8 @@ async fn t6_t12_phase2_accept_is_counted_but_not_persisted_past_m() {
     );
 }
 
-/// T7: with no in-memory checkpoint phase 2 falls back to its last bot reply,
-/// which is past M even though M is off the phase-2 page. The clamped cursor
-/// must be what gets published, as seen by the next channel's fetch.
+/// T7: phase 2's last-bot-reply fallback lands past an off-page M; the next
+/// channel's fetch must see the clamped cursor published, not the fallback.
 #[tokio::test(flavor = "current_thread")]
 async fn t7_phase2_fallback_retry_is_clamped_before_it_is_published() {
     let fx = Fixture::new().await;
