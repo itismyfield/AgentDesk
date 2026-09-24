@@ -1207,14 +1207,15 @@ async fn exact_receipt_short_fallback_settles_original_actor_and_preserves_succe
                     original.turn_nonce.clone(),
                 ),
             );
-            crate::services::discord::mailbox_recovery_kickoff(
-                &driver.shared,
-                channel,
-                actor.clone(),
-                serenity::UserId::new(DRIVER_USER_MSG_ID),
-                Some(MessageId::new(original.user_msg_id)),
-            )
-            .await;
+            driver
+                .shared
+                .mailbox(channel)
+                .restore_active_turn(
+                    actor.clone(),
+                    serenity::UserId::new(DRIVER_USER_MSG_ID),
+                    MessageId::new(original.user_msg_id),
+                )
+                .await;
             Some(actor)
         } else {
             None
