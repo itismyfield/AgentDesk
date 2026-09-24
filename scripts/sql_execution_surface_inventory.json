@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "52027d4baf430f5a381ceb5ec5f03c1c817e68f2",
+  "measured_at_sha": "f5b8937795b448303d3f51c70ba184f89047b018",
   "records": [
     {
       "root": "migrations/postgres",
@@ -1192,6 +1192,15 @@
     },
     {
       "root": "migrations/postgres",
+      "kind": "MIGRATION",
+      "path": "migrations/postgres/0130_machine_resource_samples.sql",
+      "api": "migration.file",
+      "symbol": "file",
+      "classification": "STATIC_FILE",
+      "fingerprint": "sha256:9695911826f3a1845578b70d348a8c640bdfe0a5489b1a51f4bf2c9b6e60826a"
+    },
+    {
+      "root": "migrations/postgres",
       "kind": "MIGRATION_METADATA",
       "path": "migrations/postgres/checksum-repair-allowlist.json",
       "api": "migration.non_sql_tracked",
@@ -1206,7 +1215,7 @@
       "api": "migration.non_sql_tracked",
       "symbol": "non_sql_tracked",
       "classification": "NON_SQL_TRACKED",
-      "fingerprint": "sha256:d6740930c60e49dfbf1a8318321f15a0076bcd3123298c72e3152fdc4faa2fae"
+      "fingerprint": "sha256:3bc77774e2579f88eadd9698474445e8947d492a0afda605a8c9a4989c8945d0"
     },
     {
       "root": "policies",
@@ -25003,6 +25012,33 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:bbf1b347dbdced255450b380002acaf11e2d763674fe66ebdf77436e83e6e6e2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/machine_resources/store.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:19f0ead6db952a13e5afec5978d36373c115785ab535b1e05908a29bbd70edc4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/machine_resources/store.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7c4b5610c63ed9a80a7f67ff6fda2ca58bd79eb7f697826f227f66e675cb5d26"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/machine_resources/store.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f968986b50c30b0ae767181419c1148498a29504e7d24d606d7af6904d2ccb30"
     },
     {
       "root": "src",

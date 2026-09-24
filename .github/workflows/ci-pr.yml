@@ -281,6 +281,7 @@ jobs:
               - 'src/services/cluster/intake_router_hook/execution_requirement_tests.rs'
               - 'src/services/cluster/intake_router_hook/owner_record.rs'
               - 'src/services/cluster/intake_worker/dispatch_stamp_tests.rs'
+              - 'src/services/cluster/machine_resources/store.rs'
               - 'src/services/discord/catch_up/too_old_notice.rs'
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/stall_alert.rs'

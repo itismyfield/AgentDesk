@@ -852,6 +852,7 @@ class ParserMutations(FixtureCase):
         )
         jobs = membership.parse_jobs(workflow, self.root)
         self.assertEqual([job.name for job in jobs], ["first", "second"])
+        self.assertEqual(jobs[0].key, ".github/workflows/extra.yaml:first")
         self.assertNotIn("second", jobs[0].text)
 
     def test_jobs_parser_variants_surface_rule4_by_set_equality(self) -> None:

@@ -302,6 +302,18 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_curl("curl http://localhost:8787/api/cluster/nodes"),
         ep(
             "GET",
+            "/api/cluster/machine-resources/history",
+            "cluster",
+            "Protected machine telemetry history. Requires instance_id; optional from_ms/to_ms epoch milliseconds and limit (1-240, default 120). Defaults to the last 15 minutes, newest samples returned oldest first. Maximum query window and retention are 90 days. Unmeasured values remain null.",
+        )
+        .with_example(
+            json!({"instance_id": "runner-example", "limit": 120}),
+            json!({"instance_id": "runner-example", "samples": []}),
+        )
+        .with_error_example(400, json!({"limit": 0}), json!({"error": "invalid machine history query"}))
+        .with_curl("curl 'http://localhost:8787/api/cluster/machine-resources/history?instance_id=runner-example'"),
+        ep(
+            "GET",
             "/api/cluster/sessions",
             "cluster",
             "Protected diagnostic readout of the in-memory SessionRegistry populated by SessionDiscovery (Epic #2285 / E2 / #2344).",

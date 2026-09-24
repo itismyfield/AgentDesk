@@ -96,6 +96,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::cluster::intake_router_hook::owner_record::tests
   --skip services::cluster::intake_router_hook::pg_tests
   --skip services::cluster::intake_worker::dispatch_stamp_tests
+  --skip services::cluster::machine_resources::store::tests
   --skip services::discord::catch_up::too_old_notice::tests
   --skip services::discord::health::recovery::stall_alert::tests
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
@@ -300,6 +301,7 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::intake_preflight::tests::unsupported_provider_fails_closed
   services::cluster::intake_router_hook::owner_record::tests::advisory_lock_key_is_stable
   services::cluster::intake_router_hook::owner_record::tests::idempotency_key_is_composed_and_normalized
+  services::cluster::machine_resources::store::tests::recorder_queue_is_bounded_without_waiting_for_the_database
   services::discord::health::recovery::stall_alert::tests::owner_zero_and_tui_sentinel_never_render_mentions
   services::discord::health::recovery::stall_alert::tests::producer_liveness_suppresses_stall_page
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::idle_tmux_stale_turn_clear_refusal_preserves_mailbox_and_session

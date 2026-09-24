@@ -660,6 +660,11 @@
       "path": "migrations/postgres/0129_kakao_calendar_lease_expiry.sql",
       "sha256": "24bfe53ba58f870d67d19e69d57a4e96ce65eaa7411367d0bc93edaf8df6388f",
       "version": 129
+    },
+    {
+      "path": "migrations/postgres/0130_machine_resource_samples.sql",
+      "sha256": "65a8926e026238fbabe1de241119208ff5448705b26f8c0a2308a85fa513a387",
+      "version": 130
     }
   ],
   "version": 1
