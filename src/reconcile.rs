@@ -2079,6 +2079,7 @@ mod dispatch_delivery_reconcile_tests {
                 buffer: writer_buffer.clone(),
             })
             .finish();
+        crate::logging::test_capture::pin_callsite_interest();
         let _guard = tracing::subscriber::set_default(subscriber);
 
         let stats = reconcile_dispatch_delivery_events_pg(&pool).await.unwrap();

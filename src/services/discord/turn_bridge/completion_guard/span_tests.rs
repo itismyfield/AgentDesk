@@ -51,6 +51,7 @@ fn concurrent_completions_keep_dispatch_spans_poll_scoped() {
         .enable_all()
         .build()
         .unwrap();
+    crate::logging::test_capture::pin_callsite_interest();
     tracing::subscriber::with_default(subscriber, || runtime.block_on(exercise_completions()));
     let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
     let outside: Vec<_> = logs

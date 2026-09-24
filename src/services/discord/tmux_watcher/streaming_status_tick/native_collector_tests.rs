@@ -839,6 +839,7 @@ fn watcher_direct_idle_commit_passes_mailbox_gate_only_when_idle() {
 
     let events = std::sync::Arc::new(std::sync::Mutex::new(0usize));
     let subscriber = tracing_subscriber::registry().with(Liveness(std::sync::Arc::clone(&events)));
+    crate::logging::test_capture::pin_callsite_interest();
     let _guard = tracing::subscriber::set_default(subscriber);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

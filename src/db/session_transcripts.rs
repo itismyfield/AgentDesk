@@ -1098,6 +1098,7 @@ mod clear_fence_pg_tests {
             .with_max_level(tracing::Level::WARN)
             .with_writer(move || writer.clone())
             .finish();
+        crate::logging::test_capture::pin_callsite_interest();
         let _guard = tracing::subscriber::set_default(subscriber);
         let captured = capture_channel_clear_fence(Some(&pool), "200").await;
         assert!(

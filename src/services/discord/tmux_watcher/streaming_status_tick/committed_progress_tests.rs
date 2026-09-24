@@ -83,6 +83,7 @@ fn capture_warns(body: impl std::future::Future<Output = ()>) -> Vec<String> {
     let subscriber = tracing_subscriber::fmt().with_max_level(tracing::Level::WARN)
         .with_ansi(false).without_time()
         .with_writer(CapturingWriter(buffer.clone())).finish();
+    crate::logging::test_capture::pin_callsite_interest();
     tracing::subscriber::with_default(subscriber, || {
         tokio::runtime::Builder::new_current_thread().enable_all().build()
             .expect("current-thread runtime").block_on(body);

@@ -883,6 +883,7 @@ impl LogWriter {
             .with_max_level(tracing::Level::INFO)
             .with_writer(move || LogWriter(Arc::clone(&writer)))
             .finish();
+        crate::logging::test_capture::pin_callsite_interest();
         let guard = tracing::subscriber::set_default(subscriber);
         CapturedLogs {
             buffer,
