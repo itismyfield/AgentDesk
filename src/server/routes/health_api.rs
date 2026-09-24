@@ -3245,6 +3245,30 @@ mod tests {
         }
     }
 
+    /// T6-2 removed the `relay_authority_observation` and `axis_b_observation`
+    /// blocks from `/api/health/detail`. `health::snapshot`'s retirement test
+    /// only drives the registry snapshot layer; the standalone arm of
+    /// `health_response` (no registry) builds its JSON from scratch and is a
+    /// separate attachment site, so it needs its own pin.
+    #[tokio::test]
+    async fn retired_observation_blocks_are_absent_from_both_health_response_arms() {
+        for registry in [
+            Some(Arc::new(
+                crate::services::discord::health::HealthRegistry::new(),
+            )),
+            None,
+        ] {
+            let detail = health_body("/health/detail", registry.clone()).await;
+            for key in ["relay_authority_observation", "axis_b_observation"] {
+                assert!(
+                    detail.get(key).is_none(),
+                    "/health/detail published retired key {key} (registry present: {}): {detail}",
+                    registry.is_some()
+                );
+            }
+        }
+    }
+
     /// **The deploy gate must not move.** `ok` is computed from `status` alone,
     /// and the cleanup backlog worsens neither `status` nor `degraded_reasons`
     /// — it is a gauge, not a verdict. Publishing it therefore cannot flip a

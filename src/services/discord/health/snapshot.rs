@@ -1360,9 +1360,13 @@ mod tests {
         );
     }
 
-    /// The retired relay-authority observation blocks stay off both builds.
+    /// The retired relay-authority observation blocks stay off both registry
+    /// snapshot builds. The standalone `/health` assembly point (no registry)
+    /// is a separate attachment site, covered instead by
+    /// `retired_observation_blocks_are_absent_from_both_health_response_arms`
+    /// in `server::routes::health_api`.
     #[tokio::test]
-    async fn retired_observation_blocks_are_absent_from_every_health_build() {
+    async fn retired_observation_blocks_are_absent_from_registry_health_snapshots() {
         let registry = HealthRegistry::new();
         let public = serde_json::to_value(build_public_health_snapshot(&registry).await)
             .expect("serialize public snapshot");
@@ -1386,9 +1390,10 @@ mod tests {
     /// is the summary that every monitor polls, so the miss was fail-open.
     ///
     /// Both halves matter. The verdict polarity must be identical across the two
-    /// builds, and the detail-only payload (mailbox entries, the rollout dial,
-    /// the two observation blocks) must still stay off the public allowlist:
-    /// this raises the judgement, not the evidence behind it.
+    /// builds, and the detail-only payload (mailbox entries, the rollout dial)
+    /// must still stay off the public allowlist: this raises the judgement, not
+    /// the evidence behind it. (The relay-authority observation blocks this
+    /// comment used to name here were retired in T6-2.)
     ///
     /// Driven from a `#[test]` on a current-thread runtime rather than
     /// `#[tokio::test]`: `lock_test_env()`'s guard pins the process-wide
@@ -1463,7 +1468,8 @@ mod tests {
             assert!(
                 public_json.get("relay_authority_rollout").is_none()
                     && public_json.get("axis_b_observation").is_none(),
-                "detail-only observation blocks must stay off the public surface"
+                "the rollout dial must stay detail-only and the retired \
+                 axis_b_observation block must never resurface"
             );
         });
     }

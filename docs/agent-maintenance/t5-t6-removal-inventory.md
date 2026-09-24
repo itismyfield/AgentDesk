@@ -385,7 +385,7 @@ S6a `7d97f385ad`·`a9407c0ba4`·`f219523758`/PR #5495·#5496·#5497)을 직접 �
 
 ## §12-3 추가 — T6-2 S9 관측 기록 철거 (2026-09-25)
 
-base `origin/main c9ef5e9402`. 관측 기록은 판정 값에 관여하지 않았으므로(모든 기록 함수가 `()` 반환)
+base `origin/main ed53d261a7`. 관측 기록은 판정 값에 관여하지 않았으므로(모든 기록 함수가 `()` 반환)
 배달·게이트 동작 변화는 없다. 경로는 `src/services/discord/` 기준이다.
 
 | 범위 | 철거한 것 | 남긴 것·후속 |
@@ -399,16 +399,20 @@ base `origin/main c9ef5e9402`. 관측 기록은 판정 값에 관여하지 않�
 `recorded_stream_gate_new_mirrors_the_shipped_authority_mapping`,
 `exact_receipt_terminal_decision_records_only_evaluated_frontier_5521`,
 `cleanup_gateway_outcomes_reach_operation_observations` 를 삭제했다. 대신
-`entry_gate_matrix_over_outcome_and_anchor` 는 명시 기대표로, health 쪽은
-`retired_observation_blocks_are_absent_from_every_health_build` 로, anchor 정리는
+`entry_gate_matrix_over_outcome_and_anchor` 는 명시 기대표로, health 쪽은 registry 스냅샷 계층의
+`retired_observation_blocks_are_absent_from_registry_health_snapshots` 와 `/api/health/detail` 의
+registry·standalone 두 조립점을 함께 고정하는
+`retired_observation_blocks_are_absent_from_both_health_response_arms` 로, anchor 정리는
 `cleanup_deletes_the_candidate_and_queues_it_only_when_delete_fails` 로 바꿨다. 스트림 게이트의
 (bridge 의도·행은 위임) 칸은 `visible_authority_distinguishes_bridge_self_delegation_and_foreign_projection`
 에 단언 1개로 남겼다.
 
 **남은 참조(후속 슬라이스 몫):** `config.rs` 의 `records_authority_observations`/`consults_cohort` 와
 `cohort::admits` 는 소비자가 0 이 되어 T6-3 에서 다이얼과 함께 회수한다(그때까지 rustc dead_code
-경고 1건). Python 리포트·그 테스트·롤백 런북의 `authority_observation`/`authority_retention` 언급은
-T6-4 가 파일째 정리한다. `ARCHITECTURE.md` 트리는 `regen-docs.yml` 이 main 에서 재생성한다.
+경고 3건 — `config.rs` mode predicates(`records_authority_observations`/`governs_destructive_authority`/
+`consults_cohort`), `relay_recovery/cohort.rs` 의 `cohort_bucket`·`admits`). Python 리포트·그 테스트·
+롤백 런북의 `authority_observation`/`authority_retention` 언급은 T6-4 가 파일째 정리한다.
+`ARCHITECTURE.md` 트리는 `regen-docs.yml` 이 main 에서 재생성한다.
 
 ## §12-2 추가 — T6 도달 불가 분기(슬라이스 3) **철거 보류(HOLD)** (2026-09-17)
 
@@ -925,11 +929,13 @@ segmentation 은 48h 미만 다이얼 이탈에서 두 window 를 병합했고(r
 
 - L-21 옵션 A인 TUI-direct synthetic mailbox token/nonce의 bridge 운반은 이번 슬라이스에서
   구현하지 않았다. synthetic 턴 수명을 바꾸는 라이브 경로 리스크보다 안전성을 우선했다.
-- 대신 옵션 B로 non-permitting completion을 다이얼·코호트와 무관한 경고 및 health 누적
-  `completion_suppressions`로 관측하며, `turn_source`를 completion 기록에 추가한다.
+- 대신 옵션 B로 non-permitting completion을 다이얼·코호트와 무관한 경고로 관측하며, `turn_source`를
+  completion 기록에 추가한다. health 누적 `completion_suppressions` 카운터는 §12-3(T6-2)에서
+  retire됐고, `relay_authority_completion_suppressed` warning 로그만 잔존한다.
 - 실측 triage에서 TUI-direct `Foreign` 억제와 namespaced session의 `TURN_ACTIVE` 잔류 빈도·영향을
   확인한 뒤 옵션 A 또는 동등한 episode-bound witness 운반을 재평가한다. 이 재평가는 T6 철거가
-  아니라 후속 설계 항목이며, 채택 전까지 현재 잔여를 해결됐다고 간주하지 않는다.
+  아니라 후속 설계 항목이며, health counter retire와 무관하게 채택 전까지 현재 잔여를 해결됐다고
+  간주하지 않는다.
 
 ## S4 — 스트림 중 내구 행 소실 억제 집행 · a5e8c64d65 / PR #5489
 
