@@ -24,6 +24,8 @@ pub(super) enum Phase2EnqueueCommit {
     DuplicateQueued,
     /// #6035 `AbsorbedByActiveTurn` — the id runs inside a turn that may still
     /// end undelivered, so the enqueue is skipped but the id stays open.
+    /// `ClaimedSinceObservation` — a claim after the classifying snapshot may
+    /// have taken the id; the retry re-classifies it from a fresh snapshot.
     NotYetEvidenced,
     LastItemDedup,
     Deferred,
@@ -47,7 +49,10 @@ pub(super) fn classify_phase2_enqueue_commit(
             Some(EnqueueRefusalReason::SourceIdAlreadyQueued) => {
                 return Phase2EnqueueCommit::DuplicateQueued;
             }
-            Some(EnqueueRefusalReason::AbsorbedByActiveTurn) => {
+            Some(
+                EnqueueRefusalReason::AbsorbedByActiveTurn
+                | EnqueueRefusalReason::ClaimedSinceObservation,
+            ) => {
                 return Phase2EnqueueCommit::NotYetEvidenced;
             }
             _ => {}

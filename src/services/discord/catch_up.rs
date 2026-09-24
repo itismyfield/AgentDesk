@@ -1147,6 +1147,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     pending_uploads: Vec::new(),
                     voice_announcement: None,
                 },
+                known_snapshot.claim_observation,
             )
             .await;
             match classify_phase2_enqueue_commit(&enqueue) {
@@ -1538,6 +1539,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     pending_uploads: Vec::new(),
                     voice_announcement: None,
                 },
+                mailbox.claim_observation,
             )
             .await;
             match classify_phase2_enqueue_commit(&enqueue) {
