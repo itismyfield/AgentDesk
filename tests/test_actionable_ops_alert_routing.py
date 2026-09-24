@@ -35,11 +35,6 @@ class ActionableOpsAlertRoutingContract(unittest.TestCase):
                 "dispatch_watchdog",
                 "dispatch_stuck",
             ),
-            (
-                "src/services/auto_queue/planning.rs",
-                "auto-queue",
-                "auto_queue.entry_dispatch_failed",
-            ),
         ]:
             with self.subTest(relative=relative):
                 self.assert_producer(relative, source, reason)
@@ -69,13 +64,18 @@ class ActionableOpsAlertRoutingContract(unittest.TestCase):
         self.assertNotIn("long-turn-monitor", policy)
         self.assertNotIn("_section_L", policy)
 
-    def test_routine_stale_alert_overrides_both_targets_to_announce(self) -> None:
+    def test_routine_stale_alert_routes_thread_to_announce_or_logs(self) -> None:
         text = self.source("src/services/routines/discord_log.rs")
         start = text.index("pub async fn log_stale_paused")
         end = text.index("async fn log_to_routine_target(", start)
         stale_path = text[start:end]
         self.assertIn("log_actionable_to_routine_target_with_ttl", stale_path)
-        self.assertIn(ANNOUNCE, stale_path)
+        # #5993: no operator fallback target; a thread-less stall is a WARN.
+        self.assertNotIn("health_target", text)
+        self.assertNotIn("log_to_target_with_ttl(", stale_path)
+        self.assertIn("tracing::warn!", stale_path)
+        recovery = text[text.index("pub async fn log_recovery") : start]
+        self.assertIn("tracing::info!", recovery)
 
         helper_start = text.index("async fn log_actionable_to_routine_target_with_ttl")
         helper_end = text.index("async fn log_run_section", helper_start)

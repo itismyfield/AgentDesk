@@ -236,7 +236,6 @@ db::auto_queue::entries::dispatch_failure::tests::restoring_run_accepts_retry_wi
 db::auto_queue::entries::dispatch_failure::tests::restoring_terminal_failure_retains_run_slot_ownership_pg
 db::auto_queue::entries::dispatch_failure::tests::retry_failure_keeps_run_runnable_and_records_one_transition_pg
 db::auto_queue::entries::dispatch_failure::tests::terminal_failure_finalizes_once_and_duplicate_is_noop_pg
-db::auto_queue::entries::dispatch_failure::tests::terminal_failure_rolls_back_when_alert_obligation_cannot_enqueue_pg
 db::auto_queue::entries::tests::active_run_allows_dispatched_transition_pg
 db::auto_queue::entries::tests::cancelled_run_allows_cancelled_without_waiting_for_gate_pg
 db::auto_queue::entries::tests::cancelled_run_allows_done_without_waiting_for_gate_pg
@@ -1407,14 +1406,9 @@ services::auto_queue::route::phase_gate_catalog::tests::unknown_kind_rejected
 services::auto_queue::route::phase_gate_violations::tests::snapshot_serializes_with_zero_violations
 services::auto_queue::route::phase_gate_violations::tests::violation_serializes_round_trip
 services::auto_queue::route::phase_gate_violations::tests::violation_summary_uses_issue_number_when_available
-services::auto_queue::route::planning::failed_entry_alert_tests::failed_entry_alert_dedupe_ignores_rendered_cause
-services::auto_queue::route::planning::failed_entry_alert_tests::failed_entry_alert_identity_is_scoped_per_durable_failure_transition
-services::auto_queue::route::planning::failed_entry_alert_tests::failed_entry_alert_reason_code_is_stable
-services::auto_queue::route::planning::failed_entry_alert_tests::failed_entry_alert_ttl_is_at_least_thirty_minutes
-services::auto_queue::route::planning::failed_entry_alert_tests::failed_entry_transition_and_alert_share_commit_with_explicit_ttl_pg
-services::auto_queue::route::planning::failed_entry_alert_tests::production_failure_wrapper_preserves_restoring_slot_binding_pg
 services::auto_queue::route::planning::phase_gate_generate_validation_tests::deploy_gate_generation_is_statically_unavailable
 services::auto_queue::route::planning::phase_gate_generate_validation_tests::pr_confirm_and_legacy_default_remain_generation_compatible
+services::auto_queue::route::planning::record_entry_dispatch_failure_tests::production_failure_wrapper_preserves_restoring_slot_binding_pg
 services::auto_queue::route::query::tests::reset_before_reuse_requires_reassignment_and_existing_thread_state
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::dependency_label_preserves_done_pending_and_missing_semantics
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests::unavailable_deploy_gate_creates_no_database_rows

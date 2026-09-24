@@ -145,13 +145,8 @@ pub(super) fn attempt_restore_dispatch(
             if recovered_dispatch.is_none() {
                 let failure = record_entry_dispatch_failure(
                     deps,
-                    run_id,
                     &entry.entry_id,
-                    &entry.card_id,
-                    &entry.agent_id,
-                    entry.thread_group,
                     "restore_run_create_dispatch_failed",
-                    &error_text,
                 )?;
                 crate::auto_queue_log!(
                     warn,

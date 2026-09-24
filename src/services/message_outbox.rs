@@ -7,8 +7,6 @@ use crate::services::{
 
 mod identity;
 
-#[cfg(test)]
-pub(crate) use identity::dedupe_key_for_message_for_test;
 pub(crate) use identity::{
     ACTIONABLE_OPS_ALERT_BOT, dedupe_key_for_message, delivery_bot_for_target_session,
     is_actionable_ops_alert, is_non_turn_operational_alert, normalized_reason_code,
