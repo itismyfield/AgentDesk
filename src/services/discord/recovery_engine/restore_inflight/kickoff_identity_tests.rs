@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::kickoff_identity::*;
 use super::*;
 use crate::services::discord::{Intervention, InterventionMode, mailbox_snapshot};
