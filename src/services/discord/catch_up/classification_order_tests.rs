@@ -13,13 +13,14 @@ use std::time::{Duration, Instant};
 use poise::serenity_prelude as serenity;
 
 use super::api::{CatchUpFetchCursor, CatchUpFetchRequest};
+use super::settled_frontier::SettledFrontier;
 use super::{
     CATCH_UP_RETRY_DEFERRED_REARM_LIMIT, CatchUpClassification, CatchUpClassificationDecision,
     CatchUpDeps, CatchUpDiscordApi, CatchUpMessageView, CatchUpTooOldOutboxRequest, ChannelId,
-    MessageId, ProviderKind, RuntimeChannelBindingStatus, advance_catch_up_settled_frontier,
-    catch_up_intervention_text, catch_up_source_generation, catch_up_too_old_drop,
-    catch_up_too_old_notice, classify_catch_up_message,
-    classify_catch_up_message_with_utility_resolution, run_catch_up_sweep,
+    MessageId, ProviderKind, RuntimeChannelBindingStatus, catch_up_intervention_text,
+    catch_up_source_generation, catch_up_too_old_drop, catch_up_too_old_notice,
+    classify_catch_up_message, classify_catch_up_message_with_utility_resolution,
+    run_catch_up_sweep,
 };
 use crate::services::discord::health::UtilityBotUserIdResolution;
 use crate::services::turn_orchestrator::{
@@ -439,6 +440,13 @@ fn aged_empty_message_is_empty_without_dlq_or_notice_drop() {
     );
 }
 
+/// A lone skipped message with no membership arm, as the sweep records it.
+fn settled_alone(message_id: u64, outcome: CatchUpClassification) -> Option<u64> {
+    let mut frontier = SettledFrontier::default();
+    frontier.record_skipped(message_id, outcome, None);
+    frontier.newest()
+}
+
 #[test]
 fn aged_allowed_human_is_too_old_and_advances_the_settled_frontier() {
     let message = view(HUMAN_ID, false, 3_600, "계속 진행해");
@@ -459,7 +467,7 @@ fn aged_allowed_human_is_too_old_and_advances_the_settled_frontier() {
     assert!(notice.contains("계속 진행해"));
     assert!(notice.contains("1건"));
     assert_eq!(
-        advance_catch_up_settled_frontier(None, message.message_id),
+        settled_alone(message.message_id, outcome),
         Some(message.message_id),
         "TooOld is permanently settled and must retire from later scans"
     );
@@ -503,7 +511,7 @@ fn aged_announce_bot_settles_without_a_human_resend_notice() {
         "a human cannot resend an announce-bot trigger, so it must not construct an actionable drop"
     );
     assert_eq!(
-        advance_catch_up_settled_frontier(None, message.message_id),
+        settled_alone(message.message_id, outcome),
         Some(message.message_id),
         "the terminal bot trigger must still advance the contiguous settled frontier"
     );
