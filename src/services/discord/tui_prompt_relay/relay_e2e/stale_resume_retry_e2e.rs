@@ -1,6 +1,5 @@
-//! Stale-resume auto-retry over the relay e2e mock: a turn whose provider rejects
-//! the bound resume id is re-dispatched once on a fresh session, and Discord is
-//! left with the recovery notice and a single answer.
+//! Stale-resume auto-retry e2e: a rejected resume id is re-dispatched once on a fresh
+//! session, leaving Discord with the recovery notice and a single answer.
 
 use std::time::Duration;
 
