@@ -901,6 +901,36 @@ mod after_string_brace {
         })
         self.assertEqual(inventory.module_errors, {})
 
+    def test_lib_inventory_build_strips_debuginfo_and_keeps_environment(self) -> None:
+        # #6184: the list-only build must not inherit full debuginfo (the build
+        # hosted runners killed), yet still see the caller's environment.
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0, stdout=(
+                "nested::tests::plain_case: test\n"
+                "nested::tests::async_case: test\n"
+                "nested::after_string_brace::keeps_root_scope: test\n"
+            ), stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {"CARGO_PROFILE_TEST_DEBUG": "2", "I6184_SENTINEL": "kept"},
+        ):
+            root = Path(tmp)
+            self._fixture(root)
+            comparison = integrity.compare_lib_inventory(root, runner=runner)
+        self.assertEqual(len(calls), 1)
+        argv, kwargs = calls[0]
+        self.assertEqual(argv, ["cargo", "test", "--manifest-path",
+                                str(root / "Cargo.toml"), "--lib", "--", "--list"])
+        self.assertEqual(kwargs["env"]["CARGO_PROFILE_DEV_DEBUG"], "0")
+        self.assertEqual(kwargs["env"]["CARGO_PROFILE_TEST_DEBUG"], "0")
+        self.assertEqual(kwargs["env"]["I6184_SENTINEL"], "kept")
+        self.assertIsNone(comparison.execution_error)
+        self.assertEqual(comparison.static_only, frozenset())
+        self.assertEqual(comparison.cargo_only, frozenset())
+
     def _comparison(self, static_ids: set[str]):
         return integrity.InventoryComparison(
             frozenset(), frozenset(), frozenset(static_ids), frozenset()

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
 import shlex
 import subprocess
@@ -1298,6 +1299,10 @@ def expected_lib_static_only(platform_name: str) -> frozenset[str] | None:
         LIB_INVENTORY_STATIC_ONLY_BASE | platform_only
 
 
+LIB_INVENTORY_BUILD_ENV = {"CARGO_PROFILE_DEV_DEBUG": "0",
+                           "CARGO_PROFILE_TEST_DEBUG": "0"}
+
+
 def compare_lib_inventory(repo_root: Path, runner=None) -> InventoryComparison:
     """Compare static full lib test IDs with compiled libtest `--list` IDs."""
     inventory = collect_static_tests(discover_targets(repo_root)["lib"], repo_root)
@@ -1307,8 +1312,13 @@ def compare_lib_inventory(repo_root: Path, runner=None) -> InventoryComparison:
     runner = runner or subprocess.run
     argv = ["cargo", "test", "--manifest-path", str(repo_root / "Cargo.toml"),
             "--lib", "--", "--list"]
+    # #6184: this build only prints test names, which debuginfo never changes.
+    # Hosted 16 GB runners killed the full-debuginfo build (rc 143) while the
+    # same lib-test unit built debuginfo-free (#4245 lanes) was never killed.
+    env = {**os.environ, **LIB_INVENTORY_BUILD_ENV}
     try:
-        proc = runner(argv, cwd=repo_root, capture_output=True, text=True)
+        proc = runner(argv, cwd=repo_root, capture_output=True, text=True,
+                      env=env)
     except OSError as error:
         return InventoryComparison(frozenset(), frozenset(), static_ids,
                                    frozenset(), module_errors,
