@@ -66,6 +66,8 @@ pub(in crate::services::discord) async fn finish_recovered_turn_mailbox(
     let _ = stop_source;
 }
 
+#[path = "restore_inflight/kickoff_identity.rs"]
+mod kickoff_identity;
 #[path = "restore_inflight/output_paths.rs"]
 mod output_paths;
 #[cfg(unix)]
@@ -2689,6 +2691,9 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+#[path = "restore_inflight/kickoff_identity_tests.rs"]
+mod kickoff_identity_tests;
 #[cfg(test)]
 #[path = "restore_inflight/ready_without_output_tests.rs"]
 mod ready_without_output_tests;
