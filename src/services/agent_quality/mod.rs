@@ -12,8 +12,8 @@
 //!   * the established 15%p turn / 20%p review delta thresholds
 //!   * an explicit `sample_size >= 5` guard
 //!   * a dedicated `quality_regression_cooldowns` table for the 24h window
-//!   * DB target precedence (`agent_quality_monitoring_channel_id`, then
-//!     `kanban_human_alert_channel_id`) with no-target as the off-switch
+//!   * DB target `agent_quality_monitoring_channel_id` (#5993 retired the
+//!     human-alert fallback) with no-target as the off-switch
 //!   * drill-down link in the rendered Discord payload.
 //!
 //! Wired into the hourly maintenance scheduler in

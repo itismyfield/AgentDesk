@@ -80,7 +80,8 @@ class AlertDedupeWiringTests(unittest.TestCase):
         self.assertIn("TURN_DROP_THRESHOLD: f64 = 0.15", regression_alerts)
         self.assertIn("REVIEW_DROP_THRESHOLD: f64 = 0.20", regression_alerts)
         self.assertIn("agent_quality_monitoring_channel_id", regression_alerts)
-        self.assertIn("kanban_human_alert_channel_id", regression_alerts)
+        # #5993: the shared human-alert fallback was retired.
+        self.assertNotIn("kanban_human_alert_channel_id", regression_alerts)
         self.assertNotIn("FALLBACK_ALERT_CHANNEL", regression_alerts)
 
 

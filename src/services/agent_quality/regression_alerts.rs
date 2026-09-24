@@ -95,21 +95,17 @@ fn normalize_channel_target(channel: &str) -> Option<String> {
     })
 }
 
-/// Preserve the retired producer's operator policy: the dedicated quality
-/// channel wins, then the shared human-alert channel. No configured target is
-/// an intentional off-switch; a hard-coded fallback would silently page a
-/// different channel after authority consolidation.
+/// The dedicated quality channel is the only target (#5993 retired the shared
+/// human-alert fallback). No configured target is an intentional off-switch; a
+/// hard-coded fallback would silently page a different channel after authority
+/// consolidation.
 pub(crate) async fn resolve_alert_channel_pg(pool: &PgPool) -> Result<Option<String>> {
     let value = sqlx::query_scalar::<_, String>(
         "SELECT value
          FROM kv_meta
-         WHERE key IN ('agent_quality_monitoring_channel_id', 'kanban_human_alert_channel_id')
+         WHERE key = 'agent_quality_monitoring_channel_id'
            AND value IS NOT NULL
            AND btrim(value) <> ''
-         ORDER BY CASE key
-                      WHEN 'agent_quality_monitoring_channel_id' THEN 0
-                      ELSE 1
-                  END
          LIMIT 1",
     )
     .fetch_optional(pool)
@@ -581,7 +577,7 @@ mod explicit_decode_fallback_tests {
     }
 
     #[tokio::test]
-    async fn quality_channel_uses_db_precedence_and_no_target_off_switch_pg() {
+    async fn quality_channel_is_the_only_target_and_no_target_off_switch_pg() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
@@ -592,22 +588,22 @@ mod explicit_decode_fallback_tests {
             ),
             None
         );
+        // #5993: a leftover retired human-alert row is not a fallback target.
         must_ok(
             sqlx::query(
                 "INSERT INTO kv_meta (key, value)
-                 VALUES ('kanban_human_alert_channel_id', 'human-channel')",
+                 VALUES (concat('kanban_', 'human_alert_channel_id'), 'human-channel')",
             )
             .execute(&pool)
             .await,
-            "seed human alert target",
+            "seed retired human alert row",
         );
         assert_eq!(
             must_ok(
                 resolve_alert_channel_pg(&pool).await,
-                "resolve human quality target",
-            )
-            .as_deref(),
-            Some("channel:human-channel")
+                "resolve without dedicated quality target",
+            ),
+            None
         );
 
         must_ok(

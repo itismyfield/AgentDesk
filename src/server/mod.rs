@@ -1965,15 +1965,11 @@ fn message_outbox_failure_action(retry_count: i64) -> MessageOutboxFailureAction
 
 #[cfg(test)]
 mod message_outbox_retry_tests {
-    use super::outbox_delivery_alert::{
-        OUTBOX_DELIVERY_ALERT_SOURCE, note_terminal_outbox_delivery_failure, outbox_alert_snippet,
-        outbox_alert_target_pg,
-    };
+    use super::outbox_delivery_alert::outbox_alert_snippet;
     use super::{
-        MessageOutboxFailureAction, MessageOutboxLeaseUpdateError, PendingMessageOutboxRow,
-        drain_message_outbox_batch_once, is_terminal_turn_delivery_outbox_source,
-        mark_message_outbox_sent_pg, message_outbox_failure_action,
-        session_can_be_released_for_terminal_outbox_failure,
+        MessageOutboxFailureAction, MessageOutboxLeaseUpdateError, drain_message_outbox_batch_once,
+        is_terminal_turn_delivery_outbox_source, mark_message_outbox_sent_pg,
+        message_outbox_failure_action, session_can_be_released_for_terminal_outbox_failure,
     };
     use sqlx::Row as _;
 
@@ -1990,108 +1986,42 @@ mod message_outbox_retry_tests {
         assert!(snippet.ends_with('…'));
     }
 
-    /// #4260 vector 3: a terminal outbox failure enqueues exactly one operator
-    /// card to the `kanban_human_alert_channel_id`, never targets the failing
-    /// destination channel, and the alert card's OWN failure does not recurse.
+    /// #5993 through the hourly relay-signal job entry point: a breached signal
+    /// is reported (WARN + event, see `relay_signal_alert` tests) with no
+    /// operator configuration, and never becomes an outbox row.
     #[tokio::test]
-    async fn terminal_outbox_failure_enqueues_ops_card_and_guards_recursion_pg() {
+    async fn relay_signal_threshold_report_enqueues_nothing_pg() {
         let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
-            "agentdesk_outbox_delivery_alert",
-            "outbox terminal failure ops alert",
+            "agentdesk_relay_signal_report",
+            "relay signal threshold report",
         )
         .await
         else {
             return;
         };
         let pool = pg_db.connect_and_migrate().await;
-
-        // Unconfigured target ⇒ resolver returns None ⇒ no ops card is enqueued.
-        assert!(outbox_alert_target_pg(&pool).await.is_none());
-
+        // `relay_uncommitted_inflight_cleared` trips at a single occurrence.
         sqlx::query(
-            "INSERT INTO kv_meta (key, value) VALUES ('kanban_human_alert_channel_id', '555')",
+            "INSERT INTO observability_events (event_type, status)
+             VALUES ('relay_root_cause_counter', 'relay_uncommitted_inflight_cleared')",
         )
         .execute(&pool)
         .await
-        .expect("seed alert channel");
-        assert_eq!(
-            outbox_alert_target_pg(&pool).await.as_deref(),
-            Some("channel:555"),
-            "bare channel id must be normalized to a channel: target"
-        );
+        .expect("seed breached relay signal");
 
-        let row = |id: i64, source: &str| PendingMessageOutboxRow {
-            id,
-            target: "channel:123".to_string(),
-            content: "undeliverable body".to_string(),
-            bot: "notify".to_string(),
-            source: source.to_string(),
-            reason_code: None,
-            session_key: Some("sess-1".to_string()),
-            retry_count: 5,
-            claim_owner: "owner".to_string(),
-            claimed_at: chrono::Utc::now(),
-        };
+        let crossed =
+            crate::services::observability::report_relay_signal_threshold_crossings_pg(&pool)
+                .await
+                .expect("report relay signals");
 
-        // A normal (non-alert) source enqueues exactly one ops card (the DB
-        // work rides a detached spawn — await the returned handle so the
-        // assertion is deterministic).
-        note_terminal_outbox_delivery_failure(&pool, &row(1, "headless_turn"), "500: boom")
-            .expect("non-alert source must spawn the ops-card task")
+        assert_eq!(crossed, 1);
+        let outbox_rows: i64 = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM message_outbox")
+            .fetch_one(&pool)
             .await
-            .expect("ops-card task must not panic");
-        let alert_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*)::bigint FROM message_outbox
-               WHERE source = $1 AND target = 'channel:555'",
-        )
-        .bind(OUTBOX_DELIVERY_ALERT_SOURCE)
-        .fetch_one(&pool)
-        .await
-        .expect("count alert rows");
-        assert_eq!(alert_count, 1);
-        let (alert_bot, alert_reason): (String, Option<String>) =
-            sqlx::query_as("SELECT bot, reason_code FROM message_outbox WHERE source = $1")
-                .bind(OUTBOX_DELIVERY_ALERT_SOURCE)
-                .fetch_one(&pool)
-                .await
-                .expect("load actionable ops alert routing");
-        assert_eq!(alert_bot, "announce");
-        assert_eq!(alert_reason.as_deref(), Some("outbox_delivery_failed"));
-
-        // The alert card's OWN terminal failure must NOT even spawn a card task
-        // (recursion guard short-circuits before the detached DB work).
-        assert!(
-            note_terminal_outbox_delivery_failure(
-                &pool,
-                &row(2, OUTBOX_DELIVERY_ALERT_SOURCE),
-                "500: boom",
-            )
-            .is_none(),
-            "alert-source failures must not spawn a card-for-a-card"
-        );
-        let alert_count_after: i64 =
-            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM message_outbox WHERE source = $1")
-                .bind(OUTBOX_DELIVERY_ALERT_SOURCE)
-                .fetch_one(&pool)
-                .await
-                .expect("count alert rows after recursion guard");
+            .expect("count outbox rows");
         assert_eq!(
-            alert_count_after, 1,
-            "the alert source must never recurse into a new card"
-        );
-
-        // The ops card is never sent to the failing destination channel.
-        let to_dest: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*)::bigint FROM message_outbox
-               WHERE source = $1 AND target = 'channel:123'",
-        )
-        .bind(OUTBOX_DELIVERY_ALERT_SOURCE)
-        .fetch_one(&pool)
-        .await
-        .expect("count destination-directed alert rows");
-        assert_eq!(
-            to_dest, 0,
-            "must not notify the failing destination channel"
+            outbox_rows, 0,
+            "the report never enqueues a Discord message"
         );
 
         pool.close().await;
@@ -2815,17 +2745,14 @@ where
                         }
                     }
                     // #4260 vector 3: every terminal failure surfaces — warn +
-                    // quality event inline, ops card on a detached spawn. Sited
-                    // AFTER the session release (dual r1 codex#1) so alerting
+                    // quality event inline (#5993 retired the ops card). Sited
+                    // AFTER the session release (dual r1 codex#1) so reporting
                     // never delays freeing the channel; the destination channel
                     // is never notified (it may be the failing target itself).
                     if failed_update.is_ok() {
-                        drop(
-                            outbox_delivery_alert::note_terminal_outbox_delivery_failure(
-                                pg_pool,
-                                row,
-                                &error_text,
-                            ),
+                        outbox_delivery_alert::note_terminal_outbox_delivery_failure(
+                            row,
+                            &error_text,
                         );
                     }
                 }

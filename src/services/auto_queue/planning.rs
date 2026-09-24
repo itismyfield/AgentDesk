@@ -78,20 +78,14 @@ pub(super) fn normalize_human_alert_target(channel: String) -> Option<String> {
     })
 }
 
+/// #5993: the kv_meta mirror of the human-alert channel is retired; only the
+/// YAML field remains until its own removal slice.
 pub(super) fn human_alert_target(deps: &AutoQueueActivateDeps) -> Option<String> {
-    let pool = deps.pg_pool.as_ref()?;
-    let from_pg = match load_kv_meta_value_pg(pool, "kanban_human_alert_channel_id") {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                "[auto-queue] failed to load postgres human alert channel override"
-            );
-            None
-        }
-    };
-    from_pg
-        .or_else(|| deps.config.kanban.human_alert_channel_id.clone())
+    deps.pg_pool.as_ref()?;
+    deps.config
+        .kanban
+        .human_alert_channel_id
+        .clone()
         .and_then(normalize_human_alert_target)
 }
 

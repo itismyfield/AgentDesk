@@ -1861,7 +1861,7 @@ mod terminal_open_alert_tests {
         let pool = pg_db.connect_and_migrate().await;
         let seed_target = sqlx::query(
             "INSERT INTO kv_meta (key, value)
-             VALUES ('kanban_human_alert_channel_id', '123456')",
+             VALUES ('agent_quality_monitoring_channel_id', '123456')",
         )
         .execute(&pool)
         .await;
