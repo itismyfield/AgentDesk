@@ -366,8 +366,8 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         "production kickoff must durably dequeue B"
     );
     assert_eq!(harness.placeholder_posts(), 2);
-    // Outlasts the two-second deferred delay, so a re-armed kickoff or a
-    // provider-driven re-dispatch of B would land inside the window.
+    // Outlasts the two-second deferred kickoff delay, so an erroneously re-armed
+    // queue kickoff is observable. Provider retries are not covered here.
     assert!(
         !harness
             .wait_for_placeholder_posts(3, Duration::from_secs(3))
