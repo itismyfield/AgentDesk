@@ -6332,61 +6332,15 @@ mod relayerless_claim_tests {
     // #6210: a TUI-direct claim must leave a deliverer when the supervisor producer
     // outlives the tmux watcher.
     use super::*;
-    use crate::services::cluster::relay_producer_registry::global_relay_producer_registry;
-
-    /// The watcher-independent supervisor StreamRelay, registered the way
-    /// `watcher_supervisor` does it.
-    struct SupervisorProducer {
-        tmux: String,
-        _relay: crate::services::cluster::stream_relay::StreamRelayHandle,
-    }
-
-    impl SupervisorProducer {
-        fn register(tmux: &str) -> Self {
-            let relay = crate::services::cluster::stream_relay::spawn_stream_relay(
-                crate::services::cluster::session_matcher::MatchedChannel {
-                    channel_id: "6210".to_string(),
-                    agent_id: "agent-6210".to_string(),
-                    provider: ProviderKind::Claude,
-                    expected_session_name: tmux.to_string(),
-                    expected_rollout_path: String::new(),
-                },
-                Arc::new(crate::services::cluster::stream_relay::DiscardSink),
-            );
-            global_relay_producer_registry().register(tmux.to_string(), relay.producer());
-            assert!(
-                global_relay_producer_registry()
-                    .get_live_producer(tmux)
-                    .is_some()
-            );
-            Self {
-                tmux: tmux.to_string(),
-                _relay: relay,
-            }
-        }
-    }
-
-    impl Drop for SupervisorProducer {
-        fn drop(&mut self) {
-            global_relay_producer_registry().deregister(&self.tmux);
-        }
-    }
+    use crate::services::discord::inflight;
+    use crate::services::discord::session_relay_sink::tests::idle_relay_harness::{
+        IdleRelayHarness, PAYLOAD, live_watcher,
+    };
 
     fn enable_session_bound_delivery() {
         let health = Arc::new(crate::services::discord::health::HealthRegistry::new());
         crate::services::discord::session_relay_sink::SessionBoundDiscordRelaySink::new(health)
             .enable_delivery_for_test();
-    }
-
-    /// Relayers that will actually move this turn's output to Discord.
-    fn live_deliverers(shared: &SharedData, tmux: &str, owner: ExternalInputRelayOwner) -> usize {
-        let watcher_live = shared.tmux_watchers.tmux_session_live_for_relay(tmux) == Some(true);
-        let watcher_path = watcher_live
-            && matches!(
-                owner,
-                ExternalInputRelayOwner::TmuxWatcher | ExternalInputRelayOwner::SessionBoundRelay
-            );
-        usize::from(watcher_path) + usize::from(observer_should_spawn_bridge_tail(false, owner))
     }
 
     async fn claim(
@@ -6414,10 +6368,10 @@ mod relayerless_claim_tests {
         let root = tempfile::tempdir().expect("isolated inflight root");
         let _env = crate::config::set_agentdesk_root_for_test(root.path());
         enable_session_bound_delivery();
-        let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = ChannelId::new(6_210_001);
         let tmux = "AgentDesk-claude-6210-t1";
-        let _producer = SupervisorProducer::register(tmux);
+        let harness = IdleRelayHarness::start(root.path(), channel.get(), tmux).await;
+        let shared = harness.shared.clone();
 
         let claim = claim(&shared, channel, tmux, 6_210_101).await;
         assert!(claim.claimed);
@@ -6426,44 +6380,169 @@ mod relayerless_claim_tests {
             ExternalInputRelayOwner::BridgeAdapter,
             "a supervisor producer without a tmux watcher never feeds the sink"
         );
-        let row = crate::services::discord::inflight::load_inflight_state(
-            &ProviderKind::Claude,
-            channel.get(),
-        )
-        .expect("claimed row");
-        assert_eq!(row.effective_relay_owner_kind(), RelayOwnerKind::None);
+        assert_eq!(
+            row(channel).effective_relay_owner_kind(),
+            RelayOwnerKind::None
+        );
+        harness.stop().await;
     }
 
-    /// T4: demoting the watcher, then claiming the next turn, still leaves exactly one deliverer.
-    #[cfg(unix)]
+    fn bind_transcript(tmux: &str, transcript: &Path) {
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            tmux,
+            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: transcript.to_str().expect("utf8 path").to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: None,
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+    }
+
+    fn reclaim(shared: &SharedData, channel: ChannelId) -> inflight::OrphanRelayReclaimOutcome {
+        let pin = inflight::InflightEpisodePin::from_state(&row(channel));
+        let claude = ProviderKind::Claude;
+        inflight::reclaim_watcherless_session_bound_relay_owner(
+            shared,
+            &claude,
+            channel.get(),
+            &pin,
+        )
+    }
+
+    /// `row` as if its last update was `secs` ago.
+    fn aged(row: &inflight::InflightTurnState, secs: i64) -> inflight::InflightTurnState {
+        let mut row = row.clone();
+        let then = chrono::Local::now() - chrono::Duration::seconds(secs);
+        row.updated_at = then.format("%Y-%m-%d %H:%M:%S").to_string();
+        row
+    }
+
+    fn row(channel: ChannelId) -> inflight::InflightTurnState {
+        inflight::load_inflight_state(&ProviderKind::Claude, channel.get()).expect("claimed row")
+    }
+
+    /// Race (a) and P2 1: the watcher dies between the owner decision and the durable save.
+    /// The `SessionBoundRelay` row is recovered by the pinned reclaim, the idle relay waits the
+    /// 300 s ownerless age (nothing sent while the row is fresh), then sends exactly once.
     #[tokio::test(flavor = "current_thread")]
-    async fn demotion_then_claim_cycle_keeps_one_deliverer() {
+    async fn watcher_lost_between_owner_decision_and_save_is_sent_once_after_the_age() {
         let root = tempfile::tempdir().expect("isolated inflight root");
         let _env = crate::config::set_agentdesk_root_for_test(root.path());
         enable_session_bound_delivery();
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let channel = ChannelId::new(6_210_004);
-        let tmux = "AgentDesk-claude-6210-t4";
-        let _producer = SupervisorProducer::register(tmux);
-        let handle = test_watcher_handle(tmux, Path::new("/tmp/adk-6210-t4.jsonl"));
-        let cancel = handle.cancel.clone();
-        shared.tmux_watchers.insert(channel, handle);
-        assert_eq!(
-            live_deliverers(&shared, tmux, ExternalInputRelayOwner::TmuxWatcher),
-            1
-        );
+        let channel = ChannelId::new(6_210_005);
+        let tmux = "AgentDesk-claude-6210-race-a";
+        let mut harness = IdleRelayHarness::start(root.path(), channel.get(), tmux).await;
+        let shared = harness.shared.clone();
+        bind_transcript(tmux, &harness.transcript);
+        let watcher = live_watcher(tmux, "/tmp/adk-6210-race-a-other.jsonl");
+        let cancel = watcher.cancel.clone();
+        shared.tmux_watchers.insert(channel, watcher);
 
-        // Stale-foreign demotion: the registry entry goes and its cancel is set.
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        *synthetic_start::bridge_handoff::ADMISSION_PAUSE
+            .lock()
+            .unwrap() = Some((channel.get(), entered.clone(), resume.clone()));
+        let claiming = tokio::spawn({
+            let shared = shared.clone();
+            async move { claim(&shared, channel, tmux, 6_210_105).await }
+        });
+        entered.notified().await;
         assert!(shared.tmux_watchers.remove(&channel).is_some());
         cancel.store(true, Ordering::Release);
-
-        let claim = claim(&shared, channel, tmux, 6_210_104).await;
+        resume.notify_one();
+        let claim = claiming.await.expect("claim task");
         assert!(claim.claimed);
         assert_eq!(
-            live_deliverers(&shared, tmux, claim.relay_owner),
-            1,
-            "owner {:?} after demotion must keep exactly one deliverer",
-            claim.relay_owner
+            claim.relay_owner,
+            ExternalInputRelayOwner::SessionBoundRelay
         );
+        assert!(!observer_should_spawn_bridge_tail(false, claim.relay_owner));
+
+        let start = row(channel).turn_start_offset.expect("turn start");
+        let mut transcript = std::fs::read(&harness.transcript).expect("transcript");
+        transcript.extend_from_slice(PAYLOAD.as_bytes());
+        std::fs::write(&harness.transcript, &transcript).expect("turn output");
+        tokio::time::sleep(std::time::Duration::from_millis(11_000)).await;
+        assert!(harness.sent().is_empty(), "black-holed until reclaimed");
+
+        assert_eq!(
+            reclaim(&shared, channel),
+            inflight::OrphanRelayReclaimOutcome::Downgraded
+        );
+        let reclaimed = row(channel);
+        assert_eq!(reclaimed.effective_relay_owner_kind(), RelayOwnerKind::None);
+        let stale =
+            |secs| inflight::ownerless_external_input_inflight_is_stale(&aged(&reclaimed, secs));
+        assert!(
+            !stale(0) && !stale(295) && stale(301),
+            "300 s ownerless age"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(2_000)).await;
+        assert!(
+            harness.sent().is_empty(),
+            "a fresh reclaimed row waits for the age"
+        );
+
+        // Age the row past the threshold, as 300 s of quiet would.
+        let path = root.path().join(format!(
+            "runtime/discord_inflight/claude/{}.json",
+            channel.get()
+        ));
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&aged(&reclaimed, 301)).unwrap(),
+        )
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(3_000)).await;
+        let sent = harness.sent();
+        assert_eq!(sent.len(), 1, "exactly one send: {sent:?}");
+        assert_eq!(sent[0].relay_range, Some((start, transcript.len() as u64)));
+        harness.stop().await;
+    }
+
+    /// Race (b): the watcher attaches right after the `BridgeAdapter` row is saved. The bridge
+    /// tail stays the only deliverer: the session-bound sink sends nothing and the pinned
+    /// reclaim leaves the row alone.
+    #[tokio::test(flavor = "current_thread")]
+    async fn watcher_attaching_after_a_bridge_adapter_save_adds_no_session_bound_send() {
+        let root = tempfile::tempdir().expect("isolated inflight root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        enable_session_bound_delivery();
+        let channel = ChannelId::new(6_210_006);
+        let tmux = "AgentDesk-claude-6210-race-b";
+        let mut harness = IdleRelayHarness::start(root.path(), channel.get(), tmux).await;
+        let shared = harness.shared.clone();
+        bind_transcript(tmux, &harness.transcript);
+
+        let claim = claim(&shared, channel, tmux, 6_210_106).await;
+        assert!(claim.claimed);
+        assert_eq!(claim.relay_owner, ExternalInputRelayOwner::BridgeAdapter);
+        assert!(observer_should_spawn_bridge_tail(false, claim.relay_owner));
+        shared.tmux_watchers.insert(
+            channel,
+            live_watcher(tmux, "/tmp/adk-6210-race-b-other.jsonl"),
+        );
+
+        std::fs::write(&harness.transcript, PAYLOAD).expect("turn output");
+        tokio::time::sleep(std::time::Duration::from_millis(11_000)).await;
+        assert_eq!(
+            reclaim(&shared, channel),
+            inflight::OrphanRelayReclaimOutcome::Skipped
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+        assert!(
+            harness.sent().is_empty(),
+            "the bridge tail is the only deliverer"
+        );
+        assert_eq!(
+            row(channel).effective_relay_owner_kind(),
+            RelayOwnerKind::None
+        );
+        harness.stop().await;
     }
 }

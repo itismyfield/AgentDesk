@@ -3383,6 +3383,7 @@ services::discord::inflight::orphan_relay_reclaim::tests::orphan_shape_rejects_c
 services::discord::inflight::orphan_relay_reclaim::tests::orphan_shape_rejects_delivered_marker_row
 services::discord::inflight::orphan_relay_reclaim::tests::orphan_shape_still_matches_genuine_black_hole_without_delivered_marker
 services::discord::inflight::orphan_relay_reclaim::tests::pinned_watcherless_episode_downgrades_a_fresh_orphan_without_the_age_gate
+services::discord::inflight::orphan_relay_reclaim::tests::watcher_attaching_after_the_absence_check_keeps_the_session_bound_owner
 services::discord::inflight::post_loop_identity_guard_tests::post_loop_finalize_saves_require_matching_identity
 services::discord::inflight::rebind_origin_reap_tests::active_or_unknown_watcher_rebind_not_reaped_readopt_preserved_3879
 services::discord::inflight::rebind_origin_reap_tests::boot_path_preserves_dead_watcher_rebind
@@ -5324,6 +5325,7 @@ services::discord::session_relay_sink::orphan_reclaim::tests::cross_session_recl
 services::discord::session_relay_sink::orphan_reclaim::tests::delivered_at_scan_time_suppressed_by_unlocked_first_line_filter
 services::discord::session_relay_sink::orphan_reclaim::tests::live_producer_that_survives_is_not_falsely_reclaimed
 services::discord::session_relay_sink::orphan_reclaim::tests::non_orphan_shape_is_never_reclaimed
+services::discord::session_relay_sink::orphan_reclaim::tests::pinned_reclaim_recovers_the_suffix_past_a_partial_watermark
 services::discord::session_relay_sink::orphan_reclaim::tests::pinned_watcherless_reclaim_lets_the_idle_relay_recover_the_undelivered_tail
 services::discord::session_relay_sink::orphan_reclaim::tests::producer_dies_before_commit_with_undelivered_body_is_reclaimed
 services::discord::session_relay_sink::orphan_reclaim::tests::registered_but_shutdown_producer_is_reclaimed_as_dead
@@ -6706,7 +6708,8 @@ services::discord::tui_prompt_relay::tests::registry_is_authoritative_for_owner_
 services::discord::tui_prompt_relay::tests::registry_miss_but_dedupe_hit_drops_and_does_not_use_mirror
 services::discord::tui_prompt_relay::tests::relay_prompt_decision_skips_model_two_half_transcript
 services::discord::tui_prompt_relay::tests::relayerless_claim_tests::claim_without_live_watcher_stamps_bridge_adapter_despite_supervisor_producer
-services::discord::tui_prompt_relay::tests::relayerless_claim_tests::demotion_then_claim_cycle_keeps_one_deliverer
+services::discord::tui_prompt_relay::tests::relayerless_claim_tests::watcher_attaching_after_a_bridge_adapter_save_adds_no_session_bound_send
+services::discord::tui_prompt_relay::tests::relayerless_claim_tests::watcher_lost_between_owner_decision_and_save_is_sent_once_after_the_age
 services::discord::tui_prompt_relay::tests::s3t1_abort_and_recv_error_preserve_foreign_turn_and_anchor
 services::discord::tui_prompt_relay::tests::s3t2_delivery_failure_never_cancels_successor_or_commits_cursor
 services::discord::tui_prompt_relay::tests::s3t3_abort_deletes_only_owned_unreferenced_placeholder

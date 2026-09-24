@@ -54,6 +54,7 @@ use super::{
     inflight_state_path, load_inflight_state_unlocked, lock_inflight_state_path, now_unix,
     persist_under_lock, persist_under_lock_preserving_updated_at,
 };
+use crate::services::discord::{TmuxWatcherRegistry, lock_tmux_watcher_registry};
 
 /// #3960 — the row SHAPE of a `SessionBoundRelay` TUI-direct synthetic claim
 /// whose claim-time relay producer has died with the answer still undelivered.
@@ -192,7 +193,7 @@ fn downgrade_orphan_owner_in_root(
     channel_id: u64,
     require_identity: &InflightTurnIdentity,
     require_tmux_session_name: &str,
-    exact_episode: Option<&InflightEpisodePin>,
+    exact_episode: Option<(&InflightEpisodePin, &TmuxWatcherRegistry)>,
 ) -> OrphanRelayReclaimOutcome {
     let path = inflight_state_path(root, provider, channel_id);
     let Ok(_lock) = lock_inflight_state_path(&path) else {
@@ -223,12 +224,19 @@ fn downgrade_orphan_owner_in_root(
     // row IS downgraded, and the send-point committed re-gate guarantees single
     // delivery. See this module's header.
     let orphan = match exact_episode {
-        Some(pin) => {
+        Some((pin, _)) => {
             pin.matches_state(&state) && session_bound_relay_external_input_orphan_structure(&state)
         }
         None => session_bound_relay_external_input_orphan_shape_at(&state, now_unix()),
     };
     if !orphan {
+        return OrphanRelayReclaimOutcome::Skipped;
+    }
+    // Watcher inserts take this registry lock, so none can attach between this recheck and the save.
+    let _watcher_registry = exact_episode.map(|_| lock_tmux_watcher_registry());
+    if let Some((_, watchers)) = exact_episode
+        && watchers.tmux_session_live_for_relay(require_tmux_session_name) == Some(true)
+    {
         return OrphanRelayReclaimOutcome::Skipped;
     }
     state.set_relay_owner_kind(RelayOwnerKind::None);
@@ -253,6 +261,7 @@ fn downgrade_orphan_owner_in_root(
 
 /// Watchdog / relay-recovery reclaim of the pinned episode's `SessionBoundRelay` row. The
 /// supervisor producer outlives the tmux watcher, so without a watcher the sink never hears it.
+/// The owner flips at once; the idle relay still waits the 300 s ownerless age from `updated_at`.
 pub(in crate::services::discord) fn reclaim_watcherless_session_bound_relay_owner(
     shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
@@ -276,7 +285,7 @@ pub(in crate::services::discord) fn reclaim_watcherless_session_bound_relay_owne
     {
         return OrphanRelayReclaimOutcome::Skipped;
     }
-    // Same first-line filter as #3960: a watermark already past the turn start means delivered.
+    // Only a watermark at EOF proves the whole turn delivered; a partial one leaves a suffix to send.
     let eof = state
         .output_path
         .as_deref()
@@ -289,14 +298,19 @@ pub(in crate::services::discord) fn reclaim_watcherless_session_bound_relay_owne
         tmux,
         eof,
     );
-    if committed > state.turn_start_offset.unwrap_or(state.last_offset) {
+    if committed > state.turn_start_offset.unwrap_or(state.last_offset)
+        && eof.is_none_or(|eof| committed >= eof)
+    {
         return OrphanRelayReclaimOutcome::Skipped;
     }
     let Some(root) = inflight_runtime_root() else {
         return OrphanRelayReclaimOutcome::IoError;
     };
+    #[cfg(test)]
+    tests::after_watcher_absence_check(channel_id);
     let identity = InflightTurnIdentity::from_state(&state);
-    downgrade_orphan_owner_in_root(&root, provider, channel_id, &identity, tmux, Some(pin))
+    let pinned = Some((pin, &shared.tmux_watchers));
+    downgrade_orphan_owner_in_root(&root, provider, channel_id, &identity, tmux, pinned)
 }
 
 /// Outcome of [`mark_session_bound_relay_delivered_locked`].
@@ -389,6 +403,35 @@ pub(super) fn mark_session_bound_relay_delivered_locked_in_root(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Barrier between the pinned reclaim's unlocked watcher-absence check and its locked downgrade.
+    static AFTER_WATCHER_ABSENCE_CHECK: std::sync::Mutex<Option<(u64, Box<dyn FnOnce() + Send>)>> =
+        std::sync::Mutex::new(None);
+
+    pub(super) fn after_watcher_absence_check(channel_id: u64) {
+        let mut slot = AFTER_WATCHER_ABSENCE_CHECK.lock().unwrap();
+        if slot.as_ref().is_some_and(|(id, _)| *id == channel_id)
+            && let Some((_, hook)) = slot.take()
+        {
+            drop(slot);
+            hook();
+        }
+    }
+
+    fn live_watcher(session: &str) -> crate::services::discord::TmuxWatcherHandle {
+        crate::services::discord::TmuxWatcherHandle {
+            tmux_session_name: session.to_string(),
+            output_path: "/tmp/adk-6210-other.jsonl".to_string(),
+            paused: std::sync::Arc::default(),
+            resume_offset: std::sync::Arc::default(),
+            cancel: std::sync::Arc::default(),
+            pause_epoch: std::sync::Arc::default(),
+            turn_delivered: std::sync::Arc::default(),
+            last_heartbeat_ts_ms: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(
+                crate::services::discord::tmux_watcher_now_ms(),
+            )),
+        }
+    }
 
     fn to_local(unix: i64) -> String {
         use chrono::TimeZone;
@@ -910,6 +953,7 @@ mod tests {
         let tmux = state.tmux_session_name.clone().expect("session");
         let identity = InflightTurnIdentity::from_state(&state);
         let pin = InflightEpisodePin::from_state(&state);
+        let watchers = TmuxWatcherRegistry::new();
         let downgrade = |pin: Option<&InflightEpisodePin>| {
             downgrade_orphan_owner_in_root(
                 root,
@@ -917,7 +961,7 @@ mod tests {
                 state.channel_id,
                 &identity,
                 &tmux,
-                pin,
+                pin.map(|pin| (pin, &watchers)),
             )
         };
         write_row_verbatim(root, &state);
@@ -959,6 +1003,12 @@ mod tests {
         }
 
         write_row_verbatim(root, &state);
+        // The in-lock recheck: a live watcher registered by now keeps the owner.
+        let live = live_watcher(&tmux);
+        let channel = poise::serenity_prelude::ChannelId::new(state.channel_id);
+        watchers.insert(channel, live);
+        assert_eq!(downgrade(Some(&pin)), OrphanRelayReclaimOutcome::Skipped);
+        watchers.remove(&channel);
         assert_eq!(downgrade(Some(&pin)), OrphanRelayReclaimOutcome::Downgraded);
         let path = inflight_state_path(root, &ProviderKind::Claude, state.channel_id);
         let row = load_inflight_state_unlocked(&path).expect("row survives");
@@ -966,6 +1016,41 @@ mod tests {
         assert_eq!(
             (row.turn_start_offset, row.last_offset),
             (state.turn_start_offset, state.last_offset)
+        );
+    }
+
+    /// #6210 P1-2: a watcher that attaches right after the unlocked absence check keeps the
+    /// owner; the downgrade rechecks under the registry lock before it commits.
+    #[test]
+    fn watcher_attaching_after_the_absence_check_keeps_the_session_bound_owner() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root = crate::config::set_agentdesk_root_for_test(tmp.path());
+        let mut state = orphan_row(now_unix());
+        state.ensure_finalizer_turn_id();
+        write_row_verbatim(&inflight_runtime_root().expect("root"), &state);
+        let pin = InflightEpisodePin::from_state(&state);
+        let (provider, channel_id) = (ProviderKind::Claude, state.channel_id);
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let (attach, watcher) = (shared.clone(), live_watcher("AgentDesk-claude-adk-cc"));
+        *AFTER_WATCHER_ABSENCE_CHECK.lock().unwrap() = Some((
+            channel_id,
+            Box::new(move || {
+                let channel = poise::serenity_prelude::ChannelId::new(channel_id);
+                attach.tmux_watchers.insert(channel, watcher);
+            }),
+        ));
+
+        let outcome =
+            reclaim_watcherless_session_bound_relay_owner(&shared, &provider, channel_id, &pin);
+        assert_eq!(outcome, OrphanRelayReclaimOutcome::Skipped);
+        assert!(
+            AFTER_WATCHER_ABSENCE_CHECK.lock().unwrap().is_none(),
+            "barrier ran"
+        );
+        let row = super::super::load_inflight_state(&provider, channel_id).expect("row");
+        assert_eq!(
+            row.effective_relay_owner_kind(),
+            RelayOwnerKind::SessionBoundRelay
         );
     }
 }
