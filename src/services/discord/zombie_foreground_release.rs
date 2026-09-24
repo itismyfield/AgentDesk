@@ -279,11 +279,11 @@ pub(crate) enum InflightEpisodeLookup {
 /// returning the claiming episode's identity costs no extra I/O and no extra
 /// parse pass.
 ///
-/// NOTE: `load_inflight_states` is not a read-only probe. It takes the
-/// per-path lock and deletes rows it finds malformed or provider-mismatched,
-/// backfills finalizer ids, and emits the one-to-one invariant event. That
-/// behaviour predates this function; it is named here because the reconciler
-/// now calls it from the boot sweep, which is the widest entry point it has.
+/// NOTE: the loader takes per-path locks to revalidate, backfills finalizer
+/// ids on rows it keeps, and emits the one-to-one invariant event. It never
+/// unlinks: a row its verdict would retire is hidden, so it reads `Unclaimed`
+/// here until the boot reaper retires it. The reconciler reads that as
+/// `Absent`, a named I20 violation until hidden rows report as unknown.
 pub(crate) fn inflight_episode_lookup_for_tmux_name(
     provider: &ProviderKind,
     tmux_name: &str,
@@ -291,7 +291,7 @@ pub(crate) fn inflight_episode_lookup_for_tmux_name(
     let Some(root) = super::inflight::inflight_runtime_root() else {
         return InflightEpisodeLookup::Unprobeable;
     };
-    // Keep the loader's cleanup/backfill behaviour, but retain whether every
+    // Keep the loader's backfill behaviour, but retain whether every
     // candidate row could be inspected. Only a missing provider directory is a
     // complete empty store; all other enumeration/read failures are unknown.
     let loaded = super::inflight::load_inflight_states_for_probe_from_root(&root, provider);
