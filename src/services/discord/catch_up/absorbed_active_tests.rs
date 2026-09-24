@@ -266,3 +266,129 @@ async fn a2_exhausted_rearm_budget_leaves_h_to_the_periodic_backstop() {
         backstop.enqueue_log()
     );
 }
+
+/// Only the checkpoint reply is on the phase-1 page; `ids` reach phase 2 alone.
+fn phase2_only(fx: &Fixture, channel_id: ChannelId, ids: &[MessageId]) -> StrictApi {
+    let checkpoint = MessageId::new(*fx.shared.last_message_ids.get(&channel_id).unwrap());
+    let api = StrictApi::new(&fx.shared)
+        .with_history(channel_id, vec![own_reply(channel_id, checkpoint)]);
+    ids.iter()
+        .fold(api, |api, id| api.arriving_at(1, human(channel_id, *id)))
+}
+
+/// r10 F1: H is Open on the phase-2 page and a newer X is accepted with no
+/// defer; X must not carry the checkpoint past H, and once the absorbing turn
+/// ends undelivered the barrier retry re-offers H.
+async fn assert_phase2_open_h_is_held_then_reoffered(
+    fx: &Fixture,
+    channel_id: ChannelId,
+    (checkpoint, h): (MessageId, MessageId),
+    ids: &[MessageId],
+) {
+    let held = (Some(checkpoint.get()), Some(checkpoint.get()));
+    assert_eq!(
+        fx.surfaces(channel_id),
+        held,
+        "X carried the checkpoint past H"
+    );
+    let retry = fx.pending(channel_id).expect("the open H keeps a retry");
+    assert!(
+        retry.checkpoint < h.get(),
+        "retry {} passed H {h}",
+        retry.checkpoint
+    );
+
+    discord::mailbox_finish_turn(&fx.shared, &fx.provider, channel_id).await;
+    let mut history = vec![own_reply(channel_id, checkpoint)];
+    history.extend(ids.iter().map(|id| human(channel_id, *id)));
+    let second = StrictApi::new(&fx.shared).with_history(channel_id, history);
+    fx.retry_sweep(&second, channel_id).await;
+    assert!(
+        accepted(&second).contains(&h.get()),
+        "{:?}",
+        second.enqueue_log()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase2_absorbed_refusal_then_accepted_x_does_not_leap_h() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(4_603_548);
+    let (checkpoint, h, x, p) = (id(1, 400), id(2, 150), id(3, 130), id(4, 120));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    let api = phase2_only(&fx, channel_id, &[h, x, p]).with_hooks(h, &[Hook::AbsorbInto(p)]);
+
+    fx.sweep(&api).await;
+
+    assert_eq!(
+        api.enqueue_log()[..2],
+        [(h.get(), false, ABSORBED), (x.get(), true, None)]
+    );
+    assert_phase2_open_h_is_held_then_reoffered(&fx, channel_id, (checkpoint, h), &[h, x, p]).await;
+}
+
+/// The membership-skip variant: P's merged head already absorbed H.
+#[tokio::test(flavor = "current_thread")]
+async fn phase2_absorbed_membership_then_accepted_x_does_not_leap_h() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(4_603_549);
+    let (checkpoint, h, x, p) = (id(1, 400), id(2, 150), id(3, 130), id(4, 120));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    absorb_and_claim(&fx.shared, &fx.provider, channel_id, &[h], p).await;
+    let api = phase2_only(&fx, channel_id, &[h, x, p]);
+
+    fx.sweep(&api).await;
+
+    assert_eq!(api.enqueue_log()[0], (x.get(), true, None));
+    assert_phase2_open_h_is_held_then_reoffered(&fx, channel_id, (checkpoint, h), &[h, x, p]).await;
+}
+
+/// The same leap on main's queue-membership arm (#5996): a queued M seen only
+/// on the phase-2 page holds the checkpoint and keeps a retry before it.
+#[tokio::test(flavor = "current_thread")]
+async fn phase2_queued_membership_then_accepted_x_does_not_leap_m() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(4_603_550);
+    let (checkpoint, m, x) = (id(1, 400), id(2, 150), id(3, 130));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    fx.queue(channel_id, m).await;
+    let api = phase2_only(&fx, channel_id, &[m, x]);
+
+    fx.sweep(&api).await;
+
+    let (first, enqueued, _) = api.enqueue_log()[0];
+    assert_eq!((first, enqueued), (x.get(), true), "X is accepted");
+    let held = (Some(checkpoint.get()), Some(checkpoint.get()));
+    assert_eq!(
+        fx.surfaces(channel_id),
+        held,
+        "X carried the checkpoint past M"
+    );
+    let retry = fx.pending(channel_id).expect("the open M keeps a retry");
+    assert!(
+        retry.checkpoint < m.get(),
+        "retry {} passed M {m}",
+        retry.checkpoint
+    );
+}
+
+/// A queued id at or under the checkpoint is already past the frontier: it
+/// neither holds a newer accepted X nor arms a retry below the checkpoint.
+#[tokio::test(flavor = "current_thread")]
+async fn phase2_open_id_under_the_checkpoint_does_not_seal() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(4_603_551);
+    let (reply, m, checkpoint, x) = (id(1, 500), id(2, 400), id(3, 300), id(4, 130));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    fx.queue(channel_id, m).await;
+    let history = vec![own_reply(channel_id, reply), human(channel_id, m)];
+    let api = StrictApi::new(&fx.shared)
+        .with_history(channel_id, history)
+        .arriving_at(1, human(channel_id, x));
+
+    fx.sweep(&api).await;
+
+    assert_eq!(api.enqueue_log(), [(x.get(), true, None)]);
+    assert_eq!(fx.surfaces(channel_id), (Some(x.get()), Some(x.get())));
+    assert_eq!(fx.pending(channel_id), None);
+}

@@ -92,19 +92,15 @@ use classification::{
     classify_catch_up_message, classify_catch_up_message_with_utility_resolution,
     is_restart_gap_notice,
 };
-#[cfg(test)]
-use phase2::catch_up_enqueue_accepted;
 use phase2::{
-    Phase2EnqueueCommit, Phase2RecoveryStats, advance_phase2_checkpoint,
+    Phase2EnqueueCommit, Phase2Frontier, Phase2RecoveryStats, advance_phase2_checkpoint,
     catch_up_last_item_dedup_is_checkpoint_safe, catch_up_remaining_queue_capacity,
     classify_phase2_enqueue_commit, log_catch_up_enqueue_not_accepted,
-    phase2_checkpoint_after_duplicate_commit, phase2_checkpoint_after_membership_skip,
-    phase2_retry_after_checkpoint,
 };
+#[cfg(test)]
+use phase2::{catch_up_enqueue_accepted, phase2_retry_after_checkpoint};
 use retry_state::merge_catch_up_retry_state;
-use settled_frontier::{
-    RetainedBarrier, SettledFrontier, clamp_retry_cursor, safe_durable_candidate,
-};
+use settled_frontier::{RetainedBarrier, SettledFrontier};
 use too_old_notice::{
     CATCH_UP_TOO_OLD_NOTICE_MAX_ITEMS, CatchUpTooOldDrop, CatchUpTooOldOutboxRequest,
     actionable_drop as catch_up_too_old_drop, catch_up_too_old_snippet,
@@ -757,8 +753,8 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
     // Phase 2 must not bypass an incomplete unbounded Recent scan and persist a
     // newer recovery across the same unknown lower gap.
     let mut incomplete_recent_channels: HashSet<ChannelId> = HashSet::new();
-    // Phase-1 barriers bound phase 2's durable write and every retry cursor.
-    let mut phase1_barriers: HashMap<ChannelId, RetainedBarrier> = HashMap::new();
+    // Open barriers bound phase 2's durable write and every retry cursor.
+    let mut open_barriers: HashMap<ChannelId, RetainedBarrier> = HashMap::new();
 
     // Pace successive per-channel REST scans so a many-channel sweep doesn't
     // fire as one tight burst (see `catch_up_scan_pace`). The first eligible
@@ -1289,7 +1285,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             );
         }
         if let Some(retained) = retained {
-            phase1_barriers.insert(channel_id, retained);
+            open_barriers.insert(channel_id, retained);
         }
     }
 
@@ -1387,18 +1383,11 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         // per channel. A Settled outcome in phase 2 simply skips (no enqueue, no
         // notice) — an already-answered message must not be re-surfaced.
         let settled_ids = settled_ledger_consult::settled_ids(provider, channel_id);
-        // Scan-local clamp only; the persisted checkpoint is never lowered.
-        let barrier = phase1_barriers
-            .get(&channel_id)
-            .map(|retained| retained.barrier);
-        let mut phase2_checkpoint =
-            (shared.last_message_ids.get(&channel_id)).map(|v| clamp_retry_cursor(*v, barrier));
+        let barrier = open_barriers.get(&channel_id).map(|r| r.barrier);
+        let mut frontier = Phase2Frontier::new(barrier, last_bot_response_id);
+        let live_checkpoint = shared.last_message_ids.get(&channel_id).map(|v| *v);
+        let mut phase2_checkpoint = frontier.scan_checkpoint(live_checkpoint);
         let phase2_checkpoint_start = phase2_checkpoint;
-        let mut max_recovered_id: Option<u64> = None;
-        let retry_cursor = |recovered, checkpoint| {
-            let cursor = phase2_retry_after_checkpoint(recovered, checkpoint, last_bot_response_id);
-            clamp_retry_cursor(cursor, barrier)
-        };
         let mut stats = Phase2RecoveryStats {
             returned: recent.len(),
             discovered: unanswered_slice.len(),
@@ -1436,7 +1425,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             if existing_ids.contains(&mid) {
                 stats.duplicate += 1;
                 phase2_checkpoint =
-                    phase2_checkpoint_after_membership_skip(phase2_checkpoint, &known_arms, mid);
+                    frontier.after_membership_skip(phase2_checkpoint, &known_arms, mid);
                 continue;
             }
             if phase2_checkpoint.is_some_and(|saved| mid <= saved) {
@@ -1467,7 +1456,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 discord_io::author_authorized(shared, msg.author.id.get()).await,
             ) {
                 CatchUpClassificationDecision::UtilityIdentityUnavailable => {
-                    let retry_after = retry_cursor(max_recovered_id, phase2_checkpoint);
+                    let retry_after = frontier.retry_cursor(phase2_checkpoint);
                     phase2_retry_after = rearm_catch_up_retry_after_defer(
                         shared,
                         channel_id,
@@ -1498,7 +1487,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             ));
 
             if stats.enqueued >= remaining_capacity {
-                let retry_after = retry_cursor(max_recovered_id, phase2_checkpoint);
+                let retry_after = frontier.retry_cursor(phase2_checkpoint);
                 let retry_after = arm_catch_up_retry_pending(shared, channel_id, retry_after);
                 phase2_retry_after = Some(retry_after);
                 stats.deferred += 1;
@@ -1555,7 +1544,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 Phase2EnqueueCommit::Accepted => {
                     existing_ids.insert(mid);
                     phase2_checkpoint = advance_phase2_checkpoint(phase2_checkpoint, mid);
-                    max_recovered_id = advance_phase2_checkpoint(max_recovered_id, mid);
+                    frontier.recovered(mid);
                     stats.enqueued += 1;
                 }
                 // #5996/#6035: only the active-turn refusal advances (`FrontierEvidence`).
@@ -1564,7 +1553,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 | Phase2EnqueueCommit::NotYetEvidenced) => {
                     existing_ids.insert(mid);
                     phase2_checkpoint =
-                        phase2_checkpoint_after_duplicate_commit(commit, phase2_checkpoint, mid);
+                        frontier.after_duplicate_commit(commit, phase2_checkpoint, mid);
                     stats.duplicate += 1;
                 }
                 Phase2EnqueueCommit::LastItemDedup => {
@@ -1578,7 +1567,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                         stats.duplicate += 1;
                     } else {
                         log_catch_up_enqueue_not_accepted("phase2", channel_id, msg.id, &enqueue);
-                        let retry_after = retry_cursor(max_recovered_id, phase2_checkpoint);
+                        let retry_after = frontier.retry_cursor(phase2_checkpoint);
                         phase2_retry_after = rearm_catch_up_retry_after_defer(
                             shared,
                             channel_id,
@@ -1594,7 +1583,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 }
                 Phase2EnqueueCommit::Deferred => {
                     log_catch_up_enqueue_not_accepted("phase2", channel_id, msg.id, &enqueue);
-                    let retry_after = retry_cursor(max_recovered_id, phase2_checkpoint);
+                    let retry_after = frontier.retry_cursor(phase2_checkpoint);
                     phase2_retry_after = rearm_catch_up_retry_after_defer(
                         shared,
                         channel_id,
@@ -1607,12 +1596,13 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             }
         }
 
-        if let Some(newest) = safe_durable_candidate(max_recovered_id, barrier) {
+        if let Some(newest) = frontier.durable() {
             advance_last_message_checkpoint(shared, provider, channel_id, MessageId::new(newest));
         }
+        frontier.retain_into(&mut open_barriers, channel_id, phase2_checkpoint);
         phase2_recovered += stats.enqueued;
         if stats.deferred > 0 && phase2_retry_after.is_none() {
-            phase1_barriers
+            open_barriers
                 .entry(channel_id)
                 .and_modify(|r| r.exhausted = true);
         }
@@ -1652,7 +1642,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
 
     // An open barrier must be reread next sweep; waiting on membership spends
     // no budget, and an exhausted budget is not reset by a fresh arm.
-    for (channel_id, retained) in phase1_barriers {
+    for (channel_id, retained) in open_barriers {
         if retained.exhausted {
             continue;
         }

@@ -10,6 +10,7 @@ use super::super::MailboxEnqueueOutcome;
 use super::super::recovery_known_ids::RecoveryKnownIdArm;
 use super::classification::CatchUpClassification;
 use super::frontier_evidence::FrontierEvidence;
+use super::settled_frontier::{RetainedBarrier, clamp_retry_cursor, safe_durable_candidate};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Phase2EnqueueCommit {
@@ -71,38 +72,123 @@ pub(super) fn advance_phase2_checkpoint(checkpoint: Option<u64>, message_id: u64
     Some(checkpoint.map_or(message_id, |saved| saved.max(message_id)))
 }
 
-/// #5996 / I20: skip and advance are not one decision. The skip is retried on
-/// the next scan; the advance forecloses the message. An id no arm claims
-/// resolves to no-advance — the retryable side. This is never reached for an id
-/// the same scan inserted, because each message in the slice is visited once.
-pub(super) fn phase2_checkpoint_after_membership_skip(
-    checkpoint: Option<u64>,
-    known_arms: &HashMap<u64, RecoveryKnownIdArm>,
-    message_id: u64,
-) -> Option<u64> {
-    let arm = known_arms.get(&message_id).copied();
-    let evidence = FrontierEvidence::of_known(CatchUpClassification::Duplicate, arm);
-    phase2_checkpoint_after_skip(evidence, checkpoint, message_id)
+/// #6035: phase 2's frontier. The first id this scan leaves open is a barrier
+/// like phase 1's, so no later accepted id carries the durable checkpoint or a
+/// retry cursor past it.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Phase2Frontier {
+    phase1_barrier: Option<u64>,
+    first_open: Option<u64>,
+    max_recovered: Option<u64>,
+    last_bot_response_id: u64,
 }
 
-/// #5996/#6035: only a refusal naming THIS message as the active turn advances.
-pub(super) fn phase2_checkpoint_after_duplicate_commit(
-    commit: Phase2EnqueueCommit,
-    checkpoint: Option<u64>,
-    message_id: u64,
-) -> Option<u64> {
-    phase2_checkpoint_after_skip(FrontierEvidence::of_commit(commit), checkpoint, message_id)
-}
+impl Phase2Frontier {
+    pub(super) fn new(phase1_barrier: Option<u64>, last_bot_response_id: u64) -> Self {
+        Self {
+            phase1_barrier,
+            first_open: None,
+            max_recovered: None,
+            last_bot_response_id,
+        }
+    }
 
-/// The advance forecloses the message, so only `Dispatched` evidence does.
-fn phase2_checkpoint_after_skip(
-    evidence: FrontierEvidence,
-    checkpoint: Option<u64>,
-    message_id: u64,
-) -> Option<u64> {
-    match evidence {
-        FrontierEvidence::Dispatched => advance_phase2_checkpoint(checkpoint, message_id),
-        FrontierEvidence::Open => checkpoint,
+    fn barrier(&self) -> Option<u64> {
+        match (self.phase1_barrier, self.first_open) {
+            (Some(phase1), Some(open)) => Some(phase1.min(open)),
+            (phase1, open) => phase1.or(open),
+        }
+    }
+
+    /// Scan-local clamp only; the persisted checkpoint is never lowered.
+    pub(super) fn scan_checkpoint(&self, live: Option<u64>) -> Option<u64> {
+        live.map(|checkpoint| clamp_retry_cursor(checkpoint, self.barrier()))
+    }
+
+    pub(super) fn recovered(&mut self, message_id: u64) {
+        self.max_recovered = advance_phase2_checkpoint(self.max_recovered, message_id);
+    }
+
+    /// #5996 / I20: skip and advance are not one decision. The skip is retried
+    /// on the next scan; the advance forecloses the message. An id no arm
+    /// claims resolves to no-advance — the retryable side. This is never
+    /// reached for an id the same scan inserted, because each message in the
+    /// slice is visited once.
+    pub(super) fn after_membership_skip(
+        &mut self,
+        checkpoint: Option<u64>,
+        known_arms: &HashMap<u64, RecoveryKnownIdArm>,
+        message_id: u64,
+    ) -> Option<u64> {
+        let arm = known_arms.get(&message_id).copied();
+        let evidence = FrontierEvidence::of_known(CatchUpClassification::Duplicate, arm);
+        self.after_skip(evidence, checkpoint, message_id)
+    }
+
+    /// #5996/#6035: only a refusal naming THIS message as the active turn advances.
+    pub(super) fn after_duplicate_commit(
+        &mut self,
+        commit: Phase2EnqueueCommit,
+        checkpoint: Option<u64>,
+        message_id: u64,
+    ) -> Option<u64> {
+        let evidence = FrontierEvidence::of_commit(commit);
+        self.after_skip(evidence, checkpoint, message_id)
+    }
+
+    /// The advance forecloses the message, so only `Dispatched` evidence does;
+    /// an `Open` id past the checkpoint seals the frontier instead.
+    fn after_skip(
+        &mut self,
+        evidence: FrontierEvidence,
+        checkpoint: Option<u64>,
+        message_id: u64,
+    ) -> Option<u64> {
+        match evidence {
+            FrontierEvidence::Dispatched => advance_phase2_checkpoint(checkpoint, message_id),
+            FrontierEvidence::Open if checkpoint.is_some_and(|saved| message_id <= saved) => {
+                checkpoint
+            }
+            FrontierEvidence::Open => {
+                let open = self.first_open.map_or(message_id, |o| o.min(message_id));
+                self.first_open = Some(open);
+                checkpoint
+            }
+        }
+    }
+
+    pub(super) fn retry_cursor(&self, checkpoint: Option<u64>) -> u64 {
+        let recovered = self.max_recovered;
+        let cursor =
+            phase2_retry_after_checkpoint(recovered, checkpoint, self.last_bot_response_id);
+        clamp_retry_cursor(cursor, self.barrier())
+    }
+
+    pub(super) fn durable(&self) -> Option<u64> {
+        safe_durable_candidate(self.max_recovered, self.barrier())
+    }
+
+    /// An id this scan left open is reread by the end-of-sweep retry arm.
+    pub(super) fn retain_into(
+        &self,
+        barriers: &mut HashMap<ChannelId, RetainedBarrier>,
+        channel_id: ChannelId,
+        checkpoint: Option<u64>,
+    ) {
+        let Some(barrier) = self.first_open.and(self.barrier()) else {
+            return;
+        };
+        let retry_after = self.retry_cursor(checkpoint);
+        (barriers.entry(channel_id))
+            .and_modify(|retained| {
+                retained.barrier = retained.barrier.min(barrier);
+                retained.retry_after = retained.retry_after.min(retry_after);
+            })
+            .or_insert(RetainedBarrier {
+                barrier,
+                retry_after,
+                exhausted: false,
+            });
     }
 }
 

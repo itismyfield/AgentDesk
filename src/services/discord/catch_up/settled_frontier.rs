@@ -77,7 +77,7 @@ impl SettledFrontier {
     }
 }
 
-/// Phase-1 barrier handed to phase 2 and to the end-of-sweep retry arm.
+/// An open barrier: phase 1 hands its own to phase 2; both reach the retry arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RetainedBarrier {
     pub(super) barrier: u64,
