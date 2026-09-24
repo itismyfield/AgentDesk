@@ -228,6 +228,12 @@ pub(crate) static ADOPT_FENCE_FORWARD_DISPATCHES: std::sync::Mutex<
     Vec<(crate::db::relay_dead_letter::RelayDeadLetterRecord, String)>,
 > = std::sync::Mutex::new(Vec::new());
 
+/// Bytes a test appends to a transcript just before custody reads it, as a live turn would.
+#[cfg(test)]
+static ADOPT_FENCE_FORWARD_TEST_GROWTH: std::sync::Mutex<
+    std::collections::BTreeMap<String, Vec<u8>>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
 /// What a fence-forward can keep of the unread range `[range_start, old EOF)`.
 #[derive(Debug, PartialEq, Eq)]
 enum UnreadRange {
@@ -245,6 +251,16 @@ fn snapshot_unread_range(old_path: Option<&str>, range_start: u64) -> Result<Unr
             "row has no saved transcript path",
         ));
     };
+    #[cfg(test)]
+    if let Some(tail) = (ADOPT_FENCE_FORWARD_TEST_GROWTH.lock())
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(path)
+    {
+        use std::io::Write as _;
+        let file = std::fs::OpenOptions::new().append(true).open(path);
+        file.and_then(|mut file| file.write_all(&tail))
+            .expect("grow");
+    }
     let mut bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -712,19 +728,25 @@ mod tests {
         assert_eq!(non_claude, None);
     }
 
+    fn fence_forwards(
+        channel_id: u64,
+    ) -> Vec<(crate::db::relay_dead_letter::RelayDeadLetterRecord, String)> {
+        ADOPT_FENCE_FORWARD_DISPATCHES
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .filter(|(record, _)| record.channel_id == channel_id.to_string())
+            .cloned()
+            .collect()
+    }
+
     /// Asserts exactly one fence-forward record (dead-letter + notice) and one violation.
     fn assert_one_fence_forward(
         events: &[crate::services::observability::events::StructuredEvent],
         channel_id: u64,
         needles: &[&str],
     ) {
-        let dispatches: Vec<_> = ADOPT_FENCE_FORWARD_DISPATCHES
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .iter()
-            .filter(|(record, _)| record.channel_id == channel_id.to_string())
-            .cloned()
-            .collect();
+        let dispatches = fence_forwards(channel_id);
         assert_eq!(dispatches.len(), 1, "Ok with no record is a silent loss");
         let (record, notice) = &dispatches[0];
         use crate::db::relay_dead_letter::KIND_ADOPT_FENCE_FORWARD;
@@ -897,23 +919,44 @@ mod tests {
         row: Option<inflight::InflightTurnState>,
     }
 
-    /// Drives `rebind_inflight_for_channel` for a TUI-direct row resting at `turn_start_offset`
-    /// 4096, with an optional newer lease turn and an in-memory committed offset. Without
-    /// `custody` the dead-letter INSERT fails (no pool). `operator` passes the transcript as an
-    /// operator `output_path` override.
+    /// What differs between the full-path rebind cases.
     #[cfg(unix)]
-    fn rebind_tui_direct_row(
-        channel_id: u64,
-        case: &str,
-        lease_turn_id: Option<&str>,
-        committed: u64,
-        row_runtime_kind: Option<RuntimeHandoffKind>,
-        custody: bool,
-        operator: bool,
-    ) -> Option<Rebind> {
+    #[derive(Clone, Copy)]
+    enum Knob {
+        /// A live lease names this turn id.
+        Lease(&'static str),
+        /// An idle tail/bridge already committed this offset.
+        Committed(u64),
+        /// The row lacks its durable `ClaudeTui` runtime stamp.
+        Unstamped,
+        /// The dead-letter INSERT succeeds; without it there is no pool, so it fails.
+        Custody,
+        /// The transcript comes in as an operator `output_path` override.
+        Operator,
+        /// A live turn appends these bytes after the rebind's stat, just before custody reads.
+        Grow(&'static str),
+    }
+
+    /// Drives `rebind_inflight_for_channel` for a TUI-direct row resting at `turn_start_offset`
+    /// 4096 on a Claude transcript, shaped by `knobs`.
+    #[cfg(unix)]
+    fn rebind_tui_direct_row(channel_id: u64, case: &str, knobs: &[Knob]) -> Option<Rebind> {
         use crate::services::platform::tmux;
         use crate::services::tui_prompt_dedupe as dedupe;
         use std::sync::atomic::Ordering::SeqCst;
+        let (mut lease_turn_id, mut committed, mut grow) = (None, 0, None);
+        let (mut custody, mut operator) = (false, false);
+        let mut row_runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        for knob in knobs {
+            match *knob {
+                Knob::Lease(turn_id) => lease_turn_id = Some(turn_id),
+                Knob::Committed(offset) => committed = offset,
+                Knob::Unstamped => row_runtime_kind = None,
+                Knob::Custody => custody = true,
+                Knob::Operator => operator = true,
+                Knob::Grow(tail) => grow = Some(tail),
+            }
+        }
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -941,7 +984,8 @@ mod tests {
         let transcript = tmp.path().join("projects").join(SESSION_FILE);
         std::fs::create_dir_all(transcript.parent().unwrap()).expect("projects dir");
         let eof = write_transcript(&transcript, &"BACKLOG_BODY_6159 ".repeat(512));
-        let mut row = tui_direct_row(channel_id, &session, transcript.to_str().unwrap());
+        let path = transcript.to_str().unwrap();
+        let mut row = tui_direct_row(channel_id, &session, path);
         row.runtime_kind = row_runtime_kind;
         assert!(inflight::save_inflight_state_if_absent(&row).expect("persist row"));
         if let Some(turn_id) = lease_turn_id {
@@ -955,12 +999,17 @@ mod tests {
                 .unwrap_or_else(|error| error.into_inner())
                 .insert(channel_id.to_string());
         }
+        if let Some(tail) = grow {
+            (ADOPT_FENCE_FORWARD_TEST_GROWTH.lock())
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(path.to_string(), tail.as_bytes().to_vec());
+        }
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = poise::serenity_prelude::ChannelId::new(channel_id);
         let coord = shared.tmux_relay_coord(channel);
         coord.confirmed_end_offset.store(committed, SeqCst);
         let http = std::sync::Arc::new(poise::serenity_prelude::Http::new("Bot test-token"));
-        let output = operator.then(|| transcript.to_str().unwrap());
+        let output = operator.then_some(path);
         let overrides =
             super::super::ManualRebindOverrides::validated(&ProviderKind::Claude, output, None)
                 .expect("operator override");
@@ -993,21 +1042,30 @@ mod tests {
         })
     }
 
+    /// A refused rebind leaves the row's cursor on the unread range and announces nothing.
+    #[cfg(unix)]
+    fn assert_cursor_kept(rebind: Rebind, channel_id: u64) {
+        assert!(rebind.eof > 4_096, "the unread range is not empty");
+        assert!(rebind.initial.is_err(), "must fail: {:?}", rebind.initial);
+        let row = rebind.row.expect("row survives a failed rebind");
+        let cursor = (row.turn_start_offset, row.last_offset);
+        assert_eq!(cursor, (Some(4_096), 4_096), "cursor must not move to EOF");
+        assert!(fence_forwards(channel_id).is_empty(), "nothing was fenced");
+    }
+
     #[cfg(unix)]
     #[test]
     fn rebind_fences_a_tui_direct_row_forward_past_a_newer_turn_and_records_it() {
         let channel_id = 6_159_003_u64;
-        let claude = Some(RuntimeHandoffKind::ClaudeTui);
-        let Some(rebind) =
-            rebind_tui_direct_row(channel_id, "mixed", Some("turn-b"), 0, claude, true, false)
-        else {
+        let knobs = [Knob::Lease("turn-b"), Knob::Custody];
+        let Some(rebind) = rebind_tui_direct_row(channel_id, "mixed", &knobs) else {
             return;
         };
         let eof = rebind.eof;
         assert_eq!(
             rebind.initial.ok(),
             Some(eof),
-            "the newer turn must not replay here"
+            "the newer turn must not replay"
         );
         // The dead-letter keeps the dropped range's body; the notice names its size.
         let dropped = eof - 4_096;
@@ -1024,16 +1082,8 @@ mod tests {
     #[test]
     fn rebind_preserves_a_tui_direct_row_but_never_below_the_committed_offset() {
         let channel_id = 6_159_004_u64;
-        let claude = Some(RuntimeHandoffKind::ClaudeTui);
-        let Some(rebind) = rebind_tui_direct_row(
-            channel_id,
-            "keep",
-            Some("turn-a"),
-            8_192,
-            claude,
-            true,
-            false,
-        ) else {
+        let knobs = [Knob::Lease("turn-a"), Knob::Committed(8_192), Knob::Custody];
+        let Some(rebind) = rebind_tui_direct_row(channel_id, "keep", &knobs) else {
             return;
         };
         assert!(rebind.eof > 8_192);
@@ -1042,13 +1092,8 @@ mod tests {
             Some(8_192),
             "resume, clamped to committed"
         );
-        let dispatches = ADOPT_FENCE_FORWARD_DISPATCHES
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let fenced = dispatches
-            .iter()
-            .any(|(record, _)| record.channel_id == channel_id.to_string());
-        assert!(!fenced, "preserve is not a fence-forward");
+        let fenced = fence_forwards(channel_id);
+        assert!(fenced.is_empty(), "preserve is not a fence-forward");
     }
 
     /// Without a live lease naming the row's turn, the range may hold a newer turn.
@@ -1056,10 +1101,7 @@ mod tests {
     #[test]
     fn rebind_fences_a_tui_direct_row_whose_turn_identity_is_unknown() {
         let channel_id = 6_159_006_u64;
-        let claude = Some(RuntimeHandoffKind::ClaudeTui);
-        let Some(rebind) =
-            rebind_tui_direct_row(channel_id, "nolease", None, 0, claude, true, false)
-        else {
+        let Some(rebind) = rebind_tui_direct_row(channel_id, "nolease", &[Knob::Custody]) else {
             return;
         };
         assert_eq!(
@@ -1075,43 +1117,19 @@ mod tests {
     #[test]
     fn rebind_keeps_the_row_offsets_when_the_unread_range_is_not_in_custody() {
         let channel_id = 6_159_007_u64;
-        let claude = Some(RuntimeHandoffKind::ClaudeTui);
-        let Some(rebind) = rebind_tui_direct_row(
-            channel_id,
-            "nocustody",
-            Some("turn-b"),
-            0,
-            claude,
-            false,
-            false,
-        ) else {
+        let knobs = [Knob::Lease("turn-b")];
+        let Some(rebind) = rebind_tui_direct_row(channel_id, "nocustody", &knobs) else {
             return;
         };
-        assert!(rebind.eof > 4_096, "the unread range is not empty");
-        assert!(
-            rebind.initial.is_err(),
-            "rebind must fail: {:?}",
-            rebind.initial
-        );
-        let row = rebind.row.expect("row survives a failed rebind");
-        let cursor = (row.turn_start_offset, row.last_offset);
-        assert_eq!(cursor, (Some(4_096), 4_096), "cursor must not move to EOF");
-        let dispatches = ADOPT_FENCE_FORWARD_DISPATCHES
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let announced = dispatches
-            .iter()
-            .any(|(record, _)| record.channel_id == channel_id.to_string());
-        assert!(!announced, "nothing was fenced, so nothing is announced");
+        assert_cursor_kept(rebind, channel_id);
     }
 
     #[cfg(unix)]
     #[test]
     fn rebind_never_rebases_an_unstamped_tui_direct_row_to_eof_without_a_record() {
         let channel_id = 6_159_005_u64;
-        let Some(rebind) =
-            rebind_tui_direct_row(channel_id, "unstamped", None, 0, None, true, false)
-        else {
+        let knobs = [Knob::Unstamped, Knob::Custody];
+        let Some(rebind) = rebind_tui_direct_row(channel_id, "unstamped", &knobs) else {
             return;
         };
         assert_eq!(rebind.initial.ok(), Some(rebind.eof));
@@ -1124,42 +1142,19 @@ mod tests {
     #[test]
     fn rebind_with_an_output_path_override_keeps_the_row_offsets_without_custody() {
         let channel_id = 6_159_011_u64;
-        let claude = Some(RuntimeHandoffKind::ClaudeTui);
-        let Some(rebind) = rebind_tui_direct_row(
-            channel_id,
-            "opnocustody",
-            Some("turn-a"),
-            0,
-            claude,
-            false,
-            true,
-        ) else {
+        let knobs = [Knob::Lease("turn-a"), Knob::Operator];
+        let Some(rebind) = rebind_tui_direct_row(channel_id, "opnocustody", &knobs) else {
             return;
         };
-        assert!(
-            rebind.initial.is_err(),
-            "rebind must fail: {:?}",
-            rebind.initial
-        );
-        let row = rebind.row.expect("row survives a failed rebind");
-        let cursor = (row.turn_start_offset, row.last_offset);
-        assert_eq!(cursor, (Some(4_096), 4_096), "cursor must not move to EOF");
+        assert_cursor_kept(rebind, channel_id);
     }
 
     #[cfg(unix)]
     #[test]
     fn rebind_with_an_output_path_override_rebases_to_eof_only_after_custody() {
         let channel_id = 6_159_012_u64;
-        let claude = Some(RuntimeHandoffKind::ClaudeTui);
-        let Some(rebind) = rebind_tui_direct_row(
-            channel_id,
-            "opcustody",
-            Some("turn-a"),
-            0,
-            claude,
-            true,
-            true,
-        ) else {
+        let knobs = [Knob::Lease("turn-a"), Knob::Operator, Knob::Custody];
+        let Some(rebind) = rebind_tui_direct_row(channel_id, "opcustody", &knobs) else {
             return;
         };
         let eof = rebind.eof;
@@ -1167,6 +1162,29 @@ mod tests {
         let row = rebind.row.expect("adopted row");
         assert_eq!((row.turn_start_offset, row.last_offset), (Some(eof), eof));
         let needles = ["cause=operator_override", "BACKLOG_BODY_6159"];
+        assert_one_fence_forward(&rebind.events, channel_id, &needles);
+    }
+
+    /// Bytes a live turn appends after the rebind's stat are kept, so the fence lands past them
+    /// too: the watcher and the row skip exactly what custody kept, not the stale stat.
+    #[cfg(unix)]
+    #[test]
+    fn rebind_fences_at_the_end_of_the_kept_range_when_the_transcript_grows() {
+        let channel_id = 6_159_013_u64;
+        let knobs = [
+            Knob::Lease("turn-b"),
+            Knob::Custody,
+            Knob::Grow("\nGROWN_6159"),
+        ];
+        let Some(rebind) = rebind_tui_direct_row(channel_id, "grown", &knobs) else {
+            return;
+        };
+        let kept_end = rebind.eof + "\nGROWN_6159".len() as u64;
+        assert_eq!(rebind.initial.ok(), Some(kept_end));
+        let row = rebind.row.expect("adopted row");
+        let cursor = (row.turn_start_offset, row.last_offset);
+        assert_eq!(cursor, (Some(kept_end), kept_end));
+        let needles = ["GROWN_6159", &format!("old_eof={kept_end}")];
         assert_one_fence_forward(&rebind.events, channel_id, &needles);
     }
 }
