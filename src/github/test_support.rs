@@ -35,13 +35,11 @@ impl std::io::Write for LogBuffer {
 pub(super) struct LogCapture {
     pub dispatch: tracing::Dispatch,
     output: LogBuffer,
-    // Two live dispatchers prevent a parallel test from caching no interest
-    // for the shared warning callsite while it has no local subscriber.
-    _other_dispatch: tracing::Dispatch,
 }
 
 impl LogCapture {
     pub fn new() -> Self {
+        crate::logging::test_capture::pin_callsite_interest();
         let output = LogBuffer(Arc::new(Mutex::new(Vec::new())));
         let writer = output.clone();
         let subscriber = tracing_subscriber::fmt()
@@ -53,7 +51,6 @@ impl LogCapture {
         Self {
             dispatch: tracing::Dispatch::new(subscriber),
             output,
-            _other_dispatch: tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()),
         }
     }
 

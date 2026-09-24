@@ -29,6 +29,133 @@ pub(crate) fn tracing_env_filter() -> Result<EnvFilter> {
     Ok(EnvFilter::from_default_env().add_directive(directive))
 }
 
+/// Test log capture. While at most one dispatcher is registered, tracing-core
+/// caches a callsite's interest from whichever thread hits it first, so a
+/// subscriber-less test thread can cache `never` under another test's capture.
+#[cfg(test)]
+pub(crate) mod test_capture {
+    use std::sync::OnceLock;
+
+    use tracing::level_filters::LevelFilter;
+    use tracing::subscriber::{Interest, Subscriber};
+    use tracing::{Dispatch, Event, Metadata, span};
+
+    /// Registered but never installed as any thread's default, so it receives no
+    /// events. `sometimes` keeps every callsite's cached interest off `never`.
+    struct InterestPin;
+
+    impl Subscriber for InterestPin {
+        fn register_callsite(&self, _: &'static Metadata<'static>) -> Interest {
+            Interest::sometimes()
+        }
+
+        // OFF is the identity for the global max level, which stays the max over
+        // the real dispatchers.
+        fn max_level_hint(&self) -> Option<LevelFilter> {
+            Some(LevelFilter::OFF)
+        }
+
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            false
+        }
+
+        fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
+
+        fn event(&self, _: &Event<'_>) {}
+
+        fn enter(&self, _: &span::Id) {}
+
+        fn exit(&self, _: &span::Id) {}
+    }
+
+    /// Call before installing a capture subscriber. Two permanent registrations
+    /// keep tracing-core off its single-dispatcher path for the whole process.
+    pub(crate) fn pin_callsite_interest() {
+        static PINS: OnceLock<[Dispatch; 2]> = OnceLock::new();
+        PINS.get_or_init(|| [Dispatch::new(InterestPin), Dispatch::new(InterestPin)]);
+    }
+
+    mod tests {
+        use super::pin_callsite_interest;
+        use std::sync::mpsc;
+
+        #[derive(Clone, Default)]
+        struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl std::io::Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+            type Writer = Captured;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        macro_rules! fresh_callsites {
+            ($($n:literal)*) => {
+                [$({
+                    fn emit() {
+                        tracing::debug!(probe = $n, "interest pin probe");
+                    }
+                    emit as fn()
+                }),*]
+            };
+        }
+
+        /// Each probe callsite is registered first by a thread with no subscriber
+        /// while the capture is live; the capture must still see it.
+        #[test]
+        fn a_callsite_first_hit_without_a_subscriber_still_reaches_a_live_capture() {
+            let probes = fresh_callsites!(0 1 2 3 4 5 6 7);
+            let mut lost = Vec::new();
+            for (n, emit) in probes.into_iter().enumerate() {
+                pin_callsite_interest();
+                let writer = Captured::default();
+                let subscriber = tracing_subscriber::fmt()
+                    .with_max_level(tracing::Level::DEBUG)
+                    .with_ansi(false)
+                    .without_time()
+                    .with_writer(writer.clone())
+                    .finish();
+                let (ready_tx, ready_rx) = mpsc::channel();
+                let (hit_tx, hit_rx) = mpsc::channel();
+                let foreign = std::thread::spawn(move || {
+                    ready_rx.recv().unwrap();
+                    emit();
+                    hit_tx.send(()).unwrap();
+                });
+                tracing::subscriber::with_default(subscriber, || {
+                    ready_tx.send(()).unwrap();
+                    hit_rx.recv().unwrap();
+                    emit();
+                });
+                foreign.join().unwrap();
+                let logs = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+                if !logs.contains(&format!("probe={n}")) {
+                    lost.push(n);
+                }
+            }
+            assert!(lost.is_empty(), "capture lost probe callsites {lost:?}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,6 +230,7 @@ mod tests {
             })
             .finish();
 
+        crate::logging::test_capture::pin_callsite_interest();
         tracing::subscriber::with_default(subscriber, emit);
         String::from_utf8(buffer.lock().unwrap().clone()).unwrap()
     }

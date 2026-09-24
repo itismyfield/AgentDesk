@@ -438,6 +438,7 @@ mod tests {
                 buffer: buffer.clone(),
             })
             .finish();
+        crate::logging::test_capture::pin_callsite_interest();
         let _guard = tracing::subscriber::set_default(subscriber);
 
         let outcome = do_finalize(

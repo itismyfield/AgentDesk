@@ -1005,6 +1005,7 @@ mod tests {
             .without_time()
             .with_writer(writer)
             .finish();
+        crate::logging::test_capture::pin_callsite_interest();
         let guard = tracing::subscriber::set_default(subscriber);
         f();
         drop(guard);

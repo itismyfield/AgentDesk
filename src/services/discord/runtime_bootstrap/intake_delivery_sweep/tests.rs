@@ -227,6 +227,7 @@ async fn sweep_is_bounded_and_ordered_and_logs_truncation_pg() {
             buffer: Arc::clone(&writer_buffer),
         })
         .finish();
+    crate::logging::test_capture::pin_callsite_interest();
     let _guard = tracing::subscriber::set_default(subscriber);
     let stats = sweep_once(&pool, READY, cutoffs(now), 1).await.unwrap();
     drop(_guard);

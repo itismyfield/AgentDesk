@@ -4838,6 +4838,7 @@ mod tests {
         for message in messages {
             state.push_message_text(message);
         }
+        crate::logging::test_capture::pin_callsite_interest();
         tracing::subscriber::with_default(subscriber, || {
             promote_task_complete_fallback_text(&mut state)
         });

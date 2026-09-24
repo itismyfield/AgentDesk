@@ -205,6 +205,7 @@ async fn terminal_delivery_epilogue_routes_identity_mismatch_to_warn() {
         .without_time()
         .with_writer(CapturingWriter(buffer.clone()))
         .finish();
+    crate::logging::test_capture::pin_callsite_interest();
     let _subscriber_guard = tracing::subscriber::set_default(subscriber);
 
     handle_delivery_epilogue(
