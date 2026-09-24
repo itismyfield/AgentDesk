@@ -496,29 +496,45 @@ that retires turn-lifetime state.
   path then refreshes that row onto the new nonce and keeps its source and
   progress. Re-adoption is the exception, and it must itself cross a fenced
   admission — a compare-and-set that refuses an occupied slot and refuses an
-  episode the mailbox already released. Current examples are restart
-  restoration (`RecoveryKickoff`, and the pane-alive and boot watcher reattach
-  through `reregister_active_turn_from_inflight`), runtime/manual rebind (the
-  operator rebind route, automatic watcher reattach and watcher respawn, all
-  through `reregister_active_turn_from_inflight`), and TUI-direct dormant
-  resumption (`capture_dormant`, behind the idle unpublished resume and the
-  idle partial recovery) together with TUI-direct admission over a matching
-  row (`prepare_admission`, both its retained-allocation branch and its
-  fresh-token branch). A pending-start replay is construction under the same
+  episode the mailbox already released. The released-episode check names the
+  row's episode, not the token being installed. The current re-adoption paths
+  are restart restoration (`RecoveryKickoff`, and the pane-alive and boot
+  watcher reattach through `reregister_active_turn_from_inflight`),
+  runtime/manual rebind (the operator rebind route, automatic watcher reattach
+  and watcher respawn, all through `reregister_active_turn_from_inflight`), and
+  TUI-direct dormant resumption (`capture_dormant`, behind the idle unpublished
+  resume and the idle partial recovery) together with TUI-direct admission over
+  a matching row (`prepare_admission`, both its retained-allocation branch and
+  its fresh-token branch). Listing a path classifies it as re-adoption; it does
+  not certify it fenced. A pending-start replay is construction under the same
   test — only while no matching row exists. This is an enumeration, not a
-  survey (see I20). Known gaps (#5951): dormant resumption and TUI-direct
-  admission over a matching row, retained or fresh, are admitted through the
-  unfenced claim; the re-mint fence is raised only by an exact-nonce release,
-  so an episode ended by a channel-scoped release can be re-minted from a row
-  that outlived it; and the fence lives in the mailbox actor, so a registry
-  purge that recreates the actor forgets it.
+  survey (see I20). The current re-mint fence proves only a release seen by
+  the current process's current mailbox actor incarnation, so today only
+  runtime/manual rebind within that incarnation's history is fenced. Known
+  gaps (#5951): restart `RecoveryKickoff` is a compare-and-set on slot
+  occupancy only and never consults the re-mint fence; the fence is in-memory,
+  so the restart pane-alive and boot watcher reattach refuse only releases
+  the new process itself saw and cannot refuse an episode a prior process
+  released — for example `OperatorRelease::claim` commits the exact mailbox
+  release before it clears the durable row, so a process death between the
+  two leaves a row for an already-released episode that the next boot
+  re-adopts; dormant resumption and TUI-direct admission over a matching row,
+  retained or fresh, are admitted through the unfenced claim; the re-mint
+  fence is raised only by an exact-nonce release, so an episode ended by a
+  channel-scoped release can be re-minted from a row that outlived it; and
+  the fence lives in the mailbox actor, so a registry purge that recreates
+  the actor forgets it. Fenced restart re-adoption needs a durable release
+  authority that outlives the process.
 - Episode identity: `(user_msg_id ≠ 0, turn_nonce, start cutoff)`. The nonce
   compares exactly; `None` is an exact legacy value, never a wildcard (I8). The
   cutoff is an `Instant` captured BEFORE the observation the writer decided on,
   so an episode admitted after that observation cannot match. A writer holding
   the episode's own `Arc<CancelToken>` may add pointer equality.
-- Writer grades. Every retire/clear of the lease, the row, or queued work is
-  exactly one of:
+- Writer grades. Every retire/clear of the lease or the row, and every
+  channel-wide purge of queued work, is exactly one of the grades below.
+  Item-scoped queue lifecycle — dequeuing or cancelling one exact queued
+  message (`mailbox_cancel_queued_primary_message`) — retires no episode and
+  is outside them:
   1. OWNER — the episode's driver ends its own episode with its captured
      identity. Lifecycle authority; it needs no progress witness.
   2. OBSERVER — a repair/recovery consumer retires the episode it observed: the
@@ -537,8 +553,12 @@ that retires turn-lifetime state.
      the observation boundary of its stale decision, together with the
      identity and cutoff, never a value read after that decision. A successor
      that adopts or re-inserts between the decision and a later capture would
-     be captured as the writer's own. Pointer or value equality alone does not
-     name an episode.
+     be captured as the writer's own. The capture also records a successor
+     still pending admission — one that reserved the watcher or inserted the
+     thread-parent pair before the observation but has not been admitted yet
+     — and the writer leaves a pending successor's side effect alone; a
+     pending reservation that is abandoned rolls itself back. Pointer or value
+     equality alone does not name an episode.
   3. TEARDOWN — channel-wide destruction whose target is not named by an
      episode. It needs two things that answer different questions.
      A stale-target fence answers WHO is destroyed: the teardown commits only
@@ -559,8 +579,9 @@ that retires turn-lifetime state.
         sweep. It owes I20's terminal or progress warrant for what it destroys,
         in addition to the fence, and it destroys only what that warrant
         covers. A warrant about a provider session or a dispatch does not cover
-        queued work or a dispatch reservation, so an automatic teardown releases
-        and never purges.
+        queued work or a dispatch reservation: with only such a warrant it may
+        release the covered state but must not purge queued work or a
+        dispatch reservation.
   Forbidden as authority: channel scope alone, message id alone,
   `user_msg_id == 0` alone, the `cancelled` flag alone, age, tmux session name,
   an unchanged epoch alone.
@@ -569,12 +590,16 @@ that retires turn-lifetime state.
   and completion signals are keyed by channel and belong to the registered
   successor, and a handle cloned before the purge still reaches the closed
   actor. The refusal binds the wrapper that sent the request as well as the
-  actor arm: every mutating reply says whether it was accepted, and a refused
-  one runs none of the wrapper's channel-keyed follow-up — the `recovery_done`
-  signal, completion events, queue-exit feedback — because that key names the
-  successor too. Admission memory that outlives one episode (the re-mint
-  fence) is carried to the successor actor.
-- Refusal is the correct outcome, not an error. A mismatch, a stale epoch or a
+  actor arm: a closed/stale request must be distinguishable from an accepted
+  mutation before any channel-keyed wrapper post-effect — the `recovery_done`
+  signal, completion events, queue-exit feedback — can commit, because that
+  key names the successor too; alternatively those effects must be part of
+  the same accepted actor operation. An accepted reply's follow-up is bound
+  to the incarnation that accepted it, never re-resolved by channel, because
+  a purge may register a successor between the reply and the follow-up.
+  Admission memory that outlives one episode (the re-mint fence) is carried
+  to the successor actor.
+- A refusal is fail-closed and observable. A mismatch, a stale epoch or a
   closed actor leaves the successor's token, owner, message id, nonce, queue,
   dispatch reservation, row, watcher, recovery signal and `global_active`
   unchanged and is reported by status/log. Cost asymmetry as in I20.
@@ -594,9 +619,12 @@ that retires turn-lifetime state.
   pointer-bound watcher cleanup under reuse, value-bound thread-parent cleanup,
   mutations accepted by a purged actor, channel-keyed wrapper follow-up that
   runs even when the request reached a closed actor (the `recovery_done`
-  signal, completion events, queue-exit feedback), TUI-direct admission over a
-  matching row through the unfenced claim, and the other admission gaps above
-  remain in production; each is assigned to a #5951 slice.
+  signal, completion events, queue-exit feedback), accepted wrapper follow-up
+  re-resolved by channel, side effects of a pending thread-parent or watcher
+  successor, restart `RecoveryKickoff` without a re-mint check, restart
+  reattach that cannot see a prior process's release, TUI-direct admission
+  over a matching row through the unfenced claim, and the other admission
+  gaps above remain in production; each is assigned to a #5951 slice.
 - Invariant key: `turn_writer_names_its_episode`. This section lands the
   contract only: the `record_invariant_check` wiring and a deliberate-violation
   test per writer (steps 2 and 3 below) belong to the #5951 slices that close
