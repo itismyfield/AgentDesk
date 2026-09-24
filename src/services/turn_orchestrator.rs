@@ -79,7 +79,7 @@ use queue_cancellation::{
     has_soft_intervention,
 };
 pub(crate) use recovery_kickoff::RecoveryKickoffResult;
-use recovery_kickoff::occupied_kickoff_outcome;
+use recovery_kickoff::{occupied_kickoff_outcome, reset_activation_signals};
 pub(crate) use reply_results::{
     HasPendingSoftQueueResult, QueuePersistenceFailure, RestartDrainAllResult, RestartDrainResult,
     TryStartTurnResult,
@@ -2159,7 +2159,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         let _ = reply.send(outcome);
                         continue;
                     }
-                    reset_turn_finished_signal(channel_id);
+                    reset_activation_signals(channel_id);
                     let activated_turn = state.cancel_token.is_none();
                     state.active_turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
                     state

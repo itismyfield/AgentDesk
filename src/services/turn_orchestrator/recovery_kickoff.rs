@@ -1,8 +1,9 @@
 use std::sync::atomic::Ordering;
 
-use poise::serenity_prelude::MessageId;
+use poise::serenity_prelude::{ChannelId, MessageId};
 
-use super::ChannelMailboxState;
+use super::turn_finished_signal::reset_turn_finished_signal;
+use super::{ChannelMailboxRegistry, ChannelMailboxState};
 use crate::services::provider::CancelToken;
 
 /// Outcome of a `RecoveryKickoff`. Only `Activated` installed the candidate;
@@ -51,5 +52,14 @@ pub(super) fn occupied_kickoff_outcome(
         RecoveryKickoffResult::AlreadyActiveSameEpisode
     } else {
         RecoveryKickoffResult::OccupiedDifferentEpisode
+    }
+}
+
+/// Runs only on the empty-slot `Activated` transition, before `recovery_started_at`
+/// is observable, so a refusal never clears a live recovery's `recovery_done` latch.
+pub(super) fn reset_activation_signals(channel_id: ChannelId) {
+    reset_turn_finished_signal(channel_id);
+    if let Some(recovery_done) = ChannelMailboxRegistry::global_recovery_done(channel_id) {
+        recovery_done.reset();
     }
 }

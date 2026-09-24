@@ -27,6 +27,13 @@ async fn signal_latched(registry: &ChannelMailboxRegistry, channel_id: ChannelId
         .is_ok()
 }
 
+async fn recovery_done_latched(registry: &ChannelMailboxRegistry, channel_id: ChannelId) -> bool {
+    let signal = registry.recovery_done(channel_id);
+    tokio::time::timeout(std::time::Duration::from_millis(25), signal.wait())
+        .await
+        .is_ok()
+}
+
 /// Every field an occupant's release or liveness gates read back.
 #[derive(Debug, PartialEq)]
 struct Occupant {
@@ -83,7 +90,11 @@ async fn start_a(handle: &ChannelMailboxHandle, msg: u64, nonce: &str) -> Arc<Ca
 
 #[tokio::test]
 async fn different_episode_kickoff_leaves_occupant_and_signal_untouched() {
-    for (channel, b_msg, b_nonce) in [(5_951_101, 202, "b"), (5_951_102, 101, "b")] {
+    for (channel, b_msg, b_nonce) in [
+        (5_951_101, 202, "b"),
+        (5_951_102, 101, "b"),
+        (5_951_112, 202, "a"),
+    ] {
         let registry = ChannelMailboxRegistry::default();
         let channel_id = ChannelId::new(channel);
         let handle = registry.handle(channel_id);
@@ -128,6 +139,7 @@ async fn empty_slot_kickoff_installs_and_releases_its_own_episode() {
     let channel_id = ChannelId::new(5_951_104);
     let handle = registry.handle(channel_id);
     registry.turn_finished(channel_id).mark_done();
+    registry.recovery_done(channel_id).mark_done();
     let token = episode(Some("r"));
 
     let result = handle
@@ -143,6 +155,7 @@ async fn empty_slot_kickoff_installs_and_releases_its_own_episode() {
     assert!(installed.recovery_started_at.is_some());
     assert!(installed.turn_started_at.is_some());
     assert!(!signal_latched(&registry, channel_id).await);
+    assert!(!recovery_done_latched(&registry, channel_id).await);
     let removed = finish_episode(&handle, MessageId::new(301), "r").await;
     assert!(removed.is_some_and(|removed| Arc::ptr_eq(&removed, &token)));
     assert!(!handle.has_active_turn().await.unwrap());
@@ -174,6 +187,23 @@ async fn cancelled_occupant_is_not_replaced_until_its_exact_finish() {
         occupant(&handle).await.token,
         Arc::as_ptr(&token_b) as usize
     );
+}
+
+#[tokio::test]
+async fn cancelled_occupant_wins_over_an_exact_same_episode_match() {
+    let registry = ChannelMailboxRegistry::default();
+    let channel_id = ChannelId::new(5_951_113);
+    let handle = registry.handle(channel_id);
+    let token_a = start_a(&handle, 101, "a").await;
+    token_a.publish_cancel("recovery-kickoff-cas-test".to_string());
+    let before = occupant(&handle).await;
+
+    let result = handle
+        .recovery_kickoff(episode(Some("a")), OWNER_A, Some(MessageId::new(101)))
+        .await;
+
+    assert_eq!(result, RecoveryKickoffResult::OccupiedCancelled);
+    assert_eq!(occupant(&handle).await, before);
 }
 
 #[tokio::test]
@@ -209,12 +239,17 @@ async fn refused_kickoffs_never_reset_the_finished_signal() {
             token_a.publish_cancel("recovery-kickoff-cas-test".to_string());
         }
         registry.turn_finished(channel_id).mark_done();
+        registry.recovery_done(channel_id).mark_done();
 
         let result = handle
             .recovery_kickoff(episode(Some(nonce)), OWNER_B, Some(MessageId::new(msg)))
             .await;
 
         assert_eq!(result, expected);
+        assert!(
+            recovery_done_latched(&registry, channel_id).await,
+            "channel {channel}: refused kickoff reset the recovery_done latch"
+        );
         assert!(
             signal_latched(&registry, channel_id).await,
             "channel {channel}: refused kickoff reset the finished signal"

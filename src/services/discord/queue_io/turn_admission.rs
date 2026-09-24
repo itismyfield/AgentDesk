@@ -155,10 +155,6 @@ pub(in crate::services::discord) async fn mailbox_recovery_kickoff(
     else {
         return RecoveryKickoffResult::Unavailable;
     };
-    // #2443 — reset the per-channel `recovery_done` latch BEFORE recovery
-    // starts; a stale "done" flag would let `watchers/lifecycle.rs` graduate
-    // its skip early and race the ongoing recovery. Idempotent and cheap.
-    shared.mailboxes.recovery_done(channel_id).reset();
     // #3297 r3 — tombstone refusal ⇒ retry on a fresh registered actor.
     let result = shared
         .mailboxes
@@ -182,3 +178,7 @@ pub(in crate::services::discord) async fn mailbox_recovery_kickoff(
     }
     result
 }
+
+#[cfg(test)]
+#[path = "turn_admission_tests.rs"]
+mod tests;
