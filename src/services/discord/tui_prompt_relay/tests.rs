@@ -4409,55 +4409,36 @@ fn synthetic_watcher_claim_requires_live_watcher_covering_output() {
     ));
 }
 
-/// #3876 (codex rework): the birth-site relay-owner decision for a TUI-direct /
-/// warm-followup synthetic inflight is gated on a LIVE per-session producer, NOT
-/// the global session-bound flag. `SessionBoundRelay` (sink commits) only when
-/// the watcher cannot own AND session-bound delivery is enabled AND a live
-/// producer exists; otherwise `BridgeAdapter` so the watcher-independent
-/// transcript-direct bridge tail stays the deliverer (regression guard against
-/// the producer-starve answer-loss).
+/// Birth-site owner table. `SessionBoundRelay` needs session-bound delivery, a live
+/// producer AND a live tmux watcher: the supervisor keeps its producer alive with no
+/// watcher, so the producer alone (#6210, formerly pinned as `SessionBoundRelay`
+/// here) left the row with no deliverer.
 #[test]
 fn synthetic_relay_owner_gates_session_bound_on_live_producer() {
     use super::synthetic_start::tui_direct_synthetic_relay_owner;
+    use ExternalInputRelayOwner::{BridgeAdapter, SessionBoundRelay, TmuxWatcher};
 
-    // (c) Live watcher owns the output → watcher relays the body (unchanged),
-    // regardless of session-bound / producer signals.
-    assert_eq!(
-        tui_direct_synthetic_relay_owner(true, true, true),
-        ExternalInputRelayOwner::TmuxWatcher,
-    );
-    assert_eq!(
-        tui_direct_synthetic_relay_owner(true, true, false),
-        ExternalInputRelayOwner::TmuxWatcher,
-    );
-    assert_eq!(
-        tui_direct_synthetic_relay_owner(true, false, false),
-        ExternalInputRelayOwner::TmuxWatcher,
-    );
-    // (b) THE FIX (demoed watcher-alive-path-mismatch case): watcher cannot own +
-    // session-bound enabled + a LIVE producer exists (the sink can actually
-    // commit) → SessionBoundRelay.
-    assert_eq!(
-        tui_direct_synthetic_relay_owner(false, true, true),
-        ExternalInputRelayOwner::SessionBoundRelay,
-    );
-    // (a) REGRESSION GUARD (watcher-detached / STALL-WATCHDOG force-clean): watcher
-    // cannot own + NO live producer → BridgeAdapter, so the watcher-independent
-    // transcript-direct bridge tail still delivers (a SessionBoundRelay stamp here
-    // would starve the sink AND stand the tail down → answer loss).
-    assert_eq!(
-        tui_direct_synthetic_relay_owner(false, true, false),
-        ExternalInputRelayOwner::BridgeAdapter,
-    );
-    // Session-bound delivery disabled → legacy bridge-tail path regardless of producer.
-    assert_eq!(
-        tui_direct_synthetic_relay_owner(false, false, true),
-        ExternalInputRelayOwner::BridgeAdapter,
-    );
-    assert_eq!(
-        tui_direct_synthetic_relay_owner(false, false, false),
-        ExternalInputRelayOwner::BridgeAdapter,
-    );
+    // (watcher_can_own, session_bound, live_producer, tmux_watcher_live) -> owner
+    let table = [
+        ((true, true, true, true), TmuxWatcher),
+        ((true, true, false, true), TmuxWatcher),
+        ((true, false, false, true), TmuxWatcher),
+        // Watcher alive on another output path: it still forwards to the sink.
+        ((false, true, true, true), SessionBoundRelay),
+        // #6210: supervisor producer alive, watcher gone -> the bridge tail delivers.
+        ((false, true, true, false), BridgeAdapter),
+        ((false, true, false, true), BridgeAdapter),
+        ((false, true, false, false), BridgeAdapter),
+        ((false, false, true, true), BridgeAdapter),
+        ((false, false, false, false), BridgeAdapter),
+    ];
+    for ((own, bound, producer, watcher), expected) in table {
+        assert_eq!(
+            tui_direct_synthetic_relay_owner(own, bound, producer, watcher),
+            expected,
+            "owner for can_own={own} session_bound={bound} producer={producer} watcher={watcher}",
+        );
+    }
 }
 
 /// #4455: the idle rollout observer records a provisional BridgeAdapter lease
@@ -4560,7 +4541,7 @@ fn synthetic_owner_delivery_path_matches_producer_presence() {
     // Producer present (the demoed fix case): owner = SessionBoundRelay, the sink
     // gate ACCEPTS the row (commits the body), and the bridge tail stands down →
     // the sink is the SOLE committer.
-    let producer_present_owner = tui_direct_synthetic_relay_owner(false, true, true);
+    let producer_present_owner = tui_direct_synthetic_relay_owner(false, true, true, true);
     assert_eq!(
         producer_present_owner,
         ExternalInputRelayOwner::SessionBoundRelay
@@ -4591,7 +4572,7 @@ fn synthetic_owner_delivery_path_matches_producer_presence() {
     // Producer ABSENT (watcher-detached / force-clean): owner = BridgeAdapter, the
     // sink cannot deliver, so the watcher-independent bridge tail MUST be the SOLE
     // relayer — `observer_should_spawn_bridge_tail` true → the answer still ships.
-    let producer_absent_owner = tui_direct_synthetic_relay_owner(false, true, false);
+    let producer_absent_owner = tui_direct_synthetic_relay_owner(false, true, false, true);
     assert_eq!(
         producer_absent_owner,
         ExternalInputRelayOwner::BridgeAdapter
@@ -6345,3 +6326,144 @@ mod synthetic_bridge_handoff_pg_tests;
 
 #[cfg(unix)]
 mod synthetic_terminal_ordering_tests;
+
+#[cfg(unix)]
+mod relayerless_claim_tests {
+    // #6210: a TUI-direct claim must leave a deliverer when the supervisor producer
+    // outlives the tmux watcher.
+    use super::*;
+    use crate::services::cluster::relay_producer_registry::global_relay_producer_registry;
+
+    /// The watcher-independent supervisor StreamRelay, registered the way
+    /// `watcher_supervisor` does it.
+    struct SupervisorProducer {
+        tmux: String,
+        _relay: crate::services::cluster::stream_relay::StreamRelayHandle,
+    }
+
+    impl SupervisorProducer {
+        fn register(tmux: &str) -> Self {
+            let relay = crate::services::cluster::stream_relay::spawn_stream_relay(
+                crate::services::cluster::session_matcher::MatchedChannel {
+                    channel_id: "6210".to_string(),
+                    agent_id: "agent-6210".to_string(),
+                    provider: ProviderKind::Claude,
+                    expected_session_name: tmux.to_string(),
+                    expected_rollout_path: String::new(),
+                },
+                Arc::new(crate::services::cluster::stream_relay::DiscardSink),
+            );
+            global_relay_producer_registry().register(tmux.to_string(), relay.producer());
+            assert!(
+                global_relay_producer_registry()
+                    .get_live_producer(tmux)
+                    .is_some()
+            );
+            Self {
+                tmux: tmux.to_string(),
+                _relay: relay,
+            }
+        }
+    }
+
+    impl Drop for SupervisorProducer {
+        fn drop(&mut self) {
+            global_relay_producer_registry().deregister(&self.tmux);
+        }
+    }
+
+    fn enable_session_bound_delivery() {
+        let health = Arc::new(crate::services::discord::health::HealthRegistry::new());
+        crate::services::discord::session_relay_sink::SessionBoundDiscordRelaySink::new(health)
+            .enable_delivery_for_test();
+    }
+
+    /// Relayers that will actually move this turn's output to Discord.
+    fn live_deliverers(shared: &SharedData, tmux: &str, owner: ExternalInputRelayOwner) -> usize {
+        let watcher_live = shared.tmux_watchers.tmux_session_live_for_relay(tmux) == Some(true);
+        let watcher_path = watcher_live
+            && matches!(
+                owner,
+                ExternalInputRelayOwner::TmuxWatcher | ExternalInputRelayOwner::SessionBoundRelay
+            );
+        usize::from(watcher_path) + usize::from(observer_should_spawn_bridge_tail(false, owner))
+    }
+
+    async fn claim(
+        shared: &Arc<SharedData>,
+        channel: ChannelId,
+        tmux: &str,
+        anchor: u64,
+    ) -> synthetic_start::TuiDirectSyntheticTurnClaim {
+        synthetic_start::claim_tui_direct_synthetic_turn(
+            shared,
+            &ProviderKind::Claude,
+            channel,
+            tmux,
+            "prompt",
+            MessageId::new(anchor),
+            &s1_lease_5833(Some(&format!("turn-6210-{anchor}"))),
+        )
+        .await
+    }
+
+    /// T1: supervisor producer live, watcher registry empty -> BridgeAdapter.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn claim_without_live_watcher_stamps_bridge_adapter_despite_supervisor_producer() {
+        let root = tempfile::tempdir().expect("isolated inflight root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        enable_session_bound_delivery();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(6_210_001);
+        let tmux = "AgentDesk-claude-6210-t1";
+        let _producer = SupervisorProducer::register(tmux);
+
+        let claim = claim(&shared, channel, tmux, 6_210_101).await;
+        assert!(claim.claimed);
+        assert_eq!(
+            claim.relay_owner,
+            ExternalInputRelayOwner::BridgeAdapter,
+            "a supervisor producer without a tmux watcher never feeds the sink"
+        );
+        let row = crate::services::discord::inflight::load_inflight_state(
+            &ProviderKind::Claude,
+            channel.get(),
+        )
+        .expect("claimed row");
+        assert_eq!(row.effective_relay_owner_kind(), RelayOwnerKind::None);
+    }
+
+    /// T4: demoting the watcher, then claiming the next turn, still leaves exactly one deliverer.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn demotion_then_claim_cycle_keeps_one_deliverer() {
+        let root = tempfile::tempdir().expect("isolated inflight root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        enable_session_bound_delivery();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(6_210_004);
+        let tmux = "AgentDesk-claude-6210-t4";
+        let _producer = SupervisorProducer::register(tmux);
+        let handle = test_watcher_handle(tmux, Path::new("/tmp/adk-6210-t4.jsonl"));
+        let cancel = handle.cancel.clone();
+        shared.tmux_watchers.insert(channel, handle);
+        assert_eq!(
+            live_deliverers(&shared, tmux, ExternalInputRelayOwner::TmuxWatcher),
+            1
+        );
+
+        // Stale-foreign demotion: the registry entry goes and its cancel is set.
+        assert!(shared.tmux_watchers.remove(&channel).is_some());
+        cancel.store(true, Ordering::Release);
+
+        let claim = claim(&shared, channel, tmux, 6_210_104).await;
+        assert!(claim.claimed);
+        assert_eq!(
+            live_deliverers(&shared, tmux, claim.relay_owner),
+            1,
+            "owner {:?} after demotion must keep exactly one deliverer",
+            claim.relay_owner
+        );
+    }
+}

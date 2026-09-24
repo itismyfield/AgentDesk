@@ -403,4 +403,130 @@ mod tests {
              delivered prefix"
         );
     }
+    /// #6210 T3: a lease-less `SessionBoundRelay` row with the supervisor producer alive and no
+    /// tmux watcher (the claim/save TOCTOU shape) black-holes in the idle relay until the pinned
+    /// watchdog reclaim; then the idle relay sends the undelivered tail once, with no rebind.
+    #[tokio::test]
+    async fn pinned_watcherless_reclaim_lets_the_idle_relay_recover_the_undelivered_tail() {
+        use crate::services::cluster::stream_relay::{
+            RelaySink, RelaySinkError, RelaySinkOutcome, StreamFrame,
+        };
+        let temp = tempfile::TempDir::new().expect("temp runtime root");
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+        let provider = ProviderKind::Claude;
+        let channel_id = 6_210_301_u64;
+        let session = format!("AgentDesk-claude-6210-t3-{}", std::process::id());
+        let transcript = temp.path().join("transcript.jsonl");
+        std::fs::write(&transcript, b"").expect("empty transcript");
+        let binding = crate::services::cluster::session_matcher::MatchedChannel {
+            channel_id: channel_id.to_string(),
+            agent_id: "agent-6210".to_string(),
+            provider: provider.clone(),
+            expected_session_name: session.clone(),
+            expected_rollout_path: transcript.to_str().expect("utf8 path").to_string(),
+        };
+
+        struct Capture(tokio::sync::mpsc::UnboundedSender<StreamFrame>);
+        #[async_trait::async_trait]
+        impl RelaySink for Capture {
+            async fn deliver(
+                &self,
+                frame: &StreamFrame,
+            ) -> Result<RelaySinkOutcome, RelaySinkError> {
+                self.0.send(frame.clone()).expect("capture frame");
+                Ok(RelaySinkOutcome::FrameAccepted)
+            }
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let relay = crate::services::cluster::stream_relay::spawn_stream_relay(
+            binding.clone(),
+            std::sync::Arc::new(Capture(tx)),
+        );
+        let producers =
+            crate::services::cluster::relay_producer_registry::global_relay_producer_registry();
+        producers.register(session.clone(), relay.producer());
+        let sessions = crate::services::cluster::session_registry::global_session_registry();
+        sessions.upsert(binding.clone(), None);
+        let health = std::sync::Arc::new(HealthRegistry::new());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        health
+            .register(provider.as_str().to_string(), shared.clone())
+            .await;
+        let sink = std::sync::Arc::new(super::super::SessionBoundDiscordRelaySink::new(health));
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task = tokio::spawn(super::super::run_idle_jsonl_relay_loop(
+            shutdown.clone(),
+            sink,
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+        let mut row = stale_session_bound_relay_row(channel_id, &session);
+        row.output_path = Some(transcript.to_str().expect("utf8 path").to_string());
+        row.turn_start_offset = Some(0);
+        row.ensure_finalizer_turn_id();
+        write_inflight_row_verbatim(temp.path(), &provider, channel_id, &row);
+        let payload = "{\"type\":\"system\",\"subtype\":\"init\"}\n{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"회수할 응답\"}]}}\n";
+        std::fs::write(&transcript, payload).expect("undelivered tail");
+        // Past the idle relay's new-session grace: the SessionBoundRelay row still holds it.
+        tokio::time::sleep(std::time::Duration::from_millis(11_000)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "no watcher feeds the sink: the tail is black-holed"
+        );
+
+        let row = inflight::load_inflight_state(&provider, channel_id).expect("row");
+        let pin = inflight::InflightEpisodePin::from_state(&row);
+        let watcher = crate::services::discord::TmuxWatcherHandle {
+            tmux_session_name: session.clone(),
+            output_path: transcript.to_str().expect("utf8 path").to_string(),
+            paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resume_offset: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pause_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_delivered: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_heartbeat_ts_ms: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(
+                crate::services::discord::tmux_watcher_now_ms(),
+            )),
+        };
+        shared
+            .tmux_watchers
+            .insert(ChannelId::new(channel_id), watcher);
+        assert_eq!(
+            inflight::reclaim_watcherless_session_bound_relay_owner(
+                &shared, &provider, channel_id, &pin
+            ),
+            inflight::OrphanRelayReclaimOutcome::Skipped,
+            "a live watcher still feeds the sink"
+        );
+        shared.tmux_watchers.remove(&ChannelId::new(channel_id));
+        assert_eq!(
+            inflight::reclaim_watcherless_session_bound_relay_owner(
+                &shared, &provider, channel_id, &pin
+            ),
+            inflight::OrphanRelayReclaimOutcome::Downgraded
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+
+        let frame = rx.try_recv().expect("the idle relay re-delivers the tail");
+        assert_eq!(frame.relay_range, Some((0, payload.len() as u64)));
+        assert_eq!(frame.payload, payload);
+        // The capture sink never commits; once the sink's commit lands, no resend follows.
+        let channel = ChannelId::new(channel_id);
+        (shared.tmux_relay_coord(channel).confirmed_end_offset)
+            .store(payload.len() as u64, std::sync::atomic::Ordering::SeqCst);
+        while rx.try_recv().is_ok() {}
+        tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+        assert!(rx.try_recv().is_err(), "no duplicate after the commit");
+        let row = inflight::load_inflight_state(&provider, channel_id).expect("row survives");
+        assert_eq!(
+            (row.turn_start_offset, row.last_offset),
+            (Some(0), 0),
+            "cursor not fenced"
+        );
+
+        shutdown.store(true, std::sync::atomic::Ordering::Release);
+        let _ = task.await;
+        sessions.remove(&session);
+        producers.deregister(&session);
+    }
 }
