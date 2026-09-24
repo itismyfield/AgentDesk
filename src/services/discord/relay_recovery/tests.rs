@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 #[path = "tests/circuit_breaker_apply.rs"]
 mod circuit_breaker_apply;
 #[path = "tests/orphan_token_finish.rs"]
-mod orphan_token_finish;
+pub(in crate::services::discord) mod orphan_token_finish;
 
 fn isolated_agentdesk_root() -> (AgentdeskRootGuard, tempfile::TempDir) {
     let temp = tempfile::TempDir::new().unwrap();
@@ -2221,6 +2221,23 @@ fn old_orphan_shape_remains_auto_heal_eligible() {
     );
     assert!(decision.auto_heal.eligible);
     assert_eq!(decision.auto_heal.skipped_reason, None);
+
+    // Without a reachability ledger only the operator lane keeps this verdict.
+    use RelayRecoveryApplySource::{Manual, ProbeAutoHeal, StallWatchdog};
+    for (source, kept) in [
+        (Manual, true),
+        (ProbeAutoHeal, false),
+        (StallWatchdog, false),
+    ] {
+        let mut withheld = decision.clone();
+        withhold_orphan_token_clear_without_ledger(&mut withheld, source);
+        let reason = (!kept).then_some("axis_b_orphan_token_reachability_unobserved");
+        let got = (
+            withheld.auto_heal.eligible,
+            withheld.auto_heal.skipped_reason,
+        );
+        assert_eq!(got, (kept, reason), "{source:?}");
+    }
 }
 
 #[test]
@@ -2266,7 +2283,7 @@ fn token_only_agentdesk_tmux_with_unknown_liveness_stays_protected_after_grace()
     assert!(!decision.auto_heal.eligible);
     assert_eq!(
         decision.auto_heal.skipped_reason,
-        Some("protected_agentdesk_tmux_session")
+        Some("orphan_token_producer_liveness_unmeasured")
     );
 }
 
@@ -2329,7 +2346,7 @@ fn orphan_token_live_evidence_and_agentdesk_tmux_stay_protected() {
     assert!(!protected_tmux.auto_heal.eligible);
     assert_eq!(
         protected_tmux.auto_heal.skipped_reason,
-        Some("protected_agentdesk_tmux_session")
+        Some("orphan_token_producer_liveness_unmeasured")
     );
 }
 

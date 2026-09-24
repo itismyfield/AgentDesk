@@ -530,6 +530,8 @@ async fn auto_apply_relay_recovery_for_shared_at(
             decision.auto_heal.skipped_reason = Some("axis_b_warrant_site_unmapped");
         }
     }
+    #[cfg(not(unix))]
+    withhold_orphan_token_clear_without_ledger(&mut decision, source);
 
     if decision.action != allowed_action {
         decision.auto_heal.skipped_reason = Some("auto_heal_action_not_allowed");
@@ -1066,4 +1068,4 @@ mod axis_b_tests {
 
 #[cfg(test)]
 #[path = "relay_recovery/tests.rs"]
-mod tests;
+pub(in crate::services::discord) mod tests;

@@ -228,6 +228,21 @@ pub(in crate::services::discord) const ORPHAN_TOKEN_UNMEASURED_REFUSALS: [&str; 
     ORPHAN_TOKEN_EPISODE_UNMEASURED,
 ];
 
+/// No unix-only reachability ledger means no warrant: automatic orphan clears are withheld (I20).
+#[cfg(any(test, not(unix)))]
+pub(super) fn withhold_orphan_token_clear_without_ledger(
+    decision: &mut RelayRecoveryDecision,
+    source: RelayRecoveryApplySource,
+) {
+    if decision.action == RelayRecoveryActionKind::ClearOrphanPendingToken
+        && source != RelayRecoveryApplySource::Manual
+        && decision.auto_heal.eligible
+    {
+        decision.auto_heal.eligible = false;
+        decision.auto_heal.skipped_reason = Some(ORPHAN_TOKEN_REACHABILITY_UNOBSERVED);
+    }
+}
+
 pub(super) fn is_agentdesk_tmux_session(tmux_session: Option<&str>) -> bool {
     tmux_session.is_some_and(|session| session.starts_with("AgentDesk-"))
 }
@@ -408,11 +423,18 @@ pub(in crate::services::discord) fn plan_relay_recovery(
         RelayStallState::OrphanPendingToken => {
             let eligible = eligible_orphan_pending_token(snapshot, now_ms);
             let admission_grace = orphan_pending_token_within_admission_grace(snapshot, now_ms);
+            // Precedes the AgentDesk-name label so a failed probe is still graded (I20).
+            let unmeasured = snapshot.tmux_alive.is_none()
+                && !snapshot.bridge_inflight_present
+                && !snapshot.watcher_attached
+                && !admission_grace;
             (
                 RelayRecoveryActionKind::ClearOrphanPendingToken,
                 "mailbox holds a cancel token without bridge, watcher, or live tmux evidence",
                 eligible,
-                (!eligible).then_some(if protected_tmux {
+                (!eligible).then_some(if unmeasured {
+                    ORPHAN_TOKEN_PRODUCER_LIVENESS_UNMEASURED
+                } else if protected_tmux {
                     "protected_agentdesk_tmux_session"
                 } else if snapshot.bridge_inflight_present
                     || snapshot.watcher_attached
@@ -421,8 +443,6 @@ pub(in crate::services::discord) fn plan_relay_recovery(
                     "orphan_token_has_live_evidence"
                 } else if admission_grace {
                     "orphan_token_within_admission_grace"
-                } else if snapshot.tmux_alive.is_none() {
-                    ORPHAN_TOKEN_PRODUCER_LIVENESS_UNMEASURED
                 } else {
                     "orphan_token_missing_required_evidence"
                 }),

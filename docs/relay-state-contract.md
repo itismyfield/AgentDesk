@@ -1116,12 +1116,14 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   making it presence + absences + age, the exact shape this invariant forbids. What keeps
   it inside this invariant is refusal, not evidence. Both forms require a MEASURED death
   (`tmux_alive == Some(false)`, whatever the session is named), so an UNMEASURED producer
-  is refused (`orphan_token_producer_liveness_unmeasured`) on every arm — including the
-  `StallWatchdog` arm, where `relay_recovery::auto_apply_relay_recovery_for_shared_at`
-  nulls `tmux_alive` before planning. On the automatic arms `destructive_warrant_bind`
-  also refuses this action when its snapshot, reachability observation, or episode pair
-  is unmeasured, and a rowless channel's pair always is, so the periodic sweep retires
-  no rowless anchor at all. Each refusal is graded under this invariant's key, once per
+  is refused on every arm — as `orphan_token_producer_liveness_unmeasured` past the admission
+  grace, `AgentDesk-*` names included — even the `StallWatchdog` arm, where
+  `relay_recovery::auto_apply_relay_recovery_for_shared_at` nulls `tmux_alive` before planning.
+  On unix the automatic arms' `destructive_warrant_bind` also refuses this action when its
+  snapshot, reachability observation, or episode pair is unmeasured, and a rowless channel's
+  pair always is; non-unix builds withhold every automatic clear of this action
+  (`withhold_orphan_token_clear_without_ledger`), so no platform's periodic sweep retires a
+  rowless anchor. Each unmeasured refusal is graded under this invariant's key, once per
   episode, by `relay_auto_heal::record_orphan_token_refused_without_witness`. Where the
   arm does apply (the operator lane), it finishes only the snapshot's episode through
   `mailbox_finish_turn_if_matches_episode_started_before` and keeps the queue; it no

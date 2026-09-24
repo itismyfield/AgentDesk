@@ -7,30 +7,10 @@ use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 use super::super::HealthRegistry;
 use crate::config::TestEnvVarGuard;
 use crate::services::discord::SharedData;
+use crate::services::discord::relay_recovery::tests::orphan_token_finish::queued;
 use crate::services::provider::{CancelToken, ProviderKind};
-use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 
 const PAST_ADMISSION_GRACE: Duration = Duration::from_secs(31);
-
-fn queued(message_id: u64) -> Intervention {
-    Intervention {
-        author_id: UserId::new(7),
-        author_is_bot: false,
-        message_id: MessageId::new(message_id),
-        queued_generation: crate::services::discord::runtime_store::load_generation(),
-        source_message_ids: vec![MessageId::new(message_id)],
-        source_message_queued_generations: Vec::new(),
-        source_text_segments: Vec::new(),
-        text: format!("queued behind orphan token {message_id}"),
-        mode: InterventionMode::Soft,
-        created_at: std::time::Instant::now(),
-        reply_context: None,
-        has_reply_boundary: false,
-        merge_consecutive: false,
-        pending_uploads: Vec::new(),
-        voice_announcement: None,
-    }
-}
 
 /// A rowless, watcherless mailbox anchor aged past the admission grace with
 /// three queued messages behind it — the orphan-token sweep's target shape.
@@ -114,16 +94,22 @@ fn i20_refusals(
         .collect()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unmeasured_orphan_token_keeps_anchor_and_queue_and_is_graded_once() {
-    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let root = tempfile::tempdir().expect("runtime root");
-    let _env =
-        TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+/// Two sweep ticks over a rowless orphan keep everything and grade it once.
+async fn assert_wedge_graded_once(
+    channel: ChannelId,
+    tmux_session: Option<&str>,
+    tmux_alive: Option<bool>,
+    refused_reason: &str,
+) {
     let provider = ProviderKind::Codex;
-    let channel = ChannelId::new(5_996_101);
-    let anchor = MessageId::new(5_996_110);
-    let (registry, shared, token) = seed_orphan_with_queue(&provider, channel, anchor, None).await;
+    let anchor = MessageId::new(channel.get() + 9);
+    let (registry, shared, token) =
+        seed_orphan_with_queue(&provider, channel, anchor, tmux_session).await;
+    let watcher_state = registry
+        .snapshot_watcher_state_for_shared(&provider, shared.clone(), channel.get())
+        .await
+        .expect("orphan snapshot");
+    assert_eq!(watcher_state.relay_health.tmux_alive, tmux_alive);
 
     for _ in 0..2 {
         super::run_orphan_token_auto_heal_pass(&registry, &provider, &[shared.clone()]).await;
@@ -137,12 +123,41 @@ async fn unmeasured_orphan_token_keeps_anchor_and_queue_and_is_graded_once() {
         "one wedged episode is graded once across ticks: {refusals:?}"
     );
     let details = &refusals[0].payload["details"];
-    assert_eq!(
-        details["refused_reason"],
-        "orphan_token_producer_liveness_unmeasured"
-    );
+    assert_eq!(details["refused_reason"], refused_reason);
     assert_eq!(details["retired"], false);
     assert_eq!(details["queue_depth"], 3);
+}
+
+const UNMEASURED: &str = "orphan_token_producer_liveness_unmeasured";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unmeasured_orphan_token_keeps_anchor_and_queue_and_is_graded_once() {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let root = tempfile::tempdir().expect("runtime root");
+    let _env =
+        TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+    assert_wedge_graded_once(ChannelId::new(5_996_101), None, None, UNMEASURED).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agentdesk_session_probe_failure_is_graded_as_unmeasured() {
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let root = tempfile::tempdir().expect("runtime root");
+    let _env =
+        TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+    // Session probes fail (`tmux_alive=None`) with no real server; `-V` still succeeds.
+    let fake_tmux = root.path().join("tmux");
+    let script = "#!/bin/sh\ncase \" $* \" in *\" -V \"*) exit 0;; esac\necho denied >&2; exit 1\n";
+    std::fs::write(&fake_tmux, script).expect("fake tmux");
+    std::fs::set_permissions(&fake_tmux, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::iter::once(root.path().to_path_buf()).chain(std::env::split_paths(&inherited));
+    let path = std::env::join_paths(path).expect("PATH");
+    let _path = TestEnvVarGuard::set_value_after_shared_test_env_lock("PATH", &path);
+    let session = format!("AgentDesk-codex-5996-probe-failed-{}", std::process::id());
+    assert_wedge_graded_once(ChannelId::new(5_996_601), Some(&session), None, UNMEASURED).await;
 }
 
 #[cfg(unix)]
@@ -156,29 +171,12 @@ async fn confirmed_dead_rowless_orphan_token_still_needs_a_warrant() {
     let root = tempfile::tempdir().expect("runtime root");
     let _env =
         TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
-    let provider = ProviderKind::Codex;
-    let channel = ChannelId::new(5_996_201);
-    let anchor = MessageId::new(5_996_210);
     let dead_session = format!("plain-shell-5996-dead-{}", std::process::id());
-    let (registry, shared, token) =
-        seed_orphan_with_queue(&provider, channel, anchor, Some(&dead_session)).await;
-    let watcher_state = registry
-        .snapshot_watcher_state_for_shared(&provider, shared.clone(), channel.get())
-        .await
-        .expect("orphan snapshot");
-    assert_eq!(
-        watcher_state.relay_health.tmux_alive,
+    assert_wedge_graded_once(
+        ChannelId::new(5_996_201),
+        Some(&dead_session),
         Some(false),
-        "fixture must be the measured-death shape"
-    );
-
-    super::run_orphan_token_auto_heal_pass(&registry, &provider, &[shared.clone()]).await;
-
-    assert_anchor_and_queue_kept(&shared, channel, anchor, &token).await;
-    let refusals = i20_refusals(channel);
-    assert_eq!(refusals.len(), 1, "{refusals:?}");
-    assert_eq!(
-        refusals[0].payload["details"]["refused_reason"],
-        "axis_b_orphan_token_reachability_unobserved"
-    );
+        "axis_b_orphan_token_reachability_unobserved",
+    )
+    .await;
 }

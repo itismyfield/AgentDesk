@@ -2990,6 +2990,7 @@ services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_l
 services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_should_force_clean_requires_all_signals
 services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_skips_completed_idle_wakeup_turn
 services::discord::health::redaction::tests::visible_message_id_redacts_zero_placeholders
+services::discord::health::relay_auto_heal::orphan_token_tests::agentdesk_session_probe_failure_is_graded_as_unmeasured
 services::discord::health::relay_auto_heal::orphan_token_tests::confirmed_dead_rowless_orphan_token_still_needs_a_warrant
 services::discord::health::relay_auto_heal::orphan_token_tests::unmeasured_orphan_token_keeps_anchor_and_queue_and_is_graded_once
 services::discord::health::relay_auto_heal::tests::a_fresh_watcher_still_accepts_the_zero_frontier_5943

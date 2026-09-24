@@ -1,7 +1,7 @@
 use super::*;
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 
-fn queued(message_id: u64) -> Intervention {
+pub(in crate::services::discord) fn queued(message_id: u64) -> Intervention {
     Intervention {
         author_id: UserId::new(7),
         author_is_bot: false,
