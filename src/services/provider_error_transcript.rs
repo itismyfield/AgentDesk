@@ -9,6 +9,7 @@ const UNKNOWN_PROVIDER_ERROR_PREFIXES: &[&str] = &[
     "error: unknown qwen error",
     "error: unknown gemini error",
     "error: unknown claude error",
+    "error: unknown antigravity error",
 ];
 
 pub(crate) fn is_strong_provider_error_transcript(message: &str) -> bool {
@@ -64,6 +65,10 @@ fn is_provider_error_presentation(lower: &str) -> bool {
         .iter()
         .any(|prefix| lower.contains(prefix))
         || has_rate_limit_marker(lower)
+        || (lower.starts_with("⚠️ provider가 응답을 완료하지 못했어요.")
+            && lower
+                .lines()
+                .any(|line| is_explicit_provider_error_line(line.trim())))
 }
 
 /// OpenCode may surface the provider failure directly as an `Error: ...`
@@ -95,6 +100,7 @@ fn has_rate_limit_marker(lower: &str) -> bool {
 
 fn has_provider_error_marker_at_start(lower: &str) -> bool {
     [
+        "agy returned an empty response",
         "apierror",
         "ai_apicallerror",
         "too many requests",
@@ -118,9 +124,48 @@ fn has_provider_error_marker_at_start(lower: &str) -> bool {
     })
 }
 
+/// A fresh Qwen wrapper can remain alive after a terminal API error. Only
+/// accept its complete latest send/error/ready envelope, never old scrollback
+/// or an error quoted inside a useful response.
+pub(crate) fn qwen_terminal_api_error(pane: &str) -> Option<String> {
+    let (_, latest_send) = pane.rsplit_once("[sending...]")?;
+    let lines: Vec<_> = latest_send
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if lines.len() != 2 || lines[1] != "▶ Ready for input (type message + Enter)" {
+        return None;
+    }
+    let error = lines[0];
+    (error.starts_with("[API Error:") && is_strong_provider_error_transcript(error))
+        .then(|| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_strong_provider_error_transcript;
+    use super::{is_strong_provider_error_transcript, qwen_terminal_api_error};
+
+    #[test]
+    fn qwen_terminal_error_requires_latest_complete_wrapper_envelope() {
+        let failed = "[sending...]\n[API Error: 410 status code (no body)]\n\n▶ Ready for input (type message + Enter)\n";
+        assert_eq!(
+            qwen_terminal_api_error(failed).as_deref(),
+            Some("[API Error: 410 status code (no body)]")
+        );
+        assert!(qwen_terminal_api_error(&format!("{failed}\n[sending...]\nWorking...")).is_none());
+        assert!(
+            qwen_terminal_api_error(
+                &failed.replace("▶ Ready for input (type message + Enter)", "Working...")
+            )
+            .is_none()
+        );
+        assert!(qwen_terminal_api_error(&failed.replace("[sending...]", "Report:")).is_none());
+        assert!(
+            qwen_terminal_api_error(&failed.replace("\n\n▶", "\nRecovered successfully\n▶"))
+                .is_none()
+        );
+    }
 
     #[test]
     fn recognizes_narrow_provider_error_envelopes() {
@@ -136,6 +181,8 @@ mod tests {
             "Error: AI_APICallError: Too Many Requests (429)",
             "Error: APIError",
             "Error: APIError: upstream request failed",
+            "Error: AGY returned an empty response because a tool permission was denied in headless mode.",
+            "⚠️ provider가 응답을 완료하지 못했어요.\n||**상세**\n```text\nError: AGY returned an empty response because a tool permission was denied in headless mode.\n```||",
             "⚠️ provider가 응답을 완료하지 못했어요.\n||**상세**\n```text\nError: Unknown OpenCode error\n```||",
             "⚠️ provider가 응답을 완료하지 못했어요.\n||**상세**\n```text\nError: APIError\n```||",
             "⚠️ provider가 응답을 완료하지 못했어요.\n||**상세**\n```text\nAI_APICallError: statusCode: 429\n```||",
@@ -158,6 +205,7 @@ mod tests {
             "[API Error: 400 status code (no body)",
             "Error: a report about an AI_APICallError is ready.",
             "The provider returned Too Many Requests; the retry succeeded.",
+            "Provider error example: ||```text\nError: AGY returned an empty response\n```||\nThe retry succeeded.",
         ] {
             assert!(
                 !is_strong_provider_error_transcript(message),

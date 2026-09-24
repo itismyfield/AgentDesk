@@ -8356,6 +8356,7 @@ services::provider_auth_profile::tests::test_007_named_claude_profiles_flag_cswa
 services::provider_auth_profile::tests::test_008_debug_redacts_env_values
 services::provider_auth_profile::tests::test_012_empty_profile_home_never_copies_global
 services::provider_error_transcript::tests::ignores_normal_error_discussion
+services::provider_error_transcript::tests::qwen_terminal_error_requires_latest_complete_wrapper_envelope
 services::provider_error_transcript::tests::recognizes_narrow_provider_error_envelopes
 services::provider_hosting::tests::any_requested_tui_hosting_channel_runtime_tui_alone_is_enough
 services::provider_hosting::tests::any_requested_tui_hosting_picks_up_explicit_runtime_tui
