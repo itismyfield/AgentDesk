@@ -230,6 +230,11 @@ class ApiDocsCoverageTest(unittest.TestCase):
 
         self.assertIn("| `GET` | `/api/v1/overview` |", route_inventory)
 
+    def test_generated_route_inventory_includes_browser_entry_routes(self) -> None:
+        route_inventory = CHECKER.inventory.generated_route_inventory()
+        for path in ("/", "/settings", "/ws"):
+            self.assertIn(f"| `GET` | `{path}` |", route_inventory)
+
     def test_route_inventory_is_isolated_idempotent_and_renders_collector_output(self) -> None:
         inventory = CHECKER.inventory
         with TemporaryDirectory() as tmp:
@@ -253,7 +258,7 @@ class ApiDocsCoverageTest(unittest.TestCase):
                 "}\n",
                 encoding="utf-8",
             )
-            (root / "src" / "server" / "mod.rs").write_text(
+            (root / "src" / "server" / "web_surface.rs").write_text(
                 "fn server_fixture_marker() {}\n", encoding="utf-8"
             )
 

@@ -1721,7 +1721,7 @@ def mounted_api_route_source_paths(
 ) -> list[Path]:
     """Return route declaration files merged by ``compose_api_router``.
 
-    ``src/server/mod.rs`` nests the composed API router under ``/api``. The
+    ``src/server/web_surface.rs`` nests the composed API router under ``/api``. The
     composed router itself is centralized in ``src/server/routes/mod.rs``; parse
     that merge chain so coverage follows the actual mounted router graph instead
     of scanning files by convention.
@@ -2076,7 +2076,7 @@ def generated_route_inventory() -> str:
     by_file, by_name = build_function_index(function_paths)
     route_entries = collect_mounted_api_route_entries(function_paths, by_file, by_name)
     route_entries.extend(
-        parse_route_file(REPO_ROOT / "src" / "server" / "mod.rs", "", by_file, by_name)
+        parse_route_file(REPO_ROOT / "src" / "server" / "web_surface.rs", "", by_file, by_name)
     )
     route_entries.sort(key=lambda entry: (entry.path, entry.method, entry.handler))
     return render_route_inventory(route_entries)

@@ -746,7 +746,8 @@ pub(super) fn public_api_domain(router: ApiRouter) -> ApiRouter {
 
 pub(super) fn protected_api_domain(router: ApiRouter, state: AppState) -> ApiRouter {
     router
-        .layer(axum::middleware::from_fn_with_state(
+        // Authentication must not wrap the fallback of merged routers.
+        .route_layer(axum::middleware::from_fn_with_state(
             state,
             auth::auth_middleware,
         ))
