@@ -1,23 +1,29 @@
+use std::collections::HashSet;
+use std::net::IpAddr;
 use std::time::Duration;
 
 use sysinfo::{CpuRefreshKind, DiskKind, Disks, MemoryRefreshKind, RefreshKind, System};
 
-use super::{CpuResources, DiskResources, MachineResources, MemoryResources, SAMPLE_INTERVAL};
+use super::{
+    CpuResources, DiskResources, MachineResources, MemoryResources, SAMPLE_INTERVAL, network,
+};
 
 pub(super) struct Sampler {
     system: System,
     disks: Disks,
+    network: network::NetworkSampler,
     physical_cores: Option<usize>,
     primed: bool,
 }
 
 impl Sampler {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(advertised_ip: Option<IpAddr>, wired: HashSet<String>) -> Self {
         Self {
             system: System::new_with_specifics(
                 RefreshKind::nothing().with_cpu(CpuRefreshKind::nothing().with_cpu_usage()),
             ),
             disks: Disks::new(),
+            network: network::NetworkSampler::new(advertised_ip, wired),
             physical_cores: System::physical_core_count(),
             primed: false,
         }
@@ -87,6 +93,7 @@ impl Sampler {
             memory,
             disks,
             gpus: Vec::new(),
+            network: self.network.collect(),
         }
     }
 }
