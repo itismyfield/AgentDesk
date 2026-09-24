@@ -37,37 +37,9 @@ fn recovery_output_path_with_tmux_fallback(
         .or_else(|| (!fallback_output.is_empty()).then_some(fallback_output))
 }
 
-pub(in crate::services::discord) async fn finish_recovered_turn_mailbox(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    stop_source: &'static str,
-) {
-    // #3016 phase 4: route the recovery terminal through the single-authority
-    // finalizer. The recovered turn is channel-scoped here (the caller did not
-    // thread its real `user_msg_id`), so we submit `user_msg_id == 0` — the
-    // finalizer resolves it to the channel's single live entry (or finalizes
-    // the orphan directly) and runs the SAME channel-scoped `mailbox_finish_turn`
-    // + gated counter decrement + watchdog-override clear + dispatch_thread_parents
-    // retain + role-override cleanup + queue kickoff this code did inline. The
-    // ledger phase gate keeps a racing watcher/bridge terminal exactly-once safe.
-    // `FinalizeContext::monitor` reproduces the inline side-effect set (no
-    // inflight clear, no completion-cleanup, no voice drain, kick off backlog).
-    //
-    // Recovery is single-turn-per-channel (the channel is being recovered, not
-    // running a fresh turn), so id-0 here is safe: the finalizer's id-0 guard
-    // makes an AMBIGUOUS submission (a recently-Finalized entry AND a different
-    // live turn) a NO-OP — it never releases a newer turn's token — and the
-    // unambiguous case (the recovered turn is the single live entry) finalizes
-    // it exactly as the inline code did. This reproduces the prior
-    // channel-scoped `mailbox_finish_turn` semantics, now ledger-gated.
-    let _ =
-        finish_recovered_turn_mailbox_with_snapshot(shared, provider, channel_id, 0, None).await;
-    let _ = stop_source;
-}
-
 #[path = "restore_inflight/kickoff_identity.rs"]
 mod kickoff_identity;
+pub(in crate::services::discord) use kickoff_identity::finish_recovered_turn_mailbox;
 #[path = "restore_inflight/output_paths.rs"]
 mod output_paths;
 #[cfg(unix)]
