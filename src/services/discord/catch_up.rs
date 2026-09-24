@@ -76,7 +76,7 @@ pub(in crate::services) struct CatchUpRetryState {
 mod api;
 mod classification;
 mod phase2;
-mod retry_state;
+pub(in crate::services::discord) mod retry_state;
 mod settled_frontier;
 mod settled_ledger_consult;
 mod too_old_notice;

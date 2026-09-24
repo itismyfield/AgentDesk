@@ -3,9 +3,17 @@
 
 use std::time::Instant;
 
+use poise::serenity_prelude::{ChannelId, MessageId};
+
+use super::super::{
+    SharedData, advance_last_message_checkpoint, mailbox_clear_channel, mailbox_snapshot,
+    recovery_known_message_ids,
+};
 use super::{
     CATCH_UP_RETRY_DEFERRED_REARM_LIMIT, CATCH_UP_RETRY_FETCH_FAILURE_LIMIT, CatchUpRetryState,
 };
+use crate::services::provider::ProviderKind;
+use crate::services::turn_orchestrator::ClearChannelResult;
 
 impl CatchUpRetryState {
     pub(super) fn new(checkpoint: u64) -> Self {
@@ -66,4 +74,28 @@ pub(super) fn merge_catch_up_retry_state(
 
 pub(super) fn merge_catch_up_retry_checkpoint(existing: Option<u64>, retry_after: u64) -> u64 {
     existing.map_or(retry_after, |checkpoint| checkpoint.min(retry_after))
+}
+
+/// #6035: an intentional clear (`/clear`) discards the catch-up backlog too.
+/// The pending retry and a checkpoint left below the cleared ids would otherwise
+/// reread them as unanswered and run what the user just cleared. Teardown and
+/// recovery clears keep plain `mailbox_clear_channel`, whose loss is recovered.
+pub(in crate::services::discord) async fn clear_channel_discarding_catch_up_backlog(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> ClearChannelResult {
+    let known = recovery_known_message_ids(&mailbox_snapshot(shared, channel_id).await);
+    let cleared = mailbox_clear_channel(shared, provider, channel_id).await;
+    shared.catch_up_retry_pending.remove(&channel_id);
+    let exited = cleared.queue_exit_events.iter().flat_map(|event| {
+        let sources = event.intervention.source_message_ids.iter();
+        sources
+            .chain([&event.intervention.message_id])
+            .map(|id| id.get())
+    });
+    if let Some(newest) = known.into_iter().chain(exited).max() {
+        advance_last_message_checkpoint(shared, provider, channel_id, MessageId::new(newest));
+    }
+    cleared
 }

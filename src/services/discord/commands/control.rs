@@ -5,13 +5,14 @@ use std::sync::Arc;
 
 use crate::services::provider::ProviderKind;
 
+use super::super::catch_up::retry_state::clear_channel_discarding_catch_up_backlog;
 use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::queue_io::mailbox_cancel_queued_primary_message;
 use super::super::settings::cleanup_channel_uploads;
 use super::super::settings::save_bot_settings;
 use super::super::turn_bridge::stop_active_turn;
 use super::super::{
-    Context, Error, SharedData, check_auth, mailbox_cancel_active_turn, mailbox_clear_channel,
+    Context, Error, SharedData, check_auth, mailbox_cancel_active_turn,
     saturating_decrement_global_active,
 };
 use super::config::{
@@ -403,7 +404,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
             .map(|ch_name| provider.build_tmux_session_name(ch_name))
     };
 
-    let cleared = mailbox_clear_channel(shared, provider, channel_id).await;
+    let cleared = clear_channel_discarding_catch_up_backlog(shared, provider, channel_id).await;
     if cleared.removed_token.is_some() {
         saturating_decrement_global_active(shared);
     }

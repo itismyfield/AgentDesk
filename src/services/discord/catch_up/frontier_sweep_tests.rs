@@ -621,15 +621,18 @@ async fn t6b_phase2_scan_checkpoint_is_clamped_without_lowering_the_live_one() {
 
 #[derive(Clone, Copy, Debug)]
 enum Resolution {
+    /// Teardown/recovery clear: an unintended loss, so M is recovered again.
     LeftQueueUnprocessed,
     BecameActiveTurn,
     /// M is the newest primary of a merged head that also carries older H. The
     /// claim drops H's evidence, so H is re-offered, never leapt (#6205 dedups).
     MergedHeadClaimed,
+    /// `/clear`: the user discarded M, so neither sweep may run it again.
+    IntentionallyCleared,
 }
 
-/// T9: once M's membership resolves, the next retry sweep either re-recovers
-/// M or settles it on turn evidence, and the barrier is gone.
+/// T9: once M's membership resolves, the next sweep either re-recovers M or
+/// settles it, runs nothing already run or cleared, and leaves no barrier.
 async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
     let fx = Fixture::new().await;
     let (checkpoint, h, m) = (id(1, 600), id(2, 150), id(3, 120));
@@ -657,6 +660,11 @@ async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
         Resolution::LeftQueueUnprocessed => {
             discord::mailbox_clear_channel(&fx.shared, &fx.provider, channel_id).await;
         }
+        Resolution::IntentionallyCleared => {
+            let discard = super::super::retry_state::clear_channel_discarding_catch_up_backlog;
+            discard(&fx.shared, &fx.provider, channel_id).await;
+            assert_eq!(fx.pending(channel_id), None, "/clear drops the retry");
+        }
         Resolution::BecameActiveTurn => {
             let started =
                 discord::mailbox_try_start_turn(&fx.shared, channel_id, token, owner, m).await;
@@ -672,15 +680,19 @@ async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
         }
     }
     let second = StrictApi::new(&fx.shared).with_history(channel_id, history);
-    fx.retry_sweep(&second, channel_id).await;
-
-    assert_phase1_read(&second, after(checkpoint), &[m]);
+    if let Resolution::IntentionallyCleared = resolution {
+        fx.sweep(&second).await;
+        assert_phase1_read(&second, after(m), &[]);
+    } else {
+        fx.retry_sweep(&second, channel_id).await;
+        assert_phase1_read(&second, after(checkpoint), &[m]);
+    }
     let log = second.enqueue_log().into_iter();
     let rerun: Vec<u64> = log.filter(|(_, ok, _)| *ok).map(|(id, ..)| id).collect();
     let expected_rerun = match resolution {
         Resolution::LeftQueueUnprocessed => vec![m.get()],
         Resolution::MergedHeadClaimed => vec![h.get()],
-        Resolution::BecameActiveTurn => Vec::new(),
+        Resolution::BecameActiveTurn | Resolution::IntentionallyCleared => Vec::new(),
     };
     assert_eq!(rerun, expected_rerun, "{resolution:?}");
     let expected = (Some(m.get()), Some(m.get()));
@@ -705,6 +717,11 @@ async fn t9_m_settles_once_a_turn_takes_it() {
 #[tokio::test(flavor = "current_thread")]
 async fn t9_absorbed_h_is_reoffered_not_leapt_once_its_merged_head_is_claimed() {
     t9_case(ChannelId::new(4_603_521), Resolution::MergedHeadClaimed).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn t9_m_discarded_by_clear_is_not_recovered() {
+    t9_case(ChannelId::new(4_603_522), Resolution::IntentionallyCleared).await;
 }
 
 /// T10: without an earlier barrier, active-turn and terminal messages advance.
