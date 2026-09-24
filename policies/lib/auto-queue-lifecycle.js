@@ -211,10 +211,10 @@ function continueRunAfterEntry(runId, agentId, doneGroup, donePhase, anchorCardI
   if (activeStates.length > 0) {
     var placeholders = activeStates.map(function() { return "?"; }).join(",");
     var active = agentdesk.db.query(
-      "SELECT COUNT(*) as cnt FROM kanban_cards WHERE assigned_agent_id = ? AND status IN (" + placeholders + ")",
+      "SELECT id FROM kanban_cards WHERE assigned_agent_id = ? AND status IN (" + placeholders + ") LIMIT 1",
       [agentId].concat(activeStates)
     );
-    agentBusy = active.length > 0 && active[0].cnt > 0;
+    agentBusy = active.length > 0;
   }
 
   // Grace window no longer needed past this point — either we keep

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "f5b8937795b448303d3f51c70ba184f89047b018",
+  "measured_at_sha": "ed53d261a7683dc416712e8ff01406ab1f5c6ea3",
   "records": [
     {
       "root": "migrations/postgres",
@@ -1584,7 +1584,7 @@
       "api": "agentdesk.db.query",
       "symbol": "query",
       "classification": "UNRESOLVED",
-      "fingerprint": "sha256:75d120ac557d482e70780513119a772b621f2a071fe90faf22a19169982e871c"
+      "fingerprint": "sha256:243d3659dc09bc907cd1eca93cc0a2b9b293e00e1ae9f88cdfef248759c9ca0b"
     },
     {
       "root": "policies",
@@ -16353,6 +16353,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:4409055f7cb6779b44dd3c3b7dfe42eb7bd4350fe75adc703c149c318b410103"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/reconcile.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:47df67fdad130fe6e0d45f4318b0458ebbf7960ca5bd94990d39e254a61fbd01"
     },
     {
@@ -16479,6 +16488,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:f158c79a7c912f0fa38ab06a1a28c80763c482a1c9d3d97b0bc3781f5387fd65"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/reconcile.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:f3b991c3355745aa0a14a86249769406b82b95d414183e43225b6de790f10fe4"
     },
     {
@@ -16533,16 +16551,7 @@
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
-      "fingerprint": "sha256:dd858f8a3420dd6bc13ba8a19a3fec5346376b71f1b4d7f0a080abc09f3fa10b"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/reconcile.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:3d0ec80ed0175e55cd2c0f67ea207e0438fe101f0828b881f172ab232989bd3d"
+      "fingerprint": "sha256:e22a0abfcdccdbef3b2d700e12b0f847708ddf6929fffd5c0f45cdf791c4ccd2"
     },
     {
       "root": "src",
