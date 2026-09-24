@@ -129,7 +129,8 @@ export function useOnboardingWizardActions({
     setError("");
     try {
       for (let i = 0; i < commandBots.length; i += 1) {
-        if (!commandBots[i].token) {
+        const trimmedToken = commandBots[i].token?.trim() || "";
+        if (!trimmedToken) {
           setError(
             tr(
               `실행 봇 ${i + 1}의 토큰을 입력하세요.`,
@@ -138,7 +139,7 @@ export function useOnboardingWizardActions({
           );
           return;
         }
-        const info = await validateBotToken(commandBots[i].token);
+        const info = await validateBotToken(trimmedToken);
         setCommandBots((prev) => {
           const copy = [...prev];
           copy[i] = { ...copy[i], botInfo: info };
@@ -155,19 +156,21 @@ export function useOnboardingWizardActions({
         }
       }
 
-      if (!announceToken) {
+      const trimmedAnnounceToken = announceToken?.trim() || "";
+      if (!trimmedAnnounceToken) {
         setError(tr("통신 봇 토큰을 입력하세요.", "Enter communication bot token."));
         return;
       }
-      const announceInfo = await validateBotToken(announceToken);
+      const announceInfo = await validateBotToken(trimmedAnnounceToken);
       setAnnounceBotInfo(announceInfo);
       if (!announceInfo.valid) {
         setError(tr("통신 봇 토큰이 유효하지 않습니다.", "Communication bot token is invalid."));
         return;
       }
 
-      if (notifyToken) {
-        const notifyInfo = await validateBotToken(notifyToken);
+      const trimmedNotifyToken = notifyToken?.trim() || "";
+      if (trimmedNotifyToken) {
+        const notifyInfo = await validateBotToken(trimmedNotifyToken);
         setNotifyBotInfo(notifyInfo);
         if (!notifyInfo.valid) {
           setError(tr("알림 봇 토큰이 유효하지 않습니다.", "Notification bot token is invalid."));
@@ -213,7 +216,7 @@ export function useOnboardingWizardActions({
   }, [commandBots, setCheckingProviders, setProviderStatuses]);
 
   const fetchChannels = useCallback(async () => {
-    const token = announceToken || commandBots[0]?.token;
+    const token = announceToken.trim() || commandBots[0]?.token.trim();
     if (!token) return;
     try {
       const response = await fetch("/api/onboarding/channels", {
@@ -335,10 +338,10 @@ export function useOnboardingWizardActions({
         credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          token: commandBots[0]?.token || "",
-          announce_token: announceToken || null,
-          notify_token: notifyToken || null,
-          command_token_2: commandBots.length > 1 ? commandBots[1].token : null,
+          token: commandBots[0]?.token.trim() || "",
+          announce_token: announceToken.trim() || null,
+          notify_token: notifyToken.trim() || null,
+          command_token_2: commandBots.length > 1 ? commandBots[1].token.trim() || null : null,
           command_provider_2: commandBots.length > 1 ? commandBots[1].provider : null,
           guild_id: selectedGuild,
           owner_id: ownerId || null,
