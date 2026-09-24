@@ -104,7 +104,8 @@ impl CatchUpDiscordApi for StrictApi {
         // Discord pages are newest-first; `after` selects the oldest ids past
         // the cursor, `before` and no cursor the newest ids below it.
         visible.sort_by_key(|message| std::cmp::Reverse(message.id.get()));
-        let limit = usize::from(request.limit);
+        // Serenity's `GetMessages::limit` clamps to 100.
+        let limit = usize::from(request.limit.min(100));
         let page: Vec<serenity::Message> = match request.cursor {
             Some(CatchUpFetchCursor::After(after)) => {
                 let mut past: Vec<_> = visible.into_iter().filter(|m| m.id.get() > after).collect();
@@ -281,9 +282,8 @@ async fn t10_active_turn_and_terminal_messages_still_advance() {
     assert_eq!(fx.pending(channel_id), None);
 }
 
-/// Cursor contract of the fixture itself: pages are newest-first, `After`
-/// keeps the oldest ids past the cursor, and a late arrival is invisible to
-/// earlier fetch calls.
+/// Fixture cursor contract: newest-first pages (`After` keeps the oldest ids past
+/// the cursor), limit clamped to 100, late arrivals hidden from earlier fetches.
 #[tokio::test(flavor = "current_thread")]
 async fn strict_api_pages_follow_the_discord_cursor_contract() {
     let fx = Fixture::new().await;
@@ -316,11 +316,18 @@ async fn strict_api_pages_follow_the_discord_cursor_contract() {
         (requests[3], vec![ids[1], ids[0]]),
     ];
     assert_eq!(pages, expected);
+
+    let wide = ChannelId::new(4_603_520);
+    let many = (1..=101).map(|seq| human(wide, id(seq, 200)));
+    let api = StrictApi::new(&fx.shared).with_history(wide, many.collect());
+    let page = api
+        .fetch_messages(wide, CatchUpFetchRequest::new(101))
+        .await;
+    assert_eq!(page.expect("scripted page").len(), 100);
 }
 
-/// Cursor contract on the sweep: a deferred N publishes its retry at the
-/// checkpoint before the next channel is fetched, and the retry sweep's
-/// `After` read returns N, recovers it, and retires the retry.
+/// A deferred N publishes its retry at the checkpoint before the next channel's
+/// fetch; the retry sweep's `After` reread recovers N and retires the retry.
 #[tokio::test(flavor = "current_thread")]
 async fn deferred_retry_is_published_at_the_checkpoint_and_rereads_n() {
     let fx = Fixture::new().await;
