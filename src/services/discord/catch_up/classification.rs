@@ -179,7 +179,13 @@ fn disposition_for_utility_ids(
     );
     let is_allowed_automation = allowed_bot_ids.contains(&msg.author_id)
         || announce_bot_id.is_some_and(|id| id == msg.author_id);
-    if outcome == CatchUpClassification::Recover && !is_allowed_automation && !author_is_authorized
+    // TooOld is gated too: it echoes the author and snippet into the channel
+    // and persists the content to the DLQ, so an unauthorized human gets neither.
+    if matches!(
+        outcome,
+        CatchUpClassification::Recover | CatchUpClassification::TooOld
+    ) && !is_allowed_automation
+        && !author_is_authorized
     {
         outcome = CatchUpClassification::NotAllowed;
     }

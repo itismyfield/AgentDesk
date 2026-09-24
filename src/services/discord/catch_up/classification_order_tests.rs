@@ -30,6 +30,7 @@ const INFO_BOT_ID: u64 = 1_481_522_187_197_218_816;
 const ANNOUNCE_BOT_ID: u64 = 1_481_522_187_197_218_817;
 const NOTIFY_BOT_ID: u64 = 1_481_522_187_197_218_818;
 const HUMAN_ID: u64 = 343_742_347_365_974_026;
+const UNAUTHORIZED_HUMAN_ID: u64 = 343_742_347_365_974_027;
 
 fn view(author_id: u64, author_is_bot: bool, age_secs: i64, text: &str) -> CatchUpMessageView {
     CatchUpMessageView {
@@ -1316,6 +1317,7 @@ async fn production_sweep_advances_through_mixed_terminal_aged_page() {
     let empty_id = message_id_with_age(4, Duration::from_secs(410));
     let human_id = message_id_with_age(5, Duration::from_secs(400));
     write_checkpoint(root.path(), &provider, channel_id, task_id.get() - 1);
+    shared.settings.write().await.allowed_user_ids = vec![HUMAN_ID];
 
     let mut system = discord_message(
         channel_id,
@@ -1389,6 +1391,7 @@ async fn production_sweep_uses_semantic_utility_identity_when_bot_flag_is_false(
     let fresh_notify_id = message_id_with_age(5, Duration::from_secs(60));
     write_checkpoint(root.path(), &provider, channel_id, announce_id.get() - 1);
     shared.settings.write().await.allowed_bot_ids = vec![INFO_BOT_ID];
+    shared.settings.write().await.allowed_user_ids = vec![HUMAN_ID];
 
     let (api, outbox) = TestCatchUpApi::new(vec![
         discord_message(
@@ -1840,6 +1843,7 @@ async fn production_sweep_outbox_contract_dedupes_same_batch_and_separates_new_h
     let first_id = message_id_with_age(1, Duration::from_secs(410));
     let second_id = message_id_with_age(2, Duration::from_secs(400));
     write_checkpoint(root.path(), &provider, channel_id, first_id.get() - 1);
+    shared.settings.write().await.allowed_user_ids = vec![HUMAN_ID];
 
     let (first_api, outbox) = TestCatchUpApi::new(vec![discord_message(
         channel_id,
@@ -2305,6 +2309,7 @@ async fn ledger_suppresses_the_restart_gap_notice_for_an_answered_message() {
         "아까 그거 다 됐어?",
     );
     write_checkpoint(root.path(), &provider, channel_id, answered.id.get() - 1);
+    shared.settings.write().await.allowed_user_ids = vec![HUMAN_ID];
 
     // The turn reached terminal delivery before the restart → on the ledger.
     crate::services::discord::outbound::completed_turn_ledger::append_completed_turn(
@@ -2539,4 +2544,218 @@ async fn phase2_unauthorized_human_is_not_enqueued() {
         "phase 2 must keep refusing an unauthorized author"
     );
     assert!(outbox.lock().expect("outbox capture lock").is_empty());
+}
+
+// Unauthorized aged humans get neither the TooOld resend notice (which echoes
+// author id + snippet) nor a DLQ record.
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase1_unauthorized_human_too_old_is_neither_noticed_nor_dead_lettered() {
+    let root = scoped_runtime_root();
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_604_205);
+    let aged_id = message_id_with_age(1, Duration::from_secs(3_600));
+    write_checkpoint(root.path(), &provider, channel_id, aged_id.get() - 1);
+
+    // Default settings authorize nobody.
+    let (api, outbox) = TestCatchUpApi::new(vec![discord_message(
+        channel_id,
+        aged_id,
+        UNAUTHORIZED_HUMAN_ID,
+        false,
+        "미인가 사용자의 오래된 요청",
+    )]);
+    let api = api.with_utility_bot_ids(Some(ANNOUNCE_BOT_ID), Some(NOTIFY_BOT_ID));
+
+    run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
+
+    assert!(
+        outbox.lock().expect("outbox capture lock").is_empty(),
+        "an unauthorized author's id and content must not be echoed into the channel"
+    );
+    assert!(
+        api.dead_letters
+            .lock()
+            .expect("dead-letter capture lock")
+            .is_empty(),
+        "an unauthorized author's content must not be persisted to the DLQ"
+    );
+    assert_eq!(
+        shared.last_message_ids.get(&channel_id).map(|id| *id),
+        Some(aged_id.get()),
+        "the refusal is terminal and still retires on the durable frontier"
+    );
+    assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
+    assert!(
+        super::super::mailbox_snapshot(&shared, channel_id)
+            .await
+            .intervention_queue
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase1_authorized_human_too_old_keeps_notice_and_dead_letter_per_author() {
+    let root = scoped_runtime_root();
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_604_206);
+    let authorized_id = message_id_with_age(1, Duration::from_secs(3_600));
+    let unauthorized_id = message_id_with_age(2, Duration::from_secs(3_500));
+    write_checkpoint(root.path(), &provider, channel_id, authorized_id.get() - 1);
+    shared.settings.write().await.allowed_user_ids = vec![HUMAN_ID];
+
+    let (api, outbox) = TestCatchUpApi::new(vec![
+        discord_message(channel_id, authorized_id, HUMAN_ID, false, "인가된 요청"),
+        discord_message(
+            channel_id,
+            unauthorized_id,
+            UNAUTHORIZED_HUMAN_ID,
+            false,
+            "미인가 요청",
+        ),
+    ]);
+    let api = api.with_utility_bot_ids(Some(ANNOUNCE_BOT_ID), Some(NOTIFY_BOT_ID));
+
+    run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
+
+    assert_eq!(
+        *outbox.lock().expect("outbox capture lock"),
+        vec![CatchUpTooOldOutboxRequest {
+            target: format!("channel:{channel_id}"),
+            content: format!(
+                "⚠️ 재시작 공백으로 1건이 5분 초과로 미처리되었습니다. 필요하면 다시 보내주세요:\n• `{HUMAN_ID}`: 인가된 요청"
+            ),
+            bot: "notify",
+            source: "catch_up_too_old",
+            reason_code: "catch_up.too_old",
+            session_key: format!("catch_up_too_old:{channel_id}:{}", authorized_id.get()),
+        }],
+        "only the authorized author enters the notice, and owns the batch key"
+    );
+    let dead_letters: Vec<_> = api
+        .dead_letters
+        .lock()
+        .expect("dead-letter capture lock")
+        .iter()
+        .map(|record| (record.author_id.clone(), record.content.clone()))
+        .collect();
+    assert_eq!(
+        dead_letters,
+        vec![(Some(HUMAN_ID.to_string()), "인가된 요청".to_string())],
+        "only the authorized author's TooOld is dead-lettered"
+    );
+    assert_eq!(
+        shared.last_message_ids.get(&channel_id).map(|id| *id),
+        Some(unauthorized_id.get()),
+        "both aged messages settle as one contiguous prefix"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase1_allowed_automation_too_old_is_dead_lettered_without_authorization() {
+    let root = scoped_runtime_root();
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_604_207);
+    let announce_id = message_id_with_age(1, Duration::from_secs(3_600));
+    let allowed_id = message_id_with_age(2, Duration::from_secs(3_500));
+    write_checkpoint(root.path(), &provider, channel_id, announce_id.get() - 1);
+    // No user is authorized; automation is allowed only by its configured role.
+    shared.settings.write().await.allowed_bot_ids = vec![INFO_BOT_ID];
+
+    let (api, outbox) = TestCatchUpApi::new(vec![
+        discord_message(
+            channel_id,
+            announce_id,
+            ANNOUNCE_BOT_ID,
+            true,
+            "PM triage: inspect the stalled workflow",
+        ),
+        discord_message(
+            channel_id,
+            allowed_id,
+            INFO_BOT_ID,
+            true,
+            "DISPATCH:1f3c2b1a-0000-4000-8000-000000000000",
+        ),
+    ]);
+    let api = api.with_utility_bot_ids(Some(ANNOUNCE_BOT_ID), Some(NOTIFY_BOT_ID));
+
+    run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
+
+    assert!(
+        outbox.lock().expect("outbox capture lock").is_empty(),
+        "automation TooOld stays internal evidence"
+    );
+    let dead_letters: Vec<_> = api
+        .dead_letters
+        .lock()
+        .expect("dead-letter capture lock")
+        .iter()
+        .map(|record| record.author_id.clone())
+        .collect();
+    assert_eq!(
+        dead_letters,
+        vec![
+            Some(ANNOUNCE_BOT_ID.to_string()),
+            Some(INFO_BOT_ID.to_string())
+        ],
+        "allowed automation keeps its TooOld DLQ evidence without user authorization"
+    );
+    assert_eq!(
+        shared.last_message_ids.get(&channel_id).map(|id| *id),
+        Some(allowed_id.get())
+    );
+}
+
+/// Notify-only unavailability settles (the refusal is identity-independent);
+/// announce unavailability still defers because announce bypasses auth.
+#[test]
+fn aged_unauthorized_human_classifies_not_allowed_across_identity_states() {
+    let aged = view(
+        UNAUTHORIZED_HUMAN_ID,
+        false,
+        3_600,
+        "미인가 사용자의 오래된 요청",
+    );
+    let resolved = UtilityBotUserIdResolution::Resolved(ANNOUNCE_BOT_ID);
+    let not_allowed = CatchUpClassificationDecision::Determinate(CatchUpClassification::NotAllowed);
+    assert_eq!(
+        classify_with_resolutions_for_author(
+            &aged,
+            resolved,
+            UtilityBotUserIdResolution::Resolved(NOTIFY_BOT_ID),
+            false,
+        ),
+        not_allowed
+    );
+    assert_eq!(
+        classify_with_resolutions_for_author(
+            &aged,
+            resolved,
+            UtilityBotUserIdResolution::Unavailable,
+            false,
+        ),
+        not_allowed
+    );
+    assert_eq!(
+        classify_with_resolutions_for_author(
+            &aged,
+            UtilityBotUserIdResolution::Unavailable,
+            UtilityBotUserIdResolution::Unconfigured,
+            false,
+        ),
+        CatchUpClassificationDecision::UtilityIdentityUnavailable
+    );
+    assert_eq!(
+        classify_with_resolutions_for_author(
+            &aged,
+            resolved,
+            UtilityBotUserIdResolution::Resolved(NOTIFY_BOT_ID),
+            true,
+        ),
+        CatchUpClassificationDecision::Determinate(CatchUpClassification::TooOld)
+    );
 }
