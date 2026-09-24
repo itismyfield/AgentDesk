@@ -1963,6 +1963,19 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             continue;
         }
 
+        let Some(kickoff_identity) = kickoff_identity::recovery_kickoff_identity(&state) else {
+            kickoff_identity::dispose_ownerless_row(
+                http,
+                shared,
+                provider,
+                &state,
+                &tmux_session_name,
+                &output_path,
+            )
+            .await;
+            continue;
+        };
+
         shared
             .restart
             .recovering_channels
@@ -2094,10 +2107,8 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             shared,
             channel_id,
             cancel_token.clone(),
-            UserId::new(state.request_owner_user_id),
-            // user_msg_id == 0 (TUI-direct turn) → no active user message to
-            // bind; `optional_message_id` yields None instead of panicking.
-            user_msg_id,
+            kickoff_identity.request_owner,
+            kickoff_identity.user_message_id,
         )
         .await;
 
@@ -2481,7 +2492,10 @@ mod tests {
             "\n                    shared\n                        .restart\n                        .recovering_channels\n                        .insert("
         ));
         assert!(production.contains(
-            "            continue;\n        }\n\n        shared\n            .restart\n            .recovering_channels\n            .insert("
+            "            continue;\n        }\n\n        let Some(kickoff_identity) = kickoff_identity::recovery_kickoff_identity(&state) else {"
+        ));
+        assert!(production.contains(
+            "            continue;\n        };\n\n        shared\n            .restart\n            .recovering_channels\n            .insert("
         ));
         assert_eq!(production.matches(".recovering_channels\n").count(), 3);
     }

@@ -902,6 +902,8 @@ src/
 │   │   │   ├── rebind_runtime/
 │   │   │   │   └── codex_relay_generation.rs
 │   │   │   ├── restore_inflight/
+│   │   │   │   ├── kickoff_identity.rs
+│   │   │   │   ├── kickoff_identity_tests.rs
 │   │   │   │   ├── output_paths.rs
 │   │   │   │   └── ready_without_output_tests.rs
 │   │   │   ├── analytics_transcript.rs
