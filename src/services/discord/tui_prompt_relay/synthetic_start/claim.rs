@@ -233,3 +233,28 @@ pub(in crate::services::discord) fn build_tui_direct_synthetic_inflight_state(
     state.injected_prompt_message_id = Some(user_msg_id.get());
     state
 }
+
+/// Test seam: the production TUI-direct synthetic claim, for the watcher's
+/// terminal-commit tests outside this module.
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) async fn claim_tui_direct_synthetic_turn_for_tests(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    prompt_text: &str,
+    anchor_message_id: MessageId,
+    lease: &ExternalInputRelayLease,
+) -> bool {
+    claim_tui_direct_synthetic_turn(
+        shared,
+        provider,
+        channel_id,
+        tmux_session_name,
+        prompt_text,
+        anchor_message_id,
+        lease,
+    )
+    .await
+    .claimed
+}

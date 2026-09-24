@@ -6018,6 +6018,11 @@ services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_ma
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::paused_preserves_markers
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::pending_preserves_markers
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::same_a_suppresses_duplicate
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::synthetic_mailbox_release_tests::late_row_from_another_session_is_never_finished_by_this_watcher
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::synthetic_mailbox_release_tests::newer_late_row_keeps_its_row_and_mailbox
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::synthetic_mailbox_release_tests::refused_guarded_clear_releases_nothing
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::synthetic_mailbox_release_tests::synthetic_row_born_after_preflight_releases_its_mailbox_on_terminal_commit
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::synthetic_mailbox_release_tests::synthetic_row_pinned_by_preflight_still_releases_its_mailbox
 services::discord::tmux::tmux_watcher::terminal_readiness::rewind_attempt_key_tests::reset_rewind_attempts_keys_offset_with_turn_identity_4115
 services::discord::tmux::tmux_watcher::terminal_readiness::tests::bridge_suppressed_turn_discards_pending_buffer_before_direct_input
 services::discord::tmux::tmux_watcher::terminal_readiness::tests::claude_watcher_ready_keeps_busy_when_partial_user_follows_terminator

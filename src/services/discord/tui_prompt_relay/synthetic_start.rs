@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) mod bridge_handoff;
-mod claim;
+pub(in crate::services::discord) mod claim;
 mod stale_reclaim;
 pub(in crate::services::discord) use claim::build_tui_direct_synthetic_inflight_state;
 pub(super) use claim::{claim_tui_direct_synthetic_turn, claim_tui_direct_synthetic_turn_inner};

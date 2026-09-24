@@ -1146,7 +1146,8 @@ src/
 │   │   │   ├── supervisor_relay/
 │   │   │   │   └── supervisor_frame_source.rs
 │   │   │   ├── terminal_commit_epilogue/
-│   │   │   │   └── continuation_marker_tests.rs
+│   │   │   │   ├── continuation_marker_tests.rs
+│   │   │   │   └── synthetic_mailbox_release_tests.rs
 │   │   │   ├── turn_identity/
 │   │   │   │   └── soft_terminal_authority.rs
 │   │   │   ├── turn_stream_collector/
