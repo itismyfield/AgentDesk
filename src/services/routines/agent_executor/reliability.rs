@@ -148,6 +148,20 @@ impl RoutineAgentExecutor {
             crate::services::platform::tmux::PaneLiveness::DeadOrAbsent => Some(format!(
                 "routine fresh provider session ended before completion ({provider_name})"
             )),
+            crate::services::platform::tmux::PaneLiveness::Live if provider_name == "qwen" => {
+                let pane = tokio::task::spawn_blocking(move || {
+                    crate::services::platform::tmux::capture_pane_timeout(
+                        &session_name,
+                        -40,
+                        std::time::Duration::from_secs(2),
+                    )
+                })
+                .await
+                .ok()
+                .flatten()?;
+                crate::services::provider_error_transcript::qwen_terminal_api_error(&pane)
+                    .map(|error| format!("routine Qwen terminal API failure: {error}"))
+            }
             crate::services::platform::tmux::PaneLiveness::Live
             | crate::services::platform::tmux::PaneLiveness::ProbeError => None,
         }
