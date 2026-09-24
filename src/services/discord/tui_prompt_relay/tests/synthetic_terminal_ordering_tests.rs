@@ -199,9 +199,8 @@ fn terminal_ordering_fixture(
                 let replacement = if replace_actor {
                     let actor = Arc::new(CancelToken::from_persisted_turn_nonce(
                         original_actor.turn_nonce().map(str::to_owned)));
-                    crate::services::discord::mailbox_recovery_kickoff(
-                        &shared, channel, actor.clone(),
-                        serenity::UserId::new(TUI_DIRECT_SYNTHETIC_OWNER_USER_ID), Some(anchor),
+                    shared.mailbox(channel).restore_active_turn(
+                        actor.clone(), serenity::UserId::new(TUI_DIRECT_SYNTHETIC_OWNER_USER_ID), anchor,
                     ).await;
                     let swapped = crate::services::discord::mailbox_snapshot(&shared, channel).await;
                     assert!(swapped.cancel_token.as_ref().is_some_and(|active| Arc::ptr_eq(active, &actor)));

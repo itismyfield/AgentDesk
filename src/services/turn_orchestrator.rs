@@ -24,6 +24,9 @@ mod mailbox_unreachable_tests;
 mod overflow;
 mod pending_queue_persistence;
 mod queue_cancellation;
+mod recovery_kickoff;
+#[cfg(test)]
+mod recovery_kickoff_tests;
 pub(crate) mod registry_purge;
 mod remint_fence;
 mod reply_results;
@@ -75,9 +78,11 @@ use queue_cancellation::{
     cancel_soft_intervention_by_primary_message_id, dequeue_next_soft_intervention,
     has_soft_intervention,
 };
+pub(crate) use recovery_kickoff::RecoveryKickoffResult;
+use recovery_kickoff::{kickoff_refusal, reset_activation_signals};
 pub(crate) use reply_results::{
-    HasPendingSoftQueueResult, QueuePersistenceFailure, RecoveryKickoffResult,
-    RestartDrainAllResult, RestartDrainResult, TryStartTurnResult,
+    HasPendingSoftQueueResult, QueuePersistenceFailure, RestartDrainAllResult, RestartDrainResult,
+    TryStartTurnResult,
 };
 pub(crate) use source_generation::SourceMessageQueuedGeneration;
 pub(crate) use turn_finished_signal::TurnFinishedSignal;
@@ -864,10 +869,7 @@ impl ChannelMailboxHandle {
             reply,
         })
         .await
-        .unwrap_or(RecoveryKickoffResult {
-            activated_turn: false,
-            refused_closed: false,
-        })
+        .unwrap_or(RecoveryKickoffResult::Unavailable)
     }
 
     pub(crate) async fn clear_recovery_marker(&self) {
@@ -2146,7 +2148,12 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     user_message_id,
                     reply,
                 } => {
-                    reset_turn_finished_signal(channel_id);
+                    // CAS: a refused kickoff leaves the slot, its signals and the fence untouched.
+                    if let Some(refusal) = kickoff_refusal(&state, &cancel_token, user_message_id) {
+                        let _ = reply.send(refusal);
+                        continue;
+                    }
+                    reset_activation_signals(channel_id);
                     let activated_turn = state.cancel_token.is_none();
                     state.active_turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
                     state
@@ -2159,16 +2166,9 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     state.active_turn_kind = ActiveTurnKind::default();
                     let recovery_started_at = Instant::now();
                     state.recovery_started_at = Some(recovery_started_at);
-                    if activated_turn || state.turn_started_at.is_none() {
-                        state.turn_started_at = Some(Utc::now());
-                    }
-                    if activated_turn || state.turn_started_instant.is_none() {
-                        state.turn_started_instant = Some(recovery_started_at);
-                    }
-                    let _ = reply.send(RecoveryKickoffResult {
-                        activated_turn,
-                        refused_closed: false,
-                    });
+                    state.turn_started_at = Some(Utc::now());
+                    state.turn_started_instant = Some(recovery_started_at);
+                    let _ = reply.send(RecoveryKickoffResult::Activated);
                 }
                 ChannelMailboxMsg::ClearRecoveryMarker { reply } => {
                     state.recovery_started_at = None;
@@ -5967,7 +5967,7 @@ mod persistence_tests {
                     Some(marker.message_id),
                 )
                 .await;
-            assert!(recovery.activated_turn);
+            assert!(recovery.activated_turn());
             save_channel_pending_dispatch_marker(&provider, token_hash, channel_id, &marker, None)
                 .unwrap();
             let markers = load_pending_dispatch_markers(&provider, token_hash);

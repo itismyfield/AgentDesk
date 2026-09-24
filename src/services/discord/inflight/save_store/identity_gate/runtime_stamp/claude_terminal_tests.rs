@@ -1,7 +1,5 @@
 use super::*;
-use crate::services::discord::{
-    mailbox_recovery_kickoff, mailbox_try_start_turn, make_shared_data_for_tests,
-};
+use crate::services::discord::{mailbox_try_start_turn, make_shared_data_for_tests};
 use crate::services::provider::CancelToken;
 use crate::services::tui_prompt_dedupe as dedupe;
 use serenity::all::{ChannelId, MessageId, UserId};
@@ -358,14 +356,15 @@ fn claude_terminal_range_rejects_unproven_source_and_same_nonce_successor_withou
                                 if defect == "foreign-actor" {
                                     *actor = Arc::downgrade(&successor);
                                 } else {
-                                    mailbox_recovery_kickoff(
-                                        &fixture.shared,
-                                        ChannelId::new(fixture.local.channel_id),
-                                        successor.clone(),
-                                        UserId::new(fixture.local.request_owner_user_id),
-                                        Some(MessageId::new(fixture.local.user_msg_id)),
-                                    )
-                                    .await;
+                                    fixture
+                                        .shared
+                                        .mailbox(ChannelId::new(fixture.local.channel_id))
+                                        .restore_active_turn(
+                                            successor.clone(),
+                                            UserId::new(fixture.local.request_owner_user_id),
+                                            MessageId::new(fixture.local.user_msg_id),
+                                        )
+                                        .await;
                                 }
                                 foreign_actor = Some(successor);
                             }

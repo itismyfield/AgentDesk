@@ -13,12 +13,6 @@ pub(crate) struct HasPendingSoftQueueResult {
     pub(crate) persistence_error: Option<String>,
 }
 
-pub(crate) struct RecoveryKickoffResult {
-    pub(crate) activated_turn: bool,
-    /// #3297 r3 — kickoff refused by a purge tombstone (`state.closed`).
-    pub(crate) refused_closed: bool,
-}
-
 #[derive(Default)]
 pub(crate) struct TryStartTurnResult {
     pub(crate) started: bool,

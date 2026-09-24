@@ -1291,7 +1291,7 @@ mod released_episode_mint_fence_tests {
                         mailbox
                             .recovery_kickoff(token, owner, Some(message))
                             .await
-                            .activated_turn
+                            .activated_turn()
                     );
                 } else {
                     mailbox.restore_active_turn(token, owner, message).await;
@@ -1338,7 +1338,7 @@ mod released_episode_mint_fence_tests {
                     Some(MessageId::new(stale.effective_finalizer_turn_id())),
                 )
                 .await
-                .activated_turn;
+                .activated_turn();
             let _ = finalizer_release(shared, &stale).await;
             // Whichever token is left, the live episode loses it without a release.
             let _ = crate::services::discord::mailbox_finish_turn_if_matches(
