@@ -9,7 +9,7 @@
 //! only termination signal is:
 //!
 //! 1. The owning [`WatcherSupervisor`] told us the session disappeared
-//!    (graceful shutdown via [`StreamRelayHandle::shutdown`]).
+//!    (graceful shutdown via [`StreamRelayHandle::shutdown_with_result`]).
 //! 2. The relay's runtime shutdown flag flipped.
 //! 3. The upstream frame source returned None (queue closed).
 //!
@@ -372,7 +372,7 @@ impl RelaySink for DiscardSink {
 }
 
 /// Handle returned by [`spawn_stream_relay`]. The supervisor holds one of
-/// these per active session and uses [`Self::shutdown`] when the session
+/// these per active session and uses [`Self::shutdown_with_result`] when the session
 /// disappears from the [`super::session_registry::SessionRegistry`].
 pub struct StreamRelayHandle {
     matched: MatchedChannel,
@@ -744,7 +744,7 @@ impl std::fmt::Debug for StreamRelayHandle {
 }
 
 /// Spawn a relay task for `matched`. The returned handle is the only stable
-/// reference the supervisor needs — drop it (or call `shutdown`) to wind the
+/// reference the supervisor needs — drop it (or call `shutdown_with_result`) to wind the
 /// relay down.
 pub fn spawn_stream_relay(matched: MatchedChannel, sink: Arc<dyn RelaySink>) -> StreamRelayHandle {
     spawn_stream_relay_with_buffer(matched, sink, DEFAULT_RELAY_BUFFER)
