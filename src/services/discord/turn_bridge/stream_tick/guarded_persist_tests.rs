@@ -120,31 +120,6 @@ fn recorded_stream_gate_new_mirrors_the_shipped_authority_mapping() {
     }
 }
 
-/// #5464 T5 S4's deployment no-op, stated as the property that makes it one: the
-/// predicate's only caller is the S7a entry gate
-/// (`bridge_entry_persist::bridge_entry_rowless_cohort_admits`) and under the
-/// SHIPPED dial it must admit no channel. `Observe` is deliberately not enough
-/// either: it is the mode the promotion evidence is collected under.
-#[test]
-fn the_shipped_dial_admits_no_channel_to_the_stream_loop_enforcement_cohort() {
-    use crate::config::RelayAuthorityMode;
-
-    let defaults = crate::config::RuntimeSettingsConfig::default();
-    assert_eq!(defaults.relay_authority_mode, RelayAuthorityMode::Legacy);
-    assert_eq!(defaults.relay_authority_cohort_percent, 0);
-    assert!(
-        !RelayAuthorityMode::Observe.governs_destructive_authority(),
-        "the observing mode must not be able to enforce",
-    );
-
-    for channel_id in (0..2_000u64).map(|index| 1_534_511_598_012_600_371 + index * 7) {
-        assert!(
-            !stream_loop_suppression_cohort_admits(channel_id),
-            "channel {channel_id} was admitted to the enforcement cohort by the shipped dial"
-        );
-    }
-}
-
 /// The one cell S4 moves, at the seam that decides it — and the cells that must
 /// NOT move with it. The mismatch family is an exact-episode veto rather than a
 /// structural signal (design r3 ERRATUM R3-E4-3), so it keeps its termination

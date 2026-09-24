@@ -204,6 +204,12 @@ and set the dial to the target position. Two knobs, two granularities:
 
 No restart and no deploy. The next decision reads the new value.
 
+**Not a dial-reclaim target (not applicable).** The S7a bridge-entry gate, the
+C1 rowless-terminal candidacy and the three cancel-handoff rowless checks no
+longer read the dial: they run the former `Enforce` path unconditionally. Moving
+the dial to `observe`, `legacy` or a narrower cohort does not revert them; only a
+code revert does.
+
 **`observe` is not a safe halfway house for this dial.** Enforcement is
 `governs_destructive_authority`, which is `matches!(self, Self::Enforce)`
 (`config.rs:1812`) — so `observe` withdraws enforcement exactly as completely as
@@ -257,16 +263,15 @@ it, the same outcome falls through to `AuthorityLost` (`guarded_persist.rs:111`)
 → `stream_tick.rs:360` → `stream_loop.rs:892-894` breaks the loop →
 `turn_bridge/mod.rs:702-706` relinquishes bridge authority, defuses the inflight
 guard and **returns without running `post_loop_finalize`**, orphaning a finished
-answer. The entry gate reverts with it: `bridge_entry_rowless_cohort_admits`
-(`bridge_entry_persist.rs:96`) delegates to the same predicate, and outside the
-cohort `:116` drops the `ContinueRowless` verdict. In the measured window that
-is 34 of 328 turns (`entry old->new: end->continue_rowless: 34`).
+answer. The entry gate no longer reverts with it: it takes `ContinueRowless`
+onto an existing anchor under every dial position (see "Not a dial-reclaim
+target" above). In the measured window that path carried 34 of 328 turns
+(`entry old->new: end->continue_rowless: 34`).
 
-**Why it can be silent.** Four production read sites resolve the dial with
-`.unwrap_or_default()` — i.e. to `Legacy/0` — with no log line:
-`cohort.rs:227` (health), `authority_observation.rs:350` (observation),
-`guarded_persist.rs:79` (stream gate), and the entry gate via
-`bridge_entry_persist.rs:97`. Both fields are `#[serde(default, …)]`
+**Why it can be silent.** The remaining production read sites resolve the dial
+with `.unwrap_or_default()` — i.e. to `Legacy/0` — with no log line:
+`cohort.rs:227` (health) and `authority_observation.rs:350` (observation). The
+stream-gate and entry-gate reads were removed with their dial dependence. Both fields are `#[serde(default, …)]`
 (`config.rs:1858,1864`), so a **deleted, misspelled or dropped key parses
 clean and reads as `Legacy/0`** — no rejection, no warning. A whole-config
 rewrite by a binary whose typed `Config` has no such fields drops them outright;

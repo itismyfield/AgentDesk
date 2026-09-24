@@ -179,10 +179,9 @@ fn production_call_site_feeds_the_pre_relay_inflight_row_5175() {
 // with `inflight_present=false` — terminal bodies that reached no channel.
 // ---------------------------------------------------------------------------
 
-/// Both AC1 operands present, inside the enforcement cohort.
+/// Both AC1 operands present.
 fn full_rowless_authority() -> RowlessDeliveryAuthority {
     RowlessDeliveryAuthority {
-        cohort_admits: true,
         ledger_obligation_open: true,
         delivery_lease_present: true,
     }
@@ -198,7 +197,6 @@ fn rowless_soft_terminal_stays_a_delivery_candidate_on_a_ledger_obligation_5464_
         FRAME_END,
         Some(WatcherTerminalKind::SoftStopHookSummary),
         RowlessDeliveryAuthority {
-            cohort_admits: true,
             ledger_obligation_open: true,
             delivery_lease_present: false,
         },
@@ -225,7 +223,6 @@ fn rowless_soft_terminal_stays_a_delivery_candidate_on_a_delivery_lease_5464_c1(
         FRAME_END,
         Some(WatcherTerminalKind::SoftStopHookSummary),
         RowlessDeliveryAuthority {
-            cohort_admits: true,
             ledger_obligation_open: false,
             delivery_lease_present: true,
         },
@@ -249,7 +246,6 @@ fn rowless_soft_terminal_is_still_denied_without_ledger_or_lease_5464_c1() {
         FRAME_END,
         Some(WatcherTerminalKind::SoftStopHookSummary),
         RowlessDeliveryAuthority {
-            cohort_admits: true,
             ledger_obligation_open: false,
             delivery_lease_present: false,
         },
@@ -261,27 +257,6 @@ fn rowless_soft_terminal_is_still_denied_without_ledger_or_lease_5464_c1() {
         Some(SoftTerminalAuthorityDenial::NoInflightRow),
         "with neither AC1 operand the structural refusal must survive"
     );
-}
-
-#[test]
-fn rowless_evidence_is_inert_outside_the_enforcement_cohort_5464_c1() {
-    // The deployment no-op: under the shipped dial `cohort_admits` is false, so
-    // even both operands together change nothing and the channel keeps the
-    // mapping that ships today.
-    let (authorized, denial) = watcher_soft_terminal_direct_send_authority(
-        &tui_direct_binding(),
-        None,
-        FRAME_END,
-        Some(WatcherTerminalKind::SoftStopHookSummary),
-        RowlessDeliveryAuthority {
-            cohort_admits: false,
-            ledger_obligation_open: true,
-            delivery_lease_present: true,
-        },
-    );
-
-    assert!(!authorized);
-    assert_eq!(denial, Some(SoftTerminalAuthorityDenial::NoInflightRow));
 }
 
 #[test]
@@ -339,23 +314,20 @@ fn rowless_evidence_never_relaxes_the_five_exact_episode_conjuncts_5464_c1() {
 }
 
 #[test]
-fn rowless_candidacy_requires_the_cohort_and_one_positive_operand_5464_c1() {
+fn rowless_candidacy_requires_one_positive_operand_5464_c1() {
     // The predicate's whole truth table, so a mutation that drops an operand or
-    // flips the conjunction cannot stay green on the scenarios above alone.
-    for cohort_admits in [false, true] {
-        for ledger_obligation_open in [false, true] {
-            for delivery_lease_present in [false, true] {
-                let evidence = RowlessDeliveryAuthority {
-                    cohort_admits,
-                    ledger_obligation_open,
-                    delivery_lease_present,
-                };
-                assert_eq!(
-                    evidence.retains_delivery_candidacy(),
-                    cohort_admits && (ledger_obligation_open || delivery_lease_present),
-                    "{evidence:?}"
-                );
-            }
+    // flips the disjunction cannot stay green on the scenarios above alone.
+    for ledger_obligation_open in [false, true] {
+        for delivery_lease_present in [false, true] {
+            let evidence = RowlessDeliveryAuthority {
+                ledger_obligation_open,
+                delivery_lease_present,
+            };
+            assert_eq!(
+                evidence.retains_delivery_candidacy(),
+                ledger_obligation_open || delivery_lease_present,
+                "{evidence:?}"
+            );
         }
     }
 }
@@ -393,8 +365,8 @@ fn production_call_site_reads_the_ledger_and_the_delivery_lease_5464_c1() {
         "lease presence must come from the pure operand whose polarity is pinned"
     );
     assert!(
-        reader.contains("cohort::enforcement_admits"),
-        "the relaxation must be gated by the shared relay-authority cohort predicate"
+        !reader.contains("cohort::"),
+        "the relaxation must not be gated by a rollout cohort read"
     );
 
     let call_site = source

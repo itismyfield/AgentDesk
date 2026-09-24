@@ -70,24 +70,6 @@ pub(crate) fn admits(mode: RelayAuthorityMode, percent: u8, channel_id: u64) -> 
     mode.consults_cohort() && cohort_bucket(channel_id) < effective_cohort_percent(percent)
 }
 
-/// The relay-authority cohort question for a call site that ENFORCES.
-///
-/// The mode predicate is `governs_destructive_authority`, not
-/// `records_authority_observations`: `Observe` must stay behaviour-identical
-/// to `Legacy` for every consumer that is not the AC3 recorder. Callers read
-/// this ONCE per decision and pass the answer down.
-pub(crate) fn enforcement_admits(channel_id: u64) -> bool {
-    let (mode, percent) = crate::config_live_reload::current()
-        .map(|config| {
-            (
-                config.runtime.relay_authority_mode,
-                config.runtime.relay_authority_cohort_percent,
-            )
-        })
-        .unwrap_or_default();
-    mode.governs_destructive_authority() && admits(mode, percent, channel_id)
-}
-
 /// Content fingerprint of the live cohort configuration (design §5.2).
 ///
 /// `config_live_reload` keeps no generation counter, so rollout windows are
@@ -191,27 +173,6 @@ mod tests {
     /// never advances.
     fn low_bit_ids(count: u64) -> impl Iterator<Item = u64> {
         (0..count).map(|index| SNOWFLAKE_BASE + index)
-    }
-
-    /// Under the shipped dial, `enforcement_admits` answers `false` for every
-    /// channel, so the watcher's rowless soft-terminal relaxation cannot be
-    /// taken without a config change. `Observe` alone must not be enough
-    /// either, or it would change the behaviour the AC3 evidence describes.
-    #[test]
-    fn shipped_defaults_admit_no_channel_to_the_enforcement_cohort() {
-        let defaults = crate::config::RuntimeSettingsConfig::default();
-        assert_eq!(defaults.relay_authority_mode, RelayAuthorityMode::Legacy);
-        assert_eq!(defaults.relay_authority_cohort_percent, 0);
-        assert!(
-            !RelayAuthorityMode::Observe.governs_destructive_authority(),
-            "the observing mode must not be able to enforce",
-        );
-        for channel_id in snowflake_ids(2_000) {
-            assert!(
-                !enforcement_admits(channel_id),
-                "channel {channel_id} was admitted to the enforcement cohort by the shipped dial"
-            );
-        }
     }
 
     /// Under the shipped defaults no channel is in the cohort, so no consumer
