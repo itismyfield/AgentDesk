@@ -835,6 +835,7 @@ mod tests {
             };
             CALLS.store(0, Ordering::SeqCst);
             DETAILS.store(0, Ordering::SeqCst);
+            crate::logging::test_capture::pin_callsite_interest();
             let snapshot =
                 super::super::snapshot::build_health_snapshot_with_options(&registry, options)
                     .with_subscriber(tracing_subscriber::registry().with(DetailDelay))
