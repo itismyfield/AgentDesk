@@ -20,19 +20,19 @@ pub(crate) enum IndependentTmuxReadiness {
 /// that a provider stopped working. Missing bindings/captures fail closed.
 pub(crate) fn provider_session_is_proven_idle(tmux_session_name: &str) -> bool {
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
-        provider_session_is_proven_idle_under_authority(authority)
+        provider_session_is_proven_idle_under_authority(authority).is_ok()
     })
 }
 
 /// Keep the final provider probe and kill under the same source authority used
 /// by runtime rebinding, so a replacement binding cannot race an idle decision.
-/// None means preserve; Some(false) means a proven-idle kill itself failed.
+/// Err names why the session was preserved; Ok(false) means the kill failed.
 pub(crate) fn kill_proven_idle_provider_session(
     tmux_session_name: &str,
     reason: &str,
-) -> Option<bool> {
+) -> Result<bool, &'static str> {
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
-        provider_session_is_proven_idle_under_authority(authority).then(|| {
+        provider_session_is_proven_idle_under_authority(authority).map(|()| {
             crate::services::platform::tmux::kill_session_output_timeout(
                 tmux_session_name,
                 reason,
@@ -45,12 +45,12 @@ pub(crate) fn kill_proven_idle_provider_session(
 
 fn provider_session_is_proven_idle_under_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
-) -> bool {
+) -> Result<(), &'static str> {
     let tmux_session_name = authority.session();
     let Some((provider, _)) =
         crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_session_name)
     else {
-        return false;
+        return Err("provider_unknown");
     };
     let binding =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
@@ -75,16 +75,18 @@ fn provider_session_is_proven_idle_under_authority(
                 .flatten()
         });
     let Some(native_path) = native_path else {
-        return false;
+        return Err("transcript_unresolved");
     };
     let Some(pane) = crate::services::platform::tmux::capture_pane_timeout(
         tmux_session_name,
         -80,
         std::time::Duration::from_secs(2),
     ) else {
-        return false;
+        return Err("pane_capture_failed");
     };
     provider_output_is_proven_idle(&provider, &native_path, &pane)
+        .then_some(())
+        .ok_or("provider_idle_not_proven")
 }
 
 fn provider_output_is_proven_idle(provider: &ProviderKind, native_path: &Path, pane: &str) -> bool {

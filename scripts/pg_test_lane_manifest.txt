@@ -618,6 +618,7 @@ server::routes::auto_queue_lifecycle_pg_tests::tests::stale_manual_rebind_cannot
 server::routes::auto_queue_preflight_harness_tests::auto_queue_preflight_fixture_sandbox_roundtrip_pg
 server::routes::campaigns::tests::postgres_campaign_http_auth_conflict_and_history_pg
 server::routes::campaigns::tests::postgres_ledger_round_trips_a_document_past_the_axum_default_limit_pg
+server::routes::dispatched_sessions::tests::idle_kill_route_preserves_unobservable_session_and_kills_proven_idle_pg
 server::routes::dispatched_sessions::tests::precondition_changed_handler_contract_is_conflict_and_retryable_pg
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows

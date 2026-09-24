@@ -15,6 +15,10 @@ pub(crate) fn is_actionable_ops_alert(source: &str, reason_code: Option<&str>) -
             | ("github_sync", Some("github_sync.terminal_open_issue"))
             | ("long_turn_watchdog", Some("long_turn_cluster"))
             | ("relay_signal_rollup", Some("relay_signal.threshold"))
+            | (
+                "relay_signal_rollup",
+                Some("relay_signal.idle_cleanup_preserved")
+            )
             | ("slo_alerter", Some("slo_threshold_breach"))
             | ("dispatch_watchdog", Some("dispatch_stuck"))
             | ("routine-runtime", Some("routine_paused_stale"))

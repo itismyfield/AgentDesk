@@ -175,6 +175,7 @@ async fn enqueue_relay_alert_pg(
     dedupe_key: &str,
     content: &str,
     now_ms: i64,
+    reason_code: &str,
 ) -> Result<bool> {
     // Claim the dedupe slot atomically *before* enqueueing so concurrent
     // leaders cannot double-post the same signal in the same window.
@@ -189,7 +190,7 @@ async fn enqueue_relay_alert_pg(
             content,
             bot: crate::services::message_outbox::ACTIONABLE_OPS_ALERT_BOT,
             source: "relay_signal_rollup",
-            reason_code: Some("relay_signal.threshold"),
+            reason_code: Some(reason_code),
             session_key: Some(dedupe_key),
         },
     )
@@ -232,7 +233,16 @@ pub(crate) async fn enqueue_relay_signal_alerts_pg(pool: &PgPool) -> Result<u64>
         }
         let dedupe_key = relay_alert_dedupe_key(signal.key, now_ms);
         let content = relay_alert_content(signal, count, threshold);
-        if enqueue_relay_alert_pg(pool, &target, &dedupe_key, &content, now_ms).await? {
+        if enqueue_relay_alert_pg(
+            pool,
+            &target,
+            &dedupe_key,
+            &content,
+            now_ms,
+            "relay_signal.threshold",
+        )
+        .await?
+        {
             alert_count = alert_count.saturating_add(1);
             tracing::warn!(
                 signal = signal.key,
@@ -246,9 +256,65 @@ pub(crate) async fn enqueue_relay_signal_alerts_pg(pool: &PgPool) -> Result<u64>
     Ok(alert_count)
 }
 
+pub(super) const IDLE_CLEANUP_PRESERVED_REASON_CODE: &str = "relay_signal.idle_cleanup_preserved";
+
+pub(super) fn idle_cleanup_preserved_alert_content(
+    channel: &str,
+    preserved_reason: &str,
+    unobserved_minutes: Option<u64>,
+) -> String {
+    let duration = match unobserved_minutes {
+        Some(minutes) if minutes >= 60 => format!("{}시간 {}분", minutes / 60, minutes % 60),
+        Some(minutes) => format!("{minutes}분"),
+        None => "알 수 없음".to_string(),
+    };
+    format!(
+        "idle 자동 정리 보류: 채널 `{channel}` 사유 `{preserved_reason}` — 마지막 heartbeat 이후 {duration}, tmux 유지."
+    )
+}
+
+/// One operator line when idle cleanup keeps a session it could not prove idle.
+/// The per-session slot shares the relay alert TTL, so the 5-minute idle-kill
+/// tick cannot repeat it while the session stays preserved.
+pub(crate) async fn enqueue_idle_cleanup_preserved_alert_pg(
+    pool: &PgPool,
+    session_key: &str,
+    channel: &str,
+    preserved_reason: &str,
+    unobserved_minutes: Option<u64>,
+) -> Result<bool> {
+    let Some(target) = relay_alert_target_pg(pool).await? else {
+        return Ok(false);
+    };
+    enqueue_relay_alert_pg(
+        pool,
+        &target,
+        &format!("relay_alert:idle_cleanup_preserved:{session_key}"),
+        &idle_cleanup_preserved_alert_content(channel, preserved_reason, unobserved_minutes),
+        chrono::Utc::now().timestamp_millis(),
+        IDLE_CLEANUP_PRESERVED_REASON_CODE,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_cleanup_preserved_alert_is_one_actionable_line() {
+        let content =
+            idle_cleanup_preserved_alert_content("adk-cc", "transcript_unresolved", Some(435));
+        assert!(!content.contains('\n'));
+        for part in ["adk-cc", "transcript_unresolved", "7시간 15분"] {
+            assert!(content.contains(part), "{content}");
+        }
+        assert!(idle_cleanup_preserved_alert_content("c", "r", None).contains("알 수 없음"));
+        assert!(crate::services::message_outbox::is_actionable_ops_alert(
+            "relay_signal_rollup",
+            Some(IDLE_CLEANUP_PRESERVED_REASON_CODE)
+        ));
+    }
 
     fn signal(key: &'static str, default_threshold: u32) -> RelaySignal {
         RelaySignal {
