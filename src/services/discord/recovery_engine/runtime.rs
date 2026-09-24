@@ -97,20 +97,6 @@ pub(in crate::services::discord) fn readopt_marker_eligible_real_user(
         && state.user_msg_id != 0
 }
 
-/// Only the mailbox's own record of releasing this exact episode proves the turn
-/// already ended here; without it (e.g. a prior process's row) re-registering stays open.
-fn mailbox_released_this_episode(
-    snapshot: &crate::services::turn_orchestrator::ChannelMailboxSnapshot,
-    user_msg_id: serenity::model::id::MessageId,
-    turn_nonce: Option<&str>,
-) -> bool {
-    matches!(
-        (snapshot.released_episode.as_ref(), turn_nonce),
-        (Some((released_id, released_nonce)), Some(nonce))
-            if *released_id == user_msg_id && released_nonce == nonce
-    )
-}
-
 /// #4370: mark this mailbox slot as re-adopted-from-inflight so the TUI-direct
 /// synthetic `stale_reclaim` path recognises this real-user mailbox owner as
 /// reclaimable-when-stale (generalising #4018's synthetic-owner-only reclaim to
@@ -322,16 +308,6 @@ async fn reregister_active_turn_from_inflight_inner(
         return false;
     }
 
-    if mailbox_released_this_episode(&snapshot, finalizer_msg_id, state.turn_nonce.as_deref()) {
-        tracing::warn!(
-            provider = %provider.as_str(),
-            channel_id = state.channel_id,
-            finalizer_turn_id,
-            "inflight reregister refused to mint: this mailbox already released this exact episode"
-        );
-        return false;
-    }
-
     let cancel_token = Arc::new(CancelToken::from_persisted_turn_nonce(
         state.turn_nonce.clone(),
     ));
@@ -342,7 +318,11 @@ async fn reregister_active_turn_from_inflight_inner(
         "inflight reregister active turn",
     );
 
-    let started = super::mailbox_try_start_turn(
+    #[cfg(test)]
+    mint_window::pause(state.channel_id).await;
+    // Only the mailbox's own record of releasing this exact episode refuses the
+    // mint; a row it never released here (e.g. a prior process's) stays open.
+    let claim = super::queue_io::mailbox_try_start_turn_unless_released(
         shared,
         channel_id,
         cancel_token,
@@ -350,6 +330,15 @@ async fn reregister_active_turn_from_inflight_inner(
         finalizer_msg_id,
     )
     .await;
+    if claim.refused_released_episode {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = state.channel_id,
+            finalizer_turn_id,
+            "inflight reregister refused to mint: this mailbox already released this exact episode"
+        );
+    }
+    let started = claim.started;
     if started {
         reseed_recovered_finalizer_ledger(
             shared,
@@ -965,6 +954,42 @@ mod readopted_ledger_record_gate_tests {
     }
 }
 
+/// Parks one reregister of a channel after its mailbox snapshot and before its
+/// mint, so a test can land a concurrent mint and release inside that window.
+#[cfg(test)]
+mod mint_window {
+    use std::sync::Mutex;
+    use tokio::sync::oneshot;
+
+    type Pause = (u64, oneshot::Sender<()>, oneshot::Receiver<()>);
+    static ARMED: Mutex<Vec<Pause>> = Mutex::new(Vec::new());
+
+    /// Returns (reached, resume) for the next reregister of `channel_id`.
+    pub(super) fn arm(channel_id: u64) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached_tx, reached_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        ARMED
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push((channel_id, reached_tx, resume_rx));
+        (reached_rx, resume_tx)
+    }
+
+    pub(super) async fn pause(channel_id: u64) {
+        let armed = {
+            let mut armed = ARMED.lock().unwrap_or_else(|poison| poison.into_inner());
+            armed
+                .iter()
+                .position(|(armed_channel, ..)| *armed_channel == channel_id)
+                .map(|index| armed.swap_remove(index))
+        };
+        if let Some((_, reached, resume)) = armed {
+            let _ = reached.send(());
+            let _ = resume.await;
+        }
+    }
+}
+
 /// Re-registering an episode whose token this mailbox already released would
 /// re-open a finished turn; any other empty-mailbox row is recovery's to mint.
 #[cfg(test)]
@@ -1024,6 +1049,41 @@ mod released_episode_mint_fence_tests {
             })
     }
 
+    /// Releases `state`'s episode through the finalizer's episode-keyed claim;
+    /// returns whether that claim took a token.
+    async fn finalizer_release(
+        shared: &std::sync::Arc<crate::services::discord::SharedData>,
+        state: &InflightTurnState,
+    ) -> bool {
+        let key = crate::services::discord::turn_finalizer::TurnKey::new(
+            ChannelId::new(state.channel_id),
+            state.effective_finalizer_turn_id(),
+            shared.restart.current_generation,
+        )
+        .with_episode_nonce(state.turn_nonce.as_deref());
+        crate::services::discord::turn_finalizer::claim_normal_episode(
+            shared,
+            &ProviderKind::Claude,
+            key,
+            false,
+            None,
+        )
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|captured| captured.finish.removed_token.is_some())
+    }
+
+    async fn token_present(
+        shared: &std::sync::Arc<crate::services::discord::SharedData>,
+        state: &InflightTurnState,
+    ) -> bool {
+        crate::services::discord::mailbox_snapshot(shared, ChannelId::new(state.channel_id))
+            .await
+            .cancel_token
+            .is_some()
+    }
+
     /// Mints `minted` and releases it the way the finalizer does, then
     /// re-registers `reloaded`; returns (reregister verdict, token present).
     async fn reregister_after_release(
@@ -1031,22 +1091,93 @@ mod released_episode_mint_fence_tests {
         minted: &InflightTurnState,
         reloaded: &InflightTurnState,
     ) -> (bool, bool) {
-        let channel_id = ChannelId::new(minted.channel_id);
         assert!(super::reregister_active_turn_from_inflight(shared, minted).await);
-        let finish = crate::services::discord::mailbox_finish_turn_if_matches(
-            shared,
-            &ProviderKind::Claude,
-            channel_id,
-            MessageId::new(minted.effective_finalizer_turn_id()),
-        )
-        .await;
         assert!(
-            finish.removed_token.is_some(),
+            finalizer_release(shared, minted).await,
             "the finalizer released the token"
         );
         let restored = super::reregister_active_turn_from_inflight(shared, reloaded).await;
-        let snapshot = crate::services::discord::mailbox_snapshot(shared, channel_id).await;
-        (restored, snapshot.cancel_token.is_some())
+        (restored, token_present(shared, reloaded).await)
+    }
+
+    /// A late message-id-only release can take a live successor's token, but it
+    /// names no episode, so it must not fence that successor's recovery.
+    #[test]
+    fn a_late_release_for_another_episode_does_not_fence_the_live_one() {
+        let earlier = row(524_205);
+        let mut live = earlier.clone();
+        live.turn_nonce = Some("live-episode".to_string());
+        let (kept, restored, token_present) = with_running_process(async |shared| {
+            assert!(super::reregister_active_turn_from_inflight(shared, &live).await);
+            let kept =
+                !finalizer_release(shared, &earlier).await && token_present(shared, &live).await;
+            let taken = crate::services::discord::mailbox_finish_turn_if_matches(
+                shared,
+                &ProviderKind::Claude,
+                ChannelId::new(earlier.channel_id),
+                MessageId::new(earlier.effective_finalizer_turn_id()),
+            )
+            .await;
+            assert!(
+                taken.removed_token.is_some(),
+                "the message-id-only release takes whatever episode holds the id"
+            );
+            let restored = super::reregister_active_turn_from_inflight(shared, &live).await;
+            (kept, restored, token_present(shared, &live).await)
+        });
+        assert!(
+            kept,
+            "an episode-keyed late release must leave the live episode's token alone"
+        );
+        assert!(
+            restored && token_present,
+            "the live episode was never released on its own identity, so recovery re-mints it"
+        );
+    }
+
+    #[test]
+    fn a_later_release_does_not_erase_an_earlier_witness() {
+        let first = row(524_206);
+        let mut second = row(524_206);
+        second.user_msg_id += 2;
+        let (restored, token_present) = with_running_process(async |shared| {
+            for episode in [&first, &second] {
+                assert!(super::reregister_active_turn_from_inflight(shared, episode).await);
+                assert!(finalizer_release(shared, episode).await);
+            }
+            let restored = super::reregister_active_turn_from_inflight(shared, &first).await;
+            (restored, token_present(shared, &first).await)
+        });
+        assert!(
+            !restored && !token_present,
+            "the second release must not erase the proof that the first episode ended"
+        );
+    }
+
+    /// A reregister that read an empty mailbox before the same episode was
+    /// minted and released elsewhere must still be refused at its mint.
+    #[test]
+    fn a_release_inside_the_mint_window_still_fences_the_mint() {
+        let state = row(524_207);
+        let (restored, token_present) = with_running_process(async |shared| {
+            let (reached, resume) = super::mint_window::arm(state.channel_id);
+            let stale = super::reregister_active_turn_from_inflight(shared, &state);
+            let concurrent = async {
+                tokio::time::timeout(std::time::Duration::from_secs(10), reached)
+                    .await
+                    .expect("the stale reregister reached its mint")
+                    .expect("the mint window stayed armed");
+                assert!(super::reregister_active_turn_from_inflight(shared, &state).await);
+                assert!(finalizer_release(shared, &state).await);
+                let _ = resume.send(());
+            };
+            let (restored, ()) = tokio::join!(stale, concurrent);
+            (restored, token_present(shared, &state).await)
+        });
+        assert!(
+            !restored && !token_present,
+            "the witness must be checked in the same mailbox step that mints"
+        );
     }
 
     #[test]
@@ -1097,29 +1228,6 @@ mod released_episode_mint_fence_tests {
             restored && token_present,
             "the witness names one exact episode, not every episode of its message"
         );
-    }
-
-    #[test]
-    fn a_row_without_a_nonce_never_matches_a_witness() {
-        let snapshot = crate::services::turn_orchestrator::ChannelMailboxSnapshot {
-            released_episode: Some((MessageId::new(7), "episode-a".to_string())),
-            ..Default::default()
-        };
-        assert!(super::mailbox_released_this_episode(
-            &snapshot,
-            MessageId::new(7),
-            Some("episode-a")
-        ));
-        assert!(!super::mailbox_released_this_episode(
-            &snapshot,
-            MessageId::new(7),
-            None
-        ));
-        assert!(!super::mailbox_released_this_episode(
-            &snapshot,
-            MessageId::new(8),
-            Some("episode-a")
-        ));
     }
 
     #[test]

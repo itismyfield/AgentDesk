@@ -34,12 +34,9 @@ pub(super) fn release_active_turn_anchor(
         .turn_started_instant
         .filter(|_| removed_token.is_some());
     pause_inbound_stall_for_turn(state, held);
-    let released_nonce = state.active_turn_nonce.take();
-    if removed_token.is_some() {
-        state.released_episode = state.active_user_message_id.zip(released_nonce);
-    }
     state.active_request_owner = None;
     state.active_user_message_id = None;
+    state.active_turn_nonce = None;
     // #3167 — clear the priority class with the rest of the active-turn anchor.
     state.active_turn_kind = ActiveTurnKind::default();
     state.recovery_started_at = None;
@@ -449,37 +446,5 @@ mod lease_release_identity_tests {
             assert!(state.turn_started_instant.is_none(), "{label}");
             assert!(state.recovery_started_at.is_none(), "{label}");
         }
-    }
-
-    /// The release witness names only an episode whose token was actually taken,
-    /// and a later idle release must not erase it.
-    #[test]
-    fn release_witnesses_only_the_episode_whose_token_it_took() {
-        let channel_id = ChannelId::new(5_242_001);
-        let mut state = ChannelMailboxState {
-            cancel_token: Some(Arc::new(CancelToken::new())),
-            active_user_message_id: Some(MessageId::new(7)),
-            active_turn_nonce: Some("episode-a".to_string()),
-            ..Default::default()
-        };
-        assert!(release_active_turn_anchor(&mut state, channel_id, None).is_some());
-        let witness = Some((MessageId::new(7), "episode-a".to_string()));
-        assert_eq!(state.released_episode, witness);
-        assert!(release_active_turn_anchor(&mut state, channel_id, None).is_none());
-        assert_eq!(
-            state.released_episode, witness,
-            "an idle release takes nothing"
-        );
-
-        let mut tokenless = ChannelMailboxState {
-            active_user_message_id: Some(MessageId::new(8)),
-            active_turn_nonce: Some("episode-b".to_string()),
-            ..Default::default()
-        };
-        assert!(release_active_turn_anchor(&mut tokenless, channel_id, None).is_none());
-        assert_eq!(
-            tokenless.released_episode, None,
-            "no token, no release witness"
-        );
     }
 }

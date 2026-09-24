@@ -25,6 +25,7 @@ mod overflow;
 mod pending_queue_persistence;
 mod queue_cancellation;
 pub(crate) mod registry_purge;
+mod released_episodes;
 mod source_generation;
 mod turn_finished_signal;
 use active_source_dedup::{
@@ -399,8 +400,6 @@ pub(crate) struct ChannelMailboxSnapshot {
     /// freshness anchor so the banner doesn't fire within the first poll of
     /// a brand-new turn.
     pub(crate) turn_started_at: Option<DateTime<Utc>>,
-    /// The (user message id, turn nonce) whose token this mailbox last released.
-    pub(crate) released_episode: Option<(MessageId, String)>,
 }
 
 pub(crate) struct FinishTurnResult {
@@ -462,6 +461,8 @@ pub(crate) struct RecoveryKickoffResult {
 #[derive(Default)]
 pub(crate) struct TryStartTurnResult {
     pub(crate) started: bool,
+    /// The claim named an episode this mailbox already released.
+    pub(crate) refused_released_episode: bool,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
     pub(crate) persistence_error: Option<String>,
 }
@@ -820,6 +821,7 @@ impl ChannelMailboxHandle {
             user_message_id,
             turn_kind,
             admission_order,
+            refuse_released_episode: false,
             persistence,
             reply,
         })
@@ -1487,6 +1489,8 @@ enum ChannelMailboxMsg {
         turn_kind: ActiveTurnKind,
         /// #5937 — whether this claim may overtake queued inbound work.
         admission_order: TurnAdmissionOrder,
+        /// Refuse, in this same step, an episode `released_episodes` holds.
+        refuse_released_episode: bool,
         persistence: Option<QueuePersistenceContext>,
         reply: oneshot::Sender<TryStartTurnResult>,
     },
@@ -1745,8 +1749,8 @@ struct ChannelMailboxState {
     /// Monotonic companion to `turn_started_at`, for in-process race guards
     /// that must distinguish a stale active claim from a fresh same-id claim.
     turn_started_instant: Option<Instant>,
-    /// In-memory only, so it never speaks for an episode a prior process released.
-    released_episode: Option<(MessageId, String)>,
+    /// Exact-episode releases a recovery re-mint must not re-open.
+    released_episodes: released_episodes::ReleasedEpisodes,
 }
 
 fn persist_queue(
@@ -2073,13 +2077,18 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     user_message_id,
                     turn_kind,
                     admission_order,
+                    refuse_released_episode,
                     persistence,
                     reply,
                 } => {
                     // #3167 BLOCKER-2 / #5937 — a claim yields to work that was
                     // queued or reserved before it; see `inbound_order`. A
                     // claim that cannot start must disturb neither gate.
-                    let idle = state.cancel_token.is_none();
+                    let refused_released_episode = refuse_released_episode
+                        && state
+                            .released_episodes
+                            .contains(user_message_id, cancel_token.turn_nonce());
+                    let idle = state.cancel_token.is_none() && !refused_released_episode;
                     let yields = idle
                         && claim_yields(&mut state, turn_kind, user_message_id, admission_order);
                     let mut queue_exit_events = Vec::new();
@@ -2106,6 +2115,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         }
                     }
                     let _ = reply.send(TryStartTurnResult {
+                        refused_released_episode,
                         started: if !can_start || persistence_error.is_some() {
                             false
                         } else {
@@ -2572,12 +2582,20 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     if matches {
                         state.last_persistence = Some(persistence.clone());
                         let finished_user_message_id = state.active_user_message_id;
-                        let _ = reply.send(finalize_turn_state(
+                        let finished = finalize_turn_state(
                             &mut state,
                             channel_id,
                             Some(&persistence),
                             preserve_queue,
-                        ));
+                        );
+                        if finished.removed_token.is_some()
+                            && let Some(nonce) = turn_nonce_guard.named_nonce()
+                        {
+                            state
+                                .released_episodes
+                                .record(expected_user_message_id, nonce);
+                        }
+                        let _ = reply.send(finished);
                         if !preserve_queue && let Some(user_message_id) = finished_user_message_id {
                             consume_pending_dispatch_marker_if_matches(
                                 &mut state,
