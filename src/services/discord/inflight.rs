@@ -89,12 +89,14 @@ mod removal;
 pub(crate) use self::removal::invalidate_stale_generation;
 pub(in crate::services::discord) use self::removal::load_inflight_states_for_probe_from_root;
 use self::removal::load_inflight_states_from_root;
-pub(in crate::services::discord) use self::removal::reap_inflight_rows_at_boot_blocking;
 #[cfg(test)]
 use self::removal::{
     invalidate_stale_generation_in_root, set_test_tmux_alive_override, stale_removal_reason,
 };
 pub(super) use self::removal::{log_inflight_remove, log_inflight_remove_for_path};
+pub(in crate::services::discord) use self::removal::{
+    observe_inflight_create_collision, reap_inflight_rows_at_boot_blocking,
+};
 
 mod watcher_state;
 pub(in crate::services::discord) use self::watcher_state::{

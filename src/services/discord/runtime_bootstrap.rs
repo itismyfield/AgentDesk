@@ -931,6 +931,72 @@ agents:
             );
         }
     }
+
+    // Tree-wide call-site pin: a new caller of the reaper, of the boot
+    // invalidate, or of the restore that runs it must be reviewed here.
+    #[test]
+    fn boot_row_retirement_call_sites_are_pinned_tree_wide() {
+        let (inflight, bootstrap) = ("discord/inflight", "discord/runtime_bootstrap");
+        let expected: [(&str, &str, Vec<String>); 3] = [
+            (
+                "reap_inflight_rows_at_boot",
+                "",
+                vec![
+                    format!("{inflight}.rs"),
+                    format!("{inflight}/removal.rs"),
+                    format!("{inflight}/removal/boot_reaper.rs"),
+                    format!("{bootstrap}.rs"),
+                ],
+            ),
+            (
+                "invalidate_stale_generation",
+                "(",
+                vec![
+                    format!("{inflight}/removal.rs"),
+                    format!("{bootstrap}/queued_recovery.rs"),
+                ],
+            ),
+            (
+                "restore_queued_and_inflight_work",
+                "(",
+                vec![
+                    format!("{bootstrap}/queued_recovery.rs"),
+                    format!("{bootstrap}/recovery_flush.rs"),
+                ],
+            ),
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        let mut pending = vec![root.clone()];
+        while let Some(dir) = pending.pop() {
+            for path in std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+            {
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    files.push((
+                        path.strip_prefix(&root)
+                            .unwrap()
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                        std::fs::read_to_string(&path).unwrap(),
+                    ));
+                }
+            }
+        }
+        for (name, suffix, allowed) in expected {
+            let needle = format!("{name}{suffix}");
+            let mut found: Vec<_> = files
+                .iter()
+                .filter(|(_, text)| text.contains(&needle))
+                .map(|(path, _)| path.trim_start_matches("services/").to_string())
+                .collect();
+            found.sort();
+            assert_eq!(found, allowed, "{needle}");
+        }
+    }
 }
 
 #[cfg(test)]

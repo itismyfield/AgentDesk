@@ -424,6 +424,20 @@ pub(super) fn stale_removal_reason(
     age_secs: u64,
     current_generation: u64,
 ) -> Option<String> {
+    stale_removal_reason_with_probe(
+        state,
+        age_secs,
+        current_generation,
+        &mut tmux_pane_alive_for_stale_check,
+    )
+}
+
+fn stale_removal_reason_with_probe(
+    state: &InflightTurnState,
+    age_secs: u64,
+    current_generation: u64,
+    pane_alive: &mut dyn FnMut(&str) -> bool,
+) -> Option<String> {
     match state.restart_mode {
         Some(restart_mode) => {
             // A planned-restart row is intentionally authored by the outgoing
@@ -454,7 +468,7 @@ pub(super) fn stale_removal_reason(
                 // probe per stale row, gated by all the cheaper checks above.
                 if matches!(restart_mode, InflightRestartMode::DrainRestart)
                     && let Some(name) = state.tmux_session_name.as_deref()
-                    && tmux_pane_alive_for_stale_check(name)
+                    && pane_alive(name)
                 {
                     tracing::info!(
                         "  ⚠ inflight stale-age ({age_secs}s > {max_age}s) overridden — tmux pane '{name}' still alive (channel {})",
@@ -472,7 +486,7 @@ pub(super) fn stale_removal_reason(
         None => {
             if age_secs > INFLIGHT_MAX_AGE_SECS {
                 if let Some(name) = state.tmux_session_name.as_deref()
-                    && tmux_pane_alive_for_stale_check(name)
+                    && pane_alive(name)
                 {
                     tracing::info!(
                         "  ⚠ inflight stale-age ({age_secs}s > {INFLIGHT_MAX_AGE_SECS}s) overridden — tmux pane '{name}' still alive (channel {})",
@@ -705,6 +719,74 @@ pub(in crate::services::discord) use boot_reaper::reap_inflight_rows_at_boot_blo
 #[cfg(test)]
 use boot_reaper::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::services::discord) enum CollisionVerdict {
+    Keep,
+    KeepGateRefused,
+    HiddenStale,
+    /// Aged past the threshold; only a tmux pane probe could decide it.
+    AgedNamedUnprobed,
+    HiddenProviderMismatch,
+    HiddenMalformed,
+    Missing,
+    Unreadable,
+}
+
+/// What a create-new turn start collided with, for measuring turns that run
+/// without a durable row. Takes no lock, writes nothing and never probes tmux.
+pub(in crate::services::discord) fn observe_inflight_create_collision(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> (CollisionVerdict, serde_json::Value) {
+    let allocation = crate::services::discord::runtime_store::process_generation_binding();
+    let path = inflight_runtime_root().map(|root| inflight_state_path(&root, provider, channel_id));
+    let content = path.as_deref().map(fs::read_to_string);
+    let mtime_age_secs = path.as_deref().and_then(inflight_age_secs_for_path);
+    let state = match &content {
+        Some(Ok(content)) => parse_inflight_state_content(content).ok(),
+        _ => None,
+    };
+    let mut probe_consulted = false;
+    let verdict = match (&content, &state) {
+        (Some(Err(error)), _) if error.kind() == std::io::ErrorKind::NotFound => {
+            CollisionVerdict::Missing
+        }
+        (None | Some(Err(_)), _) => CollisionVerdict::Unreadable,
+        (_, None) => CollisionVerdict::HiddenMalformed,
+        (_, Some(row)) if row.provider_kind().as_ref() != Some(provider) => {
+            CollisionVerdict::HiddenProviderMismatch
+        }
+        (_, Some(row)) => match mtime_age_secs.and_then(|age| {
+            stale_removal_reason_with_probe(row, age, allocation.generation, &mut |_| {
+                probe_consulted = true;
+                false
+            })
+        }) {
+            None => CollisionVerdict::Keep,
+            Some(_) if loader_gate_refuses_with_allocation(row, allocation) => {
+                CollisionVerdict::KeepGateRefused
+            }
+            Some(_) if probe_consulted => CollisionVerdict::AgedNamedUnprobed,
+            Some(_) => CollisionVerdict::HiddenStale,
+        },
+    };
+    let row = state.as_ref();
+    let detail = serde_json::json!({
+        "verdict": verdict,
+        "mtime_age_secs": mtime_age_secs,
+        "updated_at_age_secs": row
+            .and_then(|row| parse_updated_at_unix(&row.updated_at))
+            .map(|at| now_unix() - at),
+        "existing_user_msg_id": row.map(|row| row.user_msg_id),
+        "existing_turn_nonce_present": row.is_some_and(|row| row.turn_nonce.is_some()),
+        "existing_born_generation": row.map(|row| row.born_generation),
+        "current_generation": allocation.generation,
+        "existing_restart_mode": row.and_then(|row| row.restart_mode).map(InflightRestartMode::label),
+        "existing_tmux_named": row.is_some_and(|row| row.tmux_session_name.is_some()),
+    });
+    (verdict, detail)
+}
 #[cfg(test)]
 mod loader_gate_observation_tests {
     use super::*;
@@ -1024,9 +1106,17 @@ mod loader_gate_observation_tests {
             "record_loader_generation_gate",
             "emit_loader_generation_gate_allowed",
         ];
+        let observe = owned
+            .split_once("fn observe_inflight_create_collision(")
+            .unwrap()
+            .1;
         for effect in effects.iter().chain(&events) {
-            assert!(!reads.contains(effect), "{effect}");
+            assert!(
+                !reads.contains(effect) && !observe.contains(effect),
+                "{effect}"
+            );
         }
+        assert!(!observe.contains("lock") && !observe.contains("emit_inflight_lifecycle_event"));
         assert_eq!(
             reads
                 .matches("runtime_store::process_generation_binding();")
@@ -1358,6 +1448,104 @@ mod nondestructive_loader_tests {
             (report.kept, report.reaped_malformed),
             (1, 0),
             "X5: {report:?}"
+        );
+    }
+
+    // X6: a writer holding the lock across the swap is waited for, then honoured.
+    #[test]
+    fn boot_reaper_waits_for_a_lock_holder_then_keeps_its_row() {
+        let env = Env::new();
+        let path = env.seed(&row(5_996_051, None), STALE);
+        let mut successor = row(5_996_051, None);
+        successor.user_msg_id = 7;
+        let writer = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let (hook_writer, hook_path) = (writer.clone(), path.clone());
+        let hook = move |_: &Path| {
+            let (held_tx, held_rx) = std::sync::mpsc::channel();
+            *hook_writer.borrow_mut() = Some(std::thread::spawn(move || {
+                let _lock = lock_inflight_state_path(&hook_path).unwrap();
+                held_tx.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                rewrite(&hook_path, &successor, STALE);
+            }));
+            held_rx.recv().unwrap();
+        };
+        let report = with_pre_lock_hook(hook, || env.reap());
+        writer.borrow_mut().take().unwrap().join().unwrap();
+        assert_eq!((report.changed, report.reaped_stale), (1, 0), "{report:?}");
+        assert_eq!(read_inflight_state_content(&path).unwrap().user_msg_id, 7);
+    }
+
+    // S1 + S2: a row refreshed while a read waited on its lock is returned and
+    // marked, as the in-read revalidation always did.
+    #[test]
+    fn reads_return_and_mark_a_row_refreshed_before_the_lock() {
+        let env = Env::new();
+        let mut fresh = row(5_996_061, None);
+        let path = env.seed(&fresh, STALE);
+        fresh.save_generation += 1;
+        let refresh = |fresh: InflightTurnState| move |p: &Path| rewrite(p, &fresh, 0);
+        let loaded = with_pre_lock_hook(refresh(fresh.clone()), || {
+            super::super::load_inflight_states(&CLAUDE)
+        });
+        assert_eq!(
+            loaded.iter().map(|s| s.save_generation).collect::<Vec<_>>(),
+            [fresh.save_generation]
+        );
+
+        rewrite(&path, &fresh, STALE);
+        let mode = InflightRestartMode::DrainRestart;
+        let mark = || super::super::mark_all_inflight_states_restart_mode_checked(&CLAUDE, mode);
+        assert_eq!(with_pre_lock_hook(refresh(fresh), mark), Ok(1));
+        assert!(
+            read_inflight_state_content(&path)
+                .unwrap()
+                .restart_mode
+                .is_some()
+        );
+    }
+
+    // C1 + C2: a hidden row blocks create-new, and the observation classifies
+    // it without a lock, a write or a tmux probe.
+    #[test]
+    fn create_collision_is_observed_without_touching_the_row() {
+        let env = Env::new();
+        let hidden = row(5_996_071, None);
+        let path = env.seed(&hidden, STALE);
+        let before = snapshot(&path);
+        let created = super::super::save_inflight_state_create_new(&row(5_996_071, None));
+        assert!(matches!(
+            created,
+            Err(CreateNewInflightError::AlreadyExists)
+        ));
+        let (verdict, detail) = observe_inflight_create_collision(&CLAUDE, 5_996_071);
+        assert_eq!(verdict, CollisionVerdict::HiddenStale);
+        assert!(
+            detail["mtime_age_secs"]
+                .as_i64()
+                .is_some_and(|age| age >= STALE)
+        );
+        assert_eq!(detail["existing_user_msg_id"], hidden.user_msg_id);
+        assert_eq!(snapshot(&path), before);
+
+        set_test_tmux_alive_override(Some(&["AgentDesk-claude-c2"]));
+        let named = env.seed(&row(5_996_072, Some("AgentDesk-claude-c2")), STALE);
+        fs::write(inflight_state_path(&env.dir(), &CLAUDE, 5_996_073), "{").unwrap();
+        env.seed(&row(5_996_074, None), 0);
+        for (channel_id, expected) in [
+            (5_996_072, CollisionVerdict::AgedNamedUnprobed),
+            (5_996_073, CollisionVerdict::HiddenMalformed),
+            (5_996_074, CollisionVerdict::Keep),
+            (5_996_075, CollisionVerdict::Missing),
+        ] {
+            assert_eq!(
+                observe_inflight_create_collision(&CLAUDE, channel_id).0,
+                expected
+            );
+        }
+        assert!(
+            !named.with_extension("json.lock").exists(),
+            "the observation never locks"
         );
     }
 

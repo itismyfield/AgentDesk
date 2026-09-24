@@ -516,6 +516,44 @@ mod runtime_label_tests {
 
         assert_eq!(inflight_runtime_label(&state), "Claude TUI");
     }
+
+    // A diagnostics read hides a stale row from the report but never unlinks it.
+    #[tokio::test]
+    async fn inflight_report_hides_but_keeps_a_stale_row() {
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let state = InflightTurnState::new(
+            ProviderKind::Claude,
+            5_996_031,
+            None,
+            1,
+            2,
+            3,
+            "prompt".to_string(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        let path = root
+            .path()
+            .join("runtime/discord_inflight/claude/5996031.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, serde_json::to_string(&state).unwrap()).unwrap();
+        let aged = chrono::Utc::now().timestamp() - 301;
+        filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(aged, 0)).unwrap();
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let report =
+            build_inflight_report(&shared, &ProviderKind::Claude, ChannelId::new(5_996_031)).await;
+        assert!(report.contains("- saved turns: `0`"), "{report}");
+        assert!(path.exists());
+    }
 }
 
 fn build_queue_report_sync(
