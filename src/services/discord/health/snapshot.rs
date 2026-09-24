@@ -36,9 +36,6 @@ use crate::services::discord::relay_health::{
     DurableFrontierObservation, FrontierProvenanceReport, RelayActiveTurn, RelayHealthSnapshot,
     RelayStallClassifier, RelayStallState,
 };
-use crate::services::discord::relay_recovery::authority_observation::{
-    self, RelayAuthorityObservationReport,
-};
 use crate::services::discord::relay_recovery::cohort::{self, RelayAuthorityRolloutReport};
 use crate::services::provider::ProviderKind;
 #[cfg(unix)]
@@ -244,12 +241,6 @@ pub struct DiscordHealthSnapshot {
     /// public build keeps the key absent rather than publishing a null.
     #[serde(skip_serializing_if = "Option::is_none")]
     relay_authority_rollout: Option<RelayAuthorityRolloutReport>,
-    /// #5464 T5 S2: axis-A old/new observation triage — cumulative counters
-    /// plus the last 16 turns per channel. Detail-only for the same reason the
-    /// dial above is, and a triage sample rather than the AC3 promotion gate,
-    /// which reads the JSONL event log instead (design §5.3).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    relay_authority_observation: Option<RelayAuthorityObservationReport>,
 }
 
 impl DiscordHealthSnapshot {
@@ -1097,8 +1088,6 @@ pub(super) async fn build_health_snapshot_with_options(
         providers: provider_entries,
         mailboxes: mailbox_entries,
         relay_authority_rollout: include_mailbox_details.then(cohort::rollout_report),
-        relay_authority_observation: include_mailbox_details
-            .then(authority_observation::observation_report),
     }
 }
 
@@ -1371,67 +1360,19 @@ mod tests {
         );
     }
 
-    /// #5464 T5 S2: the axis-A observation block rides the same detail axis as
-    /// the S1 dial above, and publishes the whole triage shape.
-    ///
-    /// The counters are process-cumulative, so this pins the shape and the
-    /// detail gate rather than the values — any other test in this binary that
-    /// records an observation would move them, and a value assertion here would
-    /// turn that into a spurious ordering dependency.
+    /// The retired relay-authority observation blocks stay off both builds.
     #[tokio::test]
-    async fn relay_authority_observation_is_published_on_the_detail_build_only() {
+    async fn retired_observation_blocks_are_absent_from_every_health_build() {
         let registry = HealthRegistry::new();
-
         let public = serde_json::to_value(build_public_health_snapshot(&registry).await)
             .expect("serialize public snapshot");
-        assert!(
-            public.get("relay_authority_observation").is_none(),
-            "observation triage must not reach the public health allowlist"
-        );
-        #[cfg(unix)]
-        assert!(
-            public.get("axis_b_observation").is_none(),
-            "axis-B triage must not reach the public health allowlist"
-        );
-
         let detail = serde_json::to_value(build_health_snapshot(&registry).await)
             .expect("serialize detail snapshot");
-        let observation = detail
-            .get("relay_authority_observation")
-            .expect("detail health publishes the observation block");
-        let mut keys: Vec<&str> = observation
-            .as_object()
-            .expect("the observation block is a JSON object")
-            .keys()
-            .map(String::as_str)
-            .collect();
-        keys.sort_unstable();
-        assert_eq!(
-            keys,
-            [
-                "channels",
-                "completion_scopes",
-                "completion_sink_dropped_records",
-                "completion_suppressions",
-                "new_stricter_verdicts",
-                "resident_buffers",
-                "rowless_continuations",
-                "sink_dropped_records",
-                "stream_diff_ticks",
-                "turns_recorded",
-            ]
-        );
-        assert_eq!(
-            observation
-                .get("new_stricter_verdicts")
-                .and_then(serde_json::Value::as_u64),
-            Some(0),
-            "AC2-R's monotone-relaxing alarm counter must be zero in this process"
-        );
-        assert!(
-            detail.get("axis_b_observation").is_none(),
-            "the retired comparison block must be absent from detail health"
-        );
+        for (build, json) in [("public", &public), ("detail", &detail)] {
+            for key in ["relay_authority_observation", "axis_b_observation"] {
+                assert!(json.get(key).is_none(), "{build} health publishes {key}");
+            }
+        }
     }
 
     /// #5736: the summary build answers the relay-verdict axis instead of
@@ -1521,7 +1462,6 @@ mod tests {
             let public_json = serde_json::to_value(public).expect("serialize public snapshot");
             assert!(
                 public_json.get("relay_authority_rollout").is_none()
-                    && public_json.get("relay_authority_observation").is_none()
                     && public_json.get("axis_b_observation").is_none(),
                 "detail-only observation blocks must stay off the public surface"
             );

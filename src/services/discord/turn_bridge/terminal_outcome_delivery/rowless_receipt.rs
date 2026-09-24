@@ -47,40 +47,7 @@ impl<'a> ReceiptDecisionInput<'a> {
 pub(in crate::services::discord::turn_bridge) fn decision(
     ctx: ReceiptDecisionInput<'_>,
 ) -> TerminalReceiptDisposition {
-    use crate::services::discord::relay_recovery::authority_observation::delivery_boundary::{
-        TerminalReceiptDecisionRecord, record_terminal_receipt_decision,
-    };
-    let (disposition, source, anchor, frontier_already_covers) = decision_with_evidence(&ctx);
-    record_terminal_receipt_decision(TerminalReceiptDecisionRecord {
-        provider: ctx.provider,
-        channel_id: ctx.channel_id.get(),
-        turn_id: ctx.inflight_state.effective_finalizer_turn_id(),
-        source: source.as_ref(),
-        anchor,
-        current_message_id:
-            super::super::current_message_anchor::durable_current_msg_id_from_detached(
-                ctx.current_msg_id,
-            ),
-        frontier_already_covers,
-        disposition: match disposition {
-            TerminalReceiptDisposition::Continue => "continue",
-            TerminalReceiptDisposition::AlreadyDelivered => "already_delivered",
-            TerminalReceiptDisposition::ForeignAnchor => "foreign_anchor",
-        },
-    });
-    disposition
-}
-
-type DecisionEvidence = (
-    TerminalReceiptDisposition,
-    Option<dr::ExactJsonlSourceIdentity>,
-    Option<delivery_frontier_probe::CurrentGenerationAnchor>,
-    Option<bool>,
-);
-
-fn decision_with_evidence(ctx: &ReceiptDecisionInput<'_>) -> DecisionEvidence {
     use TerminalReceiptDisposition::*;
-    let unknown = |disposition| (disposition, None, None, None);
     let local = ctx.inflight_state;
     let identity = InflightTurnIdentity::from_state(local);
     let fresh = load_inflight_state_read_only(ctx.provider, local.channel_id);
@@ -100,14 +67,14 @@ fn decision_with_evidence(ctx: &ReceiptDecisionInput<'_>) -> DecisionEvidence {
     // A crash can leave an owned row at its original anchor after the fallback
     // receipt commits. Missing terminal confirmation must still consult it.
     if own_row && !ctx.entry_was_rowless && local.terminal_delivery_committed {
-        return unknown(Continue);
+        return Continue;
     }
     let Some(tmux) = local.tmux_session_name.as_deref().filter(|s| !s.is_empty()) else {
-        return unknown(fallback);
+        return fallback;
     };
     crate::services::tmux_common::with_tmux_source_authority(tmux, |authority| {
         let Some((source, _path, eof)) = verified_source_under_authority(&ctx, authority) else {
-            return unknown(fallback);
+            return fallback;
         };
         let eof = Some(eof);
         // An exact current-source receipt survives advancement of the frontier
@@ -118,8 +85,7 @@ fn decision_with_evidence(ctx: &ReceiptDecisionInput<'_>) -> DecisionEvidence {
         };
         if has_receipt(ctx.current_msg_id.get()) {
             // The exact receipt settles this retry before a frontier read.
-            // Preserve that unmeasured frontier instead of synthesizing true.
-            return (AlreadyDelivered, Some(source), None, None);
+            return AlreadyDelivered;
         }
         let anchor = delivery_frontier_probe::current_generation_delivered_anchor(
             ctx.provider,
@@ -133,7 +99,7 @@ fn decision_with_evidence(ctx: &ReceiptDecisionInput<'_>) -> DecisionEvidence {
                 && anchor.panel_channel_id == ctx.channel_id.get()
                 && has_receipt(anchor.panel_msg_id)
         });
-        let disposition = if frontier_covers
+        if frontier_covers
             || dr::read_record(ctx.provider, source.offset_authority_channel_id).is_some_and(
                 |record| {
                     record.confirmed_deliveries.iter().any(|receipt| {
@@ -142,19 +108,14 @@ fn decision_with_evidence(ctx: &ReceiptDecisionInput<'_>) -> DecisionEvidence {
                             && has_receipt(receipt.message_id)
                     })
                 },
-            ) {
+            )
+        {
             // Both same-anchor retries and a receipt on another anchor are
             // settled without touching either Discord message.
             AlreadyDelivered
         } else {
             fallback
-        };
-        (
-            disposition,
-            Some(source),
-            anchor,
-            anchor.map(|_| frontier_covers),
-        )
+        }
     })
 }
 

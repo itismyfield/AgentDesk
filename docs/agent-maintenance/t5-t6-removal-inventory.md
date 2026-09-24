@@ -288,8 +288,8 @@ tests net **+5,828**, generated net **+337**, tooling net **+6**이다.
 | S4 판정: `turn_bridge/stream_tick/guarded_persist.rs` 의 `visible_mutation_authority_after_guarded_save` | `cohort_admits: bool` 파라미터, `GuardedSaveOutcome::Missing if cohort_admits => Suppressed` 의 guard, 그리고 `Missing` 이 `AuthorityLost` 로 떨어지던 fall-through arm 을 철거했다. 이제 `Missing => Suppressed` 가 무조건이다. | `IdentityMismatch => AuthorityLost`(exact-episode veto)와 `IoError => Retry`(일시 저장 실패)는 그대로다. S2 관측점 `record_stream_loop_gate` 호출도 그대로다. |
 | S4 배선(tick): `turn_bridge/stream_tick.rs` | tick 진입 1회 코호트 읽기(`let cohort_admits = stream_loop_suppression_cohort_admits(channel_id.get())`)와 게이트 호출부 2곳의 인자, 그리고 import 이름을 철거했다. | 16개 `authorize_visible_mutation!` 사이트와 dirty flush 의 판정 경로 자체는 불변이다. |
 | S4 배선(tool-arm): `turn_bridge/stream_loop/tool_arms/authority.rs` | restart fence 와 terminal tool-result fence 의 코호트 문의 2곳(`let cohort_admits = …`)과 게이트 인자 2곳, use 블록의 술어 import 를 철거했다. | `stream_tool_outcome_after_restart_authority` 와 `terminal_tool_result_transition_permission` 의 매핑은 불변이다. `Missing` 이 `Suppressed` 가 되면서 restart arm 은 `AuthorityLost` 대신 `Continue` 로 귀결된다. |
-| **철거하지 않음(T6-1 에서 철거됨)** — 술어 본체 `guarded_persist.rs` 의 `stream_loop_suppression_cohort_admits` | 없음. 철거 집합 **밖**에 살아 있는 호출자가 있다: `turn_bridge/bridge_entry_persist.rs` 의 `bridge_entry_rowless_cohort_admits`(S7a 진입 게이트)가 위임 호출한다. | 본체 철거(D2)는 S7a 진입 게이트 철거가 선행이다. 테스트 `the_shipped_dial_admits_no_channel_to_the_stream_loop_enforcement_cohort` 는 보존했다 — 이름의 "stream_loop" 은 D1 이후 오칭이지만 개명은 술어의 새 소유자(S7a) 범위의 작업이다. |
-| **철거하지 않음** — 공용 rollout 다이얼 `relay_authority_mode`/`relay_authority_cohort_percent`, `relay_recovery/cohort.rs`, `relay_recovery/authority_observation.rs`, `relay_recovery/authority_retention.rs` | 없음. | 전부 S9 회수 경계다. D1 은 이 모듈들을 건드리지 않았고 `authority_observation` 은 doc 크로스레퍼런스 1줄만 갱신했다. |
+| **D1 범위 밖, T6-1 에서 철거** — 술어 본체 `guarded_persist.rs` 의 `stream_loop_suppression_cohort_admits` | D1 시점에는 S7a 진입 게이트(`bridge_entry_rowless_cohort_admits`)가 위임 호출해 남겼다. | T6-1 이 진입 게이트와 함께 본체와 전용 테스트 `the_shipped_dial_admits_no_channel_to_the_stream_loop_enforcement_cohort` 를 철거했다(§12-2 추가 참조). |
+| **D1 범위 밖** — 공용 rollout 다이얼 `relay_authority_mode`/`relay_authority_cohort_percent`, `relay_recovery/cohort.rs`, `relay_recovery/authority_observation.rs`, `relay_recovery/authority_retention.rs` | 없음. | 전부 S9 회수 경계다. 관측 두 모듈은 T6-2 가 철거했고(§12-3 추가), 다이얼과 `cohort.rs` 는 T6-3 몫이다. |
 | **철거하지 않음** — `WatcherStateSnapshot.reachability_observation`, `axis_b_exact_episode_required` 등 `skipped_reason` 문자열 | 없음. | 이름이 observation/axis_b 라 관측처럼 보이나 전자는 `relay_recovery/destructive_warrant.rs` 가 소비하는 **증거 입력**이고 후자는 **집행 거부 사유**다. 둘 다 영구 보존이다. |
 
 **테스트 처분:** `guarded_persist_tests.rs` 의 어휘 pin
@@ -382,6 +382,33 @@ S6a `7d97f385ad`·`a9407c0ba4`·`f219523758`/PR #5495·#5496·#5497)을 직접 �
 쓰고, `#[allow(dead_code)] // #NNNN` 190건을 별도의 인벤토리 후보 풀로 읽어야 한다.
 
 ---
+
+## §12-3 추가 — T6-2 S9 관측 기록 철거 (2026-09-25)
+
+base `origin/main c9ef5e9402`. 관측 기록은 판정 값에 관여하지 않았으므로(모든 기록 함수가 `()` 반환)
+배달·게이트 동작 변화는 없다. 경로는 `src/services/discord/` 기준이다.
+
+| 범위 | 철거한 것 | 남긴 것·후속 |
+|---|---|---|
+| 관측 모듈 | `relay_recovery/authority_observation.rs`, `authority_observation/delivery_boundary.rs`, `relay_recovery/authority_retention.rs` 전량과 `relay_recovery.rs` 의 mod 선언 | 디스크의 `relay_authority/*.jsonl` 은 코드 밖이라 그대로 둔다. retention pruner 가 사라져 새 파일은 더 생기지 않고 기존 파일도 지우지 않는다. |
+| 기록 호출 | `bridge_entry_persist.rs`(진입), `stream_tick/guarded_persist.rs`(tick), `post_loop_finalize.rs`(loop exit), `completion_postlude/channel_episode_scope.rs`(scope 기록·`completion_suppressions` 카운터), `terminal_outcome_delivery/rowless_receipt.rs`(receipt 결정), `current_message_anchor.rs`(unbound anchor 정리) | `channel_episode_scope` 의 `relay_authority_completion_suppressed` warn 로그는 남는다. `rowless_receipt::decision` 은 disposition 만 계산한다(증거 튜플 제거). |
+| 진입 게이트 | `entry_gate_new`/`LifecycleVerdict` 위임 | `bridge_entry_disposition_continues` 가 같은 매핑을 직접 match 한다(`Saved` 계속, `RowAbsent` 는 기존 anchor 위에서만, 나머지 종료). |
+| health | `/api/health/detail` 의 `relay_authority_observation` 블록(registry·standalone 두 조립점) | `relay_authority_rollout` 블록은 T6-3 몫이다. |
+
+**테스트 처분:** 두 관측 모듈 테스트 22개, health 형태 pin 2개, 관측 기록을 읽던
+`recorded_stream_gate_new_mirrors_the_shipped_authority_mapping`,
+`exact_receipt_terminal_decision_records_only_evaluated_frontier_5521`,
+`cleanup_gateway_outcomes_reach_operation_observations` 를 삭제했다. 대신
+`entry_gate_matrix_over_outcome_and_anchor` 는 명시 기대표로, health 쪽은
+`retired_observation_blocks_are_absent_from_every_health_build` 로, anchor 정리는
+`cleanup_deletes_the_candidate_and_queues_it_only_when_delete_fails` 로 바꿨다. 스트림 게이트의
+(bridge 의도·행은 위임) 칸은 `visible_authority_distinguishes_bridge_self_delegation_and_foreign_projection`
+에 단언 1개로 남겼다.
+
+**남은 참조(후속 슬라이스 몫):** `config.rs` 의 `records_authority_observations`/`consults_cohort` 와
+`cohort::admits` 는 소비자가 0 이 되어 T6-3 에서 다이얼과 함께 회수한다(그때까지 rustc dead_code
+경고 1건). Python 리포트·그 테스트·롤백 런북의 `authority_observation`/`authority_retention` 언급은
+T6-4 가 파일째 정리한다. `ARCHITECTURE.md` 트리는 `regen-docs.yml` 이 main 에서 재생성한다.
 
 ## §12-2 추가 — T6 도달 불가 분기(슬라이스 3) **철거 보류(HOLD)** (2026-09-17)
 

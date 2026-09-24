@@ -61,7 +61,7 @@ pub(in crate::services::discord::turn_bridge) fn visible_mutation_authority_afte
 
     let authority_unchanged =
         StreamRelayAuthority::from_state(inflight_state) == intended_authority;
-    let authority = match outcome {
+    match outcome {
         GuardedSaveOutcome::Saved
             if authority_unchanged && intended_authority.bridge_owns_relay() =>
         {
@@ -76,17 +76,7 @@ pub(in crate::services::discord::turn_bridge) fn visible_mutation_authority_afte
         | GuardedSaveOutcome::Unnameable
         | GuardedSaveOutcome::SuccessorOwned => VisibleMutationAuthority::AuthorityLost,
         GuardedSaveOutcome::IoError => VisibleMutationAuthority::Retry,
-    };
-    // #5464 T5 S2: the one observation point that covers all sixteen
-    // `authorize_visible_mutation!` sites. It tallies in memory for the cohort
-    // and returns `()`, so `authority` reaches the caller unchanged.
-    crate::services::discord::relay_recovery::authority_observation::record_stream_loop_gate(
-        inflight_state,
-        outcome,
-        authority_unchanged,
-        intended_authority.bridge_owns_relay(),
-    );
-    authority
+    }
 }
 
 pub(super) fn sync_stream_tick_tool_fields(

@@ -130,22 +130,24 @@ pub(super) fn bridge_stream_relay_suppressed(
     watcher_owns_assistant_relay || standby_relay_owns_output
 }
 
-/// Bridge entry lifecycle gate: `entry_gate_new` plus ONE precondition.
-/// No bridge guard/finalizer may be constructed until this returns true.
-/// `ContinueRowless` needs an anchor that ALREADY exists, because with none
-/// `ensure_bridge_current_message_anchor` sends a placeholder, cannot bind it to
-/// a row that does not exist, and deletes it — today's silence plus a flicker.
+/// Bridge entry lifecycle gate. No bridge guard/finalizer may be constructed
+/// until this returns true. A vanished row continues rowless only onto an anchor
+/// that ALREADY exists: with none, `ensure_bridge_current_message_anchor` would
+/// send a placeholder it cannot bind to a missing row and then delete it.
+/// Another owner's row (the mismatch family) and `IoError` end the turn.
 pub(super) fn bridge_entry_disposition_continues(
     outcome: crate::services::discord::inflight::GuardedSaveOutcome,
     anchor_present: bool,
 ) -> bool {
-    use crate::services::discord::relay_recovery::authority_observation::{
-        LifecycleVerdict, entry_gate_new,
-    };
+    use crate::services::discord::inflight::GuardedSaveOutcome;
 
-    match entry_gate_new(outcome) {
-        LifecycleVerdict::ContinueRowless => anchor_present,
-        verdict => !verdict.ends_lifecycle(),
+    match outcome {
+        GuardedSaveOutcome::Saved => true,
+        GuardedSaveOutcome::RowAbsent => anchor_present,
+        GuardedSaveOutcome::AuthorityPinned
+        | GuardedSaveOutcome::Unnameable
+        | GuardedSaveOutcome::SuccessorOwned
+        | GuardedSaveOutcome::IoError => false,
     }
 }
 
@@ -429,14 +431,6 @@ pub(super) async fn establish_bridge_entry_authority(
         &mut runtime,
         ctx.resumed_placeholder_clear_applied,
     );
-    // #5464 T5 S2: record what this gate answers and what the AC2-R gate would
-    // answer, for the cohort only. Observation returns `()`, so the gate below
-    // reads the same `outcome` it always did.
-    crate::services::discord::relay_recovery::authority_observation::record_bridge_entry_gate(
-        ctx.shared,
-        &ctx.bridge.inflight_state,
-        outcome,
-    );
     let anchor_was_absent = durable_current_msg_id_from_detached(*runtime.current_msg_id) == 0;
     *ctx.entry_was_rowless =
         outcome == crate::services::discord::inflight::GuardedSaveOutcome::RowAbsent;
@@ -635,52 +629,27 @@ mod tests {
     }
 
     /// The shipped entry gate over its whole input domain (outcome x anchor):
-    /// `entry_gate_new` with only the rowless arm withheld when no anchor exists,
-    /// and never ending a lifecycle the recorded `entry_gate_old` would continue.
+    /// only `Saved` continues unconditionally, a vanished row continues only
+    /// onto an existing anchor, and every other outcome ends the turn.
     #[test]
     fn entry_gate_matrix_over_outcome_and_anchor() {
-        use crate::services::discord::relay_recovery::authority_observation::{
-            LifecycleVerdict, entry_gate_new, entry_gate_old,
-        };
-
-        for outcome in [
-            GuardedSaveOutcome::Saved,
-            GuardedSaveOutcome::RowAbsent,
-            GuardedSaveOutcome::AuthorityPinned,
-            GuardedSaveOutcome::Unnameable,
-            GuardedSaveOutcome::SuccessorOwned,
-            GuardedSaveOutcome::IoError,
+        for (outcome, onto_anchor, without_anchor) in [
+            (GuardedSaveOutcome::Saved, true, true),
+            (GuardedSaveOutcome::RowAbsent, true, false),
+            (GuardedSaveOutcome::AuthorityPinned, false, false),
+            (GuardedSaveOutcome::Unnameable, false, false),
+            (GuardedSaveOutcome::SuccessorOwned, false, false),
+            (GuardedSaveOutcome::IoError, false, false),
         ] {
             assert_eq!(
-                bridge_entry_disposition_continues(outcome, true),
-                !entry_gate_new(outcome).ends_lifecycle(),
-                "{outcome:?}: onto an anchor, the gate must be entry_gate_new"
-            );
-            assert_eq!(
-                bridge_entry_disposition_continues(outcome, false),
-                !entry_gate_new(outcome).ends_lifecycle()
-                    && entry_gate_new(outcome) != LifecycleVerdict::ContinueRowless,
-                "{outcome:?}: with no anchor the rowless arm is the only one withheld"
-            );
-            assert!(
-                entry_gate_old(outcome).ends_lifecycle()
-                    || bridge_entry_disposition_continues(outcome, true),
-                "{outcome:?}: the gate may end fewer lifecycles than entry_gate_old, never more"
+                (
+                    bridge_entry_disposition_continues(outcome, true),
+                    bridge_entry_disposition_continues(outcome, false),
+                ),
+                (onto_anchor, without_anchor),
+                "{outcome:?}"
             );
         }
-        assert!(
-            entry_gate_old(GuardedSaveOutcome::RowAbsent).ends_lifecycle()
-                && !entry_gate_new(GuardedSaveOutcome::RowAbsent).ends_lifecycle(),
-            "AC1: the recorded old gate ends the turn on a missing row and AC2-R must not"
-        );
-        assert_eq!(
-            (
-                bridge_entry_disposition_continues(GuardedSaveOutcome::RowAbsent, false),
-                bridge_entry_disposition_continues(GuardedSaveOutcome::RowAbsent, true),
-            ),
-            (false, true),
-            "AC1: a rowless turn continues only onto an anchor that already exists"
-        );
     }
 
     fn rowless_entry_state(channel_id: u64) -> InflightTurnState {

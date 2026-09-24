@@ -8,9 +8,6 @@
 //! runtime root and drives the shipped writer against it.
 
 use super::*;
-use crate::services::discord::relay_recovery::authority_observation::{
-    LifecycleVerdict, entry_gate_new, entry_gate_old, stream_gate_new, stream_gate_old,
-};
 use crate::services::provider::ProviderKind;
 
 const CALLER: &str = "test::5951_s1_outcome_decomposition";
@@ -184,11 +181,9 @@ fn guarded_save_outcome_truth_table_separates_all_six_identity_mismatch_causes()
     );
 }
 
-/// Behaviour preservation: every variant the pre-#5951 `IdentityMismatch` stood
-/// for must still produce the identical verdict at the shipped lifecycle gates,
-/// and `Saved` / `RowAbsent` / `IoError` must stay outside the legacy class.
-///
-/// This is what a helper that forgets one variant fails on.
+/// Every variant the pre-#5951 `IdentityMismatch` stood for answers the legacy
+/// predicate, and `Saved` / `RowAbsent` / `IoError` stay outside it. The gate
+/// verdicts themselves are pinned beside each gate in `turn_bridge`.
 #[test]
 fn every_split_variant_keeps_the_pre_split_identity_mismatch_verdict() {
     const LEGACY: [GuardedSaveOutcome; 3] = [
@@ -201,30 +196,6 @@ fn every_split_variant_keeps_the_pre_split_identity_mismatch_verdict() {
             refusal.is_identity_mismatch_legacy(),
             "{refusal:?} must answer the legacy identity-mismatch predicate"
         );
-        assert_eq!(
-            entry_gate_old(refusal),
-            LifecycleVerdict::End,
-            "{refusal:?}"
-        );
-        assert_eq!(
-            entry_gate_new(refusal),
-            LifecycleVerdict::End,
-            "{refusal:?}"
-        );
-        for authority_unchanged in [true, false] {
-            for bridge_owns_relay in [true, false] {
-                assert_eq!(
-                    stream_gate_old(refusal, authority_unchanged, bridge_owns_relay),
-                    LifecycleVerdict::End,
-                    "{refusal:?} ({authority_unchanged}, {bridge_owns_relay})"
-                );
-                assert_eq!(
-                    stream_gate_new(refusal, authority_unchanged, bridge_owns_relay),
-                    LifecycleVerdict::End,
-                    "{refusal:?} ({authority_unchanged}, {bridge_owns_relay})"
-                );
-            }
-        }
     }
     for outside in [
         GuardedSaveOutcome::Saved,
