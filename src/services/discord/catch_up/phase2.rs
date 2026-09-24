@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::services::turn_orchestrator::{
@@ -6,8 +6,8 @@ use crate::services::turn_orchestrator::{
 };
 use poise::serenity_prelude::{ChannelId, MessageId};
 
-use super::super::recovery_known_ids::{RecoveryKnownIdArm, recovery_known_id_arms};
-use super::super::{ChannelMailboxSnapshot, MailboxEnqueueOutcome};
+use super::super::MailboxEnqueueOutcome;
+use super::super::recovery_known_ids::RecoveryKnownIdArm;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Phase2EnqueueCommit {
@@ -61,16 +61,6 @@ pub(super) fn catch_up_remaining_queue_capacity(queue_len: usize) -> usize {
 
 pub(super) fn advance_phase2_checkpoint(checkpoint: Option<u64>, message_id: u64) -> Option<u64> {
     Some(checkpoint.map_or(message_id, |saved| saved.max(message_id)))
-}
-
-/// #5996: the membership view and the provenance view are one walk, so they
-/// cannot drift — `existing_ids` is exactly this map's key set.
-pub(super) fn phase2_known_arms_and_ids(
-    mailbox: &ChannelMailboxSnapshot,
-) -> (HashMap<u64, RecoveryKnownIdArm>, HashSet<u64>) {
-    let arms = recovery_known_id_arms(mailbox);
-    let ids = arms.keys().copied().collect();
-    (arms, ids)
 }
 
 /// #5996 / I20: skip and advance are not one decision. The skip is retried on

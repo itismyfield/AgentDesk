@@ -358,7 +358,7 @@ const RESTART_REPORT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const DEFERRED_RESTART_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 pub(in crate::services::discord) use recovery_known_ids::{
-    RecoveryKnownIdArm, queued_message_ids, recovery_known_id_arms, recovery_known_message_ids,
+    RecoveryKnownIdArm, queued_message_ids, recovery_known_arms_and_ids, recovery_known_message_ids,
 };
 
 pub(in crate::services::discord) fn advance_last_message_checkpoint(

@@ -35,9 +35,8 @@ impl CatchUpRetryState {
         })
     }
 
-    // #4156: advance the Deferred re-arm budget. Returns `None` once the cap is
-    // exhausted so the caller stops re-arming (the backlog then ages out or a
-    // fresh catch-up trigger restarts the cycle), matching `after_fetch_failure`.
+    // #4156: advance the Deferred re-arm budget; `None` once the cap is spent
+    // stops re-arming, as in `after_fetch_failure`, until a fresh trigger.
     pub(super) fn after_deferred_rearm(self, checkpoint: u64) -> Option<Self> {
         let deferred_rearms = self.deferred_rearms.saturating_add(1);
         (deferred_rearms <= CATCH_UP_RETRY_DEFERRED_REARM_LIMIT).then_some(Self {
@@ -76,10 +75,8 @@ pub(super) fn merge_catch_up_retry_checkpoint(existing: Option<u64>, retry_after
     existing.map_or(retry_after, |checkpoint| checkpoint.min(retry_after))
 }
 
-/// #6035: an intentional clear (`/clear`) discards the catch-up backlog too.
-/// The pending retry and a checkpoint left below the cleared ids would otherwise
-/// reread them as unanswered and run what the user just cleared. Teardown and
-/// recovery clears keep plain `mailbox_clear_channel`, whose loss is recovered.
+/// #6035: `/clear` also drops the pending retry and lifts the checkpoint past the cleared ids,
+/// so no sweep reruns them; teardown clears keep `mailbox_clear_channel` so their loss recovers.
 pub(in crate::services::discord) async fn clear_channel_discarding_catch_up_backlog(
     shared: &SharedData,
     provider: &ProviderKind,
