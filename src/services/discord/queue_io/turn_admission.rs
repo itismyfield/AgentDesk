@@ -1,6 +1,6 @@
 //! One mailbox/token admission boundary shared by chat, headless and routine turns.
 use super::*;
-use crate::services::turn_orchestrator::TurnAdmissionOrder;
+use crate::services::turn_orchestrator::{TryStartTurnResult, TurnAdmissionOrder};
 
 pub(in crate::services::discord) async fn mailbox_try_start_turn_kinded_with_feedback(
     shared: &SharedData,
@@ -16,10 +16,10 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_kinded_with_fee
         cancel_token,
         request_owner,
         user_message_id,
-        turn_kind,
-        TurnAdmissionOrder::Immediate,
+        AdmissionClaim::Kinded(turn_kind, TurnAdmissionOrder::Immediate),
     )
     .await
+    .started
 }
 
 /// #5937 — the Discord text-intake claim. Unlike recovery, reaper and healing
@@ -38,10 +38,39 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_behind_queue(
         cancel_token,
         request_owner,
         user_message_id,
-        ActiveTurnKind::UserOrAgent,
-        TurnAdmissionOrder::BehindQueue,
+        AdmissionClaim::Kinded(ActiveTurnKind::UserOrAgent, TurnAdmissionOrder::BehindQueue),
     )
     .await
+    .started
+}
+
+/// Recovery re-mint of a persisted episode: refused by the mailbox actor, in
+/// the same step as the claim, when that episode did not start after the last
+/// exact release.
+pub(in crate::services::discord) async fn mailbox_try_start_turn_unless_released(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    cancel_token: Arc<CancelToken>,
+    request_owner: UserId,
+    user_message_id: MessageId,
+) -> TryStartTurnResult {
+    mailbox_try_start_turn_ordered(
+        shared,
+        channel_id,
+        cancel_token,
+        request_owner,
+        user_message_id,
+        AdmissionClaim::UnlessReleased,
+    )
+    .await
+}
+
+/// The mailbox claim an admitted turn issues.
+#[derive(Clone, Copy, Debug)]
+enum AdmissionClaim {
+    Kinded(ActiveTurnKind, TurnAdmissionOrder),
+    /// An immediate user claim the actor's recovery fence may refuse.
+    UnlessReleased,
 }
 
 async fn mailbox_try_start_turn_ordered(
@@ -50,9 +79,8 @@ async fn mailbox_try_start_turn_ordered(
     cancel_token: Arc<CancelToken>,
     request_owner: UserId,
     user_message_id: MessageId,
-    turn_kind: ActiveTurnKind,
-    admission_order: TurnAdmissionOrder,
-) -> bool {
+    claim: AdmissionClaim,
+) -> TryStartTurnResult {
     let _recovery_admission = match crate::services::agent_recovery::admission::admit(
         &channel_id.get().to_string(),
         &shared.provider,
@@ -67,32 +95,47 @@ async fn mailbox_try_start_turn_ordered(
                 error,
                 "recovery mailbox admission refused"
             );
-            return false;
+            return TryStartTurnResult::default();
         }
     };
-    let result = shared
-        .mailbox(channel_id)
-        .try_start_turn_kinded_with_persistence(
-            cancel_token,
-            request_owner,
-            user_message_id,
-            turn_kind,
-            admission_order,
-            queue_persistence_context(shared, &shared.provider, channel_id),
-        )
-        .await;
+    let mailbox = shared.mailbox(channel_id);
+    let persistence = queue_persistence_context(shared, &shared.provider, channel_id);
+    let result = match claim {
+        AdmissionClaim::Kinded(turn_kind, admission_order) => {
+            mailbox
+                .try_start_turn_kinded_with_persistence(
+                    cancel_token,
+                    request_owner,
+                    user_message_id,
+                    turn_kind,
+                    admission_order,
+                    persistence,
+                )
+                .await
+        }
+        AdmissionClaim::UnlessReleased => {
+            mailbox
+                .try_start_turn_unless_released(
+                    cancel_token,
+                    request_owner,
+                    user_message_id,
+                    persistence,
+                )
+                .await
+        }
+    };
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
     if let Some(error) = result.persistence_error.as_ref() {
         tracing::error!(
             provider = shared.provider.as_str(),
             channel_id = channel_id.get(),
             user_message_id = user_message_id.get(),
-            turn_kind = ?turn_kind,
+            claim = ?claim,
             error = %error,
             "mailbox try-start failed durable active-source queue purge"
         );
     }
-    result.started
+    result
 }
 
 pub(in crate::services::discord) async fn mailbox_recovery_kickoff(

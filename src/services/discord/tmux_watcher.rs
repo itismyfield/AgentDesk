@@ -65,7 +65,7 @@ mod placeholder_reclaim;
 mod single_message_footer;
 
 #[path = "tmux_watcher/completion_producer.rs"]
-pub(super) mod completion_producer;
+pub(in crate::services::discord) mod completion_producer;
 
 #[cfg(test)]
 #[path = "tmux_watcher/single_message_footer_tests.rs"]

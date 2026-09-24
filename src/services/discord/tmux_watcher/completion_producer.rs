@@ -88,7 +88,7 @@ pub(in crate::services::discord) async fn release_restored_watcher_active_turn_b
     true
 }
 
-pub(super) fn watcher_completion_key(
+pub(in crate::services::discord) fn watcher_completion_key(
     shared: &SharedData,
     channel_id: ChannelId,
     state: Option<&InflightTurnState>,

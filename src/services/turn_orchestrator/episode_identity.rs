@@ -15,6 +15,14 @@ impl TurnNonceGuard {
     pub(super) fn exact(turn_nonce: Option<String>) -> Self {
         Self::Exact(turn_nonce.filter(|nonce| !nonce.is_empty()))
     }
+
+    /// The one episode a matching finish provably took; `Ignore` names none.
+    pub(super) fn named_nonce(&self) -> Option<&str> {
+        match self {
+            Self::Exact(Some(nonce)) => Some(nonce),
+            _ => None,
+        }
+    }
 }
 
 pub(super) fn turn_nonce_guard_matches(
@@ -39,6 +47,30 @@ impl ChannelMailboxHandle {
         .await
         .unwrap_or(None)
         .map(|committed| *committed)
+    }
+
+    /// Recovery re-mint: the actor refuses an episode that did not start after
+    /// its last exact release in the same step as the claim, so no release can
+    /// land between check and mint.
+    pub(crate) async fn try_start_turn_unless_released(
+        &self,
+        cancel_token: Arc<CancelToken>,
+        request_owner: UserId,
+        user_message_id: MessageId,
+        persistence: QueuePersistenceContext,
+    ) -> TryStartTurnResult {
+        self.request(|reply| ChannelMailboxMsg::TryStartTurn {
+            cancel_token,
+            request_owner,
+            user_message_id,
+            turn_kind: ActiveTurnKind::UserOrAgent,
+            admission_order: TurnAdmissionOrder::Immediate,
+            refuse_released_episode: true,
+            persistence: Some(persistence),
+            reply,
+        })
+        .await
+        .unwrap_or_default()
     }
 
     /// Operator recovery preserves queue payloads, ordering and pending claims.
