@@ -18,14 +18,14 @@ async fn witness_step<T>(label: &str, future: impl Future<Output = T>) -> T {
 }
 
 fn install_missing_tmux_probe() -> (tempfile::TempDir, crate::config::TestEnvVarGuard) {
+    install_tmux_probe("echo 'no server running on test socket' >&2\nexit 1")
+}
+
+fn install_tmux_probe(body: &str) -> (tempfile::TempDir, crate::config::TestEnvVarGuard) {
     let temp = tempfile::TempDir::new().expect("tmux probe dir");
     let binary = temp.path().join("tmux");
     let mut file = std::fs::File::create(&binary).expect("fake tmux");
-    writeln!(
-        file,
-        "#!/bin/sh\necho 'no server running on test socket' >&2\nexit 1"
-    )
-    .expect("fake tmux body");
+    writeln!(file, "#!/bin/sh\n{body}").expect("fake tmux body");
     let mut permissions = std::fs::metadata(&binary)
         .expect("tmux metadata")
         .permissions();
@@ -138,6 +138,127 @@ async fn precondition_changed_handler_contract_is_conflict_and_retryable_pg() {
     assert_eq!(body["retry"], true);
     assert!(body["message"].as_str().unwrap().contains("retry"));
     assert_eq!(body["diagnostic_at"], "after_failed_update");
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// Idle cleanup through the real kill-tmux route: a session whose transcript is
+/// unresolved keeps its tmux and raises one deduplicated alert, while a provider
+/// proven idle by its native transcript and pane is killed.
+#[tokio::test(flavor = "current_thread")]
+async fn idle_kill_route_preserves_unobservable_session_and_kills_proven_idle_pg() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (tmux_probe, _path_guard) = install_tmux_probe(concat!(
+        "[ \"$1\" = -u ] && shift\n",
+        "dir=$(dirname \"$0\")\n",
+        "case \"$1\" in\n",
+        "has-session) [ -e \"$dir/alive\" ] && exit 0; echo \"can't find session\" >&2; exit 1 ;;\n",
+        "capture-pane) printf 'Ready for input (type message + Enter)\\n> \\n' ;;\n",
+        "kill-session) echo \"$3\" >> \"$dir/killed\"; rm -f \"$dir/alive\" ;;\n",
+        "esac",
+    ));
+    let runtime_root = tempfile::TempDir::new().expect("runtime root");
+    let _root_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        runtime_root.path(),
+    );
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+    let channel = format!("idle-pin-{}", uuid::Uuid::new_v4().simple());
+    let tmux_name = format!("AgentDesk-claude-{channel}");
+    let session_key = format!(
+        "{}:{tmux_name}",
+        crate::services::platform::hostname_short()
+    );
+    sqlx::query(
+        "INSERT INTO sessions (session_key, provider, status, last_heartbeat)
+         VALUES ($1, 'claude', 'idle', NOW() - INTERVAL '7 hours')",
+    )
+    .bind(&session_key)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO kv_meta (key, value) VALUES ('kanban_human_alert_channel_id', '42')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    std::fs::write(tmux_probe.path().join("alive"), "").unwrap();
+    let killed_log = tmux_probe.path().join("killed");
+    let state = test_state(pool.clone());
+    let kill = || {
+        super::kill_tmux_session(
+            State(state.clone()),
+            axum::http::HeaderMap::new(),
+            Path(session_key.clone()),
+            Json(crate::services::dispatched_sessions::KillTmuxOptions {
+                reason: Some("idle 7시간 초과 — 자동 정리".to_string()),
+                minimum_idle_minutes: Some(360),
+            }),
+        )
+    };
+    let alerts = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT content FROM message_outbox
+             WHERE reason_code = 'relay_signal.idle_cleanup_preserved'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+
+    // Unobservable: live tmux, idle-looking pane, but no resolvable transcript.
+    for _ in 0..2 {
+        let (status, Json(body)) = kill().await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["tmux_killed"], false, "{body}");
+        assert_eq!(body["skipped_provider_activity_guard"], true, "{body}");
+        assert_eq!(body["preserved_reason"], "transcript_unresolved", "{body}");
+        assert!(
+            !killed_log.exists(),
+            "unobservable session must not be killed"
+        );
+    }
+    let sent = alerts().await;
+    assert_eq!(sent.len(), 1, "repeated skips must dedupe: {sent:?}");
+    assert!(sent[0].contains(&channel), "{}", sent[0]);
+    assert!(sent[0].contains("transcript_unresolved"), "{}", sent[0]);
+    assert!(sent[0].contains("7시간"), "{}", sent[0]);
+
+    // Observable idle: the bound native transcript and the pane agree.
+    let transcript = runtime_root.path().join("native.jsonl");
+    std::fs::write(
+        &transcript,
+        "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+    )
+    .unwrap();
+    let old = std::time::SystemTime::now() - Duration::from_secs(24 * 60 * 60);
+    filetime::set_file_mtime(&transcript, filetime::FileTime::from_system_time(old)).unwrap();
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        &tmux_name,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            output_path: transcript.to_string_lossy().into_owned(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    let (status, Json(body)) = kill().await;
+    crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&tmux_name);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["tmux_killed"], true, "{body}");
+    assert_eq!(
+        std::fs::read_to_string(&killed_log).unwrap().trim(),
+        format!("={tmux_name}:")
+    );
+    assert_eq!(
+        alerts().await.len(),
+        1,
+        "a proven-idle kill raises no alert"
+    );
 
     pool.close().await;
     pg_db.drop().await;

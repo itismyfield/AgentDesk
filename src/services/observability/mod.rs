@@ -52,7 +52,9 @@ pub use queries::{
 };
 // #3561 — operator relay-loss signal monitor. Driven by the hourly
 // `RelaySignalAlerterJob` maintenance job (see `server::maintenance`).
-pub(crate) use relay_signal_alert::enqueue_relay_signal_alerts_pg;
+pub(crate) use relay_signal_alert::{
+    enqueue_idle_cleanup_preserved_alert_pg, enqueue_relay_signal_alerts_pg,
+};
 
 pub(super) const EVENT_BATCH_SIZE: usize = 64;
 pub(super) const EVENT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);

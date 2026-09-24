@@ -108,6 +108,8 @@ pub(super) async fn kill_tmux_session_impl(
     if (reason_is_idle_cleanup || minimum_idle_minutes.is_some())
         && tmux_presence == crate::services::platform::tmux::SessionPresence::ProbeFailed
     {
+        alert_idle_cleanup_preserved(pool, session_key, &tmux_name, "tmux_probe_failed", None)
+            .await;
         return (
             StatusCode::OK,
             Json(json!({
@@ -117,6 +119,7 @@ pub(super) async fn kill_tmux_session_impl(
                 "tmux_session_name": tmux_name,
                 "session_row_preserved": true,
                 "skipped_provider_activity_guard": true,
+                "preserved_reason": "tmux_probe_failed",
             })),
         );
     }
@@ -239,32 +242,47 @@ pub(super) async fn kill_tmux_session_impl(
         .await;
         let probe_name = tmux_name.clone();
         let probe_reason = reason.to_string();
-        if unoccupied {
-            idle_tmux_kill_result = tokio::task::spawn_blocking(move || {
+        let probe = if unoccupied {
+            tokio::task::spawn_blocking(move || {
                 crate::services::tmux_turn_liveness::kill_proven_idle_provider_session(
                     &probe_name,
                     &probe_reason,
                 )
             })
             .await
-            .unwrap_or(None);
-        }
-        if idle_tmux_kill_result.is_none() {
-            tracing::info!(
-                session_key,
-                "idle cleanup preserved provider: idle state not proven"
-            );
-            return (
-                StatusCode::OK,
-                Json(json!({
-                    "ok": true,
-                    "tmux_killed": false,
-                    "tmux_was_alive": true,
-                    "tmux_session_name": tmux_name,
-                    "session_row_preserved": true,
-                    "skipped_provider_activity_guard": true,
-                })),
-            );
+            .unwrap_or(Err("probe_task_failed"))
+        } else {
+            Err("session_occupied")
+        };
+        match probe {
+            Ok(killed) => idle_tmux_kill_result = Some(killed),
+            Err(preserved_reason) => {
+                tracing::info!(
+                    session_key,
+                    preserved_reason,
+                    "idle cleanup preserved provider: idle state not proven"
+                );
+                alert_idle_cleanup_preserved(
+                    pool,
+                    session_key,
+                    &tmux_name,
+                    preserved_reason,
+                    idle_decision_last_seen_nanos,
+                )
+                .await;
+                return (
+                    StatusCode::OK,
+                    Json(json!({
+                        "ok": true,
+                        "tmux_killed": false,
+                        "tmux_was_alive": true,
+                        "tmux_session_name": tmux_name,
+                        "session_row_preserved": true,
+                        "skipped_provider_activity_guard": true,
+                        "preserved_reason": preserved_reason,
+                    })),
+                );
+            }
         }
     }
 
@@ -419,6 +437,36 @@ pub(super) async fn kill_tmux_session_impl(
             "active_dispatch_id": active_dispatch_id,
         })),
     )
+}
+
+/// A kill skipped because idle could not be proven reaches the operator as one
+/// deduplicated line: channel, preserve reason and time since last heartbeat.
+async fn alert_idle_cleanup_preserved(
+    pool: &sqlx::PgPool,
+    session_key: &str,
+    tmux_name: &str,
+    preserved_reason: &str,
+    last_seen_nanos: Option<i64>,
+) {
+    let last_seen_nanos = match last_seen_nanos {
+        Some(nanos) => nanos,
+        None => dispatched_sessions_db::session_last_seen_unix_nanos_pg(pool, session_key)
+            .await
+            .unwrap_or(0),
+    };
+    let channel = crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_name)
+        .map_or_else(|| tmux_name.to_string(), |(_, channel)| channel);
+    if let Err(error) = crate::services::observability::enqueue_idle_cleanup_preserved_alert_pg(
+        pool,
+        session_key,
+        &channel,
+        preserved_reason,
+        runtime_activity_age_minutes(last_seen_nanos, now_unix_nanos()),
+    )
+    .await
+    {
+        tracing::warn!(session_key, "idle cleanup preserved alert failed: {error}");
+    }
 }
 
 fn reason_is_idle_cleanup_reason(reason: &str) -> bool {
