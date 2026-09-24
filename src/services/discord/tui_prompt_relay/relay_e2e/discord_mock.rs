@@ -22,6 +22,9 @@ pub(super) const USER_ID: u64 = 940_487_400_000_002;
 pub(super) const BOT_ID: u64 = 940_487_400_000_003;
 const FIRST_RESPONSE_MESSAGE_ID: u64 = 940_487_400_000_021;
 
+/// Minted message id to `(reply_to, latest content)`.
+type MintedMessages = std::collections::BTreeMap<u64, (Option<u64>, String)>;
+
 /// Counters and gates over the mock's message endpoint. A `"..."` body is the
 /// relay's placeholder post, which the harness uses as its dispatch witness;
 /// the first one parks until released so a second turn can queue behind an
@@ -41,6 +44,8 @@ pub(super) struct DiscordMockState {
     /// seeds it, which is the "nothing to catch up" answer.
     pub(super) history: Arc<Mutex<Vec<Value>>>,
     pub(super) history_queries: Arc<Mutex<Vec<HistoryQuery>>>,
+    /// Every message the mock minted, in id order, as `(reply_to, latest content)`.
+    pub(super) messages: Arc<Mutex<MintedMessages>>,
     next_response_id: Arc<AtomicU64>,
 }
 
@@ -54,6 +59,7 @@ impl DiscordMockState {
             unhandled: Arc::new(Mutex::new(Vec::new())),
             history: Arc::new(Mutex::new(Vec::new())),
             history_queries: Arc::new(Mutex::new(Vec::new())),
+            messages: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             next_response_id: Arc::new(AtomicU64::new(FIRST_RESPONSE_MESSAGE_ID)),
         }
     }
@@ -279,6 +285,16 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
             state.local_note_posts.fetch_add(1, Ordering::SeqCst);
         }
         let id = state.next_response_id.fetch_add(1, Ordering::SeqCst);
+        let reply_to = payload
+            .pointer("/message_reference/message_id")
+            .and_then(Value::as_str)
+            .and_then(|id| id.parse().ok());
+        let message = (reply_to, content.clone());
+        state
+            .messages
+            .lock()
+            .expect("mock messages")
+            .insert(id, message);
         return (StatusCode::OK, Json(discord_message_json(id, &content))).into_response();
     }
 
@@ -310,6 +326,14 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
             .unwrap_or_default();
         let id = path.rsplit('/').next().and_then(|tail| tail.parse().ok());
         let id = id.unwrap_or(FIRST_RESPONSE_MESSAGE_ID);
+        let edited = content.to_string();
+        state
+            .messages
+            .lock()
+            .expect("mock messages")
+            .entry(id)
+            .or_default()
+            .1 = edited;
         return Json(discord_message_json(id, content)).into_response();
     }
     if method == Method::POST && path == format!("/api/v10/channels/{CHANNEL_ID}/typing") {

@@ -14,6 +14,7 @@
 
 mod catch_up_pagination_e2e;
 mod discord_mock;
+mod stale_resume_retry_e2e;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -85,6 +86,37 @@ fn watcher_handle(tmux_session_name: &str, output_path: &std::path::Path) -> Tmu
     }
 }
 
+/// What the `claude` stand-in answers.
+#[derive(Clone, Copy)]
+pub(super) enum ProviderStub {
+    /// Every turn succeeds at once on the bound session.
+    Success,
+    /// A `--resume` launch is rejected as a stale session, as a real CLI rejects the
+    /// synthetic id; a fresh launch succeeds.
+    StaleResumeThenSuccess,
+}
+
+fn write_provider_stub(root: &std::path::Path, stub: ProviderStub) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join("claude-stub");
+    let stale = match stub {
+        ProviderStub::Success => "",
+        ProviderStub::StaleResumeThenSuccess => {
+            "case \"$*\" in *--resume*) echo '{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true}'\n\
+             echo 'No conversation found with session ID' >&2; exit 1;; esac\n"
+        }
+    };
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '0.0.0 (stub)'; exit 0; fi\ncat >/dev/null\n{stale}\
+         echo '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{SESSION_UUID}\"}}'\n\
+         echo '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"{SESSION_UUID}\"}}'\n"
+    );
+    std::fs::write(&path, script).expect("write provider stub");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod provider stub");
+    path
+}
+
 /// An isolated AgentDesk root, a mock Discord transport, a real
 /// `serenity::Context` over it, and a channel already bound to a session.
 ///
@@ -100,6 +132,8 @@ pub(super) struct RelayE2eHarness {
     _server: AbortOnDrop<()>,
     _dedupe_guard: std::sync::MutexGuard<'static, ()>,
     _intake_guard: crate::config::TestEnvVarGuard,
+    _provider_guard: crate::config::TestEnvVarGuard,
+    _config_guard: crate::config::TestEnvVarGuard,
     _root_guard: crate::config::TestEnvVarGuard,
     _env_lock: std::sync::MutexGuard<'static, ()>,
     root: tempfile::TempDir,
@@ -107,6 +141,10 @@ pub(super) struct RelayE2eHarness {
 
 impl RelayE2eHarness {
     pub(super) async fn start() -> Self {
+        Self::start_with_provider(ProviderStub::Success).await
+    }
+
+    pub(super) async fn start_with_provider(stub: ProviderStub) -> Self {
         let env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -118,6 +156,16 @@ impl RelayE2eHarness {
         let intake_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "ADK_INTAKE_ROUTING_MODE",
             std::path::Path::new("disabled"),
+        );
+        // Dispatched turns must not reach a host `claude` or host config: a real
+        // CLI rejects the synthetic resume id and triggers a stale-resume re-dispatch.
+        let provider_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_CLAUDE_PATH",
+            &write_provider_stub(root.path(), stub),
+        );
+        let config_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_CONFIG",
+            &root.path().join("config").join("agentdesk.yaml"),
         );
         let dedupe_guard = dedupe::TEST_LOCK
             .lock()
@@ -160,6 +208,8 @@ impl RelayE2eHarness {
             _server: AbortOnDrop(Some(server)),
             _dedupe_guard: dedupe_guard,
             _intake_guard: intake_guard,
+            _provider_guard: provider_guard,
+            _config_guard: config_guard,
             _root_guard: root_guard,
             _env_lock: env_lock,
             root,
@@ -268,6 +318,12 @@ impl RelayE2eHarness {
     /// Non-placeholder POSTs, which carry local-only control notes.
     pub(super) fn local_note_posts(&self) -> usize {
         self.mock.local_note_posts.load(Ordering::SeqCst)
+    }
+
+    /// Every message the mock minted, oldest first, as `(reply_to, latest content)`.
+    pub(super) fn messages(&self) -> Vec<(Option<u64>, String)> {
+        let messages = self.mock.messages.lock().expect("mock messages");
+        messages.values().cloned().collect()
     }
 
     /// Requests the mock could not answer. A non-empty list means production

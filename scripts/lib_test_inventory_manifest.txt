@@ -6476,6 +6476,7 @@ services::discord::tui_prompt_relay::rehydration::tests::markerless_codex_tui_fa
 services::discord::tui_prompt_relay::relay_e2e::catch_up_pagination_e2e::checkpointed_catch_up_reads_the_page_just_past_the_cursor
 services::discord::tui_prompt_relay::relay_e2e::catch_up_pagination_e2e::recent_catch_up_pages_back_to_a_buried_user_message_and_stops
 services::discord::tui_prompt_relay::relay_e2e::discord_mock::history_page_returns_the_ids_nearest_the_cursor_newest_first
+services::discord::tui_prompt_relay::relay_e2e::stale_resume_retry_e2e::stale_resume_retry_turns_first_placeholder_into_notice_and_answers_once
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_committed_terminal_settles_even_with_bytes_left_over
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_fully_drained_frozen_transcript_settles_its_unfinalizable_inflight
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_hook_adopted_binding_outranks_the_stale_launch_script
