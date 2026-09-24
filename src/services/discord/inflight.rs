@@ -89,6 +89,7 @@ mod removal;
 pub(crate) use self::removal::invalidate_stale_generation;
 pub(in crate::services::discord) use self::removal::load_inflight_states_for_probe_from_root;
 use self::removal::load_inflight_states_from_root;
+pub(in crate::services::discord) use self::removal::reap_inflight_rows_at_boot_blocking;
 #[cfg(test)]
 use self::removal::{
     invalidate_stale_generation_in_root, set_test_tmux_alive_override, stale_removal_reason,
@@ -293,11 +294,11 @@ pub(super) fn inflight_state_version() -> u32 {
     INFLIGHT_STATE_VERSION
 }
 
-/// Load all inflight states for a provider WITHOUT the eviction side-effect
-/// that `load_inflight_states_from_root` performs. Returns each state paired
+/// Load all inflight states for a provider WITHOUT the verdict filter that
+/// `load_inflight_states_from_root` applies. Returns each state paired
 /// with its file-mtime age in seconds. Used by `placeholder_sweeper` so the
-/// sweeper can read-then-act-then-evict in one pass instead of racing the
-/// regular load path's auto-deletion on stale entries.
+/// sweeper can read-then-act-then-evict in one pass, including the stale
+/// entries the regular load path hides.
 pub(super) fn load_inflight_states_for_sweep(
     provider: &ProviderKind,
 ) -> Vec<(InflightTurnState, u64)> {
@@ -531,8 +532,8 @@ pub(super) fn mark_all_inflight_states_restart_mode_checked(
     // gap therefore had its progress overwritten (frontier regression) → the
     // replacement watcher re-relayed `full_response[response_sent_offset..]`,
     // i.e. a duplicate Discord send (the issue's live sub-2000-char repro).
-    // The enumeration is reused only to discover the live rows (its stale-row
-    // GC side effects are preserved); the mutation re-reads the FRESH on-disk
+    // The enumeration is reused only to discover the live rows (rows its verdict
+    // would retire stay hidden and unmarked); the mutation re-reads the FRESH on-disk
     // row under the advisory lock and sets ONLY restart_mode / restart_generation,
     // never the frontier, so it can no longer regress a concurrent writer.
     let states = load_inflight_states_from_root(&root, provider);
@@ -2704,7 +2705,10 @@ mod stall_recovery_tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].channel_id, 111);
         assert!(valid_path.exists());
-        assert!(!malformed_path.exists());
+        assert!(
+            malformed_path.exists(),
+            "a read hides a malformed row, never unlinks it"
+        );
     }
 
     fn build_inflight_for_guard_tests(
@@ -4518,16 +4522,18 @@ mod stall_recovery_tests {
 
     /// §4.4 narrowed the loader's refusal to `row_is_current_generation(state,
     /// current) && state.tmux_session_name.is_some()`, so an unnamed
-    /// current-generation row stays inside the 300s loader reclaim scope. That
-    /// is §9-2's accepted limit, and it is deliberate: an unnamed row has no
-    /// other in-process reclaimer, so widening the gate to it would trade a
-    /// bounded 300s window for residence that lasts as long as the process.
+    /// current-generation row stays inside the loader verdict's reclaim scope.
+    /// The loader only hides it; the boot reaper retires it. Accepted cost: the
+    /// row is unmeasured and retiring it by age alone is what I20 forbids, so
+    /// until the next boot that channel's new turns run without a durable row
+    /// (no restart recovery, no sweeper tracking). A witness-based verdict is
+    /// the fix.
     ///
     /// The generation must be pinned explicitly (both test mutexes + a rooted
     /// env guard + `set_process_generation_for_tests`, matching the named-row
     /// sibling above). Reading the ambient `process_generation()` instead yields
     /// 0 in this test binary, which fails the fence's first term and diverts the
-    /// row into the §9-8 legacy fail-open — the removal below would then hold
+    /// row into the §9-8 legacy fail-open — the hiding below would then hold
     /// for a reason that never evaluates the narrowing term at all.
     #[test]
     fn destructive_loader_keeps_unnamed_current_generation_rows_in_reclaim_scope() {
@@ -4582,8 +4588,8 @@ mod stall_recovery_tests {
         );
         assert!(loaded.is_empty());
         assert!(
-            !path.exists(),
-            "the loader remains the bounded reclaimer for unnamed rows"
+            path.exists(),
+            "the loader hides the unnamed row; only the boot reaper retires it"
         );
     }
 }

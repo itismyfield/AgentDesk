@@ -1,8 +1,10 @@
-//! Inflight removal, stale-generation invalidation, and load-time pruning.
+//! Inflight removal, stale-generation invalidation, and the non-destructive loader.
 
 use super::*;
 use std::collections::HashMap;
 use std::path::Path;
+
+use super::store::InflightStateFileLock;
 
 fn channel_id_from_path(path: &Path) -> u64 {
     path.file_stem()
@@ -496,22 +498,118 @@ fn stale_removal_reason_for_path(
     stale_removal_reason(state, inflight_age_secs_for_path(path)?, current_generation)
 }
 
-enum LockedInflightRead {
-    State(InflightTurnState),
-    GoneOrMalformed,
-    Unreadable,
+#[cfg(test)]
+type PreLockHook = Box<dyn FnMut(&Path)>;
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_ROW_LOCK: std::cell::RefCell<Option<PreLockHook>> = std::cell::RefCell::new(None);
 }
 
-fn read_inflight_state_for_probe_under_lock(path: &Path) -> LockedInflightRead {
-    match fs::read_to_string(path) {
-        Ok(content) => parse_inflight_state_content(&content)
-            .map(LockedInflightRead::State)
-            .unwrap_or(LockedInflightRead::GoneOrMalformed),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            LockedInflightRead::GoneOrMalformed
+/// One row's loader verdict. Deciding never writes: every hide verdict and
+/// the gate refusal carry the sidecar lock they were decided under, so the boot
+/// reaper acts on them without releasing that lock first.
+enum RowVerdict {
+    /// Returned; the flag marks an unlocked parse that needs a finalizer-id backfill.
+    Keep(InflightTurnState, bool),
+    /// Returned without backfill: stale, but the generation gate refuses.
+    KeepGateRefused(InflightTurnState, InflightStateFileLock),
+    /// Hidden stale row: reason, unlocked snapshot, locked re-read.
+    HideStale(
+        String,
+        InflightTurnState,
+        InflightTurnState,
+        InflightStateFileLock,
+    ),
+    /// Hidden foreign row: log label, unlocked snapshot, locked re-read.
+    HideForeign(
+        &'static str,
+        InflightTurnState,
+        InflightTurnState,
+        InflightStateFileLock,
+    ),
+    /// Hidden unparseable row: unlocked bytes, locked bytes.
+    HideMalformed(String, String, InflightStateFileLock),
+    /// Nothing to return; `true` when the scan is left incomplete.
+    Skip(bool),
+}
+
+/// Takes the row's lock and re-reads it; anything but a parsed row is already
+/// the verdict.
+fn relock(
+    path: &Path,
+    content: &str,
+) -> Result<(InflightTurnState, InflightStateFileLock), Box<RowVerdict>> {
+    #[cfg(test)]
+    BEFORE_ROW_LOCK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(path);
         }
-        Err(_) => LockedInflightRead::Unreadable,
+    });
+    let lock = lock_inflight_state_path(path).map_err(|_| Box::new(RowVerdict::Skip(true)))?;
+    match fs::read_to_string(path) {
+        Ok(locked) => match parse_inflight_state_content(&locked) {
+            Ok(state) => Ok((state, lock)),
+            Err(_) => Err(Box::new(RowVerdict::HideMalformed(
+                content.to_string(),
+                locked,
+                lock,
+            ))),
+        },
+        Err(error) => Err(Box::new(RowVerdict::Skip(
+            error.kind() != std::io::ErrorKind::NotFound,
+        ))),
     }
+}
+
+fn classify_inflight_row(
+    path: &Path,
+    provider: &ProviderKind,
+    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,
+) -> RowVerdict {
+    let generation = allocation.generation;
+    let verdict = || -> Result<RowVerdict, Box<RowVerdict>> {
+        let Ok(content) = fs::read_to_string(path) else {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ⚠ failed to read inflight state file: {}",
+                path.display()
+            );
+            return Ok(RowVerdict::Skip(true));
+        };
+        let (mut state, mut backfill) =
+            match parse_inflight_state_content_with_finalizer_backfill(&content) {
+                Ok(parsed) => parsed,
+                Err(_) => (relock(path, &content)?.0, false),
+            };
+        let foreign = |row: &InflightTurnState| row.provider_kind().as_ref() != Some(provider);
+        if foreign(&state) {
+            let (locked, lock) = relock(path, &content)?;
+            if foreign(&locked) {
+                let label = "load_inflight_states_from_root_provider_mismatch";
+                return Ok(RowVerdict::HideForeign(label, state, locked, lock));
+            }
+            (state, backfill) = (locked, false);
+        }
+        if stale_removal_reason_for_path(path, &state, generation).is_none() {
+            return Ok(RowVerdict::Keep(state, backfill));
+        }
+        let (locked, lock) = relock(path, &content)?;
+        if foreign(&locked) {
+            let label = "load_inflight_states_from_root_stale_provider_mismatch";
+            return Ok(RowVerdict::HideForeign(label, state, locked, lock));
+        }
+        Ok(
+            match stale_removal_reason_for_path(path, &locked, generation) {
+                Some(_) if loader_gate_refuses_with_allocation(&locked, allocation) => {
+                    RowVerdict::KeepGateRefused(locked, lock)
+                }
+                Some(reason) => RowVerdict::HideStale(reason, state, locked, lock),
+                None => RowVerdict::Keep(locked, false),
+            },
+        )
+    };
+    verdict().unwrap_or_else(|verdict| *verdict)
 }
 
 pub(in crate::services::discord) struct InflightProbeLoad {
@@ -526,6 +624,8 @@ pub(super) fn load_inflight_states_from_root(
     load_inflight_states_for_probe_from_root(root, provider).states
 }
 
+/// Rows the loader's verdict would retire are hidden, never unlinked or
+/// renamed: `boot_reaper` is their only retirement path.
 pub(in crate::services::discord) fn load_inflight_states_for_probe_from_root(
     root: &Path,
     provider: &ProviderKind,
@@ -544,7 +644,6 @@ pub(in crate::services::discord) fn load_inflight_states_for_probe_from_root(
     let mut complete = true;
     let mut tmux_owners: HashMap<String, u64> = HashMap::new();
     let allocation = crate::services::discord::runtime_store::process_generation_binding();
-    let current_generation = allocation.generation;
     for entry in entries {
         let path = match entry {
             Ok(entry) => entry.path(),
@@ -556,175 +655,23 @@ pub(in crate::services::discord) fn load_inflight_states_for_probe_from_root(
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let Ok(content) = fs::read_to_string(&path) else {
-            complete = false;
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ⚠ failed to read inflight state file: {}",
-                path.display()
-            );
-            continue;
+        let state = match classify_inflight_row(&path, provider, allocation) {
+            RowVerdict::Keep(state, true) => {
+                let backfilled = backfill_finalizer_turn_id_under_lock(root, &path, provider);
+                complete &= backfilled.is_some();
+                backfilled.unwrap_or(state)
+            }
+            RowVerdict::Keep(state, false) | RowVerdict::KeepGateRefused(state, _) => state,
+            RowVerdict::Skip(incomplete) => {
+                complete &= !incomplete;
+                continue;
+            }
+            RowVerdict::HideStale(..)
+            | RowVerdict::HideForeign(..)
+            | RowVerdict::HideMalformed(..) => {
+                continue;
+            }
         };
-        let (mut state, mut finalizer_backfilled) =
-            match parse_inflight_state_content_with_finalizer_backfill(&content) {
-                Ok(parsed) => parsed,
-                Err(_) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts}] ⚠ removing malformed inflight state file: {}",
-                        path.display()
-                    );
-                    let Ok(_lock) = lock_inflight_state_path(&path) else {
-                        complete = false;
-                        continue;
-                    };
-                    match fs::read_to_string(&path) {
-                        Ok(locked_content) => match parse_inflight_state_content(&locked_content) {
-                            Ok(locked_state) => (locked_state, false),
-                            Err(_) => {
-                                log_loader_inflight_remove(
-                                    provider,
-                                    channel_id_from_path(&path),
-                                    user_msg_id_for_inflight_remove_log(&path),
-                                    "load_inflight_states_from_root_malformed",
-                                    &path,
-                                    None,
-                                    current_generation,
-                                );
-                                let _ = fs::remove_file(&path);
-                                continue;
-                            }
-                        },
-                        Err(error) => {
-                            if error.kind() != std::io::ErrorKind::NotFound {
-                                complete = false;
-                            }
-                            log_loader_inflight_remove(
-                                provider,
-                                channel_id_from_path(&path),
-                                user_msg_id_for_inflight_remove_log(&path),
-                                "load_inflight_states_from_root_malformed",
-                                &path,
-                                None,
-                                current_generation,
-                            );
-                            let _ = fs::remove_file(&path);
-                            continue;
-                        }
-                    }
-                }
-            };
-        if state.provider_kind().as_ref() != Some(provider) {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ⚠ removing inflight state with provider mismatch: {}",
-                path.display()
-            );
-            let Ok(_lock) = lock_inflight_state_path(&path) else {
-                complete = false;
-                continue;
-            };
-            let locked_state = match read_inflight_state_for_probe_under_lock(&path) {
-                LockedInflightRead::State(state) => state,
-                read => {
-                    complete &= !matches!(read, LockedInflightRead::Unreadable);
-                    log_loader_inflight_remove(
-                        provider,
-                        channel_id_from_path(&path),
-                        user_msg_id_for_inflight_remove_log(&path),
-                        "load_inflight_states_from_root_provider_mismatch",
-                        &path,
-                        None,
-                        current_generation,
-                    );
-                    let _ = fs::remove_file(&path);
-                    continue;
-                }
-            };
-            if locked_state.provider_kind().as_ref() != Some(provider) {
-                log_loader_inflight_remove(
-                    provider,
-                    locked_state.channel_id,
-                    locked_state.user_msg_id,
-                    "load_inflight_states_from_root_provider_mismatch",
-                    &path,
-                    Some(&locked_state),
-                    current_generation,
-                );
-                let _ = fs::remove_file(&path);
-                continue;
-            }
-            finalizer_backfilled = false;
-            state = locked_state;
-        }
-        if stale_removal_reason_for_path(&path, &state, current_generation).is_some() {
-            let Ok(_lock) = lock_inflight_state_path(&path) else {
-                complete = false;
-                continue;
-            };
-            let locked_state = match read_inflight_state_for_probe_under_lock(&path) {
-                LockedInflightRead::State(state) => state,
-                read => {
-                    complete &= !matches!(read, LockedInflightRead::Unreadable);
-                    log_loader_inflight_remove(
-                        provider,
-                        channel_id_from_path(&path),
-                        user_msg_id_for_inflight_remove_log(&path),
-                        "load_inflight_states_from_root_stale",
-                        &path,
-                        None,
-                        current_generation,
-                    );
-                    let _ = fs::remove_file(&path);
-                    continue;
-                }
-            };
-            if locked_state.provider_kind().as_ref() != Some(provider) {
-                log_loader_inflight_remove(
-                    provider,
-                    locked_state.channel_id,
-                    locked_state.user_msg_id,
-                    "load_inflight_states_from_root_stale_provider_mismatch",
-                    &path,
-                    Some(&locked_state),
-                    current_generation,
-                );
-                let _ = fs::remove_file(&path);
-                continue;
-            }
-            if let Some(reason) =
-                stale_removal_reason_for_path(&path, &locked_state, current_generation)
-            {
-                if loader_gate_refuses_with_allocation(&locked_state, allocation) {
-                    record_loader_generation_gate(&locked_state, allocation, &path);
-                } else {
-                    emit_loader_generation_gate_allowed(provider, &locked_state, allocation, &path);
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!("  [{ts}] ⚠ {}: {}", reason, path.display());
-                    log_loader_inflight_remove(
-                        provider,
-                        locked_state.channel_id,
-                        locked_state.user_msg_id,
-                        "load_inflight_states_from_root_stale",
-                        &path,
-                        Some(&locked_state),
-                        current_generation,
-                    );
-                    let _ = fs::remove_file(&path);
-                    continue;
-                }
-            }
-            finalizer_backfilled = false;
-            state = locked_state;
-        }
-        if finalizer_backfilled {
-            if let Some(locked_state) = backfill_finalizer_turn_id_under_lock(root, &path, provider)
-            {
-                state = locked_state;
-            } else {
-                complete = false;
-            }
-        }
         if let Some(tmux_session_name) = state
             .tmux_session_name
             .as_deref()
@@ -752,6 +699,11 @@ pub(in crate::services::discord) fn load_inflight_states_for_probe_from_root(
     }
     InflightProbeLoad { states, complete }
 }
+
+mod boot_reaper;
+pub(in crate::services::discord) use boot_reaper::reap_inflight_rows_at_boot_blocking;
+#[cfg(test)]
+use boot_reaper::*;
 
 #[cfg(test)]
 mod loader_gate_observation_tests {
@@ -959,6 +911,7 @@ mod loader_gate_observation_tests {
         for (offset, born, matching) in [(0, bound.generation, true), (1, stale, false)] {
             let state = row(63_000 + index as u64 * 2 + offset, born, Some("named"));
             let path = seed_stale(root, &state);
+            reap_inflight_rows_at_boot_in_root(root, &ProviderKind::Claude);
             let loaded = load_inflight_states_for_probe_from_root(root, &ProviderKind::Claude);
             let refused = matching && bound.generation != 0;
             assert_eq!(path.exists(), refused);
@@ -1052,29 +1005,65 @@ mod loader_gate_observation_tests {
             "state: &InflightTurnState,\n    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,\n) -> bool {\n    loader_gate_refuses(state, allocation.generation)\n}"
         );
 
-        let public_loader = source
-            .split_once("fn load_inflight_states_for_probe_from_root(")
-            .expect("public probe loader must remain present")
-            .1
-            .split_once(
-                "#[cfg(test)]
-mod loader_gate_observation_tests",
-            )
-            .expect("public probe loader must remain bounded by its tests")
+        // Reads decide without side effects; only the reaper retires, and only
+        // after its lock-held revalidation.
+        let owned = source
+            .split_once("\nmod loader_gate_observation_tests")
+            .unwrap()
             .0;
+        let reads = owned.split_once("fn classify_inflight_row(").unwrap().1;
+        let reads = reads.split_once("\nmod boot_reaper;").unwrap().0;
+        let effects = [
+            "fs::remove_file",
+            "fs::rename",
+            "fs::write",
+            "atomic_write",
+            "persist_under_lock",
+        ];
+        let events = [
+            "record_loader_generation_gate",
+            "emit_loader_generation_gate_allowed",
+        ];
+        for effect in effects.iter().chain(&events) {
+            assert!(!reads.contains(effect), "{effect}");
+        }
         assert_eq!(
-            public_loader
-                .matches("let allocation = crate::services::discord::runtime_store::process_generation_binding();")
+            reads
+                .matches("runtime_store::process_generation_binding();")
                 .count(),
-            1,
+            1
         );
-        let stale_decision = public_loader.rsplit_once("            if let Some(reason) =\n                stale_removal_reason_for_path(&path, &locked_state, current_generation)").unwrap().1.split_once("\n        if finalizer_backfilled {").unwrap().0;
+        assert!(
+            !reads.contains("allocation.epoch_route()")
+                && !reads.contains("allocation.epoch_advanced()")
+        );
+        let reaper = include_str!("removal/boot_reaper.rs");
+        let reaper = reaper
+            .split_once("fn reap_inflight_rows_at_boot_in_root(")
+            .unwrap()
+            .1;
+        let arms: Vec<_> = reaper.split("RowVerdict::").collect();
+        for (arm, check) in [
+            ("HideStale(", "same_snapshot(&unlocked, &locked)"),
+            ("HideForeign(", "same_snapshot(&unlocked, &locked)"),
+            ("HideMalformed(", "unlocked == locked"),
+        ] {
+            assert!(
+                arms.iter()
+                    .any(|arm_text| arm_text.starts_with(arm) && arm_text.contains(check)),
+                "{arm}"
+            );
+        }
+        let marks = [
+            "if !unchanged {",
+            "emit_loader_generation_gate_allowed(",
+            "fs::remove_file(&path)",
+        ];
+        assert!(marks.map(|mark| reaper.find(mark).expect(mark)).is_sorted());
         assert_eq!(
-            stale_decision,
-            "\n            {\n                if loader_gate_refuses_with_allocation(&locked_state, allocation) {\n                    record_loader_generation_gate(&locked_state, allocation, &path);\n                } else {\n                    emit_loader_generation_gate_allowed(provider, &locked_state, allocation, &path);\n                    let ts = chrono::Local::now().format(\"%H:%M:%S\");\n                    tracing::info!(\"  [{ts}] ⚠ {}: {}\", reason, path.display());\n                    log_loader_inflight_remove(\n                        provider,\n                        locked_state.channel_id,\n                        locked_state.user_msg_id,\n                        \"load_inflight_states_from_root_stale\",\n                        &path,\n                        Some(&locked_state),\n                        current_generation,\n                    );\n                    let _ = fs::remove_file(&path);\n                    continue;\n                }\n            }\n            finalizer_backfilled = false;\n            state = locked_state;\n        }"
+            owned.matches("fs::remove_file(").count() + reaper.matches("fs::remove_file(").count(),
+            2
         );
-        assert!(!public_loader.contains("allocation.epoch_route()"));
-        assert!(!public_loader.contains("allocation.epoch_advanced()"));
 
         let public_witness = source
             .split_once("fn public_loader_observes_production_shaped_published_routes()")
@@ -1090,5 +1079,386 @@ mod loader_gate_observation_tests",
             1,
             "the process-global tmux override witness must share its canonical test mutex",
         );
+    }
+}
+
+#[cfg(test)]
+mod nondestructive_loader_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    const G: u64 = 59_960;
+    const STALE: i64 = INFLIGHT_MAX_AGE_SECS as i64 + 1;
+    const CLAUDE: ProviderKind = ProviderKind::Claude;
+
+    /// Pinned generation, no live tmux pane, rows under `AGENTDESK_ROOT_DIR`.
+    struct Env {
+        root: tempfile::TempDir,
+        _root_env: crate::config::TestEnvVarGuard,
+        _env_lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
+        _tmux: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Env {
+        fn new() -> Self {
+            let tmux = super::super::stall_recovery_tests::stale_override_test_mutex()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+            let root = tempfile::tempdir().unwrap();
+            let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                "AGENTDESK_ROOT_DIR",
+                root.path(),
+            );
+            crate::services::discord::runtime_store::set_process_generation_for_tests(Some(G));
+            set_test_tmux_alive_override(Some(&[]));
+            Self {
+                root,
+                _root_env,
+                _env_lock: env_lock,
+                _tmux: tmux,
+            }
+        }
+
+        fn dir(&self) -> PathBuf {
+            self.root.path().join("runtime").join("discord_inflight")
+        }
+
+        /// Writes `state` verbatim into the Claude directory, `age` seconds old.
+        fn seed(&self, state: &InflightTurnState, age: i64) -> PathBuf {
+            let path = inflight_state_path(&self.dir(), &CLAUDE, state.channel_id);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            rewrite(&path, state, age);
+            path
+        }
+
+        fn reap(&self) -> BootReapReport {
+            reap_inflight_rows_at_boot_in_root(&self.dir(), &CLAUDE)
+        }
+    }
+
+    impl Drop for Env {
+        fn drop(&mut self) {
+            set_test_tmux_alive_override(None);
+            crate::services::discord::runtime_store::set_process_generation_for_tests(None);
+        }
+    }
+
+    fn row(channel_id: u64, tmux: Option<&str>) -> InflightTurnState {
+        let (owner, msg, text) = (42, channel_id + 1, "prompt".to_string());
+        let (tmux, out) = (tmux.map(str::to_string), Some("/tmp/out.jsonl".to_string()));
+        let mut state = InflightTurnState::new(
+            CLAUDE, channel_id, None, owner, msg, msg, text, None, tmux, out, None, 0,
+        );
+        state.born_generation = G - 1;
+        state
+    }
+
+    fn rewrite(path: &Path, state: &InflightTurnState, age: i64) {
+        fs::write(path, serde_json::to_string_pretty(state).unwrap()).unwrap();
+        let mtime = filetime::FileTime::from_unix_time(chrono::Utc::now().timestamp() - age, 0);
+        filetime::set_file_mtime(path, mtime).unwrap();
+    }
+
+    fn snapshot(path: &Path) -> (Vec<u8>, std::time::SystemTime) {
+        (
+            fs::read(path).unwrap(),
+            fs::metadata(path).unwrap().modified().unwrap(),
+        )
+    }
+
+    /// The shapes the loader verdict retires: stale prior-generation, malformed,
+    /// and another provider's row filed in this directory.
+    fn seed_retirable(env: &Env) -> [PathBuf; 3] {
+        let malformed = inflight_state_path(&env.dir(), &CLAUDE, 999);
+        let mut foreign = row(5_996_003, None);
+        foreign.provider = ProviderKind::Codex.as_str().to_string();
+        let [stale, foreign] = [
+            env.seed(&row(5_996_001, None), STALE),
+            env.seed(&foreign, 0),
+        ];
+        fs::write(&malformed, "{ malformed json ]").unwrap();
+        [stale, malformed, foreign]
+    }
+
+    /// Runs `action` once, the first time a verdict is about to take a lock.
+    fn with_pre_lock_hook<R>(action: impl FnOnce(&Path) + 'static, run: impl FnOnce() -> R) -> R {
+        let mut action = Some(action);
+        let hook = move |path: &Path| {
+            if let Some(action) = action.take() {
+                action(path);
+            }
+        };
+        BEFORE_ROW_LOCK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        let out = run();
+        BEFORE_ROW_LOCK.with(|slot| *slot.borrow_mut() = None);
+        out
+    }
+
+    // R1-R4: every production read wrapper hides the rows it used to unlink.
+    #[test]
+    fn production_readers_hide_but_never_unlink_retirable_rows() {
+        let env = Env::new();
+        let [stale, malformed, foreign] = seed_retirable(&env);
+        let named = env.seed(&row(5_996_004, Some("AgentDesk-claude-r4")), STALE);
+        let paths = [stale, malformed, foreign, named];
+        let before = paths.each_ref().map(|path| snapshot(path));
+
+        assert!(super::super::load_inflight_states(&CLAUDE).is_empty());
+        assert_eq!(
+            super::super::latest_request_owner_user_id_for_channel(5_996_001),
+            None
+        );
+        assert!(!crate::services::discord::has_fresh_inflight_for_channel(
+            5_996_001
+        ));
+        use crate::services::discord::zombie_foreground_release as zombie;
+        let lookup = zombie::inflight_episode_lookup_for_tmux_name(&CLAUDE, "AgentDesk-claude-r4");
+        assert_eq!(lookup, zombie::InflightEpisodeLookup::Unclaimed);
+        assert_eq!(paths.each_ref().map(|path| snapshot(path)), before);
+    }
+
+    // R6 + M1: shutdown marking skips a hidden stale row without refreshing it,
+    // and the next boot's reaper retires it.
+    #[test]
+    fn restart_marking_leaves_hidden_rows_to_the_next_boot_reaper() {
+        let env = Env::new();
+        let stale = env.seed(&row(5_996_011, None), STALE);
+        env.seed(&row(5_996_012, None), 0);
+        let before = snapshot(&stale);
+        let mode = InflightRestartMode::DrainRestart;
+        assert_eq!(
+            super::super::mark_all_inflight_states_restart_mode_checked(&CLAUDE, mode),
+            Ok(1)
+        );
+        assert_eq!(snapshot(&stale), before);
+
+        crate::services::discord::runtime_store::set_process_generation_for_tests(Some(G + 1));
+        let report = env.reap();
+        assert_eq!((report.reaped_stale, report.kept), (1, 1), "{report:?}");
+        assert!(!stale.exists());
+    }
+
+    // B1-B3: backfill is written only to a row whose unlocked verdict was keep,
+    // so a read never refreshes the mtime a hidden or refused row is aged by.
+    #[test]
+    fn loader_backfills_only_rows_it_keeps_on_the_unlocked_verdict() {
+        let env = Env::new();
+        let mut refused = row(5_996_021, Some("AgentDesk-claude-b2"));
+        refused.born_generation = G;
+        let [mut hidden, mut fresh] = [row(5_996_022, None), row(5_996_023, None)];
+        for state in [&mut refused, &mut hidden, &mut fresh] {
+            state.finalizer_turn_id = 0;
+        }
+        let kept_legacy = [env.seed(&refused, STALE), env.seed(&hidden, STALE)];
+        let fresh_path = env.seed(&fresh, 0);
+        let before = kept_legacy.each_ref().map(|path| snapshot(path));
+
+        assert_eq!(super::super::load_inflight_states(&CLAUDE).len(), 2);
+        assert_eq!(kept_legacy.each_ref().map(|path| snapshot(path)), before);
+        let on_disk: InflightTurnState =
+            serde_json::from_slice(&fs::read(fresh_path).unwrap()).unwrap();
+        assert_ne!(
+            on_disk.finalizer_turn_id, 0,
+            "a kept legacy row is backfilled"
+        );
+    }
+
+    // M3's route table covers the gate refusal; this covers the other verdicts.
+    #[test]
+    fn boot_reaper_retires_foreign_malformed_and_out_of_window_rows() {
+        let env = Env::new();
+        let [stale, malformed, foreign] = seed_retirable(&env);
+        let drains = [(5_996_031, G - 2), (5_996_032, G - 1)].map(|(channel_id, generation)| {
+            let mut state = row(channel_id, None);
+            state.set_restart_mode(InflightRestartMode::DrainRestart);
+            state.restart_generation = Some(generation);
+            env.seed(&state, STALE)
+        });
+        let report = env.reap();
+        let reaped = (
+            report.reaped_stale,
+            report.reaped_provider_mismatch,
+            report.reaped_malformed,
+        );
+        assert_eq!((reaped, report.kept), ((2, 1, 1), 1), "{report:?}");
+        assert!(
+            [&stale, &malformed, &foreign, &drains[0]]
+                .iter()
+                .all(|path| !path.exists())
+        );
+        assert!(drains[1].exists(), "a drain row inside its window survives");
+        assert!(
+            malformed.with_extension("json.lock").exists(),
+            "lock sidecars are never reaped"
+        );
+    }
+
+    // X1-X5: whatever replaces, refreshes, advances, clears or repairs the row
+    // between the unlocked verdict and the lock stops the unlink.
+    #[test]
+    fn boot_reaper_revalidates_the_snapshot_under_the_lock() {
+        let env = Env::new();
+        let a = row(5_996_041, None);
+        let mut swapped = row(5_996_041, None);
+        (swapped.user_msg_id, swapped.turn_nonce) = (7, Some("successor".to_string()));
+        let mut progressed = a.clone();
+        (progressed.save_generation, progressed.updated_at) =
+            (9, "2099-01-01 00:00:00".to_string());
+        type Case = (
+            &'static str,
+            Box<dyn FnOnce(&Path)>,
+            fn(&BootReapReport) -> usize,
+            bool,
+        );
+        let cases: [Case; 4] = [
+            (
+                "X1",
+                Box::new(move |p| rewrite(p, &swapped, STALE)),
+                |r| r.changed,
+                true,
+            ),
+            (
+                "X2",
+                Box::new({
+                    let a = a.clone();
+                    move |p| rewrite(p, &a, 0)
+                }),
+                |r| r.kept,
+                true,
+            ),
+            (
+                "X3",
+                Box::new(move |p| rewrite(p, &progressed, STALE)),
+                |r| r.changed,
+                true,
+            ),
+            (
+                "X4",
+                Box::new(|p| fs::remove_file(p).unwrap()),
+                |r| r.missing,
+                false,
+            ),
+        ];
+        for (label, action, counter, survives) in cases {
+            let path = env.seed(&a, STALE);
+            let report = with_pre_lock_hook(action, || env.reap());
+            assert_eq!(
+                (counter(&report), report.reaped_stale),
+                (1, 0),
+                "{label}: {report:?}"
+            );
+            assert_eq!(path.exists(), survives, "{label}");
+        }
+        let torn = inflight_state_path(&env.dir(), &CLAUDE, 5_996_042);
+        fs::write(&torn, "{ torn").unwrap();
+        let repaired = row(5_996_042, None);
+        let report = with_pre_lock_hook(move |p| rewrite(p, &repaired, 0), || env.reap());
+        assert_eq!(
+            (report.kept, report.reaped_malformed),
+            (1, 0),
+            "X5: {report:?}"
+        );
+    }
+
+    // W3: one pass per provider; a later caller waits for it and runs nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn boot_reap_once_runs_once_per_provider_and_later_callers_wait() {
+        let guard = std::sync::Arc::new(BootReapOnce::default());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let kept = |kept| BootReapReport {
+            kept,
+            ..BootReapReport::default()
+        };
+        let first_reap = move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            kept(7)
+        };
+        let first = tokio::spawn({
+            let guard = guard.clone();
+            async move { guard.run_once(&CLAUDE, first_reap).await }
+        });
+        started_rx.await.unwrap();
+        let second = tokio::spawn({
+            let guard = guard.clone();
+            async move {
+                guard
+                    .run_once(&CLAUDE, || -> BootReapReport { panic!("second pass") })
+                    .await
+            }
+        });
+        let other = guard.run_once(&ProviderKind::Codex, move || kept(1)).await;
+        assert_eq!((other.already_ran, other.kept), (false, 1));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !second.is_finished(),
+            "a later caller must wait for the first pass"
+        );
+        release_tx.send(()).unwrap();
+        let (first, second) = (first.await.unwrap(), second.await.unwrap());
+        assert_eq!(
+            [
+                (first.already_ran, first.kept),
+                (second.already_ran, second.kept)
+            ],
+            [(false, 7), (true, 7)]
+        );
+    }
+
+    // W4: a cancelled first caller does not reopen the gate; the next caller
+    // waits for the pass already running instead of starting a second one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn boot_reap_once_survives_a_cancelled_first_caller() {
+        let guard = std::sync::Arc::new(BootReapOnce::default());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let first = tokio::spawn({
+            let guard = guard.clone();
+            async move {
+                let reap = move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    BootReapReport {
+                        kept: 7,
+                        ..BootReapReport::default()
+                    }
+                };
+                guard.run_once(&CLAUDE, reap).await
+            }
+        });
+        started_rx.await.unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let second = tokio::spawn({
+            let guard = guard.clone();
+            async move {
+                guard
+                    .run_once(&CLAUDE, || -> BootReapReport { panic!("second pass") })
+                    .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!second.is_finished(), "the running pass must be awaited");
+        release_tx.send(()).unwrap();
+        let second = second.await.unwrap();
+        assert_eq!((second.already_ran, second.kept), (true, 7));
+    }
+
+    // The env-root wrapper reaches `_in_root` through the guard, once.
+    #[tokio::test]
+    async fn boot_reaper_wrapper_reaps_the_env_root_once() {
+        let env = Env::new();
+        let path = env.seed(&row(5_996_081, None), STALE);
+        let guard = BootReapOnce::default();
+        let first = reap_inflight_rows_at_boot_with_guard(&guard, &CLAUDE).await;
+        assert_eq!(
+            (first.already_ran, first.reaped_stale, path.exists()),
+            (false, 1, false)
+        );
+        env.seed(&row(5_996_081, None), STALE);
+        let second = reap_inflight_rows_at_boot_with_guard(&guard, &CLAUDE).await;
+        assert_eq!((second.already_ran, path.exists()), (true, true));
     }
 }

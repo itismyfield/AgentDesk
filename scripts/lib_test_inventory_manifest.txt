@@ -3430,6 +3430,14 @@ services::discord::inflight::removal::loader_gate_observation_tests::loader_allo
 services::discord::inflight::removal::loader_gate_observation_tests::loader_allow_kind_is_distinct_from_the_reconcile_fence_kind
 services::discord::inflight::removal::loader_gate_observation_tests::observation_labels_and_allocation_only_evaluation_api_are_exact
 services::discord::inflight::removal::loader_gate_observation_tests::public_loader_observes_production_shaped_published_routes
+services::discord::inflight::removal::nondestructive_loader_tests::boot_reap_once_runs_once_per_provider_and_later_callers_wait
+services::discord::inflight::removal::nondestructive_loader_tests::boot_reap_once_survives_a_cancelled_first_caller
+services::discord::inflight::removal::nondestructive_loader_tests::boot_reaper_retires_foreign_malformed_and_out_of_window_rows
+services::discord::inflight::removal::nondestructive_loader_tests::boot_reaper_revalidates_the_snapshot_under_the_lock
+services::discord::inflight::removal::nondestructive_loader_tests::boot_reaper_wrapper_reaps_the_env_root_once
+services::discord::inflight::removal::nondestructive_loader_tests::loader_backfills_only_rows_it_keeps_on_the_unlocked_verdict
+services::discord::inflight::removal::nondestructive_loader_tests::production_readers_hide_but_never_unlink_retirable_rows
+services::discord::inflight::removal::nondestructive_loader_tests::restart_marking_leaves_hidden_rows_to_the_next_boot_reaper
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_guarded_save_does_not_resurrect_a_deleted_row
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_guarded_save_preserves_newer_owner_bytes_on_identity_mismatch
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_patch_accepts_same_value_prior_write_within_ui_group
@@ -5114,6 +5122,7 @@ services::discord::runtime_bootstrap::bootstrap_tests::filter_restored_queued_pl
 services::discord::runtime_bootstrap::bootstrap_tests::legacy_durable_handoff_cleanup_removes_retired_json_tree
 services::discord::runtime_bootstrap::bootstrap_tests::reaction_status_removal_cannot_cancel_gateway_contract
 services::discord::runtime_bootstrap::bootstrap_tests::restored_settings_filters_sort_parse_and_drop_disabled_entries
+services::discord::runtime_bootstrap::bootstrap_tests::run_bot_reaper_precedes_runtime_branches_and_only_utility_returns_literally
 services::discord::runtime_bootstrap::bootstrap_tests::standby_registration_advances_the_observable_generation
 services::discord::runtime_bootstrap::bootstrap_tests::standby_registration_settles_the_reconcile_obligation
 services::discord::runtime_bootstrap::bootstrap_tests::startup_doctor_barrier_arrive_decrements_once_until_release

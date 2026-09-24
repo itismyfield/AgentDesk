@@ -265,6 +265,11 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             codex_goals_reset_channels: &restored_codex_goals_reset_channels,
         },
     );
+    // Sole boot owner of loader-verdict row retirement: every runtime shape
+    // passes here after the generation is allocated and before any mint surface.
+    // Only the utility branch leaves earlier: it builds no runtime or mint surface. Its
+    // doctor handles only health-registered runtimes, which register after their reaper.
+    super::inflight::reap_inflight_rows_at_boot_blocking(&provider).await;
     super::tui_prompt_relay::spawn_tui_prompt_relay(shared.clone(), provider.clone());
 
     // Phase 5.2 of intake-node-routing (issue #2009): populate
@@ -880,6 +885,51 @@ agents:
 
         assert_eq!(after_first, before + 1);
         assert_eq!(registry.registration_generation(), after_first);
+    }
+
+    // Lexical pin, not a control-flow proof: one awaited reaper call after generation
+    // allocation and before the runtime markers; the only literal `return` before it is
+    // the utility one. `?`, break, process::exit or a diverging helper slip past it.
+    #[test]
+    fn run_bot_reaper_precedes_runtime_branches_and_only_utility_returns_literally() {
+        let source = include_str!("runtime_bootstrap.rs");
+        let production = source
+            .split_once("#[cfg(test)]\nmod bootstrap_tests")
+            .unwrap()
+            .0;
+        let body = production
+            .split_once("pub(crate) async fn run_bot(")
+            .unwrap()
+            .1;
+        let body = body.split_once("\n}\n").unwrap().0;
+        assert_eq!(body.matches("reap_inflight_rows_at_boot").count(), 1);
+        let call = "super::inflight::reap_inflight_rows_at_boot_blocking(&provider).await;";
+        let at = body
+            .find(call)
+            .expect("the reaper call must be awaited in run_bot");
+        assert!(body.find("run_bot_build_shared_data(").unwrap() < at);
+        // The only literal `return` allowed before the reaper is the utility one.
+        let utility = "if let Some(bot_name) = should_skip_agent_runtime_launch(token) {";
+        let mut prefix = body[..at].to_string();
+        if let Some((before, rest)) = body[..at].split_once(utility) {
+            let (branch, after) = rest.split_once("\n    }\n").unwrap();
+            assert_eq!(branch.matches("return").count(), 1, "utility branch");
+            prefix = format!("{before}{after}");
+        }
+        assert!(!prefix.contains("return"), "no exit may precede the reaper");
+        for later in [
+            "spawn_tui_prompt_relay(",
+            "if !modules.gateway",
+            "restore_worker_queues(",
+            "run_bot_acquire_gateway_lease(",
+            "GatewayLeaseOutcome::Standby",
+            "run_bot_start_gateway_runtime(",
+        ] {
+            assert!(
+                at < body.find(later).expect(later),
+                "reaper must precede {later}"
+            );
+        }
     }
 }
 
