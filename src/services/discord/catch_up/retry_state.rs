@@ -5,9 +5,10 @@ use std::time::Instant;
 
 use poise::serenity_prelude::{ChannelId, MessageId};
 
+use super::super::reaction_lifecycle::is_real_discord_message_id_value;
 use super::super::{
-    SharedData, advance_last_message_checkpoint, mailbox_clear_channel, mailbox_snapshot,
-    recovery_known_message_ids,
+    SharedData, advance_last_message_checkpoint, is_synthetic_headless_message_id_raw,
+    mailbox_clear_channel,
 };
 use super::{
     CATCH_UP_RETRY_DEFERRED_REARM_LIMIT, CATCH_UP_RETRY_FETCH_FAILURE_LIMIT, CatchUpRetryState,
@@ -82,16 +83,14 @@ pub(in crate::services::discord) async fn clear_channel_discarding_catch_up_back
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> ClearChannelResult {
-    let known = recovery_known_message_ids(&mailbox_snapshot(shared, channel_id).await);
     let cleared = mailbox_clear_channel(shared, provider, channel_id).await;
     shared.catch_up_retry_pending.remove(&channel_id);
-    let exited = cleared.queue_exit_events.iter().flat_map(|event| {
-        let sources = event.intervention.source_message_ids.iter();
-        sources
-            .chain([&event.intervention.message_id])
-            .map(|id| id.get())
-    });
-    if let Some(newest) = known.into_iter().chain(exited).max() {
+    // Only real Discord ids are cursors: a synthetic headless/voice id would hide every later message.
+    let real = |id: &u64| {
+        is_real_discord_message_id_value(*id) && !is_synthetic_headless_message_id_raw(*id)
+    };
+    let discarded = cleared.discarded_message_ids.iter().map(|id| id.get());
+    if let Some(newest) = discarded.filter(real).max() {
         advance_last_message_checkpoint(shared, provider, channel_id, MessageId::new(newest));
     }
     cleared

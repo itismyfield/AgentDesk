@@ -140,6 +140,7 @@ fn recovery_known_id_arms(
     arms
 }
 
+#[cfg(test)]
 pub(in crate::services::discord) fn recovery_known_message_ids(
     snapshot: &ChannelMailboxSnapshot,
 ) -> std::collections::HashSet<u64> {

@@ -629,6 +629,8 @@ enum Resolution {
     MergedHeadClaimed,
     /// `/clear`: the user discarded M, so neither sweep may run it again.
     IntentionallyCleared,
+    /// `/clear` while M sits in an orphaned dequeue→claim reservation.
+    OrphanedReservationCleared,
 }
 
 /// T9: once M's membership resolves, the next sweep either re-recovers M or
@@ -665,6 +667,30 @@ async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
             discard(&fx.shared, &fx.provider, channel_id).await;
             assert_eq!(fx.pending(channel_id), None, "/clear drops the retry");
         }
+        Resolution::OrphanedReservationCleared => {
+            let taken =
+                discord::mailbox_take_next_soft_intervention(&fx.shared, &fx.provider, channel_id);
+            drop(taken.await.into_intervention().expect("head taken"));
+            let orphaned =
+                crate::services::turn_orchestrator::PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER;
+            let mailbox = fx.shared.mailbox(channel_id);
+            mailbox
+                .age_inbound_waits_for_test(orphaned + Duration::from_secs(60))
+                .await;
+            let snapshot = discord::mailbox_snapshot(&fx.shared, channel_id).await;
+            assert_eq!(
+                snapshot.pending_user_dispatch,
+                Some(m),
+                "M is only reserved"
+            );
+            assert!(
+                !discord::recovery_known_arms_and_ids(&snapshot)
+                    .1
+                    .contains(&m.get())
+            );
+            let discard = super::super::retry_state::clear_channel_discarding_catch_up_backlog;
+            discard(&fx.shared, &fx.provider, channel_id).await;
+        }
         Resolution::BecameActiveTurn => {
             let started =
                 discord::mailbox_try_start_turn(&fx.shared, channel_id, token, owner, m).await;
@@ -680,7 +706,7 @@ async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
         }
     }
     let second = StrictApi::new(&fx.shared).with_history(channel_id, history);
-    if let Resolution::IntentionallyCleared = resolution {
+    if let Resolution::IntentionallyCleared | Resolution::OrphanedReservationCleared = resolution {
         fx.sweep(&second).await;
         assert_phase1_read(&second, after(m), &[]);
     } else {
@@ -692,7 +718,9 @@ async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
     let expected_rerun = match resolution {
         Resolution::LeftQueueUnprocessed => vec![m.get()],
         Resolution::MergedHeadClaimed => vec![h.get()],
-        Resolution::BecameActiveTurn | Resolution::IntentionallyCleared => Vec::new(),
+        Resolution::BecameActiveTurn
+        | Resolution::IntentionallyCleared
+        | Resolution::OrphanedReservationCleared => Vec::new(),
     };
     assert_eq!(rerun, expected_rerun, "{resolution:?}");
     let expected = (Some(m.get()), Some(m.get()));
@@ -722,6 +750,49 @@ async fn t9_absorbed_h_is_reoffered_not_leapt_once_its_merged_head_is_claimed() 
 #[tokio::test(flavor = "current_thread")]
 async fn t9_m_discarded_by_clear_is_not_recovered() {
     t9_case(ChannelId::new(4_603_522), Resolution::IntentionallyCleared).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn t9_m_in_an_orphaned_reservation_discarded_by_clear_is_not_recovered() {
+    t9_case(
+        ChannelId::new(4_603_523),
+        Resolution::OrphanedReservationCleared,
+    )
+    .await;
+}
+
+/// T9b: a synthetic headless active id is not a Discord cursor, so `/clear` lifts the
+/// checkpoint to the newest real discarded id and a later real message is still recovered.
+#[tokio::test(flavor = "current_thread")]
+async fn t9b_clear_during_a_synthetic_active_turn_keeps_later_messages_visible() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(4_603_524);
+    let (checkpoint, m, n) = (id(1, 600), id(2, 120), id(3, 30));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    fx.queue(channel_id, m).await;
+    let synthetic = MessageId::new(9_100_000_000_000_000_001);
+    let token = Arc::new(crate::services::provider::CancelToken::new());
+    let owner = serenity::UserId::new(HUMAN_ID);
+    let started =
+        discord::mailbox_try_start_turn(&fx.shared, channel_id, token, owner, synthetic).await;
+    assert!(started, "headless turn holds the slot");
+
+    let discard = super::super::retry_state::clear_channel_discarding_catch_up_backlog;
+    discard(&fx.shared, &fx.provider, channel_id).await;
+
+    let expected = (Some(m.get()), Some(m.get()));
+    assert_eq!(
+        fx.surfaces(channel_id),
+        expected,
+        "checkpoint stops at real M"
+    );
+    let history = vec![own_reply(channel_id, checkpoint), human(channel_id, m)];
+    let api = StrictApi::new(&fx.shared)
+        .with_history(channel_id, history)
+        .arriving_at(0, human(channel_id, n));
+    fx.sweep(&api).await;
+    assert_phase1_read(&api, after(m), &[n]);
+    assert_eq!(api.enqueue_log(), [(n.get(), true, None)]);
 }
 
 /// T10: without an earlier barrier, active-turn and terminal messages advance.
