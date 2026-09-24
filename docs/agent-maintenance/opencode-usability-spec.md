@@ -378,7 +378,8 @@ Minimum blocked headers:
 - `[ADK API Usage]`
 - `[Agent Performance`
 - `[Peer Agent Directory]`
-- `You are chatting with a user through Discord.`
+- `This session is also connected to a Discord channel;`
+- `Input source:`
 - `When your work produces a file the user would want`
 - `Current working directory:`
 - `These instructions are authoritative for this turn.`

@@ -24,6 +24,7 @@ const HIDDEN_HEADERS: &[&str] = &[
 
 const HIDDEN_LINE_PREFIXES: &[&str] = &[
     "You are chatting with a user through Discord.",
+    "This session is also connected to a Discord channel;",
     "Discord context:",
     "Channel participants:",
     "Current working directory:",
@@ -34,6 +35,7 @@ const HIDDEN_LINE_PREFIXES: &[&str] = &[
     "Discord formatting rules:",
     "This Discord channel does not support interactive prompts.",
     "Message author prefix:",
+    "Input source:",
     "Reply context:",
     "These instructions are authoritative for this turn.",
 ];
@@ -224,5 +226,16 @@ mod tests {
             sanitize_hidden_context(echoed),
             "사용자에게 보여야 하는 답변"
         );
+    }
+
+    #[test]
+    fn strips_echoed_discord_connection_and_input_source_lines() {
+        let echoed = "[ADK API Usage]\n\
+                      Inspect the docs first.\n\n\
+                      This session is also connected to a Discord channel; input can arrive from Discord or be typed directly into the provider TUI.\n\n\
+                      Input source: Only input carrying the prefix was delivered through AgentDesk.\n\n\
+                      visible answer";
+
+        assert_eq!(sanitize_hidden_context(echoed), "visible answer");
     }
 }

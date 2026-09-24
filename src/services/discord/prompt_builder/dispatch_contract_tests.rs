@@ -333,8 +333,9 @@ fn full_prompt_manifest_records_shared_knowledge_and_longterm_catalog() {
     for (name, expected_fragment) in [
         (
             "base_discord",
-            "You are chatting with a user through Discord.",
+            "This session is also connected to a Discord channel;",
         ),
+        ("base_discord", "Input source: Only input carrying"),
         ("shared_knowledge", "important invariant"),
         ("longterm_catalog", "durable fact"),
     ] {

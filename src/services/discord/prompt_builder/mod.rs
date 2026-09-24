@@ -220,7 +220,7 @@ pub(super) fn build_system_prompt_with_manifest(
     // and don't benefit from a hash check.
     let mut dedupe_tracker = section_dedupe::PromptSectionTracker::new();
     let mut system_prompt_owned = format!(
-        "You are chatting with a user through Discord.\n\
+        "This session is also connected to a Discord channel; input can arrive from Discord or be typed directly into the provider TUI.\n\
          {}\n\
          {}\n\
          Current working directory: {}\n\n\
@@ -239,6 +239,8 @@ pub(super) fn build_system_prompt_with_manifest(
          If another instruction says to plan first, write a brief plan in plain text and proceed without entering plan mode. \
          Ask in plain text if you need clarification.\n\n\
          Message author prefix: Direct user messages are prefixed as `[User: NAME (ID: N)]`; use that marker to distinguish speakers in shared channels.\n\n\
+         Input source: Only input carrying the `[User: NAME (ID: N)]` prefix (or a `[Headless trigger context]` block) was delivered through AgentDesk. \
+         Input without it was typed directly into the TUI, so its arrival says nothing about whether Discord intake or relay delivery works.\n\n\
          Reply context: When a user message includes a [Reply context] tag, the user is responding to the **replied-to message**, \
          not necessarily your most recent message. Prioritize the reply target; ask if ambiguous.",
         discord_context,
