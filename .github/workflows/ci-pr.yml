@@ -124,6 +124,15 @@ jobs:
               - 'src/services/gemini.rs'
               - 'src/services/qwen.rs'
               - 'src/services/qwen_tmux_wrapper.rs'
+              # Provider launch trees and the session-host boundary they probe
+              # sessions through; this lane's cargo targets do not run them.
+              - 'src/services/claude.rs'
+              - 'src/services/claude/**'
+              - 'src/services/codex.rs'
+              - 'src/services/codex/**'
+              - 'src/services/qwen/**'
+              - 'src/services/session_host.rs'
+              - 'src/services/session_host/**'
               - 'src/services/opencode.rs'
               - 'src/services/provider.rs'
               - 'src/services/provider_runtime.rs'
@@ -550,11 +559,16 @@ jobs:
               - 'src/services/api_friction/**'
               - 'src/services/auto_queue/**'
               - 'src/services/automation_candidate_materializer/**'
+              - 'src/services/claude/**'
               - 'src/services/claude_e/**'
               - 'src/services/claude_tui/**'
               - 'src/services/cluster/**'
               - 'src/services/codex_tui/**'
               - 'src/services/dispatches/**'
+              # qwen/ (like claude/ above) carries cfg(unix) shims, and
+              # session_host/'s TmuxHost has a not(unix) stub Windows compiles.
+              - 'src/services/qwen/**'
+              - 'src/services/session_host/**'
               # DERIVED BLOCK (#5832) -- do not hand-edit. cross_os_rust does
               # not select 'src/services/discord/**' wholesale, so every file in
               # that subtree that carries a platform cfg shim (or names a
