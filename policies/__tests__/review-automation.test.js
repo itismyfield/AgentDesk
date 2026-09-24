@@ -568,6 +568,51 @@ test("review-automation keeps a create-pr failure retryable when the handoff ale
   assert.equal(state.executions.filter((e) => e.sql.indexOf(MARKER_SQL) >= 0).length, 0, "nor the durable marker");
 });
 
+// #5993: run the REAL 00-escalation.js helpers in the policy's context (the runtime's shared global scope).
+function loadWithRealEscalation(options) {
+  const loaded = loadPolicy("policies/review-automation.js", options);
+  const file = require("node:path").join(__dirname, "..", "00-escalation.js");
+  require("node:vm").runInContext(require("node:fs").readFileSync(file, "utf8"), loaded.context, { filename: file });
+  return loaded;
+}
+const undelivered = (state) => state.logs.error.filter((line) => line.indexOf("NOT delivered") >= 0).length;
+
+test("review-automation settles a create-pr handoff surfaced as a human-alert WARN when no deadlock channel is set", () => {
+  const fake = createPrTrackingFake([{ card_id: "card-cp9", last_error: "no_open_pr_found", dispatch_generation: "gen-9" }]);
+  const { policy, state } = loadWithRealEscalation({
+    cards: { "card-cp9": { id: "card-cp9", status: "done" } },
+    dbQuery: createSqlRouter([{ match: "FROM pr_tracking", result: (sql) => fake.query(sql) }]),
+    dbExecute: (sql, params) => { if (sql.indexOf(MARKER_SQL) >= 0) fake.execute(sql, params); }
+  });
+
+  policy.onTick5min({}); policy.onTick5min({});
+
+  const alerts = state.logs.warn.filter((line) => line.indexOf("[human-alert] (review-automation)") === 0);
+  assert.equal(alerts.length, 1, "surfaced once, then settled");
+  assert.match(alerts[0], /Create-PR Handoff[\s\S]*card-cp9/);
+  assert.equal(undelivered(state), 0);
+  assert.deepEqual([...state.kv.keys()], ["pr_create_handoff:card-cp9:gen-9"]);
+  assert.equal(state.executions.filter((e) => e.sql.indexOf(MARKER_SQL) >= 0).length, 1, "durable marker written");
+  assert.equal(state.messageQueues.length, 0);
+});
+
+test("review-automation keeps a create-pr handoff retryable when the real deadlock-channel enqueue fails", () => {
+  const { agentdesk, state } = loadWithRealEscalation({
+    config: { deadlock_manager_channel_id: "123" },
+    cards: { "card-cp8": { id: "card-cp8", status: "review" } },
+    extraAgentdesk: {
+      message: { queue: (target) => { state.messageQueues.push({ target }); return { error: "outbox down" }; } },
+      reviewAutomation: { recordPrCreateFailure: () => ({ ok: true, retry_count: 1, escalated: false }) }
+    }
+  });
+
+  agentdesk.reviewAutomation.markPrCreateFailed("card-cp8", "no_open_pr_found", "gen-8");
+
+  assert.deepEqual(state.messageQueues, [{ target: "channel:123" }]);
+  assert.equal(undelivered(state), 1);
+  assert.equal(state.kv.size + state.executions.filter((e) => e.sql.indexOf(MARKER_SQL) >= 0).length, 0);
+});
+
 // #5716 slice B: handoffCreatePr / reuse-refresh / reseed each stamp a fresh dispatch_generation AND
 // reset retry_count to 0, so every generation's first failure is retry_count=1 — only the generation
 // tells them apart. The third call repeats gen-b: deduped, and deliberately left without the durable

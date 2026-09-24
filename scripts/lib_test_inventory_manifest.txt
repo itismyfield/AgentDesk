@@ -8153,6 +8153,9 @@ services::observability::relay_signal_alert::tests::effective_threshold_ignores_
 services::observability::relay_signal_alert::tests::effective_threshold_prefers_positive_override
 services::observability::relay_signal_alert::tests::idle_cleanup_preserved_summary_is_one_line
 services::observability::relay_signal_alert::tests::idle_cleanup_preserved_warns_and_records_every_occurrence_as_event
+services::observability::relay_signal_alert::tests::idle_cleanup_preserved_warns_the_flushed_count_of_an_evicted_session
+services::observability::relay_signal_alert::tests::preserved_warn_gate_evicts_oldest_at_capacity_and_flushes_its_count
+services::observability::relay_signal_alert::tests::preserved_warn_gate_sweeps_expired_sessions_without_losing_counts
 services::observability::relay_signal_alert::tests::preserved_warn_gate_warns_once_per_interval_per_session
 services::observability::relay_signal_alert::tests::signal_statuses_match_emit_path_names
 services::observability::relay_signal_alert::tests::signal_table_covers_documented_relay_loss_vectors

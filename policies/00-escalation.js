@@ -100,10 +100,11 @@ function queuedOk(result) {
 
 // #5993: the human-alert channel is retired. The message itself goes to the
 // policy log at WARN, so callers keep their signal without a Discord target.
-// Returns false: nothing was queued.
+// Returns true: the WARN reached the only human-alert surface left, so a create-PR handoff falling
+// back here settles instead of being re-swept; only a failed deadlock-channel enqueue is false.
 function notifyHumanAlert(message, source) {
   agentdesk.log.warn("[human-alert] (" + (source || "system") + ") " + message);
-  return false;
+  return true;
 }
 
 function getDeadlockManagerChannel() {
