@@ -366,11 +366,11 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         "production kickoff must durably dequeue B"
     );
     assert_eq!(harness.placeholder_posts(), 2);
-    // Deadline-bounded rather than a fixed sleep, same window: it covers a
-    // dispatch racing the wake, not the deferred worker's later kickoff.
+    // Outlasts the two-second deferred delay, so a re-armed kickoff or a
+    // provider-driven re-dispatch of B would land inside the window.
     assert!(
         !harness
-            .wait_for_placeholder_posts(3, Duration::from_millis(100))
+            .wait_for_placeholder_posts(3, Duration::from_secs(3))
             .await,
         "coalesced two-half wake must not dispatch B twice"
     );
