@@ -2756,6 +2756,16 @@ test.describe("Dashboard smoke tests", () => {
     let offline = false;
     let cpuUsage = 37.5;
     let includeRunner = true;
+    await page.route(/\/api\/cluster\/machine-resources\/history\?/, route => {
+      const now = Date.now();
+      const instance_id = new URL(route.request().url()).searchParams.get("instance_id");
+      return route.fulfill({ json: { instance_id, samples: [30_000, 20_000, 10_000].map((age, index) => ({
+        schema: 1, observed_at_ms: now - age, expires_at_ms: now - age + 30_000, sample_interval_ms: 5_000,
+        cpu: { model: "Example CPU", physical_cores: 8, logical_cores: 16, usage_percent: 20 + index * 10 },
+        memory: null, disks: [], gpus: [], network: { interface: "Ethernet", wired: true,
+          received_bytes_per_sec: 1_024 * (index + 1), transmitted_bytes_per_sec: 512 * (index + 1) },
+      })) } });
+    });
     await page.route(/\/api\/cluster\/nodes$/, route => {
       if (fail) return route.fulfill({ status: 503, json: { error: "fixture unavailable" } });
       const now = Date.now();
@@ -2774,6 +2784,7 @@ test.describe("Dashboard smoke tests", () => {
             memory: { total_bytes: 32 * 1024 ** 3, used_bytes: 16 * 1024 ** 3, available_bytes: 16 * 1024 ** 3 },
             disks: [{ name: "Data", mount_point: index ? "C:\\" : "/", kind: "SSD", total_bytes: 1024 ** 4, used_bytes: 512 * 1024 ** 3, available_bytes: 512 * 1024 ** 3 }],
             gpus: [{ name: "Example GPU", usage_percent: 25, memory_used_bytes: 4 * 1024 ** 3, memory_total_bytes: 16 * 1024 ** 3, shared_memory: false }],
+            network: { interface: "Ethernet", wired: true, received_bytes_per_sec: 4096, transmitted_bytes_per_sec: 2048 },
           }, execution_capacity: { version: 1, slots: 2 }, execution_readiness: {
             os: index ? "windows" : "linux", arch: "x86_64", runtime_profile: index ? "runner" : "full",
             observed_at_ms: now, expires_at_ms: now + 60_000, backends: ["process"],
@@ -2799,6 +2810,8 @@ test.describe("Dashboard smoke tests", () => {
     await expect(runner.getByText(/신규 실행 가능|Ready for new work/, { exact: true })).toBeVisible();
     await expect(runner.getByText("Example CPU", { exact: true })).toBeVisible();
     await expect(runner.getByText("Example GPU", { exact: true })).toBeVisible();
+    await expect(runner.getByTestId("machine-trend-cpu").locator("svg")).toBeVisible();
+    await expect(runner.getByTestId("machine-trend-network").locator("svg path")).toHaveCount(3);
     await expect(runner.getByRole("meter", { name: /CPU 사용률|CPU utilization/ })).toHaveAttribute("aria-valuenow", "37.5");
     await expect(runner.getByText("antigravity", { exact: true })).toHaveCount(0);
     await expect(runner.getByText(/설정된 역할|Configured role/, { exact: true })).toHaveCount(0);
@@ -2813,6 +2826,7 @@ test.describe("Dashboard smoke tests", () => {
     await expect(panel).toBeVisible();
     await page.reload();
     await expect(panel).toBeVisible();
+    await expect(runner.getByTestId("machine-trend-cpu").locator("svg")).toBeVisible();
     fail = true;
     await panel.getByRole("button", { name: /상태 새로고침|Refresh status/ }).click();
     await expect(panel.getByRole("alert")).toContainText(/마지막 조회|last snapshot/);

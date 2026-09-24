@@ -4,6 +4,7 @@ import type { ClusterNode } from "../../api/clusterNodes";
 import { nodePlatformLabel, nodeRoleLabel, runtimeModeLabel } from "../../lib/nodeLabels";
 import { StatusBadge } from "../common/StatusBadge";
 import { SettingsMachineResources } from "./SettingsMachineResources";
+import { useMachineResourceHistory } from "./useMachineResourceHistory";
 import {
   machineApiOrigin, machineConnection, machineOnline, machineReadinessReason, machineRole,
 } from "./SettingsMachineModel";
@@ -33,6 +34,7 @@ type Props = {
 };
 
 export function SettingsMachineCard({ node, localId, leaseTtlSeconds, stale, sessionCountsUnavailable, now, tr }: Props) {
+  const history = useMachineResourceHistory(node.instance_id);
   const role = machineRole(node.effective_role);
   const connection = machineConnection(node, localId, stale, now, leaseTtlSeconds, tr);
   const online = !stale && machineOnline(node, now, leaseTtlSeconds);
@@ -67,7 +69,11 @@ export function SettingsMachineCard({ node, localId, leaseTtlSeconds, stale, ses
     </div>
     <p className="mt-3 text-xs leading-5 text-th-text-muted">{connection.detail}</p>
     <p className="mt-1 text-xs text-th-text-muted">{probe ? `${nodePlatformLabel(probe.os, tr)} / ${probe.arch}` : unknown} · {runtimeModeLabel(probe?.runtime_profile, tr)}</p>
-    <SettingsMachineResources resources={node.capabilities.machine_resources} stale={stale || !online} now={now} tr={tr} />
+    <SettingsMachineResources resources={node.capabilities.machine_resources} history={history.data ?? []} stale={stale || !online} now={now} tr={tr} />
+    {history.isError && <p className="mt-2 text-xs text-th-text-muted">{tr(
+      "저장된 이력을 불러오지 못했습니다. 다음 갱신 때 다시 시도합니다.",
+      "Saved history is unavailable. It will be retried on the next refresh.",
+    )}</p>}
     <details className="mt-4 rounded-xl border border-th-border p-3">
       <summary className="cursor-pointer text-xs font-medium">{tr("장치 및 연결 상세", "Device and connection details")}</summary>
     <dl className="mt-3 grid min-w-0 grid-cols-1 gap-x-5 gap-y-3 sm:grid-cols-2">

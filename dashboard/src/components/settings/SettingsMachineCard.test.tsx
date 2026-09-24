@@ -1,7 +1,11 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import type { ClusterNode } from "../../api/clusterNodes";
 import { SettingsMachineCard } from "./SettingsMachineCard";
+
+vi.mock("./useMachineResourceHistory", () => ({
+  useMachineResourceHistory: () => ({ data: [] }),
+}));
 
 const now = Date.parse("2026-09-23T00:00:30Z");
 const node: ClusterNode = {
