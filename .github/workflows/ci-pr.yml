@@ -1636,6 +1636,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
+          components: clippy
 
       - name: Setup sccache for lib inventory
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -1733,6 +1734,10 @@ jobs:
         run: |
           python3 scripts/check_contract_symbol_refs.py
           python3 -m unittest tests.test_contract_symbol_refs
+
+      # H2 tmux boundary ratchet, Linux lane; inert (no-op / warn-only) until activation.
+      - name: H2 tmux boundary measurement (linux, inert)
+        run: bash scripts/ci/h2_measure.sh --lane linux --inert
 
       - name: Upload maintainability audit artifact
         if: always()
