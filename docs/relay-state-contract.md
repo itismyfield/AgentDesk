@@ -1102,7 +1102,7 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   and OWNER-SCOPED (`classify_reclaimable_mailbox_owner`). The second,
   `relay_auto_heal::run_orphan_token_auto_heal_pass`, is PERIODIC but NOT evidence-driven:
   `health::recovery::run_stall_watchdog_pass` drives it over every mailbox snapshot into
-  the `Clear` arm behind `eligible_orphan_pending_token`, whose age-free
+  the orphan-token arm behind `eligible_orphan_pending_token`, whose age-free
   `..._without_admission_grace` form runs only for the `StallWatchdog` source, not the
   `ProbeAutoHeal` one this sweep uses — and at this commit no call site outside
   `#[cfg(test)]` reaches this action (`apply_watchdog_orphan_token_cleanup` is called
@@ -1113,16 +1113,19 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   Both forms are a ledger PRESENCE (`mailbox_has_cancel_token`) over absences, no witness
   among them — and the graced form adds an AGE term on top
   (`!orphan_pending_token_within_admission_grace` over `mailbox_turn_started_at_ms`),
-  making it presence + absences + age, the exact shape this invariant forbids. Both turn
-  on `tmux_alive == Some(false) || !is_agentdesk_tmux_session(..)`: an UNMEASURED producer
-  (`tmux_alive` `None`) passes that gate wherever the session is not named `AgentDesk-*`
-  — a PRE-EXISTING candidate violation of this invariant, not the gap filled — and where
-  it IS so named that same term refuses the repair (`protected_agentdesk_tmux_session`).
-  That refusal is not load-bearing on the `StallWatchdog` arm, where
-  `relay_recovery::auto_apply_relay_recovery_for_shared_at` nulls `tmux_session` and
-  `tmux_alive` before planning: `!is_agentdesk_tmux_session(None)` is then true and the
-  protected reason cannot be emitted at all. A lane re-wiring that arm into production
-  inherits the defeat along with it.
+  making it presence + absences + age, the exact shape this invariant forbids. What keeps
+  it inside this invariant is refusal, not evidence. Both forms require a MEASURED death
+  (`tmux_alive == Some(false)`, whatever the session is named), so an UNMEASURED producer
+  is refused (`orphan_token_producer_liveness_unmeasured`) on every arm — including the
+  `StallWatchdog` arm, where `relay_recovery::auto_apply_relay_recovery_for_shared_at`
+  nulls `tmux_alive` before planning. On the automatic arms `destructive_warrant_bind`
+  also refuses this action when its snapshot, reachability observation, or episode pair
+  is unmeasured, and a rowless channel's pair always is, so the periodic sweep retires
+  no rowless anchor at all. Each refusal is graded under this invariant's key, once per
+  episode, by `relay_auto_heal::record_orphan_token_refused_without_witness`. Where the
+  arm does apply (the operator lane), it finishes only the snapshot's episode through
+  `mailbox_finish_turn_if_matches_episode_started_before` and keeps the queue; it no
+  longer reaches the `Clear` arm.
   So what is missing is evidence, not periodicity, and the population is wider than the
   sweep's reach: `stale_thread_proof` also preempts the classifier, after which
   `eligible_stale_thread_proof` refuses that channel too (it requires

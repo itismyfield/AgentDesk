@@ -7,6 +7,8 @@ use std::sync::atomic::Ordering;
 
 #[path = "tests/circuit_breaker_apply.rs"]
 mod circuit_breaker_apply;
+#[path = "tests/orphan_token_finish.rs"]
+mod orphan_token_finish;
 
 fn isolated_agentdesk_root() -> (AgentdeskRootGuard, tempfile::TempDir) {
     let temp = tempfile::TempDir::new().unwrap();
@@ -2206,6 +2208,7 @@ fn old_orphan_shape_remains_auto_heal_eligible() {
             mailbox_has_cancel_token: true,
             mailbox_active_user_msg_id: Some(9001),
             mailbox_turn_started_at_ms: Some(1_000),
+            tmux_alive: Some(false),
             ..snapshot()
         },
         RelayStallState::OrphanPendingToken,
@@ -2218,6 +2221,31 @@ fn old_orphan_shape_remains_auto_heal_eligible() {
     );
     assert!(decision.auto_heal.eligible);
     assert_eq!(decision.auto_heal.skipped_reason, None);
+}
+
+#[test]
+fn unmeasured_non_agentdesk_orphan_token_is_not_retired_after_grace() {
+    for tmux_session in [None, Some("plain-shell".to_string())] {
+        let decision = plan_relay_recovery(
+            &RelayHealthSnapshot {
+                mailbox_has_cancel_token: true,
+                mailbox_active_user_msg_id: Some(9001),
+                mailbox_turn_started_at_ms: Some(1_000),
+                tmux_session,
+                tmux_alive: None,
+                queue_depth: 3,
+                ..snapshot()
+            },
+            RelayStallState::OrphanPendingToken,
+            1_000 + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64 + 1_000,
+        );
+
+        assert!(!decision.auto_heal.eligible);
+        assert_eq!(
+            decision.auto_heal.skipped_reason,
+            Some("orphan_token_producer_liveness_unmeasured")
+        );
+    }
 }
 
 #[test]
@@ -2614,14 +2642,22 @@ async fn manual_relay_recovery_plans_and_admits_on_one_captured_instant() {
     let _guard = auto_heal_test_lock().lock().await;
     clear_auto_heal_attempts_for_tests();
     let (_root_guard, _root_dir) = isolated_agentdesk_root();
+    // Only a measured producer death admits the reclaim, and that takes a probe.
+    if !crate::services::platform::tmux::is_available() {
+        eprintln!("skipping manual plan/admit instant: tmux unavailable");
+        return;
+    }
     let provider = ProviderKind::Codex;
     let (registry, shared) = registry_with_shared(provider.clone()).await;
     let channel = ChannelId::new(3_360_010);
     let window_ms = AUTO_HEAL_WINDOW_SECS * 1_000;
     let reg = &registry;
     let who = Some(provider.as_str());
+    let dead_session = format!("plain-shell-3360010-dead-{}", std::process::id());
 
-    start_test_turn(&shared, channel, MessageId::new(96)).await;
+    start_test_turn(&shared, channel, MessageId::new(96))
+        .await
+        .bind_unmanaged_session_name(&dead_session);
     // ORDER MATTERS: capture `base_ms` only AFTER the turn exists. The mailbox
     // stamps `turn_started_at` from the wall clock, and admission refuses while
     // `base_ms - turn_started_at_ms < ORPHAN_PENDING_TOKEN_ADMISSION_GRACE`.
@@ -2636,7 +2672,9 @@ async fn manual_relay_recovery_plans_and_admits_on_one_captured_instant() {
     assert!(first.applied, "a fresh-window manual reclaim must apply");
 
     // Still inside the window the first reservation opened at `base_ms`.
-    start_test_turn(&shared, channel, MessageId::new(97)).await;
+    start_test_turn(&shared, channel, MessageId::new(97))
+        .await
+        .bind_unmanaged_session_name(&dead_session);
     let inside = run_relay_recovery_at(reg, who, channel.get(), true, base_ms + window_ms - 1)
         .await
         .expect("in-window manual recovery should evaluate");
@@ -2660,137 +2698,55 @@ async fn manual_relay_recovery_plans_and_admits_on_one_captured_instant() {
 }
 
 #[tokio::test]
-async fn probe_auto_apply_is_rate_limited_per_channel_action() {
+async fn automatic_orphan_token_reclaim_refuses_an_unmeasured_producer() {
     let _guard = auto_heal_test_lock().lock().await;
     clear_auto_heal_attempts_for_tests();
     let (_root_guard, _root_dir) = isolated_agentdesk_root();
     let provider = ProviderKind::Codex;
     let (registry, shared) = registry_with_shared(provider.clone()).await;
-    let channel = ChannelId::new(3_360_002);
-    start_test_turn(&shared, channel, MessageId::new(92)).await;
 
-    let first = auto_apply_relay_recovery_for_shared_at(
-        &registry,
-        shared.clone(),
-        &provider,
-        channel.get(),
-        RelayRecoveryActionKind::ClearOrphanPendingToken,
-        RelayRecoveryApplySource::ProbeAutoHeal,
-        chrono::Utc::now().timestamp_millis()
-            + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64,
-    )
-    .await
-    .expect("first orphan token auto-heal should evaluate");
-    assert!(first.applied);
-
-    start_test_turn(&shared, channel, MessageId::new(93)).await;
-    let second = auto_apply_relay_recovery_for_shared_at(
-        &registry,
-        shared.clone(),
-        &provider,
-        channel.get(),
-        RelayRecoveryActionKind::ClearOrphanPendingToken,
-        RelayRecoveryApplySource::ProbeAutoHeal,
-        chrono::Utc::now().timestamp_millis()
-            + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64,
-    )
-    .await
-    .expect("second orphan token auto-heal should evaluate");
-
-    assert!(second.skipped);
-    assert!(!second.applied);
-    assert_eq!(
-        second.decision.auto_heal.skipped_reason,
-        Some("auto_heal_rate_limited")
-    );
-    assert!(
-        super::super::mailbox_snapshot(&shared, channel)
+    // The watchdog lane nulls the probed liveness before planning, so it now
+    // lands on the same unmeasured refusal as the probe lane.
+    for (channel, message, source) in [
+        (3_360_002, 92, RelayRecoveryApplySource::ProbeAutoHeal),
+        (3_360_005, 94, RelayRecoveryApplySource::StallWatchdog),
+    ] {
+        let channel = ChannelId::new(channel);
+        let token = start_test_turn(&shared, channel, MessageId::new(message)).await;
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+        for attempt in 0..2 {
+            let response = auto_apply_relay_recovery_for_shared_at(
+                &registry,
+                shared.clone(),
+                &provider,
+                channel.get(),
+                RelayRecoveryActionKind::ClearOrphanPendingToken,
+                source,
+                chrono::Utc::now().timestamp_millis()
+                    + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64,
+            )
             .await
-            .cancel_token
-            .is_some(),
-        "rate-limited auto-heal must leave the token untouched"
-    );
-}
+            .expect("orphan token auto-heal should evaluate");
 
-#[tokio::test]
-async fn watchdog_auto_apply_is_rate_limited_after_first_token_reclaim() {
-    let _guard = auto_heal_test_lock().lock().await;
-    clear_auto_heal_attempts_for_tests();
-    let (_root_guard, _root_dir) = isolated_agentdesk_root();
-    let provider = ProviderKind::Codex;
-    let (registry, shared) = registry_with_shared(provider.clone()).await;
-    let channel = ChannelId::new(3_360_005);
-
-    let first_token = start_test_turn(&shared, channel, MessageId::new(94)).await;
-    shared.restart.global_active.store(1, Ordering::Relaxed);
-    let first = auto_apply_relay_recovery_for_shared_at(
-        &registry,
-        shared.clone(),
-        &provider,
-        channel.get(),
-        RelayRecoveryActionKind::ClearOrphanPendingToken,
-        RelayRecoveryApplySource::StallWatchdog,
-        chrono::Utc::now().timestamp_millis()
-            + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64,
-    )
-    .await
-    .expect("first watchdog orphan token auto-heal should evaluate");
-
-    assert!(first.applied);
-    assert!(!first.skipped);
-    assert_eq!(
-        first.decision.action,
-        RelayRecoveryActionKind::ClearOrphanPendingToken
-    );
-    assert_eq!(
-        first.decision.auto_heal.skipped_reason, None,
-        "the first watchdog reclaim in a fresh window must pass"
-    );
-    assert!(
-        first
-            .apply_result
-            .as_ref()
-            .is_some_and(|result| result.removed_mailbox_token)
-    );
-    assert!(
-        super::super::mailbox_snapshot(&shared, channel)
-            .await
-            .cancel_token
-            .is_none()
-    );
-    assert!(first_token.cancelled.load(Ordering::Relaxed));
-    assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
-
-    let second_token = start_test_turn(&shared, channel, MessageId::new(95)).await;
-    shared.restart.global_active.store(1, Ordering::Relaxed);
-    let second = auto_apply_relay_recovery_for_shared_at(
-        &registry,
-        shared.clone(),
-        &provider,
-        channel.get(),
-        RelayRecoveryActionKind::ClearOrphanPendingToken,
-        RelayRecoveryApplySource::StallWatchdog,
-        chrono::Utc::now().timestamp_millis()
-            + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64,
-    )
-    .await
-    .expect("second watchdog orphan token auto-heal should evaluate");
-
-    assert!(second.skipped);
-    assert!(!second.applied);
-    assert_eq!(
-        second.decision.auto_heal.skipped_reason,
-        Some("auto_heal_rate_limited")
-    );
-    assert!(
-        super::super::mailbox_snapshot(&shared, channel)
-            .await
-            .cancel_token
-            .is_some(),
-        "rate-limited watchdog auto-heal must leave the token untouched"
-    );
-    assert!(!second_token.cancelled.load(Ordering::Relaxed));
-    assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+            assert!(response.skipped, "{source:?} attempt {attempt}");
+            assert!(!response.applied);
+            assert_eq!(
+                response.decision.auto_heal.skipped_reason,
+                Some("orphan_token_producer_liveness_unmeasured"),
+                "a refusal spends no budget, so a repeat is refused, not rate-limited"
+            );
+        }
+        assert!(
+            super::super::mailbox_snapshot(&shared, channel)
+                .await
+                .cancel_token
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &token)),
+            "{source:?} must leave the unmeasured token untouched"
+        );
+        assert!(!token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+    }
 }
 
 #[tokio::test]

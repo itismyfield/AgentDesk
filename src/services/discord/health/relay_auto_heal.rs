@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use poise::serenity_prelude::ChannelId;
 
@@ -8,7 +9,8 @@ use super::{HealthRegistry, stall_liveness};
 use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
 use crate::services::discord::relay_health::{DurableFrontierObservation, RelayStallState};
 use crate::services::discord::relay_recovery::{
-    self, RelayRecoveryActionKind, RelayRecoveryApplySource, RelayRecoveryError,
+    self, RelayRecoveryActionKind, RelayRecoveryApplySource, RelayRecoveryDecision,
+    RelayRecoveryError,
 };
 use crate::services::discord::{RelayFrontierToken, SharedData};
 use crate::services::provider::ProviderKind;
@@ -833,6 +835,9 @@ async fn apply_orphan_pending_token_cleanup(
         source,
     )
     .await?;
+    if !response.applied {
+        record_orphan_token_refused_without_witness(provider, &response.decision);
+    }
     let removed_mailbox_token = response.applied
         && response
             .apply_result
@@ -853,6 +858,64 @@ async fn apply_orphan_pending_token_cleanup(
     Ok(removed_mailbox_token)
 }
 
+type OrphanEpisode = (Option<u64>, Option<String>);
+
+/// Last episode graded per channel: a wedge the 30s probe keeps refusing is
+/// recorded once per episode, not once per tick.
+static ORPHAN_TOKEN_REFUSALS_GRADED: LazyLock<Mutex<HashMap<(String, u64), OrphanEpisode>>> =
+    LazyLock::new(Default::default);
+
+/// I20: an orphan-token retirement refused because its deciding operand was
+/// never measured leaves the anchor held; record that wedge where it is decided.
+fn record_orphan_token_refused_without_witness(
+    provider: &ProviderKind,
+    decision: &RelayRecoveryDecision,
+) {
+    let Some(refused_reason) = decision
+        .auto_heal
+        .skipped_reason
+        .filter(|reason| relay_recovery::ORPHAN_TOKEN_UNMEASURED_REFUSALS.contains(reason))
+    else {
+        return;
+    };
+    let episode = (
+        decision.affected.mailbox_active_user_msg_id,
+        decision.affected.mailbox_active_turn_nonce.clone(),
+    );
+    let already_graded = ORPHAN_TOKEN_REFUSALS_GRADED
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(
+            (provider.as_str().to_string(), decision.channel_id),
+            episode.clone(),
+        )
+        .is_some_and(|previous| previous == episode);
+    if already_graded {
+        return;
+    }
+    crate::services::observability::record_invariant_check(
+        false,
+        crate::services::observability::InvariantViolation {
+            provider: Some(provider.as_str()),
+            channel_id: Some(decision.channel_id),
+            dispatch_id: None,
+            session_key: decision.affected.tmux_session.as_deref(),
+            turn_id: None,
+            invariant: crate::services::observability::LIVE_TURN_PROVEN_BY_PROGRESS_INVARIANT,
+            code_location: "src/services/discord/health/relay_auto_heal.rs:apply_orphan_pending_token_cleanup",
+            message: "orphan pending-token auto-heal reached its retirement decision with no progress witness",
+            details: serde_json::json!({
+                "decided_by": "no_readable_witness",
+                "refused_reason": refused_reason,
+                "tmux_alive": decision.evidence.tmux_alive,
+                "queue_depth": decision.evidence.queue_depth,
+                "mailbox_active_user_msg_id": decision.affected.mailbox_active_user_msg_id,
+                "retired": false,
+            }),
+        },
+    );
+}
+
 fn trace_orphan_auto_heal_error(
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -867,6 +930,9 @@ fn trace_orphan_auto_heal_error(
         "relay recovery auto-heal skipped"
     );
 }
+
+#[cfg(test)]
+mod orphan_token_tests;
 
 #[cfg(test)]
 mod tests {

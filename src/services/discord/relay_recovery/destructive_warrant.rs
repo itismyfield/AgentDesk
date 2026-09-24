@@ -1,5 +1,8 @@
 //! Planning-time axis-B veto for automatic destructive recovery candidates.
-use super::{RelayRecoveryActionKind, health};
+use super::{
+    ORPHAN_TOKEN_EPISODE_UNMEASURED, ORPHAN_TOKEN_REACHABILITY_UNOBSERVED,
+    ORPHAN_TOKEN_SNAPSHOT_ABSENT, RelayRecoveryActionKind, health,
+};
 use crate::services::provider::ProviderKind;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,10 +50,10 @@ fn rule(
     //
     // r3 (P2-1) corrects what r2 claimed for `RequireEpisode`. It is NOT a
     // barrier for this population: `exact_episode_evidence` answers
-    // `OperandAbsent` when either nonce is missing, and the match below treats
-    // `Matched | OperandAbsent` alike, so an abandoned routine channel — which
-    // by construction has no live mailbox or inflight episode — passes the
-    // warrant. The rule only bites on `Mismatched`, i.e. two nonces that
+    // `OperandAbsent` when either nonce is missing, and `operand_absent` treats
+    // that like `Matched` for every action but `ClearOrphanPendingToken`, so an
+    // abandoned routine channel — which by construction has no live mailbox or
+    // inflight episode — passes the warrant. The rule only bites on `Mismatched`, i.e. two nonces that
     // disagree. The decision stands anyway, for the reason above and not for
     // the reason r2 gave: the point is that `Expired` grants no MORE than the
     // `Unknown` the same channel carried one tick earlier. `Expired` changes
@@ -123,6 +126,24 @@ pub(in crate::services::discord) const fn structural_candidate_apply(eligible: b
     eligible
 }
 
+/// A missing operand abstains for every action except the orphan-token clear,
+/// whose rowless shape would otherwise retire an anchor on absence alone (I20).
+fn operand_absent(
+    action: RelayRecoveryActionKind,
+    orphan_reason: &'static str,
+) -> DestructiveWarrant {
+    if action == RelayRecoveryActionKind::ClearOrphanPendingToken {
+        return DestructiveWarrant {
+            eligible: false,
+            skipped_reason: Some(orphan_reason),
+        };
+    }
+    DestructiveWarrant {
+        eligible: true,
+        skipped_reason: None,
+    }
+}
+
 pub(in crate::services::discord) fn destructive_warrant_bind(
     structural_eligible: bool,
     action: RelayRecoveryActionKind,
@@ -137,16 +158,10 @@ pub(in crate::services::discord) fn destructive_warrant_bind(
         };
     }
     let Some(snapshot) = snapshot else {
-        return DestructiveWarrant {
-            eligible: true,
-            skipped_reason: None,
-        };
+        return operand_absent(action, ORPHAN_TOKEN_SNAPSHOT_ABSENT);
     };
     let Some((verdict, _)) = snapshot.reachability_observation() else {
-        return DestructiveWarrant {
-            eligible: true,
-            skipped_reason: None,
-        };
+        return operand_absent(action, ORPHAN_TOKEN_REACHABILITY_UNOBSERVED);
     };
     match rule(action, verdict, pinned_adoption) {
         WarrantRule::PassLedger => DestructiveWarrant {
@@ -154,10 +169,13 @@ pub(in crate::services::discord) fn destructive_warrant_bind(
             skipped_reason: None,
         },
         WarrantRule::RequireEpisode => match exact_episode_evidence(provider, snapshot) {
-            EpisodeEvidence::Matched | EpisodeEvidence::OperandAbsent => DestructiveWarrant {
+            EpisodeEvidence::Matched => DestructiveWarrant {
                 eligible: true,
                 skipped_reason: None,
             },
+            EpisodeEvidence::OperandAbsent => {
+                operand_absent(action, ORPHAN_TOKEN_EPISODE_UNMEASURED)
+            }
             EpisodeEvidence::Mismatched => DestructiveWarrant {
                 eligible: false,
                 skipped_reason: Some("axis_b_exact_episode_required"),
@@ -379,7 +397,11 @@ mod tests {
         let provider = ProviderKind::Codex;
         for action in ACTIONS {
             assert!(!destructive_warrant_bind(false, action, &provider, None, false).eligible);
-            assert!(destructive_warrant_bind(true, action, &provider, None, false).eligible);
+            let unobserved = destructive_warrant_bind(true, action, &provider, None, false);
+            assert_eq!(
+                unobserved.eligible,
+                action != RelayRecoveryActionKind::ClearOrphanPendingToken
+            );
         }
 
         let mut snapshot = super::super::axis_b_tests::quiet_snapshot_for_warrant_tests(54_643);
@@ -387,7 +409,7 @@ mod tests {
         assert!(
             destructive_warrant_bind(
                 true,
-                RelayRecoveryActionKind::ClearOrphanPendingToken,
+                RelayRecoveryActionKind::ClearStaleThreadProof,
                 &provider,
                 Some(&snapshot),
                 false,
@@ -404,13 +426,61 @@ mod tests {
         assert!(
             destructive_warrant_bind(
                 true,
-                RelayRecoveryActionKind::ClearOrphanPendingToken,
+                RelayRecoveryActionKind::ClearStaleThreadProof,
                 &provider,
                 Some(&snapshot),
                 false,
             )
             .eligible,
             "legacy missing episode nonce must abstain rather than veto"
+        );
+    }
+
+    #[test]
+    fn orphan_token_warrant_refuses_every_unmeasured_operand() {
+        let provider = ProviderKind::Codex;
+        let orphan = RelayRecoveryActionKind::ClearOrphanPendingToken;
+        let refused = |warrant: DestructiveWarrant| (warrant.eligible, warrant.skipped_reason);
+
+        assert_eq!(
+            refused(destructive_warrant_bind(
+                true, orphan, &provider, None, false
+            )),
+            (false, Some("axis_b_orphan_token_snapshot_absent"))
+        );
+        let mut snapshot = super::super::axis_b_tests::quiet_snapshot_for_warrant_tests(54_644);
+        assert_eq!(
+            refused(destructive_warrant_bind(
+                true,
+                orphan,
+                &provider,
+                Some(&snapshot),
+                false
+            )),
+            (false, Some("axis_b_orphan_token_reachability_unobserved"))
+        );
+
+        let root = tempfile::tempdir().expect("inflight root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+        snapshot.reachability_observation = Some((
+            ReachabilityVerdict::unknown(ReachabilityUnknownReason::NeverObserved, 1),
+            1,
+        ));
+        snapshot.mailbox_active_turn_nonce = Some("mailbox-episode".to_string());
+        assert_eq!(
+            compare_episode_nonces(Some("mailbox-episode"), None),
+            EpisodeEvidence::OperandAbsent
+        );
+        assert_eq!(
+            refused(destructive_warrant_bind(
+                true,
+                orphan,
+                &provider,
+                Some(&snapshot),
+                false
+            )),
+            (false, Some("axis_b_orphan_token_episode_unmeasured")),
+            "a rowless episode cannot be matched, so it cannot warrant a retirement"
         );
     }
 }

@@ -40,9 +40,9 @@ use super::relay_health::{
     DurableFrontierObservation, RelayActiveTurn, RelayHealthSnapshot, RelayStallState,
 };
 use super::{
-    SharedData, destructive_cancel_gate, health, inflight, mailbox_clear_channel,
-    mailbox_clear_recovery_marker, mailbox_finish_turn, mailbox_snapshot, recovery,
-    saturating_decrement_global_active, stall_recovery, turn_finalizer,
+    SharedData, destructive_cancel_gate, health, inflight, mailbox_clear_recovery_marker,
+    mailbox_finish_turn, mailbox_snapshot, recovery, saturating_decrement_global_active,
+    stall_recovery, turn_finalizer,
 };
 use crate::services::provider::ProviderKind;
 
@@ -285,6 +285,7 @@ async fn run_relay_recovery_at(
         None => None,
     };
 
+    let observed_before = std::time::Instant::now();
     let snapshot = match parsed_provider.as_ref() {
         Some(provider) => {
             registry
@@ -301,6 +302,8 @@ async fn run_relay_recovery_at(
     let mut decision =
         plan_relay_recovery(&snapshot.relay_health, snapshot.relay_stall_state, now_ms);
     decision.affected.finalizer_turn_id = snapshot.inflight_finalizer_turn_id;
+    decision.affected.mailbox_active_turn_nonce = snapshot.mailbox_active_turn_nonce.clone();
+    decision.affected.observed_before = Some(observed_before);
     trace_relay_recovery_decision(&decision, apply);
 
     if !apply {
@@ -455,6 +458,7 @@ async fn auto_apply_relay_recovery_for_shared_at(
     source: RelayRecoveryApplySource,
     now_ms: i64,
 ) -> Result<RelayRecoveryResponse, RelayRecoveryError> {
+    let observed_before = std::time::Instant::now();
     let snapshot = registry
         .snapshot_watcher_state_for_shared(provider, shared.clone(), channel_id)
         .await
@@ -497,6 +501,8 @@ async fn auto_apply_relay_recovery_for_shared_at(
         decision.auto_heal.skipped_reason = None;
     }
     decision.affected.finalizer_turn_id = snapshot.inflight_finalizer_turn_id;
+    decision.affected.mailbox_active_turn_nonce = snapshot.mailbox_active_turn_nonce.clone();
+    decision.affected.observed_before = Some(observed_before);
     trace_relay_recovery_decision(&decision, true);
     #[cfg(unix)]
     if decision.action.is_destructive() {

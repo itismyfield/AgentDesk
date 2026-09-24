@@ -721,6 +721,8 @@ src/
 │   │   │   │   ├── stall_watchdog_task.rs
 │   │   │   │   ├── stop_result.rs
 │   │   │   │   └── watchdog_decisions.rs
+│   │   │   ├── relay_auto_heal/
+│   │   │   │   └── orphan_token_tests.rs
 │   │   │   ├── snapshot/
 │   │   │   │   └── relay_probe.rs
 │   │   │   ├── stall_liveness/
@@ -935,7 +937,8 @@ src/
 │   │   │   ├── authority_observation/
 │   │   │   │   └── delivery_boundary.rs
 │   │   │   ├── tests/
-│   │   │   │   └── circuit_breaker_apply.rs
+│   │   │   │   ├── circuit_breaker_apply.rs
+│   │   │   │   └── orphan_token_finish.rs
 │   │   │   ├── apply.rs
 │   │   │   ├── authority_observation.rs
 │   │   │   ├── authority_retention.rs
