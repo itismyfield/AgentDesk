@@ -45,7 +45,7 @@ describe("EmojiPicker", () => {
     const button = target.querySelector("button");
     expect(button).not.toBeNull();
     expect(button?.getAttribute("aria-expanded")).toBe("false");
-    expect(button?.getAttribute("aria-label")).toBe("Selected emoji: 🤖, change emoji");
+    expect(button?.getAttribute("aria-label")).toBe("Selected icon: 🤖, change icon");
     expect(button?.getAttribute("aria-haspopup")).toBe("dialog");
   });
 
@@ -66,7 +66,7 @@ describe("EmojiPicker", () => {
 
     const dialog = target.querySelector('div[role="dialog"]');
     expect(dialog).not.toBeNull();
-    expect(dialog?.getAttribute("aria-label")).toBe("Choose an emoji");
+    expect(dialog?.getAttribute("aria-label")).toBe("Choose an icon");
   });
 
   it("returns focus to the trigger when dismissed by an outside click", async () => {

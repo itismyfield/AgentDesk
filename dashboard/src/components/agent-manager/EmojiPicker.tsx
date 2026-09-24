@@ -99,8 +99,8 @@ export default function EmojiPicker({
         aria-label={
           ariaLabel ||
           (value
-            ? tr({ ko: `선택된 이모지: ${value}, 이모지 변경`, en: `Selected emoji: ${value}, change emoji` })
-            : tr({ ko: "이모지 선택기 열기", en: "Open emoji picker" }))
+            ? tr({ ko: `선택된 아이콘: ${value}, 아이콘 변경`, en: `Selected icon: ${value}, change icon` })
+            : tr({ ko: "아이콘 선택기 열기", en: "Open icon picker" }))
         }
       >
         {value || "❓"}
@@ -108,7 +108,7 @@ export default function EmojiPicker({
       {open && (
         <div
           role="dialog"
-          aria-label={dialogLabel || tr({ ko: "이모지 선택", en: "Choose an emoji" })}
+          aria-label={dialogLabel || tr({ ko: "아이콘 선택", en: "Choose an icon" })}
           className="absolute left-0 top-full z-[60] mt-1 overflow-hidden rounded-xl shadow-2xl"
           style={{
             background:
