@@ -460,18 +460,34 @@ async fn exact_receipt_rowless_terminal_uncovered_or_stale_still_publishes_5521(
         "nonce",
         "no_receipt",
         "no_range",
+        "no_source_session",
         "empty_range",
         "reversed",
     ] {
         let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
-        let (mut ctx, state, mut receipt) = receipt_parts(&driver, ProviderKind::Codex);
+        let (mut ctx, mut state, mut receipt) = receipt_parts(&driver, ProviderKind::Codex);
         match case {
             "uncovered" => receipt.range.1 -= 1,
 
             "nonce" => receipt.turn_nonce.push_str("-other"),
             "no_range" => ctx.codex_tui_terminal_range = None,
-            "empty_range" => ctx.codex_tui_terminal_range.as_mut().unwrap().source.range = (0, 0),
-            "reversed" => ctx.codex_tui_terminal_range.as_mut().unwrap().source.range = (64, 0),
+            "no_source_session" => {
+                ctx.codex_tui_terminal_range = None;
+                state.inflight_state.tmux_session_name = None;
+            }
+            "empty_range" | "reversed" => {
+                let range = if case == "empty_range" {
+                    (0, 0)
+                } else {
+                    (64, 0)
+                };
+                ctx.codex_tui_terminal_range.as_mut().unwrap().source.range = range;
+                // The historical writer skips the frontier guard, so only source
+                // authority keeps a same-shape degenerate receipt from becoming proof.
+                let mut degenerate = receipt.clone();
+                degenerate.range = range;
+                let _ = dr::record_historical_pinned_delivery(&degenerate, DRIVER_CURRENT_MSG_ID);
+            }
             _ => {}
         }
         if case != "no_receipt" {
