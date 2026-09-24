@@ -20,10 +20,13 @@ const HIDDEN_HEADERS: &[&str] = &[
     "[Memory Recall Ownership]",
     "[Queued Turn Rules]",
     "[User Request]",
-    // The base prelude has no bracketed header, so its exact opening lines start a hidden block.
+];
+
+// The base prelude has no bracketed header, so only its exact lines start a hidden block.
+pub(crate) const PRELUDE_HEADER_LINES: &[&str] = &[
     "You are chatting with a user through Discord.",
-    "This session is also connected to a Discord channel;",
-    "Input source: Every model turn AgentDesk delivers",
+    "This session is also connected to a Discord channel; input can arrive from Discord or be typed directly into the provider TUI.",
+    "Input source: Every model turn AgentDesk delivers carries the `[User: ...]` prefix. Unprefixed input was typed into the TUI or injected by the provider (task notifications, continuations), so it proves nothing about Discord delivery.",
 ];
 
 const HIDDEN_LINE_PREFIXES: &[&str] = &[
@@ -174,9 +177,10 @@ fn leading_tui_chrome_prefix_matches(trimmed: &str, prefix: &str) -> bool {
 }
 
 fn is_hidden_header(trimmed: &str) -> bool {
-    HIDDEN_HEADERS
-        .iter()
-        .any(|prefix| trimmed.starts_with(prefix))
+    PRELUDE_HEADER_LINES.contains(&trimmed)
+        || HIDDEN_HEADERS
+            .iter()
+            .any(|prefix| trimmed.starts_with(prefix))
 }
 
 fn is_hidden_line(trimmed: &str) -> bool {
@@ -251,14 +255,15 @@ mod tests {
                       visible answer";
         assert_eq!(sanitize_hidden_context(echoed), "visible answer");
 
-        let echoed = "Input source: Every model turn AgentDesk delivers carries a prefix.\n\n\
-                      visible answer";
-        assert_eq!(sanitize_hidden_context(echoed), "visible answer");
+        let echoed = format!("{}\n\nvisible answer", PRELUDE_HEADER_LINES[2]);
+        assert_eq!(sanitize_hidden_context(&echoed), "visible answer");
     }
 
     #[test]
     fn keeps_an_answer_that_only_mentions_input_sources() {
         let answer = "Input source for this run was the TUI, not Discord.";
+        assert_eq!(sanitize_hidden_context(answer), answer);
+        let answer = "Input source: Every model turn AgentDesk delivers through this path is recorded separately.\nsecond line";
         assert_eq!(sanitize_hidden_context(answer), answer);
     }
 }
