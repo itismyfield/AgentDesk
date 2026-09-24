@@ -302,11 +302,19 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
     }
 }
 
-struct TmuxFixture(String);
+/// Pins the Codex periodic pass's tmux view for this thread and clears it on unwind.
+struct PinnedTmuxView;
 
-impl Drop for TmuxFixture {
+impl PinnedTmuxView {
+    fn live(sessions: &[&str]) -> Self {
+        CODEX_PASS_TMUX_VIEW.set(Some(sessions.iter().map(ToString::to_string).collect()));
+        Self
+    }
+}
+
+impl Drop for PinnedTmuxView {
     fn drop(&mut self) {
-        crate::services::platform::tmux::kill_session(&self.0, "rehydration entry fixture");
+        CODEX_PASS_TMUX_VIEW.set(None);
     }
 }
 
@@ -328,26 +336,11 @@ fn entry_pass_recoveries(shared: &Arc<SharedData>) -> usize {
 
 #[test]
 fn periodic_entry_pass_reports_one_recovery_then_settles() {
-    if !std::process::Command::new("tmux")
-        .arg("-V")
-        .output()
-        .is_ok_and(|output| output.status.success())
-    {
-        eprintln!("skipping: tmux unavailable");
-        return;
-    }
     fixture(|root| {
-        let session = format!("adk-rehydrate-entry-{}", std::process::id());
-        crate::services::platform::tmux::kill_session(&session, "rehydration entry fixture");
-        assert!(
-            crate::services::platform::tmux::create_session(&session, None, "sleep 120")
-                .expect("start tmux fixture")
-                .status
-                .success()
-        );
-        let _tmux = TmuxFixture(session.clone());
+        let session = "adk-rehydrate-entry";
+        let _tmux = PinnedTmuxView::live(&[session]);
         crate::services::tmux_common::write_tmux_runtime_kind_marker(
-            &session,
+            session,
             RuntimeHandoffKind::CodexTui,
         )
         .unwrap();
@@ -358,12 +351,12 @@ fn periodic_entry_pass_reports_one_recovery_then_settles() {
         )
         .unwrap();
         crate::services::codex_tui::session::write_codex_tui_rollout_marker(
-            &session,
+            session,
             &path,
             Some("entry"),
         )
         .unwrap();
-        dedupe::register_tmux_channel(&session, CHANNEL);
+        dedupe::register_tmux_channel(session, CHANNEL);
         let shared = crate::services::discord::make_shared_data_for_tests();
 
         assert_eq!(
@@ -372,11 +365,12 @@ fn periodic_entry_pass_reports_one_recovery_then_settles() {
             "missing binding restores"
         );
         let mut progressed =
-            dedupe::runtime_binding_for_tmux_session(&session).expect("restored binding");
+            dedupe::runtime_binding_for_tmux_session(session).expect("restored binding");
         assert_eq!(progressed.output_path, path.display().to_string());
         progressed.last_offset = 17;
         progressed.relay_last_offset = Some(11);
-        dedupe::register_tmux_runtime_binding(&session, progressed.clone());
+        dedupe::register_tmux_runtime_binding(session, progressed.clone());
+        let written = dedupe::runtime_binding_recorded_at_for_tests(session);
 
         for _ in 0..3 {
             assert_eq!(
@@ -386,7 +380,12 @@ fn periodic_entry_pass_reports_one_recovery_then_settles() {
             );
         }
         assert_eq!(
-            dedupe::runtime_binding_for_tmux_session(&session),
+            dedupe::runtime_binding_recorded_at_for_tests(session),
+            written,
+            "a settled pass must not rewrite the binding, even with the same value"
+        );
+        assert_eq!(
+            dedupe::runtime_binding_for_tmux_session(session),
             Some(progressed)
         );
     });
