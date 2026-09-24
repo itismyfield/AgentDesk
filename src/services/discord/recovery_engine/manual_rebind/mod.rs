@@ -380,7 +380,42 @@ async fn rebind_inflight_for_channel_inner(
     let session_id_for_state = runtime_state.session_id;
     let mut force_initial_offset = runtime_state.force_initial_offset;
     let mut forced_adopted_transcript_rebase_offset = None;
-    if force_initial_offset.is_none()
+    let mut minimum_initial_offset = minimum_initial_offset;
+    let latest_lease_turn_id = crate::services::tui_prompt_dedupe::external_input_relay_lease(
+        provider.as_str(),
+        &tmux_session_name,
+        channel_id,
+    )
+    .and_then(|lease| lease.turn_id);
+    let tui_direct_adopt = existing_inflight.as_ref().and_then(|existing| {
+        adoption::tui_direct_adopt_offsets(
+            runtime_kind_for_state,
+            existing,
+            &output_path,
+            latest_lease_turn_id.as_deref(),
+        )
+    });
+    if force_initial_offset.is_none() && tui_direct_adopt.is_some() {
+        match tui_direct_adopt {
+            Some(adoption::TuiDirectAdoptOffsets::FenceForward(_)) => {
+                force_initial_offset = Some(synthetic_initial_offset);
+                forced_adopted_transcript_rebase_offset = Some(synthetic_initial_offset);
+            }
+            _ => {
+                // Same coordinate space: resume from the row, but never below what an idle
+                // tail/bridge already committed for this transcript.
+                let committed = adoption::claude_transcript_committed_offset(
+                    shared,
+                    discord_channel_id,
+                    &tmux_session_name,
+                    std::fs::metadata(&output_path)
+                        .ok()
+                        .map(|metadata| metadata.len()),
+                );
+                minimum_initial_offset = minimum_initial_offset.max(Some(committed));
+            }
+        }
+    } else if force_initial_offset.is_none()
         && let Some(offset) = claude_tui_force_initial_offset_for_adopted_transcript(
             runtime_kind_for_state,
             existing_inflight.as_ref(),
@@ -571,7 +606,7 @@ async fn rebind_inflight_for_channel_inner(
                 .unwrap_or(0),
         )
     };
-    let initial_offset = rebind_initial_offset_with_floor_unless_forced(
+    let mut initial_offset = rebind_initial_offset_with_floor_unless_forced(
         initial_offset_without_floor,
         minimum_initial_offset,
         output_len_for_floor,
@@ -585,6 +620,50 @@ async fn rebind_inflight_for_channel_inner(
             initial_offset_without_floor,
             initial_offset
         );
+    }
+
+    // Custody before the fence: the adoption below overwrites the only cursor into the range.
+    // A Codex relay rebuild is exempt: it replays from a start derived from the row's cursor.
+    let fence_cause = adoption::tui_direct_fence_cause(
+        existing_inflight.as_ref(),
+        tui_direct_adopt,
+        existing_offset_rebase_to_output.filter(|_| pending_codex_tui_rebind_relay.is_none()),
+        runtime_state.rebase_existing_offsets_to_output,
+    );
+    let fence_forward_custody = match (fence_cause, existing_inflight.as_ref()) {
+        (Some(cause), Some(existing)) => {
+            let facts = adoption::AdoptFenceForward {
+                cause,
+                existing,
+                tmux_session_name: &tmux_session_name,
+                output_path: &output_path,
+                initial_offset,
+                latest_lease_turn_id: latest_lease_turn_id.as_deref(),
+            };
+            let custody = adoption::take_adopt_fence_forward_custody(
+                shared.pg_pool.as_ref(),
+                channel_id,
+                &facts,
+            )
+            .await;
+            Some(custody.map_err(|error| {
+                tracing::warn!(
+                    channel_id,
+                    tmux_session = %tmux_session_name,
+                    cause = cause.as_str(),
+                    %error,
+                    "rebind kept a TUI-direct row's offsets: its unread range is not in custody",
+                );
+                RebindError::Internal(format!(
+                    "adopt fence-forward custody for channel {channel_id}: {error}"
+                ))
+            })?)
+        }
+        _ => None,
+    };
+    if let Some(fence) = fence_forward_custody.as_ref().and_then(|c| c.fenced_at) {
+        initial_offset = fence;
+        existing_offset_rebase_to_output = Some(fence);
     }
 
     let mut inflight_rollback_on_relay_setup_failure: Option<PendingRebindInflightRollback>;
@@ -873,6 +952,16 @@ async fn rebind_inflight_for_channel_inner(
         }
     };
     drop(locked_episode);
+
+    if let Some(custody) = fence_forward_custody {
+        adoption::announce_adopt_fence_forward(
+            shared,
+            provider,
+            channel_id,
+            &tmux_session_name,
+            custody,
+        );
+    }
 
     Ok(RebindOutcome {
         tmux_session: tmux_session_name,

@@ -78,6 +78,371 @@ pub(crate) fn claude_tui_force_initial_offset_for_adopted_transcript(
 
     Some(synthetic_initial_offset)
 }
+/// Why a TUI-direct row's saved offsets cannot be kept on the live transcript.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AdoptFenceForwardCause {
+    TranscriptRotated,
+    CoordinateSpaceMismatch,
+    NewerTurnMixed,
+    /// No live lease names the running turn (a restart, or a turn past the lease TTL), so the
+    /// unread range may already hold a newer turn.
+    TurnIdentityUnknown,
+    /// An operator `output_path` override rebased the row to the output's EOF.
+    OperatorOverride,
+}
+
+impl AdoptFenceForwardCause {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::TranscriptRotated => "transcript_rotated",
+            Self::CoordinateSpaceMismatch => "coordinate_space_mismatch",
+            Self::NewerTurnMixed => "newer_turn_mixed",
+            Self::TurnIdentityUnknown => "turn_identity_unknown",
+            Self::OperatorOverride => "operator_override",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TuiDirectAdoptOffsets {
+    Preserve,
+    FenceForward(AdoptFenceForwardCause),
+}
+
+/// `None` leaves rows other than a TUI-direct row adopted onto a Claude transcript to
+/// [`claude_tui_force_initial_offset_for_adopted_transcript`].
+pub(crate) fn tui_direct_adopt_offsets(
+    runtime_kind: Option<RuntimeHandoffKind>,
+    existing: &inflight::InflightTurnState,
+    output_path: &str,
+    latest_lease_turn_id: Option<&str>,
+) -> Option<TuiDirectAdoptOffsets> {
+    if existing.request_owner_user_id
+        != crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
+        || runtime_kind != Some(RuntimeHandoffKind::ClaudeTui)
+        || claude_rebind_transcript_path(output_path).is_none()
+    {
+        return None;
+    }
+    fn non_empty(value: Option<&str>) -> Option<&str> {
+        value.map(str::trim).filter(|value| !value.is_empty())
+    }
+    let cause = match non_empty(existing.output_path.as_deref()) {
+        Some(saved) if !rebind_output_paths_same(saved, output_path) => {
+            Some(AdoptFenceForwardCause::TranscriptRotated)
+        }
+        None => Some(AdoptFenceForwardCause::CoordinateSpaceMismatch),
+        Some(_)
+            if existing.runtime_kind != Some(RuntimeHandoffKind::ClaudeTui)
+                || non_empty(existing.input_fifo_path.as_deref()).is_some() =>
+        {
+            Some(AdoptFenceForwardCause::CoordinateSpaceMismatch)
+        }
+        // Only a live lease naming the row's own turn proves `[turn_start_offset, EOF)` is its
+        // output alone; a different lease is a newer turn, and no lease proves nothing.
+        Some(_) => match non_empty(latest_lease_turn_id) {
+            Some(latest) if non_empty(existing.external_turn_id.as_deref()) == Some(latest) => None,
+            Some(_) => Some(AdoptFenceForwardCause::NewerTurnMixed),
+            None => Some(AdoptFenceForwardCause::TurnIdentityUnknown),
+        },
+    };
+    Some(cause.map_or(
+        TuiDirectAdoptOffsets::Preserve,
+        TuiDirectAdoptOffsets::FenceForward,
+    ))
+}
+
+/// A TUI-direct row needs custody whenever the rebase that will land overwrites its only cursor,
+/// whether the adoption or an operator override asked for that rebase.
+pub(crate) fn tui_direct_fence_cause(
+    existing: Option<&inflight::InflightTurnState>,
+    adopt: Option<TuiDirectAdoptOffsets>,
+    rebase: Option<u64>,
+    operator_override: bool,
+) -> Option<AdoptFenceForwardCause> {
+    let owner = existing?.request_owner_user_id;
+    rebase.filter(|_| {
+        owner == crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
+    })?;
+    Some(match adopt {
+        _ if operator_override => AdoptFenceForwardCause::OperatorOverride,
+        Some(TuiDirectAdoptOffsets::FenceForward(cause)) => cause,
+        _ => AdoptFenceForwardCause::CoordinateSpaceMismatch,
+    })
+}
+
+/// Committed delivery offset for a Claude transcript, after the same generation/regression
+/// watermark resets the watcher runs, so a stale prior-wrapper watermark never clamps forward.
+pub(crate) fn claude_transcript_committed_offset(
+    shared: &crate::services::discord::SharedData,
+    channel_id: poise::serenity_prelude::ChannelId,
+    tmux_session_name: &str,
+    transcript_eof: Option<u64>,
+) -> u64 {
+    #[cfg(unix)]
+    use crate::services::discord::tmux;
+    #[cfg(not(unix))]
+    let _ = (tmux_session_name, transcript_eof);
+    #[cfg(unix)]
+    tmux::reset_stale_relay_watermark_if_output_regressed(
+        shared,
+        channel_id,
+        tmux_session_name,
+        transcript_eof.unwrap_or(0),
+        "tui_direct_adopt",
+    );
+    #[cfg(unix)]
+    tmux::reset_relay_watermark_on_generation_change(
+        shared,
+        channel_id,
+        tmux_session_name,
+        "tui_direct_adopt",
+    );
+    crate::services::discord::outbound::delivery_record::effective_committed_offset(
+        shared,
+        &crate::services::provider::ProviderKind::Claude,
+        channel_id,
+        tmux_session_name,
+        transcript_eof,
+    )
+}
+
+pub(crate) const ADOPT_FENCE_FORWARD_INVARIANT: &str = "tui_direct_adopt_keeps_its_turn_offsets";
+
+pub(crate) struct AdoptFenceForward<'a> {
+    pub cause: AdoptFenceForwardCause,
+    /// The row as it was before adoption, in its own coordinate space.
+    pub existing: &'a inflight::InflightTurnState,
+    pub tmux_session_name: &'a str,
+    pub output_path: &'a str,
+    pub initial_offset: u64,
+    pub latest_lease_turn_id: Option<&'a str>,
+}
+
+/// Channels whose custody INSERT a test accepts in place of PG; any other channel takes the
+/// production path.
+#[cfg(test)]
+pub(crate) static ADOPT_FENCE_FORWARD_TEST_CUSTODY: std::sync::Mutex<
+    std::collections::BTreeSet<String>,
+> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+#[cfg(test)]
+pub(crate) static ADOPT_FENCE_FORWARD_DISPATCHES: std::sync::Mutex<
+    Vec<(crate::db::relay_dead_letter::RelayDeadLetterRecord, String)>,
+> = std::sync::Mutex::new(Vec::new());
+
+/// Bytes a test appends to a transcript just before custody reads it, as a live turn would.
+#[cfg(test)]
+static ADOPT_FENCE_FORWARD_TEST_GROWTH: std::sync::Mutex<
+    std::collections::BTreeMap<String, Vec<u8>>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// What a fence-forward can keep of the unread range `[range_start, old EOF)`.
+#[derive(Debug, PartialEq, Eq)]
+enum UnreadRange {
+    /// `[range_start, old_eof)` exactly as one read saw it, so what is kept is what is skipped.
+    Bytes { old_eof: u64, bytes: Vec<u8> },
+    /// The saved coordinates no longer address any bytes, so only the range itself is kept.
+    Unaddressable(&'static str),
+}
+
+/// `Err` means the bytes exist but could not be read; fencing then would drop a body a retry
+/// can still keep.
+fn snapshot_unread_range(old_path: Option<&str>, range_start: u64) -> Result<UnreadRange, String> {
+    let Some(path) = old_path else {
+        return Ok(UnreadRange::Unaddressable(
+            "row has no saved transcript path",
+        ));
+    };
+    #[cfg(test)]
+    if let Some(tail) = (ADOPT_FENCE_FORWARD_TEST_GROWTH.lock())
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(path)
+    {
+        use std::io::Write as _;
+        let file = std::fs::OpenOptions::new().append(true).open(path);
+        file.and_then(|mut file| file.write_all(&tail))
+            .expect("grow");
+    }
+    let mut bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(UnreadRange::Unaddressable(
+                "saved transcript no longer exists",
+            ));
+        }
+        Err(error) => return Err(format!("read saved transcript {path}: {error}")),
+    };
+    let start = usize::try_from(range_start).ok();
+    let Some(start) = start.filter(|start| *start <= bytes.len()) else {
+        return Ok(UnreadRange::Unaddressable(
+            "saved offset lies past the saved transcript's end",
+        ));
+    };
+    let old_eof = bytes.len() as u64;
+    let bytes = bytes.split_off(start);
+    Ok(UnreadRange::Bytes { old_eof, bytes })
+}
+
+/// Proof that the unread range is in dead-letter custody; only this lets a rebind fence past it.
+pub(crate) struct AdoptFenceForwardCustody {
+    /// The kept range's end when the fence lands in the same file, so the fence skips exactly it.
+    pub(crate) fenced_at: Option<u64>,
+    cause: AdoptFenceForwardCause,
+    turn_id: Option<String>,
+    record: crate::db::relay_dead_letter::RelayDeadLetterRecord,
+    notice: String,
+}
+
+async fn insert_custody(
+    pool: Option<&sqlx::PgPool>,
+    record: &crate::db::relay_dead_letter::RelayDeadLetterRecord,
+) -> Result<(), String> {
+    #[cfg(test)]
+    if ADOPT_FENCE_FORWARD_TEST_CUSTODY
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains(&record.channel_id)
+    {
+        return Ok(());
+    }
+    let pool = pool.ok_or("no dead-letter pool")?;
+    let inserted = crate::db::relay_dead_letter::insert(pool, record).await;
+    inserted.map(drop).map_err(|error| error.to_string())
+}
+
+/// Puts the row's unread range `[turn_start_offset, old EOF)` in dead-letter custody before the
+/// caller overwrites the only cursor into it: its raw bytes when readable, else the range and why.
+/// `Err` means nothing was recorded, so the caller must keep the row's offsets.
+pub(crate) async fn take_adopt_fence_forward_custody(
+    pool: Option<&sqlx::PgPool>,
+    channel_id: u64,
+    facts: &AdoptFenceForward<'_>,
+) -> Result<AdoptFenceForwardCustody, String> {
+    let existing = facts.existing;
+    let range_start = existing.turn_start_offset.unwrap_or(existing.last_offset);
+    let old_path = (existing.output_path.as_deref().map(str::trim)).filter(|path| !path.is_empty());
+    let same_file = old_path.is_some_and(|old| rebind_output_paths_same(old, facts.output_path));
+    let mut fenced_at = None;
+    let (custody, content, notice) = match snapshot_unread_range(old_path, range_start)? {
+        UnreadRange::Bytes { old_eof, bytes } => {
+            fenced_at = same_file.then_some(old_eof);
+            let dropped = bytes.len();
+            // Raw bytes, not a parse: a record cut mid-write is kept whole. TEXT takes no NUL.
+            use base64::Engine as _;
+            let (encoding, content) = match String::from_utf8(bytes) {
+                Ok(text) if !text.contains('\0') => ("utf8", text),
+                Ok(text) => ("base64", base64::prelude::BASE64_STANDARD.encode(text)),
+                Err(error) => (
+                    "base64",
+                    base64::prelude::BASE64_STANDARD.encode(error.as_bytes()),
+                ),
+            };
+            let custody = format!(
+                "custody=raw encoding={encoding} dropped_bytes={dropped} old_eof={old_eof}"
+            );
+            let notice = format!("이전 응답 {dropped}바이트를 이어서 전달하지 못해 보관했습니다");
+            (custody, content, notice)
+        }
+        UnreadRange::Unaddressable(why) => {
+            let custody = format!("custody=unrecoverable why=\"{why}\"");
+            let notice =
+                "이전 응답을 이어서 전달하지 못했고 원본을 읽을 수 없어 범위만 기록했습니다"
+                    .to_string();
+            (custody, String::new(), notice)
+        }
+    };
+    let message_id = (existing.user_msg_id != 0).then(|| existing.user_msg_id.to_string());
+    let record = crate::db::relay_dead_letter::RelayDeadLetterRecord {
+        kind: crate::db::relay_dead_letter::KIND_ADOPT_FENCE_FORWARD.to_string(),
+        channel_id: channel_id.to_string(),
+        author_id: message_id.clone(),
+        message_id,
+        content,
+        reason: format!(
+            "cause={} {custody} range_start={range_start} old_path={} new_path={} new_offset={} tmux={} row_turn_id={} lease_turn_id={}",
+            facts.cause.as_str(),
+            old_path.unwrap_or("-"),
+            facts.output_path,
+            fenced_at.unwrap_or(facts.initial_offset),
+            facts.tmux_session_name,
+            existing.external_turn_id.as_deref().unwrap_or("-"),
+            facts.latest_lease_turn_id.unwrap_or("-"),
+        ),
+    };
+    insert_custody(pool, &record).await?;
+    Ok(AdoptFenceForwardCustody {
+        fenced_at,
+        cause: facts.cause,
+        turn_id: existing.external_turn_id.clone(),
+        record,
+        notice: format!(
+            "⚠️ **응답 이어받기 실패** — 세션 복구 중 {notice} (relay dead-letter `{}`).",
+            crate::db::relay_dead_letter::KIND_ADOPT_FENCE_FORWARD
+        ),
+    })
+}
+
+/// After the fence landed: the loss to the invariant log and one line to the channel. Both are
+/// best-effort because the range is already in custody.
+pub(crate) fn announce_adopt_fence_forward(
+    shared: &crate::services::discord::SharedData,
+    provider: &crate::services::provider::ProviderKind,
+    channel_id: u64,
+    tmux_session_name: &str,
+    custody: AdoptFenceForwardCustody,
+) {
+    let AdoptFenceForwardCustody {
+        cause,
+        turn_id,
+        record,
+        notice,
+        ..
+    } = custody;
+    crate::services::observability::record_invariant_check(
+        false,
+        crate::services::observability::InvariantViolation {
+            provider: Some(provider.as_str()),
+            channel_id: Some(channel_id),
+            dispatch_id: None,
+            session_key: Some(tmux_session_name),
+            turn_id: turn_id.as_deref(),
+            invariant: ADOPT_FENCE_FORWARD_INVARIANT,
+            code_location: "src/services/discord/recovery_engine/manual_rebind/adoption.rs:announce_adopt_fence_forward",
+            message: "rebind could not keep a TUI-direct row's offsets and restarted the watcher at transcript EOF",
+            details: serde_json::json!({ "cause": cause.as_str(), "reason": record.reason }),
+        },
+    );
+    #[cfg(test)]
+    ADOPT_FENCE_FORWARD_DISPATCHES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push((record, notice.clone()));
+
+    let Some(pool) = shared.pg_pool.clone() else {
+        tracing::warn!(
+            channel_id,
+            "adopt fence-forward notice not sent: no outbox pool"
+        );
+        return;
+    };
+    tokio::spawn(async move {
+        let target = format!("channel:{channel_id}");
+        let message = crate::services::message_outbox::OutboxMessage {
+            target: &target,
+            content: &notice,
+            bot: crate::services::discord::bot_role::UtilityBotRole::Notify.alias(),
+            source: "adopt_fence_forward_notice",
+            reason_code: Some("adopt.fence_forward"),
+            session_key: Some(&target),
+        };
+        if let Err(error) = crate::services::message_outbox::enqueue_outbox_pg(&pool, message).await
+        {
+            tracing::warn!("[dlq] failed to enqueue adopt fence-forward notice: {error}");
+        }
+    });
+}
+
 pub(crate) fn claude_tui_rebind_should_reregister_runtime_binding(
     runtime_kind: Option<RuntimeHandoffKind>,
     output_path: &str,
@@ -300,5 +665,529 @@ mod tests {
             Some(RuntimeHandoffKind::LegacyTmuxWrapper),
             "/tmp/78fdb7f3-0000-4000-8000-000000000000.jsonl",
         ));
+    }
+
+    fn tui_direct_row(
+        channel_id: u64,
+        tmux: &str,
+        output_path: &str,
+    ) -> inflight::InflightTurnState {
+        let mut row = inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            channel_id,
+            None,
+            crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID,
+            6_159_000_001,
+            6_159_000_002,
+            "tui prompt".to_string(),
+            Some("61590000-0000-4000-8000-000000000000".to_string()),
+            Some(tmux.to_string()),
+            Some(output_path.to_string()),
+            None,
+            4_096,
+        );
+        row.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        row.turn_start_offset = Some(4_096);
+        row.external_turn_id = Some("turn-a".to_string());
+        row.turn_source = inflight::TurnSource::ExternalInput;
+        row
+    }
+
+    #[test]
+    fn tui_direct_adopt_keeps_offsets_only_in_their_own_coordinate_space() {
+        use AdoptFenceForwardCause::*;
+        use TuiDirectAdoptOffsets::*;
+        type Edit = fn(&mut inflight::InflightTurnState);
+        let transcript = "/tmp/61590000-0000-4000-8000-000000000000.jsonl";
+        let base = tui_direct_row(6_159_001, "AgentDesk-claude-6159-cc", transcript);
+        const ROTATED: &str = "/tmp/71590000-0000-4000-8000-000000000000.jsonl";
+        let mismatch = Some(FenceForward(CoordinateSpaceMismatch));
+        let cases: [(Edit, Option<&str>, Option<TuiDirectAdoptOffsets>); 8] = [
+            (|_| {}, None, Some(FenceForward(TurnIdentityUnknown))),
+            (|_| {}, Some("turn-a"), Some(Preserve)),
+            (|_| {}, Some("turn-b"), Some(FenceForward(NewerTurnMixed))),
+            (
+                |row| row.output_path = Some(ROTATED.into()),
+                None,
+                Some(FenceForward(TranscriptRotated)),
+            ),
+            (|row| row.output_path = None, None, mismatch),
+            (
+                |row| row.input_fifo_path = Some("fifo".into()),
+                None,
+                mismatch,
+            ),
+            (|row| row.runtime_kind = None, None, mismatch),
+            (|row| row.request_owner_user_id = 456, Some("turn-b"), None),
+        ];
+        for (index, (edit, lease, expected)) in cases.into_iter().enumerate() {
+            let mut row = base.clone();
+            edit(&mut row);
+            let claude = Some(RuntimeHandoffKind::ClaudeTui);
+            let actual = tui_direct_adopt_offsets(claude, &row, transcript, lease);
+            assert_eq!(actual, expected, "case {index}");
+        }
+        let non_claude = tui_direct_adopt_offsets(None, &base, transcript, None);
+        assert_eq!(non_claude, None);
+    }
+
+    fn fence_forwards(
+        channel_id: u64,
+    ) -> Vec<(crate::db::relay_dead_letter::RelayDeadLetterRecord, String)> {
+        ADOPT_FENCE_FORWARD_DISPATCHES
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .filter(|(record, _)| record.channel_id == channel_id.to_string())
+            .cloned()
+            .collect()
+    }
+
+    /// Asserts exactly one fence-forward record (dead-letter + notice) and one violation.
+    fn assert_one_fence_forward(
+        events: &[crate::services::observability::events::StructuredEvent],
+        channel_id: u64,
+        needles: &[&str],
+    ) {
+        let dispatches = fence_forwards(channel_id);
+        assert_eq!(dispatches.len(), 1, "Ok with no record is a silent loss");
+        let (record, notice) = &dispatches[0];
+        use crate::db::relay_dead_letter::KIND_ADOPT_FENCE_FORWARD;
+        assert_eq!(record.kind, KIND_ADOPT_FENCE_FORWARD);
+        let dump = format!("{record:?} {notice}");
+        for needle in needles {
+            assert!(dump.contains(needle), "missing {needle}: {dump}");
+        }
+        let violations = events.iter().filter(|event| {
+            event.event_type == "invariant_violation"
+                && event.channel_id == Some(channel_id)
+                && event
+                    .payload
+                    .to_string()
+                    .contains(ADOPT_FENCE_FORWARD_INVARIANT)
+        });
+        assert_eq!(violations.count(), 1);
+    }
+
+    const SESSION_FILE: &str = "61590000-0000-4000-8000-000000000000.jsonl";
+
+    /// Writes filler up to `turn_start`, then an assistant line holding `body` with no newline.
+    fn write_transcript(path: &std::path::Path, body: &str) -> u64 {
+        let mut bytes = vec![b'x'; 4_095];
+        bytes.push(b'\n');
+        let line = serde_json::json!({"type": "assistant", "message": {"content": [{"type": "text", "text": body}]}});
+        bytes.extend_from_slice(line.to_string().as_bytes());
+        std::fs::write(path, &bytes).expect("write transcript");
+        bytes.len() as u64
+    }
+
+    #[test]
+    fn unread_range_snapshot_keeps_the_body_or_says_why_it_cannot() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let transcript = tmp.path().join("unread.jsonl");
+        let eof = write_transcript(&transcript, "KEPT_BODY_6159");
+        let path = transcript.to_str().unwrap();
+        match snapshot_unread_range(Some(path), 4_096) {
+            Ok(UnreadRange::Bytes { old_eof, bytes }) => {
+                assert_eq!(old_eof, eof);
+                assert_eq!(bytes, std::fs::read(&transcript).unwrap()[4_096..]);
+            }
+            other => panic!("a readable range keeps its bytes: {other:?}"),
+        }
+        let gone = tmp.path().join("gone.jsonl");
+        let unaddressable = [
+            snapshot_unread_range(None, 0),
+            snapshot_unread_range(Some(gone.to_str().unwrap()), 0),
+            snapshot_unread_range(Some(path), eof + 1),
+        ];
+        for snapshot in unaddressable {
+            assert!(
+                matches!(snapshot, Ok(UnreadRange::Unaddressable(_))),
+                "{snapshot:?}"
+            );
+        }
+        // Present but unreadable is not "gone": a retry may still keep the body.
+        assert!(snapshot_unread_range(tmp.path().to_str(), 0).is_err());
+    }
+
+    /// A record still being written is normal mid-turn: custody keeps its bytes, not a parse.
+    #[tokio::test]
+    async fn custody_keeps_a_record_cut_mid_write_byte_for_byte_and_fences_at_its_end() {
+        let channel_id = 6_159_009_u64;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let transcript = tmp.path().join(SESSION_FILE);
+        let complete = write_transcript(&transcript, "WHOLE_6159");
+        let partial = r#"
+{"type":"assistant","message":{"content":[{"type":"text","text":"CUT_6159 한"#;
+        let mut bytes = std::fs::read(&transcript).unwrap();
+        bytes.extend_from_slice(&partial.as_bytes()[..partial.len() - 1]);
+        std::fs::write(&transcript, &bytes).unwrap();
+        let path = transcript.to_str().unwrap();
+        let row = tui_direct_row(channel_id, "tmux-6159", path);
+        let facts = AdoptFenceForward {
+            cause: AdoptFenceForwardCause::NewerTurnMixed,
+            existing: &row,
+            tmux_session_name: "tmux-6159",
+            output_path: path,
+            initial_offset: complete,
+            latest_lease_turn_id: Some("turn-b"),
+        };
+        ADOPT_FENCE_FORWARD_TEST_CUSTODY
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(channel_id.to_string());
+        let custody = take_adopt_fence_forward_custody(None, channel_id, &facts)
+            .await
+            .expect("custody");
+        let eof = bytes.len() as u64;
+        assert_eq!(
+            custody.fenced_at,
+            Some(eof),
+            "the fence skips exactly the kept range"
+        );
+        let reason = &custody.record.reason;
+        assert!(reason.contains("custody=raw encoding=base64"), "{reason}");
+        let kept = format!("dropped_bytes={} old_eof={eof}", eof - 4_096);
+        assert!(reason.contains(&kept) && reason.contains(&format!("new_offset={eof}")));
+        use base64::Engine as _;
+        let content = base64::prelude::BASE64_STANDARD.decode(&custody.record.content);
+        assert_eq!(content.expect("base64"), bytes[4_096..], "{reason}");
+    }
+
+    #[test]
+    fn any_rebase_of_a_tui_direct_row_needs_custody_whoever_asked_for_it() {
+        use AdoptFenceForwardCause::*;
+        let row = tui_direct_row(6_159_010, "tmux-6159", "/tmp/not-a-transcript.jsonl");
+        let preserve = Some(TuiDirectAdoptOffsets::Preserve);
+        let rotated = Some(TuiDirectAdoptOffsets::FenceForward(TranscriptRotated));
+        let cause =
+            |adopt, rebase, operator| tui_direct_fence_cause(Some(&row), adopt, rebase, operator);
+        assert_eq!(cause(None, Some(7), true), Some(OperatorOverride));
+        assert_eq!(cause(preserve, Some(7), true), Some(OperatorOverride));
+        assert_eq!(cause(rotated, Some(7), false), Some(TranscriptRotated));
+        assert_eq!(
+            cause(preserve, None, true),
+            None,
+            "no rebase, nothing to keep"
+        );
+        let mut owned = row.clone();
+        owned.request_owner_user_id = 456;
+        assert_eq!(
+            tui_direct_fence_cause(Some(&owned), None, Some(7), true),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unaddressable_range_is_recorded_before_it_may_be_fenced() {
+        let channel_id = 6_159_008_u64;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let gone = tmp
+            .path()
+            .join("71590000-0000-4000-8000-000000000000.jsonl");
+        let row = tui_direct_row(channel_id, "tmux-6159", gone.to_str().unwrap());
+        let facts = AdoptFenceForward {
+            cause: AdoptFenceForwardCause::TranscriptRotated,
+            existing: &row,
+            tmux_session_name: "tmux-6159",
+            output_path: "/tmp/61590000-0000-4000-8000-000000000000.jsonl",
+            initial_offset: 99,
+            latest_lease_turn_id: None,
+        };
+        let refused = take_adopt_fence_forward_custody(None, channel_id, &facts).await;
+        assert!(refused.is_err(), "no record, no custody");
+        ADOPT_FENCE_FORWARD_TEST_CUSTODY
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(channel_id.to_string());
+        let custody = take_adopt_fence_forward_custody(None, channel_id, &facts)
+            .await
+            .expect("the range itself is recorded");
+        let reason = &custody.record.reason;
+        assert!(reason.contains("cause=transcript_rotated"), "{reason}");
+        assert!(reason.contains("custody=unrecoverable"), "{reason}");
+        assert!(reason.contains("range_start=4096"), "{reason}");
+        assert!(custody.record.content.is_empty());
+    }
+
+    #[cfg(unix)]
+    use crate::services::observability::events::{StructuredEvent, test_capture::capture_sync};
+
+    #[cfg(unix)]
+    struct Rebind {
+        initial: Result<u64, super::super::RebindError>,
+        eof: u64,
+        events: Vec<StructuredEvent>,
+        /// The row as persisted after the rebind returned.
+        row: Option<inflight::InflightTurnState>,
+    }
+
+    /// What differs between the full-path rebind cases.
+    #[cfg(unix)]
+    #[derive(Clone, Copy)]
+    enum Knob {
+        /// A live lease names this turn id.
+        Lease(&'static str),
+        /// An idle tail/bridge already committed this offset.
+        Committed(u64),
+        /// The row lacks its durable `ClaudeTui` runtime stamp.
+        Unstamped,
+        /// The dead-letter INSERT succeeds; without it there is no pool, so it fails.
+        Custody,
+        /// The transcript comes in as an operator `output_path` override.
+        Operator,
+        /// A live turn appends these bytes after the rebind's stat, just before custody reads.
+        Grow(&'static str),
+    }
+
+    /// Drives `rebind_inflight_for_channel` for a TUI-direct row resting at `turn_start_offset`
+    /// 4096 on a Claude transcript, shaped by `knobs`.
+    #[cfg(unix)]
+    fn rebind_tui_direct_row(channel_id: u64, case: &str, knobs: &[Knob]) -> Option<Rebind> {
+        use crate::services::platform::tmux;
+        use crate::services::tui_prompt_dedupe as dedupe;
+        use std::sync::atomic::Ordering::SeqCst;
+        let (mut lease_turn_id, mut committed, mut grow) = (None, 0, None);
+        let (mut custody, mut operator) = (false, false);
+        let mut row_runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        for knob in knobs {
+            match *knob {
+                Knob::Lease(turn_id) => lease_turn_id = Some(turn_id),
+                Knob::Committed(offset) => committed = offset,
+                Knob::Unstamped => row_runtime_kind = None,
+                Knob::Custody => custody = true,
+                Knob::Operator => operator = true,
+                Knob::Grow(tail) => grow = Some(tail),
+            }
+        }
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tmp.path(),
+        );
+        if !tmux::is_available() {
+            eprintln!("skipping TUI-direct full-path rebind test: tmux is not available");
+            return None;
+        }
+        let session = format!("AgentDesk-claude-e2e6159{case}-{}-cc", std::process::id());
+        let created = tmux::create_session(&session, None, "sleep 60").expect("create tmux");
+        assert!(created.status.success(), "create tmux session");
+        crate::services::tmux_common::write_tmux_runtime_kind_marker(
+            &session,
+            RuntimeHandoffKind::ClaudeTui,
+        )
+        .expect("write runtime-kind marker");
+        let _claude_dir = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "CLAUDE_CONFIG_DIR",
+            tmp.path(),
+        );
+        let transcript = tmp.path().join("projects").join(SESSION_FILE);
+        std::fs::create_dir_all(transcript.parent().unwrap()).expect("projects dir");
+        let eof = write_transcript(&transcript, &"BACKLOG_BODY_6159 ".repeat(512));
+        let path = transcript.to_str().unwrap();
+        let mut row = tui_direct_row(channel_id, &session, path);
+        row.runtime_kind = row_runtime_kind;
+        assert!(inflight::save_inflight_state_if_absent(&row).expect("persist row"));
+        if let Some(turn_id) = lease_turn_id {
+            let mut lease = dedupe::ExternalInputRelayLease::unassigned(Some(channel_id));
+            lease.turn_id = Some(turn_id.to_string());
+            dedupe::record_external_input_turn_lease("claude", &session, lease);
+        }
+        if custody {
+            ADOPT_FENCE_FORWARD_TEST_CUSTODY
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(channel_id.to_string());
+        }
+        if let Some(tail) = grow {
+            (ADOPT_FENCE_FORWARD_TEST_GROWTH.lock())
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(path.to_string(), tail.as_bytes().to_vec());
+        }
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = poise::serenity_prelude::ChannelId::new(channel_id);
+        let coord = shared.tmux_relay_coord(channel);
+        coord.confirmed_end_offset.store(committed, SeqCst);
+        let http = std::sync::Arc::new(poise::serenity_prelude::Http::new("Bot test-token"));
+        let output = operator.then_some(path);
+        let overrides =
+            super::super::ManualRebindOverrides::validated(&ProviderKind::Claude, output, None)
+                .expect("operator override");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (result, events) = capture_sync(|| {
+            runtime.block_on(super::super::rebind_inflight_for_channel(
+                &http,
+                &shared,
+                &ProviderKind::Claude,
+                channel_id,
+                Some(session.clone()),
+                overrides,
+                None,
+            ))
+        });
+        // Dropping the runtime cancels the adopted watcher's tasks.
+        drop(runtime);
+        let row = inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel_id);
+        dedupe::clear_external_input_relay_lease("claude", &session, channel_id);
+        let _ = crate::services::platform::tmux::kill_session(&session, "rebind test cleanup");
+        let initial = result.map(|outcome| outcome.initial_offset);
+        Some(Rebind {
+            initial,
+            eof,
+            events,
+            row,
+        })
+    }
+
+    /// A refused rebind leaves the row's cursor on the unread range and announces nothing.
+    #[cfg(unix)]
+    fn assert_cursor_kept(rebind: Rebind, channel_id: u64) {
+        assert!(rebind.eof > 4_096, "the unread range is not empty");
+        assert!(rebind.initial.is_err(), "must fail: {:?}", rebind.initial);
+        let row = rebind.row.expect("row survives a failed rebind");
+        let cursor = (row.turn_start_offset, row.last_offset);
+        assert_eq!(cursor, (Some(4_096), 4_096), "cursor must not move to EOF");
+        assert!(fence_forwards(channel_id).is_empty(), "nothing was fenced");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rebind_fences_a_tui_direct_row_forward_past_a_newer_turn_and_records_it() {
+        let channel_id = 6_159_003_u64;
+        let knobs = [Knob::Lease("turn-b"), Knob::Custody];
+        let Some(rebind) = rebind_tui_direct_row(channel_id, "mixed", &knobs) else {
+            return;
+        };
+        let eof = rebind.eof;
+        assert_eq!(
+            rebind.initial.ok(),
+            Some(eof),
+            "the newer turn must not replay"
+        );
+        // The dead-letter keeps the dropped range's body; the notice names its size.
+        let dropped = eof - 4_096;
+        let needles = [
+            "cause=newer_turn_mixed",
+            "BACKLOG_BODY_6159",
+            &format!("dropped_bytes={dropped}"),
+            &format!("{dropped}바이트"),
+        ];
+        assert_one_fence_forward(&rebind.events, channel_id, &needles);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rebind_preserves_a_tui_direct_row_but_never_below_the_committed_offset() {
+        let channel_id = 6_159_004_u64;
+        let knobs = [Knob::Lease("turn-a"), Knob::Committed(8_192), Knob::Custody];
+        let Some(rebind) = rebind_tui_direct_row(channel_id, "keep", &knobs) else {
+            return;
+        };
+        assert!(rebind.eof > 8_192);
+        assert_eq!(
+            rebind.initial.ok(),
+            Some(8_192),
+            "resume, clamped to committed"
+        );
+        let fenced = fence_forwards(channel_id);
+        assert!(fenced.is_empty(), "preserve is not a fence-forward");
+    }
+
+    /// Without a live lease naming the row's turn, the range may hold a newer turn.
+    #[cfg(unix)]
+    #[test]
+    fn rebind_fences_a_tui_direct_row_whose_turn_identity_is_unknown() {
+        let channel_id = 6_159_006_u64;
+        let Some(rebind) = rebind_tui_direct_row(channel_id, "nolease", &[Knob::Custody]) else {
+            return;
+        };
+        assert_eq!(
+            rebind.initial.ok(),
+            Some(rebind.eof),
+            "unknown is not same-turn"
+        );
+        let needles = ["cause=turn_identity_unknown", "BACKLOG_BODY_6159"];
+        assert_one_fence_forward(&rebind.events, channel_id, &needles);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rebind_keeps_the_row_offsets_when_the_unread_range_is_not_in_custody() {
+        let channel_id = 6_159_007_u64;
+        let knobs = [Knob::Lease("turn-b")];
+        let Some(rebind) = rebind_tui_direct_row(channel_id, "nocustody", &knobs) else {
+            return;
+        };
+        assert_cursor_kept(rebind, channel_id);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rebind_never_rebases_an_unstamped_tui_direct_row_to_eof_without_a_record() {
+        let channel_id = 6_159_005_u64;
+        let knobs = [Knob::Unstamped, Knob::Custody];
+        let Some(rebind) = rebind_tui_direct_row(channel_id, "unstamped", &knobs) else {
+            return;
+        };
+        assert_eq!(rebind.initial.ok(), Some(rebind.eof));
+        let needles = ["cause=coordinate_space_mismatch"];
+        assert_one_fence_forward(&rebind.events, channel_id, &needles);
+    }
+
+    /// An operator `output_path` override rebases to EOF too, so it passes the same custody gate.
+    #[cfg(unix)]
+    #[test]
+    fn rebind_with_an_output_path_override_keeps_the_row_offsets_without_custody() {
+        let channel_id = 6_159_011_u64;
+        let knobs = [Knob::Lease("turn-a"), Knob::Operator];
+        let Some(rebind) = rebind_tui_direct_row(channel_id, "opnocustody", &knobs) else {
+            return;
+        };
+        assert_cursor_kept(rebind, channel_id);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rebind_with_an_output_path_override_rebases_to_eof_only_after_custody() {
+        let channel_id = 6_159_012_u64;
+        let knobs = [Knob::Lease("turn-a"), Knob::Operator, Knob::Custody];
+        let Some(rebind) = rebind_tui_direct_row(channel_id, "opcustody", &knobs) else {
+            return;
+        };
+        let eof = rebind.eof;
+        assert_eq!(rebind.initial.ok(), Some(eof));
+        let row = rebind.row.expect("adopted row");
+        assert_eq!((row.turn_start_offset, row.last_offset), (Some(eof), eof));
+        let needles = ["cause=operator_override", "BACKLOG_BODY_6159"];
+        assert_one_fence_forward(&rebind.events, channel_id, &needles);
+    }
+
+    /// Bytes a live turn appends after the rebind's stat are kept, so the fence lands past them
+    /// too: the watcher and the row skip exactly what custody kept, not the stale stat.
+    #[cfg(unix)]
+    #[test]
+    fn rebind_fences_at_the_end_of_the_kept_range_when_the_transcript_grows() {
+        let channel_id = 6_159_013_u64;
+        let knobs = [
+            Knob::Lease("turn-b"),
+            Knob::Custody,
+            Knob::Grow("\nGROWN_6159"),
+        ];
+        let Some(rebind) = rebind_tui_direct_row(channel_id, "grown", &knobs) else {
+            return;
+        };
+        let kept_end = rebind.eof + "\nGROWN_6159".len() as u64;
+        assert_eq!(rebind.initial.ok(), Some(kept_end));
+        let row = rebind.row.expect("adopted row");
+        let cursor = (row.turn_start_offset, row.last_offset);
+        assert_eq!(cursor, (Some(kept_end), kept_end));
+        let needles = ["GROWN_6159", &format!("old_eof={kept_end}")];
+        assert_one_fence_forward(&rebind.events, channel_id, &needles);
     }
 }
