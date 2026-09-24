@@ -320,8 +320,8 @@ async fn reregister_active_turn_from_inflight_inner(
 
     #[cfg(test)]
     mint_window::pause(state.channel_id).await;
-    // Only the mailbox's own record of releasing this exact episode refuses the
-    // mint; a row it never released here (e.g. a prior process's) stays open.
+    // After an exact release in this process, only the episode the mailbox
+    // started since then may be re-minted; before any, every row stays open.
     let claim = super::queue_io::mailbox_try_start_turn_unless_released(
         shared,
         channel_id,
@@ -335,7 +335,7 @@ async fn reregister_active_turn_from_inflight_inner(
             provider = %provider.as_str(),
             channel_id = state.channel_id,
             finalizer_turn_id,
-            "inflight reregister refused to mint: this mailbox already released this exact episode"
+            "inflight reregister refused to mint: this episode did not start after the mailbox's last exact release"
         );
     }
     let started = claim.started;
@@ -990,8 +990,8 @@ mod mint_window {
     }
 }
 
-/// Re-registering an episode whose token this mailbox already released would
-/// re-open a finished turn; any other empty-mailbox row is recovery's to mint.
+/// Re-registering an episode that did not start after the mailbox's last exact
+/// release would re-open a finished turn; the episode started since is recovery's.
 #[cfg(test)]
 mod released_episode_mint_fence_tests {
     use super::inflight::InflightTurnState;
@@ -1021,6 +1021,33 @@ mod released_episode_mint_fence_tests {
         );
         state.born_generation = RUNNING_GENERATION;
         state
+    }
+
+    /// The `index`-th distinct episode of `channel_id`.
+    fn episode(channel_id: u64, index: u64) -> InflightTurnState {
+        let mut state = row(channel_id);
+        state.user_msg_id += 2 * index;
+        state.turn_nonce = Some(format!("episode-{index}"));
+        state
+    }
+
+    /// Starts `state`'s episode the way a new user turn claims the mailbox.
+    async fn start_live(
+        shared: &std::sync::Arc<crate::services::discord::SharedData>,
+        state: &InflightTurnState,
+    ) -> bool {
+        shared
+            .mailbox(ChannelId::new(state.channel_id))
+            .try_start_turn(
+                std::sync::Arc::new(
+                    crate::services::provider::CancelToken::from_persisted_turn_nonce(
+                        state.turn_nonce.clone(),
+                    ),
+                ),
+                serenity::model::id::UserId::new(state.request_owner_user_id),
+                MessageId::new(state.effective_finalizer_turn_id()),
+            )
+            .await
     }
 
     /// Runs `body` against a fresh runtime whose epoch is `RUNNING_GENERATION`
@@ -1141,10 +1168,10 @@ mod released_episode_mint_fence_tests {
         let mut second = row(524_206);
         second.user_msg_id += 2;
         let (restored, token_present) = with_running_process(async |shared| {
-            for episode in [&first, &second] {
-                assert!(super::reregister_active_turn_from_inflight(shared, episode).await);
-                assert!(finalizer_release(shared, episode).await);
-            }
+            assert!(super::reregister_active_turn_from_inflight(shared, &first).await);
+            assert!(finalizer_release(shared, &first).await);
+            assert!(start_live(shared, &second).await);
+            assert!(finalizer_release(shared, &second).await);
             let restored = super::reregister_active_turn_from_inflight(shared, &first).await;
             (restored, token_present(shared, &first).await)
         });
@@ -1177,6 +1204,145 @@ mod released_episode_mint_fence_tests {
         assert!(
             !restored && !token_present,
             "the witness must be checked in the same mailbox step that mints"
+        );
+    }
+
+    /// However many episodes finish after A, a reregister that read A's row
+    /// before A's release must still be refused when it finally mints.
+    #[test]
+    fn a_stale_reregister_stays_fenced_after_many_later_releases() {
+        const LATER_RELEASES: u64 = 100;
+        let stale = episode(524_208, 0);
+        let (restored, token_present) = with_running_process(async |shared| {
+            let (reached, resume) = super::mint_window::arm(stale.channel_id);
+            let parked = super::reregister_active_turn_from_inflight(shared, &stale);
+            let later = async {
+                tokio::time::timeout(std::time::Duration::from_secs(10), reached)
+                    .await
+                    .expect("the stale reregister reached its mint")
+                    .expect("the mint window stayed armed");
+                assert!(super::reregister_active_turn_from_inflight(shared, &stale).await);
+                assert!(finalizer_release(shared, &stale).await);
+                for index in 1..=LATER_RELEASES {
+                    let later = episode(stale.channel_id, index);
+                    assert!(start_live(shared, &later).await);
+                    assert!(finalizer_release(shared, &later).await);
+                }
+                let _ = resume.send(());
+            };
+            let (restored, ()) = tokio::join!(parked, later);
+            (restored, token_present(shared, &stale).await)
+        });
+        assert!(
+            !restored && !token_present,
+            "later releases must not wear away the proof that A already ended"
+        );
+    }
+
+    /// An episode started after the last release is still live when it loses
+    /// its token without a release, so recovery must re-mint it.
+    #[test]
+    fn a_live_episode_started_after_the_releases_still_reattaches() {
+        let live = episode(524_209, 101);
+        let (restored, token_present) = with_running_process(async |shared| {
+            for index in 0..100 {
+                let earlier = episode(live.channel_id, index);
+                assert!(start_live(shared, &earlier).await);
+                assert!(finalizer_release(shared, &earlier).await);
+            }
+            assert!(start_live(shared, &live).await);
+            let taken = crate::services::discord::mailbox_finish_turn_if_matches(
+                shared,
+                &ProviderKind::Claude,
+                ChannelId::new(live.channel_id),
+                MessageId::new(live.effective_finalizer_turn_id()),
+            )
+            .await;
+            assert!(taken.removed_token.is_some());
+            let restored = super::reregister_active_turn_from_inflight(shared, &live).await;
+            (restored, token_present(shared, &live).await)
+        });
+        assert!(
+            restored && token_present,
+            "only episodes that started before the last release are fenced"
+        );
+    }
+
+    /// A recovery kickoff or restore also starts an episode, so it stays
+    /// re-attachable after an earlier release when it later loses its token.
+    #[test]
+    fn a_recovery_installed_episode_after_a_release_still_reattaches() {
+        for (index, kickoff) in [(1, true), (2, false)] {
+            let earlier = episode(524_211, 0);
+            let installed = episode(earlier.channel_id, index);
+            let (restored, token_present) = with_running_process(async |shared| {
+                assert!(start_live(shared, &earlier).await);
+                assert!(finalizer_release(shared, &earlier).await);
+                let mailbox = shared.mailbox(ChannelId::new(installed.channel_id));
+                let token = std::sync::Arc::new(
+                    crate::services::provider::CancelToken::from_persisted_turn_nonce(
+                        installed.turn_nonce.clone(),
+                    ),
+                );
+                let owner = serenity::model::id::UserId::new(installed.request_owner_user_id);
+                let message = MessageId::new(installed.effective_finalizer_turn_id());
+                if kickoff {
+                    assert!(
+                        mailbox
+                            .recovery_kickoff(token, owner, Some(message))
+                            .await
+                            .activated_turn
+                    );
+                } else {
+                    mailbox.restore_active_turn(token, owner, message).await;
+                }
+                let taken = crate::services::discord::mailbox_finish_turn_if_matches(
+                    shared,
+                    &ProviderKind::Claude,
+                    ChannelId::new(installed.channel_id),
+                    message,
+                )
+                .await;
+                assert!(taken.removed_token.is_some());
+                let restored =
+                    super::reregister_active_turn_from_inflight(shared, &installed).await;
+                (restored, token_present(shared, &installed).await)
+            });
+            assert!(
+                restored && token_present,
+                "an episode installed by recovery (kickoff={kickoff}) after the release is still live"
+            );
+        }
+    }
+
+    /// The restored watcher's own completion release must raise the fence, not
+    /// fall back to a message-id-only finish that proves no episode ended.
+    #[test]
+    fn a_restored_watcher_completion_fences_the_remint() {
+        let state = row(524_210);
+        let (released, restored, token_present) = with_running_process(async |shared| {
+            assert!(super::reregister_active_turn_from_inflight(shared, &state).await);
+            let key = crate::services::discord::tmux::tmux_watcher::watcher_completion_key(
+                shared,
+                ChannelId::new(state.channel_id),
+                Some(&state),
+                state.tmux_session_name.as_deref().expect("tmux session"),
+                state.last_offset + 1,
+            );
+            assert!(key.is_some_and(|key| key.episode.is_some()));
+            let released = crate::services::discord::tmux::tmux_watcher::release_restored_watcher_active_turn_before_panel_edit(
+                shared,
+                &ProviderKind::Claude,
+                key,
+            )
+            .await;
+            let restored = super::reregister_active_turn_from_inflight(shared, &state).await;
+            (released, restored, token_present(shared, &state).await)
+        });
+        assert!(released, "the watcher completion released the token");
+        assert!(
+            !restored && !token_present,
+            "a footer-completed restored episode must not re-occupy the mailbox"
         );
     }
 
@@ -1222,7 +1388,19 @@ mod released_episode_mint_fence_tests {
         let mut successor = released.clone();
         successor.turn_nonce = Some("successor-episode".to_string());
         let (restored, token_present) = with_running_process(async |shared| {
-            reregister_after_release(shared, &released, &successor).await
+            assert!(super::reregister_active_turn_from_inflight(shared, &released).await);
+            assert!(finalizer_release(shared, &released).await);
+            assert!(start_live(shared, &successor).await);
+            let taken = crate::services::discord::mailbox_finish_turn_if_matches(
+                shared,
+                &ProviderKind::Claude,
+                ChannelId::new(successor.channel_id),
+                MessageId::new(successor.effective_finalizer_turn_id()),
+            )
+            .await;
+            assert!(taken.removed_token.is_some());
+            let restored = super::reregister_active_turn_from_inflight(shared, &successor).await;
+            (restored, token_present(shared, &successor).await)
         });
         assert!(
             restored && token_present,

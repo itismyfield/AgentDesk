@@ -49,8 +49,9 @@ impl ChannelMailboxHandle {
         .map(|committed| *committed)
     }
 
-    /// Recovery re-mint: the actor refuses an already-released episode in the
-    /// same step as the claim, so no release can land between check and mint.
+    /// Recovery re-mint: the actor refuses an episode that did not start after
+    /// its last exact release in the same step as the claim, so no release can
+    /// land between check and mint.
     pub(crate) async fn try_start_turn_unless_released(
         &self,
         cancel_token: Arc<CancelToken>,

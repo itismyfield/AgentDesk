@@ -179,6 +179,10 @@ pub(in crate::services::discord) use self::completion_gate::{
     TuiCompletionGateOutcome, run_tui_completion_gate,
 };
 use self::completion_producer::*;
+#[cfg(test)]
+pub(in crate::services::discord) use self::completion_producer::{
+    release_restored_watcher_active_turn_before_panel_edit, watcher_completion_key,
+};
 use self::jsonl_rotation::*;
 use self::loop_poll_prologue::*;
 use self::no_result_exits::*;

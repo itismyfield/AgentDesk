@@ -51,6 +51,22 @@ impl Fixture {
         );
     }
 
+    /// A next input claims the released mailbox as a new turn, not a recovery.
+    async fn next_input_claims(&self, next: &inflight::InflightTurnState) -> bool {
+        self.shared
+            .mailbox(ChannelId::new(next.channel_id))
+            .try_start_turn(
+                Arc::new(
+                    crate::services::provider::CancelToken::from_persisted_turn_nonce(
+                        next.turn_nonce.clone(),
+                    ),
+                ),
+                serenity::model::id::UserId::new(next.request_owner_user_id),
+                serenity::model::id::MessageId::new(next.effective_finalizer_turn_id()),
+            )
+            .await
+    }
+
     async fn settle<F, Fut>(&self, state: &inflight::InflightTurnState, relay: F) -> bool
     where
         F: FnOnce(String) -> Fut,
@@ -121,7 +137,7 @@ async fn partial_eof_delivers_only_unposted_response_and_releases_for_next_input
         let mut next = state;
         next.user_msg_id += 10;
         next.turn_nonce = Some("next-input".to_string());
-        assert!(super::super::reregister_active_turn_from_inflight(&fixture.shared, &next).await);
+        assert!(fixture.next_input_claims(&next).await);
     }
 }
 
@@ -602,7 +618,7 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
         let mut next = fixture.state.clone();
         next.user_msg_id += 10;
         next.turn_nonce = Some("next-prefix-input".into());
-        assert!(super::super::reregister_active_turn_from_inflight(&fixture.shared, &next).await);
+        assert!(fixture.next_input_claims(&next).await);
     }
 }
 
@@ -1471,9 +1487,7 @@ async fn ready_eof_exact_fallback_receipt_skips_retransport_before_terminal_mirr
             let mut next = state;
             next.user_msg_id += 10;
             next.turn_nonce = Some("next-input".into());
-            assert!(
-                super::super::reregister_active_turn_from_inflight(&fixture.shared, &next).await
-            );
+            assert!(fixture.next_input_claims(&next).await);
         }
     }
 }

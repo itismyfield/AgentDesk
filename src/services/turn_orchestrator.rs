@@ -25,7 +25,7 @@ mod overflow;
 mod pending_queue_persistence;
 mod queue_cancellation;
 pub(crate) mod registry_purge;
-mod released_episodes;
+mod remint_fence;
 mod source_generation;
 mod turn_finished_signal;
 use active_source_dedup::{
@@ -461,7 +461,7 @@ pub(crate) struct RecoveryKickoffResult {
 #[derive(Default)]
 pub(crate) struct TryStartTurnResult {
     pub(crate) started: bool,
-    /// The claim named an episode this mailbox already released.
+    /// The recovery fence refused the claim's episode as already ended.
     pub(crate) refused_released_episode: bool,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
     pub(crate) persistence_error: Option<String>,
@@ -1489,7 +1489,7 @@ enum ChannelMailboxMsg {
         turn_kind: ActiveTurnKind,
         /// #5937 — whether this claim may overtake queued inbound work.
         admission_order: TurnAdmissionOrder,
-        /// Refuse, in this same step, an episode `released_episodes` holds.
+        /// Refuse, in this same step, an episode `remint_fence` refuses.
         refuse_released_episode: bool,
         persistence: Option<QueuePersistenceContext>,
         reply: oneshot::Sender<TryStartTurnResult>,
@@ -1749,8 +1749,8 @@ struct ChannelMailboxState {
     /// Monotonic companion to `turn_started_at`, for in-process race guards
     /// that must distinguish a stale active claim from a fresh same-id claim.
     turn_started_instant: Option<Instant>,
-    /// Exact-episode releases a recovery re-mint must not re-open.
-    released_episodes: released_episodes::ReleasedEpisodes,
+    /// Which persisted episode a recovery re-mint may still re-open.
+    remint_fence: remint_fence::RemintFence,
 }
 
 fn persist_queue(
@@ -2086,8 +2086,8 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     // claim that cannot start must disturb neither gate.
                     let refused_released_episode = refuse_released_episode
                         && state
-                            .released_episodes
-                            .contains(user_message_id, cancel_token.turn_nonce());
+                            .remint_fence
+                            .refuses(user_message_id, cancel_token.turn_nonce());
                     let idle = state.cancel_token.is_none() && !refused_released_episode;
                     let yields = idle
                         && claim_yields(&mut state, turn_kind, user_message_id, admission_order);
@@ -2121,6 +2121,9 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         } else {
                             reset_turn_finished_signal(channel_id);
                             state.active_turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
+                            state
+                                .remint_fence
+                                .note_started(Some(user_message_id), cancel_token.turn_nonce());
                             state.cancel_token = Some(cancel_token);
                             state.active_request_owner = Some(request_owner);
                             state.active_user_message_id = Some(user_message_id);
@@ -2157,6 +2160,9 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     reset_turn_finished_signal(channel_id);
                     let was_idle = state.cancel_token.is_none();
                     state.active_turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
+                    state
+                        .remint_fence
+                        .note_started(Some(user_message_id), cancel_token.turn_nonce());
                     state.cancel_token = Some(cancel_token);
                     state.active_request_owner = Some(request_owner);
                     state.active_user_message_id = Some(user_message_id);
@@ -2179,6 +2185,9 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     reset_turn_finished_signal(channel_id);
                     let activated_turn = state.cancel_token.is_none();
                     state.active_turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
+                    state
+                        .remint_fence
+                        .note_started(user_message_id, cancel_token.turn_nonce());
                     state.cancel_token = Some(cancel_token);
                     state.active_request_owner = Some(request_owner);
                     state.active_user_message_id = user_message_id;
@@ -2592,8 +2601,8 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             && let Some(nonce) = turn_nonce_guard.named_nonce()
                         {
                             state
-                                .released_episodes
-                                .record(expected_user_message_id, nonce);
+                                .remint_fence
+                                .note_exact_release(expected_user_message_id, nonce);
                         }
                         let _ = reply.send(finished);
                         if !preserve_queue && let Some(user_message_id) = finished_user_message_id {

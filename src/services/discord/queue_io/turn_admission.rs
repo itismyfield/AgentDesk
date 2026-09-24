@@ -45,7 +45,8 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_behind_queue(
 }
 
 /// Recovery re-mint of a persisted episode: refused by the mailbox actor, in
-/// the same step as the claim, when that exact episode was already released.
+/// the same step as the claim, when that episode did not start after the last
+/// exact release.
 pub(in crate::services::discord) async fn mailbox_try_start_turn_unless_released(
     shared: &SharedData,
     channel_id: ChannelId,
@@ -68,7 +69,7 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_unless_released
 #[derive(Clone, Copy, Debug)]
 enum AdmissionClaim {
     Kinded(ActiveTurnKind, TurnAdmissionOrder),
-    /// An immediate user claim the actor refuses for an already-released episode.
+    /// An immediate user claim the actor's recovery fence may refuse.
     UnlessReleased,
 }
 
