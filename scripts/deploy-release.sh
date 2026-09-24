@@ -41,7 +41,7 @@ fi
 #   AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1  allow deploying a HEAD that is not
 #                                      exactly origin/main.
 #   AGENTDESK_DEPLOY_ALLOW_DIRTY=1     allow deploying with local changes.
-#   AGENTDESK_DEPLOY_TARGET_SHA=<sha>  deploy this origin/main ancestor, not the tip (#6200).
+#   AGENTDESK_DEPLOY_TARGET_SHA=<sha>  deploy this CI-Main-green origin/main ancestor, not the tip (#6200).
 #   AGENTDESK_DEPLOY_SKIP_FRESHNESS=1  skip both source-identity and remote
 #                                      freshness gates for an intentional
 #                                      offline/emergency deploy. In this mode,
@@ -168,7 +168,7 @@ DEPLOY_PEERS_OVERRIDE=()
 DEPLOY_PEERS_FILE="${AGENTDESK_DEPLOY_PEERS_FILE:-$ADK_REL/config/deploy-peers.txt}"
 DEPLOY_PEER_INVOCATION="${AGENTDESK_DEPLOY_PEER_INVOCATION:-0}"
 DEPLOY_FAST="${AGENTDESK_DEPLOY_FAST:-0}"
-# #6200: an optional CI-green commit to deploy in place of the origin/main tip.
+# Optional CI-green commit to deploy in place of the origin/main tip.
 # Empty keeps every gate on its origin/main path; a malformed value is refused up front.
 DEPLOY_TARGET_SHA="${AGENTDESK_DEPLOY_TARGET_SHA:-}"
 if [ -n "$DEPLOY_TARGET_SHA" ] && ! [[ "$DEPLOY_TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
@@ -655,7 +655,7 @@ _clean_release_build_cache_after_staging() {
 }
 
 _verify_deploy_target_sha() {
-    # #6200: a pinned deploy target replaces the "HEAD is origin/main tip" rule with
+    # A pinned deploy target replaces the "HEAD is origin/main tip" rule with
     # "HEAD is the target AND the target is already on origin/main". Needs a fresh origin/main.
     local head_sha
     head_sha="$(git -C "$REPO" rev-parse HEAD)"
@@ -670,6 +670,21 @@ _verify_deploy_target_sha() {
         exit 1
     fi
     echo "▸ Deploy target pinned: ${DEPLOY_TARGET_SHA} (ancestor of origin/main)"
+}
+
+_verify_deploy_target_ci_green() {
+    # A pinned target exists to deploy a CI-green commit; refuse one without a successful CI Main run.
+    local conclusions
+    if ! conclusions="$(cd "$REPO" && gh run list --workflow ci-main.yml --commit "$DEPLOY_TARGET_SHA" \
+        --json conclusion --jq '.[].conclusion' 2>&1)"; then
+        echo "✗ Refusing release deploy: could not query CI Main for ${DEPLOY_TARGET_SHA}: ${conclusions}"
+        exit 1
+    fi
+    if ! grep -qx 'success' <<<"$conclusions"; then
+        echo "✗ Refusing release deploy: AGENTDESK_DEPLOY_TARGET_SHA (${DEPLOY_TARGET_SHA}) has no successful CI Main run (got: ${conclusions:-none})"
+        exit 1
+    fi
+    echo "▸ Deploy target CI Main: success"
 }
 
 _check_repo_remote_freshness() {
@@ -687,6 +702,8 @@ _check_repo_remote_freshness() {
             exit 1
         fi
         _verify_deploy_target_sha
+        # The leader vets CI once; peers only get a target the leader already accepted.
+        [ "$DEPLOY_PEER_INVOCATION" = "1" ] || _verify_deploy_target_ci_green
         return 0
     fi
 
@@ -1661,7 +1678,7 @@ _deploy_to_one_peer() {
         remote_cd_command='remote_root="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"; cd "${AGENTDESK_REPO_DIR:-$remote_root/workspaces/agentdesk}"'
     fi
     if [ -n "${DEPLOY_TARGET_SHA:-}" ]; then
-        # #6200: the peer must build the leader's pinned source, so a leader HEAD elsewhere is refused.
+        # The peer must build the leader's pinned source, so a leader HEAD elsewhere is refused.
         if [ "$expected_repo_head" != "$DEPLOY_TARGET_SHA" ]; then
             echo "✗ [peer:$peer] leader HEAD ($expected_repo_head) is not AGENTDESK_DEPLOY_TARGET_SHA ($DEPLOY_TARGET_SHA); refusing peer deploy"
             return 1

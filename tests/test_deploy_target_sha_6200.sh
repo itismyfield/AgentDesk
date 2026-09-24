@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regression test for #6200: AGENTDESK_DEPLOY_TARGET_SHA pins the deploy to a
-# CI-green commit that is already on origin/main but no longer its tip.
+# CI-Main-green commit that is already on origin/main but no longer its tip.
 #
 # Observed 2026-09-24: b28c9c36e6 was green, two later merges cancelled CI Main,
 # and the leader freshness gate plus the peer `ff-only origin/main` pre-sync made
@@ -8,6 +8,7 @@
 #   - malformed target values are refused before anything runs;
 #   - the local gates pass on HEAD == target ∧ target ⊑ origin/main, and refuse
 #     a non-ancestor target or a HEAD that is not the target;
+#   - the leader refuses a target without a successful CI Main run (gh stub);
 #   - the peer pre-sync fast-forwards only up to the target and refuses (never
 #     rewinds) a peer main that is already past it;
 #   - with no target set, the gates and the pre-sync command are unchanged.
@@ -50,7 +51,7 @@ extract_target_validation() {
     ' "$DEPLOY_SH"
 }
 
-for fn in _verify_deploy_target_sha _check_repo_source_identity \
+for fn in _verify_deploy_target_sha _verify_deploy_target_ci_green _check_repo_source_identity \
     _check_repo_remote_freshness _deploy_peer_env_prelude _deploy_to_one_peer; do
     body="$(extract_function "$fn")"
     if [ -z "$body" ]; then
@@ -101,6 +102,20 @@ git -C "$LEADER" checkout --quiet main
 REPO="$LEADER"
 # shellcheck disable=SC2034  # Read by the production functions loaded through eval.
 DEPLOY_SSH_CONNECT_TIMEOUT=1
+# shellcheck disable=SC2034  # Read by the production functions loaded through eval.
+DEPLOY_PEER_INVOCATION=0
+
+# gh stub: CI Main conclusions for the queried commit come from GH_STUB_CONCLUSIONS;
+# GH_STUB_FAIL=1 simulates an unreachable/unauthenticated gh. Calls are logged.
+GH_CALLS_FILE="$TMP_ROOT/gh-calls"
+GH_STUB_CONCLUSIONS="success"
+GH_STUB_FAIL=0
+# shellcheck disable=SC2329  # Invoked by the production function loaded through eval.
+gh() {
+    printf '%s\n' "$*" >>"$GH_CALLS_FILE"
+    [ "$GH_STUB_FAIL" != "1" ] || { echo "gh: not authenticated" >&2; return 1; }
+    [ -z "$GH_STUB_CONCLUSIONS" ] || printf '%s\n' "$GH_STUB_CONCLUSIONS"
+}
 
 leader_at() {
     git -C "$LEADER" checkout --quiet main
@@ -144,6 +159,33 @@ run_gate "source identity: HEAD == target, ancestor of origin/main" 0 "Deploy ta
 run_gate "remote freshness: HEAD == target behind origin/main" 0 "Deploy target pinned: $SHA_B" \
     _check_repo_remote_freshness
 
+grep -qF -- "--commit $SHA_B" "$GH_CALLS_FILE" \
+    || fail_test "the CI Main query must name the pinned target commit; got: $(cat "$GH_CALLS_FILE" 2>/dev/null)"
+
+# CI Main must have succeeded on the target; cancelled/failed/absent/unqueryable is refused.
+GH_STUB_CONCLUSIONS="$(printf 'cancelled\nsuccess')"
+run_gate "remote freshness: target with a successful re-run among cancelled ones" 0 "CI Main: success" \
+    _check_repo_remote_freshness
+for conclusions in "cancelled" "failure" "" "$(printf 'cancelled\nfailure')"; do
+    GH_STUB_CONCLUSIONS="$conclusions"
+    run_gate "remote freshness: target CI Main '${conclusions//$'\n'/,}' is not green" 1 "has no successful CI Main run" \
+        _check_repo_remote_freshness
+done
+GH_STUB_CONCLUSIONS="success"
+GH_STUB_FAIL=1
+run_gate "remote freshness: CI Main status cannot be queried" 1 "could not query CI Main" \
+    _check_repo_remote_freshness
+GH_STUB_FAIL=0
+GH_STUB_CONCLUSIONS="failure"
+rm -f "$GH_CALLS_FILE"
+DEPLOY_PEER_INVOCATION=1
+run_gate "remote freshness on a peer: the leader already vetted CI" 0 "Deploy target pinned: $SHA_B" \
+    _check_repo_remote_freshness
+# shellcheck disable=SC2034  # Read by the production functions loaded through eval.
+DEPLOY_PEER_INVOCATION=0
+[ ! -s "$GH_CALLS_FILE" ] || fail_test "a peer invocation must not re-query CI Main"
+GH_STUB_CONCLUSIONS="success"
+
 DEPLOY_TARGET_SHA="$SHA_A"
 run_gate "source identity: HEAD is not the target" 1 "does not match AGENTDESK_DEPLOY_TARGET_SHA" \
     _check_repo_source_identity
@@ -167,6 +209,10 @@ run_gate "default remote freshness: HEAD behind origin/main" 1 "is behind origin
 leader_at "$SHA_C"
 run_gate "default source identity: HEAD == origin/main" 0 "" _check_repo_source_identity
 run_gate "default remote freshness: HEAD == origin/main" 0 "" _check_repo_remote_freshness
+rm -f "$GH_CALLS_FILE"
+leader_at "$SHA_B"
+run_gate "default remote freshness never queries CI" 1 "" _check_repo_remote_freshness
+[ ! -s "$GH_CALLS_FILE" ] || fail_test "an unset target must not query CI Main"
 
 # --- 4. the target reaches peers ---------------------------------------------
 DEPLOY_PEER_ENV_CHECK="$(AGENTDESK_DEPLOY_TARGET_SHA="$SHA_B" _deploy_peer_env_prelude)"
