@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use poise::serenity_prelude as serenity;
 
+use super::api::{CatchUpFetchCursor, CatchUpFetchRequest};
 use super::{
     CATCH_UP_RETRY_DEFERRED_REARM_LIMIT, CatchUpClassification, CatchUpClassificationDecision,
     CatchUpDeps, CatchUpDiscordApi, CatchUpMessageView, CatchUpTooOldOutboxRequest, ChannelId,
@@ -788,7 +789,7 @@ impl CatchUpDiscordApi for TestCatchUpApi {
     async fn fetch_messages(
         &self,
         _channel_id: ChannelId,
-        _request: serenity::builder::GetMessages,
+        _request: CatchUpFetchRequest,
     ) -> Result<Vec<serenity::Message>, String> {
         let call = self.fetch_calls.fetch_add(1, Ordering::Relaxed);
         if let Some(fetches) = &self.scripted_fetches {
@@ -2759,3 +2760,6 @@ fn aged_unauthorized_human_classifies_not_allowed_across_identity_states() {
         CatchUpClassificationDecision::Determinate(CatchUpClassification::TooOld)
     );
 }
+
+#[path = "frontier_sweep_tests.rs"]
+mod frontier_sweep_tests;

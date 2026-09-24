@@ -109,113 +109,7 @@ impl CatchUpRetryState {
     }
 }
 
-#[async_trait::async_trait]
-trait CatchUpDiscordApi: Sync {
-    async fn current_user_id(&self) -> Result<Option<u64>, String>;
-
-    async fn resolve_runtime_channel_binding_status(
-        &self,
-        channel_id: ChannelId,
-    ) -> RuntimeChannelBindingStatus;
-
-    async fn fetch_messages(
-        &self,
-        channel_id: ChannelId,
-        request: serenity::builder::GetMessages,
-    ) -> Result<Vec<serenity::Message>, String>;
-
-    async fn cleanup_recovered_catch_up_hourglass(
-        &self,
-        shared: &Arc<SharedData>,
-        channel_id: ChannelId,
-        message_id: MessageId,
-    );
-
-    fn enqueue_too_old_notice(
-        &self,
-        pool: Option<sqlx::PgPool>,
-        request: CatchUpTooOldOutboxRequest,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        pool.map(|pool| too_old_notice::spawn_outbox(pool, request))
-    }
-
-    fn record_too_old_dead_letter(
-        &self,
-        pool: Option<&sqlx::PgPool>,
-        record: crate::db::relay_dead_letter::RelayDeadLetterRecord,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        crate::db::relay_dead_letter::record_detached(pool, record)
-    }
-
-    async fn utility_bot_user_ids(
-        &self,
-        shared: &SharedData,
-    ) -> (
-        health::UtilityBotUserIdResolution,
-        health::UtilityBotUserIdResolution,
-    ) {
-        let Some(registry) = shared.health_registry() else {
-            return (
-                health::UtilityBotUserIdResolution::Unconfigured,
-                health::UtilityBotUserIdResolution::Unconfigured,
-            );
-        };
-        (
-            registry
-                .utility_bot_user_id_resolution(super::bot_role::UtilityBotRole::Announce)
-                .await,
-            registry
-                .utility_bot_user_id_resolution(super::bot_role::UtilityBotRole::Notify)
-                .await,
-        )
-    }
-}
-
-struct SerenityCatchUpDiscordApi<'a> {
-    http: &'a Arc<serenity::Http>,
-}
-
-#[async_trait::async_trait]
-impl CatchUpDiscordApi for SerenityCatchUpDiscordApi<'_> {
-    async fn current_user_id(&self) -> Result<Option<u64>, String> {
-        self.http
-            .get_current_user()
-            .await
-            .map(|user| Some(user.id.get()))
-            .map_err(|err| err.to_string())
-    }
-
-    async fn resolve_runtime_channel_binding_status(
-        &self,
-        channel_id: ChannelId,
-    ) -> RuntimeChannelBindingStatus {
-        resolve_runtime_channel_binding_status(self.http, channel_id).await
-    }
-
-    async fn fetch_messages(
-        &self,
-        channel_id: ChannelId,
-        request: serenity::builder::GetMessages,
-    ) -> Result<Vec<serenity::Message>, String> {
-        channel_id
-            .messages(self.http, request)
-            .await
-            .map_err(|err| err.to_string())
-    }
-
-    async fn cleanup_recovered_catch_up_hourglass(
-        &self,
-        shared: &Arc<SharedData>,
-        channel_id: ChannelId,
-        message_id: MessageId,
-    ) {
-        reaction_cleanup::cleanup_recovered_catch_up_hourglass(
-            self.http, shared, channel_id, message_id,
-        )
-        .await;
-    }
-}
-
+mod api;
 mod classification;
 mod phase2;
 mod settled_ledger_consult;
@@ -225,6 +119,7 @@ mod too_old_notice;
 #[path = "catch_up/classification_order_tests.rs"]
 mod classification_order_tests;
 
+use api::{CatchUpDiscordApi, CatchUpFetchRequest, SerenityCatchUpDiscordApi};
 use classification::{
     CatchUpClassification, CatchUpClassificationDecision, CatchUpMessageView, CatchUpScanStats,
     classify_catch_up_message, classify_catch_up_message_with_utility_resolution,
@@ -1016,9 +911,9 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         // headroom for the realistic
         // bot:user ratio. Discord per-channel rate limit (5 req / 5 sec)
         // has plenty of margin for this 5x cost.
-        let mut request = serenity::builder::GetMessages::new().limit(CATCH_UP_FETCH_LIMIT);
+        let mut request = CatchUpFetchRequest::new(CATCH_UP_FETCH_LIMIT);
         if let CatchUpFetchMode::After(last_id) = fetch_mode {
-            request = request.after(MessageId::new(last_id));
+            request = request.after(last_id);
         }
         let mut messages = match api.fetch_messages(channel_id, request).await {
             Ok(msgs) => msgs,
@@ -1084,9 +979,8 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 if should_pace_before_scan(true) {
                     catch_up_scan_pace_gap().await;
                 }
-                let older_request = serenity::builder::GetMessages::new()
-                    .limit(CATCH_UP_FETCH_LIMIT)
-                    .before(oldest_id);
+                let older_request =
+                    CatchUpFetchRequest::new(CATCH_UP_FETCH_LIMIT).before(oldest_id.get());
                 match api.fetch_messages(channel_id, older_request).await {
                     Ok(mut older) if !older.is_empty() => {
                         // A non-advancing/overlapping REST page is not proof that
@@ -1294,7 +1188,8 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 &allowed_bot_ids,
                 announce_resolution,
             );
-            let enqueue = mailbox_enqueue_intervention(
+            let enqueue = A::enqueue_intervention(
+                api,
                 shared,
                 provider,
                 channel_id,
@@ -1495,7 +1390,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
 
         // Fetch last 20 messages (newest first — default Discord order)
         let recent = match api
-            .fetch_messages(channel_id, serenity::builder::GetMessages::new().limit(20))
+            .fetch_messages(channel_id, CatchUpFetchRequest::new(20))
             .await
         {
             Ok(msgs) => msgs,
@@ -1673,7 +1568,8 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 &allowed_bot_ids_phase2,
                 announce_resolution_phase2,
             );
-            let enqueue = mailbox_enqueue_intervention(
+            let enqueue = A::enqueue_intervention(
+                api,
                 shared,
                 provider,
                 channel_id,
@@ -1986,7 +1882,7 @@ mod catch_up_recovery_tests {
         async fn fetch_messages(
             &self,
             _channel_id: ChannelId,
-            _request: serenity::builder::GetMessages,
+            _request: super::CatchUpFetchRequest,
         ) -> Result<Vec<serenity::Message>, String> {
             let fetch_attempt = self
                 .fetch_attempts

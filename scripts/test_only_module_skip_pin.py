@@ -81,6 +81,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/cluster/stream_relay/tests/shutdown_tests.rs",
         "src/services/discord/abandon_request_store/probe_contract_tests.rs",
         "src/services/discord/catch_up/classification_order_tests.rs",
+        "src/services/discord/catch_up/frontier_sweep_tests.rs",
         "src/services/discord/commands/inspect/tests.rs",
         "src/services/discord/delivery_lease_cell/exact_lease/tests.rs",
         "src/services/discord/formatting/replace_long_message_tests.rs",
