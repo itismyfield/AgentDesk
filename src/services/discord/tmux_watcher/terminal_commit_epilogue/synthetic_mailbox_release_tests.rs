@@ -50,7 +50,7 @@ async fn claim(
     lease.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
     let lease =
         crate::services::tui_prompt_dedupe::record_external_input_turn_lease("claude", tmux, lease);
-    crate::services::discord::tui_prompt_relay::claim_tui_direct_synthetic_turn_for_tests(
+    crate::services::discord::tui_prompt_relay::synthetic_start::claim::claim_tui_direct_synthetic_turn_for_tests(
         shared,
         &ProviderKind::Claude,
         channel,
