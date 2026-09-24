@@ -2791,7 +2791,7 @@ services::discord::health::reachability::composite::composite_tests::a_rowless_t
 services::discord::health::reachability::composite::composite_tests::a_rowless_turn_inside_its_grace_takes_the_ladder_a_row_backed_turn_takes
 services::discord::health::reachability::composite::composite_tests::a_rowless_turn_whose_own_prose_ages_past_fail_bound_reads_unreachable
 services::discord::health::reachability::composite::composite_tests::a_stale_high_frontier_does_not_retire_an_obligation_past_the_transcript_eof
-services::discord::health::reachability::composite::composite_tests::a_stuck_rowless_turn_keeps_its_reason_over_an_equal_rank_transport_trace
+services::discord::health::reachability::composite::composite_tests::a_stuck_rowless_turn_keeps_the_manual_redelivery_ban_of_an_equal_rank_transport_trace
 services::discord::health::reachability::composite::composite_tests::a_truncated_read_outranks_the_ttl_gate_even_when_every_expiry_conjunct_holds
 services::discord::health::reachability::composite::composite_tests::an_abandoned_ledger_past_its_ttl_expires_out_of_the_health_judgment
 services::discord::health::reachability::composite::composite_tests::an_external_override_keeps_the_in_band_redelivery_ban

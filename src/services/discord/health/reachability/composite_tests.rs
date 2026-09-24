@@ -2081,10 +2081,10 @@ fn a_rowless_turn_whose_own_prose_ages_past_fail_bound_reads_unreachable() {
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
-/// Only a STRICTLY stronger ladder verdict displaces a stuck rowless turn: a
-/// transport trace shares its rank, so the turn keeps naming itself.
+/// A transport trace shares a stuck rowless turn's rank but carries the manual
+/// redelivery ban, so it keeps the verdict and the detail surface keeps the ban.
 #[test]
-fn a_stuck_rowless_turn_keeps_its_reason_over_an_equal_rank_transport_trace() {
+fn a_stuck_rowless_turn_keeps_the_manual_redelivery_ban_of_an_equal_rank_transport_trace() {
     let past_fail = |rowless_turn| {
         Case {
             ledger: Some(ledger_with(
@@ -2097,14 +2097,25 @@ fn a_stuck_rowless_turn_keeps_its_reason_over_an_equal_rank_transport_trace() {
         }
         .classify()
     };
-    assert!(matches!(
-        past_fail(RowlessTurn::WithinGrace),
-        ReachabilityVerdict::TransportUnknown { .. }
-    ));
-    assert!(matches!(
-        past_fail(RowlessTurn::OutlivedGrace).unknown_reason(),
-        Some(ReachabilityUnknownReason::RowlessActiveTurn { .. })
-    ));
+    for rowless_turn in [RowlessTurn::WithinGrace, RowlessTurn::OutlivedGrace] {
+        let verdict = past_fail(rowless_turn);
+        assert!(
+            verdict.requires_manual_redelivery_ban_notice(),
+            "{rowless_turn:?}: the manual redelivery ban must survive, got {verdict:?}"
+        );
+        assert!(
+            matches!(verdict, ReachabilityVerdict::TransportUnknown { .. }),
+            "{rowless_turn:?}: expected TransportUnknown, got {verdict:?}"
+        );
+        let report = RelayVerdictReport::of(
+            &compose_relay_verdict(verdict, ExternalRelayVerdict::Unknown),
+            true,
+        );
+        assert!(
+            report.manual_redelivery_banned,
+            "{rowless_turn:?}: /api/health/detail must keep manual_redelivery_banned"
+        );
+    }
 }
 
 /// Inside the row-acquisition grace a rowless turn is the normal turn-boundary

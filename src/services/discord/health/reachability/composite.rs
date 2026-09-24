@@ -643,7 +643,11 @@ pub(in crate::services::discord) fn classify_reachability(
     );
     // A stuck turn's own prose can age past `fail_bound` only after the turn
     // outlived the grace, so a strictly stronger ladder verdict must win here.
-    if in_band_rank(&ladder) > in_band_rank(&rowless) {
+    // An equal-rank verdict carrying the manual redelivery ban also wins, so the
+    // rowless reason never strips the duplicate-send warning.
+    if in_band_rank(&ladder) > in_band_rank(&rowless)
+        || ladder.requires_manual_redelivery_ban_notice()
+    {
         ladder
     } else {
         rowless
