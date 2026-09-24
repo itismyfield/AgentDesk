@@ -41,6 +41,7 @@ fi
 #   AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1  allow deploying a HEAD that is not
 #                                      exactly origin/main.
 #   AGENTDESK_DEPLOY_ALLOW_DIRTY=1     allow deploying with local changes.
+#   AGENTDESK_DEPLOY_TARGET_SHA=<sha>  deploy this CI-Main-green origin/main ancestor, not the tip.
 #   AGENTDESK_DEPLOY_SKIP_FRESHNESS=1  skip both source-identity and remote
 #                                      freshness gates for an intentional
 #                                      offline/emergency deploy. In this mode,
@@ -167,6 +168,16 @@ DEPLOY_PEERS_OVERRIDE=()
 DEPLOY_PEERS_FILE="${AGENTDESK_DEPLOY_PEERS_FILE:-$ADK_REL/config/deploy-peers.txt}"
 DEPLOY_PEER_INVOCATION="${AGENTDESK_DEPLOY_PEER_INVOCATION:-0}"
 DEPLOY_FAST="${AGENTDESK_DEPLOY_FAST:-0}"
+# Optional CI-green commit to deploy instead of the origin/main tip. A prebuilt
+# binary is refused with it because nothing ties that binary to the target commit.
+DEPLOY_TARGET_SHA="${AGENTDESK_DEPLOY_TARGET_SHA:-}"
+if [ -n "$DEPLOY_TARGET_SHA" ] && ! [[ "$DEPLOY_TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "✗ AGENTDESK_DEPLOY_TARGET_SHA must be a full 40-character lowercase hex commit SHA; got '${DEPLOY_TARGET_SHA}'"
+    exit 2
+elif [ -n "$DEPLOY_TARGET_SHA" ] && [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
+    echo "✗ AGENTDESK_DEPLOY_TARGET_SHA cannot be combined with AGENTDESK_DEPLOY_BINARY; build the target from source"
+    exit 2
+fi
 # #4348 Defect 3: bound the peer SSH connection phase so an unreachable mDNS
 # alias (e.g. mac-book.local not resolving) fails fast instead of hanging the
 # whole cluster deploy. Only the connect is bounded; a reachable peer's long
@@ -646,11 +657,57 @@ _clean_release_build_cache_after_staging() {
     fi
 }
 
+_verify_deploy_target_sha() {
+    # Pinned deploys require HEAD == target and target on origin/main instead of HEAD == tip.
+    local head_sha
+    head_sha="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
+    if [ "$head_sha" != "$DEPLOY_TARGET_SHA" ]; then
+        echo "✗ Refusing release deploy: HEAD (${head_sha}) does not match AGENTDESK_DEPLOY_TARGET_SHA (${DEPLOY_TARGET_SHA})"
+        echo "  Check out the target commit first (for example: git reset --hard ${DEPLOY_TARGET_SHA} on main)."
+        exit 1
+    fi
+    if ! git -C "$REPO" merge-base --is-ancestor "$DEPLOY_TARGET_SHA" origin/main 2>/dev/null; then
+        echo "✗ Refusing release deploy: AGENTDESK_DEPLOY_TARGET_SHA (${DEPLOY_TARGET_SHA}) is not an ancestor of origin/main"
+        echo "  Only commits already merged to origin/main may be deployed as a pinned target."
+        exit 1
+    fi
+    echo "▸ Deploy target pinned: ${DEPLOY_TARGET_SHA} (ancestor of origin/main)"
+}
+
+_verify_deploy_target_ci_green() {
+    # Refuse a pinned target without a successful CI Main run; the status filter avoids the run-list page cap.
+    local conclusions
+    if ! conclusions="$(cd "$REPO" && gh run list --workflow ci-main.yml --commit "$DEPLOY_TARGET_SHA" \
+        --status success --limit 1 --json conclusion --jq '.[].conclusion' 2>&1)"; then
+        echo "✗ Refusing release deploy: could not query CI Main for ${DEPLOY_TARGET_SHA}: ${conclusions}"
+        exit 1
+    fi
+    if ! grep -qx 'success' <<<"$conclusions"; then
+        echo "✗ Refusing release deploy: AGENTDESK_DEPLOY_TARGET_SHA (${DEPLOY_TARGET_SHA}) has no successful CI Main run (got: ${conclusions:-none})"
+        exit 1
+    fi
+    echo "▸ Deploy target CI Main: success"
+}
+
 _check_repo_remote_freshness() {
     [ "${AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS:-0}" != "1" ] || return 0
     [ "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}" != "1" ] || return 0
     [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] || return 0
     git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+
+    if [ -n "${DEPLOY_TARGET_SHA:-}" ]; then
+        # A pinned target is behind origin/main by design; judge it by ancestry, not by lag.
+        echo "▸ Checking git freshness against origin/main (pinned target)..."
+        if ! git -C "$REPO" fetch --quiet origin main; then
+            echo "✗ Could not refresh origin/main; refusing release deploy from unverifiable source"
+            echo "  Set AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS=1 only for an intentional offline deploy."
+            exit 1
+        fi
+        _verify_deploy_target_sha
+        # Peers only receive a target the leader already vetted, so only the leader queries CI.
+        [ "$DEPLOY_PEER_INVOCATION" = "1" ] || _verify_deploy_target_ci_green
+        return 0
+    fi
 
     local upstream_ref remote_name remote_branch head_sha upstream_sha behind_count
     upstream_ref="$(git -C "$REPO" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
@@ -681,6 +738,11 @@ _check_repo_remote_freshness() {
 }
 
 _check_repo_source_identity() {
+    if [ -n "${DEPLOY_TARGET_SHA:-}" ]; then
+        # The pin binds the built source under every escape hatch; only the CI query is skippable.
+        _verify_deploy_target_sha
+        [ "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}" != "1" ] || return 0
+    fi
     [ "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}" != "1" ] || return 0
     [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] || return 0
     git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
@@ -711,7 +773,8 @@ _check_repo_source_identity() {
 
     echo "▸ Build source: branch=${branch} head=${head_short} origin/main=${main_short:-unknown} dirty=${dirty_flag}"
 
-    if [ "${AGENTDESK_DEPLOY_ALLOW_NON_MAIN:-0}" != "1" ]; then
+    # A pinned target was verified on entry and replaces the branch/tip rule.
+    if [ -z "${DEPLOY_TARGET_SHA:-}" ] && [ "${AGENTDESK_DEPLOY_ALLOW_NON_MAIN:-0}" != "1" ]; then
         if [ "$branch" != "main" ]; then
             echo "✗ Refusing release deploy from non-main branch: ${branch}"
             echo "  Switch to main and fast-forward, or set AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1 for an intentional branch deploy."
@@ -1262,6 +1325,7 @@ _deploy_peer_env_prelude() {
         AGENTDESK_DEPLOY_SKIP_BUILD_CACHE_CLEANUP \
         AGENTDESK_DEPLOY_SKIP_FRESHNESS \
         AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS \
+        AGENTDESK_DEPLOY_TARGET_SHA \
         AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT \
         AGENTDESK_DEPLOY_MAX_LOADAVG \
         AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL \
@@ -1618,11 +1682,34 @@ _deploy_to_one_peer() {
     else
         remote_cd_command='remote_root="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"; cd "${AGENTDESK_REPO_DIR:-$remote_root/workspaces/agentdesk}"'
     fi
-    remote_presync_command="set -e
+    if [ -n "${DEPLOY_TARGET_SHA:-}" ]; then
+        # The peer must build the leader's pinned source, so a leader HEAD elsewhere is refused.
+        if [ "$expected_repo_head" != "$DEPLOY_TARGET_SHA" ]; then
+            echo "✗ [peer:$peer] leader HEAD ($expected_repo_head) is not AGENTDESK_DEPLOY_TARGET_SHA ($DEPLOY_TARGET_SHA); refusing peer deploy"
+            return 1
+        fi
+        # Fast-forward only up to the target; a peer main already past it is refused, never rewound.
+        remote_presync_command="set -e
+${remote_cd_command}
+target_sha=$(printf '%q' "$DEPLOY_TARGET_SHA")
+git fetch --quiet origin main
+git checkout --quiet main
+if ! git merge-base --is-ancestor \"\$target_sha\" origin/main; then
+    echo \"✗ deploy target \$target_sha is not an ancestor of origin/main on this peer\" >&2
+    exit 1
+fi
+if ! git merge-base --is-ancestor HEAD \"\$target_sha\"; then
+    echo \"✗ peer main (\$(git rev-parse HEAD)) is already ahead of or diverged from deploy target \$target_sha; refusing to rewind\" >&2
+    exit 1
+fi
+git merge --quiet --ff-only \"\$target_sha\""
+    else
+        remote_presync_command="set -e
 ${remote_cd_command}
 git fetch --quiet origin main
 git checkout --quiet main
 git merge --quiet --ff-only origin/main"
+    fi
     echo "▸ [peer:$peer] Pre-syncing repo (fast-forward only)..."
     if ! ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" "bash -lc $(printf '%q' "$remote_presync_command")"; then
         echo "✗ [peer:$peer] Pre-sync failed (diverged, fetch error, or unreachable within ${DEPLOY_SSH_CONNECT_TIMEOUT}s). Resolve on the peer and retry."
@@ -1799,6 +1886,7 @@ export AGENTDESK_DEPLOY_BINARY=$(printf '%q' "${AGENTDESK_DEPLOY_BINARY:-}")
 export AGENTDESK_DEPLOY_FAST=$(printf '%q' "${AGENTDESK_DEPLOY_FAST:-0}")
 export AGENTDESK_DEPLOY_SKIP_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}")
 export AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS:-0}")
+export AGENTDESK_DEPLOY_TARGET_SHA=$(printf '%q' "${AGENTDESK_DEPLOY_TARGET_SHA:-}")
 export AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT=$(printf '%q' "${AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT:-0}")
 export AGENTDESK_DEPLOY_MAX_LOADAVG=$(printf '%q' "${AGENTDESK_DEPLOY_MAX_LOADAVG:-}")
 export AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL=$(printf '%q' "${AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL:-}")
