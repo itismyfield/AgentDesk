@@ -988,8 +988,7 @@ targets = {
     "runs_on" => "ubuntu-latest",
     # Pin the accepted-turn regressions and removal of the retired timeout test.
     # All remaining commands and execution settings retain their reviewed values.
-    "job_sha256" => "bc9b37fe902f19c4d5100391da9c625ea69d32beadf415146798c5987af7d80b",
-    "require_debug_env" => false,
+    "job_sha256" => "200a2f71705d5e83b6160a85f31a1560a8453740661bbac313513c69d9ae61d7",
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [

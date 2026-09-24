@@ -1070,6 +1070,8 @@ jobs:
       PGUSER: postgres
       PGPASSWORD: postgres
       AGENTDESK_REQUIRE_PG: "1"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
 
@@ -1752,7 +1754,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=ab468365bb018e90a26ac73dc6b3cf8427d6e49dd33a7bc027f647c7690f955e
+          expected=8ddf10ee6751f444715e3f77adbe49d0718d68633bad2b41c68e1f834e6b415a
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -1910,7 +1912,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=ab468365bb018e90a26ac73dc6b3cf8427d6e49dd33a7bc027f647c7690f955e
+          expected=8ddf10ee6751f444715e3f77adbe49d0718d68633bad2b41c68e1f834e6b415a
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
