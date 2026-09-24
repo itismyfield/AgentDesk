@@ -2759,11 +2759,14 @@ test.describe("Dashboard smoke tests", () => {
     await page.route(/\/api\/cluster\/machine-resources\/history\?/, route => {
       const now = Date.now();
       const instance_id = new URL(route.request().url()).searchParams.get("instance_id");
-      return route.fulfill({ json: { instance_id, samples: [30_000, 20_000, 10_000].map((age, index) => ({
-        schema: 1, observed_at_ms: now - age, expires_at_ms: now - age + 30_000, sample_interval_ms: 5_000,
-        cpu: { model: "Example CPU", physical_cores: 8, logical_cores: 16, usage_percent: 20 + index * 10 },
-        memory: null, disks: [], gpus: [], network: { interface: "Ethernet", wired: true,
-          received_bytes_per_sec: 1_024 * (index + 1), transmitted_bytes_per_sec: 512 * (index + 1) },
+      return route.fulfill({ json: { instance_id, samples: Array.from({ length: 180 }, (_, index) => ({
+        schema: 1, observed_at_ms: now - (180 - index) * 5_000, expires_at_ms: now - (180 - index) * 5_000 + 30_000, sample_interval_ms: 5_000,
+        cpu: { model: "Example CPU", physical_cores: 8, logical_cores: 16, usage_percent: 35 + 20 * Math.sin(index / 8) },
+        memory: { total_bytes: 32 * 1024 ** 3, used_bytes: (16 + Math.sin(index / 20)) * 1024 ** 3, available_bytes: (16 - Math.sin(index / 20)) * 1024 ** 3 },
+        disks: [{ name: "Data", mount_point: instance_id === "runner-example" ? "C:\\" : "/", kind: "SSD", total_bytes: 1024 ** 4, used_bytes: 512 * 1024 ** 3, available_bytes: 512 * 1024 ** 3 }],
+        gpus: [{ name: "Example GPU", usage_percent: 25 + 10 * Math.sin(index / 4), memory_used_bytes: 4 * 1024 ** 3, memory_total_bytes: 16 * 1024 ** 3, shared_memory: false }],
+        network: { interface: "Ethernet", wired: true,
+          received_bytes_per_sec: 2_048 + 1_024 * Math.sin(index / 6), transmitted_bytes_per_sec: 1_024 + 512 * Math.cos(index / 5) },
       })) } });
     });
     await page.route(/\/api\/cluster\/nodes$/, route => {
@@ -2811,7 +2814,19 @@ test.describe("Dashboard smoke tests", () => {
     await expect(runner.getByText("Example CPU", { exact: true })).toBeVisible();
     await expect(runner.getByText("Example GPU", { exact: true })).toBeVisible();
     await expect(runner.getByTestId("machine-trend-cpu").locator("svg")).toBeVisible();
-    await expect(runner.getByTestId("machine-trend-network").locator("svg path")).toHaveCount(3);
+    for (const kind of ["cpu", "memory", "disk", "gpu"]) {
+      const chart = runner.getByTestId(`machine-trend-${kind}`);
+      await expect(chart).toHaveCSS("background-color", "rgb(38, 38, 38)");
+      await expect(chart.locator('[data-layer="line"]')).toHaveCount(1);
+      await expect(chart.locator('[data-layer="area"]')).toHaveCount(1);
+    }
+    const networkChart = runner.getByTestId("machine-trend-network");
+    await expect(networkChart).toHaveCSS("background-color", "rgb(38, 38, 38)");
+    await expect(networkChart.locator('[data-layer="line"]')).toHaveCount(2);
+    await expect(networkChart.locator('[data-layer="area"]')).toHaveCount(2);
+    await expect(networkChart.locator('[data-layer="line"][data-series="primary"]')).toHaveAttribute("stroke", "#f472b6");
+    await expect(networkChart.locator('[data-layer="area"][data-series="primary"]')).toHaveAttribute("fill-opacity", "0.22");
+    await expect(networkChart.locator('[data-layer="line"][data-series="secondary"]')).toHaveAttribute("stroke-dasharray", "3 2");
     await expect(runner.getByRole("meter", { name: /CPU 사용률|CPU utilization/ })).toHaveAttribute("aria-valuenow", "37.5");
     await expect(runner.getByText("antigravity", { exact: true })).toHaveCount(0);
     await expect(runner.getByText(/설정된 역할|Configured role/, { exact: true })).toHaveCount(0);
@@ -2820,6 +2835,7 @@ test.describe("Dashboard smoke tests", () => {
     await expect(runner.getByRole("meter", { name: /CPU 사용률|CPU utilization/ })).toHaveAttribute("aria-valuenow", "62.5");
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: testInfo.outputPath("machine-settings.png"), fullPage: true });
+    await runner.getByRole("region", { name: /하드웨어 및 사용량|Hardware and utilization/ }).screenshot({ path: testInfo.outputPath("hardware-utilization.png") });
     await page.locator("#settings-tab-general").click();
     await expect(panel).toHaveCount(0);
     await page.goBack();

@@ -9,7 +9,8 @@ it("keeps missing network readings as gaps instead of inventing a connected tren
       { at: 1, value: 10 }, { at: 2, value: 20 }, { at: 3, value: null },
       { at: 4, value: 30 }, { at: 5, value: 40 },
     ]} />);
-  expect((html.match(/<path /g) ?? []).length).toBe(3); // baseline plus two separate trends
+  expect((html.match(/data-layer="line"/g) ?? []).length).toBe(2);
+  expect((html.match(/data-layer="area"/g) ?? []).length).toBe(2);
 });
 
 it("leaves a gap after expired samples and preserves a fixed fifteen-minute time axis", () => {
@@ -18,9 +19,12 @@ it("leaves a gap after expired samples and preserves a fixed fifteen-minute time
       { at: 0, expiresAt: 30_000, value: 10 }, { at: 10_000, expiresAt: 40_000, value: 20 },
       { at: 890_000, expiresAt: 920_000, value: 30 }, { at: 900_000, expiresAt: 930_000, value: 40 },
     ]} />);
-  expect((html.match(/<path /g) ?? []).length).toBe(3);
+  expect((html.match(/data-layer="line"/g) ?? []).length).toBe(2);
+  expect((html.match(/data-layer="area"/g) ?? []).length).toBe(2);
   expect(html).toContain("M98.89,");
   expect(html).toContain("L1.11,");
+  expect(html).toContain("L1.11,32 L0.00,32 Z");
+  expect(html).toContain("L100.00,32 L98.89,32 Z");
 });
 
 it("deduplicates live and saved samples and excludes expired timeline windows", () => {

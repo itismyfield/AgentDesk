@@ -29,12 +29,15 @@ export function readings(samples: MachineResources[], select: (sample: MachineRe
   });
 }
 
-function lines(readings: TrendReading[], ceiling: number, start: number, end: number): string[] {
-  const paths: string[] = [];
-  let points: string[] = [];
+function lines(readings: TrendReading[], ceiling: number, start: number, end: number) {
+  const paths: { line: string; area: string }[] = [];
+  let points: { x: string; y: string }[] = [];
   let previous: TrendReading | undefined;
   const flush = () => {
-    if (points.length > 1) paths.push(points.join(" "));
+    if (points.length > 1) {
+      const line = points.map(({ x, y }, index) => `${index ? "L" : "M"}${x},${y}`).join(" ");
+      paths.push({ line, area: `${line} L${points.at(-1)!.x},${CHART_HEIGHT} L${points[0].x},${CHART_HEIGHT} Z` });
+    }
     points = [];
   };
   for (const reading of readings) {
@@ -43,7 +46,7 @@ function lines(readings: TrendReading[], ceiling: number, start: number, end: nu
     if (reading.value == null) { flush(); continue; }
     const x = (Math.max(0, Math.min(1, (reading.at - start) / Math.max(1, end - start))) * 100).toFixed(2);
     const y = (CHART_HEIGHT - Math.min(ceiling, reading.value) / ceiling * (CHART_HEIGHT - 2)).toFixed(2);
-    points.push(`${points.length ? "L" : "M"}${x},${y}`);
+    points.push({ x, y });
   }
   flush();
   return paths;
@@ -60,13 +63,15 @@ export function MachineSparkline({ values, secondary, color, label, stale, tr, n
   const primaryLines = lines(values, ceiling, start, end);
   const secondaryLines = secondary ? lines(secondary, ceiling, start, end) : [];
   return <div className={`h-16 overflow-hidden border ${stale ? "opacity-60" : ""}`}
-    style={{ borderColor: `${COLORS[color]}70`, backgroundColor: `${COLORS[color]}14` }} data-testid={`machine-trend-${color}`}>
+    style={{ borderColor: "#737373", backgroundColor: "#262626" }} data-testid={`machine-trend-${color}`}>
     {primaryLines.length || secondaryLines.length ? <svg viewBox={`0 0 100 ${CHART_HEIGHT}`} preserveAspectRatio="none"
       className="h-full w-full" role="img" aria-label={`${label} ${tr("최근 15분 추이", "last 15 minutes trend")}`}>
-      <path d={`M0,${CHART_HEIGHT} L100,${CHART_HEIGHT}`} stroke="currentColor" className="text-th-border" strokeWidth="0.7" />
-      {primaryLines.map((path, index) => <path key={`primary-${index}`} d={path} fill="none" stroke={COLORS[color]} strokeWidth="1.6" vectorEffect="non-scaling-stroke" />)}
-      {secondaryLines.map((path, index) => <path key={`secondary-${index}`} d={path} fill="none" stroke={COLORS.networkOut} strokeWidth="1.4" vectorEffect="non-scaling-stroke" />)}
-    </svg> : <p className="flex h-full items-center justify-center px-1 text-center text-[10px] text-th-text-muted">{tr("측정값 수집 중", "Collecting samples")}</p>}
+      <path d={`M0,${CHART_HEIGHT} L100,${CHART_HEIGHT}`} stroke="#737373" strokeWidth="0.7" />
+      {primaryLines.map((path, index) => <path key={`primary-area-${index}`} d={path.area} fill={COLORS[color]} fillOpacity="0.22" stroke="none" data-layer="area" data-series="primary" />)}
+      {secondaryLines.map((path, index) => <path key={`secondary-area-${index}`} d={path.area} fill={COLORS.networkOut} fillOpacity="0.14" stroke="none" data-layer="area" data-series="secondary" />)}
+      {primaryLines.map((path, index) => <path key={`primary-${index}`} d={path.line} fill="none" stroke={COLORS[color]} strokeWidth="1.6" vectorEffect="non-scaling-stroke" data-layer="line" data-series="primary" />)}
+      {secondaryLines.map((path, index) => <path key={`secondary-${index}`} d={path.line} fill="none" stroke={COLORS.networkOut} strokeWidth="1.4" strokeDasharray="3 2" vectorEffect="non-scaling-stroke" data-layer="line" data-series="secondary" />)}
+    </svg> : <p className="flex h-full items-center justify-center px-1 text-center text-[10px] text-neutral-400">{tr("측정값 수집 중", "Collecting samples")}</p>}
   </div>;
 }
 
