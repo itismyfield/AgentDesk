@@ -10,6 +10,42 @@ use super::AppState;
 use crate::error::{AppError, AppResult, ErrorCode};
 use sqlx::PgPool;
 
+#[derive(Debug, Deserialize)]
+pub struct MachineResourceHistoryQuery {
+    pub instance_id: String,
+    pub from_ms: Option<i64>,
+    pub to_ms: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+pub async fn machine_resource_history(
+    State(state): State<AppState>,
+    Query(query): Query<MachineResourceHistoryQuery>,
+) -> AppResult<Json<serde_json::Value>> {
+    use crate::services::cluster::machine_resources::store;
+
+    let instance_id = query.instance_id.trim();
+    let now = chrono::Utc::now().timestamp_millis();
+    let to_ms = query.to_ms.unwrap_or(now.saturating_add(5_000));
+    let from_ms = query
+        .from_ms
+        .unwrap_or_else(|| to_ms.saturating_sub(store::HISTORY_WINDOW_MS));
+    let limit = query.limit.unwrap_or(store::HISTORY_DEFAULT_LIMIT);
+    if instance_id.is_empty()
+        || instance_id.len() > 255
+        || from_ms <= 0
+        || to_ms < from_ms
+        || to_ms.saturating_sub(from_ms) > store::HISTORY_RETENTION_DAYS * 24 * 60 * 60 * 1_000
+        || !(1..=store::HISTORY_MAX_LIMIT).contains(&limit)
+    {
+        return Err(AppError::bad_request("invalid machine history query"));
+    }
+    let samples = store::history(pg_pool(&state)?, instance_id, from_ms, to_ms, limit)
+        .await
+        .map_err(|error| AppError::internal(format!("machine history unavailable: {error}")))?;
+    Ok(Json(store::history_response(instance_id, samples)))
+}
+
 fn pg_pool(state: &AppState) -> AppResult<&PgPool> {
     state.pg_pool_ref().ok_or_else(|| {
         AppError::new(

@@ -8,6 +8,7 @@ use serde_json::{Map, Value};
 
 mod gpu;
 mod sampler;
+pub(crate) mod store;
 #[cfg(test)]
 mod tests;
 

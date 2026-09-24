@@ -312,6 +312,11 @@ fn spawn_heartbeat_loop(
     let stale_threshold_secs = lease_ttl_secs.max(interval_secs * 3);
     let leader_eligible =
         leader_eligible && matches!(configured_role, ClusterRole::Hub | ClusterRole::Auto);
+    let resource_recorder = super::machine_resources::store::spawn_recorder(
+        pool.clone(),
+        instance_id.clone(),
+        leader_active.clone(),
+    );
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         interval.tick().await;
@@ -371,6 +376,10 @@ fn spawn_heartbeat_loop(
             .await
             {
                 tracing::warn!("[cluster] heartbeat failed: {error}");
+            } else if let Some(sample) = capabilities.get("machine_resources")
+                && resource_recorder.try_send(sample.clone()).is_err()
+            {
+                tracing::debug!("[cluster] machine sample dropped while recorder is busy");
             }
             if let Err(error) =
                 upsert_worker_mcp_endpoints(&pool, &instance_id, &capabilities).await

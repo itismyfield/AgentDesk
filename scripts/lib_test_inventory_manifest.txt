@@ -2038,6 +2038,8 @@ services::cluster::intake_worker_capabilities::tests::preserving_request_require
 services::cluster::intake_worker_capabilities::tests::runtime_capability_advertises_preservation_protocol
 services::cluster::machine_resources::gpu::macos::tests::apple_gpu_preserves_shared_memory_and_missing_metrics
 services::cluster::machine_resources::gpu::macos::tests::discrete_gpu_does_not_present_system_allocations_as_vram
+services::cluster::machine_resources::store::tests::postgres_machine_history_is_durable_ordered_deduplicated_and_retained
+services::cluster::machine_resources::store::tests::recorder_queue_is_bounded_without_waiting_for_the_database
 services::cluster::machine_resources::tests::first_cpu_sample_is_unknown_and_memory_and_disk_accounting_are_bounded
 services::cluster::machine_resources::tests::non_finite_usage_is_not_a_healthy_zero
 services::cluster::machine_resources::tests::nvidia_counters_preserve_large_vram_and_unavailable_values
