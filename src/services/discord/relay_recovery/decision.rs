@@ -107,6 +107,14 @@ pub(in crate::services::discord) struct RelayRecoveryAffectedIdentifiers {
     pub mailbox_active_user_msg_id: Option<u64>,
     pub bridge_current_msg_id: Option<u64>,
     pub finalizer_turn_id: Option<u64>,
+    /// Episode nonce captured with the snapshot; the orphan-token finish only
+    /// releases an anchor that still carries it.
+    #[serde(skip)]
+    pub mailbox_active_turn_nonce: Option<String>,
+    /// Instant taken before the snapshot was read, so a turn admitted after it
+    /// can never match the guarded finish.
+    #[serde(skip)]
+    pub observed_before: Option<std::time::Instant>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -204,6 +212,37 @@ impl RelayRecoveryError {
     }
 }
 
+pub(in crate::services::discord) const ORPHAN_TOKEN_PRODUCER_LIVENESS_UNMEASURED: &str =
+    "orphan_token_producer_liveness_unmeasured";
+pub(super) const ORPHAN_TOKEN_SNAPSHOT_ABSENT: &str = "axis_b_orphan_token_snapshot_absent";
+pub(super) const ORPHAN_TOKEN_REACHABILITY_UNOBSERVED: &str =
+    "axis_b_orphan_token_reachability_unobserved";
+pub(super) const ORPHAN_TOKEN_EPISODE_UNMEASURED: &str = "axis_b_orphan_token_episode_unmeasured";
+
+/// Orphan-token refusals whose deciding operand was never measured; each one
+/// leaves the anchor held rather than retiring it without a witness (I20).
+pub(in crate::services::discord) const ORPHAN_TOKEN_UNMEASURED_REFUSALS: [&str; 4] = [
+    ORPHAN_TOKEN_PRODUCER_LIVENESS_UNMEASURED,
+    ORPHAN_TOKEN_SNAPSHOT_ABSENT,
+    ORPHAN_TOKEN_REACHABILITY_UNOBSERVED,
+    ORPHAN_TOKEN_EPISODE_UNMEASURED,
+];
+
+/// No unix-only reachability ledger means no warrant: automatic orphan clears are withheld (I20).
+#[cfg(any(test, not(unix)))]
+pub(super) fn withhold_orphan_token_clear_without_ledger(
+    decision: &mut RelayRecoveryDecision,
+    source: RelayRecoveryApplySource,
+) {
+    if decision.action == RelayRecoveryActionKind::ClearOrphanPendingToken
+        && source != RelayRecoveryApplySource::Manual
+        && decision.auto_heal.eligible
+    {
+        decision.auto_heal.eligible = false;
+        decision.auto_heal.skipped_reason = Some(ORPHAN_TOKEN_REACHABILITY_UNOBSERVED);
+    }
+}
+
 pub(super) fn is_agentdesk_tmux_session(tmux_session: Option<&str>) -> bool {
     tmux_session.is_some_and(|session| session.starts_with("AgentDesk-"))
 }
@@ -242,6 +281,8 @@ fn affected_from_snapshot(snapshot: &RelayHealthSnapshot) -> RelayRecoveryAffect
         mailbox_active_user_msg_id: snapshot.mailbox_active_user_msg_id,
         bridge_current_msg_id: snapshot.bridge_current_msg_id,
         finalizer_turn_id: None,
+        mailbox_active_turn_nonce: None,
+        observed_before: None,
     }
 }
 
@@ -272,14 +313,9 @@ pub(super) fn eligible_orphan_pending_token_without_admission_grace(
     snapshot.mailbox_has_cancel_token
         && !snapshot.bridge_inflight_present
         && !snapshot.watcher_attached
-        && snapshot.tmux_alive != Some(true)
-        // The AgentDesk-name guard only protects a token whose tmux liveness is
-        // still uncertain (`None`, e.g. a transient probe error) — NOT one the
-        // probe positively confirmed dead. Without the `Some(false)` escape a
-        // genuinely dead `AgentDesk-*` orphan token is protected forever and
-        // wedges the mailbox slot with no reclaim path (#4569 review regression).
-        && (snapshot.tmux_alive == Some(false)
-            || !is_agentdesk_tmux_session(snapshot.tmux_session.as_deref()))
+        // Only a measured death qualifies, whatever the session is named: `None`
+        // is a failed or skipped probe, not evidence the producer stopped (I20).
+        && snapshot.tmux_alive == Some(false)
 }
 
 fn eligible_orphan_pending_token(snapshot: &RelayHealthSnapshot, now_ms: i64) -> bool {
@@ -387,11 +423,18 @@ pub(in crate::services::discord) fn plan_relay_recovery(
         RelayStallState::OrphanPendingToken => {
             let eligible = eligible_orphan_pending_token(snapshot, now_ms);
             let admission_grace = orphan_pending_token_within_admission_grace(snapshot, now_ms);
+            // Precedes the AgentDesk-name label so a failed probe is still graded (I20).
+            let unmeasured = snapshot.tmux_alive.is_none()
+                && !snapshot.bridge_inflight_present
+                && !snapshot.watcher_attached
+                && !admission_grace;
             (
                 RelayRecoveryActionKind::ClearOrphanPendingToken,
                 "mailbox holds a cancel token without bridge, watcher, or live tmux evidence",
                 eligible,
-                (!eligible).then_some(if protected_tmux {
+                (!eligible).then_some(if unmeasured {
+                    ORPHAN_TOKEN_PRODUCER_LIVENESS_UNMEASURED
+                } else if protected_tmux {
                     "protected_agentdesk_tmux_session"
                 } else if snapshot.bridge_inflight_present
                     || snapshot.watcher_attached

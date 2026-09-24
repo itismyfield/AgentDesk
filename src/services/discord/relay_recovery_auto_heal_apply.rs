@@ -946,45 +946,45 @@ mod tests {
                 .register(provider.as_str().to_string(), shared.clone())
                 .await;
             let channel = ChannelId::new(4_423_301);
+            if !crate::services::platform::tmux::is_available() {
+                eprintln!("skipping manual apply after probe exhaustion: tmux unavailable");
+                return;
+            }
 
-            start_turn(&shared, channel, 4_423_311).await;
+            start_turn(&shared, channel, 4_423_311)
+                .await
+                .bind_unmanaged_session_name(&format!(
+                    "plain-shell-4423301-dead-{}",
+                    std::process::id()
+                ));
             shared
                 .mailboxes
                 .handle(channel)
                 .age_active_turn_for_test(ORPHAN_PENDING_TOKEN_ADMISSION_GRACE)
                 .await;
-            let first = auto_apply_relay_recovery_for_shared(
-                &registry,
-                shared.clone(),
-                &provider,
+            // The probe lane no longer reclaims a rowless orphan, so its window
+            // is spent directly; only the operator lane's own budget may gate it.
+            let probe_key = auto_heal_key(
+                provider.as_str(),
                 channel.get(),
                 RelayRecoveryActionKind::ClearOrphanPendingToken,
                 RelayRecoveryApplySource::ProbeAutoHeal,
+            );
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            while reserve_auto_heal_attempt(
+                &probe_key,
+                now_ms,
+                AUTO_HEAL_DEFAULT_MAX_ATTEMPTS_PER_WINDOW,
             )
-            .await
-            .expect("first probe apply");
-            assert!(first.applied);
-
-            start_turn(&shared, channel, 4_423_312).await;
-            shared
-                .mailboxes
-                .handle(channel)
-                .age_active_turn_for_test(ORPHAN_PENDING_TOKEN_ADMISSION_GRACE)
-                .await;
-            let blocked_probe = auto_apply_relay_recovery_for_shared(
-                &registry,
-                shared.clone(),
-                &provider,
-                channel.get(),
-                RelayRecoveryActionKind::ClearOrphanPendingToken,
-                RelayRecoveryApplySource::ProbeAutoHeal,
-            )
-            .await
-            .expect("exhausted probe apply");
-            assert!(blocked_probe.skipped);
+            .is_ok()
+            {}
             assert_eq!(
-                blocked_probe.decision.auto_heal.skipped_reason,
-                Some("auto_heal_rate_limited")
+                reserve_auto_heal_attempt(
+                    &probe_key,
+                    now_ms,
+                    AUTO_HEAL_DEFAULT_MAX_ATTEMPTS_PER_WINDOW
+                ),
+                Err("auto_heal_rate_limited")
             );
 
             let manual = auto_apply_relay_recovery_for_shared(

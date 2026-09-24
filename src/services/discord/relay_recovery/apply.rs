@@ -1,5 +1,10 @@
 use super::*;
 
+use poise::serenity_prelude::MessageId;
+
+use super::super::{
+    mailbox_finish_turn_if_matches_episode_started_before, schedule_deferred_idle_queue_kickoff,
+};
 use crate::services::discord::tmux_watcher_registry::{
     TerminalDeliveryFence, WatcherIdentityFence, execution_identity_mode,
 };
@@ -46,28 +51,65 @@ pub(super) async fn apply_relay_recovery_decision(
         }
         RelayRecoveryActionKind::ClearOrphanPendingToken => {
             let channel = ChannelId::new(decision.channel_id);
-            let cleared = mailbox_clear_channel(shared, provider, channel).await;
+            // Finish only the snapshot's exact episode and keep the queue: a
+            // successor admitted after the snapshot fails the nonce/start guard.
+            let finish = match (
+                decision.affected.mailbox_active_user_msg_id,
+                decision.affected.observed_before,
+            ) {
+                (Some(user_msg_id), Some(observed_before)) if user_msg_id != 0 => Some(
+                    mailbox_finish_turn_if_matches_episode_started_before(
+                        shared,
+                        provider,
+                        channel,
+                        MessageId::new(user_msg_id),
+                        decision.affected.mailbox_active_turn_nonce.clone(),
+                        observed_before,
+                    )
+                    .await,
+                ),
+                _ => None,
+            };
+            let removed_token = finish
+                .as_ref()
+                .and_then(|finish| finish.removed_token.clone());
             if source.cleanup_session() {
                 super::stall_recovery::finalize_orphaned_clear(
                     shared,
                     channel,
-                    cleared.removed_token.clone(),
+                    removed_token.clone(),
                     source.finalizer_reason(),
                 );
             } else {
                 super::stall_recovery::finalize_orphaned_clear_preserve_session(
                     shared,
                     channel,
-                    cleared.removed_token.clone(),
+                    removed_token.clone(),
                     source.finalizer_reason(),
                 );
             }
-            mailbox_clear_recovery_marker(shared, channel).await;
+            if removed_token.is_some() {
+                mailbox_clear_recovery_marker(shared, channel).await;
+            }
+            if finish.as_ref().is_some_and(|finish| {
+                finish.removed_token.is_some() && finish.mailbox_online && finish.has_pending
+            }) {
+                schedule_deferred_idle_queue_kickoff(
+                    shared.clone(),
+                    provider.clone(),
+                    channel,
+                    "relay_recovery_orphan_token_finish",
+                );
+            }
             let after = mailbox_snapshot(shared, channel).await;
             RelayRecoveryApplyResult {
-                status: "applied",
+                status: match (&finish, &removed_token) {
+                    (_, Some(_)) => "applied",
+                    (Some(_), None) => "orphan_token_episode_changed",
+                    (None, None) => "orphan_token_episode_unidentified",
+                },
                 removed_thread_proofs: 0,
-                removed_mailbox_token: cleared.removed_token.is_some(),
+                removed_mailbox_token: removed_token.is_some(),
                 post_mailbox_has_cancel_token: Some(after.cancel_token.is_some()),
                 post_mailbox_queue_depth: Some(after.intervention_queue.len()),
                 reattach_watcher_spawned: None,

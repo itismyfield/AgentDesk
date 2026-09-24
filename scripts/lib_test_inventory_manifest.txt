@@ -2955,7 +2955,7 @@ services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backsto
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_flat_capture_pages_genuine_stall_pg
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::reachability_warrant_vetoes_transport_unknown_watchdog_branch
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::reuse_no_op_reattach_tick_still_skips_the_destructive_branches_5396
-services::discord::health::recovery::stall_watchdog_auto_heal_tests::stall_watchdog_cleanup_releases_residual_orphan_pending_token
+services::discord::health::recovery::stall_watchdog_auto_heal_tests::stall_watchdog_cleanup_keeps_orphan_pending_token_without_measured_death
 services::discord::health::recovery::stall_watchdog_pure_tests::chunk_ledger_growing_response_never_lowers_confirmed_prefix
 services::discord::health::recovery::stall_watchdog_pure_tests::chunk_ledger_ignores_stale_identity_or_changed_confirmed_chunk
 services::discord::health::recovery::stall_watchdog_pure_tests::chunk_ledger_records_send_failure_boundary_without_offset_loss
@@ -2991,6 +2991,9 @@ services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_l
 services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_should_force_clean_requires_all_signals
 services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_skips_completed_idle_wakeup_turn
 services::discord::health::redaction::tests::visible_message_id_redacts_zero_placeholders
+services::discord::health::relay_auto_heal::orphan_token_tests::agentdesk_session_probe_failure_is_graded_as_unmeasured
+services::discord::health::relay_auto_heal::orphan_token_tests::confirmed_dead_rowless_orphan_token_still_needs_a_warrant
+services::discord::health::relay_auto_heal::orphan_token_tests::unmeasured_orphan_token_keeps_anchor_and_queue_and_is_graded_once
 services::discord::health::relay_auto_heal::tests::a_fresh_watcher_still_accepts_the_zero_frontier_5943
 services::discord::health::relay_auto_heal::tests::a_freshly_born_turn_resumes_at_its_birth_offset_not_zero_5943
 services::discord::health::relay_auto_heal::tests::a_generation_mismatch_still_floors_the_redrive_at_the_turn_start_5943
@@ -4743,6 +4746,7 @@ services::discord::relay_recovery::cohort::tests::shipped_defaults_admit_no_chan
 services::discord::relay_recovery::cohort::tests::the_published_effective_width_is_the_width_admission_gates_on
 services::discord::relay_recovery::destructive_warrant::tests::clear_orphan_pending_token_requires_the_same_episode_when_both_operands_exist
 services::discord::relay_recovery::destructive_warrant::tests::exact_episode_distinguishes_match_mismatch_and_missing_operands
+services::discord::relay_recovery::destructive_warrant::tests::orphan_token_warrant_refuses_every_unmeasured_operand
 services::discord::relay_recovery::destructive_warrant::tests::pinned_adoption_only_relaxes_transport_unknown_reattach
 services::discord::relay_recovery::destructive_warrant::tests::the_warrant_fixture_covers_every_verdict_variant_exactly_once
 services::discord::relay_recovery::destructive_warrant::tests::truth_table_is_explicit_for_every_destructive_action_and_verdict
@@ -4755,6 +4759,7 @@ services::discord::relay_recovery::tests::active_foreground_stream_is_observe_on
 services::discord::relay_recovery::tests::auto_apply_is_limited_to_requested_action_kind
 services::discord::relay_recovery::tests::auto_apply_preserves_fresh_admission_token
 services::discord::relay_recovery::tests::auto_heal_attempts_are_rate_limited_per_window
+services::discord::relay_recovery::tests::automatic_orphan_token_reclaim_refuses_an_unmeasured_producer
 services::discord::relay_recovery::tests::circuit_breaker_apply::durable_reattach_circuit_open_preserves_every_live_turn_authority
 services::discord::relay_recovery::tests::circuit_breaker_apply::first_reserved_dead_frontier_apply_preserves_episode_and_reattaches_watcher
 services::discord::relay_recovery::tests::circuit_breaker_apply::zero_originating_message_with_a_distinct_mailbox_anchor_reaches_reattach_apply
@@ -4776,10 +4781,12 @@ services::discord::relay_recovery::tests::live_agentdesk_tmux_relay_dead_can_rea
 services::discord::relay_recovery::tests::live_agentdesk_tmux_relay_dead_without_mailbox_token_can_adopt_ownerless_inflight
 services::discord::relay_recovery::tests::manual_relay_recovery_plans_and_admits_on_one_captured_instant
 services::discord::relay_recovery::tests::old_orphan_shape_remains_auto_heal_eligible
+services::discord::relay_recovery::tests::orphan_token_finish::manual_recovery_finishes_a_measured_dead_orphan_and_promotes_its_queue
+services::discord::relay_recovery::tests::orphan_token_finish::orphan_token_apply_finishes_the_snapshot_episode_and_keeps_the_queue
+services::discord::relay_recovery::tests::orphan_token_finish::orphan_token_apply_leaves_a_successor_episode_untouched
 services::discord::relay_recovery::tests::orphan_token_live_evidence_and_agentdesk_tmux_stay_protected
 services::discord::relay_recovery::tests::post_gate_identity_matched_live_delivery_lease_blocks_dead_frontier_watcher_cancel
 services::discord::relay_recovery::tests::post_gate_relay_emission_no_longer_blocks_dead_frontier_watcher_cancel
-services::discord::relay_recovery::tests::probe_auto_apply_is_rate_limited_per_channel_action
 services::discord::relay_recovery::tests::probe_redrive_reattach_stays_eligible_with_unreadable_reachability_operand
 services::discord::relay_recovery::tests::queue_blocked_allows_disk_backed_queue_to_reach_drain_helper
 services::discord::relay_recovery::tests::queue_blocked_does_not_drain_when_live_turn_evidence_remains
@@ -4798,9 +4805,9 @@ services::discord::relay_recovery::tests::reused_live_watcher_status_is_not_coun
 services::discord::relay_recovery::tests::stale_watcher_with_jsonl_progress_rebinds_without_canceling_turn
 services::discord::relay_recovery::tests::token_only_agentdesk_tmux_confirmed_dead_is_reclaimed_after_grace
 services::discord::relay_recovery::tests::token_only_agentdesk_tmux_with_unknown_liveness_stays_protected_after_grace
+services::discord::relay_recovery::tests::unmeasured_non_agentdesk_orphan_token_is_not_retired_after_grace
 services::discord::relay_recovery::tests::unpaired_active_token_is_observe_only
 services::discord::relay_recovery::tests::unread_tail_is_proven_drained_only_for_a_measured_zero
-services::discord::relay_recovery::tests::watchdog_auto_apply_is_rate_limited_after_first_token_reclaim
 services::discord::relay_recovery::tests::watcher_owned_live_relay_with_relay_progress_is_not_destructive_cancel_candidate
 services::discord::relay_recovery::tests::watcher_owned_live_relay_with_unread_bytes_and_zero_relay_offset_is_actionable
 services::discord::replace_outcome_policy::a0_replace_outcome_policy_tests::a0_committed_arms_never_request_offset_retry
