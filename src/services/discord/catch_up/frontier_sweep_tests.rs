@@ -1,5 +1,5 @@
-//! Sweep-level tests over a fetch fixture that honours the Discord cursor
-//! contract, so a retry cursor is proven by what it rereads.
+//! Sweep-level settled-frontier barrier tests over a fetch fixture that honours
+//! the Discord cursor contract, so a retry cursor is proven by what it rereads.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
@@ -11,6 +11,8 @@ use crate::services::turn_orchestrator::EnqueueRefusalReason;
 
 #[derive(Clone, Copy)]
 enum Hook {
+    /// Another producer queues the id between the scan snapshot and the enqueue.
+    PreQueue,
     Defer,
 }
 
@@ -156,6 +158,11 @@ impl CatchUpDiscordApi for StrictApi {
                 refusal_reason: Some(EnqueueRefusalReason::ActorUnreachable),
                 persistence_error: None,
             },
+            Some(Hook::PreQueue) => {
+                queue(shared, provider, channel_id, message_id).await;
+                discord::mailbox_enqueue_intervention(shared, provider, channel_id, intervention)
+                    .await
+            }
             None => {
                 discord::mailbox_enqueue_intervention(shared, provider, channel_id, intervention)
                     .await
@@ -221,6 +228,22 @@ impl Fixture {
         let deps = CatchUpDeps::new(api, &self.shared, &self.provider);
         run_catch_up_sweep(deps.with_pending_retry_channels(&pending)).await;
     }
+
+    async fn queue(&self, channel_id: ChannelId, message_id: MessageId) {
+        queue(&self.shared, &self.provider, channel_id, message_id).await;
+    }
+}
+
+async fn queue(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    message_id: MessageId,
+) {
+    let intervention = queued_intervention(message_id, 0);
+    let outcome =
+        discord::mailbox_enqueue_intervention(shared, provider, channel_id, intervention).await;
+    assert!(super::super::catch_up_enqueue_accepted(&outcome));
 }
 
 fn id(sequence: u64, age_secs: u64) -> MessageId {
@@ -255,6 +278,433 @@ fn assert_phase1_read(api: &StrictApi, request: CatchUpFetchRequest, ids: &[Mess
             "phase 1 saw {message_id}"
         );
     }
+}
+
+#[test]
+fn f1_unsealed_frontier_matches_the_max_and_retry_formula() {
+    let mut frontier = SettledFrontier::default();
+    assert_eq!(frontier.retry_after(Some(40), 90), 40);
+    assert_eq!(frontier.retry_after(None, 90), 89);
+    for message_id in [50, 70, 60] {
+        frontier.settle(message_id);
+    }
+    assert_eq!(frontier.newest(), Some(70));
+    assert_eq!(frontier.retry_after(Some(40), 90), 70);
+    assert_eq!(frontier.retained_barrier(Some(40), false), None);
+}
+
+#[test]
+fn f2_a_later_settle_cannot_leap_the_first_sealed_message() {
+    let mut frontier = SettledFrontier::default();
+    frontier.settle(50);
+    frontier.seal(100);
+    frontier.settle(200);
+    frontier.seal(150);
+    assert_eq!(
+        frontier.newest(),
+        Some(50),
+        "200 must not leap the barrier at 100"
+    );
+    assert_eq!(frontier.retry_after(None, 300), 50);
+    let retained = frontier
+        .retained_barrier(None, false)
+        .expect("barrier kept");
+    assert_eq!((retained.barrier, retained.retry_after), (100, 50));
+    frontier.seal(80);
+    assert_eq!(frontier.retained_barrier(None, false).unwrap().barrier, 80);
+
+    let mut unsettled = SettledFrontier::default();
+    unsettled.seal(100);
+    unsettled.settle(200);
+    assert_eq!(unsettled.newest(), None);
+    assert_eq!(unsettled.retry_after(None, 300), 99);
+}
+
+#[test]
+fn f3_a_durable_candidate_at_or_past_the_barrier_is_dropped_not_lowered() {
+    use super::super::settled_frontier::safe_durable_candidate;
+    assert_eq!(safe_durable_candidate(Some(200), Some(100)), None);
+    assert_eq!(safe_durable_candidate(Some(100), Some(100)), None);
+    assert_eq!(safe_durable_candidate(Some(99), Some(100)), Some(99));
+    assert_eq!(safe_durable_candidate(Some(200), None), Some(200));
+}
+
+/// T1 + T8: a queue-only message moves neither checkpoint surface, and the
+/// retry left behind keeps the consumed state's origin and budgets.
+#[tokio::test(flavor = "current_thread")]
+async fn t1_t8_queue_only_message_holds_both_surfaces_and_keeps_retry_origin() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(4_603_501);
+    let (checkpoint, m) = (id(1, 600), id(2, 120));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    fx.queue(channel_id, m).await;
+    let armed_at = Instant::now() - Duration::from_secs(5);
+    let consumed = CatchUpRetryState {
+        checkpoint: checkpoint.get(),
+        fetch_failures: 1,
+        deferred_rearms: 3,
+        armed_at,
+    };
+    fx.shared
+        .catch_up_retry_pending
+        .insert(channel_id, consumed);
+    let api = StrictApi::new(&fx.shared).with_history(
+        channel_id,
+        vec![own_reply(channel_id, checkpoint), human(channel_id, m)],
+    );
+
+    fx.retry_sweep(&api, channel_id).await;
+
+    assert_phase1_read(&api, after(checkpoint), &[m]);
+    let expected = (Some(checkpoint.get()), Some(checkpoint.get()));
+    assert_eq!(
+        fx.surfaces(channel_id),
+        expected,
+        "memory and disk stay before M"
+    );
+    assert_eq!(
+        fx.pending(channel_id),
+        Some(consumed),
+        "the open barrier re-arms with the consumed origin and budgets unchanged"
+    );
+}
+
+/// T2 + T12: later terminal and recoverable messages are still classified and
+/// recovered, but neither carries the checkpoint past M.
+#[tokio::test(flavor = "current_thread")]
+async fn t2_later_terminal_and_accepted_messages_do_not_leap_m() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(4_603_502);
+    let (checkpoint, m, terminal, n) = (id(1, 900), id(2, 700), id(3, 200), id(4, 30));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    fx.queue(channel_id, m).await;
+    let api = StrictApi::new(&fx.shared).with_history(
+        channel_id,
+        vec![
+            own_reply(channel_id, checkpoint),
+            human(channel_id, m),
+            foreign_bot(channel_id, terminal),
+            human(channel_id, n),
+        ],
+    );
+
+    let logs = LogWriter::capture();
+
+    fx.sweep(&api).await;
+
+    let logs = logs.finish();
+    assert_phase1_read(&api, after(checkpoint), &[m, terminal, n]);
+    assert_eq!(api.enqueue_log().first(), Some(&(n.get(), true, None)));
+    let expected = (Some(checkpoint.get()), Some(checkpoint.get()));
+    assert_eq!(fx.surfaces(channel_id), expected);
+    assert!(
+        logs.contains("CATCH-UP: total 1 message(s) recovered across channels"),
+        "the phase-1 total counts the accepted N with no durable write: {logs}"
+    );
+}
+
+/// T3: a live dispatch reservation covers its primary and absorbed source
+/// ids, but a reservation is not a turn.
+#[tokio::test(flavor = "current_thread")]
+async fn t3_live_pending_dispatch_ids_are_not_dispatch_evidence() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(4_603_503);
+    let (checkpoint, source, primary, terminal) = (id(1, 600), id(2, 200), id(3, 150), id(4, 60));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    let mut head = queued_intervention(primary, 0);
+    head.source_message_ids = vec![source, primary];
+    let outcome =
+        discord::mailbox_enqueue_intervention(&fx.shared, &fx.provider, channel_id, head).await;
+    assert!(super::super::catch_up_enqueue_accepted(&outcome));
+    let _taken =
+        discord::mailbox_take_next_soft_intervention(&fx.shared, &fx.provider, channel_id).await;
+    let snapshot = discord::mailbox_snapshot(&fx.shared, channel_id).await;
+    assert!(snapshot.intervention_queue.is_empty());
+    assert_eq!(snapshot.pending_user_dispatch, Some(primary));
+    let api = StrictApi::new(&fx.shared).with_history(
+        channel_id,
+        vec![
+            human(channel_id, source),
+            human(channel_id, primary),
+            foreign_bot(channel_id, terminal),
+        ],
+    );
+
+    fx.sweep(&api).await;
+
+    assert_phase1_read(&api, after(checkpoint), &[source, primary, terminal]);
+    let expected = (Some(checkpoint.get()), Some(checkpoint.get()));
+    assert_eq!(fx.surfaces(channel_id), expected);
+}
+
+/// T4: the id was queued after the phase-1 snapshot, so the real enqueue
+/// refuses it as `SourceIdAlreadyQueued`; that commit arm seals too.
+#[tokio::test(flavor = "current_thread")]
+async fn t4_queued_race_refusal_seals_the_frontier() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(4_603_504);
+    let (checkpoint, m, n) = (id(1, 600), id(2, 120), id(3, 30));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    let api = StrictApi::new(&fx.shared)
+        .with_history(channel_id, vec![human(channel_id, m), human(channel_id, n)])
+        .with_hooks(m, &[Hook::PreQueue]);
+
+    fx.sweep(&api).await;
+
+    assert_phase1_read(&api, after(checkpoint), &[m, n]);
+    let refused = (
+        m.get(),
+        false,
+        Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
+    );
+    assert_eq!(api.enqueue_log()[..2], [refused, (n.get(), true, None)]);
+    let expected = (Some(checkpoint.get()), Some(checkpoint.get()));
+    assert_eq!(fx.surfaces(channel_id), expected);
+}
+
+/// T5: Recent mode, no checkpoint, M seals, N defers: N's retry is published
+/// before M (the end-of-sweep merge would hide it) so the next `After` returns M.
+#[tokio::test(flavor = "current_thread")]
+async fn t5_recent_mode_defer_retry_stays_before_m_and_rereads_it() {
+    let fx = Fixture::new().await;
+    let (channel_id, observer) = (ChannelId::new(4_603_505), ChannelId::new(4_603_515));
+    write_role_map(fx.root.path(), &fx.provider, channel_id);
+    write_checkpoint(fx.root.path(), &fx.provider, observer, id(1, 900).get());
+    let (m, n) = (id(1, 120), id(2, 30));
+    fx.queue(channel_id, m).await;
+    let api = StrictApi::new(&fx.shared)
+        .with_history(channel_id, vec![human(channel_id, m), human(channel_id, n)])
+        .with_hooks(n, &[Hook::Defer]);
+
+    fx.sweep(&api).await;
+
+    assert_phase1_read(&api, CatchUpFetchRequest::new(50), &[m, n]);
+    let published = {
+        let fetches = api.fetches.lock().unwrap();
+        let observed = fetches.iter().find(|fetch| fetch.channel_id == observer);
+        observed
+            .expect("observer scanned")
+            .pending
+            .get(&channel_id)
+            .copied()
+    };
+    let published = published.expect("N's defer published a retry before the observer scan");
+    assert!(
+        published < m.get(),
+        "published retry {published} must stay before M {m}"
+    );
+    assert_eq!(
+        api.enqueue_log(),
+        [(n.get(), false, Some(EnqueueRefusalReason::ActorUnreachable))]
+    );
+    let retry = fx.pending(channel_id).expect("deferred N arms a retry");
+    assert!(
+        retry.checkpoint < m.get(),
+        "retry {} must stay before M {m}",
+        retry.checkpoint
+    );
+    assert_eq!(fx.surfaces(channel_id), (None, None));
+
+    let reread = StrictApi::new(&fx.shared)
+        .with_history(channel_id, vec![human(channel_id, m), human(channel_id, n)]);
+    fx.retry_sweep(&reread, channel_id).await;
+    assert_phase1_read(&reread, after(MessageId::new(retry.checkpoint)), &[m]);
+}
+
+/// T6 + T12: N appears only on the phase-2 page and is accepted; the phase-2
+/// durable write must not pass M, and the recovery total still counts N.
+#[tokio::test(flavor = "current_thread")]
+async fn t6_t12_phase2_accept_is_counted_but_not_persisted_past_m() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(4_603_506);
+    let (checkpoint, m, n) = (id(1, 400), id(2, 120), id(3, 30));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    fx.queue(channel_id, m).await;
+    let api = StrictApi::new(&fx.shared)
+        .with_history(
+            channel_id,
+            vec![own_reply(channel_id, checkpoint), human(channel_id, m)],
+        )
+        .arriving_at(1, human(channel_id, n));
+    let logs = LogWriter::capture();
+
+    fx.sweep(&api).await;
+
+    let log = api.fetch_log();
+    assert_eq!(log[0].2, [m.get()], "phase 1 did not see N");
+    assert_eq!(log[1].1, CatchUpFetchRequest::new(20));
+    assert!(log[1].2.contains(&n.get()), "phase 2 saw N");
+    assert_eq!(api.enqueue_log(), [(n.get(), true, None)]);
+    let expected = (Some(checkpoint.get()), Some(checkpoint.get()));
+    assert_eq!(
+        fx.surfaces(channel_id),
+        expected,
+        "phase 2 must not persist N past M"
+    );
+    let logs = logs.finish();
+    assert!(
+        logs.contains("CATCH-UP phase2: total 1 unanswered message(s) recovered"),
+        "the recovery total counts the accepted N: {logs}"
+    );
+}
+
+/// T7: phase 2's last-bot-reply fallback lands past an off-page M; the next
+/// channel's fetch must see the clamped cursor published, not the fallback.
+#[tokio::test(flavor = "current_thread")]
+async fn t7_phase2_fallback_retry_is_clamped_before_it_is_published() {
+    let fx = Fixture::new().await;
+    let (x, y) = (ChannelId::new(4_603_507), ChannelId::new(4_603_508));
+    let (checkpoint, m, reply, n) = (id(1, 900), id(2, 500), id(40, 200), id(41, 30));
+    write_checkpoint(fx.root.path(), &fx.provider, x, checkpoint.get());
+    write_checkpoint(fx.root.path(), &fx.provider, y, checkpoint.get());
+    fx.queue(x, m).await;
+    let mut history = vec![human(x, m), own_reply(x, reply)];
+    history.extend((3..21).map(|seq| foreign_bot(x, id(seq, 480 - seq * 5))));
+    // Fetch calls: phase 1 x (0), phase 1 y (1), phase 2 x (2), phase 2 y (3).
+    let api = StrictApi::new(&fx.shared)
+        .with_history(x, history)
+        .arriving_at(2, human(x, n))
+        .with_hooks(n, &[Hook::Defer]);
+
+    fx.sweep(&api).await;
+
+    let fetches = api.fetches.lock().unwrap();
+    let (phase2_x, phase2_y) = (&fetches[2], &fetches[3]);
+    assert_eq!((phase2_x.channel_id, phase2_y.channel_id), (x, y));
+    assert!(!phase2_x.returned.contains(&m.get()) && phase2_x.returned.contains(&n.get()));
+    let published = phase2_y.pending.get(&x).copied().expect("phase 2 armed x");
+    assert!(
+        published < m.get(),
+        "published retry {published} must stay before M {m}"
+    );
+    drop(fetches);
+    let deferred = (n.get(), false, Some(EnqueueRefusalReason::ActorUnreachable));
+    assert_eq!(api.enqueue_log(), [deferred]);
+    assert_eq!(
+        fx.pending(x).map(|state| state.checkpoint),
+        Some(checkpoint.get())
+    );
+}
+
+/// T6b: a live checkpoint already past M is clamped for the phase-2 scan
+/// only, so N is still recovered, and the persisted value is not lowered.
+#[tokio::test(flavor = "current_thread")]
+async fn t6b_phase2_scan_checkpoint_is_clamped_without_lowering_the_live_one() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(4_603_516);
+    let (checkpoint, m, n, live) = (id(1, 400), id(2, 120), id(3, 30), id(4, 5));
+    write_checkpoint(fx.root.path(), &fx.provider, channel_id, checkpoint.get());
+    fx.shared.last_message_ids.insert(channel_id, live.get());
+    let consumed = CatchUpRetryState::new(checkpoint.get());
+    fx.shared
+        .catch_up_retry_pending
+        .insert(channel_id, consumed);
+    fx.queue(channel_id, m).await;
+    let api = StrictApi::new(&fx.shared)
+        .with_history(
+            channel_id,
+            vec![own_reply(channel_id, checkpoint), human(channel_id, m)],
+        )
+        .arriving_at(1, human(channel_id, n));
+
+    fx.retry_sweep(&api, channel_id).await;
+
+    assert_phase1_read(&api, after(checkpoint), &[m]);
+    assert_eq!(
+        api.enqueue_log(),
+        [(n.get(), true, None)],
+        "phase 2 still scans N"
+    );
+    let expected = (Some(live.get()), Some(checkpoint.get()));
+    assert_eq!(fx.surfaces(channel_id), expected, "neither surface moves");
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Resolution {
+    LeftQueueUnprocessed,
+    BecameActiveTurn,
+    /// M is the newest primary of a merged head that also carries older H. The
+    /// claim drops H's evidence, so H is re-offered, never leapt (#6205 dedups).
+    MergedHeadClaimed,
+}
+
+/// T9: once M's membership resolves, the next retry sweep either re-recovers
+/// M or settles it on turn evidence, and the barrier is gone.
+async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
+    let fx = Fixture::new().await;
+    let (checkpoint, h, m) = (id(1, 600), id(2, 150), id(3, 120));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    let mut history = vec![own_reply(channel_id, checkpoint)];
+    if let Resolution::MergedHeadClaimed = resolution {
+        let mut head = queued_intervention(m, 0);
+        head.source_message_ids = vec![h, m];
+        let queued =
+            discord::mailbox_enqueue_intervention(&fx.shared, &fx.provider, channel_id, head);
+        assert!(super::super::catch_up_enqueue_accepted(&queued.await));
+        history.push(human(channel_id, h));
+    } else {
+        fx.queue(channel_id, m).await;
+    }
+    history.push(human(channel_id, m));
+    let first = StrictApi::new(&fx.shared).with_history(channel_id, history.clone());
+    fx.sweep(&first).await;
+    let held = fx.pending(channel_id).expect("barrier kept a retry");
+    assert_eq!(held.checkpoint, checkpoint.get(), "{resolution:?}");
+
+    let token = Arc::new(crate::services::provider::CancelToken::new());
+    let owner = serenity::UserId::new(HUMAN_ID);
+    match resolution {
+        Resolution::LeftQueueUnprocessed => {
+            discord::mailbox_clear_channel(&fx.shared, &fx.provider, channel_id).await;
+        }
+        Resolution::BecameActiveTurn => {
+            let started =
+                discord::mailbox_try_start_turn(&fx.shared, channel_id, token, owner, m).await;
+            assert!(started, "{resolution:?}");
+        }
+        Resolution::MergedHeadClaimed => {
+            let taken =
+                discord::mailbox_take_next_soft_intervention(&fx.shared, &fx.provider, channel_id);
+            let (_head, _, _lease) = taken.await.into_intervention().expect("head taken");
+            let started =
+                discord::mailbox_try_start_turn(&fx.shared, channel_id, token, owner, m).await;
+            assert!(started, "{resolution:?}");
+        }
+    }
+    let second = StrictApi::new(&fx.shared).with_history(channel_id, history);
+    fx.retry_sweep(&second, channel_id).await;
+
+    assert_phase1_read(&second, after(checkpoint), &[m]);
+    let log = second.enqueue_log().into_iter();
+    let rerun: Vec<u64> = log.filter(|(_, ok, _)| *ok).map(|(id, ..)| id).collect();
+    let expected_rerun = match resolution {
+        Resolution::LeftQueueUnprocessed => vec![m.get()],
+        Resolution::MergedHeadClaimed => vec![h.get()],
+        Resolution::BecameActiveTurn => Vec::new(),
+    };
+    assert_eq!(rerun, expected_rerun, "{resolution:?}");
+    let expected = (Some(m.get()), Some(m.get()));
+    assert_eq!(fx.surfaces(channel_id), expected, "{resolution:?}");
+    assert_eq!(
+        fx.pending(channel_id),
+        None,
+        "{resolution:?}: no residual barrier"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn t9_unprocessed_m_is_recovered_once_it_leaves_the_queue() {
+    t9_case(ChannelId::new(4_603_509), Resolution::LeftQueueUnprocessed).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn t9_m_settles_once_a_turn_takes_it() {
+    t9_case(ChannelId::new(4_603_510), Resolution::BecameActiveTurn).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn t9_absorbed_h_is_reoffered_not_leapt_once_its_merged_head_is_claimed() {
+    t9_case(ChannelId::new(4_603_521), Resolution::MergedHeadClaimed).await;
 }
 
 /// T10: without an earlier barrier, active-turn and terminal messages advance.
@@ -374,6 +824,47 @@ async fn deferred_retry_is_published_at_the_checkpoint_and_rereads_n() {
         logs.contains("CATCH-UP: total 1 message(s) recovered across channels"),
         "the retry sweep counts the recovered N: {logs}"
     );
+}
+
+/// T11: a Deferred budget exhausted this sweep stays exhausted; the barrier
+/// arm must not hand the channel a fresh retry.
+#[tokio::test(flavor = "current_thread")]
+async fn t11_exhausted_budget_is_not_reset_by_the_barrier_arm() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(4_603_512);
+    let (checkpoint, m, n) = (id(1, 600), id(2, 120), id(3, 30));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    fx.queue(channel_id, m).await;
+    let mut exhausted = CatchUpRetryState::new(checkpoint.get());
+    exhausted.deferred_rearms = super::CATCH_UP_RETRY_DEFERRED_REARM_LIMIT;
+    fx.shared
+        .catch_up_retry_pending
+        .insert(channel_id, exhausted);
+    let history = vec![
+        own_reply(channel_id, checkpoint),
+        human(channel_id, m),
+        human(channel_id, n),
+    ];
+    let api = StrictApi::new(&fx.shared)
+        .with_history(channel_id, history)
+        .with_hooks(n, &[Hook::Defer, Hook::Defer]);
+
+    fx.retry_sweep(&api, channel_id).await;
+
+    assert_phase1_read(&api, after(checkpoint), &[m, n]);
+    let deferred = (n.get(), false, Some(EnqueueRefusalReason::ActorUnreachable));
+    assert_eq!(
+        api.enqueue_log(),
+        [deferred, deferred],
+        "both phases hit the budget"
+    );
+    assert_eq!(
+        fx.pending(channel_id),
+        None,
+        "no fresh retry after exhaustion"
+    );
+    let expected = (Some(checkpoint.get()), Some(checkpoint.get()));
+    assert_eq!(fx.surfaces(channel_id), expected);
 }
 
 struct LogWriter(Arc<Mutex<Vec<u8>>>);

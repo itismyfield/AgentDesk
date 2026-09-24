@@ -73,45 +73,11 @@ pub(in crate::services) struct CatchUpRetryState {
     armed_at: Instant,
 }
 
-impl CatchUpRetryState {
-    fn new(checkpoint: u64) -> Self {
-        Self {
-            checkpoint,
-            fetch_failures: 0,
-            deferred_rearms: 0,
-            armed_at: Instant::now(),
-        }
-    }
-
-    fn after_fetch_failure(self) -> Option<Self> {
-        let fetch_failures = self.fetch_failures.saturating_add(1);
-        (fetch_failures <= CATCH_UP_RETRY_FETCH_FAILURE_LIMIT).then_some(Self {
-            checkpoint: self.checkpoint,
-            fetch_failures,
-            deferred_rearms: self.deferred_rearms,
-            armed_at: self.armed_at,
-        })
-    }
-
-    // #4156: advance the Deferred re-arm budget. Returns `None` once the cap is
-    // exhausted so the caller stops re-arming (the backlog then ages out or a
-    // fresh catch-up trigger restarts the cycle), matching `after_fetch_failure`.
-    fn after_deferred_rearm(self, checkpoint: u64) -> Option<Self> {
-        let deferred_rearms = self.deferred_rearms.saturating_add(1);
-        (deferred_rearms <= CATCH_UP_RETRY_DEFERRED_REARM_LIMIT).then_some(Self {
-            checkpoint,
-            fetch_failures: self.fetch_failures,
-            deferred_rearms,
-            // Preserve the original arm time so the arm-time age window
-            // (`catch_up_message_age_reference_time`) is NOT reset each cycle.
-            armed_at: self.armed_at,
-        })
-    }
-}
-
 mod api;
 mod classification;
 mod phase2;
+mod retry_state;
+mod settled_frontier;
 mod settled_ledger_consult;
 mod too_old_notice;
 
@@ -132,6 +98,10 @@ use phase2::{
     classify_phase2_enqueue_commit, log_catch_up_enqueue_not_accepted,
     phase2_checkpoint_after_duplicate_commit, phase2_checkpoint_after_membership_skip,
     phase2_known_arms_and_ids, phase2_retry_after_checkpoint,
+};
+use retry_state::merge_catch_up_retry_state;
+use settled_frontier::{
+    RetainedBarrier, SettledFrontier, clamp_retry_cursor, safe_durable_candidate,
 };
 use too_old_notice::{
     CATCH_UP_TOO_OLD_NOTICE_MAX_ITEMS, CatchUpTooOldDrop, CatchUpTooOldOutboxRequest,
@@ -172,27 +142,6 @@ fn arm_catch_up_retry_state(
         .or_insert(retry_state);
     *pending = merge_catch_up_retry_state(Some(*pending), retry_state);
     *pending
-}
-
-fn merge_catch_up_retry_state(
-    existing: Option<CatchUpRetryState>,
-    retry_state: CatchUpRetryState,
-) -> CatchUpRetryState {
-    let Some(existing) = existing else {
-        return retry_state;
-    };
-    CatchUpRetryState {
-        checkpoint: merge_catch_up_retry_checkpoint(
-            Some(existing.checkpoint),
-            retry_state.checkpoint,
-        ),
-        // A merged older checkpoint inherits the most exhausted budget so the
-        // same old backlog cannot gain unbounded retries through fresh arms.
-        fetch_failures: existing.fetch_failures.max(retry_state.fetch_failures),
-        // #4156: same most-exhausted rule for the Deferred re-arm budget.
-        deferred_rearms: existing.deferred_rearms.max(retry_state.deferred_rearms),
-        armed_at: existing.armed_at.min(retry_state.armed_at),
-    }
 }
 
 fn collect_catch_up_retry_pending_channels(shared: &SharedData) -> HashSet<ChannelId> {
@@ -302,10 +251,6 @@ fn rearm_catch_up_retry_after_defer(
     };
     let rearmed = arm_catch_up_retry_state(shared, channel_id, next_retry_state);
     Some(rearmed.checkpoint)
-}
-
-fn merge_catch_up_retry_checkpoint(existing: Option<u64>, retry_after: u64) -> u64 {
-    existing.map_or(retry_after, |checkpoint| checkpoint.min(retry_after))
 }
 
 fn catch_up_message_age_reference_time(
@@ -642,10 +587,6 @@ fn is_restart_gap_notice(author_is_bot: bool, text: &str) -> bool {
     author_is_bot && text.starts_with(CATCH_UP_TOO_OLD_NOTICE_PREFIX)
 }
 
-fn advance_catch_up_settled_frontier(frontier: Option<u64>, message_id: u64) -> Option<u64> {
-    Some(frontier.map_or(message_id, |settled| settled.max(message_id)))
-}
-
 fn catch_up_intervention_created_at(
     scan_wall_time: chrono::DateTime<chrono::Utc>,
     scan_instant: Instant,
@@ -823,6 +764,8 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
     // Phase 2 must not bypass an incomplete unbounded Recent scan and persist a
     // newer recovery across the same unknown lower gap.
     let mut incomplete_recent_channels: HashSet<ChannelId> = HashSet::new();
+    // Phase-1 barriers bound phase 2's durable write and every retry cursor.
+    let mut phase1_barriers: HashMap<ChannelId, RetainedBarrier> = HashMap::new();
 
     // Pace successive per-channel REST scans so a many-channel sweep doesn't
     // fire as one tight burst (see `catch_up_scan_pace`). The first eligible
@@ -1028,7 +971,9 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
 
         // Get bot's own user ID to filter out self-messages
         // Collect existing message IDs in queue for dedup
-        let existing_ids = recovery_known_message_ids(&mailbox_snapshot(shared, channel_id).await);
+        let known_snapshot = mailbox_snapshot(shared, channel_id).await;
+        let existing_ids = recovery_known_message_ids(&known_snapshot);
+        let known_arms = recovery_known_id_arms(&known_snapshot);
         // #4564: the durable completed-turn ledger for this channel, read once per
         // scan (mirrors `existing_ids`). Suppresses the false restart-gap TooOld
         // notice for inbound messages that already reached terminal delivery.
@@ -1043,9 +988,10 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         let notify_bot_id = notify_resolution.user_id();
         // Newest message that this oldest-first scan has durably settled.
         // Non-recover classifications settle immediately; Recover settles only
-        // after an accepted/safe-dedup enqueue. The current cap/defer item never
-        // enters this frontier, so persisting it cannot skip recoverable work.
-        let mut max_settled_id: Option<u64> = None;
+        // after an accepted/safe-dedup enqueue. The first message left open
+        // (un-evidenced duplicate, cap, defer) seals it for the rest of the scan.
+        let mut frontier = SettledFrontier::default();
+        let mut retry_exhausted = false;
         let mut stats = CatchUpScanStats::default();
         stats.returned = messages.len();
         // #4260/#4453: actionable human TooOld drops accumulated for one
@@ -1102,15 +1048,14 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 CatchUpClassificationDecision::Determinate(outcome) => outcome,
                 CatchUpClassificationDecision::UtilityIdentityUnavailable => {
                     let mid = msg.id.get();
-                    let retry_after = max_settled_id
-                        .or(scan_checkpoint)
-                        .unwrap_or_else(|| mid.saturating_sub(1));
+                    frontier.seal(mid);
                     let retry_after = rearm_catch_up_retry_after_defer(
                         shared,
                         channel_id,
-                        retry_after,
+                        frontier.retry_after(scan_checkpoint, mid),
                         retry_state,
                     );
+                    retry_exhausted |= retry_after.is_none();
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!(
                         channel_id = channel_id.get(),
@@ -1129,9 +1074,8 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             // the last actually-queued message — newer entries that we
             // declined are still > `after_msg` for the next pass.
             if outcome == CatchUpClassification::Recover && stats.recovered >= remaining_capacity {
-                let retry_after = max_settled_id
-                    .or(scan_checkpoint)
-                    .unwrap_or_else(|| mid.saturating_sub(1));
+                frontier.seal(mid);
+                let retry_after = frontier.retry_after(scan_checkpoint, mid);
                 let retry_after = arm_catch_up_retry_pending(shared, channel_id, retry_after);
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
@@ -1174,7 +1118,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                         too_old_drops.push(drop);
                     }
                 }
-                max_settled_id = advance_catch_up_settled_frontier(max_settled_id, mid);
+                frontier.record_skipped(mid, outcome, known_arms.get(&mid).copied());
                 stats.record(outcome);
                 continue;
             }
@@ -1224,13 +1168,13 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     stats.record(CatchUpClassification::Recover);
                     api.cleanup_recovered_catch_up_hourglass(shared, channel_id, msg.id)
                         .await;
-                    max_settled_id = advance_catch_up_settled_frontier(max_settled_id, mid);
+                    frontier.settle(mid);
                 }
-                // #5996 does not change this arm: phase 1 still retires a queued
-                // duplicate on the DURABLE frontier. Second coordinate, in #6035.
-                Phase2EnqueueCommit::DuplicateActiveTurn | Phase2EnqueueCommit::DuplicateQueued => {
+                // A queued refusal is membership, not dispatch: it seals.
+                commit @ (Phase2EnqueueCommit::DuplicateActiveTurn
+                | Phase2EnqueueCommit::DuplicateQueued) => {
                     stats.record(CatchUpClassification::Duplicate);
-                    max_settled_id = advance_catch_up_settled_frontier(max_settled_id, mid);
+                    frontier.record_duplicate_commit(mid, commit);
                 }
                 Phase2EnqueueCommit::LastItemDedup => {
                     let snapshot = mailbox_snapshot(shared, channel_id).await;
@@ -1239,27 +1183,32 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                         msg.id,
                     ) {
                         stats.record(CatchUpClassification::Duplicate);
-                        max_settled_id = advance_catch_up_settled_frontier(max_settled_id, mid);
+                        frontier.settle(mid);
                     } else {
                         log_catch_up_enqueue_not_accepted("phase1", channel_id, msg.id, &enqueue);
-                        let retry_after = max_settled_id
-                            .or(scan_checkpoint)
-                            .unwrap_or_else(|| mid.saturating_sub(1));
-                        rearm_catch_up_retry_after_defer(
+                        frontier.seal(mid);
+                        let retry_after = frontier.retry_after(scan_checkpoint, mid);
+                        retry_exhausted |= rearm_catch_up_retry_after_defer(
                             shared,
                             channel_id,
                             retry_after,
                             retry_state,
-                        );
+                        )
+                        .is_none();
                         break;
                     }
                 }
                 Phase2EnqueueCommit::Deferred => {
                     log_catch_up_enqueue_not_accepted("phase1", channel_id, msg.id, &enqueue);
-                    let retry_after = max_settled_id
-                        .or(scan_checkpoint)
-                        .unwrap_or_else(|| mid.saturating_sub(1));
-                    rearm_catch_up_retry_after_defer(shared, channel_id, retry_after, retry_state);
+                    frontier.seal(mid);
+                    let retry_after = frontier.retry_after(scan_checkpoint, mid);
+                    retry_exhausted |= rearm_catch_up_retry_after_defer(
+                        shared,
+                        channel_id,
+                        retry_after,
+                        retry_state,
+                    )
+                    .is_none();
                     break;
                 }
             }
@@ -1304,14 +1253,19 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         // Persist the contiguous settled frontier even when a retry is pending.
         // The current cap/defer item was deliberately not folded in, so this
         // retires permanent skips without crossing work that still needs retry.
-        if let Some(newest) = max_settled_id {
+        let retained = frontier.retained_barrier(scan_checkpoint, retry_exhausted);
+        if let Some(newest) = frontier.newest() {
             advance_last_message_checkpoint(shared, provider, channel_id, MessageId::new(newest));
             if retry_checkpoint.is_some()
                 && !shared.catch_up_retry_pending.contains_key(&channel_id)
             {
                 let ts = chrono::Local::now().format("%H:%M:%S");
+                let outcome = match retained {
+                    Some(retained) => format!("retained at barrier {}", retained.barrier),
+                    None => "completed".to_owned(),
+                };
                 tracing::info!(
-                    "  [{ts}] 🔁 catch-up: retry completed for channel {} at checkpoint {}",
+                    "  [{ts}] 🔁 catch-up: retry {outcome} for channel {} at checkpoint {}",
                     channel_id,
                     newest
                 );
@@ -1339,6 +1293,9 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     session_key: format!("catch_up_too_old:{channel_id}:{batch_id}"),
                 },
             );
+        }
+        if let Some(retained) = retained {
+            phase1_barriers.insert(channel_id, retained);
         }
     }
 
@@ -1436,9 +1393,18 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         // per channel. A Settled outcome in phase 2 simply skips (no enqueue, no
         // notice) — an already-answered message must not be re-surfaced.
         let settled_ids = settled_ledger_consult::settled_ids(provider, channel_id);
-        let mut phase2_checkpoint = shared.last_message_ids.get(&channel_id).map(|v| *v);
+        // Scan-local clamp only; the persisted checkpoint is never lowered.
+        let barrier = phase1_barriers
+            .get(&channel_id)
+            .map(|retained| retained.barrier);
+        let mut phase2_checkpoint =
+            (shared.last_message_ids.get(&channel_id)).map(|v| clamp_retry_cursor(*v, barrier));
         let phase2_checkpoint_start = phase2_checkpoint;
         let mut max_recovered_id: Option<u64> = None;
+        let retry_cursor = |recovered, checkpoint| {
+            let cursor = phase2_retry_after_checkpoint(recovered, checkpoint, last_bot_response_id);
+            clamp_retry_cursor(cursor, barrier)
+        };
         let mut stats = Phase2RecoveryStats {
             returned: recent.len(),
             discovered: unanswered_slice.len(),
@@ -1507,11 +1473,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 discord_io::author_authorized(shared, msg.author.id.get()).await,
             ) {
                 CatchUpClassificationDecision::UtilityIdentityUnavailable => {
-                    let retry_after = phase2_retry_after_checkpoint(
-                        max_recovered_id,
-                        phase2_checkpoint,
-                        last_bot_response_id,
-                    );
+                    let retry_after = retry_cursor(max_recovered_id, phase2_checkpoint);
                     phase2_retry_after = rearm_catch_up_retry_after_defer(
                         shared,
                         channel_id,
@@ -1542,11 +1504,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             ));
 
             if stats.enqueued >= remaining_capacity {
-                let retry_after = phase2_retry_after_checkpoint(
-                    max_recovered_id,
-                    phase2_checkpoint,
-                    last_bot_response_id,
-                );
+                let retry_after = retry_cursor(max_recovered_id, phase2_checkpoint);
                 let retry_after = arm_catch_up_retry_pending(shared, channel_id, retry_after);
                 phase2_retry_after = Some(retry_after);
                 stats.deferred += 1;
@@ -1626,11 +1584,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                         stats.duplicate += 1;
                     } else {
                         log_catch_up_enqueue_not_accepted("phase2", channel_id, msg.id, &enqueue);
-                        let retry_after = phase2_retry_after_checkpoint(
-                            max_recovered_id,
-                            phase2_checkpoint,
-                            last_bot_response_id,
-                        );
+                        let retry_after = retry_cursor(max_recovered_id, phase2_checkpoint);
                         phase2_retry_after = rearm_catch_up_retry_after_defer(
                             shared,
                             channel_id,
@@ -1646,11 +1600,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 }
                 Phase2EnqueueCommit::Deferred => {
                     log_catch_up_enqueue_not_accepted("phase2", channel_id, msg.id, &enqueue);
-                    let retry_after = phase2_retry_after_checkpoint(
-                        max_recovered_id,
-                        phase2_checkpoint,
-                        last_bot_response_id,
-                    );
+                    let retry_after = retry_cursor(max_recovered_id, phase2_checkpoint);
                     phase2_retry_after = rearm_catch_up_retry_after_defer(
                         shared,
                         channel_id,
@@ -1663,9 +1613,14 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             }
         }
 
-        if let Some(newest) = max_recovered_id {
+        if let Some(newest) = safe_durable_candidate(max_recovered_id, barrier) {
             advance_last_message_checkpoint(shared, provider, channel_id, MessageId::new(newest));
-            phase2_recovered += stats.enqueued;
+        }
+        phase2_recovered += stats.enqueued;
+        if stats.deferred > 0 && phase2_retry_after.is_none() {
+            phase1_barriers
+                .entry(channel_id)
+                .and_modify(|r| r.exhausted = true);
         }
 
         if stats.enqueued > 0 {
@@ -1700,10 +1655,26 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             "  [{ts}] 🔍 CATCH-UP phase2: total {phase2_recovered} unanswered message(s) recovered"
         );
     }
+
+    // An open barrier must be reread next sweep; waiting on membership spends
+    // no budget, and an exhausted budget is not reset by a fresh arm.
+    for (channel_id, retained) in phase1_barriers {
+        if retained.exhausted {
+            continue;
+        }
+        let prior = consumed_retry_states_this_cycle.get(&channel_id).copied();
+        let base = prior.unwrap_or_else(|| CatchUpRetryState::new(retained.retry_after));
+        let state = CatchUpRetryState {
+            checkpoint: retained.retry_after,
+            ..base
+        };
+        arm_catch_up_retry_state(shared, channel_id, state);
+    }
 }
 
 #[cfg(test)]
 mod catch_up_recovery_tests {
+    use super::retry_state::merge_catch_up_retry_checkpoint;
     use super::{
         CATCH_UP_RECENT_MAX_PAGES, CATCH_UP_RETRY_DEFERRED_REARM_LIMIT,
         CATCH_UP_RETRY_FETCH_FAILURE_LIMIT, CATCH_UP_SCAN_PACE_DEFAULT_MS, CatchUpChannelCandidate,
@@ -1716,11 +1687,11 @@ mod catch_up_recovery_tests {
         catch_up_remaining_queue_capacity, catch_up_too_old_notice, catch_up_too_old_snippet,
         classify_catch_up_message, classify_phase2_enqueue_commit,
         collect_catch_up_retry_pending_channels, consume_catch_up_retry_state_for_scan,
-        insert_configured_catch_up_candidate, is_restart_gap_notice,
-        merge_catch_up_retry_checkpoint, parse_catch_up_scan_pace, phase2_retry_after_checkpoint,
-        prune_stale_checkpoint_files, rearm_catch_up_retry_after_defer,
-        rearm_catch_up_retry_after_fetch_failure, recent_page_decision, run_catch_up_sweep,
-        should_pace_before_scan, take_catch_up_retry_checkpoint_after_queue_drain,
+        insert_configured_catch_up_candidate, is_restart_gap_notice, parse_catch_up_scan_pace,
+        phase2_retry_after_checkpoint, prune_stale_checkpoint_files,
+        rearm_catch_up_retry_after_defer, rearm_catch_up_retry_after_fetch_failure,
+        recent_page_decision, run_catch_up_sweep, should_pace_before_scan,
+        take_catch_up_retry_checkpoint_after_queue_drain,
     };
     use crate::services::turn_orchestrator::{
         EnqueueRefusalReason, Intervention, InterventionMode, MAX_INTERVENTIONS_PER_CHANNEL,
