@@ -20,6 +20,10 @@ export const machineResourcesSchema = z.object({
     name: z.string(), usage_percent: percent,
     memory_used_bytes: bytes.nullable(), memory_total_bytes: bytes.nullable(), shared_memory: z.boolean(),
   })),
+  network: z.object({
+    interface: z.string(), wired: z.boolean(),
+    received_bytes_per_sec: bytes.nullable(), transmitted_bytes_per_sec: bytes.nullable(),
+  }).nullish(),
 });
 
 export type MachineResources = z.infer<typeof machineResourcesSchema>;

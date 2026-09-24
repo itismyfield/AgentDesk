@@ -22,6 +22,23 @@ it("shows CPU, GPU, memory and disk capacity with measured utilization", () => {
     expect(html).toContain(text);
 });
 
+it("shows independently colored trends and Ethernet throughput from persisted samples", () => {
+  const network = { interface: "Ethernet", wired: true, received_bytes_per_sec: 2 * gib, transmitted_bytes_per_sec: gib };
+  const current = { ...resources, network };
+  const prior = { ...current, observed_at_ms: now - 5_000,
+    cpu: { ...current.cpu, usage_percent: 20 }, network: { ...network, received_bytes_per_sec: gib } };
+  const html = renderToStaticMarkup(<SettingsMachineResources resources={current} history={[prior]}
+    now={now} stale={false} tr={(_ko, en) => en} />);
+  for (const color of ["cpu", "memory", "gpu", "disk", "network"])
+    expect(html).toContain(`data-testid="machine-trend-${color}"`);
+  expect(html).toContain("Ethernet");
+  expect(html).toContain("Receive");
+  expect(html).toContain("Send");
+  expect(html).toContain("2 GiB/s");
+  expect(html).toContain("#38bdf8");
+  expect(html).toContain("#f472b6");
+});
+
 it("does not label expired or disconnected measurements as live utilization", () => {
   for (const html of [render(resources, true), render({ ...resources, expires_at_ms: now }), render({ ...resources, observed_at_ms: now + 60_000 })]) {
     expect(html).toContain("Sample expired");
