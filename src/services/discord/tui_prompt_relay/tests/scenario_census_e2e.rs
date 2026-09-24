@@ -8,14 +8,19 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::mpsc;
 
 use serde_yaml::Value;
 
-use crate::services::agent_protocol::StreamMessage;
-use crate::services::discord::tmux::{WatcherToolState, process_watcher_lines};
-use crate::services::provider::ProviderKind;
-use crate::services::session_backend::{StreamLineState, process_stream_line};
+// Replay runs Codex frames through the tmux watcher, a Unix-only relay path
+// that production never takes on Windows; the census tests stay cross-platform.
+#[cfg(unix)]
+use {
+    crate::services::agent_protocol::StreamMessage,
+    crate::services::discord::tmux::{WatcherToolState, process_watcher_lines},
+    crate::services::provider::ProviderKind,
+    crate::services::session_backend::{StreamLineState, process_stream_line},
+    std::sync::mpsc,
+};
 
 const SCENARIO_SUBDIR: &str = "tests/e2e/tui_relay/scenarios";
 const RUNNABLE_CLASS: &str = "fixture";
@@ -29,6 +34,7 @@ const CENSUS_TOTAL: usize = CENSUS_FIXTURE + CENSUS_LIVE + CENSUS_UNSUPPORTED;
 
 /// The runnable scenario whose `task_complete.last_agent_message` diverges from
 /// its streamed text; the test below pins that both reach the relay once.
+#[cfg(unix)]
 const DIVERGENT_TASK_COMPLETE_SCENARIO: &str = "E-25";
 
 struct Scenario {
@@ -37,7 +43,9 @@ struct Scenario {
     coverage_class: String,
     agent_mode: String,
     skip_reason: Option<String>,
+    #[cfg(unix)]
     steps: Vec<Value>,
+    #[cfg(unix)]
     assertions: Vec<Value>,
 }
 
@@ -52,6 +60,7 @@ fn text_of(node: &Value, key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+#[cfg(unix)]
 fn seq_of(node: &Value, key: &str) -> Vec<Value> {
     node.get(key)
         .and_then(Value::as_sequence)
@@ -89,7 +98,9 @@ fn load_scenarios() -> Vec<Scenario> {
                 agent_mode: text_of(&doc, "agent_mode")
                     .unwrap_or_else(|| panic!("{file} must declare agent_mode")),
                 skip_reason: text_of(&doc, "skip_reason"),
+                #[cfg(unix)]
                 steps: seq_of(&doc, "steps"),
+                #[cfg(unix)]
                 assertions: seq_of(&doc, "assertions"),
                 file,
             }
@@ -133,10 +144,12 @@ fn class_tally(scenarios: &[Scenario]) -> BTreeMap<String, usize> {
     tally
 }
 
+#[cfg(unix)]
 fn to_json(frame: &Value) -> serde_json::Value {
     serde_json::to_value(frame).expect("scenario frame is JSON representable")
 }
 
+#[cfg(unix)]
 fn push_text(out: &mut String, message: &StreamMessage) {
     match message {
         StreamMessage::Text { content } => out.push_str(content),
@@ -147,6 +160,7 @@ fn push_text(out: &mut String, message: &StreamMessage) {
     out.push('\n');
 }
 
+#[cfg(unix)]
 fn replay_claude(frames: &[Value]) -> String {
     let (sender, receiver) = mpsc::channel();
     let mut state = StreamLineState::new();
@@ -171,6 +185,7 @@ fn replay_claude(frames: &[Value]) -> String {
 
 /// Feeds the frames to the tmux watcher exactly as it reads a Codex rollout
 /// (native `RolloutRecordDecoder` included) and returns the body it would relay.
+#[cfg(unix)]
 fn replay_codex(frames: &[Value]) -> String {
     let mut buffer: String = frames
         .iter()
@@ -190,6 +205,7 @@ fn replay_codex(frames: &[Value]) -> String {
 
 /// Replays a runnable scenario's declared frames through the production stream
 /// parsers and returns everything they relayed.
+#[cfg(unix)]
 fn production_replay(scenario: &Scenario) -> String {
     let mut produced = String::new();
     let mut replays = 0usize;
@@ -220,6 +236,7 @@ fn production_replay(scenario: &Scenario) -> String {
     produced
 }
 
+#[cfg(unix)]
 fn declared_markers(scenario: &Scenario) -> Vec<String> {
     scenario
         .assertions
@@ -229,6 +246,7 @@ fn declared_markers(scenario: &Scenario) -> Vec<String> {
 }
 
 /// The `task_complete.last_agent_message` lines of the scenario's own frames.
+#[cfg(unix)]
 fn task_complete_final_body(scenario: &Scenario) -> Vec<String> {
     let mut lines = Vec::new();
     for step in &scenario.steps {
@@ -299,6 +317,7 @@ fn every_excluded_scenario_names_its_reason_in_its_own_file() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn runnable_scenarios_replay_their_declared_markers_through_production_parsers() {
     let scenarios = load_scenarios();
@@ -340,6 +359,7 @@ fn runnable_scenarios_replay_their_declared_markers_through_production_parsers()
 
 /// A divergent `task_complete` body is appended after the streamed text so that
 /// both reach the tmux watcher relay, each exactly once.
+#[cfg(unix)]
 #[test]
 fn e25_task_complete_body_and_streamed_text_relay_exactly_once() {
     let scenarios = load_scenarios();
@@ -389,6 +409,7 @@ fn e25_task_complete_body_and_streamed_text_relay_exactly_once() {
 }
 
 /// The streamed `output_text` and the frames of the scenario's Codex replay.
+#[cfg(unix)]
 fn codex_stream_and_frames(scenario: &Scenario) -> (String, Vec<Value>) {
     let frames = scenario
         .steps

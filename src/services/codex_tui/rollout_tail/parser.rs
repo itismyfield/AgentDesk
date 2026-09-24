@@ -108,6 +108,8 @@ pub(super) struct RolloutParseState {
     pub(super) discord_origin_prompt: Option<String>,
     pub(super) heuristic_finalize_waiting_for_completion_logged: bool,
     pub(super) last_emitted_text_ended_with_newline: Option<bool>,
+    /// Byte offset in `final_text` where the most recent message text begins.
+    pub(super) last_message_start: usize,
 }
 
 impl RolloutParseState {
@@ -122,6 +124,7 @@ impl RolloutParseState {
 
     pub(super) fn push_message_text(&mut self, text: &str) -> String {
         let chunk = join_streamed_message_boundary(self.last_emitted_text_ended_with_newline, text);
+        self.last_message_start = self.final_text.len() + chunk.len() - text.len();
         self.final_text.push_str(&chunk);
         self.last_emitted_text_ended_with_newline = Some(text.ends_with('\n'));
         chunk

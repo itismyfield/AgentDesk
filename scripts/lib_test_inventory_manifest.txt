@@ -2363,7 +2363,9 @@ services::codex_tui::rollout_tail::tests::single_codex_message_streams_without_i
 services::codex_tui::rollout_tail::tests::starts_at_known_offset_to_avoid_stale_replay
 services::codex_tui::rollout_tail::tests::streamed_accumulation_mirrors_final_text
 services::codex_tui::rollout_tail::tests::stuck_tool_call_deadline_emits_recovery_done
+services::codex_tui::rollout_tail::tests::task_complete_body_matching_only_the_last_message_lands_once
 services::codex_tui::rollout_tail::tests::task_complete_emits_done_immediately_without_waiting_for_drain
+services::codex_tui::rollout_tail::tests::task_complete_handoff_logs_only_when_it_overrides_streamed_text
 services::codex_tui::rollout_tail::tests::task_complete_last_agent_message_promotes_full_body_over_streamed_tail
 services::codex_tui::rollout_tail::tests::task_complete_recorded_but_pending_tool_call_blocks_fast_path
 services::codex_tui::rollout_tail::tests::task_complete_substring_of_commentary_still_lands

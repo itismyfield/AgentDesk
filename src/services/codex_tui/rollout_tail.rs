@@ -1401,32 +1401,40 @@ fn promote_task_complete_fallback_text(state: &mut RolloutParseState) {
     let Some(text) = state.task_complete_fallback_text.take() else {
         return;
     };
+    let had_streamed_text = state.saw_assistant_text;
 
-    // `last_agent_message` is the authoritative terminal body and is always
-    // consumed, landing at most once: empty `final_text` appends, a superset
-    // replaces a streamed tail or mirrored commentary, an already-mirrored body
-    // (equal or a message-boundary suffix) is dropped, and anything else
-    // appends boundary-joined. Arbitrary substring containment is NOT a drop —
-    // a short terminal body quoted mid-sentence is still a new body.
+    // Always consume the authoritative body: replace what it supersedes (whole
+    // text or last message), drop a proven mirror, append anything else.
+    let superseded_from = [0, state.last_message_start].into_iter().find(|&start| {
+        state
+            .final_text
+            .get(start..)
+            .is_some_and(|streamed| task_complete_fallback_supersedes_final_text(streamed, &text))
+    });
     if state.final_text.is_empty() {
         state.push_message_text(&text);
-    } else if task_complete_fallback_supersedes_final_text(&state.final_text, &text) {
-        tracing::info!(
-            target: "agentdesk::codex_rollout_handoff",
-            previous_final_text_len = state.final_text.len(),
-            task_complete_fallback_len = text.len(),
-            "codex rollout promoted task_complete last_agent_message over streamed text"
-        );
-        state.final_text = text;
+    } else if let Some(start) = superseded_from {
+        if had_streamed_text {
+            tracing::info!(
+                target: "agentdesk::codex_rollout_handoff",
+                previous_final_text_len = state.final_text.len(),
+                task_complete_fallback_len = text.len(),
+                "codex rollout promoted task_complete last_agent_message over streamed text"
+            );
+        }
+        state.final_text.truncate(start);
+        state.final_text.push_str(&text);
     } else if !task_complete_fallback_already_mirrored(&state.final_text, &text) {
         // Real Codex rollouts end the stream with this body; a divergent one is
         // delivered rather than dropped, and surfaced because it is unexpected.
-        tracing::warn!(
-            target: "agentdesk::codex_rollout_handoff",
-            streamed_len = state.final_text.len(),
-            task_complete_fallback_len = text.len(),
-            "codex rollout task_complete last_agent_message diverges from streamed text; appending it"
-        );
+        if had_streamed_text {
+            tracing::warn!(
+                target: "agentdesk::codex_rollout_handoff",
+                streamed_len = state.final_text.len(),
+                task_complete_fallback_len = text.len(),
+                "codex rollout task_complete last_agent_message diverges from streamed text; appending it"
+            );
+        }
         state.push_message_text(&text);
     }
     state.saw_assistant_text = true;
@@ -1435,8 +1443,7 @@ fn promote_task_complete_fallback_text(state: &mut RolloutParseState) {
 // The fallback counts as already mirrored only when it IS the final text or
 // sits at the end after a message boundary — a mid-sentence substring match
 // (e.g. commentary quoting the terminal verdict) must still append. The
-// boundary tolerates horizontal whitespace after the newline (r4 P3: an
-// indented mirrored body must still drop).
+// boundary tolerates non-newline whitespace (indentation, NBSP) after the newline.
 fn task_complete_fallback_already_mirrored(final_text: &str, fallback_text: &str) -> bool {
     let streamed = final_text.trim();
     let fallback = fallback_text.trim();
@@ -1446,7 +1453,7 @@ fn task_complete_fallback_already_mirrored(final_text: &str, fallback_text: &str
     let Some(prefix) = streamed.strip_suffix(fallback) else {
         return false;
     };
-    let boundary = prefix.trim_end_matches([' ', '\t']);
+    let boundary = prefix.trim_end_matches(|c: char| c != '\n' && c.is_whitespace());
     boundary.is_empty() || boundary.ends_with('\n')
 }
 
@@ -4802,6 +4809,84 @@ mod tests {
             1,
             "indented mirrored suffix must drop, not double: {result:?}"
         );
+    }
+
+    /// Promotes `fallback` over `messages` and returns the final text plus the
+    /// handoff log lines it emitted.
+    fn promote_with_logs(streamed: bool, messages: &[&str], fallback: &str) -> (String, String) {
+        #[derive(Clone, Default)]
+        struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Logs {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let logs = Logs::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .finish();
+        let mut state = RolloutParseState {
+            saw_assistant_text: streamed,
+            task_complete_fallback_text: Some(fallback.to_string()),
+            ..Default::default()
+        };
+        for message in messages {
+            state.push_message_text(message);
+        }
+        tracing::subscriber::with_default(subscriber, || {
+            promote_task_complete_fallback_text(&mut state)
+        });
+        let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        (state.final_text, logs)
+    }
+
+    #[test]
+    fn task_complete_handoff_logs_only_when_it_overrides_streamed_text() {
+        const DIVERGED: &str = "diverges from streamed text";
+        const PROMOTED: &str = "over streamed text";
+        let (text, logs) = promote_with_logs(true, &["[S]"], "[B]");
+        assert_eq!(text, "[S]\n\n[B]");
+        assert!(
+            logs.contains("WARN") && logs.matches(DIVERGED).count() == 1,
+            "{logs:?}"
+        );
+        let (text, logs) = promote_with_logs(true, &["[S]"], "[B]\n[S]");
+        assert_eq!(text, "[B]\n[S]");
+        assert!(
+            logs.contains(PROMOTED) && !logs.contains(DIVERGED),
+            "{logs:?}"
+        );
+        for (streamed, fallback) in [(true, "[S]"), (false, "[B]"), (false, "[B]\n[S]")] {
+            let (_, logs) = promote_with_logs(streamed, &["[S]"], fallback);
+            assert!(
+                logs.is_empty(),
+                "{fallback:?} streamed={streamed}: {logs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn task_complete_body_matching_only_the_last_message_lands_once() {
+        let (text, logs) = promote_with_logs(true, &["[C]", "[T]"], "[H]\n[T]");
+        assert_eq!(
+            text, "[C]\n\n[H]\n[T]",
+            "a body superseding the tail replaces it"
+        );
+        assert!(!logs.contains("WARN"), "{logs:?}");
+        let (text, logs) = promote_with_logs(true, &["[C]", "\u{a0}[T]"], "\u{a0}[T]");
+        assert_eq!(
+            text, "[C]\n\n\u{a0}[T]",
+            "a mirror led by NBSP is still a mirror"
+        );
+        assert!(logs.is_empty(), "{logs:?}");
     }
 
     // #3343 round 2 (3) — mirror property. For a multi-record fixture mixing
