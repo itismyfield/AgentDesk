@@ -78,6 +78,33 @@ pub(super) fn readopted_finish_mark_allowed(
     !completion_is_stale_for_newer_turn && !anchor_cleanup_is_stale_for_newer_turn
 }
 
+/// #5704: which turn does this terminal-commit pass finalize, and from which row?
+///
+/// The pre-relay snapshot stays the first authority (#3016/#3645). When it pins
+/// no turn, fall back to the row this pass just cleared: a TUI-direct synthetic
+/// row created during the relay's ack wait is invisible to the snapshot, and
+/// clearing it without finishing its mailbox episode leaves the mailbox owned by
+/// a rowless turn forever. The cleared row goes through the same session and
+/// output-range test as the snapshot, so a row from another session or one that
+/// starts after this output range resolves to 0 and nothing is finalized.
+pub(super) fn committed_finalize_target<'a>(
+    inflight_before_relay: Option<&'a InflightTurnState>,
+    committed_cleared_row: Option<&'a InflightTurnState>,
+    tmux_session_name: &str,
+    current_offset: u64,
+) -> (u64, Option<&'a InflightTurnState>) {
+    let pinned = pinned_finalizer_turn_id(inflight_before_relay, tmux_session_name, current_offset);
+    if pinned != 0 {
+        return (pinned, inflight_before_relay);
+    }
+    let cleared =
+        pinned_finalizer_turn_id(committed_cleared_row, tmux_session_name, current_offset);
+    if cleared != 0 {
+        return (cleared, committed_cleared_row);
+    }
+    (0, inflight_before_relay)
+}
+
 pub(super) async fn run_terminal_commit_epilogue(
     context: &TerminalCommitEpilogueContext<'_>,
     locals: TerminalCommitEpilogueLocals<'_>,
@@ -240,6 +267,9 @@ pub(super) async fn run_terminal_commit_epilogue(
                     )
                     .await;
         }
+        // #5704: the row this pass atomically cleared. Its mailbox episode must be
+        // released by the same pass (see `committed_finalize_target` below).
+        let mut committed_cleared_row: Option<&InflightTurnState> = None;
         if committed_row_cleanup_allowed {
             if let Some(pinned_clear_identity) = pinned_committed_clear_identity.as_ref() {
                 let clear_outcome =
@@ -251,6 +281,7 @@ pub(super) async fn run_terminal_commit_epilogue(
                         );
                 match clear_outcome {
                     crate::services::discord::inflight::GuardedClearOutcome::Cleared => {
+                        committed_cleared_row = inflight_state.as_ref();
                         let watcher_turn_id = inflight_state
                             .as_ref()
                             .filter(|s| s.user_msg_id != 0)
@@ -364,8 +395,12 @@ pub(super) async fn run_terminal_commit_epilogue(
         // snapshot, with `pinned_finalizer_turn_id` mirroring the output-range
         // guard so newer same-session follow-ups yield 0 and skip destructive
         // completion side effects consistently.
-        let restored_finalizer_turn_id = pinned_finalizer_turn_id(
+        // #5704: a TUI-direct synthetic row can be born during the relay's ack
+        // wait, after the pre-relay snapshot was taken. This pass then clears that
+        // row, so it must also finish that row's exact mailbox episode.
+        let (restored_finalizer_turn_id, finalizer_claim_row) = committed_finalize_target(
             inflight_before_relay.as_ref(),
+            committed_cleared_row,
             &tmux_session_name,
             current_offset,
         );
@@ -409,9 +444,9 @@ pub(super) async fn run_terminal_commit_epilogue(
                     true,
                     dispatch_ok,
                     // #3350 codex r1-1: inflight was cleared above — carry the
-                    // pre-relay snapshot (the same row `restored_user_msg_id` was
-                    // pinned from) for the finalize-time marker ensure.
-                    inflight_before_relay.as_ref().map(
+                    // row `restored_finalizer_turn_id` was pinned from for the
+                    // finalize-time marker ensure.
+                    finalizer_claim_row.map(
                         crate::services::discord::turn_finalizer::SyntheticClaimSnapshot::from_row,
                     ),
                     // #4106: when the pre-panel early release already drove the
@@ -535,3 +570,7 @@ pub(super) async fn run_terminal_commit_epilogue(
 #[cfg(test)]
 #[path = "terminal_commit_epilogue/continuation_marker_tests.rs"]
 mod continuation_marker_tests;
+
+#[cfg(test)]
+#[path = "terminal_commit_epilogue/synthetic_mailbox_release_tests.rs"]
+mod synthetic_mailbox_release_tests;

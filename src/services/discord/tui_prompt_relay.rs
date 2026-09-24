@@ -144,6 +144,31 @@ use self::synthetic_start::{
     release_stale_ownerless_tui_direct_mailbox_if_current, tui_direct_watcher_can_own_output,
 };
 
+/// #5704 test seam: the production TUI-direct synthetic claim, for the watcher's
+/// terminal-commit tests outside this module.
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) async fn claim_tui_direct_synthetic_turn_for_tests(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    prompt_text: &str,
+    anchor_message_id: MessageId,
+    lease: &ExternalInputRelayLease,
+) -> bool {
+    synthetic_start::claim_tui_direct_synthetic_turn(
+        shared,
+        provider,
+        channel_id,
+        tmux_session_name,
+        prompt_text,
+        anchor_message_id,
+        lease,
+    )
+    .await
+    .claimed
+}
+
 #[cfg(unix)]
 mod claude_idle_bridge;
 #[cfg(unix)]
