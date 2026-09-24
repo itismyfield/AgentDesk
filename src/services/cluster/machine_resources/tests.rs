@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn first_cpu_sample_is_unknown_and_memory_and_disk_accounting_are_bounded() {
-    let snapshot = sampler::Sampler::new().collect(MIN_SAMPLE_TTL);
+    let snapshot = sampler::Sampler::new(None, Default::default()).collect(MIN_SAMPLE_TTL);
     assert_eq!(snapshot.cpu.usage_percent, None);
     assert_eq!(snapshot.expires_at_ms - snapshot.observed_at_ms, 30_000);
     if let Some(memory) = snapshot.memory {

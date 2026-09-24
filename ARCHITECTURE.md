@@ -577,7 +577,9 @@ src/
 │   │   │   ├── gpu/
 │   │   │   │   ├── macos.rs
 │   │   │   │   └── other.rs
+│   │   │   ├── command.rs
 │   │   │   ├── gpu.rs
+│   │   │   ├── network.rs
 │   │   │   ├── sampler.rs
 │   │   │   ├── store.rs
 │   │   │   └── tests.rs

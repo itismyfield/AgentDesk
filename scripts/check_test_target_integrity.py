@@ -102,8 +102,6 @@ LIB_INVENTORY_STATIC_ONLY_BY_PLATFORM = {
         "cli::init::launchd_plist_tests::clamp_launchd_nofile_soft_limit_never_exceeds_host_hard_limit",
         "cli::init::launchd_plist_tests::generate_launchd_plist_release_sets_clamped_soft_number_of_files_limit",
         "cli::init::launchd_plist_tests::generate_launchd_plist_uses_requested_fresh_home_and_root_only",
-        "services::cluster::machine_resources::gpu::macos::tests::apple_gpu_preserves_shared_memory_and_missing_metrics",
-        "services::cluster::machine_resources::gpu::macos::tests::discrete_gpu_does_not_present_system_allocations_as_vram",
         "services::platform::binary_resolver::tests::codex_fallback_dirs_include_app_bundle_resources_on_macos",
     }),
 }

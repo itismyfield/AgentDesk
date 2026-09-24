@@ -6,7 +6,9 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+mod command;
 mod gpu;
+mod network;
 mod sampler;
 pub(crate) mod store;
 #[cfg(test)]
@@ -28,6 +30,7 @@ pub(crate) struct MachineResources {
     pub memory: Option<MemoryResources>,
     pub disks: Vec<DiskResources>,
     pub gpus: Vec<GpuResources>,
+    pub network: Option<NetworkResources>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -65,6 +68,14 @@ pub(crate) struct GpuResources {
     pub shared_memory: bool,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct NetworkResources {
+    pub interface: String,
+    pub wired: bool,
+    pub received_bytes_per_sec: Option<u64>,
+    pub transmitted_bytes_per_sec: Option<u64>,
+}
+
 pub(crate) fn publish(capabilities: &mut Map<String, Value>) {
     capabilities.insert(
         "machine_resources".into(),
@@ -76,21 +87,25 @@ pub(crate) fn publish(capabilities: &mut Map<String, Value>) {
     );
 }
 
-pub(crate) fn spawn(heartbeat_interval_secs: u64) {
+pub(crate) fn spawn(heartbeat_interval_secs: u64, api_base_url: Option<&str>) {
+    let advertised_ip = api_base_url.and_then(network::advertised_ip);
     let ttl = MIN_SAMPLE_TTL.max(Duration::from_secs(
         heartbeat_interval_secs.saturating_mul(3),
     ));
     tokio::spawn(async move {
+        let wired = network::wired_interfaces().await;
         let mut sampler = None;
         let mut gpu = gpu::GpuSampler::default();
         let mut interval = tokio::time::interval(SAMPLE_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            let wired = wired.clone();
             // One collector owns the CPU delta history. Never accumulate
             // detached collectors when a host filesystem is slow.
             let result = tokio::task::spawn_blocking(move || {
-                let mut sampler = sampler.unwrap_or_else(sampler::Sampler::new);
+                let mut sampler =
+                    sampler.unwrap_or_else(|| sampler::Sampler::new(advertised_ip, wired));
                 let snapshot = sampler.collect(ttl);
                 (sampler, snapshot)
             })

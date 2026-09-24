@@ -1,7 +1,8 @@
-use super::{GpuResources, command};
+use super::GpuResources;
 
+#[cfg(target_os = "macos")]
 pub(super) async fn collect() -> Option<Vec<GpuResources>> {
-    let output = command(
+    let output = super::command(
         "/usr/sbin/ioreg",
         &["-r", "-d", "1", "-c", "IOAccelerator", "-a"],
     )

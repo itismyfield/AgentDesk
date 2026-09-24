@@ -1,19 +1,10 @@
-use std::process::Stdio;
-use std::time::Duration;
+use super::{GpuResources, command::run as command};
 
-use tokio::io::AsyncReadExt;
-
-use super::GpuResources;
-
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 mod macos;
 #[cfg(not(target_os = "macos"))]
 mod other;
 
-// Driver utilities must never hold the collector indefinitely. The commands
-// return a small device list, not per-process or identifying information.
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
-const MAX_OUTPUT_BYTES: u64 = 128 * 1024;
 #[cfg(any(test, not(target_os = "macos")))]
 const MIB_BYTES: f64 = 1024.0 * 1024.0;
 
@@ -39,35 +30,6 @@ impl GpuSampler {
         }
         self.previous.clone()
     }
-}
-
-async fn command(program: &str, args: &[&str]) -> Option<Vec<u8>> {
-    let mut command = tokio::process::Command::new(program);
-    command
-        .args(args)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .stdout(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(windows)]
-    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-    let mut child = command.spawn().ok()?;
-    let stdout = child.stdout.take()?;
-    tokio::time::timeout(COMMAND_TIMEOUT, async {
-        let mut output = Vec::new();
-        stdout
-            .take(MAX_OUTPUT_BYTES + 1)
-            .read_to_end(&mut output)
-            .await
-            .ok()?;
-        if output.len() as u64 > MAX_OUTPUT_BYTES {
-            return None;
-        }
-        child.wait().await.ok()?.success().then_some(output)
-    })
-    .await
-    .ok()
-    .flatten()
 }
 
 #[cfg(any(test, not(target_os = "macos")))]
