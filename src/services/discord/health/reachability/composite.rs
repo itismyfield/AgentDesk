@@ -22,6 +22,7 @@ use crate::services::discord::outbound::delivery_record::delivery_record_path;
 use crate::services::discord::outbound::receipt_index::{
     ReceiptIndex, ReceiptIndexRead, read_receipt_index_at,
 };
+use crate::services::discord::relay_health::RelayHealthSnapshot;
 use crate::services::provider::ProviderKind;
 
 use super::super::session_enrichment::ExecutorWitness;
@@ -33,6 +34,7 @@ use super::ledger::{
     LedgerObligation, ReachabilityLedger, ledger_file_exists, ledger_path, read_ledger_at,
 };
 use super::ledger_ttl::{EXPIRED_REASON, expired_without_a_producer, ledger_committed_at_epoch_ms};
+use super::observation::REACHABILITY_OBSERVATION_INTERVAL_SECS;
 use super::verdict::{
     NotAliveObligationState, ReachabilityUnknownReason, ReachabilityVerdict,
     TransportUnknownEvidence,
@@ -49,6 +51,14 @@ const OBLIGATION_WARN_BOUND_SECS: u64 = 120;
 /// not measured: above the longest single provider turn tolerated before
 /// calling a relay lost (4987 §7).
 const OBLIGATION_FAIL_BOUND_SECS: u64 = 600;
+
+/// Turn age past which a reconfirmed token-without-row stops passing health
+/// (4987 §6.3 row 1): two observation ticks. Deliberately not the stall
+/// classifier's `UNPAIRED_ACTIVE_TOKEN_GRACE_SECS` — that one decides when to
+/// call the shape stuck, this one how long health may vouch for a turn with
+/// no durable row.
+pub(in crate::services::discord) const ROWLESS_REACHABILITY_GRACE_SECS: u64 =
+    2 * REACHABILITY_OBSERVATION_INTERVAL_SECS;
 
 /// Which tier's claim the composition took.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -363,6 +373,33 @@ pub(in crate::services::discord) enum TranscriptLiveness {
     Resolved { eof: u64, alive: bool },
 }
 
+/// A mailbox turn with no inflight row, split at [`ROWLESS_REACHABILITY_GRACE_SECS`].
+/// Inside it the rowless shape is the normal turn-boundary window of 4987 §6.3
+/// row 1 and takes the obligation ladder; past it the turn is `Unknown` unless
+/// the ladder has something stronger to say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum RowlessTurn {
+    None,
+    WithinGrace,
+    OutlivedGrace,
+}
+
+impl RowlessTurn {
+    pub(in crate::services::discord) fn of(health: &RelayHealthSnapshot) -> Self {
+        if !(health.unpaired_active_token_reconfirmed
+            && health.mailbox_has_cancel_token
+            && !health.bridge_inflight_present)
+        {
+            return Self::None;
+        }
+        match health.mailbox_turn_age_secs {
+            Some(age) if age < ROWLESS_REACHABILITY_GRACE_SECS => Self::WithinGrace,
+            // An unreadable turn age cannot place the turn inside the grace.
+            _ => Self::OutlivedGrace,
+        }
+    }
+}
+
 /// The Tier A materials one composition consumes. Every field is a fact some
 /// earlier slice already produces; nothing here opens a file.
 pub(in crate::services::discord) struct ReachabilityInputs<'a> {
@@ -386,7 +423,7 @@ pub(in crate::services::discord) struct ReachabilityInputs<'a> {
     /// The bounded per-tick read did not see the whole tail.
     pub read_truncated: bool,
     /// The mailbox reports an active turn with no in-flight row.
-    pub rowless_active_turn: bool,
+    pub rowless_turn: RowlessTurn,
     /// A placeholder exists for the turn while its terminal receipt does not.
     pub placeholder_present: bool,
     pub now_epoch_ms: u64,
@@ -465,9 +502,8 @@ fn sweep_coverage(
 /// set answers nothing. Actual order: coordinate divergence, store
 /// readability, never-observed, read truncation, ledger expiry, transcript
 /// resolution — only divergence-first is load bearing (it makes every later
-/// operand ambiguous). Rowless-active-turn is the exception and runs AFTER the
-/// sweep (#5946 O1): its operands are computable, so it reports them instead
-/// of discarding them.
+/// operand ambiguous). Rowless-active-turn is the exception: it is graded
+/// against the ladder's own verdict and yields to a strictly stronger one.
 /// #5071 relay-tail S1 (I-5): the `Unknown` arms name what they observed;
 /// `Unknown` permits no health regardless.
 pub(in crate::services::discord) fn classify_reachability(
@@ -534,28 +570,7 @@ pub(in crate::services::discord) fn classify_reachability(
     let held_ranges = (sweep.uncovered_ages_secs.len() + sweep.unproven_ages_secs.len()) as u32;
     let oldest_held = oldest_uncovered.max(oldest_unproven);
 
-    // #5946 O1: placed AFTER the sweep, not before it. Ahead of the sweep this
-    // arm returned a coverage-free `Unknown`, so a rowless active turn could
-    // never produce the evidence that would say its prose was already
-    // delivered — the verdict was not wrong, its operands were never computed.
-    // The ladder above is untouched: every arm that outranks this one still
-    // answers first, and the arms below still see the same `oldest_held`.
-    //
-    // What this still cannot do: `live_obligations()` is the INCARNATION's set
-    // (covered obligations are never subtracted), so these counts do not
-    // isolate the current turn. See `ReachabilityUnknownReason::RowlessActiveTurn`.
-    if inputs.rowless_active_turn {
-        return ReachabilityVerdict::unknown(
-            ReachabilityUnknownReason::RowlessActiveTurn {
-                incarnation_live_obligations: ledger.live_obligations().len() as u32,
-                uncovered_ranges: sweep.uncovered_ages_secs.len() as u32,
-                unproven_ranges: sweep.unproven_ages_secs.len() as u32,
-            },
-            oldest_held.unwrap_or(0),
-        );
-    }
-
-    match oldest_held {
+    let ladder = match oldest_held {
         // Every obligation retired, or none was ever framed (4987 §4.1); §-1.4
         // gates this on positive alive evidence, not its absence.
         None => {
@@ -586,29 +601,56 @@ pub(in crate::services::discord) fn classify_reachability(
         Some(oldest) => {
             let past_fail = oldest_uncovered.is_some_and(|age| age >= OBLIGATION_FAIL_BOUND_SECS);
             if !past_fail {
-                return ReachabilityVerdict::Degraded {
+                ReachabilityVerdict::Degraded {
                     oldest_unsatisfied_age_secs: oldest,
                     uncovered_ranges: held_ranges,
-                };
-            }
-            // Past `fail_bound` with a genuinely uncovered range: a transport
-            // trace demotes to `TransportUnknown` (4987 §-1.3b); without one
-            // it's the §-1.4 counterexample 2 true positive.
-            match transport_evidence(
-                &sweep,
-                inputs.placeholder_present,
-                inputs.process_started_at_epoch_ms,
-            ) {
-                Some(evidence) => ReachabilityVerdict::TransportUnknown {
-                    since_secs: oldest,
-                    evidence,
-                },
-                None => ReachabilityVerdict::Unreachable {
-                    oldest_unsatisfied_age_secs: oldest,
-                    uncovered_ranges: held_ranges,
-                },
+                }
+            } else {
+                // Past `fail_bound` with a genuinely uncovered range: a transport
+                // trace demotes to `TransportUnknown` (4987 §-1.3b); without one
+                // it's the §-1.4 counterexample 2 true positive.
+                match transport_evidence(
+                    &sweep,
+                    inputs.placeholder_present,
+                    inputs.process_started_at_epoch_ms,
+                ) {
+                    Some(evidence) => ReachabilityVerdict::TransportUnknown {
+                        since_secs: oldest,
+                        evidence,
+                    },
+                    None => ReachabilityVerdict::Unreachable {
+                        oldest_unsatisfied_age_secs: oldest,
+                        uncovered_ranges: held_ranges,
+                    },
+                }
             }
         }
+    };
+
+    // Graded after the sweep so it publishes the coverage it saw. The counts
+    // are the INCARNATION's (covered obligations are never subtracted); see
+    // `ReachabilityUnknownReason::RowlessActiveTurn`.
+    if inputs.rowless_turn != RowlessTurn::OutlivedGrace {
+        return ladder;
+    }
+    let rowless = ReachabilityVerdict::unknown(
+        ReachabilityUnknownReason::RowlessActiveTurn {
+            incarnation_live_obligations: ledger.live_obligations().len() as u32,
+            uncovered_ranges: sweep.uncovered_ages_secs.len() as u32,
+            unproven_ranges: sweep.unproven_ages_secs.len() as u32,
+        },
+        oldest_held.unwrap_or(0),
+    );
+    // A stuck turn's own prose can age past `fail_bound` only after the turn
+    // outlived the grace, so a strictly stronger ladder verdict must win here.
+    // An equal-rank verdict carrying the manual redelivery ban also wins, so the
+    // rowless reason never strips the duplicate-send warning.
+    if in_band_rank(&ladder) > in_band_rank(&rowless)
+        || ladder.requires_manual_redelivery_ban_notice()
+    {
+        ladder
+    } else {
+        rowless
     }
 }
 
@@ -650,7 +692,7 @@ pub(in crate::services::discord) struct RelayVerdictProbe<'a> {
     /// 4987 §-1.4's second alive witness: pane up with nothing pending, so a
     /// non-growing transcript is idle rather than dead.
     pub pane_idle_confirmed: bool,
-    pub rowless_active_turn: bool,
+    pub rowless_turn: RowlessTurn,
     /// A placeholder message is outstanding for this channel.
     pub placeholder_present: bool,
     /// #5942: caller-owned since establishing it costs a tmux round trip
@@ -719,7 +761,7 @@ pub(in crate::services::discord) fn observe_relay_verdict(
         // The observation task records its own truncation in the ledger it
         // writes; this reader doesn't tail, so it has none of its own.
         read_truncated: false,
-        rowless_active_turn: probe.rowless_active_turn,
+        rowless_turn: probe.rowless_turn,
         placeholder_present: probe.placeholder_present,
         now_epoch_ms: probe.now_epoch_ms,
         process_started_at_epoch_ms: probe.process_started_at_epoch_ms,

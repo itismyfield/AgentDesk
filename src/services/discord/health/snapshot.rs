@@ -705,7 +705,6 @@ async fn watcher_state_snapshot_for_shared(
         let operands = relay_verdict_probe_operands(
             detail_executor_witness(tmux_session_alive, authoritative_tmux_session.as_deref()),
             &relay_health,
-            unpaired_active_token_reconfirmed,
             process_started_at_unix,
         );
         Some((
@@ -718,7 +717,7 @@ async fn watcher_state_snapshot_for_shared(
                     .and_then(|state| state.output_path.as_deref()),
                 registry_output_path: session.watcher_output_path.as_deref(),
                 pane_idle_confirmed: operands.pane_idle_confirmed,
-                rowless_active_turn: operands.rowless_active_turn,
+                rowless_turn: operands.rowless_turn,
                 placeholder_present: operands.placeholder_present,
                 executor: operands.executor,
                 now_epoch_ms: operands.now_epoch_ms,
@@ -945,7 +944,6 @@ pub(super) async fn build_health_snapshot_with_options(
                 let operands = relay_verdict_probe_operands(
                     executor_witness,
                     &relay_health,
-                    unpaired_active_token_reconfirmed,
                     registry.started_at_unix(),
                 );
                 observe_relay_verdict(RelayVerdictProbe {
@@ -957,7 +955,7 @@ pub(super) async fn build_health_snapshot_with_options(
                         .and_then(|state| state.output_path.as_deref()),
                     registry_output_path: session.watcher_output_path.as_deref(),
                     pane_idle_confirmed: operands.pane_idle_confirmed,
-                    rowless_active_turn: operands.rowless_active_turn,
+                    rowless_turn: operands.rowless_turn,
                     placeholder_present: operands.placeholder_present,
                     executor: operands.executor,
                     now_epoch_ms: operands.now_epoch_ms,
@@ -1230,7 +1228,7 @@ mod tests {
     use crate::services::agent_protocol::RuntimeHandoffKind;
     #[cfg(unix)]
     use crate::services::discord::health::reachability::composite::{
-        compose_relay_verdict, set_relay_verdict_source_for_tests,
+        RowlessTurn, compose_relay_verdict, set_relay_verdict_source_for_tests,
     };
     #[cfg(unix)]
     use crate::services::discord::health::reachability::external_verdict::ExternalRelayVerdict;
@@ -1293,24 +1291,20 @@ mod tests {
     #[test]
     fn relay_verdict_probe_operands_preserve_process_start_and_pane_semantics() {
         let relay_health = idle_relay_health_for_probe_operands();
-        let operands = relay_verdict_probe_operands(
-            ExecutorWitness::Present,
-            &relay_health,
-            true,
-            1_725_000_123,
-        );
+        let operands =
+            relay_verdict_probe_operands(ExecutorWitness::Present, &relay_health, 1_725_000_123);
         assert_eq!(operands.process_started_at_epoch_ms, 1_725_000_123_000);
         assert!(operands.pane_idle_confirmed);
-        assert!(operands.rowless_active_turn);
+        // Derived from the snapshot now; this idle one holds no token.
+        assert_eq!(operands.rowless_turn, RowlessTurn::None);
         assert!(operands.placeholder_present);
         assert!(
-            !relay_verdict_probe_operands(ExecutorWitness::Absent, &relay_health, false, 1)
+            !relay_verdict_probe_operands(ExecutorWitness::Absent, &relay_health, 1)
                 .pane_idle_confirmed
         );
         assert_eq!(operands.executor, ExecutorWitness::Present);
         assert_eq!(
-            relay_verdict_probe_operands(ExecutorWitness::Unwitnessed, &relay_health, false, 1)
-                .executor,
+            relay_verdict_probe_operands(ExecutorWitness::Unwitnessed, &relay_health, 1).executor,
             ExecutorWitness::Unwitnessed,
             "an unwitnessed probe must not be flattened into an absence"
         );
@@ -1849,8 +1843,7 @@ mod tests {
             (ExecutorWitness::Absent, false),
             (ExecutorWitness::Unwitnessed, false),
         ] {
-            let operands =
-                relay_verdict_probe_operands(witness, &relay_health, false, 1_725_000_123);
+            let operands = relay_verdict_probe_operands(witness, &relay_health, 1_725_000_123);
             assert_eq!(
                 operands.pane_idle_confirmed, expected,
                 "{witness:?} produced the wrong pane-idle witness"

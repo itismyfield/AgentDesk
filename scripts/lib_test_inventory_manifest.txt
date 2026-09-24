@@ -2795,7 +2795,10 @@ services::discord::health::reachability::composite::composite_tests::a_live_tran
 services::discord::health::reachability::composite::composite_tests::a_resolved_but_not_alive_transcript_still_expires_with_no_executor
 services::discord::health::reachability::composite::composite_tests::a_rowless_active_turn_publishes_the_coverage_the_sweep_computed
 services::discord::health::reachability::composite::composite_tests::a_rowless_turn_carrying_coverage_still_grants_no_authority
+services::discord::health::reachability::composite::composite_tests::a_rowless_turn_inside_its_grace_takes_the_ladder_a_row_backed_turn_takes
+services::discord::health::reachability::composite::composite_tests::a_rowless_turn_whose_own_prose_ages_past_fail_bound_reads_unreachable
 services::discord::health::reachability::composite::composite_tests::a_stale_high_frontier_does_not_retire_an_obligation_past_the_transcript_eof
+services::discord::health::reachability::composite::composite_tests::a_stuck_rowless_turn_keeps_the_manual_redelivery_ban_of_an_equal_rank_transport_trace
 services::discord::health::reachability::composite::composite_tests::a_truncated_read_outranks_the_ttl_gate_even_when_every_expiry_conjunct_holds
 services::discord::health::reachability::composite::composite_tests::an_abandoned_ledger_past_its_ttl_expires_out_of_the_health_judgment
 services::discord::health::reachability::composite::composite_tests::an_external_override_keeps_the_in_band_redelivery_ban
@@ -2814,6 +2817,7 @@ services::discord::health::reachability::composite::composite_tests::each_branch
 services::discord::health::reachability::composite::composite_tests::no_composed_verdict_authorizes_a_destructive_action
 services::discord::health::reachability::composite::composite_tests::nothing_observed_is_not_green
 services::discord::health::reachability::composite::composite_tests::observe_relay_verdict_expires_a_backdated_ledger_it_located_itself
+services::discord::health::reachability::composite::composite_tests::reachability_unreachable_when_inflight_row_absent_during_live_turn
 services::discord::health::reachability::composite::composite_tests::section_6_2_divergence_leaves_desynced_false_and_the_relay_verdict_not_healthy
 services::discord::health::reachability::composite::composite_tests::the_composition_ladder_covers_every_verdict_variant
 services::discord::health::reachability::composite::composite_tests::the_expired_report_publishes_its_age_and_its_abstention
@@ -3042,6 +3046,7 @@ services::discord::health::session_enrichment::tests::only_exact_dead_or_absent_
 services::discord::health::session_enrichment::tests::the_health_poll_reports_an_absent_coordinate_as_absent
 services::discord::health::session_enrichment::tests::transcript_discovery_falls_back_to_the_inflight_row_and_then_to_nothing
 services::discord::health::session_enrichment::tests::transcript_discovery_prefers_the_live_watcher_over_the_inflight_row
+services::discord::health::snapshot::relay_probe::tests::health_grace_and_stall_threshold_for_a_rowless_turn_move_independently
 services::discord::health::snapshot::tests::a_green_relay_verdict_degrades_the_snapshot_in_neither_mode
 services::discord::health::snapshot::tests::a_health_poll_leaves_a_legacy_inflight_row_byte_identical
 services::discord::health::snapshot::tests::a_non_green_relay_verdict_never_improves_an_unhealthy_snapshot
@@ -3148,6 +3153,7 @@ services::discord::health::transcript_binding_stall::tests::a_superseded_binding
 services::discord::health::transcript_binding_stall::tests::a_transcript_that_grew_recently_is_healthy_even_mid_rotation
 services::discord::health::transcript_binding_stall::tests::an_idle_channel_is_never_alerted_on
 services::discord::health::transcript_binding_stall::tests::an_unresolvable_bound_transcript_is_not_this_verdict
+services::discord::health::unpaired_active_token::tests::a_built_snapshot_is_reconfirmed_only_for_a_token_without_a_row
 services::discord::health::unpaired_active_token::tests::completion_between_initial_reads_and_recheck_invalidates_candidate
 services::discord::health::unpaired_active_token::tests::every_identity_coordinate_must_remain_stable
 services::discord::health::watcher_respawn::idle_relay_absence::tests::a_binding_of_the_wrong_runtime_kind_is_not_armed
