@@ -2059,8 +2059,8 @@ fn a_rowless_turn_whose_own_prose_ages_past_fail_bound_reads_unreachable() {
             ..RelayHealthSnapshot::test_snapshot()
         };
         let expected = match turn_age {
-            ..60 => ReachabilityVerdict::Reachable,
-            ..605 => rowless(obligation_age),
+            0..60 => ReachabilityVerdict::Reachable,
+            60..605 => rowless(obligation_age),
             _ => unreachable(obligation_age),
         };
         let verdict = Case {

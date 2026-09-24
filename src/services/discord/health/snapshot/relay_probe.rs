@@ -176,5 +176,25 @@ mod tests {
             RowlessTurn::None,
             "an unreconfirmed pairing is not a rowless turn at any age"
         );
+        // Snapshots are built freely outside the producer, so the reader holds
+        // token-without-row itself rather than trusting the reconfirmation.
+        for (label, snapshot) in [
+            (
+                "no token",
+                RelayHealthSnapshot {
+                    mailbox_has_cancel_token: false,
+                    ..rowless_capture(Some(738))
+                },
+            ),
+            (
+                "row present",
+                RelayHealthSnapshot {
+                    bridge_inflight_present: true,
+                    ..rowless_capture(Some(738))
+                },
+            ),
+        ] {
+            assert_eq!(RowlessTurn::of(&snapshot), RowlessTurn::None, "{label}");
+        }
     }
 }
