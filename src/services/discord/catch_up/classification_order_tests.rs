@@ -2546,10 +2546,8 @@ async fn phase2_unauthorized_human_is_not_enqueued() {
     assert!(outbox.lock().expect("outbox capture lock").is_empty());
 }
 
-// ---------------------------------------------------------------------------
-// #6042: an aged unauthorized human must not reach the TooOld resend notice
-// (which echoes author id + snippet into the channel) or the durable DLQ.
-// ---------------------------------------------------------------------------
+// Unauthorized aged humans get neither the TooOld resend notice (which echoes
+// author id + snippet) nor a DLQ record.
 
 #[tokio::test(flavor = "current_thread")]
 async fn phase1_unauthorized_human_too_old_is_neither_noticed_nor_dead_lettered() {
@@ -2712,9 +2710,8 @@ async fn phase1_allowed_automation_too_old_is_dead_lettered_without_authorizatio
     );
 }
 
-/// Pins the outcome and its utility-identity interaction: with only notify
-/// unavailable the refusal is identity-independent, so it settles instead of
-/// deferring; announce unavailability still defers (announce bypasses auth).
+/// Notify-only unavailability settles (the refusal is identity-independent);
+/// announce unavailability still defers because announce bypasses auth.
 #[test]
 fn aged_unauthorized_human_classifies_not_allowed_across_identity_states() {
     let aged = view(
