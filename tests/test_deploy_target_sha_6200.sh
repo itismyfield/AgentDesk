@@ -1,19 +1,6 @@
 #!/usr/bin/env bash
-# Regression test for #6200: AGENTDESK_DEPLOY_TARGET_SHA pins the deploy to a
-# CI-Main-green commit that is already on origin/main but no longer its tip.
-#
-# Observed 2026-09-24: b28c9c36e6 was green, two later merges cancelled CI Main,
-# and the leader freshness gate plus the peer `ff-only origin/main` pre-sync made
-# the green commit undeployable. This file pins the pinned-target contract:
-#   - malformed target values are refused before anything runs;
-#   - the local gates pass on HEAD == target ∧ target ⊑ origin/main, and refuse
-#     a non-ancestor target or a HEAD that is not the target;
-#   - the leader refuses a target without a successful CI Main run (gh stub);
-#   - the peer pre-sync fast-forwards only up to the target and refuses (never
-#     rewinds) a peer main that is already past it;
-#   - with no target set, the gates and the pre-sync command are unchanged.
-# Git runs against throwaway local repos and ssh is a shell stub: no network,
-# no launchctl, no real peer.
+# Pinned deploy target (AGENTDESK_DEPLOY_TARGET_SHA): leader identity/ancestry/CI gates and
+# peer ff-only-to-target pre-sync, against throwaway git repos with ssh and gh stubbed.
 
 set -euo pipefail
 
@@ -105,16 +92,22 @@ DEPLOY_SSH_CONNECT_TIMEOUT=1
 # shellcheck disable=SC2034  # Read by the production functions loaded through eval.
 DEPLOY_PEER_INVOCATION=0
 
-# gh stub: CI Main conclusions for the queried commit come from GH_STUB_CONCLUSIONS;
-# GH_STUB_FAIL=1 simulates an unreachable/unauthenticated gh. Calls are logged.
+# gh stub: accepts only the exact CI Main success query for DEPLOY_TARGET_SHA and answers it
+# from GH_STUB_CONCLUSIONS (all runs of that commit); GH_STUB_FAIL=1 simulates a gh failure.
 GH_CALLS_FILE="$TMP_ROOT/gh-calls"
 GH_STUB_CONCLUSIONS="success"
 GH_STUB_FAIL=0
 # shellcheck disable=SC2329  # Invoked by the production function loaded through eval.
 gh() {
     printf '%s\n' "$*" >>"$GH_CALLS_FILE"
+    local expected=(run list --workflow ci-main.yml --commit "$DEPLOY_TARGET_SHA"
+        --status success --limit 1 --json conclusion --jq '.[].conclusion')
+    if [ "$*" != "${expected[*]}" ]; then
+        echo "gh stub: unexpected argv: $*" >&2
+        return 1
+    fi
     [ "$GH_STUB_FAIL" != "1" ] || { echo "gh: not authenticated" >&2; return 1; }
-    [ -z "$GH_STUB_CONCLUSIONS" ] || printf '%s\n' "$GH_STUB_CONCLUSIONS"
+    ! grep -qx success <<<"$GH_STUB_CONCLUSIONS" || echo success
 }
 
 leader_at() {
@@ -199,6 +192,40 @@ run_gate "source identity: target is not an ancestor of origin/main" 1 "is not a
 run_gate "remote freshness: target is not an ancestor of origin/main" 1 "is not an ancestor of origin/main" \
     _check_repo_remote_freshness
 
+# --- 2b. freshness escape hatches keep the pin; only the CI query is skipped --
+rc=0
+out="$(AGENTDESK_DEPLOY_TARGET_SHA="$SHA_B" AGENTDESK_DEPLOY_BINARY=/tmp/prebuilt bash -c "$validation_block" 2>&1)" || rc=$?
+if [ "$rc" -ne 2 ] || ! grep -qF 'cannot be combined with AGENTDESK_DEPLOY_BINARY' <<<"$out"; then
+    fail_test "a pinned target with a prebuilt binary must exit 2; got rc=$rc: $out"
+fi
+rc=0
+out="$(AGENTDESK_DEPLOY_BINARY=/tmp/prebuilt bash -c "$validation_block" 2>&1)" || rc=$?
+[ "$rc" -eq 0 ] || fail_test "a prebuilt binary without a target must pass validation; got rc=$rc: $out"
+
+leader_at "$SHA_C"
+DEPLOY_TARGET_SHA="$SHA_B"
+for hatch in AGENTDESK_DEPLOY_SKIP_FRESHNESS AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS; do
+    export "$hatch=1"
+    run_gate "$hatch: HEAD is not the target" 1 "does not match AGENTDESK_DEPLOY_TARGET_SHA" \
+        _check_repo_source_identity
+    unset "$hatch"
+done
+leader_at "$SHA_SIDE"
+DEPLOY_TARGET_SHA="$SHA_SIDE"
+export AGENTDESK_DEPLOY_SKIP_FRESHNESS=1
+run_gate "SKIP_FRESHNESS: target is not an ancestor of origin/main" 1 "is not an ancestor of origin/main" \
+    _check_repo_source_identity
+leader_at "$SHA_B"
+DEPLOY_TARGET_SHA="$SHA_B"
+GH_STUB_CONCLUSIONS="failure"
+rm -f "$GH_CALLS_FILE"
+run_gate "SKIP_FRESHNESS: pinned HEAD passes without CI" 0 "Deploy target pinned: $SHA_B" \
+    _check_repo_source_identity
+run_gate "SKIP_FRESHNESS: remote freshness is skipped" 0 "" _check_repo_remote_freshness
+unset AGENTDESK_DEPLOY_SKIP_FRESHNESS
+[ ! -s "$GH_CALLS_FILE" ] || fail_test "a freshness escape hatch skips only the CI Main query; gh was called"
+GH_STUB_CONCLUSIONS="success"
+
 # --- 3. no target: the origin/main tip rule is unchanged ---------------------
 DEPLOY_TARGET_SHA=""
 leader_at "$SHA_B"
@@ -213,6 +240,21 @@ rm -f "$GH_CALLS_FILE"
 leader_at "$SHA_B"
 run_gate "default remote freshness never queries CI" 1 "" _check_repo_remote_freshness
 [ ! -s "$GH_CALLS_FILE" ] || fail_test "an unset target must not query CI Main"
+# Legacy escape hatches and branch rules behave as before when no target is set.
+export AGENTDESK_DEPLOY_SKIP_FRESHNESS=1
+run_gate "default SKIP_FRESHNESS: stale HEAD passes source identity" 0 "" _check_repo_source_identity
+run_gate "default SKIP_FRESHNESS: stale HEAD passes remote freshness" 0 "" _check_repo_remote_freshness
+unset AGENTDESK_DEPLOY_SKIP_FRESHNESS
+export AGENTDESK_DEPLOY_BINARY=/tmp/prebuilt
+run_gate "default prebuilt binary: stale HEAD passes source identity" 0 "" _check_repo_source_identity
+unset AGENTDESK_DEPLOY_BINARY
+git -C "$LEADER" checkout --quiet side
+run_gate "default: non-main branch is refused" 1 "Refusing release deploy from non-main branch: side" \
+    _check_repo_source_identity
+export AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1
+run_gate "default ALLOW_NON_MAIN: non-main branch passes" 0 "" _check_repo_source_identity
+unset AGENTDESK_DEPLOY_ALLOW_NON_MAIN
+git -C "$LEADER" checkout --quiet main
 
 # --- 4. the target reaches peers ---------------------------------------------
 DEPLOY_PEER_ENV_CHECK="$(AGENTDESK_DEPLOY_TARGET_SHA="$SHA_B" _deploy_peer_env_prelude)"

@@ -41,7 +41,7 @@ fi
 #   AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1  allow deploying a HEAD that is not
 #                                      exactly origin/main.
 #   AGENTDESK_DEPLOY_ALLOW_DIRTY=1     allow deploying with local changes.
-#   AGENTDESK_DEPLOY_TARGET_SHA=<sha>  deploy this CI-Main-green origin/main ancestor, not the tip (#6200).
+#   AGENTDESK_DEPLOY_TARGET_SHA=<sha>  deploy this CI-Main-green origin/main ancestor, not the tip.
 #   AGENTDESK_DEPLOY_SKIP_FRESHNESS=1  skip both source-identity and remote
 #                                      freshness gates for an intentional
 #                                      offline/emergency deploy. In this mode,
@@ -168,11 +168,14 @@ DEPLOY_PEERS_OVERRIDE=()
 DEPLOY_PEERS_FILE="${AGENTDESK_DEPLOY_PEERS_FILE:-$ADK_REL/config/deploy-peers.txt}"
 DEPLOY_PEER_INVOCATION="${AGENTDESK_DEPLOY_PEER_INVOCATION:-0}"
 DEPLOY_FAST="${AGENTDESK_DEPLOY_FAST:-0}"
-# Optional CI-green commit to deploy in place of the origin/main tip.
-# Empty keeps every gate on its origin/main path; a malformed value is refused up front.
+# Optional CI-green commit to deploy instead of the origin/main tip. A prebuilt
+# binary is refused with it because nothing ties that binary to the target commit.
 DEPLOY_TARGET_SHA="${AGENTDESK_DEPLOY_TARGET_SHA:-}"
 if [ -n "$DEPLOY_TARGET_SHA" ] && ! [[ "$DEPLOY_TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
     echo "✗ AGENTDESK_DEPLOY_TARGET_SHA must be a full 40-character lowercase hex commit SHA; got '${DEPLOY_TARGET_SHA}'"
+    exit 2
+elif [ -n "$DEPLOY_TARGET_SHA" ] && [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
+    echo "✗ AGENTDESK_DEPLOY_TARGET_SHA cannot be combined with AGENTDESK_DEPLOY_BINARY; build the target from source"
     exit 2
 fi
 # #4348 Defect 3: bound the peer SSH connection phase so an unreachable mDNS
@@ -655,10 +658,9 @@ _clean_release_build_cache_after_staging() {
 }
 
 _verify_deploy_target_sha() {
-    # A pinned deploy target replaces the "HEAD is origin/main tip" rule with
-    # "HEAD is the target AND the target is already on origin/main". Needs a fresh origin/main.
+    # Pinned deploys require HEAD == target and target on origin/main instead of HEAD == tip.
     local head_sha
-    head_sha="$(git -C "$REPO" rev-parse HEAD)"
+    head_sha="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
     if [ "$head_sha" != "$DEPLOY_TARGET_SHA" ]; then
         echo "✗ Refusing release deploy: HEAD (${head_sha}) does not match AGENTDESK_DEPLOY_TARGET_SHA (${DEPLOY_TARGET_SHA})"
         echo "  Check out the target commit first (for example: git reset --hard ${DEPLOY_TARGET_SHA} on main)."
@@ -673,10 +675,10 @@ _verify_deploy_target_sha() {
 }
 
 _verify_deploy_target_ci_green() {
-    # A pinned target exists to deploy a CI-green commit; refuse one without a successful CI Main run.
+    # Refuse a pinned target without a successful CI Main run; the status filter avoids the run-list page cap.
     local conclusions
     if ! conclusions="$(cd "$REPO" && gh run list --workflow ci-main.yml --commit "$DEPLOY_TARGET_SHA" \
-        --json conclusion --jq '.[].conclusion' 2>&1)"; then
+        --status success --limit 1 --json conclusion --jq '.[].conclusion' 2>&1)"; then
         echo "✗ Refusing release deploy: could not query CI Main for ${DEPLOY_TARGET_SHA}: ${conclusions}"
         exit 1
     fi
@@ -702,7 +704,7 @@ _check_repo_remote_freshness() {
             exit 1
         fi
         _verify_deploy_target_sha
-        # The leader vets CI once; peers only get a target the leader already accepted.
+        # Peers only receive a target the leader already vetted, so only the leader queries CI.
         [ "$DEPLOY_PEER_INVOCATION" = "1" ] || _verify_deploy_target_ci_green
         return 0
     fi
@@ -736,6 +738,11 @@ _check_repo_remote_freshness() {
 }
 
 _check_repo_source_identity() {
+    if [ -n "${DEPLOY_TARGET_SHA:-}" ]; then
+        # The pin binds the built source under every escape hatch; only the CI query is skippable.
+        _verify_deploy_target_sha
+        [ "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}" != "1" ] || return 0
+    fi
     [ "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}" != "1" ] || return 0
     [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] || return 0
     git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
@@ -766,10 +773,8 @@ _check_repo_source_identity() {
 
     echo "▸ Build source: branch=${branch} head=${head_short} origin/main=${main_short:-unknown} dirty=${dirty_flag}"
 
-    if [ -n "${DEPLOY_TARGET_SHA:-}" ]; then
-        # The pinned SHA fixes the source exactly, so it stands in for the branch/tip rule below.
-        _verify_deploy_target_sha
-    elif [ "${AGENTDESK_DEPLOY_ALLOW_NON_MAIN:-0}" != "1" ]; then
+    # A pinned target was verified on entry and replaces the branch/tip rule.
+    if [ -z "${DEPLOY_TARGET_SHA:-}" ] && [ "${AGENTDESK_DEPLOY_ALLOW_NON_MAIN:-0}" != "1" ]; then
         if [ "$branch" != "main" ]; then
             echo "✗ Refusing release deploy from non-main branch: ${branch}"
             echo "  Switch to main and fast-forward, or set AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1 for an intentional branch deploy."
