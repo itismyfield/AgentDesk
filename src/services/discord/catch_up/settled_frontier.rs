@@ -3,6 +3,7 @@
 
 use super::super::recovery_known_ids::RecoveryKnownIdArm;
 use super::classification::CatchUpClassification;
+use super::frontier_evidence::FrontierEvidence;
 use super::phase2::Phase2EnqueueCommit;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -29,30 +30,24 @@ impl SettledFrontier {
         );
     }
 
-    /// Only an active turn proves a known id was dispatched; queued or pending
-    /// membership leaves it open.
     pub(super) fn record_skipped(
         &mut self,
         message_id: u64,
         outcome: CatchUpClassification,
         arm: Option<RecoveryKnownIdArm>,
     ) {
-        if outcome == CatchUpClassification::Duplicate
-            && !arm.is_some_and(RecoveryKnownIdArm::is_dispatch_evidence)
-        {
-            self.seal(message_id);
-        } else {
-            self.settle(message_id);
-        }
+        self.record(message_id, FrontierEvidence::of_known(outcome, arm));
     }
 
     pub(super) fn record_duplicate_commit(&mut self, message_id: u64, commit: Phase2EnqueueCommit) {
-        match commit {
-            Phase2EnqueueCommit::DuplicateActiveTurn => self.settle(message_id),
-            Phase2EnqueueCommit::Accepted
-            | Phase2EnqueueCommit::DuplicateQueued
-            | Phase2EnqueueCommit::LastItemDedup
-            | Phase2EnqueueCommit::Deferred => self.seal(message_id),
+        self.record(message_id, FrontierEvidence::of_commit(commit));
+    }
+
+    /// Only `Dispatched` evidence may join the contiguous settled run.
+    fn record(&mut self, message_id: u64, evidence: FrontierEvidence) {
+        match evidence {
+            FrontierEvidence::Dispatched => self.settle(message_id),
+            FrontierEvidence::Open => self.seal(message_id),
         }
     }
 

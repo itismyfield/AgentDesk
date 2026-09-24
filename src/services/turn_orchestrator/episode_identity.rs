@@ -271,6 +271,7 @@ impl ChannelMailboxState {
             intervention_queue: self.intervention_queue.clone(),
             pending_user_dispatch: self.pending_user_dispatch,
             pending_user_dispatch_source_ids: self.pending_user_dispatch_source_ids.clone(),
+            active_absorbed_source_ids: self.active_absorbed_source_ids.clone(),
             pending_user_dispatch_since: self.pending_user_dispatch_since,
             pending_user_dispatch_lease_held_by_caller: self
                 .pending_user_dispatch_lease

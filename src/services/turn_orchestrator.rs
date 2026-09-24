@@ -34,8 +34,9 @@ mod reply_results;
 mod source_generation;
 mod turn_finished_signal;
 use active_source_dedup::{
-    intervention_has_active_source, intervention_sources_all_match_active,
-    purge_active_source_from_queue, strip_source_message_id_from_intervention,
+    active_turn_enqueue_refusal, intervention_has_active_source,
+    intervention_sources_all_match_active, purge_active_source_from_queue,
+    strip_source_message_id_from_intervention,
 };
 use clear_channel::clear_channel_state;
 pub(crate) use dispatch_reservation::{
@@ -252,13 +253,10 @@ pub(crate) fn enqueue_intervention(
     ensure_source_message_ids(&mut intervention);
 
     if intervention_sources_all_match_active(&intervention, active_user_message_id) {
-        return EnqueueInterventionResult {
-            enqueued: false,
-            merged: false,
-            refusal_reason: Some(EnqueueRefusalReason::AlreadyActiveTurn),
+        return EnqueueInterventionResult::refused(
+            EnqueueRefusalReason::AlreadyActiveTurn,
             queue_exit_events,
-            persistence_error: None,
-        };
+        );
     }
     if let Some(active_id) = intervention_has_active_source(&intervention, active_user_message_id) {
         strip_source_message_id_from_intervention(&mut intervention, active_id);
@@ -268,13 +266,10 @@ pub(crate) fn enqueue_intervention(
         .iter()
         .any(|item| item.source_message_ids.contains(&intervention.message_id))
     {
-        return EnqueueInterventionResult {
-            enqueued: false,
-            merged: false,
-            refusal_reason: Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
+        return EnqueueInterventionResult::refused(
+            EnqueueRefusalReason::SourceIdAlreadyQueued,
             queue_exit_events,
-            persistence_error: None,
-        };
+        );
     }
 
     if let Some(last) = queue.last() {
@@ -285,13 +280,10 @@ pub(crate) fn enqueue_intervention(
             && last.pending_uploads == intervention.pending_uploads
             && intervention_age_since(last, &intervention) <= INTERVENTION_DEDUP_WINDOW
         {
-            return EnqueueInterventionResult {
-                enqueued: false,
-                merged: false,
-                refusal_reason: Some(EnqueueRefusalReason::LastItemDedup),
+            return EnqueueInterventionResult::refused(
+                EnqueueRefusalReason::LastItemDedup,
                 queue_exit_events,
-                persistence_error: None,
-            };
+            );
         }
     }
 
@@ -402,6 +394,8 @@ pub(crate) struct ChannelMailboxSnapshot {
     /// field on `ChannelMailboxState`). Recovery dedup must union these with
     /// the primary across the dequeue→claim window.
     pub(crate) pending_user_dispatch_source_ids: Vec<MessageId>,
+    /// #6035 — see the same-named field on `ChannelMailboxState`.
+    pub(crate) active_absorbed_source_ids: Vec<MessageId>,
     pub(crate) pending_user_dispatch_since: Option<Instant>,
     pub(crate) pending_user_dispatch_lease_held_by_caller: bool,
     pub(crate) recently_valve_cleared_dispatch: Option<(MessageId, Instant)>,
@@ -467,6 +461,8 @@ pub(crate) enum EnqueueRefusalReason {
     /// Re-enqueuing it would let the deferred drain dispatch the same user input
     /// again after the active turn finishes.
     AlreadyActiveTurn,
+    /// #6035 — the active turn's merged head absorbed every source; not dispatch evidence.
+    AbsorbedByActiveTurn,
     /// The incoming `message_id` is already present in some queued entry's
     /// `source_message_ids` — duplicate insert from a re-entry or rehydrated
     /// queue.
@@ -490,6 +486,7 @@ impl EnqueueRefusalReason {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             EnqueueRefusalReason::AlreadyActiveTurn => "already_active_turn",
+            EnqueueRefusalReason::AbsorbedByActiveTurn => "absorbed_by_active_turn",
             EnqueueRefusalReason::SourceIdAlreadyQueued => "source_id_already_queued",
             EnqueueRefusalReason::SourceIdPendingOrActive => "source_id_pending_or_active",
             EnqueueRefusalReason::LastItemDedup => "last_item_dedup",
@@ -1693,6 +1690,8 @@ struct ChannelMailboxState {
     /// window. Set and cleared strictly alongside `pending_user_dispatch` so
     /// the two can never disagree.
     pending_user_dispatch_source_ids: Vec<MessageId>,
+    /// #6035 — ids the active turn's merged head absorbed (set on claim, cleared on release).
+    active_absorbed_source_ids: Vec<MessageId>,
     pending_user_dispatch_lease: Option<Arc<DispatchLease>>,
     /// #3167 BLOCKER-2 SAFETY VALVE — consecutive `Background` starts refused
     /// SOLELY because of `pending_user_dispatch` (the queue is already empty).
@@ -2189,17 +2188,8 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     // Intentional pre-hydrate guard: a pure self-requeue of the
                     // active message is never durable work, so it must not prune,
                     // hydrate, or otherwise mutate queue state before refusal.
-                    if intervention_sources_all_match_active(
-                        &intervention,
-                        state.active_user_message_id,
-                    ) {
-                        let _ = reply.send(EnqueueInterventionResult {
-                            enqueued: false,
-                            merged: false,
-                            refusal_reason: Some(EnqueueRefusalReason::AlreadyActiveTurn),
-                            queue_exit_events: Vec::new(),
-                            persistence_error: None,
-                        });
+                    if let Some(reason) = active_turn_enqueue_refusal(&state, &intervention) {
+                        let _ = reply.send(EnqueueInterventionResult::refused(reason, Vec::new()));
                         continue;
                     }
                     let hydrate_result = hydrate_pending_queue_from_disk_if_present(

@@ -8,6 +8,8 @@ use poise::serenity_prelude::{ChannelId, MessageId};
 
 use super::super::MailboxEnqueueOutcome;
 use super::super::recovery_known_ids::RecoveryKnownIdArm;
+use super::classification::CatchUpClassification;
+use super::frontier_evidence::FrontierEvidence;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Phase2EnqueueCommit {
@@ -19,6 +21,9 @@ pub(super) enum Phase2EnqueueCommit {
     /// id, which says accepted, not dispatched. #5996 keeps it apart from the
     /// arm above for that reason alone; both still skip.
     DuplicateQueued,
+    /// #6035 `AbsorbedByActiveTurn` — the id runs inside a turn that may still
+    /// end undelivered, so the enqueue is skipped but the id stays open.
+    NotYetEvidenced,
     LastItemDedup,
     Deferred,
 }
@@ -40,6 +45,9 @@ pub(super) fn classify_phase2_enqueue_commit(
             }
             Some(EnqueueRefusalReason::SourceIdAlreadyQueued) => {
                 return Phase2EnqueueCommit::DuplicateQueued;
+            }
+            Some(EnqueueRefusalReason::AbsorbedByActiveTurn) => {
+                return Phase2EnqueueCommit::NotYetEvidenced;
             }
             _ => {}
         }
@@ -72,27 +80,29 @@ pub(super) fn phase2_checkpoint_after_membership_skip(
     known_arms: &HashMap<u64, RecoveryKnownIdArm>,
     message_id: u64,
 ) -> Option<u64> {
-    match known_arms.get(&message_id) {
-        Some(arm) if arm.is_dispatch_evidence() => {
-            advance_phase2_checkpoint(checkpoint, message_id)
-        }
-        _ => checkpoint,
-    }
+    let arm = known_arms.get(&message_id).copied();
+    let evidence = FrontierEvidence::of_known(CatchUpClassification::Duplicate, arm);
+    phase2_checkpoint_after_skip(evidence, checkpoint, message_id)
 }
 
-/// #5996: `AlreadyActiveTurn` names THIS message as the turn a slot holds, so
-/// it is evidence of dispatch and advances. `SourceIdAlreadyQueued` names a
-/// queued entry holding the id — membership, which does not.
+/// #5996/#6035: only a refusal naming THIS message as the active turn advances.
 pub(super) fn phase2_checkpoint_after_duplicate_commit(
     commit: Phase2EnqueueCommit,
     checkpoint: Option<u64>,
     message_id: u64,
 ) -> Option<u64> {
-    match commit {
-        Phase2EnqueueCommit::DuplicateActiveTurn => {
-            advance_phase2_checkpoint(checkpoint, message_id)
-        }
-        _ => checkpoint,
+    phase2_checkpoint_after_skip(FrontierEvidence::of_commit(commit), checkpoint, message_id)
+}
+
+/// The advance forecloses the message, so only `Dispatched` evidence does.
+fn phase2_checkpoint_after_skip(
+    evidence: FrontierEvidence,
+    checkpoint: Option<u64>,
+    message_id: u64,
+) -> Option<u64> {
+    match evidence {
+        FrontierEvidence::Dispatched => advance_phase2_checkpoint(checkpoint, message_id),
+        FrontierEvidence::Open => checkpoint,
     }
 }
 

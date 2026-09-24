@@ -39,20 +39,12 @@ pub(in crate::services::discord) enum RecoveryKnownIdArm {
     /// a checkpoint advanced during the live window forecloses the very rescan
     /// that fallback exists to reach.
     PendingDispatch,
+    /// #6035 — the active turn's merged head absorbed this id. The content runs
+    /// in that turn, but the turn may still end undelivered: not evidence.
+    AbsorbedActiveTurn,
     /// `active_user_message_id` — `try_start_turn` stamped THIS message onto
     /// the slot the current turn holds.
     ActiveTurn,
-}
-
-impl RecoveryKnownIdArm {
-    /// I20: "the checkpoint may advance past a message only on evidence of
-    /// dispatch or answer."
-    pub(in crate::services::discord) fn is_dispatch_evidence(self) -> bool {
-        match self {
-            Self::ActiveTurn => true,
-            Self::Queued | Self::PendingDispatch => false,
-        }
-    }
 }
 
 pub(in crate::services::discord) fn queued_message_ids(
@@ -133,6 +125,9 @@ fn recovery_known_id_arms(
     // in-mailbox evidence covering that gap, so recovery must consult it too.
     for reserved_id in live_pending_dispatch_message_ids(snapshot) {
         arms.insert(reserved_id.get(), RecoveryKnownIdArm::PendingDispatch);
+    }
+    for absorbed in &snapshot.active_absorbed_source_ids {
+        arms.insert(absorbed.get(), RecoveryKnownIdArm::AbsorbedActiveTurn);
     }
     if let Some(active_id) = snapshot.active_user_message_id {
         arms.insert(active_id.get(), RecoveryKnownIdArm::ActiveTurn);
@@ -263,15 +258,6 @@ mod recovery_known_message_ids_tests {
             known.contains(&MERGED_SOURCE),
             "an absorbed source id must not be re-exposed to recovery"
         );
-    }
-
-    /// #5996: only the active-turn arm names a message a turn actually took,
-    /// so only it may move a checkpoint past one.
-    #[test]
-    fn only_the_active_turn_arm_is_dispatch_evidence() {
-        assert!(RecoveryKnownIdArm::ActiveTurn.is_dispatch_evidence());
-        assert!(!RecoveryKnownIdArm::Queued.is_dispatch_evidence());
-        assert!(!RecoveryKnownIdArm::PendingDispatch.is_dispatch_evidence());
     }
 
     /// #5996: the union erased which source answered. Each arm must be

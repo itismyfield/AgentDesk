@@ -1,5 +1,14 @@
 use super::health::UtilityBotUserIdResolution;
 
+/// #4443: true when a message is our own restart-gap notice reposted through
+/// an allowed sender bot. Both catch-up phases must classify these out:
+/// re-collecting one nests it inside the next notice (one level per restart,
+/// every channel) and phase2 would hand a young one to the agent as input.
+/// Prefix + bot-author scoped so a human quoting the marker still recovers.
+pub(super) fn is_restart_gap_notice(author_is_bot: bool, text: &str) -> bool {
+    author_is_bot && text.starts_with(super::CATCH_UP_TOO_OLD_NOTICE_PREFIX)
+}
+
 /// Eligible/rejection buckets for catch-up scans. These are logged separately so
 /// "no recovery" is distinguishable from filter, dedupe, and age-window skips.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,7 +115,7 @@ pub(in crate::services::discord) fn classify_catch_up_message(
     if existing_ids.contains(&msg.message_id) {
         return CatchUpClassification::Duplicate;
     }
-    if super::is_restart_gap_notice(msg.author_is_bot, &msg.trimmed_text) {
+    if is_restart_gap_notice(msg.author_is_bot, &msg.trimmed_text) {
         return CatchUpClassification::SelfAuthored;
     }
     if msg.trimmed_text.is_empty() {

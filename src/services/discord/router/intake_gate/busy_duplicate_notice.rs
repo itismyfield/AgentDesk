@@ -21,6 +21,7 @@ fn should_silence(reason: Option<EnqueueRefusalReason>) -> bool {
     matches!(
         reason,
         Some(EnqueueRefusalReason::AlreadyActiveTurn)
+            | Some(EnqueueRefusalReason::AbsorbedByActiveTurn)
             | Some(EnqueueRefusalReason::SourceIdAlreadyQueued)
     )
 }
@@ -36,6 +37,9 @@ mod tests {
         )));
         assert!(should_silence(Some(
             EnqueueRefusalReason::AlreadyActiveTurn
+        )));
+        assert!(should_silence(Some(
+            EnqueueRefusalReason::AbsorbedByActiveTurn
         )));
     }
 

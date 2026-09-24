@@ -75,6 +75,7 @@ pub(in crate::services) struct CatchUpRetryState {
 
 mod api;
 mod classification;
+mod frontier_evidence;
 mod phase2;
 pub(in crate::services::discord) mod retry_state;
 mod settled_frontier;
@@ -89,6 +90,7 @@ use api::{CatchUpDiscordApi, CatchUpFetchRequest, SerenityCatchUpDiscordApi};
 use classification::{
     CatchUpClassification, CatchUpClassificationDecision, CatchUpMessageView, CatchUpScanStats,
     classify_catch_up_message, classify_catch_up_message_with_utility_resolution,
+    is_restart_gap_notice,
 };
 #[cfg(test)]
 use phase2::catch_up_enqueue_accepted;
@@ -577,15 +579,6 @@ async fn catch_up_scan_pace_gap() {
 /// the notice builder and the catch-up classifiers so a reworded notice cannot
 /// silently break the self-recollection guard.
 const CATCH_UP_TOO_OLD_NOTICE_PREFIX: &str = "⚠️ 재시작 공백으로";
-
-/// #4443: true when a message is our own restart-gap notice reposted through
-/// an allowed sender bot. Both catch-up phases must classify these out:
-/// re-collecting one nests it inside the next notice (one level per restart,
-/// every channel) and phase2 would hand a young one to the agent as input.
-/// Prefix + bot-author scoped so a human quoting the marker still recovers.
-fn is_restart_gap_notice(author_is_bot: bool, text: &str) -> bool {
-    author_is_bot && text.starts_with(CATCH_UP_TOO_OLD_NOTICE_PREFIX)
-}
 
 fn catch_up_intervention_created_at(
     scan_wall_time: chrono::DateTime<chrono::Utc>,
@@ -1167,9 +1160,10 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                         .await;
                     frontier.settle(mid);
                 }
-                // A queued refusal is membership, not dispatch: it seals.
+                // Only the active-turn refusal is dispatch evidence (#6035); the rest seal.
                 commit @ (Phase2EnqueueCommit::DuplicateActiveTurn
-                | Phase2EnqueueCommit::DuplicateQueued) => {
+                | Phase2EnqueueCommit::DuplicateQueued
+                | Phase2EnqueueCommit::NotYetEvidenced) => {
                     stats.record(CatchUpClassification::Duplicate);
                     frontier.record_duplicate_commit(mid, commit);
                 }
@@ -1564,10 +1558,10 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     max_recovered_id = advance_phase2_checkpoint(max_recovered_id, mid);
                     stats.enqueued += 1;
                 }
-                // #5996: the active-turn refusal advances, the queued one does
-                // not. `phase2_checkpoint_after_duplicate_commit` holds the rule.
+                // #5996/#6035: only the active-turn refusal advances (`FrontierEvidence`).
                 commit @ (Phase2EnqueueCommit::DuplicateActiveTurn
-                | Phase2EnqueueCommit::DuplicateQueued) => {
+                | Phase2EnqueueCommit::DuplicateQueued
+                | Phase2EnqueueCommit::NotYetEvidenced) => {
                     existing_ids.insert(mid);
                     phase2_checkpoint =
                         phase2_checkpoint_after_duplicate_commit(commit, phase2_checkpoint, mid);
@@ -3067,6 +3061,17 @@ mod catch_up_recovery_tests {
         assert_eq!(
             classify_phase2_enqueue_commit(&already_active),
             Phase2EnqueueCommit::DuplicateActiveTurn
+        );
+
+        let absorbed = super::super::MailboxEnqueueOutcome {
+            enqueued: false,
+            merged: false,
+            refusal_reason: Some(EnqueueRefusalReason::AbsorbedByActiveTurn),
+            persistence_error: None,
+        };
+        assert_eq!(
+            classify_phase2_enqueue_commit(&absorbed),
+            Phase2EnqueueCommit::NotYetEvidenced
         );
 
         let last_item_dedup = super::super::MailboxEnqueueOutcome {
