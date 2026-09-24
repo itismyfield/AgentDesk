@@ -1783,6 +1783,13 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── probe.rs
 │   │   └── trusted_target.rs
+│   ├── session_host/
+│   │   ├── legacy_collapse.rs
+│   │   ├── model.rs
+│   │   ├── process_host.rs
+│   │   ├── resolve.rs
+│   │   ├── tmux_host.rs
+│   │   └── traits.rs
 │   ├── settings/
 │   │   └── runtime_config_put.rs
 │   ├── slo/
@@ -1912,6 +1919,7 @@ src/
 │   ├── session_activity.rs
 │   ├── session_backend.rs
 │   ├── session_forwarding.rs
+│   ├── session_host.rs
 │   ├── session_resume.rs
 │   ├── session_selector_validity.rs
 │   ├── settings.rs
