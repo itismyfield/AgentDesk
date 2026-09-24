@@ -1516,6 +1516,7 @@ mod generation_allocation_tests {
             .with_max_level(tracing::Level::TRACE)
             .with_writer(CapturingWriter(buffer.clone()))
             .finish();
+        crate::logging::test_capture::pin_callsite_interest();
         tracing::subscriber::with_default(subscriber, run);
         let logs = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
         assert_eq!(logs.lines().count(), 1, "logs={logs}");

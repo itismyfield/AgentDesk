@@ -1129,6 +1129,7 @@ mod tests {
     async fn shutdown_observation_emits_exact_error_subtypes() {
         use tracing::instrument::WithSubscriber;
         let capture = ShutdownCapture::default();
+        crate::logging::test_capture::pin_callsite_interest();
         for (panic, site) in [(true, "panic"), (false, "cancel")] {
             let error = shutdown_join_error(panic).await;
             observe_relay_shutdown(std::future::ready(Err(error)), site)

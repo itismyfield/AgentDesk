@@ -1073,6 +1073,7 @@ mod tests {
                 buffer: buffer.clone(),
             })
             .finish();
+        crate::logging::test_capture::pin_callsite_interest();
         tracing::subscriber::with_default(subscriber, emit);
         String::from_utf8(
             buffer

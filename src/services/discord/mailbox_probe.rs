@@ -154,6 +154,7 @@ mod mailbox_unreachable_tests {
         let levels = std::sync::Arc::default();
         let subscriber =
             tracing_subscriber::registry().with(Levels(std::sync::Arc::clone(&levels)));
+        crate::logging::test_capture::pin_callsite_interest();
         (levels, tracing::subscriber::set_default(subscriber))
     }
 

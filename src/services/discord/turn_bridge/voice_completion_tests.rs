@@ -555,6 +555,7 @@ async fn background_completion_target_consumes_legacy_flagged_local_only_fallbac
     // `flavor = "current_thread"` the tokio runtime keeps every
     // await on this same thread, so warns emitted inside the async
     // call are routed to our capturing subscriber.
+    crate::logging::test_capture::pin_callsite_interest();
     let _guard = tracing::subscriber::set_default(subscriber);
 
     let resolved = voice_background_completion_target(

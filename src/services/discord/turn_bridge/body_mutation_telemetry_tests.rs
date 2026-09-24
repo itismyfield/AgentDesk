@@ -56,6 +56,7 @@ pub(in crate::services::discord::turn_bridge) fn captured_logs<F: FnOnce()>(body
         .with_writer(writer.clone())
         .with_ansi(false)
         .finish();
+    crate::logging::test_capture::pin_callsite_interest();
     tracing::subscriber::with_default(subscriber, body);
     let bytes = writer.buffer.lock().unwrap().clone();
     String::from_utf8(bytes).expect("captured log is utf-8")
@@ -76,6 +77,7 @@ fn captured_logs_under_production_filter<F: FnOnce()>(body: F) -> String {
             crate::logging::DEFAULT_TRACING_DIRECTIVE,
         ))
         .finish();
+    crate::logging::test_capture::pin_callsite_interest();
     tracing::subscriber::with_default(subscriber, body);
     let bytes = writer.buffer.lock().unwrap().clone();
     String::from_utf8(bytes).expect("captured log is utf-8")

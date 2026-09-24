@@ -683,6 +683,7 @@ mod tests {
             .with_max_level(tracing::Level::INFO)
             .with_writer(move || writer.clone())
             .finish();
+        crate::logging::test_capture::pin_callsite_interest();
         let _subscriber = tracing::subscriber::set_default(subscriber);
         for (metadata_id, source, parent, expected) in [
             (
