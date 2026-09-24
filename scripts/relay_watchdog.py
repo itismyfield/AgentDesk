@@ -84,13 +84,11 @@ PG_STATE_KEY = "_pg_tunnel"
 # #5484: `/api/health/detail` that never yields a usable `db` is PG_UNKNOWN —
 # no evidence about Postgres, deliberately not a PG alert. But a runtime that
 # stopped booting emits exactly that forever, which is how 2026-08-21 went
-# unreported for ~7h. Its own incident, on the PG circuit's thresholds and its
-# #4379 de-duplication contract, never a PG verdict.
+# unreported for ~7h. Its own incident, on the PG circuit's thresholds, never
+# a PG verdict.
 RUNTIME_HEALTH_STATE_KEY = "_runtime_health"
 RUNTIME_UNOBSERVABLE_RETRY_SECS = 60
 RUNTIME_UNOBSERVABLE_MAX_RETRIES = 5
-# Both circuits defer one tick behind #4379 and then say so, in one wording.
-DCSERVER_DEDUP_NOTE = "\n\n참고: dcserver 부트 PG 알림이 먼저 발화해 이 알림을 1 tick 보류했습니다."
 
 # Independent watcher-coverage states (#4408 phase 1).  Coverage is evaluated
 # in parallel with transcript-vs-Discord gap judgment; these states must never
@@ -3396,7 +3394,6 @@ class Runtime:
         self.log_path = root / "logs/relay-watchdog.log"
         self.state_path = root / "logs/relay-watchdog.state.json"
         self.deploy_marker = root / "logs/relay-watchdog.deploy-marker"
-        self.dcserver_pg_alert_state = root / "logs/dcserver-pg-alert.state"
         self.external_verdict_root = root / "runtime" / EXTERNAL_VERDICT_DIR
         # Per-read scratch, not persisted state: `discord_haystack` sets it and
         # the same tick's sidecar publish reads it. It starts False and is reset
@@ -3685,20 +3682,6 @@ class Runtime:
             tunnel_open = None
         return evaluate_pg_health(False, tunnel_open)
 
-    def recent_dcserver_pg_alert(self, now: float) -> bool:
-        """Read #4379's successful-alert stamp for one-tick de-duplication.
-
-        The Rust writer stores integer UNIX seconds.  Invalid/future content is
-        fail-open (not recent), matching its own rate-limit semantics so a bad
-        state file can never silence this independent watchdog.
-        """
-        try:
-            sent_at = float(self.dcserver_pg_alert_state.read_text().strip())
-        except (OSError, ValueError):
-            return False
-        elapsed = now - sent_at
-        return 0 <= elapsed < self.cfg.pg_realert_secs
-
     def dcserver_snapshot(self) -> str:
         bits = []
         # /api/health/detail, NOT /api/health: the public projection strips live
@@ -3979,7 +3962,7 @@ def tick_runtime_observability(
             rt.log("[runtime-health] OBSERVABLE — unobservable incident closed")
         # `last_alert` outlives the incident so a flapping endpoint cannot
         # re-alert inside the cooldown; everything incident-local is dropped.
-        for key in ("since", "attempts", "last_attempt", "dedup_deferred"):
+        for key in ("since", "attempts", "last_attempt"):
             obs.pop(key, None)
         return
 
@@ -3991,15 +3974,6 @@ def tick_runtime_observability(
     if now - _sanitized_stamp(obs.get("last_alert", 0.0), now) < rt.cfg.pg_realert_secs:
         rt.log("[runtime-health] db unobservable persists (suppressed, cooldown)")
         return
-    # #4379's dcserver boot alert is PG-independent, rate-limited to the same
-    # 900s, and would run a second stream through a PG-boot crash loop. Ride its
-    # contract (see below): defer only the FIRST alert of an incident by exactly
-    # one tick, then send with the note — de-duplication cannot become silence.
-    if not obs.get("alerting") and not obs.get("dedup_deferred"):
-        if rt.recent_dcserver_pg_alert(now):
-            obs["dedup_deferred"] = True
-            rt.log("[runtime-health] dcserver boot alert recent — defer one tick")
-            return
     delivered = rt.alert(
         ch,
         "\U0001f6a8 **런타임 health 관측 불가 (relay watchdog)**\n\n"
@@ -4007,8 +3981,7 @@ def tick_runtime_observability(
         " 동안 한 번도 읽지 못했습니다(무응답·비정상 JSON·`db` 필드 부재). 이는 "
         "**관측 불가**이며 PG 장애로 단정하지 않습니다. watchdog은 런타임을 "
         "재시작하지 않으므로 런타임 프로세스와 launchd 상태를 직접 확인해 주세요."
-        f"\n\n런타임: {rt.dcserver_snapshot()}"
-        + (DCSERVER_DEDUP_NOTE if obs.get("dedup_deferred") else ""),
+        f"\n\n런타임: {rt.dcserver_snapshot()}",
         trigger_turn=False,
     )
     obs["last_attempt"] = now
@@ -4017,7 +3990,6 @@ def tick_runtime_observability(
         rt.log(f"[runtime-health] ALERT send failed (attempt {attempts + 1})")
         return
     obs.update(alerting=True, last_alert=now, attempts=0)
-    obs.pop("dedup_deferred", None)
     rt.log(f"[runtime-health] ALERT unobservable duration={int(unobservable_for)}s")
 
 
@@ -4037,8 +4009,7 @@ def tick_pg_tunnel(rt: Runtime, state: dict[str, Any], now: float) -> None:
         # Unknown is not recovery from an already-alerting incident, but it
         # breaks a pending "N minutes continuously db=false" interval.
         if not pgs.get("alerting"):
-            for key in ("unhealthy_since", "dedup_deferred", "dcserver_alert_seen"):
-                pgs.pop(key, None)
+            pgs.pop("unhealthy_since", None)
         rt.log("[pg-tunnel] health/detail db unknown — PG timer not advanced")
         return
 
@@ -4059,8 +4030,6 @@ def tick_pg_tunnel(rt: Runtime, state: dict[str, Any], now: float) -> None:
             "alerting",
             "unhealthy_since",
             "cause",
-            "dedup_deferred",
-            "dcserver_alert_seen",
         ):
             pgs.pop(key, None)
         return
@@ -4110,33 +4079,16 @@ def tick_pg_tunnel(rt: Runtime, state: dict[str, Any], now: float) -> None:
         )
         return
 
-    # #4379 may just have emitted its PG-independent boot alert.  Defer only
-    # the FIRST watchdog alert by exactly one tick; the next tick still sends
-    # (with correlation text) so de-duplication can never turn into silence.
-    if not pgs.get("alerting") and not pgs.get("dedup_deferred"):
-        if rt.recent_dcserver_pg_alert(now):
-            pgs["dedup_deferred"] = True
-            pgs["dcserver_alert_seen"] = True
-            rt.log(
-                "[pg-tunnel] dcserver PG boot alert is recent — "
-                "deferring watchdog alert by one tick"
-            )
-            return
-
-    correlation = DCSERVER_DEDUP_NOTE if pgs.get("dcserver_alert_seen") else ""
     minutes = max(1, int(unhealthy_for // 60))
     rt.alert(
         ch,
         "🚨 **PG 경로 지속 장애 (relay watchdog)**\n\n"
         f"`/api/health/detail`의 `db=false`가 **{minutes}분** 지속되었습니다.\n"
         f"원인 판별: **{cause_text}**.\n\n"
-        f"런타임: {rt.dcserver_snapshot()}"
-        f"{correlation}",
+        f"런타임: {rt.dcserver_snapshot()}",
     )
     pgs["last_alert"] = now
     pgs["alerting"] = True
-    pgs.pop("dedup_deferred", None)
-    pgs.pop("dcserver_alert_seen", None)
     rt.log(
         f"[pg-tunnel] ALERT db=false cause={cause_state} "
         f"duration={int(unhealthy_for)}s"

@@ -52,13 +52,7 @@ fn escalation_defaults_from_configs(
             .escalation
             .owner_user_id
             .or(boot_config.discord.owner_id),
-        pm_channel_id: normalize_optional_string(
-            live_config
-                .escalation
-                .pm_channel_id
-                .clone()
-                .or_else(|| live_config.kanban.human_alert_channel_id.clone()),
-        ),
+        pm_channel_id: normalize_optional_string(live_config.escalation.pm_channel_id.clone()),
         schedule: EscalationScheduleSettings {
             pm_hours: live_config
                 .escalation
@@ -161,5 +155,22 @@ mod tests {
         let defaults = escalation_defaults_from_configs(&boot, &live);
 
         assert_eq!(defaults.owner_user_id, Some(333));
+    }
+
+    /// #5993: the PM channel comes only from `escalation.pm_channel_id`; with
+    /// it unset the route reports `pm_channel_id is not configured`.
+    #[test]
+    fn escalation_pm_channel_comes_only_from_escalation_config() {
+        let boot = Config::default();
+        let mut live = boot.clone();
+        assert_eq!(
+            escalation_defaults_from_configs(&boot, &live).pm_channel_id,
+            None
+        );
+        live.escalation.pm_channel_id = Some(" 444 ".to_string());
+        assert_eq!(
+            escalation_defaults_from_configs(&boot, &live).pm_channel_id,
+            Some("444".to_string())
+        );
     }
 }

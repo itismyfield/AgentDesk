@@ -154,25 +154,12 @@ NON_PG_SKIP_ARGS=(
 NON_PG_FILTER_REPLAY=(
   cli::dcserver_pg_bootstrap::tests::backoff_delay_follows_exponential_schedule
   cli::dcserver_pg_bootstrap::tests::backoff_delay_saturates_at_cap
-  cli::dcserver_pg_bootstrap::tests::boundary_deadline_cuts_off_hung_send
-  cli::dcserver_pg_bootstrap::tests::candidate_tokens_cover_single_token_boot_and_dedupe
   cli::dcserver_pg_bootstrap::tests::connect_exhausts_budget_and_reports_last_error
   cli::dcserver_pg_bootstrap::tests::connect_retries_then_succeeds_recording_backoff
   cli::dcserver_pg_bootstrap::tests::connect_returns_immediately_on_first_success
   cli::dcserver_pg_bootstrap::tests::exhausted_ok_none_reports_required_message
-  cli::dcserver_pg_bootstrap::tests::failed_send_rolls_back_stamp_so_next_boot_retries
-  cli::dcserver_pg_bootstrap::tests::multi_candidate_falls_through_to_second_token
   cli::dcserver_pg_bootstrap::tests::pool_timeout_diagnostic_includes_timestamp_source_and_attempt
-  cli::dcserver_pg_bootstrap::tests::rollback_falls_back_to_sentinel_when_delete_is_blocked
-  cli::dcserver_pg_bootstrap::tests::rollback_without_stamp_is_a_noop
-  cli::dcserver_pg_bootstrap::tests::should_send_alert_allows_after_window
-  cli::dcserver_pg_bootstrap::tests::should_send_alert_allows_on_future_last_sent
-  cli::dcserver_pg_bootstrap::tests::should_send_alert_allows_when_never_sent
-  cli::dcserver_pg_bootstrap::tests::should_send_alert_suppresses_within_window
-  cli::dcserver_pg_bootstrap::tests::single_token_boot_sends_with_that_token
-  cli::dcserver_pg_bootstrap::tests::slow_startup_timeout_exhausts_retries_then_notifies
-  cli::dcserver_pg_bootstrap::tests::stamp_write_failure_still_sends_fail_open
-  cli::dcserver_pg_bootstrap::tests::successful_send_keeps_stamp_and_suppresses_next_boot
+  cli::dcserver_pg_bootstrap::tests::slow_startup_timeout_exhausts_retries_and_reports_the_exit_line
   cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_detail_includes_applied_and_resolved_hashes
   db::auto_queue::entries::tests::pinned_dispatch_identity_is_declared_before_the_stale_retry_loop
   db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::explicit_phase_gate_verdict_key_blocks_inference

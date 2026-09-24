@@ -436,14 +436,8 @@ impl SupervisedWorkerRegistry {
                     return Ok(None);
                 };
                 let routines_config = self.config.routines.clone();
-                let routine_health_target = self
-                    .config
-                    .kanban
-                    .human_alert_channel_id
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(|value| format!("channel:{value}"));
+                // #5993: no operator health target (see routines helpers).
+                let routine_health_target: Option<String> = None;
                 let routine_health_registry = self.health_registry.clone();
                 self.register_leader_tokio(spec, move || {
                     let routine_pg_pool = routine_pg_pool.clone();
