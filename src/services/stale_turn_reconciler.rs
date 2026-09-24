@@ -1581,6 +1581,7 @@ mod tests {
             .without_time()
             .with_writer(Writer(logs.clone()))
             .finish();
+        crate::logging::test_capture::pin_callsite_interest();
         let _subscriber = tracing::subscriber::set_default(subscriber);
         let (barrier, reached, resume) = apply_barrier();
         let _guard = install_stale_sweep_apply_barrier(barrier);

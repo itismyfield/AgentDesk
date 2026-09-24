@@ -1312,6 +1312,7 @@ mod tests {
             .with_ansi(false)
             .with_env_filter(tracing_subscriber::EnvFilter::new(directive))
             .finish();
+        crate::logging::test_capture::pin_callsite_interest();
         tracing::subscriber::with_default(subscriber, || {
             reconcile_runtime_locals_from_inflight_state(&shared, &mut harness.runtime);
         });

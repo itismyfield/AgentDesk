@@ -88,6 +88,7 @@ mod lease_release_identity_tests {
     where
         F: std::future::Future<Output = ()>,
     {
+        crate::logging::test_capture::pin_callsite_interest();
         let writer = CapturingWriter::default();
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)

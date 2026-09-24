@@ -541,6 +541,7 @@ async fn settlement_sql_error_is_swallowed_and_counted() {
         .without_time()
         .with_writer(CapturingWriter(Arc::clone(&logs)))
         .finish();
+    crate::logging::test_capture::pin_callsite_interest();
     let _guard = tracing::subscriber::set_default(subscriber);
     settle_intake_row_at_bridge_exit(
         &shared,

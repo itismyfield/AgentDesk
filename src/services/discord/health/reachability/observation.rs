@@ -366,6 +366,7 @@ mod tests {
             .with_max_level(tracing::Level::WARN)
             .with_writer(CapturingWriter(log_buffer.clone()))
             .finish();
+        crate::logging::test_capture::pin_callsite_interest();
         let state = tracing::subscriber::with_default(subscriber, || {
             observe_channel_at(&ledger_path, stale_snapshot, 3, || Some(live_snapshot))
         });

@@ -450,6 +450,7 @@ mod tests {
             },
         };
 
+        crate::logging::test_capture::pin_callsite_interest();
         tracing::subscriber::with_default(subscriber, || {
             record_decision(
                 IntakeRoutingMode::Observe,

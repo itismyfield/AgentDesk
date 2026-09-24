@@ -1683,6 +1683,7 @@ mod tests {
             .without_time()
             .with_writer(CapturingWriter(buffer.clone()))
             .finish();
+        crate::logging::test_capture::pin_callsite_interest();
         let result = tracing::subscriber::with_default(subscriber, run);
         let output = String::from_utf8_lossy(&buffer.lock().unwrap()).into_owned();
         (result, output)
@@ -2273,6 +2274,7 @@ mod tests {
             .without_time()
             .with_writer(CapturingWriter(buffer.clone()))
             .finish();
+        crate::logging::test_capture::pin_callsite_interest();
         let _subscriber_guard = tracing::subscriber::set_default(subscriber);
         let registry = HealthRegistry::new();
         assert!(
