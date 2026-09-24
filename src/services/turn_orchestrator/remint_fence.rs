@@ -1,5 +1,6 @@
 //! Which persisted episodes a recovery re-mint may still re-open.
 
+use crate::services::provider::CancelToken;
 use poise::serenity_prelude::MessageId;
 
 /// The mailbox holds one episode at a time, so an episode that did not start
@@ -21,6 +22,19 @@ impl RemintFence {
         turn_nonce: Option<&str>,
     ) {
         self.latest_started = Some((user_message_id, turn_nonce.map(str::to_owned)));
+    }
+
+    /// A recovery kickoff that found a live token gained no ownership, so it
+    /// must leave the latest started episode where it is.
+    pub(super) fn note_kickoff(
+        &mut self,
+        claimed_empty_slot: bool,
+        user_message_id: Option<MessageId>,
+        token: &CancelToken,
+    ) {
+        if claimed_empty_slot {
+            self.note_started(user_message_id, token.turn_nonce());
+        }
     }
 
     pub(super) fn note_exact_release(&mut self, user_message_id: MessageId, turn_nonce: &str) {

@@ -1315,6 +1315,49 @@ mod released_episode_mint_fence_tests {
         }
     }
 
+    /// A stale startup snapshot whose kickoff finds a live token gains no
+    /// ownership, so its later cleanup must not fence the live episode.
+    #[test]
+    fn a_busy_recovery_kickoff_does_not_fence_the_live_episode() {
+        let earlier = episode(524_212, 0);
+        let live = episode(earlier.channel_id, 1);
+        let stale = episode(earlier.channel_id, 2);
+        let (activated, restored, token_present) = with_running_process(async |shared| {
+            assert!(start_live(shared, &earlier).await);
+            assert!(finalizer_release(shared, &earlier).await);
+            assert!(start_live(shared, &live).await);
+            let activated = shared
+                .mailbox(ChannelId::new(stale.channel_id))
+                .recovery_kickoff(
+                    std::sync::Arc::new(
+                        crate::services::provider::CancelToken::from_persisted_turn_nonce(
+                            stale.turn_nonce.clone(),
+                        ),
+                    ),
+                    serenity::model::id::UserId::new(stale.request_owner_user_id),
+                    Some(MessageId::new(stale.effective_finalizer_turn_id())),
+                )
+                .await
+                .activated_turn;
+            let _ = finalizer_release(shared, &stale).await;
+            // Whichever token is left, the live episode loses it without a release.
+            let _ = crate::services::discord::mailbox_finish_turn_if_matches(
+                shared,
+                &ProviderKind::Claude,
+                ChannelId::new(live.channel_id),
+                MessageId::new(live.effective_finalizer_turn_id()),
+            )
+            .await;
+            let restored = super::reregister_active_turn_from_inflight(shared, &live).await;
+            (activated, restored, token_present(shared, &live).await)
+        });
+        assert!(!activated, "the live episode still held the mailbox");
+        assert!(
+            restored && token_present,
+            "a kickoff that claimed no empty slot must not become the latest episode"
+        );
+    }
+
     /// The restored watcher's own completion release must raise the fence, not
     /// fall back to a message-id-only finish that proves no episode ended.
     #[cfg(unix)]

@@ -2151,7 +2151,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     state.active_turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
                     state
                         .remint_fence
-                        .note_started(user_message_id, cancel_token.turn_nonce());
+                        .note_kickoff(activated_turn, user_message_id, &cancel_token);
                     state.cancel_token = Some(cancel_token);
                     state.active_request_owner = Some(request_owner);
                     state.active_user_message_id = user_message_id;
