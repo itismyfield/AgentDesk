@@ -1253,14 +1253,19 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         // Persist the contiguous settled frontier even when a retry is pending.
         // The current cap/defer item was deliberately not folded in, so this
         // retires permanent skips without crossing work that still needs retry.
+        let retained = frontier.retained_barrier(scan_checkpoint, retry_exhausted);
         if let Some(newest) = frontier.newest() {
             advance_last_message_checkpoint(shared, provider, channel_id, MessageId::new(newest));
             if retry_checkpoint.is_some()
                 && !shared.catch_up_retry_pending.contains_key(&channel_id)
             {
                 let ts = chrono::Local::now().format("%H:%M:%S");
+                let outcome = match retained {
+                    Some(retained) => format!("retained at barrier {}", retained.barrier),
+                    None => "completed".to_owned(),
+                };
                 tracing::info!(
-                    "  [{ts}] 🔁 catch-up: retry completed for channel {} at checkpoint {}",
+                    "  [{ts}] 🔁 catch-up: retry {outcome} for channel {} at checkpoint {}",
                     channel_id,
                     newest
                 );
@@ -1289,7 +1294,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 },
             );
         }
-        if let Some(retained) = frontier.retained_barrier(scan_checkpoint, retry_exhausted) {
+        if let Some(retained) = retained {
             phase1_barriers.insert(channel_id, retained);
         }
     }

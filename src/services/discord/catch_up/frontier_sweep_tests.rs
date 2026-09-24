@@ -409,10 +409,10 @@ async fn t2_later_terminal_and_accepted_messages_do_not_leap_m() {
 async fn t3_live_pending_dispatch_ids_are_not_dispatch_evidence() {
     let fx = Fixture::new().await;
     let channel_id = ChannelId::new(4_603_503);
-    let (checkpoint, primary, source, terminal) = (id(1, 600), id(2, 200), id(3, 150), id(4, 60));
+    let (checkpoint, source, primary, terminal) = (id(1, 600), id(2, 200), id(3, 150), id(4, 60));
     fx.seed_checkpoint(channel_id, checkpoint);
     let mut head = queued_intervention(primary, 0);
-    head.source_message_ids = vec![primary, source];
+    head.source_message_ids = vec![source, primary];
     let outcome =
         discord::mailbox_enqueue_intervention(&fx.shared, &fx.provider, channel_id, head).await;
     assert!(super::super::catch_up_enqueue_accepted(&outcome));
@@ -424,15 +424,15 @@ async fn t3_live_pending_dispatch_ids_are_not_dispatch_evidence() {
     let api = StrictApi::new(&fx.shared).with_history(
         channel_id,
         vec![
-            human(channel_id, primary),
             human(channel_id, source),
+            human(channel_id, primary),
             foreign_bot(channel_id, terminal),
         ],
     );
 
     fx.sweep(&api).await;
 
-    assert_phase1_read(&api, after(checkpoint), &[primary, source, terminal]);
+    assert_phase1_read(&api, after(checkpoint), &[source, primary, terminal]);
     let expected = (Some(checkpoint.get()), Some(checkpoint.get()));
     assert_eq!(fx.surfaces(channel_id), expected);
 }
@@ -623,28 +623,49 @@ async fn t6b_phase2_scan_checkpoint_is_clamped_without_lowering_the_live_one() {
 enum Resolution {
     LeftQueueUnprocessed,
     BecameActiveTurn,
+    /// M is the newest primary of a merged head that also carries older H. The
+    /// claim drops H's evidence, so H is re-offered, never leapt (#6205 dedups).
+    MergedHeadClaimed,
 }
 
 /// T9: once M's membership resolves, the next retry sweep either re-recovers
 /// M or settles it on turn evidence, and the barrier is gone.
 async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
     let fx = Fixture::new().await;
-    let (checkpoint, m) = (id(1, 600), id(2, 120));
+    let (checkpoint, h, m) = (id(1, 600), id(2, 150), id(3, 120));
     fx.seed_checkpoint(channel_id, checkpoint);
-    fx.queue(channel_id, m).await;
-    let history = vec![own_reply(channel_id, checkpoint), human(channel_id, m)];
+    let mut history = vec![own_reply(channel_id, checkpoint)];
+    if let Resolution::MergedHeadClaimed = resolution {
+        let mut head = queued_intervention(m, 0);
+        head.source_message_ids = vec![h, m];
+        let queued =
+            discord::mailbox_enqueue_intervention(&fx.shared, &fx.provider, channel_id, head);
+        assert!(super::super::catch_up_enqueue_accepted(&queued.await));
+        history.push(human(channel_id, h));
+    } else {
+        fx.queue(channel_id, m).await;
+    }
+    history.push(human(channel_id, m));
     let first = StrictApi::new(&fx.shared).with_history(channel_id, history.clone());
     fx.sweep(&first).await;
     let held = fx.pending(channel_id).expect("barrier kept a retry");
     assert_eq!(held.checkpoint, checkpoint.get(), "{resolution:?}");
 
+    let token = Arc::new(crate::services::provider::CancelToken::new());
+    let owner = serenity::UserId::new(HUMAN_ID);
     match resolution {
         Resolution::LeftQueueUnprocessed => {
             discord::mailbox_clear_channel(&fx.shared, &fx.provider, channel_id).await;
         }
         Resolution::BecameActiveTurn => {
-            let token = Arc::new(crate::services::provider::CancelToken::new());
-            let owner = serenity::UserId::new(HUMAN_ID);
+            let started =
+                discord::mailbox_try_start_turn(&fx.shared, channel_id, token, owner, m).await;
+            assert!(started, "{resolution:?}");
+        }
+        Resolution::MergedHeadClaimed => {
+            let taken =
+                discord::mailbox_take_next_soft_intervention(&fx.shared, &fx.provider, channel_id);
+            let (_head, _, _lease) = taken.await.into_intervention().expect("head taken");
             let started =
                 discord::mailbox_try_start_turn(&fx.shared, channel_id, token, owner, m).await;
             assert!(started, "{resolution:?}");
@@ -654,9 +675,14 @@ async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
     fx.retry_sweep(&second, channel_id).await;
 
     assert_phase1_read(&second, after(checkpoint), &[m]);
-    let recovered = second.enqueue_log().contains(&(m.get(), true, None));
-    let expect_recovery = matches!(resolution, Resolution::LeftQueueUnprocessed);
-    assert_eq!(recovered, expect_recovery, "{resolution:?}");
+    let log = second.enqueue_log().into_iter();
+    let rerun: Vec<u64> = log.filter(|(_, ok, _)| *ok).map(|(id, ..)| id).collect();
+    let expected_rerun = match resolution {
+        Resolution::LeftQueueUnprocessed => vec![m.get()],
+        Resolution::MergedHeadClaimed => vec![h.get()],
+        Resolution::BecameActiveTurn => Vec::new(),
+    };
+    assert_eq!(rerun, expected_rerun, "{resolution:?}");
     let expected = (Some(m.get()), Some(m.get()));
     assert_eq!(fx.surfaces(channel_id), expected, "{resolution:?}");
     assert_eq!(
@@ -674,6 +700,11 @@ async fn t9_unprocessed_m_is_recovered_once_it_leaves_the_queue() {
 #[tokio::test(flavor = "current_thread")]
 async fn t9_m_settles_once_a_turn_takes_it() {
     t9_case(ChannelId::new(4_603_510), Resolution::BecameActiveTurn).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn t9_absorbed_h_is_reoffered_not_leapt_once_its_merged_head_is_claimed() {
+    t9_case(ChannelId::new(4_603_521), Resolution::MergedHeadClaimed).await;
 }
 
 /// T10: without an earlier barrier, active-turn and terminal messages advance.

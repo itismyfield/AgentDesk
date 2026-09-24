@@ -2542,6 +2542,7 @@ services::discord::catch_up::classification_order_tests::frontier_sweep_tests::t
 services::discord::catch_up::classification_order_tests::frontier_sweep_tests::t6_t12_phase2_accept_is_counted_but_not_persisted_past_m
 services::discord::catch_up::classification_order_tests::frontier_sweep_tests::t6b_phase2_scan_checkpoint_is_clamped_without_lowering_the_live_one
 services::discord::catch_up::classification_order_tests::frontier_sweep_tests::t7_phase2_fallback_retry_is_clamped_before_it_is_published
+services::discord::catch_up::classification_order_tests::frontier_sweep_tests::t9_absorbed_h_is_reoffered_not_leapt_once_its_merged_head_is_claimed
 services::discord::catch_up::classification_order_tests::frontier_sweep_tests::t9_m_settles_once_a_turn_takes_it
 services::discord::catch_up::classification_order_tests::frontier_sweep_tests::t9_unprocessed_m_is_recovered_once_it_leaves_the_queue
 services::discord::catch_up::classification_order_tests::ledger_suppresses_the_restart_gap_notice_for_an_answered_message

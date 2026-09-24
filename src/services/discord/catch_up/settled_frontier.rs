@@ -49,7 +49,10 @@ impl SettledFrontier {
     pub(super) fn record_duplicate_commit(&mut self, message_id: u64, commit: Phase2EnqueueCommit) {
         match commit {
             Phase2EnqueueCommit::DuplicateActiveTurn => self.settle(message_id),
-            _ => self.seal(message_id),
+            Phase2EnqueueCommit::Accepted
+            | Phase2EnqueueCommit::DuplicateQueued
+            | Phase2EnqueueCommit::LastItemDedup
+            | Phase2EnqueueCommit::Deferred => self.seal(message_id),
         }
     }
 
