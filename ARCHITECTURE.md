@@ -401,6 +401,8 @@ src/
 │   │   ├── turn_lease.rs
 │   │   ├── v1.rs
 │   │   └── voice_config.rs
+│   ├── web_surface/
+│   │   └── tests.rs
 │   ├── worker_registry/
 │   │   ├── registry.rs
 │   │   └── status.rs
@@ -424,6 +426,7 @@ src/
 │   ├── state.rs
 │   ├── task_dispatch_claims.rs
 │   ├── test_phase_runs.rs
+│   ├── web_surface.rs
 │   ├── worker_recovery.rs
 │   ├── worker_registry.rs
 │   └── ws.rs
