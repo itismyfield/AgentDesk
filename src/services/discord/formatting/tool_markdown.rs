@@ -5,10 +5,6 @@ pub(crate) fn redact_sensitive_for_placeholder(input: &str) -> String {
         LazyLock::new(|| Regex::new(r"sk-[A-Za-z0-9][A-Za-z0-9_-]{8,}").expect("valid key regex"));
     static BEARER_RE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(?i)\bBearer\s+\S+").expect("valid bearer token regex"));
-    static ASSIGNMENT_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?i)\b(password|token|api[_-]?key)=\S+")
-            .expect("valid secret assignment regex")
-    });
     static EMAIL_RE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b").expect("valid email regex")
     });
@@ -19,7 +15,7 @@ pub(crate) fn redact_sensitive_for_placeholder(input: &str) -> String {
     let redacted = crate::utils::redact::redact_cookie_headers(input, "***");
     let redacted = OPENAI_KEY_RE.replace_all(&redacted, "***");
     let redacted = BEARER_RE.replace_all(&redacted, "Bearer ***");
-    let redacted = ASSIGNMENT_RE.replace_all(&redacted, "${1}=***");
+    let redacted = crate::utils::redact::redact_assignments(&redacted);
     EMAIL_RE.replace_all(&redacted, "***@***").into_owned()
 }
 
@@ -722,4 +718,33 @@ pub(in crate::services::discord) fn format_for_discord_with_status_panel(
     };
     let cleaned = super::strip_placeholder_lines(input);
     format_for_discord(&cleaned)
+}
+
+#[cfg(test)]
+mod assignment_redaction_tests {
+    use super::{format_tool_input, redact_sensitive_for_placeholder};
+
+    #[test]
+    fn summaries_mask_quoted_and_spaced_assignments_before_display() {
+        for input in [
+            r#"password = "fake secret words""#,
+            r#"API_KEY='fake secret words'"#,
+            r#"{"client_secret": "fake secret words"}"#,
+        ] {
+            let redacted = redact_sensitive_for_placeholder(input);
+            assert!(!redacted.contains("fake secret words"), "{redacted}");
+            assert!(!redacted.contains("secret words"), "{redacted}");
+            assert!(redacted.contains("***"), "{redacted}");
+        }
+        let summary = format_tool_input(
+            "Bash",
+            r#"{"command":"password = 'fake secret words' echo safe"}"#,
+        );
+        assert!(!summary.contains("secret words"), "{summary}");
+        assert!(summary.contains("echo safe"), "{summary}");
+        assert_eq!(
+            redact_sensitive_for_placeholder("api_key_id=public-id"),
+            "api_key_id=public-id"
+        );
+    }
 }

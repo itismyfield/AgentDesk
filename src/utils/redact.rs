@@ -465,16 +465,9 @@ pub(crate) fn serialize_json_with_redacted_cookie_headers(
     output
 }
 
-pub(crate) fn redact_known_secrets(input: &str) -> String {
-    // Mask whole PEM private-key blocks first so later single-token rules cannot
-    // leave the key body behind, and so the registered-secret pass is unaffected.
-    let redacted = PRIVATE_KEY_BLOCK_RE.replace_all(input, "***");
-    let redacted = POSTGRES_DSN_RE.replace_all(&redacted, |captures: &regex::Captures<'_>| {
-        mask_dsn_password(captures.get(0).map(|m| m.as_str()).unwrap_or_default())
-    });
-    let redacted = redact_sensitive_headers(&redacted, "***");
-    let mut redacted = ASSIGNMENT_RE
-        .replace_all(&redacted, |captures: &regex::Captures<'_>| {
+pub(crate) fn redact_assignments(input: &str) -> String {
+    ASSIGNMENT_RE
+        .replace_all(input, |captures: &regex::Captures<'_>| {
             let key_sep = captures.get(1).map(|m| m.as_str()).unwrap_or_default();
             // `*_ID` / `*-ID` fields (e.g. `private_key_id`, `api-key-id`) are
             // identifiers, not secrets — leave them intact instead of masking a
@@ -499,7 +492,18 @@ pub(crate) fn redact_known_secrets(input: &str) -> String {
                 format!("{key_sep}***")
             }
         })
-        .into_owned();
+        .into_owned()
+}
+
+pub(crate) fn redact_known_secrets(input: &str) -> String {
+    // Mask whole PEM private-key blocks first so later single-token rules cannot
+    // leave the key body behind, and so the registered-secret pass is unaffected.
+    let redacted = PRIVATE_KEY_BLOCK_RE.replace_all(input, "***");
+    let redacted = POSTGRES_DSN_RE.replace_all(&redacted, |captures: &regex::Captures<'_>| {
+        mask_dsn_password(captures.get(0).map(|m| m.as_str()).unwrap_or_default())
+    });
+    let redacted = redact_sensitive_headers(&redacted, "***");
+    let mut redacted = redact_assignments(&redacted);
     let secrets = match KNOWN_SECRETS.read() {
         Ok(guard) => guard.clone(),
         Err(poisoned) => poisoned.into_inner().clone(),
