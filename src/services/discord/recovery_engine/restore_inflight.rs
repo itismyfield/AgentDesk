@@ -2099,7 +2099,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         )
         .await;
 
-        if !kickoff.activated_turn {
+        if !kickoff.activated_turn() {
             continue;
         }
         // Consume outgoing planned-restart authority (identity-guarded readoption)

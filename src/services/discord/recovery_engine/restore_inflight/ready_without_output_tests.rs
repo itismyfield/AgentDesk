@@ -873,15 +873,15 @@ async fn captured_finalizer_refuses_same_id_legacy_recovery_actor_replacement() 
             .await;
         }
         let successor = Arc::new(CancelToken::from_persisted_turn_nonce(None));
-        // RecoveryKickoff can replace the token without advancing turn_started_instant.
+        // An unguarded rebind replaces the token without advancing turn_started_instant.
         // Only the actual actor comparison can protect this same-ID legacy successor.
         fixture
             .shared
             .mailbox(channel)
-            .recovery_kickoff(
+            .restore_active_turn(
                 successor.clone(),
                 UserId::new(state.request_owner_user_id),
-                Some(MessageId::new(state.effective_finalizer_turn_id())),
+                MessageId::new(state.effective_finalizer_turn_id()),
             )
             .await;
         let _ = finish_recovered_turn_mailbox_for_captured_state(
@@ -1023,7 +1023,7 @@ async fn partial_eof_actual_fallback_uses_own_anchor_snapshot_and_refuses_foreig
                     // The durable row, including save generation, remains untouched.
                     shared
                         .mailbox(channel)
-                        .recovery_kickoff(replacement, owner, Some(user))
+                        .restore_active_turn(replacement, owner, user)
                         .await;
                 })
             })
@@ -1122,10 +1122,10 @@ async fn partial_eof_actual_fallback_uses_own_anchor_snapshot_and_refuses_foreig
             fixture
                 .shared
                 .mailbox(channel)
-                .recovery_kickoff(
+                .restore_active_turn(
                     replacement_actor.clone(),
                     UserId::new(state.request_owner_user_id),
-                    Some(MessageId::new(state.effective_finalizer_turn_id())),
+                    MessageId::new(state.effective_finalizer_turn_id()),
                 )
                 .await;
             adopted_bytes = Some(std::fs::read(&row_path).expect("row adopted by B"));
@@ -1198,10 +1198,10 @@ async fn captured_episode_claim_preserves_actor_witness_and_refuses_mismatched_r
             fixture
                 .shared
                 .mailbox(channel)
-                .recovery_kickoff(
+                .restore_active_turn(
                     replacement.clone(),
                     UserId::new(state.request_owner_user_id),
-                    Some(MessageId::new(state.effective_finalizer_turn_id())),
+                    MessageId::new(state.effective_finalizer_turn_id()),
                 )
                 .await;
         }

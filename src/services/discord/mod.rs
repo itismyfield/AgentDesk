@@ -655,7 +655,7 @@ pub(in crate::services::discord) fn saturating_decrement_global_active(
 /// INVARIANT: `global_active` == number of mailbox slots currently in the
 /// started-not-yet-finished state. This helper MUST be called +1 IFF a mailbox
 /// `try_start_turn` / `recovery_kickoff` actually activated a slot
-/// (`started` / `activated_turn == true`); the matching -1 happens IFF a
+/// (`started` / `activated_turn()`); the matching -1 happens IFF a
 /// mailbox finish/clear actually removed it (`removed_token.is_some()`). Keeping
 /// increment/decrement 1:1 with the real mailbox state transition — NEVER caller
 /// intent — is what prevents the drift/underflow seen in #2934.

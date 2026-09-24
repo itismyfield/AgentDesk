@@ -99,10 +99,7 @@ pub(super) fn gate_closed_arm(
         // `recovery_started_at`, and (via the wrapper's `activated_turn`)
         // incremented `global_active` — live work on a severed actor.
         ChannelMailboxMsg::RecoveryKickoff { reply, .. } => {
-            let _ = reply.send(RecoveryKickoffResult {
-                activated_turn: false,
-                refused_closed: true,
-            });
+            let _ = reply.send(RecoveryKickoffResult::RefusedClosed);
             None
         }
         // Pre-fix this arm accepted (and disk-persisted) queue content that
@@ -177,7 +174,7 @@ impl ChannelMailboxRegistry {
                 .handle(channel_id)
                 .recovery_kickoff(cancel_token.clone(), request_owner, user_message_id)
                 .await;
-            if !result.refused_closed {
+            if !result.refused_closed() {
                 return result;
             }
             if attempt == CLOSED_RETRY_ATTEMPTS {
@@ -612,11 +609,11 @@ mod tests {
             )
             .await;
         assert!(
-            result.refused_closed,
+            result.refused_closed(),
             "a kickoff racing the purge must be refused by the closed tombstone"
         );
         assert!(
-            !result.activated_turn,
+            !result.activated_turn(),
             "a refused kickoff must not report an activated turn \
              (pre-fix this incremented global_active for an unreachable actor)"
         );
@@ -761,8 +758,8 @@ mod tests {
                 None,
             )
             .await;
-        assert!(kickoff.refused_closed);
-        assert!(!kickoff.activated_turn);
+        assert!(kickoff.refused_closed());
+        assert!(!kickoff.activated_turn());
         assert!(!handle.has_active_turn().await.unwrap());
         GLOBAL_CHANNEL_MAILBOXES.remove(&channel);
     }
@@ -789,8 +786,8 @@ mod tests {
                 Some(MessageId::new(11)),
             )
             .await;
-        assert!(!result.refused_closed);
-        assert!(result.activated_turn);
+        assert!(!result.refused_closed());
+        assert!(result.activated_turn());
         let fresh_handle = registry.handle(channel);
         assert!(fresh_handle.has_active_turn().await.unwrap());
 
