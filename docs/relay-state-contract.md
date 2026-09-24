@@ -479,6 +479,129 @@ plan.
 - Invariant key: `mailbox_episode_identity_exact` (enforced by the actor predicate
   and mutation-proven regression tests rather than an observe-only hook).
 
+## I21. A turn-lifetime writer names the episode it observed (#5951)
+
+Numbered after I20 (#5996) and placed after I8 because it generalizes I8's
+destructive-consumer clause from stale durable-repair paths to every writer
+that retires turn-lifetime state.
+
+- Authority. The mailbox active-turn lease is the authority for "a turn is
+  running on this channel"; the durable inflight row is derived from it.
+  Normal construction is lease → row: the admitting writer claims the lease,
+  then saves the row carrying the lease's nonce. Whether an admission is
+  construction is decided by the durable row, not by the token: it is
+  construction only while no row for the episode it would own exists. An
+  admission over a matching row is row → lease re-adoption whether it carries
+  a retained `Arc<CancelToken>` or a freshly minted token — the TUI-direct
+  path then refreshes that row onto the new nonce and keeps its source and
+  progress. Re-adoption is the exception, and it must itself cross a fenced
+  admission — a compare-and-set that refuses an occupied slot and refuses an
+  episode the mailbox already released. Current examples are restart
+  restoration (`RecoveryKickoff`, and the pane-alive and boot watcher reattach
+  through `reregister_active_turn_from_inflight`), runtime/manual rebind (the
+  operator rebind route, automatic watcher reattach and watcher respawn, all
+  through `reregister_active_turn_from_inflight`), and TUI-direct dormant
+  resumption (`capture_dormant`, behind the idle unpublished resume and the
+  idle partial recovery) together with TUI-direct admission over a matching
+  row (`prepare_admission`, both its retained-allocation branch and its
+  fresh-token branch). A pending-start replay is construction under the same
+  test — only while no matching row exists. This is an enumeration, not a
+  survey (see I20). Known gaps (#5951): dormant resumption and TUI-direct
+  admission over a matching row, retained or fresh, are admitted through the
+  unfenced claim; the re-mint fence is raised only by an exact-nonce release,
+  so an episode ended by a channel-scoped release can be re-minted from a row
+  that outlived it; and the fence lives in the mailbox actor, so a registry
+  purge that recreates the actor forgets it.
+- Episode identity: `(user_msg_id ≠ 0, turn_nonce, start cutoff)`. The nonce
+  compares exactly; `None` is an exact legacy value, never a wildcard (I8). The
+  cutoff is an `Instant` captured BEFORE the observation the writer decided on,
+  so an episode admitted after that observation cannot match. A writer holding
+  the episode's own `Arc<CancelToken>` may add pointer equality.
+- Writer grades. Every retire/clear of the lease, the row, or queued work is
+  exactly one of:
+  1. OWNER — the episode's driver ends its own episode with its captured
+     identity. Lifecycle authority; it needs no progress witness.
+  2. OBSERVER — a repair/recovery consumer retires the episode it observed: the
+     lease through
+     `sym:mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before`
+     with the observed identity and cutoff, the row through an identity + nonce
+     + generation compare-and-delete under the per-path lock. The decision to
+     retire additionally needs I20's progress witness. Every side effect after
+     the retirement (watcher registry, start-time and recovery tables, thread
+     parents, recovery marker) is bound to the retired episode the same way,
+     because a successor may claim the slot the moment the retirement commits.
+     A side effect whose key a successor can reinstall verbatim — a watcher it
+     reuses rather than replaces, a thread-parent pair it re-inserts — carries
+     a generation that the reuse or re-insertion advances. The generation is
+     observation-relative: the writer compares only the value it captured at
+     the observation boundary of its stale decision, together with the
+     identity and cutoff, never a value read after that decision. A successor
+     that adopts or re-inserts between the decision and a later capture would
+     be captured as the writer's own. Pointer or value equality alone does not
+     name an episode.
+  3. TEARDOWN — channel-wide destruction whose target is not named by an
+     episode. It needs two things that answer different questions.
+     A stale-target fence answers WHO is destroyed: the teardown commits only
+     if the mailbox's destructive-state epoch is unchanged since the
+     observation it decided on, and it is delivered to the same mailbox actor
+     that observation read. The epoch advances on every successful mutation
+     that creates authority or work a teardown could erase — a lease install; a
+     queue insertion, including disk hydration and restored items or markers
+     even when the request that triggered the hydration is itself refused; a
+     queue → dispatch-reservation move. A teardown whose observation is stale is
+     a destructive no-op. The fence never answers WHETHER destruction is
+     allowed; that authority is graded:
+     a. POLICY TEARDOWN — an explicit user or operator command (`/clear`,
+        operator hard stop, force cancel, routine reset). The command is the
+        authority; the fence confines it to the state the commander could have
+        seen.
+     b. AUTOMATIC TEARDOWN — idle expiry, slot recycle and any other unrequested
+        sweep. It owes I20's terminal or progress warrant for what it destroys,
+        in addition to the fence, and it destroys only what that warrant
+        covers. A warrant about a provider session or a dispatch does not cover
+        queued work or a dispatch reservation, so an automatic teardown releases
+        and never purges.
+  Forbidden as authority: channel scope alone, message id alone,
+  `user_msg_id == 0` alone, the `cancelled` flag alone, age, tmux session name,
+  an unchanged epoch alone.
+- Actor incarnation. A mailbox actor closed by a registry purge refuses every
+  mutation, not only starts: the channel's durable queue file, dispatch marker
+  and completion signals are keyed by channel and belong to the registered
+  successor, and a handle cloned before the purge still reaches the closed
+  actor. The refusal binds the wrapper that sent the request as well as the
+  actor arm: every mutating reply says whether it was accepted, and a refused
+  one runs none of the wrapper's channel-keyed follow-up — the `recovery_done`
+  signal, completion events, queue-exit feedback — because that key names the
+  successor too. Admission memory that outlives one episode (the re-mint
+  fence) is carried to the successor actor.
+- Refusal is the correct outcome, not an error. A mismatch, a stale epoch or a
+  closed actor leaves the successor's token, owner, message id, nonce, queue,
+  dispatch reservation, row, watcher, recovery signal and `global_active`
+  unchanged and is reported by status/log. Cost asymmetry as in I20.
+- Unnameable episodes: a lease without a message id (a restored id-0 row) cannot
+  be named by grade 2. A destructive consumer refuses and records this key once
+  per captured-row fingerprint — provider, channel, process generation, row
+  `save_generation` and `updated_at` — a telemetry key only, never release
+  authority. The consuming lane adds a threshold-1 `RELAY_SIGNAL_DEFINITIONS`
+  entry for the key, as I17, I18 and I20 did. The missing name is a producer gap
+  tracked by #5951, not a license to fall back to channel scope.
+- Teardown is not an exception list. Naming a call site here does not make it
+  compliant; until it is fenced and graded it is an open violation in #5951's
+  closure matrix.
+- Current gap (enumeration, #5951): channel-scoped lease finishes, message-id
+  -only finishes, `mailbox_clear_channel` teardowns, `cancelled`-flag finishes,
+  identity-free row deletes, channel-keyed post-retirement cleanup,
+  pointer-bound watcher cleanup under reuse, value-bound thread-parent cleanup,
+  mutations accepted by a purged actor, channel-keyed wrapper follow-up that
+  runs even when the request reached a closed actor (the `recovery_done`
+  signal, completion events, queue-exit feedback), TUI-direct admission over a
+  matching row through the unfenced claim, and the other admission gaps above
+  remain in production; each is assigned to a #5951 slice.
+- Invariant key: `turn_writer_names_its_episode`. This section lands the
+  contract only: the `record_invariant_check` wiring and a deliberate-violation
+  test per writer (steps 2 and 3 below) belong to the #5951 slices that close
+  the gaps above, each citing this section.
+
 ## I9. every session-bound terminal POST holds the shared delivery lease (#4277)
 
 - Definition: terminal deliveries parsed by
