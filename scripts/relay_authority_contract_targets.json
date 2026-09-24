@@ -117,22 +117,10 @@
       "module": "services::discord::turn_bridge::bridge_entry_persist::tests",
       "command": [
         "cargo", "test", "--lib",
-        "services::discord::turn_bridge::bridge_entry_persist::tests::recorded_entry_gate_old_mirrors_the_shipped_lifecycle_gate"
+        "services::discord::turn_bridge::bridge_entry_persist::tests::entry_gate_matrix_over_outcome_and_anchor"
       ],
       "minimum": 1,
-      "derivation": "Existing #5902 witness at 2554366addb110455b86e651e4e39ef702cd8ac0, located by its Rust test declaration: Saved/Missing/IdentityMismatch/IoError across cohort and anchor states. The floor is one explicitly named test; the existing CI verifier must enumerate it and the execution step must pass it. No new local Cargo execution is claimed by this registration."
-    },
-    {
-      "name": "t5-s7a-live-dial-isolation",
-      "boundary": "T5",
-      "status": "active",
-      "module": "services::discord::turn_bridge::bridge_entry_persist::tests",
-      "command": [
-        "cargo", "test", "--lib",
-        "services::discord::turn_bridge::bridge_entry_persist::tests::the_deployed_enforce_dial_governs_every_channel_and_observe_governs_none"
-      ],
-      "minimum": 1,
-      "derivation": "Existing #5902 isolated-process test at 2554366addb110455b86e651e4e39ef702cd8ac0 exercises the actual entry cohort wrapper with Enforce/100 and Observe/100. One named-test floor; actual list and execution are verified by CI, not inferred from a compiled-in Legacy default. This is not a live deployment acceptance test."
+      "derivation": "T6-1 unconditional entry gate: Saved/Missing/IdentityMismatch/IoError across anchor states, with no cohort operand (replaces the #5902 cohort-framed witness). The floor is one explicitly named test; the existing CI verifier must enumerate it and the execution step must pass it. No new local Cargo execution is claimed by this registration."
     },
     {
       "name": "t5-s7a-no-anchor-no-visible-mutation",
@@ -189,7 +177,7 @@
       "boundary": "T5",
       "status": "gap",
       "module": "services::discord::inflight",
-      "reason": "Active T5 targets cover S4 lifecycle preservation, #5902 S7a's gated entry matrix/anchor/detached state, and #5881 C1's rowless terminal candidacy. Full T5 remains incomplete: entry-to-terminal/receipt/next-turn integration, synthetic claim handoff, remaining suppression paths and live acceptance are not established by registering these tests. Keep rollback closure and T6 authorization separate."
+      "reason": "Active T5 targets cover S4 lifecycle preservation, #5902 S7a's entry matrix/anchor/detached state, and #5881 C1's rowless terminal candidacy. Full T5 remains incomplete: entry-to-terminal/receipt/next-turn integration, synthetic claim handoff, remaining suppression paths and live acceptance are not established by registering these tests. Keep rollback closure and T6 authorization separate."
     },
     {
       "name": "relay-e2e-local-model-queue-wake",

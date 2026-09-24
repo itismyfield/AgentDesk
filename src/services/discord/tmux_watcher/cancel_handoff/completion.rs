@@ -45,12 +45,10 @@ pub(in crate::services::discord::tmux::tmux_watcher) async fn finish_after_recei
     };
     // The ordinary live-row path retains its existing epilogue. Corruption is
     // not absence, and a successor projection must never be borrowed or cleared.
-    if !crate::services::discord::relay_recovery::cohort::enforcement_admits(channel.get())
-        || !matches!(
-            inflight::load_inflight_state_read_only_result(provider, channel.get()),
-            Ok(None)
-        )
-        || original.provider != provider.as_str()
+    if !matches!(
+        inflight::load_inflight_state_read_only_result(provider, channel.get()),
+        Ok(None)
+    ) || original.provider != provider.as_str()
         || original.channel_id != channel.get()
         || original.effective_finalizer_turn_id() == 0
         || original.turn_start_offset != Some(range.0)

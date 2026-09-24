@@ -926,7 +926,7 @@ targets = {
     # The target is nested under `tests::` because declaring it at the relay
     # root would push tui_prompt_relay.rs past its hotfile ceiling, and the
     # ceiling may not be raised.
-    "job_sha256" => "feb18b590f02930e88324f196fbbf50a546ffe91d8e510b0c64922f4e17864de",
+    "job_sha256" => "5e5923cd9624a060781099c8cbd8f366eaedcb00d7d36f40e4754a8c2f8c38a2",
     "job_timeout_minutes" => 50,
     "cargo_steps" => {
       "Verify named relay-authority targets and selection floors" => {
@@ -939,8 +939,7 @@ targets = {
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_without_ending_stream_lifecycle -- --test-threads=1",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::recorded_entry_gate_old_mirrors_the_shipped_lifecycle_gate -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::the_deployed_enforce_dial_governs_every_channel_and_observe_governs_none -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::entry_gate_matrix_over_outcome_and_anchor -- --test-threads=1",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::an_enforced_rowless_turn_without_an_anchor_sends_no_placeholder -- --test-threads=1",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals -- --test-threads=1",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests -- --test-threads=1",

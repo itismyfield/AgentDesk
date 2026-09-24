@@ -47,15 +47,13 @@ pub(in crate::services::discord) fn recorded_episode(
     channel: ChannelId,
     session: &str,
 ) -> Option<RecordedEpisode> {
-    if !crate::services::discord::relay_recovery::cohort::enforcement_admits(channel.get())
-        || !matches!(
-            crate::services::discord::inflight::load_inflight_state_read_only_result(
-                provider,
-                channel.get()
-            ),
-            Ok(None)
-        )
-    {
+    if !matches!(
+        crate::services::discord::inflight::load_inflight_state_read_only_result(
+            provider,
+            channel.get()
+        ),
+        Ok(None)
+    ) {
         return None;
     }
     let recorded = shared
@@ -160,25 +158,23 @@ impl Pending {
                 // captured while the original source/turn was known, never a fresh
                 // rowless read or an identity reconstructed from the successor.
                 // Existing publication/receipt/lease gates still decide delivery.
-                crate::services::discord::relay_recovery::cohort::enforcement_admits(channel.get())
-                    && self
-                        .turn
-                        .as_ref()
-                        .and_then(|turn| turn.startup_inflight_snapshot.as_ref())
-                        .is_some_and(|original| {
-                            self.identity
-                                .as_ref()
-                                .is_some_and(|id| id.matches_state(original))
-                                && self.nonce.as_deref().is_some_and(|nonce| !nonce.is_empty())
-                                && self.nonce == original.turn_nonce
-                                && original.provider == provider.as_str()
-                                && original.channel_id == channel.get()
-                                && original.tmux_session_name.as_deref() == Some(session)
-                                && original.output_path.as_deref() == Some(path)
-                                && original
-                                    .turn_start_offset
-                                    .is_some_and(|start| start < self.offset)
-                        })
+                self.turn
+                    .as_ref()
+                    .and_then(|turn| turn.startup_inflight_snapshot.as_ref())
+                    .is_some_and(|original| {
+                        self.identity
+                            .as_ref()
+                            .is_some_and(|id| id.matches_state(original))
+                            && self.nonce.as_deref().is_some_and(|nonce| !nonce.is_empty())
+                            && self.nonce == original.turn_nonce
+                            && original.provider == provider.as_str()
+                            && original.channel_id == channel.get()
+                            && original.tmux_session_name.as_deref() == Some(session)
+                            && original.output_path.as_deref() == Some(path)
+                            && original
+                                .turn_start_offset
+                                .is_some_and(|start| start < self.offset)
+                    })
             }
         };
         self.provider == *provider

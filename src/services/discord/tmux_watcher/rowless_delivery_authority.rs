@@ -1,5 +1,5 @@
-//! #5464 T5 C1 rowless delivery authority: the two T5 AC1 operands, the
-//! cohort that gates them, and the candidacy predicate they feed.
+//! #5464 T5 C1 rowless delivery authority: the two T5 AC1 operands and the
+//! candidacy predicate they feed.
 //!
 //! Split out of `terminal_relay_plan.rs` to keep that module inside the
 //! `src/services/discord/tmux_watcher/**` namespace size cap.
@@ -9,24 +9,23 @@ use crate::services::discord::LeaseSnapshot;
 
 /// #5464 T5 C1: delivery authority for a terminal frame whose durable inflight
 /// row is GONE, read from the two sources T5 AC1 names — the ledger's output
-/// obligation and the delivery lease — plus the rollout cohort that gates them.
+/// obligation and the delivery lease.
 ///
-/// Three named operands, not one fused bool, so the flight recorder's
-/// `soft_terminal_denial` stays attributable: surviving on a ledger obligation,
-/// on a lease, and being outside the cohort are different operational stories.
+/// Two named operands, not one fused bool, so the flight recorder's
+/// `soft_terminal_denial` stays attributable: surviving on a ledger obligation
+/// and on a lease are different operational stories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) struct RowlessDeliveryAuthority {
-    pub(super) cohort_admits: bool,
     pub(super) ledger_obligation_open: bool,
     pub(super) delivery_lease_present: bool,
 }
 
 impl RowlessDeliveryAuthority {
     /// A structural signal alone never ends delivery (T5 AC1), but it takes a
-    /// POSITIVE operand to keep the frame alive: inside the enforcement cohort a
-    /// rowless frame the ledger has settled and no lease covers is still refused.
+    /// POSITIVE operand to keep the frame alive: a rowless frame the ledger has
+    /// settled and no lease covers is still refused.
     pub(super) fn retains_delivery_candidacy(self) -> bool {
-        self.cohort_admits && (self.ledger_obligation_open || self.delivery_lease_present)
+        self.ledger_obligation_open || self.delivery_lease_present
     }
 }
 
@@ -56,7 +55,7 @@ pub(super) fn lease_has_live_holder(snapshot: &LeaseSnapshot) -> bool {
     matches!(snapshot, LeaseSnapshot::Leased { .. })
 }
 
-/// Read the three operands for this frame: the rollout cohort, the DURABLE ledger
+/// Read the two operands for this frame: the DURABLE ledger
 /// obligation (against the generation-guarded (#1270) and EOF-guarded (#4188)
 /// `resolved_delivered_frontier_end_current_generation`, deliberately NOT the in-memory
 /// watermark-fusing `committed_floor_for_resend_dedup`), and the live delivery
@@ -79,9 +78,6 @@ pub(super) fn read_rowless_delivery_authority(
         transcript_eof,
     );
     RowlessDeliveryAuthority {
-        cohort_admits: crate::services::discord::relay_recovery::cohort::enforcement_admits(
-            channel_id.get(),
-        ),
         ledger_obligation_open: ledger_owes_output(consumed_end, delivered_end),
         delivery_lease_present: lease_has_live_holder(&shared.delivery_lease(channel_id).read()),
     }

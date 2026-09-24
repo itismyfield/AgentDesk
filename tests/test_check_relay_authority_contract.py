@@ -104,7 +104,6 @@ class ManifestContract(unittest.TestCase):
             "t5-s4-missing-row-cohort-lifecycle",
             "t5-s4-same-authority-watcher-epoch",
             "t5-s7a-entry-outcome-matrix",
-            "t5-s7a-live-dial-isolation",
             "t5-s7a-no-anchor-no-visible-mutation",
             "t5-s7a-detached-rowless-state-preserved",
             "t5-c1-rowless-terminal-ledger-and-lease",
@@ -141,8 +140,8 @@ class ManifestContract(unittest.TestCase):
         )
         selected = [lane for lane in lanes
                     if lane.name.startswith(("t5-s7a-", "t5-c1-", "t5-native-"))]
-        self.assertEqual(len(selected), 6)
-        self.assertEqual([lane.minimum for lane in selected], [1, 1, 1, 1, 15, 1])
+        self.assertEqual(len(selected), 5)
+        self.assertEqual([lane.minimum for lane in selected], [1, 1, 1, 15, 1])
         self.assertIn("t5-structural-signal-authority-teardown",
                       {gap["name"] for gap in gaps})
         job = contract.load_relay_authority_job(REPO_ROOT)

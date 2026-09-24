@@ -52,34 +52,6 @@ impl VisibleMutationAuthority {
     }
 }
 
-/// Whether this channel may take the AC2-R stream-loop suppression.
-///
-/// Shaped after `authority_observation::observing_dial`: both operands veto and
-/// both shipped values are the denying one, so a node nobody enrolled keeps the
-/// mapping that ships today. The mode predicate is `governs_destructive_authority`
-/// and not `records_authority_observations`, because `Observe` is the mode the
-/// promotion evidence is collected under and has to stay behaviour-identical to
-/// `Legacy` for every consumer that is not the recorder.
-///
-/// Callers read this ONCE at gate entry and pass the answer down, so one pass
-/// through a fence cannot answer the question two different ways and the gate
-/// below stays pure — which is what lets `stream_gate_old`/`stream_gate_new`
-/// mirror it operand for operand.
-pub(in crate::services::discord::turn_bridge) fn stream_loop_suppression_cohort_admits(
-    channel_id: u64,
-) -> bool {
-    let (mode, percent) = crate::config_live_reload::current()
-        .map(|config| {
-            (
-                config.runtime.relay_authority_mode,
-                config.runtime.relay_authority_cohort_percent,
-            )
-        })
-        .unwrap_or_default();
-    mode.governs_destructive_authority()
-        && crate::services::discord::relay_recovery::cohort::admits(mode, percent, channel_id)
-}
-
 pub(in crate::services::discord::turn_bridge) fn visible_mutation_authority_after_guarded_save(
     outcome: GuardedSaveOutcome,
     inflight_state: &InflightTurnState,

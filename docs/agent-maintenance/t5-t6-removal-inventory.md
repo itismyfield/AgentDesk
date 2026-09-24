@@ -288,7 +288,7 @@ tests net **+5,828**, generated net **+337**, tooling net **+6**이다.
 | S4 판정: `turn_bridge/stream_tick/guarded_persist.rs` 의 `visible_mutation_authority_after_guarded_save` | `cohort_admits: bool` 파라미터, `GuardedSaveOutcome::Missing if cohort_admits => Suppressed` 의 guard, 그리고 `Missing` 이 `AuthorityLost` 로 떨어지던 fall-through arm 을 철거했다. 이제 `Missing => Suppressed` 가 무조건이다. | `IdentityMismatch => AuthorityLost`(exact-episode veto)와 `IoError => Retry`(일시 저장 실패)는 그대로다. S2 관측점 `record_stream_loop_gate` 호출도 그대로다. |
 | S4 배선(tick): `turn_bridge/stream_tick.rs` | tick 진입 1회 코호트 읽기(`let cohort_admits = stream_loop_suppression_cohort_admits(channel_id.get())`)와 게이트 호출부 2곳의 인자, 그리고 import 이름을 철거했다. | 16개 `authorize_visible_mutation!` 사이트와 dirty flush 의 판정 경로 자체는 불변이다. |
 | S4 배선(tool-arm): `turn_bridge/stream_loop/tool_arms/authority.rs` | restart fence 와 terminal tool-result fence 의 코호트 문의 2곳(`let cohort_admits = …`)과 게이트 인자 2곳, use 블록의 술어 import 를 철거했다. | `stream_tool_outcome_after_restart_authority` 와 `terminal_tool_result_transition_permission` 의 매핑은 불변이다. `Missing` 이 `Suppressed` 가 되면서 restart arm 은 `AuthorityLost` 대신 `Continue` 로 귀결된다. |
-| **철거하지 않음** — 술어 본체 `guarded_persist.rs` 의 `stream_loop_suppression_cohort_admits` | 없음. 철거 집합 **밖**에 살아 있는 호출자가 있다: `turn_bridge/bridge_entry_persist.rs` 의 `bridge_entry_rowless_cohort_admits`(S7a 진입 게이트)가 위임 호출한다. | 본체 철거(D2)는 S7a 진입 게이트 철거가 선행이다. 테스트 `the_shipped_dial_admits_no_channel_to_the_stream_loop_enforcement_cohort` 는 보존했다 — 이름의 "stream_loop" 은 D1 이후 오칭이지만 개명은 술어의 새 소유자(S7a) 범위의 작업이다. |
+| **철거하지 않음(T6-1 에서 철거됨)** — 술어 본체 `guarded_persist.rs` 의 `stream_loop_suppression_cohort_admits` | 없음. 철거 집합 **밖**에 살아 있는 호출자가 있다: `turn_bridge/bridge_entry_persist.rs` 의 `bridge_entry_rowless_cohort_admits`(S7a 진입 게이트)가 위임 호출한다. | 본체 철거(D2)는 S7a 진입 게이트 철거가 선행이다. 테스트 `the_shipped_dial_admits_no_channel_to_the_stream_loop_enforcement_cohort` 는 보존했다 — 이름의 "stream_loop" 은 D1 이후 오칭이지만 개명은 술어의 새 소유자(S7a) 범위의 작업이다. |
 | **철거하지 않음** — 공용 rollout 다이얼 `relay_authority_mode`/`relay_authority_cohort_percent`, `relay_recovery/cohort.rs`, `relay_recovery/authority_observation.rs`, `relay_recovery/authority_retention.rs` | 없음. | 전부 S9 회수 경계다. D1 은 이 모듈들을 건드리지 않았고 `authority_observation` 은 doc 크로스레퍼런스 1줄만 갱신했다. |
 | **철거하지 않음** — `WatcherStateSnapshot.reachability_observation`, `axis_b_exact_episode_required` 등 `skipped_reason` 문자열 | 없음. | 이름이 observation/axis_b 라 관측처럼 보이나 전자는 `relay_recovery/destructive_warrant.rs` 가 소비하는 **증거 입력**이고 후자는 **집행 거부 사유**다. 둘 다 영구 보존이다. |
 
@@ -324,6 +324,37 @@ D1 은 다른 슬라이스를 선행으로 요구하지 않는다.
 포함한 리포 전체 순증은 **+183/−206 = −23줄**이다. 캡·베이스라인·레지스트리 숫자는 하나도 올리지
 않았다(CI 명명 레인 `minimum` 은 1 그대로, `#5321` 게이트 핀과 `job_sha256` 은 내용 변경에 따른
 재핀이며 완화가 아니다).
+
+## §12-2 추가 — T6-1 집행 게이트 무조건화 (S7a 진입·D2·C1·cancel handoff) (2026-09-24)
+
+base `origin/main c55d93e350`. 사용자가 2026-09-24 #5071 live acceptance 를 수용하고 rollback 을
+종료했으며, 두 노드 모두 `relay_authority_mode: enforce` / `relay_authority_cohort_percent: 100`
+(fingerprint `d1d48477e7e326bd`)이다. 아래 네 게이트는 그 다이얼에서 이미 실행되던 `Enforce` 경로를
+무조건으로 굳힌다. **cohort 모듈의 `admits`/fingerprint/rollout report, config 다이얼,
+`authority_observation`, Python 리포트는 손대지 않는다(T6-2~T6-4).**
+
+| 범위 | 철거한 레거시 경로 | 영구 보호·후속 처분 |
+|---|---|---|
+| A1 S7a 진입: `turn_bridge/bridge_entry_persist.rs` | `bridge_entry_lifecycle_can_continue`(Saved 만 계속), `bridge_entry_rowless_cohort_admits`(다이얼 읽기), `bridge_entry_disposition_continues` 의 `cohort_admits` 인자와 코호트 밖 분기. | `entry_gate_new` 매핑과 "`ContinueRowless` 는 이미 있는 anchor 위에서만" 전제는 그대로다. 식별 불일치·`IoError` 는 계속 턴을 끝낸다. |
+| A2 D2: `turn_bridge/stream_tick/guarded_persist.rs` | 술어 본체 `stream_loop_suppression_cohort_admits`(A1 이 마지막 호출자였다). | — |
+| A3 C1: `tmux_watcher/rowless_delivery_authority.rs` | `RowlessDeliveryAuthority.cohort_admits` 피연산자. 후보 유지는 `ledger_obligation_open \|\| delivery_lease_present`. | ledger·lease 두 피연산자와 다섯 exact-episode veto 는 그대로다. |
+| A4 cancel handoff: `tmux_watcher/cancel_handoff.rs`(2곳)·`cancel_handoff/completion.rs`(1곳) | `enforcement_admits(channel)` 조건 3곳. | 행 부재(`Ok(None)`) 확인, 원래 턴 스냅샷의 identity·nonce·provider·channel 결합, generation·source identity·reset incarnation·receipt 검사는 그대로다. |
+| dead code 최소 처리: `relay_recovery/cohort.rs` | A3·A4 이후 호출자가 없어진 `enforcement_admits` 와 전용 테스트 `shipped_defaults_admit_no_channel_to_the_enforcement_cohort`. | `admits`·`cohort_fingerprint`·`rollout_report` 는 관측·health 가 계속 소비하므로 T6-2 이후 회수 경계다. |
+
+**테스트 처분:** 코호트 전제 테스트 `an_uninstalled_live_config_leaves_the_entry_rowless_cohort_empty`,
+`the_deployed_enforce_dial_governs_every_channel_and_observe_governs_none`(+ `run_dial_child`),
+`the_shipped_dial_admits_no_channel_to_the_stream_loop_enforcement_cohort`,
+`rowless_evidence_is_inert_outside_the_enforcement_cohort_5464_c1` 은 전삭했다.
+`recorded_entry_gate_old_mirrors_the_shipped_lifecycle_gate` 는 코호트 안 행 단언을 그대로 옮긴
+단일 outcome×anchor 행렬 `entry_gate_matrix_over_outcome_and_anchor` 로,
+`rowless_candidacy_requires_the_cohort_and_one_positive_operand_5464_c1` 은 2×2 진리표
+`rowless_candidacy_requires_one_positive_operand_5464_c1` 로 바꿨다. 명명 레인
+`t5-s7a-entry-outcome-matrix` 선택자를 갱신하고 `t5-s7a-live-dial-isolation` 레인은 삭제했다.
+
+**롤백 수단 변화:** 다이얼을 `observe`/`legacy`/좁은 cohort 로 옮겨도 이 네 게이트는 되돌아가지
+않는다(런북 Rollback 절에 "dial-reclaim 대상 아님" 명시). 되돌리는 수단은 코드 revert 뿐이다.
+
+**철거·예산 경계:** `git diff --numstat origin/main -- src/` 기준 **+96/−369 = 순증 −273줄**이다.
 
 ### §12-2 마킹 계약 — 형식이 갈려 있어 마킹 grep 으로 census 를 못 한다
 
@@ -895,6 +926,7 @@ segmentation 은 48h 미만 다이얼 이탈에서 두 window 를 병합했고(r
   게이트)가 위임 호출하며, 그 파일 독스가 "S4 and S7a enforce under ONE dial"로 공유를 명시한다.
   본체 철거(D2)는 S7a 진입 게이트 철거가 선행돼야 하고, 공용 rollout 다이얼·cohort는 그대로
   S9 회수 경계를 따른다. 순서는 **D1(완료) → S7a 진입 게이트 철거 → D2 → S9 다이얼 회수**다.
+  **S7a 진입 게이트 철거와 D2 는 T6-1 에서 완료됐다**(위 "§12-2 추가 — T6-1" 참조).
 - **영구 보존:** 다른 턴의 정확한 episode가 확인되거나 실제 전달 주체가 바뀐 경우의 권위 상실,
   일시 저장 실패 때의 가시 변경 억제와 재시도, 같은 위임 권위 아래 bridge 가시 변경만 억제하는
   동작은 남아야 한다. 내구 행 소실 뒤 정상 종료 처리에 도달한 낡은 bridge가 후임을 오염시키지
