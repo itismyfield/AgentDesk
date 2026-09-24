@@ -26,6 +26,7 @@ mod pending_queue_persistence;
 mod queue_cancellation;
 pub(crate) mod registry_purge;
 mod remint_fence;
+mod reply_results;
 mod source_generation;
 mod turn_finished_signal;
 use active_source_dedup::{
@@ -73,6 +74,10 @@ pub(crate) use queue_cancellation::has_soft_intervention_at;
 use queue_cancellation::{
     cancel_soft_intervention_by_primary_message_id, dequeue_next_soft_intervention,
     has_soft_intervention,
+};
+pub(crate) use reply_results::{
+    HasPendingSoftQueueResult, QueuePersistenceFailure, RecoveryKickoffResult,
+    RestartDrainAllResult, RestartDrainResult, TryStartTurnResult,
 };
 pub(crate) use source_generation::SourceMessageQueuedGeneration;
 pub(crate) use turn_finished_signal::TurnFinishedSignal;
@@ -441,47 +446,6 @@ pub(crate) struct PurgeQueueResult {
     /// (only possible when `clear_cancelled_active_anchor` was requested and
     /// the anchored token was already cancelled).
     pub(crate) cleared_active_anchor: bool,
-}
-
-pub(crate) struct HasPendingSoftQueueResult {
-    pub(crate) has_pending: bool,
-    pub(crate) queue_exit_events: Vec<QueueExitEvent>,
-    // Uniform queue-mutation persistence-result surface; no consumer yet.
-    // See `FinishTurnResult`.
-    #[allow(dead_code)]
-    pub(crate) persistence_error: Option<String>,
-}
-
-pub(crate) struct RecoveryKickoffResult {
-    pub(crate) activated_turn: bool,
-    /// #3297 r3 — kickoff refused by a purge tombstone (`state.closed`).
-    pub(crate) refused_closed: bool,
-}
-
-#[derive(Default)]
-pub(crate) struct TryStartTurnResult {
-    pub(crate) started: bool,
-    /// The recovery fence refused the claim's episode as already ended.
-    pub(crate) refused_released_episode: bool,
-    pub(crate) queue_exit_events: Vec<QueueExitEvent>,
-    pub(crate) persistence_error: Option<String>,
-}
-
-pub(crate) struct RestartDrainResult {
-    pub(crate) queued_count: usize,
-    pub(crate) persistence_error: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct QueuePersistenceFailure {
-    pub(crate) channel_id: ChannelId,
-    pub(crate) error: String,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct RestartDrainAllResult {
-    pub(crate) queued_count: usize,
-    pub(crate) persistence_errors: Vec<QueuePersistenceFailure>,
 }
 
 /// #2728: identifies which guard in `enqueue_intervention` produced an

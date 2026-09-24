@@ -1323,7 +1323,7 @@ mod released_episode_mint_fence_tests {
         let state = row(524_210);
         let (released, restored, token_present) = with_running_process(async |shared| {
             assert!(super::reregister_active_turn_from_inflight(shared, &state).await);
-            let key = crate::services::discord::tmux::tmux_watcher::watcher_completion_key(
+            let key = crate::services::discord::tmux::tmux_watcher::completion_producer::watcher_completion_key(
                 shared,
                 ChannelId::new(state.channel_id),
                 Some(&state),
@@ -1331,7 +1331,7 @@ mod released_episode_mint_fence_tests {
                 state.last_offset + 1,
             );
             assert!(key.is_some_and(|key| key.episode.is_some()));
-            let released = crate::services::discord::tmux::tmux_watcher::release_restored_watcher_active_turn_before_panel_edit(
+            let released = crate::services::discord::tmux::tmux_watcher::completion_producer::release_restored_watcher_active_turn_before_panel_edit(
                 shared,
                 &ProviderKind::Claude,
                 key,
