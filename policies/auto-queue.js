@@ -299,7 +299,7 @@ var autoQueue = {
       state.failed_reason = _phaseGateFailureReason(result, passVerdict, state.failed_verdict);
       savePhaseGateState(gate.run_id, phase, state);
       pauseRun(gate.run_id);
-      // #2035: surface verdict mismatch as a discord alert (debounced 1/hr).
+      // #2035: surface verdict mismatch as a human-alert WARN log line (debounced 1/hr, #5993).
       _maybeAlertPhaseGateVerdictMismatch(
         gate.run_id, phase,
         state.anchor_card_id || dispatch.kanban_card_id,
