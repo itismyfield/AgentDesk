@@ -123,6 +123,107 @@ mod remint_fence_tests {
         );
     }
 
+    fn persistence() -> QueuePersistenceContext {
+        QueuePersistenceContext::new(&ProviderKind::Claude, "l5951", None)
+    }
+
+    async fn release_exactly(handle: &ChannelMailboxHandle, message: u64, nonce: &str) {
+        let owner = UserId::new(5951);
+        assert!(
+            handle
+                .try_start_turn(episode_token(nonce), owner, MessageId::new(message))
+                .await
+        );
+        let exact = handle
+            .finish_turn_if_matches_episode_started_before(
+                MessageId::new(message),
+                Some(nonce.to_string()),
+                std::time::Instant::now(),
+                persistence(),
+            )
+            .await;
+        assert!(exact.removed_token.is_some());
+    }
+
+    async fn remint_refused(handle: &ChannelMailboxHandle, message: u64, nonce: &str) -> bool {
+        let remint = handle
+            .try_start_turn_unless_released(
+                episode_token(nonce),
+                UserId::new(5951),
+                MessageId::new(message),
+                persistence(),
+            )
+            .await;
+        assert_eq!(remint.started, !remint.refused_released_episode);
+        if remint.started {
+            let _ = handle.hard_stop().await;
+        }
+        remint.refused_released_episode
+    }
+
+    fn forget_globals(channel: ChannelId) {
+        GLOBAL_CHANNEL_MAILBOXES.remove(&channel);
+        GLOBAL_RECOVERY_DONE_SIGNALS.remove(&channel);
+        GLOBAL_TURN_FINISHED_SIGNALS.remove(&channel);
+    }
+
+    /// P7 (T-F1) — a registry purge recreates the channel's actor; the
+    /// successor must still refuse an episode released before the purge.
+    #[tokio::test]
+    async fn a_recreated_actor_still_refuses_an_episode_released_before_the_purge() {
+        let registry = ChannelMailboxRegistry::default();
+        let channel = ChannelId::new(5_951_001);
+        let first = registry.handle(channel);
+        release_exactly(&first, 7, "episode-a").await;
+        assert!(remint_refused(&first, 7, "episode-a").await, "control");
+
+        assert_eq!(
+            registry.remove_idle_entry(channel).await,
+            registry_purge::MailboxPurgeOutcome::Removed
+        );
+        let successor = registry.handle(channel);
+        assert!(!successor.sender.same_channel(&first.sender));
+        assert!(
+            remint_refused(&successor, 7, "episode-a").await,
+            "the purge that recreated the actor forgot the fence"
+        );
+        forget_globals(channel);
+    }
+
+    /// T-F3 — every incarnation of a channel shares one fence: a release on a
+    /// successor stays refused on the next one, and a no-op finish through a
+    /// purged handle never lowers it.
+    #[tokio::test]
+    async fn every_incarnation_of_a_channel_shares_one_fence() {
+        let registry = ChannelMailboxRegistry::default();
+        let channel = ChannelId::new(5_951_002);
+        let first = registry.handle(channel);
+        assert_eq!(
+            registry.remove_idle_entry(channel).await,
+            registry_purge::MailboxPurgeOutcome::Removed
+        );
+        let second = registry.handle(channel);
+        release_exactly(&second, 9, "episode-b").await;
+        assert_eq!(
+            registry.remove_idle_entry(channel).await,
+            registry_purge::MailboxPurgeOutcome::Removed
+        );
+        let third = registry.handle(channel);
+        assert!(remint_refused(&third, 9, "episode-b").await);
+
+        let stale = first
+            .finish_turn_if_matches_episode_started_before(
+                MessageId::new(9),
+                Some("episode-b".to_string()),
+                std::time::Instant::now(),
+                persistence(),
+            )
+            .await;
+        assert!(stale.removed_token.is_none());
+        assert!(remint_refused(&third, 9, "episode-b").await);
+        forget_globals(channel);
+    }
+
     #[test]
     fn only_the_episode_started_since_the_last_release_is_recoverable() {
         let (a, live) = (MessageId::new(7), MessageId::new(200));

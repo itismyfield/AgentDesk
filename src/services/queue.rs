@@ -66,7 +66,7 @@ async fn schedule_post_cancel_queue_drain(
 /// With a live mailbox actor, disk cleanup is serialized inside
 /// `PurgeQueue`; without one, remove the persisted queue file for this
 /// channel directly across the provider's token namespaces.
-async fn force_purge_channel_mailbox(
+pub(super) async fn force_purge_channel_mailbox(
     health_registry: Option<&Arc<HealthRegistry>>,
     target: &TurnLifecycleTarget,
     session_key: Option<&str>,
