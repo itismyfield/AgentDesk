@@ -52,6 +52,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/db/intake_outbox_dispatch_stamp/tests.rs",
         "src/db/prompt_manifests/tests.rs",
         "src/db/scheduled_messages/postgres_tests.rs",
+        "src/dispatch/dispatch_status/terminal_timestamp_tests.rs",
         "src/github/sync/warning_tests.rs",
         "src/github/triage/warning_tests.rs",
         "src/server/database_fixture_invariant_tests.rs",

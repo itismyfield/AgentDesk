@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "f5b8937795b448303d3f51c70ba184f89047b018",
+  "measured_at_sha": "ed53d261a7683dc416712e8ff01406ab1f5c6ea3",
   "records": [
     {
       "root": "migrations/postgres",
@@ -13266,7 +13266,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:9c8c8f49beb5399b908e8ce6ecd72167659f3aa3cc6a0020d6fdaed33331ec83"
+      "fingerprint": "sha256:a01b33b699eb27e9f85cee7b29228f23390479a87143c873f554b5686922f7f9"
     },
     {
       "root": "src",
@@ -13329,7 +13329,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:e66d6d4726ee1d9cad19992664e088c4768a86dbac337e006387a6270e4179be"
+      "fingerprint": "sha256:ee7f04f1a5a21dcbaf4649885078ec39871dd5d4161de3ee4db4db9446ffd60c"
     },
     {
       "root": "src",
@@ -13456,6 +13456,42 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:f81e85adc26547ab33b7d8a908f196b5aef1fe2b422d88a855f3c290d02a9bdd"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/dispatch/dispatch_status/terminal_timestamp_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:80cfbf9d7a35c1bb93312b1891831e5b9c5621ef6641845d67aaafef2fefc887"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/dispatch/dispatch_status/terminal_timestamp_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:1e3ab3853be791923ddab67bc19218edaee55b0794d961f6e28878038c281c48"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/dispatch/dispatch_status/terminal_timestamp_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:20ef78b9b9869ddbb21a81025678bbaace80a5ed1d184be148c31b7e375ed219"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/dispatch/dispatch_status/terminal_timestamp_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e702320bcb370cb7ef81aabd2b0e9bdbfa241d7bf94d2a8e8ab1741fc6afe09f"
     },
     {
       "root": "src",
