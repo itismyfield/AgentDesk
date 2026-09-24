@@ -2371,6 +2371,7 @@ services::codex_tui::rollout_tail::tests::task_complete_recorded_but_pending_too
 services::codex_tui::rollout_tail::tests::task_complete_substring_of_commentary_still_lands
 services::codex_tui::rollout_tail::tests::task_complete_synthesizes_composer_ready_for_tmux_session
 services::codex_tui::rollout_tail::tests::task_complete_waits_for_pending_tool_call_output
+services::codex_tui::rollout_tail::tests::task_complete_whole_text_replacement_resets_message_offsets
 services::codex_tui::rollout_tail::tests::task_complete_without_assistant_text_uses_last_agent_message
 services::codex_tui::rollout_tail::tests::terminal_drain_processes_final_line_without_newline
 services::codex_tui::rollout_tail::tests::tool_call_argument_fallback_order_is_preserved

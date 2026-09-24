@@ -129,6 +129,14 @@ impl RolloutParseState {
         self.last_emitted_text_ended_with_newline = Some(text.ends_with('\n'));
         chunk
     }
+
+    /// Replaces `final_text` from `start` with `text`, keeping message offsets in step.
+    pub(super) fn replace_message_text_from(&mut self, start: usize, text: &str) {
+        self.final_text.truncate(start);
+        self.final_text.push_str(text);
+        self.last_message_start = start;
+        self.last_emitted_text_ended_with_newline = Some(text.ends_with('\n'));
+    }
 }
 
 pub(super) fn process_rollout_line_bytes(

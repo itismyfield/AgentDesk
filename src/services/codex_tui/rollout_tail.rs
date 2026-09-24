@@ -1422,8 +1422,7 @@ fn promote_task_complete_fallback_text(state: &mut RolloutParseState) {
                 "codex rollout promoted task_complete last_agent_message over streamed text"
             );
         }
-        state.final_text.truncate(start);
-        state.final_text.push_str(&text);
+        state.replace_message_text_from(start, &text);
     } else if !task_complete_fallback_already_mirrored(&state.final_text, &text) {
         // Real Codex rollouts end the stream with this body; a divergent one is
         // delivered rather than dropped, and surfaced because it is unexpected.
@@ -1440,10 +1439,8 @@ fn promote_task_complete_fallback_text(state: &mut RolloutParseState) {
     state.saw_assistant_text = true;
 }
 
-// The fallback counts as already mirrored only when it IS the final text or
-// sits at the end after a message boundary — a mid-sentence substring match
-// (e.g. commentary quoting the terminal verdict) must still append. The
-// boundary tolerates non-newline whitespace (indentation, NBSP) after the newline.
+// Drop only an exact or message-boundary suffix mirror; a mid-message match appends.
+// Non-newline whitespace (indentation, NBSP) after the boundary newline is tolerated.
 fn task_complete_fallback_already_mirrored(final_text: &str, fallback_text: &str) -> bool {
     let streamed = final_text.trim();
     let fallback = fallback_text.trim();
@@ -4887,6 +4884,23 @@ mod tests {
             "a mirror led by NBSP is still a mirror"
         );
         assert!(logs.is_empty(), "{logs:?}");
+    }
+
+    #[test]
+    fn task_complete_whole_text_replacement_resets_message_offsets() {
+        let mut state = RolloutParseState::default();
+        state.push_message_text("[C]");
+        state.push_message_text("[T]\n");
+        for _ in 0..2 {
+            state.task_complete_fallback_text = Some("HEAD:[C]\n\n[T]".to_string());
+            promote_task_complete_fallback_text(&mut state);
+            assert_eq!(
+                state.final_text, "HEAD:[C]\n\n[T]",
+                "re-promotion must not stack"
+            );
+        }
+        assert_eq!(state.last_message_start, 0);
+        assert_eq!(state.last_emitted_text_ended_with_newline, Some(false));
     }
 
     // #3343 round 2 (3) — mirror property. For a multi-record fixture mixing

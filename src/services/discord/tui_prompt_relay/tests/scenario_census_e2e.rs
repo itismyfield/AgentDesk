@@ -8,18 +8,18 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::mpsc;
 
 use serde_yaml::Value;
 
-// Replay runs Codex frames through the tmux watcher, a Unix-only relay path
-// that production never takes on Windows; the census tests stay cross-platform.
+use crate::services::agent_protocol::StreamMessage;
+use crate::services::session_backend::{StreamLineState, process_stream_line};
+// Codex frames replay through the tmux watcher, a Unix-only relay path that
+// production never takes on Windows; Claude replay and the census stay portable.
 #[cfg(unix)]
-use {
-    crate::services::agent_protocol::StreamMessage,
-    crate::services::discord::tmux::{WatcherToolState, process_watcher_lines},
-    crate::services::provider::ProviderKind,
-    crate::services::session_backend::{StreamLineState, process_stream_line},
-    std::sync::mpsc,
+use crate::services::{
+    discord::tmux::{WatcherToolState, process_watcher_lines},
+    provider::ProviderKind,
 };
 
 const SCENARIO_SUBDIR: &str = "tests/e2e/tui_relay/scenarios";
@@ -43,9 +43,7 @@ struct Scenario {
     coverage_class: String,
     agent_mode: String,
     skip_reason: Option<String>,
-    #[cfg(unix)]
     steps: Vec<Value>,
-    #[cfg(unix)]
     assertions: Vec<Value>,
 }
 
@@ -60,7 +58,6 @@ fn text_of(node: &Value, key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-#[cfg(unix)]
 fn seq_of(node: &Value, key: &str) -> Vec<Value> {
     node.get(key)
         .and_then(Value::as_sequence)
@@ -98,9 +95,7 @@ fn load_scenarios() -> Vec<Scenario> {
                 agent_mode: text_of(&doc, "agent_mode")
                     .unwrap_or_else(|| panic!("{file} must declare agent_mode")),
                 skip_reason: text_of(&doc, "skip_reason"),
-                #[cfg(unix)]
                 steps: seq_of(&doc, "steps"),
-                #[cfg(unix)]
                 assertions: seq_of(&doc, "assertions"),
                 file,
             }
@@ -144,12 +139,10 @@ fn class_tally(scenarios: &[Scenario]) -> BTreeMap<String, usize> {
     tally
 }
 
-#[cfg(unix)]
 fn to_json(frame: &Value) -> serde_json::Value {
     serde_json::to_value(frame).expect("scenario frame is JSON representable")
 }
 
-#[cfg(unix)]
 fn push_text(out: &mut String, message: &StreamMessage) {
     match message {
         StreamMessage::Text { content } => out.push_str(content),
@@ -160,7 +153,6 @@ fn push_text(out: &mut String, message: &StreamMessage) {
     out.push('\n');
 }
 
-#[cfg(unix)]
 fn replay_claude(frames: &[Value]) -> String {
     let (sender, receiver) = mpsc::channel();
     let mut state = StreamLineState::new();
@@ -204,9 +196,8 @@ fn replay_codex(frames: &[Value]) -> String {
 }
 
 /// Replays a runnable scenario's declared frames through the production stream
-/// parsers and returns everything they relayed.
-#[cfg(unix)]
-fn production_replay(scenario: &Scenario) -> String {
+/// parsers and returns everything they relayed, or `None` where Codex replay is unavailable.
+fn production_replay(scenario: &Scenario) -> Option<String> {
     let mut produced = String::new();
     let mut replays = 0usize;
     for step in &scenario.steps {
@@ -223,7 +214,10 @@ fn production_replay(scenario: &Scenario) -> String {
         );
         produced.push_str(&match provider.as_str() {
             "claude" => replay_claude(&frames),
+            #[cfg(unix)]
             "codex" => replay_codex(&frames),
+            #[cfg(not(unix))]
+            "codex" => return None,
             other => panic!("{} replay_fixture provider {other:?}", scenario.file),
         });
         replays += 1;
@@ -233,10 +227,9 @@ fn production_replay(scenario: &Scenario) -> String {
         "{} is classed {RUNNABLE_CLASS} but declares no replay_fixture step",
         scenario.file
     );
-    produced
+    Some(produced)
 }
 
-#[cfg(unix)]
 fn declared_markers(scenario: &Scenario) -> Vec<String> {
     scenario
         .assertions
@@ -317,7 +310,6 @@ fn every_excluded_scenario_names_its_reason_in_its_own_file() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn runnable_scenarios_replay_their_declared_markers_through_production_parsers() {
     let scenarios = load_scenarios();
@@ -327,9 +319,16 @@ fn runnable_scenarios_replay_their_declared_markers_through_production_parsers()
         CENSUS_FIXTURE,
         "runnable scenario count drifted from the pinned census"
     );
-    let mut executed = 0usize;
+    let (mut executed, mut skipped) = (0usize, 0usize);
     for scenario in &runnable {
-        let produced = production_replay(scenario);
+        let Some(produced) = production_replay(scenario) else {
+            println!(
+                "skipped {} ({}): Codex replay is Unix-only",
+                scenario.id, scenario.file
+            );
+            skipped += 1;
+            continue;
+        };
         let markers = declared_markers(scenario);
         assert!(
             !markers.is_empty(),
@@ -352,7 +351,8 @@ fn runnable_scenarios_replay_their_declared_markers_through_production_parsers()
         executed += 1;
     }
     assert_eq!(
-        executed, CENSUS_FIXTURE,
+        executed + skipped,
+        CENSUS_FIXTURE,
         "executed scenario count must equal the pinned runnable census"
     );
 }
