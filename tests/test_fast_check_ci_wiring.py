@@ -85,6 +85,7 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --lib engine::ops::kv_ops::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib server::routes::docs::inventory::endpoints::part_0 -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::task_completion_v1::tests -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib services::session_host:: -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib source_registry -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib task_notification -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib delivery_lease_key -- --skip _pg --skip pg_ --skip postgres",

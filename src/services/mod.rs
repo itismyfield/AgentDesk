@@ -123,6 +123,9 @@ pub mod stream_json_cli;
 #[allow(dead_code)]
 pub mod session_backend;
 pub mod session_forwarding;
+// Consumer-free until call sites move onto the host boundary.
+#[allow(dead_code, unused_imports)]
+pub mod session_host;
 pub mod session_resume;
 pub mod settings;
 pub mod shell_guard;
