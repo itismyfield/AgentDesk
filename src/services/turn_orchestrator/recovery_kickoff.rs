@@ -34,9 +34,25 @@ impl RecoveryKickoffResult {
     }
 }
 
+/// A kickoff claims only an empty slot; an occupied one, including its finished
+/// signal, is never rebound.
+pub(super) fn kickoff_refusal(
+    state: &ChannelMailboxState,
+    candidate: &CancelToken,
+    user_message_id: Option<MessageId>,
+) -> Option<RecoveryKickoffResult> {
+    let occupant = state.cancel_token.as_deref()?;
+    Some(occupied_kickoff_outcome(
+        state,
+        occupant,
+        candidate,
+        user_message_id,
+    ))
+}
+
 /// Classifies a kickoff against an occupied slot. Same episode needs an exact,
 /// present nonce, so `None == None` never proves identity (id-0 turns included).
-pub(super) fn occupied_kickoff_outcome(
+fn occupied_kickoff_outcome(
     state: &ChannelMailboxState,
     occupant: &CancelToken,
     candidate: &CancelToken,

@@ -334,3 +334,44 @@ async fn kickoff_then_try_start_preserves_the_recovery_claim() {
     let removed = finish_episode(&handle, MessageId::new(101), "a").await;
     assert!(removed.is_some_and(|token| Arc::ptr_eq(&token, &token_a)));
 }
+
+async fn remint_admitted(handle: &ChannelMailboxHandle, msg: u64, nonce: &str) -> bool {
+    handle
+        .try_start_turn_unless_released(
+            episode(Some(nonce)),
+            OWNER_A,
+            MessageId::new(msg),
+            persistence(),
+        )
+        .await
+        .started
+}
+
+#[tokio::test]
+async fn occupied_kickoff_does_not_move_the_latest_started_episode() {
+    let registry = ChannelMailboxRegistry::default();
+    let channel_id = ChannelId::new(5_951_115);
+    let handle = registry.handle(channel_id);
+    start_a(&handle, 101, "a").await;
+    assert!(
+        finish_episode(&handle, MessageId::new(101), "a")
+            .await
+            .is_some()
+    );
+    start_a(&handle, 300, "l").await;
+
+    let result = handle
+        .recovery_kickoff(episode(Some("b")), OWNER_B, Some(MessageId::new(202)))
+        .await;
+
+    assert_eq!(result, RecoveryKickoffResult::OccupiedDifferentEpisode);
+    assert!(
+        finish_episode(&handle, MessageId::new(300), "l")
+            .await
+            .is_some()
+    );
+    assert!(
+        !remint_admitted(&handle, 202, "b").await,
+        "an occupied kickoff must not record its episode as started"
+    );
+}

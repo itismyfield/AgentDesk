@@ -79,7 +79,7 @@ use queue_cancellation::{
     has_soft_intervention,
 };
 pub(crate) use recovery_kickoff::RecoveryKickoffResult;
-use recovery_kickoff::{occupied_kickoff_outcome, reset_activation_signals};
+use recovery_kickoff::{kickoff_refusal, reset_activation_signals};
 pub(crate) use reply_results::{
     HasPendingSoftQueueResult, QueuePersistenceFailure, RestartDrainAllResult, RestartDrainResult,
     TryStartTurnResult,
@@ -2148,15 +2148,9 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     user_message_id,
                     reply,
                 } => {
-                    // CAS: an occupied slot, including its finished signal, is never rebound.
-                    if let Some(occupant) = state.cancel_token.as_deref() {
-                        let outcome = occupied_kickoff_outcome(
-                            &state,
-                            occupant,
-                            &cancel_token,
-                            user_message_id,
-                        );
-                        let _ = reply.send(outcome);
+                    // CAS: a refused kickoff leaves the slot, its signals and the fence untouched.
+                    if let Some(refusal) = kickoff_refusal(&state, &cancel_token, user_message_id) {
+                        let _ = reply.send(refusal);
                         continue;
                     }
                     reset_activation_signals(channel_id);
