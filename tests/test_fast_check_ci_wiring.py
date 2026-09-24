@@ -723,6 +723,29 @@ class FastCheckCiWiringTests(unittest.TestCase):
             },
         )
 
+    def test_provider_and_session_host_trees_select_native_windows_lane(self) -> None:
+        """Hand-listed cfg-shim trees outside the derived discord block.
+
+        `src/services/*` reaches only the parent `.rs` files, so each subtree
+        glob is load-bearing: commenting it out must unselect its sample file.
+        """
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        cross_os_paths = paths_filter_definitions(workflow)["cross_os_rust"]
+        owners = {
+            "src/services/claude/**": "src/services/claude/tui_session_launch.rs",
+            "src/services/qwen/**": "src/services/qwen/session_lifecycle.rs",
+            "src/services/session_host/**": "src/services/session_host/tmux_host.rs",
+        }
+        self.assertTrue(selects(cross_os_paths, "src/services/session_host.rs"))
+        for selector, sample in owners.items():
+            with self.subTest(selector=selector):
+                self.assertEqual(cross_os_paths.count(selector), 1)
+                self.assertTrue(selects(cross_os_paths, sample))
+                survivors = paths_filter_definitions(
+                    comment_out_in_filter(workflow, "cross_os_rust", selector)
+                )["cross_os_rust"]
+                self.assertFalse(selects(survivors, sample))
+
     def test_macos_pr_lane_runs_single_message_panel_tests(self) -> None:
         workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
         command = (

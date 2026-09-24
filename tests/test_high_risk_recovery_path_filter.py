@@ -161,6 +161,16 @@ class HighRiskRecoveryPathFilterTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIn(LANE, select(self.filters, [path]))
 
+    def test_provider_launch_and_session_host_paths_select_the_lane(self) -> None:
+        for path in (
+            "src/services/claude.rs", "src/services/claude/tui_session_launch.rs",
+            "src/services/codex.rs", "src/services/codex/followup_reader.rs",
+            "src/services/qwen/session_lifecycle.rs",
+            "src/services/session_host.rs", "src/services/session_host/resolve.rs",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(LANE, select(self.filters, [path]))
+
     def test_unrelated_documentation_change_does_not_select_the_lane(self) -> None:
         changed = ["docs/architecture/relay.md", "README.md", "AGENTS.md"]
         self.assertNotIn(LANE, select(self.filters, changed))
