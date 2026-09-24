@@ -1212,7 +1212,7 @@ function handOffPrCreateFailure(cardId, errorMsg, retryCount, generation) {
   );
   if (!delivered) {
     agentdesk.log.error("[review] Create-PR handoff alert for card " + cardId +
-      " was NOT delivered (no alert channel, or the outbox enqueue failed) — leaving the row for the next sweep");
+      " was NOT delivered (the deadlock-channel outbox enqueue failed) — leaving the row for the next sweep");
     return false;
   }
   // #5716 r7: the alert is enqueued from here on, so a throw in the dedup/marker bookkeeping must NOT be
@@ -1231,8 +1231,9 @@ function handOffPrCreateFailure(cardId, errorMsg, retryCount, generation) {
 // blocked_reason was lost to a crash before the marker UPDATE — and dropping
 // the global terminalState equality covers per-card pipeline overrides and
 // multi-terminal pipelines. The 30-day floor is a ROLLING window on updated_at, not a removal boundary: it
-// caps the deploy-time page storm from historical failures, and it also expires a failure nobody could
-// alert (no alert channel) 30 days after its last write — see the PR body.
+// caps the deploy-time page storm from historical failures, and it also expires a failure whose
+// deadlock-channel enqueue kept failing 30 days after its last write. Without a deadlock channel the
+// handoff settles on its human-alert WARN log line (#5993), so that case never stays a candidate.
 function sweepStrandedPrCreateFailures() {
   var rows = agentdesk.db.query(
     "SELECT card_id, last_error, retry_count, dispatch_generation FROM pr_tracking " +
