@@ -116,7 +116,7 @@ fn live_pending_dispatch_message_ids(snapshot: &ChannelMailboxSnapshot) -> Vec<M
 ///
 /// [`recovery_known_message_ids`] is this map's key set, so the three sources
 /// are walked once and the two views cannot drift apart.
-pub(in crate::services::discord) fn recovery_known_id_arms(
+fn recovery_known_id_arms(
     snapshot: &ChannelMailboxSnapshot,
 ) -> std::collections::HashMap<u64, RecoveryKnownIdArm> {
     // Weakest evidence first: a later insert overwrites an earlier one, so an
@@ -140,10 +140,24 @@ pub(in crate::services::discord) fn recovery_known_id_arms(
     arms
 }
 
+#[cfg(test)]
 pub(in crate::services::discord) fn recovery_known_message_ids(
     snapshot: &ChannelMailboxSnapshot,
 ) -> std::collections::HashSet<u64> {
     recovery_known_id_arms(snapshot).into_keys().collect()
+}
+
+/// #5996: the provenance map and its key set from one walk, for scans that need
+/// both membership and the arm behind it.
+pub(in crate::services::discord) fn recovery_known_arms_and_ids(
+    snapshot: &ChannelMailboxSnapshot,
+) -> (
+    std::collections::HashMap<u64, RecoveryKnownIdArm>,
+    std::collections::HashSet<u64>,
+) {
+    let arms = recovery_known_id_arms(snapshot);
+    let ids = arms.keys().copied().collect();
+    (arms, ids)
 }
 
 #[cfg(test)]
@@ -292,8 +306,9 @@ mod recovery_known_message_ids_tests {
             active_user_message_id: Some(MessageId::new(RESERVED)),
             ..ChannelMailboxSnapshot::default()
         };
-        let arms = recovery_known_id_arms(&snapshot);
-        let ids = recovery_known_message_ids(&snapshot);
+        let (arms, ids) = recovery_known_arms_and_ids(&snapshot);
+        assert_eq!(arms, recovery_known_id_arms(&snapshot));
+        assert_eq!(ids, recovery_known_message_ids(&snapshot));
         assert_eq!(
             arms.keys()
                 .copied()

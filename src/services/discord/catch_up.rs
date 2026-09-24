@@ -76,7 +76,7 @@ pub(in crate::services) struct CatchUpRetryState {
 mod api;
 mod classification;
 mod phase2;
-mod retry_state;
+pub(in crate::services::discord) mod retry_state;
 mod settled_frontier;
 mod settled_ledger_consult;
 mod too_old_notice;
@@ -97,7 +97,7 @@ use phase2::{
     catch_up_last_item_dedup_is_checkpoint_safe, catch_up_remaining_queue_capacity,
     classify_phase2_enqueue_commit, log_catch_up_enqueue_not_accepted,
     phase2_checkpoint_after_duplicate_commit, phase2_checkpoint_after_membership_skip,
-    phase2_known_arms_and_ids, phase2_retry_after_checkpoint,
+    phase2_retry_after_checkpoint,
 };
 use retry_state::merge_catch_up_retry_state;
 use settled_frontier::{
@@ -972,8 +972,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         // Get bot's own user ID to filter out self-messages
         // Collect existing message IDs in queue for dedup
         let known_snapshot = mailbox_snapshot(shared, channel_id).await;
-        let existing_ids = recovery_known_message_ids(&known_snapshot);
-        let known_arms = recovery_known_id_arms(&known_snapshot);
+        let (known_arms, existing_ids) = recovery_known_arms_and_ids(&known_snapshot);
         // #4564: the durable completed-turn ledger for this channel, read once per
         // scan (mirrors `existing_ids`). Suppresses the false restart-gap TooOld
         // notice for inbound messages that already reached terminal delivery.
@@ -986,10 +985,8 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         let (announce_resolution, notify_resolution) = api.utility_bot_user_ids(shared).await;
         let announce_bot_id = announce_resolution.user_id();
         let notify_bot_id = notify_resolution.user_id();
-        // Newest message that this oldest-first scan has durably settled.
-        // Non-recover classifications settle immediately; Recover settles only
-        // after an accepted/safe-dedup enqueue. The first message left open
-        // (un-evidenced duplicate, cap, defer) seals it for the rest of the scan.
+        // Newest id this oldest-first scan durably settled; the first message it
+        // leaves open (un-evidenced duplicate, cap, defer) seals it for the scan.
         let mut frontier = SettledFrontier::default();
         let mut retry_exhausted = false;
         let mut stats = CatchUpScanStats::default();
@@ -1261,6 +1258,9 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 let outcome = match retained {
+                    Some(retained) if retained.exhausted => {
+                        format!("exhausted at barrier {}", retained.barrier)
+                    }
                     Some(retained) => format!("retained at barrier {}", retained.barrier),
                     None => "completed".to_owned(),
                 };
@@ -1388,7 +1388,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             catch_up_remaining_queue_capacity(mailbox.intervention_queue.len());
         // #5996: keep the arm that answered for each id — only the arm can say
         // whether a membership carries the evidence an advance must earn.
-        let (known_arms, mut existing_ids) = phase2_known_arms_and_ids(&mailbox);
+        let (known_arms, mut existing_ids) = recovery_known_arms_and_ids(&mailbox);
         // #4564: same durable completed-turn ledger consult as phase 1, read once
         // per channel. A Settled outcome in phase 2 simply skips (no enqueue, no
         // notice) — an already-answered message must not be re-surfaced.

@@ -621,15 +621,20 @@ async fn t6b_phase2_scan_checkpoint_is_clamped_without_lowering_the_live_one() {
 
 #[derive(Clone, Copy, Debug)]
 enum Resolution {
+    /// Teardown/recovery clear: an unintended loss, so M is recovered again.
     LeftQueueUnprocessed,
     BecameActiveTurn,
     /// M is the newest primary of a merged head that also carries older H. The
     /// claim drops H's evidence, so H is re-offered, never leapt (#6205 dedups).
     MergedHeadClaimed,
+    /// `/clear`: the user discarded M, so neither sweep may run it again.
+    IntentionallyCleared,
+    /// `/clear` while M sits in an orphaned dequeue→claim reservation.
+    OrphanedReservationCleared,
 }
 
-/// T9: once M's membership resolves, the next retry sweep either re-recovers
-/// M or settles it on turn evidence, and the barrier is gone.
+/// T9: once M's membership resolves, the next sweep either re-recovers M or
+/// settles it, runs nothing already run or cleared, and leaves no barrier.
 async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
     let fx = Fixture::new().await;
     let (checkpoint, h, m) = (id(1, 600), id(2, 150), id(3, 120));
@@ -657,6 +662,35 @@ async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
         Resolution::LeftQueueUnprocessed => {
             discord::mailbox_clear_channel(&fx.shared, &fx.provider, channel_id).await;
         }
+        Resolution::IntentionallyCleared => {
+            let discard = super::super::retry_state::clear_channel_discarding_catch_up_backlog;
+            discard(&fx.shared, &fx.provider, channel_id).await;
+            assert_eq!(fx.pending(channel_id), None, "/clear drops the retry");
+        }
+        Resolution::OrphanedReservationCleared => {
+            let taken =
+                discord::mailbox_take_next_soft_intervention(&fx.shared, &fx.provider, channel_id);
+            drop(taken.await.into_intervention().expect("head taken"));
+            let orphaned =
+                crate::services::turn_orchestrator::PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER;
+            let mailbox = fx.shared.mailbox(channel_id);
+            mailbox
+                .age_inbound_waits_for_test(orphaned + Duration::from_secs(60))
+                .await;
+            let snapshot = discord::mailbox_snapshot(&fx.shared, channel_id).await;
+            assert_eq!(
+                snapshot.pending_user_dispatch,
+                Some(m),
+                "M is only reserved"
+            );
+            assert!(
+                !discord::recovery_known_arms_and_ids(&snapshot)
+                    .1
+                    .contains(&m.get())
+            );
+            let discard = super::super::retry_state::clear_channel_discarding_catch_up_backlog;
+            discard(&fx.shared, &fx.provider, channel_id).await;
+        }
         Resolution::BecameActiveTurn => {
             let started =
                 discord::mailbox_try_start_turn(&fx.shared, channel_id, token, owner, m).await;
@@ -672,15 +706,21 @@ async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
         }
     }
     let second = StrictApi::new(&fx.shared).with_history(channel_id, history);
-    fx.retry_sweep(&second, channel_id).await;
-
-    assert_phase1_read(&second, after(checkpoint), &[m]);
+    if let Resolution::IntentionallyCleared | Resolution::OrphanedReservationCleared = resolution {
+        fx.sweep(&second).await;
+        assert_phase1_read(&second, after(m), &[]);
+    } else {
+        fx.retry_sweep(&second, channel_id).await;
+        assert_phase1_read(&second, after(checkpoint), &[m]);
+    }
     let log = second.enqueue_log().into_iter();
     let rerun: Vec<u64> = log.filter(|(_, ok, _)| *ok).map(|(id, ..)| id).collect();
     let expected_rerun = match resolution {
         Resolution::LeftQueueUnprocessed => vec![m.get()],
         Resolution::MergedHeadClaimed => vec![h.get()],
-        Resolution::BecameActiveTurn => Vec::new(),
+        Resolution::BecameActiveTurn
+        | Resolution::IntentionallyCleared
+        | Resolution::OrphanedReservationCleared => Vec::new(),
     };
     assert_eq!(rerun, expected_rerun, "{resolution:?}");
     let expected = (Some(m.get()), Some(m.get()));
@@ -705,6 +745,54 @@ async fn t9_m_settles_once_a_turn_takes_it() {
 #[tokio::test(flavor = "current_thread")]
 async fn t9_absorbed_h_is_reoffered_not_leapt_once_its_merged_head_is_claimed() {
     t9_case(ChannelId::new(4_603_521), Resolution::MergedHeadClaimed).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn t9_m_discarded_by_clear_is_not_recovered() {
+    t9_case(ChannelId::new(4_603_522), Resolution::IntentionallyCleared).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn t9_m_in_an_orphaned_reservation_discarded_by_clear_is_not_recovered() {
+    t9_case(
+        ChannelId::new(4_603_523),
+        Resolution::OrphanedReservationCleared,
+    )
+    .await;
+}
+
+/// T9b: a synthetic headless active id is not a Discord cursor, so `/clear` lifts the
+/// checkpoint to the newest real discarded id and a later real message is still recovered.
+#[tokio::test(flavor = "current_thread")]
+async fn t9b_clear_during_a_synthetic_active_turn_keeps_later_messages_visible() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(4_603_524);
+    let (checkpoint, m, n) = (id(1, 600), id(2, 120), id(3, 30));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    fx.queue(channel_id, m).await;
+    let synthetic = MessageId::new(9_100_000_000_000_000_001);
+    let token = Arc::new(crate::services::provider::CancelToken::new());
+    let owner = serenity::UserId::new(HUMAN_ID);
+    let started =
+        discord::mailbox_try_start_turn(&fx.shared, channel_id, token, owner, synthetic).await;
+    assert!(started, "headless turn holds the slot");
+
+    let discard = super::super::retry_state::clear_channel_discarding_catch_up_backlog;
+    discard(&fx.shared, &fx.provider, channel_id).await;
+
+    let expected = (Some(m.get()), Some(m.get()));
+    assert_eq!(
+        fx.surfaces(channel_id),
+        expected,
+        "checkpoint stops at real M"
+    );
+    let history = vec![own_reply(channel_id, checkpoint), human(channel_id, m)];
+    let api = StrictApi::new(&fx.shared)
+        .with_history(channel_id, history)
+        .arriving_at(0, human(channel_id, n));
+    fx.sweep(&api).await;
+    assert_phase1_read(&api, after(m), &[n]);
+    assert_eq!(api.enqueue_log(), [(n.get(), true, None)]);
 }
 
 /// T10: without an earlier barrier, active-turn and terminal messages advance.
@@ -865,6 +953,42 @@ async fn t11_exhausted_budget_is_not_reset_by_the_barrier_arm() {
     );
     let expected = (Some(checkpoint.get()), Some(checkpoint.get()));
     assert_eq!(fx.surfaces(channel_id), expected);
+}
+
+/// T11b: with a settled predecessor A, a Deferred M that spends the last budget
+/// advances to A and is logged as exhausted, never as a retained retry.
+#[tokio::test(flavor = "current_thread")]
+async fn t11b_exhausted_barrier_after_a_settled_predecessor_is_not_logged_as_retained() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(4_603_523);
+    let (checkpoint, a, m) = (id(1, 600), id(2, 300), id(3, 120));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    let mut last_budget = CatchUpRetryState::new(checkpoint.get());
+    last_budget.deferred_rearms = super::CATCH_UP_RETRY_DEFERRED_REARM_LIMIT;
+    (fx.shared.catch_up_retry_pending).insert(channel_id, last_budget);
+    let history = vec![
+        own_reply(channel_id, checkpoint),
+        foreign_bot(channel_id, a),
+        human(channel_id, m),
+    ];
+    let api = StrictApi::new(&fx.shared)
+        .with_history(channel_id, history)
+        .with_hooks(m, &[Hook::Defer, Hook::Defer]);
+
+    let logs = LogWriter::capture();
+    fx.retry_sweep(&api, channel_id).await;
+    let logs = logs.finish();
+
+    assert_phase1_read(&api, after(checkpoint), &[a, m]);
+    assert_eq!(fx.surfaces(channel_id), (Some(a.get()), Some(a.get())));
+    assert_eq!(
+        fx.pending(channel_id),
+        None,
+        "the spent budget arms nothing"
+    );
+    let exhausted = format!("retry exhausted at barrier {m} for channel {channel_id}");
+    assert!(logs.contains(&exhausted), "{logs}");
+    assert!(!logs.contains("retry retained at barrier"), "{logs}");
 }
 
 struct LogWriter(Arc<Mutex<Vec<u8>>>);

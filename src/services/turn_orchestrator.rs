@@ -12,6 +12,7 @@ use crate::services::provider::{CancelToken, ProviderKind};
 
 // #3293: non-creating registry lookup + operator-gated idle-entry purge.
 mod active_source_dedup;
+mod clear_channel;
 mod dispatch_cleanup;
 mod dispatch_reservation;
 mod episode_identity;
@@ -36,6 +37,7 @@ use active_source_dedup::{
     intervention_has_active_source, intervention_sources_all_match_active,
     purge_active_source_from_queue, strip_source_message_id_from_intervention,
 };
+use clear_channel::clear_channel_state;
 pub(crate) use dispatch_reservation::{
     PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER, VALVE_CLEARED_DISPATCH_MARKER_GRACE,
 };
@@ -428,6 +430,8 @@ pub(crate) struct FinishTurnResult {
 pub(crate) struct ClearChannelResult {
     pub(crate) removed_token: Option<Arc<CancelToken>>,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
+    /// #6035: every inbound id this clear discarded (active, reservation, queue), read in-actor.
+    pub(crate) discarded_message_ids: Vec<MessageId>,
     // Uniform queue-mutation persistence-result surface; written on the
     // clear-channel path, no consumer yet. See `FinishTurnResult`.
     #[allow(dead_code)]
@@ -1042,6 +1046,7 @@ impl ChannelMailboxHandle {
             .unwrap_or(ClearChannelResult {
                 removed_token: None,
                 queue_exit_events: Vec::new(),
+                discarded_message_ids: Vec::new(),
                 persistence_error: None,
             })
     }
@@ -2632,47 +2637,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     }
                 }
                 ChannelMailboxMsg::Clear { persistence, reply } => {
-                    state.last_persistence = Some(persistence.clone());
-                    let removed_token = release_active_turn_anchor(
-                        &mut state,
-                        channel_id,
-                        Some(&persistence.provider),
-                    );
-                    let previous_queue = state.intervention_queue.clone();
-                    let queue_exit_events = state
-                        .intervention_queue
-                        .drain(..)
-                        .map(|intervention| {
-                            QueueExitEvent::new(intervention, QueueExitKind::Superseded)
-                        })
-                        .collect();
-                    let result = if let Err(error) = persist_queue_or_restore(
-                        &mut state,
-                        channel_id,
-                        &persistence,
-                        previous_queue,
-                        "clear",
-                    ) {
-                        ClearChannelResult {
-                            removed_token,
-                            queue_exit_events: Vec::new(),
-                            persistence_error: Some(error),
-                        }
-                    } else {
-                        clear_pending_user_dispatch(&mut state);
-                        state.recently_valve_cleared_dispatch = None;
-                        delete_pending_dispatch_marker_with_persistence(
-                            &persistence,
-                            channel_id,
-                            "clear",
-                        );
-                        ClearChannelResult {
-                            removed_token,
-                            queue_exit_events,
-                            persistence_error: None,
-                        }
-                    };
-                    let _ = reply.send(result);
+                    let _ = reply.send(clear_channel_state(&mut state, channel_id, persistence));
                     mark_turn_finished_signal_done(channel_id);
                 }
                 ChannelMailboxMsg::PurgeQueue {

@@ -1291,7 +1291,7 @@ async fn recent_initial_fetch_failure_blocks_phase2_then_recovers_whole_gap() {
 
     let recovered_mailbox = super::super::mailbox_snapshot(&shared, channel_id).await;
     assert_eq!(
-        super::super::recovery_known_message_ids(&recovered_mailbox),
+        super::super::recovery_known_arms_and_ids(&recovered_mailbox).1,
         HashSet::from([older_human_id.get(), newer_human_id.get()]),
         "the next complete sweep must recover the whole previously unknown gap, including ids merged into one intervention"
     );
