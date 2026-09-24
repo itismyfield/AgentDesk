@@ -186,6 +186,7 @@ export default function OfficeManagerModal({
                       tone="neutral"
                       compact
                       title={tr("멤버 관리", "Manage Members")}
+                      aria-label={tr("멤버 관리", "Manage Members")}
                     >
                       <Settings2
                         size={14}
@@ -203,6 +204,7 @@ export default function OfficeManagerModal({
                       onClick={() => handleDelete(o.id)}
                       tone="danger"
                       compact
+                      aria-label={tr("오피스 삭제", "Delete Office")}
                     >
                       <Trash2 size={14} className="text-red-400" />
                     </SurfaceActionButton>
