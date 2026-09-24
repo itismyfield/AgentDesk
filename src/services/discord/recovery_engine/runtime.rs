@@ -1317,6 +1317,7 @@ mod released_episode_mint_fence_tests {
 
     /// The restored watcher's own completion release must raise the fence, not
     /// fall back to a message-id-only finish that proves no episode ended.
+    #[cfg(unix)]
     #[test]
     fn a_restored_watcher_completion_fences_the_remint() {
         let state = row(524_210);
