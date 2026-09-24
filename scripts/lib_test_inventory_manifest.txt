@@ -8134,6 +8134,8 @@ services::observability::queries::alert_authority_tests::rollup_is_aggregation_o
 services::observability::recovery_audit::tests::build_recovery_audit_record_redacts_and_hashes_full_body
 services::observability::recovery_audit::tests::recovery_audit_pg_tests::recovery_audit_round_trips_and_fetches_by_turn
 services::observability::relay_signal_alert::tests::alert_content_names_the_signal_and_counts
+services::observability::relay_signal_alert::tests::alert_drop_ledger_counts_every_drop_and_warns_once_per_interval
+services::observability::relay_signal_alert::tests::alert_drop_note_warns_once_and_records_every_drop_as_event
 services::observability::relay_signal_alert::tests::channel_target_normalization
 services::observability::relay_signal_alert::tests::dedupe_key_is_per_signal
 services::observability::relay_signal_alert::tests::dedupe_key_is_stable_within_the_hour
@@ -8141,6 +8143,7 @@ services::observability::relay_signal_alert::tests::dedupe_key_rolls_over_at_the
 services::observability::relay_signal_alert::tests::effective_threshold_ignores_zero_and_missing_override
 services::observability::relay_signal_alert::tests::effective_threshold_prefers_positive_override
 services::observability::relay_signal_alert::tests::idle_cleanup_preserved_alert_is_one_actionable_line
+services::observability::relay_signal_alert::tests::missing_alert_target_drops_are_visible_and_configured_target_enqueues_pg
 services::observability::relay_signal_alert::tests::signal_statuses_match_emit_path_names
 services::observability::relay_signal_alert::tests::signal_table_covers_documented_relay_loss_vectors
 services::observability::relay_signal_alert::tests::signal_table_excludes_benign_watcher_owned_non_attempt

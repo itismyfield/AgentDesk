@@ -24,13 +24,140 @@
 //!     shared #4449 worker policy falls back to notify only if announce delivery
 //!     fails; cooldown and target off-switches still bound turn creation.
 //!   * Double off-switch: the alert target (`kanban_human_alert_channel_id`)
-//!     being unset short-circuits to 0 alerts, so an unconfigured deploy is
-//!     guaranteed never to spam.
+//!     being unset yields 0 alerts, so an unconfigured deploy is guaranteed
+//!     never to spam the channel.
+//!   * #5993: an unset target must not make the drop itself invisible. Every
+//!     alert discarded for want of a target is counted as an
+//!     `operator_alert_dropped` observability event (status = reason_code), and
+//!     one warn per reason_code per `RELAY_SIGNAL_ALERT_DEDUPE_TTL_SECS` names
+//!     the missing setting, so the 5-minute idle-cleanup tick cannot flood logs.
+
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
+use serde_json::json;
 use sqlx::PgPool;
 
-use super::{RELAY_SIGNAL_ALERT_DEDUPE_TTL_SECS, RELAY_SIGNAL_DEFINITIONS, RelaySignal};
+use super::{
+    CounterDelta, RELAY_SIGNAL_ALERT_DEDUPE_TTL_SECS, RELAY_SIGNAL_DEFINITIONS, RelaySignal,
+};
+
+/// kv_meta key holding the operator alert channel. Named in the drop warn so the
+/// log line says exactly which setting would have delivered the alert.
+pub(super) const ALERT_TARGET_SETTING_KEY: &str = "kanban_human_alert_channel_id";
+
+/// `observability_events.event_type` for an alert discarded because no target
+/// is configured. `status` carries the discarded alert's reason_code, so
+/// `COUNT(*) ... GROUP BY status` is the per-reason drop count.
+pub(super) const ALERT_DROPPED_EVENT_TYPE: &str = "operator_alert_dropped";
+
+const RELAY_SIGNAL_THRESHOLD_REASON_CODE: &str = "relay_signal.threshold";
+
+const ALERT_DROP_WARN_INTERVAL: Duration =
+    Duration::from_secs(RELAY_SIGNAL_ALERT_DEDUPE_TTL_SECS as u64);
+
+#[derive(Debug, Default)]
+struct AlertDropTally {
+    total: u64,
+    last_warned_at: Option<Instant>,
+    suppressed_since_warn: u64,
+}
+
+/// Per-reason_code drop tally for this process. The count grows on every drop;
+/// the warn is due at most once per `ALERT_DROP_WARN_INTERVAL` per reason_code.
+#[derive(Debug, Default)]
+struct AlertDropLedger {
+    by_reason: HashMap<String, AlertDropTally>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AlertDropNote {
+    total: u64,
+    /// `Some(n)` when a warn is due now; `n` drops were suppressed since the last one.
+    warn_due: Option<u64>,
+}
+
+impl AlertDropLedger {
+    fn note(&mut self, reason_code: &str, now: Instant) -> AlertDropNote {
+        let tally = self.by_reason.entry(reason_code.to_string()).or_default();
+        tally.total = tally.total.saturating_add(1);
+        let due = tally.last_warned_at.is_none_or(|warned_at| {
+            now.saturating_duration_since(warned_at) >= ALERT_DROP_WARN_INTERVAL
+        });
+        let warn_due = if due {
+            tally.last_warned_at = Some(now);
+            Some(std::mem::take(&mut tally.suppressed_since_warn))
+        } else {
+            tally.suppressed_since_warn = tally.suppressed_since_warn.saturating_add(1);
+            None
+        };
+        AlertDropNote {
+            total: tally.total,
+            warn_due,
+        }
+    }
+}
+
+fn alert_drop_ledger() -> &'static Mutex<AlertDropLedger> {
+    static LEDGER: OnceLock<Mutex<AlertDropLedger>> = OnceLock::new();
+    LEDGER.get_or_init(|| Mutex::new(AlertDropLedger::default()))
+}
+
+/// #5993: record one operator alert discarded because `ALERT_TARGET_SETTING_KEY`
+/// is unset. Always counts (observability event + process tally); warns at most
+/// once per reason_code per interval.
+fn note_alert_dropped_without_target(reason_code: &str, dedupe_key: &str) {
+    let note = alert_drop_ledger()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .note(reason_code, Instant::now());
+    if let Some(suppressed) = note.warn_due {
+        tracing::warn!(
+            setting_key = ALERT_TARGET_SETTING_KEY,
+            reason_code,
+            dropped_total = note.total,
+            suppressed_since_last_warn = suppressed,
+            "[relay-signal] operator alert dropped: kv_meta `{ALERT_TARGET_SETTING_KEY}` is unset, so `{reason_code}` alerts are discarded; each drop is recorded as `{ALERT_DROPPED_EVENT_TYPE}`"
+        );
+    }
+    super::emit::emit_event(
+        ALERT_DROPPED_EVENT_TYPE,
+        None,
+        None,
+        None,
+        Some(dedupe_key),
+        None,
+        Some(reason_code),
+        CounterDelta::default(),
+        json!({
+            "reason_code": reason_code,
+            "missing_setting": ALERT_TARGET_SETTING_KEY,
+            "dedupe_key": dedupe_key,
+            "dropped_total_this_process": note.total,
+        }),
+    );
+}
+
+#[cfg(test)]
+fn alert_drops_this_process(reason_code: &str) -> u64 {
+    alert_drop_ledger()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .by_reason
+        .get(reason_code)
+        .map_or(0, |tally| tally.total)
+}
+
+#[cfg(test)]
+fn reset_alert_drops_for_tests(reason_code: &str) {
+    alert_drop_ledger()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .by_reason
+        .remove(reason_code);
+}
 
 fn normalize_channel_target(channel: &str) -> Option<String> {
     let channel = channel.trim();
@@ -46,8 +173,8 @@ fn normalize_channel_target(channel: &str) -> Option<String> {
 
 /// Resolve the operator alert target. Reuses the same kv_meta key the
 /// agent-quality alert pipeline uses (`kanban_human_alert_channel_id`) so a
-/// single operator config drives both. `None` ⇒ the job short-circuits and
-/// never enqueues, guaranteeing an unconfigured deploy stays silent.
+/// single operator config drives both. `None` ⇒ nothing is ever enqueued, so an
+/// unconfigured deploy never posts; each discarded alert is still counted (#5993).
 async fn relay_alert_target_pg(pool: &PgPool) -> Result<Option<String>> {
     let value = sqlx::query_scalar::<_, String>(
         "SELECT value
@@ -216,10 +343,9 @@ async fn enqueue_relay_alert_pg(
 /// no signal breached its threshold). Never panics; an individual signal's
 /// failure surfaces as the job error so the scheduler records it.
 pub(crate) async fn enqueue_relay_signal_alerts_pg(pool: &PgPool) -> Result<u64> {
-    // Off-switch #1: no operator alert target ⇒ stay completely silent.
-    let Some(target) = relay_alert_target_pg(pool).await? else {
-        return Ok(0);
-    };
+    // Off-switch #1: no operator alert target ⇒ nothing reaches the channel, but
+    // a breached signal is still recorded as a visible drop (#5993).
+    let target = relay_alert_target_pg(pool).await?;
 
     let override_threshold = relay_alert_threshold_override_pg(pool).await?;
     let now_ms = chrono::Utc::now().timestamp_millis();
@@ -232,14 +358,18 @@ pub(crate) async fn enqueue_relay_signal_alerts_pg(pool: &PgPool) -> Result<u64>
             continue;
         }
         let dedupe_key = relay_alert_dedupe_key(signal.key, now_ms);
+        let Some(target) = target.as_deref() else {
+            note_alert_dropped_without_target(RELAY_SIGNAL_THRESHOLD_REASON_CODE, &dedupe_key);
+            continue;
+        };
         let content = relay_alert_content(signal, count, threshold);
         if enqueue_relay_alert_pg(
             pool,
-            &target,
+            target,
             &dedupe_key,
             &content,
             now_ms,
-            "relay_signal.threshold",
+            RELAY_SIGNAL_THRESHOLD_REASON_CODE,
         )
         .await?
         {
@@ -275,7 +405,8 @@ pub(super) fn idle_cleanup_preserved_alert_content(
 
 /// One operator line when idle cleanup keeps a session it could not prove idle.
 /// The per-session slot shares the relay alert TTL, so the 5-minute idle-kill
-/// tick cannot repeat it while the session stays preserved.
+/// tick cannot repeat it while the session stays preserved. Without a target the
+/// line is dropped visibly (#5993) and `Ok(false)` is returned.
 pub(crate) async fn enqueue_idle_cleanup_preserved_alert_pg(
     pool: &PgPool,
     session_key: &str,
@@ -283,13 +414,15 @@ pub(crate) async fn enqueue_idle_cleanup_preserved_alert_pg(
     preserved_reason: &str,
     unobserved_minutes: Option<u64>,
 ) -> Result<bool> {
+    let dedupe_key = format!("relay_alert:idle_cleanup_preserved:{session_key}");
     let Some(target) = relay_alert_target_pg(pool).await? else {
+        note_alert_dropped_without_target(IDLE_CLEANUP_PRESERVED_REASON_CODE, &dedupe_key);
         return Ok(false);
     };
     enqueue_relay_alert_pg(
         pool,
         &target,
-        &format!("relay_alert:idle_cleanup_preserved:{session_key}"),
+        &dedupe_key,
         &idle_cleanup_preserved_alert_content(channel, preserved_reason, unobserved_minutes),
         chrono::Utc::now().timestamp_millis(),
         IDLE_CLEANUP_PRESERVED_REASON_CODE,
@@ -314,6 +447,233 @@ mod tests {
             "relay_signal_rollup",
             Some(IDLE_CLEANUP_PRESERVED_REASON_CODE)
         ));
+    }
+
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_logs() -> (Captured, tracing::Dispatch) {
+        crate::logging::test_capture::pin_callsite_interest();
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(captured.clone())
+            .finish();
+        (captured, tracing::Dispatch::new(subscriber))
+    }
+
+    fn drop_warns(captured: &Captured, reason_code: &str) -> Vec<String> {
+        String::from_utf8(captured.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains("operator alert dropped") && line.contains(reason_code))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// #5993: every drop counts, but the warn for one reason_code is due once per
+    /// interval — the 5-minute idle-cleanup tick must not repeat it.
+    #[test]
+    fn alert_drop_ledger_counts_every_drop_and_warns_once_per_interval() {
+        let mut ledger = AlertDropLedger::default();
+        let t0 = Instant::now();
+        let tick = Duration::from_secs(5 * 60);
+        assert_eq!(
+            ledger.note("r.a", t0),
+            AlertDropNote {
+                total: 1,
+                warn_due: Some(0)
+            }
+        );
+        for (i, expected_total) in (2..=4).enumerate() {
+            assert_eq!(
+                ledger.note("r.a", t0 + tick * (i as u32 + 1)),
+                AlertDropNote {
+                    total: expected_total,
+                    warn_due: None
+                },
+                "a drop inside the interval counts but does not warn again"
+            );
+        }
+        assert_eq!(
+            ledger.note("r.b", t0 + tick),
+            AlertDropNote {
+                total: 1,
+                warn_due: Some(0)
+            },
+            "each reason_code warns independently"
+        );
+        assert_eq!(
+            ledger.note("r.a", t0 + ALERT_DROP_WARN_INTERVAL),
+            AlertDropNote {
+                total: 5,
+                warn_due: Some(3)
+            },
+            "after the interval the warn repeats and reports what it suppressed"
+        );
+    }
+
+    /// #5993: a drop names the missing setting and the discarded reason_code in
+    /// one warn, and lands in the observability event stream on every call.
+    #[test]
+    fn alert_drop_note_warns_once_and_records_every_drop_as_event() {
+        let _runtime = crate::services::observability::test_runtime_lock();
+        let reason = "test.alert_drop_note";
+        reset_alert_drops_for_tests(reason);
+        let (captured, dispatch) = capture_logs();
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+        let dedupe_key = format!("relay_alert:test:{}", uuid::Uuid::new_v4().simple());
+        for _ in 0..3 {
+            note_alert_dropped_without_target(reason, &dedupe_key);
+        }
+
+        let warns = drop_warns(&captured, reason);
+        assert_eq!(warns.len(), 1, "{warns:?}");
+        assert!(warns[0].trim_start().starts_with("WARN"), "{warns:?}");
+        assert!(warns[0].contains(ALERT_TARGET_SETTING_KEY), "{warns:?}");
+        assert_eq!(alert_drops_this_process(reason), 3);
+        let events = crate::services::observability::events::recent(10_000)
+            .into_iter()
+            .filter(|event| {
+                event.event_type == ALERT_DROPPED_EVENT_TYPE
+                    && event.payload["session_key"] == dedupe_key.as_str()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 3, "every drop is an observability event");
+        for event in events {
+            assert_eq!(event.payload["status"], reason);
+            assert_eq!(event.payload["missing_setting"], ALERT_TARGET_SETTING_KEY);
+        }
+    }
+
+    /// #5993 through the real enqueue entry points: with no target, both relay
+    /// alert paths drop visibly (one warn per reason, every drop counted, no
+    /// outbox row); with a target, both enqueue exactly as before.
+    #[tokio::test]
+    async fn missing_alert_target_drops_are_visible_and_configured_target_enqueues_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_relay_alert_drop",
+            "relay alert target missing drop",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        reset_alert_drops_for_tests(IDLE_CLEANUP_PRESERVED_REASON_CODE);
+        reset_alert_drops_for_tests(RELAY_SIGNAL_THRESHOLD_REASON_CODE);
+        // `relay_uncommitted_inflight_cleared` trips at a single occurrence.
+        sqlx::query(
+            "INSERT INTO observability_events (event_type, status)
+             VALUES ('relay_root_cause_counter', 'relay_uncommitted_inflight_cleared')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed breached relay signal");
+        let outbox_rows = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::bigint FROM message_outbox WHERE source = 'relay_signal_rollup'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("count relay outbox rows")
+        };
+
+        let (captured, dispatch) = capture_logs();
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+        for tick in 0..3 {
+            assert!(
+                !enqueue_idle_cleanup_preserved_alert_pg(
+                    &pool,
+                    &format!("session-{tick}"),
+                    "adk-cc",
+                    "transcript_unresolved",
+                    Some(10),
+                )
+                .await
+                .expect("idle cleanup alert without target")
+            );
+        }
+        assert_eq!(enqueue_relay_signal_alerts_pg(&pool).await.unwrap(), 0);
+        assert_eq!(enqueue_relay_signal_alerts_pg(&pool).await.unwrap(), 0);
+
+        assert_eq!(outbox_rows().await, 0, "no target ⇒ nothing reaches outbox");
+        assert_eq!(
+            drop_warns(&captured, IDLE_CLEANUP_PRESERVED_REASON_CODE).len(),
+            1,
+            "repeated idle-cleanup drops warn once"
+        );
+        assert_eq!(
+            drop_warns(&captured, RELAY_SIGNAL_THRESHOLD_REASON_CODE).len(),
+            1,
+            "repeated threshold drops warn once"
+        );
+        assert_eq!(
+            alert_drops_this_process(IDLE_CLEANUP_PRESERVED_REASON_CODE),
+            3
+        );
+        assert_eq!(
+            alert_drops_this_process(RELAY_SIGNAL_THRESHOLD_REASON_CODE),
+            2
+        );
+
+        sqlx::query("INSERT INTO kv_meta (key, value) VALUES ($1, '555')")
+            .bind(ALERT_TARGET_SETTING_KEY)
+            .execute(&pool)
+            .await
+            .expect("seed alert target");
+        assert!(
+            enqueue_idle_cleanup_preserved_alert_pg(
+                &pool,
+                "session-0",
+                "adk-cc",
+                "transcript_unresolved",
+                Some(10),
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(enqueue_relay_signal_alerts_pg(&pool).await.unwrap(), 1);
+        let targets = sqlx::query_scalar::<_, String>(
+            "SELECT target FROM message_outbox WHERE source = 'relay_signal_rollup'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(targets, vec!["channel:555", "channel:555"]);
+        assert_eq!(
+            alert_drops_this_process(IDLE_CLEANUP_PRESERVED_REASON_CODE),
+            3,
+            "a configured target is not a drop"
+        );
+        assert_eq!(
+            alert_drops_this_process(RELAY_SIGNAL_THRESHOLD_REASON_CODE),
+            2
+        );
+        drop(_guard);
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     fn signal(key: &'static str, default_threshold: u32) -> RelaySignal {
