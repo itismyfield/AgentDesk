@@ -35,7 +35,7 @@ export default function MarkdownContent({ content, className }: Props) {
           const lowerUrl = url.trim().toLowerCase();
           if (lowerUrl.startsWith("discord:")) {
             // Only allow specific discord protocol formats used in the app, strip others
-            if (/^discord:\/\/discord\.com\/channels\/[^\/]+\/[^\/]+(\/[^\/]+)?$/.test(lowerUrl)) {
+            if (/^discord:\/\/discord\.com\/channels\/(?:[0-9]+|@me)\/[0-9]+(?:\/[0-9]+)?$/.test(lowerUrl)) {
               return url;
             }
             return "";
