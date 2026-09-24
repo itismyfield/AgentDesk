@@ -241,6 +241,16 @@ pub(crate) fn reset_state_for_tests() {
     *state = TuiPromptDedupeState::default();
 }
 
+/// Test-only: when the runtime binding for `tmux_session_name` was last written.
+#[cfg(test)]
+pub(crate) fn runtime_binding_recorded_at_for_tests(tmux_session_name: &str) -> Option<Instant> {
+    let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state
+        .runtime_by_tmux
+        .get(tmux_session_name)
+        .map(|entry| entry.recorded_at)
+}
+
 /// Test-only: record a prompt anchor whose `recorded_at` is backdated by `age`,
 /// so a test can simulate an anchor stamped at submit time for a turn that has
 /// been streaming for `age`. Crate-visible so sibling modules (e.g. the

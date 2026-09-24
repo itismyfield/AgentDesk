@@ -6457,6 +6457,7 @@ services::discord::tui_prompt_relay::rehydration::idempotency_tests::concurrent_
 services::discord::tui_prompt_relay::rehydration::idempotency_tests::incomplete_session_metadata_does_not_reset_a_valid_rollout_cursor
 services::discord::tui_prompt_relay::rehydration::idempotency_tests::live_marker_rotation_replaces_even_when_old_rollout_still_exists
 services::discord::tui_prompt_relay::rehydration::idempotency_tests::namespace_change_repairs_relay_path_without_rewinding_rollout
+services::discord::tui_prompt_relay::rehydration::idempotency_tests::periodic_entry_pass_reports_one_recovery_then_settles
 services::discord::tui_prompt_relay::rehydration::idempotency_tests::recreated_tmux_with_evicted_binding_can_rehydrate_same_rollout
 services::discord::tui_prompt_relay::rehydration::idempotency_tests::rollout_alias_and_channel_mirror_repair_preserve_binding
 services::discord::tui_prompt_relay::rehydration::idempotency_tests::second_rehydration_is_noop_and_preserves_stream_row_identity

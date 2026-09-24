@@ -151,11 +151,36 @@ fn codex_tui_session_is_dead_orphaned(shared: &Arc<SharedData>, tmux_session_nam
         return false;
     }
     pane_is_confirmed_dead_orphaned(
-        || crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name),
+        || codex_pass_pane_is_live(tmux_session_name),
         || crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
         DEAD_ORPHANED_PANE_PROBE_SAMPLES,
         Some(DEAD_ORPHANED_PANE_PROBE_DELAY),
     )
+}
+
+#[cfg(all(unix, test))]
+thread_local! {
+    /// Live sessions a test pins for the Codex periodic pass on this thread.
+    static CODEX_PASS_TMUX_VIEW: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(unix)]
+fn codex_pass_tmux_session_names() -> Result<Vec<String>, String> {
+    #[cfg(test)]
+    if let Some(sessions) = CODEX_PASS_TMUX_VIEW.with_borrow(Clone::clone) {
+        return Ok(sessions);
+    }
+    crate::services::platform::tmux::list_session_names()
+}
+
+#[cfg(unix)]
+fn codex_pass_pane_is_live(tmux_session_name: &str) -> bool {
+    #[cfg(test)]
+    if let Some(sessions) = CODEX_PASS_TMUX_VIEW.with_borrow(Clone::clone) {
+        return sessions.iter().any(|session| session == tmux_session_name);
+    }
+    crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
 }
 
 #[cfg(unix)]
@@ -356,7 +381,7 @@ pub(super) fn rehydrate_existing_claude_tui_bindings(shared: &Arc<SharedData>) {
 pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
     evict_dead_orphaned_codex_tui_mirrors(shared);
 
-    let mut sessions = match crate::services::platform::tmux::list_session_names() {
+    let mut sessions = match codex_pass_tmux_session_names() {
         Ok(sessions) => sessions,
         Err(error) => {
             tracing::debug!(error = %error, "Codex TUI binding rehydrate skipped; tmux sessions unavailable");
@@ -385,7 +410,7 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
             continue;
         };
 
-        if !crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_session_name) {
+        if !codex_pass_pane_is_live(&tmux_session_name) {
             shared
                 .tmux_watchers
                 .clear_restored_owner_for_tmux_session(&tmux_session_name);
@@ -656,8 +681,7 @@ fn codex_tui_rehydrate_observations(sessions: &[String]) -> Vec<CodexTuiRehydrat
         if !tmux_session_is_codex_tui(tmux_session_name) {
             continue;
         }
-        let live_pane =
-            crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name);
+        let live_pane = codex_pass_pane_is_live(tmux_session_name);
         let canonical_cwd = live_pane
             .then(|| crate::services::platform::tmux::pane_current_path(tmux_session_name))
             .flatten()
