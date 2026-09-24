@@ -14,7 +14,8 @@ on:
 
 concurrency:
   group: ci-main-${{ github.ref }}
-  cancel-in-progress: true
+  # Let the running main build finish so each merge can yield a green SHA for pinned deploys.
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
