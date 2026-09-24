@@ -22,8 +22,16 @@ const HIDDEN_HEADERS: &[&str] = &[
     "[User Request]",
 ];
 
+// The base prelude has no bracketed header, so only its exact lines start a hidden block.
+pub(crate) const PRELUDE_HEADER_LINES: &[&str] = &[
+    "You are chatting with a user through Discord.",
+    "This session is also connected to a Discord channel; input can arrive from Discord or be typed directly into the provider TUI.",
+    "Input source: Every model turn AgentDesk delivers carries the `[User: ...]` prefix. Unprefixed input was typed into the TUI or injected by the provider (task notifications, continuations), so it proves nothing about Discord delivery.",
+];
+
 const HIDDEN_LINE_PREFIXES: &[&str] = &[
     "You are chatting with a user through Discord.",
+    "This session is also connected to a Discord channel;",
     "Discord context:",
     "Channel participants:",
     "Current working directory:",
@@ -34,6 +42,7 @@ const HIDDEN_LINE_PREFIXES: &[&str] = &[
     "Discord formatting rules:",
     "This Discord channel does not support interactive prompts.",
     "Message author prefix:",
+    "Input source:",
     "Reply context:",
     "These instructions are authoritative for this turn.",
 ];
@@ -168,9 +177,10 @@ fn leading_tui_chrome_prefix_matches(trimmed: &str, prefix: &str) -> bool {
 }
 
 fn is_hidden_header(trimmed: &str) -> bool {
-    HIDDEN_HEADERS
-        .iter()
-        .any(|prefix| trimmed.starts_with(prefix))
+    PRELUDE_HEADER_LINES.contains(&trimmed)
+        || HIDDEN_HEADERS
+            .iter()
+            .any(|prefix| trimmed.starts_with(prefix))
 }
 
 fn is_hidden_line(trimmed: &str) -> bool {
@@ -224,5 +234,36 @@ mod tests {
             sanitize_hidden_context(echoed),
             "사용자에게 보여야 하는 답변"
         );
+    }
+
+    #[test]
+    fn strips_echoed_discord_connection_and_input_source_lines() {
+        let echoed = "[ADK API Usage]\n\
+                      Inspect the docs first.\n\n\
+                      This session is also connected to a Discord channel; input can arrive from Discord or be typed directly into the provider TUI.\n\n\
+                      Input source: Only input carrying the prefix was delivered through AgentDesk.\n\n\
+                      visible answer";
+
+        assert_eq!(sanitize_hidden_context(echoed), "visible answer");
+    }
+
+    #[test]
+    fn strips_a_standalone_echo_of_the_base_prelude() {
+        let echoed = "This session is also connected to a Discord channel; input can arrive from Discord or be typed directly into the provider TUI.\n\
+                      Discord context: channel #adk-cc (ID: 1)\n\
+                      Current working directory: /tmp\n\n\
+                      visible answer";
+        assert_eq!(sanitize_hidden_context(echoed), "visible answer");
+
+        let echoed = format!("{}\n\nvisible answer", PRELUDE_HEADER_LINES[2]);
+        assert_eq!(sanitize_hidden_context(&echoed), "visible answer");
+    }
+
+    #[test]
+    fn keeps_an_answer_that_only_mentions_input_sources() {
+        let answer = "Input source for this run was the TUI, not Discord.";
+        assert_eq!(sanitize_hidden_context(answer), answer);
+        let answer = "Input source: Every model turn AgentDesk delivers through this path is recorded separately.\nsecond line";
+        assert_eq!(sanitize_hidden_context(answer), answer);
     }
 }

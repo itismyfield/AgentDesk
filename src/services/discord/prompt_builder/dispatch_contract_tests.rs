@@ -329,11 +329,24 @@ fn full_prompt_manifest_records_shared_knowledge_and_longterm_catalog() {
         Some("turn-layer-inventory"),
     );
 
+    for line in crate::services::discord::response_sanitizer::PRELUDE_HEADER_LINES
+        .iter()
+        .skip(1)
+    {
+        assert!(
+            built.system_prompt.lines().any(|l| l.trim() == *line),
+            "sanitizer prelude line drifted from the prompt: {line}"
+        );
+    }
     let manifest = built.manifest.expect("prompt manifest");
     for (name, expected_fragment) in [
         (
             "base_discord",
-            "You are chatting with a user through Discord.",
+            "This session is also connected to a Discord channel;",
+        ),
+        (
+            "base_discord",
+            "Input source: Every model turn AgentDesk delivers",
         ),
         ("shared_knowledge", "important invariant"),
         ("longterm_catalog", "durable fact"),
