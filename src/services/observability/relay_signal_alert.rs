@@ -1,67 +1,47 @@
-//! #3561 — operator monitor + Discord alert for relay-loss signals.
+//! #3561 — operator monitor for relay-loss signals.
 //!
 //! The internal `relay_health` machinery (RelayHealthSnapshot, relay_recovery)
-//! exists for *recovery*, but there was no operator-facing alert when the
+//! exists for *recovery*, but there was no operator-facing signal when the
 //! relay-loss invariant signals spike — outages were only discovered after the
 //! fact by grepping logs. This job aggregates the restart-safe
 //! `observability_events` stream (the durable mirror of the relay root-cause
-//! counters + offset invariant violations) over a 1-hour window and enqueues a
-//! single de-duplicated Discord alert per signal per hour when a signal crosses
-//! its threshold.
+//! counters + offset invariant violations) over a 1-hour window and reports
+//! every signal that crosses its threshold.
 //!
-//! Design notes (see #3561):
+//! Design notes (see #3561, #5993):
 //!   * Source of truth is the persistent `observability_events` table, NOT the
 //!     in-memory atomics — atomics reset to 0 on every process restart and are
 //!     per-provider scoped, which breaks delta bookkeeping across deploys.
-//!   * Driven by the hourly `MaintenanceJob` scheduler (PG pool in hand), the
-//!     same proven scheduler harness the aggregation rollup uses — not the per-provider
-//!     stall watchdog (hot path, single-provider scope).
-//!   * Anti-spam is a TOCTOU-safe kv_meta dedupe-slot claim keyed by
-//!     `relay_alert:{signal}:{hour_bucket}` with a
-//!     1-hour TTL so each signal alerts at most once per hour.
-//!   * Delivery reuses the existing `message_outbox` enqueue path with the
-//!     announce bot because a threshold breach is operator-actionable. The
-//!     shared #4449 worker policy falls back to notify only if announce delivery
-//!     fails; cooldown and target off-switches still bound turn creation.
-//!   * Double off-switch: the alert target (`kanban_human_alert_channel_id`)
-//!     being unset short-circuits to 0 alerts, so an unconfigured deploy is
-//!     guaranteed never to spam.
+//!   * Driven by the hourly leader `MaintenanceJob` scheduler (PG pool in
+//!     hand), the same proven scheduler harness the aggregation rollup uses —
+//!     not the per-provider stall watchdog (hot path, single-provider scope).
+//!   * #5993 retired the Discord human-alert channel. Production never set
+//!     it, so every report was discarded without a trace. A crossing is now a
+//!     WARN line plus a durable `relay_signal_threshold_crossed` observability
+//!     event, and an idle-cleanup preservation is a WARN line plus an
+//!     `idle_cleanup_preserved` event. Neither depends on operator
+//!     configuration, so neither can be silently dropped.
+
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
+use serde_json::json;
 use sqlx::PgPool;
 
-use super::{RELAY_SIGNAL_ALERT_DEDUPE_TTL_SECS, RELAY_SIGNAL_DEFINITIONS, RelaySignal};
+use super::{CounterDelta, RELAY_SIGNAL_DEFINITIONS, RELAY_SIGNAL_REPEAT_WARN_SECS, RelaySignal};
 
-fn normalize_channel_target(channel: &str) -> Option<String> {
-    let channel = channel.trim();
-    if channel.is_empty() {
-        return None;
-    }
-    Some(if channel.starts_with("channel:") {
-        channel.to_string()
-    } else {
-        format!("channel:{channel}")
-    })
-}
+/// `observability_events.event_type` for one signal over its hourly threshold.
+/// `status` carries the signal key.
+pub(super) const RELAY_SIGNAL_THRESHOLD_EVENT_TYPE: &str = "relay_signal_threshold_crossed";
 
-/// Resolve the operator alert target. Reuses the same kv_meta key the
-/// agent-quality alert pipeline uses (`kanban_human_alert_channel_id`) so a
-/// single operator config drives both. `None` ⇒ the job short-circuits and
-/// never enqueues, guaranteeing an unconfigured deploy stays silent.
-async fn relay_alert_target_pg(pool: &PgPool) -> Result<Option<String>> {
-    let value = sqlx::query_scalar::<_, String>(
-        "SELECT value
-         FROM kv_meta
-         WHERE key = 'kanban_human_alert_channel_id'
-           AND value IS NOT NULL
-           AND btrim(value) <> ''
-         LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| anyhow!("load relay signal alert target: {error}"))?;
-    Ok(value.as_deref().and_then(normalize_channel_target))
-}
+/// `observability_events.event_type` for an idle cleanup that kept a session it
+/// could not prove idle. `status` carries the preserve reason.
+pub(super) const IDLE_CLEANUP_PRESERVED_EVENT_TYPE: &str = "idle_cleanup_preserved";
+
+const IDLE_CLEANUP_PRESERVED_WARN_INTERVAL: Duration =
+    Duration::from_secs(RELAY_SIGNAL_REPEAT_WARN_SECS);
 
 /// Read the operator threshold override from kv_meta (mirrored from
 /// `config.kanban.relay_alert_threshold` by `services::settings`). A non-numeric
@@ -83,65 +63,15 @@ async fn relay_alert_threshold_override_pg(pool: &PgPool) -> Result<Option<u32>>
     Ok(value.and_then(|raw| raw.trim().parse::<u32>().ok()))
 }
 
-/// The hourly bucket a `now_ms` timestamp falls into. Stable within the hour so
-/// repeated job ticks inside the same window resolve to the same dedupe key.
-fn hour_bucket(now_ms: i64) -> i64 {
-    now_ms.div_euclid(3_600_000)
-}
-
-/// Dedupe key for one signal in one hourly window. Mirrors the
-/// `agent_quality_alert:*` key shape so the kv_meta slot semantics match.
-pub(super) fn relay_alert_dedupe_key(signal_key: &str, now_ms: i64) -> String {
-    format!("relay_alert:{signal_key}:{}", hour_bucket(now_ms))
-}
-
 /// Effective threshold for `signal`: the operator override when present, else
 /// the conservative built-in default. A `0` override is ignored (treated as
 /// "use default") so a misconfigured `relay_alert_threshold = 0` cannot turn
-/// every window into a spam storm.
+/// every window into a warn storm.
 pub(super) fn effective_threshold(signal: &RelaySignal, override_threshold: Option<u32>) -> u32 {
     match override_threshold {
         Some(value) if value > 0 => value,
         _ => signal.default_threshold,
     }
-}
-
-/// #3561: atomically claim the dedupe slot for `key` iff the previous claim is
-/// older than `RELAY_SIGNAL_ALERT_DEDUPE_TTL_SECS`. Mirrors
-/// the established alert-slot pattern — single-statement TOCTOU-safe
-/// claim, defensive `^[0-9]+$` guard against legacy non-numeric kv_meta values.
-async fn claim_relay_alert_slot_pg(pool: &PgPool, key: &str, now_ms: i64) -> Result<bool> {
-    let dedupe_ms = RELAY_SIGNAL_ALERT_DEDUPE_TTL_SECS.saturating_mul(1000);
-    let claimed = sqlx::query_scalar::<_, i32>(
-        "INSERT INTO kv_meta (key, value)
-         VALUES ($1, $2)
-         ON CONFLICT (key) DO UPDATE
-             SET value = EXCLUDED.value
-             WHERE CASE
-                 WHEN kv_meta.value ~ '^[0-9]+$'
-                     THEN kv_meta.value::bigint + $3 <= ($2)::bigint
-                 ELSE TRUE
-             END
-         RETURNING 1",
-    )
-    .bind(key)
-    .bind(now_ms.to_string())
-    .bind(dedupe_ms)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| anyhow!("claim relay alert dedupe key {key}: {error}"))?;
-    Ok(claimed.is_some())
-}
-
-/// Best-effort rollback of a freshly-claimed dedupe slot when the subsequent
-/// outbox INSERT fails, so the next cycle can retry.
-async fn release_relay_alert_slot_pg(pool: &PgPool, key: &str) -> Result<()> {
-    sqlx::query("DELETE FROM kv_meta WHERE key = $1")
-        .bind(key)
-        .execute(pool)
-        .await
-        .map_err(|error| anyhow!("release relay alert dedupe key {key}: {error}"))?;
-    Ok(())
 }
 
 /// Count the rows for one signal inside the trailing 1-hour window. Uses the
@@ -162,103 +92,72 @@ async fn count_signal_last_hour_pg(pool: &PgPool, signal: &RelaySignal) -> Resul
     Ok(count)
 }
 
-pub(super) fn relay_alert_content(signal: &RelaySignal, count: i64, threshold: u32) -> String {
+pub(super) fn relay_signal_threshold_summary(
+    signal: &RelaySignal,
+    count: i64,
+    threshold: u32,
+) -> String {
     format!(
         "릴레이 누락 신호 임계 초과: `{}` ({}) 최근 1시간 {count}건 (임계 {threshold}). 운영 점검 필요.",
         signal.key, signal.label,
     )
 }
 
-async fn enqueue_relay_alert_pg(
-    pool: &PgPool,
-    target: &str,
-    dedupe_key: &str,
-    content: &str,
-    now_ms: i64,
-    reason_code: &str,
-) -> Result<bool> {
-    // Claim the dedupe slot atomically *before* enqueueing so concurrent
-    // leaders cannot double-post the same signal in the same window.
-    if !claim_relay_alert_slot_pg(pool, dedupe_key, now_ms).await? {
-        return Ok(false);
+/// #3561 entry point: evaluate every relay-loss signal over the trailing hour
+/// and report each breached one. Returns the number of signals over their
+/// threshold this cycle. Never panics; an individual signal's query failure
+/// surfaces as the job error so the scheduler records it.
+pub(crate) async fn report_relay_signal_threshold_crossings_pg(pool: &PgPool) -> Result<u64> {
+    let override_threshold = relay_alert_threshold_override_pg(pool).await?;
+    let mut counts = Vec::with_capacity(RELAY_SIGNAL_DEFINITIONS.len());
+    for signal in RELAY_SIGNAL_DEFINITIONS {
+        counts.push((signal, count_signal_last_hour_pg(pool, signal).await?));
     }
-
-    let enqueued = match crate::services::message_outbox::enqueue_outbox_pg(
-        pool,
-        crate::services::message_outbox::OutboxMessage {
-            target,
-            content,
-            bot: crate::services::message_outbox::ACTIONABLE_OPS_ALERT_BOT,
-            source: "relay_signal_rollup",
-            reason_code: Some(reason_code),
-            session_key: Some(dedupe_key),
-        },
-    )
-    .await
-    {
-        Ok(enqueued) => enqueued,
-        Err(error) => {
-            if let Err(rollback_err) = release_relay_alert_slot_pg(pool, dedupe_key).await {
-                tracing::warn!(
-                    "[relay-signal] failed to release dedupe slot {dedupe_key} after outbox error: {rollback_err}"
-                );
-            }
-            return Err(anyhow!("enqueue relay signal alert: {error}"));
-        }
-    };
-
-    Ok(enqueued)
+    Ok(report_threshold_crossings(&counts, override_threshold))
 }
 
-/// #3561 entry point: evaluate every relay-loss signal over the trailing hour
-/// and enqueue one de-duplicated operator alert per breached signal. Returns
-/// the number of alerts enqueued this cycle (0 when no target is configured or
-/// no signal breached its threshold). Never panics; an individual signal's
-/// failure surfaces as the job error so the scheduler records it.
-pub(crate) async fn enqueue_relay_signal_alerts_pg(pool: &PgPool) -> Result<u64> {
-    // Off-switch #1: no operator alert target ⇒ stay completely silent.
-    let Some(target) = relay_alert_target_pg(pool).await? else {
-        return Ok(0);
-    };
-
-    let override_threshold = relay_alert_threshold_override_pg(pool).await?;
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let mut alert_count = 0u64;
-
-    for signal in RELAY_SIGNAL_DEFINITIONS {
-        let count = count_signal_last_hour_pg(pool, signal).await?;
+/// Report every signal whose hourly count reached its threshold as a WARN line
+/// plus a `relay_signal_threshold_crossed` event.
+fn report_threshold_crossings(
+    counts: &[(&RelaySignal, i64)],
+    override_threshold: Option<u32>,
+) -> u64 {
+    let mut crossed = 0u64;
+    for &(signal, count) in counts {
         let threshold = effective_threshold(signal, override_threshold);
         if count < i64::from(threshold) {
             continue;
         }
-        let dedupe_key = relay_alert_dedupe_key(signal.key, now_ms);
-        let content = relay_alert_content(signal, count, threshold);
-        if enqueue_relay_alert_pg(
-            pool,
-            &target,
-            &dedupe_key,
-            &content,
-            now_ms,
-            "relay_signal.threshold",
-        )
-        .await?
-        {
-            alert_count = alert_count.saturating_add(1);
-            tracing::warn!(
-                signal = signal.key,
-                count,
-                threshold,
-                "[relay-signal] relay-loss signal crossed threshold; operator alert enqueued"
-            );
-        }
+        crossed = crossed.saturating_add(1);
+        let summary = relay_signal_threshold_summary(signal, count, threshold);
+        tracing::warn!(
+            signal = signal.key,
+            count,
+            threshold,
+            "[relay-signal] relay-loss signal crossed threshold: {summary}"
+        );
+        super::emit::emit_event(
+            RELAY_SIGNAL_THRESHOLD_EVENT_TYPE,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(signal.key),
+            CounterDelta::default(),
+            json!({
+                "signal": signal.key,
+                "label": signal.label,
+                "count": count,
+                "threshold": threshold,
+                "window_secs": 3600,
+            }),
+        );
     }
-
-    Ok(alert_count)
+    crossed
 }
 
-pub(super) const IDLE_CLEANUP_PRESERVED_REASON_CODE: &str = "relay_signal.idle_cleanup_preserved";
-
-pub(super) fn idle_cleanup_preserved_alert_content(
+pub(super) fn idle_cleanup_preserved_summary(
     channel: &str,
     preserved_reason: &str,
     unobserved_minutes: Option<u64>,
@@ -273,47 +172,427 @@ pub(super) fn idle_cleanup_preserved_alert_content(
     )
 }
 
-/// One operator line when idle cleanup keeps a session it could not prove idle.
-/// The per-session slot shares the relay alert TTL, so the 5-minute idle-kill
-/// tick cannot repeat it while the session stays preserved.
-pub(crate) async fn enqueue_idle_cleanup_preserved_alert_pg(
-    pool: &PgPool,
+/// Per-session warn gate. Every preservation is an event; the WARN line for one
+/// session is due at most once per interval so the 5-minute idle-kill tick
+/// cannot repeat it while the session stays preserved.
+/// Process-local (a restart forgets it; events are the durable record) and hard-bounded at `CAPACITY`:
+/// expired entries are swept once per interval and when a new session finds it full, else the oldest
+/// is evicted. A dropped entry's non-zero `suppressed` count is returned for reporting, never lost.
+#[derive(Debug, Default)]
+struct PreservedWarnGate {
+    by_session: HashMap<String, PreservedTally>,
+    next_sweep_at: Option<Instant>,
+}
+
+#[derive(Debug)]
+struct PreservedTally {
+    warned_at: Instant,
+    suppressed: u64,
+    total: u64,
+}
+
+impl PreservedWarnGate {
+    const CAPACITY: usize = 1024;
+
+    /// Returns the warn due now (`Some(n)`: `n` preservations of this session
+    /// were not warned since the last one) and the `(session, suppressed)`
+    /// pairs dropped from the gate with preservations still unreported.
+    fn admit(&mut self, session_key: &str, now: Instant) -> (Option<u64>, Vec<(String, u64)>) {
+        let within = |warned_at: Instant| {
+            now.saturating_duration_since(warned_at) < IDLE_CLEANUP_PRESERVED_WARN_INTERVAL
+        };
+        let mut flushed = Vec::new();
+        let full =
+            self.by_session.len() >= Self::CAPACITY && !self.by_session.contains_key(session_key);
+        if full || self.next_sweep_at.is_none_or(|at| now >= at) {
+            // The admitted session is exempt: its held-back count rides on its own warn.
+            self.by_session.retain(|key, tally| {
+                let keep = key == session_key || within(tally.warned_at);
+                if !keep && tally.suppressed > 0 {
+                    flushed.push((key.clone(), tally.suppressed));
+                }
+                keep
+            });
+            self.next_sweep_at = Some(now + IDLE_CLEANUP_PRESERVED_WARN_INTERVAL);
+        }
+        let warn_due = match self.by_session.get_mut(session_key) {
+            Some(tally) if within(tally.warned_at) => {
+                tally.total = tally.total.saturating_add(1);
+                tally.suppressed = tally.suppressed.saturating_add(1);
+                None
+            }
+            Some(tally) => {
+                tally.total = tally.total.saturating_add(1);
+                tally.warned_at = now;
+                Some(std::mem::take(&mut tally.suppressed))
+            }
+            None => {
+                let full = self.by_session.len() >= Self::CAPACITY;
+                let by_age = full.then(|| self.by_session.iter().min_by_key(|(_, t)| t.warned_at));
+                if let Some(key) = by_age.flatten().map(|(key, _)| key.clone())
+                    && let Some(dropped) = self.by_session.remove(&key)
+                    && dropped.suppressed > 0
+                {
+                    flushed.push((key, dropped.suppressed));
+                }
+                let fresh = PreservedTally {
+                    warned_at: now,
+                    suppressed: 0,
+                    total: 1,
+                };
+                self.by_session.insert(session_key.to_string(), fresh);
+                Some(0)
+            }
+        };
+        (warn_due, flushed)
+    }
+}
+
+fn preserved_warn_gate() -> &'static Mutex<PreservedWarnGate> {
+    static GATE: OnceLock<Mutex<PreservedWarnGate>> = OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(PreservedWarnGate::default()))
+}
+
+/// #5993: idle cleanup kept a session it could not prove idle. Always records an
+/// `idle_cleanup_preserved` event; warns at most once per session per interval.
+pub(crate) fn record_idle_cleanup_preserved(
     session_key: &str,
     channel: &str,
     preserved_reason: &str,
     unobserved_minutes: Option<u64>,
-) -> Result<bool> {
-    let Some(target) = relay_alert_target_pg(pool).await? else {
-        return Ok(false);
-    };
-    enqueue_relay_alert_pg(
-        pool,
-        &target,
-        &format!("relay_alert:idle_cleanup_preserved:{session_key}"),
-        &idle_cleanup_preserved_alert_content(channel, preserved_reason, unobserved_minutes),
-        chrono::Utc::now().timestamp_millis(),
-        IDLE_CLEANUP_PRESERVED_REASON_CODE,
-    )
-    .await
+) {
+    record_idle_cleanup_preserved_with(
+        preserved_warn_gate(),
+        session_key,
+        channel,
+        preserved_reason,
+        unobserved_minutes,
+        Instant::now(),
+    );
+}
+
+fn record_idle_cleanup_preserved_with(
+    gate: &Mutex<PreservedWarnGate>,
+    session_key: &str,
+    channel: &str,
+    preserved_reason: &str,
+    unobserved_minutes: Option<u64>,
+    now: Instant,
+) {
+    let (warn_due, flushed) = gate
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .admit(session_key, now);
+    for (dropped_key, suppressed) in &flushed {
+        tracing::warn!(
+            session_key = dropped_key.as_str(),
+            suppressed_since_last_warn = suppressed,
+            "[relay-signal] idle 자동 정리 보류: 세션 `{dropped_key}` 경고 게이트 정리 — 미보고 보류 {suppressed}건"
+        );
+    }
+    if let Some(suppressed) = warn_due {
+        let summary = idle_cleanup_preserved_summary(channel, preserved_reason, unobserved_minutes);
+        tracing::warn!(
+            session_key,
+            channel,
+            preserved_reason,
+            unobserved_minutes,
+            suppressed_since_last_warn = suppressed,
+            "[relay-signal] {summary}"
+        );
+    }
+    super::emit::emit_event(
+        IDLE_CLEANUP_PRESERVED_EVENT_TYPE,
+        None,
+        None,
+        None,
+        Some(session_key),
+        None,
+        Some(preserved_reason),
+        CounterDelta::default(),
+        json!({
+            "channel": channel,
+            "preserved_reason": preserved_reason,
+            "unobserved_minutes": unobserved_minutes,
+        }),
+    );
+}
+
+/// Preservations recorded for `session_key` by this process (tests only; the
+/// durable record is the `idle_cleanup_preserved` event stream).
+#[cfg(test)]
+pub(crate) fn idle_cleanup_preserved_count(session_key: &str) -> u64 {
+    preserved_warn_gate()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .by_session
+        .get(session_key)
+        .map_or(0, |tally| tally.total)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn idle_cleanup_preserved_alert_is_one_actionable_line() {
-        let content =
-            idle_cleanup_preserved_alert_content("adk-cc", "transcript_unresolved", Some(435));
-        assert!(!content.contains('\n'));
-        for part in ["adk-cc", "transcript_unresolved", "7시간 15분"] {
-            assert!(content.contains(part), "{content}");
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
         }
-        assert!(idle_cleanup_preserved_alert_content("c", "r", None).contains("알 수 없음"));
-        assert!(crate::services::message_outbox::is_actionable_ops_alert(
-            "relay_signal_rollup",
-            Some(IDLE_CLEANUP_PRESERVED_REASON_CODE)
-        ));
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_logs() -> (Captured, tracing::Dispatch) {
+        crate::logging::test_capture::pin_callsite_interest();
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(captured.clone())
+            .finish();
+        (captured, tracing::Dispatch::new(subscriber))
+    }
+
+    fn warn_lines(captured: &Captured, needle: &str) -> Vec<String> {
+        String::from_utf8(captured.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .filter(|line| line.trim_start().starts_with("WARN") && line.contains(needle))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn recent_events(
+        event_type: &str,
+    ) -> Vec<crate::services::observability::events::StructuredEvent> {
+        crate::services::observability::events::recent(10_000)
+            .into_iter()
+            .filter(|event| event.event_type == event_type)
+            .collect()
+    }
+
+    #[test]
+    fn idle_cleanup_preserved_summary_is_one_line() {
+        let summary = idle_cleanup_preserved_summary("adk-cc", "transcript_unresolved", Some(435));
+        assert!(!summary.contains('\n'));
+        for part in ["adk-cc", "transcript_unresolved", "7시간 15분"] {
+            assert!(summary.contains(part), "{summary}");
+        }
+        assert!(idle_cleanup_preserved_summary("c", "r", None).contains("알 수 없음"));
+    }
+
+    /// #5993: the 5-minute idle-kill tick re-preserves the same session; the warn
+    /// repeats once per interval and reports what it held back.
+    #[test]
+    fn preserved_warn_gate_warns_once_per_interval_per_session() {
+        let mut gate = PreservedWarnGate::default();
+        let t0 = Instant::now();
+        let tick = Duration::from_secs(5 * 60);
+        assert_eq!(gate.admit("s1", t0).0, Some(0));
+        for i in 1..=3u32 {
+            assert_eq!(gate.admit("s1", t0 + tick * i).0, None, "tick {i}");
+        }
+        assert_eq!(
+            gate.admit("s2", t0 + tick).0,
+            Some(0),
+            "sessions warn independently"
+        );
+        assert_eq!(
+            gate.admit("s1", t0 + IDLE_CLEANUP_PRESERVED_WARN_INTERVAL),
+            (Some(3), vec![]),
+            "after the interval the warn repeats with the suppressed count"
+        );
+    }
+
+    /// Fills `gate` to capacity: `s0` first at `at` holding `held` preservations
+    /// back, every other session one second later holding none.
+    fn fill_gate(gate: &mut PreservedWarnGate, at: Instant, held: u64) {
+        for _ in 0..=held {
+            gate.admit("s0", at);
+        }
+        let late = at + Duration::from_secs(1);
+        for i in 1..PreservedWarnGate::CAPACITY {
+            assert_eq!(gate.admit(&format!("s{i}"), late).0, Some(0));
+        }
+        assert_eq!(gate.by_session.len(), PreservedWarnGate::CAPACITY);
+    }
+
+    /// #5993 r1: a hard bound. With nothing expired, a new session evicts the one
+    /// warned longest ago, whose held-back count is flushed rather than lost.
+    #[test]
+    fn preserved_warn_gate_evicts_oldest_at_capacity_and_flushes_its_count() {
+        let mut gate = PreservedWarnGate::default();
+        let t0 = Instant::now();
+        fill_gate(&mut gate, t0, 2);
+        let t1 = t0 + Duration::from_secs(60);
+        for i in 1..PreservedWarnGate::CAPACITY {
+            assert_eq!(gate.admit(&format!("s{i}"), t1).0, None);
+        }
+        assert_eq!(
+            gate.admit("new", t1),
+            (Some(0), vec![("s0".to_string(), 2)])
+        );
+        assert_eq!(gate.by_session.len(), PreservedWarnGate::CAPACITY);
+
+        // A burst of new sessions pushes every older one out; each `s{i}` held one back.
+        let mut flushed = Vec::new();
+        for i in 0..PreservedWarnGate::CAPACITY {
+            let (warn_due, dropped) =
+                gate.admit(&format!("burst-{i}"), t1 + Duration::from_secs(60));
+            assert_eq!(warn_due, Some(0));
+            flushed.extend(dropped);
+            assert!(gate.by_session.len() <= PreservedWarnGate::CAPACITY);
+        }
+        assert_eq!(flushed.len(), PreservedWarnGate::CAPACITY - 1);
+        assert!(
+            flushed
+                .iter()
+                .all(|(key, n)| key.starts_with('s') && *n == 1)
+        );
+        assert!(gate.by_session.keys().all(|key| key.starts_with("burst-")));
+    }
+
+    /// #5993 r1: expiry. The admitted session keeps its own held-back count for
+    /// its warn even when the gate is full; other expired sessions are swept
+    /// (below capacity too, once per interval) and their counts flushed.
+    #[test]
+    fn preserved_warn_gate_sweeps_expired_sessions_without_losing_counts() {
+        let mut gate = PreservedWarnGate::default();
+        let t0 = Instant::now();
+        fill_gate(&mut gate, t0, 3);
+        assert_eq!(gate.admit("s1", t0 + Duration::from_secs(1)).0, None);
+        let later = t0 + IDLE_CLEANUP_PRESERVED_WARN_INTERVAL + Duration::from_secs(1);
+        assert_eq!(
+            gate.admit("s0", later),
+            (Some(3), vec![("s1".to_string(), 1)])
+        );
+        assert_eq!(gate.by_session.len(), 1);
+
+        gate.admit("held", later);
+        gate.admit("held", later + Duration::from_secs(60));
+        gate.admit("fresh", later + Duration::from_secs(120));
+        let (_, flushed) = gate.admit("other", later + IDLE_CLEANUP_PRESERVED_WARN_INTERVAL);
+        assert_eq!(flushed, vec![("held".to_string(), 1)]);
+        let mut left: Vec<_> = gate.by_session.keys().cloned().collect();
+        left.sort();
+        assert_eq!(left, ["fresh", "other"]);
+    }
+
+    /// #5993 r1: a flushed count reaches the log as its own WARN line.
+    #[test]
+    fn idle_cleanup_preserved_warns_the_flushed_count_of_an_evicted_session() {
+        let _runtime = crate::services::observability::test_runtime_lock();
+        let (captured, dispatch) = capture_logs();
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+        let (gate, t0) = (Mutex::new(PreservedWarnGate::default()), Instant::now());
+        fill_gate(&mut gate.lock().unwrap(), t0, 4);
+        let newcomer = format!("newcomer-{}", uuid::Uuid::new_v4().simple());
+        let now = t0 + Duration::from_secs(2);
+        record_idle_cleanup_preserved_with(&gate, &newcomer, "adk-cc", "probe_failed", None, now);
+
+        let warns = warn_lines(&captured, "`s0`");
+        assert_eq!(warns.len(), 1, "{warns:?}");
+        assert!(warns[0].contains("미보고 보류 4건"), "{warns:?}");
+        assert!(
+            warns[0].contains("suppressed_since_last_warn=4"),
+            "{warns:?}"
+        );
+        assert_eq!(warn_lines(&captured, &newcomer).len(), 1);
+    }
+
+    /// #5993 (decision 2026-09-25): an idle-cleanup preservation used to reach
+    /// the operator only through the retired alert channel. It must now leave a
+    /// WARN line and an `idle_cleanup_preserved` event on every occurrence.
+    #[test]
+    fn idle_cleanup_preserved_warns_and_records_every_occurrence_as_event() {
+        let _runtime = crate::services::observability::test_runtime_lock();
+        let (captured, dispatch) = capture_logs();
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+        let session_key = format!("host:AgentDesk-claude-{}", uuid::Uuid::new_v4().simple());
+        for _ in 0..3 {
+            record_idle_cleanup_preserved(
+                &session_key,
+                "adk-cc",
+                "transcript_unresolved",
+                Some(435),
+            );
+        }
+
+        assert_eq!(idle_cleanup_preserved_count(&session_key), 3);
+        let warns = warn_lines(&captured, &session_key);
+        assert_eq!(warns.len(), 1, "{warns:?}");
+        for part in [
+            "idle 자동 정리 보류",
+            "adk-cc",
+            "transcript_unresolved",
+            "7시간 15분",
+        ] {
+            assert!(warns[0].contains(part), "{warns:?}");
+        }
+        let events: Vec<_> = recent_events(IDLE_CLEANUP_PRESERVED_EVENT_TYPE)
+            .into_iter()
+            .filter(|event| event.payload["session_key"] == session_key.as_str())
+            .collect();
+        assert_eq!(
+            events.len(),
+            3,
+            "every preservation is an observability event"
+        );
+        for event in events {
+            assert_eq!(event.payload["status"], "transcript_unresolved");
+            assert_eq!(event.payload["channel"], "adk-cc");
+            assert_eq!(event.payload["unobserved_minutes"], 435);
+        }
+    }
+
+    /// #5993: each crossed signal is one WARN line and one
+    /// `relay_signal_threshold_crossed` event; signals under threshold are silent.
+    #[test]
+    fn threshold_report_warns_and_records_event_per_crossed_signal() {
+        let _runtime = crate::services::observability::test_runtime_lock();
+        let (captured, dispatch) = capture_logs();
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+        let key: &'static str =
+            Box::leak(format!("test_signal_{}", uuid::Uuid::new_v4().simple()).into_boxed_str());
+        let under: &'static str =
+            Box::leak(format!("test_signal_{}", uuid::Uuid::new_v4().simple()).into_boxed_str());
+        let crossed_signal = signal(key, 3);
+        let quiet_signal = signal(under, 3);
+
+        let crossed = report_threshold_crossings(&[(&crossed_signal, 4), (&quiet_signal, 2)], None);
+
+        assert_eq!(crossed, 1);
+        let warns = warn_lines(&captured, key);
+        assert_eq!(warns.len(), 1, "{warns:?}");
+        assert!(warns[0].contains("crossed threshold"), "{warns:?}");
+        assert!(warn_lines(&captured, under).is_empty());
+        let events: Vec<_> = recent_events(RELAY_SIGNAL_THRESHOLD_EVENT_TYPE)
+            .into_iter()
+            .filter(|event| event.payload["status"] == key)
+            .collect();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].payload["count"], 4);
+        assert_eq!(events[0].payload["threshold"], 3);
+        assert!(
+            recent_events(RELAY_SIGNAL_THRESHOLD_EVENT_TYPE)
+                .iter()
+                .all(|event| event.payload["status"] != under)
+        );
     }
 
     fn signal(key: &'static str, default_threshold: u32) -> RelaySignal {
@@ -324,37 +603,6 @@ mod tests {
             default_threshold,
             label: "test signal",
         }
-    }
-
-    #[test]
-    fn dedupe_key_is_stable_within_the_hour() {
-        // Hour-aligned base so +59m stays inside the same hourly bucket.
-        let base = 472_222i64 * 3_600_000;
-        let a = relay_alert_dedupe_key("relay_terminal_ack_timeout", base);
-        let b = relay_alert_dedupe_key("relay_terminal_ack_timeout", base + 59 * 60 * 1000);
-        assert_eq!(a, b, "same hour bucket must share a dedupe key");
-        assert!(a.starts_with("relay_alert:relay_terminal_ack_timeout:"));
-    }
-
-    #[test]
-    fn dedupe_key_rolls_over_at_the_hour_boundary() {
-        let bucket0 = 0i64;
-        let bucket1 = 3_600_000i64; // exactly one hour later
-        assert_ne!(
-            relay_alert_dedupe_key("sig", bucket0),
-            relay_alert_dedupe_key("sig", bucket1),
-            "crossing the hour boundary must produce a fresh dedupe key"
-        );
-    }
-
-    #[test]
-    fn dedupe_key_is_per_signal() {
-        let now = 1_700_000_000_000i64;
-        assert_ne!(
-            relay_alert_dedupe_key("relay_owner_unknown", now),
-            relay_alert_dedupe_key("relay_terminal_ack_timeout", now),
-            "distinct signals must not share a dedupe slot in the same hour"
-        );
     }
 
     #[test]
@@ -374,31 +622,17 @@ mod tests {
         assert_eq!(
             effective_threshold(&sig, Some(0)),
             5,
-            "a 0 override must not turn every window into a spam storm"
+            "a 0 override must not turn every window into a warn storm"
         );
     }
 
     #[test]
-    fn alert_content_names_the_signal_and_counts() {
+    fn threshold_summary_names_the_signal_and_counts() {
         let sig = signal("relay_terminal_ack_timeout", 5);
-        let content = relay_alert_content(&sig, 7, 5);
+        let content = relay_signal_threshold_summary(&sig, 7, 5);
         assert!(content.contains("relay_terminal_ack_timeout"));
         assert!(content.contains('7'));
         assert!(content.contains('5'));
-    }
-
-    #[test]
-    fn channel_target_normalization() {
-        assert_eq!(
-            normalize_channel_target("123").as_deref(),
-            Some("channel:123")
-        );
-        assert_eq!(
-            normalize_channel_target("channel:123").as_deref(),
-            Some("channel:123")
-        );
-        assert_eq!(normalize_channel_target("   ").as_deref(), None);
-        assert_eq!(normalize_channel_target("").as_deref(), None);
     }
 
     /// The canonical signal table must cover every relay-loss vector #3561

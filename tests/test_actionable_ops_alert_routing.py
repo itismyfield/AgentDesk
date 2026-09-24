@@ -25,19 +25,9 @@ class ActionableOpsAlertRoutingContract(unittest.TestCase):
     def test_all_rust_actionable_producers_use_announce_primary(self) -> None:
         for relative, source, reason in [
             (
-                "src/server/outbox_delivery_alert.rs",
-                "outbox_delivery_alert",
-                "outbox_delivery_failed",
-            ),
-            (
                 "src/github/sync.rs",
                 "github_sync",
                 "github_sync.terminal_open_issue",
-            ),
-            (
-                "src/services/observability/relay_signal_alert.rs",
-                "relay_signal_rollup",
-                "relay_signal.threshold",
             ),
             ("src/services/slo/mod.rs", "slo_alerter", "slo_threshold_breach"),
             (
@@ -53,6 +43,19 @@ class ActionableOpsAlertRoutingContract(unittest.TestCase):
         ]:
             with self.subTest(relative=relative):
                 self.assert_producer(relative, source, reason)
+
+    def test_retired_human_alert_producers_enqueue_nothing(self) -> None:
+        # #5993: terminal outbox failures and relay signals are WARN lines plus
+        # observability events; neither producer may reach the outbox again.
+        for relative in [
+            "src/server/outbox_delivery_alert.rs",
+            "src/services/observability/relay_signal_alert.rs",
+        ]:
+            with self.subTest(relative=relative):
+                text = self.source(relative)
+                self.assertNotIn("enqueue_outbox", text)
+                self.assertNotIn(ANNOUNCE, text)
+                self.assertIn("tracing::warn!", text)
 
     def test_long_turn_monitoring_is_not_registered_or_scheduled(self) -> None:
         # Elapsed turn duration no longer triggers manager alerts or automatic

@@ -51,9 +51,12 @@ pub use queries::{
     query_agent_quality_ranking_with, query_agent_quality_summary, run_agent_quality_rollup_pg,
 };
 // #3561 — operator relay-loss signal monitor. Driven by the hourly
-// `RelaySignalAlerterJob` maintenance job (see `server::maintenance`).
+// `RelaySignalAlerterJob` maintenance job (see `server::maintenance`). #5993:
+// reports are WARN lines plus observability events, never Discord messages.
+#[cfg(test)]
+pub(crate) use relay_signal_alert::idle_cleanup_preserved_count;
 pub(crate) use relay_signal_alert::{
-    enqueue_idle_cleanup_preserved_alert_pg, enqueue_relay_signal_alerts_pg,
+    record_idle_cleanup_preserved, report_relay_signal_threshold_crossings_pg,
 };
 
 pub(super) const EVENT_BATCH_SIZE: usize = 64;
@@ -75,9 +78,10 @@ pub(super) const DEFAULT_QUALITY_RANKING_LIMIT: usize = 50;
 pub(super) const MAX_QUALITY_RANKING_LIMIT: usize = 200;
 pub(super) const QUALITY_SAMPLE_GUARD: i64 = 5;
 
-// #3561 — relay-loss operator monitor. Each signal alerts at most once per
-// hour (`RELAY_SIGNAL_ALERT_DEDUPE_TTL_SECS`), so the dedupe window matches the
-// job cadence. The per-signal `default_threshold` values are conservative:
+// #3561 — relay-loss operator monitor. The hourly job reports each signal at
+// most once per run; `RELAY_SIGNAL_REPEAT_WARN_SECS` bounds how often one
+// preserved idle session repeats its WARN line (#5993). The per-signal
+// `default_threshold` values are conservative:
 //   * `relay_terminal_ack_timeout` (duplicate-emit vector) tolerates a few per
 //     hour before it's worth waking an operator.
 //   * `relay_owner_unknown` (relay started with unknown owner) is rarer and
@@ -89,7 +93,7 @@ pub(super) const QUALITY_SAMPLE_GUARD: i64 = 5;
 //     single occurrence warrants an alert.
 // All are overridable per-deploy via `kanban.relay_alert_threshold`
 // (mirrored to kv_meta `kanban_relay_alert_threshold` by `services::settings`).
-pub(super) const RELAY_SIGNAL_ALERT_DEDUPE_TTL_SECS: i64 = 60 * 60;
+pub(super) const RELAY_SIGNAL_REPEAT_WARN_SECS: u64 = 60 * 60;
 
 /// One relay-loss signal as projected onto the `observability_events` table.
 /// `event_type` + `status` uniquely identify the persisted rows that count
@@ -98,7 +102,7 @@ pub(super) const RELAY_SIGNAL_ALERT_DEDUPE_TTL_SECS: i64 = 60 * 60;
 /// `kanban.relay_alert_threshold`).
 #[derive(Debug, Clone, Copy)]
 pub(super) struct RelaySignal {
-    /// Stable identifier used in the dedupe key and the alert body.
+    /// Stable identifier used as the report event status and in the WARN line.
     pub(super) key: &'static str,
     /// `observability_events.event_type` filter.
     pub(super) event_type: &'static str,
@@ -109,7 +113,7 @@ pub(super) struct RelaySignal {
     pub(super) statuses: &'static [&'static str],
     /// Conservative built-in hourly trip threshold.
     pub(super) default_threshold: u32,
-    /// Human-readable label for the operator alert.
+    /// Human-readable label for the operator report.
     pub(super) label: &'static str,
 }
 

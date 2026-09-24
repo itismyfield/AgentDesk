@@ -48,7 +48,7 @@ const AGENT_QUALITY_ROLLUP_STARTUP_STAGGER: Duration = Duration::from_secs(0);
 const QUALITY_REGRESSION_ALERTER_STARTUP_STAGGER: Duration = Duration::from_secs(15);
 
 /// `relay_signal_alerter`: sequenced after the quality alerter on the same
-/// hourly tick so the two alert pipelines do not race for a connection at boot.
+/// hourly tick so the two jobs do not race for a connection at boot.
 const RELAY_SIGNAL_ALERTER_STARTUP_STAGGER: Duration = Duration::from_secs(30);
 
 /// `storage.cancel_tombstone_prune`: small boot offset so the tombstone prune
@@ -239,15 +239,15 @@ impl MaintenanceJob for QualityRegressionAlerterJob {
     }
 }
 
-/// #3561 — hourly relay-loss signal monitor + operator alert.
+/// #3561 — hourly relay-loss signal monitor.
 ///
 /// Aggregates the restart-safe `observability_events` stream (relay root-cause
-/// counters + offset invariant violations) over the trailing hour and enqueues
-/// a single de-duplicated Discord alert per signal when its count crosses the
-/// (conservative, config-overridable) threshold. Double off-switch: no alert
-/// target configured ⇒ no enqueue, so unconfigured deploys never spam. The 30s
+/// counters + offset invariant violations) over the trailing hour and reports
+/// every signal whose count crosses the (conservative, config-overridable)
+/// threshold as a WARN line plus a `relay_signal_threshold_crossed` event
+/// (#5993: no Discord channel, so no configuration can silence it). The 30s
 /// startup stagger sequences it after the quality alerter on the same hourly
-/// tick so the two alert pipelines do not race for a connection at boot.
+/// tick so the two jobs do not race for a connection at boot.
 struct RelaySignalAlerterJob;
 
 impl MaintenanceJob for RelaySignalAlerterJob {
@@ -264,11 +264,12 @@ impl MaintenanceJob for RelaySignalAlerterJob {
 
     fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
         Box::pin(async move {
-            let alerts =
-                crate::services::observability::enqueue_relay_signal_alerts_pg(pool).await?;
+            let crossed =
+                crate::services::observability::report_relay_signal_threshold_crossings_pg(pool)
+                    .await?;
             tracing::info!(
                 job = self.name(),
-                alerts_dispatched = alerts,
+                signals_over_threshold = crossed,
                 "relay signal alerter completed"
             );
             Ok(())
@@ -990,7 +991,7 @@ mod registry_membership_tests {
 
     /// #3561 — the relay-loss operator monitor must be registered so the
     /// leader scheduler actually evaluates the relay signal thresholds hourly;
-    /// otherwise the alert pipeline silently never runs.
+    /// otherwise the signal report silently never runs.
     #[test]
     fn static_registry_includes_relay_signal_alerter() {
         let registry = MaintenanceJobRegistry::static_registry();

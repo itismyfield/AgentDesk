@@ -141,10 +141,11 @@ state, not current runtime ownership. Numbered migrations are not rewritten
 after deployment; this section and the module/scheduler contracts above are
 the current authority.
 
-The target is loaded from PostgreSQL using the existing operator precedence:
-`agent_quality_monitoring_channel_id`, then `kanban_human_alert_channel_id`.
-When neither key is configured, quality regression alerting is intentionally
-silent; authority consolidation does not introduce a hard-coded channel.
+The target is loaded from PostgreSQL `kv_meta.agent_quality_monitoring_channel_id`.
+The shared human-alert channel fallback was retired in #5993. When the key is
+not configured, quality regression alerting is intentionally silent; authority
+consolidation does not introduce a hard-coded channel. The daily aggregates the
+rules read stay in `agent_quality_daily`.
 
 ---
 

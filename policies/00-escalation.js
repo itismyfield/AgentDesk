@@ -90,10 +90,6 @@ function getConfiguredChannelTarget(configKey, purpose) {
   return "channel:" + ch;
 }
 
-function getHumanAlertChannel() {
-  return getConfiguredChannelTarget("kanban_human_alert_channel_id", "human alert");
-}
-
 // #5716: agentdesk.message.queue never throws — it returns {ok:true,id} or
 // {error:"..."} (src/engine/ops/message_ops.rs message_queue_raw). Callers that
 // ignore it report a delivery that never happened, so enqueue failure must
@@ -102,10 +98,13 @@ function queuedOk(result) {
   return !!(result && result.ok === true);
 }
 
+// #5993: the human-alert channel is retired. The message itself goes to the
+// policy log at WARN, so callers keep their signal without a Discord target.
+// Returns true: the WARN reached the only human-alert surface left, so a create-PR handoff falling
+// back here settles instead of being re-swept; only a failed deadlock-channel enqueue is false.
 function notifyHumanAlert(message, source) {
-  var target = getHumanAlertChannel();
-  if (!target) return false;
-  return queuedOk(agentdesk.message.queue(target, message, "notify", source || "system"));
+  agentdesk.log.warn("[human-alert] (" + (source || "system") + ") " + message);
+  return true;
 }
 
 function getDeadlockManagerChannel() {

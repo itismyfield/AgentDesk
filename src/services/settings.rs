@@ -30,6 +30,10 @@ const RETIRED_CONFIG_KEYS: &[&str] = &[
     "context_clear_idle_minutes",
     "counter_model_review_enabled",
     "narrate_progress",
+    // #5993: the human-alert channel was retired; operator signals are WARN
+    // lines and observability events. Deleting the row at boot also leaves the
+    // remaining frozen reader with no target.
+    "kanban_human_alert_channel_id",
 ];
 
 const RUNTIME_CONFIG_KEYS: &[&str] = &[
@@ -77,13 +81,6 @@ const CONFIG_KEYS: &[(&str, &str, &str, &str, Option<&str>)] = &[
         "pipeline",
         "데드락 매니저 채널 ID",
         "Deadlock Manager Channel ID",
-        None,
-    ),
-    (
-        "kanban_human_alert_channel_id",
-        "pipeline",
-        "사람 알림 채널 ID",
-        "Human Alert Channel ID",
         None,
     ),
     (
@@ -522,7 +519,6 @@ fn yaml_section_value(config: &crate::config::Config, key: &str) -> Option<Strin
     match key {
         "kanban_manager_channel_id" => config.kanban.manager_channel_id.clone(),
         "deadlock_manager_channel_id" => config.kanban.deadlock_manager_channel_id.clone(),
-        "kanban_human_alert_channel_id" => config.kanban.human_alert_channel_id.clone(),
         "agent_quality_monitoring_channel_id" => None,
         "kanban_relay_alert_threshold" => stringified_number(config.kanban.relay_alert_threshold),
         "review_enabled" => stringified_bool(config.review.enabled),
@@ -1760,5 +1756,63 @@ mod tests {
         drop(service);
         pool.close().await;
         database.drop().await;
+    }
+}
+
+/// Kept outside the PostgreSQL-backed `tests` module so the non-PG lanes run it.
+#[cfg(test)]
+mod retired_key_tests {
+    use super::*;
+
+    /// #5993: the retired human-alert key is deleted at boot, never seeded or
+    /// listed as a config entry, and referenced by no code outside the listed
+    /// follow-up slices.
+    #[test]
+    fn retired_human_alert_channel_key_is_deleted_and_unread() {
+        let key = concat!("kanban_", "human_alert_channel_id");
+        let actions = config_default_seed_actions(&crate::config::Config::default());
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, KvSeedAction::Delete { key: k } if k == key))
+        );
+        assert!(!actions.iter().any(|action| matches!(action, KvSeedAction::Put { key: k, .. } | KvSeedAction::PutIfAbsent { key: k, .. } if k == key)));
+        assert!(CONFIG_KEYS.iter().all(|(k, ..)| *k != key));
+
+        // Follow-up slices own these: the frozen watcher reader (#6210) and the
+        // `kanban.human_alert_channel_id` config-field removal.
+        let allowed = [
+            "src/services/settings.rs",
+            "src/services/discord/watchers/lifecycle/ready_failure.rs",
+            "src/config.rs",
+            "src/cli/doctor/orchestrator/relay_notifications.rs",
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut stack: Vec<std::path::PathBuf> = ["src", "policies", "dashboard/src"]
+            .iter()
+            .map(|dir| root.join(dir))
+            .collect();
+        let mut readers = Vec::new();
+        while let Some(path) = stack.pop() {
+            if path.is_dir() {
+                for entry in std::fs::read_dir(&path).unwrap() {
+                    stack.push(entry.unwrap().path());
+                }
+            } else if std::fs::read_to_string(&path).is_ok_and(|text| text.contains(key)) {
+                let relative = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                readers.push(relative);
+            }
+        }
+        readers.sort();
+        let mut expected: Vec<String> = allowed.iter().map(|path| path.to_string()).collect();
+        expected.sort();
+        assert_eq!(
+            readers, expected,
+            "new or removed references to the retired key"
+        );
     }
 }

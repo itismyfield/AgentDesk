@@ -179,10 +179,6 @@ async fn idle_kill_route_preserves_unobservable_session_and_kills_proven_idle_pg
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO kv_meta (key, value) VALUES ('kanban_human_alert_channel_id', '42')")
-        .execute(&pool)
-        .await
-        .unwrap();
     std::fs::write(tmux_probe.path().join("alive"), "").unwrap();
     let killed_log = tmux_probe.path().join("killed");
     let state = test_state(pool.clone());
@@ -197,14 +193,14 @@ async fn idle_kill_route_preserves_unobservable_session_and_kills_proven_idle_pg
             }),
         )
     };
-    let alerts = || async {
-        sqlx::query_scalar::<_, String>(
-            "SELECT content FROM message_outbox
-             WHERE reason_code = 'relay_signal.idle_cleanup_preserved'",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap()
+    // #5993: the preservation is an `idle_cleanup_preserved` event plus a WARN
+    // line, never an operator-channel message.
+    let preserved = || crate::services::observability::idle_cleanup_preserved_count(&session_key);
+    let outbox_rows = || async {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM message_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
     };
 
     // Unobservable: live tmux, idle-looking pane, but no resolvable transcript.
@@ -219,11 +215,8 @@ async fn idle_kill_route_preserves_unobservable_session_and_kills_proven_idle_pg
             "unobservable session must not be killed"
         );
     }
-    let sent = alerts().await;
-    assert_eq!(sent.len(), 1, "repeated skips must dedupe: {sent:?}");
-    assert!(sent[0].contains(&channel), "{}", sent[0]);
-    assert!(sent[0].contains("transcript_unresolved"), "{}", sent[0]);
-    assert!(sent[0].contains("7시간"), "{}", sent[0]);
+    assert_eq!(preserved(), 2, "every skip is recorded");
+    assert_eq!(outbox_rows().await, 0, "no operator-channel message");
 
     // Observable idle: the bound native transcript and the pane agree.
     let transcript = runtime_root.path().join("native.jsonl");
@@ -254,11 +247,8 @@ async fn idle_kill_route_preserves_unobservable_session_and_kills_proven_idle_pg
         std::fs::read_to_string(&killed_log).unwrap().trim(),
         format!("={tmux_name}:")
     );
-    assert_eq!(
-        alerts().await.len(),
-        1,
-        "a proven-idle kill raises no alert"
-    );
+    assert_eq!(preserved(), 2, "a proven-idle kill records no preservation");
+    assert_eq!(outbox_rows().await, 0);
 
     pool.close().await;
     pg_db.drop().await;

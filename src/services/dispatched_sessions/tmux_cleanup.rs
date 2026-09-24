@@ -108,7 +108,7 @@ pub(super) async fn kill_tmux_session_impl(
     if (reason_is_idle_cleanup || minimum_idle_minutes.is_some())
         && tmux_presence == crate::services::platform::tmux::SessionPresence::ProbeFailed
     {
-        alert_idle_cleanup_preserved(pool, session_key, &tmux_name, "tmux_probe_failed", None)
+        record_idle_cleanup_preserved(pool, session_key, &tmux_name, "tmux_probe_failed", None)
             .await;
         return (
             StatusCode::OK,
@@ -262,7 +262,7 @@ pub(super) async fn kill_tmux_session_impl(
                     preserved_reason,
                     "idle cleanup preserved provider: idle state not proven"
                 );
-                alert_idle_cleanup_preserved(
+                record_idle_cleanup_preserved(
                     pool,
                     session_key,
                     &tmux_name,
@@ -439,9 +439,10 @@ pub(super) async fn kill_tmux_session_impl(
     )
 }
 
-/// A kill skipped because idle could not be proven reaches the operator as one
-/// deduplicated line: channel, preserve reason and time since last heartbeat.
-async fn alert_idle_cleanup_preserved(
+/// A kill skipped because idle could not be proven is recorded as an
+/// `idle_cleanup_preserved` event and a WARN line (#5993): channel, preserve
+/// reason and time since last heartbeat.
+async fn record_idle_cleanup_preserved(
     pool: &sqlx::PgPool,
     session_key: &str,
     tmux_name: &str,
@@ -456,17 +457,12 @@ async fn alert_idle_cleanup_preserved(
     };
     let channel = crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_name)
         .map_or_else(|| tmux_name.to_string(), |(_, channel)| channel);
-    if let Err(error) = crate::services::observability::enqueue_idle_cleanup_preserved_alert_pg(
-        pool,
+    crate::services::observability::record_idle_cleanup_preserved(
         session_key,
         &channel,
         preserved_reason,
         runtime_activity_age_minutes(last_seen_nanos, now_unix_nanos()),
-    )
-    .await
-    {
-        tracing::warn!(session_key, "idle cleanup preserved alert failed: {error}");
-    }
+    );
 }
 
 fn reason_is_idle_cleanup_reason(reason: &str) -> bool {
