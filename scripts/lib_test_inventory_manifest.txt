@@ -1124,6 +1124,7 @@ server::routes::health_api::tests::public_health_json_sanitizes_provider_ids_inc
 server::routes::health_api::tests::public_health_keeps_each_release_source_fact_independent
 server::routes::health_api::tests::public_health_reads_release_source_manifest_from_runtime_root
 server::routes::health_api::tests::registry_purge_decision_gates_on_request_and_fully_applied_repair
+server::routes::health_api::tests::retired_observation_blocks_are_absent_from_both_health_response_arms
 server::routes::health_api::tests::stale_mailbox_repair_applied_includes_session_only_disconnect
 server::routes::health_api::tests::standalone_relay_authority_rollout_publishes_the_whole_dormant_block
 server::routes::health_api::tests::summary_and_detail_routes_agree_on_expired_relay_ledgers
@@ -3075,7 +3076,7 @@ services::discord::health::snapshot::tests::provider_scoped_snapshot_timeout_doe
 services::discord::health::snapshot::tests::rebind_origin_idle_only_without_cancel_token
 services::discord::health::snapshot::tests::relay_authority_rollout_is_published_on_the_detail_build_only
 services::discord::health::snapshot::tests::relay_verdict_probe_operands_preserve_process_start_and_pane_semantics
-services::discord::health::snapshot::tests::retired_observation_blocks_are_absent_from_every_health_build
+services::discord::health::snapshot::tests::retired_observation_blocks_are_absent_from_registry_health_snapshots
 services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::reachability_operand_uses_the_canonical_ledger_path
 services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::watcher_state_snapshot_abstains_when_reachability_ledger_is_absent
 services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::watcher_state_snapshot_records_row_vs_registry_identity_divergence
