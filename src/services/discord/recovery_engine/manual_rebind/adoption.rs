@@ -179,7 +179,10 @@ pub(crate) fn claude_transcript_committed_offset(
     tmux_session_name: &str,
     transcript_eof: Option<u64>,
 ) -> u64 {
+    #[cfg(unix)]
     use crate::services::discord::tmux;
+    #[cfg(not(unix))]
+    let _ = (tmux_session_name, transcript_eof);
     #[cfg(unix)]
     tmux::reset_stale_relay_watermark_if_output_regressed(
         shared,
