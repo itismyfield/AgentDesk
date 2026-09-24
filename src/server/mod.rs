@@ -2796,7 +2796,6 @@ async fn routine_runtime_loop(
     pg_pool: Arc<PgPool>,
     health_registry: Option<Arc<HealthRegistry>>,
     routines_config: crate::config::RoutinesConfig,
-    routine_health_target: Option<String>,
     tick_interval_secs: u64,
 ) {
     use crate::services::routines::{
@@ -2838,11 +2837,8 @@ async fn routine_runtime_loop(
         routines_config.max_checkpoint_bytes,
     );
     routine_script_audit::warn_once_unregistered(pg_pool.as_ref(), &routine_script_dirs).await;
-    let discord_logger = RoutineDiscordLogger::new_with_health_registry(
-        pg_pool.clone(),
-        health_registry.clone(),
-        routine_health_target,
-    );
+    let discord_logger =
+        RoutineDiscordLogger::new_with_health_registry(pg_pool.clone(), health_registry.clone());
     let agent_executor =
         RoutineAgentExecutor::new(pg_pool, health_registry, routines_config.agent_timeout_secs);
     match store.recover_stale_running_runs().await {

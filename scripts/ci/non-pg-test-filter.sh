@@ -81,7 +81,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::auto_queue::route::command::tests
   --skip services::auto_queue::route::fsm::tests
   --skip services::auto_queue::route::phase_gate::tests
-  --skip services::auto_queue::route::planning::failed_entry_alert_tests
+  --skip services::auto_queue::route::planning::record_entry_dispatch_failure_tests
   --skip services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests
   --skip services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests
   --skip services::auto_queue::tests
@@ -269,10 +269,6 @@ NON_PG_FILTER_REPLAY=(
   services::auto_queue::route::control_routes::phase_gate_repair_route_tests::repair_caller_audit_label_uses_verified_principal_when_pg_resolved
   services::auto_queue::route::fsm::tests::clamp_retry_limit_bounds
   services::auto_queue::route::phase_gate::tests::sandbox_preflight_metadata_disables_external_side_effects_only_when_safe
-  services::auto_queue::route::planning::failed_entry_alert_tests::failed_entry_alert_dedupe_ignores_rendered_cause
-  services::auto_queue::route::planning::failed_entry_alert_tests::failed_entry_alert_identity_is_scoped_per_durable_failure_transition
-  services::auto_queue::route::planning::failed_entry_alert_tests::failed_entry_alert_reason_code_is_stable
-  services::auto_queue::route::planning::failed_entry_alert_tests::failed_entry_alert_ttl_is_at_least_thirty_minutes
   services::auto_queue::tests::auto_queue_status_entry_normalizes_github_repo_url
   services::auto_queue::tests::auto_queue_status_omits_diagnostics_without_slot_invariant_violation
   services::auto_queue::tests::auto_queue_status_reports_actionable_slot_invariant_diagnostics

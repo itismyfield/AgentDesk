@@ -193,7 +193,7 @@ services::auto_queue::route::command::reset_run_scope_pg_tests
 services::auto_queue::route::command::tests
 services::auto_queue::route::fsm::tests
 services::auto_queue::route::phase_gate::tests
-services::auto_queue::route::planning::failed_entry_alert_tests
+services::auto_queue::route::planning::record_entry_dispatch_failure_tests
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests
 services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests
 services::auto_queue::tests
@@ -269,7 +269,6 @@ db::auto_queue::entries::dispatch_failure::tests::restoring_run_accepts_retry_wi
 db::auto_queue::entries::dispatch_failure::tests::restoring_terminal_failure_retains_run_slot_ownership_pg
 db::auto_queue::entries::dispatch_failure::tests::retry_failure_keeps_run_runnable_and_records_one_transition_pg
 db::auto_queue::entries::dispatch_failure::tests::terminal_failure_finalizes_once_and_duplicate_is_noop_pg
-db::auto_queue::entries::dispatch_failure::tests::terminal_failure_rolls_back_when_alert_obligation_cannot_enqueue_pg
 db::auto_queue::entries::tests::active_run_allows_dispatched_transition_pg
 db::auto_queue::entries::tests::cancelled_run_allows_cancelled_without_waiting_for_gate_pg
 db::auto_queue::entries::tests::cancelled_run_allows_done_without_waiting_for_gate_pg
@@ -720,8 +719,7 @@ services::auto_queue::route::fsm::tests::recovery_reattach_path_rechecks_cancell
 services::auto_queue::route::fsm::tests::restore_attach_existing_path_rechecks_cancelled_run_pg
 services::auto_queue::route::phase_gate::tests::attachment_free_gate_uses_newest_entry_single_run_pg
 services::auto_queue::route::phase_gate::tests::cancelled_run_rejects_dispatch_attach_pg
-services::auto_queue::route::planning::failed_entry_alert_tests::failed_entry_transition_and_alert_share_commit_with_explicit_ttl_pg
-services::auto_queue::route::planning::failed_entry_alert_tests::production_failure_wrapper_preserves_restoring_slot_binding_pg
+services::auto_queue::route::planning::record_entry_dispatch_failure_tests::production_failure_wrapper_preserves_restoring_slot_binding_pg
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests::unavailable_deploy_gate_creates_no_database_rows
 services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests::clear_slot_sessions_pg_batches_unique_targets_and_preserves_ineligible_rows
 services::auto_queue::tests::auto_queue_status_query_uses_latest_review_clock_pg
