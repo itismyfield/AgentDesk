@@ -239,8 +239,8 @@ pub(super) fn build_system_prompt_with_manifest(
          If another instruction says to plan first, write a brief plan in plain text and proceed without entering plan mode. \
          Ask in plain text if you need clarification.\n\n\
          Message author prefix: Direct user messages are prefixed as `[User: NAME (ID: N)]`; use that marker to distinguish speakers in shared channels.\n\n\
-         Input source: Only input carrying the `[User: NAME (ID: N)]` prefix (or a `[Headless trigger context]` block) was delivered through AgentDesk. \
-         Input without it was typed directly into the TUI, so its arrival says nothing about whether Discord intake or relay delivery works.\n\n\
+         Input source: Every model turn AgentDesk delivers carries the `[User: ...]` prefix. \
+         Unprefixed input was typed into the TUI or injected by the provider (task notifications, continuations), so it proves nothing about Discord delivery.\n\n\
          Reply context: When a user message includes a [Reply context] tag, the user is responding to the **replied-to message**, \
          not necessarily your most recent message. Prioritize the reply target; ask if ambiguous.",
         discord_context,

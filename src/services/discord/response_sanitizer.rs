@@ -20,6 +20,10 @@ const HIDDEN_HEADERS: &[&str] = &[
     "[Memory Recall Ownership]",
     "[Queued Turn Rules]",
     "[User Request]",
+    // The base prelude has no bracketed header, so its exact opening lines start a hidden block.
+    "You are chatting with a user through Discord.",
+    "This session is also connected to a Discord channel;",
+    "Input source: Every model turn AgentDesk delivers",
 ];
 
 const HIDDEN_LINE_PREFIXES: &[&str] = &[
@@ -237,5 +241,24 @@ mod tests {
                       visible answer";
 
         assert_eq!(sanitize_hidden_context(echoed), "visible answer");
+    }
+
+    #[test]
+    fn strips_a_standalone_echo_of_the_base_prelude() {
+        let echoed = "This session is also connected to a Discord channel; input can arrive from Discord or be typed directly into the provider TUI.\n\
+                      Discord context: channel #adk-cc (ID: 1)\n\
+                      Current working directory: /tmp\n\n\
+                      visible answer";
+        assert_eq!(sanitize_hidden_context(echoed), "visible answer");
+
+        let echoed = "Input source: Every model turn AgentDesk delivers carries a prefix.\n\n\
+                      visible answer";
+        assert_eq!(sanitize_hidden_context(echoed), "visible answer");
+    }
+
+    #[test]
+    fn keeps_an_answer_that_only_mentions_input_sources() {
+        let answer = "Input source for this run was the TUI, not Discord.";
+        assert_eq!(sanitize_hidden_context(answer), answer);
     }
 }

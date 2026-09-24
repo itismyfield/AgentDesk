@@ -335,7 +335,7 @@ fn full_prompt_manifest_records_shared_knowledge_and_longterm_catalog() {
             "base_discord",
             "This session is also connected to a Discord channel;",
         ),
-        ("base_discord", "Input source: Only input carrying"),
+        ("base_discord", "Input source: Every model turn AgentDesk delivers"),
         ("shared_knowledge", "important invariant"),
         ("longterm_catalog", "durable fact"),
     ] {
