@@ -38,7 +38,6 @@ mod tests {
         assert!(!dead_only_if_dead_or_absent(HostLiveness::ProbeError));
     }
 
-    #[cfg(unix)]
     #[test]
     fn blank_name_collapses_like_the_platform_probes() {
         use crate::services::platform::tmux;

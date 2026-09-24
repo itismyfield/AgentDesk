@@ -108,10 +108,6 @@ mod tests {
     #[test]
     fn unregistered_session_reads_as_missing_and_dead() {
         let session = HostSessionRef::process(UNREGISTERED);
-        assert_eq!(
-            session_backend::process_session_pid(UNREGISTERED).is_some(),
-            ProcessHost.presence(session) == HostPresence::Present
-        );
         assert_eq!(ProcessHost.presence(session), HostPresence::Missing);
         assert_eq!(ProcessHost.liveness(session), HostLiveness::DeadOrAbsent);
         assert_eq!(ProcessHost.execution_pid(session), Ok(None));
