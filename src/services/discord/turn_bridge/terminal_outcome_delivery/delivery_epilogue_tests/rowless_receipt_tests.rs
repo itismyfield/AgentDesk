@@ -466,15 +466,13 @@ async fn exact_receipt_rowless_terminal_uncovered_or_stale_still_publishes_5521(
     ] {
         let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
         let (mut ctx, mut state, mut receipt) = receipt_parts(&driver, ProviderKind::Codex);
+        let mut degenerate = None;
         match case {
             "uncovered" => receipt.range.1 -= 1,
 
             "nonce" => receipt.turn_nonce.push_str("-other"),
             "no_range" => ctx.codex_tui_terminal_range = None,
-            "no_source_session" => {
-                ctx.codex_tui_terminal_range = None;
-                state.inflight_state.tmux_session_name = None;
-            }
+            "no_source_session" => state.inflight_state.tmux_session_name = None,
             "empty_range" | "reversed" => {
                 let range = if case == "empty_range" {
                     (0, 0)
@@ -482,16 +480,32 @@ async fn exact_receipt_rowless_terminal_uncovered_or_stale_still_publishes_5521(
                     (64, 0)
                 };
                 ctx.codex_tui_terminal_range.as_mut().unwrap().source.range = range;
-                // The historical writer skips the frontier guard, so only source
-                // authority keeps a same-shape degenerate receipt from becoming proof.
-                let mut degenerate = receipt.clone();
-                degenerate.range = range;
-                let _ = dr::record_historical_pinned_delivery(&degenerate, DRIVER_CURRENT_MSG_ID);
+                let mut source = receipt.clone();
+                source.range = range;
+                degenerate = Some(dr::ConfirmedDeliveryReceipt {
+                    source,
+                    delivery_channel_id: DRIVER_CHANNEL_ID,
+                    message_id: DRIVER_CURRENT_MSG_ID,
+                });
             }
             _ => {}
         }
         if case != "no_receipt" {
             dr::record_current_pinned_delivery(&receipt, DRIVER_CURRENT_MSG_ID).unwrap();
+        }
+        if let Some(degenerate) = degenerate {
+            // Writers reject degenerate ranges, so store one raw: only read-side
+            // source authority may keep a same-shape stored receipt from being proof.
+            let path = dr::delivery_record_path(&ProviderKind::Codex, DRIVER_CHANNEL_ID).unwrap();
+            let _lock = dr::lock_record_path(&path).unwrap();
+            let mut record = dr::read_record_at(&path).unwrap_or_default();
+            record.confirmed_deliveries.push(degenerate.clone());
+            std::fs::write(&path, serde_json::to_string(&record).unwrap()).unwrap();
+            assert!(
+                dr::read_record(&ProviderKind::Codex, DRIVER_CHANNEL_ID)
+                    .is_some_and(|record| record.confirmed_deliveries.contains(&degenerate)),
+                "{case}: degenerate receipt must be stored"
+            );
         }
         if case == "stale" {
             let generation =
