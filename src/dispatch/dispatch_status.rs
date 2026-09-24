@@ -2,10 +2,8 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::{PgPool, Row};
 
-use crate::db::auto_queue::phase_gate_verdict;
-use crate::engine::PolicyEngine;
-
 use super::dispatch_query::query_dispatch_row_pg;
+use crate::{db::auto_queue::phase_gate_verdict, engine::PolicyEngine};
 
 pub(crate) const VALID_DISPATCH_STATUSES: &[&str] =
     &["pending", "dispatched", "completed", "cancelled", "failed"];
@@ -645,7 +643,7 @@ async fn set_dispatch_status_on_pg_tx_with_sync(
                  updated_at = NOW(),
                  last_stuck_alert_at = NULL,
                  completed_at = CASE
-                     WHEN $1 = 'completed' THEN COALESCE(completed_at, NOW())
+                     WHEN $1 IN ('completed', 'failed', 'cancelled') THEN COALESCE(completed_at, NOW())
                      ELSE completed_at
                  END
              WHERE id = $3
@@ -682,7 +680,7 @@ async fn set_dispatch_status_on_pg_tx_with_sync(
                  updated_at = NOW(),
                  last_stuck_alert_at = NULL,
                  completed_at = CASE
-                     WHEN $1 = 'completed' THEN COALESCE(completed_at, NOW())
+                     WHEN $1 IN ('completed', 'failed', 'cancelled') THEN COALESCE(completed_at, NOW())
                      ELSE completed_at
                  END
              WHERE id = $2
@@ -1570,6 +1568,8 @@ fn infer_phase_gate_verdict(
     Some(details.enriched_result)
 }
 
+#[cfg(test)]
+mod terminal_timestamp_tests;
 #[cfg(test)]
 mod auto_queue_terminal_sync_policy_tests {
     use super::{

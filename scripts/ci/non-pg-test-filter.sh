@@ -45,6 +45,7 @@ NON_PG_SKIP_ARGS=(
   --skip dispatch::dispatch_cancel::pg_observability_tests
   --skip dispatch::dispatch_context::pg_rereview_tests
   --skip dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests
+  --skip dispatch::dispatch_status::terminal_timestamp_tests
   --skip engine::ops::auto_queue_ops::tests
   --skip engine::ops::config_ops::tests
   --skip engine::ops::db_ops::tests

@@ -233,6 +233,7 @@ jobs:
               - 'src/dispatch/dispatch_cancel.rs'
               - 'src/dispatch/dispatch_context.rs'
               - 'src/dispatch/dispatch_status.rs'
+              - 'src/dispatch/dispatch_status/terminal_timestamp_tests.rs'
               - 'src/engine/ops/auto_queue_ops.rs'
               - 'src/engine/ops/config_ops.rs'
               - 'src/engine/ops/db_ops.rs'
