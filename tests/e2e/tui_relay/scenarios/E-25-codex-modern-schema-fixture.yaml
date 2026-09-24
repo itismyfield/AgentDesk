@@ -13,6 +13,11 @@ notes: |
   #2972 local/non-live coverage for the #2943 Codex modern-schema replay gap.
   The fixture models the #2895/#2899 blackhole class where visible output can
   appear but task_complete finalization or follow-up readiness gets lost.
+  Its last_agent_message deliberately diverges from the streamed text. Real
+  Codex rollouts end the stream with that body (0 divergent of 4096 streamed
+  turns counted in #6033), so this pins the defensive path: production appends
+  the divergent body after the streamed text instead of dropping it, which
+  scenario_census_e2e replays through the tmux watcher.
 steps:
   - replay_fixture:
       kind: codex_modern_schema

@@ -13,8 +13,14 @@ use std::sync::mpsc;
 use serde_yaml::Value;
 
 use crate::services::agent_protocol::StreamMessage;
-use crate::services::codex_tui::rollout_tail::RolloutRecordDecoder;
 use crate::services::session_backend::{StreamLineState, process_stream_line};
+// Codex frames replay through the tmux watcher, a Unix-only relay path that
+// production never takes on Windows; Claude replay and the census stay portable.
+#[cfg(unix)]
+use crate::services::{
+    discord::tmux::{WatcherToolState, process_watcher_lines},
+    provider::ProviderKind,
+};
 
 const SCENARIO_SUBDIR: &str = "tests/e2e/tui_relay/scenarios";
 const RUNNABLE_CLASS: &str = "fixture";
@@ -26,9 +32,10 @@ const CENSUS_LIVE: usize = 30;
 const CENSUS_UNSUPPORTED: usize = 3;
 const CENSUS_TOTAL: usize = CENSUS_FIXTURE + CENSUS_LIVE + CENSUS_UNSUPPORTED;
 
-/// The one runnable scenario whose declared markers production does not relay
-/// (#6033). Its replay is judged by the pin test below, not by the marker rule.
-const PRODUCTION_DIVERGENCE_SCENARIO: &str = "E-25";
+/// The runnable scenario whose `task_complete.last_agent_message` diverges from
+/// its streamed text; the test below pins that both reach the relay once.
+#[cfg(unix)]
+const DIVERGENT_TASK_COMPLETE_SCENARIO: &str = "E-25";
 
 struct Scenario {
     id: String,
@@ -168,31 +175,29 @@ fn replay_claude(frames: &[Value]) -> String {
     out
 }
 
+/// Feeds the frames to the tmux watcher exactly as it reads a Codex rollout
+/// (native `RolloutRecordDecoder` included) and returns the body it would relay.
+#[cfg(unix)]
 fn replay_codex(frames: &[Value]) -> String {
-    let mut decoder = RolloutRecordDecoder::default();
-    let mut out = String::new();
-    for frame in frames {
-        if let Some(messages) = decoder.decode(&to_json(frame)) {
-            for message in &messages {
-                push_text(&mut out, message);
-            }
-        }
-    }
-    // `task_complete.last_agent_message` reaches `final_text` only once the
-    // explicit completion policy promotes it, which is the consuming call.
-    if let Ok(completed) = decoder.completed_response()
-        && !completed.is_empty()
-        && !out.contains(completed.as_str())
-    {
-        out.push_str(&completed);
-        out.push('\n');
-    }
-    out
+    let mut buffer: String = frames
+        .iter()
+        .map(|frame| format!("{}\n", to_json(frame)))
+        .collect();
+    let mut state = StreamLineState::new();
+    let mut response = String::new();
+    let mut tools = WatcherToolState::new();
+    tools.set_provider(&ProviderKind::Codex);
+    let outcome = process_watcher_lines(&mut buffer, &mut state, &mut response, &mut tools);
+    assert!(
+        outcome.found_result,
+        "Codex frames never finalized the watcher turn; relayed={response:?}"
+    );
+    response
 }
 
 /// Replays a runnable scenario's declared frames through the production stream
-/// parsers and returns everything they relayed.
-fn production_replay(scenario: &Scenario) -> String {
+/// parsers and returns everything they relayed, or `None` where Codex replay is unavailable.
+fn production_replay(scenario: &Scenario) -> Option<String> {
     let mut produced = String::new();
     let mut replays = 0usize;
     for step in &scenario.steps {
@@ -209,7 +214,10 @@ fn production_replay(scenario: &Scenario) -> String {
         );
         produced.push_str(&match provider.as_str() {
             "claude" => replay_claude(&frames),
+            #[cfg(unix)]
             "codex" => replay_codex(&frames),
+            #[cfg(not(unix))]
+            "codex" => return None,
             other => panic!("{} replay_fixture provider {other:?}", scenario.file),
         });
         replays += 1;
@@ -219,7 +227,7 @@ fn production_replay(scenario: &Scenario) -> String {
         "{} is classed {RUNNABLE_CLASS} but declares no replay_fixture step",
         scenario.file
     );
-    produced
+    Some(produced)
 }
 
 fn declared_markers(scenario: &Scenario) -> Vec<String> {
@@ -230,13 +238,8 @@ fn declared_markers(scenario: &Scenario) -> Vec<String> {
         .collect()
 }
 
-/// The body #6033 drops, read out of the scenario's own `task_complete` frame.
-///
-/// Deliberately not the marker list: a scenario may also declare `text_present`
-/// for streamed text that production has always relayed, and such a marker says
-/// nothing about this defect. Pinning on the marker list would turn "someone
-/// added a streaming assertion" into "#6033 is fixed, drop the pin", which
-/// deletes the only regression pin while the defect is still live.
+/// The `task_complete.last_agent_message` lines of the scenario's own frames.
+#[cfg(unix)]
 fn task_complete_final_body(scenario: &Scenario) -> Vec<String> {
     let mut lines = Vec::new();
     for step in &scenario.steps {
@@ -316,20 +319,16 @@ fn runnable_scenarios_replay_their_declared_markers_through_production_parsers()
         CENSUS_FIXTURE,
         "runnable scenario count drifted from the pinned census"
     );
-    // Without this the #6033 pin below could rot silently: if E-25 were deleted
-    // or reclassified, that test would stay green while guarding nothing.
-    assert!(
-        runnable
-            .iter()
-            .any(|scenario| scenario.id == PRODUCTION_DIVERGENCE_SCENARIO),
-        "{PRODUCTION_DIVERGENCE_SCENARIO} left the runnable set; its #6033 pin now guards nothing"
-    );
-    let mut executed = 0usize;
-    for scenario in runnable
-        .iter()
-        .filter(|scenario| scenario.id != PRODUCTION_DIVERGENCE_SCENARIO)
-    {
-        let produced = production_replay(scenario);
+    let (mut executed, mut skipped) = (0usize, 0usize);
+    for scenario in &runnable {
+        let Some(produced) = production_replay(scenario) else {
+            println!(
+                "skipped {} ({}): Codex replay is Unix-only",
+                scenario.id, scenario.file
+            );
+            skipped += 1;
+            continue;
+        };
         let markers = declared_markers(scenario);
         assert!(
             !markers.is_empty(),
@@ -352,52 +351,78 @@ fn runnable_scenarios_replay_their_declared_markers_through_production_parsers()
         executed += 1;
     }
     assert_eq!(
-        executed,
-        CENSUS_FIXTURE - 1,
-        "executed scenario count must equal the pinned runnable census minus the #6033 pin"
+        executed + skipped,
+        CENSUS_FIXTURE,
+        "executed scenario count must equal the pinned runnable census"
     );
 }
 
-/// This assertion pins a DEFECT, not a behaviour worth keeping: production drops
-/// `task_complete.last_agent_message` when it neither supersedes nor mirrors the
-/// streamed text (#6033). When production is fixed this test goes red — that is
-/// correct. Invert the assertion then and delete the constant it reads.
-///
-/// It is pinned on that frame's body, not on the scenario's marker list, so the
-/// only way it can go red is the one the message names.
+/// A divergent `task_complete` body is appended after the streamed text so that
+/// both reach the tmux watcher relay, each exactly once.
+#[cfg(unix)]
 #[test]
-fn e25_task_complete_final_body_is_dropped_pending_6033() {
+fn e25_task_complete_body_and_streamed_text_relay_exactly_once() {
     let scenarios = load_scenarios();
     let scenario = scenarios
         .iter()
-        .find(|scenario| scenario.id == PRODUCTION_DIVERGENCE_SCENARIO)
-        .unwrap_or_else(|| panic!("{PRODUCTION_DIVERGENCE_SCENARIO} must still exist"));
-    let produced = production_replay(scenario);
+        .find(|scenario| scenario.id == DIVERGENT_TASK_COMPLETE_SCENARIO)
+        .unwrap_or_else(|| panic!("{DIVERGENT_TASK_COMPLETE_SCENARIO} must still exist"));
     let body = task_complete_final_body(scenario);
     assert!(
         !body.is_empty(),
-        "{} declares no task_complete.last_agent_message body to pin",
+        "{} declares no task_complete.last_agent_message body",
         scenario.file
     );
-    let relayed: Vec<&String> = body
+    let (streamed, mut frames) = codex_stream_and_frames(scenario);
+
+    let relayed = replay_codex(&frames);
+    for line in body.iter().chain([&streamed]) {
+        assert_eq!(
+            relayed.matches(line.as_str()).count(),
+            1,
+            "{} must relay {line:?} exactly once; relayed={relayed:?}",
+            scenario.file
+        );
+    }
+    assert!(
+        relayed.find(streamed.as_str()) < relayed.find(body[0].as_str()),
+        "streamed text must precede the task_complete body; relayed={relayed:?}"
+    );
+
+    // The #3343 dedup shapes: a body ending in the streamed tail replaces it,
+    // and a body equal to the streamed text is already relayed.
+    let superset = format!("{}\n{streamed}", body.join("\n"));
+    for fallback in [superset, streamed.clone()] {
+        for frame in &mut frames {
+            if let Some(payload) = frame.get_mut("payload")
+                && payload.get("last_agent_message").is_some()
+            {
+                payload["last_agent_message"] = Value::String(fallback.clone());
+            }
+        }
+        assert_eq!(
+            replay_codex(&frames),
+            fallback,
+            "a mirrored or superset task_complete body must land once, not double"
+        );
+    }
+}
+
+/// The streamed `output_text` and the frames of the scenario's Codex replay.
+#[cfg(unix)]
+fn codex_stream_and_frames(scenario: &Scenario) -> (String, Vec<Value>) {
+    let frames = scenario
+        .steps
         .iter()
-        .filter(|line| produced.contains(line.as_str()))
-        .collect();
-    assert!(
-        relayed.is_empty(),
-        "#6033 is fixed: production now relays the task_complete.last_agent_message body {relayed:?} \
-         for {}. Invert this assertion and delete {PRODUCTION_DIVERGENCE_SCENARIO}'s constant.",
-        scenario.file
-    );
-    assert!(
-        !produced.is_empty(),
-        "{} relayed nothing at all through the production parser",
-        scenario.file
-    );
-    println!(
-        "pinned {} ({}): {} task_complete.last_agent_message lines dropped by production (#6033)",
-        scenario.id,
-        scenario.file,
-        body.len()
-    );
+        .filter_map(|step| step.get("replay_fixture"))
+        .find(|spec| text_of(spec, "provider").as_deref() == Some("codex"))
+        .map(|spec| seq_of(spec, "frames"))
+        .unwrap_or_else(|| panic!("{} declares no codex replay_fixture", scenario.file));
+    let streamed = frames
+        .iter()
+        .filter_map(|frame| frame.get("payload"))
+        .flat_map(|payload| seq_of(payload, "content"))
+        .find_map(|item| text_of(&item, "text"))
+        .unwrap_or_else(|| panic!("{} streams no output_text", scenario.file));
+    (streamed, frames)
 }

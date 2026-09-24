@@ -217,7 +217,7 @@
         "services::discord::tui_prompt_relay::tests::scenario_census_e2e"
       ],
       "minimum": 4,
-      "derivation": "Four tests: the class census, the per-file exclusion reasons, the production replay of the runnable scenarios through session_backend::process_stream_line and codex_tui::rollout_tail::RolloutRecordDecoder, and the #6033 pin. The floor is the count declared before each mutation run; a run that selects fewer is a failure, not a pass."
+      "derivation": "Four tests: the class census, the per-file exclusion reasons, the production replay of the runnable scenarios through session_backend::process_stream_line and the tmux watcher process_watcher_lines (native RolloutRecordDecoder), and the E-25 task_complete body relay-exactly-once test. The floor is the count declared before each mutation run; a run that selects fewer is a failure, not a pass."
     }
   ]
 }
