@@ -457,7 +457,7 @@ pub(crate) fn save_channel_queue(
     crate::services::discord::runtime_store::critical_atomic_write(&path, &json, context)
 }
 
-pub(super) fn save_channel_pending_dispatch_marker(
+pub(crate) fn save_channel_pending_dispatch_marker(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: ChannelId,

@@ -15,7 +15,8 @@ use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::turn_orchestrator::registry_purge::MailboxPurgeOutcome;
 use crate::services::turn_orchestrator::{
-    RecoveryDoneSignal, load_channel_pending_queue_for_tests, save_channel_queue,
+    RecoveryDoneSignal, load_channel_pending_queue_for_tests, save_channel_pending_dispatch_marker,
+    save_channel_queue,
 };
 
 const QUEUED: u64 = 21;
@@ -155,14 +156,17 @@ async fn refused_restitution_lands_on_the_successor() {
     );
 }
 
-/// Restitution the closed actor refuses on every retry, its purge unlink held, is reported
-/// unrestored, not as an empty merge the boot restore counts as duplicates.
+/// Restitution refused on every retry is reported unrestored, not as an empty merge, and
+/// its queue stays on disk through the later marker restore and hydrate.
 #[tokio::test]
 async fn exhausted_restitution_is_not_an_empty_success() {
     let _root = isolated_agentdesk_root();
     let provider = ProviderKind::Claude;
     let shared = discord::make_shared_data_for_tests();
-    let channel = ChannelId::new(5_951_641);
+    let (channel, token_hash) = (ChannelId::new(5_951_641), &shared.token_hash);
+    save_channel_queue(&provider, token_hash, channel, &[queued(OFFERED)], None).unwrap();
+    save_channel_pending_dispatch_marker(&provider, token_hash, channel, &queued(QUEUED), None)
+        .unwrap();
     let _old = shared.mailbox(channel);
     let purge = shared.mailboxes.remove_idle_entry(channel);
     tokio::pin!(purge);
@@ -176,6 +180,54 @@ async fn exhausted_restitution_is_not_an_empty_success() {
         "read as empty: {result:?}"
     );
     assert_eq!(purge.await, MailboxPurgeOutcome::Removed);
+    let marker = queued(QUEUED);
+    discord::mailbox_merge_restored_dispatch_marker(&shared, &provider, channel, marker, None)
+        .await;
+    for step in ["marker restore", "hydrate"] {
+        let memory = shared.mailbox(channel).snapshot().await.intervention_queue;
+        let disk = load_channel_pending_queue_for_tests(&provider, token_hash, channel).0;
+        for (place, queue) in [("memory", memory), ("disk", disk)] {
+            let ids: Vec<u64> = queue.iter().map(|item| item.message_id.get()).collect();
+            assert_eq!(ids, [QUEUED, OFFERED], "{place} after {step}");
+        }
+        discord::mailbox_hydrate_pending_queue_from_disk(&shared, &provider, channel).await;
+    }
+}
+
+/// A successor's soft take, restart drain and front requeue keep a queue left only on disk,
+/// not rewrite it away.
+#[tokio::test]
+async fn whole_queue_writes_keep_a_disk_only_queue() {
+    let _root = isolated_agentdesk_root();
+    let provider = ProviderKind::Claude;
+    let shared = discord::make_shared_data_for_tests();
+    let token_hash = &shared.token_hash;
+    for (index, arm) in ["take", "drain", "requeue"].into_iter().enumerate() {
+        let channel = ChannelId::new(5_951_651 + index as u64);
+        save_channel_queue(&provider, token_hash, channel, &[queued(OFFERED)], None).unwrap();
+        let persistence = discord::queue_persistence_context(&shared, &provider, channel);
+        let mailbox = shared.mailbox(channel);
+        if arm == "take" {
+            let taken = mailbox.take_next_soft(persistence).await.intervention;
+            assert_eq!(taken.map(|item| item.message_id.get()), Some(OFFERED));
+            continue;
+        }
+        let expected: &[u64] = if arm == "drain" {
+            mailbox.restart_drain(persistence).await;
+            &[OFFERED]
+        } else {
+            assert!(
+                mailbox
+                    .requeue_front(queued(QUEUED), persistence)
+                    .await
+                    .enqueued
+            );
+            &[QUEUED, OFFERED]
+        };
+        let disk = load_channel_pending_queue_for_tests(&provider, token_hash, channel).0;
+        let ids: Vec<u64> = disk.iter().map(|item| item.message_id.get()).collect();
+        assert_eq!(ids, expected, "{arm}");
+    }
 }
 
 /// T-E3t — a soft-queue take the closed actor refused says nothing about the

@@ -353,6 +353,21 @@ pub(super) fn merge_pending_dispatch_marker_into_state(
     }
 }
 
+/// Absorbs the channel's disk queue before an arm rewrites the whole file from memory, so a
+/// backlog left only on disk (an unrestored restitution) is kept, not overwritten.
+pub(super) fn absorb_disk_queue(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+) -> HydratePendingQueueResult {
+    let (items, over) =
+        load_channel_pending_queue(&persistence.provider, &persistence.token_hash, channel_id);
+    let mut persistence = persistence.clone();
+    persistence.dispatch_role_override =
+        persistence.dispatch_role_override.or(over.map(|c| c.get()));
+    hydrate_pending_queue_into_state(state, channel_id, items, persistence, over)
+}
+
 pub(super) fn hydrate_pending_queue_from_disk_if_present(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
@@ -420,7 +435,10 @@ pub(super) fn reconcile_pending_dispatch_marker_before_take_next(
     channel_id: ChannelId,
     persistence: &QueuePersistenceContext,
 ) -> Option<TakeNextSoftResult> {
-    if state.pending_user_dispatch.is_some() {
+    let absorb_error = (state.pending_user_dispatch.is_none())
+        .then(|| absorb_disk_queue(state, channel_id, persistence).persistence_error)
+        .flatten();
+    if state.pending_user_dispatch.is_some() || absorb_error.is_some() {
         return Some(TakeNextSoftResult {
             intervention: None,
             dispatch_lease: None,
@@ -430,7 +448,7 @@ pub(super) fn reconcile_pending_dispatch_marker_before_take_next(
                 .any(|item| item.mode == InterventionMode::Soft),
             queue_len_after: state.intervention_queue.len(),
             queue_exit_events: Vec::new(),
-            persistence_error: None,
+            persistence_error: absorb_error,
         });
     }
 

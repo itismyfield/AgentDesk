@@ -45,7 +45,7 @@ pub(crate) use dispatch_reservation::{
     PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER, VALVE_CLEARED_DISPATCH_MARKER_GRACE,
 };
 use dispatch_reservation::{
-    abandon_pending_dispatch_reservation, clear_pending_user_dispatch,
+    abandon_pending_dispatch_reservation, absorb_disk_queue, clear_pending_user_dispatch,
     clear_stale_pending_dispatch_reservation, consume_pending_dispatch_marker_if_matches,
     delete_pending_dispatch_marker_with_persistence, hydrate_pending_queue_from_disk_if_present,
     hydrate_pending_queue_into_state, merge_pending_dispatch_marker_into_state,
@@ -65,7 +65,7 @@ pub(crate) use overflow::SoftInterventionProbe;
 use overflow::drain_head_overflow;
 #[cfg(test)]
 use pending_queue_persistence::load_channel_pending_queue;
-use pending_queue_persistence::save_channel_pending_dispatch_marker;
+pub(crate) use pending_queue_persistence::save_channel_pending_dispatch_marker;
 pub(crate) use pending_queue_persistence::{
     PendingQueueItem, cleanup_stale_pending_queue_tmp_files_all_tokens,
     load_channel_pending_dispatch_marker, load_pending_dispatch_markers, load_pending_queues,
@@ -2340,6 +2340,17 @@ fn spawn_channel_mailbox(
                     reply,
                 } => {
                     state.last_persistence = Some(persistence.clone());
+                    let absorb_error =
+                        absorb_disk_queue(&mut state, channel_id, &persistence).persistence_error;
+                    if absorb_error.is_some() {
+                        let _ = reply.send(RequeueInterventionResult {
+                            enqueued: false,
+                            refusal_reason: None,
+                            queue_exit_events: Vec::new(),
+                            persistence_error: absorb_error,
+                        });
+                        continue;
+                    }
                     let identity_ids = front_requeue::intervention_identity_ids(&intervention);
                     let authorized_pending_restore = dispatch_lease.as_ref().and_then(|lease| {
                         let pending = state.pending_user_dispatch?;
@@ -2747,6 +2758,11 @@ fn spawn_channel_mailbox(
                         });
                         continue;
                     }
+                    let absorbed = absorb_disk_queue(&mut state, channel_id, &persistence);
+                    if absorbed.persistence_error.is_some() {
+                        let _ = reply.send(absorbed);
+                        continue;
+                    }
                     let mut effective_persistence = persistence.clone();
                     if effective_persistence.dispatch_role_override.is_none() {
                         effective_persistence.dispatch_role_override =
@@ -2764,8 +2780,11 @@ fn spawn_channel_mailbox(
                 }
                 ChannelMailboxMsg::RestartDrain { persistence, reply } => {
                     state.last_persistence = Some(persistence.clone());
-                    let persistence_error =
-                        persist_queue(channel_id, &state.intervention_queue, &persistence).err();
+                    let persistence_error = absorb_disk_queue(&mut state, channel_id, &persistence)
+                        .persistence_error
+                        .or_else(|| {
+                            persist_queue(channel_id, &state.intervention_queue, &persistence).err()
+                        });
                     let _ = reply.send(RestartDrainResult {
                         queued_count: if persistence_error.is_some() {
                             0
