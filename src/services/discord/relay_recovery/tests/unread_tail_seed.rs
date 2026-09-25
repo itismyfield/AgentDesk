@@ -134,8 +134,8 @@ impl UnreadTailSeed {
                 },
             );
         }
-        inflight::save_inflight_state(&row).expect("persist row fixture");
-        // `save_inflight_state` stamps `updated_at`; age the persisted row past
+        inflight::save_inflight_state_create_new(&row).expect("persist row fixture");
+        // The save stamps `updated_at`; age the persisted row past
         // the desync and watchdog windows directly.
         let stale_at = (chrono::Local::now() - chrono::Duration::minutes(30))
             .format("%Y-%m-%d %H:%M:%S")
