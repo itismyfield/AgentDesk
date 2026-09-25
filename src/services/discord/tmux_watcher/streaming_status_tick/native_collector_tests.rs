@@ -114,10 +114,7 @@ fn native_collector_case(test_name: &str, mode: u8) {
     }
     let (_lock, root) = isolate_root();
     // Configuration installation has no uninstall, hence the isolated child.
-    let mut config = crate::config::Config::default();
-    config.runtime.relay_authority_mode = crate::config::RelayAuthorityMode::Enforce;
-    config.runtime.relay_authority_cohort_percent = 100;
-    crate::config_live_reload::install(config);
+    crate::config_live_reload::install(crate::config::Config::default());
     capture_warns(async {
         let (mut fx, mut row) = seed_recovered_row(root.root.path(), 5834);
         let marker = crate::services::tmux_common::session_temp_path(&fx.tmux, "generation");
