@@ -6439,7 +6439,7 @@ mod persistence_tests {
     }
 
     #[test]
-    fn take_next_soft_persist_failure_restores_queue_and_keeps_marker() {
+    fn take_next_soft_unreadable_queue_keeps_queue_and_writes_no_marker() {
         let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         let _env_guard = EnvGuard::set_root(tmp.path());
@@ -6471,8 +6471,8 @@ mod persistence_tests {
                 head.message_id
             );
             assert!(
-                marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
-                "marker remains the durable backstop when queue-without-head persistence fails"
+                !marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
+                "an unreadable queue file stops the take before any head is dequeued"
             );
         });
     }
