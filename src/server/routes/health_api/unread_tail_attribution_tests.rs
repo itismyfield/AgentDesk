@@ -1,9 +1,5 @@
-//! #5996 P-L2a (I20) production-entry tests for the two HTTP decision sites
-//! that read `unread_bytes` as destructive permission: the manual relay-recovery
-//! `ReattachWatcher` idle-clear and the stale-mailbox repair route's idle-tmux
-//! branch. Real tmux, real `SessionEnrichment::load`; skipped (NO VERDICT)
-//! without tmux. These rows pin today's decisions and the refusal record only —
-//! PR-L2a-1 changes no decision.
+//! HTTP entry tests for the unread-tail refusal record at the manual reattach and
+//! stale-mailbox sites; real tmux, skipped (NO VERDICT) without it. No decision changes.
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
@@ -46,16 +42,16 @@ async fn manual_reattach_refusals(
     channel: u64,
     shape: UnreadTailShape,
 ) -> Option<Vec<serde_json::Value>> {
-    let seed = UnreadTailSeed::start(channel, shape, false).await?;
+    let seed = UnreadTailSeed::start(channel, shape).await?;
     let plan = relay_recovery(&seed, false).await;
     assert_eq!(plan["decision"]["action"], "reattach_watcher", "{plan}");
     assert_eq!(plan["decision"]["auto_heal"]["eligible"], true, "{plan}");
     let unread = &plan["decision"]["evidence"]["unread_bytes"];
     match shape {
-        UnreadTailShape::RowOutputMissing => assert!(unread.is_null(), "{plan}"),
         UnreadTailShape::MeasuredBacklog => {
             assert!(unread.as_u64().is_some_and(|bytes| bytes > 0), "{plan}")
         }
+        _ => assert!(unread.is_null(), "{plan}"),
     }
 
     for _ in 0..2 {
@@ -71,9 +67,7 @@ async fn manual_reattach_refusals(
     Some(seed.refusals())
 }
 
-/// T1(n2): a missing transcript leaves the tail UNMEASURED but also reads the
-/// readiness Unknown, so the tail is not the refusing conjunct and nothing is
-/// recorded. The positive row is `reattach_idle_tmux_clear_requires_a_measured_drained_tail`.
+/// A missing transcript leaves the tail UNMEASURED but readiness Unknown too, so nothing is recorded.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_reattach_records_nothing_when_readiness_also_refuses() {
@@ -85,8 +79,25 @@ async fn manual_reattach_records_nothing_when_readiness_also_refuses() {
     assert!(refusals.is_empty(), "{refusals:?}");
 }
 
-/// T1(n3): a MEASURED backlog also refuses the clear, but that is the invariant
-/// working, not a wedge — nothing is recorded.
+/// An UNMEASURED tail with candidate and readiness admitting is recorded once, unless an
+/// unrelayed final answer is what refuses; the turn survives either way.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_reattach_records_only_when_no_unrelayed_answer_refuses() {
+    for (channel, answer) in [(5_996_110_003, false), (5_996_110_004, true)] {
+        let shape = UnreadTailShape::ForeignWatcher { answer };
+        let Some(refusals) = manual_reattach_refusals(channel, shape).await else {
+            return;
+        };
+        assert_eq!(refusals.len(), usize::from(!answer), "{refusals:?}");
+        if !answer {
+            assert_eq!(refusals[0]["site"], "manual_reattach_idle_clear");
+            assert_eq!(refusals[0]["decided_by"], "unattributed_tail");
+        }
+    }
+}
+
+/// A MEASURED backlog refuses the clear as the invariant intends: nothing is recorded.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_reattach_records_nothing_for_a_measured_backlog() {
@@ -98,13 +109,11 @@ async fn manual_reattach_records_nothing_for_a_measured_backlog() {
     assert!(refusals.is_empty(), "{refusals:?}");
 }
 
-/// T2(n1): the stale-mailbox repair route answers 409 for the same UNMEASURED
-/// tail (as before), now naming it in `unread_tail`, and records it once.
+/// The stale-mailbox route still answers 409 for an UNMEASURED tail, names it, and records it once.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_mailbox_repair_names_and_records_an_unmeasured_tail() {
-    let Some(seed) =
-        UnreadTailSeed::start(5_996_120_001, UnreadTailShape::RowOutputMissing, false).await
+    let Some(seed) = UnreadTailSeed::start(5_996_120_001, UnreadTailShape::RowOutputMissing).await
     else {
         return;
     };
@@ -121,8 +130,7 @@ async fn stale_mailbox_repair_names_and_records_an_unmeasured_tail() {
     assert_eq!(refusals[0]["site"], UNREAD_TAIL_SITE_STALE_MAILBOX);
     assert_eq!(refusals[0]["decided_by"], "tail_not_measured");
 
-    // Only the tail as the refusing conjunct is recorded: a fresh episode that
-    // another conjunct already refused records nothing.
+    // A fresh episode another conjunct already refused records nothing.
     let mut fresh_episode = seed
         .registry
         .snapshot_watcher_state_for_provider(&seed.provider, seed.channel.get())

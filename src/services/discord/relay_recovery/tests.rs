@@ -1430,8 +1430,8 @@ fn unread_tail_is_proven_drained_only_for_a_measured_zero() {
     );
 }
 
-/// #5996 P-L2a: `decided_by` names why a tail is UNMEASURED from the published
-/// coordinates; a measured tail has no reason at all.
+/// `decided_by` names why a tail is UNMEASURED from the published coordinates;
+/// a measured tail has no reason at all.
 #[test]
 fn unmeasured_tail_reason_derives_from_the_published_coordinates() {
     assert_eq!(unmeasured_tail_reason(Some(0), Some(8), 8), None);
@@ -1573,8 +1573,8 @@ async fn reattach_idle_tmux_clear_requires_a_measured_drained_tail() {
                 "{label}: the inflight row must survive for the non-destructive path"
             );
         }
-        // #5996 P-L2a (I20): only the UNMEASURED refusal is a recorded wedge,
-        // once per episode however often the manual lane runs again.
+        // Only the UNMEASURED refusal is a recorded wedge, once per episode
+        // however often the manual lane runs again.
         let refusals = || unread_tail_seed::unmeasured_tail_refusals(channel.get());
         assert_eq!(
             refusals().len(),
