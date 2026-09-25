@@ -19,7 +19,7 @@ The orchestration rule-surface rows (lane caps, campaign execution rules) were a
 - Older docs with deprecated front matter are retained for history. Their config and policy lists are not write targets unless they point back here.
 - Merges into `main` always go through a pull request that an agent babysits: it confirms CI and review, then merges, and repairs the PR on failure. No policy merges automatically.
 - `main` branch protection requires a pull request and the required status checks, and `enforce_admins` applies it to administrators too (decided 2026-09-25), so no one pushes directly to `main` or merges past a failing required check.
-- Branch protection is the enforcement mechanism for these merge rules. `.githooks/pre-push` only regenerates inventory docs on push; it does not block or gate pushes to `main`.
+- Branch protection is the enforcement mechanism for these merge rules. `.githooks/pre-push` enforces inventory-doc freshness (it exits 1 when inventory generation fails or generated docs drift without `GIT_AUTO_REGEN_DOCS=1`), but it does not reject a push because its destination is `main`.
 
 ## Matrix
 
