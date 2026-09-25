@@ -33,9 +33,8 @@ const ANNOUNCE_BOT_ID: u64 = 1_481_522_187_197_218_817;
 const NOTIFY_BOT_ID: u64 = 1_481_522_187_197_218_818;
 const HUMAN_ID: u64 = 343_742_347_365_974_026;
 const UNAUTHORIZED_HUMAN_ID: u64 = 343_742_347_365_974_027;
-/// #6059: a configured owner distinct from every author these tests send, so a
-/// fixture that needs an authorized human keeps the owner precondition without
-/// authorizing the author through ownership.
+/// Owner distinct from every author sent here: satisfies the owner requirement
+/// without authorizing any author through ownership.
 const OWNER_ID: u64 = 343_742_347_365_974_030;
 
 fn view(author_id: u64, author_is_bot: bool, age_secs: i64, text: &str) -> CatchUpMessageView {
@@ -2599,11 +2598,8 @@ async fn phase2_unauthorized_human_is_not_enqueued() {
     assert!(outbox.lock().expect("outbox capture lock").is_empty());
 }
 
-// #6059: live intake refuses every human while `owner_user_id` is unset, even
-// in allow-all mode or for an allow-listed id; catch-up used to accept them.
-// Each scenario runs the ownerless refusal and an owner-only control on fresh
-// state, so the refusal cannot pass because the sweep never classified the
-// message, and the control cannot fail because the refusal moved a checkpoint.
+// Without an owner, catch-up refuses allow-all and allow-listed humans like live
+// intake; each refusal is paired with an owner-only control on fresh state.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug)]

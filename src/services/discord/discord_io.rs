@@ -18,10 +18,8 @@ pub(super) async fn check_auth(
     _token: &str,
 ) -> bool {
     let uid = user_id.get();
-    // #2044 F2: a read lock, not a write lock, so per-message auth checks do
-    // not serialise against unrelated settings readers (voice, dispatch,
-    // management commands). Read once: the decision and its diagnostic
-    // context come from the same settings, and the guard drops before logging.
+    // One read lock yields both the decision and its diagnostic flag from the
+    // same settings; the guard drops before logging.
     let (authorized, owner_missing) = {
         let settings = shared.settings.read().await;
         (
@@ -55,9 +53,8 @@ pub(super) fn user_is_authorized(settings: &DiscordBotSettings, user_id: u64) ->
             || settings.allowed_user_ids.contains(&user_id))
 }
 
-/// Check a recovered author's user authorization through the shared predicate.
-/// Results agree with live user authorization for identical settings and user ID;
-/// separately timed reads are not guaranteed to observe the same settings.
+/// Recovered-author authorization through the shared predicate; a separately
+/// timed read may observe different settings than live intake did.
 pub(super) async fn author_authorized(shared: &Arc<SharedData>, user_id: u64) -> bool {
     let settings = shared.settings.read().await;
     user_is_authorized(&settings, user_id)
@@ -550,8 +547,8 @@ mod tests {
         }
     }
 
-    /// #6059 §7-A: every owner / allow-all / allow-list combination with its
-    /// expected answer written out, never recomputed from the predicate.
+    /// Every owner / allow-all / allow-list combination with a hand-written
+    /// expected answer, never recomputed from the predicate.
     const POLICY_MATRIX: [PolicyCase; 12] = [
         case("C01", None, false, false, false),
         case("C02", None, false, true, false),
