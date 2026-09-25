@@ -324,6 +324,12 @@ class EndToEnd(Tree):
         self.assertEqual((code, "::warning::h2-admission: R-O: clippy::duplicate_mod" in err), (0, True))
         self.assertEqual(self.run_main("--lane", "linux", "--base", self.base)[0], 1)
 
+    def test_unreadable_dep_info_follows_inert(self) -> None:
+        (self.root / "target/debug/deps/agentdesk-00aa.d").write_bytes(b"\xff")
+        code, _, err = self.run_main("--lane", "linux", "--base", self.base, "--inert")
+        self.assertEqual((code, "::warning::h2-admission: R-O: cannot read root lib dep-info" in err), (0, True))
+        self.assertEqual(self.run_main("--lane", "linux", "--base", self.base)[0], 1)
+
 class DepInfo(unittest.TestCase):
     """R-O over the root lib dep-info of a two-module crate."""
 
@@ -331,8 +337,9 @@ class DepInfo(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
-        lib = 'mod a;\n#[path = "sp ace.rs"]\nmod s;\n#[path = "한글.rs"]\nmod k;\n'
-        for rel, text in {"src/lib.rs": lib, "src/a.rs": "", "src/sp ace.rs": "", "src/한글.rs": "", "src/b.rs": ""}.items():
+        lib = 'mod a;\n#[path = "sp ace.rs"]\nmod s;\n#[path = "한글.rs"]\nmod k;\n#[path = "payload.inc"]\nmod payload;\n'
+        files = {"src/lib.rs": lib, "src/a.rs": "", "src/sp ace.rs": "", "src/한글.rs": "", "src/b.rs": "", "src/payload.inc": ""}
+        for rel, text in files.items():
             (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
             (self.root / rel).write_text(text, encoding="utf-8")
         h2._MODULE_TABLES.clear()
@@ -357,7 +364,8 @@ class DepInfo(unittest.TestCase):
         with tempfile.TemporaryDirectory() as elsewhere:
             (outside := Path(elsewhere) / "g.rs").write_text("")
             self.assertIn("outside the repo", self.problems(str(outside))[0])
-        for extra in ("src/shared.inc", "migrations/postgres/sub/x.sql", "vendor/migrations/postgres/x.sql", "assets/a.html"):
+        # src/payload.inc is mounted by `#[path]`, so it is in the module tree yet still not data
+        for extra in ("src/payload.inc", "src/shared.inc", "migrations/postgres/sub/x.sql", "vendor/migrations/postgres/x.sql", "assets/a.html"):
             with self.subTest(extra=extra):
                 self.assertEqual(self.problems(extra), [f"R-O: lib compile input {extra} is not in the data allowlist"])
 
@@ -365,6 +373,28 @@ class DepInfo(unittest.TestCase):
         # `\ ` escapes, UTF-8, canonical absolute spelling and `..` all name module-tree files
         self.assertEqual(self.problems("src/sp ace.rs", "src/한글.rs", os.path.realpath(self.root / "src/a.rs"),
                                        "src/x/../a.rs"), [])
+
+    def test_symlinked_modules_compare_by_target(self) -> None:
+        with tempfile.TemporaryDirectory() as elsewhere:
+            (outside := Path(os.path.realpath(elsewhere)) / "g.rs").write_text("")
+            (self.root / "src/real.rs").write_text("")
+            (self.root / "src/sym.rs").symlink_to("real.rs")
+            (self.root / "src/out.rs").symlink_to(outside)
+            with (self.root / "src/lib.rs").open("a", encoding="utf-8") as lib:
+                lib.write("mod sym;\nmod out;\n")
+            self.assertEqual(self.problems("src/sym.rs", "src/x/../sym.rs"), [])
+            self.assertEqual(self.problems("src/out.rs"), [f"R-O: lib compile input {outside.as_posix()} is outside the repo"])
+
+    def test_invalid_dep_info_is_a_problem(self) -> None:
+        depinfo = write_depinfo(self.root, "c0ffee", ["src/lib.rs", "src/a.rs"])
+        cases = {"empty": "", "stray line": depinfo.read_text(encoding="utf-8") + "not a rule\n",
+                 "no compile rule": "unrelated: Cargo.toml\n", "no root source": f"{depinfo}: src/a.rs\n"}
+        for case, text in cases.items():
+            with self.subTest(case=case):
+                depinfo.write_text(text, encoding="utf-8")
+                problems = h2_depinfo.ro_problems(self.root, [artifact(self.root, "c0ffee")])
+                self.assertEqual([p[:len(f"R-O: root lib dep-info {depinfo}")] for p in problems],
+                                 [f"R-O: root lib dep-info {depinfo}"])
 
     def test_dep_info_is_matched_by_the_root_lib_hash(self) -> None:
         decoy = write_depinfo(self.root, "deadbeef", ["src/lib.rs", "src/b.rs"])
