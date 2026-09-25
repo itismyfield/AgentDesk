@@ -24,28 +24,19 @@ pub(super) struct ThreadGuardForceCleanProof {
     turn_nonce: Option<String>,
     observed_before: std::time::Instant,
     inflight: crate::services::discord::inflight::InflightTurnState,
+    mailbox_has_cancel_token: bool,
 }
 
-/// Routing entries pointing at the thread while the proven episode still held it.
-struct ThreadGuardRoutingSnapshot {
-    parents: Vec<serenity::ChannelId>,
-    role_override: Option<serenity::ChannelId>,
-}
-
-fn snapshot_thread_guard_routing(
+/// Parents routed to the thread while the proven episode still held it.
+fn snapshot_thread_guard_parents(
     shared: &std::sync::Arc<SharedData>,
     thread_id: serenity::ChannelId,
-) -> ThreadGuardRoutingSnapshot {
+) -> Vec<serenity::ChannelId> {
     let parents = shared.dispatch.thread_parents.iter();
-    ThreadGuardRoutingSnapshot {
-        parents: parents
-            .filter(|entry| *entry.value() == thread_id)
-            .map(|entry| *entry.key())
-            .collect(),
-        role_override: crate::services::discord::turn_finalizer::cleanup::snapshot_role_override(
-            shared, thread_id,
-        ),
-    }
+    parents
+        .filter(|entry| *entry.value() == thread_id)
+        .map(|entry| *entry.key())
+        .collect()
 }
 
 /// Non-unix builds have no tmux reachability evidence source: every warrant
@@ -204,6 +195,7 @@ fn thread_guard_force_clean_proof(
         turn_nonce: snapshot.mailbox_active_turn_nonce,
         observed_before: proof.observed_before,
         inflight: proof.inflight,
+        mailbox_has_cancel_token: snapshot.relay_health.mailbox_has_cancel_token,
     })
 }
 
@@ -221,7 +213,7 @@ pub(super) async fn thread_guard_force_clean_stale_thread(
     };
     // Snapshot while the proven episode still holds the thread; a later
     // registration of a different value survives the cleanup.
-    let routing = snapshot_thread_guard_routing(shared, thread_id);
+    let parents = snapshot_thread_guard_parents(shared, thread_id);
     let Ok(finish) = thread_guard_release_proven_anchor(shared, provider, thread_id, &proof).await
     else {
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -231,7 +223,7 @@ pub(super) async fn thread_guard_force_clean_stale_thread(
         );
         return false;
     };
-    thread_guard_cleanup_released_episode(shared, provider, thread_id, &proof, finish, routing)
+    thread_guard_cleanup_released_episode(shared, provider, thread_id, &proof, finish, parents)
 }
 
 /// Releases the proof's anchor without a completion event. `Err` means a
@@ -262,21 +254,23 @@ async fn thread_guard_release_proven_anchor(
     Ok(Some(finish))
 }
 
-/// Cleanup limited to what the proven episode still owns. The queue-eligible
-/// edge goes last so a drained successor never races this cleanup.
+/// Cleanup limited to what the proven episode still owns. The queue-eligible edge
+/// goes last, though other admission paths may already be starting a successor.
 fn thread_guard_cleanup_released_episode(
     shared: &std::sync::Arc<SharedData>,
     provider: &ProviderKind,
     thread_id: serenity::ChannelId,
     proof: &ThreadGuardForceCleanProof,
     finish: Option<crate::services::turn_orchestrator::FinishTurnResult>,
-    routing: ThreadGuardRoutingSnapshot,
+    parents: Vec<serenity::ChannelId>,
 ) -> bool {
-    // Without an anchor only the idle residue row may go; the thread stays guarded.
-    let _ = crate::services::discord::inflight::clear_inflight_state_for_snapshot(
-        provider,
-        &proof.inflight,
-    );
+    // Without an anchor the row goes only if no token held the mailbox; the thread stays guarded.
+    if finish.is_some() || !proof.mailbox_has_cancel_token {
+        let _ = crate::services::discord::inflight::clear_inflight_state_for_snapshot(
+            provider,
+            &proof.inflight,
+        );
+    }
     let Some(finish) = finish else {
         return false;
     };
@@ -285,16 +279,15 @@ fn thread_guard_cleanup_released_episode(
         "  [{ts}] 🔓 THREAD-GUARD: stale inflight detected for thread {}, cleaning up and proceeding",
         thread_id
     );
-    // Releases `cancelled` and `global_active` but never kills tmux by name: a
-    // successor may already reuse the session; wedged sessions stay with the stall watchdog.
+    // Releases `cancelled` and `global_active` without killing tmux by name, since a successor
+    // may reuse the session; a live wedged session is left running and not reclaimed automatically.
     crate::services::discord::stall_recovery::finalize_orphaned_clear_preserve_session(
         shared,
         thread_id,
         finish.removed_token.clone(),
         "1446_thread_guard_stale_inflight",
     );
-    let thread_parent_kickoffs: Vec<_> = routing
-        .parents
+    let thread_parent_kickoffs: Vec<_> = parents
         .into_iter()
         .filter(|parent| {
             let parents = &shared.dispatch.thread_parents;
@@ -303,14 +296,6 @@ fn thread_guard_cleanup_released_episode(
                 .is_some()
         })
         .collect();
-    // Kept while queued follow-ups still need the counter-model override.
-    if !finish.has_pending {
-        crate::services::discord::turn_finalizer::cleanup::remove_owned_role_override(
-            shared,
-            thread_id,
-            routing.role_override,
-        );
-    }
     crate::services::discord::turn_finalizer::cleanup::kickoff_thread_parents_after_finalize(
         shared,
         provider,
@@ -860,24 +845,8 @@ mod thread_guard_stale_pure_tests {
                 shared.as_ref(),
             );
 
-        let proof = super::thread_guard_should_force_clean_stale_thread(
-            &shared,
-            &provider,
-            thread_id,
-            chrono::Utc::now().timestamp(),
-        )
-        .await
-        .expect("a dead dispatch thread must warrant force-clean");
-        assert!(
-            super::thread_guard_force_clean_stale_thread(
-                &shared,
-                &provider,
-                parent_id,
-                thread_id,
-                Some(proof),
-            )
-            .await
-        );
+        let proof = force_clean_proof_for(&shared, &provider, thread_id).await;
+        assert!(force_clean(&shared, thread_id, Some(proof)).await);
 
         let after = crate::services::discord::mailbox_snapshot(&shared, thread_id).await;
         assert_eq!(
@@ -908,14 +877,7 @@ mod thread_guard_stale_pure_tests {
         let (_registry, shared, _stale_token) =
             seed_stale_thread_with_queue(&provider, thread_id, anchor, 3).await;
         shared.dispatch.thread_parents.insert(parent_id, thread_id);
-        let proof = super::thread_guard_should_force_clean_stale_thread(
-            &shared,
-            &provider,
-            thread_id,
-            chrono::Utc::now().timestamp(),
-        )
-        .await
-        .expect("a dead dispatch thread must warrant force-clean");
+        let proof = force_clean_proof_for(&shared, &provider, thread_id).await;
 
         // A->B under the same message id; B is backdated so only its nonce differs.
         crate::services::discord::mailbox_finish_turn(&shared, &provider, thread_id).await;
@@ -936,16 +898,7 @@ mod thread_guard_stale_pure_tests {
             .await;
         shared.restart.global_active.store(1, Ordering::Relaxed);
 
-        assert!(
-            !super::thread_guard_force_clean_stale_thread(
-                &shared,
-                &provider,
-                parent_id,
-                thread_id,
-                Some(proof),
-            )
-            .await
-        );
+        assert!(!force_clean(&shared, thread_id, Some(proof)).await);
 
         let after = crate::services::discord::mailbox_snapshot(&shared, thread_id).await;
         assert!(
@@ -965,6 +918,10 @@ mod thread_guard_stale_pure_tests {
     }
 
     const ID_BASE: u64 = 900_000_000_000_000;
+
+    fn channel(offset: u64) -> ChannelId {
+        ChannelId::new(ID_BASE + offset)
+    }
 
     async fn force_clean_proof_for(
         shared: &Arc<SharedData>,
@@ -994,9 +951,9 @@ mod thread_guard_stale_pure_tests {
         proof: &super::ThreadGuardForceCleanProof,
     ) -> (
         crate::services::turn_orchestrator::FinishTurnResult,
-        super::ThreadGuardRoutingSnapshot,
+        Vec<ChannelId>,
     ) {
-        let routing = super::snapshot_thread_guard_routing(shared, thread_id);
+        let parents = super::snapshot_thread_guard_parents(shared, thread_id);
         let finish = super::thread_guard_release_proven_anchor(
             shared,
             &ProviderKind::Codex,
@@ -1006,7 +963,7 @@ mod thread_guard_stale_pure_tests {
         .await;
         (
             finish.expect("the proof owns the anchor").expect("anchor"),
-            routing,
+            parents,
         )
     }
 
@@ -1083,8 +1040,8 @@ mod thread_guard_stale_pure_tests {
         let temp = tempfile::tempdir().expect("create temp runtime root");
         let _guard = EnvRootGuard::set(temp.path());
         let provider = ProviderKind::Codex;
-        let (parent_id, thread_id) = (ChannelId::new(ID_BASE + 940), ChannelId::new(ID_BASE + 941));
-        let alt_id = ChannelId::new(ID_BASE + 942);
+        let (parent_id, thread_id) = (channel(940), channel(941));
+        let alt_id = channel(942);
         let nonce = Some("nonce-a".to_string());
         let stale_row =
             seed_inflight_row(&provider, ID_BASE + 941, &stale_updated_at(), 8_001, nonce);
@@ -1094,6 +1051,7 @@ mod thread_guard_stale_pure_tests {
             turn_nonce: None,
             observed_before: std::time::Instant::now(),
             inflight: stale_row,
+            mailbox_has_cancel_token: false,
         };
 
         let successor = Arc::new(CancelToken::new());
@@ -1116,10 +1074,7 @@ mod thread_guard_stale_pure_tests {
         let temp = tempfile::tempdir().expect("create temp runtime root");
         let _guard = EnvRootGuard::set(temp.path());
         let provider = ProviderKind::Codex;
-        let (parent_id, thread_id) = (
-            ChannelId::new(ID_BASE + 1_060),
-            ChannelId::new(ID_BASE + 1_061),
-        );
+        let (parent_id, thread_id) = (channel(1_060), channel(1_061));
         let nonce = Some("nonce-a".to_string());
         seed_inflight_row(
             &provider,
@@ -1161,7 +1116,7 @@ mod thread_guard_stale_pure_tests {
         let temp = tempfile::tempdir().expect("create temp runtime root");
         let _guard = EnvRootGuard::set(temp.path());
         let provider = ProviderKind::Codex;
-        let thread_id = ChannelId::new(ID_BASE + 951);
+        let thread_id = channel(951);
         let (registry, shared) = shared_with_registry(&provider).await;
         let observed_before = std::time::Instant::now();
         let mut old_row = inflight_with_updated_at(&provider, ID_BASE + 951, &stale_updated_at());
@@ -1200,9 +1155,9 @@ mod thread_guard_stale_pure_tests {
         let temp = tempfile::tempdir().expect("create temp runtime root");
         let _guard = EnvRootGuard::set(temp.path());
         let provider = ProviderKind::Codex;
-        let (parent_id, thread_id) = (ChannelId::new(ID_BASE + 960), ChannelId::new(ID_BASE + 961));
-        let (alt_id, next_thread) = (ChannelId::new(ID_BASE + 962), ChannelId::new(ID_BASE + 963));
-        let next_alt = ChannelId::new(ID_BASE + 964);
+        let (parent_id, thread_id) = (channel(960), channel(961));
+        let (alt_id, next_thread) = (channel(962), channel(963));
+        let next_alt = channel(964);
         let (_registry, shared, _stale_token) =
             seed_stale_thread_with_queue(&provider, thread_id, MessageId::new(8_001), 0).await;
         shared.dispatch.thread_parents.insert(parent_id, thread_id);
@@ -1248,7 +1203,7 @@ mod thread_guard_stale_pure_tests {
         let temp = tempfile::tempdir().expect("create temp runtime root");
         let _guard = EnvRootGuard::set(temp.path());
         let provider = ProviderKind::Codex;
-        let (thread_id, anchor) = (ChannelId::new(ID_BASE + 971), MessageId::new(8_001));
+        let (thread_id, anchor) = (channel(971), MessageId::new(8_001));
         let (_registry, shared, stale_token) =
             seed_stale_thread_with_queue(&provider, thread_id, anchor, 0).await;
         let proof = force_clean_proof_for(&shared, &provider, thread_id).await;
@@ -1266,49 +1221,43 @@ mod thread_guard_stale_pure_tests {
     }
 
     /// Known limit of the value-compare cleanup: re-registering the same
-    /// `parent -> thread` / `thread -> alt` values after the snapshot is removed.
+    /// `parent -> thread` value after the snapshot is removed.
     #[tokio::test]
     async fn thread_guard_force_clean_same_value_reregistration_is_documented_aba() {
         let temp = tempfile::tempdir().expect("create temp runtime root");
         let _guard = EnvRootGuard::set(temp.path());
         let provider = ProviderKind::Codex;
-        let (parent_id, thread_id) = (ChannelId::new(ID_BASE + 980), ChannelId::new(ID_BASE + 981));
-        let alt_id = ChannelId::new(ID_BASE + 982);
+        let (parent_id, thread_id) = (channel(980), channel(981));
         let (_registry, shared, _stale_token) =
             seed_stale_thread_with_queue(&provider, thread_id, MessageId::new(8_001), 0).await;
         shared.dispatch.thread_parents.insert(parent_id, thread_id);
-        shared.dispatch.role_overrides.insert(thread_id, alt_id);
         let proof = force_clean_proof_for(&shared, &provider, thread_id).await;
         let (finish, owned) = release_proven_anchor(&shared, thread_id, &proof).await;
-        assert!(!finish.has_pending);
 
         shared.dispatch.thread_parents.insert(parent_id, thread_id);
-        shared.dispatch.role_overrides.insert(thread_id, alt_id);
         let finish = Some(finish);
         assert!(super::thread_guard_cleanup_released_episode(
             &shared, &provider, thread_id, &proof, finish, owned,
         ));
-        assert_eq!(routing(&shared, parent_id, thread_id), (None, None));
+        assert!(!shared.dispatch.thread_parents.contains_key(&parent_id));
     }
 
-    /// Without a later registration the finished episode's own override goes.
+    /// The force-clean clears the parent guard and the row but never touches the role override.
     #[tokio::test]
-    async fn thread_guard_force_clean_removes_the_owned_role_override() {
+    async fn thread_guard_force_clean_leaves_the_role_override_untouched() {
         let temp = tempfile::tempdir().expect("create temp runtime root");
         let _guard = EnvRootGuard::set(temp.path());
         let provider = ProviderKind::Codex;
-        let (parent_id, thread_id) = (ChannelId::new(ID_BASE + 990), ChannelId::new(ID_BASE + 991));
+        let (parent_id, thread_id) = (channel(990), channel(991));
         let (_registry, shared, _stale_token) =
             seed_stale_thread_with_queue(&provider, thread_id, MessageId::new(8_001), 0).await;
+        let alt_id = channel(992);
         shared.dispatch.thread_parents.insert(parent_id, thread_id);
-        shared
-            .dispatch
-            .role_overrides
-            .insert(thread_id, ChannelId::new(ID_BASE + 992));
+        shared.dispatch.role_overrides.insert(thread_id, alt_id);
         let proof = force_clean_proof_for(&shared, &provider, thread_id).await;
 
         assert!(force_clean(&shared, thread_id, Some(proof)).await);
-        assert_eq!(routing(&shared, parent_id, thread_id), (None, None));
+        assert_eq!(routing(&shared, parent_id, thread_id), (None, Some(alt_id)));
         let row = crate::services::discord::inflight::load_inflight_state(&provider, ID_BASE + 991);
         assert!(row.is_none());
     }
@@ -1320,15 +1269,9 @@ mod thread_guard_stale_pure_tests {
         let temp = tempfile::tempdir().expect("create temp runtime root");
         let _guard = EnvRootGuard::set(temp.path());
         let provider = ProviderKind::Codex;
-        let (parent_id, thread_id) = (
-            ChannelId::new(ID_BASE + 1_050),
-            ChannelId::new(ID_BASE + 1_051),
-        );
-        let (alt_id, successor_parent, successor_alt) = (
-            ChannelId::new(ID_BASE + 1_052),
-            ChannelId::new(ID_BASE + 1_053),
-            ChannelId::new(ID_BASE + 1_054),
-        );
+        let (parent_id, thread_id) = (channel(1_050), channel(1_051));
+        let (alt_id, successor_parent, successor_alt) =
+            (channel(1_052), channel(1_053), channel(1_054));
         let (_registry, shared, _stale_token) =
             seed_stale_thread_with_queue(&provider, thread_id, MessageId::new(8_001), 0).await;
         shared.dispatch.thread_parents.insert(parent_id, thread_id);
@@ -1366,7 +1309,7 @@ mod thread_guard_stale_pure_tests {
                 let temp = tempfile::tempdir().expect("create temp runtime root");
                 let _guard = EnvRootGuard::set(temp.path());
                 let provider = ProviderKind::Codex;
-                let (thread_id, anchor) = (ChannelId::new(ID_BASE + 1_001), MessageId::new(8_001));
+                let (thread_id, anchor) = (channel(1_001), MessageId::new(8_001));
                 let (_registry, shared, stale_token) =
                     seed_stale_thread_with_queue(&provider, thread_id, anchor, 1).await;
                 let session_name = "AgentDesk-codex-thread-guard-shared-session";
@@ -1394,18 +1337,9 @@ mod thread_guard_stale_pure_tests {
         let temp = tempfile::tempdir().expect("create temp runtime root");
         let _guard = EnvRootGuard::set(temp.path());
         let provider = ProviderKind::Codex;
-        let (parent_id, thread_id) = (
-            ChannelId::new(ID_BASE + 1_010),
-            ChannelId::new(ID_BASE + 1_011),
-        );
-        let (other_parent, other_thread) = (
-            ChannelId::new(ID_BASE + 1_013),
-            ChannelId::new(ID_BASE + 1_014),
-        );
-        let (alt_id, other_alt) = (
-            ChannelId::new(ID_BASE + 1_012),
-            ChannelId::new(ID_BASE + 1_015),
-        );
+        let (parent_id, thread_id) = (channel(1_010), channel(1_011));
+        let (other_parent, other_thread) = (channel(1_013), channel(1_014));
+        let (alt_id, other_alt) = (channel(1_012), channel(1_015));
         let (_registry, shared, _stale_token) =
             seed_stale_thread_with_queue(&provider, thread_id, MessageId::new(8_001), 0).await;
         shared.dispatch.thread_parents.insert(parent_id, thread_id);
@@ -1422,31 +1356,9 @@ mod thread_guard_stale_pure_tests {
 
         assert!(force_clean(&shared, thread_id, Some(proof)).await);
         assert_eq!(kicked_parents(&shared), vec![parent_id]);
-        assert_eq!(routing(&shared, parent_id, thread_id), (None, None));
+        assert_eq!(routing(&shared, parent_id, thread_id), (None, Some(alt_id)));
         let other_routing = routing(&shared, other_parent, other_thread);
         assert_eq!(other_routing, (Some(other_thread), Some(other_alt)));
-    }
-
-    /// Queued follow-ups still need a restored counter-model override, so it
-    /// survives the cleanup while the parent guard goes.
-    #[tokio::test]
-    async fn thread_guard_force_clean_keeps_restored_override_when_pending() {
-        let temp = tempfile::tempdir().expect("create temp runtime root");
-        let _guard = EnvRootGuard::set(temp.path());
-        let provider = ProviderKind::Codex;
-        let (parent_id, thread_id) = (
-            ChannelId::new(ID_BASE + 1_020),
-            ChannelId::new(ID_BASE + 1_021),
-        );
-        let alt_id = ChannelId::new(ID_BASE + 1_022);
-        let (_registry, shared, _stale_token) =
-            seed_stale_thread_with_queue(&provider, thread_id, MessageId::new(8_001), 1).await;
-        shared.dispatch.thread_parents.insert(parent_id, thread_id);
-        shared.dispatch.role_overrides.insert(thread_id, alt_id);
-        let proof = force_clean_proof_for(&shared, &provider, thread_id).await;
-
-        assert!(force_clean(&shared, thread_id, Some(proof)).await);
-        assert_eq!(routing(&shared, parent_id, thread_id), (None, Some(alt_id)));
     }
 
     /// Records the finalize log and each completion publish in order, noting
@@ -1490,10 +1402,7 @@ mod thread_guard_stale_pure_tests {
         let temp = tempfile::tempdir().expect("create temp runtime root");
         let _guard = EnvRootGuard::set(temp.path());
         let provider = ProviderKind::Codex;
-        let (parent_id, thread_id) = (
-            ChannelId::new(ID_BASE + 1_030),
-            ChannelId::new(ID_BASE + 1_031),
-        );
+        let (parent_id, thread_id) = (channel(1_030), channel(1_031));
         let (_registry, shared, _stale_token) =
             seed_stale_thread_with_queue(&provider, thread_id, MessageId::new(8_001), 1).await;
         shared.dispatch.thread_parents.insert(parent_id, thread_id);
@@ -1562,11 +1471,8 @@ mod thread_guard_stale_pure_tests {
             let temp = tempfile::tempdir().expect("create temp runtime root");
             let _guard = EnvRootGuard::set(temp.path());
             let provider = ProviderKind::Codex;
-            let (parent_id, thread_id) = (
-                ChannelId::new(ID_BASE + 1_040),
-                ChannelId::new(ID_BASE + 1_041),
-            );
-            let alt_id = ChannelId::new(ID_BASE + 1_042);
+            let (parent_id, thread_id) = (channel(1_040), channel(1_041));
+            let alt_id = channel(1_042);
             let nonce = Some("nonce-a".to_string());
             seed_inflight_row(
                 &provider,

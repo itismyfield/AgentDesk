@@ -4924,14 +4924,15 @@ services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_test
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_clears_target_parent_despite_unrelated_registration
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_completion_event_drives_real_dequeue
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_does_not_kill_successor_shared_tmux_name
-services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_keeps_restored_override_when_pending
+services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_keeps_a_successor_preregistered_role_override
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_keeps_the_thread_queue
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_leaves_a_successor_episode_untouched
+services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_leaves_the_role_override_untouched
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_rejects_an_episode_started_after_the_proof
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_rejects_mismatched_episode
-services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_removes_the_owned_role_override
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_same_value_reregistration_is_documented_aba
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_without_anchor_defers_to_a_new_episode
+services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_without_anchor_keeps_the_row_of_a_held_token
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_proof_rejects_a_row_from_another_episode
 services::discord::router::intake_queue_transaction::tests::accepted_commit_applies_reaction_and_advances_checkpoint
 services::discord::router::intake_queue_transaction::tests::accepted_commit_can_apply_static_reaction

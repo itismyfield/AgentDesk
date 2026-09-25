@@ -1,23 +1,5 @@
-//! #1446 stall-deadlock recovery — shared post-clear bookkeeping.
-//!
-//! The stall watchdog's force-clean path (`health::run_stall_watchdog_pass`)
-//! calls `mailbox_clear_channel` on a channel whose original
-//! turn task has already died. `mailbox_clear_channel` returns the
-//! orphaned `cancel_token` in `ClearChannelResult.removed_token`, but the
-//! normal turn-finish lifecycle (`finalize_turn_state` →
-//! `cancel_active_token` → saturating `global_active` decrement) was never run,
-//! so without this helper:
-//!   - `global_active` stays > 0 forever, blocking deferred-restart
-//!     drain (`/api/restart-deferred`) and confusing health-status
-//!     reporters that key off active-turn count;
-//!   - any leftover child process / tmux session attached to the orphaned
-//!     token keeps running outside the mailbox where no watchdog can
-//!     reach it.
-//!
-//! `finalize_orphaned_clear` mirrors the
-//! `placeholder_sweeper::finalize_abandoned_mailbox` cleanup pattern so
-//! stall recovery honours the same global-counter invariants
-//! as every other turn-end path in the system.
+//! Post-processing for the `removed_token` a mailbox Clear or guarded Finish returns.
+//! `PreserveSession` releases only local bookkeeping; `CleanupSession` is an authorized kill.
 
 use std::sync::Arc;
 
