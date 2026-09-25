@@ -40,9 +40,8 @@ export function buildRequestGenerateGroups(
 }
 
 /**
- * Resets exactly the run the panel shows, in one call: `run_id` pins every
- * server write, so a per-agent loop only repeats it (#6243). Returns `false`
- * without calling the API when there is no run to reset.
+ * Resets the shown run in one call, since `run_id` pins every server write.
+ * Returns `false` without calling the API when there is no run.
  */
 export async function resetAutoQueueForSelection(
   api: AutoQueueResetApi,

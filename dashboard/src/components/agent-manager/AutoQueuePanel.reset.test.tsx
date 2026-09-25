@@ -31,8 +31,8 @@ function makeEntry(id: string, agentId: string): DispatchQueueEntry {
   };
 }
 
-// A NULL-agent run whose entries span two agents: the pre-#6243 handler looped
-// one reset per entry agent here.
+// A NULL-agent run whose entries span two agents, so a per-agent reset loop
+// would call the API more than once.
 function makeStatus(status: AutoQueueRun["status"]): AutoQueueStatus {
   return {
     run: {
@@ -81,11 +81,13 @@ async function render(status: AutoQueueRun["status"]) {
 const resetButton = () =>
   [...container.querySelectorAll("button")].find((button) => button.textContent === "Reset");
 
-it.each<AutoQueueRun["status"]>(["generated", "pending"])(
+it.each<AutoQueueRun["status"]>(["generated", "pending", "completed", "cancelled"])(
   "resets a %s run spanning several agents with one run-pinned call",
   async (status) => {
     await render(status);
-    await act(async () => resetButton()!.click());
+    const button = resetButton();
+    expect(button).toBeDefined();
+    await act(async () => button!.click());
 
     expect(resetAutoQueue).toHaveBeenCalledExactlyOnceWith({
       runId: "run-1",
@@ -95,9 +97,9 @@ it.each<AutoQueueRun["status"]>(["generated", "pending"])(
   },
 );
 
-// The server refuses a live-run reset (409); the operator ends the run instead.
+// The server refuses reset on a live run (409). End only proves the header rendered.
 it.each<AutoQueueRun["status"]>(["active", "paused", "restoring"])(
-  "hides Reset and keeps End for a %s run",
+  "hides Reset for a %s run",
   async (status) => {
     await render(status);
 

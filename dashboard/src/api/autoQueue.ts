@@ -259,7 +259,7 @@ export async function reorderAutoQueueEntries(
   });
 }
 
-/** `runId` pins every server write (#4880); `repo`/`agentId` only narrow it. */
+/** `runId` pins every server write; `repo`/`agentId` only narrow it. */
 export interface AutoQueueResetScope {
   runId: string;
   repo?: string | null;
