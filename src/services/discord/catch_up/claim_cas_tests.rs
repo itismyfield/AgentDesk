@@ -1,6 +1,5 @@
-//! The enqueue replays the classifying snapshot's claim observation,
-//! so a claim after it (same actor, a fresh actor, or past the retained window)
-//! refuses instead of queueing work a finished turn already took.
+//! A claim after the classifying snapshot (same actor, fresh actor, or past the
+//! retained window) refuses the enqueue instead of requeueing taken work.
 
 use super::absorbed_active_tests::absorb_and_claim;
 use super::*;
@@ -86,9 +85,8 @@ fn race_history(
     ]
 }
 
-/// Phase 1 refuses both of the race's ids against its stale snapshot; phase 2
-/// re-classifies them from a fresh one and `rerun` is what it enqueues. A
-/// later retry offers nothing again.
+/// Phase 1 refuses the race's ids on its stale snapshot; phase 2 re-classifies
+/// them from a fresh one and enqueues `rerun`. A later retry offers nothing.
 async fn assert_refused_then_reclassified(
     fx: &Fixture,
     api: &StrictApi,
@@ -111,10 +109,8 @@ async fn assert_refused_then_reclassified(
     assert_eq!(accepted(&retry), Vec::<u64>::new(), "offered twice");
 }
 
-/// H is unknown at the snapshot; before its enqueue lands,
-/// P absorbs H, claims, delivers and finishes. P is never queued for a second
-/// turn — the fresh read settles it on its own row. H is re-offered once: alias
-/// settlement is out of scope here, so that duplicate is the residual.
+/// P absorbs, claims and delivers unknown H before H's enqueue lands: P is never
+/// requeued; H is re-offered once (alias settlement is out of scope).
 #[tokio::test(flavor = "current_thread")]
 async fn t_f2a_delivered_race_is_refused_and_p_settles_on_its_row() {
     let fx = Fixture::new().await;
@@ -155,9 +151,8 @@ async fn t_f2b_undelivered_race_is_recovered_from_a_fresh_snapshot() {
     assert_refused_then_reclassified(&fx, &api, (channel_id, h, p), &[h, p], &[&[h, p]]).await;
 }
 
-/// The snapshot saw actor A; a purge (`remove_idle_entry`) lets a fresh
-/// actor B claim and finish from seq 0. A's observation must not pass on B,
-/// and a fresh snapshot of B recovers both ids.
+/// After a purge, fresh actor B claims from seq 0: A's observation must not
+/// pass on B, and a fresh snapshot of B recovers both ids.
 #[tokio::test(flavor = "current_thread")]
 async fn t_f6_an_observation_of_a_purged_actor_refuses_on_its_successor() {
     let fx = Fixture::new().await;

@@ -194,7 +194,7 @@ pub(in crate::services::discord) async fn mailbox_enqueue_observed_intervention(
     intervention: Intervention,
     observed: Option<ClaimObservation>,
 ) -> MailboxEnqueueOutcome {
-    // #3297 r3 — tombstone refusal ⇒ retry on a fresh registered actor
+    // Tombstone refusal ⇒ retry on a fresh registered actor
     // instead of orphaning the queue on a purged one.
     let result = shared
         .mailboxes

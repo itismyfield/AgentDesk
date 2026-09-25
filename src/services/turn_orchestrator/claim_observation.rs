@@ -20,9 +20,8 @@ pub(crate) const RECENT_CLAIMS_CAP: usize = 64;
 
 /// Incarnation 0 is never minted, so a defaulted observation always refuses.
 static NEXT_INCARNATION: AtomicU64 = AtomicU64::new(1);
-/// Bumped when a purge tombstones a channel's actor: a snapshot that saw no
-/// actor must not trust a fresh one when an intermediate actor may have come
-/// and gone.
+/// Bumped when a purge tombstones a channel's actor, so a no-actor snapshot
+/// does not trust a fresh actor when an intermediate one may have claimed.
 static PURGE_EPOCHS: LazyLock<DashMap<ChannelId, u64>> = LazyLock::new(DashMap::new);
 
 fn purge_epoch(channel_id: ChannelId) -> u64 {
@@ -74,9 +73,8 @@ impl ChannelMailboxSnapshot {
     }
 }
 
-/// Per-actor claim history: every claim bumps `seq` and records the ids the
-/// claimed turn speaks for — the same primary + absorbed set its snapshot arms
-/// expose, so a rebind or re-mint is covered exactly like a first claim.
+/// Per-actor claim history: each claim bumps `seq` and records the primary +
+/// absorbed ids, so a rebind or re-mint is covered like a first claim.
 pub(super) struct ClaimLog {
     incarnation: u64,
     purge_epoch: u64,
@@ -149,10 +147,8 @@ impl ClaimLog {
 }
 
 impl ChannelMailboxState {
-    /// Called by every arm that sets `active_user_message_id`, after the claim.
-    /// It records exactly the set `AbsorbedByActiveTurn` refuses, so a rebind
-    /// or restore is covered as far as the actor knows its absorbed ids; an
-    /// absorbed set rebuilt after a restart must be in place before this runs.
+    /// Called after every claim that sets `active_user_message_id`; records the set
+    /// `AbsorbedByActiveTurn` refuses, so a restored absorbed set must precede it.
     pub(super) fn record_claim(&mut self) {
         let mut ids: Vec<MessageId> = self.active_user_message_id.into_iter().collect();
         ids.extend(self.active_absorbed_source_ids.iter().copied());
