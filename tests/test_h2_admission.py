@@ -85,7 +85,7 @@ def diag_lines(sources: dict[str, str]) -> list[str]:
             "message": f"use of a disallowed method `{callee}`", "spans": [span]}}))
     return out
 
-PATCHES = dict(OWNER_ROSTER=frozenset({OWNER}), NONEXEC=frozenset(), W_TYPES=frozenset({TYPE}),
+PATCHES = dict(OWNER_ROSTER=frozenset({OWNER}), R_C_GRANDFATHERED={}, NONEXEC=frozenset(), W_TYPES=frozenset({TYPE}),
                PS=frozenset({"agentdesk::services::platform::tmux::read_process_args"}),
                KNOWN_UNREFERENCED={lane: frozenset({TOKIO}) for lane in h2.LANES})
 
@@ -246,7 +246,7 @@ class EndToEnd(Tree):
         self.admit(row)
         problems = self.evaluate()
         self.assertIn("folds several items (H8); set lines = [4, 5, 6]", "".join(problems))
-        self.assertTrue(any(p.startswith("R-C: src/services/probe.rs spawns tmux") for p in problems))
+        self.assertTrue(any(p.startswith("R-C: src/services/probe.rs pairs `Command` with 1") for p in problems))
         self.edit(PROBE, '.arg("tmux")', '.arg("status")')
         self.admit(row.replace("issue", "lines = [4, 5, 6]\nissue"))
         self.assertEqual(self.evaluate(), [])
@@ -254,9 +254,15 @@ class EndToEnd(Tree):
         self.assertTrue(any("is unambiguous; drop lines" in p for p in self.evaluate()))
 
     def test_inventory_and_dead_entries(self) -> None:
-        self.edit(OWNER, "pub(crate) fn read", "pub fn kill_server() {}\npub(crate) fn read")
-        self.assertEqual(self.evaluate(), [
-            "R-E: owner pub fn inventory mismatch: agentdesk::services::platform::tmux::kill_server (unclassified)"])
+        for added, path in (("pub fn kill_server() {}", "kill_server"),
+                            ("pub struct RawTmux;\nimpl RawTmux {\n    pub fn run(&self) {}\n    fn private(&self) {}\n}", "RawTmux::run"),
+                            ("mod inner {\n    pub(super) fn deep() {}\n}", "inner::deep"),
+                            ('pub extern "C" fn ext() {}', "ext")):
+            with self.subTest(added=path):
+                self.edit(OWNER, "pub(crate) fn read", added + "\npub(crate) fn read")
+                self.assertEqual(self.evaluate(), ["R-E: owner pub fn inventory mismatch: "
+                                                   f"agentdesk::services::platform::tmux::{path} (unclassified)"])
+                self.edit(OWNER, added + "\n", "")
         toml = (self.root / "clippy.toml").read_text()
         (self.root / "clippy.toml").write_text(
             toml.replace(TOKIO, "tokio::process::Command::spawn").replace(TYPE, TYPE + "X")
@@ -299,9 +305,13 @@ class ParseAdmissions(unittest.TestCase):
                 adm.parse_admissions(textwrap.dedent(GROW).replace(*bad))
 
 class ZeroRules(unittest.TestCase):
-    def rules(self, files: dict[str, str], roster=frozenset()) -> list[str]:
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(adm, "OWNER_ROSTER", roster):
-            for rel, text in files.items():
+    OLD = "src/old.rs"  # grandfathered: already pairs `Command` with one tmux message literal
+    OLD_TEXT = 'use std::process::Command;\nfn f() { Command::new("git"); log("tmux session died"); }\n'
+
+    def rules(self, files: dict[str, str], roster=frozenset(), pins=None) -> list[str]:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(adm, "OWNER_ROSTER", roster), \
+                mock.patch.object(adm, "R_C_GRANDFATHERED", {self.OLD: 1} if pins is None else pins):
+            for rel, text in {self.OLD: self.OLD_TEXT, **files}.items():
                 (Path(tmp) / rel).parent.mkdir(parents=True, exist_ok=True)
                 (Path(tmp) / rel).write_text(textwrap.dedent(text), encoding="utf-8")
             return sorted(p.split(":")[0] for p in adm.zero_rules(Path(tmp)))
@@ -311,28 +321,44 @@ class ZeroRules(unittest.TestCase):
             "src/a.rs": """\
                 use std::process::Command;
                 // Command::new("tmux") in a comment
-                fn f() { Command::new("git").arg("status"); log("tmux session died"); }
-                const LABEL: &str = "tmux-probe";
+                fn f() { Command::new("git").arg("status"); }
+                const LABEL: &str = "probe-tmux";
                 #[cfg(test)]
                 mod tests { fn t() { std::process::Command::new("tmux"); libc::execvp(); } }
                 """,
+            "src/msg.rs": 'fn f() -> String { "tmux session died".into() }\n',  # no `Command` token
             "src/a_tests.rs": 'fn t() { Command::new("tmux"); }\n',
             "src/services/platform/tmux.rs": 'fn own() { Command::new("tmux"); }\n',
             "src/runtime_layout/windows_links.rs": "fn junction() {}\n",
             "Cargo.lock": 'name = "empty-lock"\nname = "rustyline"\n',
         }, roster=frozenset({"src/services/platform/tmux.rs"})), [])
 
-    def test_each_rule_rejects(self) -> None:
+    def test_r_c_catches_g2_shapes_and_keeps_pins_tight(self) -> None:
+        # G2: a grandfathered spawn site re-pointed at tmux without a new Command::new
+        for name, text in {
+            "let_binding": 'use std::process::Command;\nfn f() { let bin = "tmux"; Command::new(bin); }\n',
+            "alias": 'use std::process::Command as Cmd;\nfn f() { Cmd::new("tmux"); }\n',
+            "wrapper": 'use std::process::Command;\nfn spawn(p: &str) { Command::new(p); }\nfn f() { spawn("tmux"); }\n',
+            "path_program": 'fn f() { std::process::Command::new("/opt/bin/tmux"); }\n',
+            "shell_arg": 'use std::process::Command;\nfn f(c: &mut Command) { c.args(["-c", "tmux kill-server"]); }\n',
+        }.items():
+            with self.subTest(shape=name):
+                self.assertEqual(self.rules({f"src/{name}.rs": text}), ["R-C"])
+        # the same swap inside an already-grandfathered file raises its pinned count
+        grown = self.OLD_TEXT.replace('Command::new("git")', 'Command::new("tmux")')
+        self.assertEqual(self.rules({self.OLD: grown}), ["R-C"])
+        self.assertEqual(self.rules({}, pins={self.OLD: 2}), ["R-C"])  # stale pin must be lowered
+        self.assertEqual(self.rules({}, pins={}), ["R-C"])  # an unpinned existing pair is red
+
+    def test_each_other_rule_rejects(self) -> None:
         self.assertEqual(self.rules({
-            "src/c.rs": 'fn f() { std::process::Command::new("/opt/bin/tmux"); }\n',
-            "src/c_arg.rs": 'fn f(c: &mut Cmd) { c.args(["-c", "tmux kill-server"]); }\n',
             "src/c2.rs": 'static BIN: &\'static str = "tmux";\n',
             "src/f.rs": "fn f() { unsafe { libc::execvp(p, a) }; }\n",
             "src/f_ext.rs": "fn f(mut c: Command) { let _ = c.exec(); }\n",
             "src/services/session_host/extra.rs": "fn x() {}\n",
             "src/runtime_layout/windows_links.rs": "// spawns TMUX\n",
             "Cargo.lock": 'name = "portable-pty"\nname = "tmux_interface"\n',
-        }), ["R-C", "R-C", "R-C2", "R-F", "R-F", "R-O", "R-O", "R-O", "R-O"])
+        }), ["R-C2", "R-F", "R-F", "R-O", "R-O", "R-O", "R-O"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -129,6 +129,11 @@ class DiagnosticsAndItems(Fixture):
         self.assertEqual(self.config[WRAP], ("W", frozenset({"linux"})))
         self.assertEqual(self.config[TYPE], ("TYPES", frozenset(h2.LANES)))
         self.assertNotIn("some::other::thing", self.config)
+        # r6 §2.5: a duplicated path is rejected, not silently overridden by the later entry
+        (self.root / "clippy.toml").write_text(CLIPPY_TOML.replace("]\ndisallowed-types",
+                                               f'  {{ path = "{TMUX}", reason = "H2 W linux" }},\n]\ndisallowed-types'))
+        with self.assertRaisesRegex(h2.MeasureError, "duplicate H2 path"):
+            h2.load_config(self.root / "clippy.toml")
         rows = h2.diagnostics(self.lines())
         self.assertEqual(len(rows), len(set(rows)))
         self.assertTrue(all(file.startswith("src/") for file, *_ in rows))

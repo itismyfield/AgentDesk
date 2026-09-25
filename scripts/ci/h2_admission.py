@@ -32,7 +32,7 @@ OWNER_ROSTER = frozenset({
     *(f"src/services/session_host/{name}.rs"
       for name in ("legacy_collapse", "model", "process_host", "resolve", "tmux_host", "traits")),
 })
-# R-E: owner pub fns are EXEC (clippy.toml) or one of these non-tmux-exec helpers.
+# R-E: low-level tmux owner API inventory; each pub fn is EXEC (clippy.toml) or a non-exec helper.
 INVENTORY_FILES = ("src/services/platform/tmux.rs", "src/services/platform/tmux/availability.rs")
 NONEXEC = frozenset(f"agentdesk::services::platform::tmux::availability::{name}" for name in (
     "mark_available_from_live_session", "invalidate_cache", "cached_unavailable_due_to_missing"))
@@ -47,11 +47,26 @@ KNOWN_UNREFERENCED: dict[str, frozenset[str]] = {lane: frozenset() for lane in m
 # H9: files no measured lane compiles; they must not mention tmux at all.
 WINDOWS_ONLY_FILES = ("src/runtime_layout/windows_links.rs",)
 
-PUB_FN_RE = re.compile(r"^pub(?:\([^)]*\))?\s+(?:(?:async|const|unsafe)\s+)*fn\s+([A-Za-z_]\w*)", re.M)
-# R-C: a literal tmux program (`Command::new("/usr/bin/tmux")`) or a tmux script/arg (`.arg("tmux ls")`).
-SPAWN_CALL_RE = re.compile(r"\bCommand\s*::\s*new\s*\(|\.\s*args?\s*\(")
-STRING_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
-RC2_RE = re.compile(r"\b(?:const|static)\s+(?:mut\s+)?\w+\s*:\s*&\s*(?:'\w+\s+)?str\s*=\s*b?r?#*\"(?:[^\"\s]*/)?tmux[\s\"]")
+# Visibility left of an item's `fn` token: pub / pub(crate) / pub(super) plus qualifiers.
+PUB_PREFIX_RE = re.compile(r"\bpub(?:\s*\([^)]*\))?\s+(?:(?:async|const|unsafe|extern)\s+)*$")
+# R-C (r6): a file pairing a `Command` token (a `use .. Command as X` alias line included) with a
+# "tmux" / "tmux .." / "../tmux" literal. Pre-existing pairs are pinned per file by literal count.
+TMUX_LITERAL_RE = re.compile(r'b?r?#*"(?:[^"\s]*/)?tmux(?:"|\s)')
+R_C_GRANDFATHERED = {
+    "src/cli/dcserver.rs": 2,
+    "src/cli/doctor/orchestrator.rs": 13,
+    "src/engine/ops/exec_ops.rs": 1,
+    "src/services/claude.rs": 3,
+    "src/services/codex.rs": 2,
+    "src/services/codex_tmux_wrapper.rs": 1,
+    "src/services/discord/idle_recap/scrollback.rs": 1,
+    "src/services/discord/recovery_engine.rs": 1,
+    "src/services/discord/recovery_engine/restore_inflight/output_paths.rs": 1,
+    "src/services/discord/tmux_reaper.rs": 4,
+    "src/services/qwen/session_lifecycle.rs": 1,
+    "src/services/qwen_tmux_wrapper.rs": 1,
+}
+RC2_RE = re.compile(r"\b(?:const|static)\s+(?:mut\s+)?\w+\s*:\s*&\s*(?:'\w+\s+)?str\s*=\s*b?r?#*\"tmux")
 RF_RE = re.compile(r"\blibc::(?:exec\w*|posix_spawn\w*)|\bposix_spawnp?\b|\bnix::unistd::exec\w*|\.exec\s*\(\s*\)")
 LOCK_NAME_RE = re.compile(r'^name = "([^"]+)"', re.M)
 LOCK_BANNED_RE = re.compile(r"tmux|(?:^|[-_])pty(?:[-_]|$)")
@@ -70,51 +85,59 @@ def _load_lexer():
 
 LEXER = _load_lexer()
 
-def production_views(path: Path) -> tuple[str, str]:
-    """Non-test text as (code only, code + literals); comments are blanked."""
+def production_views(path: Path) -> tuple[str, str, list[str]]:
+    """Non-test text as (code only, code + literals, literals); comments and test lines are blanked."""
     countable = {lineno for lineno, _code, keep in LEXER.production_lines(path) if keep}
     state = rust_lex.StripState()
-    code, mixed = [], []
+    code, mixed, literals = [], [], []
     for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         segments = rust_lex.lex_segments(line, state)
         if lineno not in countable:
+            code.append("")
+            mixed.append("")
             continue
+        literals += [t for k, t in segments if k == rust_lex.LITERAL]
         code.append("".join(t if k == rust_lex.CODE else " " * len(t) for k, t in segments))
         mixed.append("".join(t if k in (rust_lex.CODE, rust_lex.LITERAL) else " " * len(t) for k, t in segments))
-    return "\n".join(code), "\n".join(mixed)
+    return "\n".join(code), "\n".join(mixed), literals
 
-def tmux_spawn_literals(code: str, mixed: str) -> list[str]:
-    """String literals naming tmux as a spawned program or as a spawn argument."""
-    hits = []
-    for call in SPAWN_CALL_RE.finditer(code):
-        depth, end = 0, call.end() - 1
-        for end in range(call.end() - 1, len(code)):  # `code` has literals blanked, same columns
-            depth += (code[end] in "([{") - (code[end] in ")]}")
-            if depth == 0:
-                break
-        program = call.group(0).startswith("Command")
-        for lit in STRING_RE.findall(mixed[call.end():end]):
-            if (program and lit.rsplit("/", 1)[-1] == "tmux") or (not program and re.match(r"(?:\S*/)?tmux(?:\s|$)", lit)):
-                hits.append(lit)
-    return hits
+def owner_pub_fns(root: Path, rel: str, modpath: str) -> set[str]:
+    """Every pub fn of an owner file (free, inherent-impl, nested-module), via the measurer's brace walk."""
+    code = production_views(root / rel)[0]
+    src = m.SourceFile(code)
+    found = set()
+    for start, _end, names, registrable in src.items:
+        line_start = code.rfind("\n", 0, start) + 1
+        if names[-1].startswith(("const ", "static ")) or not PUB_PREFIX_RE.search(code[line_start:start]):
+            continue
+        # trait-impl methods have no registrable path; a `pub` one cannot exist, so this keeps a marker
+        found.add("::".join([modpath, *(registrable or names)]))
+    return found
 
 def _is_owner(rel: str) -> bool:
     return rel in m.OWNER_FILES or rel.startswith(m.OWNER_PREFIXES)
 
 def zero_rules(root: Path) -> list[str]:
     """R-C, R-C2, R-F over non-owner prod Rust; R-O roster, Cargo.lock (H4) and H9 files."""
-    problems = []
+    problems, rc_found = [], {}
     for path in sorted((root / "src").rglob("*.rs")):
         rel = path.relative_to(root).as_posix()
         if _is_owner(rel) or LEXER.is_test_file(path.name) or rel in LEXER.PINNED_TEST_ONLY_MODULE_FILES:
             continue
-        code, mixed = production_views(path)
-        if hits := tmux_spawn_literals(code, mixed):
-            problems.append(f"R-C: {rel} spawns tmux by literal outside the owner: {hits}")
+        code, mixed, literals = production_views(path)
+        tmux_literals = sum(1 for lit in literals if TMUX_LITERAL_RE.match(lit))
+        if tmux_literals and re.search(r"\bCommand\b", code):
+            rc_found[rel] = tmux_literals
         if RC2_RE.search(mixed):
             problems.append(f"R-C2: {rel} binds a \"tmux\" const/static outside the owner")
         if RF_RE.search(code):
             problems.append(f"R-F: {rel} calls exec/posix_spawn directly")
+    for rel in sorted(set(rc_found) | set(R_C_GRANDFATHERED)):
+        got, pinned = rc_found.get(rel, 0), R_C_GRANDFATHERED.get(rel, 0)
+        if got > pinned:
+            problems.append(f"R-C: {rel} pairs `Command` with {got} tmux literal(s) outside the owner (pinned {pinned})")
+        elif got < pinned:
+            problems.append(f"R-C: {rel} now has {got} tmux literal(s); lower its R_C_GRANDFATHERED pin from {pinned}")
     found = {p.relative_to(root).as_posix() for pattern in OWNER_GLOBS for hit in root.glob(pattern)
              for p in ([hit] if hit.is_file() else hit.rglob("*")) if p.is_file()}
     for rel in sorted(found ^ OWNER_ROSTER):
@@ -132,8 +155,7 @@ def inventory(root: Path, config: dict, lane: str, lines: list[str], result: dic
     """R-E: owner inventory, fixed SUBPROC/TYPES sets, lane W*/SUBPROC_W fixpoint equality, dead entries."""
     problems = []
     table = m._module_table(root)
-    owner_pub = {f"{table[rel]}::{name}" for rel in INVENTORY_FILES if rel in table
-                 for name in PUB_FN_RE.findall(production_views(root / rel)[0])}
+    owner_pub = {path for rel in INVENTORY_FILES if rel in table for path in owner_pub_fns(root, rel, table[rel])}
     by_set = collections.defaultdict(set)
     for path, (set_name, lanes) in config.items():
         by_set[set_name].add(path)

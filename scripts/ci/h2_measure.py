@@ -213,6 +213,8 @@ def load_config(clippy_toml: Path) -> dict[str, tuple[str, frozenset[str]]]:
             lanes = frozenset(LANES) if parts[2] == "both" else frozenset({parts[2]})
             if (key == "disallowed-types") != (parts[1] == "TYPES") or not lanes <= set(LANES):
                 raise MeasureError(f"bad H2 entry in {clippy_toml}: {entry}")
+            if entry["path"] in config:  # a later duplicate would silently override the first
+                raise MeasureError(f"duplicate H2 path in {clippy_toml}: {entry['path']}")
             config[entry["path"]] = (parts[1], lanes)
     return config
 
