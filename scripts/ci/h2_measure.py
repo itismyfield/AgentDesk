@@ -71,6 +71,11 @@ class SourceFile:
         self.stripped = "\n".join(rust_lex.strip_line(line, state).ljust(len(line)) for line in lines)
         self.line_offsets = [0, *itertools.accumulate(len(line) + 1 for line in lines)]
         self.items = _item_ranges(self.stripped)
+        self.item_names = collections.Counter("::".join(names) for _, _, names, _ in self.items)
+
+    def ambiguous(self, item: str) -> bool:
+        """H8: `<module>` or a name shared by several items (`const _`, cfg twins) folds sites."""
+        return item == "<module>" or self.item_names[item] > 1
 
     def offset(self, line: int, column: int) -> int:
         return self.line_offsets[line - 1] + column - 1
@@ -288,6 +293,7 @@ def measure(root: Path, lines, config) -> dict:
     sources: dict[str, SourceFile] = {}
     rows = {section: collections.Counter() for section in SECTIONS}
     derived = {"W": set(), "SUBPROC_W": set(), "unregistrable": set()}
+    sites = {section: collections.defaultdict(list) for section in SECTIONS}  # H8 aux, key unchanged
     total = 0
     type_names = {p.rsplit("::", 1)[-1] for p, (s, _) in config.items() if s == "TYPES"}
     for file, line, col, _code, callee in diagnostics(lines):
@@ -301,6 +307,8 @@ def measure(root: Path, lines, config) -> dict:
         item, parts, item_range = src.enclosing(pos)
         set_name = config[callee][0]
         rows[SET_SECTION[set_name]][(file, item, callee)] += 1
+        if src.ambiguous(item):
+            sites[SET_SECTION[set_name]][(file, item, callee)].append(line)
         target = "W" if set_name in ("EXEC", "W", "TYPES") else None
         if set_name == "SUBPROC" and subproc_seed(src, pos, item_range):
             target = "SUBPROC_W"
@@ -313,7 +321,8 @@ def measure(root: Path, lines, config) -> dict:
             continue  # a registered Self type already covers its trait-impl bodies
         else:
             derived["unregistrable"].add(f"{file}::{item}")
-    return {"rows": rows, "derived": derived, "total": total}
+    sites = {section: {key: sorted(v) for key, v in found.items()} for section, found in sites.items()}
+    return {"rows": rows, "derived": derived, "total": total, "sites": sites}
 
 def load_baseline(root: Path) -> dict | None:
     present = [root / rel for rel in BASELINE_FILES if (root / rel).exists()]
@@ -435,8 +444,9 @@ def main(argv=None) -> int:
         lines = args.json.read_text(encoding="utf-8").splitlines() if args.json else run_clippy(root, None)
         result = measure(root, lines, config)
         if not args.check:
-            rows = {s: [dict(zip(("file", "item", "callee"), k), count=v) for k, v in sorted(r.items())]
-                    for s, r in result["rows"].items()}
+            rows = {s: [dict(zip(("file", "item", "callee"), k), count=v,
+                             **({"lines": result["sites"][s][k]} if k in result["sites"][s] else {}))
+                        for k, v in sorted(r.items())] for s, r in result["rows"].items()}
             derived = {k: sorted(v) for k, v in result["derived"].items()}
             print(json.dumps({"lane": args.lane, "total": result["total"], "rows": rows, "derived": derived}, indent=1))
             return 0
