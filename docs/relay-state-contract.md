@@ -531,10 +531,15 @@ that retires turn-lifetime state.
   released — for example `OperatorRelease::claim` commits the exact mailbox
   release before it clears the durable row, so a process death between the
   two leaves a row for an already-released episode that the next boot
-  re-adopts; dormant resumption is admitted through the unfenced claim,
+  re-adopts; dormant resumption stays on the unfenced claim by design,
   because the owner's own finalize raises the fence too and would refuse the
   undelivered tail it exists to deliver, so its fence must admit resumption
-  only while an undelivered tail remains under the same owner; the re-mint
+  only while an undelivered tail remains under the same owner; unpublished
+  resume (`resume_unpublished` → `spawn_claude_idle_response_tail_once`) does
+  not stop at the next `user` prompt, so an episode with no terminal record
+  gets a later turn's body on its placeholder with or without an exact
+  release — a source-boundary defect (#6253) not introduced or widened by
+  fencing; the re-mint
   fence is raised only by an exact-nonce release, so an episode ended by a
   channel-scoped release can be re-minted from a row that outlived it.
   Fenced restart re-adoption needs a durable release
