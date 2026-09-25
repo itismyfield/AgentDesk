@@ -129,16 +129,20 @@ def owner_pub_fns(root: Path, rel: str, modpath: str) -> set[str]:
     return found
 
 def owner_shape_problems(root: Path) -> list[str]:
-    """R-E: no macro_rules!/item-level macro and no trait default method in the owner API files."""
+    """R-E/R-O: no macro_rules!/item-level macro in any owner file; no trait default method in the owner API files.
+    Review r6: a macro can synthesize `#[path]` (`#[$attr]`) that has_path_attr cannot see, so it is refused, not expanded."""
     problems = []
-    for rel in INVENTORY_FILES:
+    for rel in sorted(OWNER_ROSTER):
         if not (root / rel).exists():
             continue
         code = production_views(root / rel)[0]
         items = m.SourceFile(code).items
-        problems += [f"R-E: {rel} uses item-level macro `{call.group(1) or call.group(2)}!`; owner API must be plain fns"
+        problems += [f"{'R-E' if rel in INVENTORY_FILES else 'R-O'}: {rel} uses item-level macro "
+                     f"`{call.group(1) or call.group(2)}!`; owner files must be plain items"
                      for call in ITEM_MACRO_RE.finditer(code)
                      if call.group(1) or not any(s <= call.start() <= e for s, e, _, _ in items)]
+        if rel not in INVENTORY_FILES:
+            continue
         # a fn with a body whose parent scope is a trait declared here is a default method
         traits = set(TRAIT_RE.findall(code))
         problems += [f"R-E: {rel} trait default method {'::'.join(names)}; owner API must be plain fns"

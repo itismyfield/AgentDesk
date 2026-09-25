@@ -311,7 +311,7 @@ class ZeroRules(unittest.TestCase):
             for rel, text in {self.OLD: self.OLD_TEXT, **files}.items():
                 (Path(tmp) / rel).parent.mkdir(parents=True, exist_ok=True)
                 (Path(tmp) / rel).write_text(textwrap.dedent(text), encoding="utf-8")
-            return sorted(p.split(":")[0] for p in adm.zero_rules(Path(tmp)))
+            return sorted(p.split(":")[0] for p in adm.zero_rules(Path(tmp)) + adm.owner_shape_problems(Path(tmp)))
 
     def test_clean_shapes_pass(self) -> None:
         self.assertEqual(self.rules({
@@ -394,6 +394,19 @@ class ZeroRules(unittest.TestCase):
         for attr, want in [*((a, ["R-O"]) for a in red), *((a, []) for a in green)]:
             escape = {k: v.replace('#[path = "pty_escape.rs"]', attr) for k, v in ESCAPE.items()}
             self.assertEqual(self.rules(escape, roster=frozenset(ESCAPE)), want, attr)
+
+    def test_owner_path_attribute_span_skips_literals_and_comments(self) -> None:
+        # review r6 P2: `]`/`[` inside a raw string, char literal or comment must not end the span early
+        for attr in ('#[cfg_attr(unix, doc = r#"]"#, path = "pty_escape.rs")]', "#[cfg_attr(unix, marker = ']', path = \"pty_escape.rs\")]",
+                     '#[cfg_attr(unix, /* ] [ */ path = "pty_escape.rs")]', '#[cfg_attr(unix, doc = r#"\n] [\n"#, path = "pty_escape.rs")]'):
+            escape = {k: v.replace('#[path = "pty_escape.rs"]', attr) for k, v in ESCAPE.items()}
+            self.assertEqual(self.rules(escape, roster=frozenset(ESCAPE)), ["R-O"], attr)
+
+    def test_owner_macros_are_refused_outside_the_api_files(self) -> None:
+        # review r6 P1: a macro can synthesize `#[path]` (`#[$attr]`), so every owner file refuses item-level macros
+        host = {"src/services/session_host.rs": 'macro_rules! mount { ($attr:meta) => { #[$attr] mod escape; }; }\n'
+                                                'mount!(path = "../outside_owner.rs");\n'}
+        self.assertEqual(self.rules(host, roster=frozenset(host)), ["R-O", "R-O"])
 
 ESCAPE = {"src/services/platform/tmux.rs": '#[path = "pty_escape.rs"]\npub(crate) mod escape;\npub fn has_session() {}\n'}
 
