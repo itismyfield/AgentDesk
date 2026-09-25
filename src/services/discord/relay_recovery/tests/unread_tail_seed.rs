@@ -235,8 +235,8 @@ async fn rowed_snapshot(
     snapshot
 }
 
-/// Refusals nothing names are never folded together; a row's birth episode is graded
-/// once per site however its tmux name reads, and a new birth is its own.
+/// Refusals nothing names are never folded together; a row observed once, as the manual
+/// lane does, is graded once per site by birth however its tmux name reads.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unmeasured_tail_episodes_are_graded_by_birth_never_by_absence() {
@@ -246,37 +246,42 @@ async fn unmeasured_tail_episodes_are_graded_by_birth_never_by_absence() {
         return;
     };
     let (provider, channel) = (&seed.provider, seed.channel.get());
-    let record = |snapshot: &crate::services::discord::health::WatcherStateSnapshot, site| {
-        super::record_unmeasured_tail_refusal_for_snapshot(provider, channel, snapshot, site)
+    let record_row = |site| {
+        let row = inflight::load_inflight_state_read_only(provider, channel);
+        let (tail, liveness) = ((None, None, 0), (false, Some(true)));
+        let episode = ((None, None), row.as_ref());
+        super::record_unmeasured_tail_refusal(
+            provider, channel, site, None, tail, liveness, episode,
+        )
     };
-    let site = UNREAD_TAIL_SITE_STALE_MAILBOX;
+    let site = UNREAD_TAIL_SITE_MANUAL_REATTACH;
     let count = || seed.refusals().len();
 
     let mut rowless = rowed_snapshot(&seed).await;
     rowless.inflight_identity = None;
     for session in ["AgentDesk-claude-5996-a", "AgentDesk-claude-5996-b"] {
         rowless.tmux_session = Some(session.to_string());
-        record(&rowless, site);
+        let other = UNREAD_TAIL_SITE_STALE_MAILBOX;
+        super::record_unmeasured_tail_refusal_for_snapshot(provider, channel, &rowless, other);
     }
     assert_eq!(count(), 2, "a row-less session change is a new refusal");
 
-    let born = rowed_snapshot(&seed).await;
-    for snapshot_site in [site, site, UNREAD_TAIL_SITE_MANUAL_REATTACH] {
-        record(&born, snapshot_site);
+    for row_site in [site, site, UNREAD_TAIL_SITE_STALE_MAILBOX] {
+        record_row(row_site);
     }
     assert_eq!(count(), 4, "one birth episode is graded once per site");
 
     edit_persisted_row(provider, channel, |row| {
         row["tmux_session_name"] = "renamed".into()
     });
-    record(&rowed_snapshot(&seed).await, site);
+    record_row(site);
     assert_eq!(count(), 4, "a learned tmux name keeps the birth episode");
     let nonce = inflight::load_inflight_state_read_only(provider, channel)
         .unwrap()
         .turn_nonce;
     for turn_nonce in ["reborn".into(), serde_json::json!(nonce)] {
         edit_persisted_row(provider, channel, |row| row["turn_nonce"] = turn_nonce);
-        record(&rowed_snapshot(&seed).await, site);
+        record_row(site);
     }
     assert_eq!(
         count(),
@@ -296,8 +301,27 @@ async fn unmeasured_tail_episodes_are_graded_by_birth_never_by_absence() {
         (row["user_msg_id"], row["turn_nonce"]) = (0.into(), serde_json::Value::Null);
         row.as_object_mut().unwrap().remove("turn_start_offset");
     });
-    let unnameable = rowed_snapshot(&seed).await;
-    record(&unnameable, site);
-    record(&unnameable, site);
+    record_row(site);
+    record_row(site);
     assert_eq!(count(), 7, "an unnameable row is never folded into itself");
+}
+
+/// A retained snapshot never keys the row that replaced its turn: two births, two records.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retained_snapshot_never_keys_a_later_birth() {
+    let Some(seed) = UnreadTailSeed::start(5_996_140_002, UnreadTailShape::RowOutputMissing).await
+    else {
+        return;
+    };
+    let (provider, channel) = (&seed.provider, seed.channel.get());
+    let record = |snapshot: &crate::services::discord::health::WatcherStateSnapshot| {
+        let site = super::UNREAD_TAIL_SITE_STALE_MAILBOX;
+        super::record_unmeasured_tail_refusal_for_snapshot(provider, channel, snapshot, site)
+    };
+    let retained = rowed_snapshot(&seed).await;
+    edit_persisted_row(provider, channel, |row| row["turn_nonce"] = "B".into());
+    record(&retained);
+    record(&rowed_snapshot(&seed).await);
+    assert_eq!(seed.refusals().len(), 2, "{:?}", seed.refusals());
 }

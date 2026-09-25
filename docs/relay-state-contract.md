@@ -1418,11 +1418,11 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   admits (the manual arm judges those on a read-only row load, so recording writes
   nothing). `decided_by` ∈ {`tail_not_measured`, `saturated_tail`,
   `zero_not_attributable`, `unattributed_tail`}. One record per episode per site,
-  over the last 8 episodes that site graded: the mailbox turn, else the inflight
-  row's birth pin (`InflightEpisodePin::is_same_episode_as`, plus
-  `turn_start_offset` for an id-0 row without a nonce). A refusal nothing names —
-  no mailbox turn and no row, or an id-0 row with neither nonce nor offset — is
-  recorded every time rather than folded into another. A measured backlog and
+  over the last 8 episodes that site graded: the mailbox turn, else the manual arm's
+  row birth pin (`InflightEpisodePin::is_same_episode_as`, plus `turn_start_offset`
+  for an id-0 row without a nonce). A refusal nothing names — no mailbox turn and no
+  row observed with the decision (a stale-mailbox snapshot carries none), or an id-0
+  row with neither nonce nor offset — is recorded every time, never folded. A measured backlog and
   the reachability idle witness record nothing; the refusals pre-existed and no
   decision changed.
 - Invariant key: `live_turn_proven_by_progress_not_presence`. This document lands the
