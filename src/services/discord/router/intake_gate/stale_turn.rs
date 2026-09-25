@@ -813,8 +813,8 @@ mod thread_guard_stale_pure_tests {
         (registry, shared, cancel_token)
     }
 
-    /// The THREAD-GUARD force-clean releases the dead dispatch's anchor
-    /// but must keep the thread's queued follow-ups (no Superseded drain).
+    /// The force-clean keeps the thread's queued follow-ups (no Superseded drain) and, as
+    /// on main, drops `parent -> thread` so intake does not take the parent for a thread.
     #[tokio::test]
     async fn thread_guard_force_clean_keeps_the_thread_queue() {
         let temp = tempfile::tempdir().expect("create temp runtime root");
@@ -842,7 +842,11 @@ mod thread_guard_stale_pure_tests {
         assert!(after.cancel_token.is_none());
         assert!(token.cancelled.load(Ordering::Relaxed));
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
-        assert!(shared.dispatch.thread_parents.contains_key(&parent_id));
+        let is_thread = shared.dispatch.thread_parents.contains_key(&parent_id);
+        assert!(
+            !is_thread,
+            "intake_turn's is_thread check must not see the parent"
+        );
         assert_eq!(kicked_parents(&shared), vec![parent_id]);
         let event = rx
             .try_recv()
@@ -939,7 +943,10 @@ mod thread_guard_stale_pure_tests {
         crate::services::turn_orchestrator::FinishTurnResult,
         Vec<ChannelId>,
     ) {
-        let parents = super::snapshot_thread_guard_parents(shared, thread_id);
+        let parents =
+            crate::services::discord::turn_finalizer::cleanup::collect_and_clear_thread_parents(
+                shared, thread_id,
+            );
         let finish = super::thread_guard_release_proven_anchor(
             shared,
             &ProviderKind::Codex,
@@ -1133,10 +1140,10 @@ mod thread_guard_stale_pure_tests {
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
     }
 
-    /// After A's finish, a replacement B keeps its row, mapping and override while
-    /// A's parent is kicked; the queue-eligible edge follows the cleanup.
+    /// A parent remapped to another thread after A's finish keeps that mapping and is left
+    /// for the new owner to kick; the replacement B and the queue-eligible edge are kept.
     #[tokio::test]
-    async fn thread_guard_cleanup_after_finish_spares_a_replacement_episode() {
+    async fn thread_guard_cleanup_leaves_a_parent_remapped_after_finish() {
         let temp = tempfile::tempdir().expect("create temp runtime root");
         let _guard = EnvRootGuard::set(temp.path());
         let provider = ProviderKind::Codex;
@@ -1174,7 +1181,7 @@ mod thread_guard_stale_pure_tests {
         assert_episode_untouched(&shared, thread_id, &replacement, 9_001).await;
         let routing_after = routing(&shared, parent_id, thread_id);
         assert_eq!(routing_after, (Some(next_thread), Some(next_alt)));
-        assert_eq!(kicked_parents(&shared), vec![parent_id]);
+        assert!(kicked_parents(&shared).is_empty());
         let event = rx
             .try_recv()
             .expect("the queue-eligible edge must follow the cleanup");
