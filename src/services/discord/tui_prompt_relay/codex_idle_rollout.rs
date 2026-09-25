@@ -293,6 +293,7 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                             "codex idle rollout relay selected external turn owner"
                         );
                         if wait_for_tui_direct_synthetic_non_bridge_claim(
+                            &shared.tmux_watchers,
                             &ProviderKind::Codex,
                             channel_id,
                             &tmux_session_name,

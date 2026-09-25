@@ -4472,3 +4472,132 @@ impl SessionBoundDiscordRelaySink {
         sink
     }
 }
+
+/// #6210: the real idle JSONL relay loop over one captured supervisor StreamRelay, whose
+/// sink commits each frame the way the Discord sink does, so sends are counted exactly.
+pub(in crate::services::discord) mod idle_relay_harness {
+    use crate::services::cluster::stream_relay::{
+        RelaySink, RelaySinkError, RelaySinkOutcome, StreamFrame, StreamRelayHandle,
+    };
+    use crate::services::discord::SharedData;
+    use serenity::model::id::ChannelId;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct CommittingCapture {
+        frames: tokio::sync::mpsc::UnboundedSender<StreamFrame>,
+        shared: Arc<SharedData>,
+        channel: ChannelId,
+    }
+
+    #[async_trait::async_trait]
+    impl RelaySink for CommittingCapture {
+        async fn deliver(&self, frame: &StreamFrame) -> Result<RelaySinkOutcome, RelaySinkError> {
+            if let Some((_, end)) = frame.relay_range {
+                let coord = self.shared.tmux_relay_coord(self.channel);
+                coord.confirmed_end_offset.fetch_max(end, Ordering::SeqCst);
+            }
+            self.frames.send(frame.clone()).expect("capture frame");
+            Ok(RelaySinkOutcome::FrameAccepted)
+        }
+    }
+
+    pub(in crate::services::discord) const PAYLOAD: &str = "{\"type\":\"system\",\"subtype\":\"init\"}\n{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"회수할 응답\"}]}}\n";
+
+    /// A registered, heartbeating tmux watcher handle for `session`.
+    pub(in crate::services::discord) fn live_watcher(
+        session: &str,
+        output_path: &str,
+    ) -> crate::services::discord::TmuxWatcherHandle {
+        crate::services::discord::TmuxWatcherHandle {
+            tmux_session_name: session.to_string(),
+            output_path: output_path.to_string(),
+            paused: Arc::default(),
+            resume_offset: Arc::default(),
+            cancel: Arc::default(),
+            pause_epoch: Arc::default(),
+            turn_delivered: Arc::default(),
+            last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                crate::services::discord::tmux_watcher_now_ms(),
+            )),
+        }
+    }
+
+    pub(in crate::services::discord) struct IdleRelayHarness {
+        pub(in crate::services::discord) shared: Arc<SharedData>,
+        pub(in crate::services::discord) transcript: std::path::PathBuf,
+        session: String,
+        frames: tokio::sync::mpsc::UnboundedReceiver<StreamFrame>,
+        shutdown: Arc<AtomicBool>,
+        task: tokio::task::JoinHandle<()>,
+        _relay: StreamRelayHandle,
+    }
+
+    impl IdleRelayHarness {
+        /// Starts on an empty transcript under `root`, so the loop's cursor begins at 0.
+        pub(in crate::services::discord) async fn start(
+            root: &std::path::Path,
+            channel_id: u64,
+            session: &str,
+        ) -> Self {
+            let provider = crate::services::provider::ProviderKind::Claude;
+            let transcript = root.join(format!("{session}.jsonl"));
+            std::fs::write(&transcript, b"").expect("empty transcript");
+            let binding = crate::services::cluster::session_matcher::MatchedChannel {
+                channel_id: channel_id.to_string(),
+                agent_id: "agent-6210".to_string(),
+                provider: provider.clone(),
+                expected_session_name: session.to_string(),
+                expected_rollout_path: transcript.to_str().expect("utf8 path").to_string(),
+            };
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let (tx, frames) = tokio::sync::mpsc::unbounded_channel();
+            let relay = crate::services::cluster::stream_relay::spawn_stream_relay(
+                binding.clone(),
+                Arc::new(CommittingCapture {
+                    frames: tx,
+                    shared: shared.clone(),
+                    channel: ChannelId::new(channel_id),
+                }),
+            );
+            crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
+                .register(session.to_string(), relay.producer());
+            crate::services::cluster::session_registry::global_session_registry()
+                .upsert(binding, None);
+            let health = Arc::new(crate::services::discord::health::HealthRegistry::new());
+            health
+                .register(provider.as_str().to_string(), shared.clone())
+                .await;
+            let sink = Arc::new(super::super::SessionBoundDiscordRelaySink::new(health));
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let task = tokio::spawn(super::super::run_idle_jsonl_relay_loop(
+                shutdown.clone(),
+                sink,
+            ));
+            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+            Self {
+                shared,
+                transcript,
+                session: session.to_string(),
+                frames,
+                shutdown,
+                task,
+                _relay: relay,
+            }
+        }
+
+        /// Frames the supervisor relay handed to its sink since the last call.
+        pub(in crate::services::discord) fn sent(&mut self) -> Vec<StreamFrame> {
+            std::iter::from_fn(|| self.frames.try_recv().ok()).collect()
+        }
+
+        pub(in crate::services::discord) async fn stop(self) {
+            self.shutdown.store(true, Ordering::Release);
+            let _ = self.task.await;
+            crate::services::cluster::session_registry::global_session_registry()
+                .remove(&self.session);
+            crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
+                .deregister(&self.session);
+        }
+    }
+}

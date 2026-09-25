@@ -12,6 +12,15 @@ pub(super) async fn apply_rebind(
     decision: &RelayRecoveryDecision,
     episode: Option<&circuit_breaker::RelayReattachEpisode>,
 ) -> RelayRecoveryApplyResult {
+    if let Some(pin) = episode.map(circuit_breaker::RelayReattachEpisode::pin) {
+        super::health::reclaim_watcherless_session_bound_relay(
+            registry,
+            provider,
+            ChannelId::new(decision.channel_id),
+            pin,
+        )
+        .await;
+    }
     match registry
         .rebind_inflight(
             provider,

@@ -429,6 +429,7 @@ async fn relay_idle_claude_bindings(shared_ref: &Arc<SharedData>) {
                     "Claude idle transcript relay selected external turn owner"
                 );
                 if wait_for_tui_direct_synthetic_non_bridge_claim(
+                    &shared.tmux_watchers,
                     &ProviderKind::Claude,
                     channel_id,
                     &tmux_session_name,
