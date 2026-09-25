@@ -32,8 +32,8 @@ var autoQueueLog = _autoQueueLogLib.autoQueueLog;
 
 var PHASE_GATE_HUMAN_ESCALATION_THRESHOLD = 3;
 var PHASE_GATE_FAILURE_TTL_SEC = 7 * 24 * 60 * 60;
-// #2035: debounce phase-gate verdict-mismatch discord alerts to one per
-// run per hour so operators are not spammed when polling churns.
+// #2035: debounce phase-gate verdict-mismatch human-alert WARNs to one per
+// run+phase per hour so the log is not flooded when polling churns.
 var PHASE_GATE_ALERT_DEBOUNCE_TTL_SEC = 60 * 60;
 // #2035: prevent the auto-close fallback from running more than once per
 // (card, phase, commit) so a misbehaving check cannot loop-close the issue.
@@ -257,9 +257,10 @@ function handlePhaseGateFailure(cardId, phase, reason, context) {
   return failureCount;
 }
 
-// #2035: emit a Discord alert when phase-gate evaluation pauseRun()s the
-// queue due to a verdict mismatch. Debounced to one alert per run+phase
-// per hour so periodic re-evaluations do not spam the channel.
+// #2035: emit a human-alert WARN log line (#5993: no Discord channel) when
+// phase-gate evaluation pauseRun()s the queue due to a verdict mismatch.
+// Debounced to one per run+phase per hour so periodic re-evaluations do not
+// flood the log.
 function _maybeAlertPhaseGateVerdictMismatch(runId, phase, cardId, reason) {
   if (!runId) return;
   var key = "phase_gate_verdict_alert:" + runId + ":" + phase;
