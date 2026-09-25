@@ -8,11 +8,12 @@ use std::sync::atomic::Ordering;
 #[path = "tests/circuit_breaker_apply.rs"]
 mod circuit_breaker_apply;
 #[path = "tests/incarnation_follow_up.rs"]
-mod incarnation_follow_up;
+pub(in crate::services::discord) mod incarnation_follow_up;
 #[path = "tests/orphan_token_finish.rs"]
 pub(in crate::services::discord) mod orphan_token_finish;
 
-fn isolated_agentdesk_root() -> (AgentdeskRootGuard, tempfile::TempDir) {
+pub(in crate::services::discord) fn isolated_agentdesk_root()
+-> (AgentdeskRootGuard, tempfile::TempDir) {
     let temp = tempfile::TempDir::new().unwrap();
     // Canonical acquisition path: locking `shared_test_env_lock` directly
     // skipped both the re-entry tripwire and the `E`-after-`P` order tripwire,
@@ -2811,7 +2812,7 @@ async fn auto_apply_is_limited_to_requested_action_kind() {
 // non-empty text the caller skips the destructive clear (rebind fall-
 // through). When the tail is genuinely empty the guard is silent and the
 // existing clear behavior is preserved.
-struct AgentdeskRootGuard {
+pub(in crate::services::discord) struct AgentdeskRootGuard {
     previous: Option<std::ffi::OsString>,
     _lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
 }

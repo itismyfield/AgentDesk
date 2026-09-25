@@ -294,6 +294,9 @@ impl ChannelMailboxRegistry {
 }
 
 #[cfg(test)]
+mod closed_gate_tests;
+
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use std::time::Instant;
@@ -320,7 +323,7 @@ mod tests {
         }
     }
 
-    fn make_intervention(message_id: u64, text: &str) -> Intervention {
+    pub(super) fn make_intervention(message_id: u64, text: &str) -> Intervention {
         Intervention {
             author_id: UserId::new(7),
             author_is_bot: false,

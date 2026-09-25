@@ -247,6 +247,9 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_episode
 }
 
 #[cfg(test)]
+mod closed_actor_tests;
+
+#[cfg(test)]
 mod relay_state_contract_refs {
     #[test]
     fn contract_symbols_exist() {

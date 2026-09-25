@@ -95,3 +95,13 @@ pub(in crate::services::discord) async fn clear_channel_discarding_catch_up_back
     }
     cleared
 }
+
+#[cfg(test)]
+pub(in crate::services::discord) fn arm_catch_up_retry_for_tests(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    checkpoint: u64,
+) {
+    let state = CatchUpRetryState::new(checkpoint);
+    shared.catch_up_retry_pending.insert(channel_id, state);
+}
