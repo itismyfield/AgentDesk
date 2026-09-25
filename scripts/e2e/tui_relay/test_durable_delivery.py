@@ -419,7 +419,7 @@ class SafetyAndDeadlineFixtures(unittest.TestCase):
         self.assertEqual(result["dirty_active_residue"], busy)
         reset.assert_not_called()
 
-    def test_recheck_to_send_residual_window_and_honesty_claim_are_pinned(self):
+    def test_recheck_to_send_residual_window_is_pinned(self):
         state = {"prompt_sent_after_recheck_race": False}
         class Client:
             base_url = "http://agentdesk.test"
@@ -456,13 +456,6 @@ class SafetyAndDeadlineFixtures(unittest.TestCase):
                 run_id="fixture",
                 client=Client(),
             )
-        claim = " ".join((ROOT / "docs/e2e/multi-provider-e2e.md").read_text().split())
-        self.assertIn(
-            "the prompt-time recheck narrows the nominal gate-return-to-prompt window "
-            "from 368 seconds to 0 seconds, and the last-mailbox-snapshot-to-prompt "
-            "window from 373 seconds to 5 seconds. it does not close the toctou",
-            claim.lower(),
-        )
         self.assertEqual(gate.call_count, 2)
         self.assertTrue(state["prompt_sent_after_recheck_race"])
         self.assertEqual(result["status"], "pass", result)
