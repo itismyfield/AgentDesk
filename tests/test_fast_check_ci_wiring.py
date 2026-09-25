@@ -19,7 +19,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "b5c91170ab5bc40950a118108d6e9a7746b81728b60d105339f9c1f2d66cafef"
+    "d653e3eee8d2daba31a4cbd1bf20967c0d8ec825eb2aa3e9fdada7570ee40ece"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Path-filtered required contexts: (mirror job, required name, runner job,
@@ -1489,7 +1489,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     job_id
                     for job_id, candidate in jobs.items()
                     if isinstance(candidate, dict)
-                    and str(candidate.get("name", "")).strip() == context
+                    and str(candidate.get("name", job_id)).strip() == context
                 ]
                 self.assertEqual(publishers, [mirror_id])
 
@@ -1497,6 +1497,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         baseline = self.run_hardening_fixture(workflow)
         self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        # label -> [(context, original block, mutated block, diagnostics)]; one
+        # gate run per label mutates all three contexts and must name each.
+        batches: dict[str, list[tuple[str, str, str, tuple[str, ...]]]] = {}
         for (
             mirror_id,
             context,
@@ -1531,6 +1534,21 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     "        run: 'true'\n",
                     1,
                 ),
+                "mirror step if false": mirror.replace(
+                    "        run: ./scripts/required-check-mirror.sh\n",
+                    "        if: false\n        run: ./scripts/required-check-mirror.sh\n",
+                    1,
+                ),
+                "mirror step or true": mirror.replace(
+                    "        run: ./scripts/required-check-mirror.sh\n",
+                    "        run: ./scripts/required-check-mirror.sh || true\n",
+                    1,
+                ),
+                "helper pin step if false": mirror.replace(
+                    f"      - name: {PATH_FILTER_MIRROR_PIN_STEP}\n",
+                    f"      - name: {PATH_FILTER_MIRROR_PIN_STEP}\n        if: false\n",
+                    1,
+                ),
                 "filter output forced false": mirror.replace(
                     f"FILTER_OUTPUT: {filter_output}\n", "FILTER_OUTPUT: false\n", 1
                 ),
@@ -1543,27 +1561,93 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     f"    name: {runner_name}\n", f"    name: {context}\n", 1
                 ),
             }
-            cases = [
-                (label, mirror, mutated) for label, mutated in mirror_mutations.items()
-            ] + [
-                (label, runner, mutated) for label, mutated in runner_mutations.items()
-            ]
-            for label, original, mutated_block in cases:
+            diagnostics = (
+                f"{context} required-context mirror {mirror_id} ",
+                f"{context} runner job {runner_id} ",
+                f"required {context} context must belong only to jobs.{mirror_id};",
+            )
+            for label, mutated in mirror_mutations.items():
+                batches.setdefault(label, []).append((context, mirror, mutated, diagnostics))
+            for label, mutated in runner_mutations.items():
+                batches.setdefault(label, []).append((context, runner, mutated, diagnostics))
+        for label, cases in batches.items():
+            mutated = workflow
+            for context, original, mutated_block, _diagnostics in cases:
                 with self.subTest(context=context, mutation=label):
                     self.assertNotEqual(mutated_block, original)
-                    mutated = workflow.replace(original, mutated_block, 1)
-                    result = self.run_hardening_fixture(mutated)
-                    self.assertNotEqual(result.returncode, 0, result.stderr)
+                mutated = mutated.replace(original, mutated_block, 1)
+            result = self.run_hardening_fixture(mutated)
+            self.assertNotEqual(result.returncode, 0, result.stderr)
+            for context, _original, _mutated_block, diagnostics in cases:
+                with self.subTest(context=context, mutation=label):
+                    self.assertTrue(
+                        any(marker in result.stderr for marker in diagnostics),
+                        result.stderr,
+                    )
 
-        release_probe = (
-            "name: probe\non:\n  pull_request:\njobs:\n  probe:\n"
-            "    name: Lint\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"
+        # Effective check names (#5083 P2-2): an unnamed job publishes its ID,
+        # and a matrix job without a name expression gets a value suffix.
+        unnamed_jobs = (
+            "  Lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"
+            "  Dashboard:\n    strategy:\n      matrix:\n        runtime: [\"Node 22\"]\n"
+            "    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"
         )
-        result = self.run_hardening_fixture(
-            workflow, extra_workflows={"probe.yml": release_probe}
-        )
-        self.assertNotEqual(result.returncode, 0, result.stderr)
-        self.assertIn("pull_request workflow must not publish required Lint context", result.stderr)
+        result = self.run_hardening_fixture(workflow.rstrip("\n") + "\n\n" + unnamed_jobs)
+        with self.subTest(in_pr_workflow="gate rc"):
+            self.assertNotEqual(result.returncode, 0, result.stderr)
+        for context, mirror_id, job_id in (
+            ("Lint", "lint_required_context", "Lint"),
+            ("Dashboard (Node 22)", "dashboard_required_context", "Dashboard"),
+        ):
+            with self.subTest(in_pr_workflow=job_id):
+                self.assertIn(
+                    f"required {context} context must belong only to jobs.{mirror_id}; "
+                    f"publishers: [\"{mirror_id}\", \"{job_id}\"]",
+                    result.stderr,
+                )
+
+        # Other workflows, on any trigger (#5083 P2-1), must not publish a
+        # required name; workflow names do not namespace check names.
+        probes = {
+            "named-lint.yml": ("pull_request:", "probe", "    name: Lint\n", "Lint"),
+            "unnamed-lint.yml": ("pull_request:", "Lint", "", "Lint"),
+            "unnamed-matrix.yml": (
+                "pull_request:",
+                "Dashboard",
+                "    strategy:\n      matrix:\n        runtime: [\"Node 22\"]\n",
+                "Dashboard (Node 22)",
+            ),
+            "named-matrix.yml": (
+                "schedule:\n    - cron: '0 0 * * *'",
+                "probe",
+                "    name: Dashboard\n    strategy:\n      matrix:\n        runtime: [\"Node 22\"]\n",
+                "Dashboard (Node 22)",
+            ),
+            "dispatch.yml": ("workflow_dispatch:", "probe", "    name: High-risk recovery\n", "High-risk recovery"),
+            "push.yml": (
+                "push:\n    branches: [main]",
+                "probe",
+                "    name: Dashboard (Node 22)\n",
+                "Dashboard (Node 22)",
+            ),
+        }
+        extra_workflows = {
+            file: (
+                f"name: probe\non:\n  {trigger}\njobs:\n  {job_id}:\n{job_fields}"
+                "    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"
+            )
+            for file, (trigger, job_id, job_fields, _context) in probes.items()
+        }
+        result = self.run_hardening_fixture(workflow, extra_workflows=extra_workflows)
+        with self.subTest(probe="gate rc"):
+            self.assertNotEqual(result.returncode, 0, result.stderr)
+        for file, (_trigger, job_id, _job_fields, context) in probes.items():
+            with self.subTest(probe=file):
+                self.assertIn(
+                    f".github/workflows/{file}: workflow must not publish required "
+                    f"{context} context (jobs: {job_id})",
+                    result.stderr,
+                )
 
     def test_path_filter_required_mirrors_fail_closed_on_upstream_results(self) -> None:
         jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]

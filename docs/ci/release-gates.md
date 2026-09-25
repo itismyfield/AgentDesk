@@ -279,8 +279,9 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scri
 
 ### Always-on (필터 없음)
 
-- **Full tests** / **PostgreSQL tests** / **High-risk recovery** 는 path filter 없이 `main` push 시 무조건 실행. 이 세 gate는 `changes` job의 outputs에 의존하지 않으며 `if:` 조건 없이 정의된다 — `ci-main.yml`에는 `changes` job 자체가 없다(#5232 R3).
+- **Full tests** / **PostgreSQL tests** / **High-risk recovery (main)** 는 path filter 없이 `main` push 시 무조건 실행. 이 세 gate는 `changes` job의 outputs에 의존하지 않으며 `if:` 조건 없이 정의된다 — `ci-main.yml`에는 `changes` job 자체가 없다(#5232 R3).
 - 즉, 커밋이 어떤 파일만 건드리든 이 셋은 실행되고 red면 merge 차단에 준하는 신호다.
+- main/nightly job 이름은 PR 필수 context(`Lint`, `High-risk recovery`, `Dashboard (Node 22)`)와 겹치지 않는다. 워크플로 이름은 check 이름을 구분하지 않아 같은 SHA에 경쟁 게시가 생기므로, `check-ci-runner-hardening.sh`가 트리거와 무관하게 유효 이름(job ID·matrix 접미사 포함)으로 강제한다(#5083).
 
 ### Conditional (`high_risk_recovery` path filter — `ci-pr.yml` 전용)
 
@@ -372,7 +373,7 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scri
 | --- | --- | --- | --- |
 | Full tests 개별 케이스 red | `<mod>::<test>` (e.g. `pipeline::tests::…`) | `cargo test -p agentdesk <identifier> -- --exact --nocapture` | `agent:project-agentdesk` |
 | PG tests 개별 케이스 red | `<mod>::…_pg_…` / `postgres_…` | `cargo test -p agentdesk <identifier> -- --exact --nocapture` | `agent:project-agentdesk` |
-| High-risk recovery job 자체 red (로그에서 test id 추출 실패) | `job::High-risk recovery` | `_job-level failure; see failing workflow job_` | `agent:project-agentdesk` |
+| High-risk recovery job 자체 red (로그에서 test id 추출 실패) | `job::High-risk recovery (main)` | `_job-level failure; see failing workflow job_` | `agent:project-agentdesk` |
 | High-risk recovery 개별 시나리오 red | `high_risk_recovery::<submod>::scenario_…` | `cargo test -p agentdesk <identifier> -- --exact --nocapture` | `agent:project-agentdesk` |
 | 인프라 종료(job-level, test id 추출 실패 + SIGTERM/signal 15/exit 143/cancel, **real-failure 신호 없음**) | **미기록 — flaky skip** | (없음, ci-red 미승격) | (없음) |
 | Job-level red + 공유 술어 `scripts/ci/real-failure-predicate.sh` 의 real-failure 신호 — SIGTERM 노이즈 혼재 여부 무관 | `job::<name>` | `_job-level failure; see failing workflow job_` | `agent:project-agentdesk` |

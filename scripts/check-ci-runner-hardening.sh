@@ -1321,16 +1321,6 @@ def load_jobs(path)
   [document, jobs.is_a?(Hash) ? jobs : {}]
 end
 
-def pull_request_triggered?(document)
-  trigger = document.is_a?(Hash) ? (document[true] || document["on"]) : nil
-  events = case trigger
-  when Hash then trigger.keys
-  when Array then trigger
-  else [trigger]
-  end
-  events.any? { |event| %w[pull_request pull_request_target].include?(event.to_s) }
-end
-
 # Mirrors the Script checks rule: one matrix substitution is allowed only when
 # its static prefix/suffix cannot render the required context.
 def can_render_context?(name, context)
@@ -1343,6 +1333,20 @@ def can_render_context?(name, context)
 
   [matrix_name[1], matrix_name[2]].any? { |fragment| fragment.include?(context) } ||
     (context.start_with?(matrix_name[1]) && context.end_with?(matrix_name[2]))
+end
+
+# GitHub publishes an unnamed job under its job ID, and appends
+# " (<matrix values>)" to a matrix job whose name has no expression. Matrix
+# values are not enumerated: any such suffix fails closed.
+def publishes_context?(job_id, job, context)
+  return false unless job.is_a?(Hash)
+
+  name = job["name"].nil? ? job_id.to_s : job["name"].to_s
+  return true if can_render_context?(name, context)
+
+  matrix = job["strategy"].is_a?(Hash) ? job["strategy"]["matrix"] : job["strategy"]
+  !matrix.nil? && !name.include?("${{") &&
+    context.start_with?("#{name.strip} (") && context.end_with?(")")
 end
 
 lint_filter = "needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true'"
@@ -1456,9 +1460,7 @@ specs.each do |spec|
     end
   end
 
-  publishers = jobs.select do |_job_id, job|
-    job.is_a?(Hash) && job["name"].is_a?(String) && can_render_context?(job["name"], context)
-  end.keys.map(&:to_s)
+  publishers = jobs.select { |job_id, job| publishes_context?(job_id, job, context) }.keys.map(&:to_s)
   unless publishers == [mirror_id]
     errors << "required #{context} context must belong only to jobs.#{mirror_id}; publishers: #{publishers.inspect}"
   end
@@ -1471,16 +1473,15 @@ end
     errors << "#{path}: cannot parse YAML: #{error.message}"
     next
   end
-  next unless pull_request_triggered?(document)
 
+  # Workflow names do not namespace check names, so any trigger that can
+  # report on a candidate SHA (push, dispatch, schedule) counts.
   specs.each do |spec|
     context = spec.fetch("context")
-    publishers = other_jobs.select do |_job_id, job|
-      job.is_a?(Hash) && job["name"].is_a?(String) && can_render_context?(job["name"], context)
-    end.keys.map(&:to_s)
+    publishers = other_jobs.select { |job_id, job| publishes_context?(job_id, job, context) }.keys.map(&:to_s)
     next if publishers.empty?
 
-    errors << "#{path}: pull_request workflow must not publish required #{context} context (jobs: #{publishers.join(', ')})"
+    errors << "#{path}: workflow must not publish required #{context} context (jobs: #{publishers.join(', ')})"
   end
 end
 
