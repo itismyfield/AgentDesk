@@ -497,9 +497,14 @@ that retires turn-lifetime state.
   progress. Re-adoption is the exception, and it must itself cross a fenced
   admission — a compare-and-set that refuses an occupied slot and refuses an
   episode the mailbox already released. The released-episode check names the
-  row's episode, not the token being installed. The current re-adoption paths
-  are restart restoration (`RecoveryKickoff`, and the pane-alive and boot
-  watcher reattach through `reregister_active_turn_from_inflight`),
+  row's episode, not the token being installed. TUI-direct admission decides
+  construction from the row it read before claiming the slot and re-checks
+  that decision before it refreshes a row: a construction that finds a
+  matching row by then, or an adoption whose row is no longer the same
+  episode, leaves the row alone and releases its own lease. The current
+  re-adoption paths are restart restoration (`RecoveryKickoff`, and the
+  pane-alive and boot watcher reattach through
+  `reregister_active_turn_from_inflight`),
   runtime/manual rebind (the operator rebind route, automatic watcher reattach
   and watcher respawn, all through `reregister_active_turn_from_inflight`), and
   TUI-direct dormant resumption (`capture_dormant`, behind the idle unpublished
@@ -509,8 +514,13 @@ that retires turn-lifetime state.
   not certify it fenced. A pending-start replay is construction under the same
   test — only while no matching row exists. This is an enumeration, not a
   survey (see I20). The current re-mint fence proves only a release seen by
-  the current process's current mailbox actor incarnation, so today only
-  runtime/manual rebind within that incarnation's history is fenced. Known
+  the current process's current mailbox actor incarnation, so today
+  runtime/manual rebind, TUI-direct dormant resumption and TUI-direct
+  admission over a matching row are fenced only within that incarnation's
+  history. Every exact-nonce release raises the fence, the owner's normal
+  finalize and a failed claim's own rollback included, so within a process an
+  episode that is not the latest started since that release is refused
+  re-adoption even if it was never itself released. Known
   gaps (#5951): restart `RecoveryKickoff` is a compare-and-set on slot
   occupancy only and never consults the re-mint fence; the fence is in-memory,
   so the restart pane-alive and boot watcher reattach refuse only releases
@@ -518,10 +528,9 @@ that retires turn-lifetime state.
   released — for example `OperatorRelease::claim` commits the exact mailbox
   release before it clears the durable row, so a process death between the
   two leaves a row for an already-released episode that the next boot
-  re-adopts; dormant resumption and TUI-direct admission over a matching row,
-  retained or fresh, are admitted through the unfenced claim; the re-mint
-  fence is raised only by an exact-nonce release, so an episode ended by a
-  channel-scoped release can be re-minted from a row that outlived it; and
+  re-adopts; the re-mint fence is raised only by an exact-nonce release, so
+  an episode ended by a channel-scoped release can be re-minted from a row
+  that outlived it; and
   the fence lives in the mailbox actor, so a registry purge that recreates
   the actor forgets it. Fenced restart re-adoption needs a durable release
   authority that outlives the process.
@@ -622,8 +631,7 @@ that retires turn-lifetime state.
   signal, completion events, queue-exit feedback), accepted wrapper follow-up
   re-resolved by channel, side effects of a pending thread-parent or watcher
   successor, restart `RecoveryKickoff` without a re-mint check, restart
-  reattach that cannot see a prior process's release, TUI-direct admission
-  over a matching row through the unfenced claim, and the other admission
+  reattach that cannot see a prior process's release, and the other admission
   gaps above remain in production; each is assigned to a #5951 slice.
 - Invariant key: `turn_writer_names_its_episode`. This section lands the
   contract only: the `record_invariant_check` wiring and a deliberate-violation

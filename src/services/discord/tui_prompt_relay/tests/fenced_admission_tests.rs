@@ -7,7 +7,7 @@ use crate::services::tui_prompt_dedupe::{ExternalInputRelayLease, TuiRuntimeBind
 use crate::services::turn_orchestrator::ActiveTurnKind;
 use poise::serenity_prelude::UserId;
 use std::time::Instant;
-use synthetic_start::bridge_handoff::ADMISSION_PAUSE;
+use synthetic_start::bridge_handoff::{ADMISSION_PAUSE, PREPARE_PAUSE};
 
 const TMUX: &str = "c3r-fenced-admission";
 const OTHER_TMUX: &str = "c3r-fenced-admission-other";
@@ -314,9 +314,9 @@ fn dormant_partial_capture_follows_the_latest_started_episode() {
 }
 
 /// T-R8b' (D1): the owner's own normal finalize is an exact release too, so the
-/// undelivered tail it left is resumed only while the fence is not consulted.
+/// undelivered tail it left is not resumed in this process.
 #[test]
-fn dormant_partial_capture_after_the_owners_normal_finalize() {
+fn dormant_partial_capture_after_the_owners_normal_finalize_is_refused() {
     run(|output| async move {
         let case = Case::new(&make_shared_data_for_tests(), 5_951_805, &output);
         let msg = 5_951_815;
@@ -332,24 +332,24 @@ fn dormant_partial_capture_after_the_owners_normal_finalize() {
             "an undelivered tail remains"
         );
         assert!(
-            case.capture(&row).await,
-            "D1 characterization: main resumes"
+            !case.capture(&row).await,
+            "D1 (a): refused after the finalize"
         );
     });
 }
 
 /// T-R8f (D1, F2): X's dormant row makes another anchor's claim fail; that claim's own
-/// rollback is an exact release.
+/// rollback is an exact release, after which X is refused.
 #[test]
-fn dormant_partial_capture_after_another_claims_rollback() {
+fn dormant_partial_capture_after_another_claims_rollback_is_refused() {
     run(|output| async move {
         let case = Case::new(&make_shared_data_for_tests(), 5_951_806, &output);
         case.turn(5_951_816, "r8f-x", false).await;
         let row = case.dormant_row(5_951_816, "r8f-x");
         assert!(!case.claim(5_951_826, OTHER_TMUX).await);
         assert!(
-            case.capture(&row).await,
-            "D1 characterization: main resumes"
+            !case.capture(&row).await,
+            "D1 (a): refused after the rollback"
         );
     });
 }
@@ -444,6 +444,29 @@ fn construction_does_not_refresh_a_row_that_appeared_after_admission() {
     });
 }
 
+/// T-R9g: a released episode's row that appears between the prepare read and the
+/// admission is not refreshed by the construction that did not see it.
+#[test]
+fn construction_does_not_refresh_a_row_that_appeared_before_admission() {
+    run(|output| async move {
+        let case = Case::new(&make_shared_data_for_tests(), 5_951_845, &output);
+        let n1 = case.construct(5_951_855).await;
+        assert!(case.exact(5_951_855, &n1).await);
+        let released = case.row().unwrap();
+        assert!(inflight::clear_inflight_state(
+            &ProviderKind::Claude,
+            case.channel.get()
+        ));
+        let before = case.observe().await;
+        let claimed = case
+            .claim_paused(5_951_855, &PREPARE_PAUSE, || case.save(&released))
+            .await;
+        assert!(!claimed, "construction refreshed a released episode's row");
+        assert_eq!(case.nonce(), Some(n1));
+        assert_eq!(case.observe().await.1, before.1);
+    });
+}
+
 /// T-R9f': the episode re-check is added to, not substituted for, the row predicate.
 #[test]
 fn adoption_does_not_refresh_a_row_whose_external_turn_changed() {
@@ -467,17 +490,17 @@ fn adoption_does_not_refresh_a_row_whose_external_turn_changed() {
 }
 
 /// T-R9i (D1, F2): another anchor's failed claim rolls back with an exact release,
-/// before the same anchor claims its row again.
+/// after which the same anchor's row is refused re-adoption.
 #[test]
-fn claim_over_a_row_after_another_claims_rollback() {
+fn claim_over_a_row_after_another_claims_rollback_is_refused() {
     run(|output| async move {
         let case = Case::new(&make_shared_data_for_tests(), 5_951_844, &output);
         case.construct(5_951_854).await;
         assert!(case.by_id(5_951_854).await);
         assert!(!case.claim(5_951_864, OTHER_TMUX).await);
         assert!(
-            case.claim(5_951_854, TMUX).await,
-            "D1 characterization: main re-adopts"
+            !case.claim(5_951_854, TMUX).await,
+            "D1 (a): refused after the rollback"
         );
     });
 }

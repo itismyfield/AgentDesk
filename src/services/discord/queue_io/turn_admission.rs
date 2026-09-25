@@ -54,23 +54,48 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_unless_released
     request_owner: UserId,
     user_message_id: MessageId,
 ) -> TryStartTurnResult {
+    let episode_nonce = cancel_token.turn_nonce().map(str::to_owned);
+    mailbox_try_start_turn_adopting(
+        shared,
+        channel_id,
+        cancel_token,
+        request_owner,
+        user_message_id,
+        ActiveTurnKind::UserOrAgent,
+        episode_nonce,
+    )
+    .await
+}
+
+/// Row -> lease re-adoption: the actor refuses, in the claim's own step, the
+/// ROW's episode when it did not start after the last exact release; the
+/// installed token's nonce is what it records as started.
+pub(in crate::services::discord) async fn mailbox_try_start_turn_adopting(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    cancel_token: Arc<CancelToken>,
+    request_owner: UserId,
+    user_message_id: MessageId,
+    kind: ActiveTurnKind,
+    episode_nonce: Option<String>,
+) -> TryStartTurnResult {
     mailbox_try_start_turn_ordered(
         shared,
         channel_id,
         cancel_token,
         request_owner,
         user_message_id,
-        AdmissionClaim::UnlessReleased,
+        AdmissionClaim::Adopt(kind, episode_nonce),
     )
     .await
 }
 
 /// The mailbox claim an admitted turn issues.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum AdmissionClaim {
     Kinded(ActiveTurnKind, TurnAdmissionOrder),
-    /// An immediate user claim the actor's recovery fence may refuse.
-    UnlessReleased,
+    /// An immediate claim the actor's recovery fence may refuse for the named episode.
+    Adopt(ActiveTurnKind, Option<String>),
 }
 
 async fn mailbox_try_start_turn_ordered(
@@ -113,12 +138,14 @@ async fn mailbox_try_start_turn_ordered(
                 )
                 .await
         }
-        AdmissionClaim::UnlessReleased => {
+        AdmissionClaim::Adopt(kind, ref episode_nonce) => {
             mailbox
-                .try_start_turn_unless_released(
+                .try_start_turn_adopting(
                     cancel_token,
                     request_owner,
                     user_message_id,
+                    kind,
+                    episode_nonce.clone(),
                     persistence,
                 )
                 .await
