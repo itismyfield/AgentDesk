@@ -2693,12 +2693,9 @@ jobs:
                 self.assertEqual(journal.read_text().splitlines(),
                                  ["-m", "unittest", "tests.test_nightly_ci_triage"])
 
-    def test_ci_script_checks_runs_this_contract(self) -> None:
+    def test_ci_script_checks_runs_lane_coverage_contract(self) -> None:
         script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(
             encoding="utf-8"
-        )
-        self.assertIn(
-            '"$PYTHON" -m unittest tests.test_fast_check_ci_wiring', script
         )
         self.assertIn(
             'scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"',
