@@ -4773,6 +4773,7 @@ services::discord::relay_recovery::destructive_warrant::tests::truth_table_is_ex
 services::discord::relay_recovery::destructive_warrant::tests::warrant_is_monotone_and_abstains_when_its_operand_is_absent
 services::discord::relay_recovery::idle_tmux::unread_tail_seed::a_retained_decision_never_keys_a_later_birth
 services::discord::relay_recovery::idle_tmux::unread_tail_seed::a_retained_snapshot_never_keys_a_later_birth
+services::discord::relay_recovery::idle_tmux::unread_tail_seed::a_returning_mailbox_turn_keeps_its_prior_grading
 services::discord::relay_recovery::idle_tmux::unread_tail_seed::unmeasured_tail_refusals_nothing_names_are_never_folded
 services::discord::relay_recovery::leaked_row_sweep::tests::discord_row_is_sweep_candidate_without_pending_start
 services::discord::relay_recovery::leaked_row_sweep::tests::sweep_rejects_rows_without_channel_or_tmux_identity

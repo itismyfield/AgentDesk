@@ -316,3 +316,23 @@ async fn a_retained_decision_never_keys_a_later_birth() {
     assert!(!admits(&rowed_decision(&seed).await));
     assert_eq!(seed.refusals().len(), 2, "{:?}", seed.refusals());
 }
+
+/// Mailbox turns A, B, A on one site: every call refuses, but A's grading outlives B's.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_returning_mailbox_turn_keeps_its_prior_grading() {
+    let Some(seed) = UnreadTailSeed::start(5_996_140_005, UnreadTailShape::RowOutputMissing).await
+    else {
+        return;
+    };
+    let mut snapshot = rowed_snapshot(&seed).await;
+    for (turn, expected) in [("A", 1), ("B", 2), ("A", 2)] {
+        snapshot.mailbox_active_turn_nonce = Some(turn.to_string());
+        assert!(!super::stale_mailbox_idle_tail_admits(
+            &seed.provider,
+            &snapshot,
+            true
+        ));
+        assert_eq!(seed.refusals().len(), expected, "after turn {turn}");
+    }
+}
