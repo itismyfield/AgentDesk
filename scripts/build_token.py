@@ -22,7 +22,12 @@ Descendants outliving that child are not covered and no process-group kill is
 used, because the build's group intentionally holds an sccache daemon.
 
 An explicit --delegate-lease permits one cooperative wrapper hop. Ordinary
-children inherit no lease; this does not make whole-deploy wrapping or ABBA safe.
+children inherit no lease, only a refusal marker: a nested wrapper under a live
+holder exits EXIT_NESTED at once instead of waiting on its own ancestor, and
+deploy-release.sh runs the same check before its deploy lock, so whole-deploy
+wrapping and the token-then-deploy-lock ABBA fail fast rather than time out.
+deploy-release.sh's `cargo metadata --no-deps` target lookup is read-only and
+stays unwired by design.
 
 Waiting is first-come-first-served. `acquire()` retries a non-blocking flock, so
 the kernel never queues the waiters; on 2026-09-17 that let a lane release the
@@ -51,6 +56,9 @@ WAIT_TIMEOUT_ENV = "ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS"
 # build log (build-release.sh runs cargo through `tail -1`). Absent: stderr.
 DIAG_FD_ENV = "ADK_BUILD_TOKEN_DIAG_FD"
 LEASE_ENV = "ADK_BUILD_TOKEN_LEASE"
+# "<dev>:<ino>:<pid>:<ps lstart>" of the token-holding wrapper, set in its child's env; the
+# start time rejects a reused pid. Refusal only: a forged marker can refuse, never lock.
+HOLDER_ENV = "ADK_BUILD_TOKEN_HOLDER"
 # Opt-out for the sccache activation below: these spellings (trimmed, case-folded)
 # turn it off, anything else -- unset included -- leaves it on.
 SCCACHE_OPT_OUT_ENV = "ADK_BUILD_TOKEN_SCCACHE"
@@ -79,6 +87,7 @@ _SEQUENCE_RETRY_SECS = 0.005
 EXIT_USAGE = 64
 EXIT_TOKEN_UNUSABLE = 69
 EXIT_TOKEN_TIMEOUT = 75
+EXIT_NESTED = 73
 _WOULD_BLOCK = (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES)
 
 # POSIX.1 sigaction(): the call shall fail with EINVAL for exactly these two.
@@ -410,7 +419,7 @@ def acquire(fd: int, path: str, timeout: float) -> None:
                 raise BuildTokenTimeout(
                     f"build token {path} still held after {timeout:g}s: raise"
                     f" {WAIT_TIMEOUT_ENV} to wait longer, or clear the holder -- an"
-                    " ancestor of this process holding the token deadlocks here")
+                    " ancestor holding the token outside this wrapper deadlocks here")
             time.sleep(WAIT_POLL_SECS)
 
 
@@ -424,6 +433,53 @@ def hold_token(path: str, env: Mapping[str, str]) -> Iterator[int]:
         yield fd
     finally:
         os.close(fd)
+
+
+def _ps(*args: str) -> str:
+    """`ps` output in the C locale and UTC so start times compare as strings; empty on failure."""
+    try:
+        return subprocess.run(["ps", *args], capture_output=True, text=True, timeout=5,
+                              check=True, env={**os.environ, "LC_ALL": "C", "TZ": "UTC0"}).stdout
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+
+
+def process_start(pid: int) -> str:
+    """`pid`'s start time as `ps -o lstart=` prints it, or "" when unreadable."""
+    return " ".join(_ps("-o", "lstart=", "-p", str(pid)).split())
+
+
+def _ancestor_starts() -> dict[int, str]:
+    """This process's ancestors -> start times, from one `ps` snapshot; empty when unreadable."""
+    table: dict[int, tuple[int, str]] = {}
+    try:
+        for line in _ps("-A", "-o", "pid=,ppid=,lstart=").splitlines():
+            if line.strip():
+                pid, ppid, start = line.split(None, 2)
+                table[int(pid)] = (int(ppid), " ".join(start.split()))
+    except ValueError:
+        return {}
+    seen: dict[int, str] = {}
+    pid = table.get(os.getpid(), (os.getppid(), ""))[0]
+    while pid > 1 and pid not in seen:
+        ppid, seen[pid] = table.get(pid, (0, ""))
+        pid = ppid
+    return seen
+
+
+def nested_holder(path: str, env: Mapping[str, str]) -> int | None:
+    """The live ancestor whose wrapper holds `path`; None for no, stale or unverifiable marker."""
+    try:
+        dev, ino, pid, start = env[HOLDER_ENV].split(":", 3)
+        dev, ino, pid = int(dev), int(ino), int(pid)
+        live = os.stat(path)
+    except (KeyError, ValueError, OSError):
+        return None
+    if (live.st_dev, live.st_ino) != (dev, ino) or not start:
+        return None
+    if _ancestor_starts().get(pid) != start:  # dead, non-ancestor, or a reused pid
+        return None
+    return pid
 
 
 def _exit_code(returncode: int) -> int:
@@ -605,6 +661,12 @@ def run(command: Sequence[str], env: Mapping[str, str] | None = None,
             print(f"build token: {exc}", file=sys.stderr)
             return EXIT_TOKEN_UNUSABLE
     apply_sccache_env(child_env)
+    holder = None if carrier is not None else nested_holder(path, os.environ)
+    if holder is not None:
+        print(f"build token: ancestor pid {holder} already holds {path}; refusing a nested"
+              " wrapper rather than waiting on it (--delegate-lease allows one hop)", file=sys.stderr)
+        return EXIT_NESTED
+    start = process_start(os.getpid())
     with _supervised() as supervisor:
         try:
             lease = inherited_lease(carrier, path) if carrier is not None else hold_token(path, child_env)
@@ -612,6 +674,8 @@ def run(command: Sequence[str], env: Mapping[str, str] | None = None,
                 if carrier is not None and delegate_lease:
                     raise BuildTokenError("an inherited lease cannot be delegated again")
                 assert_live_token(fd, path)
+                held = os.fstat(fd)
+                child_env[HOLDER_ENV] = f"{held.st_dev}:{held.st_ino}:{os.getpid()}:{start}"
                 rc = run_protected(command, child_env, supervisor, fd if delegate_lease else None)
         except BuildTokenTimeout as exc:
             print(f"build token: {exc}", file=sys.stderr)
@@ -643,6 +707,8 @@ def main(argv: Sequence[str]) -> int:
     delegate = len(args) > 1 and args[1] == "--delegate-lease"
     if delegate:  # Only before --; everything after -- remains command argv.
         del args[1]
+    if args[1:] == ["--refuse-if-nested"]:  # No command: exit status is the verdict.
+        return EXIT_NESTED if nested_holder(CANONICAL_TOKEN_PATH, os.environ) is not None else 0
     try:
         command = parse_command(args)
     except BuildTokenError as exc:

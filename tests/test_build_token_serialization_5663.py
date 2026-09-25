@@ -22,6 +22,7 @@ import contextlib
 import json
 import functools
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -108,26 +109,55 @@ def alive(pid: int) -> bool:
 
 
 def joined_lines(text: str) -> list[str]:
-    """Join backslash continuations so a wrapped command reads as one line."""
+    """Drop backslash-newlines as bash does, so a wrapped command reads as one logical line."""
     out: list[str] = []
     for raw in text.splitlines():
         if out and out[-1].endswith("\\"):
-            out[-1] = out[-1][:-1] + " " + raw.strip()
+            out[-1] = out[-1][:-1] + raw
         else:
             out.append(raw)
     return out
 
 
-def release_cargo_sites() -> dict[str, list[str]]:
-    """Release cargo invocations per tracked build script, discovered by scanning."""
+# The one wrapped form an array reference may take: the whole line, as deploy-release.sh writes it.
+WRAPPED = (r'(?:if )?\(cd "\$REPO" && (?:[A-Z_]+=\w+ )?python3 scripts/build_token\.py'
+           r' -- "\$\{{{name}\[@\]\}}"\)(?:; then)?')
+
+
+# A cargo array declaration; one without its closing paren (e.g. `$(...)` inside) or later changed by
+# `name+=`/`name[i]=` is unsupported, since its final arguments cannot be read from the declaration.
+DECL = re.compile(r"(\w+)=\((\s*cargo\s[^()]*)(\)?)")
+
+
+def cargo_sites(text: str) -> list[tuple[str, bool]]:
+    """Release cargo sites as (line, wired): one-/multi-line `name=(cargo ...)` arrays, their refs (only WRAPPED is
+    wired) and direct lines; unsupported declarations fail. A drift gate, blind to eval/source/function/alias calls."""
+    logical = "\n".join(joined_lines(text))
+    lines = [x.strip() for x in logical.splitlines()]
+    hits = []
+    for m in DECL.finditer(logical):
+        name, body, decl = m.group(1), m.group(2), " ".join(m.group(0).split())
+        supported = m.group(3) and not re.search(r"(?<![\w$])" + name + r"(?:\[[^]]*\]\+?|\+)=", logical)
+        if supported and not (re.search(r"\b(?:build|clean)\b", body) and re.search("--release|--profile", body)):
+            continue
+        refs = [x for x in lines if supported and re.search(r"\$\{?" + name + r"(?!\w)", x)]
+        # An unsupported or never-referenced array is reported where it is declared, unwired.
+        hits += [(x, bool(re.fullmatch(WRAPPED.format(name=name), x))) for x in refs] or [(decl, False)]
+    for s in map(str.strip, DECL.sub("", logical).splitlines()):
+        if (re.search(r"cargo\s+(?:build|clean)\b", s) and not s.startswith(("#", "echo"))
+                and ("--release" in s or "--profile" in s)):
+            hits.append((s, "build_token.py" in re.split(r"(?:^|\s)#", s)[0]))
+    return sorted(set(hits), key=hits.index)
+
+
+def release_cargo_sites() -> dict[str, list[tuple[str, bool]]]:
+    """`cargo_sites` for every tracked build script that has any."""
     tracked = subprocess.run(["git", "-C", str(REPO), "ls-files"], check=True,
                              capture_output=True, text=True).stdout.split()
-    found: dict[str, list[str]] = {}
+    found: dict[str, list[tuple[str, bool]]] = {}
     for rel in tracked:
         if rel.endswith(".sh") or Path(rel).name == "Makefile":
-            hits = [s for s in map(str.strip, joined_lines((REPO / rel).read_text("utf-8")))
-                    if "cargo build" in s and not s.startswith(("#", "echo"))
-                    and ("--release" in s or "--profile" in s)]
+            hits = cargo_sites((REPO / rel).read_text("utf-8"))
             if hits:
                 found[rel] = hits
     return found
@@ -159,6 +189,29 @@ class TokenTestCase(unittest.TestCase):
         for pipe in (proc.stdout, proc.stderr):
             self.addCleanup(pipe.close)
         return proc
+
+    def isolated_cli(self, entered: Path | None = None, extra_seal: str = "") -> Path:
+        source = (SCRIPTS / "build_token.py").read_text()
+        constant = f'CANONICAL_TOKEN_PATH = "{CANONICAL}"'
+        self.assertEqual(source.count(constant), 1)
+        replacement = f"CANONICAL_TOKEN_PATH = {str(self.token)!r}"
+        sealed = source.replace(constant, replacement)
+        self.assertEqual(sealed.replace(replacement, constant), source)
+        # Functions remain byte-identical; only the constant and entry seal differ.
+        seal = """
+_open_before_seal = os.open
+def _sealed_open(path, *args, **kwargs):
+    if "adk-build-token.lock" in str(path):
+        raise AssertionError("fixture breach: canonical token open")
+    return _open_before_seal(path, *args, **kwargs)
+os.open = _sealed_open
+""" + extra_seal
+        if entered is not None:
+            seal += (f"if LEASE_ENV in os.environ:\n    with open({str(entered)!r}, 'w') as out:\n"
+                     "        out.write('%d %d' % (os.getpid(), os.getppid()))\n")
+        wrapper = self.tmp / "build_token.py"
+        wrapper.write_text(sealed.replace('if __name__ == "__main__":', seal + '\nif __name__ == "__main__":'))
+        return wrapper
 
 
 class DerivationTests(unittest.TestCase):
@@ -232,14 +285,43 @@ class WiringTests(unittest.TestCase):
         self.assertGreaterEqual(len(sites), 4, sites)
         doc = (SCRIPTS / "build_token.py").read_text(encoding="utf-8")
         for rel, lines in sites.items():
-            wired = rel not in UNWIRED_BY_DESIGN
-            for line in lines:
-                self.assertEqual("build_token.py" in line, wired, f"{rel}: wiring: {line}")
+            for line, wired in lines:
+                self.assertEqual(wired, rel not in UNWIRED_BY_DESIGN, f"{rel}: wiring: {line}: wrap it"
+                                 " with build_token.py or rename/remove the reference")
                 if wired and "| tail -" in line:
                     self.assertIn("3>&2", line, "a log pipe must not swallow the notices")
         for rel in UNWIRED_BY_DESIGN:
             self.assertIn(rel, sites, f"{rel} stopped building a release; fix the disclosure")
             self.assertIn(Path(rel).name, doc, f"{rel} builds a release undisclosed")
+
+    def test_an_array_reference_is_wired_only_in_the_wrapped_form(self) -> None:
+        # Fail-closed: a reference inside a comment or a quoted string is refused as well.
+        wrapped = 'python3 scripts/build_token.py -- "${clean_cmd[@]}")'
+        for line, wired in (
+                ('2>/dev/null "${clean_cmd[@]}"', False), ('command -- "${clean_cmd[@]}"', False),
+                ('env -u RUSTC_WRAPPER "${clean_cmd[@]}"', False), ('X="a b" "${clean_cmd[@]}"', False),
+                ('(cd "$REPO" && ${clean_cmd[@]}) || true', False), ('"${clean_cmd[*]}"', False),
+                ("X=1 $clean_cmd", False), ('if "${clean_cmd[@]}"; then :; fi', False),
+                ("echo 'if ${clean_cmd[@]}'", False), ("true # if ${clean_cmd[@]}", False),
+                ("# $clean_cmd", False), (f'(cd "$REPO" && {wrapped}; "${{clean_cmd[@]}}"', False),
+                (f'(cd "$REPO" && {wrapped}', True),
+                (f'if (cd "$REPO" && ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS=60 {wrapped}; then', True),
+                ("", None)):
+            with self.subTest(line):
+                want = [(line, wired)] if line else [("clean_cmd=(cargo clean --release)", False)]
+                self.assertEqual(cargo_sites(f"clean_cmd=(cargo clean --release)\n{line}\n"), want)
+        # Multi-line, unclosed and appended declarations, a continuation inside a name, a wrapper named in a comment.
+        ref, bare = f'(cd "$REPO" && {wrapped}', ("cargo clean --release # build_token.py", False)
+        for text, want in (('clean_cmd=(cargo clean\n  --release)\n"${clean_cmd[@]}"', [('"${clean_cmd[@]}"', False)]),
+                           (f'clean_cmd=(cargo clean $(flag))\n{ref}', [("clean_cmd=(cargo clean $", False)]),
+                           (f'clean_cmd=(cargo clean)\nclean_cmd+=(--release)\n{ref}',
+                            [("clean_cmd=(cargo clean)", False)]),
+                           (f'clean_cmd=(cargo build x)\nclean_cmd[2]=--release\n{ref}',
+                            [("clean_cmd=(cargo build x)", False)]),
+                           (f'clean_cmd=(cargo clean --release)\n{ref}\n"${{clean_\\\ncmd[@]}}"',
+                            [(ref, True), ('"${clean_cmd[@]}"', False)]), (bare[0], [bare])):
+            with self.subTest(text):
+                self.assertEqual(cargo_sites(text + "\n"), want)
 
     def test_the_win32_backend_has_a_production_caller(self) -> None:
         source = (SCRIPTS / "build_token.py").read_text(encoding="utf-8")
@@ -462,29 +544,6 @@ class SerializationTests(TokenTestCase):
 
 class ReentrantContractTests(TokenTestCase):
     """One-hop opt-in, using the real CLI with only its token path isolated."""
-
-    def isolated_cli(self, entered: Path | None = None) -> Path:
-        source = (SCRIPTS / "build_token.py").read_text()
-        constant = f'CANONICAL_TOKEN_PATH = "{CANONICAL}"'
-        self.assertEqual(source.count(constant), 1)
-        replacement = f"CANONICAL_TOKEN_PATH = {str(self.token)!r}"
-        sealed = source.replace(constant, replacement)
-        self.assertEqual(sealed.replace(replacement, constant), source)
-        # Functions remain byte-identical; only the constant and entry seal differ.
-        seal = """
-_open_before_seal = os.open
-def _sealed_open(path, *args, **kwargs):
-    if "adk-build-token.lock" in str(path):
-        raise AssertionError("fixture breach: canonical token open")
-    return _open_before_seal(path, *args, **kwargs)
-os.open = _sealed_open
-"""
-        if entered is not None:
-            seal += (f"if LEASE_ENV in os.environ:\n    with open({str(entered)!r}, 'w') as out:\n"
-                     "        out.write('%d %d' % (os.getpid(), os.getppid()))\n")
-        wrapper = self.tmp / "build_token.py"
-        wrapper.write_text(sealed.replace('if __name__ == "__main__":', seal + '\nif __name__ == "__main__":'))
-        return wrapper
 
     @contextlib.contextmanager
     def offer(self, holder: int):
@@ -749,6 +808,232 @@ class MutationOwnerTests(TokenTestCase):
                          "TERM", f"the wrapper never forwarded the signal: {err}")
         self.assertNotEqual(int(pid_file.read_text()), proc.pid, "the child must be a child")
         self.assertEqual(proc.returncode, -int(signal.SIGTERM), err)
+
+
+# The status deploy-release.sh and callers match literally, so tests that must also run
+# against a base without bt.EXIT_NESTED compare with it.
+NESTED_STATUS = 73
+
+# Stands in for the deploy lock wait that follows detach in deploy-release.sh.
+_DEPLOY_LOCK_WAIT = """
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR)
+deadline = time.monotonic() + float(sys.argv[2])
+open(sys.argv[3], "w").write("waiting")
+while True:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except BlockingIOError:
+        if time.monotonic() >= deadline:
+            raise SystemExit(75)
+        time.sleep(0.05)
+open(sys.argv[4], "w").write("reached")
+"""
+
+
+class NestedHolderTests(TokenTestCase):
+    """A wrapper under a live holder is refused at once; the marker grants nothing."""
+
+    def marker(self, pid: int, token: Path | None = None, start: str | None = None) -> str:
+        st = (token or self.token).stat()
+        return f"{st.st_dev}:{st.st_ino}:{pid}:{bt.process_start(pid) if start is None else start}"
+
+    def dead_pid(self) -> int:
+        return int(subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                                  check=True, capture_output=True, text=True).stdout)
+
+    def run_marked(self, marker: str, wait: str = "5") -> tuple[int, bool]:
+        ran = self.tmp / "marked.ran"
+        ran.unlink(missing_ok=True)
+        with mock.patch.dict(os.environ, {bt.HOLDER_ENV: marker}):
+            rc = bt.run([sys.executable, "-c", f"open({str(ran)!r}, 'w')"],
+                        env={bt.WAIT_TIMEOUT_ENV: wait}, path=str(self.token))
+        return rc, ran.exists()
+
+    def deploy_head(self, before_guard: str = "") -> str:
+        """deploy-release.sh up to its detach block, i.e. all that runs before the deploy lock."""
+        head, detach, _ = (SCRIPTS / "deploy-release.sh").read_text().partition(
+            "# --- macOS: always run detached")
+        self.assertTrue(detach, "detach block not found")
+        prologue, strict, rest = head.partition("set -euo pipefail\n")
+        self.assertTrue(strict)
+        return prologue + strict + before_guard + rest
+
+    def test_a_nested_wrapper_is_refused_at_once_instead_of_waiting_on_its_ancestor(self) -> None:
+        wrapper, ran = self.isolated_cli(), self.tmp / "inner.ran"
+        inner = [sys.executable, str(wrapper), "--", sys.executable, "-c", f"open({str(ran)!r}, 'w')"]
+        outer = subprocess.run([sys.executable, str(wrapper), "--", *inner], capture_output=True,
+                               text=True, timeout=60,
+                               env={**os.environ, bt.WAIT_TIMEOUT_ENV: "5", bt.DIAG_FD_ENV: ""})
+        self.assertNotIn("fixture breach", outer.stderr)
+        self.assertEqual(outer.returncode, NESTED_STATUS, outer.stderr)
+        self.assertNotIn("waiting for", outer.stderr, "the nested wrapper queued behind its ancestor")
+        self.assertIn("ancestor pid", outer.stderr)
+        self.assertFalse(ran.exists(), "a refused wrapper ran its command")
+
+    def test_only_a_live_ancestor_holding_this_inode_refuses(self) -> None:
+        sibling = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.addCleanup(sibling.wait)
+        self.addCleanup(sibling.kill)
+        other = self.tmp / "other.lock"
+        other.touch()
+        ppid, some_start = os.getppid(), bt.process_start(os.getpid())
+        self.assertTrue(some_start, "ps lstart unreadable here")
+        for label, marker, want in (
+                ("live ancestor", self.marker(ppid), (bt.EXIT_NESTED, False)),
+                ("dead pid", self.marker(self.dead_pid(), start=some_start), (0, True)),
+                ("live non-ancestor", self.marker(sibling.pid), (0, True)),
+                ("this process", self.marker(os.getpid()), (0, True)),
+                ("other inode", self.marker(ppid, other), (0, True)),
+                # The pid now names another process: an ancestor that reused the holder's pid.
+                ("reused pid", self.marker(ppid, start="Thu Jan  1 00:00:00 1970"), (0, True)),
+                ("no start time", self.marker(ppid, start=""), (0, True)),
+                ("pid-only marker", self.marker(ppid, start="").rstrip(":"), (0, True)),
+                ("malformed", "not:a:marker", (0, True))):
+            with self.subTest(label):
+                self.assertEqual(self.run_marked(marker), want)
+        with self.subTest("ps unreadable"), mock.patch.object(bt, "_ps", return_value=""):
+            self.assertEqual(self.run_marked(self.marker(ppid)), (0, True))
+
+    def test_the_verdict_does_not_depend_on_the_callers_timezone(self) -> None:
+        ppid = str(os.getppid())
+        printed = {tz: subprocess.run(["ps", "-o", "lstart=", "-p", ppid], capture_output=True, text=True,
+                                      env={**os.environ, "LC_ALL": "C", "TZ": tz}) for tz in ("UTC0", "EST5")}
+        for tz, raw in printed.items():
+            self.assertEqual((raw.returncode, bool(raw.stdout.strip())), (0, True), f"ps under {tz}: {raw.stderr}")
+        self.assertEqual(len({raw.stdout for raw in printed.values()}), 2,
+                         "ps ignores TZ here, so this case proves nothing")
+        with mock.patch.dict(os.environ, {"TZ": "UTC0"}):
+            marker = self.marker(os.getppid())
+        with mock.patch.dict(os.environ, {"TZ": "EST5"}):
+            self.assertEqual(self.run_marked(marker), (bt.EXIT_NESTED, False))
+
+    def test_a_forged_marker_never_stands_in_for_the_lock(self) -> None:
+        fcntl.flock(self.open_token(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # held by someone else
+        for label, pid, rc in (("stale", self.dead_pid(), bt.EXIT_TOKEN_TIMEOUT),
+                               ("ancestor", os.getppid(), bt.EXIT_NESTED)):
+            with self.subTest(label):
+                self.assertEqual(self.run_marked(self.marker(pid), wait="0.5"), (rc, False))
+
+    def test_a_token_holder_cannot_starve_a_deploy_that_holds_the_deploy_lock(self) -> None:
+        # A (`build_token.py -- deploy-release.sh`) is held before its guard until B, a deploy
+        # holding the deploy lock, queues for A's token; unguarded, A then waits on B's lock.
+        wrapper = self.isolated_cli()
+        lock, started, go, waiting, reached, built = (self.tmp / name for name in (
+            "deploy.lock", "a.started", "a.go", "a.waiting", "a.reached", "b.built"))
+        lock.touch()
+        scenario = self.tmp / "deploy-release.sh"  # beside the isolated build_token.py
+        scenario.write_text(
+            self.deploy_head('touch "$A_STARTED"\nuntil [ -e "$A_GO" ]; do sleep 0.05; done\n')
+            + '"$TEST_PY" -c "$LOCK_WAIT" "$DEPLOY_LOCK" 20 "$A_WAITING" "$A_REACHED"\n')
+        deploy_lock = os.open(lock, os.O_RDWR)
+        self.addCleanup(os.close, deploy_lock)
+        fcntl.flock(deploy_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # held on B's behalf
+        a = subprocess.Popen(
+            [sys.executable, str(wrapper), "--", "bash", str(scenario)],
+            env={**os.environ, bt.WAIT_TIMEOUT_ENV: "60", bt.DIAG_FD_ENV: "", "A_STARTED": str(started),
+                 "A_GO": str(go), "TEST_PY": sys.executable, "LOCK_WAIT": _DEPLOY_LOCK_WAIT,
+                 "DEPLOY_LOCK": str(lock), "A_WAITING": str(waiting), "A_REACHED": str(reached)},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(a.kill)
+        wait_for(started)  # A's wrapper holds the token and stays paused before the guard
+        b = subprocess.Popen([sys.executable, str(wrapper), "--", sys.executable, "-c",
+                              f"open({str(built)!r}, 'w')"], stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True,
+                             env={**os.environ, bt.WAIT_TIMEOUT_ENV: "60", bt.DIAG_FD_ENV: ""})
+        self.addCleanup(b.kill)
+        self.assertIn("waiting for", b.stderr.readline(), "B never queued behind A's token")
+        go.touch()
+        deadline = time.monotonic() + 30  # well past the guard's 5 s ps allowance
+        while not (built.exists() or waiting.exists()) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        deadlocked = waiting.exists()
+        fcntl.flock(deploy_lock, fcntl.LOCK_UN)
+        _, b_err = b.communicate(timeout=60)
+        _, a_err = a.communicate(timeout=60)
+        self.assertNotIn("fixture breach", a_err + b_err)
+        self.assertFalse(deadlocked, "A went for the deploy lock while B waited for A's token")
+        self.assertEqual(b.returncode, 0, f"the lock-holding deploy starved for the token: {b_err}")
+        self.assertTrue(built.exists())
+        self.assertEqual(a.returncode, NESTED_STATUS, a_err)
+        self.assertIn("Refusing release deploy", a_err)
+        self.assertFalse(reached.exists(), "the refused deploy still went for the deploy lock")
+
+    def test_the_guard_refuses_only_on_the_helpers_nested_verdict(self) -> None:
+        guard_dir = self.tmp / "guard"
+        guard_dir.mkdir()
+        invoked, passed = guard_dir / "invoked", guard_dir / "passed"
+        script = guard_dir / "deploy-release.sh"
+        script.write_text(self.deploy_head() + f'touch "{passed}"\n')
+        self.assertEqual(bt.EXIT_NESTED, NESTED_STATUS, "the guard below matches the literal")
+        for verdict, marked, want in ((73, True, 73), (1, True, 0), (0, True, 0), (73, False, 0)):
+            with self.subTest(verdict=verdict, marked=marked):
+                invoked.unlink(missing_ok=True)
+                passed.unlink(missing_ok=True)
+                (guard_dir / "build_token.py").write_text(
+                    f"open({str(invoked)!r}, 'w')\nraise SystemExit({verdict})\n")
+                env = {k: v for k, v in os.environ.items() if k != bt.HOLDER_ENV}
+                if marked:
+                    env[bt.HOLDER_ENV] = "1:2:3"
+                proc = subprocess.run(["bash", str(script)], env=env, capture_output=True,
+                                      text=True, timeout=60)
+                self.assertEqual(proc.returncode, want, proc.stderr)
+                self.assertEqual(invoked.exists(), marked, "helper runs only when marked")
+                self.assertEqual(passed.exists(), want == 0)
+
+
+class DeployCleanupTokenTests(TokenTestCase):
+    def test_a_busy_token_costs_the_deploy_cleanup_a_60s_wait_and_a_skip(self) -> None:
+        # Only the copy's clock runs 120x fast, so the fixed 60 s bound passes in half a second.
+        (self.tmp / "scripts").mkdir()
+        self.isolated_cli(extra_seal="_mono = time.monotonic\ntime.monotonic = lambda: _mono() * 120\n").rename(
+            self.tmp / "scripts" / "build_token.py")
+        cleaned, cargo = self.tmp / "cleaned", self.tmp / "bin" / "cargo"
+        cargo.parent.mkdir()
+        cargo.write_text(f"#!/bin/sh\ntouch '{cleaned}'\n")
+        cargo.chmod(0o755)
+        name = "_clean_release_build_cache_after_staging"
+        body = (SCRIPTS / "deploy-release.sh").read_text().split(f"\n{name}() {{", 1)[1].split("\n}\n", 1)[0]
+        fcntl.flock(self.open_token(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # held by a running build
+        env = {k: v for k, v in os.environ.items() if k not in (
+            bt.HOLDER_ENV, "AGENTDESK_DEPLOY_BINARY", "AGENTDESK_DEPLOY_SKIP_BUILD_CACHE_CLEANUP")}
+        proc = subprocess.run(["bash", "-c", f"set -euo pipefail\n{name}() {{{body}\n}}\n{name}"],
+                              capture_output=True, text=True, timeout=30,
+                              env={**env, "PATH": f"{cargo.parent}:{env['PATH']}", "REPO": str(self.tmp),
+                                   "DEPLOY_BUILD_PROFILE": "release", bt.DIAG_FD_ENV: ""})
+        self.assertNotIn("fixture breach", proc.stderr)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("still held after 60s", proc.stderr)
+        self.assertIn("cargo clean for release failed; continuing", proc.stdout)
+        self.assertFalse(cleaned.exists(), "cargo clean ran without the token")
+
+
+class CancelWhileWaitingTests(TokenTestCase):
+    def test_a_signal_while_waiting_spawns_nothing_and_leaves_the_token_alone(self) -> None:
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            with self.subTest(sig=sig.name):
+                spawned = self.tmp / f"{sig.name}.spawned"
+                holder = self.open_token()
+                fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                before = self.token.stat()
+                # SIG_DFL first: an inherited SIG_IGN is the caller's choice and unsupervised.
+                waiter = self.driver(f"signal.signal({int(sig)}, signal.SIG_DFL)\n"
+                                     f"run([sys.executable, '-c', \"open({str(spawned)!r}, 'w')\"])",
+                                     env={bt.WAIT_TIMEOUT_ENV: "10", bt.DIAG_FD_ENV: ""})
+                self.addCleanup(waiter.kill)
+                self.assertIn("waiting for", waiter.stderr.readline())
+                os.kill(waiter.pid, sig)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    waiter.wait(timeout=1)
+                fcntl.flock(holder, fcntl.LOCK_UN)  # a waiter that survived would now spawn
+                _, err = waiter.communicate(timeout=30)
+                self.assertEqual(waiter.returncode, -int(sig), err)
+                self.assertFalse(spawned.exists(), "a cancelled waiter spawned its command")
+                after = self.token.stat()
+                self.assertEqual((before.st_dev, before.st_ino), (after.st_dev, after.st_ino))
+                queue = os.listdir(bt.queue_dir(str(self.token)))
+                self.assertEqual([n for n in queue if not n.startswith(".")], [], "ticket left behind")
 
 
 class CliTests(TokenTestCase):
