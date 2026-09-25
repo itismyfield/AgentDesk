@@ -321,7 +321,7 @@ async fn a_retained_decision_never_keys_a_later_birth() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_returning_mailbox_turn_keeps_its_prior_grading() {
-    let Some(seed) = UnreadTailSeed::start(5_996_140_005, UnreadTailShape::RowOutputMissing).await
+    let Some(seed) = UnreadTailSeed::start(5_996_140_006, UnreadTailShape::RowOutputMissing).await
     else {
         return;
     };
