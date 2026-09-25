@@ -532,14 +532,8 @@ pub(crate) fn record_unmeasured_tail_refusal_for_snapshot(
         snapshot.mailbox_active_user_msg_id,
         snapshot.mailbox_active_turn_nonce.clone(),
     );
-    // The row names the episode only while it is still the one this snapshot saw.
-    let identity = snapshot.inflight_identity.as_ref();
-    let row = identity
-        .filter(|_| mailbox == (None, None))
-        .and_then(|identity| {
-            super::inflight::load_inflight_state_read_only(provider, channel_id)
-                .filter(|row| identity.matches_state(row))
-        });
+    // A snapshot carries no birth to validate a re-read row against, so
+    // without mailbox coordinates it records unkeyed.
     record_unmeasured_tail_refusal(
         provider,
         channel_id,
@@ -551,7 +545,7 @@ pub(crate) fn record_unmeasured_tail_refusal_for_snapshot(
             relay.last_relay_offset,
         ),
         (relay.watcher_attached, relay.tmux_alive),
-        (mailbox, row.as_ref()),
+        (mailbox, None),
     );
 }
 
