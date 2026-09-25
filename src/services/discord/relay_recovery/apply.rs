@@ -125,10 +125,14 @@ pub(super) async fn apply_relay_recovery_decision(
             // manual lane keeps the idle-turn retirement behavior.
             if episode.is_none()
                 && let Some(tmux_session) = decision.affected.tmux_session.as_deref()
+                && let Some(inflight_clear_state) =
+                    load_idle_tmux_reattach_inflight_clear_candidate(provider, decision.channel_id)
                 // #5071 relay-tail S2: `Some(0)`, never `None`. An unmeasured
                 // tail must not open the destructive branch — see
-                // `unread_tail_is_proven_drained`.
-                && unread_tail_is_proven_drained(decision.evidence.unread_bytes)
+                // `unread_tail_is_proven_drained`. #5996 P-L2a: evaluated once a
+                // retirement candidate exists, so the refusal it records names
+                // a row this branch could have retired (all terms are an AND).
+                && reattach_idle_clear_tail_admits(provider, decision)
                 // This branch intentionally does not route through
                 // `destructive_cancel_gate`: the snapshot readiness check is
                 // the turn-scope proof that the provider prompt has returned
@@ -147,8 +151,6 @@ pub(super) async fn apply_relay_recovery_decision(
                 // `unread_tail_is_proven_drained`). The cleanup below only
                 // retires stale mailbox/inflight bookkeeping for an already-idle
                 // turn.
-                && let Some(inflight_clear_state) =
-                    load_idle_tmux_reattach_inflight_clear_candidate(provider, decision.channel_id)
                 && idle_tmux_repair_snapshot_ready_for_input(
                     provider,
                     decision.channel_id,

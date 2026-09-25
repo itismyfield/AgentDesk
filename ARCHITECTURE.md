@@ -315,7 +315,8 @@ src/
 │   │   │   └── runtime.rs
 │   │   ├── health_api/
 │   │   │   ├── public_projection.rs
-│   │   │   └── runtime_profile.rs
+│   │   │   ├── runtime_profile.rs
+│   │   │   └── unread_tail_attribution_tests.rs
 │   │   ├── review_verdict/
 │   │   │   ├── decision_route.rs
 │   │   │   ├── mod.rs
@@ -731,7 +732,8 @@ src/
 │   │   │   │   ├── stall_alert.rs
 │   │   │   │   ├── stall_watchdog_task.rs
 │   │   │   │   ├── stop_result.rs
-│   │   │   │   └── watchdog_decisions.rs
+│   │   │   │   ├── watchdog_decisions.rs
+│   │   │   │   └── watchdog_unread_tail_tests.rs
 │   │   │   ├── relay_auto_heal/
 │   │   │   │   └── orphan_token_tests.rs
 │   │   │   ├── snapshot/
@@ -956,7 +958,8 @@ src/
 │   │   │   ├── tests/
 │   │   │   │   ├── circuit_breaker_apply.rs
 │   │   │   │   ├── incarnation_follow_up.rs
-│   │   │   │   └── orphan_token_finish.rs
+│   │   │   │   ├── orphan_token_finish.rs
+│   │   │   │   └── unread_tail_seed.rs
 │   │   │   ├── apply.rs
 │   │   │   ├── decision.rs
 │   │   │   ├── destructive_warrant.rs

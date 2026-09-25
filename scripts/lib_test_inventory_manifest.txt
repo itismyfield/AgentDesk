@@ -1106,6 +1106,9 @@ server::routes::health_api::tests::stale_mailbox_repair_applied_includes_session
 server::routes::health_api::tests::summary_and_detail_routes_agree_on_expired_relay_ledgers
 server::routes::health_api::tests::summary_and_detail_routes_agree_on_status_and_degraded_reasons
 server::routes::health_api::tests::supported_provider_ids_contain_no_colon
+server::routes::health_api::unread_tail_attribution_tests::manual_reattach_records_an_unmeasured_tail_refusal_once
+server::routes::health_api::unread_tail_attribution_tests::manual_reattach_records_nothing_for_a_measured_backlog
+server::routes::health_api::unread_tail_attribution_tests::stale_mailbox_repair_names_and_records_an_unmeasured_tail
 server::routes::kakao_calendar::tests::calendar_mutations_require_stable_nonempty_bounded_keys
 server::routes::kakao_calendar::tests::calendar_requires_real_bearer_not_claimed_identity_or_local_origin
 server::routes::kanban::update_card_validation_tests::update_card_validation_accepts_valid_metadata_json_object
@@ -3010,6 +3013,7 @@ services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_l
 services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_liveness_keeps_force_clean_when_jsonl_stale
 services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_should_force_clean_requires_all_signals
 services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_skips_completed_idle_wakeup_turn
+services::discord::health::recovery::watchdog_decisions::watchdog_unread_tail_tests::explicit_background_watchdog_records_an_unmeasured_tail_refusal_once
 services::discord::health::redaction::tests::visible_message_id_redacts_zero_placeholders
 services::discord::health::relay_auto_heal::orphan_token_tests::agentdesk_session_probe_failure_is_graded_as_unmeasured
 services::discord::health::relay_auto_heal::orphan_token_tests::confirmed_dead_rowless_orphan_token_still_needs_a_warrant
@@ -4826,6 +4830,7 @@ services::discord::relay_recovery::tests::stale_watcher_with_jsonl_progress_rebi
 services::discord::relay_recovery::tests::token_only_agentdesk_tmux_confirmed_dead_is_reclaimed_after_grace
 services::discord::relay_recovery::tests::token_only_agentdesk_tmux_with_unknown_liveness_stays_protected_after_grace
 services::discord::relay_recovery::tests::unmeasured_non_agentdesk_orphan_token_is_not_retired_after_grace
+services::discord::relay_recovery::tests::unmeasured_tail_reason_derives_from_the_published_coordinates
 services::discord::relay_recovery::tests::unpaired_active_token_is_observe_only
 services::discord::relay_recovery::tests::unread_tail_is_proven_drained_only_for_a_measured_zero
 services::discord::relay_recovery::tests::watcher_owned_live_relay_with_relay_progress_is_not_destructive_cancel_candidate
