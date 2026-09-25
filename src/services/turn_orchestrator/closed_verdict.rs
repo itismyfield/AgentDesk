@@ -1,6 +1,5 @@
-//! #5951 C3t-0g — for the arms below an empty answer reads as "nothing to do",
-//! so they reply through a [`VerdictReply`]: callers tell a purge-closed
-//! actor's refusal (and a dead actor) apart and stop before any follow-up.
+//! For these arms an empty answer reads as "nothing to do", so a [`VerdictReply`] lets callers tell
+//! a purge-closed (or dead) actor's refusal apart and stop before any follow-up.
 
 use poise::serenity_prelude::{ChannelId, MessageId};
 use tokio::sync::oneshot;

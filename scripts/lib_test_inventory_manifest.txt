@@ -3658,6 +3658,7 @@ services::discord::jsonl_watcher::tests::jsonl_watcher_notifies_on_dead_marker_c
 services::discord::jsonl_watcher::tests::notify_fires_when_file_modified
 services::discord::jsonl_watcher::tests::notify_is_inert_when_parent_missing_but_does_not_panic
 services::discord::last_message_checkpoint_tests::advance_last_message_checkpoint_interleaved_advances_keep_max
+services::discord::mailbox_finish::closed_actor_tests::exhausted_restitution_is_not_an_empty_success
 services::discord::mailbox_finish::closed_actor_tests::refused_restitution_lands_on_the_successor
 services::discord::mailbox_finish::closed_actor_tests::refused_take_keeps_the_pending_catch_up_retry
 services::discord::mailbox_finish::closed_actor_tests::refused_wrapper_request_runs_no_follow_up

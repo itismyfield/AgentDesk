@@ -1,7 +1,5 @@
-//! #5951 C3t-0g — a purge-closed actor keeps answering the handles that still
-//! point at it, but the disk queue, the dispatch marker and the
-//! `turn_finished` signal are keyed by channel, so they already belong to the
-//! successor. No request reaching the closed actor may change them.
+//! A purge-closed actor still answers stale handles, but its channel-keyed disk queue, dispatch
+//! marker and `turn_finished` signal are the successor's: no request to it may change them.
 
 use std::future::Future;
 use std::pin::Pin;

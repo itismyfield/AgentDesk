@@ -1,7 +1,5 @@
-//! #5951 C3t-0g — wrappers whose request reached a purge-closed actor. The
-//! purge's `CloseIfIdle` is queued ahead of the wrapper's request, so the old
-//! actor answers it closed. Automatic follow-up must stop there; accepted
-//! work handed back to the channel must land on the successor.
+//! Wrappers whose request reached a purge-closed actor: automatic follow-up stops there, and
+//! accepted work handed back to the channel lands on the successor or is reported unrestored.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -27,9 +25,8 @@ fn latched(signal: &RecoveryDoneSignal) -> bool {
     signal.wait().now_or_never().is_some()
 }
 
-/// Queues `wrapper`'s request on the channel's actor behind the purge's
-/// `CloseIfIdle` and lets the purge finish. The returned wrapper resumes with
-/// the closed actor's answer.
+/// Queues `wrapper`'s request behind the purge's `CloseIfIdle` and lets the purge finish;
+/// the returned wrapper resumes with the closed actor's answer.
 async fn queued_behind_purge<'a, T>(
     shared: &SharedData,
     channel: ChannelId,
@@ -104,9 +101,8 @@ impl Restitution {
     }
 }
 
-/// T-E3r — work the old actor would have taken back (a front requeue,
-/// restored queue items, the disk queue) lands on the
-/// successor, in memory and on disk, and never on the closed actor.
+/// T-E3r — work the old actor would have taken back (front requeue, restored items, disk queue)
+/// lands on the successor, in memory and on disk, and never on the closed actor.
 #[tokio::test]
 async fn refused_restitution_lands_on_the_successor() {
     let _root = isolated_agentdesk_root();
@@ -157,6 +153,29 @@ async fn refused_restitution_lands_on_the_successor() {
         "restitution missed the successor:\n{}",
         lost.join("\n")
     );
+}
+
+/// Restitution the closed actor refuses on every retry, its purge unlink held, is reported
+/// unrestored, not as an empty merge the boot restore counts as duplicates.
+#[tokio::test]
+async fn exhausted_restitution_is_not_an_empty_success() {
+    let _root = isolated_agentdesk_root();
+    let provider = ProviderKind::Claude;
+    let shared = discord::make_shared_data_for_tests();
+    let channel = ChannelId::new(5_951_641);
+    let _old = shared.mailbox(channel);
+    let purge = shared.mailboxes.remove_idle_entry(channel);
+    tokio::pin!(purge);
+    assert!(futures::poll!(purge.as_mut()).is_pending());
+    let items = vec![queued(OFFERED)];
+    let merge = discord::mailbox_merge_restored_queue_items(&shared, &provider, channel, items);
+    let result = merge.await;
+    assert_eq!(result.absorbed, 0);
+    assert!(
+        result.persistence_error.is_some(),
+        "read as empty: {result:?}"
+    );
+    assert_eq!(purge.await, MailboxPurgeOutcome::Removed);
 }
 
 /// T-E3t — a soft-queue take the closed actor refused says nothing about the

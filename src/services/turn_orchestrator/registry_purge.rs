@@ -30,12 +30,8 @@
 //! about to be severed from the registry. Refused callers recover through the
 //! `*_with_closed_retry` registry helpers below, which re-resolve a FRESH
 //! actor (the unlink runs right after the verdict) and replay the request.
-//!
-//! #5951 C3t-0g: the gate is exhaustive. A closed actor's disk queue, dispatch
-//! marker and `turn_finished` signal are keyed by channel, so they are the
-//! successor's; every arm that is not a read is refused. Accepted work
-//! (restitution) and user commands replay on the fresh actor through
-//! [`retry_while_closed`]; automatic follow-up just stops.
+//! The gate is exhaustive: a closed actor's channel-keyed state is the successor's, so every non-read
+//! arm is refused; restitution and user commands replay through [`retry_while_closed`].
 
 use std::future::Future;
 use std::sync::Arc;
@@ -77,12 +73,8 @@ pub(super) fn close_if_idle_verdict(state: &mut ChannelMailboxState) -> Result<(
     Ok(())
 }
 
-/// #3297 r3 (codex) / #5951 C3t-0g — single tombstone gate run by the actor
-/// loop BEFORE the arm match. When `state.closed` is set, reads pass and every
-/// other arm is answered here — with the arm's "cannot start"/offline reply or
-/// a `VerdictReply` refusal (classification docs on `ChannelMailboxMsg`) — and
-/// `None` is returned so the loop skips the match. The match is exhaustive:
-/// a new arm does not compile until it is classified here.
+/// Tombstone gate run before the actor's arm match: on a closed actor reads pass, every other arm is
+/// refused here and `None` skips the match. Exhaustive, so a new arm must be classified here.
 pub(super) fn gate_closed_arm(
     state: &ChannelMailboxState,
     channel_id: ChannelId,
@@ -104,9 +96,8 @@ pub(super) fn gate_closed_arm(
         M::AgeActiveTurnForTest { .. }
         | M::AgeInboundWaitsForTest { .. }
         | M::AgeValveClearedDispatchForTest { .. } => return Some(msg),
-        // Start-like (#3297 r3): pre-fix these bound a turn or recovery marker,
-        // or accepted queue content, that the unlink then orphaned. Callers
-        // replay through the `*_with_closed_retry` helpers below.
+        // Start-like arms would bind work the unlink orphans; callers replay through
+        // the `*_with_closed_retry` helpers below.
         M::TryStartTurn { reply, .. } => {
             let _ = reply.send(TryStartTurnResult::default());
             "TryStartTurn"
@@ -134,11 +125,8 @@ pub(super) fn gate_closed_arm(
             });
             "RequeueFront"
         }
-        // The reply is dropped: the handle's offline fallback is the refusal
-        // (no turn cancelled or finished, nothing pending, abandoned, drained,
-        // purged or cancelled). A closed actor holds no turn and no queue
-        // (`close_if_idle_verdict`), so it is also what the arm would answer;
-        // finish wrappers read `mailbox_online: false` and stop.
+        // Reply dropped: the handle's offline fallback is the refusal, and what an idle closed
+        // actor would answer anyway; finish wrappers read `mailbox_online: false` and stop.
         M::CancelActiveTurnWithReason { .. }
         | M::CancelActiveTurnIfCurrent { .. }
         | M::CancelActiveTurnIfCurrentWithReason { .. }
@@ -179,7 +167,7 @@ pub(super) fn gate_closed_arm(
 /// future is dropped mid-removal (tombstoned entry never unlinked).
 const CLOSED_RETRY_ATTEMPTS: usize = 3;
 
-/// #5951 C3t-0g — a reply that may be a purge-closed actor's refusal.
+/// A reply that may be a purge-closed actor's refusal.
 pub(crate) trait RefusedClosed {
     fn refused_closed(&self) -> bool;
 }
@@ -196,9 +184,8 @@ impl RefusedClosed for RequeueInterventionResult {
     }
 }
 
-/// #5951 C3t-0g — like the `*_with_closed_retry` helpers: replay `op` on a
-/// freshly resolved actor while a purge-closed one refuses it. Returns the
-/// handle that gave the final reply; `None` when `resolve` finds no actor.
+/// Replays `op` on a freshly resolved actor while a purge-closed one refuses it, like the
+/// `*_with_closed_retry` helpers. Returns the final reply's handle; `None` when no actor resolves.
 pub(crate) async fn retry_while_closed<R: RefusedClosed, Fut: Future<Output = R>>(
     channel_id: ChannelId,
     mut resolve: impl FnMut() -> Option<ChannelMailboxHandle>,

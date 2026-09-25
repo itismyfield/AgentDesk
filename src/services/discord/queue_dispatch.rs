@@ -215,7 +215,7 @@ async fn mailbox_take_soft_intervention(
     primary_message_id: Option<MessageId>,
 ) -> MailboxTakeNextSoftOutcome {
     loop {
-        // #5951 C3t-0g — a closed actor's refusal spends no catch-up retry.
+        // A closed actor's refusal spends no catch-up retry.
         let Ok(result) = shared
             .mailbox(channel_id)
             .take_soft_matching_or_refused(
@@ -336,7 +336,7 @@ pub(super) async fn mailbox_restore_dequeued_head(
     .await
 }
 
-/// #5951 C3t-0g — restitution: a purge-closed actor's `MailboxClosed` is replayed
+/// Restitution: a purge-closed actor's `MailboxClosed` is replayed
 /// on the fresh actor (whose lease check then sees a plain front requeue).
 async fn mailbox_front_requeue_outcome<Fut>(
     shared: &SharedData,

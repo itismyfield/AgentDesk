@@ -1333,19 +1333,8 @@ impl ChannelMailboxRegistry {
     }
 }
 
-// #3297 r3 / #5951 C3t-0g — tombstone classification, enforced for EVERY arm
-// by the exhaustive `registry_purge::gate_closed_arm` ahead of the actor's
-// match. Once `CloseIfIdle` sets `state.closed` (actor about to be unlinked),
-// the disk queue, dispatch marker and turn_finished signal it would touch are
-// keyed by channel and already belong to the successor, so:
-//  (a) reads (and `CloseIfIdle`) pass;
-//  (b) every other arm is REFUSED with a reply its caller can recognise: the
-//      arm's "cannot start"/offline answer, or a `VerdictReply` refusal where
-//      the empty answer would read as "nothing to do". Restitution and user
-//      commands replay on a fresh actor via `registry_purge::retry_while_closed`;
-//  (c) CommitCapturedReadyDelivery refuses closed actors in its own arm;
-//      replay on a successor would discard the captured actor's authority.
-// A new arm does not compile until the gate classifies it.
+// Once `CloseIfIdle` sets `state.closed`, the exhaustive `registry_purge::gate_closed_arm` passes
+// reads and refuses every other arm; CommitCapturedReadyDelivery refuses closed actors in its own arm.
 enum ChannelMailboxMsg {
     CommitCapturedReadyDelivery {
         commit: Box<crate::services::discord::CapturedReadyDeliveryCommit>,
@@ -1855,7 +1844,7 @@ fn spawn_channel_mailbox(
             ..Default::default()
         };
         while let Some(msg) = rx.recv().await {
-            // #3297 r3 / #5951 — a tombstoned actor serves only reads (enum docs).
+            // A tombstoned actor serves only reads (enum docs).
             let Some(msg) = registry_purge::gate_closed_arm(&state, channel_id, msg) else {
                 continue;
             };

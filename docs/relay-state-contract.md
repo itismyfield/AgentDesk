@@ -620,7 +620,8 @@ that retires turn-lifetime state.
   identity-free row deletes, channel-keyed post-retirement cleanup,
   pointer-bound watcher cleanup under reuse, value-bound thread-parent cleanup,
   a user command (`/clear`, a queued-message cancel, a force purge) that a
-  purge-closed actor refused and that is not replayed on the successor, a
+  purge-closed actor refused and that is not replayed on the successor,
+  restitution still refused after its retries (reported unrestored, left on disk), a
   completion event published after an accepted finish, which names the
   channel rather than the incarnation, side effects of a pending thread-parent or watcher
   successor, restart `RecoveryKickoff` without a re-mint check, restart

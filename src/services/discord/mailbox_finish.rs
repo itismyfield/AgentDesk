@@ -26,7 +26,7 @@ pub(in crate::services::discord) async fn mailbox_clear_recovery_marker(
     channel_id: ChannelId,
 ) {
     let handle = shared.mailbox(channel_id);
-    // #5951 C3t-0g — a closed actor held no marker; nothing to announce.
+    // A closed actor held no marker; nothing to announce.
     if handle.clear_recovery_marker_or_refused().await.is_err() {
         return;
     }
@@ -107,7 +107,7 @@ pub(in crate::services::discord) async fn mailbox_finish_turn(
     let result = handle
         .finish_turn(queue_persistence_context(shared, provider, channel_id))
         .await;
-    // #5951 C3t-0g — offline: a purge-closed or dead actor finished nothing.
+    // Offline: a purge-closed or dead actor finished nothing.
     if !result.mailbox_online {
         return result;
     }
@@ -275,7 +275,7 @@ pub(in crate::services::discord) async fn mailbox_clear_channel(
 ) -> ClearChannelResult {
     let handle = shared.mailbox(channel_id);
     let persistence = queue_persistence_context(shared, provider, channel_id);
-    // #5951 C3t-0g — a purge-closed actor held nothing to clear.
+    // A purge-closed actor held nothing to clear.
     let Ok(result) = handle.clear_or_refused(persistence).await else {
         return ClearChannelResult::default();
     };
@@ -287,8 +287,8 @@ pub(in crate::services::discord) async fn mailbox_clear_channel(
     result
 }
 
-/// #5951 C3t-0g — accepted work handed back to the channel's actor: a
-/// purge-closed actor's refusal is replayed on the fresh one, never dropped.
+/// Hands accepted work back to the channel's actor, replaying it while a purge-closed one refuses.
+/// A refusal that outlasts the retries is an error, not an empty merge counted as duplicates.
 pub(super) async fn restitution<Fut>(
     shared: &SharedData,
     channel_id: ChannelId,
@@ -297,10 +297,14 @@ pub(super) async fn restitution<Fut>(
 where
     Fut: std::future::Future<Output = Result<HydratePendingQueueResult, MailboxRefusal>>,
 {
-    let accepted = retry_while_closed(channel_id, || Some(shared.mailbox(channel_id)), op).await;
-    accepted
-        .and_then(|(_, verdict)| verdict.ok())
-        .unwrap_or_default()
+    match retry_while_closed(channel_id, || Some(shared.mailbox(channel_id)), op).await {
+        Some((_, Ok(result))) => result,
+        Some((_, Err(MailboxRefusal::Closed))) => HydratePendingQueueResult {
+            persistence_error: Some("mailbox still purge-closed after retries".to_string()),
+            ..Default::default()
+        },
+        Some((_, Err(MailboxRefusal::Unreachable))) | None => HydratePendingQueueResult::default(),
+    }
 }
 
 #[cfg(test)]
