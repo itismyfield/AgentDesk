@@ -406,40 +406,9 @@ pub(crate) fn unmeasured_tail_reason(
     })
 }
 
-/// A graded refusal's episode: the mailbox turn, else the inflight row's birth pin
-/// plus the id-0 offset tiebreak the pin does not compare.
-#[derive(Clone, Debug)]
-enum UnmeasuredTailEpisode {
-    Mailbox(Option<u64>, Option<String>),
-    Row(Box<super::inflight::InflightEpisodePin>, Option<u64>),
-}
-
-impl UnmeasuredTailEpisode {
-    /// `None` when nothing names the turn: such a refusal is never folded into another.
-    fn of(
-        mailbox: (Option<u64>, Option<String>),
-        row: Option<&super::inflight::InflightTurnState>,
-    ) -> Option<Self> {
-        if mailbox != (None, None) {
-            return Some(Self::Mailbox(mailbox.0, mailbox.1));
-        }
-        let row = row?;
-        let nameless = row.user_msg_id == 0 && row.turn_nonce.is_none();
-        let tiebreak = row.turn_start_offset.filter(|_| nameless);
-        let pin = super::inflight::InflightEpisodePin::from_state(row);
-        (!nameless || tiebreak.is_some()).then(|| Self::Row(Box::new(pin), tiebreak))
-    }
-
-    fn is_same_episode_as(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Mailbox(a, b), Self::Mailbox(c, d)) => a == c && b == d,
-            (Self::Row(a, x), Self::Row(b, y)) => a.is_same_episode_as(b) && x == y,
-            _ => false,
-        }
-    }
-}
-
 type UnmeasuredTailSite = (String, u64, &'static str);
+/// A graded refusal's episode: the mailbox turn (user message id, nonce).
+type UnmeasuredTailEpisode = (Option<u64>, Option<String>);
 
 /// Recent episodes graded per channel and site, so a wedge a site keeps
 /// refusing is recorded once per episode rather than once per call.
@@ -461,15 +430,15 @@ pub(super) fn reattach_idle_clear_tail_admits(
     }
     // Judged on a read-only load so the refusal writes nothing.
     let (channel, ready) = (decision.channel_id, idle_tmux_repair_pane_ready_for_input);
-    let Some(state) = super::inflight::load_inflight_state_read_only(provider, channel)
+    let others_admit = super::inflight::load_inflight_state_read_only(provider, channel)
         .filter(super::inflight::inflight_state_allows_idle_tmux_repair_state)
         .filter(|row| {
             idle_tmux_repair_snapshot_ready_for_input(provider, channel, tmux_session, row, ready)
         })
-        .filter(|state| !idle_tmux_repair_has_unrelayed_tail_answer(state))
-    else {
+        .is_some_and(|state| !idle_tmux_repair_has_unrelayed_tail_answer(&state));
+    if !others_admit {
         return false;
-    };
+    }
     record_unmeasured_tail_refusal(
         provider,
         decision.channel_id,
@@ -481,12 +450,10 @@ pub(super) fn reattach_idle_clear_tail_admits(
             evidence.last_relay_offset,
         ),
         (evidence.watcher_attached, evidence.tmux_alive),
+        // The row loaded here is not the observation the tail came from, so it never keys.
         (
-            (
-                decision.affected.mailbox_active_user_msg_id,
-                decision.affected.mailbox_active_turn_nonce.clone(),
-            ),
-            Some(&state),
+            decision.affected.mailbox_active_user_msg_id,
+            decision.affected.mailbox_active_turn_nonce.clone(),
         ),
     );
     false
@@ -532,8 +499,6 @@ pub(crate) fn record_unmeasured_tail_refusal_for_snapshot(
         snapshot.mailbox_active_user_msg_id,
         snapshot.mailbox_active_turn_nonce.clone(),
     );
-    // A snapshot carries no birth to validate a re-read row against, so
-    // without mailbox coordinates it records unkeyed.
     record_unmeasured_tail_refusal(
         provider,
         channel_id,
@@ -545,7 +510,7 @@ pub(crate) fn record_unmeasured_tail_refusal_for_snapshot(
             relay.last_relay_offset,
         ),
         (relay.watcher_attached, relay.tmux_alive),
-        (mailbox, None),
+        mailbox,
     );
 }
 
@@ -556,10 +521,7 @@ fn record_unmeasured_tail_refusal(
     tmux_session: Option<&str>,
     (unread_bytes, last_capture_offset, last_relay_offset): (Option<u64>, Option<u64>, u64),
     (watcher_attached, tmux_alive): (bool, Option<bool>),
-    (mailbox, row): (
-        (Option<u64>, Option<String>),
-        Option<&super::inflight::InflightTurnState>,
-    ),
+    mailbox: UnmeasuredTailEpisode,
 ) {
     // A measured backlog is the invariant working, not a wedge.
     let Some(decided_by) =
@@ -568,20 +530,21 @@ fn record_unmeasured_tail_refusal(
         return;
     };
     let user_msg_id = mailbox.0;
-    if let Some(episode) = UnmeasuredTailEpisode::of(mailbox, row) {
+    // Without a mailbox turn nothing names the episode, so the refusal is never folded.
+    if mailbox != (None, None) {
         let mut graded = UNMEASURED_TAIL_REFUSALS_GRADED
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let recent = graded
             .entry((provider.as_str().to_string(), channel_id, site))
             .or_default();
-        if recent.iter().any(|seen| seen.is_same_episode_as(&episode)) {
+        if recent.contains(&mailbox) {
             return;
         }
         if recent.len() == UNMEASURED_TAIL_EPISODES_KEPT {
             recent.pop_front();
         }
-        recent.push_back(episode);
+        recent.push_back(mailbox);
     }
     crate::services::observability::record_invariant_check(
         false,
