@@ -30,8 +30,7 @@ src/
 │   │   ├── orchestrator/
 │   │   │   ├── config_dir_checks.rs
 │   │   │   ├── health_snapshot.rs
-│   │   │   ├── provider_credentials.rs
-│   │   │   └── relay_notifications.rs
+│   │   │   └── provider_credentials.rs
 │   │   ├── contract.rs
 │   │   ├── health.rs
 │   │   ├── mailbox.rs

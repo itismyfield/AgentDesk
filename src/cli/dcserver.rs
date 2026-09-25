@@ -1138,17 +1138,13 @@ pub fn handle_dcserver(token: Option<String>) {
         // this, a single `connect()` failure hit `exit(1)` immediately; under
         // launchd (KeepAlive + ThrottleInterval=5) a transient DB blip became a
         // ~8s tight crash loop that flooded the log and left Discord relay
-        // silently dead. We now retry (1 + MAX_RETRIES attempts, 1→2→4→8→16s)
-        // and alert only on exhaustion. Both startup initialization and runtime
-        // pool activation remain inside that envelope before any exit.
+        // silently dead. We now retry (1 + MAX_RETRIES attempts, 1→2→4→8→16s).
+        // Both startup initialization and runtime pool activation remain inside
+        // that envelope before any exit. #5993: exhaustion is reported by the
+        // stderr exit line below (the Discord DB-down alert is retired).
         let discord_pg_pool = {
             let connect_cfg = ad_config.clone();
-            let alert_tokens = crate::cli::dcserver_pg_bootstrap::candidate_alert_tokens(
-                launch_configs.iter().map(|config| config.token.as_str()),
-                token.as_deref(),
-            );
-            let alert_channel = ad_config.kanban.human_alert_channel_id.clone();
-            let bootstrap = crate::cli::dcserver_pg_bootstrap::connect_with_backoff_and_notify(
+            let bootstrap = crate::cli::dcserver_pg_bootstrap::connect_with_backoff(
                 || {
                     let cfg = connect_cfg.clone();
                     let root = runtime_root.clone();
@@ -1174,14 +1170,6 @@ pub fn handle_dcserver(token: Option<String>) {
                 },
                 |delay| tokio::time::sleep(delay),
                 "cli::dcserver::postgres_startup_and_runtime",
-                move |failure| async move {
-                    crate::cli::dcserver_pg_bootstrap::notify_pg_unavailable(
-                        alert_tokens,
-                        alert_channel.as_deref(),
-                        &failure.last_error,
-                    )
-                    .await;
-                },
             )
             .await;
             match bootstrap {
@@ -1190,10 +1178,7 @@ pub fn handle_dcserver(token: Option<String>) {
                     pool
                 }
                 Err(failure) => {
-                    eprintln!(
-                        "  ✖ PostgreSQL connect failed after {} attempt(s): {}",
-                        failure.attempts, failure.last_error
-                    );
+                    eprintln!("  ✖ {}", failure.exhaustion_line());
                     std::process::exit(1);
                 }
             }

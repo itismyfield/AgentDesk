@@ -66,29 +66,6 @@ pub(super) fn effective_max_entry_retries(deps: &AutoQueueActivateDeps) -> i64 {
     clamp_retry_limit(from_pg.unwrap_or(fallback))
 }
 
-pub(super) fn normalize_human_alert_target(channel: String) -> Option<String> {
-    let channel = channel.trim();
-    if channel.is_empty() {
-        return None;
-    }
-    Some(if channel.starts_with("channel:") {
-        channel.to_string()
-    } else {
-        format!("channel:{channel}")
-    })
-}
-
-/// #5993: the kv_meta mirror of the human-alert channel is retired; only the
-/// YAML field remains until its own removal slice.
-pub(super) fn human_alert_target(deps: &AutoQueueActivateDeps) -> Option<String> {
-    deps.pg_pool.as_ref()?;
-    deps.config
-        .kanban
-        .human_alert_channel_id
-        .clone()
-        .and_then(normalize_human_alert_target)
-}
-
 pub(super) fn compact_failure_summary(message: &str) -> String {
     let normalized = message.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut chars = normalized.chars();
@@ -119,7 +96,11 @@ pub(super) fn record_entry_dispatch_failure(
     let retry_limit = effective_max_entry_retries(deps);
     let entry_id_text = entry_id.to_string();
     let trigger_source_text = trigger_source.to_string();
-    let alert_target = human_alert_target(deps);
+    // #5993: the human-alert target is retired, so the terminal failure is
+    // recorded without an outbox card; callers WARN-log every failure and its
+    // retry/terminal transition. The alert branch below goes with its db
+    // helper in the follow-up slice.
+    let alert_target: Option<String> = None;
     let alert_run_id = run_id.to_string();
     let alert_entry_id = entry_id.to_string();
     let alert_card_id = card_id.to_string();
