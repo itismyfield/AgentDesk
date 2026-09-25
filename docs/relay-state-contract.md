@@ -622,9 +622,11 @@ that retires turn-lifetime state.
   a user command (`/clear`, a queued-message cancel, a force purge) that a
   purge-closed actor refused and that is not replayed on the successor,
   restitution still refused after its retries (reported unrestored and left on
-  disk; the successor absorbs the disk queue it read successfully before a
-  whole-queue replacement and refuses it on a failed read, intentional Clear/Purge
-  excepted; boot restore merging an older snapshot stays open in #6258), a
+  disk; marker restore, take, drain and requeue absorb a successfully read disk
+  queue before a whole-queue replacement and refuse it on a failed read, while
+  `HydratePendingQueueFromDisk` and `Enqueue` may still read a corrupt file as
+  empty and replace it (#6259); Clear/Purge discard on purpose; boot restore
+  merging an older snapshot stays open in #6258), a
   completion event published after an accepted finish, which names the
   channel rather than the incarnation, side effects of a pending thread-parent or watcher
   successor, restart `RecoveryKickoff` without a re-mint check, restart

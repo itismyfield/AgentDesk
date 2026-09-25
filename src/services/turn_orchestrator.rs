@@ -6477,6 +6477,69 @@ mod persistence_tests {
         });
     }
 
+    /// The queue read and marker save succeed but the final queue write fails, as a tail
+    /// replacement and as an empty-tail unlink: the head stays queued behind its durable marker.
+    #[test]
+    fn take_next_soft_final_persist_failure_restores_head_and_keeps_marker() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "dispatch-marker-final-persist-fail";
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let registry = ChannelMailboxRegistry::default();
+            for (channel, ids) in [
+                (4_024_254, vec![4_024_255, 4_024_256]),
+                (4_024_257, vec![4_024_258]),
+            ] {
+                let channel_id = ChannelId::new(channel);
+                let handle = registry.handle(channel_id);
+                let queue: Vec<Intervention> = ids
+                    .iter()
+                    .map(|id| make_intervention(*id, "queued", None))
+                    .collect();
+                handle.replace_queue(queue, persistence.clone()).await;
+                let ids_of = |queue: &[Intervention]| -> Vec<u64> {
+                    queue.iter().map(|item| item.message_id.get()).collect()
+                };
+                let disk_ids =
+                    || ids_of(&load_channel_pending_queue(&provider, token_hash, channel_id).0);
+                let marker_id = || {
+                    load_channel_pending_dispatch_marker(&provider, token_hash, channel_id)
+                        .map(|(marker, _)| marker.message_id.get())
+                };
+
+                pending_queue_persistence::save_fault::fail_next(channel_id);
+                let taken = handle.take_next_soft(persistence.clone()).await;
+
+                assert!(taken.intervention.is_none(), "{channel}");
+                assert!(taken.dispatch_lease.is_none(), "{channel}");
+                assert!(taken.queue_exit_events.is_empty(), "{channel}");
+                assert!(taken.persistence_error.is_some(), "{channel}");
+                let snapshot = handle.snapshot().await;
+                assert_eq!(
+                    ids_of(&snapshot.intervention_queue),
+                    ids,
+                    "{channel} memory"
+                );
+                assert_eq!(snapshot.pending_user_dispatch, None, "{channel}");
+                assert_eq!(disk_ids(), ids, "{channel} disk");
+                assert_eq!(marker_id(), Some(ids[0]), "{channel} marker");
+
+                let retried = handle.take_next_soft(persistence.clone()).await;
+                assert_eq!(
+                    retried.intervention.map(|item| item.message_id.get()),
+                    Some(ids[0])
+                );
+                assert!(retried.dispatch_lease.is_some() && retried.persistence_error.is_none());
+                assert_eq!(disk_ids(), ids[1..], "{channel} disk after retry");
+                assert_eq!(marker_id(), Some(ids[0]), "{channel} marker after retry");
+            }
+        });
+    }
+
     #[test]
     fn purge_queue_clears_live_dispatch_reservation_and_marker() {
         let _lock = lock_test_env();

@@ -415,6 +415,13 @@ pub(crate) fn save_channel_queue(
             channel_id.get()
         ));
     };
+    #[cfg(test)]
+    if save_fault::take(channel_id) {
+        return Err(format!(
+            "injected pending queue save failure {}",
+            path.display()
+        ));
+    }
     if queue.is_empty() {
         return match fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -836,6 +843,28 @@ pub(crate) fn warn_legacy_pending_queue_files(provider: &ProviderKind) {
                 path.display()
             );
         }
+    }
+}
+
+/// Test-only: fail a channel's next queue save before the file is touched, once.
+#[cfg(test)]
+pub(super) mod save_fault {
+    use poise::serenity_prelude::ChannelId;
+    use std::sync::Mutex;
+
+    static ARMED: Mutex<Vec<ChannelId>> = Mutex::new(Vec::new());
+
+    pub(in crate::services::turn_orchestrator) fn fail_next(channel_id: ChannelId) {
+        ARMED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(channel_id);
+    }
+
+    pub(super) fn take(channel_id: ChannelId) -> bool {
+        let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
+        let index = armed.iter().position(|armed| *armed == channel_id);
+        index.map(|index| armed.swap_remove(index)).is_some()
     }
 }
 
