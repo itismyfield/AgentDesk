@@ -46,6 +46,9 @@ RUST_INPUTS = (
     "scripts/operator-init-portable.py",
     ".github/workflows/ci-macos-trusted.yml",
     "scripts/ci/macos-trusted-rust-filter.py",
+    # H2 tmux-boundary ratchet: lint config, measurer, admissions and baselines.
+    "clippy.toml",
+    "scripts/ci/h2_*",
 )
 
 

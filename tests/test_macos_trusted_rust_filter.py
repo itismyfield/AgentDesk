@@ -47,6 +47,8 @@ PATTERN_SAMPLES = {
     "scripts/operator-init-portable.py": "scripts/operator-init-portable.py",
     ".github/workflows/ci-macos-trusted.yml": ".github/workflows/ci-macos-trusted.yml",
     "scripts/ci/macos-trusted-rust-filter.py": "scripts/ci/macos-trusted-rust-filter.py",
+    "clippy.toml": "clippy.toml",
+    "scripts/ci/h2_*": "scripts/ci/h2_baseline_services.toml",
 }
 
 # PR #6109: scripts, workflows and justfile only, zero Rust.
@@ -98,6 +100,10 @@ class PatternTests(unittest.TestCase):
             "skills/foo/SKILL.md",
             "src.rs.bak",
             "migrations.md",
+            # near misses of the H2 patterns
+            "docs/clippy.toml",
+            "scripts/h2_measure.py",
+            "scripts/ci/infra-failure-rerun.sh",
         ):
             with self.subTest(path=path):
                 self.assertFalse(flt.is_rust_input(path))
