@@ -811,6 +811,7 @@ services::cluster::machine_resources::store::tests::postgres_machine_history_is_
 services::discord::catch_up::too_old_notice::tests::default_adapter_preserves_outbox_contract_and_pg_dedupe_pg
 services::discord::catch_up::too_old_notice::tests::persistent_dedupe_suppresses_too_old_notice_across_restart_gap_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_commits_its_transcript_boundary_only_after_the_queue_persists_pg
+services::discord::commands::control::clear_persist_failure_tests::clear_whose_boundary_commit_fails_keeps_the_session_and_process_pg
 services::discord::health::recovery::stall_alert::tests::pg_outbox_routes_dm_alerts_and_dedupes_without_synthetic_owner_mentions
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::long_active_turn_preserves_authority_without_paging_pg
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_capture_advance_has_defense_in_depth_suppression_pg

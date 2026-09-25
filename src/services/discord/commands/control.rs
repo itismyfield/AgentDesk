@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::db::session_transcripts;
-use crate::services::provider::ProviderKind;
+use crate::services::provider::{CancelToken, ProviderKind};
 
 use super::super::catch_up::retry_state::clear_channel_discarding_catch_up_backlog;
 use super::super::formatting::{send_long_message_ctx, truncate_str};
@@ -406,6 +406,19 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     .await
 }
 
+/// Keep all stop sites converging on `stop_active_turn` so the
+/// abort-key-then-SIGKILL ordering can never regress to the legacy pattern.
+async fn stop_released_turn(
+    provider: &ProviderKind,
+    token: Option<Arc<CancelToken>>,
+    clear_source: &str,
+) {
+    if let Some(token) = token {
+        let policy = super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession;
+        stop_active_turn(provider, &token, policy, clear_source).await;
+    }
+}
+
 /// Without a pool (tests) this skips only the transcript clear boundary.
 async fn clear_channel_session_state_fenced(
     http: &Arc<serenity::Http>,
@@ -442,15 +455,7 @@ async fn clear_channel_session_state_fenced(
     // stop the released turn and re-arm the backlog instead of reporting a clear.
     if let Some(error) = cleared.persistence_error {
         drop(boundary); // rolls the uncommitted boundary back
-        if let Some(token) = cleared.removed_token {
-            stop_active_turn(
-                provider,
-                &token,
-                super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
-                clear_source,
-            )
-            .await;
-        }
+        stop_released_turn(provider, cleared.removed_token, clear_source).await;
         super::super::schedule_deferred_idle_queue_kickoff(
             shared.clone(),
             provider.clone(),
@@ -462,10 +467,17 @@ async fn clear_channel_session_state_fenced(
         );
     }
     let channel_key = channel_id.get().to_string();
-    let boundary_committed = match boundary {
-        Some(tx) => session_transcripts::finish_channel_clear_boundary_tx(tx, &channel_key).await,
-        None => Ok(()),
-    };
+    // A failed boundary keeps the old transcript fence, so the session must
+    // survive it too; only the released turn is stopped, still under the guard.
+    if let Some(tx) = boundary
+        && let Err(error) =
+            session_transcripts::finish_channel_clear_boundary_tx(tx, &channel_key).await
+    {
+        stop_released_turn(provider, cleared.removed_token, clear_source).await;
+        anyhow::bail!(
+            "세션을 초기화하지 못했어요: 대기열은 비웠지만 대화 경계 저장에 실패해 세션을 유지했어요 ({error})"
+        );
+    }
     drop(transition_guard);
 
     {
@@ -491,18 +503,7 @@ async fn clear_channel_session_state_fenced(
     clear_all_fast_mode_reset_markers(shared, channel_id).await;
     persist_codex_goals_reset_marker(shared, channel_id, false).await;
 
-    if let Some(token) = cleared.removed_token {
-        // #1218: keep all stop sites converging on `stop_active_turn` so the
-        // abort-key-then-SIGKILL ordering can never regress to the legacy
-        // pair-by-hand pattern.
-        stop_active_turn(
-            provider,
-            &token,
-            super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
-            clear_source,
-        )
-        .await;
-    }
+    stop_released_turn(provider, cleared.removed_token, clear_source).await;
 
     let resolved_session_key =
         resolve_session_key_for_clear(http, shared, channel_id, provider).await;
@@ -548,7 +549,7 @@ async fn clear_channel_session_state_fenced(
         );
     }
 
-    boundary_committed
+    Ok(())
 }
 
 /// /stop — Cancel in-progress AI request
@@ -1342,6 +1343,127 @@ mod clear_persist_failure_tests {
             pool.close().await;
             db.drop().await;
         });
+    }
+
+    async fn soft_clear_notifications(pool: &sqlx::PgPool, channel_id: ChannelId) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM message_outbox WHERE target = $1 AND reason_code = $2",
+        )
+        .bind(format!("channel:{}", channel_id.get()))
+        .bind(super::SOFT_CLEAR_REASON_CODE)
+        .fetch_one(pool)
+        .await
+        .expect("read soft-clear notifications")
+    }
+
+    async fn reject_boundary_writes(pool: &sqlx::PgPool, reject: bool) {
+        let statements: &[&str] = if reject {
+            &[
+                "CREATE FUNCTION reject_clear_boundary() RETURNS trigger AS $$
+                 BEGIN RAISE EXCEPTION 'injected clear boundary failure'; END;
+                 $$ LANGUAGE plpgsql",
+                "CREATE TRIGGER reject_clear_boundary_trigger
+                 BEFORE INSERT OR UPDATE ON channel_session_clear_boundaries
+                 FOR EACH ROW EXECUTE FUNCTION reject_clear_boundary()",
+            ]
+        } else {
+            &["DROP TRIGGER reject_clear_boundary_trigger ON channel_session_clear_boundaries"]
+        };
+        for statement in statements {
+            sqlx::query(statement)
+                .execute(pool)
+                .await
+                .expect("toggle the clear boundary trap"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        }
+    }
+
+    #[test]
+    fn clear_whose_boundary_commit_fails_keeps_the_session_and_process_pg() {
+        let root = tempfile::tempdir().expect("scratch runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(6_233_106);
+        let session_name = provider.build_tmux_session_name(CHANNEL_NAME);
+        let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        crate::services::session_backend::insert_process_session(
+            session_name.clone(),
+            crate::services::session_backend::SessionHandle::TestProcess {
+                pid: 6_233_106,
+                alive: alive.clone(),
+            },
+        );
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+                "agentdesk_clear_boundary_reject_6233",
+                "rejected clear transcript boundary",
+            )
+            .await;
+            let pool = db.connect_and_migrate_with_max_connections(4).await;
+            let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(
+                pool.clone(),
+            ));
+            seed_session(&shared, channel_id).await;
+            seed_backlog(&shared, &provider, channel_id).await;
+            reject_boundary_writes(&pool, true).await;
+            let http = Arc::new(serenity::Http::new(""));
+            let clear = || {
+                clear_channel_session_state(
+                    &http,
+                    &shared,
+                    &provider,
+                    channel_id,
+                    "/clear",
+                    SoftClearNotifyMode::Enqueue,
+                )
+            };
+
+            let failed = clear()
+                .await
+                .expect_err("a failed boundary fails the clear");
+            assert_eq!(
+                queue_len(&shared, channel_id).await,
+                0,
+                "the persisted empty queue stays"
+            );
+            assert_eq!(
+                session_state(&shared, channel_id).await,
+                (Some(SESSION_ID.to_string()), false),
+                "the session behind the old transcript fence is kept"
+            );
+            assert!(alive.load(Ordering::SeqCst), "the managed process is kept");
+            assert!(
+                boundary_rows(&pool, channel_id).await.is_empty(),
+                "no boundary is recorded"
+            );
+            assert_eq!(
+                soft_clear_notifications(&pool, channel_id).await,
+                0,
+                "no soft-clear notification is sent"
+            );
+            assert!(
+                failed.to_string().contains("대기열은 비웠지만"),
+                "the error reports the partially applied clear: {failed}"
+            );
+
+            reject_boundary_writes(&pool, false).await;
+            clear().await.expect("the retried clear succeeds");
+            assert_eq!(boundary_rows(&pool, channel_id).await, [1]);
+            assert_eq!(session_state(&shared, channel_id).await, (None, true));
+            assert_eq!(soft_clear_notifications(&pool, channel_id).await, 1);
+
+            pool.close().await;
+            db.drop().await;
+        });
+        assert!(
+            !alive.load(Ordering::SeqCst),
+            "the retried clear resets the managed process"
+        );
+        crate::services::session_backend::remove_process_session(&session_name);
     }
 }
 
