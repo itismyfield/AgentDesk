@@ -1233,7 +1233,7 @@ function handOffPrCreateFailure(cardId, errorMsg, retryCount, generation) {
 // multi-terminal pipelines. The 30-day floor is a ROLLING window on updated_at, not a removal boundary: it
 // caps the deploy-time page storm from historical failures, and it also expires a failure whose
 // deadlock-channel enqueue kept failing 30 days after its last write. Without a deadlock channel the
-// handoff settles on its human-alert WARN log line (#5993), so that case never stays a candidate.
+// handoff settles on its human-alert WARN log line (#5993) unless recording the handoff fails.
 function sweepStrandedPrCreateFailures() {
   var rows = agentdesk.db.query(
     "SELECT card_id, last_error, retry_count, dispatch_generation FROM pr_tracking " +

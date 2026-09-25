@@ -33,7 +33,7 @@ var autoQueueLog = _autoQueueLogLib.autoQueueLog;
 var PHASE_GATE_HUMAN_ESCALATION_THRESHOLD = 3;
 var PHASE_GATE_FAILURE_TTL_SEC = 7 * 24 * 60 * 60;
 // #2035: debounce phase-gate verdict-mismatch human-alert WARNs to one per
-// run per hour so the log is not flooded when polling churns.
+// run+phase per hour so the log is not flooded when polling churns.
 var PHASE_GATE_ALERT_DEBOUNCE_TTL_SEC = 60 * 60;
 // #2035: prevent the auto-close fallback from running more than once per
 // (card, phase, commit) so a misbehaving check cannot loop-close the issue.
