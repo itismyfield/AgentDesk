@@ -35,6 +35,8 @@ SECTIONS = ("exec", "w", "types", "subproc", "subproc_w_callers")
 SET_SECTION = {"EXEC": "exec", "W": "w", "TYPES": "types", "SUBPROC": "subproc", "SUBPROC_W": "subproc_w_callers"}
 DERIVED_SETS = ("W", "SUBPROC_W")
 LINTS = ("clippy::disallowed_methods", "clippy::disallowed_types")
+# R-O lints forced in the same pass; diagnostics() skips them so they never become measured rows.
+RO_LINTS = ("clippy::duplicate_mod",)
 # Raised by the activation PR; 0 keeps the measurer inert until then.
 LIVENESS_FLOOR = 0
 MAX_REGEN_ITERATIONS = 20
@@ -248,12 +250,12 @@ def diagnostics(lines) -> list[tuple[str, int, int, str, str]]:
     return sorted(seen)
 
 def run_clippy(root: Path, conf_dir: Path | None) -> list[str]:
-    """Lint only the lib target. Touching lib.rs forces a re-lint instead of a cache replay;
-    `--cap-lints warn` stops unrelated deny lints from aborting it (force-warn is uncapped)."""
+    """Lint only the lib target. Touching lib.rs forces a re-lint (and a fresh dep-info) instead of a
+    cache replay; `--cap-lints warn` stops unrelated deny lints from aborting it (force-warn is uncapped)."""
     (root / "src/lib.rs").touch()
     env = dict(os.environ, CARGO_INCREMENTAL="0", **({"CLIPPY_CONF_DIR": str(conf_dir)} if conf_dir else {}))
     command = ["cargo", "clippy", "--lib", "--message-format=json", "--", "--cap-lints", "warn",
-               *itertools.chain.from_iterable(("--force-warn", lint) for lint in LINTS)]
+               *itertools.chain.from_iterable(("--force-warn", lint) for lint in LINTS + RO_LINTS)]
     proc = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True)
     if proc.returncode != 0:
         raise MeasureError(f"cargo clippy failed ({proc.returncode}):\n{proc.stderr[-4000:]}")

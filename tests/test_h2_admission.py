@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -16,6 +18,7 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
 import h2_admission as adm  # noqa: E402
+import h2_depinfo  # noqa: E402
 import h2_measure as h2  # noqa: E402
 from tests.test_h2_measure import diag, locate  # noqa: E402  (shared clippy-JSON fixture helpers)
 
@@ -70,6 +73,26 @@ def diag_lines(sources: dict[str, str]) -> list[str]:
     return [diag(file, *locate(sources[file], needle), callee, lint=lint or "clippy::disallowed_methods")
             for file, needle, callee, lint in NEEDLES if needle in sources[file]]
 
+def artifact(root: Path, digest: str, *, name: str = "agentdesk", src: str = "src/lib.rs", test: bool = False) -> str:
+    """A cargo `compiler-artifact` line for a lib whose dep-info is `target/debug/deps/<name>-<digest>.d`."""
+    return json.dumps({"reason": "compiler-artifact", "target": {"kind": ["lib"], "name": name, "src_path": str(root / src)},
+                       "profile": {"test": test}, "filenames": [str(root / f"target/debug/deps/lib{name}-{digest}.rmeta")]})
+
+def write_depinfo(root: Path, digest: str, deps) -> Path:
+    """A rustc-shaped dep-info: `.d` and `.rmeta` rules, per-file empty rules, env-dep comments."""
+    path = root / f"target/debug/deps/agentdesk-{digest}.d"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    escaped = [str(d).replace(" ", "\\ ") for d in deps]
+    rmeta = path.with_name(f"libagentdesk-{digest}.rmeta")
+    path.write_text(f"{path}: {' '.join(escaped)}\n\n{rmeta}: {' '.join(escaped)}\n\n" + "".join(f"{d}:\n" for d in escaped)
+                    + f"\n# env-dep:CARGO_MANIFEST_DIR={root}\n# env-dep:CLIPPY_CONF_DIR\n", encoding="utf-8")
+    return path
+
+def dup_mod(file: str, line: int) -> str:
+    return json.dumps({"reason": "compiler-message", "target": {"kind": ["lib"]}, "message": {
+        "code": {"code": "clippy::duplicate_mod"}, "message": "file is loaded as a module multiple times: `src/a.rs`",
+        "spans": [{"file_name": file, "line_start": line, "column_start": 1, "is_primary": True}]}})
+
 PATCHES = dict(OWNER_ROSTER=frozenset({OWNER}), R_C_GRANDFATHERED={}, NONEXEC=frozenset(), W_TYPES=frozenset({TYPE}),
                PS=frozenset({"agentdesk::services::platform::tmux::read_process_args"}),
                KNOWN_UNREFERENCED={lane: frozenset({TOKIO}) for lane in h2.LANES})
@@ -85,11 +108,12 @@ class Tree(unittest.TestCase):
             patcher = mock.patch.object(adm, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
-        self.sources = dict(SOURCES)
+        self.sources, self.extra = dict(SOURCES), []
         self.write(self.sources)
         (self.root / "scripts/ci").mkdir(parents=True)
         (self.root / "clippy.toml").write_text(CLIPPY_TOML, encoding="utf-8")
         self.regen_baseline()
+        write_depinfo(self.root, "00aa", [*SOURCES, "Cargo.toml"])
         self.git("init", "-q", "-b", "main")
         self.commit("base")
         self.base = self.git("rev-parse", "HEAD").strip()
@@ -123,11 +147,14 @@ class Tree(unittest.TestCase):
     def admit(self, *rows: str) -> None:
         (self.root / adm.ADMISSIONS_FILE).write_text("".join(textwrap.dedent(r) for r in rows), encoding="utf-8")
 
+    def lines(self) -> list[str]:
+        return [*diag_lines(self.sources), artifact(self.root, "00aa"), *self.extra]
+
     def evaluate(self, lane: str = "linux") -> list[str]:
-        return adm.evaluate(self.root, lane, self.base, diag_lines(self.sources))
+        return adm.evaluate(self.root, lane, self.base, self.lines())
 
     def run_main(self, *args: str) -> tuple[int, str, str]:
-        (json_path := self.root.parent / f"{self.root.name}.json").write_text("\n".join(diag_lines(self.sources)))
+        (json_path := self.root.parent / f"{self.root.name}.json").write_text("\n".join(self.lines()))
         self.addCleanup(json_path.unlink, missing_ok=True)
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
@@ -289,6 +316,67 @@ class EndToEnd(Tree):
         self.assertEqual(code, 0)
         self.assertIn("::warning::h2-admission: admission: linux", err)
         self.assertEqual(self.run_main("--lane", "linux", "--base", self.base)[0], 1)
+
+    def test_duplicate_mod_is_an_r_o_violation(self) -> None:
+        self.extra = [dup_mod("src/services/mod.rs", 3)]
+        self.assertEqual([p[:28] for p in self.evaluate()], ["R-O: clippy::duplicate_mod: "])
+        code, _, err = self.run_main("--lane", "linux", "--base", self.base, "--inert")
+        self.assertEqual((code, "::warning::h2-admission: R-O: clippy::duplicate_mod" in err), (0, True))
+        self.assertEqual(self.run_main("--lane", "linux", "--base", self.base)[0], 1)
+
+class DepInfo(unittest.TestCase):
+    """R-O over the root lib dep-info of a two-module crate."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        lib = 'mod a;\n#[path = "sp ace.rs"]\nmod s;\n#[path = "한글.rs"]\nmod k;\n'
+        for rel, text in {"src/lib.rs": lib, "src/a.rs": "", "src/sp ace.rs": "", "src/한글.rs": "", "src/b.rs": ""}.items():
+            (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / rel).write_text(text, encoding="utf-8")
+        h2._MODULE_TABLES.clear()
+        self.addCleanup(h2._MODULE_TABLES.clear)
+
+    def problems(self, *extra: str, lines: list[str] | None = None) -> list[str]:
+        write_depinfo(self.root, "c0ffee", ["src/lib.rs", "src/a.rs", *extra])
+        return h2_depinfo.ro_problems(self.root, [artifact(self.root, "c0ffee")] if lines is None else lines)
+
+    def test_rust_input_must_be_in_the_module_tree(self) -> None:
+        self.assertEqual(self.problems(), [])
+        out_dir = "target/debug/build/agentdesk-1/out/g.rs"
+        for extra, rel in (("src/b.rs", "src/b.rs"), (str(self.root / out_dir), out_dir)):  # unmounted file, OUT_DIR code
+            with self.subTest(extra=extra):
+                self.assertEqual(self.problems(extra), [f"R-O: {rel} is compiled into the lib but is not in the module tree"])
+
+    def test_allowlisted_data_inputs_pass(self) -> None:
+        self.assertEqual(self.problems(str(self.root / "migrations/postgres/0001_init.sql"), "Cargo.toml", "clippy.toml",
+                                       "src/../defaults.json", "src/server/../../assets/runner-entry.html"), [])
+
+    def test_other_non_rust_inputs_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as elsewhere:
+            (outside := Path(elsewhere) / "g.rs").write_text("")
+            self.assertIn("outside the repo", self.problems(str(outside))[0])
+        for extra in ("src/shared.inc", "migrations/postgres/sub/x.sql", "vendor/migrations/postgres/x.sql", "assets/a.html"):
+            with self.subTest(extra=extra):
+                self.assertEqual(self.problems(extra), [f"R-O: lib compile input {extra} is not in the data allowlist"])
+
+    def test_paths_are_unescaped_and_normalized(self) -> None:
+        # `\ ` escapes, UTF-8, canonical absolute spelling and `..` all name module-tree files
+        self.assertEqual(self.problems("src/sp ace.rs", "src/한글.rs", os.path.realpath(self.root / "src/a.rs"),
+                                       "src/x/../a.rs"), [])
+
+    def test_dep_info_is_matched_by_the_root_lib_hash(self) -> None:
+        decoy = write_depinfo(self.root, "deadbeef", ["src/lib.rs", "src/b.rs"])
+        os.utime(decoy, (time.time() + 60, time.time() + 60))  # newest on disk, but not this run's artifact
+        others = [artifact(self.root, "5e5e", name="serde", src="vendor/serde/src/lib.rs"),
+                  artifact(self.root, "7e57", test=True)]
+        self.assertEqual(self.problems(lines=[*others, artifact(self.root, "c0ffee")]), [])
+        for lines, needle in (([], "expected one root lib artifact dep-info, found []"),
+                              ([artifact(self.root, "c0ffee"), artifact(self.root, "deadbeef")], "expected one root lib"),
+                              ([artifact(self.root, "0bad")], "agentdesk-0bad.d does not exist")):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.problems(lines=lines)[0])
 
 class ParseAdmissions(unittest.TestCase):
     def test_schema(self) -> None:
