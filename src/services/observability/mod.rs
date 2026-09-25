@@ -79,8 +79,8 @@ pub(super) const MAX_QUALITY_RANKING_LIMIT: usize = 200;
 pub(super) const QUALITY_SAMPLE_GUARD: i64 = 5;
 
 // #3561 — relay-loss operator monitor. The hourly job reports each signal at
-// most once per run; `RELAY_SIGNAL_REPEAT_WARN_SECS` bounds how often one
-// preserved idle session repeats its WARN line (#5993). The per-signal
+// most once per run; `RELAY_SIGNAL_REPEAT_WARN_SECS` bounds how often the
+// idle-cleanup preservation WARN line repeats, process-wide (#5993). The per-signal
 // `default_threshold` values are conservative:
 //   * `relay_terminal_ack_timeout` (duplicate-emit vector) tolerates a few per
 //     hour before it's worth waking an operator.
