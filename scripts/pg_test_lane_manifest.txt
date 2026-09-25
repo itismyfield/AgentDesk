@@ -78,6 +78,7 @@ src/services/cluster/intake_router_hook/owner_record.rs
 src/services/cluster/intake_worker/dispatch_stamp_tests.rs
 src/services/cluster/machine_resources/store.rs
 src/services/discord/catch_up/too_old_notice.rs
+src/services/discord/commands/control.rs
 src/services/discord/health/recovery.rs
 src/services/discord/health/recovery/stall_alert.rs
 src/services/discord/idle_recap_interaction.rs
@@ -211,6 +212,7 @@ services::cluster::intake_router_hook::pg_tests
 services::cluster::intake_worker::dispatch_stamp_tests
 services::cluster::machine_resources::store::tests
 services::discord::catch_up::too_old_notice::tests
+services::discord::commands::control::clear_persist_failure_tests
 services::discord::health::recovery::stall_alert::tests
 services::discord::health::recovery::stall_watchdog_auto_heal_tests
 services::discord::idle_cleanup_selector_tests
@@ -808,6 +810,7 @@ services::cluster::intake_worker::dispatch_stamp_tests::worker_mark_done_false_o
 services::cluster::machine_resources::store::tests::postgres_machine_history_is_durable_ordered_deduplicated_and_retained
 services::discord::catch_up::too_old_notice::tests::default_adapter_preserves_outbox_contract_and_pg_dedupe_pg
 services::discord::catch_up::too_old_notice::tests::persistent_dedupe_suppresses_too_old_notice_across_restart_gap_pg
+services::discord::commands::control::clear_persist_failure_tests::clear_commits_its_transcript_boundary_only_after_the_queue_persists_pg
 services::discord::health::recovery::stall_alert::tests::pg_outbox_routes_dm_alerts_and_dedupes_without_synthetic_owner_mentions
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::long_active_turn_preserves_authority_without_paging_pg
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_capture_advance_has_defense_in_depth_suppression_pg
