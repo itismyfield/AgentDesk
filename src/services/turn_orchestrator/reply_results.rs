@@ -18,7 +18,7 @@ pub(crate) struct TryStartTurnResult {
     pub(crate) started: bool,
     /// The recovery fence refused the claim's episode as already ended.
     pub(crate) refused_released_episode: bool,
-    /// #6035 PR-S: the active turn's absorbed ids; the claim's own only when `started`.
+    /// The active turn's absorbed ids; the claim's own only when `started`.
     pub(crate) absorbed_source_ids: Vec<MessageId>,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
     pub(crate) persistence_error: Option<String>,

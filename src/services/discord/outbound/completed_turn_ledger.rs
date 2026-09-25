@@ -30,13 +30,8 @@
 //! mechanism. Like the delivery-record sidecar, its dedicated subtree keeps it
 //! outside the old-binary inflight reaper's scan set.
 //!
-//! ## Merged-head aliases (#6035 PR-S)
-//!
-//! Merged head `P`'s episode `n` absorbs earlier ids `H`; only `P` is answered.
-//! The claim records `alias(P, n, H)` BEFORE the episode can deliver, and `H` is
-//! settled only when the SAME read holds `entry(P, Some(n))`. Any missing link
-//! reads "not settled" (duplicate, never loss). Pruning can only remove
-//! evidence: a row-backed alias dies with its row; rowless ones are a bounded pool.
+//! Merged-head aliases: `H`, absorbed by episode `n` of head `P`, is settled only when one read
+//! holds both `alias(P, n, H)` and `entry(P, Some(n))`; a missing link duplicates, never loses.
 
 use std::collections::HashSet;
 use std::fs;
@@ -59,9 +54,8 @@ const LEDGER_RETENTION_MS: u64 = 48 * 60 * 60 * 1000;
 /// Hard cap on retained entries (the tighter of the time-window / cap bound).
 const LEDGER_ENTRY_CAP: usize = 500;
 
-/// #6035 PR-S: cap on aliases no entry backs yet. Claims are serialized per
-/// channel, so the active turn's alias is always the newest and is never the
-/// one evicted.
+/// Cap on aliases no entry backs yet. Claims are serialized per channel, so the
+/// active turn's alias is always the newest and never the one evicted.
 const ROWLESS_ALIAS_CAP: usize = 64;
 
 /// One completed turn: the inbound `user_msg_id` and when its terminal delivery
@@ -70,13 +64,12 @@ const ROWLESS_ALIAS_CAP: usize = 64;
 pub(in crate::services::discord) struct CompletedTurnEntry {
     pub user_msg_id: u64,
     pub committed_at_epoch_ms: u64,
-    /// #6035 PR-S: the delivered episode, only when the delivery proved it
-    /// (exact receipt). `None` never certifies an alias.
+    /// The delivered episode, only when the delivery proved it; `None` never certifies an alias.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_nonce: Option<String>,
 }
 
-/// #6035 PR-S: episode `turn_nonce` of merged head `primary` absorbed `absorbed`.
+/// Episode `turn_nonce` of merged head `primary` absorbed `absorbed`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::services::discord) struct MergedAlias {
     pub primary: u64,
@@ -192,9 +185,8 @@ fn prune_entries(entries: &mut Vec<CompletedTurnEntry>, now_ms: u64) {
     }
 }
 
-/// F7: prune entries, then aliases. An alias an entry backed before the prune
-/// dies with that entry; the rest form a separate pool with its own retention
-/// and [`ROWLESS_ALIAS_CAP`], oldest `claimed_at` evicted first.
+/// Prune entries, then aliases. A row-backed alias dies with its row; rowless ones
+/// are capped at [`ROWLESS_ALIAS_CAP`] only, oldest `claimed_at` evicted first.
 fn prune_ledger(ledger: &mut CompletedTurnLedger, now_ms: u64) {
     let backed_before: Vec<bool> = ledger
         .merged_aliases
@@ -205,12 +197,11 @@ fn prune_ledger(ledger: &mut CompletedTurnLedger, now_ms: u64) {
     let aliases = std::mem::take(&mut ledger.merged_aliases);
     let (mut kept, mut rowless) = (Vec::new(), Vec::new());
     for (alias, backed_before) in aliases.into_iter().zip(backed_before) {
-        if backed_before {
-            if ledger.backs(&alias) {
-                kept.push(alias);
-            }
-        } else if now_ms.saturating_sub(alias.claimed_at_epoch_ms) <= LEDGER_RETENTION_MS {
+        // No age eviction: claims are serialized per channel, so an active alias stays newest.
+        if !backed_before {
             rowless.push(alias);
+        } else if ledger.backs(&alias) {
+            kept.push(alias);
         }
     }
     rowless.sort_by_key(|alias| alias.claimed_at_epoch_ms);
@@ -307,9 +298,8 @@ pub(in crate::services::discord) fn append_completed_turn(
     append_completed_episode(provider, channel_id, user_msg_id, None);
 }
 
-/// [`append_completed_turn`] for a delivery that proved its episode. Pass a
-/// nonce ONLY with same-episode provenance for `user_msg_id` (A7): a wrong one
-/// could settle another episode's absorbed ids, `None` only forgoes that.
+/// [`append_completed_turn`] for a delivery that proved its episode. Pass a nonce only with
+/// same-episode provenance: a wrong one could settle another episode's absorbed ids.
 pub(in crate::services::discord) fn append_completed_episode(
     provider: &ProviderKind,
     channel_id: u64,
@@ -339,10 +329,8 @@ pub(in crate::services::discord) fn append_completed_episode(
     }
 }
 
-/// #6035 PR-S: durably record that episode `turn_nonce` of `primary` absorbed
-/// `absorbed`. The claim wrapper calls this before it reports the claim, so
-/// the alias precedes every delivery of that episode. Best effort: a missing
-/// alias only leaves the absorbed ids unsettled (a duplicate, never loss).
+/// Durably record that episode `turn_nonce` of `primary` absorbed `absorbed`, before the claim
+/// is reported. Best effort: a missing alias leaves them unsettled (a duplicate, never loss).
 pub(in crate::services::discord) fn record_merged_alias(
     provider: &ProviderKind,
     channel_id: u64,
@@ -480,7 +468,7 @@ mod tests {
             !settled_at(&path).contains(&H),
             "a rowless alias is no evidence"
         );
-        // T-S3: a delayed append of P's EARLIER episode cannot certify n2.
+        // A delayed append of P's earlier episode cannot certify n2.
         append_at(&path, P, Some("n1"), 2_000).expect("delayed n1");
         assert!(!settled_at(&path).contains(&H));
         append_at(&path, P, Some("n2"), 3_000).expect("n2 delivered");
@@ -533,7 +521,7 @@ mod tests {
         assert_eq!(ledger.merged_aliases.len(), LEDGER_ENTRY_CAP + 1);
         assert!(
             ledger.merged_aliases.contains(&alias(P, "active", H, now)),
-            "F7"
+            "the active alias is kept"
         );
     }
 
@@ -562,5 +550,15 @@ mod tests {
             primaries,
             (101..=100 + ROWLESS_ALIAS_CAP as u64).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn a_long_active_rowless_alias_survives_an_unrelated_append() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("codex").join("active.json");
+        record_alias_at(&path, P, "active", &[H], 1_000).expect("alias");
+        append_at(&path, 7_001, None, 1_000 + LEDGER_RETENTION_MS + 1).expect("append");
+        let aliases = read_ledger_at(&path).expect("ledger").merged_aliases;
+        assert_eq!(aliases, vec![alias(P, "active", H, 1_000)]);
     }
 }

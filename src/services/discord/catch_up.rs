@@ -963,7 +963,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         let known_snapshot = mailbox_snapshot(shared, channel_id).await;
         let (mut known_arms, mut existing_ids) = recovery_known_arms_and_ids(&known_snapshot);
         // #4564: one completed-turn ledger read per scan suppresses the false TooOld
-        // notice for delivered ids; #6035 PR-S: it also restores durable absorbed arms.
+        // notice for delivered ids and restores the active episode's durable absorbed arms.
         let ledger = settled_ledger_consult::read(provider, channel_id);
         let settled_ids = ledger.settle(&known_snapshot, &mut known_arms, &mut existing_ids);
 

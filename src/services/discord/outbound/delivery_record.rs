@@ -2401,7 +2401,7 @@ fn shadow_mirror_delivered_frontier_inner(
                 .and_then(|_| fresh.as_ref().map(|state| state.user_msg_id))
                 .filter(|user_msg_id| *user_msg_id != 0)
         });
-    // #6035 A7: only the exact receipt's own row proves its episode nonce.
+    // Only the exact receipt's own row proves its episode nonce.
     let receipt_row = receipt.as_ref().zip(fresh.as_ref());
     let proven = receipt_row.filter(|(_, r)| Some(r.user_msg_id) == safe_ledger_user_msg_id);
     let nonce = proven.map(|(receipt, _)| receipt.source.turn_nonce.clone());
@@ -5922,8 +5922,8 @@ mod tests {
         assert!(!range_already_committed(422_855, 0));
     }
 
-    /// #6035 PR-S A7 fixture: one channel whose delivery-channel row is `user`'s
-    /// episode `"ep-n"`, spanning `(start, 64)` under a current generation.
+    /// One channel whose delivery-channel row is `user`'s episode `"ep-n"`,
+    /// spanning `(start, 64)` under a current generation.
     #[cfg(unix)]
     fn nonce_provenance_fixture(
         channel: u64,
@@ -5970,8 +5970,8 @@ mod tests {
             true, Some(603_599), anchor, Some("answer"), Some(pin));
     }
 
-    /// #6035 A7: the exact receipt pins the fresh row to this range, so the row's
-    /// own id is recorded with its episode nonce — bridge and watcher alike.
+    /// The exact receipt pins the fresh row to this range, so the row's own id
+    /// is recorded with its episode nonce, bridge and watcher alike.
     #[cfg(unix)]
     #[test]
     fn exact_receipt_row_records_its_episode_nonce_6035() {
@@ -5994,9 +5994,8 @@ mod tests {
         assert_eq!(ledger_rows(watcher), [(user, Some("ep-n".to_string()))]);
     }
 
-    /// #6035 A7: without exact same-episode provenance the row is `None`: a pin
-    /// naming another turn, the same id's row on another range (a delayed append
-    /// of an earlier episode), an unknown generation, and the pinned sink.
+    /// Without exact same-episode provenance the nonce is `None`: another turn's pin,
+    /// a row on another range, an unknown generation, and the pinned sink.
     #[cfg(unix)]
     #[test]
     fn unproven_provenance_records_no_nonce_6035() {

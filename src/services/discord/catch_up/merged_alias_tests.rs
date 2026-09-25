@@ -1,5 +1,5 @@
-//! #6035 PR-S — a merged head's durable alias settles its absorbed ids only
-//! when that same episode (primary, turn nonce) is on the completed-turn ledger.
+//! A merged head's durable alias settles its absorbed ids only when that same
+//! episode (primary, turn nonce) is on the completed-turn ledger.
 
 use super::absorbed_active_tests::absorb_and_claim;
 use super::*;
@@ -31,9 +31,8 @@ fn append_episode(fx: &Fixture, channel_id: ChannelId, primary: MessageId, nonce
     completed_turn_ledger::append_completed_episode(provider, channel, primary.get(), Some(nonce));
 }
 
-/// T-S1: P's episode n absorbed H and was delivered, so the next scan settles
-/// H with no enqueue and advances — and a restarted process agrees. The alias
-/// is durable the moment the claim is reported (M10).
+/// P's episode absorbed H and was delivered, so the next scan settles H with no
+/// enqueue and advances, and a restarted process agrees.
 #[tokio::test(flavor = "current_thread")]
 async fn t_s1_a_delivered_episode_settles_what_it_absorbed() {
     let fx = Fixture::new().await;
@@ -73,9 +72,8 @@ async fn t_s1_a_delivered_episode_settles_what_it_absorbed() {
     assert_eq!(memory, Some(p.get()));
 }
 
-/// T-S2 / T-S3 (F5): P's first episode n1 is delivered, its second n2 absorbs
-/// H and ends undelivered. The (P, n1) row — appended before the alias or
-/// delayed past it — cannot certify alias (P, n2), so H is recovered.
+/// P's delivered episode n1 row, appended before or after the alias, cannot
+/// certify the undelivered episode n2 that absorbed H, so H is recovered.
 async fn assert_other_episode_row_does_not_settle(channel_id: ChannelId, delayed: bool) {
     let fx = Fixture::new().await;
     let (checkpoint, h, p) = (id(1, 600), id(2, 150), id(3, 120));
@@ -112,8 +110,8 @@ async fn t_s3_a_delayed_append_of_an_earlier_episode_does_not_settle_h() {
     assert_other_episode_row_does_not_settle(ChannelId::new(4_603_554), true).await;
 }
 
-/// T-S7 (scope pin): the alias lives on the claim channel's ledger while a
-/// split delivery lands on another channel's, so H is duplicated, never settled.
+/// The alias lives on the claim channel's ledger and a split delivery on
+/// another's, so H is duplicated, never settled.
 #[tokio::test(flavor = "current_thread")]
 async fn t_s7_a_split_channel_delivery_duplicates_but_never_settles() {
     let fx = Fixture::new().await;
@@ -137,9 +135,8 @@ async fn t_s7_a_split_channel_delivery_duplicates_but_never_settles() {
     );
 }
 
-/// T-S8: after a restart `RestoreActiveTurn` re-binds P's persisted episode
-/// with no in-memory absorbed set; the durable alias of that same episode
-/// restores H as `AbsorbedActiveTurn`, so H is neither re-run nor leapt.
+/// A restored episode has no in-memory absorbed set; its durable alias restores
+/// H as `AbsorbedActiveTurn`, so H is neither re-run nor leapt.
 #[tokio::test(flavor = "current_thread")]
 async fn t_s8_a_restored_episode_holds_its_durably_absorbed_ids() {
     let fx = Fixture::new().await;
@@ -175,8 +172,7 @@ async fn t_s8_a_restored_episode_holds_its_durably_absorbed_ids() {
     assert_eq!(memory, Some(checkpoint.get()), "H is not leapt");
 }
 
-/// Claim-wrapper provenance: a legacy nonce-less token or a claim that
-/// absorbed nothing writes no alias (T-S4 at the producer).
+/// A legacy nonce-less token or a claim that absorbed nothing writes no alias.
 #[tokio::test(flavor = "current_thread")]
 async fn a_claim_without_nonce_or_absorption_writes_no_alias() {
     let fx = Fixture::new().await;

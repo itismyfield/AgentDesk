@@ -49,8 +49,9 @@ INTAKE_SPEC.loader.exec_module(intake_guard)
 # private caller.
 # #5755 removes the unproven loop_poll_prologue shared-frontier advance.
 # T5 detached custody adds one direct historical pinned receipt write.
-TOTAL_CALL_SITES = 49
-PINNED_SYMBOLS = 29
+# Merged-head aliases add `append_completed_episode` (2) and `record_merged_alias` (1).
+TOTAL_CALL_SITES = 52
+PINNED_SYMBOLS = 31
 ZERO_PINNED = {
     "write_confirmed_delivery",
     "write_proven_gone_equal_range_frontier",
@@ -101,7 +102,8 @@ MANUAL_CLASSIFICATION = [
     # T6 unrecorded dead-code sweep slice 1: 3 -> 2 production / 12 -> 11 blind.
     # The unwired `shadow_mirror_same_channel_frontier_with_body` entry point
     # (zero production and zero test callers) was deleted with its funnel call.
-    ("src/services/discord/outbound/delivery_record.rs", "shadow_mirror_delivered_frontier", 2, 11),
+    # The nonce-provenance tests' `bridge_delivery` helper adds one: 11 -> 12 blind.
+    ("src/services/discord/outbound/delivery_record.rs", "shadow_mirror_delivered_frontier", 2, 12),
     ("src/services/discord/outbound/delivery_record.rs", "append_completed_turn", 2, 2),
     # #5071 T1 S7. Hand-verified: the recovery file's `#[cfg(test)] mod tests`
     # opens at the end of the file, and the ONE production spelling of the new

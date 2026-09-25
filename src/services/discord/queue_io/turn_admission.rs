@@ -125,8 +125,8 @@ async fn mailbox_try_start_turn_ordered(
                 .await
         }
     };
-    // #6035 PR-S: the alias lands before the claim is reported, hence before
-    // any delivery of this episode can append `(user_message_id, turn_nonce)`.
+    // The alias lands before the claim is reported, hence before any delivery
+    // of this episode can append `(user_message_id, turn_nonce)`.
     if result.started
         && !result.absorbed_source_ids.is_empty()
         && let Some(turn_nonce) = turn_nonce.as_deref()

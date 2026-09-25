@@ -2102,7 +2102,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             // non-blocking.
                             state.active_turn_kind = turn_kind;
                             // #3167 BLOCKER-2 — retire only this claim's own reservation
-                            // (#5937: a claim is not drain progress); #6035: note its absorbed.
+                            // (#5937: a claim is not drain progress).
                             if turn_kind == ActiveTurnKind::UserOrAgent {
                                 settle_pending_dispatch_on_claim(
                                     &mut state,

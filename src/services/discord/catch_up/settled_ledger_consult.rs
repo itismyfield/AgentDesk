@@ -29,14 +29,8 @@ pub(in crate::services::discord) fn read(
 }
 
 impl ScanLedger {
-    /// The set of inbound `user_msg_id`s with a durable completed-turn record —
-    /// merged-head aliases joined on the same episode — from the same single
-    /// ledger read that also restores the active episode's absorbed ids after a
-    /// restart (#6035 PR-S T-S8): an actor re-bound by `RestoreActiveTurn` has
-    /// no in-memory absorbed set, but the durable alias of `(active primary,
-    /// active nonce)` names it. Those ids join `known`/`arms` as
-    /// [`RecoveryKnownIdArm::AbsorbedActiveTurn`] (Open), exactly as the live
-    /// set does. `snapshot` must be read first.
+    /// Settled ids from this one read. After `snapshot` is read, the active episode's durable
+    /// absorbed ids also join `known`/`arms` as `AbsorbedActiveTurn` (a restored actor has none).
     pub(in crate::services::discord) fn settle(
         &self,
         snapshot: &ChannelMailboxSnapshot,

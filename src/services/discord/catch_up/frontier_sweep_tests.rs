@@ -638,7 +638,7 @@ enum Resolution {
     LeftQueueUnprocessed,
     BecameActiveTurn,
     /// M is the newest primary of a merged head that also carries older H. H is
-    /// held while M's turn runs (#6205), then settled by M's delivered episode (#6035).
+    /// held while M's turn runs (#6205), then settled by M's delivered episode.
     MergedHeadClaimed,
     /// `/clear`: the user discarded M, so neither sweep may run it again.
     IntentionallyCleared,
@@ -732,7 +732,7 @@ async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
             assert_eq!(fx.surfaces(channel_id), held, "{resolution:?}");
             let retry = fx.pending(channel_id).expect("H keeps the barrier retry");
             assert_eq!(retry.checkpoint, checkpoint.get(), "{resolution:?}");
-            // #6035 PR-S: M's episode is delivered, so its durable alias settles H.
+            // M's episode is delivered, so its durable alias settles H.
             let (provider, nonce) = (&fx.provider, turn_nonce.as_deref());
             completed_turn_ledger::append_completed_episode(
                 provider,

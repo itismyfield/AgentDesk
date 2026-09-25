@@ -3727,6 +3727,7 @@ services::discord::org_writer::tests::named_profile_rejects_provider_mismatch_be
 services::discord::org_writer::tests::named_profile_unlink_requires_detach_and_keeps_catalog_operation_scoped
 services::discord::org_writer::tests::primary_profile_cannot_be_unlinked_until_reset_to_system_default
 services::discord::org_writer::tests::test_012_catalog_append_round_trips_extra_and_skips_secrets
+services::discord::outbound::completed_turn_ledger::tests::a_long_active_rowless_alias_survives_an_unrelated_append
 services::discord::outbound::completed_turn_ledger::tests::active_rowless_alias_survives_row_backed_pool_t_s5_6035
 services::discord::outbound::completed_turn_ledger::tests::alias_settles_only_with_the_same_episode_entry_6035
 services::discord::outbound::completed_turn_ledger::tests::append_dedups_by_user_msg_id_keeping_latest_commit_time
