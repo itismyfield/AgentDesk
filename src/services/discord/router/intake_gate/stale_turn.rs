@@ -1109,6 +1109,51 @@ mod thread_guard_stale_pure_tests {
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
     }
 
+    /// A token held without an anchor keeps the stale row as its only durable
+    /// evidence, along with the token and the parent guard.
+    #[tokio::test]
+    async fn thread_guard_force_clean_without_anchor_keeps_the_row_of_a_held_token() {
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let _guard = EnvRootGuard::set(temp.path());
+        let provider = ProviderKind::Codex;
+        let (parent_id, thread_id) = (
+            ChannelId::new(ID_BASE + 1_060),
+            ChannelId::new(ID_BASE + 1_061),
+        );
+        let nonce = Some("nonce-a".to_string());
+        seed_inflight_row(
+            &provider,
+            ID_BASE + 1_061,
+            &stale_updated_at(),
+            8_001,
+            nonce,
+        );
+        let (_registry, shared) = shared_with_registry(&provider).await;
+        let token = Arc::new(CancelToken::new());
+        shared
+            .mailbox(thread_id)
+            .recovery_kickoff(token.clone(), UserId::new(7), None)
+            .await;
+        shared.dispatch.thread_parents.insert(parent_id, thread_id);
+        let proof = force_clean_proof_for(&shared, &provider, thread_id).await;
+
+        assert!(!force_clean(&shared, thread_id, Some(proof)).await);
+        let row =
+            crate::services::discord::inflight::load_inflight_state(&provider, ID_BASE + 1_061);
+        assert!(
+            row.is_some(),
+            "the held token's only durable evidence stays"
+        );
+        let after = crate::services::discord::mailbox_snapshot(&shared, thread_id).await;
+        assert!(
+            after
+                .cancel_token
+                .is_some_and(|current| Arc::ptr_eq(&current, &token))
+        );
+        assert!(!token.cancelled.load(Ordering::Relaxed));
+        assert!(shared.dispatch.thread_parents.contains_key(&parent_id));
+    }
+
     /// A stale verdict from the old row must not authorize finishing the
     /// mailbox's newer episode that shares only the anchor id.
     #[tokio::test]
@@ -1266,6 +1311,39 @@ mod thread_guard_stale_pure_tests {
         assert_eq!(routing(&shared, parent_id, thread_id), (None, None));
         let row = crate::services::discord::inflight::load_inflight_state(&provider, ID_BASE + 991);
         assert!(row.is_none());
+    }
+
+    /// A successor that registered its own override before the force-clean
+    /// keeps it: the cleanup cannot tell that entry from the dead episode's.
+    #[tokio::test]
+    async fn thread_guard_force_clean_keeps_a_successor_preregistered_role_override() {
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let _guard = EnvRootGuard::set(temp.path());
+        let provider = ProviderKind::Codex;
+        let (parent_id, thread_id) = (
+            ChannelId::new(ID_BASE + 1_050),
+            ChannelId::new(ID_BASE + 1_051),
+        );
+        let (alt_id, successor_parent, successor_alt) = (
+            ChannelId::new(ID_BASE + 1_052),
+            ChannelId::new(ID_BASE + 1_053),
+            ChannelId::new(ID_BASE + 1_054),
+        );
+        let (_registry, shared, _stale_token) =
+            seed_stale_thread_with_queue(&provider, thread_id, MessageId::new(8_001), 0).await;
+        shared.dispatch.thread_parents.insert(parent_id, thread_id);
+        shared.dispatch.role_overrides.insert(thread_id, alt_id);
+        let proof = force_clean_proof_for(&shared, &provider, thread_id).await;
+
+        // B reuses the thread from another parent and registers before claiming it.
+        let dispatch = &shared.dispatch;
+        dispatch.thread_parents.insert(successor_parent, thread_id);
+        dispatch.role_overrides.insert(thread_id, successor_alt);
+
+        assert!(force_clean(&shared, thread_id, Some(proof)).await);
+        assert!(!dispatch.thread_parents.contains_key(&parent_id));
+        let role_override = dispatch.role_overrides.get(&thread_id).map(|e| *e.value());
+        assert_eq!(role_override, Some(successor_alt));
     }
 
     /// Parents whose deferred idle-queue kick was scheduled, read before any yield.
