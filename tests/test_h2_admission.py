@@ -385,6 +385,16 @@ class ZeroRules(unittest.TestCase):
         with mock.patch.object(adm, "PATH_ATTR_ALLOWED", frozenset(ESCAPE)):
             self.assertEqual(self.rules(ESCAPE, roster=frozenset(ESCAPE)), [])
 
+    def test_owner_path_attribute_span_is_bracket_matched(self) -> None:
+        # review r5: a `]` before `path =` must not end the attribute span; string literals are already blanked
+        red = ('#[cfg_attr(unix, doc = [h2], path = "pty_escape.rs")]', '#[cfg_attr(any(unix, doc = [[1], [2]]), path = "pty_escape.rs")]',
+               '#[cfg_attr(\n    all(unix, not(test)),\n    doc = [h2],\n    path\n        = "pty_escape.rs"\n)]',
+               '#[cfg_attr(unix, doc = "]", path = "pty_escape.rs")]')
+        green = ('#[cfg_attr(unix, xpath = "pty_escape.rs")]', '#[doc = "["]', '#[doc = [h2]]\nfn f() { let path = 1; }')
+        for attr, want in [*((a, ["R-O"]) for a in red), *((a, []) for a in green)]:
+            escape = {k: v.replace('#[path = "pty_escape.rs"]', attr) for k, v in ESCAPE.items()}
+            self.assertEqual(self.rules(escape, roster=frozenset(ESCAPE)), want, attr)
+
 ESCAPE = {"src/services/platform/tmux.rs": '#[path = "pty_escape.rs"]\npub(crate) mod escape;\npub fn has_session() {}\n'}
 
 if __name__ == "__main__":

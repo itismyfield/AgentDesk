@@ -151,6 +151,20 @@ def tmux_literal_sites(code: str, mixed: str, literals: list[tuple[int, str]]) -
     line = lambda pos: " ".join(mixed[mixed.rfind("\n", 0, pos) + 1:(mixed.find("\n", pos) + 1 or len(mixed) + 1) - 1].split())
     return collections.Counter((src.enclosing(pos)[0], line(pos)) for pos, text in literals if TMUX_LITERAL_RE.match(text))
 
+def has_path_attr(code: str) -> bool:
+    """True if a `#[..]`/`#![..]` attribute names `path =` anywhere inside it, cfg_attr and multi-line included.
+    Review r5: the span ends at the depth-matched `]`, so a nested `[..]` before `path =` cannot cut it short."""
+    for opener in re.finditer(r"#\s*!?\s*\[", code):
+        depth, end = 0, len(code)
+        for i in range(opener.end() - 1, len(code)):
+            depth += {"[": 1, "]": -1}.get(code[i], 0)
+            if depth == 0:
+                end = i
+                break
+        if re.search(r"\bpath\s*=", code[opener.end():end]):
+            return True
+    return False
+
 def zero_rules(root: Path) -> list[str]:
     """R-C, R-C2, R-F over non-owner prod Rust; R-O roster, Cargo.lock (H4) and H9 files."""
     problems, rc_found = [], {}
@@ -177,7 +191,7 @@ def zero_rules(root: Path) -> list[str]:
         problems.append(f"R-O: owner roster mismatch: {rel} ({'unlisted' if rel in found else 'missing'})")
     # r6 §2.1: an owner file may not mount a module from outside the owner paths via #[path]
     problems += [f"R-O: {rel} uses #[path]; owner modules must live under the owner paths"
-                 for rel in sorted(found - PATH_ATTR_ALLOWED) if re.search(r"#\s*!?\s*\[[^\]]*?\bpath\s*=", production_views(root / rel)[0])]
+                 for rel in sorted(found - PATH_ATTR_ALLOWED) if has_path_attr(production_views(root / rel)[0])]
     lock = root / "Cargo.lock"
     if lock.exists():
         problems += [f"R-O: Cargo.lock brings in `{name}` (tmux/pty crate, H4)"
