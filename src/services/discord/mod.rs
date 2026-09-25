@@ -1285,7 +1285,11 @@ fn make_shared_data_for_tests_with_storage_and_intake_capabilities(
             shutdown_slot_consumed: std::sync::atomic::AtomicBool::new(false),
         },
         turn_finalizer: turn_finalizer::TurnFinalizer::spawn(),
-        dispatch: DispatchRoutingState::default(),
+        dispatch: DispatchRoutingState {
+            intake_dedup: dashmap::DashMap::new(),
+            thread_parents: dashmap::DashMap::new(),
+            role_overrides: dashmap::DashMap::new(),
+        },
         voice_barge_in: Arc::new(voice_barge_in::VoiceBargeInRuntime::disabled()),
         voice_pairings: Arc::new(voice_routing::VoiceChannelPairingStore::load_default()),
         bot_connected: std::sync::atomic::AtomicBool::new(false),

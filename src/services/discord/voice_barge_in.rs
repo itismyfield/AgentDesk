@@ -1368,7 +1368,11 @@ mod tests {
                 shutdown_slot_consumed: std::sync::atomic::AtomicBool::new(false),
             },
             turn_finalizer: super::super::turn_finalizer::TurnFinalizer::spawn(),
-            dispatch: super::super::DispatchRoutingState::default(),
+            dispatch: super::super::DispatchRoutingState {
+                intake_dedup: dashmap::DashMap::new(),
+                thread_parents: dashmap::DashMap::new(),
+                role_overrides: dashmap::DashMap::new(),
+            },
             voice_barge_in: Arc::new(VoiceBargeInRuntime::disabled()),
             voice_pairings: Arc::new(
                 super::super::voice_routing::VoiceChannelPairingStore::load_default(),

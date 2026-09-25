@@ -24,8 +24,28 @@ pub(super) struct ThreadGuardForceCleanProof {
     turn_nonce: Option<String>,
     observed_before: std::time::Instant,
     inflight: crate::services::discord::inflight::InflightTurnState,
-    /// Dispatch-map registrations after this value belong to a later episode.
-    registration_generation: u64,
+}
+
+/// Routing entries pointing at the thread while the proven episode still held it.
+struct ThreadGuardRoutingSnapshot {
+    parents: Vec<serenity::ChannelId>,
+    role_override: Option<serenity::ChannelId>,
+}
+
+fn snapshot_thread_guard_routing(
+    shared: &std::sync::Arc<SharedData>,
+    thread_id: serenity::ChannelId,
+) -> ThreadGuardRoutingSnapshot {
+    let parents = shared.dispatch.thread_parents.iter();
+    ThreadGuardRoutingSnapshot {
+        parents: parents
+            .filter(|entry| *entry.value() == thread_id)
+            .map(|entry| *entry.key())
+            .collect(),
+        role_override: crate::services::discord::turn_finalizer::cleanup::snapshot_role_override(
+            shared, thread_id,
+        ),
+    }
 }
 
 /// Non-unix builds have no tmux reachability evidence source: every warrant
@@ -158,21 +178,19 @@ pub(super) async fn thread_guard_should_force_clean_stale_thread(
     thread_id: serenity::ChannelId,
     now_unix_secs: i64,
 ) -> Option<ThreadGuardForceCleanProof> {
-    let registration_generation = shared.dispatch.registration_generation();
     let proof =
         classify_channel_stale_active_turn_proof(shared, provider, thread_id, now_unix_secs)
             .await?;
     if !stale_turn_axis_b_warrants(provider, &proof) {
         return None;
     }
-    thread_guard_force_clean_proof(proof, registration_generation)
+    thread_guard_force_clean_proof(proof)
 }
 
 /// The stale row and the mailbox anchor must name one episode: an id-only
 /// match can be a successor that reused the anchor id.
 fn thread_guard_force_clean_proof(
     proof: StaleActiveTurnProof,
-    registration_generation: u64,
 ) -> Option<ThreadGuardForceCleanProof> {
     let snapshot = proof.snapshot;
     if snapshot.mailbox_active_user_msg_id.is_some_and(|id| {
@@ -186,7 +204,6 @@ fn thread_guard_force_clean_proof(
         turn_nonce: snapshot.mailbox_active_turn_nonce,
         observed_before: proof.observed_before,
         inflight: proof.inflight,
-        registration_generation,
     })
 }
 
@@ -202,11 +219,9 @@ pub(super) async fn thread_guard_force_clean_stale_thread(
     let Some(proof) = proof else {
         return false;
     };
-    // Snapshot before the finish await so a follow-up's fresh override survives.
-    let owned_role_override =
-        crate::services::discord::turn_finalizer::cleanup::snapshot_role_override(
-            shared, thread_id,
-        );
+    // Snapshot while the proven episode still holds the thread; a later
+    // registration of a different value survives the cleanup.
+    let routing = snapshot_thread_guard_routing(shared, thread_id);
     let Ok(finish) = thread_guard_release_proven_anchor(shared, provider, thread_id, &proof).await
     else {
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -216,14 +231,7 @@ pub(super) async fn thread_guard_force_clean_stale_thread(
         );
         return false;
     };
-    thread_guard_cleanup_released_episode(
-        shared,
-        provider,
-        thread_id,
-        &proof,
-        finish,
-        owned_role_override,
-    )
+    thread_guard_cleanup_released_episode(shared, provider, thread_id, &proof, finish, routing)
 }
 
 /// Releases the proof's anchor without a completion event. `Err` means a
@@ -262,7 +270,7 @@ fn thread_guard_cleanup_released_episode(
     thread_id: serenity::ChannelId,
     proof: &ThreadGuardForceCleanProof,
     finish: Option<crate::services::turn_orchestrator::FinishTurnResult>,
-    owned_role_override: Option<serenity::ChannelId>,
+    routing: ThreadGuardRoutingSnapshot,
 ) -> bool {
     // Without an anchor only the idle residue row may go; the thread stays guarded.
     let _ = crate::services::discord::inflight::clear_inflight_state_for_snapshot(
@@ -277,21 +285,30 @@ fn thread_guard_cleanup_released_episode(
         "  [{ts}] 🔓 THREAD-GUARD: stale inflight detected for thread {}, cleaning up and proceeding",
         thread_id
     );
-    // `finalize_orphaned_clear` owns `cancelled` and the `global_active` decrement.
-    crate::services::discord::stall_recovery::finalize_orphaned_clear(
+    // Releases `cancelled` and `global_active` but never kills tmux by name: a
+    // successor may already reuse the session; wedged sessions stay with the stall watchdog.
+    crate::services::discord::stall_recovery::finalize_orphaned_clear_preserve_session(
         shared,
         thread_id,
         finish.removed_token.clone(),
         "1446_thread_guard_stale_inflight",
     );
-    let thread_parent_kickoffs = shared
-        .dispatch
-        .clear_thread_parents_registered_before(thread_id, proof.registration_generation);
+    let thread_parent_kickoffs: Vec<_> = routing
+        .parents
+        .into_iter()
+        .filter(|parent| {
+            let parents = &shared.dispatch.thread_parents;
+            parents
+                .remove_if(parent, |_, thread| *thread == thread_id)
+                .is_some()
+        })
+        .collect();
+    // Kept while queued follow-ups still need the counter-model override.
     if !finish.has_pending {
-        shared.dispatch.remove_role_override_registered_before(
+        crate::services::discord::turn_finalizer::cleanup::remove_owned_role_override(
+            shared,
             thread_id,
-            owned_role_override,
-            proof.registration_generation,
+            routing.role_override,
         );
     }
     crate::services::discord::turn_finalizer::cleanup::kickoff_thread_parents_after_finalize(
@@ -977,11 +994,9 @@ mod thread_guard_stale_pure_tests {
         proof: &super::ThreadGuardForceCleanProof,
     ) -> (
         crate::services::turn_orchestrator::FinishTurnResult,
-        Option<ChannelId>,
+        super::ThreadGuardRoutingSnapshot,
     ) {
-        let owned = crate::services::discord::turn_finalizer::cleanup::snapshot_role_override(
-            shared, thread_id,
-        );
+        let routing = super::snapshot_thread_guard_routing(shared, thread_id);
         let finish = super::thread_guard_release_proven_anchor(
             shared,
             &ProviderKind::Codex,
@@ -991,7 +1006,7 @@ mod thread_guard_stale_pure_tests {
         .await;
         (
             finish.expect("the proof owns the anchor").expect("anchor"),
-            owned,
+            routing,
         )
     }
 
@@ -1079,13 +1094,12 @@ mod thread_guard_stale_pure_tests {
             turn_nonce: None,
             observed_before: std::time::Instant::now(),
             inflight: stale_row,
-            registration_generation: shared.dispatch.registration_generation(),
         };
 
         let successor = Arc::new(CancelToken::new());
         start_episode(&shared, thread_id, &successor, 8_002, &fresh_updated_at()).await;
-        shared.dispatch.set_thread_parent(parent_id, thread_id);
-        shared.dispatch.set_role_override(thread_id, alt_id);
+        shared.dispatch.thread_parents.insert(parent_id, thread_id);
+        shared.dispatch.role_overrides.insert(thread_id, alt_id);
         shared.restart.global_active.store(1, Ordering::Relaxed);
 
         assert!(!force_clean(&shared, thread_id, Some(proof)).await);
@@ -1127,27 +1141,27 @@ mod thread_guard_stale_pure_tests {
             "the mixed evidence alone would authorize a force-clean"
         );
 
-        let generation = shared.dispatch.registration_generation();
-        let proof = super::thread_guard_force_clean_proof(mixed, generation);
+        let proof = super::thread_guard_force_clean_proof(mixed);
         assert!(proof.is_none());
         assert!(!force_clean(&shared, thread_id, proof).await);
         assert_episode_untouched(&shared, thread_id, &successor, 8_001).await;
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
     }
 
-    /// After A's finish, a replacement B that claims the thread keeps its row,
-    /// mapping and override; the queue-eligible edge follows the cleanup.
+    /// After A's finish, a replacement B that claims the thread keeps its row
+    /// and its own mapping and override; the queue-eligible edge follows the cleanup.
     #[tokio::test]
     async fn thread_guard_cleanup_after_finish_spares_a_replacement_episode() {
         let temp = tempfile::tempdir().expect("create temp runtime root");
         let _guard = EnvRootGuard::set(temp.path());
         let provider = ProviderKind::Codex;
         let (parent_id, thread_id) = (ChannelId::new(ID_BASE + 960), ChannelId::new(ID_BASE + 961));
-        let alt_id = ChannelId::new(ID_BASE + 962);
+        let (alt_id, next_thread) = (ChannelId::new(ID_BASE + 962), ChannelId::new(ID_BASE + 963));
+        let next_alt = ChannelId::new(ID_BASE + 964);
         let (_registry, shared, _stale_token) =
-            seed_stale_thread_with_queue(&provider, thread_id, MessageId::new(8_001), 3).await;
-        shared.dispatch.set_thread_parent(parent_id, thread_id);
-        shared.dispatch.set_role_override(thread_id, alt_id);
+            seed_stale_thread_with_queue(&provider, thread_id, MessageId::new(8_001), 0).await;
+        shared.dispatch.thread_parents.insert(parent_id, thread_id);
+        shared.dispatch.role_overrides.insert(thread_id, alt_id);
         let mut rx =
             crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
                 shared.as_ref(),
@@ -1161,16 +1175,21 @@ mod thread_guard_stale_pure_tests {
 
         let replacement = Arc::new(CancelToken::new());
         start_episode(&shared, thread_id, &replacement, 9_001, &fresh_updated_at()).await;
-        shared.dispatch.set_thread_parent(parent_id, thread_id);
-        shared.dispatch.set_role_override(thread_id, alt_id);
+        shared
+            .dispatch
+            .thread_parents
+            .insert(parent_id, next_thread);
+        shared.dispatch.role_overrides.insert(thread_id, next_alt);
 
+        assert!(!finish.has_pending);
         let finish = Some(finish);
         assert!(super::thread_guard_cleanup_released_episode(
             &shared, &provider, thread_id, &proof, finish, owned,
         ));
         assert_episode_untouched(&shared, thread_id, &replacement, 9_001).await;
         let routing_after = routing(&shared, parent_id, thread_id);
-        assert_eq!(routing_after, (Some(thread_id), Some(alt_id)));
+        assert_eq!(routing_after, (Some(next_thread), Some(next_alt)));
+        assert!(kicked_parents(&shared).is_empty());
         let event = rx
             .try_recv()
             .expect("the queue-eligible edge must follow the cleanup");
@@ -1201,27 +1220,30 @@ mod thread_guard_stale_pure_tests {
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
     }
 
-    /// A successor re-registering the same `thread -> alt` override after A's
-    /// finish keeps it, although the value equals A's snapshot.
+    /// Known limit of the value-compare cleanup: re-registering the same
+    /// `parent -> thread` / `thread -> alt` values after the snapshot is removed.
     #[tokio::test]
-    async fn thread_guard_cleanup_keeps_a_same_value_role_override_reregistration() {
+    async fn thread_guard_force_clean_same_value_reregistration_is_documented_aba() {
         let temp = tempfile::tempdir().expect("create temp runtime root");
         let _guard = EnvRootGuard::set(temp.path());
         let provider = ProviderKind::Codex;
-        let (thread_id, alt_id) = (ChannelId::new(ID_BASE + 981), ChannelId::new(ID_BASE + 982));
+        let (parent_id, thread_id) = (ChannelId::new(ID_BASE + 980), ChannelId::new(ID_BASE + 981));
+        let alt_id = ChannelId::new(ID_BASE + 982);
         let (_registry, shared, _stale_token) =
             seed_stale_thread_with_queue(&provider, thread_id, MessageId::new(8_001), 0).await;
-        shared.dispatch.set_role_override(thread_id, alt_id);
+        shared.dispatch.thread_parents.insert(parent_id, thread_id);
+        shared.dispatch.role_overrides.insert(thread_id, alt_id);
         let proof = force_clean_proof_for(&shared, &provider, thread_id).await;
         let (finish, owned) = release_proven_anchor(&shared, thread_id, &proof).await;
         assert!(!finish.has_pending);
 
-        shared.dispatch.set_role_override(thread_id, alt_id);
+        shared.dispatch.thread_parents.insert(parent_id, thread_id);
+        shared.dispatch.role_overrides.insert(thread_id, alt_id);
         let finish = Some(finish);
         assert!(super::thread_guard_cleanup_released_episode(
             &shared, &provider, thread_id, &proof, finish, owned,
         ));
-        assert_eq!(routing(&shared, thread_id, thread_id).1, Some(alt_id));
+        assert_eq!(routing(&shared, parent_id, thread_id), (None, None));
     }
 
     /// Without a later registration the finished episode's own override goes.
@@ -1233,10 +1255,11 @@ mod thread_guard_stale_pure_tests {
         let (parent_id, thread_id) = (ChannelId::new(ID_BASE + 990), ChannelId::new(ID_BASE + 991));
         let (_registry, shared, _stale_token) =
             seed_stale_thread_with_queue(&provider, thread_id, MessageId::new(8_001), 0).await;
-        shared.dispatch.set_thread_parent(parent_id, thread_id);
+        shared.dispatch.thread_parents.insert(parent_id, thread_id);
         shared
             .dispatch
-            .set_role_override(thread_id, ChannelId::new(ID_BASE + 992));
+            .role_overrides
+            .insert(thread_id, ChannelId::new(ID_BASE + 992));
         let proof = force_clean_proof_for(&shared, &provider, thread_id).await;
 
         assert!(force_clean(&shared, thread_id, Some(proof)).await);
@@ -1307,19 +1330,228 @@ mod thread_guard_stale_pure_tests {
         );
         let (_registry, shared, _stale_token) =
             seed_stale_thread_with_queue(&provider, thread_id, MessageId::new(8_001), 0).await;
-        shared.dispatch.set_thread_parent(parent_id, thread_id);
-        shared.dispatch.set_role_override(thread_id, alt_id);
+        shared.dispatch.thread_parents.insert(parent_id, thread_id);
+        shared.dispatch.role_overrides.insert(thread_id, alt_id);
         let proof = force_clean_proof_for(&shared, &provider, thread_id).await;
         shared
             .dispatch
-            .set_thread_parent(other_parent, other_thread);
-        shared.dispatch.set_role_override(other_thread, other_alt);
+            .thread_parents
+            .insert(other_parent, other_thread);
+        shared
+            .dispatch
+            .role_overrides
+            .insert(other_thread, other_alt);
 
         assert!(force_clean(&shared, thread_id, Some(proof)).await);
         assert_eq!(kicked_parents(&shared), vec![parent_id]);
         assert_eq!(routing(&shared, parent_id, thread_id), (None, None));
         let other_routing = routing(&shared, other_parent, other_thread);
         assert_eq!(other_routing, (Some(other_thread), Some(other_alt)));
+    }
+
+    /// Queued follow-ups still need a restored counter-model override, so it
+    /// survives the cleanup while the parent guard goes.
+    #[tokio::test]
+    async fn thread_guard_force_clean_keeps_restored_override_when_pending() {
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let _guard = EnvRootGuard::set(temp.path());
+        let provider = ProviderKind::Codex;
+        let (parent_id, thread_id) = (
+            ChannelId::new(ID_BASE + 1_020),
+            ChannelId::new(ID_BASE + 1_021),
+        );
+        let alt_id = ChannelId::new(ID_BASE + 1_022);
+        let (_registry, shared, _stale_token) =
+            seed_stale_thread_with_queue(&provider, thread_id, MessageId::new(8_001), 1).await;
+        shared.dispatch.thread_parents.insert(parent_id, thread_id);
+        shared.dispatch.role_overrides.insert(thread_id, alt_id);
+        let proof = force_clean_proof_for(&shared, &provider, thread_id).await;
+
+        assert!(force_clean(&shared, thread_id, Some(proof)).await);
+        assert_eq!(routing(&shared, parent_id, thread_id), (None, Some(alt_id)));
+    }
+
+    /// Records the finalize log and each completion publish in order, noting
+    /// at each publish whether the parent guard and inflight row were gone.
+    struct CleanupOrder {
+        shared: Arc<SharedData>,
+        parent_id: ChannelId,
+        thread_id: ChannelId,
+        seen: Arc<std::sync::Mutex<Vec<(&'static str, bool)>>>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CleanupOrder {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let target = event.metadata().target();
+            let label = if target.ends_with("stall_recovery") {
+                "finalize"
+            } else if target == "agentdesk::discord::turn_completion_events" {
+                "completion"
+            } else {
+                return;
+            };
+            let parents = &self.shared.dispatch.thread_parents;
+            let row = crate::services::discord::inflight::load_inflight_state(
+                &ProviderKind::Codex,
+                self.thread_id.get(),
+            );
+            let cleaned = !parents.contains_key(&self.parent_id) && row.is_none();
+            self.seen.lock().unwrap().push((label, cleaned));
+        }
+    }
+
+    /// The queue-eligible edge comes after every cleanup step and hands the
+    /// kept follow-up to a real dequeue.
+    #[tokio::test]
+    async fn thread_guard_force_clean_completion_event_drives_real_dequeue() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let _guard = EnvRootGuard::set(temp.path());
+        let provider = ProviderKind::Codex;
+        let (parent_id, thread_id) = (
+            ChannelId::new(ID_BASE + 1_030),
+            ChannelId::new(ID_BASE + 1_031),
+        );
+        let (_registry, shared, _stale_token) =
+            seed_stale_thread_with_queue(&provider, thread_id, MessageId::new(8_001), 1).await;
+        shared.dispatch.thread_parents.insert(parent_id, thread_id);
+        let mut rx =
+            crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+                shared.as_ref(),
+            );
+        let recovery_done = shared.mailboxes.recovery_done(thread_id);
+        let proof = force_clean_proof_for(&shared, &provider, thread_id).await;
+        let seen = Arc::default();
+        let order = CleanupOrder {
+            shared: shared.clone(),
+            parent_id,
+            thread_id,
+            seen: Arc::clone(&seen),
+        };
+        crate::logging::test_capture::pin_callsite_interest();
+        let capture = tracing::subscriber::set_default(tracing_subscriber::registry().with(order));
+
+        assert!(force_clean(&shared, thread_id, Some(proof)).await);
+        drop(capture);
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+            ["finalize", "completion"]
+        );
+        assert!(
+            seen[1].1,
+            "cleanup must finish before the queue-eligible edge"
+        );
+        let event = rx
+            .try_recv()
+            .expect("the kept queue must reach the listener");
+        assert!(event.queue_is_eligible());
+        let taken = crate::services::discord::mailbox_take_next_soft_intervention(
+            &shared, &provider, thread_id,
+        )
+        .await;
+        let head = taken.intervention.expect("the kept follow-up is dequeued");
+        assert_eq!(head.message_id, MessageId::new(9_001));
+        assert!(!taken.has_more);
+        let after = crate::services::discord::mailbox_snapshot(&shared, thread_id).await;
+        assert!(after.intervention_queue.is_empty());
+        let wait =
+            tokio::time::timeout(std::time::Duration::from_millis(100), recovery_done.wait());
+        assert!(wait.await.is_ok(), "the finish must wake recovery waiters");
+    }
+
+    fn block_on_under_executor_seam(test: impl std::future::Future<Output = ()>) {
+        use crate::services::provider::cancel_token_cleanup::executor;
+        executor::with_executor_dispatch_seam(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build test runtime");
+            runtime.block_on(test);
+        });
+    }
+
+    /// A stale row whose nonce differs from the live anchor's is not a proof:
+    /// the live episode keeps its queue, row, routing and processes.
+    #[test]
+    fn thread_guard_force_clean_rejects_mismatched_episode() {
+        use crate::services::provider::cancel_token_cleanup::executor;
+        block_on_under_executor_seam(async {
+            let temp = tempfile::tempdir().expect("create temp runtime root");
+            let _guard = EnvRootGuard::set(temp.path());
+            let provider = ProviderKind::Codex;
+            let (parent_id, thread_id) = (
+                ChannelId::new(ID_BASE + 1_040),
+                ChannelId::new(ID_BASE + 1_041),
+            );
+            let alt_id = ChannelId::new(ID_BASE + 1_042);
+            let nonce = Some("nonce-a".to_string());
+            seed_inflight_row(
+                &provider,
+                ID_BASE + 1_041,
+                &stale_updated_at(),
+                8_001,
+                nonce,
+            );
+            let (_registry, shared) = shared_with_registry(&provider).await;
+            let live = Arc::new(CancelToken::new());
+            let (user, anchor) = (UserId::new(7), MessageId::new(8_001));
+            assert!(
+                crate::services::discord::mailbox_try_start_turn(
+                    &shared,
+                    thread_id,
+                    live.clone(),
+                    user,
+                    anchor,
+                )
+                .await
+            );
+            let mailbox = shared.mailbox(thread_id);
+            mailbox
+                .age_active_turn_for_test(std::time::Duration::from_secs(60))
+                .await;
+            crate::services::discord::mailbox_enqueue_intervention(
+                &shared,
+                &provider,
+                thread_id,
+                queued_thread_followup(9_001),
+            )
+            .await;
+            shared.dispatch.thread_parents.insert(parent_id, thread_id);
+            shared.dispatch.role_overrides.insert(thread_id, alt_id);
+            shared.restart.global_active.store(1, Ordering::Relaxed);
+
+            let proof = super::thread_guard_should_force_clean_stale_thread(
+                &shared,
+                &provider,
+                thread_id,
+                chrono::Utc::now().timestamp(),
+            )
+            .await;
+            assert!(proof.is_none());
+            assert!(!force_clean(&shared, thread_id, proof).await);
+
+            let after = crate::services::discord::mailbox_snapshot(&shared, thread_id).await;
+            let current = after
+                .cancel_token
+                .expect("the live episode keeps the thread");
+            assert!(Arc::ptr_eq(&current, &live));
+            assert!(!live.cancelled.load(Ordering::Relaxed));
+            assert_eq!(after.intervention_queue.len(), 1);
+            let row =
+                crate::services::discord::inflight::load_inflight_state(&provider, thread_id.get())
+                    .expect("the row stays");
+            assert_eq!(row.turn_nonce.as_deref(), Some("nonce-a"));
+            let routing_after = routing(&shared, parent_id, thread_id);
+            assert_eq!(routing_after, (Some(thread_id), Some(alt_id)));
+            assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+            assert_eq!(executor::tmux_kill_dispatches_for_test(), 0);
+            assert_eq!(executor::pid_kill_dispatches_for_test(), 0);
+        });
     }
 
     /// #1456: explicit background placeholders are a visible status surface,

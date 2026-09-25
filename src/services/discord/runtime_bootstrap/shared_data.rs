@@ -175,9 +175,15 @@ pub(super) fn run_bot_build_shared_data(
             shutdown_slot_consumed: std::sync::atomic::AtomicBool::new(false),
         },
         turn_finalizer: crate::services::discord::turn_finalizer::TurnFinalizer::spawn(),
-        // Dispatch routing defaults are side-effect-free, so this first-member position
+        // #3479 Item 3: dispatch intake/routing cluster. All three members are
+        // side-effect-free `DashMap::new()` inits, so grouping them at this
+        // first-member position (dispatch_role_overrides moved up from below)
         // preserves the evaluation order of every side-effecting initializer.
-        dispatch: DispatchRoutingState::default(),
+        dispatch: DispatchRoutingState {
+            intake_dedup: dashmap::DashMap::new(),
+            thread_parents: dashmap::DashMap::new(),
+            role_overrides: dashmap::DashMap::new(),
+        },
         bot_connected: std::sync::atomic::AtomicBool::new(false),
         last_turn_at: std::sync::Mutex::new(None),
         // #3038 S2: wrapped verbatim at the first-member position (evaluation-order preserved).
