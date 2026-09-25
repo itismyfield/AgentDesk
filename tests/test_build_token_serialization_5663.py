@@ -22,6 +22,7 @@ import contextlib
 import json
 import functools
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -121,8 +122,8 @@ def joined_lines(text: str) -> list[str]:
 def release_cargo_sites() -> dict[str, list[str]]:
     """Release cargo build/clean invocations per tracked build script, found by scanning.
 
-    A command kept in an array (`name=(cargo clean ...)`) is reported at the lines
-    that expand `"${name[@]}"`, since only those decide whether it runs wrapped.
+    A command kept in an array (`name=(cargo clean ...)`) is reported at every line that
+    expands it, quoted or not (`${name[@]}`, `${name[*]}`, `$name`), since those run it.
     """
     tracked = subprocess.run(["git", "-C", str(REPO), "ls-files"], check=True,
                              capture_output=True, text=True).stdout.split()
@@ -137,7 +138,8 @@ def release_cargo_sites() -> dict[str, list[str]]:
                     continue
                 name = s.split("=(", 1)[0] if "=(cargo " in s else None
                 # An array never expanded is reported where it is declared, unwired.
-                hits += ([x for x in lines if f'"${{{name}[@]}}"' in x] or [s]) if name else [s]
+                uses = re.compile(r"\$\{?" + re.escape(name) + r"\b") if name else None
+                hits += ([x for x in lines if uses.search(x)] or [s]) if uses else [s]
             if hits:
                 found[rel] = sorted(set(hits), key=hits.index)
     return found
@@ -773,11 +775,16 @@ class MutationOwnerTests(TokenTestCase):
         self.assertEqual(proc.returncode, -int(signal.SIGTERM), err)
 
 
+# The status deploy-release.sh and callers match literally, so tests that must also run
+# against a base without bt.EXIT_NESTED compare with it.
+NESTED_STATUS = 73
+
 # Stands in for the deploy lock wait that follows detach in deploy-release.sh.
 _DEPLOY_LOCK_WAIT = """
 import fcntl, os, sys, time
 fd = os.open(sys.argv[1], os.O_RDWR)
 deadline = time.monotonic() + float(sys.argv[2])
+open(sys.argv[3], "w").write("waiting")
 while True:
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -786,16 +793,16 @@ while True:
         if time.monotonic() >= deadline:
             raise SystemExit(75)
         time.sleep(0.05)
-open(sys.argv[3], "w").write("reached")
+open(sys.argv[4], "w").write("reached")
 """
 
 
 class NestedHolderTests(TokenTestCase):
     """A wrapper under a live holder is refused at once; the marker grants nothing."""
 
-    def marker(self, pid: int, token: Path | None = None) -> str:
+    def marker(self, pid: int, token: Path | None = None, start: str | None = None) -> str:
         st = (token or self.token).stat()
-        return f"{st.st_dev}:{st.st_ino}:{pid}"
+        return f"{st.st_dev}:{st.st_ino}:{pid}:{bt.process_start(pid) if start is None else start}"
 
     def dead_pid(self) -> int:
         return int(subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
@@ -832,7 +839,7 @@ class NestedHolderTests(TokenTestCase):
                                text=True, timeout=60,
                                env={**os.environ, bt.WAIT_TIMEOUT_ENV: "5", bt.DIAG_FD_ENV: ""})
         self.assertNotIn("fixture breach", outer.stderr)
-        self.assertEqual(outer.returncode, bt.EXIT_NESTED, outer.stderr)
+        self.assertEqual(outer.returncode, NESTED_STATUS, outer.stderr)
         self.assertNotIn("waiting for", outer.stderr, "the nested wrapper queued behind its ancestor")
         self.assertIn("ancestor pid", outer.stderr)
         self.assertFalse(ran.exists(), "a refused wrapper ran its command")
@@ -843,15 +850,23 @@ class NestedHolderTests(TokenTestCase):
         self.addCleanup(sibling.kill)
         other = self.tmp / "other.lock"
         other.touch()
+        ppid, some_start = os.getppid(), bt.process_start(os.getpid())
+        self.assertTrue(some_start, "ps lstart unreadable here")
         for label, marker, want in (
-                ("live ancestor", self.marker(os.getppid()), (bt.EXIT_NESTED, False)),
-                ("dead pid", self.marker(self.dead_pid()), (0, True)),
+                ("live ancestor", self.marker(ppid), (bt.EXIT_NESTED, False)),
+                ("dead pid", self.marker(self.dead_pid(), start=some_start), (0, True)),
                 ("live non-ancestor", self.marker(sibling.pid), (0, True)),
                 ("this process", self.marker(os.getpid()), (0, True)),
-                ("other inode", self.marker(os.getppid(), other), (0, True)),
+                ("other inode", self.marker(ppid, other), (0, True)),
+                # The pid now names another process: an ancestor that reused the holder's pid.
+                ("reused pid", self.marker(ppid, start="Thu Jan  1 00:00:00 1970"), (0, True)),
+                ("no start time", self.marker(ppid, start=""), (0, True)),
+                ("pid-only marker", self.marker(ppid, start="").rstrip(":"), (0, True)),
                 ("malformed", "not:a:marker", (0, True))):
             with self.subTest(label):
                 self.assertEqual(self.run_marked(marker), want)
+        with self.subTest("ps unreadable"), mock.patch.object(bt, "_ps", return_value=""):
+            self.assertEqual(self.run_marked(self.marker(ppid)), (0, True))
 
     def test_a_forged_marker_never_stands_in_for_the_lock(self) -> None:
         fcntl.flock(self.open_token(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # held by someone else
@@ -861,36 +876,46 @@ class NestedHolderTests(TokenTestCase):
                 self.assertEqual(self.run_marked(self.marker(pid), wait="0.5"), (rc, False))
 
     def test_a_token_holder_cannot_starve_a_deploy_that_holds_the_deploy_lock(self) -> None:
-        # A: `build_token.py -- deploy-release.sh`; B: a deploy already holding the
-        # deploy lock, now queued for the token A holds. Without the guard, A waits
-        # for B's lock while B's token wait expires first.
+        # A (`build_token.py -- deploy-release.sh`) is held before its guard until B, a deploy
+        # holding the deploy lock, queues for A's token; unguarded, A then waits on B's lock.
         wrapper = self.isolated_cli()
-        lock, started, reached, built = (self.tmp / name for name in
-                                         ("deploy.lock", "a.started", "a.reached", "b.built"))
+        lock, started, go, waiting, reached, built = (self.tmp / name for name in (
+            "deploy.lock", "a.started", "a.go", "a.waiting", "a.reached", "b.built"))
         lock.touch()
         scenario = self.tmp / "deploy-release.sh"  # beside the isolated build_token.py
-        scenario.write_text(self.deploy_head('touch "$A_STARTED"\n')
-                            + '"$TEST_PY" -c "$LOCK_WAIT" "$DEPLOY_LOCK" 6 "$A_REACHED"\n')
+        scenario.write_text(
+            self.deploy_head('touch "$A_STARTED"\nuntil [ -e "$A_GO" ]; do sleep 0.05; done\n')
+            + '"$TEST_PY" -c "$LOCK_WAIT" "$DEPLOY_LOCK" 20 "$A_WAITING" "$A_REACHED"\n')
         deploy_lock = os.open(lock, os.O_RDWR)
         self.addCleanup(os.close, deploy_lock)
-        fcntl.flock(deploy_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(deploy_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # held on B's behalf
         a = subprocess.Popen(
             [sys.executable, str(wrapper), "--", "bash", str(scenario)],
-            env={**os.environ, bt.WAIT_TIMEOUT_ENV: "30", bt.DIAG_FD_ENV: "", "A_STARTED": str(started),
-                 "TEST_PY": sys.executable, "LOCK_WAIT": _DEPLOY_LOCK_WAIT,
-                 "DEPLOY_LOCK": str(lock), "A_REACHED": str(reached)},
+            env={**os.environ, bt.WAIT_TIMEOUT_ENV: "60", bt.DIAG_FD_ENV: "", "A_STARTED": str(started),
+                 "A_GO": str(go), "TEST_PY": sys.executable, "LOCK_WAIT": _DEPLOY_LOCK_WAIT,
+                 "DEPLOY_LOCK": str(lock), "A_WAITING": str(waiting), "A_REACHED": str(reached)},
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(a.kill)
-        wait_for(started)  # A's wrapper holds the token from here on
-        b = subprocess.run([sys.executable, str(wrapper), "--", sys.executable, "-c",
-                            f"open({str(built)!r}, 'w')"], capture_output=True, text=True,
-                           timeout=60, env={**os.environ, bt.WAIT_TIMEOUT_ENV: "3"})
+        wait_for(started)  # A's wrapper holds the token and stays paused before the guard
+        b = subprocess.Popen([sys.executable, str(wrapper), "--", sys.executable, "-c",
+                              f"open({str(built)!r}, 'w')"], stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True,
+                             env={**os.environ, bt.WAIT_TIMEOUT_ENV: "60", bt.DIAG_FD_ENV: ""})
+        self.addCleanup(b.kill)
+        self.assertIn("waiting for", b.stderr.readline(), "B never queued behind A's token")
+        go.touch()
+        deadline = time.monotonic() + 30  # well past the guard's 5 s ps allowance
+        while not (built.exists() or waiting.exists()) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        deadlocked = waiting.exists()
         fcntl.flock(deploy_lock, fcntl.LOCK_UN)
+        _, b_err = b.communicate(timeout=60)
         _, a_err = a.communicate(timeout=60)
-        self.assertNotIn("fixture breach", a_err + b.stderr)
-        self.assertEqual(b.returncode, 0, f"the lock-holding deploy starved for the token: {b.stderr}")
+        self.assertNotIn("fixture breach", a_err + b_err)
+        self.assertFalse(deadlocked, "A went for the deploy lock while B waited for A's token")
+        self.assertEqual(b.returncode, 0, f"the lock-holding deploy starved for the token: {b_err}")
         self.assertTrue(built.exists())
-        self.assertEqual(a.returncode, bt.EXIT_NESTED, a_err)
+        self.assertEqual(a.returncode, NESTED_STATUS, a_err)
         self.assertIn("Refusing release deploy", a_err)
         self.assertFalse(reached.exists(), "the refused deploy still went for the deploy lock")
 
@@ -900,6 +925,7 @@ class NestedHolderTests(TokenTestCase):
         invoked, passed = guard_dir / "invoked", guard_dir / "passed"
         script = guard_dir / "deploy-release.sh"
         script.write_text(self.deploy_head() + f'touch "{passed}"\n')
+        self.assertEqual(bt.EXIT_NESTED, NESTED_STATUS, "the guard below matches the literal")
         for verdict, marked, want in ((73, True, 73), (1, True, 0), (0, True, 0), (73, False, 0)):
             with self.subTest(verdict=verdict, marked=marked):
                 invoked.unlink(missing_ok=True)

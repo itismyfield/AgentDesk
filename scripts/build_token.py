@@ -56,8 +56,8 @@ WAIT_TIMEOUT_ENV = "ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS"
 # build log (build-release.sh runs cargo through `tail -1`). Absent: stderr.
 DIAG_FD_ENV = "ADK_BUILD_TOKEN_DIAG_FD"
 LEASE_ENV = "ADK_BUILD_TOKEN_LEASE"
-# "<dev>:<ino>:<pid>" of the wrapper holding the token, set in its child's env.
-# Refusal only: it never stands in for the lock, so forging it can only refuse.
+# "<dev>:<ino>:<pid>:<ps lstart>" of the token-holding wrapper, set in its child's env; the
+# start time rejects a reused pid. Refusal only: a forged marker can refuse, never lock.
 HOLDER_ENV = "ADK_BUILD_TOKEN_HOLDER"
 # Opt-out for the sccache activation below: these spellings (trimmed, case-folded)
 # turn it off, anything else -- unset included -- leaves it on.
@@ -435,30 +435,49 @@ def hold_token(path: str, env: Mapping[str, str]) -> Iterator[int]:
         os.close(fd)
 
 
-def _ancestor_pids() -> set[int]:
-    """This process's ancestors from one `ps` snapshot; empty when unreadable."""
+def _ps(*args: str) -> str:
+    """`ps` output in the C locale so start times compare as strings; empty on failure."""
     try:
-        listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True,
-                                 text=True, timeout=5, check=True).stdout
-        parent = dict(tuple(map(int, line.split())) for line in listing.splitlines() if line.strip())
-    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
-        return set()
-    seen: set[int] = set()
-    pid = parent.get(os.getpid(), os.getppid())
+        return subprocess.run(["ps", *args], capture_output=True, text=True, timeout=5,
+                              check=True, env={**os.environ, "LC_ALL": "C"}).stdout
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+
+
+def process_start(pid: int) -> str:
+    """`pid`'s start time as `ps -o lstart=` prints it, or "" when unreadable."""
+    return " ".join(_ps("-o", "lstart=", "-p", str(pid)).split())
+
+
+def _ancestor_starts() -> dict[int, str]:
+    """This process's ancestors -> start times, from one `ps` snapshot; empty when unreadable."""
+    table: dict[int, tuple[int, str]] = {}
+    try:
+        for line in _ps("-A", "-o", "pid=,ppid=,lstart=").splitlines():
+            if line.strip():
+                pid, ppid, start = line.split(None, 2)
+                table[int(pid)] = (int(ppid), " ".join(start.split()))
+    except ValueError:
+        return {}
+    seen: dict[int, str] = {}
+    pid = table.get(os.getpid(), (os.getppid(), ""))[0]
     while pid > 1 and pid not in seen:
-        seen.add(pid)
-        pid = parent.get(pid, 0)
+        ppid, seen[pid] = table.get(pid, (0, ""))
+        pid = ppid
     return seen
 
 
 def nested_holder(path: str, env: Mapping[str, str]) -> int | None:
-    """The live ancestor whose wrapper holds `path`, or None for no or a stale marker."""
+    """The live ancestor whose wrapper holds `path`; None for no, stale or unverifiable marker."""
     try:
-        dev, ino, pid = map(int, env[HOLDER_ENV].split(":"))
+        dev, ino, pid, start = env[HOLDER_ENV].split(":", 3)
+        dev, ino, pid = int(dev), int(ino), int(pid)
         live = os.stat(path)
     except (KeyError, ValueError, OSError):
         return None
-    if (live.st_dev, live.st_ino) != (dev, ino) or pid not in _ancestor_pids():
+    if (live.st_dev, live.st_ino) != (dev, ino) or not start:
+        return None
+    if _ancestor_starts().get(pid) != start:  # dead, non-ancestor, or a reused pid
         return None
     return pid
 
@@ -647,6 +666,7 @@ def run(command: Sequence[str], env: Mapping[str, str] | None = None,
         print(f"build token: ancestor pid {holder} already holds {path}; refusing a nested"
               " wrapper rather than waiting on it (--delegate-lease allows one hop)", file=sys.stderr)
         return EXIT_NESTED
+    start = process_start(os.getpid())
     with _supervised() as supervisor:
         try:
             lease = inherited_lease(carrier, path) if carrier is not None else hold_token(path, child_env)
@@ -655,7 +675,7 @@ def run(command: Sequence[str], env: Mapping[str, str] | None = None,
                     raise BuildTokenError("an inherited lease cannot be delegated again")
                 assert_live_token(fd, path)
                 held = os.fstat(fd)
-                child_env[HOLDER_ENV] = f"{held.st_dev}:{held.st_ino}:{os.getpid()}"
+                child_env[HOLDER_ENV] = f"{held.st_dev}:{held.st_ino}:{os.getpid()}:{start}"
                 rc = run_protected(command, child_env, supervisor, fd if delegate_lease else None)
         except BuildTokenTimeout as exc:
             print(f"build token: {exc}", file=sys.stderr)

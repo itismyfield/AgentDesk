@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# --- nested under a build-token holder: refuse before detach and the deploy lock ---
-# Waiting for the deploy lock while an ancestor holds the token deadlocks against a
-# deploy that holds the lock and waits for the token. Only the helper's 73 refuses.
+# Under a build-token holder, refuse before detach and the deploy lock: waiting for the lock
+# would deadlock against a deploy that holds it and waits for the token. Only 73 refuses.
 if [ -n "${ADK_BUILD_TOKEN_HOLDER:-}" ]; then
     _adk_nested_rc=0
     python3 "$(dirname "$0")/build_token.py" --refuse-if-nested || _adk_nested_rc=$?
