@@ -186,7 +186,7 @@ fn prune_entries(entries: &mut Vec<CompletedTurnEntry>, now_ms: u64) {
 }
 
 /// Prune entries, then aliases. A row-backed alias dies with its row; rowless ones
-/// are capped at [`ROWLESS_ALIAS_CAP`] only, oldest `claimed_at` evicted first.
+/// are capped at [`ROWLESS_ALIAS_CAP`] only, earliest-appended evicted first.
 fn prune_ledger(ledger: &mut CompletedTurnLedger, now_ms: u64) {
     let backed_before: Vec<bool> = ledger
         .merged_aliases
@@ -197,14 +197,13 @@ fn prune_ledger(ledger: &mut CompletedTurnLedger, now_ms: u64) {
     let aliases = std::mem::take(&mut ledger.merged_aliases);
     let (mut kept, mut rowless) = (Vec::new(), Vec::new());
     for (alias, backed_before) in aliases.into_iter().zip(backed_before) {
-        // No age eviction: claims are serialized per channel, so an active alias stays newest.
         if !backed_before {
             rowless.push(alias);
         } else if ledger.backs(&alias) {
             kept.push(alias);
         }
     }
-    rowless.sort_by_key(|alias| alias.claimed_at_epoch_ms);
+    // Evict by stored append order, not `claimed_at`: the wall clock can move backwards.
     if rowless.len() > ROWLESS_ALIAS_CAP {
         rowless.drain(0..rowless.len() - ROWLESS_ALIAS_CAP);
     }
@@ -550,6 +549,24 @@ mod tests {
             primaries,
             (101..=100 + ROWLESS_ALIAS_CAP as u64).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn active_rowless_alias_survives_a_backwards_clock_at_cap_6035() {
+        let now = 10 * LEDGER_RETENTION_MS;
+        let mut ledger = CompletedTurnLedger::default();
+        for i in 0..ROWLESS_ALIAS_CAP as u64 {
+            ledger
+                .merged_aliases
+                .push(alias(100 + i, "n", 1_000 + i, now - 100 + i));
+        }
+        ledger
+            .merged_aliases
+            .push(alias(P, "active", H, now - 10_000));
+        prune_ledger(&mut ledger, now);
+        let primaries: Vec<u64> = ledger.merged_aliases.iter().map(|a| a.primary).collect();
+        let expected: Vec<u64> = (101..100 + ROWLESS_ALIAS_CAP as u64).chain([P]).collect();
+        assert_eq!(primaries, expected, "first-inserted evicted, active kept");
     }
 
     #[test]
