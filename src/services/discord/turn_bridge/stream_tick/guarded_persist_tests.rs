@@ -40,86 +40,6 @@ fn with_runtime_root<T>(test: impl FnOnce() -> T) -> T {
     test()
 }
 
-/// #5464 T5 S2: the recorded `new` verdict has to BE the mapping that ships.
-/// Asserted over all sixteen cells of the `outcome ×
-/// authority_unchanged × bridge_owns_relay` product by driving the production
-/// function with a state built to realize each operand pair, so the mirror
-/// cannot drift. r1 covered twelve: the missing column was
-/// `(authority_unchanged = false, bridge_owns_relay = true)`, which is the
-/// scenario the fence is for rather than an edge case (legA P1-5).
-///
-/// The same call also proves the observation added to this function is a
-/// no-op for its caller: the assertion below IS the production return
-/// value, taken with recording compiled in.
-///
-/// `stream_gate_old` survives only as the monotonicity floor the shipped mapping
-/// is checked against: the new gate may end only FEWER lifecycles.
-#[test]
-fn recorded_stream_gate_new_mirrors_the_shipped_authority_mapping() {
-    use crate::services::discord::relay_recovery::authority_observation::{
-        LifecycleVerdict, stream_gate_new, stream_gate_old,
-    };
-
-    let bridge = owner_state(4_259_123, 77_010);
-    let bridge_authority =
-        crate::services::discord::inflight::StreamRelayAuthority::from_state(&bridge);
-    assert!(bridge_authority.bridge_owns_relay());
-    let mut delegated = bridge.clone();
-    delegated.set_watcher_owner_channel_id(delegated.channel_id + 1);
-    delegated.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
-    let delegated_authority =
-        crate::services::discord::inflight::StreamRelayAuthority::from_state(&delegated);
-    assert!(!delegated_authority.bridge_owns_relay());
-    let mut foreign = delegated.clone();
-    foreign.set_watcher_owner_channel_id(delegated.channel_id + 2);
-
-    for outcome in [
-        GuardedSaveOutcome::Saved,
-        GuardedSaveOutcome::RowAbsent,
-        GuardedSaveOutcome::AuthorityPinned,
-        GuardedSaveOutcome::Unnameable,
-        GuardedSaveOutcome::SuccessorOwned,
-        GuardedSaveOutcome::IoError,
-    ] {
-        for (state, intended, authority_unchanged, bridge_owns_relay) in [
-            (&bridge, bridge_authority, true, true),
-            (&delegated, delegated_authority, true, false),
-            (&foreign, delegated_authority, false, false),
-            // The column the first three miss, and the one this fence exists
-            // for: `intended_authority` is sampled BEFORE the guarded save
-            // and `authority_unchanged` AFTER it, so "the bridge meant to own
-            // the relay and the durable row says the watcher does" is exactly
-            // `(authority_unchanged = false, bridge_owns_relay = true)`.
-            (&delegated, bridge_authority, false, true),
-        ] {
-            let verdict_of = |authority: VisibleMutationAuthority| match authority {
-                VisibleMutationAuthority::Authorized => LifecycleVerdict::Continue,
-                VisibleMutationAuthority::Suppressed => LifecycleVerdict::Suppress,
-                VisibleMutationAuthority::Retry => LifecycleVerdict::Retry,
-                VisibleMutationAuthority::AuthorityLost => LifecycleVerdict::End,
-            };
-            let shipped = visible_mutation_authority_after_guarded_save(outcome, state, intended);
-            let recorded = stream_gate_old(outcome, authority_unchanged, bridge_owns_relay);
-            let new = stream_gate_new(outcome, authority_unchanged, bridge_owns_relay);
-            assert!(
-                !(!recorded.ends_lifecycle() && new.ends_lifecycle()),
-                "the new stream gate may only end FEWER lifecycles"
-            );
-            assert_eq!(
-                new,
-                verdict_of(shipped),
-                "{outcome:?}/{authority_unchanged}/{bridge_owns_relay}: the shipped mapping \
-                 disagrees with the recorded new stream verdict"
-            );
-            assert_eq!(
-                shipped.mutation_permission().is_none(),
-                new.ends_lifecycle(),
-                "lifecycle termination must mean the same thing on both sides"
-            );
-        }
-    }
-}
-
 /// The one cell S4 moves, at the seam that decides it — and the cells that must
 /// NOT move with it. The mismatch family is an exact-episode veto rather than a
 /// structural signal (design r3 ERRATUM R3-E4-3), so it keeps its termination
@@ -203,6 +123,15 @@ fn visible_authority_distinguishes_bridge_self_delegation_and_foreign_projection
                 intended,
             ),
             VisibleMutationAuthority::Suppressed,
+        );
+        // The bridge meant to own the relay but the durable row now delegates it.
+        assert_eq!(
+            visible_mutation_authority_after_guarded_save(
+                GuardedSaveOutcome::Saved,
+                &delegated,
+                bridge_authority,
+            ),
+            VisibleMutationAuthority::AuthorityLost,
         );
         assert_eq!(
             VisibleMutationAuthority::Suppressed.mutation_permission(),

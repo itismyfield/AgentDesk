@@ -950,14 +950,10 @@ src/
 │   │   ├── relay_health/
 │   │   │   └── frontier.rs
 │   │   ├── relay_recovery/
-│   │   │   ├── authority_observation/
-│   │   │   │   └── delivery_boundary.rs
 │   │   │   ├── tests/
 │   │   │   │   ├── circuit_breaker_apply.rs
 │   │   │   │   └── orphan_token_finish.rs
 │   │   │   ├── apply.rs
-│   │   │   ├── authority_observation.rs
-│   │   │   ├── authority_retention.rs
 │   │   │   ├── cohort.rs
 │   │   │   ├── decision.rs
 │   │   │   ├── destructive_warrant.rs

@@ -123,7 +123,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `GEMINI_CLIENT_SECRET` | `src/server/mod.rs:1440` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
 | `GEMINI_CLI_HOME` | `src/services/mcp_config.rs:708` |  |
 | `HOME` | `src/cli/doctor/orchestrator.rs:463` (+9 more) | #2655: handler for the `install-memento-session-hook` CLI surface. |
-| `HOSTNAME` | `src/server/outbox_worker.rs:24` (+5 more) | Opens this turn's buffer and evicts whatever predecessor was left on this channel by a bridge exit that never reached post-loop finalize. |
+| `HOSTNAME` | `src/server/outbox_worker.rs:24` (+2 more) |  |
 | `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs:1098` (+2 more) |  |
 | `MEMENTO_WORKSPACE` | `src/server/routes/memory_api.rs:200` (+1 more) |  |
 | `OPENAI_API_KEY` | `src/server/rate_limit_sync.rs:115` | --- Codex: ~/.codex/auth.json (CLI subscription), else OPENAI_API_KEY --- |

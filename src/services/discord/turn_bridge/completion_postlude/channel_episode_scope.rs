@@ -19,7 +19,6 @@
 
 use std::sync::Arc;
 
-use super::super::super::relay_recovery::authority_observation;
 use super::super::super::{ChannelMailboxSnapshot, SharedData};
 use super::{ChannelId, InflightTurnState};
 use crate::services::provider::CancelToken;
@@ -132,7 +131,6 @@ pub(super) struct ChannelEpisodeProbe<'a> {
     shared: &'a SharedData,
     channel_id: ChannelId,
     provider: &'a super::ProviderKind,
-    turn_id: u64,
     turn_source: &'static str,
     own_nonce: Option<String>,
     mine: Arc<CancelToken>,
@@ -218,7 +216,6 @@ impl<'a> ChannelEpisodeProbe<'a> {
             shared,
             channel_id,
             provider,
-            turn_id: state.effective_finalizer_turn_id(),
             turn_source: state.turn_source.as_str(),
             own_nonce: state.turn_nonce.clone(),
             mine: mine.clone(),
@@ -247,18 +244,6 @@ impl<'a> ChannelEpisodeProbe<'a> {
             self.own_nonce.as_deref(),
             self.require_captured_actor,
         );
-        authority_observation::record_completion_scope(
-            authority_observation::CompletionScopeRecord {
-                shared: self.shared,
-                provider: self.provider,
-                turn_id: self.turn_id,
-                channel_id: self.channel_id.get(),
-                site,
-                turn_source: self.turn_source,
-                scope: decision.scope_label(),
-                scope_reason: decision.reason_label(),
-            },
-        );
         if !decision.permits_channel_effects() {
             tracing::warn!(
                 target: "agentdesk::relay_authority_completion_suppressed",
@@ -269,7 +254,6 @@ impl<'a> ChannelEpisodeProbe<'a> {
                 channel_id = self.channel_id.get(),
                 "completion channel effects suppressed"
             );
-            authority_observation::record_completion_suppression();
         }
         decision
     }
@@ -410,16 +394,9 @@ mod tests {
             )
             .await
         );
-        let before = authority_observation::observation_report();
         let foreign = probe.read("completion_r1").await;
         assert_eq!(foreign.scope, ChannelEpisodeScope::Foreign);
         assert!(!foreign.permits_channel_effects());
-        let report = authority_observation::observation_report();
-        assert_eq!(
-            report.completion_suppressions,
-            before.completion_suppressions + 1
-        );
-        assert_eq!(report.completion_scopes, before.completion_scopes);
     }
 
     #[test]
