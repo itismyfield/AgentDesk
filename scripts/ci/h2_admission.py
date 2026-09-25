@@ -28,7 +28,7 @@ OWNER_GLOBS = ("src/services/platform/tmux*", "src/services/session_host*")
 OWNER_ROSTER = frozenset({"src/services/platform/tmux.rs", "src/services/platform/tmux/availability.rs",
                           "src/services/session_host.rs", *(f"src/services/session_host/{name}.rs" for name in (
                               "legacy_collapse", "model", "process_host", "resolve", "tmux_host", "traits"))})
-# R-O: owner files allowed to carry `#[path]` (none today); listing one here is a reviewed change.
+# R-O: owner files allowed a `path =` attribute, bare or in cfg_attr (none today); a reviewed change.
 PATH_ATTR_ALLOWED: frozenset[str] = frozenset()
 # R-E: low-level tmux owner API inventory; each pub fn is EXEC (clippy.toml) or a non-exec helper.
 INVENTORY_FILES = ("src/services/platform/tmux.rs", "src/services/platform/tmux/availability.rs")
@@ -177,7 +177,7 @@ def zero_rules(root: Path) -> list[str]:
         problems.append(f"R-O: owner roster mismatch: {rel} ({'unlisted' if rel in found else 'missing'})")
     # r6 §2.1: an owner file may not mount a module from outside the owner paths via #[path]
     problems += [f"R-O: {rel} uses #[path]; owner modules must live under the owner paths"
-                 for rel in sorted(found - PATH_ATTR_ALLOWED) if re.search(r"#\s*\[\s*path\b", production_views(root / rel)[0])]
+                 for rel in sorted(found - PATH_ATTR_ALLOWED) if re.search(r"#\s*!?\s*\[[^\]]*?\bpath\s*=", production_views(root / rel)[0])]
     lock = root / "Cargo.lock"
     if lock.exists():
         problems += [f"R-O: Cargo.lock brings in `{name}` (tmux/pty crate, H4)"

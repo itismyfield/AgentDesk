@@ -378,6 +378,10 @@ class ZeroRules(unittest.TestCase):
         # review r3: an owner file mounting a non-owner file as its child module
         self.assertEqual(self.rules({**ESCAPE, "src/services/platform/pty_escape.rs": "pub(crate) fn stealth() {}\n"},
                                     roster=frozenset(ESCAPE)), ["R-O"])
+        for attr in ('#[cfg_attr(unix, path = "pty_escape.rs")]', '#[cfg_attr(all(unix, not(test)), path="pty_escape.rs")]',
+                     '#[cfg_attr(\n    unix,\n    path\n        = "pty_escape.rs"\n)]'):  # review r4: cfg_attr forms
+            escape = {k: v.replace('#[path = "pty_escape.rs"]', attr) for k, v in ESCAPE.items()}
+            self.assertEqual(self.rules(escape, roster=frozenset(ESCAPE)), ["R-O"], attr)
         with mock.patch.object(adm, "PATH_ATTR_ALLOWED", frozenset(ESCAPE)):
             self.assertEqual(self.rules(ESCAPE, roster=frozenset(ESCAPE)), [])
 
