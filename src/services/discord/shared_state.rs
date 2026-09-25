@@ -334,6 +334,7 @@ pub(in crate::services) struct SessionOverrideState {
 /// #3479 — per-dispatch routing maps deciding whether an incoming bot message
 /// starts a new turn, is deduped, or is routed into an existing dispatch
 /// thread / counter-model channel.
+#[derive(Default)]
 pub(in crate::services) struct DispatchRoutingState {
     /// Intake-level dedup cache: prevents the same message from starting two turns
     /// when duplicate bot dispatches arrive nearly simultaneously.
@@ -349,6 +350,57 @@ pub(in crate::services) struct DispatchRoutingState {
     /// resolve from the counter-model channel instead of the thread's parent.
     /// Cleared when the turn completes.
     pub(in crate::services) role_overrides: dashmap::DashMap<ChannelId, ChannelId>,
+    /// Bumped before every `thread_parents` / `role_overrides` registration so
+    /// recovery can tell a same-value re-registration from the entry it captured.
+    registration_generation: std::sync::atomic::AtomicU64,
+}
+
+impl DispatchRoutingState {
+    pub(in crate::services) fn registration_generation(&self) -> u64 {
+        self.registration_generation.load(Ordering::SeqCst)
+    }
+
+    pub(in crate::services) fn set_thread_parent(&self, parent: ChannelId, thread: ChannelId) {
+        self.registration_generation.fetch_add(1, Ordering::SeqCst);
+        self.thread_parents.insert(parent, thread);
+    }
+
+    pub(in crate::services) fn set_role_override(&self, thread: ChannelId, alt: ChannelId) {
+        self.registration_generation.fetch_add(1, Ordering::SeqCst);
+        self.role_overrides.insert(thread, alt);
+    }
+
+    /// Drops every `parent -> thread` entry unless a registration happened after
+    /// `generation`; the check runs under the shard lock the registration's insert needs.
+    pub(in crate::services) fn clear_thread_parents_registered_before(
+        &self,
+        thread: ChannelId,
+        generation: u64,
+    ) -> Vec<ChannelId> {
+        let mut parents = Vec::new();
+        self.thread_parents.retain(|parent, current| {
+            let remove = *current == thread && self.registration_generation() == generation;
+            if remove {
+                parents.push(*parent);
+            }
+            !remove
+        });
+        parents
+    }
+
+    /// Removes `owned` for `thread` unless a registration happened after `generation`.
+    pub(in crate::services) fn remove_role_override_registered_before(
+        &self,
+        thread: ChannelId,
+        owned: Option<ChannelId>,
+        generation: u64,
+    ) {
+        if let Some(owned) = owned {
+            self.role_overrides.remove_if(&thread, |_, current| {
+                *current == owned && self.registration_generation() == generation
+            });
+        }
+    }
 }
 
 // Free-function helpers over `SessionOverrideState`. The settings-coupled

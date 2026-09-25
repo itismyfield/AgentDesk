@@ -779,7 +779,7 @@ pub(super) async fn handle_text_message(
                             "  [{ts}] 🔄 Review dispatch in reused thread: overriding role to alt channel {}",
                             alt_ch
                         );
-                        shared.dispatch.role_overrides.insert(channel_id, alt_ch);
+                        shared.dispatch.set_role_override(channel_id, alt_ch);
                     }
                 }
                 channel_id
@@ -814,7 +814,7 @@ pub(super) async fn handle_text_message(
                                 cache,
                             )
                             .await;
-                        shared.dispatch.thread_parents.insert(channel_id, tid);
+                        shared.dispatch.set_thread_parent(channel_id, tid);
                         // For review dispatches reusing an implementation thread,
                         // override role/model to use the counter-model channel.
                         if is_counter_model_dispatch {
@@ -824,7 +824,7 @@ pub(super) async fn handle_text_message(
                                     "  [{ts}] 🔄 Review dispatch reusing thread: overriding role to alt channel {}",
                                     alt_ch
                                 );
-                                shared.dispatch.role_overrides.insert(tid, alt_ch);
+                                shared.dispatch.set_role_override(tid, alt_ch);
                             }
                         }
                         Some(tid)
@@ -880,7 +880,7 @@ pub(super) async fn handle_text_message(
                                     cache,
                                 )
                                 .await;
-                            shared.dispatch.thread_parents.insert(channel_id, thread.id);
+                            shared.dispatch.set_thread_parent(channel_id, thread.id);
                             super::super::link_dispatch_thread(
                                 shared.api_port,
                                 did,

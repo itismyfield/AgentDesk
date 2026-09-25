@@ -4920,8 +4920,14 @@ services::discord::router::intake_gate::reply_context_tests::attachment_reply_co
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::queue_blocked_stale_active_turn_release_publishes_completion_event
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::stale_active_turn_proof_classifies_no_owner_as_queue_blocked_orphan
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::stale_active_turn_proof_preserves_explicit_background_status
+services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_cleanup_after_finish_spares_a_replacement_episode
+services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_cleanup_keeps_a_same_value_role_override_reregistration
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_keeps_the_thread_queue
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_leaves_a_successor_episode_untouched
+services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_rejects_an_episode_started_after_the_proof
+services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_removes_the_owned_role_override
+services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_without_anchor_defers_to_a_new_episode
+services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_proof_rejects_a_row_from_another_episode
 services::discord::router::intake_queue_transaction::tests::accepted_commit_applies_reaction_and_advances_checkpoint
 services::discord::router::intake_queue_transaction::tests::accepted_commit_can_apply_static_reaction
 services::discord::router::intake_queue_transaction::tests::accepted_commit_records_reaction_failure_without_claiming_application
