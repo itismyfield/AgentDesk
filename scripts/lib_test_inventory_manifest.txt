@@ -6666,11 +6666,8 @@ services::discord::tui_prompt_relay::tests::fenced_admission_tests::claim_over_t
 services::discord::tui_prompt_relay::tests::fenced_admission_tests::claim_without_a_row_constructs_after_another_release
 services::discord::tui_prompt_relay::tests::fenced_admission_tests::construction_does_not_refresh_a_row_that_appeared_after_admission
 services::discord::tui_prompt_relay::tests::fenced_admission_tests::construction_does_not_refresh_a_row_that_appeared_before_admission
-services::discord::tui_prompt_relay::tests::fenced_admission_tests::dormant_partial_capture_after_another_claims_rollback_is_refused
-services::discord::tui_prompt_relay::tests::fenced_admission_tests::dormant_partial_capture_after_the_owners_normal_finalize_is_refused
-services::discord::tui_prompt_relay::tests::fenced_admission_tests::dormant_partial_capture_follows_the_latest_started_episode
-services::discord::tui_prompt_relay::tests::fenced_admission_tests::dormant_partial_capture_resumes_when_nothing_was_released
-services::discord::tui_prompt_relay::tests::fenced_admission_tests::dormant_resumption_refuses_an_exactly_released_episode
+services::discord::tui_prompt_relay::tests::fenced_admission_tests::dormant_resumption_reopens_an_exactly_released_episode
+services::discord::tui_prompt_relay::tests::fenced_admission_tests::released_dormant_resumption_writes_only_its_own_undelivered_tail_once
 services::discord::tui_prompt_relay::tests::formats_ssh_direct_prompt_notification
 services::discord::tui_prompt_relay::tests::formats_ssh_direct_prompt_notification_escapes_code_fence
 services::discord::tui_prompt_relay::tests::formats_ssh_direct_prompt_notification_strips_terminal_controls

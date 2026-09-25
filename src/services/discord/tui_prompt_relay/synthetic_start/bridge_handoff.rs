@@ -186,15 +186,6 @@ pub(super) async fn admit_kinded(
         row_nonce.clone(),
     )
     .await;
-    warn_if_refused(&admission, channel, anchor);
-    admission.started
-}
-
-fn warn_if_refused(
-    admission: &crate::services::turn_orchestrator::TryStartTurnResult,
-    channel: ChannelId,
-    anchor: MessageId,
-) {
     if admission.refused_released_episode {
         tracing::warn!(
             channel_id = channel.get(),
@@ -202,6 +193,7 @@ fn warn_if_refused(
             "refused re-adoption of a released TUI-direct episode"
         );
     }
+    admission.started
 }
 
 pub(super) async fn refresh_existing(
@@ -741,18 +733,15 @@ async fn capture_dormant(
                 row.turn_nonce.clone(),
             ))
         });
-        let admission = super::super::super::queue_io::mailbox_try_start_turn_adopting(
+        if !super::super::super::mailbox_try_start_turn(
             shared,
             channel,
             actor.clone(),
             serenity::UserId::new(row.request_owner_user_id),
             MessageId::new(row.user_msg_id),
-            crate::services::turn_orchestrator::ActiveTurnKind::UserOrAgent,
-            row.turn_nonce.clone(),
         )
-        .await;
-        warn_if_refused(&admission, channel, MessageId::new(row.user_msg_id));
-        if !admission.started {
+        .await
+        {
             return None;
         }
         super::super::super::increment_global_active(shared, "synthetic_bridge_resume");

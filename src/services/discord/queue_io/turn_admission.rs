@@ -67,9 +67,8 @@ pub(in crate::services::discord) async fn mailbox_try_start_turn_unless_released
     .await
 }
 
-/// Row -> lease re-adoption: the actor refuses, in the claim's own step, the
-/// ROW's episode when it did not start after the last exact release; the
-/// installed token's nonce is what it records as started.
+/// Row -> lease re-adoption: the claim's own step refuses the ROW's episode unless it
+/// started after the last exact release, and records the installed token as started.
 pub(in crate::services::discord) async fn mailbox_try_start_turn_adopting(
     shared: &SharedData,
     channel_id: ChannelId,
