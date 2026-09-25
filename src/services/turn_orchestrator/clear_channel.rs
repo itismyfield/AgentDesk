@@ -1,4 +1,5 @@
-//! #6035 — the mailbox `Clear` arm, moved out of a registered giant.
+//! The mailbox `Clear` arm: release the active turn, drain the queue and
+//! reservation, and report every discarded inbound id.
 
 use poise::serenity_prelude::{ChannelId, MessageId};
 

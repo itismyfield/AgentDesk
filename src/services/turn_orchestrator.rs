@@ -3493,6 +3493,11 @@ mod actor_hydrate_regression_tests {
                 "the anchor is released anyway"
             );
             assert_eq!(
+                cleared.discarded_message_ids,
+                [holder],
+                "only the released turn is discarded; the restored queue is not"
+            );
+            assert_eq!(
                 f.queue_len().await,
                 1,
                 "the failed clear restores the queue"

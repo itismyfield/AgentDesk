@@ -84,6 +84,10 @@ pub(in crate::services::discord) async fn clear_channel_discarding_catch_up_back
     channel_id: ChannelId,
 ) -> ClearChannelResult {
     let cleared = mailbox_clear_channel(shared, provider, channel_id).await;
+    // A failed persist restored the queue and reservation, so their ids still need the sweep.
+    if cleared.persistence_error.is_some() {
+        return cleared;
+    }
     shared.catch_up_retry_pending.remove(&channel_id);
     // Only real Discord ids are cursors: a synthetic headless/voice id would hide every later message.
     let real = |id: &u64| {
