@@ -140,21 +140,10 @@ impl UnreadTailSeed {
         let stale_at = (chrono::Local::now() - chrono::Duration::minutes(30))
             .format("%Y-%m-%d %H:%M:%S")
             .to_string();
-        let row_path = inflight::inflight_state_path(
-            &inflight::inflight_runtime_root().expect("inflight runtime root"),
-            &provider,
-            channel.get(),
-        );
-        let mut persisted: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&row_path).expect("read row fixture"))
-                .expect("parse row fixture");
-        persisted["started_at"] = serde_json::Value::String(stale_at.clone());
-        persisted["updated_at"] = serde_json::Value::String(stale_at);
-        std::fs::write(
-            &row_path,
-            serde_json::to_string_pretty(&persisted).expect("serialize row fixture"),
-        )
-        .expect("age row fixture");
+        edit_persisted_row(&provider, channel.get(), |row| {
+            row["started_at"] = serde_json::Value::String(stale_at.clone());
+            row["updated_at"] = serde_json::Value::String(stale_at);
+        });
 
         Some(Self {
             registry,
@@ -187,6 +176,22 @@ impl Drop for UnreadTailSeed {
             "#5996 seed teardown",
         );
     }
+}
+
+/// Rewrites the persisted row's raw JSON in place and returns its path.
+pub(crate) fn edit_persisted_row(
+    provider: &ProviderKind,
+    channel: u64,
+    edit: impl FnOnce(&mut serde_json::Value),
+) -> std::path::PathBuf {
+    let root = inflight::inflight_runtime_root().expect("inflight runtime root");
+    let row_path = inflight::inflight_state_path(&root, provider, channel);
+    let raw = std::fs::read_to_string(&row_path).expect("read row fixture");
+    let mut row: serde_json::Value = serde_json::from_str(&raw).expect("parse row fixture");
+    edit(&mut row);
+    let raw = serde_json::to_string_pretty(&row).expect("serialize row fixture");
+    std::fs::write(&row_path, raw).expect("rewrite row fixture");
+    row_path
 }
 
 /// The I20 unread-tail refusal `details` recorded for `channel`, oldest first.

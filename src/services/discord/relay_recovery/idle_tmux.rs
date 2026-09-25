@@ -1,6 +1,6 @@
 use super::*;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{LazyLock, Mutex};
 
 #[cfg(test)]
@@ -410,13 +410,19 @@ pub(crate) fn unmeasured_tail_reason(
     })
 }
 
-type UnmeasuredTailEpisode = (Option<u64>, Option<String>);
+/// The mailbox turn (user message, nonce), else the inflight row's identity.
+type UnmeasuredTailEpisode = (
+    Option<u64>,
+    Option<String>,
+    Option<super::inflight::InflightTurnIdentity>,
+);
 type UnmeasuredTailSite = (String, u64, &'static str);
 
-/// Last episode graded per channel and site: a wedge a site keeps refusing is
-/// recorded once per episode, not once per call.
+/// Recent episodes graded per channel and site, so a wedge a site keeps
+/// refusing is recorded once per episode rather than once per call.
+const UNMEASURED_TAIL_EPISODES_KEPT: usize = 8;
 static UNMEASURED_TAIL_REFUSALS_GRADED: LazyLock<
-    Mutex<HashMap<UnmeasuredTailSite, UnmeasuredTailEpisode>>,
+    Mutex<HashMap<UnmeasuredTailSite, VecDeque<UnmeasuredTailEpisode>>>,
 > = LazyLock::new(Default::default);
 
 /// #5996 P-L2a (I20): the manual reattach idle-clear's tail conjunct. Refusing
@@ -424,11 +430,24 @@ static UNMEASURED_TAIL_REFUSALS_GRADED: LazyLock<
 pub(super) fn reattach_idle_clear_tail_admits(
     provider: &ProviderKind,
     decision: &RelayRecoveryDecision,
+    tmux_session: &str,
 ) -> bool {
-    if unread_tail_is_proven_drained(decision.evidence.unread_bytes) {
-        return true;
-    }
     let evidence = &decision.evidence;
+    if evidence.unread_bytes.is_some() {
+        return unread_tail_is_proven_drained(evidence.unread_bytes); // a backlog is no wedge
+    }
+    // Record only when the other conjuncts would admit, judged on a read-only
+    // load so the refusal writes nothing.
+    let (channel, ready) = (decision.channel_id, idle_tmux_repair_pane_ready_for_input);
+    let Some(state) = super::inflight::load_inflight_state_read_only(provider, channel)
+        .filter(super::inflight::inflight_state_allows_idle_tmux_repair_state)
+        .filter(|row| {
+            idle_tmux_repair_snapshot_ready_for_input(provider, channel, tmux_session, row, ready)
+        })
+        .filter(|state| !idle_tmux_repair_has_unrelayed_tail_answer(state))
+    else {
+        return false;
+    };
     record_unmeasured_tail_refusal(
         provider,
         decision.channel_id,
@@ -443,6 +462,7 @@ pub(super) fn reattach_idle_clear_tail_admits(
         (
             decision.affected.mailbox_active_user_msg_id,
             decision.affected.mailbox_active_turn_nonce.clone(),
+            Some(super::inflight::InflightTurnIdentity::from_state(&state)),
         ),
     );
     false
@@ -503,6 +523,7 @@ pub(crate) fn record_unmeasured_tail_refusal_for_snapshot(
         (
             snapshot.mailbox_active_user_msg_id,
             snapshot.mailbox_active_turn_nonce.clone(),
+            snapshot.inflight_identity.clone(),
         ),
     );
 }
@@ -514,7 +535,7 @@ fn record_unmeasured_tail_refusal(
     tmux_session: Option<&str>,
     (unread_bytes, last_capture_offset, last_relay_offset): (Option<u64>, Option<u64>, u64),
     (watcher_attached, tmux_alive): (bool, Option<bool>),
-    episode: UnmeasuredTailEpisode,
+    (user_msg_id, nonce, inflight): UnmeasuredTailEpisode,
 ) {
     // A measured backlog is the invariant working, not a wedge.
     let Some(decided_by) =
@@ -522,16 +543,22 @@ fn record_unmeasured_tail_refusal(
     else {
         return;
     };
-    let already_graded = UNMEASURED_TAIL_REFUSALS_GRADED
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .insert(
-            (provider.as_str().to_string(), channel_id, site),
-            episode.clone(),
-        )
-        .is_some_and(|previous| previous == episode);
-    if already_graded {
-        return;
+    let inflight = inflight.filter(|_| user_msg_id.is_none() && nonce.is_none());
+    let episode = (user_msg_id, nonce, inflight);
+    {
+        let mut graded = UNMEASURED_TAIL_REFUSALS_GRADED
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let recent = graded
+            .entry((provider.as_str().to_string(), channel_id, site))
+            .or_default();
+        if recent.contains(&episode) {
+            return;
+        }
+        if recent.len() == UNMEASURED_TAIL_EPISODES_KEPT {
+            recent.pop_front();
+        }
+        recent.push_back(episode);
     }
     crate::services::observability::record_invariant_check(
         false,
@@ -551,7 +578,7 @@ fn record_unmeasured_tail_refusal(
                 "last_relay_offset": last_relay_offset,
                 "watcher_attached": watcher_attached,
                 "tmux_alive": tmux_alive,
-                "mailbox_active_user_msg_id": episode.0,
+                "mailbox_active_user_msg_id": user_msg_id,
                 "retired": false,
             }),
         },

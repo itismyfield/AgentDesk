@@ -1106,8 +1106,8 @@ server::routes::health_api::tests::stale_mailbox_repair_applied_includes_session
 server::routes::health_api::tests::summary_and_detail_routes_agree_on_expired_relay_ledgers
 server::routes::health_api::tests::summary_and_detail_routes_agree_on_status_and_degraded_reasons
 server::routes::health_api::tests::supported_provider_ids_contain_no_colon
-server::routes::health_api::unread_tail_attribution_tests::manual_reattach_records_an_unmeasured_tail_refusal_once
 server::routes::health_api::unread_tail_attribution_tests::manual_reattach_records_nothing_for_a_measured_backlog
+server::routes::health_api::unread_tail_attribution_tests::manual_reattach_records_nothing_when_readiness_also_refuses
 server::routes::health_api::unread_tail_attribution_tests::stale_mailbox_repair_names_and_records_an_unmeasured_tail
 server::routes::kakao_calendar::tests::calendar_mutations_require_stable_nonempty_bounded_keys
 server::routes::kakao_calendar::tests::calendar_requires_real_bearer_not_claimed_identity_or_local_origin

@@ -5,8 +5,8 @@
 //! the record it now leaves.
 
 use crate::services::discord::relay_health::RelayStallState;
-use crate::services::discord::relay_recovery::UNREAD_TAIL_SITE_WATCHDOG_EXPLICIT_BACKGROUND;
 use crate::services::discord::relay_recovery::unread_tail_seed::{UnreadTailSeed, UnreadTailShape};
+use crate::services::discord::relay_recovery::*;
 
 /// T4(n1): an owned, quiet explicit-background turn whose transcript is missing
 /// arms every force-clean conjunct but the tail. The watchdog keeps the turn (as
@@ -88,4 +88,32 @@ async fn explicit_background_watchdog_records_an_unmeasured_tail_refusal_once() 
         recent,
     ));
     assert_eq!(seed.refusals().len(), 1, "{:?}", seed.refusals());
+
+    // A MEASURED backlog carried by the snapshot records nothing at either
+    // snapshot site, even where only the tail refused.
+    let (provider, mut measured) = (&seed.provider, fresh_episode.clone());
+    measured.mailbox_active_user_msg_id = Some(2);
+    (measured.unread_bytes, measured.relay_health.unread_bytes) = (Some(64), Some(64));
+    let decided = super::explicit_background_force_clean_decided;
+    assert!(!decided(provider, channel_id, &measured, now));
+    assert!(!stale_mailbox_idle_tail_admits(provider, &measured, true));
+
+    // One record per episode per site: A, A, B, B, A is two; A at another site
+    // is its own. Without a mailbox turn, the inflight row names the episode.
+    let episode = |user_msg_id| {
+        let mut episode = snapshot.clone();
+        episode.mailbox_active_user_msg_id = None;
+        episode.mailbox_active_turn_nonce = None;
+        episode.inflight_identity.as_mut().unwrap().user_msg_id = user_msg_id;
+        episode
+    };
+    let (a, b) = (episode(11), episode(12));
+    let site = UNREAD_TAIL_SITE_WATCHDOG_EXPLICIT_BACKGROUND;
+    for episode in [&a, &a, &b, &b, &a] {
+        record_unmeasured_tail_refusal_for_snapshot(provider, channel_id, episode, site);
+    }
+    assert_eq!(seed.refusals().len(), 3, "{:?}", seed.refusals());
+    let site = UNREAD_TAIL_SITE_STALE_MAILBOX;
+    record_unmeasured_tail_refusal_for_snapshot(provider, channel_id, &a, site);
+    assert_eq!(seed.refusals().len(), 4, "{:?}", seed.refusals());
 }
