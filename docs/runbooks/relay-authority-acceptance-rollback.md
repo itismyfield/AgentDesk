@@ -59,6 +59,9 @@ Live position at the time of writing:
 
 ## Reading the Live Dial
 
+> **폐지됨:** T6-3(#6225)에서 `/api/health/detail` 의 `relay_authority_rollout` 블록이 철거되어
+> 이 절차는 `KeyError` 로 실패한다. 파일 정리는 T6-4 몫이다.
+
 The dial is published **only** on the authenticated detail build
 (`health_api.rs:518` / `:639`, `health/snapshot.rs:1108`; the public allowlist
 excludes it):
@@ -251,6 +254,9 @@ Do **not** roll back by deleting the two keys (see below).
    step 1 says whether that is the position you asked for.
 
 ## Known Residual Risk of the Rollback Direction
+
+> **폐지됨:** T6-3(#6225)에서 `/api/health/detail` 의 `relay_authority_rollout` 블록이 철거되어
+> 이 절차는 `KeyError` 로 실패한다. 파일 정리는 T6-4 몫이다.
 
 #5874 states it directly: the remaining risk of this dial is **not** wrongly
 enrolling new channels, it is *"롤백하거나 다이얼을 되돌릴 때 무음으로

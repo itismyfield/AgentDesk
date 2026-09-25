@@ -953,7 +953,6 @@ src/
 │   │   │   │   ├── circuit_breaker_apply.rs
 │   │   │   │   └── orphan_token_finish.rs
 │   │   │   ├── apply.rs
-│   │   │   ├── cohort.rs
 │   │   │   ├── decision.rs
 │   │   │   ├── destructive_warrant.rs
 │   │   │   ├── idle_tmux.rs
