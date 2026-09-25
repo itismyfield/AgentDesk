@@ -252,7 +252,7 @@ fn thread_guard_cleanup_released_episode(
     finish: Option<crate::services::turn_orchestrator::FinishTurnResult>,
     mut parents: Vec<serenity::ChannelId>,
 ) -> bool {
-    // Without a finished anchor nothing was released, so the row and the guard stay.
+    // Without a finished anchor nothing was released, so the row and the token stay.
     let Some(finish) = finish else {
         return false;
     };
