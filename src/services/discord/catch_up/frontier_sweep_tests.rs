@@ -638,7 +638,7 @@ enum Resolution {
     LeftQueueUnprocessed,
     BecameActiveTurn,
     /// M is the newest primary of a merged head that also carries older H. H is
-    /// held while M's turn runs (#6205), then re-offered once, never leapt.
+    /// held while M's turn runs (#6205), then settled by M's delivered episode (#6035).
     MergedHeadClaimed,
     /// `/clear`: the user discarded M, so neither sweep may run it again.
     IntentionallyCleared,
@@ -670,6 +670,7 @@ async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
     assert_eq!(held.checkpoint, checkpoint.get(), "{resolution:?}");
 
     let token = Arc::new(crate::services::provider::CancelToken::new());
+    let turn_nonce = token.turn_nonce().map(str::to_owned);
     let owner = serenity::UserId::new(HUMAN_ID);
     match resolution {
         Resolution::LeftQueueUnprocessed => {
@@ -731,7 +732,14 @@ async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
             assert_eq!(fx.surfaces(channel_id), held, "{resolution:?}");
             let retry = fx.pending(channel_id).expect("H keeps the barrier retry");
             assert_eq!(retry.checkpoint, checkpoint.get(), "{resolution:?}");
-            completed_turn_ledger::append_completed_turn(&fx.provider, channel_id.get(), m.get());
+            // #6035 PR-S: M's episode is delivered, so its durable alias settles H.
+            let (provider, nonce) = (&fx.provider, turn_nonce.as_deref());
+            completed_turn_ledger::append_completed_episode(
+                provider,
+                channel_id.get(),
+                m.get(),
+                nonce,
+            );
             discord::mailbox_finish_turn(&fx.shared, &fx.provider, channel_id).await;
             second = StrictApi::new(&fx.shared).with_history(channel_id, history);
             fx.retry_sweep(&second, channel_id).await;
@@ -741,8 +749,8 @@ async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
     let rerun = accepted(&second);
     let expected_rerun = match resolution {
         Resolution::LeftQueueUnprocessed => vec![m.get()],
-        Resolution::MergedHeadClaimed => vec![h.get()],
-        Resolution::BecameActiveTurn
+        Resolution::MergedHeadClaimed
+        | Resolution::BecameActiveTurn
         | Resolution::IntentionallyCleared
         | Resolution::OrphanedReservationCleared => Vec::new(),
     };
@@ -1064,3 +1072,6 @@ impl Write for LogWriter {
 
 #[path = "absorbed_active_tests.rs"]
 mod absorbed_active_tests;
+
+#[path = "merged_alias_tests.rs"]
+mod merged_alias_tests;

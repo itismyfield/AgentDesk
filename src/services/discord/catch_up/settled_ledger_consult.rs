@@ -8,18 +8,58 @@
 //! #4600 P1). An absent/malformed ledger yields an empty set, so a real message
 //! is never wrongly suppressed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use poise::serenity_prelude::ChannelId;
 
-use crate::services::discord::outbound::completed_turn_ledger;
+use crate::services::discord::ChannelMailboxSnapshot;
+use crate::services::discord::outbound::completed_turn_ledger::{self, CompletedTurnLedger};
+use crate::services::discord::recovery_known_ids::RecoveryKnownIdArm;
 use crate::services::provider::ProviderKind;
 
-/// The set of inbound `user_msg_id`s with a durable completed-turn record for
-/// `(provider, channel)`. Empty when the ledger is absent/malformed.
-pub(in crate::services::discord) fn settled_ids(
+/// One channel's completed-turn ledger, read once per scan. Absent or
+/// malformed reads as `None`, which settles nothing.
+pub(in crate::services::discord) struct ScanLedger(Option<CompletedTurnLedger>);
+
+pub(in crate::services::discord) fn read(
     provider: &ProviderKind,
     channel: ChannelId,
-) -> HashSet<u64> {
-    completed_turn_ledger::settled_user_msg_ids(provider, channel.get())
+) -> ScanLedger {
+    ScanLedger(completed_turn_ledger::read_ledger(provider, channel.get()))
+}
+
+impl ScanLedger {
+    /// The set of inbound `user_msg_id`s with a durable completed-turn record —
+    /// merged-head aliases joined on the same episode — from the same single
+    /// ledger read that also restores the active episode's absorbed ids after a
+    /// restart (#6035 PR-S T-S8): an actor re-bound by `RestoreActiveTurn` has
+    /// no in-memory absorbed set, but the durable alias of `(active primary,
+    /// active nonce)` names it. Those ids join `known`/`arms` as
+    /// [`RecoveryKnownIdArm::AbsorbedActiveTurn`] (Open), exactly as the live
+    /// set does. `snapshot` must be read first.
+    pub(in crate::services::discord) fn settle(
+        &self,
+        snapshot: &ChannelMailboxSnapshot,
+        arms: &mut HashMap<u64, RecoveryKnownIdArm>,
+        known: &mut HashSet<u64>,
+    ) -> HashSet<u64> {
+        let Some(ledger) = self.0.as_ref() else {
+            return HashSet::new();
+        };
+        if let (Some(primary), Some(turn_nonce)) = (
+            snapshot.active_user_message_id,
+            snapshot.active_turn_nonce.as_deref(),
+        ) {
+            for absorbed in ledger.absorbed_by_episode(primary.get(), turn_nonce) {
+                let arm = arms
+                    .entry(absorbed)
+                    .or_insert(RecoveryKnownIdArm::AbsorbedActiveTurn);
+                if *arm != RecoveryKnownIdArm::ActiveTurn {
+                    *arm = RecoveryKnownIdArm::AbsorbedActiveTurn;
+                }
+                known.insert(absorbed);
+            }
+        }
+        ledger.settled_ids()
+    }
 }

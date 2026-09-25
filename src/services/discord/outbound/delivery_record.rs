@@ -65,7 +65,7 @@ use std::sync::atomic::Ordering;
 use poise::serenity_prelude::ChannelId;
 use serde::{Deserialize, Serialize};
 
-use super::completed_turn_ledger;
+use super::completed_turn_ledger::{self, append_completed_episode, append_completed_turn};
 use super::turn_output_controller::DeliveryOutcome;
 use crate::services::discord::runtime_store;
 use crate::services::provider::ProviderKind;
@@ -856,11 +856,6 @@ pub(in crate::services::discord) fn historical_pinned_delivery_exists(
     read_record(&provider, source.offset_authority_channel_id)
         .is_some_and(|record| record.confirmed_deliveries.contains(&receipt))
 }
-fn append_completed_turn_if_nonzero(provider: &ProviderKind, channel_id: u64, user_msg_id: u64) {
-    if user_msg_id != 0 {
-        completed_turn_ledger::append_completed_turn(provider, channel_id, user_msg_id);
-    }
-}
 pub(in crate::services::discord) fn record_pinned_delivery_metadata(
     source: &ExactJsonlSourceIdentity,
     body: &str,
@@ -883,7 +878,7 @@ pub(in crate::services::discord) fn record_pinned_delivery_metadata(
         body,
         source.generation_mtime_ns,
     );
-    append_completed_turn_if_nonzero(&provider, source.delivery_channel_id, user_msg_id);
+    append_completed_turn(&provider, source.delivery_channel_id, user_msg_id);
 }
 fn commit_ordered_jsonl_range_at(
     path: &Path,
@@ -2406,6 +2401,10 @@ fn shadow_mirror_delivered_frontier_inner(
                 .and_then(|_| fresh.as_ref().map(|state| state.user_msg_id))
                 .filter(|user_msg_id| *user_msg_id != 0)
         });
+    // #6035 A7: only the exact receipt's own row proves its episode nonce.
+    let receipt_row = receipt.as_ref().zip(fresh.as_ref());
+    let proven = receipt_row.filter(|(_, r)| Some(r.user_msg_id) == safe_ledger_user_msg_id);
+    let nonce = proven.map(|(receipt, _)| receipt.source.turn_nonce.clone());
     let lock_authority = watcher_authority.map(|authority| WatcherFrontierLockAuthority {
         shared,
         channel,
@@ -2456,7 +2455,7 @@ fn shadow_mirror_delivered_frontier_inner(
         );
     }
     if let Some(user_msg_id) = safe_ledger_user_msg_id {
-        append_completed_turn_if_nonzero(provider, delivery_channel_id, user_msg_id);
+        append_completed_episode(provider, delivery_channel_id, user_msg_id, nonce.as_deref());
     }
 
     // The flag controls only divergence telemetry. The confirmed frontier and
@@ -5921,5 +5920,118 @@ mod tests {
         );
         // A fresh answer above 0 is NOT over-suppressed.
         assert!(!range_already_committed(422_855, 0));
+    }
+
+    /// #6035 PR-S A7 fixture: one channel whose delivery-channel row is `user`'s
+    /// episode `"ep-n"`, spanning `(start, 64)` under a current generation.
+    #[cfg(unix)]
+    fn nonce_provenance_fixture(
+        channel: u64,
+        user: u64,
+        start: u64,
+    ) -> (
+        std::sync::Arc<crate::services::discord::SharedData>,
+        &'static str,
+        i64,
+    ) {
+        let tmux = "AgentDesk-claude-6035-nonce";
+        let generation = set_phase_a_generation(tmux, 1_700_603_500);
+        #[rustfmt::skip]
+        let mut row = crate::services::discord::inflight::InflightTurnState::new(
+            ProviderKind::Claude, channel, None, 1, user, 0, "q".into(),
+            None, Some(tmux.into()), None, None, 0);
+        (row.turn_start_offset, row.last_offset) = (Some(start), 64);
+        row.turn_nonce = Some("ep-n".into());
+        crate::services::discord::inflight::save_inflight_state(&row).expect("save row");
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let coord = shared.tmux_relay_coord(ChannelId::new(channel));
+        coord
+            .confirmed_end_generation_mtime_ns
+            .store(generation, Ordering::Release);
+        coord.confirmed_end_offset.store(64, Ordering::Release);
+        (shared, tmux, generation)
+    }
+
+    #[cfg(unix)]
+    fn ledger_rows(channel: u64) -> Vec<(u64, Option<String>)> {
+        let ledger = completed_turn_ledger::read_ledger(&ProviderKind::Claude, channel);
+        let entries = ledger.map(|ledger| ledger.entries).unwrap_or_default();
+        let rows = entries.into_iter();
+        rows.map(|entry| (entry.user_msg_id, entry.turn_nonce))
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn bridge_delivery(shared: &crate::services::discord::SharedData, channel: u64, pin: u64) {
+        let tmux = Some("AgentDesk-claude-6035-nonce");
+        let (id, anchor) = (ChannelId::new(channel), Some(channel));
+        #[rustfmt::skip]
+        shadow_mirror_delivered_frontier(shared, &ProviderKind::Claude, id, tmux, (0, 64),
+            true, Some(603_599), anchor, Some("answer"), Some(pin));
+    }
+
+    /// #6035 A7: the exact receipt pins the fresh row to this range, so the row's
+    /// own id is recorded with its episode nonce — bridge and watcher alike.
+    #[cfg(unix)]
+    #[test]
+    fn exact_receipt_row_records_its_episode_nonce_6035() {
+        let _root = IsolatedRoot::new();
+        let (bridge, watcher, user) = (6_035_301, 6_035_302, 6_035_300);
+        let (shared, _, _) = nonce_provenance_fixture(bridge, user, 0);
+        bridge_delivery(&shared, bridge, user);
+        assert_eq!(ledger_rows(bridge), [(user, Some("ep-n".to_string()))]);
+
+        let (shared, tmux, generation_mtime_ns) = nonce_provenance_fixture(watcher, user, 0);
+        let channel = ChannelId::new(watcher);
+        let authority = WatcherDeliveryRecordAuthority {
+            lease_reset_incarnation: shared.relay_frontier_token(channel).reset_incarnation,
+            generation_mtime_ns,
+            ledger_user_msg_id: Some(user),
+        };
+        #[rustfmt::skip]
+        assert!(record_watcher_terminal_delivery(&shared, &ProviderKind::Claude, channel, tmux,
+            authority, (0, 64), Some(603_598), "answer"));
+        assert_eq!(ledger_rows(watcher), [(user, Some("ep-n".to_string()))]);
+    }
+
+    /// #6035 A7: without exact same-episode provenance the row is `None`: a pin
+    /// naming another turn, the same id's row on another range (a delayed append
+    /// of an earlier episode), an unknown generation, and the pinned sink.
+    #[cfg(unix)]
+    #[test]
+    fn unproven_provenance_records_no_nonce_6035() {
+        let _root = IsolatedRoot::new();
+        let (other_pin, stale_range, unknown, sink) = (6_035_311, 6_035_312, 6_035_313, 6_035_314);
+        let (user, pinned) = (6_035_310, 6_035_319);
+        let (shared, _, _) = nonce_provenance_fixture(other_pin, user, 0);
+        bridge_delivery(&shared, other_pin, pinned);
+        assert_eq!(
+            ledger_rows(other_pin),
+            [(pinned, None)],
+            "pinned id is not the row's"
+        );
+
+        let (shared, _, _) = nonce_provenance_fixture(stale_range, user, 32);
+        bridge_delivery(&shared, stale_range, user);
+        assert_eq!(
+            ledger_rows(stale_range),
+            [(user, None)],
+            "row is a later episode"
+        );
+
+        let (shared, _, _) = nonce_provenance_fixture(unknown, user, 0);
+        let coord = shared.tmux_relay_coord(ChannelId::new(unknown));
+        coord
+            .confirmed_end_generation_mtime_ns
+            .store(0, Ordering::Release);
+        bridge_delivery(&shared, unknown, user);
+        assert_eq!(ledger_rows(unknown), [(user, None)], "unknown generation");
+
+        let (_, tmux, generation) = nonce_provenance_fixture(sink, user, 0);
+        #[rustfmt::skip]
+        let (_, receipt) = exact_delivery_fixture(&ProviderKind::Claude, tmux, "ep-n", (0, 64),
+            generation, (sink, sink), 603_597);
+        record_pinned_delivery_metadata(&receipt.source, "answer", user);
+        assert_eq!(ledger_rows(sink), [(user, None)], "pinned sink");
     }
 }

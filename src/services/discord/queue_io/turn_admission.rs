@@ -100,6 +100,7 @@ async fn mailbox_try_start_turn_ordered(
     };
     let mailbox = shared.mailbox(channel_id);
     let persistence = queue_persistence_context(shared, &shared.provider, channel_id);
+    let turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
     let result = match claim {
         AdmissionClaim::Kinded(turn_kind, admission_order) => {
             mailbox
@@ -124,6 +125,25 @@ async fn mailbox_try_start_turn_ordered(
                 .await
         }
     };
+    // #6035 PR-S: the alias lands before the claim is reported, hence before
+    // any delivery of this episode can append `(user_message_id, turn_nonce)`.
+    if result.started
+        && !result.absorbed_source_ids.is_empty()
+        && let Some(turn_nonce) = turn_nonce.as_deref()
+    {
+        let absorbed: Vec<u64> = result
+            .absorbed_source_ids
+            .iter()
+            .map(|id| id.get())
+            .collect();
+        crate::services::discord::outbound::completed_turn_ledger::record_merged_alias(
+            &shared.provider,
+            channel_id.get(),
+            user_message_id.get(),
+            turn_nonce,
+            &absorbed,
+        );
+    }
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
     if let Some(error) = result.persistence_error.as_ref() {
         tracing::error!(
