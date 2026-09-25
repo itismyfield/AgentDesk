@@ -115,6 +115,18 @@ pub(in crate::services::discord) struct RelayRecoveryAffectedIdentifiers {
     /// can never match the guarded finish.
     #[serde(skip)]
     pub observed_before: Option<std::time::Instant>,
+    /// The inflight row birth the snapshot observed; a refusal keys a re-read row only by it.
+    #[serde(skip)]
+    pub inflight_birth: Option<(super::inflight::InflightEpisodePin, Option<u64>)>,
+}
+
+impl RelayRecoveryAffectedIdentifiers {
+    /// Pins the turn the snapshot observed, which the guarded finish and refusal keys check.
+    pub(super) fn pin_snapshot_turn(&mut self, snapshot: &super::health::WatcherStateSnapshot) {
+        self.finalizer_turn_id = snapshot.inflight_finalizer_turn_id;
+        self.mailbox_active_turn_nonce = snapshot.mailbox_active_turn_nonce.clone();
+        self.inflight_birth = snapshot.inflight_birth.clone();
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -283,6 +295,7 @@ fn affected_from_snapshot(snapshot: &RelayHealthSnapshot) -> RelayRecoveryAffect
         finalizer_turn_id: None,
         mailbox_active_turn_nonce: None,
         observed_before: None,
+        inflight_birth: None,
     }
 }
 

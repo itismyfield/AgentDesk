@@ -1104,6 +1104,7 @@ mod tests {
                 tmux_session_name: Some(tmux_session.to_string()),
                 turn_start_offset: Some(last_relay_offset),
             }),
+            inflight_birth: None,
             inflight_finalizer_turn_id: None,
             inflight_output_path: Some(output_path.to_string()),
             #[cfg(unix)]

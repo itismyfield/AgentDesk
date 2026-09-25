@@ -156,6 +156,10 @@ pub struct WatcherStateSnapshot {
     #[serde(skip)]
     pub(in crate::services::discord) inflight_identity:
         Option<discord::inflight::InflightTurnIdentity>,
+    /// The observed row's birth pin and start offset; a re-read row keys only that birth.
+    #[serde(skip)]
+    pub(in crate::services::discord) inflight_birth:
+        Option<(discord::inflight::InflightEpisodePin, Option<u64>)>,
     #[serde(skip)]
     pub(in crate::services::discord) inflight_finalizer_turn_id: Option<u64>,
     #[serde(skip)]
@@ -709,6 +713,7 @@ async fn watcher_state_snapshot_for_shared(
             operands.now_epoch_ms.min(i64::MAX as u64) as i64,
         ))
     });
+    let inflight = session.inflight.as_ref();
     Some(WatcherStateSnapshot {
         provider: provider_name.to_string(),
         attached: session.attached,
@@ -735,18 +740,13 @@ async fn watcher_state_snapshot_for_shared(
         bound_session_id,
         transcript_binding_stall: transcript_binding_stall.as_str(),
         inflight_terminal_delivery_committed: session.inflight_terminal_delivery_committed(),
-        inflight_identity: session
-            .inflight
-            .as_ref()
-            .map(discord::inflight::InflightTurnIdentity::from_state),
-        inflight_finalizer_turn_id: session
-            .inflight
-            .as_ref()
-            .map(|state| state.effective_finalizer_turn_id()),
-        inflight_output_path: session
-            .inflight
-            .as_ref()
-            .and_then(|state| state.output_path.clone()),
+        inflight_identity: inflight.map(discord::inflight::InflightTurnIdentity::from_state),
+        inflight_birth: inflight.map(|state| {
+            let pin = discord::inflight::InflightEpisodePin::from_state(state);
+            (pin, state.turn_start_offset)
+        }),
+        inflight_finalizer_turn_id: inflight.map(|state| state.effective_finalizer_turn_id()),
+        inflight_output_path: inflight.and_then(|state| state.output_path.clone()),
         #[cfg(unix)]
         reachability_observation,
         relay_stall_state,

@@ -4758,6 +4758,8 @@ services::discord::relay_recovery::destructive_warrant::tests::warrant_is_monoto
 services::discord::relay_recovery::idle_tmux::unread_tail_seed::a_retained_decision_never_keys_a_later_birth
 services::discord::relay_recovery::idle_tmux::unread_tail_seed::a_retained_snapshot_never_keys_a_later_birth
 services::discord::relay_recovery::idle_tmux::unread_tail_seed::a_returning_mailbox_turn_keeps_its_prior_grading
+services::discord::relay_recovery::idle_tmux::unread_tail_seed::a_snapshot_keys_only_the_birth_it_carried
+services::discord::relay_recovery::idle_tmux::unread_tail_seed::unmeasured_tail_episodes_are_graded_by_the_carried_birth
 services::discord::relay_recovery::idle_tmux::unread_tail_seed::unmeasured_tail_refusals_nothing_names_are_never_folded
 services::discord::relay_recovery::leaked_row_sweep::tests::discord_row_is_sweep_candidate_without_pending_start
 services::discord::relay_recovery::leaked_row_sweep::tests::sweep_rejects_rows_without_channel_or_tmux_identity

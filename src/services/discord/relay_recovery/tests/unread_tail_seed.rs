@@ -257,7 +257,7 @@ async fn unmeasured_tail_refusals_nothing_names_are_never_folded() {
     let count = || seed.refusals().len();
 
     let mut rowless = rowed_snapshot(&seed).await;
-    rowless.inflight_identity = None;
+    rowless.inflight_birth = None;
     for session in ["AgentDesk-claude-5996-a", "AgentDesk-claude-5996-b"] {
         rowless.tmux_session = Some(session.to_string());
         let other = UNREAD_TAIL_SITE_STALE_MAILBOX;
@@ -300,11 +300,13 @@ async fn rowed_decision(seed: &UnreadTailSeed) -> super::RelayRecoveryDecision {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let (health, stall) = (&snapshot.relay_health, snapshot.relay_stall_state);
     let mut decision = super::plan_relay_recovery(health, stall, now_ms);
+    decision.affected.pin_snapshot_turn(&snapshot);
     decision.affected.mailbox_active_user_msg_id = None;
     decision
 }
 
-/// A retained manual decision never keys the row that replaced its turn: two births, two records.
+/// A retained manual decision never keys the row that replaced its turn: two births, two
+/// records; the decision carrying the replacing birth keys it once.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_retained_decision_never_keys_a_later_birth() {
@@ -324,6 +326,108 @@ async fn a_retained_decision_never_keys_a_later_birth() {
     assert!(!admits(&retained));
     assert!(!admits(&rowed_decision(&seed).await));
     assert_eq!(seed.refusals().len(), 2, "{:?}", seed.refusals());
+    assert!(!admits(&rowed_decision(&seed).await));
+    assert_eq!(
+        seed.refusals().len(),
+        2,
+        "one birth decided twice is recorded once"
+    );
+}
+
+/// A snapshot keys a re-read row only by the birth it carried: repeated passes over one
+/// birth record once, and an unidentifiable birth never keys the identifiable one after it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_snapshot_keys_only_the_birth_it_carried() {
+    let Some(seed) = UnreadTailSeed::start(5_996_140_003, UnreadTailShape::RowOutputMissing).await
+    else {
+        return;
+    };
+    let (provider, channel) = (&seed.provider, seed.channel.get());
+    let record = |snapshot: &crate::services::discord::health::WatcherStateSnapshot| {
+        let site = super::UNREAD_TAIL_SITE_WATCHDOG_EXPLICIT_BACKGROUND;
+        super::record_unmeasured_tail_refusal_for_snapshot(provider, channel, snapshot, site)
+    };
+    record(&rowed_snapshot(&seed).await);
+    record(&rowed_snapshot(&seed).await);
+    assert_eq!(
+        seed.refusals().len(),
+        1,
+        "one birth across passes is recorded once"
+    );
+
+    edit_persisted_row(provider, channel, |row| {
+        (row["user_msg_id"], row["turn_nonce"]) = (0.into(), serde_json::Value::Null);
+        row.as_object_mut().unwrap().remove("turn_start_offset");
+    });
+    let unidentifiable = rowed_snapshot(&seed).await;
+    edit_persisted_row(provider, channel, |row| row["turn_nonce"] = "B".into());
+    record(&unidentifiable);
+    record(&rowed_snapshot(&seed).await);
+    assert_eq!(seed.refusals().len(), 3, "{:?}", seed.refusals());
+
+    edit_persisted_row(provider, channel, |row| {
+        (row["turn_nonce"], row["turn_start_offset"]) = (serde_json::Value::Null, 7.into());
+    });
+    let at_seven = rowed_snapshot(&seed).await;
+    edit_persisted_row(provider, channel, |row| row["turn_start_offset"] = 9.into());
+    record(&at_seven);
+    record(&rowed_snapshot(&seed).await);
+    assert_eq!(
+        seed.refusals().len(),
+        5,
+        "a nonce-less id-0 birth is told apart by offset"
+    );
+}
+
+/// A row read with the birth its observation carried is graded once per site by that
+/// birth, however its tmux name reads; an unnameable row is never folded into itself.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unmeasured_tail_episodes_are_graded_by_the_carried_birth() {
+    use super::{UNREAD_TAIL_SITE_MANUAL_REATTACH, UNREAD_TAIL_SITE_STALE_MAILBOX};
+    let Some(seed) = UnreadTailSeed::start(5_996_140_005, UnreadTailShape::RowOutputMissing).await
+    else {
+        return;
+    };
+    let (provider, channel) = (&seed.provider, seed.channel.get());
+    let site = UNREAD_TAIL_SITE_MANUAL_REATTACH;
+    let count = || seed.refusals().len();
+    for row_site in [site, site, UNREAD_TAIL_SITE_STALE_MAILBOX] {
+        let snapshot = rowed_snapshot(&seed).await;
+        super::record_unmeasured_tail_refusal_for_snapshot(provider, channel, &snapshot, row_site);
+    }
+    assert_eq!(count(), 2, "one birth episode is graded once per site");
+
+    let record_row = || async {
+        let snapshot = rowed_snapshot(&seed).await;
+        super::record_unmeasured_tail_refusal_for_snapshot(provider, channel, &snapshot, site);
+    };
+    edit_persisted_row(provider, channel, |row| {
+        row["tmux_session_name"] = "renamed".into()
+    });
+    record_row().await;
+    assert_eq!(count(), 2, "a learned tmux name keeps the birth episode");
+    let nonce = inflight::load_inflight_state_read_only(provider, channel)
+        .unwrap()
+        .turn_nonce;
+    for turn_nonce in ["reborn".into(), serde_json::json!(nonce)] {
+        edit_persisted_row(provider, channel, |row| row["turn_nonce"] = turn_nonce);
+        record_row().await;
+    }
+    assert_eq!(
+        count(),
+        3,
+        "a new birth is its own episode; the first is still graded"
+    );
+
+    edit_persisted_row(provider, channel, |row| {
+        (row["user_msg_id"], row["turn_nonce"]) = (0.into(), serde_json::Value::Null);
+        row.as_object_mut().unwrap().remove("turn_start_offset");
+    });
+    record_row().await;
+    record_row().await;
+    assert_eq!(count(), 5, "an unnameable row is never folded into itself");
 }
 
 /// Mailbox turns A, B, A on one site: every call refuses, but A's grading outlives B's.

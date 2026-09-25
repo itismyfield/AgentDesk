@@ -295,8 +295,7 @@ async fn run_relay_recovery_at(
 
     let mut decision =
         plan_relay_recovery(&snapshot.relay_health, snapshot.relay_stall_state, now_ms);
-    decision.affected.finalizer_turn_id = snapshot.inflight_finalizer_turn_id;
-    decision.affected.mailbox_active_turn_nonce = snapshot.mailbox_active_turn_nonce.clone();
+    decision.affected.pin_snapshot_turn(&snapshot);
     decision.affected.observed_before = Some(observed_before);
     trace_relay_recovery_decision(&decision, apply);
 
@@ -494,8 +493,7 @@ async fn auto_apply_relay_recovery_for_shared_at(
             eligible_orphan_pending_token_without_admission_grace(&planning_health);
         decision.auto_heal.skipped_reason = None;
     }
-    decision.affected.finalizer_turn_id = snapshot.inflight_finalizer_turn_id;
-    decision.affected.mailbox_active_turn_nonce = snapshot.mailbox_active_turn_nonce.clone();
+    decision.affected.pin_snapshot_turn(&snapshot);
     decision.affected.observed_before = Some(observed_before);
     trace_relay_recovery_decision(&decision, true);
     #[cfg(unix)]
@@ -682,6 +680,7 @@ mod axis_b_tests {
             transcript_binding_stall: "none",
             inflight_terminal_delivery_committed: false,
             inflight_identity: None,
+            inflight_birth: None,
             inflight_finalizer_turn_id: None,
             inflight_output_path: None,
             #[cfg(unix)]

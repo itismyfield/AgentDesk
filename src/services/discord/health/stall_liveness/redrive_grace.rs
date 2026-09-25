@@ -887,6 +887,7 @@ mod tests {
                     turn_start_offset: Some(relay_offset),
                 },
             ),
+            inflight_birth: None,
             inflight_finalizer_turn_id: None,
             inflight_output_path: Some(format!("/tmp/{tmux_session}.jsonl")),
             #[cfg(unix)]

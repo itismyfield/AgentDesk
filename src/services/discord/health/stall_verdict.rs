@@ -605,6 +605,7 @@ mod tests {
             transcript_binding_stall: "none",
             inflight_terminal_delivery_committed: false,
             inflight_identity: None,
+            inflight_birth: None,
             inflight_finalizer_turn_id: None,
             inflight_output_path: Some("/tmp/stall-verdict-fixture.jsonl".to_string()),
             #[cfg(unix)]
