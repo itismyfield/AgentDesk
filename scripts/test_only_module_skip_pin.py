@@ -197,6 +197,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_prompt_dedupe/tests.rs",
         "src/services/turn_orchestrator/mailbox_unreachable_tests.rs",
         "src/services/turn_orchestrator/recovery_kickoff_tests.rs",
+        "src/services/turn_orchestrator/registry_purge/closed_gate_tests.rs",
+        "src/services/discord/mailbox_finish/closed_actor_tests.rs",
         "src/services/discord/queue_io/turn_admission_tests.rs",
         "src/services/discord/health/relay_auto_heal/orphan_token_tests.rs",
     }

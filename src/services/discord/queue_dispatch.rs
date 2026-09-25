@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::turn_orchestrator::registry_purge::retry_while_closed;
 
 pub(super) mod kickoff;
 
@@ -214,13 +215,17 @@ async fn mailbox_take_soft_intervention(
     primary_message_id: Option<MessageId>,
 ) -> MailboxTakeNextSoftOutcome {
     loop {
-        let result: TakeNextSoftResult = shared
+        // #5951 C3t-0g — a closed actor's refusal spends no catch-up retry.
+        let Ok(result) = shared
             .mailbox(channel_id)
-            .take_soft_matching(
+            .take_soft_matching_or_refused(
                 super::queue_persistence_context(shared, provider, channel_id),
                 primary_message_id,
             )
-            .await;
+            .await
+        else {
+            return MailboxTakeNextSoftOutcome::default();
+        };
         let queue_len_after = result.queue_len_after;
         super::apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
         if let Some(error) = result.persistence_error {
@@ -304,15 +309,11 @@ pub(super) async fn mailbox_requeue_intervention_front(
     channel_id: ChannelId,
     intervention: Intervention,
 ) -> MailboxEnqueueOutcome {
-    mailbox_front_requeue_outcome(
-        shared,
-        provider,
-        channel_id,
-        shared.mailbox(channel_id).requeue_front(
-            intervention,
-            super::queue_persistence_context(shared, provider, channel_id),
-        ),
-    )
+    let persistence = super::queue_persistence_context(shared, provider, channel_id);
+    mailbox_front_requeue_outcome(shared, provider, channel_id, |h| {
+        let (i, p) = (intervention.clone(), persistence.clone());
+        async move { h.requeue_front(i, p).await }
+    })
     .await
 }
 
@@ -323,28 +324,34 @@ pub(super) async fn mailbox_restore_dequeued_head(
     intervention: Intervention,
     dispatch_lease: DispatchLeaseHandle,
 ) -> MailboxEnqueueOutcome {
-    mailbox_front_requeue_outcome(
-        shared,
-        provider,
-        channel_id,
-        shared.mailbox(channel_id).restore_dequeued_head(
-            intervention,
-            super::queue_persistence_context(shared, provider, channel_id),
-            dispatch_lease,
-        ),
-    )
+    let persistence = super::queue_persistence_context(shared, provider, channel_id);
+    mailbox_front_requeue_outcome(shared, provider, channel_id, |h| {
+        let (i, p, lease) = (
+            intervention.clone(),
+            persistence.clone(),
+            dispatch_lease.clone(),
+        );
+        async move { h.restore_dequeued_head(i, p, lease).await }
+    })
     .await
 }
 
-async fn mailbox_front_requeue_outcome(
+/// #5951 C3t-0g — restitution: a purge-closed actor's `MailboxClosed` is replayed
+/// on the fresh actor (whose lease check then sees a plain front requeue).
+async fn mailbox_front_requeue_outcome<Fut>(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
-    request: impl std::future::Future<
-        Output = crate::services::turn_orchestrator::RequeueInterventionResult,
-    >,
-) -> MailboxEnqueueOutcome {
-    let result = request.await;
+    request: impl FnMut(ChannelMailboxHandle) -> Fut,
+) -> MailboxEnqueueOutcome
+where
+    Fut:
+        std::future::Future<Output = crate::services::turn_orchestrator::RequeueInterventionResult>,
+{
+    let resolve = || Some(shared.mailbox(channel_id));
+    let Some((_, result)) = retry_while_closed(channel_id, resolve, request).await else {
+        return MailboxEnqueueOutcome::default();
+    };
     super::apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
     if let Some(error) = result.persistence_error.as_ref() {
         tracing::warn!(

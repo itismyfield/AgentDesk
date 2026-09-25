@@ -619,11 +619,10 @@ that retires turn-lifetime state.
   -only finishes, `mailbox_clear_channel` teardowns, `cancelled`-flag finishes,
   identity-free row deletes, channel-keyed post-retirement cleanup,
   pointer-bound watcher cleanup under reuse, value-bound thread-parent cleanup,
-  mutations accepted by a purged actor, channel-keyed wrapper follow-up that
-  runs even when the request reached a closed actor (the `recovery_done`
-  signal, completion events, queue-exit feedback), a completion event
-  published after an accepted finish, which names the channel rather than the
-  incarnation, side effects of a pending thread-parent or watcher
+  a user command (`/clear`, a queued-message cancel, a force purge) that a
+  purge-closed actor refused and that is not replayed on the successor, a
+  completion event published after an accepted finish, which names the
+  channel rather than the incarnation, side effects of a pending thread-parent or watcher
   successor, restart `RecoveryKickoff` without a re-mint check, restart
   reattach that cannot see a prior process's release, TUI-direct admission
   over a matching row through the unfenced claim, and the other admission

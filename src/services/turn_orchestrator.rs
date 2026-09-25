@@ -13,6 +13,7 @@ use crate::services::provider::{CancelToken, ProviderKind};
 // #3293: non-creating registry lookup + operator-gated idle-entry purge.
 mod active_source_dedup;
 mod clear_channel;
+mod closed_verdict;
 mod dispatch_cleanup;
 mod dispatch_reservation;
 mod episode_identity;
@@ -422,6 +423,7 @@ pub(crate) struct FinishTurnResult {
     pub(crate) persistence_error: Option<String>,
 }
 
+#[derive(Default)]
 pub(crate) struct ClearChannelResult {
     pub(crate) removed_token: Option<Arc<CancelToken>>,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
@@ -877,10 +879,9 @@ impl ChannelMailboxHandle {
         .unwrap_or(RecoveryKickoffResult::Unavailable)
     }
 
+    #[cfg(test)]
     pub(crate) async fn clear_recovery_marker(&self) {
-        let _ = self
-            .request(|reply| ChannelMailboxMsg::ClearRecoveryMarker { reply })
-            .await;
+        let _ = self.clear_recovery_marker_or_refused().await;
     }
 
     pub(crate) async fn enqueue(
@@ -916,6 +917,7 @@ impl ChannelMailboxHandle {
             })
     }
 
+    #[cfg(test)]
     pub(crate) async fn take_next_soft(
         &self,
         persistence: QueuePersistenceContext,
@@ -923,25 +925,22 @@ impl ChannelMailboxHandle {
         self.take_soft_matching(persistence, None).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn take_soft_matching(
         &self,
         persistence: QueuePersistenceContext,
         primary_message_id: Option<MessageId>,
     ) -> TakeNextSoftResult {
-        self.request(|reply| ChannelMailboxMsg::TakeNextSoft {
-            persistence,
-            primary_message_id,
-            reply,
-        })
-        .await
-        .unwrap_or(TakeNextSoftResult {
-            intervention: None,
-            dispatch_lease: None,
-            has_more: false,
-            queue_len_after: 0,
-            queue_exit_events: Vec::new(),
-            persistence_error: None,
-        })
+        self.take_soft_matching_or_refused(persistence, primary_message_id)
+            .await
+            .unwrap_or(TakeNextSoftResult {
+                intervention: None,
+                dispatch_lease: None,
+                has_more: false,
+                queue_len_after: 0,
+                queue_exit_events: Vec::new(),
+                persistence_error: None,
+            })
     }
 
     pub(crate) async fn requeue_front(
@@ -1041,8 +1040,9 @@ impl ChannelMailboxHandle {
             })
     }
 
+    #[cfg(test)]
     pub(crate) async fn clear(&self, persistence: QueuePersistenceContext) -> ClearChannelResult {
-        self.request(|reply| ChannelMailboxMsg::Clear { persistence, reply })
+        self.clear_or_refused(persistence)
             .await
             .unwrap_or(ClearChannelResult {
                 removed_token: None,
@@ -1091,44 +1091,38 @@ impl ChannelMailboxHandle {
             .await;
     }
 
+    #[cfg(test)]
     pub(crate) async fn hydrate_pending_queue_from_disk(
         &self,
         persistence: QueuePersistenceContext,
     ) -> HydratePendingQueueResult {
-        self.request(|reply| ChannelMailboxMsg::HydratePendingQueueFromDisk { persistence, reply })
+        self.hydrate_pending_queue_from_disk_or_refused(persistence)
             .await
             .unwrap_or_default()
     }
 
     /// #3864: actor-serialized dedup/merge/persist of restored queue items.
+    #[cfg(test)]
     pub(crate) async fn merge_restored_queue_items(
         &self,
         items: Vec<Intervention>,
         persistence: QueuePersistenceContext,
     ) -> HydratePendingQueueResult {
-        self.request(|reply| ChannelMailboxMsg::MergeRestoredQueueItems {
-            items,
-            persistence,
-            reply,
-        })
-        .await
-        .unwrap_or_default()
+        self.merge_restored_queue_items_or_refused(items, persistence)
+            .await
+            .unwrap_or_default()
     }
 
+    #[cfg(test)]
     pub(crate) async fn merge_restored_dispatch_marker(
         &self,
         marker: Intervention,
         restored_override: Option<ChannelId>,
         persistence: QueuePersistenceContext,
     ) -> HydratePendingQueueResult {
-        self.request(|reply| ChannelMailboxMsg::MergeRestoredDispatchMarker {
-            marker,
-            restored_override,
-            persistence,
-            reply,
-        })
-        .await
-        .unwrap_or_default()
+        self.merge_restored_dispatch_marker_or_refused(marker, restored_override, persistence)
+            .await
+            .unwrap_or_default()
     }
 
     pub(crate) async fn restart_drain(
@@ -1339,21 +1333,19 @@ impl ChannelMailboxRegistry {
     }
 }
 
-// #3297 r3 (codex) — tombstone classification, enforced for EVERY arm by
-// `registry_purge::gate_closed_arm` ahead of the actor's match. Once
-// `CloseIfIdle` sets `state.closed` (actor about to be unlinked):
-//  (a) START-LIKE arms — anything that binds an active turn / recovery marker
-//      or accepts NEW work (`TryStartTurn`, `RestoreActiveTurn`,
-//      `RecoveryKickoff`, `Enqueue`) — are REFUSED with that arm's existing
-//      "cannot start" reply (`TryStartTurn` ⇒ `false`); callers re-resolve a
-//      fresh actor via the registry `*_with_closed_retry` helpers and replay.
-//  (b) everything else stays ALLOWED — reads, cancels, finishes, drains, and
-//      queue RESTITUTION (`RequeueFront`/`ReplaceQueue`/hydrate, which
-//      re-persist already-accepted work to disk for a successor actor to
-//      hydrate — refusing those would drop user messages).
+// #3297 r3 / #5951 C3t-0g — tombstone classification, enforced for EVERY arm
+// by the exhaustive `registry_purge::gate_closed_arm` ahead of the actor's
+// match. Once `CloseIfIdle` sets `state.closed` (actor about to be unlinked),
+// the disk queue, dispatch marker and turn_finished signal it would touch are
+// keyed by channel and already belong to the successor, so:
+//  (a) reads (and `CloseIfIdle`) pass;
+//  (b) every other arm is REFUSED with a reply its caller can recognise: the
+//      arm's "cannot start"/offline answer, or a `VerdictReply` refusal where
+//      the empty answer would read as "nothing to do". Restitution and user
+//      commands replay on a fresh actor via `registry_purge::retry_while_closed`;
 //  (c) CommitCapturedReadyDelivery refuses closed actors in its own arm;
 //      replay on a successor would discard the captured actor's authority.
-// New arms must be classified here and (if start-like) gated there.
+// A new arm does not compile until the gate classifies it.
 enum ChannelMailboxMsg {
     CommitCapturedReadyDelivery {
         commit: Box<crate::services::discord::CapturedReadyDeliveryCommit>,
@@ -1446,7 +1438,7 @@ enum ChannelMailboxMsg {
         reply: oneshot::Sender<RecoveryKickoffResult>,
     },
     ClearRecoveryMarker {
-        reply: oneshot::Sender<()>,
+        reply: closed_verdict::VerdictReply<()>,
     },
     Enqueue {
         intervention: Intervention,
@@ -1460,7 +1452,7 @@ enum ChannelMailboxMsg {
     TakeNextSoft {
         persistence: QueuePersistenceContext,
         primary_message_id: Option<MessageId>,
-        reply: oneshot::Sender<TakeNextSoftResult>,
+        reply: closed_verdict::VerdictReply<TakeNextSoftResult>,
     },
     RequeueFront {
         intervention: Intervention,
@@ -1508,7 +1500,7 @@ enum ChannelMailboxMsg {
     },
     Clear {
         persistence: QueuePersistenceContext,
-        reply: oneshot::Sender<ClearChannelResult>,
+        reply: closed_verdict::VerdictReply<ClearChannelResult>,
     },
     /// #2706: drain the intervention queue without touching the active
     /// `cancel_token`. Used by `cancel_turn(force=true)` so the in-memory
@@ -1542,7 +1534,7 @@ enum ChannelMailboxMsg {
     },
     HydratePendingQueueFromDisk {
         persistence: QueuePersistenceContext,
-        reply: oneshot::Sender<HydratePendingQueueResult>,
+        reply: closed_verdict::VerdictReply<HydratePendingQueueResult>,
     },
     /// #3864: merge SIGTERM-restored disk queue items into the LIVE queue
     /// inside the actor, in one serialized step. Unlike `ReplaceQueue` — a
@@ -1554,13 +1546,13 @@ enum ChannelMailboxMsg {
     MergeRestoredQueueItems {
         items: Vec<Intervention>,
         persistence: QueuePersistenceContext,
-        reply: oneshot::Sender<HydratePendingQueueResult>,
+        reply: closed_verdict::VerdictReply<HydratePendingQueueResult>,
     },
     MergeRestoredDispatchMarker {
         marker: Intervention,
         restored_override: Option<ChannelId>,
         persistence: QueuePersistenceContext,
-        reply: oneshot::Sender<HydratePendingQueueResult>,
+        reply: closed_verdict::VerdictReply<HydratePendingQueueResult>,
     },
     RestartDrain {
         persistence: QueuePersistenceContext,
@@ -1863,8 +1855,8 @@ fn spawn_channel_mailbox(
             ..Default::default()
         };
         while let Some(msg) = rx.recv().await {
-            // #3297 r3 — tombstoned actor refuses start-like arms (enum docs).
-            let Some(msg) = registry_purge::gate_closed_arm(&state, msg) else {
+            // #3297 r3 / #5951 — a tombstoned actor serves only reads (enum docs).
+            let Some(msg) = registry_purge::gate_closed_arm(&state, channel_id, msg) else {
                 continue;
             };
             match msg {

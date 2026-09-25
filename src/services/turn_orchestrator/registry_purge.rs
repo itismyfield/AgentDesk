@@ -30,16 +30,24 @@
 //! about to be severed from the registry. Refused callers recover through the
 //! `*_with_closed_retry` registry helpers below, which re-resolve a FRESH
 //! actor (the unlink runs right after the verdict) and replay the request.
+//!
+//! #5951 C3t-0g: the gate is exhaustive. A closed actor's disk queue, dispatch
+//! marker and `turn_finished` signal are keyed by channel, so they are the
+//! successor's; every arm that is not a read is refused. Accepted work
+//! (restitution) and user commands replay on the fresh actor through
+//! [`retry_while_closed`]; automatic follow-up just stops.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
+pub(crate) use super::closed_verdict::MailboxRefusal;
 use super::{
     ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxRegistry, ChannelMailboxState,
     EnqueueInterventionResult, EnqueueRefusalReason, GLOBAL_CHANNEL_MAILBOXES,
     GLOBAL_RECOVERY_DONE_SIGNALS, GLOBAL_TURN_FINISHED_SIGNALS, Intervention,
-    QueuePersistenceContext, RecoveryKickoffResult, TryStartTurnResult,
+    QueuePersistenceContext, RecoveryKickoffResult, RequeueInterventionResult, TryStartTurnResult,
 };
 use crate::services::provider::CancelToken;
 
@@ -69,53 +77,98 @@ pub(super) fn close_if_idle_verdict(state: &mut ChannelMailboxState) -> Result<(
     Ok(())
 }
 
-/// #3297 r3 (codex) — single tombstone gate run by the actor loop BEFORE the
-/// arm match. When `state.closed` is set, every START-LIKE arm (class (a) in
-/// the `ChannelMailboxMsg` classification docs) is answered here with its
-/// arm's existing "cannot start" reply and `None` is returned so the loop
-/// skips the match; all other arms pass through untouched. Keeping the
-/// classification in ONE place (instead of per-arm `state.closed` checks)
-/// makes "new arm ⇒ classify it" reviewable at a glance.
+/// #3297 r3 (codex) / #5951 C3t-0g — single tombstone gate run by the actor
+/// loop BEFORE the arm match. When `state.closed` is set, reads pass and every
+/// other arm is answered here — with the arm's "cannot start"/offline reply or
+/// a `VerdictReply` refusal (classification docs on `ChannelMailboxMsg`) — and
+/// `None` is returned so the loop skips the match. The match is exhaustive:
+/// a new arm does not compile until it is classified here.
 pub(super) fn gate_closed_arm(
     state: &ChannelMailboxState,
+    channel_id: ChannelId,
     msg: ChannelMailboxMsg,
 ) -> Option<ChannelMailboxMsg> {
+    use ChannelMailboxMsg as M;
     if !state.closed {
         return Some(msg);
     }
-    match msg {
-        // Mirrors the lost-race reply of a slot already held (#3297 r2).
-        ChannelMailboxMsg::TryStartTurn { reply, .. } => {
+    let arm = match msg {
+        M::Snapshot { .. }
+        | M::HasActiveTurn { .. }
+        | M::HasBlockingActiveTurn { .. }
+        | M::ActiveTurnKind { .. }
+        | M::CancelToken { .. }
+        | M::CloseIfIdle { .. }
+        | M::CommitCapturedReadyDelivery { .. } => return Some(msg),
+        #[cfg(test)]
+        M::AgeActiveTurnForTest { .. }
+        | M::AgeInboundWaitsForTest { .. }
+        | M::AgeValveClearedDispatchForTest { .. } => return Some(msg),
+        // Start-like (#3297 r3): pre-fix these bound a turn or recovery marker,
+        // or accepted queue content, that the unlink then orphaned. Callers
+        // replay through the `*_with_closed_retry` helpers below.
+        M::TryStartTurn { reply, .. } => {
             let _ = reply.send(TryStartTurnResult::default());
-            None
+            "TryStartTurn"
         }
-        // Fire-and-forget restore: the only refusal shape is a no-op ack.
-        // (Dormant/test-only wrapper, but it binds a token — class (a).)
-        ChannelMailboxMsg::RestoreActiveTurn { reply, .. } => {
+        M::RestoreActiveTurn { reply, .. } => {
             let _ = reply.send(());
-            None
+            "RestoreActiveTurn"
         }
-        // Pre-fix this arm unconditionally bound the cancel token, marked
-        // `recovery_started_at`, and (via the wrapper's `activated_turn`)
-        // incremented `global_active` — live work on a severed actor.
-        ChannelMailboxMsg::RecoveryKickoff { reply, .. } => {
+        M::RecoveryKickoff { reply, .. } => {
             let _ = reply.send(RecoveryKickoffResult::RefusedClosed);
-            None
+            "RecoveryKickoff"
         }
-        // Pre-fix this arm accepted (and disk-persisted) queue content that
-        // the unlink then orphaned out of every registered-mailbox scan.
-        ChannelMailboxMsg::Enqueue { reply, .. } => {
-            let _ = reply.send(EnqueueInterventionResult {
+        M::Enqueue { reply, .. } => {
+            let refusal = EnqueueRefusalReason::MailboxClosed;
+            let _ = reply.send(EnqueueInterventionResult::refused(refusal, Vec::new()));
+            "Enqueue"
+        }
+        // Restitution callers read `MailboxClosed` and replay on the fresh actor.
+        M::RequeueFront { reply, .. } => {
+            let _ = reply.send(RequeueInterventionResult {
                 enqueued: false,
-                merged: false,
                 refusal_reason: Some(EnqueueRefusalReason::MailboxClosed),
                 queue_exit_events: Vec::new(),
                 persistence_error: None,
             });
-            None
+            "RequeueFront"
         }
-        other => Some(other),
-    }
+        // The reply is dropped: the handle's offline fallback is the refusal
+        // (no turn cancelled or finished, nothing pending, abandoned, drained,
+        // purged or cancelled). A closed actor holds no turn and no queue
+        // (`close_if_idle_verdict`), so it is also what the arm would answer;
+        // finish wrappers read `mailbox_online: false` and stop.
+        M::CancelActiveTurnWithReason { .. }
+        | M::CancelActiveTurnIfCurrent { .. }
+        | M::CancelActiveTurnIfCurrentWithReason { .. }
+        | M::CancelActiveTurnIfUserMessageWithReason { .. } => "CancelActiveTurn",
+        M::CancelActiveBackgroundTurnIfCurrent { .. } => "CancelActiveBackgroundTurnIfCurrent",
+        M::HasPendingSoftQueue { .. } => "HasPendingSoftQueue",
+        M::AbandonPendingDispatch { .. } => "AbandonPendingDispatch",
+        M::FinishTurn { .. } => "FinishTurn",
+        M::FinishTurnIfMatches { .. } => "FinishTurnIfMatches",
+        M::HardStop { .. } => "HardStop",
+        M::FinishCancelledTurn { .. } => "FinishCancelledTurn",
+        M::RestartDrain { .. } => "RestartDrain",
+        M::PurgeQueue { .. } => "PurgeQueue",
+        M::CancelQueuedPrimaryMessage { .. } => "CancelQueuedPrimaryMessage",
+        #[cfg(test)]
+        M::ReplaceQueue { .. } => "ReplaceQueue",
+        // Verdict arms: their empty answer would read as "nothing to do".
+        M::ClearRecoveryMarker { reply } => reply.refuse("ClearRecoveryMarker"),
+        M::TakeNextSoft { reply, .. } => reply.refuse("TakeNextSoft"),
+        M::Clear { reply, .. } => reply.refuse("Clear"),
+        M::HydratePendingQueueFromDisk { reply, .. } => reply.refuse("HydratePendingQueueFromDisk"),
+        M::MergeRestoredQueueItems { reply, .. } => reply.refuse("MergeRestoredQueueItems"),
+        M::MergeRestoredDispatchMarker { reply, .. } => reply.refuse("MergeRestoredDispatchMarker"),
+    };
+    tracing::warn!(
+        channel = channel_id.get(),
+        arm,
+        "purge-closed mailbox refused a request"
+    );
+    None
 }
 
 /// Bounded attempts for the `*_with_closed_retry` helpers. A `MailboxClosed`
@@ -125,6 +178,49 @@ pub(super) fn gate_closed_arm(
 /// for `handle()` to mint a fresh actor. The bound only matters if a purge
 /// future is dropped mid-removal (tombstoned entry never unlinked).
 const CLOSED_RETRY_ATTEMPTS: usize = 3;
+
+/// #5951 C3t-0g — a reply that may be a purge-closed actor's refusal.
+pub(crate) trait RefusedClosed {
+    fn refused_closed(&self) -> bool;
+}
+
+impl<T> RefusedClosed for Result<T, MailboxRefusal> {
+    fn refused_closed(&self) -> bool {
+        matches!(self, Err(MailboxRefusal::Closed))
+    }
+}
+
+impl RefusedClosed for RequeueInterventionResult {
+    fn refused_closed(&self) -> bool {
+        self.refusal_reason == Some(EnqueueRefusalReason::MailboxClosed)
+    }
+}
+
+/// #5951 C3t-0g — like the `*_with_closed_retry` helpers: replay `op` on a
+/// freshly resolved actor while a purge-closed one refuses it. Returns the
+/// handle that gave the final reply; `None` when `resolve` finds no actor.
+pub(crate) async fn retry_while_closed<R: RefusedClosed, Fut: Future<Output = R>>(
+    channel_id: ChannelId,
+    mut resolve: impl FnMut() -> Option<ChannelMailboxHandle>,
+    mut op: impl FnMut(ChannelMailboxHandle) -> Fut,
+) -> Option<(ChannelMailboxHandle, R)> {
+    for attempt in 1..=CLOSED_RETRY_ATTEMPTS {
+        let handle = resolve()?;
+        let reply = op(handle.clone()).await;
+        if !reply.refused_closed() {
+            return Some((handle, reply));
+        }
+        if attempt == CLOSED_RETRY_ATTEMPTS {
+            tracing::error!(
+                channel = channel_id.get(),
+                "request still refused by a purge-tombstoned mailbox after retries"
+            );
+            return Some((handle, reply));
+        }
+        tokio::task::yield_now().await;
+    }
+    unreachable!("loop always returns by the final attempt");
+}
 
 impl ChannelMailboxRegistry {
     /// #3297 r3 — enqueue that survives a purge-tombstone race: on a

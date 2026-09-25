@@ -2,7 +2,10 @@ use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
 
 use crate::services::provider::ProviderKind;
-use crate::services::turn_orchestrator::{ChannelMailboxHandle, FinishTurnResult};
+use crate::services::turn_orchestrator::registry_purge::{MailboxRefusal, retry_while_closed};
+use crate::services::turn_orchestrator::{
+    ChannelMailboxHandle, ClearChannelResult, FinishTurnResult, HydratePendingQueueResult,
+};
 
 use super::{
     SharedData, apply_queue_exit_feedback, queue_persistence_context, turn_completion_events,
@@ -23,7 +26,10 @@ pub(in crate::services::discord) async fn mailbox_clear_recovery_marker(
     channel_id: ChannelId,
 ) {
     let handle = shared.mailbox(channel_id);
-    handle.clear_recovery_marker().await;
+    // #5951 C3t-0g — a closed actor held no marker; nothing to announce.
+    if handle.clear_recovery_marker_or_refused().await.is_err() {
+        return;
+    }
     // #2443 — graduate the 60s `recovery_started_at < 60s` skip via a
     // deterministic wake-up. Every exit path of the recovery engine
     // (success / failure / cancel / stale-cleanup) funnels through this
@@ -46,6 +52,9 @@ pub(in crate::services::discord) async fn mailbox_finish_owned_turn(
     let result = handle
         .finish_turn(queue_persistence_context(shared, provider, channel_id))
         .await;
+    if !result.mailbox_online {
+        return result;
+    }
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
     handle.recovery_done().mark_done();
     turn_completion_events::publish_mailbox_release_completion_event(
@@ -76,6 +85,9 @@ pub(in crate::services::discord) async fn mailbox_finish_cancelled_turn_on(
         return unavailable_finish_turn_result();
     }
     let result = handle.finish_cancelled_turn().await;
+    if !result.mailbox_online {
+        return result;
+    }
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
     if result.removed_token.is_some() {
         handle.recovery_done().mark_done();
@@ -95,6 +107,10 @@ pub(in crate::services::discord) async fn mailbox_finish_turn(
     let result = handle
         .finish_turn(queue_persistence_context(shared, provider, channel_id))
         .await;
+    // #5951 C3t-0g — offline: a purge-closed or dead actor finished nothing.
+    if !result.mailbox_online {
+        return result;
+    }
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
     // #2443 — finish_turn is the success-path exit for the recovery engine
     // (recovery_engine.rs L648). Marking `recovery_done` here covers the
@@ -132,6 +148,9 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches(
             queue_persistence_context(shared, provider, channel_id),
         )
         .await;
+    if !result.mailbox_online {
+        return result;
+    }
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
     // Mirror `mailbox_finish_turn`: a successful guarded finish is also a
     // recovery-engine success exit. Only mark `recovery_done` when this call
@@ -171,6 +190,9 @@ async fn mailbox_finish_turn_if_matches_episode_started_before_inner(
             queue_persistence_context(shared, provider, channel_id),
         )
         .await;
+    if !result.mailbox_online {
+        return result;
+    }
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
     if result.removed_token.is_some() {
         handle.recovery_done().mark_done();
@@ -244,6 +266,41 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_episode
         expected_actor,
     )
     .await
+}
+
+pub(in crate::services::discord) async fn mailbox_clear_channel(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> ClearChannelResult {
+    let handle = shared.mailbox(channel_id);
+    let persistence = queue_persistence_context(shared, provider, channel_id);
+    // #5951 C3t-0g — a purge-closed actor held nothing to clear.
+    let Ok(result) = handle.clear_or_refused(persistence).await else {
+        return ClearChannelResult::default();
+    };
+    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    // #2443 — `Clear` is the cancel/teardown exit path. Mark recovery_done so
+    // a watcher that subscribed to the recovery latch is freed even when
+    // recovery is aborted rather than completed.
+    handle.recovery_done().mark_done();
+    result
+}
+
+/// #5951 C3t-0g — accepted work handed back to the channel's actor: a
+/// purge-closed actor's refusal is replayed on the fresh one, never dropped.
+pub(super) async fn restitution<Fut>(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    op: impl FnMut(ChannelMailboxHandle) -> Fut,
+) -> HydratePendingQueueResult
+where
+    Fut: std::future::Future<Output = Result<HydratePendingQueueResult, MailboxRefusal>>,
+{
+    let accepted = retry_while_closed(channel_id, || Some(shared.mailbox(channel_id)), op).await;
+    accepted
+        .and_then(|(_, verdict)| verdict.ok())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
