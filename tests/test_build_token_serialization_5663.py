@@ -124,7 +124,8 @@ WRAPPED = (r'(?:if )?\(cd "\$REPO" && (?:[A-Z_]+=\w+ )?python3 scripts/build_tok
            r' -- "\$\{{{name}\[@\]\}}"\)(?:; then)?')
 
 
-# A cargo array declaration; a body without its closing paren (e.g. `$(...)` inside) is unsupported.
+# A cargo array declaration; one without its closing paren (e.g. `$(...)` inside) or later changed by
+# `name+=`/`name[i]=` is unsupported, since its final arguments cannot be read from the declaration.
 DECL = re.compile(r"(\w+)=\((\s*cargo\s[^()]*)(\)?)")
 
 
@@ -136,9 +137,10 @@ def cargo_sites(text: str) -> list[tuple[str, bool]]:
     hits = []
     for m in DECL.finditer(logical):
         name, body, decl = m.group(1), m.group(2), " ".join(m.group(0).split())
-        if m.group(3) and not (re.search(r"\b(?:build|clean)\b", body) and re.search("--release|--profile", body)):
+        supported = m.group(3) and not re.search(r"(?<![\w$])" + name + r"(?:\[[^]]*\]\+?|\+)=", logical)
+        if supported and not (re.search(r"\b(?:build|clean)\b", body) and re.search("--release|--profile", body)):
             continue
-        refs = [x for x in lines if m.group(3) and re.search(r"\$\{?" + name + r"(?!\w)", x)]
+        refs = [x for x in lines if supported and re.search(r"\$\{?" + name + r"(?!\w)", x)]
         # An unsupported or never-referenced array is reported where it is declared, unwired.
         hits += [(x, bool(re.fullmatch(WRAPPED.format(name=name), x))) for x in refs] or [(decl, False)]
     for s in map(str.strip, DECL.sub("", logical).splitlines()):
@@ -308,10 +310,14 @@ class WiringTests(unittest.TestCase):
             with self.subTest(line):
                 want = [(line, wired)] if line else [("clean_cmd=(cargo clean --release)", False)]
                 self.assertEqual(cargo_sites(f"clean_cmd=(cargo clean --release)\n{line}\n"), want)
-        # Multi-line and unsupported declarations, a continuation inside a name, a wrapper named only in a comment.
+        # Multi-line, unclosed and appended declarations, a continuation inside a name, a wrapper named in a comment.
         ref, bare = f'(cd "$REPO" && {wrapped}', ("cargo clean --release # build_token.py", False)
         for text, want in (('clean_cmd=(cargo clean\n  --release)\n"${clean_cmd[@]}"', [('"${clean_cmd[@]}"', False)]),
                            (f'clean_cmd=(cargo clean $(flag))\n{ref}', [("clean_cmd=(cargo clean $", False)]),
+                           (f'clean_cmd=(cargo clean)\nclean_cmd+=(--release)\n{ref}',
+                            [("clean_cmd=(cargo clean)", False)]),
+                           (f'clean_cmd=(cargo build x)\nclean_cmd[2]=--release\n{ref}',
+                            [("clean_cmd=(cargo build x)", False)]),
                            (f'clean_cmd=(cargo clean --release)\n{ref}\n"${{clean_\\\ncmd[@]}}"',
                             [(ref, True), ('"${clean_cmd[@]}"', False)]), (bare[0], [bare])):
             with self.subTest(text):
