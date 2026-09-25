@@ -4920,6 +4920,8 @@ services::discord::router::intake_gate::reply_context_tests::attachment_reply_co
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::queue_blocked_stale_active_turn_release_publishes_completion_event
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::stale_active_turn_proof_classifies_no_owner_as_queue_blocked_orphan
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::stale_active_turn_proof_preserves_explicit_background_status
+services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_keeps_the_thread_queue
+services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_leaves_a_successor_episode_untouched
 services::discord::router::intake_queue_transaction::tests::accepted_commit_applies_reaction_and_advances_checkpoint
 services::discord::router::intake_queue_transaction::tests::accepted_commit_can_apply_static_reaction
 services::discord::router::intake_queue_transaction::tests::accepted_commit_records_reaction_failure_without_claiming_application

@@ -1113,23 +1113,23 @@ pub(in crate::services::discord) async fn handle_event(
                         // mirroring the stall-watchdog's conjunction so a
                         // quiet-but-live long turn (e.g. mid-Bash) is never
                         // mistaken for a dead dispatch.
-                        let stale_inflight = thread_guard_should_force_clean_stale_thread(
+                        let force_clean_proof = thread_guard_should_force_clean_stale_thread(
                             &data.shared,
                             &data.provider,
                             thread_id,
                             chrono::Utc::now().timestamp(),
                         )
                         .await;
-                        if stale_inflight {
-                            thread_guard_force_clean_stale_thread(
-                                &data.shared,
-                                &data.provider,
-                                channel_id,
-                                thread_id,
-                            )
-                            .await;
-                            // Fall through to normal processing below.
-                        } else {
+                        // A released thread falls through to normal processing below.
+                        if !thread_guard_force_clean_stale_thread(
+                            &data.shared,
+                            &data.provider,
+                            channel_id,
+                            thread_id,
+                            force_clean_proof,
+                        )
+                        .await
+                        {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::info!(
                                 "  [{ts}] 🔀 THREAD-GUARD: bot message to parent {} queued (dispatch thread {} active)",
