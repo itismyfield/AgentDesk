@@ -158,22 +158,29 @@ def _registrable(stack, name: str) -> tuple[str, ...]:
             parts.append(frame_name)
     return tuple(parts + [name])
 
-_MODULE_TABLES: dict[Path, dict[str, str]] = {}
+_MODULE_TABLES: dict[Path, tuple[dict[str, str], list[Path]]] = {}
 MOD_DECL_RE = re.compile(r"^([ \t]*)(?:pub(?:\([^)]*\))?[ \t]+)?mod[ \t]+([A-Za-z_]\w*)[ \t]*(;|\{)", re.M)
 PATH_ATTR_RE = re.compile(r"#\[path\s*=\s*\"([^\"]+)\"\]\s*$")
 
 def _module_table(root: Path) -> dict[str, str]:
     """{src file: crate module path}, following `mod` / `#[path]` from src/lib.rs."""
+    return _module_walk(root)[0]
+
+def _module_walk(root: Path) -> tuple[dict[str, str], list[Path]]:
+    """(module table keyed by `..`-collapsed path, module files as opened). Files are opened and searched
+    at the joined path so `..` after a directory symlink resolves on disk, as it does for rustc."""
     if root in _MODULE_TABLES:
         return _MODULE_TABLES[root]
     table: dict[str, str] = {}
+    opened: list[Path] = []
     queue = [(root / "src/lib.rs", CRATE, False)]
     while queue:
         path, modpath, owned = queue.pop()
-        rel = path.relative_to(root).as_posix()
+        rel = Path(os.path.normpath(path)).relative_to(root).as_posix()
         if rel in table or not path.exists():
             continue
         table[rel] = modpath
+        opened.append(path)
         lines = path.read_text(encoding="utf-8").splitlines()
         inline: list[tuple[str, str]] = []
         for index, line in enumerate(lines):
@@ -192,12 +199,12 @@ def _module_table(root: Path) -> dict[str, str]:
             own_dir = path.parent if owned or path.stem in ("mod", "lib", "main") else path.parent / path.stem
             base = own_dir.joinpath(*chain)
             if attr:
-                child = Path(os.path.normpath((base if chain else path.parent) / attr))
+                child = (base if chain else path.parent) / attr
             else:
                 child = next((c for c in (base / f"{name}.rs", base / name / "mod.rs") if c.exists()), base / f"{name}.rs")
             queue.append((child, "::".join([modpath, *chain, name]), bool(attr)))
-    _MODULE_TABLES[root] = table
-    return table
+    _MODULE_TABLES[root] = table, opened
+    return table, opened
 
 def h2_tag(entry, key: str) -> tuple[str, frozenset[str]] | None:
     """(SET, lanes) of an `H2 <SET> <lane>` reason; None when not H2-tagged, error when malformed."""

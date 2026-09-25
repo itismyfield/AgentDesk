@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """H2 R-O compile-input check: the root lib's rustc dep-info against the module tree.
 
-Every `.rs` rustc read for the lib must be a module the text walker knows, every other
-input must be allowlisted data, and `clippy::duplicate_mod` (one file mounted twice) must not fire.
+An input spelled or resolving to `.rs` must be a module file the text walker opened, any other must
+resolve to allowlisted data, and `clippy::duplicate_mod` (one file mounted twice) must not fire.
 """
 
 from __future__ import annotations
@@ -58,12 +58,8 @@ def parse_depinfo(text: str, depinfo: Path) -> list[tuple[str, set[str]]]:
     return rules
 
 def depinfo_inputs(root: Path, depinfo: Path) -> set[str]:
-    """Every prerequisite of a readable dep-info whose own compile rule reads src/lib.rs."""
-    try:
-        text = depinfo.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        raise m.MeasureError(f"cannot read root lib dep-info {depinfo}: {exc}") from exc
-    rules = parse_depinfo(text, depinfo)
+    """Every prerequisite of a dep-info whose own compile rule reads src/lib.rs."""
+    rules = parse_depinfo(depinfo.read_text(encoding="utf-8"), depinfo)
     # rustc names the .d and the .rmeta/.rlib it emits by absolute path; match by file name
     own = {depinfo.name, f"lib{depinfo.stem}.rmeta", f"lib{depinfo.stem}.rlib"}
     lib = os.path.realpath(root / "src/lib.rs")
@@ -71,10 +67,11 @@ def depinfo_inputs(root: Path, depinfo: Path) -> set[str]:
         raise m.MeasureError(f"root lib dep-info {depinfo} has no compile rule reading src/lib.rs")
     return set().union(*(deps for _, deps in rules))
 
-def classify(root: Path, deps) -> tuple[dict[str, str], set[str]]:
-    """({repo-relative realpath: path as written, `..` collapsed}, realpaths outside the repo)."""
+def classify(root: Path, deps) -> tuple[list[tuple[str, str]], set[str]]:
+    """([(path as written, repo-relative realpath)] per input, realpaths outside the repo).
+    Aliases of one file stay separate entries so each spelling keeps its own rule."""
     real_root = Path(os.path.realpath(root))
-    inside, outside = {}, set()
+    inside, outside = [], set()
     for dep in sorted(deps):
         path = Path(os.path.realpath(root / dep))  # an absolute dep replaces root
         try:
@@ -82,15 +79,15 @@ def classify(root: Path, deps) -> tuple[dict[str, str], set[str]]:
         except ValueError:
             outside.add(path.as_posix())
             continue
-        written = Path(os.path.normpath(root / dep))
-        inside.setdefault(rel, next((written.relative_to(r).as_posix() for r in (root, real_root)
-                                     if written.is_relative_to(r)), rel))
+        written = root / dep
+        inside.append((next((written.relative_to(r).as_posix() for r in (root, real_root)
+                             if written.is_relative_to(r)), dep), rel))
     return inside, outside
 
 def canonical_modules(root: Path) -> set[str]:
-    """The module tree as repo-relative realpaths, so a symlinked module matches the file rustc read."""
+    """The module files as opened, as repo-relative realpaths, so a symlinked module matches the file rustc read."""
     real_root = Path(os.path.realpath(root))
-    paths = (Path(os.path.realpath(root / rel)) for rel in m._module_table(root))
+    paths = (Path(os.path.realpath(path)) for path in m._module_walk(root)[1])
     return {path.relative_to(real_root).as_posix() for path in paths if path.is_relative_to(real_root)}
 
 def duplicate_mod_problems(lines) -> list[str]:
@@ -108,16 +105,21 @@ def duplicate_mod_problems(lines) -> list[str]:
 def ro_problems(root: Path, lines) -> list[str]:
     """R-O over the lib compile inputs and duplicate_mod; a missing, unreadable or invalid dep-info is itself a problem."""
     problems = duplicate_mod_problems(lines)
-    try:
+    try:  # selecting, reading and parsing the .d share one error boundary
         inside, outside = classify(root, depinfo_inputs(root, root_lib_depinfo(root, lines)))
+    except (OSError, UnicodeError) as exc:
+        return problems + [f"R-O: cannot read root lib dep-info: {exc}"]
     except m.MeasureError as exc:
         return problems + [f"R-O: {exc}"]
     modules = canonical_modules(root)
     problems += [f"R-O: lib compile input {path} is outside the repo" for path in sorted(outside)]
-    for rel, written in sorted(inside.items()):
-        # `.rs` must be a module; anything else must be data even when `#[path]` mounts it
-        if rel.endswith(".rs") and rel not in modules:
-            problems.append(f"R-O: {written} is compiled into the lib but is not in the module tree")
-        elif not rel.endswith(".rs") and not DATA_INPUT_RE.fullmatch(rel):
-            problems.append(f"R-O: lib compile input {written} is not in the data allowlist")
-    return problems
+    found = set()
+    for written, rel in inside:
+        # the written and the resolved extension each bring their rule, so an alias cannot trade one for the other;
+        # `.rs` must be a module, anything else must be data even when `#[path]` mounts it
+        rust = {written.endswith(".rs"), rel.endswith(".rs")}
+        if True in rust and rel not in modules:
+            found.add(f"R-O: {written} is compiled into the lib but is not in the module tree")
+        if False in rust and not DATA_INPUT_RE.fullmatch(rel):
+            found.add(f"R-O: lib compile input {written} is not in the data allowlist")
+    return problems + sorted(found)
