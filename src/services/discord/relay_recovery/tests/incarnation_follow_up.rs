@@ -245,3 +245,30 @@ async fn cancelled_finish_is_bound_to_the_expected_actor() {
     assert!(finished.cleared_active_turn);
     assert!(live.snapshot().await.cancel_token.is_none());
 }
+
+/// r1 P2 — another registry spawning an actor for the channel, before or
+/// after the kickoff, must not rebind the global signal the watcher
+/// (`restore.rs`) waits on for this recovery.
+#[tokio::test]
+async fn a_foreign_actor_spawn_never_hides_the_recovery_done_wake() {
+    use crate::services::turn_orchestrator::ChannelMailboxRegistry;
+    let (_root_guard, _root_dir) = isolated_agentdesk_root();
+    let provider = ProviderKind::Claude;
+    let (_registry, shared) = registry_with_shared(provider.clone()).await;
+    let channel = ChannelId::new(5_951_731);
+    let _earlier = ChannelMailboxRegistry::default().handle(channel);
+    let kickoff = shared
+        .mailbox(channel)
+        .recovery_kickoff(Arc::new(CancelToken::new()), UserId::new(1), None)
+        .await;
+    assert!(kickoff.activated_turn(), "{kickoff:?}");
+
+    let _foreign = ChannelMailboxRegistry::default().handle(channel);
+    let watched = ChannelMailboxRegistry::global_recovery_done(channel)
+        .expect("the recovering actor published its signal");
+    crate::services::discord::mailbox_finish_turn(&shared, &provider, channel).await;
+    assert!(
+        latched(&watched),
+        "the watcher waits on the foreign actor's signal and misses the wake"
+    );
+}

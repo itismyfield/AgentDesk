@@ -1856,6 +1856,7 @@ fn spawn_channel_mailbox(
     recovery_done: Arc<RecoveryDoneSignal>,
 ) -> ChannelMailboxHandle {
     let (tx, mut rx) = mpsc::unbounded_channel();
+    let own_recovery_done = recovery_done.clone();
     tokio::spawn(async move {
         let mut state = ChannelMailboxState {
             remint_fence: fence,
@@ -2131,6 +2132,8 @@ fn spawn_channel_mailbox(
                         let _ = reply.send(refusal);
                         continue;
                     }
+                    // #5951 — the watcher resolves the signal by channel: publish the recovering actor's own.
+                    GLOBAL_RECOVERY_DONE_SIGNALS.insert(channel_id, own_recovery_done.clone());
                     reset_activation_signals(channel_id);
                     let activated_turn = state.cancel_token.is_none();
                     state.active_turn_nonce = cancel_token.turn_nonce().map(str::to_owned);

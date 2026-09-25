@@ -35,9 +35,12 @@ impl ChannelMailboxRegistry {
                 let handle =
                     spawn_channel_mailbox(channel_id, self.fence_cell(channel_id), signal.clone());
                 // Publish the signal before the handle, so a purge that can see
-                // the handle can also unlink its signal.
+                // the handle can also unlink its signal. Never displace another
+                // actor's global mirror: a recovery kickoff publishes its own.
                 self.recovery_done.insert(channel_id, signal.clone());
-                GLOBAL_RECOVERY_DONE_SIGNALS.insert(channel_id, signal);
+                GLOBAL_RECOVERY_DONE_SIGNALS
+                    .entry(channel_id)
+                    .or_insert(signal);
                 entry.insert(handle.clone());
                 handle
             }
@@ -47,14 +50,14 @@ impl ChannelMailboxRegistry {
     }
 
     /// #2443 — the recovery-done signal of the channel's live actor
-    /// incarnation, creating the actor if none is registered. Each incarnation
-    /// owns its signal, mirrored into `GLOBAL_RECOVERY_DONE_SIGNALS` when it is
-    /// spawned so callers that only have a `ChannelId` can resolve it via
-    /// `global_recovery_done`. Test-only: production follow-up marks
-    /// [`ChannelMailboxHandle::recovery_done`] of the handle that sent the
-    /// request, never the signal re-resolved by channel.
+    /// incarnation, creating the actor if none is registered, mirrored into
+    /// `GLOBAL_RECOVERY_DONE_SIGNALS` as a recovery kickoff would. Test-only:
+    /// production follow-up marks [`ChannelMailboxHandle::recovery_done`] of
+    /// the handle that sent the request, never the signal re-resolved by channel.
     #[cfg(test)]
     pub(crate) fn recovery_done(&self, channel_id: ChannelId) -> Arc<RecoveryDoneSignal> {
-        self.handle(channel_id).recovery_done.clone()
+        let signal = self.handle(channel_id).recovery_done.clone();
+        GLOBAL_RECOVERY_DONE_SIGNALS.insert(channel_id, signal.clone());
+        signal
     }
 }
