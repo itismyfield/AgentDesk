@@ -26,18 +26,6 @@ pub(super) struct ThreadGuardForceCleanProof {
     inflight: crate::services::discord::inflight::InflightTurnState,
 }
 
-/// Parents routed to the thread while the proven episode still held it.
-fn snapshot_thread_guard_parents(
-    shared: &std::sync::Arc<SharedData>,
-    thread_id: serenity::ChannelId,
-) -> Vec<serenity::ChannelId> {
-    let parents = shared.dispatch.thread_parents.iter();
-    parents
-        .filter(|entry| *entry.value() == thread_id)
-        .map(|entry| *entry.key())
-        .collect()
-}
-
 /// Non-unix builds have no tmux reachability evidence source: every warrant
 /// operand is absent, so the warrant abstains and the structural
 /// classification alone decides (the pre-warrant behavior of both stale-turn
@@ -197,8 +185,8 @@ fn thread_guard_force_clean_proof(
     })
 }
 
-/// Finishes the proof's episode without completion, cleans up only what it still owns, then
-/// publishes queue-eligible; `false` (caller keeps queueing) once the proof no longer holds.
+/// Drops the parent mappings as main does, finishes the proof's episode without completion, cleans up
+/// what it still owns, then publishes queue-eligible; `false` (caller keeps queueing) otherwise.
 pub(super) async fn thread_guard_force_clean_stale_thread(
     shared: &std::sync::Arc<SharedData>,
     provider: &ProviderKind,
@@ -209,9 +197,11 @@ pub(super) async fn thread_guard_force_clean_stale_thread(
     let Some(proof) = proof else {
         return false;
     };
-    // Parents to kick once the thread is released; their mappings stay for the
-    // intake idle check to clear.
-    let parents = snapshot_thread_guard_parents(shared, thread_id);
+    // As on main, drop the parent mappings before the release; they are kicked only if it succeeds.
+    let parents =
+        crate::services::discord::turn_finalizer::cleanup::collect_and_clear_thread_parents(
+            shared, thread_id,
+        );
     let Ok(finish) = thread_guard_release_proven_anchor(shared, provider, thread_id, &proof).await
     else {
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -260,7 +250,7 @@ fn thread_guard_cleanup_released_episode(
     thread_id: serenity::ChannelId,
     proof: &ThreadGuardForceCleanProof,
     finish: Option<crate::services::turn_orchestrator::FinishTurnResult>,
-    parents: Vec<serenity::ChannelId>,
+    mut parents: Vec<serenity::ChannelId>,
 ) -> bool {
     // Without a finished anchor nothing was released, so the row and the guard stay.
     let Some(finish) = finish else {
@@ -283,6 +273,8 @@ fn thread_guard_cleanup_released_episode(
         finish.removed_token.clone(),
         "1446_thread_guard_stale_inflight",
     );
+    // A parent mapped again since is left for that mapping's owner to kick at its finalize.
+    parents.retain(|parent| !shared.dispatch.thread_parents.contains_key(parent));
     crate::services::discord::turn_finalizer::cleanup::kickoff_thread_parents_after_finalize(
         shared, provider, parents,
     );
