@@ -1,8 +1,7 @@
 //! #1446 stall-deadlock recovery — shared post-clear bookkeeping.
 //!
-//! The THREAD-GUARD's stale-thread cleanup (`router::intake_gate`) and the
-//! stall watchdog's force-clean path (`health::run_stall_watchdog_pass`)
-//! both call `mailbox_clear_channel` on a thread/channel whose original
+//! The stall watchdog's force-clean path (`health::run_stall_watchdog_pass`)
+//! calls `mailbox_clear_channel` on a channel whose original
 //! turn task has already died. `mailbox_clear_channel` returns the
 //! orphaned `cancel_token` in `ClearChannelResult.removed_token`, but the
 //! normal turn-finish lifecycle (`finalize_turn_state` →
@@ -17,7 +16,7 @@
 //!
 //! `finalize_orphaned_clear` mirrors the
 //! `placeholder_sweeper::finalize_abandoned_mailbox` cleanup pattern so
-//! both stall-recovery layers honour the same global-counter invariants
+//! stall recovery honours the same global-counter invariants
 //! as every other turn-end path in the system.
 
 use std::sync::Arc;
