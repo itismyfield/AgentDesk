@@ -515,12 +515,12 @@ that retires turn-lifetime state.
   test — only while no matching row exists. This is an enumeration, not a
   survey (see I20). The current re-mint fence proves only a release seen by
   the current process's current mailbox actor incarnation, so today
-  runtime/manual rebind, TUI-direct dormant resumption and TUI-direct
-  admission over a matching row are fenced only within that incarnation's
-  history. Every exact-nonce release raises the fence, the owner's normal
-  finalize and a failed claim's own rollback included, so within a process an
-  episode that is not the latest started since that release is refused
-  re-adoption even if it was never itself released. Known
+  runtime/manual rebind and TUI-direct admission over a matching row are
+  fenced only within that incarnation's history. Every exact-nonce release
+  raises the fence, the owner's normal finalize and a failed claim's own
+  rollback included, so within a process an episode that is not the latest
+  started since that release is refused re-adoption even if it was never
+  itself released. Known
   gaps (#5951): restart `RecoveryKickoff` is a compare-and-set on slot
   occupancy only and never consults the re-mint fence; the fence is in-memory,
   so the restart pane-alive and boot watcher reattach refuse only releases
@@ -528,9 +528,12 @@ that retires turn-lifetime state.
   released — for example `OperatorRelease::claim` commits the exact mailbox
   release before it clears the durable row, so a process death between the
   two leaves a row for an already-released episode that the next boot
-  re-adopts; the re-mint fence is raised only by an exact-nonce release, so
-  an episode ended by a channel-scoped release can be re-minted from a row
-  that outlived it; and
+  re-adopts; dormant resumption is admitted through the unfenced claim,
+  because the owner's own finalize raises the fence too and would refuse the
+  undelivered tail it exists to deliver, so its fence must admit resumption
+  only while an undelivered tail remains under the same owner; the re-mint
+  fence is raised only by an exact-nonce release, so an episode ended by a
+  channel-scoped release can be re-minted from a row that outlived it; and
   the fence lives in the mailbox actor, so a registry purge that recreates
   the actor forgets it. Fenced restart re-adoption needs a durable release
   authority that outlives the process.

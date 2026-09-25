@@ -1,13 +1,19 @@
-//! #5951 C3r — a persisted TUI-direct episode re-enters the mailbox only while
-//! the remint fence would still re-open it (I21). Same-process scope only.
+//! TUI-direct admission over a persisted row is fenced on the row's episode (I21);
+//! dormant resumption is not. Same-process scope only.
 use super::*;
+use crate::services::discord::formatting::format_for_discord_with_provider;
+use crate::services::discord::gateway::DiscordGateway;
 use crate::services::discord::inflight::{self, InflightTurnState};
+use crate::services::discord::recovery_engine;
 use crate::services::discord::{mailbox_snapshot, make_shared_data_for_tests};
 use crate::services::tui_prompt_dedupe::{ExternalInputRelayLease, TuiRuntimeBinding};
 use crate::services::turn_orchestrator::ActiveTurnKind;
+use axum::{Json, body::Bytes, http::Uri};
 use poise::serenity_prelude::UserId;
+use serde_json::Value;
 use std::time::Instant;
 use synthetic_start::bridge_handoff::{ADMISSION_PAUSE, PREPARE_PAUSE};
+use tokio::net::TcpListener;
 
 const TMUX: &str = "c3r-fenced-admission";
 const OTHER_TMUX: &str = "c3r-fenced-admission-other";
@@ -235,12 +241,12 @@ impl Case {
     }
 }
 
-// ---- R8: dormant resumption (`capture_dormant`) ----
+// ---- R8: dormant resumption (`capture_dormant`) stays unfenced ----
 
-/// T-R8a (P5) + T-R8c: neither the idle partial capture nor the unpublished resume
-/// re-opens an exactly released episode.
+/// R8 residual: neither the idle partial capture nor the unpublished resume consults
+/// the fence, so an exactly released episode is re-opened under its own nonce.
 #[test]
-fn dormant_resumption_refuses_an_exactly_released_episode() {
+fn dormant_resumption_reopens_an_exactly_released_episode() {
     run(|output| async move {
         let shared = make_shared_data_for_tests();
         for (channel, unpublished) in [(5_951_801, false), (5_951_802, true)] {
@@ -259,98 +265,98 @@ fn dormant_resumption_refuses_an_exactly_released_episode() {
                 crate::services::discord::queue_io::mailbox_try_start_turn_unless_released;
             let control = control(&shared, case.channel, token, owner, MessageId::new(msg)).await;
             assert!(!control.started && control.refused_released_episode);
-            let before = case.observe().await;
             let resume = synthetic_start::bridge_handoff::resume_unpublished;
             let resumed = match unpublished {
                 true => resume(&shared, &row, &output).await.is_some(),
                 false => case.capture(&row).await,
             };
-            assert!(
-                !resumed,
-                "R8 re-opened a released episode (unpublished={unpublished})"
-            );
-            assert_eq!(case.observe().await, before, "a refusal changes nothing");
+            assert!(resumed, "R8 is unfenced (unpublished={unpublished})");
+            let snapshot = mailbox_snapshot(&shared, case.channel).await;
+            assert_eq!(snapshot.active_user_message_id, Some(MessageId::new(msg)));
+            assert_eq!(snapshot.active_turn_nonce.as_deref(), Some("r8a"));
+            assert_eq!(snapshot.active_turn_kind, ActiveTurnKind::UserOrAgent);
         }
     });
 }
 
-/// T-R8b: without any exact release the dormant episode is resumed with its own nonce.
-#[test]
-fn dormant_partial_capture_resumes_when_nothing_was_released() {
-    run(|output| async move {
-        let case = Case::new(&make_shared_data_for_tests(), 5_951_803, &output);
-        let row = case.dormant_row(5_951_813, "r8b");
-        assert!(case.capture(&row).await);
-        let snapshot = mailbox_snapshot(&case.shared, case.channel).await;
-        assert_eq!(
-            snapshot.active_user_message_id,
-            Some(MessageId::new(5_951_813))
-        );
-        assert_eq!(snapshot.active_turn_nonce.as_deref(), Some("r8b"));
-        assert_eq!(snapshot.active_turn_kind, ActiveTurnKind::UserOrAgent);
-    });
+type Written = Arc<std::sync::Mutex<Vec<(String, String)>>>;
+const ANSWER: &str =
+    r#"{"type":"assistant","message":{"content":[{"type":"text","text":"TEXT"}]}}"#;
+
+/// A local Discord that answers every request and keeps each message body written.
+async fn discord() -> (Arc<serenity::Http>, Written) {
+    let (bodies, listener) = (Written::default(), TcpListener::bind("127.0.0.1:0"));
+    let (seen, listener) = (bodies.clone(), listener.await.unwrap());
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    let app = axum::Router::new().fallback(axum::routing::any(move |uri: Uri, body: Bytes| {
+        answer(seen.clone(), uri, body)
+    }));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let http = serenity::HttpBuilder::new("test-token").proxy(proxy);
+    (Arc::new(http.ratelimiter_disabled(true).build()), bodies)
 }
 
-/// T-R8d: after another episode's exact release, X is resumable only while it is the
-/// latest episode started; once a later one starts, X is refused.
-#[test]
-fn dormant_partial_capture_follows_the_latest_started_episode() {
-    run(|output| async move {
-        let case = Case::new(&make_shared_data_for_tests(), 5_951_804, &output);
-        let (y, x, z) = (5_951_814, 5_951_824, 5_951_834);
-        case.turn(y, "r8d-y", true).await;
-        case.turn(x, "r8d-x", false).await;
-        let row = case.dormant_row(x, "r8d-x");
-        assert!(case.capture(&row).await, "X is the latest started episode");
-        assert!(case.by_id(x).await);
-        case.turn(z, "r8d-z", false).await;
-        let before = case.observe().await;
-        assert!(
-            !case.capture(&row).await,
-            "Z started after X; X is no longer latest"
-        );
-        assert_eq!(case.observe().await, before);
-    });
+async fn answer(seen: Written, uri: Uri, body: Bytes) -> Json<Value> {
+    let payload: Value = serde_json::from_slice(&body).unwrap_or_default();
+    if let Some(content) = payload["content"].as_str() {
+        seen.lock()
+            .unwrap()
+            .push((uri.path().into(), content.into()));
+    }
+    let mut path = uri.path().split('/').skip_while(|part| *part != "channels");
+    let channel = path.nth(1).unwrap_or("1").to_owned();
+    let author = serde_json::json!({"id": "1", "username": "t", "discriminator": "0001"});
+    Json(serde_json::json!({
+        "id": "5951999", "channel_id": channel, "content": payload["content"],
+        "author": author, "timestamp": "2026-09-25T00:00:00+00:00",
+        "edited_timestamp": null, "tts": false, "mention_everyone": false,
+        "mentions": [], "mention_roles": [], "attachments": [], "embeds": [],
+        "pinned": false, "type": 0
+    }))
 }
 
-/// T-R8b' (D1): the owner's own normal finalize is an exact release too, so the
-/// undelivered tail it left is not resumed in this process.
+/// R8 residual through the production idle recovery: a released episode's own tail is
+/// written once; a committed terminal or another turn's appended body is not.
 #[test]
-fn dormant_partial_capture_after_the_owners_normal_finalize_is_refused() {
+fn released_dormant_resumption_writes_only_its_own_undelivered_tail_once() {
     run(|output| async move {
-        let case = Case::new(&make_shared_data_for_tests(), 5_951_805, &output);
-        let msg = 5_951_815;
-        assert!(case.start(msg, "r8b2").await);
-        let row = case.dormant_row(msg, "r8b2");
-        let key = crate::services::discord::turn_finalizer::TurnKey::new(case.channel, msg, 0);
-        let key = key.with_episode_nonce(Some("r8b2"));
-        let finalize = crate::services::discord::turn_finalizer::claim_normal_episode;
-        let finished = finalize(&case.shared, &ProviderKind::Claude, key, false, None).await;
-        assert!(finished.is_ok_and(|captured| captured.is_some()));
-        assert!(
-            row.full_response.len() > row.response_sent_offset,
-            "an undelivered tail remains"
-        );
-        assert!(
-            !case.capture(&row).await,
-            "D1 (a): refused after the finalize"
-        );
-    });
-}
-
-/// T-R8f (D1, F2): X's dormant row makes another anchor's claim fail; that claim's own
-/// rollback is an exact release, after which X is refused.
-#[test]
-fn dormant_partial_capture_after_another_claims_rollback_is_refused() {
-    run(|output| async move {
-        let case = Case::new(&make_shared_data_for_tests(), 5_951_806, &output);
-        case.turn(5_951_816, "r8f-x", false).await;
-        let row = case.dormant_row(5_951_816, "r8f-x");
-        assert!(!case.claim(5_951_826, OTHER_TMUX).await);
-        assert!(
-            !case.capture(&row).await,
-            "D1 (a): refused after the rollback"
-        );
+        let (http, bodies) = discord().await;
+        let shared = make_shared_data_for_tests();
+        let gateway = DiscordGateway::new(http.clone(), shared.clone(), ProviderKind::Claude, None);
+        let recover = recovery_engine::recover_idle_partial_response_from_ready_source;
+        for (i, shape) in ["tail", "committed", "successor"].into_iter().enumerate() {
+            let (channel, text) = (5_951_870 + i as u64, format!("tail of {i}"));
+            let (case, msg) = (Case::new(&shared, channel, &output), channel + 10);
+            let line = |text: &str| ANSWER.replace("TEXT", text) + "\n";
+            std::fs::write(&output, line(&text)).unwrap();
+            let mut row = case.dormant_row(msg, "r8r");
+            let extract = recovery_engine::extract_response_from_output_pub;
+            row.full_response = extract(output.to_str().unwrap(), 0);
+            row.last_offset = std::fs::metadata(&output).unwrap().len();
+            row.terminal_delivery_committed = shape == "committed";
+            row.current_msg_id = msg + 100;
+            case.save(&row);
+            case.turn(msg, "r8r", true).await;
+            if shape == "successor" {
+                std::fs::write(&output, line(&text) + &line("successor answer")).unwrap();
+            }
+            let row = case.row().unwrap();
+            let sent = bodies.lock().unwrap().len();
+            let recovered = recover(&http, &shared, &row, &output, &gateway).await;
+            let written = bodies.lock().unwrap()[sent..].to_vec();
+            let slot = mailbox_snapshot(&shared, case.channel).await.cancel_token;
+            assert!(slot.is_none(), "{shape}: released or never re-opened");
+            if shape != "tail" {
+                assert!(!recovered && written.is_empty(), "{shape}: {written:?}");
+                continue;
+            }
+            let path = format!("/api/v10/channels/{channel}/messages/{}", msg + 100);
+            let body = format_for_discord_with_provider(&row.full_response, &ProviderKind::Claude);
+            assert!(recovered && written == [(path, body)], "{written:?}");
+            assert!(written[0].1.contains(&text) && case.row().is_none());
+            assert!(!recover(&http, &shared, &row, &output, &gateway).await);
+            assert_eq!(bodies.lock().unwrap().len(), sent + 1, "written once");
+        }
     });
 }
 
@@ -489,8 +495,8 @@ fn adoption_does_not_refresh_a_row_whose_external_turn_changed() {
     });
 }
 
-/// T-R9i (D1, F2): another anchor's failed claim rolls back with an exact release,
-/// after which the same anchor's row is refused re-adoption.
+/// T-R9i: another anchor's failed claim rolls back with an exact release, after
+/// which the same anchor's row is refused re-adoption.
 #[test]
 fn claim_over_a_row_after_another_claims_rollback_is_refused() {
     run(|output| async move {
@@ -500,7 +506,7 @@ fn claim_over_a_row_after_another_claims_rollback_is_refused() {
         assert!(!case.claim(5_951_864, OTHER_TMUX).await);
         assert!(
             !case.claim(5_951_854, TMUX).await,
-            "D1 (a): refused after the rollback"
+            "R9 is fenced: refused after the rollback"
         );
     });
 }

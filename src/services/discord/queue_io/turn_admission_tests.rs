@@ -65,8 +65,8 @@ async fn only_an_activated_kickoff_resets_the_recovery_done_latch() {
     assert!(!latched(&shared, channel_id).await);
 }
 
-/// #5951 C3r: an adopting claim is fenced on the episode it names, not on the
-/// token it installs, and records the installed token as the started episode.
+/// An adopting claim is fenced on the episode it names, not on the token it
+/// installs, and records the installed token as the started episode.
 #[tokio::test]
 async fn an_adopting_claim_is_fenced_on_the_named_episode() {
     let shared = crate::services::discord::make_shared_data_for_tests();
