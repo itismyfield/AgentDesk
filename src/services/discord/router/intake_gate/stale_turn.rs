@@ -1133,9 +1133,8 @@ mod thread_guard_stale_pure_tests {
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
     }
 
-    /// After A's finish, a replacement B that claims the thread keeps its row
-    /// and its own mapping and override while A's parent is kicked; the queue-eligible
-    /// edge follows the cleanup.
+    /// After A's finish, a replacement B keeps its row, mapping and override while
+    /// A's parent is kicked; the queue-eligible edge follows the cleanup.
     #[tokio::test]
     async fn thread_guard_cleanup_after_finish_spares_a_replacement_episode() {
         let temp = tempfile::tempdir().expect("create temp runtime root");
