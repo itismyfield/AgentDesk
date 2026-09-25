@@ -143,6 +143,8 @@ pub(super) async fn restore_queued_and_inflight_work(
     // Planned-restart / hot-swap rows survive (their
     // generation gate in `stale_removal_reason`
     // already handles them with longer retention).
+    // The boot reaper in `run_bot` already ran; this is a
+    // second destructive pass on its own predicate.
     let invalidated =
         super::inflight::invalidate_stale_generation(provider, shared.restart.current_generation);
     if invalidated > 0 {

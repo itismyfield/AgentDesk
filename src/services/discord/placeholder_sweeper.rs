@@ -399,9 +399,10 @@ async fn run_placeholder_sweep_pass(
         }
         // Skip planned restart / hot-swap inflights. Their cleanup TTL is
         // intentionally extended (DrainRestart 1800s, HotSwapHandoff 900s)
-        // by `inflight::load_inflight_states_from_root` so recovery can pick
-        // them up after a restart. The sweeper would otherwise edit them as
-        // abandoned and delete the state file, defeating recovery.
+        // by `inflight::stale_removal_reason`, the verdict the boot reaper
+        // retires on, so recovery can pick them up after a restart. The
+        // sweeper would otherwise edit them as abandoned and delete the
+        // state file, defeating recovery.
         if state.restart_mode.is_some() {
             continue;
         }

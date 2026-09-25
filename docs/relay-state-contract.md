@@ -1196,6 +1196,38 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   #5996 shape — is retired on absence plus age alone; only demand bounds that today, and
   periodizing this arm unchanged is the retirement I20 forbids. The age is never the
   authority, and may not be extended to a reason whose witness IS readable.
+- Consumer — the inflight row loader
+  (`inflight::removal::load_inflight_states_for_probe_from_root` and every wrapper over
+  it: restore, shutdown and deferred-restart marking, the diagnostics reports, escalation
+  owner lookup, thread-archive freshness, the stale-turn reconciler's tmux lookup). A read
+  through the loader does not unlink or rename an inflight row. A row that the loader's
+  own verdict would retire — unparseable, filed under another provider, or aged past
+  `stale_removal_reason` and admitted by the generation gate — is retired on that verdict
+  only by `reap_inflight_rows_at_boot_blocking`, once per provider per process boot, and
+  only after it re-reads the row under the sidecar lock it holds while deciding, finds the
+  episode pin, turn identity, `save_generation` and `updated_at` it first read unchanged,
+  and re-derives that verdict from the locked read; an unparseable row is quarantined
+  under `archive/`, not unlinked. No read path retires a row on that verdict. Other
+  unlinkers retire rows on their own predicates and are outside this bullet — among
+  others the placeholder and heartbeat sweepers, `clear_store`,
+  `invalidate_stale_generation`, the intake stale-turn release, the L2 route, the stall
+  watchdog, the rebind-origin reap and the turn finalizer. A read path may HIDE a row
+  that verdict would retire: hiding reproduces the absence the old in-read unlink
+  produced and is not a new retirement. It is not a measurement either. The stale-turn
+  reconciler's tmux lookup reports a hidden row as `Unclaimed`, which it reads as
+  `Absent` and may act on; that path stays a named I20 violation until the witness-based
+  slice reports a hidden row as unknown. The loader's only write is the finalizer-id
+  backfill, and only to a row whose unlocked verdict was keep — never to a stale row the
+  generation gate preserved — so a read through this loader cannot refresh the mtime the
+  verdict measures. The single-row `load_inflight_state` is the exception: it still
+  backfills a legacy row it reads, hidden or not, and that refresh can only bring the row
+  back into recovery, never retire it. In I21's writer grades the reaper is an OBSERVER:
+  its lock-held re-read is I21's row compare-and-delete, and the progress witness I21
+  demands on top of it is the term this reaper lacks. Moving the verdict did not make it
+  progress evidence: it is still the pre-I20 predicate (mtime age, a generation window, a
+  two-state pane probe; F9-1..F9-4 in the #5996 audit), so the boot reaper is a named I20
+  violation site until that slice replaces it, and running it on a period or from a read
+  path is the retirement this invariant forbids.
 - What I20 does NOT give you. It does not authorize retiring state on the ABSENCE of
   progress evidence — absence is the unmeasured case, which this invariant sends to
   (b); a consumer reading "no witness" as "retire it" builds the very (b) loss the

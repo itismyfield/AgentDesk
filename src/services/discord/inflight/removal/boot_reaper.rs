@@ -172,7 +172,12 @@ pub(super) fn reap_inflight_rows_at_boot_in_root(
             locked.as_ref(),
             generation,
         );
-        if fs::remove_file(&path).is_ok() {
+        let retired = if stale.is_none() && locked.is_none() {
+            quarantine_malformed_row(root, provider, channel_id, &path)
+        } else {
+            fs::remove_file(&path).is_ok()
+        };
+        if retired {
             *match (&stale, &locked) {
                 (Some(_), _) => &mut report.reaped_stale,
                 (None, Some(_)) => &mut report.reaped_provider_mismatch,
@@ -195,4 +200,43 @@ pub(super) fn reap_inflight_rows_at_boot_in_root(
         "inflight boot reaper"
     );
     report
+}
+
+/// Moves an unparseable row out of the provider directory for forensics and
+/// manual restore; its lock sidecar stays. A failed move leaves the row.
+fn quarantine_malformed_row(
+    root: &Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    path: &Path,
+) -> bool {
+    let archive_dir = root.join("archive");
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S%3f");
+    let provider = provider.as_str();
+    let archive_path = archive_dir.join(format!(
+        "{stem}.json.loader-malformed-{provider}-{timestamp}"
+    ));
+    let bytes = fs::metadata(path).map_or(0, |meta| meta.len());
+    if let Err(error) =
+        fs::create_dir_all(&archive_dir).and_then(|()| fs::rename(path, &archive_path))
+    {
+        tracing::warn!(provider, path = %path.display(), %error, "malformed inflight row left in place");
+        return false;
+    }
+    crate::services::observability::emit_inflight_lifecycle_event(
+        provider,
+        channel_id,
+        None,
+        None,
+        None,
+        "loader_row_quarantined",
+        serde_json::json!({
+            "reason": "malformed",
+            "path": path.display().to_string(),
+            "archive_path": archive_path.display().to_string(),
+            "bytes": bytes,
+        }),
+    );
+    true
 }

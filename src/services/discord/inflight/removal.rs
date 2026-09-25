@@ -1147,9 +1147,11 @@ mod loader_gate_observation_tests {
         let marks = [
             "if !unchanged {",
             "emit_loader_generation_gate_allowed(",
+            "quarantine_malformed_row(root",
             "fs::remove_file(&path)",
         ];
         assert!(marks.map(|mark| reaper.find(mark).expect(mark)).is_sorted());
+        assert_eq!(reaper.matches("fs::rename(").count(), 1);
         assert_eq!(
             owned.matches("fs::remove_file(").count() + reaper.matches("fs::remove_file(").count(),
             2
@@ -1384,7 +1386,7 @@ mod nondestructive_loader_tests {
         );
     }
 
-    // X1-X5: whatever replaces, refreshes, advances, clears or repairs the row
+    // X1-X5, M5: whatever replaces, refreshes, advances, clears or repairs the row
     // between the unlocked verdict and the lock stops the unlink.
     #[test]
     fn boot_reaper_revalidates_the_snapshot_under_the_lock() {
@@ -1449,6 +1451,62 @@ mod nondestructive_loader_tests {
             (1, 0),
             "X5: {report:?}"
         );
+        // M5: malformed bytes rewritten under the lock are not the row it saw.
+        let rewritten = inflight_state_path(&env.dir(), &CLAUDE, 5_996_043);
+        fs::write(&rewritten, "{ torn").unwrap();
+        let report = with_pre_lock_hook(|p| fs::write(p, "{ torn again").unwrap(), || env.reap());
+        assert_eq!(
+            (report.changed, report.reaped_malformed),
+            (1, 0),
+            "M5: {report:?}"
+        );
+        assert!(rewritten.exists() && !env.dir().join("archive").exists());
+    }
+
+    // M4: an unparseable row moves byte for byte under `archive/`, its lock
+    // sidecar stays, and a move that fails leaves the row where it was.
+    #[test]
+    fn boot_reaper_quarantines_malformed_rows_under_archive() {
+        let env = Env::new();
+        let (archive, bytes) = (env.dir().join("archive"), b"{ malformed json ]");
+        let malformed = inflight_state_path(&env.dir(), &CLAUDE, 5_996_081);
+        fs::create_dir_all(malformed.parent().unwrap()).unwrap();
+        fs::write(&malformed, bytes).unwrap();
+        fs::write(&archive, "").unwrap();
+        assert_eq!(env.reap().reaped_malformed, 0);
+        assert_eq!(
+            fs::read(&malformed).unwrap(),
+            bytes,
+            "a failed move keeps the row"
+        );
+
+        fs::remove_file(&archive).unwrap();
+        assert_eq!(env.reap().reaped_malformed, 1);
+        let moved: Vec<_> = fs::read_dir(&archive)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        let [moved] = moved.as_slice() else {
+            panic!("{moved:?}")
+        };
+        let name = moved.file_name().unwrap().to_string_lossy();
+        assert!(
+            name.starts_with("5996081.json.loader-malformed-claude-"),
+            "{name}"
+        );
+        assert_eq!(fs::read(moved).unwrap(), bytes);
+        assert!(!malformed.exists() && malformed.with_extension("json.lock").exists());
+        let event = crate::services::observability::events::recent(usize::MAX)
+            .into_iter()
+            .find(|event| {
+                event.payload["kind"] == "loader_row_quarantined"
+                    && event.payload["extra"]["archive_path"] == moved.display().to_string()
+            })
+            .expect("quarantine event");
+        let extra = &event.payload["extra"];
+        assert_eq!(extra["reason"], "malformed");
+        assert_eq!(extra["path"], malformed.display().to_string());
+        assert_eq!(extra["bytes"], bytes.len());
     }
 
     // X6: a writer holding the lock across the swap is waited for, then honoured.
