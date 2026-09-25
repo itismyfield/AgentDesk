@@ -198,6 +198,18 @@ class AnchorTests(unittest.TestCase):
                 if mode != "empty":
                     self.assertIn("continuing with original instructions", result.stderr)
 
+    def test_background_session_commands_reach_claude_unprefixed(self):
+        for name in ("cc", "claude"):
+            for sub in ("attach", "logs", "stop", "kill", "rm", "respawn"):
+                with self.subTest(name=name, sub=sub):
+                    self.server.calls = []
+                    data, _ = self.run_wrapper(name, [sub, "b83ec9a4"])
+                    self.assertEqual(data["args"], [sub, "b83ec9a4"])
+                    self.assertEqual(self.server.calls, [])
+        if "\nclaude() {" in self.wrappers:
+            data, _ = self.run_wrapper("claude", ["hello"])
+            self.assertEqual(data["args"], ["--allow-dangerously-skip-permissions", "hello"])
+
     def test_resume_help_management_do_not_fetch(self):
         for name, args in (("cc", ["--resume", "id"]), ("cc", ["--continue"]),
                            ("cc", ["--help"]), ("cc", ["--version"]), ("cc", ["-v"]), ("cc", ["auth", "status"]),
