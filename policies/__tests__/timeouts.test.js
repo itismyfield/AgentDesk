@@ -335,6 +335,155 @@ test("timeouts dispatch maintenance shadows failed-dispatch retries without chan
   assert.equal(shadow.incomparable, true);
 });
 
+// Pins the requested-timeout retry budget: retry_count 9 still retries, 10 escalates.
+test("timeouts requested sweep retries below the dispatch budget and escalates at it", () => {
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { requested_timeout_min: 30 },
+    dbQuery: createSqlRouter([
+      {
+        match: "FROM kanban_cards kc LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id",
+        result: [
+          {
+            id: "card-last-retry",
+            assigned_agent_id: "agent-1",
+            latest_dispatch_id: "dispatch-last-retry",
+            retry_count: 9,
+            dispatch_type: "implementation"
+          },
+          {
+            id: "card-exhausted",
+            assigned_agent_id: "agent-1",
+            latest_dispatch_id: "dispatch-exhausted",
+            retry_count: 10,
+            dispatch_type: "implementation"
+          }
+        ]
+      }
+    ])
+  });
+
+  policy._section_A();
+
+  assert.deepEqual(state.dispatchMarkFailedCalls, [
+    { dispatchId: "dispatch-last-retry", reason: "Timed out waiting for agent" },
+    { dispatchId: "dispatch-exhausted", reason: "Timed out waiting for agent" }
+  ]);
+  const requestedResets = state.executions.filter((e) => /UPDATE kanban_cards SET requested_at/.test(e.sql));
+  assert.deepEqual(requestedResets.map((e) => toPlain(e.params)), [["card-last-retry"]]);
+  assert.deepEqual(state.manualInterventions, [
+    {
+      cardId: "card-exhausted",
+      reason: "Timed out waiting for agent (10 retries exhausted)",
+      options: null
+    }
+  ]);
+});
+
+test("timeouts requested sweep leaves already-terminal dispatches alone", () => {
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { requested_timeout_min: 30 },
+    markFailed() {
+      return { rows_affected: 0 };
+    },
+    dbQuery: createSqlRouter([
+      {
+        match: "FROM kanban_cards kc LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id",
+        result: [
+          {
+            id: "card-terminal",
+            assigned_agent_id: "agent-1",
+            latest_dispatch_id: "dispatch-terminal",
+            retry_count: 10,
+            dispatch_type: "implementation"
+          }
+        ]
+      }
+    ])
+  });
+
+  policy._section_A();
+
+  assert.equal(state.dispatchMarkFailedCalls.length, 1);
+  assert.deepEqual(state.executions, []);
+  assert.deepEqual(state.manualInterventions, []);
+});
+
+// Pins the failed-dispatch auto-retry budget (SQL filter) and the last-retry increment.
+test("timeouts failed-dispatch retry keeps the budget filter and retries the last attempt", () => {
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    dbQuery: createSqlRouter([
+      {
+        match: "FROM task_dispatches td JOIN kanban_cards kc ON kc.id = td.kanban_card_id",
+        result: [
+          {
+            id: "dispatch-failed-9",
+            kanban_card_id: "card-retry-9",
+            to_agent_id: "agent-1",
+            dispatch_type: null,
+            title: "Last retry",
+            retry_count: 9,
+            github_issue_url: null,
+            github_issue_number: null
+          }
+        ]
+      }
+    ])
+  });
+
+  policy._section_J();
+
+  const retryQuery = state.queries.find((q) => /WHERE td.status = 'failed'/.test(q.sql));
+  assert.ok(retryQuery);
+  assert.match(retryQuery.sql, /AND COALESCE\(td\.retry_count, 0\) < 10 /);
+  assert.deepEqual(toPlain(retryQuery.params), ["requested", "in_progress"]);
+  assert.deepEqual(state.dispatchCreates, [
+    {
+      cardId: "card-retry-9",
+      agentId: "agent-1",
+      dispatchType: "implementation",
+      title: "Last retry",
+      context: null
+    }
+  ]);
+  assert.deepEqual(state.dispatchRetryCountCalls, [
+    { dispatchId: "dispatch-1", count: 10 }
+  ]);
+  assert.deepEqual(state.manualInterventions, []);
+});
+
+test("timeouts failed-dispatch retry tolerates a dispatch create failure", () => {
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    dispatchCreate() {
+      throw new Error("create refused");
+    },
+    dbQuery: createSqlRouter([
+      {
+        match: "FROM task_dispatches td JOIN kanban_cards kc ON kc.id = td.kanban_card_id",
+        result: [
+          {
+            id: "dispatch-failed-2",
+            kanban_card_id: "card-retry-2",
+            to_agent_id: "agent-1",
+            dispatch_type: "implementation",
+            title: "Retry refused",
+            retry_count: 2,
+            github_issue_url: null,
+            github_issue_number: null
+          }
+        ]
+      }
+    ])
+  });
+
+  assert.doesNotThrow(() => policy._section_J());
+
+  assert.deepEqual(state.dispatchRetryCountCalls, []);
+  assert.deepEqual(state.executions, []);
+  assert.deepEqual(state.manualInterventions, []);
+  assert.equal(state.logs.error.length, 1);
+  assert.match(state.logs.error[0], /Failed to create retry dispatch for card card-retry-2/);
+});
+
 test("timeouts reconcile fallback does not advance a completed scope-assessment (#3605)", () => {
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     config: { pm_decision_gate_enabled: true },
