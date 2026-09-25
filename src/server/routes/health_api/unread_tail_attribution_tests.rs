@@ -11,8 +11,7 @@ use tower::ServiceExt;
 
 use crate::services::discord::relay_recovery::unread_tail_seed::{UnreadTailSeed, UnreadTailShape};
 use crate::services::discord::relay_recovery::{
-    UNREAD_TAIL_SITE_MANUAL_REATTACH, UNREAD_TAIL_SITE_STALE_MAILBOX,
-    stale_mailbox_idle_tail_admits,
+    UNREAD_TAIL_SITE_STALE_MAILBOX, stale_mailbox_idle_tail_admits,
 };
 
 async fn post(seed: &UnreadTailSeed, uri: &str, body: String) -> (StatusCode, serde_json::Value) {
@@ -72,24 +71,21 @@ async fn manual_reattach_refusals(
     Some(seed.refusals())
 }
 
-/// T1(n1): a row whose transcript is missing reaches the manual idle-clear with
-/// an UNMEASURED tail. The lane refuses (as before) and records it once.
+/// T1(n2): a missing transcript leaves the tail UNMEASURED but also reads the
+/// readiness Unknown, so the tail is not the refusing conjunct and nothing is
+/// recorded. The positive row is `reattach_idle_tmux_clear_requires_a_measured_drained_tail`.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn manual_reattach_records_an_unmeasured_tail_refusal_once() {
+async fn manual_reattach_records_nothing_when_readiness_also_refuses() {
     let Some(refusals) =
         manual_reattach_refusals(5_996_110_001, UnreadTailShape::RowOutputMissing).await
     else {
         return;
     };
-    assert_eq!(refusals.len(), 1, "{refusals:?}");
-    assert_eq!(refusals[0]["site"], UNREAD_TAIL_SITE_MANUAL_REATTACH);
-    assert_eq!(refusals[0]["decided_by"], "tail_not_measured");
-    assert_eq!(refusals[0]["last_capture_offset"], serde_json::Value::Null);
-    assert_eq!(refusals[0]["retired"], false);
+    assert!(refusals.is_empty(), "{refusals:?}");
 }
 
-/// T1(n2): a MEASURED backlog also refuses the clear, but that is the invariant
+/// T1(n3): a MEASURED backlog also refuses the clear, but that is the invariant
 /// working, not a wedge — nothing is recorded.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

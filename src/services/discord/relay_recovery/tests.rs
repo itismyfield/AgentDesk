@@ -1498,6 +1498,13 @@ async fn reattach_idle_tmux_clear_requires_a_measured_drained_tail() {
         );
         state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
         super::super::inflight::save_inflight_state(&state).expect("save idle-clear inflight");
+        // A legacy row without a finalizer id: a refusal must not backfill it.
+        let row_path = unread_tail_seed::edit_persisted_row(&provider, channel.get(), |row| {
+            if !expect_cleared {
+                row.as_object_mut().unwrap().remove("finalizer_turn_id");
+            }
+        });
+        let legacy_row = std::fs::read_to_string(&row_path).expect("read legacy row");
 
         let snapshot = RelayHealthSnapshot {
             provider: provider.as_str().to_string(),
@@ -1547,6 +1554,8 @@ async fn reattach_idle_tmux_clear_requires_a_measured_drained_tail() {
                 "{label}: the destructive lane clears the row it retired"
             );
         } else {
+            let row = std::fs::read_to_string(&row_path).expect("read refused row");
+            assert_eq!(row, legacy_row, "{label}: a refused clear must not write");
             assert_ne!(
                 result.status, "cleared_idle_tmux_stale_turn",
                 "{label}: the destructive lane must stay closed"
