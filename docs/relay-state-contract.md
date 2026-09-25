@@ -497,9 +497,14 @@ that retires turn-lifetime state.
   progress. Re-adoption is the exception, and it must itself cross a fenced
   admission — a compare-and-set that refuses an occupied slot and refuses an
   episode the mailbox already released. The released-episode check names the
-  row's episode, not the token being installed. The current re-adoption paths
-  are restart restoration (`RecoveryKickoff`, and the pane-alive and boot
-  watcher reattach through `reregister_active_turn_from_inflight`),
+  row's episode, not the token being installed. TUI-direct admission decides
+  construction from the row it read before claiming the slot and re-checks
+  that decision before it refreshes a row: a construction that finds a
+  matching row by then, or an adoption whose row is no longer the same
+  episode, leaves the row alone and releases its own lease. The current
+  re-adoption paths are restart restoration (`RecoveryKickoff`, and the
+  pane-alive and boot watcher reattach through
+  `reregister_active_turn_from_inflight`),
   runtime/manual rebind (the operator rebind route, automatic watcher reattach
   and watcher respawn, all through `reregister_active_turn_from_inflight`), and
   TUI-direct dormant resumption (`capture_dormant`, behind the idle unpublished
@@ -511,22 +516,26 @@ that retires turn-lifetime state.
   survey (see I20). The current re-mint fence proves only a release seen by
   the current process: the mailbox registry keeps one fence cell per channel
   for the life of the process and hands it to every actor incarnation it
-  spawns for that channel, so today only runtime/manual rebind within this
-  process's history is fenced. The cell is never removed, so the number of
-  cells grows with the distinct channels the process has served; the provider
-  health detail reports it as `remint_fence_cells`. Known gaps (#5951): restart `RecoveryKickoff` is a compare-and-set on slot
+  spawns for that channel, so today runtime/manual rebind, TUI-direct dormant
+  resumption and TUI-direct admission over a matching row are fenced within
+  this process's history. The cell is never removed, so the number of cells
+  grows with the distinct channels the process has served; the provider
+  health detail reports it as `remint_fence_cells`. Every exact-nonce release
+  raises the fence, the owner's normal finalize and a failed claim's own
+  rollback included, so within a process an episode that is not the latest
+  started since that release is refused re-adoption even if it was never
+  itself released. Known gaps (#5951): restart `RecoveryKickoff` is a
+  compare-and-set on slot
   occupancy only and never consults the re-mint fence; the fence is in-memory,
   so the restart pane-alive and boot watcher reattach refuse only releases
   the new process itself saw and cannot refuse an episode a prior process
   released — for example `OperatorRelease::claim` commits the exact mailbox
   release before it clears the durable row, so a process death between the
   two leaves a row for an already-released episode that the next boot
-  re-adopts; dormant resumption and TUI-direct admission over a matching row,
-  retained or fresh, are admitted through the unfenced claim; and the re-mint
-  fence is raised only by an exact-nonce release, so an episode ended by a
-  channel-scoped release can be re-minted from a row that outlived it. Fenced
-  restart re-adoption needs a durable release authority that outlives the
-  process.
+  re-adopts; and the re-mint fence is raised only by an exact-nonce release,
+  so an episode ended by a channel-scoped release can be re-minted from a row
+  that outlived it. Fenced restart re-adoption needs a durable release
+  authority that outlives the process.
 - Episode identity: `(user_msg_id ≠ 0, turn_nonce, start cutoff)`. The nonce
   compares exactly; `None` is an exact legacy value, never a wildcard (I8). The
   cutoff is an `Instant` captured BEFORE the observation the writer decided on,
@@ -630,8 +639,7 @@ that retires turn-lifetime state.
   completion event published after an accepted finish, which names the
   channel rather than the incarnation, side effects of a pending thread-parent or watcher
   successor, restart `RecoveryKickoff` without a re-mint check, restart
-  reattach that cannot see a prior process's release, TUI-direct admission
-  over a matching row through the unfenced claim, and the other admission
+  reattach that cannot see a prior process's release, and the other admission
   gaps above remain in production; each is assigned to a #5951 slice.
 - Invariant key: `turn_writer_names_its_episode`. This section lands the
   contract only: the `record_invariant_check` wiring and a deliberate-violation

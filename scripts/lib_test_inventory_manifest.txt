@@ -4381,6 +4381,7 @@ services::discord::queue_io::presleep_tests::transient_gate_backlog_counts_for_b
 services::discord::queue_io::transport::tests::rest_queue_rejected_by_changed_policy_keeps_durable_head_and_lease_free
 services::discord::queue_io::transport::tests::rest_queue_routing_preserves_thread_parent_and_dm_policy
 services::discord::queue_io::transport::tests::rest_worker_queue_transport_requires_credentials_but_not_gateway
+services::discord::queue_io::turn_admission::tests::an_adopting_claim_is_fenced_on_the_named_episode
 services::discord::queue_io::turn_admission::tests::only_an_activated_kickoff_resets_the_recovery_done_latch
 services::discord::queue_marker::tests::dispatch_drain_mailbox_marker_discards_persisted_queued_state
 services::discord::queue_marker::tests::merged_and_reconcile_markers_add_and_remove_through_reconciler
@@ -6659,13 +6660,14 @@ services::discord::tui_prompt_relay::tests::failed_claim_does_not_adopt_owner
 services::discord::tui_prompt_relay::tests::failed_synthetic_claim_cleans_only_owned_placeholder
 services::discord::tui_prompt_relay::tests::failed_synthetic_placeholder_delete_is_terminal_cleanup_guarded
 services::discord::tui_prompt_relay::tests::fenced_admission_tests::adoption_does_not_refresh_a_row_whose_external_turn_changed
-services::discord::tui_prompt_relay::tests::fenced_admission_tests::claim_over_a_row_after_another_claims_rollback
+services::discord::tui_prompt_relay::tests::fenced_admission_tests::claim_over_a_row_after_another_claims_rollback_is_refused
 services::discord::tui_prompt_relay::tests::fenced_admission_tests::claim_over_an_exactly_released_row_is_refused
 services::discord::tui_prompt_relay::tests::fenced_admission_tests::claim_over_the_latest_started_row_readopts_it
 services::discord::tui_prompt_relay::tests::fenced_admission_tests::claim_without_a_row_constructs_after_another_release
 services::discord::tui_prompt_relay::tests::fenced_admission_tests::construction_does_not_refresh_a_row_that_appeared_after_admission
-services::discord::tui_prompt_relay::tests::fenced_admission_tests::dormant_partial_capture_after_another_claims_rollback
-services::discord::tui_prompt_relay::tests::fenced_admission_tests::dormant_partial_capture_after_the_owners_normal_finalize
+services::discord::tui_prompt_relay::tests::fenced_admission_tests::construction_does_not_refresh_a_row_that_appeared_before_admission
+services::discord::tui_prompt_relay::tests::fenced_admission_tests::dormant_partial_capture_after_another_claims_rollback_is_refused
+services::discord::tui_prompt_relay::tests::fenced_admission_tests::dormant_partial_capture_after_the_owners_normal_finalize_is_refused
 services::discord::tui_prompt_relay::tests::fenced_admission_tests::dormant_partial_capture_follows_the_latest_started_episode
 services::discord::tui_prompt_relay::tests::fenced_admission_tests::dormant_partial_capture_resumes_when_nothing_was_released
 services::discord::tui_prompt_relay::tests::fenced_admission_tests::dormant_resumption_refuses_an_exactly_released_episode

@@ -3,7 +3,7 @@ mod transport;
 mod turn_admission;
 use transport::QueueTransport;
 pub(super) use turn_admission::{
-    mailbox_recovery_kickoff, mailbox_try_start_turn_behind_queue,
+    mailbox_recovery_kickoff, mailbox_try_start_turn_adopting, mailbox_try_start_turn_behind_queue,
     mailbox_try_start_turn_kinded_with_feedback, mailbox_try_start_turn_unless_released,
 };
 

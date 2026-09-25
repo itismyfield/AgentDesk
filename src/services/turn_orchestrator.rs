@@ -798,7 +798,7 @@ impl ChannelMailboxHandle {
             user_message_id,
             turn_kind,
             admission_order,
-            refuse_released_episode: false,
+            fence_episode: None,
             persistence,
             reply,
         })
@@ -1406,8 +1406,9 @@ enum ChannelMailboxMsg {
         turn_kind: ActiveTurnKind,
         /// #5937 — whether this claim may overtake queued inbound work.
         admission_order: TurnAdmissionOrder,
-        /// Refuse, in this same step, an episode `remint_fence` refuses.
-        refuse_released_episode: bool,
+        /// `Some(n)`: refuse, in this same step, when `remint_fence` refuses
+        /// episode `(user_message_id, n)` — the row's, not the token installed.
+        fence_episode: Option<Option<String>>,
         persistence: Option<QueuePersistenceContext>,
         reply: oneshot::Sender<TryStartTurnResult>,
     },
@@ -1974,17 +1975,16 @@ fn spawn_channel_mailbox(
                     user_message_id,
                     turn_kind,
                     admission_order,
-                    refuse_released_episode,
+                    fence_episode,
                     persistence,
                     reply,
                 } => {
                     // #3167 BLOCKER-2 / #5937 — a claim yields to work that was
                     // queued or reserved before it; see `inbound_order`. A
                     // claim that cannot start must disturb neither gate.
-                    let refused_released_episode = refuse_released_episode
-                        && state
-                            .remint_fence
-                            .refuses(user_message_id, cancel_token.turn_nonce());
+                    let fence = &state.remint_fence;
+                    let refused_released_episode = fence_episode
+                        .is_some_and(|episode| fence.refuses(user_message_id, episode.as_deref()));
                     let idle = state.cancel_token.is_none() && !refused_released_episode;
                     let yields = idle
                         && claim_yields(&mut state, turn_kind, user_message_id, admission_order);
