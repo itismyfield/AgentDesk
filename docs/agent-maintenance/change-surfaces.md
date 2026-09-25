@@ -269,15 +269,19 @@ time for diagnostics; neither is a stored approval value.
   environment, step-instance, argv0, and unconditional-success branches all
   change the pinned file bytes.
 - fixed surfaces: the `Script checks` publisher has exactly checkout,
-  contract, and result-mirror steps; its `name`, `needs: [changes, scripts]`,
+  contract, and one result-mirror step per shard job (`scripts` runs the
+  `cargo` shard, `scripts_guards` and `scripts_contracts` the others); its
+  `name`, `needs: [changes, scripts, scripts_guards, scripts_contracts]`,
   required job-level `if: always()`, `runs-on`, checkout provenance, and
   absence of `continue-on-error`,
   `defaults`/`env`/`environment`/`strategy`/`container` are pinned. The
   publisher's `if: always()` is what runs the fail-closed
   mirror after an upstream failure, skip, or cancellation. The independent
   `relay-authority-contract` publisher has no `needs` and must omit job-level
-  `if`; the internal `changes` and `scripts` execution jobs must also omit
-  job-level `if` so their own work cannot be condition-skipped.
+  `if`; the internal `changes` job and every shard job must also omit
+  job-level `if` so their own work cannot be condition-skipped. Each extra
+  shard job runs `./scripts/ci-script-checks.sh` exactly once with the
+  `scripts` aggregate's effective execution and its own `SCRIPT_CHECK_SHARD`.
   Its source-byte range is also hashed, so YAML scalar tags and styles remain in
   the comparison; Psych cannot erase an explicit tag such as `!!binary` or
   equate YAML 1.1 spellings such as `yes` and `012` with the intended
@@ -286,9 +290,10 @@ time for diagnostics; neither is a stored approval value.
   explicit step registry pin its absent `needs`/`if`, non-matrix shape, and
   content-hash backstop. Starting at the two required publishers, the complete
   recursive `needs` closure is the finite set
-  `{scripts_required_context, relay-authority-contract, scripts, changes}`;
-  every member must exist and omit `continue-on-error`, the Script checks
-  publisher must carry exactly `if: always()`, and the other three jobs must
+  `{scripts_required_context, relay-authority-contract, scripts,
+  scripts_guards, scripts_contracts, changes}`; every member must exist and
+  omit `continue-on-error`, the Script checks publisher must carry exactly
+  `if: always()`, and the other jobs must
   omit job-level `if`. Any edge that expands that set is a review-triggering
   gate failure.
 - aggregate execution: the calculator records shell/working-directory

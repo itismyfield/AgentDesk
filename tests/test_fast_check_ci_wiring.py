@@ -19,7 +19,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "6c82f7fe90366dd2d44b7a033a29de427ed19a93c4acafe27afb5df0e2b99f4a"
+    "6755c0cacf1f99d6a36b6e212d752391284e133f9eef2a7e6fb631b5c8b9b593"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Path-filtered required contexts: (mirror job, required name, runner job,
@@ -956,6 +956,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 "GFP_BASE_SHA": "${{ github.event.pull_request.base.sha }}",
                 "GFP_HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
                 "TEST_LANE_BASELINE_REF": "HEAD^1",
+                "SCRIPT_CHECK_SHARD": "cargo",
             },
         )
         mutated_job = scripts_job.replace(aggregate, aggregate + aggregate, 1)
@@ -1191,14 +1192,16 @@ class FastCheckCiWiringTests(unittest.TestCase):
         mirror = job_block(workflow, "scripts_required_context")
         job = yaml.safe_load(workflow)["jobs"]["scripts_required_context"]
         self.assertEqual(job["name"], "Script checks")
-        self.assertEqual(job["needs"], ["changes", "scripts"])
+        self.assertEqual(
+            job["needs"], ["changes", "scripts", "scripts_guards", "scripts_contracts"]
+        )
         self.assertEqual(job["if"], "always()")
         self.assertNotIn("continue-on-error", job)
         self.assertEqual(job["runs-on"], "ubuntu-latest")
-        self.assertEqual(len(job["steps"]), 3)
+        self.assertEqual(len(job["steps"]), 5)
         self.assertEqual(job["steps"][0], {"uses": "actions/checkout@v4"})
 
-        contract, result = job["steps"][1:]
+        contract, result = job["steps"][1:3]
         self.assertEqual(contract["name"], "Verify Script checks mirror contract (#5321)")
         self.assertEqual(contract["env"], {"BASH_ENV": "/dev/null"})
         self.assertEqual(contract["shell"], "bash")
@@ -1327,6 +1330,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
         expected_closure = {
             "changes",
             "scripts",
+            "scripts_guards",
+            "scripts_contracts",
             "scripts_required_context",
             "relay-authority-contract",
         }
@@ -1342,7 +1347,13 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(closure, expected_closure)
 
         self.assertEqual(jobs["scripts_required_context"]["if"], "always()")
-        for job_id in ("relay-authority-contract", "changes", "scripts"):
+        for job_id in (
+            "relay-authority-contract",
+            "changes",
+            "scripts",
+            "scripts_guards",
+            "scripts_contracts",
+        ):
             self.assertNotIn("if", jobs[job_id])
 
         for job_id in sorted(expected_closure):
@@ -1359,7 +1370,13 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 result = self.run_hardening_fixture(mutated)
                 self.assertNotEqual(result.returncode, 0, result.stderr)
 
-        for job_id in ("relay-authority-contract", "changes", "scripts"):
+        for job_id in (
+            "relay-authority-contract",
+            "changes",
+            "scripts",
+            "scripts_guards",
+            "scripts_contracts",
+        ):
             job = job_block(workflow, job_id)
             marker = f"    name: {jobs[job_id]['name']}\n"
             with self.subTest(job=job_id, key="if"):

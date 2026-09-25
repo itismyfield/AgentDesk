@@ -320,6 +320,12 @@ end
 # step fields that can silently disable execution, rather than whole-job hashing
 # that would force unrelated hash re-pins for every new check. Its required
 # branch-protection context is published by the separate result mirror below.
+# Each job runs one ci-script-checks.sh shard; only `scripts` provisions cargo.
+script_check_shard_jobs = {
+  "scripts" => "cargo",
+  "scripts_guards" => "guards",
+  "scripts_contracts" => "contracts",
+}
 script_checks_job = jobs["scripts"]
 unless script_checks_job.is_a?(Hash)
   warn "#{path}: Script checks runner job (scripts) must be a YAML mapping"
@@ -356,6 +362,8 @@ expected_unconditional_closure = %w[
   changes
   relay-authority-contract
   scripts
+  scripts_contracts
+  scripts_guards
   scripts_required_context
 ].sort
 unconditional_roots = %w[scripts_required_context relay-authority-contract]
@@ -416,8 +424,8 @@ unless unconditional_closure.sort == expected_unconditional_closure
 end
 
 # The required Script checks context is an unconditional result mirror. It
-# reads both upstream results and delegates the fail-closed skipped/failure
-# policy to required-check-mirror.sh. The mirror is a single fixed node, so its
+# reads `changes` and every shard result and delegates the fail-closed
+# skipped/failure policy to required-check-mirror.sh. The mirror is a single fixed node, so its
 # complete job and step surface is pinned below; no alternate execution surface
 # is permitted to hide behind the result policy.
 script_checks_context_job = jobs["scripts_required_context"]
@@ -425,19 +433,23 @@ unless script_checks_context_job.is_a?(Hash)
   warn "#{path}: Script checks required-context mirror job must be a YAML mapping"
   exit 1
 end
-expected_mirror_step = {
-  "name" => "Mirror script checks result for branch protection",
-  "env" => {
-    "BASH_ENV" => "/dev/null",
-    "PYTHON" => "python3",
-    "CHANGED_PATHS_RESULT" => "${{ needs.changes.result }}",
-    "FILTER_NAME" => "scripts",
-    "FILTER_OUTPUT" => "true",
-    "UPSTREAM_JOB_NAME" => "scripts",
-    "UPSTREAM_RESULT" => "${{ needs.scripts.result }}",
-  },
-  "run" => "./scripts/required-check-mirror.sh",
-}
+expected_shard_mirror_steps = script_check_shard_jobs.map do |job_id, shard|
+  {
+    "name" => job_id == "scripts" ?
+      "Mirror script checks result for branch protection" :
+      "Mirror script checks #{shard} shard result for branch protection",
+    "env" => {
+      "BASH_ENV" => "/dev/null",
+      "PYTHON" => "python3",
+      "CHANGED_PATHS_RESULT" => "${{ needs.changes.result }}",
+      "FILTER_NAME" => "scripts",
+      "FILTER_OUTPUT" => "true",
+      "UPSTREAM_JOB_NAME" => job_id,
+      "UPSTREAM_RESULT" => "${{ needs.#{job_id}.result }}",
+    },
+    "run" => "./scripts/required-check-mirror.sh",
+  }
+end
 expected_mirror_contract_step = {
   "name" => "Verify Script checks mirror contract (#5321)",
   "env" => {"BASH_ENV" => "/dev/null"},
@@ -465,11 +477,11 @@ expected_mirror_contract_step = {
 expected_mirror_steps = [
   {"uses" => "actions/checkout@v4"},
   expected_mirror_contract_step,
-  expected_mirror_step,
+  *expected_shard_mirror_steps,
 ]
 expected_mirror_job = {
   "name" => "Script checks",
-  "needs" => ["changes", "scripts"],
+  "needs" => ["changes", *script_check_shard_jobs.keys],
   "if" => "always()",
   "runs-on" => "ubuntu-latest",
   "steps" => expected_mirror_steps,
@@ -484,28 +496,29 @@ if script_checks_context_job["continue-on-error"]
   warn "#{path}: Script checks required-context mirror must not continue on error"
   exit 1
 end
-mirror_steps = Array(script_checks_context_job["steps"]).select do |step|
-  step.is_a?(Hash) && step["name"] == "Mirror script checks result for branch protection"
-end
-unless mirror_steps.length == 1
-  warn "#{path}: Script checks required-context mirror must retain exactly one result-mirror step"
-  exit 1
-end
-mirror_step = mirror_steps.fetch(0)
-normalized_mirror_step = canonical_yaml(mirror_step)
-if normalized_mirror_step.dig("env", "FILTER_OUTPUT")
-  normalized_mirror_step["env"]["FILTER_OUTPUT"] =
-    normalized_mirror_step["env"]["FILTER_OUTPUT"].to_s
-end
-unless normalized_mirror_step == expected_mirror_step
-  warn "#{path}: Script checks result-mirror step must retain the exact fail-closed wiring"
-  exit 1
+expected_shard_mirror_steps.each do |expected_mirror_step|
+  mirror_steps = Array(script_checks_context_job["steps"]).select do |step|
+    step.is_a?(Hash) && step["name"] == expected_mirror_step["name"]
+  end
+  unless mirror_steps.length == 1
+    warn "#{path}: Script checks required-context mirror must retain exactly one #{expected_mirror_step["name"].inspect} step"
+    exit 1
+  end
+  normalized_mirror_step = canonical_yaml(mirror_steps.fetch(0))
+  if normalized_mirror_step.dig("env", "FILTER_OUTPUT")
+    normalized_mirror_step["env"]["FILTER_OUTPUT"] =
+      normalized_mirror_step["env"]["FILTER_OUTPUT"].to_s
+  end
+  unless normalized_mirror_step == expected_mirror_step
+    warn "#{path}: Script checks result-mirror step #{expected_mirror_step["name"].inspect} must retain the exact fail-closed wiring"
+    exit 1
+  end
 end
 raw_mirror_job = raw_jobs.is_a?(Hash) ? raw_jobs["scripts_required_context"] : nil
 expected_raw_mirror_job = canonical_yaml(expected_mirror_job)
 expected_raw_mirror_job["steps"][1]["timeout-minutes"] = "10"
 unless raw_mirror_job == expected_raw_mirror_job
-  warn "#{path}: Script checks required-context mirror must retain the exact fixed job surface (raw YAML scalars; defaults/env/environment/strategy/container and three-step checkout/contract/mirror inventory)"
+  warn "#{path}: Script checks required-context mirror must retain the exact fixed job surface (raw YAML scalars; defaults/env/environment/strategy/container and checkout/contract/per-shard mirror inventory)"
   exit 1
 end
 mirror_key_node = if jobs_node.is_a?(Psych::Nodes::Mapping)
@@ -519,8 +532,8 @@ mirror_source = mirror_source&.gsub(
   "expected=<required-check-pin-sha256>",
 )
 mirror_source_sha256 = mirror_source && Digest::SHA256.hexdigest(mirror_source)
-unless mirror_source_sha256 == "b271d53eb9eca9f1b3c9c9e257979655fa723fb9f6883840e74c7a86acf07fe0"
-  warn "#{path}: Script checks required-context source bytes changed (scalar tags/styles and exact three-step surface are pinned); found #{mirror_source_sha256 || '<missing>'}"
+unless mirror_source_sha256 == "86cea9c1d95dc6062fe6edfb3fa8334e491c98f9d7f73f6a45796b9a2b9c12df"
+  warn "#{path}: Script checks required-context source bytes changed (scalar tags/styles and exact step surface are pinned); found #{mirror_source_sha256 || '<missing>'}"
   exit 1
 end
 script_check_steps = Array(script_checks_job["steps"]).select do |step|
@@ -637,6 +650,7 @@ expected_script_check_execution = {
     "GFP_BASE_SHA" => "${{ github.event.pull_request.base.sha }}",
     "GFP_HEAD_SHA" => "${{ github.event.pull_request.head.sha }}",
     "TEST_LANE_BASELINE_REF" => "HEAD^1",
+    "SCRIPT_CHECK_SHARD" => "cargo",
   },
   "runtime_env_writes" => [],
   "runtime_path_writes" => [],
@@ -650,6 +664,7 @@ expected_script_check_execution = {
     "GFP_BASE_SHA" => "${{ github.event.pull_request.base.sha }}",
     "GFP_HEAD_SHA" => "${{ github.event.pull_request.head.sha }}",
     "TEST_LANE_BASELINE_REF" => "HEAD^1",
+    "SCRIPT_CHECK_SHARD" => "cargo",
   ),
 }
 unless script_check_execution["protected_step_inventory"] == expected_script_check_execution["protected_step_inventory"]
@@ -666,6 +681,45 @@ evidence_steps = Array(script_checks_job["steps"]).select { |step| step.is_a?(Ha
 unless evidence_steps == [{"name" => "Upload giant-file progress evidence", "if" => "always()", "uses" => "actions/upload-artifact@v4", "with" => {"path" => "target/giant-file-progress/evidence.json"}}]
   warn "#{path}: giant-file progress evidence upload must remain exact and unconditional"
   exit 1
+end
+
+# The other shard jobs run the same aggregate under the same execution contract;
+# only SCRIPT_CHECK_SHARD differs, and the protected #5308 pair stays in `scripts`.
+script_check_shard_jobs.each do |job_id, shard|
+  next if job_id == "scripts"
+
+  shard_job = jobs[job_id]
+  unless shard_job.is_a?(Hash) && !shard_job.key?("if") && !shard_job.key?("continue-on-error") &&
+         (shard_job["needs"] == "changes" || shard_job["needs"] == ["changes"])
+    warn "#{path}: Script checks shard job #{job_id} must exist with exact needs: changes and no if/continue-on-error"
+    exit 1
+  end
+  shard_steps = Array(shard_job["steps"])
+  shard_run_steps = shard_steps.select { |step| step.is_a?(Hash) && step["name"] == "Run script checks" }
+  shard_run_step = shard_run_steps.first
+  shard_run_commands = if shard_run_step && shard_run_step["run"].is_a?(String)
+    shard_run_step["run"].lines.map(&:strip).reject(&:empty?)
+  else
+    []
+  end
+  unless shard_run_steps.length == 1 && !shard_run_step.key?("if") &&
+         !shard_run_step.key?("continue-on-error") && shard_run_commands == ["./scripts/ci-script-checks.sh"]
+    warn "#{path}: Script checks shard job #{job_id} must retain exactly one unconditional \"Run script checks\" step running exactly ./scripts/ci-script-checks.sh"
+    exit 1
+  end
+  shard_execution = effective_execution(document, job_id, shard_steps.index(shard_run_step))
+  shard_execution.delete("protected_step_inventory")
+  expected_shard_execution = expected_script_check_execution.reject { |key, _| key == "protected_step_inventory" }
+  expected_shard_execution = expected_shard_execution.merge(
+    "step_env" => expected_shard_execution["step_env"].merge("SCRIPT_CHECK_SHARD" => shard),
+    "effective_env" => expected_shard_execution["effective_env"].merge("SCRIPT_CHECK_SHARD" => shard),
+  )
+  unless canonical_yaml(shard_execution) == canonical_yaml(expected_shard_execution)
+    expected = JSON.generate(canonical_yaml(expected_shard_execution))
+    found = JSON.generate(canonical_yaml(shard_execution))
+    warn "#{path}: Script checks shard #{job_id} effective execution changed; expected #{expected}; found #{found}"
+    exit 1
+  end
 end
 
 writer_wiring_step_index = Array(script_checks_job["steps"]).index(writer_wiring_step)

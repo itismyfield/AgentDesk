@@ -1946,7 +1946,7 @@ class PgDbCiWiring(unittest.TestCase):
             rc = membership.check_pg_db_generated_block(self.PR_WORKFLOW, manifest)
         self.assertEqual(rc, 0)
 
-    PG_BANNER = 'banner "PostgreSQL test-lane membership gate'
+    PG_BANNER = 'if run_check contracts "PostgreSQL test-lane membership gate'
 
     def run_pg_gate_section(self, py_rc: int = 0, git_rc: int = 0) -> tuple[int, list[str]]:
         """Run this gate's shipped banner section with `$PYTHON` and `git` shadowed
@@ -1954,11 +1954,11 @@ class PgDbCiWiring(unittest.TestCase):
         _, banner, rest = self.script_checks.partition(self.PG_BANNER)
         self.assertTrue(banner, "the PG membership gate lost its banner")
         done = subprocess.run(
-            ["bash", "-euo", "pipefail", "-c", "banner() { :; }\n"
+            ["bash", "-euo", "pipefail", "-c", "run_check() { :; }\n"
              f"py() {{ echo \"py $*\"; return {py_rc}; }}\n"
              f"git() {{ echo \"git $*\"; return {git_rc}; }}\n"
              "PYTHON=py TEST_LANE_BASELINE_REF=fixture-ref\n"
-             + banner + rest.partition("\nbanner ")[0]],
+             + banner + rest.partition("\nfi\n")[0] + "\nfi\n"],
             cwd=tempfile.gettempdir(), capture_output=True, text=True)
         return done.returncode, done.stdout.splitlines()
 
