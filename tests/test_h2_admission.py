@@ -302,8 +302,8 @@ class ParseAdmissions(unittest.TestCase):
 
 class ZeroRules(unittest.TestCase):
     OLD = "src/old.rs"  # grandfathered: already pairs `Command` with one tmux message literal
-    OLD_TEXT = 'use std::process::Command;\nfn f() { Command::new("git"); log("tmux session died"); }\n'
-    PIN = {OLD: {("f", "tmux session died"): 1}}
+    OLD_TEXT = 'use std::process::Command;\nfn f() {\n    Command::new("git");\n    log("tmux session died");\n}\n'
+    PIN = {OLD: {("f", 'log("tmux session died");'): 1}}  # (item, whitespace-normalized line)
 
     def rules(self, files: dict[str, str], roster=frozenset(), pins=None) -> list[str]:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(adm, "OWNER_ROSTER", roster), \
@@ -346,15 +346,19 @@ class ZeroRules(unittest.TestCase):
         self.assertEqual(self.rules({self.OLD: grown}), ["R-C"])
         swapped = grown.replace('"tmux session died"', '"fallback via tmux died"')
         self.assertEqual(self.rules({self.OLD: swapped}), ["R-C", "R-C"])  # one gone, one new
-        # moving a pinned literal to other lines of the same item stays green
-        moved = "// header\n\n" + self.OLD_TEXT.replace("{ Command", "{\n\n    Command")
+        # moving a pinned line (reindented, reordered, shifted) inside its item stays green
+        moved = "// header\n\n" + self.OLD_TEXT.replace('    Command::new("git");\n    log', '\n  log').replace(
+            '"tmux session died");\n', '"tmux session died");\n    Command::new("git");\n')
         self.assertEqual(self.rules({self.OLD: moved}), [])
-        # same literal text moved into another item (label -> spawn program) is red too
-        two = 'use std::process::Command;\nfn a() { label("tmux"); }\nfn b() { Command::new("git"); }\n'
-        pins = {self.OLD: self.PIN[self.OLD], "src/two.rs": {("a", "tmux"): 1}}
+        # same item, same literal, new role (review r3: allowlist entry dropped, spawn program set)
+        two = 'use std::process::Command;\nfn a() {\n    let allowed = ["gh", "tmux"];\n    let bin = "git";\n    Command::new(bin);\n}\n'
+        pins = {self.OLD: self.PIN[self.OLD], "src/two.rs": {("a", 'let allowed = ["gh", "tmux"];'): 1}}
         self.assertEqual(self.rules({"src/two.rs": two}, pins=pins), [])
-        self.assertEqual(self.rules({"src/two.rs": two.replace('label("tmux")', 'label("x")')
-                                     .replace('new("git")', 'new("tmux")')}, pins=pins), ["R-C", "R-C"])
+        self.assertEqual(self.rules({"src/two.rs": two.replace('["gh", "tmux"]', '["gh"]')
+                                     .replace('bin = "git"', 'bin = "tmux"')}, pins=pins), ["R-C", "R-C"])
+        # ... and the same literal moved into another item
+        self.assertEqual(self.rules({"src/two.rs": two.replace('["gh", "tmux"]', '["gh"]')
+                                     + 'fn b() { let allowed = ["gh", "tmux"]; }\n'}, pins=pins), ["R-C", "R-C"])
         stale = {self.OLD: {**self.PIN[self.OLD], ("f", "tmux gone"): 1}}
         self.assertEqual(self.rules({}, pins=stale), ["R-C"])  # a pin with no literal must be dropped
         self.assertEqual(self.rules({}, pins={}), ["R-C"])  # an unpinned existing pair is red
@@ -367,7 +371,17 @@ class ZeroRules(unittest.TestCase):
             "src/services/session_host/extra.rs": "fn x() {}\n",
             "src/runtime_layout/windows_links.rs": "// spawns TMUX\n",
             "Cargo.lock": 'name = "portable-pty"\nname = "tmux_interface"\n',
-        }), ["R-C2", "R-F", "R-F", "R-O", "R-O", "R-O", "R-O"])
+            **ESCAPE,
+        }, roster=frozenset(ESCAPE)), ["R-C2", "R-F", "R-F", "R-O", "R-O", "R-O", "R-O", "R-O"])
+
+    def test_owner_path_attribute_needs_an_explicit_allowance(self) -> None:
+        # review r3: an owner file mounting a non-owner file as its child module
+        self.assertEqual(self.rules({**ESCAPE, "src/services/platform/pty_escape.rs": "pub(crate) fn stealth() {}\n"},
+                                    roster=frozenset(ESCAPE)), ["R-O"])
+        with mock.patch.object(adm, "PATH_ATTR_ALLOWED", frozenset(ESCAPE)):
+            self.assertEqual(self.rules(ESCAPE, roster=frozenset(ESCAPE)), [])
+
+ESCAPE = {"src/services/platform/tmux.rs": '#[path = "pty_escape.rs"]\npub(crate) mod escape;\npub fn has_session() {}\n'}
 
 if __name__ == "__main__":
     unittest.main()

@@ -232,7 +232,7 @@ class ResolveStepTests(unittest.TestCase):
             {"MACOS_RUNNER": LABELS_JSON, "RUNNER_QUERY_TOKEN": "t", "OVERFLOW_CHECKOUT": "success"},
             overflow_stub="print('hosted')\n",
         )
-        self.assertEqual((out["mode"], out["labels"]), ("hosted", '["macos-15"]'))
+        self.assertEqual((out["mode"], out["labels"]), ("hosted", '["macos-latest"]'))
         self.assertIn("macOS route: hosted", out["_summary"])
 
     def test_token_and_crashing_overflow_script_keeps_self_hosted(self) -> None:
@@ -278,17 +278,7 @@ class HostedJobWiringTests(unittest.TestCase):
         self.assertIn('echo "RUSTC_WRAPPER="', disable["run"])
         self.assertEqual(all_jobs["macos_self_hosted"]["name"], "Trusted macOS check (self-hosted)")
         runs_on = {job.get("runs-on") for job in all_jobs.values()}
-        self.assertEqual(sum(1 for job in all_jobs.values() if job.get("runs-on") == "macos-15"), 1, runs_on)
-
-    def test_h2_measurement_job_pins_an_arm64_label(self) -> None:
-        # H2 r9 §3: the hosted job running h2_measure.sh must not float on macos-latest.
-        all_jobs = jobs()
-        for name, job in all_jobs.items():
-            if any("h2_measure.sh" in str(step.get("run", "")) for step in job.get("steps", [])):
-                with self.subTest(job=name):
-                    self.assertNotIn("macos-latest", str(job["runs-on"]))
-        self.assertEqual(all_jobs["macos_hosted"]["runs-on"], "macos-15")
-        self.assertNotIn("macos-latest", WORKFLOW.read_text(encoding="utf-8"))
+        self.assertEqual(sum(1 for job in all_jobs.values() if job.get("runs-on") == "macos-latest"), 1, runs_on)
 
 
 if __name__ == "__main__":

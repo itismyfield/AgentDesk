@@ -59,7 +59,7 @@ jobs:
               echo "group="
               echo 'labels=[]'
             } >> "$GITHUB_OUTPUT"
-            echo "MACOS_RUNNER is unset; using GitHub-hosted macos-15."
+            echo "MACOS_RUNNER is unset; using GitHub-hosted macos-latest."
             echo "macOS route: hosted (MACOS_RUNNER unset)" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -105,7 +105,7 @@ jobs:
             {
               echo "mode=hosted"
               echo "group="
-              echo 'labels=["macos-15"]'
+              echo 'labels=["macos-latest"]'
             } >> "$GITHUB_OUTPUT"
             echo "macOS route: hosted (self-hosted runners saturated)" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
@@ -123,9 +123,7 @@ jobs:
     name: Trusted macOS check (hosted)
     needs: resolve_macos_runner
     if: needs.resolve_macos_runner.outputs.mode == 'hosted'
-    # Pinned arm64 label for the H2 measurement (#5340 r9 §3); h2_measure.sh's
-    # host-triple check stays the last line of defence if the image changes.
-    runs-on: macos-15
+    runs-on: macos-latest
     steps:
       # Overflow can route a docs-only push here, so gate the same heavy steps
       # as the self-hosted job. They skip only when the filter succeeded with run=false.

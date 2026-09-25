@@ -28,6 +28,8 @@ OWNER_GLOBS = ("src/services/platform/tmux*", "src/services/session_host*")
 OWNER_ROSTER = frozenset({"src/services/platform/tmux.rs", "src/services/platform/tmux/availability.rs",
                           "src/services/session_host.rs", *(f"src/services/session_host/{name}.rs" for name in (
                               "legacy_collapse", "model", "process_host", "resolve", "tmux_host", "traits"))})
+# R-O: owner files allowed to carry `#[path]` (none today); listing one here is a reviewed change.
+PATH_ATTR_ALLOWED: frozenset[str] = frozenset()
 # R-E: low-level tmux owner API inventory; each pub fn is EXEC (clippy.toml) or a non-exec helper.
 INVENTORY_FILES = ("src/services/platform/tmux.rs", "src/services/platform/tmux/availability.rs")
 NONEXEC = frozenset(f"agentdesk::services::platform::tmux::availability::{name}" for name in (
@@ -48,26 +50,29 @@ PUB_PREFIX_RE = re.compile(r"\bpub(?:\s*\([^)]*\))?\s+(?:(?:async|const|unsafe|e
 # (enclosing item, normalized literal), so swapping one tmux literal for another is still red.
 TMUX_LITERAL_RE = re.compile(r'b?r?#*"(?:[^"\s]*/)?tmux(?:"|\s)')
 R_C_GRANDFATHERED: dict[str, dict[tuple[str, str], int]] = {
-    "src/cli/dcserver.rs": {("handle_restart_dcserver", "tmux new-session failed: {}"): 1,
-        ("handle_restart_dcserver", "tmux session '{tmux_session}' failed to start"): 1},
-    "src/cli/doctor/orchestrator.rs": {("check_file_descriptor_headroom", "tmux"): 1,
-        ("check_service_manager", "tmux fallback — {fallback_session} active"): 1,
-        ("check_service_manager", "tmux has-session -t ={fallback_session}:"): 1, ("check_tmux", "tmux"): 6, ("check_tmux", "tmux available"): 1,
-        ("check_tmux", "tmux available in PATH"): 2, ("check_tmux", "tmux not found"): 1},
-    "src/engine/ops/exec_ops.rs": {("register_exec_ops", "tmux"): 1},
-    "src/services/claude.rs": {("execute_streaming_local_tmux", "tmux error: {}"): 1,
-        ("send_followup_to_tmux", "tmux session died after streaming partial follow-up output — suppress replay"): 1,
-        ("send_followup_to_tmux", "tmux session died during follow-up before new output — requesting recreation"): 1},
-    "src/services/codex.rs": {("execute_streaming_local_tmux", "tmux error: {}"): 1, ("execute_streaming_local_tui_tmux", "tmux error: {}"): 1},
-    "src/services/codex_tmux_wrapper.rs": {("run", "tmux resume loop"): 1},
-    "src/services/discord/idle_recap/scrollback.rs": {("capture_tmux_scrollback", "tmux"): 1},
-    "src/services/discord/recovery_engine.rs": {("<RebindError as Display>::fmt", "tmux session not alive: {tmux_session}"): 1},
-    "src/services/discord/recovery_engine/restore_inflight/output_paths.rs": {("tmux_pane_pid", "tmux"): 1},
-    "src/services/discord/tmux_reaper.rs": {("build_reapable_fresh_routine_sessions", "tmux reaper: failed to list reapable fresh routine sessions (#3877)"): 1,
-        ("reap_fresh_routine_orphan", "tmux reaper backstop: completed fresh routine orphan (#3877)"): 2,
-        ("reap_fresh_routine_orphan", "tmux reaper backstop: re-read of routine {routine_id} failed — skipping kill of {session_name} (#3877)"): 1},
-    "src/services/qwen/session_lifecycle.rs": {("execute_streaming_local_tmux", "tmux error: {}"): 1},
-    "src/services/qwen_tmux_wrapper.rs": {("run", "tmux resume loop"): 1},
+    "src/cli/dcserver.rs": {("handle_restart_dcserver", "\"tmux new-session failed: {}\","): 1,
+        ("handle_restart_dcserver", "return Err(format!(\"tmux session '{tmux_session}' failed to start\"));"): 1},
+    "src/cli/doctor/orchestrator.rs": {("check_file_descriptor_headroom", "process: \"tmux\","): 1,
+        ("check_service_manager", "format!(\"tmux fallback — {fallback_session} active\"),"): 1,
+        ("check_service_manager", "format!(\"tmux has-session -t ={fallback_session}:\"),"): 1, ("check_tmux", "\"tmux\","): 2,
+        ("check_tmux", ".with_expected_actual(\"tmux available in PATH\", \"tmux available\"),"): 2,
+        ("check_tmux", ".with_expected_actual(\"tmux available in PATH\", \"tmux not found\")"): 2, ("check_tmux", ".with_path(\"tmux\")"): 2,
+        ("check_tmux", "Ok(ver) => Check::ok(\"tmux\", CheckGroup::Core, \"tmux\", ver)"): 2},
+    "src/engine/ops/exec_ops.rs": {("register_exec_ops", "let allowed = [\"gh\", \"git\", \"tmux\"];"): 1},
+    "src/services/claude.rs": {("execute_streaming_local_tmux", "return Err(format!(\"tmux error: {}\", stderr));"): 1,
+        ("send_followup_to_tmux", "debug_log(\"tmux session died after streaming partial follow-up output — suppress replay\");"): 1,
+        ("send_followup_to_tmux", "debug_log(\"tmux session died during follow-up before new output — requesting recreation\");"): 1},
+    "src/services/codex.rs": {("execute_streaming_local_tmux", "return Err(format!(\"tmux error: {}\", stderr));"): 1,
+        ("execute_streaming_local_tui_tmux", "return Err(format!(\"tmux error: {}\", stderr));"): 1},
+    "src/services/codex_tmux_wrapper.rs": {("run", "InputMode::Fifo => \"tmux resume loop\","): 1},
+    "src/services/discord/idle_recap/scrollback.rs": {("capture_tmux_scrollback", "std::process::Command::new(\"tmux\")"): 1},
+    "src/services/discord/recovery_engine.rs": {("<RebindError as Display>::fmt", "write!(f, \"tmux session not alive: {tmux_session}\")"): 1},
+    "src/services/discord/recovery_engine/restore_inflight/output_paths.rs": {("tmux_pane_pid", "let mut cmd = Command::new(\"tmux\");"): 1},
+    "src/services/discord/tmux_reaper.rs": {("build_reapable_fresh_routine_sessions", "\"tmux reaper: failed to list reapable fresh routine sessions (#3877)\""): 1,
+        ("reap_fresh_routine_orphan", "\"tmux reaper backstop: completed fresh routine orphan (#3877)\","): 2,
+        ("reap_fresh_routine_orphan", "\"tmux reaper backstop: re-read of routine {routine_id} failed — skipping kill of {session_name} (#3877)\""): 1},
+    "src/services/qwen/session_lifecycle.rs": {("execute_streaming_local_tmux", "return Err(format!(\"tmux error: {}\", stderr));"): 1},
+    "src/services/qwen_tmux_wrapper.rs": {("run", "InputMode::Fifo => \"tmux resume loop\","): 1},
 }
 # R-E shape rules: owner API the item walk cannot see (macro-generated items, trait default methods).
 ITEM_MACRO_RE = re.compile(r"\b(macro_rules)\s*!|\b([A-Za-z_]\w*)\s*!\s*[({\[]")
@@ -140,12 +145,11 @@ def owner_shape_problems(root: Path) -> list[str]:
                      for _, _, names, _ in items if len(names) > 1 and names[-2] in traits]
     return problems
 
-def tmux_literal_sites(code: str, literals: list[tuple[int, str]]) -> collections.Counter:
-    """Multiset of (enclosing item, normalized literal) for the tmux literals of one file."""
+def tmux_literal_sites(code: str, mixed: str, literals: list[tuple[int, str]]) -> collections.Counter:
+    """Multiset of (enclosing item, whitespace-normalized line) per tmux literal; the line pins its role."""
     src = m.SourceFile(code)
-    return collections.Counter(
-        (src.enclosing(pos)[0], " ".join(re.sub(r'^b?r?#*"|"#*$', "", text).split()))
-        for pos, text in literals if TMUX_LITERAL_RE.match(text))
+    line = lambda pos: " ".join(mixed[mixed.rfind("\n", 0, pos) + 1:(mixed.find("\n", pos) + 1 or len(mixed) + 1) - 1].split())
+    return collections.Counter((src.enclosing(pos)[0], line(pos)) for pos, text in literals if TMUX_LITERAL_RE.match(text))
 
 def zero_rules(root: Path) -> list[str]:
     """R-C, R-C2, R-F over non-owner prod Rust; R-O roster, Cargo.lock (H4) and H9 files."""
@@ -155,7 +159,7 @@ def zero_rules(root: Path) -> list[str]:
         if rel in m.OWNER_FILES or rel.startswith(m.OWNER_PREFIXES) or LEXER.is_test_file(path.name) or rel in LEXER.PINNED_TEST_ONLY_MODULE_FILES:
             continue
         code, mixed, literals = production_views(path)
-        if re.search(r"\bCommand\b", code) and (sites := tmux_literal_sites(code, literals)):
+        if re.search(r"\bCommand\b", code) and (sites := tmux_literal_sites(code, mixed, literals)):
             rc_found[rel] = sites
         if RC2_RE.search(mixed):
             problems.append(f"R-C2: {rel} binds a \"tmux\" const/static outside the owner")
@@ -171,6 +175,9 @@ def zero_rules(root: Path) -> list[str]:
              for p in ([hit] if hit.is_file() else hit.rglob("*")) if p.is_file()}
     for rel in sorted(found ^ OWNER_ROSTER):
         problems.append(f"R-O: owner roster mismatch: {rel} ({'unlisted' if rel in found else 'missing'})")
+    # r6 §2.1: an owner file may not mount a module from outside the owner paths via #[path]
+    problems += [f"R-O: {rel} uses #[path]; owner modules must live under the owner paths"
+                 for rel in sorted(found - PATH_ATTR_ALLOWED) if re.search(r"#\s*\[\s*path\b", production_views(root / rel)[0])]
     lock = root / "Cargo.lock"
     if lock.exists():
         problems += [f"R-O: Cargo.lock brings in `{name}` (tmux/pty crate, H4)"
