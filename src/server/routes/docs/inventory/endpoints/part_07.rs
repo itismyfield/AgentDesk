@@ -343,7 +343,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/queue/reset",
             "auto-queue",
-            "Reset one auto-queue run and clear that run's queue entries",
+            "Reset one auto-queue run and clear that run's queue entries. Returns 409 Conflict when the run is live (active, paused, restoring) or still owns a dispatched entry or a pending/dispatched dispatch; end the run with /api/queue/runs/{id}/end (restoring runs: /api/queue/cancel?run_id={id}) first",
         )
         .with_params([
             ("run_id", body_param("string", true, "Run ID to reset")),
@@ -353,6 +353,11 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({"body": {"run_id": "run-1", "agent_id": "agent-1", "repo": "owner/repo"}}),
             json!({"ok": true, "run_id": "run-1", "deleted_entries": 4, "completed_runs": 1}),
+        )
+        .with_error_example(
+            409,
+            json!({"body": {"run_id": "run-1", "agent_id": "agent-1", "repo": "owner/repo"}}),
+            json!({"error": "auto-queue run still owns live work; end or cancel it before reset: status 'active'; POST /api/queue/runs/run-1/end first", "code": "auto_queue", "context": {"run_id": "run-1", "status": "active"}}),
         ),
         ep(
             "POST",

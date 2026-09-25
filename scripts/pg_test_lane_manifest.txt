@@ -619,6 +619,11 @@ server::routes::auto_queue_lifecycle_pg_tests::tests::patch_completed_is_rejecte
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_pending_start_and_metadata_updates_remain_supported_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_retired_deploy_phases_returns_client_error_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::postgres_auto_queue_lifecycle_http_routes_use_canonical_writers_pg
+server::routes::auto_queue_lifecycle_pg_tests::tests::reset_http_points_restoring_run_at_cancel_pg
+server::routes::auto_queue_lifecycle_pg_tests::tests::reset_http_refuses_live_run_until_it_is_ended_pg
+server::routes::auto_queue_lifecycle_pg_tests::tests::reset_http_rejects_malformed_body_pg
+server::routes::auto_queue_lifecycle_pg_tests::tests::reset_http_rejects_scope_mismatch_and_unknown_run_pg
+server::routes::auto_queue_lifecycle_pg_tests::tests::reset_http_resets_only_the_selected_run_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::stale_manual_rebind_cannot_reclaim_slot_after_canonical_completion_pg
 server::routes::auto_queue_preflight_harness_tests::auto_queue_preflight_fixture_sandbox_roundtrip_pg
 server::routes::campaigns::tests::postgres_campaign_http_auth_conflict_and_history_pg
@@ -714,6 +719,9 @@ services::auto_queue::route::command::reset_run_scope_pg_tests::reset_deletes_ru
 services::auto_queue::route::command::reset_run_scope_pg_tests::reset_of_missing_run_reports_not_found_pg
 services::auto_queue::route::command::reset_run_scope_pg_tests::reset_of_null_scoped_run_accepts_a_narrowing_body_pg
 services::auto_queue::route::command::reset_run_scope_pg_tests::reset_of_one_run_leaves_sibling_run_of_same_agent_intact_pg
+services::auto_queue::route::command::reset_run_scope_pg_tests::reset_refuses_every_live_run_status_pg
+services::auto_queue::route::command::reset_run_scope_pg_tests::reset_refuses_non_live_run_linked_to_live_dispatch_pg
+services::auto_queue::route::command::reset_run_scope_pg_tests::reset_refuses_non_live_run_with_dispatched_entry_pg
 services::auto_queue::route::command::tests::reopen_and_force_pause_share_multi_run_advisory_order_pg
 services::auto_queue::route::fsm::tests::recovery_reattach_path_rechecks_cancelled_run_pg
 services::auto_queue::route::fsm::tests::restore_attach_existing_path_rechecks_cancelled_run_pg
