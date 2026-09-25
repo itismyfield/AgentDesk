@@ -8021,6 +8021,11 @@ services::maintenance::jobs::worktree_orphan_sweep::resumable_keep_set_query_pg_
 services::maintenance::jobs::worktree_orphan_sweep::resumable_keep_set_tests::nested_resumable_cwd_protects_worktree_root
 services::maintenance::jobs::worktree_orphan_sweep::resumable_keep_set_tests::resumable_cwd_protects_its_worktree_dir
 services::maintenance::jobs::worktree_orphan_sweep::resumable_keep_set_tests::unreferenced_worktree_is_not_protected
+services::manual_steer::action_handle::tests::custom_id_parse_rejects_foreign_versioned_and_malformed_ids
+services::manual_steer::action_handle::tests::custom_id_round_trips_to_the_same_handle_within_discord_limit
+services::manual_steer::record::tests::record_decode_fails_closed_on_missing_unknown_or_invalid_fields
+services::manual_steer::record::tests::record_decode_rejects_unknown_or_missing_schema_version
+services::manual_steer::record::tests::record_round_trips_every_stage_and_optional_evidence
 services::mcp_config::memento_writer_hook_identity_uses_managed_url_and_requires_configured_auth
 services::mcp_config::review_slim_tests::claude_mcp_config_arg_extends_review_allowlist_from_config_and_env
 services::mcp_config::review_slim_tests::claude_mcp_config_arg_filters_review_catalog_to_allowlist
