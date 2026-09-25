@@ -185,7 +185,7 @@ pub(in crate::services::discord) async fn mailbox_recovery_kickoff(
 #[path = "turn_admission_tests.rs"]
 mod tests;
 
-/// #6035 F2 — `observed` is the claim observation of the snapshot that
+/// `observed` is the claim observation of the snapshot that
 /// classified `intervention` (catch-up); `None` for live intake.
 pub(in crate::services::discord) async fn mailbox_enqueue_observed_intervention(
     shared: &Arc<SharedData>,

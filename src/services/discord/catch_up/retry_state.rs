@@ -76,7 +76,7 @@ pub(super) fn merge_catch_up_retry_checkpoint(existing: Option<u64>, retry_after
     existing.map_or(retry_after, |checkpoint| checkpoint.min(retry_after))
 }
 
-/// #6035: `/clear` also drops the pending retry and lifts the checkpoint past the cleared ids,
+/// `/clear` also drops the pending retry and lifts the checkpoint past the cleared ids,
 /// so no sweep reruns them; teardown clears keep `mailbox_clear_channel` so their loss recovers.
 pub(in crate::services::discord) async fn clear_channel_discarding_catch_up_backlog(
     shared: &SharedData,

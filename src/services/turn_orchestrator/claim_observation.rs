@@ -1,18 +1,5 @@
-//! #6035 F2 — claim-epoch CAS between a catch-up classification snapshot and
-//! its enqueue.
-//!
-//! Catch-up classifies an id as unknown from one mailbox snapshot, then
-//! enqueues it later. In between, a live turn can absorb the id into a merged
-//! head, claim, deliver and release it; the enqueue then meets an idle actor
-//! and queues already-delivered work for a second turn. The snapshot therefore
-//! carries a [`ClaimObservation`] — `(actor incarnation, claim seq)` — and the
-//! enqueue replays it, so the actor (whose serialized loop is the only
-//! atomicity boundary) can refuse work any claim after the snapshot spoke for.
-//!
-//! Refusal is fail-closed: a different incarnation (purge → fresh actor),
-//! evicted coverage, or any claim since the snapshot whose ids overlap the
-//! sources. Catch-up reads it as not-yet-evidenced, so the frontier seals and
-//! the retry re-classifies from a fresh snapshot instead of wedging.
+//! Claim-epoch CAS: a catch-up enqueue replays the claim observation of the snapshot
+//! that classified it, so the actor refuses work a later claim may have spoken for.
 
 use std::collections::VecDeque;
 use std::sync::LazyLock;
@@ -153,6 +140,8 @@ impl ClaimLog {
         let Some(&(oldest, _)) = self.recent.front() else {
             return true;
         };
+        // Past the retained window an evicted claim may overlap, so refuse; the retry reclassifies
+        // from a fresh snapshot, so this only delays while >CAP claims land before each enqueue.
         oldest > since + 1
             || (self.recent.iter())
                 .any(|(seq, ids)| *seq > since && ids.iter().any(|id| sources.contains(id)))

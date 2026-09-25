@@ -467,7 +467,7 @@ pub(crate) enum EnqueueRefusalReason {
     AlreadyActiveTurn,
     /// #6035 — the active turn's merged head absorbed every source; not dispatch evidence.
     AbsorbedByActiveTurn,
-    /// #6035 — a claim since the classifying snapshot may speak for a source.
+    /// A claim since the classifying snapshot may speak for a source.
     ClaimedSinceObservation,
     /// The incoming `message_id` is already present in some queued entry's
     /// `source_message_ids` — duplicate insert from a re-entry or rehydrated

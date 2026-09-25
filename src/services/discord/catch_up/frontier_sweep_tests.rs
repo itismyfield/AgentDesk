@@ -19,13 +19,13 @@ enum Hook {
     /// #6035: the given primary's merged head absorbs the id and claims its
     /// turn between the scan snapshot and the enqueue.
     AbsorbInto(MessageId),
-    /// #6035 F2: like `AbsorbInto`, then the turn ends (delivered or not)
+    /// Like `AbsorbInto`, then the turn ends (delivered or not)
     /// before the enqueue lands.
     AbsorbAndEnd {
         primary: MessageId,
         delivered: bool,
     },
-    /// #6035 F6: the channel's actor is purged first, so a fresh actor runs
+    /// The channel's actor is purged first, so a fresh actor runs
     /// the undelivered `AbsorbAndEnd`.
     PurgeAbsorbAndEnd(MessageId),
 }

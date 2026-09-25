@@ -1,4 +1,4 @@
-//! #6035 F2 — the enqueue replays the classifying snapshot's claim observation,
+//! The enqueue replays the classifying snapshot's claim observation,
 //! so a claim after it (same actor, a fresh actor, or past the retained window)
 //! refuses instead of queueing work a finished turn already took.
 
@@ -111,10 +111,10 @@ async fn assert_refused_then_reclassified(
     assert_eq!(accepted(&retry), Vec::<u64>::new(), "offered twice");
 }
 
-/// T-F2a (r7 F2 repro): H is unknown at the snapshot; before its enqueue lands,
+/// H is unknown at the snapshot; before its enqueue lands,
 /// P absorbs H, claims, delivers and finishes. P is never queued for a second
 /// turn — the fresh read settles it on its own row. H is re-offered once: alias
-/// settlement is PR-S's (#6035 design v2 §3), so that duplicate is the residual.
+/// settlement is out of scope here, so that duplicate is the residual.
 #[tokio::test(flavor = "current_thread")]
 async fn t_f2a_delivered_race_is_refused_and_p_settles_on_its_row() {
     let fx = Fixture::new().await;
@@ -134,7 +134,7 @@ async fn t_f2a_delivered_race_is_refused_and_p_settles_on_its_row() {
     assert_refused_then_reclassified(&fx, &api, (channel_id, h, p), &[h], &[&[h]]).await;
 }
 
-/// T-F2b: the same race, but P ends undelivered; the fresh snapshot recovers
+/// The same race, but P ends undelivered; the fresh snapshot recovers
 /// both ids instead of refusing them again.
 #[tokio::test(flavor = "current_thread")]
 async fn t_f2b_undelivered_race_is_recovered_from_a_fresh_snapshot() {
@@ -155,7 +155,7 @@ async fn t_f2b_undelivered_race_is_recovered_from_a_fresh_snapshot() {
     assert_refused_then_reclassified(&fx, &api, (channel_id, h, p), &[h, p], &[&[h, p]]).await;
 }
 
-/// T-F6: the snapshot saw actor A; a purge (`remove_idle_entry`) lets a fresh
+/// The snapshot saw actor A; a purge (`remove_idle_entry`) lets a fresh
 /// actor B claim and finish from seq 0. A's observation must not pass on B,
 /// and a fresh snapshot of B recovers both ids.
 #[tokio::test(flavor = "current_thread")]
@@ -190,7 +190,7 @@ async fn no_actor_observation_refuses_across_a_purge() {
     assert_eq!(enqueue_seen(&fx, channel_id, x, fresh).await, None);
 }
 
-/// T-F2c: more claims since the snapshot than the actor retains refuses even
+/// More claims since the snapshot than the actor retains refuses even
 /// an unrelated id; exactly the retained window still decides by overlap.
 #[tokio::test(flavor = "current_thread")]
 async fn t_f2c_claims_past_the_retained_window_refuse_the_enqueue() {
@@ -210,7 +210,7 @@ async fn t_f2c_claims_past_the_retained_window_refuse_the_enqueue() {
     }
 }
 
-/// R8-REBIND-CAS: a snapshot taken before a rebind of the absorbing turn must
+/// A snapshot taken before a rebind of the absorbing turn must
 /// see the rebind's claim cover the absorbed id, not just its primary.
 #[tokio::test(flavor = "current_thread")]
 async fn snapshot_before_a_rebind_is_refused_for_the_absorbed_id() {
@@ -251,7 +251,7 @@ async fn snapshot_before_a_restore_is_refused_for_the_restored_id() {
     assert_eq!(enqueue_seen(&fx, channel_id, x, seen).await, None);
 }
 
-/// T-F2b at the actor: P absorbed H and ended undelivered before the snapshot;
+/// The undelivered race at the actor: P absorbed H and ended undelivered before the snapshot;
 /// only claims after it count, so an unrelated one does not refuse H again.
 #[tokio::test(flavor = "current_thread")]
 async fn an_unrelated_claim_since_the_snapshot_does_not_refuse_again() {
