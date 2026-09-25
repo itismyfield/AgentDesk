@@ -45,13 +45,13 @@ pub(crate) use dispatch_reservation::{
     PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER, VALVE_CLEARED_DISPATCH_MARKER_GRACE,
 };
 use dispatch_reservation::{
-    abandon_pending_dispatch_reservation, absorb_disk_queue, clear_pending_user_dispatch,
-    clear_stale_pending_dispatch_reservation, consume_pending_dispatch_marker_if_matches,
-    delete_pending_dispatch_marker_with_persistence, hydrate_pending_queue_from_disk_if_present,
-    hydrate_pending_queue_into_state, merge_pending_dispatch_marker_into_state,
-    pending_dispatch_lease_is_orphaned, reconcile_pending_dispatch_marker_before_take_next,
-    record_valve_cleared_pending_dispatch, set_pending_user_dispatch,
-    settle_pending_dispatch_on_claim,
+    abandon_pending_dispatch_reservation, absorb_disk_queue, absorb_disk_queue_error,
+    clear_pending_user_dispatch, clear_stale_pending_dispatch_reservation,
+    consume_pending_dispatch_marker_if_matches, delete_pending_dispatch_marker_with_persistence,
+    hydrate_pending_queue_from_disk_if_present, hydrate_pending_queue_into_state,
+    merge_pending_dispatch_marker_into_state, pending_dispatch_lease_is_orphaned,
+    reconcile_pending_dispatch_marker_before_take_next, record_valve_cleared_pending_dispatch,
+    set_pending_user_dispatch, settle_pending_dispatch_on_claim,
 };
 use episode_identity::{TurnNonceGuard, matching_cancel_token, persist_queue_or_restore};
 use front_requeue::requeue_intervention_front;
@@ -76,6 +76,7 @@ pub(crate) use pending_queue_persistence::{
 use pending_queue_persistence::{
     cleanup_stale_pending_queue_tmp_files_in_dir, cleanup_stale_pending_queue_tmp_files_under_root,
 };
+use pending_queue_persistence::{log_queue_persistence_rollback, persist_queue};
 #[cfg(test)]
 use queue_cancellation::cancel_soft_intervention_by_message_id;
 pub(crate) use queue_cancellation::has_soft_intervention_at;
@@ -1671,36 +1672,6 @@ struct ChannelMailboxState {
     remint_fence: remint_fence::FenceCell,
 }
 
-fn persist_queue(
-    channel_id: ChannelId,
-    queue: &[Intervention],
-    persistence: &QueuePersistenceContext,
-) -> Result<(), String> {
-    save_channel_queue(
-        &persistence.provider,
-        &persistence.token_hash,
-        channel_id,
-        queue,
-        persistence.dispatch_role_override,
-    )
-}
-
-fn log_queue_persistence_rollback(
-    operation: &str,
-    channel_id: ChannelId,
-    persistence: &QueuePersistenceContext,
-    error: &str,
-) {
-    tracing::error!(
-        operation,
-        provider = persistence.provider.as_str(),
-        token_hash = %persistence.token_hash,
-        channel_id = channel_id.get(),
-        error = %error,
-        "rolled back in-memory pending queue mutation after durable persistence failed"
-    );
-}
-
 fn finalize_turn_state(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
@@ -2340,15 +2311,10 @@ fn spawn_channel_mailbox(
                     reply,
                 } => {
                     state.last_persistence = Some(persistence.clone());
-                    let absorb_error =
-                        absorb_disk_queue(&mut state, channel_id, &persistence).persistence_error;
-                    if absorb_error.is_some() {
-                        let _ = reply.send(RequeueInterventionResult {
-                            enqueued: false,
-                            refusal_reason: None,
-                            queue_exit_events: Vec::new(),
-                            persistence_error: absorb_error,
-                        });
+                    if let Some(error) =
+                        absorb_disk_queue_error(&mut state, channel_id, &persistence)
+                    {
+                        let _ = reply.send(RequeueInterventionResult::absorb_failed(error));
                         continue;
                     }
                     let identity_ids = front_requeue::intervention_identity_ids(&intervention);
@@ -2780,11 +2746,13 @@ fn spawn_channel_mailbox(
                 }
                 ChannelMailboxMsg::RestartDrain { persistence, reply } => {
                     state.last_persistence = Some(persistence.clone());
-                    let persistence_error = absorb_disk_queue(&mut state, channel_id, &persistence)
-                        .persistence_error
-                        .or_else(|| {
-                            persist_queue(channel_id, &state.intervention_queue, &persistence).err()
-                        });
+                    let persistence_error =
+                        absorb_disk_queue_error(&mut state, channel_id, &persistence).or_else(
+                            || {
+                                persist_queue(channel_id, &state.intervention_queue, &persistence)
+                                    .err()
+                            },
+                        );
                     let _ = reply.send(RestartDrainResult {
                         queued_count: if persistence_error.is_some() {
                             0

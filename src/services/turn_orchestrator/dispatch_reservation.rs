@@ -12,7 +12,8 @@ use super::pending_queue_persistence::{
 };
 use super::{
     ChannelMailboxState, DispatchLease, HydratePendingQueueResult, Intervention, InterventionMode,
-    QueuePersistenceContext, TakeNextSoftResult, persist_queue_or_restore,
+    QueuePersistenceContext, RequeueInterventionResult, TakeNextSoftResult,
+    persist_queue_or_restore,
 };
 
 pub(crate) const PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER: Duration = Duration::from_secs(10);
@@ -381,6 +382,27 @@ pub(super) fn absorb_disk_queue(
     persistence.dispatch_role_override =
         persistence.dispatch_role_override.or(over.map(|c| c.get()));
     hydrate_pending_queue_into_state(state, channel_id, items, persistence, over)
+}
+
+/// `absorb_disk_queue` for arms that only need its read error to stop before their write.
+pub(super) fn absorb_disk_queue_error(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+) -> Option<String> {
+    absorb_disk_queue(state, channel_id, persistence).persistence_error
+}
+
+impl RequeueInterventionResult {
+    /// The requeue was refused because the disk queue could not be read first.
+    pub(super) fn absorb_failed(error: String) -> Self {
+        Self {
+            enqueued: false,
+            refusal_reason: None,
+            queue_exit_events: Vec::new(),
+            persistence_error: Some(error),
+        }
+    }
 }
 
 pub(super) fn hydrate_pending_queue_from_disk_if_present(
