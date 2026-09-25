@@ -1220,10 +1220,10 @@ mod thread_guard_stale_pure_tests {
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
     }
 
-    /// Known limit of the value-compare cleanup: re-registering the same
-    /// `parent -> thread` value after the snapshot is removed.
+    /// B re-registers the same `parent -> thread` after A's finish released the
+    /// thread; A's cleanup keeps that guard and only kicks the parent queue.
     #[tokio::test]
-    async fn thread_guard_force_clean_same_value_reregistration_is_documented_aba() {
+    async fn thread_guard_force_clean_spares_a_same_value_parent_reregistered_after_release() {
         let temp = tempfile::tempdir().expect("create temp runtime root");
         let _guard = EnvRootGuard::set(temp.path());
         let provider = ProviderKind::Codex;
@@ -1234,12 +1234,54 @@ mod thread_guard_stale_pure_tests {
         let proof = force_clean_proof_for(&shared, &provider, thread_id).await;
         let (finish, owned) = release_proven_anchor(&shared, thread_id, &proof).await;
 
+        let successor = Arc::new(CancelToken::new());
+        start_episode(&shared, thread_id, &successor, 9_001, &fresh_updated_at()).await;
         shared.dispatch.thread_parents.insert(parent_id, thread_id);
         let finish = Some(finish);
         assert!(super::thread_guard_cleanup_released_episode(
             &shared, &provider, thread_id, &proof, finish, owned,
         ));
-        assert!(!shared.dispatch.thread_parents.contains_key(&parent_id));
+        assert_episode_untouched(&shared, thread_id, &successor, 9_001).await;
+        let parent = shared.dispatch.thread_parents.get(&parent_id);
+        assert_eq!(parent.map(|e| *e.value()), Some(thread_id));
+        assert_eq!(kicked_parents(&shared), vec![parent_id]);
+    }
+
+    /// A token restored without rewriting the row after an anchorless, tokenless
+    /// proof keeps the row, the token and the parent guard.
+    #[tokio::test]
+    async fn thread_guard_force_clean_without_anchor_keeps_a_row_restored_after_the_proof() {
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let _guard = EnvRootGuard::set(temp.path());
+        let provider = ProviderKind::Codex;
+        let (parent_id, thread_id) = (channel(1_070), channel(1_071));
+        let nonce = Some("nonce-a".to_string());
+        seed_inflight_row(
+            &provider,
+            ID_BASE + 1_071,
+            &stale_updated_at(),
+            8_001,
+            nonce,
+        );
+        let (_registry, shared) = shared_with_registry(&provider).await;
+        shared.dispatch.thread_parents.insert(parent_id, thread_id);
+        let proof = force_clean_proof_for(&shared, &provider, thread_id).await;
+
+        let token = Arc::new(CancelToken::new());
+        let mailbox = shared.mailbox(thread_id);
+        mailbox
+            .recovery_kickoff(token.clone(), UserId::new(7), None)
+            .await;
+
+        assert!(!force_clean(&shared, thread_id, Some(proof)).await);
+        let row =
+            crate::services::discord::inflight::load_inflight_state(&provider, ID_BASE + 1_071);
+        assert!(row.is_some(), "the restored token's row stays");
+        let after = crate::services::discord::mailbox_snapshot(&shared, thread_id).await;
+        let current = after.cancel_token.expect("the restored token stays");
+        assert!(Arc::ptr_eq(&current, &token));
+        assert!(!token.cancelled.load(Ordering::Relaxed));
+        assert!(shared.dispatch.thread_parents.contains_key(&parent_id));
     }
 
     /// The force-clean clears the parent guard and the row but never touches the role override.
