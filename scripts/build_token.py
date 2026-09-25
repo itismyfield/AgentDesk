@@ -436,10 +436,10 @@ def hold_token(path: str, env: Mapping[str, str]) -> Iterator[int]:
 
 
 def _ps(*args: str) -> str:
-    """`ps` output in the C locale so start times compare as strings; empty on failure."""
+    """`ps` output in the C locale and UTC so start times compare as strings; empty on failure."""
     try:
         return subprocess.run(["ps", *args], capture_output=True, text=True, timeout=5,
-                              check=True, env={**os.environ, "LC_ALL": "C"}).stdout
+                              check=True, env={**os.environ, "LC_ALL": "C", "TZ": "UTC0"}).stdout
     except (OSError, ValueError, subprocess.SubprocessError):
         return ""
 

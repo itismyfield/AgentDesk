@@ -119,29 +119,51 @@ def joined_lines(text: str) -> list[str]:
     return out
 
 
-def release_cargo_sites() -> dict[str, list[str]]:
-    """Release cargo build/clean invocations per tracked build script, found by scanning.
+def runs_expansion(line: str, name: str) -> bool:
+    """Whether `line` runs array `name`: expanded as a command word or handed to build_token.py.
+
+    Comments and other argument uses (`echo "$name"`) do not execute it.
+    """
+    if line.startswith("#"):
+        return False
+    uses = re.compile(r'"?\$\{?' + re.escape(name) + r"\b")
+    for piece in re.split(r"&&|\|\||[;|()]|\b(?:then|do|if|elif|else|while|until)\b", line):
+        # Assignments and prefix words leave the next word in command position.
+        words = [w for w in piece.split() if w not in ("!", "{", "env", "exec", "command", "time")
+                 and not re.fullmatch(r"[A-Za-z_]\w*=\S*", w)] or [""]
+        if uses.match(words[0]) or ("build_token.py" in piece and uses.search(piece)):
+            return True
+    return False
+
+
+def cargo_sites(text: str) -> list[str]:
+    """Release cargo build/clean invocations in one build script's text.
 
     A command kept in an array (`name=(cargo clean ...)`) is reported at every line that
-    expands it, quoted or not (`${name[@]}`, `${name[*]}`, `$name`), since those run it.
+    runs it (see `runs_expansion`), in any form: quoted or not, `${name[@]}`, `${name[*]}`, `$name`.
     """
+    lines = list(map(str.strip, joined_lines(text)))
+    hits = []
+    for s in lines:
+        if (not any(f"cargo {verb}" in s for verb in ("build", "clean"))
+                or s.startswith(("#", "echo")) or not ("--release" in s or "--profile" in s)):
+            continue
+        name = s.split("=(", 1)[0] if "=(cargo " in s else None
+        # An array never run is reported where it is declared, unwired.
+        hits += ([x for x in lines if runs_expansion(x, name)] or [s]) if name else [s]
+    return sorted(set(hits), key=hits.index)
+
+
+def release_cargo_sites() -> dict[str, list[str]]:
+    """`cargo_sites` for every tracked build script that has any."""
     tracked = subprocess.run(["git", "-C", str(REPO), "ls-files"], check=True,
                              capture_output=True, text=True).stdout.split()
     found: dict[str, list[str]] = {}
     for rel in tracked:
         if rel.endswith(".sh") or Path(rel).name == "Makefile":
-            lines = list(map(str.strip, joined_lines((REPO / rel).read_text("utf-8"))))
-            hits = []
-            for s in lines:
-                if (not any(f"cargo {verb}" in s for verb in ("build", "clean"))
-                        or s.startswith(("#", "echo")) or not ("--release" in s or "--profile" in s)):
-                    continue
-                name = s.split("=(", 1)[0] if "=(cargo " in s else None
-                # An array never expanded is reported where it is declared, unwired.
-                uses = re.compile(r"\$\{?" + re.escape(name) + r"\b") if name else None
-                hits += ([x for x in lines if uses.search(x)] or [s]) if uses else [s]
+            hits = cargo_sites((REPO / rel).read_text("utf-8"))
             if hits:
-                found[rel] = sorted(set(hits), key=hits.index)
+                found[rel] = hits
     return found
 
 
@@ -287,6 +309,17 @@ class WiringTests(unittest.TestCase):
         self.assertIn("--no-deps", metadata[0])
         self.assertNotIn("build_token.py", metadata[0], "read-only lookup is unwired by design")
         self.assertIn("`cargo metadata --no-deps`", (SCRIPTS / "build_token.py").read_text(encoding="utf-8"))
+
+    def test_only_lines_that_run_the_clean_array_are_sites(self) -> None:
+        deploy = (SCRIPTS / "deploy-release.sh").read_text(encoding="utf-8")
+        base = cargo_sites(deploy)
+        for inert in ("# $clean_cmd", 'echo "$clean_cmd"', 'echo "${clean_cmd[*]}"'):
+            with self.subTest(inert):
+                self.assertEqual(cargo_sites(f"{deploy}{inert}\n"), base)
+        for runs in ('(cd "$REPO" && ${clean_cmd[@]}) || true', '"${clean_cmd[*]}"',
+                     "X=1 $clean_cmd", 'if "${clean_cmd[@]}"; then :; fi'):
+            with self.subTest(runs):
+                self.assertEqual(set(cargo_sites(f"{deploy}{runs}\n")) - set(base), {runs})
 
     def test_the_win32_backend_has_a_production_caller(self) -> None:
         source = (SCRIPTS / "build_token.py").read_text(encoding="utf-8")
@@ -867,6 +900,16 @@ class NestedHolderTests(TokenTestCase):
                 self.assertEqual(self.run_marked(marker), want)
         with self.subTest("ps unreadable"), mock.patch.object(bt, "_ps", return_value=""):
             self.assertEqual(self.run_marked(self.marker(ppid)), (0, True))
+
+    def test_the_verdict_does_not_depend_on_the_callers_timezone(self) -> None:
+        ppid = str(os.getppid())
+        printed = {subprocess.run(["ps", "-o", "lstart=", "-p", ppid], capture_output=True, text=True,
+                                  env={**os.environ, "LC_ALL": "C", "TZ": tz}).stdout for tz in ("UTC0", "EST5")}
+        self.assertEqual(len(printed), 2, "ps ignores TZ here, so this case proves nothing")
+        with mock.patch.dict(os.environ, {"TZ": "UTC0"}):
+            marker = self.marker(os.getppid())
+        with mock.patch.dict(os.environ, {"TZ": "EST5"}):
+            self.assertEqual(self.run_marked(marker), (bt.EXIT_NESTED, False))
 
     def test_a_forged_marker_never_stands_in_for_the_lock(self) -> None:
         fcntl.flock(self.open_token(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # held by someone else
