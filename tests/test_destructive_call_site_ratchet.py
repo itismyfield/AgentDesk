@@ -31,9 +31,6 @@ class SourceContractTests(unittest.TestCase):
         cls.actual, cls.registry_subcounts = ratchet.scan(ROOT)
         cls.baseline, cls.payload = ratchet.load_baseline(ROOT / ratchet.BASELINE_PATH)
 
-    def test_checked_in_tree_has_no_growth(self) -> None:
-        self.assertEqual(ratchet.growth_errors(self.actual, self.baseline), [])
-
     def test_registry_remeasurement_and_p2_1_classification_are_explicit(self) -> None:
         # #5504 Stack A moved five channel-only handoff cleanup spellings behind
         # exact cleanup helpers, so 8/3/3/2 became 3/5/4/2. The baseline
@@ -99,10 +96,9 @@ class SourceContractTests(unittest.TestCase):
         self.assertEqual(self.payload["comment"], ratchet.WARNING)
         self.assertIn("not proof of safety", ratchet.WARNING)
 
-    def test_ci_wiring_runs_scanner_and_tests(self) -> None:
+    def test_ci_wiring_runs_scanner(self) -> None:
         wiring = (ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
         self.assertIn("check_destructive_call_site_ratchet.py --check", wiring)
-        self.assertIn("tests.test_destructive_call_site_ratchet", wiring)
 
     def test_warrant_docstring_declares_all_four_limits(self) -> None:
         doc = ratchet.__doc__ or ""

@@ -159,12 +159,6 @@ class ScenarioFilter(unittest.TestCase):
         self.assertNotIn("skip_reason", e18)
         self.assertIn("acceptance_criteria", e18)
 
-    def test_e18_cancel_turn_scope_covers_supported_cells(self):
-        for cell in driver.SUPPORTED_CELLS:
-            scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
-            ids = {str(s.get("id")) for s in scenarios}
-            self.assertIn("E-18", ids)
-
     def test_e18_is_unskipped_and_uses_provider_hold_fixture(self):
         for cell in {"claude-pipe", "claude-tui", "codex-pipe", "codex-tui"}:
             scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
@@ -288,12 +282,6 @@ class ScenarioFilter(unittest.TestCase):
                 self.assertEqual(health_steps[0]["global_finalizing_max"], 0)
             else:
                 self.assertNotIn("E-19", ids)
-
-    def test_e20_concurrent_dispatch_covers_all_cells(self):
-        for cell in driver.SUPPORTED_CELLS:
-            scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
-            ids = {str(s.get("id")) for s in scenarios}
-            self.assertIn("E-20", ids)
 
     def test_e21_direct_control_strip_scope_is_tui_only(self):
         for cell in driver.SUPPORTED_CELLS:

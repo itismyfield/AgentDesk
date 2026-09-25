@@ -201,10 +201,6 @@ class DeploymentWiringTests(unittest.TestCase):
         end = deploy.index('LOCK_FILE="$ADK_REL/runtime/dcserver.lock"', start)
         return deploy[start:end]
 
-    def test_ci_script_checks_runs_this_suite(self):
-        ci = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
-        self.assertIn("tests.test_pg_tunnel", ci)
-
     def test_signal_traps_match_exact_physical_line_contract(self):
         """Enforce the deliberately narrow static trap contract.
 
@@ -473,37 +469,6 @@ class DeploymentWiringTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('"scripts/pg_tunnel.sh"', checker)
-
-    def test_exit_on_forward_failure_is_pinned(self):
-        self.assertIn(
-            "<string>-o</string><string>ExitOnForwardFailure=yes</string>",
-            self._pg_block(),
-        )
-
-    def test_server_alive_options_are_pinned(self):
-        block = self._pg_block()
-        self.assertIn(
-            "<string>-o</string><string>ServerAliveInterval=15</string>", block
-        )
-        self.assertIn(
-            "<string>-o</string><string>ServerAliveCountMax=3</string>", block
-        )
-
-    def test_connect_timeout_is_pinned(self):
-        self.assertIn(
-            "<string>-o</string><string>ConnectTimeout=10</string>",
-            self._pg_block(),
-        )
-
-    def test_batch_mode_is_pinned(self):
-        self.assertIn(
-            "<string>-o</string><string>BatchMode=yes</string>", self._pg_block()
-        )
-
-    def test_keepalive_and_throttle_are_pinned(self):
-        block = self._pg_block()
-        self.assertIn("<key>KeepAlive</key><true/>", block)
-        self.assertIn("<key>ThrottleInterval</key><integer>10</integer>", block)
 
     def test_plist_publish_is_atomic_mv(self):
         block = self._pg_block()

@@ -280,19 +280,7 @@ banner "Inflight blind-save ratchet guard (#4259)"
 "$PYTHON" scripts/check_inflight_blind_save_ratchet.py
 "$PYTHON" -m unittest tests.test_inflight_blind_save_ratchet
 
-# #4511 post-deploy smoke WARN post-restart scoping
-bash tests/test_deploy_smoke_warn_scope_4511.sh
-bash tests/test_deploy_smoke_scope.sh
 "$PYTHON" -m unittest tests.test_refresh_release_launchd_plist
-
-banner "Cluster deploy peer verdict + terminal marker contract (#5189)"
-bash tests/test_cluster_deploy_peer_verdict_5189.sh
-
-banner "Deploy migration-floor fail-forward contract (#6090)"
-bash tests/test_deploy_migration_floor_fail_forward_6090.sh
-
-banner "Deploy verdict health axis (#6092)"
-bash tests/test_deploy_verdict_health_axis_6092.sh
 
 banner "CI runner hardening guard"
 ./scripts/check-ci-runner-hardening.sh
@@ -450,22 +438,6 @@ if [ "$FAIL" -ne 0 ]; then
   exit "$FAIL"
 fi
 
-banner "Check hardcoded port/path drift"
-grep -rn '8791\|8799' --include='*.rs' --include='*.js' --include='*.yaml' --include='*.json' \
-  --exclude-dir=target --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.claude \
-  | grep -v 'Cargo.lock' \
-  | grep -v '// port' \
-  | grep -v '# port' || true
-
-echo ""
-banner "Checking hardcoded home paths (informational; see #100)"
-if grep -rn 'env!("HOME")' --include='*.rs' \
-  --exclude-dir=target --exclude-dir=.git --exclude-dir=.claude 2>/dev/null; then
-  echo "NOTE: env!(\"HOME\") found; tracked in #100"
-else
-  echo "OK: No env!(\"HOME\") found"
-fi
-
 banner "Path integrity check"
 FAIL=0
 if grep -n '/Users/\|/home/' Cargo.toml 2>/dev/null; then
@@ -595,7 +567,12 @@ banner "Shell test suites (tests/*.sh)"
 # owns script-level gates.
 SHELL_TESTS_FAILED=0
 required_shell_suites=(
+  tests/test_cluster_deploy_peer_verdict_5189.sh
+  tests/test_deploy_migration_floor_fail_forward_6090.sh
+  tests/test_deploy_smoke_scope.sh
+  tests/test_deploy_smoke_warn_scope_4511.sh
   tests/test_deploy_smoke_wedge_coverage_5244.sh
+  tests/test_deploy_verdict_health_axis_6092.sh
   tests/test_required_check_mirror.sh
 )
 for required_suite in "${required_shell_suites[@]}"; do
@@ -619,6 +596,6 @@ banner "Maintainability audit tests"
 
 banner "Maintainability audit"
 mkdir -p target
-"$PYTHON" scripts/audit_maintainability.py --format yaml > target/maintainability-audit.yaml
-"$PYTHON" scripts/audit_maintainability.py --check
+# The default stdout format is the YAML artifact; --check findings go to stderr.
+"$PYTHON" scripts/audit_maintainability.py --check > target/maintainability-audit.yaml
 echo "Wrote target/maintainability-audit.yaml"

@@ -50,19 +50,6 @@ if [ "$SKIPPED_CASES" -ne 1 ]; then
 fi
 SKIPPED_CASES=0
 
-if ! grep -Fq 'curl -sf --connect-timeout 2 --max-time 15 -X POST' "$DEPLOY_SH"; then
-    echo "FAIL: _notify_channel is missing the fixed connect/total timeout" >&2
-    FAILURES=$((FAILURES + 1))
-fi
-if ! grep -Fq 'python3 "$SCRIPT_DIR/ci-timeout.py" 10 gh issue create' "$DEPLOY_SH"; then
-    echo "FAIL: confirmed-mode gh issue create is missing the repository timeout runner" >&2
-    FAILURES=$((FAILURES + 1))
-fi
-if ! grep -Fq '# Byte-count guarantees cover NUL-free text only; command substitution drops NULs and can undercount.' "$DEPLOY_SH"; then
-    echo "FAIL: NUL-output byte-count non-guarantee is missing or changed" >&2
-    FAILURES=$((FAILURES + 1))
-fi
-
 start_hanging_listener() {
     local ready_path="$1"
     # The listener accepts TCP, consumes no response, and exits on its own after

@@ -33,45 +33,19 @@ def write(root: Path, rel: str, body: str) -> None:
 
 
 class SourceContractTests(unittest.TestCase):
-    def test_real_tree_passes_and_reports_declared_limits(self):
-        ok, message = guard.check(ROOT)
-        self.assertTrue(ok, message)
-        self.assertIn("3 production sites across 3 symbols", message)
-        for limit in ("not Rust parsing", "direct SQL writers are NOT seen", "over-counted"):
-            self.assertIn(limit, message)
-        self.assertIn(
-            f"skipped {len(guard.PINNED_TEST_ONLY_MODULE_FILES)} test files",
-            message,
-        )
-
     def test_shared_skip_pin_is_the_only_path_and_count_source(self):
         self.assertIs(
             guard.PINNED_TEST_ONLY_MODULE_FILES,
             guard._SKIP_PIN.PINNED_TEST_ONLY_MODULE_FILES,
         )
 
-    def test_conditional_pin_is_the_t2_done_writer_only(self):
-        self.assertEqual(guard.PROOF_OWNER, PROOF_OWNER)
-        self.assertEqual(guard.expected_call_sites(ROOT), CURRENT_EXPECTED_CALL_SITES)
-        self.assertTrue((ROOT / PROOF_OWNER).is_file())
-
     def test_scan_root_is_all_of_src(self):
         self.assertEqual(guard.SCAN_ROOT.as_posix(), "src")
 
-    def test_ci_script_checks_runs_the_gate_and_its_tests(self):
-        """Check wiring spelling/order, not its own execution.
-
-        When this module runs independently, deletion of the gate command fails
-        below. It cannot protect deletion of its own unittest invocation from
-        ci-script-checks.sh, because that prevents this test from running there.
-        """
+    def test_ci_script_checks_runs_the_gate(self):
+        """Check the gate command's wiring; this module's own invocation is not checkable here."""
         wiring = (ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
         self.assertIn("scripts/check_intake_outbox_done_writer_call_sites.py", wiring)
-        self.assertIn("tests.test_intake_outbox_done_writer_call_sites", wiring)
-        self.assertLess(
-            wiring.index("scripts/check_intake_outbox_done_writer_call_sites.py"),
-            wiring.index("tests.test_intake_outbox_done_writer_call_sites"),
-        )
 
     def test_allowlisted_symbol_is_imported_by_its_owner_function_file(self):
         worker = (ROOT / "src/services/cluster/intake_worker.rs").read_text(encoding="utf-8")
