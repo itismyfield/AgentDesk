@@ -1,8 +1,7 @@
-//! #5951 — one registry entry is one mailbox actor incarnation. A purge
-//! (`registry_purge.rs`) can replace it, so anything that follows an accepted
-//! request is bound to the handle that sent it, never re-resolved by channel.
-//! The channel's re-mint fence is the exception: every incarnation shares it
-//! (`remint_fence.rs`).
+//! One registry entry is one mailbox actor incarnation. A purge
+//! (`registry_purge.rs`) can replace it, so follow-up to an accepted request is
+//! bound to the handle that sent it, never re-resolved by channel. The re-mint
+//! fence is the exception: every incarnation shares it (`remint_fence.rs`).
 
 use std::sync::Arc;
 
