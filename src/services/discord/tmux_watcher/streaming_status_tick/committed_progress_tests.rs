@@ -13,6 +13,8 @@ use tracing_subscriber::fmt::MakeWriter;
 
 #[path = "native_collector_tests.rs"]
 mod native_collector_tests;
+#[path = "restored_restart_clear_tests.rs"]
+mod restored_restart_clear_tests;
 
 const WARN_EVENT: &str = "watcher_stream_progress_terminal_rejected";
 const PANEL_CHILD_ENV: &str = "AGENTDESK_5191_PANEL_FIXTURE_CHILD";
@@ -399,6 +401,16 @@ fn terminal_progress_no_false_authority() {
     expect(
         &fx,
         Some(&fx.identity),
+        WatcherProgressOutcome::TerminalAlreadyCommitted,
+    );
+    expect(&fx, Some(&other), WatcherProgressOutcome::AuthorityPinned);
+    expect(&fx, None, WatcherProgressOutcome::AuthorityPinned);
+    let mut open = load_inflight_state(&active.provider, active.channel.get()).expect("open row");
+    open.set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart);
+    save_inflight_state(&open).expect("open restart row");
+    expect(
+        &active,
+        Some(&active.identity),
         WatcherProgressOutcome::AuthorityPinned,
     );
     std::fs::remove_file(fx.path()).expect("drop row");
@@ -532,6 +544,56 @@ fn committed_progress_pinned_identity_suppresses_trailing_body() {
         for warn in &warns {
             assert!(warn.contains(&format!("discarded_current_msg_id={placeholder:?}")));
         }
+    }
+}
+
+/// A restored Claude drain-restart row the watcher committed keeps late ticks from republishing.
+#[test]
+fn committed_restored_restart_row_tick_emits_no_republication() {
+    let (_lock, guard) = isolate_root();
+    for (case, placeholder) in [(30_u64, None), (31, Some(PLACEHOLDER_MSG))] {
+        let warns = capture_warns(async {
+            let fx = seed_row(guard.root.path(), case, false, false);
+            let mut row = load_inflight_state(&fx.provider, fx.channel.get()).expect("row");
+            row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+            row.set_relay_owner_kind(
+                crate::services::discord::inflight::RelayOwnerKind::SessionBoundRelay,
+            );
+            row.set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart);
+            row.born_generation = u64::MAX;
+            row.restart_generation = Some(u64::MAX);
+            save_inflight_state(&row).expect("restored row");
+            assert!(
+                super::super::commit_decisions::mark_watcher_terminal_delivery_committed(
+                    &fx.provider,
+                    fx.channel,
+                    &fx.tmux,
+                    Some(&fx.identity),
+                    COMMITTED_BODY,
+                    0,
+                    None,
+                    COMMITTED_BODY.len() as u64,
+                )
+            );
+            let before = fx.row_bytes();
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let rec = recorder(fx.channel, true).await;
+            let mut locals = tick_locals(&fx, placeholder);
+            let mut outcomes = Vec::new();
+            for _ in 0..2 {
+                outcomes.push(run_tick(&mut locals, &rec, &shared, &fx, false).await);
+            }
+            assert!(
+                rec.seen("POST").is_empty() && rec.seen("PATCH").is_empty(),
+                "late preview writes: POST={:?} PATCH={:?}",
+                rec.seen("POST"),
+                rec.seen("PATCH")
+            );
+            assert_eq!(rec.total(), 0, "zero POST/PATCH/DELETE");
+            assert_eq!(outcomes, vec![CONTINUE, CONTINUE]);
+            assert_eq!(fx.row_bytes(), before, "committed row stays byte-identical");
+        });
+        assert_eq!(warns.len(), 2, "one central WARN per suppressed tick");
     }
 }
 

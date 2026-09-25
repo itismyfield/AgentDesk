@@ -141,6 +141,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tmux_watcher/single_message_footer_tests.rs",
         "src/services/discord/tmux_watcher/streaming_status_tick/committed_progress_tests.rs",
         "src/services/discord/tmux_watcher/streaming_status_tick/native_collector_tests.rs",
+        "src/services/discord/tmux_watcher/streaming_status_tick/restored_restart_clear_tests.rs",
         "src/services/discord/tmux_watcher/supervisor_relay_tests.rs",
         "src/services/discord/tmux_watcher/terminal_direct_fallback_tests.rs",
         "src/services/discord/tmux_watcher/terminal_readiness_tests.rs",

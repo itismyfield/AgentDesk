@@ -1498,6 +1498,7 @@ mod stall_recovery_tests {
             state.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
             state.set_restart_mode(InflightRestartMode::DrainRestart);
             if restored {
+                state.born_generation = u64::MAX;
                 state.restart_generation = Some(u64::MAX);
             }
             force_write_state(temp.path(), &state);

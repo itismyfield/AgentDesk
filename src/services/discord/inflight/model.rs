@@ -1312,12 +1312,13 @@ impl InflightTurnState {
         self.restart_generation = Some(super::super::runtime_store::process_generation());
     }
 
-    /// A drain-restart Claude TUI row a later process restored: its session-bound sink can never
-    /// close the soft-terminal turn, so the recovery watcher delivers, commits and clears it.
+    /// A drain-restart Claude TUI row restored from the generation that bore it, which the
+    /// recovery watcher delivers, commits and clears; a row a later drain re-stamped stays pinned.
     pub(in crate::services::discord) fn restored_claude_session_bound_restart(&self) -> bool {
         self.effective_relay_owner_kind() == RelayOwnerKind::SessionBoundRelay
             && self.runtime_kind == Some(RuntimeHandoffKind::ClaudeTui)
             && self.restart_mode == Some(InflightRestartMode::DrainRestart)
+            && self.restart_generation == Some(self.born_generation)
             && self.restart_generation != Some(super::super::runtime_store::process_generation())
     }
 

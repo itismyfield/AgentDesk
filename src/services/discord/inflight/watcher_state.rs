@@ -159,6 +159,14 @@ pub(super) fn persist_watcher_stream_progress_locked_in_root(
     // A pinned restart/rebind marker means a different lifecycle owns the row;
     // the streaming caller must not touch it (mirrors the refresh-path guard).
     if state.restart_mode.is_some() || state.rebind_origin {
+        // A committed restart row the caller exactly owns reports terminal so the tick stops writing.
+        if !state.rebind_origin
+            && state.tmux_session_name.as_deref() == Some(require_tmux_session_name)
+            && require_identity.is_some_and(|identity| identity.matches_state(&state))
+            && state.terminal_delivery_completed()
+        {
+            return WatcherProgressOutcome::TerminalAlreadyCommitted;
+        }
         return WatcherProgressOutcome::AuthorityPinned;
     }
     if state.tmux_session_name.as_deref() != Some(require_tmux_session_name) {

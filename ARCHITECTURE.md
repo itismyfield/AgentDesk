@@ -1156,6 +1156,7 @@ src/
 │   │   │   │   ├── committed_progress_tests.rs
 │   │   │   │   ├── existing_panel_update.rs
 │   │   │   │   ├── native_collector_tests.rs
+│   │   │   │   ├── restored_restart_clear_tests.rs
 │   │   │   │   └── types.rs
 │   │   │   ├── supervisor_relay/
 │   │   │   │   └── supervisor_frame_source.rs

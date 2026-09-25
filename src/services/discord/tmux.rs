@@ -2039,6 +2039,7 @@ mod active_bridge_turn_guard_tests {
                 Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
             state.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
             state.set_restart_mode(InflightRestartMode::DrainRestart);
+            state.born_generation = u64::MAX;
             state.restart_generation = Some(u64::MAX);
 
             assert!(!watcher_should_yield_to_inflight_state(
@@ -2047,6 +2048,26 @@ mod active_bridge_turn_guard_tests {
                 0,
                 2_019_364,
             ));
+
+            state.born_generation = u64::MAX - 1;
+            assert!(
+                watcher_should_yield_to_inflight_state(
+                    Some(&state),
+                    "AgentDesk-codex-adk-cdx",
+                    0,
+                    2_019_364,
+                ),
+                "a row re-stamped by a later drain keeps its pin"
+            );
+            state.restart_generation = None;
+            assert!(watcher_should_yield_to_inflight_state(
+                Some(&state),
+                "AgentDesk-codex-adk-cdx",
+                0,
+                2_019_364,
+            ));
+            state.born_generation = u64::MAX;
+            state.restart_generation = Some(u64::MAX);
 
             state.terminal_delivery_committed = true;
             assert!(watcher_should_yield_to_inflight_state(
@@ -2094,6 +2115,7 @@ mod active_bridge_turn_guard_tests {
                 Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
             state.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
             state.set_restart_mode(InflightRestartMode::DrainRestart);
+            state.born_generation = u64::MAX;
             state.restart_generation = Some(u64::MAX);
 
             assert!(watcher_should_yield_to_inflight_state(
