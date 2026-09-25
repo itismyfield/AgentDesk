@@ -4920,7 +4920,7 @@ services::discord::router::intake_gate::reply_context_tests::attachment_reply_co
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::queue_blocked_stale_active_turn_release_publishes_completion_event
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::stale_active_turn_proof_classifies_no_owner_as_queue_blocked_orphan
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::stale_active_turn_proof_preserves_explicit_background_status
-services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_cleanup_after_finish_spares_a_replacement_episode
+services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_cleanup_leaves_a_parent_remapped_after_finish
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_completion_event_drives_real_dequeue
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_does_not_kill_successor_shared_tmux_name
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests::thread_guard_force_clean_keeps_a_successor_preregistered_role_override

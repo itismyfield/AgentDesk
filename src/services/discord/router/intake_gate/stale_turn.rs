@@ -847,7 +847,7 @@ mod thread_guard_stale_pure_tests {
     }
 
     /// ABA: a successor that reuses the anchor id after the stale proof
-    /// keeps its token, queue, inflight file, and parent guard.
+    /// keeps its token, queue and inflight file; the dropped parent is not kicked.
     #[tokio::test]
     async fn thread_guard_force_clean_leaves_a_successor_episode_untouched() {
         let temp = tempfile::tempdir().expect("create temp runtime root");
@@ -892,7 +892,8 @@ mod thread_guard_stale_pure_tests {
         assert_eq!(after.intervention_queue.len(), 3);
         assert!(!successor.cancelled.load(Ordering::Relaxed));
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
-        assert!(shared.dispatch.thread_parents.contains_key(&parent_id));
+        assert!(!shared.dispatch.thread_parents.contains_key(&parent_id));
+        assert!(kicked_parents(&shared).is_empty());
         assert!(
             crate::services::discord::inflight::load_inflight_state(&provider, thread_id.get())
                 .is_some()
@@ -1047,12 +1048,12 @@ mod thread_guard_stale_pure_tests {
         assert!(!force_clean(&shared, thread_id, Some(proof)).await);
         assert_episode_untouched(&shared, thread_id, &successor, 8_002).await;
         let routing_after = routing(&shared, parent_id, thread_id);
-        assert_eq!(routing_after, (Some(thread_id), Some(alt_id)));
+        assert_eq!(routing_after, (None, Some(alt_id)));
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
     }
 
     /// A token held without an anchor keeps the stale row as its only durable
-    /// evidence, along with the token and the parent guard.
+    /// evidence, along with the token; the dropped parent is not kicked.
     #[tokio::test]
     async fn thread_guard_force_clean_without_anchor_keeps_the_row_of_a_held_token() {
         let temp = tempfile::tempdir().expect("create temp runtime root");
@@ -1090,7 +1091,8 @@ mod thread_guard_stale_pure_tests {
                 .is_some_and(|current| Arc::ptr_eq(&current, &token))
         );
         assert!(!token.cancelled.load(Ordering::Relaxed));
-        assert!(shared.dispatch.thread_parents.contains_key(&parent_id));
+        assert!(!shared.dispatch.thread_parents.contains_key(&parent_id));
+        assert!(kicked_parents(&shared).is_empty());
     }
 
     /// A stale verdict from the old row must not authorize finishing the
@@ -1205,7 +1207,7 @@ mod thread_guard_stale_pure_tests {
     }
 
     /// B re-registers the same `parent -> thread` after A's finish released the
-    /// thread; A's cleanup keeps that guard and only kicks the parent queue.
+    /// thread; A's cleanup keeps that guard and leaves the parent kick to B.
     #[tokio::test]
     async fn thread_guard_force_clean_spares_a_same_value_parent_reregistered_after_release() {
         let temp = tempfile::tempdir().expect("create temp runtime root");
@@ -1228,11 +1230,11 @@ mod thread_guard_stale_pure_tests {
         assert_episode_untouched(&shared, thread_id, &successor, 9_001).await;
         let parent = shared.dispatch.thread_parents.get(&parent_id);
         assert_eq!(parent.map(|e| *e.value()), Some(thread_id));
-        assert_eq!(kicked_parents(&shared), vec![parent_id]);
+        assert!(kicked_parents(&shared).is_empty());
     }
 
     /// A token restored without rewriting the row after an anchorless, tokenless
-    /// proof keeps the row, the token and the parent guard.
+    /// proof keeps the row and the token.
     #[tokio::test]
     async fn thread_guard_force_clean_without_anchor_keeps_a_row_restored_after_the_proof() {
         let temp = tempfile::tempdir().expect("create temp runtime root");
@@ -1265,11 +1267,11 @@ mod thread_guard_stale_pure_tests {
         let current = after.cancel_token.expect("the restored token stays");
         assert!(Arc::ptr_eq(&current, &token));
         assert!(!token.cancelled.load(Ordering::Relaxed));
-        assert!(shared.dispatch.thread_parents.contains_key(&parent_id));
+        assert!(!shared.dispatch.thread_parents.contains_key(&parent_id));
     }
 
-    /// The force-clean clears the row and kicks the parent but leaves both routing
-    /// entries, with or without queued follow-ups.
+    /// The force-clean clears the row and the parent mapping and kicks the parent but
+    /// leaves the role override, with or without queued follow-ups.
     #[tokio::test]
     async fn thread_guard_force_clean_leaves_the_role_override_untouched() {
         let temp = tempfile::tempdir().expect("create temp runtime root");
@@ -1287,11 +1289,7 @@ mod thread_guard_stale_pure_tests {
 
             assert!(force_clean(&shared, thread_id, Some(proof)).await);
             let routing_after = routing(&shared, parent_id, thread_id);
-            assert_eq!(
-                routing_after,
-                (Some(thread_id), Some(alt_id)),
-                "queued={queued}"
-            );
+            assert_eq!(routing_after, (None, Some(alt_id)), "queued={queued}");
             assert_eq!(kicked_parents(&shared), vec![parent_id]);
             let row =
                 crate::services::discord::inflight::load_inflight_state(&provider, thread_id.get());
@@ -1321,7 +1319,7 @@ mod thread_guard_stale_pure_tests {
         dispatch.role_overrides.insert(thread_id, successor_alt);
 
         assert!(force_clean(&shared, thread_id, Some(proof)).await);
-        assert!(dispatch.thread_parents.contains_key(&parent_id));
+        assert!(!dispatch.thread_parents.contains_key(&parent_id));
         let role_override = dispatch.role_overrides.get(&thread_id).map(|e| *e.value());
         assert_eq!(role_override, Some(successor_alt));
     }
@@ -1367,8 +1365,8 @@ mod thread_guard_stale_pure_tests {
         });
     }
 
-    /// A registration for another thread must not stop the force-clean from
-    /// kicking the proven thread's own parent; every mapping stays.
+    /// A registration for another thread must not stop the force-clean from clearing
+    /// and kicking the proven thread's own parent; the unrelated routing stays.
     #[tokio::test]
     async fn thread_guard_force_clean_kicks_target_parent_despite_unrelated_registration() {
         let temp = tempfile::tempdir().expect("create temp runtime root");
@@ -1394,7 +1392,7 @@ mod thread_guard_stale_pure_tests {
         assert!(force_clean(&shared, thread_id, Some(proof)).await);
         assert_eq!(kicked_parents(&shared), vec![parent_id]);
         let routing_after = routing(&shared, parent_id, thread_id);
-        assert_eq!(routing_after, (Some(thread_id), Some(alt_id)));
+        assert_eq!(routing_after, (None, Some(alt_id)));
         let other_routing = routing(&shared, other_parent, other_thread);
         assert_eq!(other_routing, (Some(other_thread), Some(other_alt)));
     }
