@@ -21,6 +21,9 @@ use super::AppState;
 /// because it is a registered `shrink` giant (#4710).
 mod public_projection;
 mod runtime_profile;
+#[cfg(all(test, unix))]
+mod unread_tail_attribution_tests;
+use crate::services::discord::relay_recovery::unmeasured_tail_of;
 use runtime_profile::{attach_runtime_profile, cluster_standby_without_gateway};
 
 const X_AGENTDESK_SOURCE: &str = "x-agentdesk-source";
@@ -1199,16 +1202,12 @@ pub async fn stale_mailbox_repair_handler(
                             &provider,
                             request.channel_id,
                         );
-                    // Keep the manual stale-mailbox repair's destructive idle
-                    // clear gate aligned with ReattachWatcher: unread capture bytes
-                    // are live relay evidence, so do not retire mailbox/inflight
-                    // bookkeeping while the watcher still has bytes to consume.
-                    // #5071 relay-tail S2: the shared predicate is what keeps the
-                    // two gates aligned, including on `None` — an unmeasured tail
-                    // is not a drained one.
+                    // Shared with ReattachWatcher: see `stale_mailbox_idle_tail_admits`.
                     let no_unread_bytes =
-                        crate::services::discord::relay_recovery::unread_tail_is_proven_drained(
-                            snapshot.unread_bytes,
+                        crate::services::discord::relay_recovery::stale_mailbox_idle_tail_admits(
+                            &provider,
+                            snapshot,
+                            inflight_safe && !unrelayed_tail,
                         );
                     if inflight_safe && no_unread_bytes && !unrelayed_tail {
                         health::clear_idle_tmux_stale_turn(
@@ -1316,6 +1315,7 @@ pub async fn stale_mailbox_repair_handler(
                 "fix_safety": "explicit_restart_required",
                 "safety_gate": "tmux_present",
                 "skipped_reason": "live tmux evidence exists",
+                "unread_tail": before_watcher_inflight.as_ref().and_then(unmeasured_tail_of),
                 "post_repair_mailbox": before,
                 "post_repair_watcher_inflight": before_watcher_inflight
             })),
@@ -1907,7 +1907,7 @@ mod tests {
         test_api_router_with_config_and_registry(config, None)
     }
 
-    fn test_api_router_with_config_and_registry(
+    pub(super) fn test_api_router_with_config_and_registry(
         config: crate::config::Config,
         health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
     ) -> axum::Router {

@@ -1413,6 +1413,14 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   (`record_guard_fire`) — one bucket for all invariants, unable to name which fired.
   One lane adds the threshold-1 entry carrying
   `live_turn_proven_by_progress_not_presence` in `statuses`, as I17 and I18 each did.
+  #5996 P-L2a wires it at the manual reattach idle-clear arm, the stale-mailbox
+  idle-tmux branch and the explicit-background watchdog: one record per episode per
+  site, only where the tail term is the refusing conjunct and the tail is UNMEASURED,
+  `decided_by` ∈ {`tail_not_measured`, `saturated_tail`, `zero_not_attributable`,
+  `unattributed_tail`}. A measured backlog is the invariant working and is not
+  recorded; the reachability idle witness is not a decision site and records nothing.
+  Wiring it made the pre-existing `None` refusals at these sites visible; it changed
+  no decision.
 - Invariant key: `live_turn_proven_by_progress_not_presence`. This document lands the
   contract only and enforces nothing by itself: steps 2 and 3 below — the
   `record_invariant_check` wiring and a deliberate-violation test per consumer —
