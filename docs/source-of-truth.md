@@ -17,6 +17,7 @@ The orchestration rule-surface rows (lane caps, campaign execution rules) were a
 - Legacy snapshots (`*.pre-*`, `*.bak`, `*.migrated`) are archive-only. They belong under `~/.adk/release/config/.backups/YYYY-MM-DD/`, not next to canonical files.
 - Compatibility seams such as `role_map.json`, `bot_settings.json`, the root-level legacy `agentdesk.yaml`, and `_shared.md` aliases are not canonical write targets.
 - Older docs with deprecated front matter are retained for history. Their config and policy lists are not write targets unless they point back here.
+- Merges into `main` always go through a pull request that an agent babysits: it confirms CI and review, then merges, and repairs the PR on failure. No policy merges automatically.
 
 ## Matrix
 

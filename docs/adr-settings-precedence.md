@@ -92,7 +92,7 @@ We keep per-surface storage, but every settings surface must declare:
 Representative local checks backing this ADR:
 
 - `/api/settings` replaces the stored JSON document instead of patch-merging it.
-- `/api/settings/config` distinguishes YAML-backed keys like `merge_strategy` from hardcoded-only keys like `max_review_rounds`, and now exposes restart metadata for that difference.
+- `/api/settings/config` distinguishes YAML-backed keys from hardcoded-only keys, and now exposes restart metadata for that difference.
 - `/api/settings/runtime-config` returns merged `current` values over `defaults`, confirming the baseline/override split already used by the dashboard.
 
 ## Follow-up Boundary
