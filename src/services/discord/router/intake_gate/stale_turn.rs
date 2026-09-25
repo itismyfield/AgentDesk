@@ -1245,6 +1245,83 @@ mod thread_guard_stale_pure_tests {
         assert!(row.is_none());
     }
 
+    /// Parents whose deferred idle-queue kick was scheduled, read before any yield.
+    fn kicked_parents(shared: &SharedData) -> Vec<ChannelId> {
+        let channels = &shared.restart.deferred_hook_channels;
+        channels.iter().map(|entry| *entry.key()).collect()
+    }
+
+    /// Releasing the dead episode must not kill tmux by name: a successor may
+    /// already run in a session with the same non-unified-thread name.
+    #[test]
+    fn thread_guard_force_clean_does_not_kill_successor_shared_tmux_name() {
+        use crate::services::provider::cancel_token_cleanup::executor;
+        executor::with_executor_dispatch_seam(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build test runtime");
+            runtime.block_on(async {
+                let temp = tempfile::tempdir().expect("create temp runtime root");
+                let _guard = EnvRootGuard::set(temp.path());
+                let provider = ProviderKind::Codex;
+                let (thread_id, anchor) = (ChannelId::new(ID_BASE + 1_001), MessageId::new(8_001));
+                let (_registry, shared, stale_token) =
+                    seed_stale_thread_with_queue(&provider, thread_id, anchor, 1).await;
+                let session_name = "AgentDesk-codex-thread-guard-shared-session";
+                stale_token.bind_unmanaged_session_name(session_name);
+                stale_token.store_child_pid(std::process::id());
+                let successor = CancelToken::new();
+                successor.bind_unmanaged_session_name(session_name);
+                let proof = force_clean_proof_for(&shared, &provider, thread_id).await;
+
+                assert!(force_clean(&shared, thread_id, Some(proof)).await);
+                assert!(stale_token.cancelled.load(Ordering::Relaxed));
+                assert_eq!(executor::tmux_kill_dispatches_for_test(), 0);
+                assert_eq!(executor::pid_kill_dispatches_for_test(), 0);
+                let binding = stale_token.tmux_session_name();
+                assert_eq!(binding.as_deref(), Some(session_name));
+                assert!(!successor.cancelled.load(Ordering::Relaxed));
+            });
+        });
+    }
+
+    /// A registration for another thread must not stop the force-clean from
+    /// clearing and kicking the proven thread's own parent.
+    #[tokio::test]
+    async fn thread_guard_force_clean_clears_target_parent_despite_unrelated_registration() {
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let _guard = EnvRootGuard::set(temp.path());
+        let provider = ProviderKind::Codex;
+        let (parent_id, thread_id) = (
+            ChannelId::new(ID_BASE + 1_010),
+            ChannelId::new(ID_BASE + 1_011),
+        );
+        let (other_parent, other_thread) = (
+            ChannelId::new(ID_BASE + 1_013),
+            ChannelId::new(ID_BASE + 1_014),
+        );
+        let (alt_id, other_alt) = (
+            ChannelId::new(ID_BASE + 1_012),
+            ChannelId::new(ID_BASE + 1_015),
+        );
+        let (_registry, shared, _stale_token) =
+            seed_stale_thread_with_queue(&provider, thread_id, MessageId::new(8_001), 0).await;
+        shared.dispatch.set_thread_parent(parent_id, thread_id);
+        shared.dispatch.set_role_override(thread_id, alt_id);
+        let proof = force_clean_proof_for(&shared, &provider, thread_id).await;
+        shared
+            .dispatch
+            .set_thread_parent(other_parent, other_thread);
+        shared.dispatch.set_role_override(other_thread, other_alt);
+
+        assert!(force_clean(&shared, thread_id, Some(proof)).await);
+        assert_eq!(kicked_parents(&shared), vec![parent_id]);
+        assert_eq!(routing(&shared, parent_id, thread_id), (None, None));
+        let other_routing = routing(&shared, other_parent, other_thread);
+        assert_eq!(other_routing, (Some(other_thread), Some(other_alt)));
+    }
+
     /// #1456: explicit background placeholders are a visible status surface,
     /// not disposable stale proof. Even if their inflight timestamp is old,
     /// the fail-open classifier must preserve them instead of taking the

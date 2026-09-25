@@ -333,6 +333,11 @@ pub(crate) fn pid_kill_dispatches_for_test() -> usize {
 }
 
 #[cfg(test)]
+pub(crate) fn tmux_kill_dispatches_for_test() -> usize {
+    TMUX_KILL_DISPATCHES.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
 pub(crate) fn set_pid_kill_succeeds_for_test(succeeds: bool) {
     PID_KILL_SUCCEEDS.store(succeeds, Ordering::Relaxed);
 }
