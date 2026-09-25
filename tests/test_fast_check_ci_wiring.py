@@ -19,9 +19,45 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "d5a67ffc96a91e7787e256561101ff4e7195498b8c9f4f0da9ed00970653f695"
+    "b5c91170ab5bc40950a118108d6e9a7746b81728b60d105339f9c1f2d66cafef"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
+# Path-filtered required contexts: (mirror job, required name, runner job,
+# runner name, runner `if`, FILTER_NAME, FILTER_OUTPUT).
+_LINT_FILTER = (
+    "needs.changes.outputs.rust_or_policy == 'true' || "
+    "needs.changes.outputs.relay_contract == 'true'"
+)
+PATH_FILTER_REQUIRED_MIRRORS = (
+    (
+        "lint_required_context",
+        "Lint",
+        "lint",
+        "Lint runner",
+        _LINT_FILTER,
+        "rust_or_policy_or_relay_contract",
+        "${{ " + _LINT_FILTER + " }}",
+    ),
+    (
+        "high_risk_recovery_required_context",
+        "High-risk recovery",
+        "high-risk-recovery",
+        "High-risk recovery runner",
+        "needs.changes.outputs.high_risk_recovery == 'true'",
+        "high_risk_recovery",
+        "${{ needs.changes.outputs.high_risk_recovery }}",
+    ),
+    (
+        "dashboard_required_context",
+        "Dashboard (Node 22)",
+        "dashboard",
+        "Dashboard (Node 22) runner",
+        "needs.changes.outputs.dashboard == 'true'",
+        "dashboard",
+        "${{ needs.changes.outputs.dashboard }}",
+    ),
+)
+PATH_FILTER_MIRROR_PIN_STEP = "Pin required-check mirror helper (#5321)"
 FILTER_BLOCK_HEADER = re.compile(r"^            \w+:$", re.M)
 CROSS_OS_CONSUMER_SCRIPT = REPO_ROOT / "scripts/cross_os_consumer_paths.py"
 # #5828's own break (turn_bridge/mod.rs) plus the 22 files measured on PR #5834
@@ -1403,6 +1439,215 @@ class FastCheckCiWiringTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(success.returncode, 0, success.stderr)
+
+    def test_path_filter_required_contexts_publish_from_always_mirrors(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        jobs = yaml.safe_load(workflow)["jobs"]
+        for (
+            mirror_id,
+            context,
+            runner_id,
+            runner_name,
+            runner_if,
+            filter_name,
+            filter_output,
+        ) in PATH_FILTER_REQUIRED_MIRRORS:
+            with self.subTest(context=context):
+                job = jobs[mirror_id]
+                self.assertEqual(job["name"], context)
+                self.assertEqual(job["needs"], ["changes", runner_id])
+                self.assertEqual(job["if"], "always()")
+                self.assertNotIn("continue-on-error", job)
+                self.assertEqual(job["runs-on"], "ubuntu-latest")
+                self.assertEqual(len(job["steps"]), 3)
+                self.assertEqual(job["steps"][0], {"uses": "actions/checkout@v4"})
+                pin, result = job["steps"][1:]
+                self.assertEqual(pin["name"], PATH_FILTER_MIRROR_PIN_STEP)
+                self.assertEqual(pin["env"], {"BASH_ENV": "/dev/null"})
+                self.assertEqual(pin["shell"], "bash")
+                self.assertEqual(pin["timeout-minutes"], 10)
+                self.assertIn(f"expected={REQUIRED_CHECK_MIRROR_SHA256}", pin["run"])
+                self.assertEqual(result["run"], "./scripts/required-check-mirror.sh")
+                self.assertEqual(
+                    result["env"],
+                    {
+                        "BASH_ENV": "/dev/null",
+                        "CHANGED_PATHS_RESULT": "${{ needs.changes.result }}",
+                        "FILTER_NAME": filter_name,
+                        "FILTER_OUTPUT": filter_output,
+                        "UPSTREAM_JOB_NAME": runner_id,
+                        "UPSTREAM_RESULT": f"${{{{ needs.{runner_id}.result }}}}",
+                    },
+                )
+
+                runner = jobs[runner_id]
+                self.assertEqual(runner["name"], runner_name)
+                self.assertNotEqual(runner["name"], context)
+                self.assertEqual(runner["needs"], "changes")
+                self.assertEqual(runner["if"], runner_if)
+                publishers = [
+                    job_id
+                    for job_id, candidate in jobs.items()
+                    if isinstance(candidate, dict)
+                    and str(candidate.get("name", "")).strip() == context
+                ]
+                self.assertEqual(publishers, [mirror_id])
+
+    def test_path_filter_required_mirrors_reject_fail_open_mutations(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        baseline = self.run_hardening_fixture(workflow)
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        for (
+            mirror_id,
+            context,
+            runner_id,
+            runner_name,
+            _runner_if,
+            _filter_name,
+            filter_output,
+        ) in PATH_FILTER_REQUIRED_MIRRORS:
+            mirror = job_block(workflow, mirror_id)
+            runner = job_block(workflow, runner_id)
+            mirror_mutations = {
+                "job deleted": "",
+                "changes dependency deleted": mirror.replace("      - changes\n", "", 1),
+                "job if deleted": mirror.replace("    if: always()\n", "", 1),
+                "job if weakened": mirror.replace(
+                    "    if: always()\n", "    if: success()\n", 1
+                ),
+                "job continue-on-error injected": mirror.replace(
+                    "    runs-on: ubuntu-latest\n",
+                    "    continue-on-error: true\n    runs-on: ubuntu-latest\n",
+                    1,
+                ),
+                "helper pin deleted": mirror.replace(
+                    step_block(mirror, PATH_FILTER_MIRROR_PIN_STEP), "", 1
+                ),
+                "helper pin corrupted": mirror.replace(
+                    f"expected={REQUIRED_CHECK_MIRROR_SHA256}", "expected=" + "0" * 64, 1
+                ),
+                "mirror weakened": mirror.replace(
+                    "        run: ./scripts/required-check-mirror.sh\n",
+                    "        run: 'true'\n",
+                    1,
+                ),
+                "filter output forced false": mirror.replace(
+                    f"FILTER_OUTPUT: {filter_output}\n", "FILTER_OUTPUT: false\n", 1
+                ),
+                "required name moved off mirror": mirror.replace(
+                    f"    name: {context}\n", f"    name: {context} mirror\n", 1
+                ),
+            }
+            runner_mutations = {
+                "runner publishes required name": runner.replace(
+                    f"    name: {runner_name}\n", f"    name: {context}\n", 1
+                ),
+            }
+            cases = [
+                (label, mirror, mutated) for label, mutated in mirror_mutations.items()
+            ] + [
+                (label, runner, mutated) for label, mutated in runner_mutations.items()
+            ]
+            for label, original, mutated_block in cases:
+                with self.subTest(context=context, mutation=label):
+                    self.assertNotEqual(mutated_block, original)
+                    mutated = workflow.replace(original, mutated_block, 1)
+                    result = self.run_hardening_fixture(mutated)
+                    self.assertNotEqual(result.returncode, 0, result.stderr)
+
+        release_probe = (
+            "name: probe\non:\n  pull_request:\njobs:\n  probe:\n"
+            "    name: Lint\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"
+        )
+        result = self.run_hardening_fixture(
+            workflow, extra_workflows={"probe.yml": release_probe}
+        )
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("pull_request workflow must not publish required Lint context", result.stderr)
+
+    def test_path_filter_required_mirrors_fail_closed_on_upstream_results(self) -> None:
+        jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        mirror_script = REPO_ROOT / "scripts/required-check-mirror.sh"
+        # (changes result, filter output, runner result) -> mirror passes?
+        cases = (
+            ("success", "false", "skipped", True),
+            ("success", "false", "success", True),
+            ("success", "true", "success", True),
+            ("failure", "false", "skipped", False),
+            ("cancelled", "false", "skipped", False),
+            ("skipped", "false", "skipped", False),
+            ("success", "", "skipped", False),
+            ("success", "true", "skipped", False),
+            ("success", "true", "failure", False),
+            ("success", "true", "cancelled", False),
+            ("success", "false", "failure", False),
+            ("success", "false", "cancelled", False),
+        )
+        for mirror_id, context, *_rest in PATH_FILTER_REQUIRED_MIRRORS:
+            step_env = jobs[mirror_id]["steps"][2]["env"]
+            for changes_result, filter_value, runner_result, passes in cases:
+                with self.subTest(
+                    context=context,
+                    changes=changes_result,
+                    filter=filter_value,
+                    runner=runner_result,
+                ):
+                    env = {
+                        **os.environ,
+                        **{key: str(value) for key, value in step_env.items()},
+                        "CHANGED_PATHS_RESULT": changes_result,
+                        "FILTER_OUTPUT": filter_value,
+                        "UPSTREAM_RESULT": runner_result,
+                    }
+                    result = subprocess.run(
+                        ["bash", str(mirror_script)],
+                        env=env,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    if passes:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("::error::", result.stderr)
+
+    def test_path_filter_mirror_helper_pins_reject_helper_mutations(self) -> None:
+        jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        helper = (REPO_ROOT / "scripts/required-check-mirror.sh").read_text(
+            encoding="utf-8"
+        )
+        for mirror_id, context, *_rest in PATH_FILTER_REQUIRED_MIRRORS:
+            run = jobs[mirror_id]["steps"][1]["run"]
+            self.assertEqual(run.count(REQUIRED_CHECK_MIRROR_SHA256), 1)
+            for label, helper_candidate, pin_run, passes in (
+                ("reviewed helper", helper, run, True),
+                ("one-byte helper mutation", helper + "#", run, False),
+                (
+                    "helper pin mutation",
+                    helper,
+                    run.replace(REQUIRED_CHECK_MIRROR_SHA256, "0" * 64, 1),
+                    False,
+                ),
+            ):
+                with self.subTest(context=context, case=label), tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp)
+                    (root / "scripts").mkdir()
+                    (root / "scripts/required-check-mirror.sh").write_text(
+                        helper_candidate, encoding="utf-8"
+                    )
+                    result = subprocess.run(
+                        ["bash", "-c", pin_run],
+                        cwd=root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    if passes:
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("content hash mismatch", result.stdout + result.stderr)
 
     def test_helper_content_pin_kills_all_prior_mutation_classes(self) -> None:
         helper = (REPO_ROOT / "scripts/required-check-mirror.sh").read_text(

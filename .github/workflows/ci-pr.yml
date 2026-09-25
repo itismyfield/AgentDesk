@@ -654,8 +654,9 @@ jobs:
               - 'routines/**'
             win32_build_token: ['scripts/build_token_win32.py', 'tests/test_build_token_win32_5663.py', '.github/workflows/ci-pr.yml']
 
+  # The required `Dashboard (Node 22)` context is published by dashboard_required_context.
   dashboard:
-    name: Dashboard (Node 22)
+    name: Dashboard (Node 22) runner
     needs: changes
     if: needs.changes.outputs.dashboard == 'true'
     runs-on: ubuntu-latest
@@ -907,7 +908,7 @@ jobs:
         run: ./scripts/required-check-mirror.sh
 
   dashboard_required_context:
-    name: Dashboard required context (ubuntu-latest)
+    name: Dashboard (Node 22)
     needs:
       - changes
       - dashboard
@@ -916,8 +917,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The required context runs this helper, so pin its bytes before use.
+      - name: Pin required-check mirror helper (#5321)
+        env:
+          BASH_ENV: /dev/null
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          helper_path=scripts/required-check-mirror.sh
+          expected=57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d
+          actual="$(sha256sum "$helper_path" | cut -d ' ' -f 1)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error file=$helper_path::content hash mismatch: expected $expected, found $actual; review the helper and update every #5321 helper pin together"
+            exit 1
+          fi
+
       - name: Mirror dashboard result for branch protection
         env:
+          BASH_ENV: /dev/null
           CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
           FILTER_NAME: dashboard
           FILTER_OUTPUT: ${{ needs.changes.outputs.dashboard }}
@@ -1071,8 +1088,9 @@ jobs:
         if: always()
         run: sccache --show-stats || true
 
+  # The required `High-risk recovery` context is published by high_risk_recovery_required_context.
   high-risk-recovery:
-    name: High-risk recovery
+    name: High-risk recovery runner
     needs: changes
     if: needs.changes.outputs.high_risk_recovery == 'true'
     runs-on: ubuntu-latest
@@ -1216,7 +1234,7 @@ jobs:
         run: sccache --show-stats || true
 
   high_risk_recovery_required_context:
-    name: High-risk recovery path-filter mirror (ubuntu-latest)
+    name: High-risk recovery
     needs:
       - changes
       - high-risk-recovery
@@ -1225,8 +1243,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The required context runs this helper, so pin its bytes before use.
+      - name: Pin required-check mirror helper (#5321)
+        env:
+          BASH_ENV: /dev/null
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          helper_path=scripts/required-check-mirror.sh
+          expected=57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d
+          actual="$(sha256sum "$helper_path" | cut -d ' ' -f 1)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error file=$helper_path::content hash mismatch: expected $expected, found $actual; review the helper and update every #5321 helper pin together"
+            exit 1
+          fi
+
       - name: Mirror high-risk recovery result across path-filter skips
         env:
+          BASH_ENV: /dev/null
           CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
           FILTER_NAME: high_risk_recovery
           FILTER_OUTPUT: ${{ needs.changes.outputs.high_risk_recovery }}
@@ -1523,8 +1557,9 @@ jobs:
           UPSTREAM_RESULT: ${{ needs.library_sweep.result }}
         run: ./scripts/required-check-mirror.sh
 
+  # The required `Lint` context is published by lint_required_context.
   lint:
-    name: Lint
+    name: Lint runner
     needs: changes
     # Match check_fast's composite gate so relay-contract-only changes retain
     # fmt/clippy coverage after duplicate linting was removed from that job.
@@ -1567,7 +1602,7 @@ jobs:
         run: sccache --show-stats || true
 
   lint_required_context:
-    name: Lint required context (ubuntu-latest)
+    name: Lint
     needs:
       - changes
       - lint
@@ -1576,8 +1611,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The required context runs this helper, so pin its bytes before use.
+      - name: Pin required-check mirror helper (#5321)
+        env:
+          BASH_ENV: /dev/null
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          helper_path=scripts/required-check-mirror.sh
+          expected=57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d
+          actual="$(sha256sum "$helper_path" | cut -d ' ' -f 1)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error file=$helper_path::content hash mismatch: expected $expected, found $actual; review the helper and update every #5321 helper pin together"
+            exit 1
+          fi
+
       - name: Mirror lint result for branch protection
         env:
+          BASH_ENV: /dev/null
           CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
           FILTER_NAME: rust_or_policy_or_relay_contract
           FILTER_OUTPUT: ${{ needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true' }}
@@ -1775,7 +1826,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=d5a67ffc96a91e7787e256561101ff4e7195498b8c9f4f0da9ed00970653f695
+          expected=b5c91170ab5bc40950a118108d6e9a7746b81728b60d105339f9c1f2d66cafef
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -1932,7 +1983,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=d5a67ffc96a91e7787e256561101ff4e7195498b8c9f4f0da9ed00970653f695
+          expected=b5c91170ab5bc40950a118108d6e9a7746b81728b60d105339f9c1f2d66cafef
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

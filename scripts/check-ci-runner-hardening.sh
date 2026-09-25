@@ -981,13 +981,14 @@ targets = {
   },
   "high-risk-recovery" => {
     "label" => "High-risk recovery job",
-    "name" => "High-risk recovery",
+    # Runner label only; high_risk_recovery_required_context publishes the required context.
+    "name" => "High-risk recovery runner",
     "needs" => "changes",
     "if" => "needs.changes.outputs.high_risk_recovery == 'true'",
     "runs_on" => "ubuntu-latest",
     # Pin the accepted-turn regressions and removal of the retired timeout test.
     # All remaining commands and execution settings retain their reviewed values.
-    "job_sha256" => "200a2f71705d5e83b6160a85f31a1560a8453740661bbac313513c69d9ae61d7",
+    "job_sha256" => "78a1ac49014cc9ce58aa7aec6d2ae86295b0b5cafec65cccb3bf37b5f8a0bd7f",
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [
@@ -1271,6 +1272,226 @@ RUBY
   done < <(workflow_files)
 }
 
+# Path-filtered required contexts publish from `if: always()` result mirrors so
+# a failed or cancelled `changes` job cannot leave the required name skipped.
+validate_path_filter_required_mirrors() {
+  if ! command -v ruby >/dev/null 2>&1; then
+    error "ruby is required to validate path-filter required mirrors structurally"
+    return
+  fi
+
+  local workflows=()
+  while IFS= read -r -d '' workflow; do
+    workflows+=("$workflow")
+  done < <(workflow_files)
+
+  if ! ruby - "$pr_workflow" "$REQUIRED_CHECK_MIRROR_SHA256" "${workflows[@]}" <<'RUBY'
+require "yaml"
+
+pr_path, helper_sha256, *workflow_paths = ARGV
+
+def raw_yaml_node(node)
+  case node
+  when Psych::Nodes::Mapping
+    node.children.each_slice(2).each_with_object({}) do |(key, value), mapped|
+      raise "mapping keys must be scalar" unless key.is_a?(Psych::Nodes::Scalar)
+
+      mapped[key.value] = raw_yaml_node(value)
+    end
+  when Psych::Nodes::Sequence
+    node.children.map { |item| raw_yaml_node(item) }
+  when Psych::Nodes::Scalar
+    node.value
+  else
+    raise "unsupported YAML node: #{node.class}"
+  end
+end
+
+def stringify(value)
+  case value
+  when Hash then value.transform_values { |item| stringify(item) }
+  when Array then value.map { |item| stringify(item) }
+  else value.to_s
+  end
+end
+
+def load_jobs(path)
+  document = YAML.safe_load(File.read(path), aliases: false, filename: path)
+  jobs = document.is_a?(Hash) ? document["jobs"] : nil
+  [document, jobs.is_a?(Hash) ? jobs : {}]
+end
+
+def pull_request_triggered?(document)
+  trigger = document.is_a?(Hash) ? (document[true] || document["on"]) : nil
+  events = case trigger
+  when Hash then trigger.keys
+  when Array then trigger
+  else [trigger]
+  end
+  events.any? { |event| %w[pull_request pull_request_target].include?(event.to_s) }
+end
+
+# Mirrors the Script checks rule: one matrix substitution is allowed only when
+# its static prefix/suffix cannot render the required context.
+def can_render_context?(name, context)
+  return name.strip == context unless name.include?("${{")
+
+  shape_valid = name.scan("${{").length == 1 && name.scan("}}").length == 1
+  matrix_name = shape_valid &&
+    /\A([^{}]*)\$\{\{\s*matrix\.[A-Za-z_][A-Za-z0-9_.-]*\s*\}\}([^{}]*)\z/.match(name)
+  return true unless matrix_name
+
+  [matrix_name[1], matrix_name[2]].any? { |fragment| fragment.include?(context) } ||
+    (context.start_with?(matrix_name[1]) && context.end_with?(matrix_name[2]))
+end
+
+lint_filter = "needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true'"
+specs = [
+  {
+    "mirror" => "lint_required_context",
+    "context" => "Lint",
+    "runner" => "lint",
+    "runner_name" => "Lint runner",
+    "runner_if" => lint_filter,
+    "step" => "Mirror lint result for branch protection",
+    "filter_name" => "rust_or_policy_or_relay_contract",
+    "filter_output" => "${{ #{lint_filter} }}",
+  },
+  {
+    "mirror" => "high_risk_recovery_required_context",
+    "context" => "High-risk recovery",
+    "runner" => "high-risk-recovery",
+    "runner_name" => "High-risk recovery runner",
+    "runner_if" => "needs.changes.outputs.high_risk_recovery == 'true'",
+    "step" => "Mirror high-risk recovery result across path-filter skips",
+    "filter_name" => "high_risk_recovery",
+    "filter_output" => "${{ needs.changes.outputs.high_risk_recovery }}",
+  },
+  {
+    "mirror" => "dashboard_required_context",
+    "context" => "Dashboard (Node 22)",
+    "runner" => "dashboard",
+    "runner_name" => "Dashboard (Node 22) runner",
+    "runner_if" => "needs.changes.outputs.dashboard == 'true'",
+    "step" => "Mirror dashboard result for branch protection",
+    "filter_name" => "dashboard",
+    "filter_output" => "${{ needs.changes.outputs.dashboard }}",
+  },
+]
+
+pin_step = {
+  "name" => "Pin required-check mirror helper (#5321)",
+  "env" => {"BASH_ENV" => "/dev/null"},
+  "shell" => "bash",
+  "timeout-minutes" => 10,
+  "run" => [
+    "helper_path=scripts/required-check-mirror.sh",
+    "expected=#{helper_sha256}",
+    'actual="$(sha256sum "$helper_path" | cut -d \' \' -f 1)"',
+    'if [ "$actual" != "$expected" ]; then',
+    '  echo "::error file=$helper_path::content hash mismatch: expected $expected, found $actual; review the helper and update every #5321 helper pin together"',
+    "  exit 1",
+    "fi",
+  ].join("\n") + "\n",
+}
+
+errors = []
+begin
+  _pr_document, jobs = load_jobs(pr_path)
+  raw_root = raw_yaml_node(Psych.parse_file(pr_path).root)
+  raw_jobs = raw_root.is_a?(Hash) && raw_root["jobs"].is_a?(Hash) ? raw_root["jobs"] : {}
+rescue StandardError => error
+  warn "#{pr_path}: cannot parse YAML: #{error.message}"
+  exit 1
+end
+
+specs.each do |spec|
+  mirror_id = spec.fetch("mirror")
+  context = spec.fetch("context")
+  runner_id = spec.fetch("runner")
+  expected_mirror = {
+    "name" => context,
+    "needs" => ["changes", runner_id],
+    "if" => "always()",
+    "runs-on" => "ubuntu-latest",
+    "steps" => [
+      {"uses" => "actions/checkout@v4"},
+      pin_step,
+      {
+        "name" => spec.fetch("step"),
+        "env" => {
+          "BASH_ENV" => "/dev/null",
+          "CHANGED_PATHS_RESULT" => "${{ needs.changes.result }}",
+          "FILTER_NAME" => spec.fetch("filter_name"),
+          "FILTER_OUTPUT" => spec.fetch("filter_output"),
+          "UPSTREAM_JOB_NAME" => runner_id,
+          "UPSTREAM_RESULT" => "${{ needs.#{runner_id}.result }}",
+        },
+        "run" => "./scripts/required-check-mirror.sh",
+      },
+    ],
+  }
+  mirror = jobs[mirror_id]
+  if !mirror.is_a?(Hash)
+    errors << "#{context} required-context mirror job #{mirror_id} must exist"
+  elsif mirror != expected_mirror
+    errors << "#{context} required-context mirror #{mirror_id} must retain its exact `if: always()` job surface, helper pin, and fail-closed result-mirror step"
+  elsif raw_jobs[mirror_id] != stringify(expected_mirror)
+    errors << "#{context} required-context mirror #{mirror_id} must retain the exact raw YAML scalars"
+  end
+
+  runner = jobs[runner_id]
+  if !runner.is_a?(Hash)
+    errors << "#{context} runner job #{runner_id} must exist"
+  else
+    {
+      "name" => spec.fetch("runner_name"),
+      "needs" => "changes",
+      "if" => spec.fetch("runner_if"),
+    }.each do |field, expected|
+      errors << "#{context} runner job #{runner_id} must retain exact #{field}" unless runner[field] == expected
+    end
+    if runner.key?("continue-on-error")
+      errors << "#{context} runner job #{runner_id} must not define a continue-on-error key"
+    end
+  end
+
+  publishers = jobs.select do |_job_id, job|
+    job.is_a?(Hash) && job["name"].is_a?(String) && can_render_context?(job["name"], context)
+  end.keys.map(&:to_s)
+  unless publishers == [mirror_id]
+    errors << "required #{context} context must belong only to jobs.#{mirror_id}; publishers: #{publishers.inspect}"
+  end
+end
+
+(workflow_paths - [pr_path]).each do |path|
+  begin
+    document, other_jobs = load_jobs(path)
+  rescue StandardError => error
+    errors << "#{path}: cannot parse YAML: #{error.message}"
+    next
+  end
+  next unless pull_request_triggered?(document)
+
+  specs.each do |spec|
+    context = spec.fetch("context")
+    publishers = other_jobs.select do |_job_id, job|
+      job.is_a?(Hash) && job["name"].is_a?(String) && can_render_context?(job["name"], context)
+    end.keys.map(&:to_s)
+    next if publishers.empty?
+
+    errors << "#{path}: pull_request workflow must not publish required #{context} context (jobs: #{publishers.join(', ')})"
+  end
+end
+
+errors.each { |message| warn "#{pr_path}: #{message}" }
+exit(errors.empty? ? 0 : 1)
+RUBY
+  then
+    error "$pr_workflow must publish path-filtered required contexts from fail-closed result mirrors"
+  fi
+}
+
 if [ ! -f "$trusted_workflow" ]; then
   error "missing $trusted_workflow"
 fi
@@ -1299,6 +1520,7 @@ while IFS= read -r -d '' workflow; do
 done < <(workflow_files)
 
 validate_required_context_uniqueness
+validate_path_filter_required_mirrors
 
 if [ -f "$trusted_workflow" ]; then
   if grep -Eq '^[[:space:]]+pull_request(_target)?:' "$trusted_workflow"; then
