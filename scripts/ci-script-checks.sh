@@ -183,6 +183,10 @@ banner "Destructive call-site per-file ratchet (#5071 T3-A4)"
 "$PYTHON" scripts/check_destructive_call_site_ratchet.py --check
 "$PYTHON" -m unittest tests.test_destructive_call_site_ratchet
 
+banner "H2 tmux boundary measurer self-tests"
+# The measurer is inert in CI until its baseline lands; its unit tests run now.
+"$PYTHON" -m unittest tests.test_h2_measure
+
 banner "Reachability row-independence + change-surface gate (#5071 T4-B1)"
 # 4987 §-1.5 withdrew the claim that I14 ("obligation production is independent
 # of the inflight row") is compiler-enforced: InflightTurnState is

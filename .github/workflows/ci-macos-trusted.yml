@@ -145,6 +145,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
+          components: clippy
 
       - name: Disable sccache on hosted macOS
         shell: bash
@@ -176,6 +177,11 @@ jobs:
       - name: cargo check
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         run: cargo check --all-targets
+
+      # H2 tmux boundary ratchet, macOS lane; inert until the baseline lands.
+      - name: H2 tmux boundary measurement (macos, inert)
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
+        run: bash scripts/ci/h2_measure.sh --lane macos --inert
 
       - name: cargo test (non-PG, targeted subset)
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
@@ -274,6 +280,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
+          components: clippy
 
       - name: Configure local sccache
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
@@ -317,6 +324,11 @@ jobs:
       - name: cargo check
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         run: nice -n 10 cargo check --all-targets
+
+      # H2 tmux boundary ratchet, macOS lane; inert until the baseline lands.
+      - name: H2 tmux boundary measurement (macos, inert)
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
+        run: nice -n 10 bash scripts/ci/h2_measure.sh --lane macos --inert
 
       - name: cargo test (non-PG, targeted subset)
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
