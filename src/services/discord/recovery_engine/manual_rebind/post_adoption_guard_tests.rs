@@ -642,6 +642,7 @@ fn relay_setup_failure_rollbacks_are_exact_episode_guarded() {
         expected_turn_start_offset: adopted.turn_start_offset,
         expected_last_offset_for_rebase: None,
         expected_episode: Some(adopted_pin),
+        committed: adopted.clone(),
     }
     .apply();
     assert!(outcome.contains("SuccessorOwned"), "{outcome}");

@@ -794,7 +794,8 @@ src/
 │   │   │   │   ├── identity_gate.rs
 │   │   │   │   ├── outcome_decomposition_tests.rs
 │   │   │   │   ├── post_loop_identity_guard_tests.rs
-│   │   │   │   └── rebind_adoption.rs
+│   │   │   │   ├── rebind_adoption.rs
+│   │   │   │   └── rollback_pin_tests.rs
 │   │   │   ├── stall_recovery_tests/
 │   │   │   │   ├── flake_isolation_4361.rs
 │   │   │   │   └── flake_isolation_4422.rs

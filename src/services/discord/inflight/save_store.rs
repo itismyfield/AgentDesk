@@ -42,10 +42,7 @@ pub(in crate::services::discord) use self::identity_gate::{
     touch_inflight_state_if_matches_identity,
 };
 pub(in crate::services::discord) use self::rebind_adoption::{
-    save_existing_inflight_rebind_adoption_if_matches_episode,
-    save_existing_inflight_rebind_adoption_if_matches_identity,
-    save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_episode,
-    save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity,
+    restore_inflight_rebind_adoption_if_pinned, save_existing_inflight_rebind_adoption_committed,
 };
 pub(in crate::services::discord) use super::store::GuardedSaveOutcome;
 

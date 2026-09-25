@@ -806,6 +806,7 @@ pub(in crate::services::discord::inflight) fn mark_readopted_from_inflight_if_id
     }
 }
 
+#[cfg(test)]
 pub(in crate::services::discord::inflight) fn save_existing_inflight_rebind_adoption_if_matches_identity_in_root(
     root: &Path,
     state: &InflightTurnState,
@@ -819,9 +820,11 @@ pub(in crate::services::discord::inflight) fn save_existing_inflight_rebind_adop
         None,
         expected_turn_start_offset,
         None,
+        None,
     )
 }
 
+#[cfg(test)]
 pub(in crate::services::discord::inflight) fn save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity_in_root(
     root: &Path,
     state: &InflightTurnState,
@@ -836,6 +839,7 @@ pub(in crate::services::discord::inflight) fn save_existing_inflight_rebind_adop
         None,
         expected_turn_start_offset,
         Some(expected_last_offset),
+        None,
     )
 }
 
@@ -846,6 +850,7 @@ pub(super) fn save_existing_inflight_rebind_adoption_impl_in_root(
     expected_episode: Option<&InflightEpisodePin>,
     expected_turn_start_offset: Option<u64>,
     expected_last_offset_for_rebase: Option<u64>,
+    rollback_pin: Option<&InflightTurnState>,
 ) -> GuardedSaveOutcome {
     lock_and_save_existing_inflight_rebind_adoption_impl_in_root(
         root,
@@ -854,6 +859,7 @@ pub(super) fn save_existing_inflight_rebind_adoption_impl_in_root(
         expected_episode,
         expected_turn_start_offset,
         expected_last_offset_for_rebase,
+        rollback_pin,
     )
     .map_or_else(|outcome| outcome, |_| GuardedSaveOutcome::Saved)
 }
@@ -865,6 +871,7 @@ pub(in crate::services::discord::inflight) fn lock_and_save_existing_inflight_re
     expected_episode: Option<&InflightEpisodePin>,
     expected_turn_start_offset: Option<u64>,
     expected_last_offset_for_rebase: Option<u64>,
+    rollback_pin: Option<&InflightTurnState>,
 ) -> Result<
     (
         super::super::store::InflightStateFileLock,
@@ -891,6 +898,11 @@ pub(in crate::services::discord::inflight) fn lock_and_save_existing_inflight_re
         return Err(GuardedSaveOutcome::AuthorityPinned);
     };
     if expected_episode.is_some_and(|pin| !pin.matches_state(&on_disk)) {
+        return Err(GuardedSaveOutcome::SuccessorOwned);
+    }
+    if rollback_pin
+        .is_some_and(|committed| !super::rebind_adoption::rollback_pin_holds(committed, &on_disk))
+    {
         return Err(GuardedSaveOutcome::SuccessorOwned);
     }
     if on_disk.rebind_origin {

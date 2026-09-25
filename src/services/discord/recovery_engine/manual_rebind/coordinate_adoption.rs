@@ -20,6 +20,7 @@ pub(super) async fn adopt_coordinates(
     super::inflight::InflightTurnIdentity,
     Option<u64>,
     Option<u64>,
+    Option<super::inflight::InflightTurnState>,
 ) {
     let AdoptionCoordinates {
         tmux_session_name,
@@ -52,6 +53,7 @@ pub(super) async fn adopt_coordinates(
     let rollback_expected_turn_start_offset = existing.turn_start_offset;
     let rollback_expected_last_offset_for_rebase =
         existing_offset_rebase_to_output.map(|_| existing.last_offset);
+    let mut committed = None;
     let save_outcome = if let Some(expected_episode) = expected_episode {
         let adoption_state = existing.clone();
         let expected_identity = expected.clone();
@@ -72,29 +74,31 @@ pub(super) async fn adopt_coordinates(
         match adoption {
             Ok(guard) => {
                 *existing = guard.state().clone();
+                committed = Some(existing.clone());
                 *locked_episode_from_adoption = Some(guard);
                 super::inflight::GuardedSaveOutcome::Saved
             }
             Err(outcome) => outcome,
         }
-    } else if existing_offset_rebase_to_output.is_some() {
-        super::inflight::save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity(
-            existing,
-            &expected,
-            expected_turn_start_offset,
-            expected_last_offset_for_rebase,
-        )
     } else {
-        super::inflight::save_existing_inflight_rebind_adoption_if_matches_identity(
+        match super::inflight::save_existing_inflight_rebind_adoption_committed(
             existing,
             &expected,
             expected_turn_start_offset,
-        )
+            existing_offset_rebase_to_output.map(|_| expected_last_offset_for_rebase),
+        ) {
+            Ok(row) => {
+                committed = Some(row);
+                super::inflight::GuardedSaveOutcome::Saved
+            }
+            Err(outcome) => outcome,
+        }
     };
     (
         save_outcome,
         rollback_expected,
         rollback_expected_turn_start_offset,
         rollback_expected_last_offset_for_rebase,
+        committed,
     )
 }

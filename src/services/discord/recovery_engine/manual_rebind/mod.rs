@@ -75,6 +75,7 @@ enum PendingRebindInflightRollback {
         expected_turn_start_offset: Option<u64>,
         expected_last_offset_for_rebase: Option<u64>,
         expected_episode: Option<super::inflight::InflightEpisodePin>,
+        committed: super::inflight::InflightTurnState,
     },
     ClearRebindOrigin {
         provider: crate::services::provider::ProviderKind,
@@ -93,38 +94,16 @@ impl PendingRebindInflightRollback {
                 expected_turn_start_offset,
                 expected_last_offset_for_rebase,
                 expected_episode,
+                committed,
             } => {
-                let outcome = if let Some(expected_episode) = expected_episode.as_ref() {
-                    if let Some(expected_last_offset) = expected_last_offset_for_rebase {
-                        super::inflight::save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_episode(
-                            &state,
-                            &expected,
-                            expected_episode,
-                            expected_turn_start_offset,
-                            expected_last_offset,
-                        )
-                    } else {
-                        super::inflight::save_existing_inflight_rebind_adoption_if_matches_episode(
-                            &state,
-                            &expected,
-                            expected_episode,
-                            expected_turn_start_offset,
-                        )
-                    }
-                } else if let Some(expected_last_offset) = expected_last_offset_for_rebase {
-                    super::inflight::save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity(
-                        &state,
-                        &expected,
-                        expected_turn_start_offset,
-                        expected_last_offset,
-                    )
-                } else {
-                    super::inflight::save_existing_inflight_rebind_adoption_if_matches_identity(
-                        &state,
-                        &expected,
-                        expected_turn_start_offset,
-                    )
-                };
+                let outcome = super::inflight::restore_inflight_rebind_adoption_if_pinned(
+                    &state,
+                    &expected,
+                    expected_episode.as_ref(),
+                    expected_turn_start_offset,
+                    expected_last_offset_for_rebase,
+                    &committed,
+                );
                 format!("restore_existing_adoption:{outcome:?}")
             }
             Self::ClearRebindOrigin {
@@ -679,6 +658,7 @@ async fn rebind_inflight_for_channel_inner(
             rollback_expected,
             rollback_expected_turn_start_offset,
             rollback_expected_last_offset_for_rebase,
+            committed_adoption,
         ) = coordinate_adoption::adopt_coordinates(
             &mut existing,
             coordinate_adoption::AdoptionCoordinates {
@@ -708,6 +688,11 @@ async fn rebind_inflight_for_channel_inner(
                 ))
             });
         }
+        let Some(committed) = committed_adoption else {
+            return Err(RebindError::Internal(format!(
+                "existing inflight watcher adoption for channel {channel_id} returned no committed row"
+            )));
+        };
         let adopted_episode_pin =
             expected_episode.map(|_| super::inflight::InflightEpisodePin::from_state(&existing));
         inflight_rollback_on_relay_setup_failure =
@@ -717,6 +702,7 @@ async fn rebind_inflight_for_channel_inner(
                 expected_turn_start_offset: rollback_expected_turn_start_offset,
                 expected_last_offset_for_rebase: rollback_expected_last_offset_for_rebase,
                 expected_episode: adopted_episode_pin.clone(),
+                committed,
             });
         existing
     } else {

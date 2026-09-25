@@ -173,6 +173,7 @@ pub(in crate::services::discord) fn adopt_and_lock_inflight_episode(
         Some(expected_episode),
         expected_turn_start_offset,
         expected_last_offset_for_rebase,
+        None,
     )?;
     let provider = state.provider_kind().ok_or(GuardedSaveOutcome::IoError)?;
     let path = inflight_state_path(&root, &provider, state.channel_id);

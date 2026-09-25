@@ -59,7 +59,7 @@ fn exercise(successor: bool) {
             let before = serde_json::to_value(&durable).unwrap();
             let mut adopted = original.clone();
             let mut held = None;
-            let (outcome, rollback_identity, rollback_start, rollback_frontier) =
+            let (outcome, rollback_identity, rollback_start, rollback_frontier, committed) =
                 runtime.block_on(coordinate_adoption::adopt_coordinates(
                     &mut adopted,
                     coordinate_adoption::AdoptionCoordinates {
@@ -136,8 +136,13 @@ fn exercise(successor: bool) {
             }
             drop(held); // Release the actual adoption lock before loading durable state.
             let after = inflight::load_inflight_state(&ProviderKind::Codex, 5704).unwrap();
+            // Both paths hand back the row they committed (the rollback pin).
+            assert_eq!(
+                committed.map(|row| serde_json::to_value(row).unwrap()),
+                (!successor).then(|| serde_json::to_value(&after).unwrap())
+            );
             if !successor && !pinned {
-                // Legacy save returns an outcome, not its persisted timestamp/generation.
+                // The identity path leaves the caller's local row unstamped.
                 assert_eq!(after.save_generation, original.save_generation + 1);
                 assert!(!after.updated_at.is_empty());
                 adopted.save_generation = after.save_generation;
