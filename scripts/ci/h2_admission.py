@@ -129,16 +129,20 @@ def owner_pub_fns(root: Path, rel: str, modpath: str) -> set[str]:
     return found
 
 def owner_shape_problems(root: Path) -> list[str]:
-    """R-E: no macro_rules!/item-level macro and no trait default method in the owner API files."""
+    """R-E/R-O: no macro_rules!/item-level macro in any owner file; no trait default method in the owner API files.
+    Review r6: a macro can synthesize `#[path]` (`#[$attr]`) that has_path_attr cannot see, so it is refused, not expanded."""
     problems = []
-    for rel in INVENTORY_FILES:
+    for rel in sorted(OWNER_ROSTER):
         if not (root / rel).exists():
             continue
         code = production_views(root / rel)[0]
         items = m.SourceFile(code).items
-        problems += [f"R-E: {rel} uses item-level macro `{call.group(1) or call.group(2)}!`; owner API must be plain fns"
+        problems += [f"{'R-E' if rel in INVENTORY_FILES else 'R-O'}: {rel} uses item-level macro "
+                     f"`{call.group(1) or call.group(2)}!`; owner files must be plain items"
                      for call in ITEM_MACRO_RE.finditer(code)
                      if call.group(1) or not any(s <= call.start() <= e for s, e, _, _ in items)]
+        if rel not in INVENTORY_FILES:
+            continue
         # a fn with a body whose parent scope is a trait declared here is a default method
         traits = set(TRAIT_RE.findall(code))
         problems += [f"R-E: {rel} trait default method {'::'.join(names)}; owner API must be plain fns"
@@ -150,6 +154,20 @@ def tmux_literal_sites(code: str, mixed: str, literals: list[tuple[int, str]]) -
     src = m.SourceFile(code)
     line = lambda pos: " ".join(mixed[mixed.rfind("\n", 0, pos) + 1:(mixed.find("\n", pos) + 1 or len(mixed) + 1) - 1].split())
     return collections.Counter((src.enclosing(pos)[0], line(pos)) for pos, text in literals if TMUX_LITERAL_RE.match(text))
+
+def has_path_attr(code: str) -> bool:
+    """True if a `#[..]`/`#![..]` attribute names `path =` anywhere inside it, cfg_attr and multi-line included.
+    Review r5: the span ends at the depth-matched `]`, so a nested `[..]` before `path =` cannot cut it short."""
+    for opener in re.finditer(r"#\s*!?\s*\[", code):
+        depth, end = 0, len(code)
+        for i in range(opener.end() - 1, len(code)):
+            depth += {"[": 1, "]": -1}.get(code[i], 0)
+            if depth == 0:
+                end = i
+                break
+        if re.search(r"\bpath\s*=", code[opener.end():end]):
+            return True
+    return False
 
 def zero_rules(root: Path) -> list[str]:
     """R-C, R-C2, R-F over non-owner prod Rust; R-O roster, Cargo.lock (H4) and H9 files."""
@@ -177,7 +195,7 @@ def zero_rules(root: Path) -> list[str]:
         problems.append(f"R-O: owner roster mismatch: {rel} ({'unlisted' if rel in found else 'missing'})")
     # r6 §2.1: an owner file may not mount a module from outside the owner paths via #[path]
     problems += [f"R-O: {rel} uses #[path]; owner modules must live under the owner paths"
-                 for rel in sorted(found - PATH_ATTR_ALLOWED) if re.search(r"#\s*!?\s*\[[^\]]*?\bpath\s*=", production_views(root / rel)[0])]
+                 for rel in sorted(found - PATH_ATTR_ALLOWED) if has_path_attr(production_views(root / rel)[0])]
     lock = root / "Cargo.lock"
     if lock.exists():
         problems += [f"R-O: Cargo.lock brings in `{name}` (tmux/pty crate, H4)"
