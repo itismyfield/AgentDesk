@@ -114,37 +114,9 @@ test("timeouts reconciliation module scans pending fallback dispatch keys", () =
   assert.match(state.queries[0].sql, /reconcile_dispatch:%/);
 });
 
-test("timeouts harness previewTimeoutDecision handles null payload without throwing", () => {
-  const { agentdesk, state } = loadPolicy("policies/timeouts.js");
-  let result = null;
-
-  assert.doesNotThrow(() => {
-    result = agentdesk.timeouts.previewTimeoutDecision(null);
-  });
-
-  assert.equal(state.timeoutPreviewCalls.length, 1);
-  assert.deepEqual(state.timeoutPreviewCalls[0], {});
-  assert.equal(result && typeof result, "object");
-  assert.ok(
-    Object.prototype.hasOwnProperty.call(result, "resolution") ||
-      Object.prototype.hasOwnProperty.call(result, "error")
-  );
-});
-
 test("timeouts card timeout module marks requested dispatches failed before retry", () => {
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     config: { requested_timeout_min: 30 },
-    timeouts: {
-      previewTimeoutDecision(payload) {
-        return {
-          would_retry: true,
-          would_exhaust: false,
-          resolution: "retry",
-          attempt: payload.attempt,
-          delay: 300
-        };
-      }
-    },
     dbQuery: createSqlRouter([
       {
         match: "FROM kanban_cards kc LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id",
@@ -166,34 +138,9 @@ test("timeouts card timeout module marks requested dispatches failed before retr
   assert.deepEqual(state.dispatchMarkFailedCalls, [
     { dispatchId: "dispatch-requested-1", reason: "Timed out waiting for agent" }
   ]);
-  assert.equal(state.timeoutPreviewCalls.length, 1);
-  assert.deepEqual(
-    {
-      card_id: state.timeoutPreviewCalls[0].card_id,
-      status: state.timeoutPreviewCalls[0].status,
-      state: state.timeoutPreviewCalls[0].state,
-      latest_dispatch_id: state.timeoutPreviewCalls[0].latest_dispatch_id,
-      attempt: state.timeoutPreviewCalls[0].attempt
-    },
-    {
-      card_id: "card-requested-1",
-      status: "requested",
-      state: "requested",
-      latest_dispatch_id: "dispatch-requested-1",
-      attempt: 2
-    }
-  );
-  const shadowLine = state.logs.info.find((line) => line.startsWith("[timeout_shadow] "));
-  assert.ok(shadowLine);
-  const shadow = JSON.parse(shadowLine.slice("[timeout_shadow] ".length));
-  assert.equal(shadow.target, "agentdesk::timeout_shadow");
-  assert.equal(shadow.card_id, "card-requested-1");
-  assert.equal(shadow.section, "_section_A");
-  assert.equal(shadow.js_decision, "retry");
-  assert.equal(shadow.reducer_decision, "retry");
-  assert.equal(shadow.agree, true);
   assert.match(state.executions[0].sql, /UPDATE kanban_cards SET requested_at/);
   assert.deepEqual(toPlain(state.executions[0].params), ["card-requested-1"]);
+  assert.equal(state.logs.info.some((line) => line.startsWith("[timeout_shadow]")), false);
 });
 
 test("timeouts requested sweep skips consultation side-path dispatches (#256)", () => {
@@ -258,21 +205,8 @@ test("timeouts requested sweep skips scope-assessment side-path even when overdu
   );
 });
 
-test("timeouts dispatch maintenance shadows failed-dispatch retries without changing retry mutations", () => {
+test("timeouts dispatch maintenance retries failed dispatches with an incremented retry count", () => {
   const { policy, state } = loadPolicy("policies/timeouts.js", {
-    timeouts: {
-      previewTimeoutDecision(payload) {
-        return {
-          would_retry: false,
-          would_exhaust: false,
-          resolution: "incomparable",
-          attempt: payload.attempt,
-          delay: null,
-          incomparable: true,
-          reason: "state missing"
-        };
-      }
-    },
     dbQuery: createSqlRouter([
       {
         match: "FROM task_dispatches td JOIN kanban_cards kc ON kc.id = td.kanban_card_id",
@@ -294,23 +228,6 @@ test("timeouts dispatch maintenance shadows failed-dispatch retries without chan
 
   policy._section_J();
 
-  assert.equal(state.timeoutPreviewCalls.length, 1);
-  assert.deepEqual(
-    {
-      card_id: state.timeoutPreviewCalls[0].card_id,
-      status: state.timeoutPreviewCalls[0].status,
-      state: state.timeoutPreviewCalls[0].state,
-      latest_dispatch_id: state.timeoutPreviewCalls[0].latest_dispatch_id,
-      attempt: state.timeoutPreviewCalls[0].attempt
-    },
-    {
-      card_id: "card-retry-1",
-      status: null,
-      state: null,
-      latest_dispatch_id: "dispatch-failed-1",
-      attempt: 3
-    }
-  );
   assert.deepEqual(state.dispatchCreates, [
     {
       cardId: "card-retry-1",
@@ -323,16 +240,7 @@ test("timeouts dispatch maintenance shadows failed-dispatch retries without chan
   assert.deepEqual(state.dispatchRetryCountCalls, [
     { dispatchId: "dispatch-1", count: 4 }
   ]);
-  const shadowLine = state.logs.info.find((line) => line.startsWith("[timeout_shadow] "));
-  assert.ok(shadowLine);
-  const shadow = JSON.parse(shadowLine.slice("[timeout_shadow] ".length));
-  assert.equal(shadow.target, "agentdesk::timeout_shadow");
-  assert.equal(shadow.card_id, "card-retry-1");
-  assert.equal(shadow.section, "_section_J");
-  assert.equal(shadow.js_decision, "retry");
-  assert.equal(shadow.reducer_decision, "incomparable");
-  assert.equal(shadow.agree, false);
-  assert.equal(shadow.incomparable, true);
+  assert.equal(state.logs.info.some((line) => line.startsWith("[timeout_shadow]")), false);
 });
 
 // Pins the requested-timeout retry budget: retry_count 9 still retries, 10 escalates.

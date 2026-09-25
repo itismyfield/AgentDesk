@@ -223,9 +223,6 @@ banner "Reachability canonical Rust<->Python equivalence gate (#5071 T4-B2a)"
 banner "Idle-kill owner and timeout policy regressions (#5714)"
 node --test policies/__tests__/idle-kill-owners.test.js policies/__tests__/timeouts.test.js
 
-banner "Timeout shadow aggregation gate tests (#3950)"
-node --test scripts/__tests__/timeout-shadow-gate.test.mjs
-
 banner "Operator routine scripts must stay out of git (docs/source-of-truth.md)"
 if tracked_routines="$(git ls-files routines)" && [ -n "$tracked_routines" ]; then
   echo "✗ routines/ is operator-private and must not be tracked; found:" >&2
