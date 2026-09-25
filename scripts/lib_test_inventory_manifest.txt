@@ -3662,6 +3662,7 @@ services::discord::mailbox_finish::closed_actor_tests::exhausted_restitution_is_
 services::discord::mailbox_finish::closed_actor_tests::refused_restitution_lands_on_the_successor
 services::discord::mailbox_finish::closed_actor_tests::refused_take_keeps_the_pending_catch_up_retry
 services::discord::mailbox_finish::closed_actor_tests::refused_wrapper_request_runs_no_follow_up
+services::discord::mailbox_finish::closed_actor_tests::unreadable_disk_queue_stops_whole_queue_writes
 services::discord::mailbox_finish::closed_actor_tests::whole_queue_writes_keep_a_disk_only_queue
 services::discord::mailbox_finish::relay_state_contract_refs::contract_symbols_exist
 services::discord::mailbox_probe::mailbox_unreachable_tests::unreachable_actor_is_idle_to_wrapper_but_never_ends_the_turn_wait

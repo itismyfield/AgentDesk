@@ -15,8 +15,8 @@ use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::turn_orchestrator::registry_purge::MailboxPurgeOutcome;
 use crate::services::turn_orchestrator::{
-    RecoveryDoneSignal, load_channel_pending_queue_for_tests, save_channel_pending_dispatch_marker,
-    save_channel_queue,
+    RecoveryDoneSignal, load_channel_pending_dispatch_marker, load_channel_pending_queue_for_tests,
+    save_channel_pending_dispatch_marker, save_channel_queue,
 };
 
 const QUEUED: u64 = 21;
@@ -227,6 +227,91 @@ async fn whole_queue_writes_keep_a_disk_only_queue() {
         let disk = load_channel_pending_queue_for_tests(&provider, token_hash, channel).0;
         let ids: Vec<u64> = disk.iter().map(|item| item.message_id.get()).collect();
         assert_eq!(ids, expected, "{arm}");
+    }
+}
+
+/// A queue file that exists but cannot be read (broken JSON, no read permission) stops the
+/// marker restore, take, drain and requeue with an error, leaving file and memory as they were.
+#[tokio::test]
+#[cfg(unix)]
+async fn unreadable_disk_queue_stops_whole_queue_writes() {
+    let _root = isolated_agentdesk_root();
+    let shared = discord::make_shared_data_for_tests();
+    let arms = ["marker", "take", "drain", "requeue"];
+    let rows = arms
+        .into_iter()
+        .flat_map(|arm| [(arm, "json"), (arm, "mode")]);
+    let mut broken = Vec::new();
+    for (index, (arm, fault)) in rows.enumerate() {
+        let channel = ChannelId::new(5_951_661 + index as u64);
+        if let Err(why) = unreadable_queue_row(&shared, channel, arm, fault).await {
+            broken.push(format!("{arm}/{fault}: {why}"));
+        }
+    }
+    assert!(broken.is_empty(), "{broken:#?}");
+}
+
+#[cfg(unix)]
+async fn unreadable_queue_row(
+    shared: &SharedData,
+    channel: ChannelId,
+    arm: &str,
+    fault: &str,
+) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let (provider, token_hash) = (ProviderKind::Claude, &shared.token_hash);
+    save_channel_queue(&provider, token_hash, channel, &[queued(OFFERED)], None).unwrap();
+    let dir = discord::runtime_store::discord_pending_queue_root().unwrap();
+    let path = dir
+        .join(provider.as_str())
+        .join(token_hash)
+        .join(format!("{}.json", channel.get()));
+    let mode = |bits| std::fs::set_permissions(&path, std::fs::Permissions::from_mode(bits));
+    let before = if fault == "json" {
+        std::fs::write(&path, "[{broken").unwrap();
+        "[{broken".to_owned()
+    } else {
+        let content = std::fs::read_to_string(&path).unwrap();
+        mode(0o000).unwrap();
+        content
+    };
+    let persistence = discord::queue_persistence_context(shared, &provider, channel);
+    let mailbox = shared.mailbox(channel);
+    let (error, handed_out) = match arm {
+        "marker" => {
+            let marker = queued(QUEUED);
+            save_channel_pending_dispatch_marker(&provider, token_hash, channel, &marker, None)
+                .unwrap();
+            let restored = mailbox
+                .merge_restored_dispatch_marker(marker, None, persistence)
+                .await;
+            let kept = load_channel_pending_dispatch_marker(&provider, token_hash, channel);
+            (restored.persistence_error, kept.is_none())
+        }
+        "take" => {
+            let taken = mailbox.take_next_soft(persistence).await;
+            let handed_out = taken.intervention.is_some() || taken.dispatch_lease.is_some();
+            (taken.persistence_error, handed_out)
+        }
+        "drain" => (
+            mailbox.restart_drain(persistence).await.persistence_error,
+            false,
+        ),
+        _ => {
+            let requeued = mailbox.requeue_front(queued(QUEUED), persistence).await;
+            (requeued.persistence_error, requeued.enqueued)
+        }
+    };
+    let memory = mailbox.snapshot().await.intervention_queue.len();
+    let _ = mode(0o644);
+    let after = std::fs::read_to_string(&path).map_err(|error| error.kind().to_string());
+    match (error, handed_out, memory, after) {
+        (Some(_), false, 0, Ok(after)) if after == before => Ok(()),
+        (error, handed_out, memory, after) => Err(format!(
+            "error {error:?}, dispatched/enqueued/marker spent {handed_out}, memory {memory}, \
+             file {:?}",
+            after.map(|after| after == before)
+        )),
     }
 }
 
