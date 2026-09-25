@@ -203,12 +203,8 @@ clocks:
 # (e.g. `requested_timeout_min`, default 45) via `getTimeoutInterval` in
 # `policies/lib/timeouts-helpers.js`.
 #
-# The one reader is the Rust `decide_timeout` reducer, reached through
-# `agentdesk.timeouts.previewTimeoutDecision` (src/engine/ops/timeouts_ops.rs)
-# from `shadowTimeoutDecision`. That path is preview-only: it emits the
-# `[timeout_shadow]` comparison records consumed by
-# `scripts/timeout-shadow-gate.mjs` (#3950) and never moves a card.
-# Retiring this block therefore means retiring that shadow harness too.
+# Its only reader, the preview-only Rust `decide_timeout` reducer behind `agentdesk.timeouts.previewTimeoutDecision`, has no
+# caller now that the JS `shadowTimeoutDecision` producer and `scripts/timeout-shadow-gate.mjs` are retired; that API and this block remain until a follow-up removes them.
 
 timeouts:
   # #1082: max_retries >= 1, backoff: exponential (1m→5m→15m),

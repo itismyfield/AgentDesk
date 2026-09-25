@@ -140,7 +140,6 @@ test("timeouts card timeout module marks requested dispatches failed before retr
   ]);
   assert.match(state.executions[0].sql, /UPDATE kanban_cards SET requested_at/);
   assert.deepEqual(toPlain(state.executions[0].params), ["card-requested-1"]);
-  assert.equal(state.logs.info.some((line) => line.startsWith("[timeout_shadow]")), false);
 });
 
 test("timeouts requested sweep skips consultation side-path dispatches (#256)", () => {
@@ -240,7 +239,6 @@ test("timeouts dispatch maintenance retries failed dispatches with an incremente
   assert.deepEqual(state.dispatchRetryCountCalls, [
     { dispatchId: "dispatch-1", count: 4 }
   ]);
-  assert.equal(state.logs.info.some((line) => line.startsWith("[timeout_shadow]")), false);
 });
 
 // Pins the requested-timeout retry budget: retry_count 9 still retries, 10 escalates.
