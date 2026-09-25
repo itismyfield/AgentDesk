@@ -35,7 +35,7 @@ import type {
   AutoQueuePanelCtx,
   AutoQueuePhaseRendererCtx,
 } from "./auto-queue-panel-ctx";
-import type { ViewMode } from "./auto-queue-panel-utils";
+import { deriveGateKindByPhase, type ViewMode } from "./auto-queue-panel-utils";
 
 const tr = (ko: string, _en: string) => ko;
 
@@ -102,6 +102,7 @@ function makeRendererCtx(
   return {
     currentBatchPhase: 1,
     gatesByPhase: groupGatesByPhase(gates),
+    gateKindByPhase: new Map(),
     hasBatchPhases: true,
     handleEntryStatusUpdate: () => {},
     locale: "ko",
@@ -154,6 +155,80 @@ describe("createAutoQueuePhaseRenderers / renderPhaseGateIndicator", () => {
 
     expect(() => renderPhaseGateIndicator(3)).not.toThrow();
     expect(renderToStaticMarkup(renderPhaseGateIndicator(3))).toContain("게이트");
+  });
+
+  it("renders the deploy variant for an active phase whose gate kind is deploy-gate", () => {
+    const { renderPhaseGateIndicator } = createAutoQueuePhaseRenderers(
+      makeRendererCtx([makeGate({ phase: 1, status: "pending" })], {
+        gateKindByPhase: new Map([[1, "deploy-gate"]]),
+      }),
+    );
+
+    const markup = renderToStaticMarkup(renderPhaseGateIndicator(1));
+    expect(markup).toContain("배포 게이트");
+    expect(markup).toContain("🚀");
+    expect(markup).toContain("#60a5fa");
+    expect(markup).not.toContain("⏳");
+  });
+
+  it("keeps the deploy label but the idle icon for a queued deploy-gate phase", () => {
+    const { renderPhaseGateIndicator } = createAutoQueuePhaseRenderers(
+      makeRendererCtx([makeGate({ phase: 2, status: "pending" })], {
+        gateKindByPhase: new Map([[2, "deploy-gate"]]),
+      }),
+    );
+
+    const markup = renderToStaticMarkup(renderPhaseGateIndicator(2));
+    expect(markup).toContain("배포 게이트");
+    expect(markup).toContain("○");
+    expect(markup).not.toContain("🚀");
+  });
+
+  it("renders the generic variant for an active pr-confirm phase", () => {
+    const { renderPhaseGateIndicator } = createAutoQueuePhaseRenderers(
+      makeRendererCtx([makeGate({ phase: 1, status: "pending" })], {
+        gateKindByPhase: new Map([[1, "pr-confirm"]]),
+      }),
+    );
+
+    const markup = renderToStaticMarkup(renderPhaseGateIndicator(1));
+    expect(markup).toContain("게이트");
+    expect(markup).not.toContain("배포 게이트");
+    expect(markup).toContain("⏳");
+    expect(markup).toContain("#f59e0b");
+    expect(markup).not.toContain("🚀");
+  });
+});
+
+describe("deriveGateKindByPhase", () => {
+  it("maps each batch phase to its entries' phase_gate_kind", () => {
+    const byPhase = deriveGateKindByPhase([
+      makeEntry({ id: "a", batch_phase: 1, phase_gate_kind: "pr-confirm" }),
+      makeEntry({ id: "b", batch_phase: 2, phase_gate_kind: "deploy-gate" }),
+    ]);
+
+    expect(byPhase.get(1)).toBe("pr-confirm");
+    expect(byPhase.get(2)).toBe("deploy-gate");
+  });
+
+  it("marks a phase deploy-gate when any of its entries carries that kind", () => {
+    const byPhase = deriveGateKindByPhase([
+      makeEntry({ id: "a", batch_phase: 1, phase_gate_kind: "pr-confirm" }),
+      makeEntry({ id: "b", batch_phase: 1, phase_gate_kind: "deploy-gate" }),
+      makeEntry({ id: "c", batch_phase: 1, phase_gate_kind: "pr-confirm" }),
+    ]);
+
+    expect(byPhase.get(1)).toBe("deploy-gate");
+  });
+
+  it("treats a missing batch_phase as phase 0 and skips entries without a kind", () => {
+    const byPhase = deriveGateKindByPhase([
+      makeEntry({ id: "a", batch_phase: undefined, phase_gate_kind: "pr-confirm" }),
+      makeEntry({ id: "b", batch_phase: 3 }),
+    ]);
+
+    expect(byPhase.get(0)).toBe("pr-confirm");
+    expect(byPhase.has(3)).toBe(false);
   });
 });
 

@@ -40,6 +40,8 @@ export interface DispatchQueueEntry {
   retry_count?: number;
   thread_group?: number;
   batch_phase?: number;
+  /** Catalog id of the gate that follows this entry's batch_phase (server defaults it to `pr-confirm`). */
+  phase_gate_kind?: string;
   thread_links?: AutoQueueThreadLink[];
   card_status?: string;
   review_round?: number;

@@ -21,7 +21,7 @@ import { buildRequestGenerateGroups, resetAutoQueueForSelection } from "./auto-q
 import type { AutoQueueRequestProgress } from "./auto-queue-panel-ctx";
 import AutoQueuePanelView from "./AutoQueuePanelView";
 import { useSortableReorder } from "./AutoQueueSortableRows";
-import { formatRequestGroupKey, isCompletedEntry, requestGroupKey, sortEntriesForDisplay, type ViewMode } from "./auto-queue-panel-utils";
+import { deriveGateKindByPhase, formatRequestGroupKey, isCompletedEntry, requestGroupKey, sortEntriesForDisplay, type ViewMode } from "./auto-queue-panel-utils";
 import type { ReadyAutoQueueEntry } from "./auto-queue-actions";
 
 interface Props {
@@ -357,6 +357,7 @@ export default function AutoQueuePanel({
     list.push(gate);
     gatesByPhase.set(gate.phase, list);
   }
+  const gateKindByPhase = deriveGateKindByPhase(entries);
   const agentStats: Record<
     string,
     { pending: number; dispatched: number; done: number; skipped: number; failed: number }
@@ -443,6 +444,7 @@ export default function AutoQueuePanel({
         error,
         expanded,
         failedCount,
+        gateKindByPhase,
         gatesByPhase,
         generating,
         getAgentLabel,
