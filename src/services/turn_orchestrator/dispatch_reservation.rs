@@ -65,6 +65,12 @@ pub(super) fn settle_pending_dispatch_on_claim(
             .pending_user_dispatch_source_ids
             .contains(&user_message_id)
     {
+        // #6035: the reservation's other ids now run inside this turn.
+        let reserved = state.pending_user_dispatch.into_iter();
+        state.active_absorbed_source_ids = reserved
+            .chain(state.pending_user_dispatch_source_ids.iter().copied())
+            .filter(|id| *id != user_message_id)
+            .collect();
         clear_pending_user_dispatch(state);
     }
 }

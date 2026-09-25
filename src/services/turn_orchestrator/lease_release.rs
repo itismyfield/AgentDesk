@@ -36,6 +36,7 @@ pub(super) fn release_active_turn_anchor(
     pause_inbound_stall_for_turn(state, held);
     state.active_request_owner = None;
     state.active_user_message_id = None;
+    state.active_absorbed_source_ids.clear();
     state.active_turn_nonce = None;
     // #3167 — clear the priority class with the rest of the active-turn anchor.
     state.active_turn_kind = ActiveTurnKind::default();

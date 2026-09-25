@@ -1,8 +1,9 @@
 use poise::serenity_prelude::MessageId;
 
 use super::{
-    Intervention, QueueExitEvent, QueueExitKind, SourceMessageQueuedGeneration,
-    ensure_source_message_ids, join_source_text_segments,
+    ChannelMailboxState, EnqueueInterventionResult, EnqueueRefusalReason, Intervention,
+    QueueExitEvent, QueueExitKind, SourceMessageQueuedGeneration, ensure_source_message_ids,
+    join_source_text_segments,
 };
 
 pub(super) fn intervention_sources_all_match_active(
@@ -16,6 +17,36 @@ pub(super) fn intervention_sources_all_match_active(
                 .iter()
                 .all(|source_id| *source_id == active_id)
     })
+}
+
+/// Pre-hydrate refusal of work the active turn already runs: its own message, or
+/// (#6035) only ids its merged head absorbed, which would otherwise run twice.
+pub(super) fn active_turn_enqueue_refusal(
+    state: &ChannelMailboxState,
+    intervention: &Intervention,
+) -> Option<EnqueueRefusalReason> {
+    if intervention_sources_all_match_active(intervention, state.active_user_message_id) {
+        return Some(EnqueueRefusalReason::AlreadyActiveTurn);
+    }
+    let sources = &intervention.source_message_ids;
+    let absorbed = &state.active_absorbed_source_ids;
+    (!sources.is_empty() && sources.iter().all(|source| absorbed.contains(source)))
+        .then_some(EnqueueRefusalReason::AbsorbedByActiveTurn)
+}
+
+impl EnqueueInterventionResult {
+    pub(super) fn refused(
+        reason: EnqueueRefusalReason,
+        queue_exit_events: Vec<QueueExitEvent>,
+    ) -> Self {
+        Self {
+            enqueued: false,
+            merged: false,
+            refusal_reason: Some(reason),
+            queue_exit_events,
+            persistence_error: None,
+        }
+    }
 }
 
 pub(super) fn intervention_has_active_source(

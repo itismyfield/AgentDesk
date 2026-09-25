@@ -6,6 +6,7 @@ use std::io::Write;
 
 use super::super::CatchUpRetryState;
 use super::*;
+use crate::services::discord::outbound::completed_turn_ledger;
 use crate::services::discord::{self as discord, MailboxEnqueueOutcome, SharedData};
 use crate::services::turn_orchestrator::EnqueueRefusalReason;
 
@@ -14,6 +15,9 @@ enum Hook {
     /// Another producer queues the id between the scan snapshot and the enqueue.
     PreQueue,
     Defer,
+    /// #6035: the given primary's merged head absorbs the id and claims its
+    /// turn between the scan snapshot and the enqueue.
+    AbsorbInto(MessageId),
 }
 
 #[derive(Debug)]
@@ -160,6 +164,15 @@ impl CatchUpDiscordApi for StrictApi {
             },
             Some(Hook::PreQueue) => {
                 queue(shared, provider, channel_id, message_id).await;
+                discord::mailbox_enqueue_intervention(shared, provider, channel_id, intervention)
+                    .await
+            }
+            Some(Hook::AbsorbInto(primary)) => {
+                let absorbed = [message_id];
+                absorbed_active_tests::absorb_and_claim(
+                    shared, provider, channel_id, &absorbed, primary,
+                )
+                .await;
                 discord::mailbox_enqueue_intervention(shared, provider, channel_id, intervention)
                     .await
             }
@@ -624,8 +637,8 @@ enum Resolution {
     /// Teardown/recovery clear: an unintended loss, so M is recovered again.
     LeftQueueUnprocessed,
     BecameActiveTurn,
-    /// M is the newest primary of a merged head that also carries older H. The
-    /// claim drops H's evidence, so H is re-offered, never leapt (#6205 dedups).
+    /// M is the newest primary of a merged head that also carries older H. H is
+    /// held while M's turn runs (#6205), then re-offered once, never leapt.
     MergedHeadClaimed,
     /// `/clear`: the user discarded M, so neither sweep may run it again.
     IntentionallyCleared,
@@ -705,16 +718,27 @@ async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
             assert!(started, "{resolution:?}");
         }
     }
-    let second = StrictApi::new(&fx.shared).with_history(channel_id, history);
+    let mut second = StrictApi::new(&fx.shared).with_history(channel_id, history.clone());
     if let Resolution::IntentionallyCleared | Resolution::OrphanedReservationCleared = resolution {
         fx.sweep(&second).await;
         assert_phase1_read(&second, after(m), &[]);
     } else {
         fx.retry_sweep(&second, channel_id).await;
+        if let Resolution::MergedHeadClaimed = resolution {
+            // The absorbing turn is not evidence: H is neither offered nor leapt.
+            assert_eq!(accepted(&second), Vec::<u64>::new(), "{resolution:?}");
+            let held = (Some(checkpoint.get()), Some(checkpoint.get()));
+            assert_eq!(fx.surfaces(channel_id), held, "{resolution:?}");
+            let retry = fx.pending(channel_id).expect("H keeps the barrier retry");
+            assert_eq!(retry.checkpoint, checkpoint.get(), "{resolution:?}");
+            completed_turn_ledger::append_completed_turn(&fx.provider, channel_id.get(), m.get());
+            discord::mailbox_finish_turn(&fx.shared, &fx.provider, channel_id).await;
+            second = StrictApi::new(&fx.shared).with_history(channel_id, history);
+            fx.retry_sweep(&second, channel_id).await;
+        }
         assert_phase1_read(&second, after(checkpoint), &[m]);
     }
-    let log = second.enqueue_log().into_iter();
-    let rerun: Vec<u64> = log.filter(|(_, ok, _)| *ok).map(|(id, ..)| id).collect();
+    let rerun = accepted(&second);
     let expected_rerun = match resolution {
         Resolution::LeftQueueUnprocessed => vec![m.get()],
         Resolution::MergedHeadClaimed => vec![h.get()],
@@ -730,6 +754,11 @@ async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
         None,
         "{resolution:?}: no residual barrier"
     );
+}
+
+fn accepted(api: &StrictApi) -> Vec<u64> {
+    let log = api.enqueue_log().into_iter();
+    log.filter(|(_, ok, _)| *ok).map(|(id, ..)| id).collect()
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1032,3 +1061,6 @@ impl Write for LogWriter {
         Ok(())
     }
 }
+
+#[path = "absorbed_active_tests.rs"]
+mod absorbed_active_tests;
