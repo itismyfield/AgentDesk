@@ -1,7 +1,6 @@
 module.exports = function attachDispatchMaintenance(timeouts, helpers) {
   var sendDeadlockAlert = helpers.sendDeadlockAlert;
   var MAX_DISPATCH_RETRIES = helpers.MAX_DISPATCH_RETRIES;
-  var shadowTimeoutDecision = helpers.shadowTimeoutDecision;
   var getTimeoutInterval = helpers.getTimeoutInterval;
   var latestCardActivityExpr = helpers.latestCardActivityExpr;
   var parseLocalTimestampMs = helpers.parseLocalTimestampMs;
@@ -128,17 +127,6 @@ module.exports = function attachDispatchMaintenance(timeouts, helpers) {
       for (var jr = 0; jr < failedForRetry.length; jr++) {
         var fd = failedForRetry[jr];
         var newRetryCount = fd.retry_count + 1;
-        shadowTimeoutDecision({
-          section: "_section_J",
-          card_id: fd.kanban_card_id,
-          js_decision: "retry",
-          status: null,
-          state: null,
-          review_status: null,
-          latest_dispatch_id: fd.id,
-          attempt: fd.retry_count,
-          pipeline: jCfg
-        });
         try {
           var newDispatchId = agentdesk.dispatch.create(
             fd.kanban_card_id,
