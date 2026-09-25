@@ -23,7 +23,6 @@ const RUN_LOG_SECTION_ORDER: [&str; 4] = ["started", "js_inputs", "js_action", "
 pub struct RoutineDiscordLogger {
     pool: Arc<PgPool>,
     health_registry: Option<Arc<HealthRegistry>>,
-    health_target: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -39,12 +38,10 @@ impl RoutineDiscordLogger {
     pub fn new_with_health_registry(
         pool: Arc<PgPool>,
         health_registry: Option<Arc<HealthRegistry>>,
-        health_target: Option<String>,
     ) -> Self {
         Self {
             pool,
             health_registry,
-            health_target,
         }
     }
 
@@ -244,19 +241,15 @@ impl RoutineDiscordLogger {
                 &message,
             )
             .await
-        } else if let Some(target) = self.health_target.as_deref() {
-            self.log_to_target(
-                target,
-                UtilityBotRole::Notify.alias(),
-                "routine_recovery_resumed",
-                &format!(
-                    "routine:{}:run:{}:recovery",
-                    recovered.routine_id, recovered.run_id
-                ),
-                &message,
-            )
-            .await
         } else {
+            // #5993: no operator fallback target; the interrupted run row and
+            // this line are the record for a routine without a log thread.
+            tracing::info!(
+                routine_id = %recovered.routine_id,
+                routine = %recovered.name,
+                run_id = %recovered.run_id,
+                "routine recovery has no discord thread; logging instead of posting"
+            );
             RoutineDiscordLogStatus::skipped()
         };
         self.persist_run_log_status(store, &recovered.run_id, &status)
@@ -266,9 +259,8 @@ impl RoutineDiscordLogger {
 
     /// Alert the operator that `routine` has been stuck in `paused` for
     /// `paused_for_secs` (#3564). Routed to the routine's log thread when one
-    /// exists, otherwise to the configured `health_target`; if neither is
-    /// available the message is logged via `tracing::warn` so the stall is
-    /// never silently dropped.
+    /// exists; otherwise the stall is logged via `tracing::warn` so it is never
+    /// silently dropped (#5993 retired the operator fallback target).
     ///
     /// The enqueue uses a caller-supplied dedupe TTL (`dedupe_ttl_secs`, e.g.
     /// once per day) on a stable `(reason_code, session_key)` so the 30s tick
@@ -304,25 +296,12 @@ impl RoutineDiscordLogger {
                 .await;
         }
 
-        if let Some(target) = self.health_target.as_deref() {
-            return self
-                .log_to_target_with_ttl(
-                    target,
-                    crate::services::message_outbox::ACTIONABLE_OPS_ALERT_BOT,
-                    STALE_PAUSED_REASON_CODE,
-                    &session_key,
-                    &message,
-                    dedupe_ttl_secs,
-                )
-                .await;
-        }
-
-        // No thread and no health target: never silently swallow the stall.
+        // No thread: never silently swallow the stall.
         tracing::warn!(
             routine_id = %routine.id,
             routine = %routine.name,
             paused_for_secs,
-            "routine paused stall has no discord thread or health target; logging instead of alerting"
+            "routine paused stall has no discord thread; logging instead of alerting"
         );
         RoutineDiscordLogStatus::skipped()
     }
