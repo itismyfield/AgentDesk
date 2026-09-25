@@ -97,7 +97,7 @@ pub(super) fn reset_scope_value(value: Option<&str>) -> Option<&str> {
 pub(super) fn reset_error_status(error: &str) -> StatusCode {
     if error.starts_with(RESET_RUN_NOT_FOUND) {
         StatusCode::NOT_FOUND
-    } else if error.starts_with(RESET_RUN_SCOPE_MISMATCH) {
+    } else if error.starts_with(RESET_RUN_SCOPE_MISMATCH) || error.starts_with(RESET_RUN_LIVE) {
         StatusCode::CONFLICT
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
@@ -108,6 +108,7 @@ pub(super) fn reset_error_status(error: &str) -> StatusCode {
 /// Reset a single auto-queue run. Requires `run_id`; `agent_id`/`repo` only
 /// narrow the target further (#4880). The one neighbouring reset route is
 /// `POST /api/queue/reset-global`; no agent-wide reset endpoint exists.
+/// A run that still owns live work gets 409 with its end/cancel route.
 pub async fn reset(
     State(state): State<AppState>,
     body: Bytes,
@@ -136,10 +137,17 @@ pub async fn reset(
     };
     match reset_run_scoped_with_pg(run_id, agent_id, repo, pool).await {
         Ok(response) => Ok((StatusCode::OK, Json(response))),
-        Err(error) => Err(auto_queue_json_error(
-            reset_error_status(&error),
-            Json(json!({"error": error})),
-        )),
+        Err(error) => {
+            let app_error =
+                auto_queue_json_error(reset_error_status(&error), Json(json!({"error": error})));
+            // The error envelope keeps only `error`; run fields travel in `context`.
+            Err(match reset_live_run_status(&error) {
+                Some(status) => app_error
+                    .with_context("run_id", run_id)
+                    .with_context("status", status),
+                None => app_error,
+            })
+        }
     }
 }
 
@@ -928,8 +936,8 @@ mod phase_gate_repair_route_tests {
 // the two decision points it is built from are asserted directly here.
 #[cfg(test)]
 mod reset_route_status_tests {
-    use super::{RESET_RUN_NOT_FOUND, RESET_RUN_SCOPE_MISMATCH, StatusCode};
-    use super::{reset_error_status, reset_scope_value};
+    use super::{RESET_RUN_LIVE, RESET_RUN_NOT_FOUND, RESET_RUN_SCOPE_MISMATCH, StatusCode};
+    use super::{reset_error_status, reset_live_run_status, reset_scope_value};
 
     #[test]
     fn blank_run_id_is_rejected_before_any_database_work() {
@@ -949,6 +957,16 @@ mod reset_route_status_tests {
     fn scope_mismatch_maps_to_conflict() {
         let error = format!("{RESET_RUN_SCOPE_MISMATCH}: run-1");
         assert_eq!(reset_error_status(&error), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn live_run_refusal_maps_to_conflict_and_carries_its_status() {
+        let error =
+            format!("{RESET_RUN_LIVE}: status 'paused'; POST /api/queue/runs/run-1/end first");
+        assert_eq!(reset_error_status(&error), StatusCode::CONFLICT);
+        assert_eq!(reset_live_run_status(&error), Some("paused"));
+        let scope = format!("{RESET_RUN_SCOPE_MISMATCH}: run-1");
+        assert_eq!(reset_live_run_status(&scope), None);
     }
 
     #[test]
