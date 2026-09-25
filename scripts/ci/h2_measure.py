@@ -197,6 +197,18 @@ def _module_table(root: Path) -> dict[str, str]:
     _MODULE_TABLES[root] = table
     return table
 
+def h2_tag(entry, key: str) -> tuple[str, frozenset[str]] | None:
+    """(SET, lanes) of an `H2 <SET> <lane>` reason; None when not H2-tagged, error when malformed."""
+    reason = entry.get("reason", "") if isinstance(entry, dict) else ""
+    if not str(reason).startswith("H2"):
+        return None
+    parts = str(reason).split()
+    lanes = frozenset(LANES) if parts[2:] == ["both"] else frozenset(parts[2:])
+    if (len(parts) != 3 or parts[0] != "H2" or parts[1] not in SET_SECTION or not lanes <= set(LANES)
+            or (key == "disallowed-types") != (parts[1] == "TYPES") or not isinstance(entry.get("path"), str)):
+        raise MeasureError(f"bad H2 entry in clippy.toml {key}: {entry}")
+    return parts[1], lanes
+
 def load_config(clippy_toml: Path) -> dict[str, tuple[str, frozenset[str]]]:
     """{path: (SET, lanes)} for every H2-tagged disallowed-methods/types entry."""
     if not clippy_toml.exists():
@@ -206,16 +218,11 @@ def load_config(clippy_toml: Path) -> dict[str, tuple[str, frozenset[str]]]:
     config = {}
     for key in ("disallowed-methods", "disallowed-types"):
         for entry in data.get(key, []):
-            reason = entry.get("reason", "") if isinstance(entry, dict) else ""
-            parts = reason.split()
-            if len(parts) != 3 or parts[0] != "H2" or parts[1] not in SET_SECTION:
+            if (tag := h2_tag(entry, key)) is None:
                 continue
-            lanes = frozenset(LANES) if parts[2] == "both" else frozenset({parts[2]})
-            if (key == "disallowed-types") != (parts[1] == "TYPES") or not lanes <= set(LANES):
-                raise MeasureError(f"bad H2 entry in {clippy_toml}: {entry}")
             if entry["path"] in config:  # a later duplicate would silently override the first
                 raise MeasureError(f"duplicate H2 path in {clippy_toml}: {entry['path']}")
-            config[entry["path"]] = (parts[1], lanes)
+            config[entry["path"]] = tag
     return config
 
 def diagnostics(lines) -> list[tuple[str, int, int, str, str]]:

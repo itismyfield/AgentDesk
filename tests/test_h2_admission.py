@@ -17,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
 import h2_admission as adm  # noqa: E402
 import h2_measure as h2  # noqa: E402
+from tests.test_h2_measure import diag, locate  # noqa: E402  (shared clippy-JSON fixture helpers)
 
 TMUX = "agentdesk::services::platform::tmux::has_session"
 CMD, TOKIO = "std::process::Command::new", "tokio::process::Command::new"
@@ -59,31 +60,15 @@ CLIPPY_TOML = "\n".join([
     f'  {{ path = "{TOKIO}", reason = "H2 SUBPROC both" }},',
     "]", "disallowed-types = [", f'  {{ path = "{TYPE}", reason = "H2 TYPES both" }},', "]", ""])
 # (file, needle, callee, lint) for every diagnostic the fixture sources produce
-NEEDLES = [
-    (OWNER, "pub fn has_session", TMUX, None),
-    (PROBE, "crate::services::platform::tmux::has_session(name)", TMUX, None),
-    (PROBE, 'alive("x")', "agentdesk::services::probe::alive", None),
-    (PROBE, 'Command::new("git")', CMD, None),
-    (PROBE, 'Command::new("gh")', CMD, None),
-    (PROBE, 'has_session("y")', TMUX, None),
-    (PROBE, 'has_session("z")', TMUX, None),
-    (RELAY, 'has_session("s")', TMUX, None),
-    (RELAY, "TmuxBackend)", TYPE, "clippy::disallowed_types"),
-]
+NEEDLES = [(OWNER, "pub fn has_session", TMUX, None), (PROBE, "crate::services::platform::tmux::has_session(name)", TMUX, None),
+           (PROBE, 'alive("x")', "agentdesk::services::probe::alive", None), (PROBE, 'Command::new("git")', CMD, None),
+           (PROBE, 'Command::new("gh")', CMD, None), (PROBE, 'has_session("y")', TMUX, None),
+           (PROBE, 'has_session("z")', TMUX, None), (RELAY, 'has_session("s")', TMUX, None),
+           (RELAY, "TmuxBackend)", TYPE, "clippy::disallowed_types")]
 
 def diag_lines(sources: dict[str, str]) -> list[str]:
-    out = []
-    for file, needle, callee, lint in NEEDLES:
-        text = sources[file]
-        if needle not in text:
-            continue
-        index = text.index(needle)
-        span = {"file_name": file, "line_start": text.count("\n", 0, index) + 1,
-                "column_start": index - (text.rfind("\n", 0, index) + 1) + 1, "is_primary": True}
-        out.append(json.dumps({"reason": "compiler-message", "target": {"kind": ["lib"]}, "message": {
-            "code": {"code": lint or "clippy::disallowed_methods"},
-            "message": f"use of a disallowed method `{callee}`", "spans": [span]}}))
-    return out
+    return [diag(file, *locate(sources[file], needle), callee, lint=lint or "clippy::disallowed_methods")
+            for file, needle, callee, lint in NEEDLES if needle in sources[file]]
 
 PATCHES = dict(OWNER_ROSTER=frozenset({OWNER}), R_C_GRANDFATHERED={}, NONEXEC=frozenset(), W_TYPES=frozenset({TYPE}),
                PS=frozenset({"agentdesk::services::platform::tmux::read_process_args"}),
@@ -128,8 +113,8 @@ class Tree(unittest.TestCase):
         return h2.measure(self.root, diag_lines(self.sources), h2.load_config(self.root / "clippy.toml"))
 
     def regen_baseline(self) -> None:
-        rows = self.measure()["rows"]
-        h2.write_baseline(self.root, {s: {k: dict.fromkeys(h2.LANES, v) for k, v in r.items()} for s, r in rows.items()})
+        h2.write_baseline(self.root, {s: {k: dict.fromkeys(h2.LANES, v) for k, v in r.items()}
+                                      for s, r in self.measure()["rows"].items()})
 
     def edit(self, rel: str, old: str, new: str) -> None:
         self.sources[rel] = self.sources[rel].replace(old, new, 1)
@@ -168,9 +153,8 @@ class MeasurerSites(Tree):
         # both anonymous consts fold into one key; their span lines stay as aux metadata
         self.assertEqual(result["sites"]["subproc"], {(PROBE, "const _", CMD): [4, 5]})
         self.assertEqual(result["sites"]["exec"], {})
-        out = io.StringIO()
         (self.root / "d.json").write_text("\n".join(diag_lines(self.sources)))
-        with redirect_stdout(out):
+        with redirect_stdout(out := io.StringIO()):
             h2.main(["--repo", str(self.root), "--lane", "linux", "--json", str(self.root / "d.json")])
         rows = json.loads(out.getvalue())["rows"]
         self.assertEqual([r.get("lines") for r in rows["subproc"]], [[4, 5]])
@@ -246,7 +230,7 @@ class EndToEnd(Tree):
         self.admit(row)
         problems = self.evaluate()
         self.assertIn("folds several items (H8); set lines = [4, 5, 6]", "".join(problems))
-        self.assertTrue(any(p.startswith("R-C: src/services/probe.rs pairs `Command` with 1") for p in problems))
+        self.assertTrue(any(p.startswith("R-C: src/services/probe.rs pairs `Command` with a new tmux literal") for p in problems))
         self.edit(PROBE, '.arg("tmux")', '.arg("status")')
         self.admit(row.replace("issue", "lines = [4, 5, 6]\nissue"))
         self.assertEqual(self.evaluate(), [])
@@ -254,16 +238,28 @@ class EndToEnd(Tree):
         self.assertTrue(any("is unambiguous; drop lines" in p for p in self.evaluate()))
 
     def test_inventory_and_dead_entries(self) -> None:
-        for added, path in (("pub fn kill_server() {}", "kill_server"),
-                            ("pub struct RawTmux;\nimpl RawTmux {\n    pub fn run(&self) {}\n    fn private(&self) {}\n}", "RawTmux::run"),
-                            ("mod inner {\n    pub(super) fn deep() {}\n}", "inner::deep"),
-                            ('pub extern "C" fn ext() {}', "ext")):
-            with self.subTest(added=path):
+        # every pub fn shape is inventoried; owner API the item walk cannot enumerate is refused (r2)
+        for added, needle in (("pub fn kill_server() {}", "tmux::kill_server (unclassified)"),
+                              ("pub struct RawTmux;\nimpl RawTmux {\n    pub fn run(&self) {}\n    fn private(&self) {}\n}",
+                               "tmux::RawTmux::run (unclassified)"),
+                              ("mod inner {\n    pub(super) fn deep() {}\n}", "tmux::inner::deep (unclassified)"),
+                              ('pub extern "C" fn ext() {}', "tmux::ext (unclassified)"),
+                              ("macro_rules! make { () => { pub fn stealth() {} } }", "`macro_rules!`"),
+                              ("fn helper() { macro_rules! inner { () => {} } }", "`macro_rules!`"),
+                              ("make! { stealth }", "`make!`"),
+                              ("cfg_if::cfg_if! { if #[cfg(unix)] { fn hidden() {} } }", "`cfg_if!`"),
+                              ("pub trait Probe {\n    fn required(&self);\n    fn stealth(&self) { }\n}", "default method")):
+            with self.subTest(shape=needle):
                 self.edit(OWNER, "pub(crate) fn read", added + "\npub(crate) fn read")
-                self.assertEqual(self.evaluate(), ["R-E: owner pub fn inventory mismatch: "
-                                                   f"agentdesk::services::platform::tmux::{path} (unclassified)"])
+                problems = self.evaluate()
                 self.edit(OWNER, added + "\n", "")
+                self.assertTrue(len(problems) <= 2 and any(needle in p and p.startswith("R-E: ") for p in problems), problems)
+        self.assertEqual(self.evaluate(), [])
         toml = (self.root / "clippy.toml").read_text()
+        malformed = toml.replace('reason = "H2 SUBPROC both"', 'reason = "H2 SUBPROC"', 1)
+        (self.root / "clippy.toml").write_text(malformed)
+        with self.assertRaisesRegex(h2.MeasureError, "bad H2 entry"):  # same parser as load_config
+            adm.untagged_entries(self.root / "clippy.toml")
         (self.root / "clippy.toml").write_text(
             toml.replace(TOKIO, "tokio::process::Command::spawn").replace(TYPE, TYPE + "X")
             .replace("]\ndisallowed-types", '  { path = "x::y", reason = "other" },\n]\ndisallowed-types'))
@@ -307,10 +303,11 @@ class ParseAdmissions(unittest.TestCase):
 class ZeroRules(unittest.TestCase):
     OLD = "src/old.rs"  # grandfathered: already pairs `Command` with one tmux message literal
     OLD_TEXT = 'use std::process::Command;\nfn f() { Command::new("git"); log("tmux session died"); }\n'
+    PIN = {OLD: {("f", "tmux session died"): 1}}
 
     def rules(self, files: dict[str, str], roster=frozenset(), pins=None) -> list[str]:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(adm, "OWNER_ROSTER", roster), \
-                mock.patch.object(adm, "R_C_GRANDFATHERED", {self.OLD: 1} if pins is None else pins):
+                mock.patch.object(adm, "R_C_GRANDFATHERED", self.PIN if pins is None else pins):
             for rel, text in {self.OLD: self.OLD_TEXT, **files}.items():
                 (Path(tmp) / rel).parent.mkdir(parents=True, exist_ok=True)
                 (Path(tmp) / rel).write_text(textwrap.dedent(text), encoding="utf-8")
@@ -344,10 +341,22 @@ class ZeroRules(unittest.TestCase):
         }.items():
             with self.subTest(shape=name):
                 self.assertEqual(self.rules({f"src/{name}.rs": text}), ["R-C"])
-        # the same swap inside an already-grandfathered file raises its pinned count
+        # inside a pinned file: an added literal, and a count-neutral 1:1 swap (review r2 case)
         grown = self.OLD_TEXT.replace('Command::new("git")', 'Command::new("tmux")')
         self.assertEqual(self.rules({self.OLD: grown}), ["R-C"])
-        self.assertEqual(self.rules({}, pins={self.OLD: 2}), ["R-C"])  # stale pin must be lowered
+        swapped = grown.replace('"tmux session died"', '"fallback via tmux died"')
+        self.assertEqual(self.rules({self.OLD: swapped}), ["R-C", "R-C"])  # one gone, one new
+        # moving a pinned literal to other lines of the same item stays green
+        moved = "// header\n\n" + self.OLD_TEXT.replace("{ Command", "{\n\n    Command")
+        self.assertEqual(self.rules({self.OLD: moved}), [])
+        # same literal text moved into another item (label -> spawn program) is red too
+        two = 'use std::process::Command;\nfn a() { label("tmux"); }\nfn b() { Command::new("git"); }\n'
+        pins = {self.OLD: self.PIN[self.OLD], "src/two.rs": {("a", "tmux"): 1}}
+        self.assertEqual(self.rules({"src/two.rs": two}, pins=pins), [])
+        self.assertEqual(self.rules({"src/two.rs": two.replace('label("tmux")', 'label("x")')
+                                     .replace('new("git")', 'new("tmux")')}, pins=pins), ["R-C", "R-C"])
+        stale = {self.OLD: {**self.PIN[self.OLD], ("f", "tmux gone"): 1}}
+        self.assertEqual(self.rules({}, pins=stale), ["R-C"])  # a pin with no literal must be dropped
         self.assertEqual(self.rules({}, pins={}), ["R-C"])  # an unpinned existing pair is red
 
     def test_each_other_rule_rejects(self) -> None:

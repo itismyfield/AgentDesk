@@ -25,23 +25,17 @@ REQUIRED_FIELDS = frozenset({"file", "item", "callee", "old", "new", "lane", "is
 OPTIONAL_FIELDS = frozenset({"base_sha", "lines"})
 # R-O: every file under an owner path; adding one means editing this roster in review.
 OWNER_GLOBS = ("src/services/platform/tmux*", "src/services/session_host*")
-OWNER_ROSTER = frozenset({
-    "src/services/platform/tmux.rs",
-    "src/services/platform/tmux/availability.rs",
-    "src/services/session_host.rs",
-    *(f"src/services/session_host/{name}.rs"
-      for name in ("legacy_collapse", "model", "process_host", "resolve", "tmux_host", "traits")),
-})
+OWNER_ROSTER = frozenset({"src/services/platform/tmux.rs", "src/services/platform/tmux/availability.rs",
+                          "src/services/session_host.rs", *(f"src/services/session_host/{name}.rs" for name in (
+                              "legacy_collapse", "model", "process_host", "resolve", "tmux_host", "traits"))})
 # R-E: low-level tmux owner API inventory; each pub fn is EXEC (clippy.toml) or a non-exec helper.
 INVENTORY_FILES = ("src/services/platform/tmux.rs", "src/services/platform/tmux/availability.rs")
 NONEXEC = frozenset(f"agentdesk::services::platform::tmux::availability::{name}" for name in (
     "mark_available_from_live_session", "invalidate_cache", "cached_unavailable_due_to_missing"))
 PS = frozenset(f"agentdesk::services::platform::tmux::{name}" for name in ("read_process_args", "process_start_time"))
 SUBPROC_PATHS = frozenset({"std::process::Command::new", "tokio::process::Command::new"})
-W_TYPES = frozenset({
-    "agentdesk::services::codex_tui::input::TmuxTuiActionExecutor",
-    "agentdesk::services::claude_tui::tui_relay::TmuxSendBackend",
-})
+W_TYPES = frozenset({"agentdesk::services::codex_tui::input::TmuxTuiActionExecutor",
+                     "agentdesk::services::claude_tui::tui_relay::TmuxSendBackend"})
 # Hand-kept entries allowed to have no diagnostic in a lane; the data PR pins these.
 KNOWN_UNREFERENCED: dict[str, frozenset[str]] = {lane: frozenset() for lane in m.LANES}
 # H9: files no measured lane compiles; they must not mention tmux at all.
@@ -50,22 +44,34 @@ WINDOWS_ONLY_FILES = ("src/runtime_layout/windows_links.rs",)
 # Visibility left of an item's `fn` token: pub / pub(crate) / pub(super) plus qualifiers.
 PUB_PREFIX_RE = re.compile(r"\bpub(?:\s*\([^)]*\))?\s+(?:(?:async|const|unsafe|extern)\s+)*$")
 # R-C (r6): a file pairing a `Command` token (a `use .. Command as X` alias line included) with a
-# "tmux" / "tmux .." / "../tmux" literal. Pre-existing pairs are pinned per file by literal count.
+# "tmux" / "tmux .." / "../tmux" literal. Pre-existing pairs are pinned per file as the multiset of
+# (enclosing item, normalized literal), so swapping one tmux literal for another is still red.
 TMUX_LITERAL_RE = re.compile(r'b?r?#*"(?:[^"\s]*/)?tmux(?:"|\s)')
-R_C_GRANDFATHERED = {
-    "src/cli/dcserver.rs": 2,
-    "src/cli/doctor/orchestrator.rs": 13,
-    "src/engine/ops/exec_ops.rs": 1,
-    "src/services/claude.rs": 3,
-    "src/services/codex.rs": 2,
-    "src/services/codex_tmux_wrapper.rs": 1,
-    "src/services/discord/idle_recap/scrollback.rs": 1,
-    "src/services/discord/recovery_engine.rs": 1,
-    "src/services/discord/recovery_engine/restore_inflight/output_paths.rs": 1,
-    "src/services/discord/tmux_reaper.rs": 4,
-    "src/services/qwen/session_lifecycle.rs": 1,
-    "src/services/qwen_tmux_wrapper.rs": 1,
+R_C_GRANDFATHERED: dict[str, dict[tuple[str, str], int]] = {
+    "src/cli/dcserver.rs": {("handle_restart_dcserver", "tmux new-session failed: {}"): 1,
+        ("handle_restart_dcserver", "tmux session '{tmux_session}' failed to start"): 1},
+    "src/cli/doctor/orchestrator.rs": {("check_file_descriptor_headroom", "tmux"): 1,
+        ("check_service_manager", "tmux fallback — {fallback_session} active"): 1,
+        ("check_service_manager", "tmux has-session -t ={fallback_session}:"): 1, ("check_tmux", "tmux"): 6, ("check_tmux", "tmux available"): 1,
+        ("check_tmux", "tmux available in PATH"): 2, ("check_tmux", "tmux not found"): 1},
+    "src/engine/ops/exec_ops.rs": {("register_exec_ops", "tmux"): 1},
+    "src/services/claude.rs": {("execute_streaming_local_tmux", "tmux error: {}"): 1,
+        ("send_followup_to_tmux", "tmux session died after streaming partial follow-up output — suppress replay"): 1,
+        ("send_followup_to_tmux", "tmux session died during follow-up before new output — requesting recreation"): 1},
+    "src/services/codex.rs": {("execute_streaming_local_tmux", "tmux error: {}"): 1, ("execute_streaming_local_tui_tmux", "tmux error: {}"): 1},
+    "src/services/codex_tmux_wrapper.rs": {("run", "tmux resume loop"): 1},
+    "src/services/discord/idle_recap/scrollback.rs": {("capture_tmux_scrollback", "tmux"): 1},
+    "src/services/discord/recovery_engine.rs": {("<RebindError as Display>::fmt", "tmux session not alive: {tmux_session}"): 1},
+    "src/services/discord/recovery_engine/restore_inflight/output_paths.rs": {("tmux_pane_pid", "tmux"): 1},
+    "src/services/discord/tmux_reaper.rs": {("build_reapable_fresh_routine_sessions", "tmux reaper: failed to list reapable fresh routine sessions (#3877)"): 1,
+        ("reap_fresh_routine_orphan", "tmux reaper backstop: completed fresh routine orphan (#3877)"): 2,
+        ("reap_fresh_routine_orphan", "tmux reaper backstop: re-read of routine {routine_id} failed — skipping kill of {session_name} (#3877)"): 1},
+    "src/services/qwen/session_lifecycle.rs": {("execute_streaming_local_tmux", "tmux error: {}"): 1},
+    "src/services/qwen_tmux_wrapper.rs": {("run", "tmux resume loop"): 1},
 }
+# R-E shape rules: owner API the item walk cannot see (macro-generated items, trait default methods).
+ITEM_MACRO_RE = re.compile(r"\b(macro_rules)\s*!|\b([A-Za-z_]\w*)\s*!\s*[({\[]")
+TRAIT_RE = re.compile(r"\btrait\s+([A-Za-z_]\w*)")
 RC2_RE = re.compile(r"\b(?:const|static)\s+(?:mut\s+)?\w+\s*:\s*&\s*(?:'\w+\s+)?str\s*=\s*b?r?#*\"tmux")
 RF_RE = re.compile(r"\blibc::(?:exec\w*|posix_spawn\w*)|\bposix_spawnp?\b|\bnix::unistd::exec\w*|\.exec\s*\(\s*\)")
 LOCK_NAME_RE = re.compile(r'^name = "([^"]+)"', re.M)
@@ -85,18 +91,21 @@ def _load_lexer():
 
 LEXER = _load_lexer()
 
-def production_views(path: Path) -> tuple[str, str, list[str]]:
-    """Non-test text as (code only, code + literals, literals); comments and test lines are blanked."""
+def production_views(path: Path) -> tuple[str, str, list[tuple[int, str]]]:
+    """Non-test text as (code only, code + literals, (offset, literal)); comments and test lines are blanked."""
     countable = {lineno for lineno, _code, keep in LEXER.production_lines(path) if keep}
     state = rust_lex.StripState()
-    code, mixed, literals = [], [], []
+    code, mixed, literals, offset = [], [], [], 0
     for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         segments = rust_lex.lex_segments(line, state)
         if lineno not in countable:
-            code.append("")
-            mixed.append("")
-            continue
-        literals += [t for k, t in segments if k == rust_lex.LITERAL]
+            segments = []  # blanked, but the line stays so offsets and line numbers line up
+        column = 0
+        for kind, text in segments:
+            if kind == rust_lex.LITERAL:
+                literals.append((offset + column, text))
+            column += len(text)
+        offset += column + 1
         code.append("".join(t if k == rust_lex.CODE else " " * len(t) for k, t in segments))
         mixed.append("".join(t if k in (rust_lex.CODE, rust_lex.LITERAL) else " " * len(t) for k, t in segments))
     return "\n".join(code), "\n".join(mixed), literals
@@ -114,30 +123,50 @@ def owner_pub_fns(root: Path, rel: str, modpath: str) -> set[str]:
         found.add("::".join([modpath, *(registrable or names)]))
     return found
 
-def _is_owner(rel: str) -> bool:
-    return rel in m.OWNER_FILES or rel.startswith(m.OWNER_PREFIXES)
+def owner_shape_problems(root: Path) -> list[str]:
+    """R-E: no macro_rules!/item-level macro and no trait default method in the owner API files."""
+    problems = []
+    for rel in INVENTORY_FILES:
+        if not (root / rel).exists():
+            continue
+        code = production_views(root / rel)[0]
+        items = m.SourceFile(code).items
+        problems += [f"R-E: {rel} uses item-level macro `{call.group(1) or call.group(2)}!`; owner API must be plain fns"
+                     for call in ITEM_MACRO_RE.finditer(code)
+                     if call.group(1) or not any(s <= call.start() <= e for s, e, _, _ in items)]
+        # a fn with a body whose parent scope is a trait declared here is a default method
+        traits = set(TRAIT_RE.findall(code))
+        problems += [f"R-E: {rel} trait default method {'::'.join(names)}; owner API must be plain fns"
+                     for _, _, names, _ in items if len(names) > 1 and names[-2] in traits]
+    return problems
+
+def tmux_literal_sites(code: str, literals: list[tuple[int, str]]) -> collections.Counter:
+    """Multiset of (enclosing item, normalized literal) for the tmux literals of one file."""
+    src = m.SourceFile(code)
+    return collections.Counter(
+        (src.enclosing(pos)[0], " ".join(re.sub(r'^b?r?#*"|"#*$', "", text).split()))
+        for pos, text in literals if TMUX_LITERAL_RE.match(text))
 
 def zero_rules(root: Path) -> list[str]:
     """R-C, R-C2, R-F over non-owner prod Rust; R-O roster, Cargo.lock (H4) and H9 files."""
     problems, rc_found = [], {}
     for path in sorted((root / "src").rglob("*.rs")):
         rel = path.relative_to(root).as_posix()
-        if _is_owner(rel) or LEXER.is_test_file(path.name) or rel in LEXER.PINNED_TEST_ONLY_MODULE_FILES:
+        if rel in m.OWNER_FILES or rel.startswith(m.OWNER_PREFIXES) or LEXER.is_test_file(path.name) or rel in LEXER.PINNED_TEST_ONLY_MODULE_FILES:
             continue
         code, mixed, literals = production_views(path)
-        tmux_literals = sum(1 for lit in literals if TMUX_LITERAL_RE.match(lit))
-        if tmux_literals and re.search(r"\bCommand\b", code):
-            rc_found[rel] = tmux_literals
+        if re.search(r"\bCommand\b", code) and (sites := tmux_literal_sites(code, literals)):
+            rc_found[rel] = sites
         if RC2_RE.search(mixed):
             problems.append(f"R-C2: {rel} binds a \"tmux\" const/static outside the owner")
         if RF_RE.search(code):
             problems.append(f"R-F: {rel} calls exec/posix_spawn directly")
     for rel in sorted(set(rc_found) | set(R_C_GRANDFATHERED)):
-        got, pinned = rc_found.get(rel, 0), R_C_GRANDFATHERED.get(rel, 0)
-        if got > pinned:
-            problems.append(f"R-C: {rel} pairs `Command` with {got} tmux literal(s) outside the owner (pinned {pinned})")
-        elif got < pinned:
-            problems.append(f"R-C: {rel} now has {got} tmux literal(s); lower its R_C_GRANDFATHERED pin from {pinned}")
+        got, pinned = rc_found.get(rel, collections.Counter()), collections.Counter(R_C_GRANDFATHERED.get(rel, {}))
+        problems += [f"R-C: {rel} pairs `Command` with a new tmux literal outside the owner: {site}"
+                     for site in sorted((got - pinned).elements())]
+        problems += [f"R-C: {rel} no longer has pinned tmux literal {site}; drop it from R_C_GRANDFATHERED"
+                     for site in sorted((pinned - got).elements())]
     found = {p.relative_to(root).as_posix() for pattern in OWNER_GLOBS for hit in root.glob(pattern)
              for p in ([hit] if hit.is_file() else hit.rglob("*")) if p.is_file()}
     for rel in sorted(found ^ OWNER_ROSTER):
@@ -189,7 +218,7 @@ def untagged_entries(clippy_toml: Path) -> list[str]:
     data = tomllib.loads(clippy_toml.read_text(encoding="utf-8")) if clippy_toml.exists() else {}
     return [f"R-E: clippy.toml entry without an `H2 <SET> <lane>` reason: {entry}"
             for key in ("disallowed-methods", "disallowed-types") for entry in data.get(key, [])
-            if not (isinstance(entry, dict) and str(entry.get("reason", "")).startswith("H2 "))]
+            if m.h2_tag(entry, key) is None]  # same parser as load_config; malformed H2 tags raise
 
 def parse_admissions(text: str | None) -> list[dict]:
     import tomllib
@@ -284,7 +313,7 @@ def evaluate(root: Path, lane: str, base_rev: str, lines: list[str]) -> list[str
         return [f"base {base_rev} clippy.toml has no H2 W entries; rebase onto a main that has them"]
     config = m.load_config(root / "clippy.toml")
     result = m.measure(root, lines, config)
-    problems = zero_rules(root) + untagged_entries(root / "clippy.toml")
+    problems = zero_rules(root) + owner_shape_problems(root) + untagged_entries(root / "clippy.toml")
     problems += m.compare(result["rows"], head, lane)
     if result["total"] < m.LIVENESS_FLOOR:
         problems.append(f"only {result['total']} H2 diagnostics (< liveness floor {m.LIVENESS_FLOOR})")

@@ -134,6 +134,11 @@ class DiagnosticsAndItems(Fixture):
                                                f'  {{ path = "{TMUX}", reason = "H2 W linux" }},\n]\ndisallowed-types'))
         with self.assertRaisesRegex(h2.MeasureError, "duplicate H2 path"):
             h2.load_config(self.root / "clippy.toml")
+        # a malformed H2 tag (here on a duplicate path) is an error, not a silently skipped entry
+        (self.root / "clippy.toml").write_text(CLIPPY_TOML.replace("]\ndisallowed-types",
+                                               f'  {{ path = "{TMUX}", reason = "H2 EXEC" }},\n]\ndisallowed-types'))
+        with self.assertRaisesRegex(h2.MeasureError, "bad H2 entry"):
+            h2.load_config(self.root / "clippy.toml")
         rows = h2.diagnostics(self.lines())
         self.assertEqual(len(rows), len(set(rows)))
         self.assertTrue(all(file.startswith("src/") for file, *_ in rows))
