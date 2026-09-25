@@ -3610,6 +3610,7 @@ services::discord::inflight::stall_recovery_tests::load_inflight_states_revalida
 services::discord::inflight::stall_recovery_tests::offset_monotonic_severity_uses_warn_when_downgrade_selected
 services::discord::inflight::stall_recovery_tests::ownerless_external_input_stale_only_for_unowned_pre_placeholder_synthetic_rows
 services::discord::inflight::stall_recovery_tests::reanchor_bind_requires_old_panel_and_bumps_generation_from_disk
+services::discord::inflight::stall_recovery_tests::restored_claude_session_bound_restart_row_commits_and_clears
 services::discord::inflight::stall_recovery_tests::runtime_kind_round_trips_and_direct_tui_has_no_fifo_requirement
 services::discord::inflight::stall_recovery_tests::skip_save_checks_turn_start_offset
 services::discord::inflight::stall_recovery_tests::skip_save_does_not_clobber_newer_turn

@@ -283,7 +283,10 @@ pub(super) fn commit_watcher_terminal_delivery_locked_in_root(
     let Some(mut state) = load_inflight_state_unlocked(&path) else {
         return WatcherTerminalCommitOutcome::Skipped;
     };
-    if state.restart_mode.is_some() || state.rebind_origin {
+    // A restored Claude session-bound drain-restart row is delivered by this watcher, so it commits.
+    if (state.restart_mode.is_some() && !state.restored_claude_session_bound_restart())
+        || state.rebind_origin
+    {
         return WatcherTerminalCommitOutcome::Skipped;
     }
     // Preserve the existing strong identity guard (user_msg_id + started_at +

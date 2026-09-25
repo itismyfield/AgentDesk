@@ -46,7 +46,10 @@ fn guarded_identity_clear_outcome(
     expected: &InflightTurnIdentity,
     expected_turn_nonce: Option<&str>,
 ) -> GuardedClearOutcome {
-    if state.restart_mode.is_some() {
+    // Only the watcher-committed restored Claude session-bound drain-restart row drops its pin.
+    if state.restart_mode.is_some()
+        && !(state.terminal_delivery_committed && state.restored_claude_session_bound_restart())
+    {
         return GuardedClearOutcome::PlannedRestartSkipped;
     }
     if state.rebind_origin {

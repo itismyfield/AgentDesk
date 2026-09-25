@@ -1483,6 +1483,61 @@ mod stall_recovery_tests {
         assert!(!persisted.terminal_delivery_committed);
     }
 
+    // A restored drain-restart Claude session-bound row is committed and cleared by the
+    // recovery watcher; the outgoing process's own restart row keeps its pin.
+    #[test]
+    fn restored_claude_session_bound_restart_row_commits_and_clears() {
+        let temp = TempDir::new().unwrap();
+        let _root_env = crate::config::set_agentdesk_root_for_test(temp.path());
+        let channel_id = 62_100_001;
+        let session = "AgentDesk-claude-6210";
+        for restored in [true, false] {
+            let mut state = seed_watcher_stream_state(temp.path(), channel_id, session, "", 64);
+            state.runtime_kind =
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+            state.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+            state.set_restart_mode(InflightRestartMode::DrainRestart);
+            if restored {
+                state.restart_generation = Some(u64::MAX);
+            }
+            force_write_state(temp.path(), &state);
+            let identity = InflightTurnIdentity::from_state(&state);
+
+            let commit = commit_watcher_terminal_delivery_locked_in_root(
+                temp.path(),
+                &ProviderKind::Claude,
+                channel_id,
+                &identity,
+                session,
+                WatcherTerminalCommitPatch {
+                    full_response: "final report".to_string(),
+                    last_offset: 256,
+                    last_watcher_relayed_offset: Some(256),
+                    last_watcher_relayed_generation_mtime_ns: Some(9),
+                },
+            );
+            let clear = clear_inflight_state_if_matches_identity_in_root(
+                temp.path(),
+                &ProviderKind::Claude,
+                channel_id,
+                &identity,
+            );
+            let row_left = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude)
+                .into_iter()
+                .any(|s| s.channel_id == channel_id);
+            if restored {
+                assert_eq!(commit, WatcherTerminalCommitOutcome::Committed);
+                assert_eq!(clear, GuardedClearOutcome::Cleared);
+                assert!(!row_left);
+            } else {
+                assert_eq!(commit, WatcherTerminalCommitOutcome::Skipped);
+                assert_eq!(clear, GuardedClearOutcome::PlannedRestartSkipped);
+                assert!(row_left);
+                assert!(!loaded_row(temp.path(), channel_id).terminal_delivery_committed);
+            }
+        }
+    }
+
     /// #3558: a forward commit (larger watermark than disk) advances normally —
     /// the max-serialize is a no-op when the commit is the authoritative tip.
     #[test]

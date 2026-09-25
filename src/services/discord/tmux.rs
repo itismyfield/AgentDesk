@@ -2039,6 +2039,7 @@ mod active_bridge_turn_guard_tests {
                 Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
             state.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
             state.set_restart_mode(InflightRestartMode::DrainRestart);
+            state.restart_generation = Some(u64::MAX);
 
             assert!(!watcher_should_yield_to_inflight_state(
                 Some(&state),
@@ -2056,6 +2057,26 @@ mod active_bridge_turn_guard_tests {
             ));
 
             state.terminal_delivery_committed = false;
+            state.set_restart_mode(InflightRestartMode::HotSwapHandoff);
+            state.restart_generation = Some(u64::MAX);
+            assert!(watcher_should_yield_to_inflight_state(
+                Some(&state),
+                "AgentDesk-codex-adk-cdx",
+                0,
+                2_019_364,
+            ));
+
+            state.set_restart_mode(InflightRestartMode::DrainRestart);
+            assert!(
+                watcher_should_yield_to_inflight_state(
+                    Some(&state),
+                    "AgentDesk-codex-adk-cdx",
+                    0,
+                    2_019_364,
+                ),
+                "the outgoing process keeps its own planned-restart row"
+            );
+
             state.clear_restart_mode();
             assert!(watcher_should_yield_to_inflight_state(
                 Some(&state),
@@ -2073,6 +2094,7 @@ mod active_bridge_turn_guard_tests {
                 Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
             state.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
             state.set_restart_mode(InflightRestartMode::DrainRestart);
+            state.restart_generation = Some(u64::MAX);
 
             assert!(watcher_should_yield_to_inflight_state(
                 Some(&state),
