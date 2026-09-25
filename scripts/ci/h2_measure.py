@@ -35,6 +35,8 @@ SECTIONS = ("exec", "w", "types", "subproc", "subproc_w_callers")
 SET_SECTION = {"EXEC": "exec", "W": "w", "TYPES": "types", "SUBPROC": "subproc", "SUBPROC_W": "subproc_w_callers"}
 DERIVED_SETS = ("W", "SUBPROC_W")
 LINTS = ("clippy::disallowed_methods", "clippy::disallowed_types")
+# R-O lints forced in the same pass; diagnostics() skips them so they never become measured rows.
+RO_LINTS = ("clippy::duplicate_mod",)
 # Raised by the activation PR; 0 keeps the measurer inert until then.
 LIVENESS_FLOOR = 0
 MAX_REGEN_ITERATIONS = 20
@@ -156,22 +158,29 @@ def _registrable(stack, name: str) -> tuple[str, ...]:
             parts.append(frame_name)
     return tuple(parts + [name])
 
-_MODULE_TABLES: dict[Path, dict[str, str]] = {}
+_MODULE_TABLES: dict[Path, tuple[dict[str, str], list[Path]]] = {}
 MOD_DECL_RE = re.compile(r"^([ \t]*)(?:pub(?:\([^)]*\))?[ \t]+)?mod[ \t]+([A-Za-z_]\w*)[ \t]*(;|\{)", re.M)
 PATH_ATTR_RE = re.compile(r"#\[path\s*=\s*\"([^\"]+)\"\]\s*$")
 
 def _module_table(root: Path) -> dict[str, str]:
     """{src file: crate module path}, following `mod` / `#[path]` from src/lib.rs."""
+    return _module_walk(root)[0]
+
+def _module_walk(root: Path) -> tuple[dict[str, str], list[Path]]:
+    """(module table keyed by `..`-collapsed path, module files as opened). Files are opened and searched
+    at the joined path so `..` after a directory symlink resolves on disk, as it does for rustc."""
     if root in _MODULE_TABLES:
         return _MODULE_TABLES[root]
     table: dict[str, str] = {}
+    opened: list[Path] = []
     queue = [(root / "src/lib.rs", CRATE, False)]
     while queue:
         path, modpath, owned = queue.pop()
-        rel = path.relative_to(root).as_posix()
+        rel = Path(os.path.normpath(path)).relative_to(root).as_posix()
         if rel in table or not path.exists():
             continue
         table[rel] = modpath
+        opened.append(path)
         lines = path.read_text(encoding="utf-8").splitlines()
         inline: list[tuple[str, str]] = []
         for index, line in enumerate(lines):
@@ -190,12 +199,12 @@ def _module_table(root: Path) -> dict[str, str]:
             own_dir = path.parent if owned or path.stem in ("mod", "lib", "main") else path.parent / path.stem
             base = own_dir.joinpath(*chain)
             if attr:
-                child = Path(os.path.normpath((base if chain else path.parent) / attr))
+                child = (base if chain else path.parent) / attr
             else:
                 child = next((c for c in (base / f"{name}.rs", base / name / "mod.rs") if c.exists()), base / f"{name}.rs")
             queue.append((child, "::".join([modpath, *chain, name]), bool(attr)))
-    _MODULE_TABLES[root] = table
-    return table
+    _MODULE_TABLES[root] = table, opened
+    return table, opened
 
 def h2_tag(entry, key: str) -> tuple[str, frozenset[str]] | None:
     """(SET, lanes) of an `H2 <SET> <lane>` reason; None when not H2-tagged, error when malformed."""
@@ -248,12 +257,12 @@ def diagnostics(lines) -> list[tuple[str, int, int, str, str]]:
     return sorted(seen)
 
 def run_clippy(root: Path, conf_dir: Path | None) -> list[str]:
-    """Lint only the lib target. Touching lib.rs forces a re-lint instead of a cache replay;
-    `--cap-lints warn` stops unrelated deny lints from aborting it (force-warn is uncapped)."""
+    """Lint only the lib target. Touching lib.rs forces a re-lint (and a fresh dep-info) instead of a
+    cache replay; `--cap-lints warn` stops unrelated deny lints from aborting it (force-warn is uncapped)."""
     (root / "src/lib.rs").touch()
     env = dict(os.environ, CARGO_INCREMENTAL="0", **({"CLIPPY_CONF_DIR": str(conf_dir)} if conf_dir else {}))
     command = ["cargo", "clippy", "--lib", "--message-format=json", "--", "--cap-lints", "warn",
-               *itertools.chain.from_iterable(("--force-warn", lint) for lint in LINTS)]
+               *itertools.chain.from_iterable(("--force-warn", lint) for lint in LINTS + RO_LINTS)]
     proc = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True)
     if proc.returncode != 0:
         raise MeasureError(f"cargo clippy failed ({proc.returncode}):\n{proc.stderr[-4000:]}")
