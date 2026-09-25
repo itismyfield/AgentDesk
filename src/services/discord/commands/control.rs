@@ -395,7 +395,27 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
         &channel_id.get().to_string(),
     )
     .await?;
+    clear_channel_session_state_after_boundary(
+        http,
+        shared,
+        provider,
+        channel_id,
+        clear_source,
+        notify_mode,
+        explicit_session_key,
+    )
+    .await
+}
 
+async fn clear_channel_session_state_after_boundary(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    clear_source: &str,
+    notify_mode: SoftClearNotifyMode,
+    explicit_session_key: Option<&str>,
+) -> anyhow::Result<()> {
     let tmux_name = {
         let data = shared.core.lock().await;
         data.sessions
@@ -407,6 +427,29 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     let cleared = clear_channel_discarding_catch_up_backlog(shared, provider, channel_id).await;
     if cleared.removed_token.is_some() {
         saturating_decrement_global_active(shared);
+    }
+    // #6233: a failed persist restored the backlog but already released the
+    // active anchor. Stop that turn, keep the session the backlog belongs to,
+    // re-arm the backlog like `!stop` does, and do not report a clear.
+    if let Some(error) = cleared.persistence_error {
+        if let Some(token) = cleared.removed_token {
+            stop_active_turn(
+                provider,
+                &token,
+                super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
+                clear_source,
+            )
+            .await;
+        }
+        super::super::schedule_deferred_idle_queue_kickoff(
+            shared.clone(),
+            provider.clone(),
+            channel_id,
+            "clear_persist_failed",
+        );
+        anyhow::bail!(
+            "세션을 초기화하지 못했어요: 대기열 저장에 실패해 세션과 대기열을 유지했어요 ({error})"
+        );
     }
 
     {
@@ -767,6 +810,179 @@ mod soft_clear_notify_tests {
             .as_deref(),
             Some("claude/token/host:AgentDesk-claude-channel")
         );
+    }
+}
+
+/// #6233 — an intentional clear whose queue persist fails gets its backlog
+/// restored, so it must not report success or reset the session that backlog
+/// resumes in; the restored backlog is re-armed through the idle-queue kickoff.
+#[cfg(test)]
+mod clear_persist_failure_tests {
+    use std::sync::Arc;
+
+    use poise::serenity_prelude as serenity;
+    use serenity::{ChannelId, MessageId, UserId};
+
+    use super::{SoftClearNotifyMode, clear_channel_session_state_after_boundary};
+    use crate::services::discord::{DiscordSession, SharedData, make_shared_data_for_tests};
+    use crate::services::provider::ProviderKind;
+    use crate::services::turn_orchestrator::{
+        Intervention, InterventionMode, QueuePersistenceContext,
+    };
+
+    // Gemini's managed clear is a no-op, so the success path never resets tmux.
+    const PROVIDER: ProviderKind = ProviderKind::Gemini;
+
+    fn queued(message_id: u64) -> Intervention {
+        Intervention {
+            author_id: UserId::new(1),
+            author_is_bot: false,
+            message_id: MessageId::new(message_id),
+            queued_generation: crate::services::discord::runtime_store::process_generation(),
+            source_message_ids: vec![MessageId::new(message_id)],
+            source_message_queued_generations: Vec::new(),
+            source_text_segments: Vec::new(),
+            text: "restored backlog".to_string(),
+            mode: InterventionMode::Soft,
+            created_at: std::time::Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        }
+    }
+
+    async fn seed(shared: &Arc<SharedData>, channel_id: ChannelId) {
+        shared.core.lock().await.sessions.insert(
+            channel_id,
+            DiscordSession {
+                session_id: Some("provider-session-6233".to_string()),
+                memento_context_loaded: false,
+                memento_reflected: false,
+                current_path: None,
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+                remote_profile_name: None,
+                channel_id: Some(channel_id.get()),
+                // A resolvable channel name keeps session-key lookup off Discord.
+                channel_name: Some("adk-6233-clear-persist".to_string()),
+                category_name: None,
+                last_active: tokio::time::Instant::now(),
+                worktree: None,
+                born_generation: shared.restart.current_generation,
+            },
+        );
+        let persistence = QueuePersistenceContext::new(&PROVIDER, &shared.token_hash, None);
+        let enqueued = shared
+            .mailbox(channel_id)
+            .enqueue(queued(6_233_001), persistence)
+            .await;
+        assert!(enqueued.enqueued, "the backlog is queued and persisted");
+    }
+
+    /// Runs one intentional clear under a scratch runtime root and returns the
+    /// clear's outcome, the session it left, the queue length and whether an
+    /// idle-queue kickoff was armed for the channel.
+    fn run_clear(
+        channel_id: ChannelId,
+        fail_persist: bool,
+    ) -> (anyhow::Result<()>, Option<String>, bool, usize, bool) {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let root = tempfile::tempdir().expect("scratch runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("test runtime");
+        let outcome = runtime.block_on(async {
+            let shared = make_shared_data_for_tests();
+            seed(&shared, channel_id).await;
+            if fail_persist {
+                // An emptied queue is persisted by removing its file, so a
+                // directory in that file's place makes the clear's persist fail.
+                let path = root
+                    .path()
+                    .join("runtime/discord_pending_queue")
+                    .join(PROVIDER.as_str())
+                    .join(&shared.token_hash)
+                    .join(format!("{}.json", channel_id.get()));
+                std::fs::remove_file(&path).expect("persisted queue file");
+                std::fs::create_dir(&path).expect("directory in the queue file's place");
+            }
+            let http = Arc::new(serenity::Http::new(""));
+            let result = clear_channel_session_state_after_boundary(
+                &http,
+                &shared,
+                &PROVIDER,
+                channel_id,
+                "/clear",
+                SoftClearNotifyMode::Suppress,
+                None,
+            )
+            .await;
+            let (session_id, cleared) = {
+                let data = shared.core.lock().await;
+                let session = data.sessions.get(&channel_id).expect("session kept");
+                (session.session_id.clone(), session.cleared)
+            };
+            let queue_len = shared
+                .mailbox(channel_id)
+                .snapshot()
+                .await
+                .intervention_queue
+                .len();
+            let kick_armed = shared
+                .restart
+                .deferred_hook_channels
+                .contains_key(&channel_id);
+            (result, session_id, cleared, queue_len, kick_armed)
+        });
+        drop(runtime);
+        match previous {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
+        outcome
+    }
+
+    #[test]
+    fn failed_clear_persist_is_not_reported_as_cleared_and_keeps_the_session() {
+        let (result, session_id, cleared, queue_len, kick_armed) =
+            run_clear(ChannelId::new(6_233_101), true);
+
+        assert!(
+            result.is_err(),
+            "a clear whose queue persist failed must not return the success the caller replies with"
+        );
+        assert_eq!(queue_len, 1, "the failed persist restores the backlog");
+        assert_eq!(
+            session_id.as_deref(),
+            Some("provider-session-6233"),
+            "the restored backlog must not resume in a provider session this clear reset"
+        );
+        assert!(!cleared, "the session is not marked cleared");
+        assert!(
+            kick_armed,
+            "the restored backlog is re-armed through the idle-queue kickoff"
+        );
+    }
+
+    #[test]
+    fn persisted_clear_still_resets_the_session_and_arms_no_kick() {
+        let (result, session_id, cleared, queue_len, kick_armed) =
+            run_clear(ChannelId::new(6_233_102), false);
+
+        assert!(result.is_ok(), "a persisted clear still succeeds");
+        assert_eq!(queue_len, 0, "the backlog is discarded");
+        assert_eq!(session_id, None, "the provider session is reset");
+        assert!(cleared, "the session is marked cleared");
+        assert!(!kick_armed, "an empty cleared queue arms no kickoff");
     }
 }
 

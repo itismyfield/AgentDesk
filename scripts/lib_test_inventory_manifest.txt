@@ -2595,6 +2595,8 @@ services::discord::commands::config::session_override_cluster_characterization_t
 services::discord::commands::config::session_override_cluster_characterization_tests::fast_mode_reset_entries_stay_provider_scoped
 services::discord::commands::config::session_override_cluster_characterization_tests::fast_mode_toggle_round_trip_marks_and_clears_provider_reset
 services::discord::commands::config::session_override_cluster_characterization_tests::model_override_round_trip_observed_via_would_change_probe
+services::discord::commands::control::clear_persist_failure_tests::failed_clear_persist_is_not_reported_as_cleared_and_keeps_the_session
+services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_session_and_arms_no_kick
 services::discord::commands::control::soft_clear_notify_tests::blank_explicit_session_key_falls_back_to_recomputed_key
 services::discord::commands::control::soft_clear_notify_tests::explicit_recap_session_key_wins_over_recomputed_channel_key
 services::discord::commands::control::soft_clear_notify_tests::idle_recap_clear_keeps_soft_clear_notify_row
