@@ -3185,6 +3185,14 @@ services::discord::health::transcript_binding_stall::tests::a_superseded_binding
 services::discord::health::transcript_binding_stall::tests::a_transcript_that_grew_recently_is_healthy_even_mid_rotation
 services::discord::health::transcript_binding_stall::tests::an_idle_channel_is_never_alerted_on
 services::discord::health::transcript_binding_stall::tests::an_unresolvable_bound_transcript_is_not_this_verdict
+services::discord::health::unpaired_active_token::delivered_release::tests::decide_orders_the_gates_and_maps_every_reason
+services::discord::health::unpaired_active_token::delivered_release::tests::delivered_rowless_anchor_defers_then_would_release_without_mutation
+services::discord::health::unpaired_active_token::delivered_release::tests::each_single_flip_of_the_delivered_shape_keeps_the_anchor
+services::discord::health::unpaired_active_token::delivered_release::tests::episode_receipt_names_exactly_this_nonce_session_and_channel
+services::discord::health::unpaired_active_token::delivered_release::tests::nothing_is_decided_before_the_boot_reconcile_completes
+services::discord::health::unpaired_active_token::delivered_release::tests::pane_probe_is_the_destructive_grade_idle_proof
+services::discord::health::unpaired_active_token::delivered_release::tests::production_pane_probe_without_a_binding_holds
+services::discord::health::unpaired_active_token::delivered_release::tests::row_presence_and_pane_proof_fail_closed
 services::discord::health::unpaired_active_token::tests::a_built_snapshot_is_reconfirmed_only_for_a_token_without_a_row
 services::discord::health::unpaired_active_token::tests::completion_between_initial_reads_and_recheck_invalidates_candidate
 services::discord::health::unpaired_active_token::tests::every_identity_coordinate_must_remain_stable
@@ -3706,6 +3714,7 @@ services::discord::org_writer::tests::primary_profile_cannot_be_unlinked_until_r
 services::discord::org_writer::tests::test_012_catalog_append_round_trips_extra_and_skips_secrets
 services::discord::outbound::completed_turn_ledger::tests::append_dedups_by_user_msg_id_keeping_latest_commit_time
 services::discord::outbound::completed_turn_ledger::tests::append_then_read_roundtrips_the_user_msg_id
+services::discord::outbound::completed_turn_ledger::tests::committed_at_names_only_an_exact_member
 services::discord::outbound::completed_turn_ledger::tests::prune_caps_to_the_newest_entries
 services::discord::outbound::completed_turn_ledger::tests::prune_drops_entries_past_the_retention_window
 services::discord::outbound::completed_turn_ledger::tests::settled_user_msg_ids_of_absent_ledger_is_empty

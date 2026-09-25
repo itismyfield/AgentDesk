@@ -97,6 +97,22 @@ pub(in crate::services::discord) fn read_ledger(
     read_ledger_at(&ledger_path(provider, channel_id)?)
 }
 
+/// Membership of the exact id only; the timestamp is telemetry and never names an episode.
+pub(in crate::services::discord) fn completed_turn_committed_at_ms(
+    provider: &ProviderKind,
+    channel_id: u64,
+    user_msg_id: u64,
+) -> Option<u64> {
+    if user_msg_id == 0 {
+        return None;
+    }
+    read_ledger(provider, channel_id)?
+        .entries
+        .into_iter()
+        .find(|entry| entry.user_msg_id == user_msg_id)
+        .map(|entry| entry.committed_at_epoch_ms)
+}
+
 /// The set of settled inbound `user_msg_id`s for `(provider, channel_id)`. Empty
 /// when the ledger is absent/malformed (conservative — an unreadable ledger
 /// suppresses NOTHING, so a real message is never wrongly treated as settled).
@@ -269,5 +285,22 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("codex").join("absent.json");
         assert!(read_ledger_at(&path).is_none());
+    }
+
+    #[test]
+    fn committed_at_names_only_an_exact_member() {
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let at = |id| completed_turn_committed_at_ms(&ProviderKind::Codex, 5_996, id);
+        assert_eq!(at(7_001), None, "no ledger file");
+        let path = ledger_path(&ProviderKind::Codex, 5_996).expect("ledger path");
+        append_at(&path, 7_001, 1_000).expect("append");
+        assert_eq!((at(7_001), at(7_002), at(0)), (Some(1_000), None, None));
+        fs::write(&path, "{not json").expect("corrupt ledger");
+        assert_eq!(at(7_001), None, "malformed ledger");
     }
 }

@@ -5,6 +5,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use poise::serenity_prelude::ChannelId;
 
 use super::snapshot::WatcherStateSnapshot;
+use super::unpaired_active_token::reconcile_channel as reconcile_delivered_anchor;
 use super::{HealthRegistry, stall_liveness};
 use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
 use crate::services::discord::relay_health::{DurableFrontierObservation, RelayStallState};
@@ -370,19 +371,21 @@ pub(super) async fn run_orphan_token_auto_heal_pass(
         for (channel_id, mailbox) in mailbox_snapshots {
             redrive_channels.insert(channel_id);
             if mailbox.cancel_token.is_some() {
-                match apply_orphan_pending_token_cleanup(
+                let orphan = apply_orphan_pending_token_cleanup(
                     registry,
                     provider,
                     shared.clone(),
                     channel_id,
                     RelayRecoveryApplySource::ProbeAutoHeal,
                 )
-                .await
-                {
+                .await;
+                match &orphan {
                     Ok(true) => applied += 1,
-                    Ok(false) => {}
-                    Err(RelayRecoveryError::SnapshotNotFound { .. }) => {}
-                    Err(error) => trace_orphan_auto_heal_error(provider, channel_id, &error),
+                    Ok(false) | Err(RelayRecoveryError::SnapshotNotFound { .. }) => {}
+                    Err(error) => trace_orphan_auto_heal_error(provider, channel_id, error),
+                }
+                if !matches!(orphan, Ok(true)) {
+                    let _verdict = reconcile_delivered_anchor(provider, shared, channel_id).await;
                 }
             }
 

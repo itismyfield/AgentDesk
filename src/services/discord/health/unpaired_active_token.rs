@@ -9,6 +9,9 @@ use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::ChannelMailboxSnapshot;
 
+mod delivered_release;
+pub(super) use delivered_release::reconcile_channel;
+
 pub(super) struct RelayHealthBuildInput {
     pub(super) provider: String,
     pub(super) channel_id: u64,
