@@ -3,7 +3,7 @@ import { getCampaigns, type Campaign } from "../../api/campaigns";
 import { STORAGE_KEYS } from "../../lib/storageKeys";
 import { readLocalStorageValue, writeLocalStorageValue } from "../../lib/useLocalStorage";
 import { WidgetState } from "../common/WidgetState";
-import { NODE_STATUSES, campaignProgress } from "./campaignModel";
+import { campaignProgress } from "./campaignModel";
 import { Badge, type Tr } from "./campaignPresentation";
 import CampaignExplorer from "./CampaignExplorer";
 import type { CampaignDraft } from "./CampaignNodeDetails";
@@ -65,10 +65,10 @@ export default function CampaignsPanel({ language }: { language: string }) {
         <Badge status={campaign.status} tr={tr} />
         <span className="campaign-summary-round">{tr("라운드", "Round")} {campaign.round}</span>
         <strong>{progress.percent}% <span className="campaign-muted">{progress.counts.completed}/{progress.total}</span></strong>
+        {refreshedAt && <span className="campaign-freshness">{tr("확인", "Checked")} {new Date(refreshedAt).toLocaleTimeString(language)}</span>}
       </div>
-      {campaign.description && <p className="campaign-description">{campaign.description}</p>}
+      {campaign.description && <p className="campaign-description" title={campaign.description}>{campaign.description}</p>}
       <progress className="campaign-progress" max={100} value={progress.percent} aria-label={tr("작업 완료율", "Task completion")} />
-      <div className="campaign-row"><div className="campaign-counts">{NODE_STATUSES.map((status) => <span key={status}><Badge status={status} tr={tr} /> {progress.counts[status]}</span>)}</div>{refreshedAt && <span className="campaign-freshness">{tr("확인", "Checked")} {new Date(refreshedAt).toLocaleTimeString(language)}</span>}</div>
       {campaign.nodes.length ? <CampaignExplorer key={campaign.id} campaign={campaign} tr={tr} onSaved={onSaved} drafts={drafts} onDraftChange={onDraftChange} /> : <WidgetState kind="empty" title={tr("아직 작업이 없습니다.", "No tasks yet.")} />}
     </div>}
   </section>;
