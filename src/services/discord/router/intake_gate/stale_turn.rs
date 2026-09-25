@@ -842,7 +842,8 @@ mod thread_guard_stale_pure_tests {
         assert!(after.cancel_token.is_none());
         assert!(token.cancelled.load(Ordering::Relaxed));
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
-        assert!(!shared.dispatch.thread_parents.contains_key(&parent_id));
+        assert!(shared.dispatch.thread_parents.contains_key(&parent_id));
+        assert_eq!(kicked_parents(&shared), vec![parent_id]);
         let event = rx
             .try_recv()
             .expect("the kept queue must be handed to the completion listener");
@@ -1133,7 +1134,8 @@ mod thread_guard_stale_pure_tests {
     }
 
     /// After A's finish, a replacement B that claims the thread keeps its row
-    /// and its own mapping and override; the queue-eligible edge follows the cleanup.
+    /// and its own mapping and override while A's parent is kicked; the queue-eligible
+    /// edge follows the cleanup.
     #[tokio::test]
     async fn thread_guard_cleanup_after_finish_spares_a_replacement_episode() {
         let temp = tempfile::tempdir().expect("create temp runtime root");
@@ -1173,7 +1175,7 @@ mod thread_guard_stale_pure_tests {
         assert_episode_untouched(&shared, thread_id, &replacement, 9_001).await;
         let routing_after = routing(&shared, parent_id, thread_id);
         assert_eq!(routing_after, (Some(next_thread), Some(next_alt)));
-        assert!(kicked_parents(&shared).is_empty());
+        assert_eq!(kicked_parents(&shared), vec![parent_id]);
         let event = rx
             .try_recv()
             .expect("the queue-eligible edge must follow the cleanup");
@@ -1268,24 +1270,35 @@ mod thread_guard_stale_pure_tests {
         assert!(shared.dispatch.thread_parents.contains_key(&parent_id));
     }
 
-    /// The force-clean clears the parent guard and the row but never touches the role override.
+    /// The force-clean clears the row and kicks the parent but leaves both routing
+    /// entries, with or without queued follow-ups.
     #[tokio::test]
     async fn thread_guard_force_clean_leaves_the_role_override_untouched() {
         let temp = tempfile::tempdir().expect("create temp runtime root");
         let _guard = EnvRootGuard::set(temp.path());
         let provider = ProviderKind::Codex;
-        let (parent_id, thread_id) = (channel(990), channel(991));
-        let (_registry, shared, _stale_token) =
-            seed_stale_thread_with_queue(&provider, thread_id, MessageId::new(8_001), 0).await;
-        let alt_id = channel(992);
-        shared.dispatch.thread_parents.insert(parent_id, thread_id);
-        shared.dispatch.role_overrides.insert(thread_id, alt_id);
-        let proof = force_clean_proof_for(&shared, &provider, thread_id).await;
+        for queued in [0, 1] {
+            let (parent_id, thread_id) = (channel(990 + 3 * queued), channel(991 + 3 * queued));
+            let (_registry, shared, _stale_token) =
+                seed_stale_thread_with_queue(&provider, thread_id, MessageId::new(8_001), queued)
+                    .await;
+            let alt_id = channel(992 + 3 * queued);
+            shared.dispatch.thread_parents.insert(parent_id, thread_id);
+            shared.dispatch.role_overrides.insert(thread_id, alt_id);
+            let proof = force_clean_proof_for(&shared, &provider, thread_id).await;
 
-        assert!(force_clean(&shared, thread_id, Some(proof)).await);
-        assert_eq!(routing(&shared, parent_id, thread_id), (None, Some(alt_id)));
-        let row = crate::services::discord::inflight::load_inflight_state(&provider, ID_BASE + 991);
-        assert!(row.is_none());
+            assert!(force_clean(&shared, thread_id, Some(proof)).await);
+            let routing_after = routing(&shared, parent_id, thread_id);
+            assert_eq!(
+                routing_after,
+                (Some(thread_id), Some(alt_id)),
+                "queued={queued}"
+            );
+            assert_eq!(kicked_parents(&shared), vec![parent_id]);
+            let row =
+                crate::services::discord::inflight::load_inflight_state(&provider, thread_id.get());
+            assert!(row.is_none());
+        }
     }
 
     /// A successor that registered its own override before the force-clean
@@ -1310,7 +1323,7 @@ mod thread_guard_stale_pure_tests {
         dispatch.role_overrides.insert(thread_id, successor_alt);
 
         assert!(force_clean(&shared, thread_id, Some(proof)).await);
-        assert!(!dispatch.thread_parents.contains_key(&parent_id));
+        assert!(dispatch.thread_parents.contains_key(&parent_id));
         let role_override = dispatch.role_overrides.get(&thread_id).map(|e| *e.value());
         assert_eq!(role_override, Some(successor_alt));
     }
@@ -1357,9 +1370,9 @@ mod thread_guard_stale_pure_tests {
     }
 
     /// A registration for another thread must not stop the force-clean from
-    /// clearing and kicking the proven thread's own parent.
+    /// kicking the proven thread's own parent; every mapping stays.
     #[tokio::test]
-    async fn thread_guard_force_clean_clears_target_parent_despite_unrelated_registration() {
+    async fn thread_guard_force_clean_kicks_target_parent_despite_unrelated_registration() {
         let temp = tempfile::tempdir().expect("create temp runtime root");
         let _guard = EnvRootGuard::set(temp.path());
         let provider = ProviderKind::Codex;
@@ -1382,13 +1395,14 @@ mod thread_guard_stale_pure_tests {
 
         assert!(force_clean(&shared, thread_id, Some(proof)).await);
         assert_eq!(kicked_parents(&shared), vec![parent_id]);
-        assert_eq!(routing(&shared, parent_id, thread_id), (None, Some(alt_id)));
+        let routing_after = routing(&shared, parent_id, thread_id);
+        assert_eq!(routing_after, (Some(thread_id), Some(alt_id)));
         let other_routing = routing(&shared, other_parent, other_thread);
         assert_eq!(other_routing, (Some(other_thread), Some(other_alt)));
     }
 
     /// Records the finalize log and each completion publish in order, noting
-    /// at each publish whether the parent guard and inflight row were gone.
+    /// at each publish whether the parent was kicked and the inflight row gone.
     struct CleanupOrder {
         shared: Arc<SharedData>,
         parent_id: ChannelId,
@@ -1410,12 +1424,12 @@ mod thread_guard_stale_pure_tests {
             } else {
                 return;
             };
-            let parents = &self.shared.dispatch.thread_parents;
+            let kicked = kicked_parents(&self.shared).contains(&self.parent_id);
             let row = crate::services::discord::inflight::load_inflight_state(
                 &ProviderKind::Codex,
                 self.thread_id.get(),
             );
-            let cleaned = !parents.contains_key(&self.parent_id) && row.is_none();
+            let cleaned = kicked && row.is_none();
             self.seen.lock().unwrap().push((label, cleaned));
         }
     }
