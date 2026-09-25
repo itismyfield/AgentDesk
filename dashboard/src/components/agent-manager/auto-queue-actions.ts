@@ -1,19 +1,7 @@
-export interface AutoQueueResetScope {
-  runId?: string | null;
-  repo?: string | null;
-  agentId: string;
-}
-
-interface AutoQueueGenerateApi {
-  resetAutoQueue(scope?: AutoQueueResetScope): Promise<unknown>;
-  generateAutoQueue(
-    repo: string | null,
-    agentId?: string | null,
-  ): Promise<Record<string, unknown>>;
-}
+import type { AutoQueueResetScope } from "../../api/autoQueue";
 
 interface AutoQueueResetApi {
-  resetAutoQueue(scope?: AutoQueueResetScope): Promise<unknown>;
+  resetAutoQueue(scope: AutoQueueResetScope): Promise<unknown>;
 }
 
 export interface ReadyAutoQueueEntry {
@@ -51,34 +39,18 @@ export function buildRequestGenerateGroups(
     .sort((a, b) => a.repo.localeCompare(b.repo) || a.agentId.localeCompare(b.agentId));
 }
 
-export async function generateAutoQueueForSelection(
-  api: AutoQueueGenerateApi,
-  repo: string | null,
-  agentId: string | null | undefined,
-): Promise<Record<string, unknown>> {
-  const resetAgentId = agentId?.trim();
-  if (!resetAgentId) {
-    throw new Error("agent_id is required for reset");
-  }
-
-  await api.resetAutoQueue({ repo, agentId: resetAgentId });
-  return api.generateAutoQueue(repo, agentId);
-}
-
+/**
+ * Resets exactly the run the panel shows, in one call: `run_id` pins every
+ * server write, so a per-agent loop only repeats it (#6243). Returns `false`
+ * without calling the API when there is no run to reset.
+ */
 export async function resetAutoQueueForSelection(
   api: AutoQueueResetApi,
   repo: string | null,
   agentId: string | null | undefined,
-  runId?: string | null,
-): Promise<unknown> {
-  const resetAgentId = agentId?.trim();
-  if (!resetAgentId) {
-    throw new Error("agent_id is required for reset");
-  }
-
-  return api.resetAutoQueue({
-    repo,
-    agentId: resetAgentId,
-    runId: runId ?? null,
-  });
+  runId: string | null | undefined,
+): Promise<boolean> {
+  if (!runId) return false;
+  await api.resetAutoQueue({ runId, repo, agentId: agentId?.trim() || undefined });
+  return true;
 }

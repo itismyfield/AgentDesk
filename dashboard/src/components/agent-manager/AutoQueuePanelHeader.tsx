@@ -1,6 +1,7 @@
 import { AUTOQUEUE_RUN_STATUS_TONES } from "../../theme/statusTokens";
 import { buildRequestGenerateGroups } from "./auto-queue-actions";
 import type { AutoQueuePanelCtx } from "./auto-queue-panel-ctx";
+import { isLiveAutoQueueRunStatus } from "./auto-queue-panel-state";
 import { formatTs } from "./auto-queue-panel-utils";
 
 export default function AutoQueuePanelHeader({ ctx }: { ctx: AutoQueuePanelCtx }) {
@@ -133,7 +134,7 @@ export default function AutoQueuePanelHeader({ ctx }: { ctx: AutoQueuePanelCtx }
               </button>
             );
           })()}
-          {run && (
+          {run && !isLiveAutoQueueRunStatus(run.status) && (
             <button
               onClick={() => void handleReset()}
               className="text-[11px] px-2 py-1 rounded-lg border"

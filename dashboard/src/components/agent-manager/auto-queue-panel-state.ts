@@ -40,3 +40,11 @@ export function getAutoQueuePrimaryAction(
   if (run.status === "active" && pendingCount > 0) return "dispatch";
   return null;
 }
+
+/** Mirrors `LIVE_RUN_STATUSES` in `src/db/auto_queue/run_status.rs`. */
+const LIVE_AUTO_QUEUE_RUN_STATUSES: readonly string[] = ["active", "paused", "restoring"];
+
+/** A live run still owns dispatches and slots: it is ended, not reset (#6243). */
+export function isLiveAutoQueueRunStatus(status: string): boolean {
+  return LIVE_AUTO_QUEUE_RUN_STATUSES.includes(status);
+}

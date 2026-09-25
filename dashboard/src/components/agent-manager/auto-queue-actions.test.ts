@@ -2,46 +2,53 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   buildRequestGenerateGroups,
-  generateAutoQueueForSelection,
   resetAutoQueueForSelection,
 } from "./auto-queue-actions";
 
 describe("auto-queue-actions", () => {
-  it("passes the selected repo and agent to reset and generate", async () => {
-    const resetAutoQueue = vi.fn().mockResolvedValue({ ok: true });
-    const generateAutoQueue = vi
-      .fn()
-      .mockResolvedValue({ ok: true, entries: [] });
-
-    await generateAutoQueueForSelection(
-      { resetAutoQueue, generateAutoQueue },
-      "test-repo",
-      "agent-selected",
-    );
-
-    expect(resetAutoQueue).toHaveBeenCalledWith({
-      repo: "test-repo",
-      agentId: "agent-selected",
-    });
-    expect(generateAutoQueue).toHaveBeenCalledWith("test-repo", "agent-selected");
-  });
-
-  it("passes the selected scope to reset-only actions", async () => {
+  it("resets the shown run with exactly one run-pinned call", async () => {
     const resetAutoQueue = vi.fn().mockResolvedValue({ ok: true });
 
-    await resetAutoQueueForSelection(
-      { resetAutoQueue },
-      "test-repo",
-      "agent-selected",
-      "run-123",
-    );
+    await expect(
+      resetAutoQueueForSelection(
+        { resetAutoQueue },
+        "test-repo",
+        "agent-selected",
+        "run-123",
+      ),
+    ).resolves.toBe(true);
 
-    expect(resetAutoQueue).toHaveBeenCalledWith({
-      repo: "test-repo",
-      agentId: "agent-selected",
+    expect(resetAutoQueue).toHaveBeenCalledExactlyOnceWith({
       runId: "run-123",
+      repo: "test-repo",
+      agentId: "agent-selected",
     });
   });
+
+  it("resets a NULL-agent run once without inventing an agent scope", async () => {
+    const resetAutoQueue = vi.fn().mockResolvedValue({ ok: true });
+
+    await resetAutoQueueForSelection({ resetAutoQueue }, "test-repo", null, "run-123");
+
+    expect(resetAutoQueue).toHaveBeenCalledExactlyOnceWith({
+      runId: "run-123",
+      repo: "test-repo",
+      agentId: undefined,
+    });
+  });
+
+  it.each([null, undefined, ""])(
+    "does not call reset when there is no run (runId=%j)",
+    async (runId) => {
+      const resetAutoQueue = vi.fn().mockResolvedValue({ ok: true });
+
+      await expect(
+        resetAutoQueueForSelection({ resetAutoQueue }, "test-repo", "agent-selected", runId),
+      ).resolves.toBe(false);
+
+      expect(resetAutoQueue).not.toHaveBeenCalled();
+    },
+  );
 
   it("groups request-generate candidates by repo and agent", () => {
     expect(
