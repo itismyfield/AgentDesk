@@ -325,10 +325,23 @@ class EndToEnd(Tree):
         self.assertEqual(self.run_main("--lane", "linux", "--base", self.base)[0], 1)
 
     def test_unreadable_dep_info_follows_inert(self) -> None:
-        (self.root / "target/debug/deps/agentdesk-00aa.d").write_bytes(b"\xff")
-        code, _, err = self.run_main("--lane", "linux", "--base", self.base, "--inert")
-        self.assertEqual((code, "::warning::h2-admission: R-O: cannot read root lib dep-info" in err), (0, True))
-        self.assertEqual(self.run_main("--lane", "linux", "--base", self.base)[0], 1)
+        deps = self.root / "target/debug/deps"
+        depinfo, text = deps / "agentdesk-00aa.d", (deps / "agentdesk-00aa.d").read_bytes()
+        self.addCleanup(deps.chmod, 0o755)
+        self.addCleanup(depinfo.chmod, 0o644)
+        # undecodable bytes, a read error, and a stat error while the .d is being selected
+        for case, locked in (("undecodable", None), ("read", depinfo), ("stat", deps)):
+            with self.subTest(case=case):
+                depinfo.write_bytes(b"\xff" if locked is None else text)
+                if locked is not None:
+                    locked.chmod(0)
+                try:
+                    code, _, err = self.run_main("--lane", "linux", "--base", self.base, "--inert")
+                    self.assertEqual((code, "::warning::h2-admission: R-O: " in err and "root lib dep-info" in err), (0, True))
+                    self.assertEqual(self.run_main("--lane", "linux", "--base", self.base)[0], 1)
+                finally:
+                    deps.chmod(0o755)
+                    depinfo.chmod(0o644)
 
 class DepInfo(unittest.TestCase):
     """R-O over the root lib dep-info of a two-module crate."""
@@ -383,7 +396,36 @@ class DepInfo(unittest.TestCase):
             with (self.root / "src/lib.rs").open("a", encoding="utf-8") as lib:
                 lib.write("mod sym;\nmod out;\n")
             self.assertEqual(self.problems("src/sym.rs", "src/x/../sym.rs"), [])
+            # `..` right after a directory symlink resolves on disk, for the module and its children
+            (self.root / "shared/nested").mkdir(parents=True)
+            (self.root / "shared/payload.rs").write_text("mod inner;\n")
+            (self.root / "shared/inner.rs").write_text("")
+            (self.root / "src/jump").symlink_to("../shared/nested")
+            with (self.root / "src/lib.rs").open("a", encoding="utf-8") as lib:
+                lib.write('#[path = "jump/../payload.rs"]\nmod hop;\n')
+            h2._MODULE_TABLES.clear()
+            self.assertEqual(self.problems("src/jump/../payload.rs", "src/jump/../inner.rs"), [])
             self.assertEqual(self.problems("src/out.rs"), [f"R-O: lib compile input {outside.as_posix()} is outside the repo"])
+
+    def test_aliases_keep_the_rule_of_each_spelling(self) -> None:
+        (self.root / "src/payload.inc").unlink()
+        (self.root / "src/payload.inc").symlink_to("real.rs")
+        (self.root / "src/real.rs").write_text("")
+        (self.root / "migrations/postgres").mkdir(parents=True)
+        (self.root / "migrations/postgres/1.sql").write_text("")
+        (self.root / "src/alias.rs").symlink_to("../migrations/postgres/1.sql")
+        (self.root / "src/data.inc").write_text("")
+        (self.root / "src/sym.rs").symlink_to("data.inc")
+        with (self.root / "src/lib.rs").open("a", encoding="utf-8") as lib:
+            lib.write("mod sym;\n")
+        data, code = "R-O: lib compile input {} is not in the data allowlist", "R-O: {} is compiled into the lib but is not in the module tree"
+        for extra, expected in (
+                (("src/payload.inc",), data.format("src/payload.inc")),  # non-Rust spelling of a module file
+                (("src/payload.inc", "src/real.rs"), data.format("src/payload.inc")),
+                (("src/alias.rs",), code.format("src/alias.rs")),  # Rust spelling of allowlisted data
+                (("src/sym.rs",), data.format("src/sym.rs"))):  # mounted Rust spelling of non-allowlisted data
+            with self.subTest(extra=extra):
+                self.assertEqual(self.problems(*extra), [expected])
 
     def test_invalid_dep_info_is_a_problem(self) -> None:
         depinfo = write_depinfo(self.root, "c0ffee", ["src/lib.rs", "src/a.rs"])
