@@ -18,6 +18,8 @@ The orchestration rule-surface rows (lane caps, campaign execution rules) were a
 - Compatibility seams such as `role_map.json`, `bot_settings.json`, the root-level legacy `agentdesk.yaml`, and `_shared.md` aliases are not canonical write targets.
 - Older docs with deprecated front matter are retained for history. Their config and policy lists are not write targets unless they point back here.
 - Merges into `main` always go through a pull request that an agent babysits: it confirms CI and review, then merges, and repairs the PR on failure. No policy merges automatically.
+- `main` branch protection requires a pull request and the required status checks, and `enforce_admins` applies it to administrators too (decided 2026-09-25), so no one pushes directly to `main` or merges past a failing required check.
+- Branch protection is the enforcement mechanism for these merge rules. `.githooks/pre-push` only regenerates inventory docs on push; it does not block or gate pushes to `main`.
 
 ## Matrix
 
