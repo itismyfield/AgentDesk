@@ -1086,11 +1086,8 @@ pub(in crate::services::discord) async fn handle_event(
             // turn (the thread's cancel_token is keyed by thread_id, leaving
             // the parent channel "unlocked").
             if is_allowed_bot {
-                // #1446 — copy the mapped thread_id and immediately drop the
-                // DashMap ref. `thread_guard_force_clean_stale_thread`
-                // re-acquires the same shard lock to call `.remove()`; if the
-                // ref were still held we would deadlock on the shard's
-                // RwLock. The narrow scope below releases the ref at the `}`.
+                // Copy the mapped thread and drop the DashMap ref at the `}`: the idle
+                // branch below calls `.remove()` on the same shard and would deadlock.
                 let thread_id_opt = {
                     data.shared
                         .dispatch

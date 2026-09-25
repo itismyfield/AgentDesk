@@ -24,7 +24,6 @@ pub(super) struct ThreadGuardForceCleanProof {
     turn_nonce: Option<String>,
     observed_before: std::time::Instant,
     inflight: crate::services::discord::inflight::InflightTurnState,
-    mailbox_has_cancel_token: bool,
 }
 
 /// Parents routed to the thread while the proven episode still held it.
@@ -195,7 +194,6 @@ fn thread_guard_force_clean_proof(
         turn_nonce: snapshot.mailbox_active_turn_nonce,
         observed_before: proof.observed_before,
         inflight: proof.inflight,
-        mailbox_has_cancel_token: snapshot.relay_health.mailbox_has_cancel_token,
     })
 }
 
@@ -211,8 +209,8 @@ pub(super) async fn thread_guard_force_clean_stale_thread(
     let Some(proof) = proof else {
         return false;
     };
-    // Snapshot while the proven episode still holds the thread; a later
-    // registration of a different value survives the cleanup.
+    // Parents to kick once the thread is released; their mappings stay for the
+    // intake idle check to clear.
     let parents = snapshot_thread_guard_parents(shared, thread_id);
     let Ok(finish) = thread_guard_release_proven_anchor(shared, provider, thread_id, &proof).await
     else {
@@ -264,16 +262,14 @@ fn thread_guard_cleanup_released_episode(
     finish: Option<crate::services::turn_orchestrator::FinishTurnResult>,
     parents: Vec<serenity::ChannelId>,
 ) -> bool {
-    // Without an anchor the row goes only if no token held the mailbox; the thread stays guarded.
-    if finish.is_some() || !proof.mailbox_has_cancel_token {
-        let _ = crate::services::discord::inflight::clear_inflight_state_for_snapshot(
-            provider,
-            &proof.inflight,
-        );
-    }
+    // Without a finished anchor nothing was released, so the row and the guard stay.
     let Some(finish) = finish else {
         return false;
     };
+    let _ = crate::services::discord::inflight::clear_inflight_state_for_snapshot(
+        provider,
+        &proof.inflight,
+    );
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         "  [{ts}] 🔓 THREAD-GUARD: stale inflight detected for thread {}, cleaning up and proceeding",
@@ -287,19 +283,8 @@ fn thread_guard_cleanup_released_episode(
         finish.removed_token.clone(),
         "1446_thread_guard_stale_inflight",
     );
-    let thread_parent_kickoffs: Vec<_> = parents
-        .into_iter()
-        .filter(|parent| {
-            let parents = &shared.dispatch.thread_parents;
-            parents
-                .remove_if(parent, |_, thread| *thread == thread_id)
-                .is_some()
-        })
-        .collect();
     crate::services::discord::turn_finalizer::cleanup::kickoff_thread_parents_after_finalize(
-        shared,
-        provider,
-        thread_parent_kickoffs,
+        shared, provider, parents,
     );
     crate::services::discord::turn_completion_events::publish_mailbox_release_completion_event(
         shared,
@@ -1051,7 +1036,6 @@ mod thread_guard_stale_pure_tests {
             turn_nonce: None,
             observed_before: std::time::Instant::now(),
             inflight: stale_row,
-            mailbox_has_cancel_token: false,
         };
 
         let successor = Arc::new(CancelToken::new());
