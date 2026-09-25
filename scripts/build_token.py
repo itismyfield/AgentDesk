@@ -22,7 +22,12 @@ Descendants outliving that child are not covered and no process-group kill is
 used, because the build's group intentionally holds an sccache daemon.
 
 An explicit --delegate-lease permits one cooperative wrapper hop. Ordinary
-children inherit no lease; this does not make whole-deploy wrapping or ABBA safe.
+children inherit no lease, only a refusal marker: a nested wrapper under a live
+holder exits EXIT_NESTED at once instead of waiting on its own ancestor, and
+deploy-release.sh runs the same check before its deploy lock, so whole-deploy
+wrapping and the token-then-deploy-lock ABBA fail fast rather than time out.
+deploy-release.sh's `cargo metadata --no-deps` target lookup is read-only and
+stays unwired by design.
 
 Waiting is first-come-first-served. `acquire()` retries a non-blocking flock, so
 the kernel never queues the waiters; on 2026-09-17 that let a lane release the
@@ -51,6 +56,9 @@ WAIT_TIMEOUT_ENV = "ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS"
 # build log (build-release.sh runs cargo through `tail -1`). Absent: stderr.
 DIAG_FD_ENV = "ADK_BUILD_TOKEN_DIAG_FD"
 LEASE_ENV = "ADK_BUILD_TOKEN_LEASE"
+# "<dev>:<ino>:<pid>" of the wrapper holding the token, set in its child's env.
+# Refusal only: it never stands in for the lock, so forging it can only refuse.
+HOLDER_ENV = "ADK_BUILD_TOKEN_HOLDER"
 # Opt-out for the sccache activation below: these spellings (trimmed, case-folded)
 # turn it off, anything else -- unset included -- leaves it on.
 SCCACHE_OPT_OUT_ENV = "ADK_BUILD_TOKEN_SCCACHE"
@@ -79,6 +87,7 @@ _SEQUENCE_RETRY_SECS = 0.005
 EXIT_USAGE = 64
 EXIT_TOKEN_UNUSABLE = 69
 EXIT_TOKEN_TIMEOUT = 75
+EXIT_NESTED = 73
 _WOULD_BLOCK = (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES)
 
 # POSIX.1 sigaction(): the call shall fail with EINVAL for exactly these two.
@@ -410,7 +419,7 @@ def acquire(fd: int, path: str, timeout: float) -> None:
                 raise BuildTokenTimeout(
                     f"build token {path} still held after {timeout:g}s: raise"
                     f" {WAIT_TIMEOUT_ENV} to wait longer, or clear the holder -- an"
-                    " ancestor of this process holding the token deadlocks here")
+                    " ancestor holding the token outside this wrapper deadlocks here")
             time.sleep(WAIT_POLL_SECS)
 
 
@@ -424,6 +433,34 @@ def hold_token(path: str, env: Mapping[str, str]) -> Iterator[int]:
         yield fd
     finally:
         os.close(fd)
+
+
+def _ancestor_pids() -> set[int]:
+    """This process's ancestors from one `ps` snapshot; empty when unreadable."""
+    try:
+        listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True,
+                                 text=True, timeout=5, check=True).stdout
+        parent = dict(tuple(map(int, line.split())) for line in listing.splitlines() if line.strip())
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return set()
+    seen: set[int] = set()
+    pid = parent.get(os.getpid(), os.getppid())
+    while pid > 1 and pid not in seen:
+        seen.add(pid)
+        pid = parent.get(pid, 0)
+    return seen
+
+
+def nested_holder(path: str, env: Mapping[str, str]) -> int | None:
+    """The live ancestor whose wrapper holds `path`, or None for no or a stale marker."""
+    try:
+        dev, ino, pid = map(int, env[HOLDER_ENV].split(":"))
+        live = os.stat(path)
+    except (KeyError, ValueError, OSError):
+        return None
+    if (live.st_dev, live.st_ino) != (dev, ino) or pid not in _ancestor_pids():
+        return None
+    return pid
 
 
 def _exit_code(returncode: int) -> int:
@@ -605,6 +642,11 @@ def run(command: Sequence[str], env: Mapping[str, str] | None = None,
             print(f"build token: {exc}", file=sys.stderr)
             return EXIT_TOKEN_UNUSABLE
     apply_sccache_env(child_env)
+    holder = None if carrier is not None else nested_holder(path, os.environ)
+    if holder is not None:
+        print(f"build token: ancestor pid {holder} already holds {path}; refusing a nested"
+              " wrapper rather than waiting on it (--delegate-lease allows one hop)", file=sys.stderr)
+        return EXIT_NESTED
     with _supervised() as supervisor:
         try:
             lease = inherited_lease(carrier, path) if carrier is not None else hold_token(path, child_env)
@@ -612,6 +654,8 @@ def run(command: Sequence[str], env: Mapping[str, str] | None = None,
                 if carrier is not None and delegate_lease:
                     raise BuildTokenError("an inherited lease cannot be delegated again")
                 assert_live_token(fd, path)
+                held = os.fstat(fd)
+                child_env[HOLDER_ENV] = f"{held.st_dev}:{held.st_ino}:{os.getpid()}"
                 rc = run_protected(command, child_env, supervisor, fd if delegate_lease else None)
         except BuildTokenTimeout as exc:
             print(f"build token: {exc}", file=sys.stderr)
@@ -643,6 +687,8 @@ def main(argv: Sequence[str]) -> int:
     delegate = len(args) > 1 and args[1] == "--delegate-lease"
     if delegate:  # Only before --; everything after -- remains command argv.
         del args[1]
+    if args[1:] == ["--refuse-if-nested"]:  # No command: exit status is the verdict.
+        return EXIT_NESTED if nested_holder(CANONICAL_TOKEN_PATH, os.environ) is not None else 0
     try:
         command = parse_command(args)
     except BuildTokenError as exc:
