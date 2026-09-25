@@ -24,6 +24,8 @@ pub(crate) enum UnreadTailShape {
     /// A ready transcript that a watcher bound to another session leaves unattributed
     /// (UNMEASURED); its final answer is still unrelayed when `answer`.
     ForeignWatcher { answer: bool },
+    /// `RowOutputMissing` as explicit background work whose live watcher this channel owns.
+    OwnedBackground,
 }
 
 pub(crate) struct UnreadTailSeed {
@@ -68,7 +70,7 @@ impl UnreadTailSeed {
         let output = root.path().join(format!("unread-tail-{channel}.jsonl"));
         let ready = "{\"type\":\"system\",\"subtype\":\"turn_duration\",\"session_id\":\"s\"}\n";
         let transcript = match shape {
-            UnreadTailShape::RowOutputMissing => String::new(),
+            UnreadTailShape::RowOutputMissing | UnreadTailShape::OwnedBackground => String::new(),
             UnreadTailShape::MeasuredBacklog => ready.to_string(),
             UnreadTailShape::ForeignWatcher { .. } => {
                 format!(
@@ -117,6 +119,13 @@ impl UnreadTailSeed {
             // A heartbeat-stale watcher on another pane and no row relay owner: nothing live relays.
             let foreign = format!("{tmux_session}-other");
             bind_watcher(&shared, channel, &foreign, &output, 0);
+        } else if shape == UnreadTailShape::OwnedBackground {
+            row.set_relay_owner_kind(inflight::RelayOwnerKind::Watcher);
+            row.task_notification_kind =
+                Some(crate::services::agent_protocol::TaskNotificationKind::Background);
+            row.current_msg_len = 1; // Discord write evidence the watchdog ages
+            let now = crate::services::discord::tmux_watcher_now_ms();
+            bind_watcher(&shared, channel, &tmux_session, &output, now);
         } else {
             row.set_relay_owner_kind(inflight::RelayOwnerKind::Watcher);
         }

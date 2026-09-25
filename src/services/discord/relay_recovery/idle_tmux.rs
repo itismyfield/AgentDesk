@@ -387,6 +387,8 @@ pub(crate) fn idle_tmux_repair_has_unrelayed_tail_answer(
 /// The decision sites that read `unread_bytes` as destructive permission, as the refusal record names them.
 pub(crate) const UNREAD_TAIL_SITE_MANUAL_REATTACH: &str = "manual_reattach_idle_clear";
 pub(crate) const UNREAD_TAIL_SITE_STALE_MAILBOX: &str = "stale_mailbox_idle_tmux";
+pub(crate) const UNREAD_TAIL_SITE_WATCHDOG_EXPLICIT_BACKGROUND: &str =
+    "watchdog_explicit_background";
 
 /// Why a tail is UNMEASURED, from the published coordinates; `None` when measured.
 /// A consumer may name the cause but never rebuild a tail from it.
