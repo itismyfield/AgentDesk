@@ -440,7 +440,9 @@ base `origin/main cfeff89307`. T6-1 이 네 게이트를 무조건화하고 T6-2
 
 **운영 config:** `~/.adk/release/config/agentdesk.yaml` 의 `runtime:` 에
 `relay_authority_mode: enforce` / `relay_authority_cohort_percent: 100` 이 남아 있다. 새 바이너리는
-두 키를 무시하므로 수정하지 않았다. 설정 write-back 은 모르는 키를 보존한다.
+두 키를 무시하므로 수정하지 않았다. bot-settings 의 `serde_yaml::Value` patch writer 는 두 키를
+보존하지만, whole-`Config` `save_to_path` writer 8곳("두 항목의 A6 판정" 절에 기록)을 한 번 거치면 두 키는
+사라진다. 두 키는 더 이상 어떤 판정에도 쓰이지 않으므로 사라져도 무해하다.
 
 **남은 참조(T6-4 몫):** 롤백 런북의 다이얼·`relay_authority_rollout` 조회 절차,
 `scripts/relay_authority_rollout_report.py` 와 그 테스트. CI 레인 이름
