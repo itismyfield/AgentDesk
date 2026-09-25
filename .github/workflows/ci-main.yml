@@ -172,7 +172,7 @@ jobs:
         run: sccache --show-stats || true
 
   high-risk-recovery:
-    name: High-risk recovery
+    name: High-risk recovery (main)
     # #5232 R3: deliberately UNCONDITIONAL here, unlike ci-pr.yml. ci-main has
     # no library sweep to catch a path-filter miss, so the filter would have to
     # be exhaustive to be safe; a main push pays this lane once per merge, so it
