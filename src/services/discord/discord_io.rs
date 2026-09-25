@@ -9,52 +9,55 @@ use crate::services::discord::outbound::{
 use poise::serenity_prelude::{CreateAttachment, CreateMessage};
 use std::sync::Arc;
 
-/// Check if a user is authorized (owner or allowed user)
-/// Returns true if authorized, false if rejected.
-/// Requires an explicitly configured owner unless allow-all mode is enabled.
+/// Check user authorization through `user_is_authorized` and log rejection.
+/// Allow-all mode still requires an explicitly configured owner.
 pub(super) async fn check_auth(
     user_id: UserId,
     user_name: &str,
     shared: &Arc<SharedData>,
     _token: &str,
 ) -> bool {
-    // #2044 F2: this function only reads owner_user_id / allowed_user_ids
-    // (via `user_is_authorized`), so a write lock here previously
-    // serialised every Discord intake message against settings reads
-    // happening elsewhere (voice, dispatch, management commands).
-    // Use a read lock so per-message auth checks no longer fight
-    // unrelated settings readers.
-    let settings = shared.settings.read().await;
-    match settings.owner_user_id {
-        None => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
+    let uid = user_id.get();
+    // #2044 F2: a read lock, not a write lock, so per-message auth checks do
+    // not serialise against unrelated settings readers (voice, dispatch,
+    // management commands). Read once: the decision and its diagnostic
+    // context come from the same settings, and the guard drops before logging.
+    let (authorized, owner_missing) = {
+        let settings = shared.settings.read().await;
+        (
+            user_is_authorized(&settings, uid),
+            settings.owner_user_id.is_none(),
+        )
+    };
+
+    // This branch selects diagnostics only; the shared predicate decides auth.
+    if !authorized {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        if owner_missing {
             tracing::info!(
                 "  [{ts}] ✗ Rejected: {user_name} (id:{}) — owner_user_id is not configured",
-                user_id.get()
+                uid
             );
-            false
-        }
-        Some(_) => {
-            let uid = user_id.get();
-            if user_is_authorized(&settings, uid) {
-                true
-            } else {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!("  [{ts}] ✗ Rejected: {user_name} (id:{})", uid);
-                false
-            }
+        } else {
+            tracing::info!("  [{ts}] ✗ Rejected: {user_name} (id:{})", uid);
         }
     }
+
+    authorized
 }
 
+/// Shared user-authorization predicate for live intake and catch-up.
+/// An explicitly configured owner is required, including in allow-all mode.
 pub(super) fn user_is_authorized(settings: &DiscordBotSettings, user_id: u64) -> bool {
-    settings.allow_all_users
-        || settings.owner_user_id == Some(user_id)
-        || settings.allowed_user_ids.contains(&user_id)
+    settings.owner_user_id.is_some()
+        && (settings.allow_all_users
+            || settings.owner_user_id == Some(user_id)
+            || settings.allowed_user_ids.contains(&user_id))
 }
 
-/// Authorization for a recovered author, reading the live settings snapshot
-/// exactly as `check_auth` does so catch-up and live intake cannot diverge.
+/// Check a recovered author's user authorization through the shared predicate.
+/// Results agree with live user authorization for identical settings and user ID;
+/// separately timed reads are not guaranteed to observe the same settings.
 pub(super) async fn author_authorized(shared: &Arc<SharedData>, user_id: u64) -> bool {
     let settings = shared.settings.read().await;
     user_is_authorized(&settings, user_id)
@@ -513,5 +516,112 @@ async fn deliver_channel_message(
         DeliveryResult::TransientFailure { reason }
         | DeliveryResult::PermanentFailure { reason }
         | DeliveryResult::ConfirmedMissing { reason } => Err(reason),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const USER_ID: u64 = 343_742_347_365_974_026;
+    const OTHER_OWNER_ID: u64 = 343_742_347_365_974_030;
+
+    struct PolicyCase {
+        id: &'static str,
+        owner_user_id: Option<u64>,
+        allow_all_users: bool,
+        user_listed: bool,
+        expected: bool,
+    }
+
+    const fn case(
+        id: &'static str,
+        owner_user_id: Option<u64>,
+        allow_all_users: bool,
+        user_listed: bool,
+        expected: bool,
+    ) -> PolicyCase {
+        PolicyCase {
+            id,
+            owner_user_id,
+            allow_all_users,
+            user_listed,
+            expected,
+        }
+    }
+
+    /// #6059 §7-A: every owner / allow-all / allow-list combination with its
+    /// expected answer written out, never recomputed from the predicate.
+    const POLICY_MATRIX: [PolicyCase; 12] = [
+        case("C01", None, false, false, false),
+        case("C02", None, false, true, false),
+        case("C03", None, true, false, false),
+        case("C04", None, true, true, false),
+        case("C05", Some(USER_ID), false, false, true),
+        case("C06", Some(USER_ID), false, true, true),
+        case("C07", Some(USER_ID), true, false, true),
+        case("C08", Some(USER_ID), true, true, true),
+        case("C09", Some(OTHER_OWNER_ID), false, false, false),
+        case("C10", Some(OTHER_OWNER_ID), false, true, true),
+        case("C11", Some(OTHER_OWNER_ID), true, false, true),
+        case("C12", Some(OTHER_OWNER_ID), true, true, true),
+    ];
+
+    fn apply_case(settings: &mut DiscordBotSettings, case: &PolicyCase) {
+        settings.owner_user_id = case.owner_user_id;
+        settings.allow_all_users = case.allow_all_users;
+        settings.allowed_user_ids = if case.user_listed {
+            vec![USER_ID]
+        } else {
+            Vec::new()
+        };
+    }
+
+    fn describe(case: &PolicyCase) -> String {
+        format!(
+            "{}: owner={:?} allow_all={} listed={}",
+            case.id, case.owner_user_id, case.allow_all_users, case.user_listed
+        )
+    }
+
+    #[test]
+    fn user_authorization_matches_owner_policy_matrix() {
+        let mut mismatches = Vec::new();
+        for case in &POLICY_MATRIX {
+            let mut settings = DiscordBotSettings::default();
+            apply_case(&mut settings, case);
+            let actual = user_is_authorized(&settings, USER_ID);
+            if actual != case.expected {
+                mismatches.push(format!("{} -> {actual}", describe(case)));
+            }
+        }
+        assert!(mismatches.is_empty(), "policy mismatches: {mismatches:#?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn live_and_catch_up_authorization_match_expected_policy_matrix() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let mut mismatches = Vec::new();
+        for case in &POLICY_MATRIX {
+            {
+                let mut settings = shared.settings.write().await;
+                apply_case(&mut settings, case);
+            }
+            let live = check_auth(UserId::new(USER_ID), "matrix-user", &shared, "").await;
+            let catch_up = author_authorized(&shared, USER_ID).await;
+            if live != case.expected {
+                mismatches.push(format!("check_auth {} -> {live}", describe(case)));
+            }
+            if catch_up != case.expected {
+                mismatches.push(format!(
+                    "author_authorized {} -> {catch_up}",
+                    describe(case)
+                ));
+            }
+            if live != catch_up {
+                mismatches.push(format!("live/catch-up split {}", describe(case)));
+            }
+        }
+        assert!(mismatches.is_empty(), "wrapper mismatches: {mismatches:#?}");
     }
 }

@@ -33,6 +33,10 @@ const ANNOUNCE_BOT_ID: u64 = 1_481_522_187_197_218_817;
 const NOTIFY_BOT_ID: u64 = 1_481_522_187_197_218_818;
 const HUMAN_ID: u64 = 343_742_347_365_974_026;
 const UNAUTHORIZED_HUMAN_ID: u64 = 343_742_347_365_974_027;
+/// #6059: a configured owner distinct from every author these tests send, so a
+/// fixture that needs an authorized human keeps the owner precondition without
+/// authorizing the author through ownership.
+const OWNER_ID: u64 = 343_742_347_365_974_030;
 
 fn view(author_id: u64, author_is_bot: bool, age_secs: i64, text: &str) -> CatchUpMessageView {
     CatchUpMessageView {
@@ -1119,7 +1123,11 @@ async fn recent_partial_page_failure_preserves_gap_then_recovers_older_human() {
     // `user_is_authorized` is false for every id under default test settings.
     // Without this the fresh human message classifies `NotAllowed` and the
     // sweep never reaches the behaviour this test exists to pin.
-    shared.settings.write().await.allow_all_users = true;
+    {
+        let mut settings = shared.settings.write().await;
+        settings.owner_user_id = Some(OWNER_ID);
+        settings.allow_all_users = true;
+    }
 
     let newest_terminal_id = message_id_with_age(3, Duration::from_secs(30));
     let buried_human_id = message_id_with_age(2, Duration::from_secs(120));
@@ -1216,7 +1224,11 @@ async fn recent_initial_fetch_failure_blocks_phase2_then_recovers_whole_gap() {
     // `user_is_authorized` is false for every id under default test settings.
     // Without this the fresh human message classifies `NotAllowed` and the
     // sweep never reaches the behaviour this test exists to pin.
-    shared.settings.write().await.allow_all_users = true;
+    {
+        let mut settings = shared.settings.write().await;
+        settings.owner_user_id = Some(OWNER_ID);
+        settings.allow_all_users = true;
+    }
 
     let bot_response_id = message_id_with_age(1, Duration::from_secs(180));
     let older_human_id = message_id_with_age(2, Duration::from_secs(120));
@@ -1326,7 +1338,11 @@ async fn production_sweep_advances_through_mixed_terminal_aged_page() {
     let empty_id = message_id_with_age(4, Duration::from_secs(410));
     let human_id = message_id_with_age(5, Duration::from_secs(400));
     write_checkpoint(root.path(), &provider, channel_id, task_id.get() - 1);
-    shared.settings.write().await.allowed_user_ids = vec![HUMAN_ID];
+    {
+        let mut settings = shared.settings.write().await;
+        settings.owner_user_id = Some(OWNER_ID);
+        settings.allowed_user_ids = vec![HUMAN_ID];
+    }
 
     let mut system = discord_message(
         channel_id,
@@ -1400,7 +1416,11 @@ async fn production_sweep_uses_semantic_utility_identity_when_bot_flag_is_false(
     let fresh_notify_id = message_id_with_age(5, Duration::from_secs(60));
     write_checkpoint(root.path(), &provider, channel_id, announce_id.get() - 1);
     shared.settings.write().await.allowed_bot_ids = vec![INFO_BOT_ID];
-    shared.settings.write().await.allowed_user_ids = vec![HUMAN_ID];
+    {
+        let mut settings = shared.settings.write().await;
+        settings.owner_user_id = Some(OWNER_ID);
+        settings.allowed_user_ids = vec![HUMAN_ID];
+    }
 
     let (api, outbox) = TestCatchUpApi::new(vec![
         discord_message(
@@ -1852,7 +1872,11 @@ async fn production_sweep_outbox_contract_dedupes_same_batch_and_separates_new_h
     let first_id = message_id_with_age(1, Duration::from_secs(410));
     let second_id = message_id_with_age(2, Duration::from_secs(400));
     write_checkpoint(root.path(), &provider, channel_id, first_id.get() - 1);
-    shared.settings.write().await.allowed_user_ids = vec![HUMAN_ID];
+    {
+        let mut settings = shared.settings.write().await;
+        settings.owner_user_id = Some(OWNER_ID);
+        settings.allowed_user_ids = vec![HUMAN_ID];
+    }
 
     let (first_api, outbox) = TestCatchUpApi::new(vec![discord_message(
         channel_id,
@@ -1935,7 +1959,11 @@ async fn queue_membership_alone_does_not_advance_the_phase2_checkpoint() {
     // message classifies `NotAllowed`, phase 2 skips it before the capacity
     // gate, and the sweep never reaches the checkpoint decision this test
     // exists to pin.
-    shared.settings.write().await.allow_all_users = true;
+    {
+        let mut settings = shared.settings.write().await;
+        settings.owner_user_id = Some(OWNER_ID);
+        settings.allow_all_users = true;
+    }
 
     let bot_id = message_id_with_age(1, Duration::from_secs(300));
     let queued_id = message_id_with_age(2, Duration::from_secs(120));
@@ -2032,7 +2060,11 @@ async fn an_active_turn_still_advances_the_phase2_checkpoint() {
     // Same reason as the sibling test above: phase 2 gates on
     // `author_is_authorized`, so the fresh human message that must reach the
     // capacity gate is otherwise classified `NotAllowed` and skipped.
-    shared.settings.write().await.allow_all_users = true;
+    {
+        let mut settings = shared.settings.write().await;
+        settings.owner_user_id = Some(OWNER_ID);
+        settings.allow_all_users = true;
+    }
 
     let bot_id = message_id_with_age(1, Duration::from_secs(300));
     let active_id = message_id_with_age(2, Duration::from_secs(120));
@@ -2122,7 +2154,11 @@ async fn production_sweep_checkpoint_stops_before_capacity_blocked_human() {
     // `user_is_authorized` is false for every id under default test settings.
     // Without this the fresh human message classifies `NotAllowed` and the
     // sweep never reaches the behaviour this test exists to pin.
-    shared.settings.write().await.allow_all_users = true;
+    {
+        let mut settings = shared.settings.write().await;
+        settings.owner_user_id = Some(OWNER_ID);
+        settings.allow_all_users = true;
+    }
 
     for index in 0..MAX_INTERVENTIONS_PER_CHANNEL {
         let queued_id = MessageId::new(8_000_000_000_000_000_000 + index as u64);
@@ -2318,7 +2354,11 @@ async fn ledger_suppresses_the_restart_gap_notice_for_an_answered_message() {
         "아까 그거 다 됐어?",
     );
     write_checkpoint(root.path(), &provider, channel_id, answered.id.get() - 1);
-    shared.settings.write().await.allowed_user_ids = vec![HUMAN_ID];
+    {
+        let mut settings = shared.settings.write().await;
+        settings.owner_user_id = Some(OWNER_ID);
+        settings.allowed_user_ids = vec![HUMAN_ID];
+    }
 
     // The turn reached terminal delivery before the restart → on the ledger.
     crate::services::discord::outbound::completed_turn_ledger::append_completed_turn(
@@ -2413,7 +2453,11 @@ async fn phase1_authorized_human_is_enqueued() {
     );
     // The other pole of the gate: an authorized author keeps the pre-#6042
     // behaviour exactly. Without this test an inverted gate stays green.
-    shared.settings.write().await.allow_all_users = true;
+    {
+        let mut settings = shared.settings.write().await;
+        settings.owner_user_id = Some(OWNER_ID);
+        settings.allow_all_users = true;
+    }
 
     let (api, outbox) = TestCatchUpApi::new(vec![discord_message(
         channel_id,
@@ -2555,6 +2599,200 @@ async fn phase2_unauthorized_human_is_not_enqueued() {
     assert!(outbox.lock().expect("outbox capture lock").is_empty());
 }
 
+// #6059: live intake refuses every human while `owner_user_id` is unset, even
+// in allow-all mode or for an allow-listed id; catch-up used to accept them.
+// Each scenario runs the ownerless refusal and an owner-only control on fresh
+// state, so the refusal cannot pass because the sweep never classified the
+// message, and the control cannot fail because the refusal moved a checkpoint.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+enum OwnerlessGrant {
+    AllowAll,
+    Listed,
+}
+
+async fn grant_human(shared: &super::SharedData, grant: OwnerlessGrant, owner: Option<u64>) {
+    let mut settings = shared.settings.write().await;
+    settings.owner_user_id = owner;
+    match grant {
+        OwnerlessGrant::AllowAll => settings.allow_all_users = true,
+        OwnerlessGrant::Listed => settings.allowed_user_ids = vec![HUMAN_ID],
+    }
+}
+
+struct OwnerGateSweep {
+    human_message_id: MessageId,
+    queued: Vec<MessageId>,
+    last_message_id: Option<u64>,
+    retry_pending: bool,
+    outbox_empty: bool,
+}
+
+async fn phase1_owner_gate_sweep(
+    channel_id: ChannelId,
+    grant: OwnerlessGrant,
+    owner: Option<u64>,
+) -> OwnerGateSweep {
+    let root = scoped_runtime_root();
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let human_message_id = message_id_with_age(1, Duration::from_secs(30));
+    write_checkpoint(
+        root.path(),
+        &provider,
+        channel_id,
+        human_message_id.get() - 1,
+    );
+    grant_human(&shared, grant, owner).await;
+
+    let (api, outbox) = TestCatchUpApi::new(vec![discord_message(
+        channel_id,
+        human_message_id,
+        HUMAN_ID,
+        false,
+        "owner 미설정 구성의 복구 요청",
+    )]);
+    let api = api.with_utility_bot_ids(Some(ANNOUNCE_BOT_ID), Some(NOTIFY_BOT_ID));
+    run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
+
+    let mailbox = super::super::mailbox_snapshot(&shared, channel_id).await;
+    let outbox_empty = outbox.lock().expect("outbox capture lock").is_empty();
+    OwnerGateSweep {
+        human_message_id,
+        queued: mailbox
+            .intervention_queue
+            .iter()
+            .map(|intervention| intervention.message_id)
+            .collect(),
+        last_message_id: shared.last_message_ids.get(&channel_id).map(|id| *id),
+        retry_pending: shared.catch_up_retry_pending.contains_key(&channel_id),
+        outbox_empty,
+    }
+}
+
+async fn phase2_owner_gate_sweep(
+    channel_id: ChannelId,
+    grant: OwnerlessGrant,
+    owner: Option<u64>,
+) -> OwnerGateSweep {
+    let root = scoped_runtime_root();
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let bot_id = message_id_with_age(1, Duration::from_secs(300));
+    let human_message_id = message_id_with_age(2, Duration::from_secs(30));
+    // Phase 1 takes fetch call 0 (the empty list) and phase 2 takes call 1.
+    write_checkpoint(root.path(), &provider, channel_id, bot_id.get());
+    grant_human(&shared, grant, owner).await;
+
+    let (api, outbox) = TestCatchUpApi::new(Vec::new());
+    let api = api
+        .with_utility_bot_ids(Some(ANNOUNCE_BOT_ID), Some(NOTIFY_BOT_ID))
+        .with_phase2_messages(vec![
+            discord_message(
+                channel_id,
+                human_message_id,
+                HUMAN_ID,
+                false,
+                "owner 미설정 구성의 phase 2 요청",
+            ),
+            discord_message(
+                channel_id,
+                bot_id,
+                CURRENT_BOT_ID,
+                true,
+                "previous bot response",
+            ),
+        ]);
+    run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &provider)).await;
+    assert!(
+        api.fetch_calls.load(Ordering::Relaxed) >= 2,
+        "phase 2 must have run its own fetch"
+    );
+
+    let mailbox = super::super::mailbox_snapshot(&shared, channel_id).await;
+    let outbox_empty = outbox.lock().expect("outbox capture lock").is_empty();
+    OwnerGateSweep {
+        human_message_id,
+        queued: mailbox
+            .intervention_queue
+            .iter()
+            .map(|intervention| intervention.message_id)
+            .collect(),
+        last_message_id: shared.last_message_ids.get(&channel_id).map(|id| *id),
+        retry_pending: shared.catch_up_retry_pending.contains_key(&channel_id),
+        outbox_empty,
+    }
+}
+
+async fn assert_phase1_owner_gate(grant: OwnerlessGrant, channel_id: u64) {
+    let refused = phase1_owner_gate_sweep(ChannelId::new(channel_id), grant, None).await;
+    assert!(
+        refused.queued.is_empty(),
+        "{grant:?} without an owner must not become phase-1 recovery work, got {:?}",
+        refused.queued
+    );
+    // Same terminal refusal contract as `phase1_unauthorized_human_is_not_enqueued`.
+    assert_eq!(
+        refused.last_message_id,
+        Some(refused.human_message_id.get()),
+        "{grant:?}: a terminally refused message must retire on the settled frontier"
+    );
+    assert!(
+        !refused.retry_pending,
+        "{grant:?}: authorization refusal must not arm a retry"
+    );
+    assert!(refused.outbox_empty, "{grant:?}: refusal must not notify");
+
+    let control =
+        phase1_owner_gate_sweep(ChannelId::new(channel_id + 1), grant, Some(OWNER_ID)).await;
+    assert_eq!(
+        control.queued,
+        vec![control.human_message_id],
+        "{grant:?} with only the owner added must recover the same message in phase 1"
+    );
+    assert!(control.outbox_empty);
+}
+
+async fn assert_phase2_owner_gate(grant: OwnerlessGrant, channel_id: u64) {
+    let refused = phase2_owner_gate_sweep(ChannelId::new(channel_id), grant, None).await;
+    assert!(
+        refused.queued.is_empty(),
+        "{grant:?} without an owner must not become phase-2 recovery work, got {:?}",
+        refused.queued
+    );
+    assert!(refused.outbox_empty, "{grant:?}: refusal must not notify");
+
+    let control =
+        phase2_owner_gate_sweep(ChannelId::new(channel_id + 1), grant, Some(OWNER_ID)).await;
+    assert_eq!(
+        control.queued,
+        vec![control.human_message_id],
+        "{grant:?} with only the owner added must recover the same message in phase 2"
+    );
+    assert!(control.outbox_empty);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase1_ownerless_allow_all_human_is_not_enqueued() {
+    assert_phase1_owner_gate(OwnerlessGrant::AllowAll, 4_605_901).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase1_ownerless_listed_human_is_not_enqueued() {
+    assert_phase1_owner_gate(OwnerlessGrant::Listed, 4_605_903).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase2_ownerless_allow_all_human_is_not_enqueued() {
+    assert_phase2_owner_gate(OwnerlessGrant::AllowAll, 4_605_905).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn phase2_ownerless_listed_human_is_not_enqueued() {
+    assert_phase2_owner_gate(OwnerlessGrant::Listed, 4_605_907).await;
+}
+
 // Unauthorized aged humans get neither the TooOld resend notice (which echoes
 // author id + snippet) nor a DLQ record.
 
@@ -2613,7 +2851,11 @@ async fn phase1_authorized_human_too_old_keeps_notice_and_dead_letter_per_author
     let authorized_id = message_id_with_age(1, Duration::from_secs(3_600));
     let unauthorized_id = message_id_with_age(2, Duration::from_secs(3_500));
     write_checkpoint(root.path(), &provider, channel_id, authorized_id.get() - 1);
-    shared.settings.write().await.allowed_user_ids = vec![HUMAN_ID];
+    {
+        let mut settings = shared.settings.write().await;
+        settings.owner_user_id = Some(OWNER_ID);
+        settings.allowed_user_ids = vec![HUMAN_ID];
+    }
 
     let (api, outbox) = TestCatchUpApi::new(vec![
         discord_message(channel_id, authorized_id, HUMAN_ID, false, "인가된 요청"),
