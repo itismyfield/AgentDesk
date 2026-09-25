@@ -109,11 +109,11 @@ def alive(pid: int) -> bool:
 
 
 def joined_lines(text: str) -> list[str]:
-    """Join backslash continuations so a wrapped command reads as one line."""
+    """Drop backslash-newlines as bash does, so a wrapped command reads as one logical line."""
     out: list[str] = []
     for raw in text.splitlines():
         if out and out[-1].endswith("\\"):
-            out[-1] = out[-1][:-1] + " " + raw.strip()
+            out[-1] = out[-1][:-1] + raw
         else:
             out.append(raw)
     return out
@@ -124,23 +124,27 @@ WRAPPED = (r'(?:if )?\(cd "\$REPO" && (?:[A-Z_]+=\w+ )?python3 scripts/build_tok
            r' -- "\$\{{{name}\[@\]\}}"\)(?:; then)?')
 
 
+# A cargo array declaration; a body without its closing paren (e.g. `$(...)` inside) is unsupported.
+DECL = re.compile(r"(\w+)=\((\s*cargo\s[^()]*)(\)?)")
+
+
 def cargo_sites(text: str) -> list[tuple[str, bool]]:
-    """Release cargo build/clean sites as (line, wired); read-only `cargo metadata` lookups are not sites.
-    Any `$name`/`${name` of a `name=(cargo ...)` array is a site, even quoted or commented; only WRAPPED is wired."""
-    lines = list(map(str.strip, joined_lines(text)))
+    """Release cargo sites as (line, wired): one-/multi-line `name=(cargo ...)` arrays, their refs (only WRAPPED is
+    wired) and direct lines; unsupported declarations fail. A drift gate, blind to eval/source/function/alias calls."""
+    logical = "\n".join(joined_lines(text))
+    lines = [x.strip() for x in logical.splitlines()]
     hits = []
-    for s in lines:
-        if (not any(f"cargo {verb}" in s for verb in ("build", "clean"))
-                or s.startswith(("#", "echo")) or not ("--release" in s or "--profile" in s)):
+    for m in DECL.finditer(logical):
+        name, body, decl = m.group(1), m.group(2), " ".join(m.group(0).split())
+        if m.group(3) and not (re.search(r"\b(?:build|clean)\b", body) and re.search("--release|--profile", body)):
             continue
-        array = re.search(r"(\w+)=\(cargo ", s)
-        if not array:
-            hits.append((s, "build_token.py" in s))
-            continue
-        name = array.group(1)
-        refs = [x for x in lines if re.search(r"\$\{?" + name + r"(?!\w)", x)]
-        # An array never referenced is reported where it is declared, unwired.
-        hits += [(x, bool(re.fullmatch(WRAPPED.format(name=name), x))) for x in refs] or [(s, False)]
+        refs = [x for x in lines if m.group(3) and re.search(r"\$\{?" + name + r"(?!\w)", x)]
+        # An unsupported or never-referenced array is reported where it is declared, unwired.
+        hits += [(x, bool(re.fullmatch(WRAPPED.format(name=name), x))) for x in refs] or [(decl, False)]
+    for s in map(str.strip, DECL.sub("", logical).splitlines()):
+        if (re.search(r"cargo\s+(?:build|clean)\b", s) and not s.startswith(("#", "echo"))
+                and ("--release" in s or "--profile" in s)):
+            hits.append((s, "build_token.py" in re.split(r"(?:^|\s)#", s)[0]))
     return sorted(set(hits), key=hits.index)
 
 
@@ -304,6 +308,14 @@ class WiringTests(unittest.TestCase):
             with self.subTest(line):
                 want = [(line, wired)] if line else [("clean_cmd=(cargo clean --release)", False)]
                 self.assertEqual(cargo_sites(f"clean_cmd=(cargo clean --release)\n{line}\n"), want)
+        # Multi-line and unsupported declarations, a continuation inside a name, a wrapper named only in a comment.
+        ref, bare = f'(cd "$REPO" && {wrapped}', ("cargo clean --release # build_token.py", False)
+        for text, want in (('clean_cmd=(cargo clean\n  --release)\n"${clean_cmd[@]}"', [('"${clean_cmd[@]}"', False)]),
+                           (f'clean_cmd=(cargo clean $(flag))\n{ref}', [("clean_cmd=(cargo clean $", False)]),
+                           (f'clean_cmd=(cargo clean --release)\n{ref}\n"${{clean_\\\ncmd[@]}}"',
+                            [(ref, True), ('"${clean_cmd[@]}"', False)]), (bare[0], [bare])):
+            with self.subTest(text):
+                self.assertEqual(cargo_sites(text + "\n"), want)
 
     def test_the_win32_backend_has_a_production_caller(self) -> None:
         source = (SCRIPTS / "build_token.py").read_text(encoding="utf-8")
