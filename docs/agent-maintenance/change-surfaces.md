@@ -240,11 +240,16 @@ time for diagnostics; neither is a stored approval value.
   fast-wiring unittest lines inspect the external step. The static invocation
   chain ends if one diff removes that external step and both aggregate
   self-protection lines together; it does not extend to branch protection.
+  Every `tests/test_*.py` and `scripts/**/test_*.py` file that defines a
+  `unittest.TestCase` subclass must be named, as a dotted module or a path,
+  outside comments in `scripts/ci-script-checks.sh`, `.github/workflows/*.yml`
+  or `tests/*.sh`; there is no exception list.
 - non_guarantees: the checker is not a shell parser. A required line kept at
   column zero inside an `if` or function still satisfies the textual contract,
   so unconditional execution is not established. The hardening guard owns the
   workflow execution contract; this checker only byte-pins its two assertion
-  blocks.
+  blocks. The test-module wiring check is a text match: a module named in an
+  `echo`, or wired for one class only, counts as wired.
 - tests: `tests/test_writer_gate_ci_wiring.py` builds temporary aggregate
   fixtures and requires a nonzero process exit for deletion of each aggregate
   self-protection line. `tests/test_fast_check_ci_wiring.py` mutation-tests the
