@@ -1,9 +1,5 @@
-//! #5996 P-L2a: a production-shaped idle-tmux channel for the entry tests of
-//! the three decision sites that read `unread_bytes` as destructive permission
-//! (manual reattach idle-clear, stale-mailbox repair route, explicit-background
-//! watchdog). A live `AgentDesk-` tmux pane, a mailbox turn and a persisted row
-//! aged past every staleness window; the tail reading comes only from the real
-//! `SessionEnrichment::load`, never from a synthetic snapshot.
+//! A live `AgentDesk-` pane, mailbox turn and aged row for the unread-tail entry tests;
+//! the tail reading comes only from the real `SessionEnrichment::load`.
 #![cfg_attr(not(unix), allow(dead_code))]
 
 use std::sync::Arc;
@@ -25,6 +21,9 @@ pub(crate) enum UnreadTailShape {
     /// The row's transcript holds bytes no relay frontier covers: a MEASURED
     /// backlog, which refuses the clear without being a wedge.
     MeasuredBacklog,
+    /// A ready transcript that a watcher bound to another session leaves unattributed
+    /// (UNMEASURED); its final answer is still unrelayed when `answer`.
+    ForeignWatcher { answer: bool },
 }
 
 pub(crate) struct UnreadTailSeed {
@@ -40,14 +39,7 @@ pub(crate) struct UnreadTailSeed {
 
 impl UnreadTailSeed {
     /// `None` when tmux is unavailable: the caller skips and gives NO VERDICT.
-    /// `explicit_background_owner` makes the row explicit background work whose
-    /// watcher binding is owned by this channel (the watchdog site's shape);
-    /// otherwise no watcher is bound, which is what reads the pane as orphaned.
-    pub(crate) async fn start(
-        channel: u64,
-        shape: UnreadTailShape,
-        explicit_background_owner: bool,
-    ) -> Option<Self> {
+    pub(crate) async fn start(channel: u64, shape: UnreadTailShape) -> Option<Self> {
         let lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         if !crate::services::platform::tmux::is_available() {
             eprintln!("skipping #5996 unread-tail entry fixture: tmux unavailable");
@@ -74,13 +66,23 @@ impl UnreadTailSeed {
         );
 
         let output = root.path().join(format!("unread-tail-{channel}.jsonl"));
-        if shape == UnreadTailShape::MeasuredBacklog {
-            std::fs::write(
-                &output,
-                "{\"type\":\"system\",\"subtype\":\"turn_duration\",\"session_id\":\"s\"}\n",
-            )
-            .expect("write transcript fixture");
+        let ready = "{\"type\":\"system\",\"subtype\":\"turn_duration\",\"session_id\":\"s\"}\n";
+        let transcript = match shape {
+            UnreadTailShape::RowOutputMissing => String::new(),
+            UnreadTailShape::MeasuredBacklog => ready.to_string(),
+            UnreadTailShape::ForeignWatcher { .. } => {
+                format!(
+                    "{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ANSWER\"}}\n{ready}"
+                )
+            }
+        };
+        if !transcript.is_empty() {
+            std::fs::write(&output, &transcript).expect("write transcript fixture");
         }
+        let last_offset = match shape {
+            UnreadTailShape::ForeignWatcher { answer: false } => transcript.len() as u64,
+            _ => 0,
+        };
         let user_msg = MessageId::new(channel.get() + 1);
         let token = Arc::new(CancelToken::new());
         assert!(
@@ -108,31 +110,15 @@ impl UnreadTailSeed {
             Some(tmux_session.clone()),
             Some(output.to_string_lossy().to_string()),
             None,
-            0,
+            last_offset,
         );
-        row.set_relay_owner_kind(inflight::RelayOwnerKind::Watcher);
         row.turn_nonce = token.turn_nonce().map(str::to_owned);
-        if explicit_background_owner {
-            row.task_notification_kind =
-                Some(crate::services::agent_protocol::TaskNotificationKind::Background);
-            // Discord write evidence, so the row's `updated_at` is the outbound
-            // activity the watchdog ages.
-            row.current_msg_len = 1;
-            shared.tmux_watchers.insert(
-                channel,
-                crate::services::discord::TmuxWatcherHandle {
-                    tmux_session_name: tmux_session.clone(),
-                    output_path: output.to_string_lossy().to_string(),
-                    paused: Arc::new(AtomicBool::new(false)),
-                    resume_offset: Arc::new(std::sync::Mutex::new(None)),
-                    cancel: Arc::new(AtomicBool::new(false)),
-                    pause_epoch: Arc::new(AtomicU64::new(0)),
-                    turn_delivered: Arc::new(AtomicBool::new(false)),
-                    last_heartbeat_ts_ms: Arc::new(AtomicI64::new(
-                        crate::services::discord::tmux_watcher_now_ms(),
-                    )),
-                },
-            );
+        if let UnreadTailShape::ForeignWatcher { .. } = shape {
+            // A heartbeat-stale watcher on another pane and no row relay owner: nothing live relays.
+            let foreign = format!("{tmux_session}-other");
+            bind_watcher(&shared, channel, &foreign, &output, 0);
+        } else {
+            row.set_relay_owner_kind(inflight::RelayOwnerKind::Watcher);
         }
         inflight::save_inflight_state_create_new(&row).expect("persist row fixture");
         // The save stamps `updated_at`; age the persisted row past
@@ -178,6 +164,29 @@ impl Drop for UnreadTailSeed {
     }
 }
 
+/// Binds a watcher handle for `channel` on `tmux_session` with the given heartbeat.
+pub(crate) fn bind_watcher(
+    shared: &SharedData,
+    channel: ChannelId,
+    tmux_session: &str,
+    output: &std::path::Path,
+    heartbeat_ms: i64,
+) {
+    shared.tmux_watchers.insert(
+        channel,
+        crate::services::discord::TmuxWatcherHandle {
+            tmux_session_name: tmux_session.to_string(),
+            output_path: output.to_string_lossy().to_string(),
+            paused: Arc::new(AtomicBool::new(false)),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            pause_epoch: Arc::new(AtomicU64::new(0)),
+            turn_delivered: Arc::new(AtomicBool::new(false)),
+            last_heartbeat_ts_ms: Arc::new(AtomicI64::new(heartbeat_ms)),
+        },
+    );
+}
+
 /// Rewrites the persisted row's raw JSON in place and returns its path.
 pub(crate) fn edit_persisted_row(
     provider: &ProviderKind,
@@ -207,4 +216,88 @@ pub(crate) fn unmeasured_tail_refusals(channel: u64) -> Vec<serde_json::Value> {
         .map(|event| event.payload["details"].clone())
         .filter(|details| details.get("site").is_some())
         .collect()
+}
+
+/// The seed's current snapshot with the mailbox turn cleared, so the row alone names the episode.
+async fn rowed_snapshot(
+    seed: &UnreadTailSeed,
+) -> crate::services::discord::health::WatcherStateSnapshot {
+    let registry = &seed.registry;
+    let channel = seed.channel.get();
+    let mut snapshot = registry
+        .snapshot_watcher_state_for_provider(&seed.provider, channel)
+        .await
+        .expect("fixture snapshot");
+    (
+        snapshot.mailbox_active_user_msg_id,
+        snapshot.mailbox_active_turn_nonce,
+    ) = (None, None);
+    snapshot
+}
+
+/// Refusals nothing names are never folded together; a row's birth episode is graded
+/// once per site however its tmux name reads, and a new birth is its own.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unmeasured_tail_episodes_are_graded_by_birth_never_by_absence() {
+    use super::{UNREAD_TAIL_SITE_MANUAL_REATTACH, UNREAD_TAIL_SITE_STALE_MAILBOX};
+    let Some(seed) = UnreadTailSeed::start(5_996_140_001, UnreadTailShape::RowOutputMissing).await
+    else {
+        return;
+    };
+    let (provider, channel) = (&seed.provider, seed.channel.get());
+    let record = |snapshot: &crate::services::discord::health::WatcherStateSnapshot, site| {
+        super::record_unmeasured_tail_refusal_for_snapshot(provider, channel, snapshot, site)
+    };
+    let site = UNREAD_TAIL_SITE_STALE_MAILBOX;
+    let count = || seed.refusals().len();
+
+    let mut rowless = rowed_snapshot(&seed).await;
+    rowless.inflight_identity = None;
+    for session in ["AgentDesk-claude-5996-a", "AgentDesk-claude-5996-b"] {
+        rowless.tmux_session = Some(session.to_string());
+        record(&rowless, site);
+    }
+    assert_eq!(count(), 2, "a row-less session change is a new refusal");
+
+    let born = rowed_snapshot(&seed).await;
+    for snapshot_site in [site, site, UNREAD_TAIL_SITE_MANUAL_REATTACH] {
+        record(&born, snapshot_site);
+    }
+    assert_eq!(count(), 4, "one birth episode is graded once per site");
+
+    edit_persisted_row(provider, channel, |row| {
+        row["tmux_session_name"] = "renamed".into()
+    });
+    record(&rowed_snapshot(&seed).await, site);
+    assert_eq!(count(), 4, "a learned tmux name keeps the birth episode");
+    let nonce = inflight::load_inflight_state_read_only(provider, channel)
+        .unwrap()
+        .turn_nonce;
+    for turn_nonce in ["reborn".into(), serde_json::json!(nonce)] {
+        edit_persisted_row(provider, channel, |row| row["turn_nonce"] = turn_nonce);
+        record(&rowed_snapshot(&seed).await, site);
+    }
+    assert_eq!(
+        count(),
+        5,
+        "a new birth is its own episode; the first is still graded"
+    );
+
+    let mut measured = rowed_snapshot(&seed).await;
+    (measured.unread_bytes, measured.relay_health.unread_bytes) = (Some(64), Some(64));
+    measured.mailbox_active_user_msg_id = Some(64); // an ungraded episode
+    assert!(!super::stale_mailbox_idle_tail_admits(
+        provider, &measured, true
+    ));
+    assert_eq!(count(), 5, "a measured backlog is no wedge");
+
+    edit_persisted_row(provider, channel, |row| {
+        (row["user_msg_id"], row["turn_nonce"]) = (0.into(), serde_json::Value::Null);
+        row.as_object_mut().unwrap().remove("turn_start_offset");
+    });
+    let unnameable = rowed_snapshot(&seed).await;
+    record(&unnameable, site);
+    record(&unnameable, site);
+    assert_eq!(count(), 7, "an unnameable row is never folded into itself");
 }

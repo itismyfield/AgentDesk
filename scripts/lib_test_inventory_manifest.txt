@@ -1108,6 +1108,7 @@ server::routes::health_api::tests::summary_and_detail_routes_agree_on_status_and
 server::routes::health_api::tests::supported_provider_ids_contain_no_colon
 server::routes::health_api::unread_tail_attribution_tests::manual_reattach_records_nothing_for_a_measured_backlog
 server::routes::health_api::unread_tail_attribution_tests::manual_reattach_records_nothing_when_readiness_also_refuses
+server::routes::health_api::unread_tail_attribution_tests::manual_reattach_records_only_when_no_unrelayed_answer_refuses
 server::routes::health_api::unread_tail_attribution_tests::stale_mailbox_repair_names_and_records_an_unmeasured_tail
 server::routes::kakao_calendar::tests::calendar_mutations_require_stable_nonempty_bounded_keys
 server::routes::kakao_calendar::tests::calendar_requires_real_bearer_not_claimed_identity_or_local_origin
@@ -3013,7 +3014,6 @@ services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_l
 services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_liveness_keeps_force_clean_when_jsonl_stale
 services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_should_force_clean_requires_all_signals
 services::discord::health::recovery::stall_watchdog_pure_tests::stall_watchdog_skips_completed_idle_wakeup_turn
-services::discord::health::recovery::watchdog_decisions::watchdog_unread_tail_tests::explicit_background_watchdog_records_an_unmeasured_tail_refusal_once
 services::discord::health::redaction::tests::visible_message_id_redacts_zero_placeholders
 services::discord::health::relay_auto_heal::orphan_token_tests::agentdesk_session_probe_failure_is_graded_as_unmeasured
 services::discord::health::relay_auto_heal::orphan_token_tests::confirmed_dead_rowless_orphan_token_still_needs_a_warrant
@@ -4771,6 +4771,7 @@ services::discord::relay_recovery::destructive_warrant::tests::pinned_adoption_o
 services::discord::relay_recovery::destructive_warrant::tests::the_warrant_fixture_covers_every_verdict_variant_exactly_once
 services::discord::relay_recovery::destructive_warrant::tests::truth_table_is_explicit_for_every_destructive_action_and_verdict
 services::discord::relay_recovery::destructive_warrant::tests::warrant_is_monotone_and_abstains_when_its_operand_is_absent
+services::discord::relay_recovery::idle_tmux::unread_tail_seed::unmeasured_tail_episodes_are_graded_by_birth_never_by_absence
 services::discord::relay_recovery::leaked_row_sweep::tests::discord_row_is_sweep_candidate_without_pending_start
 services::discord::relay_recovery::leaked_row_sweep::tests::sweep_rejects_rows_without_channel_or_tmux_identity
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::activate_unknown_status_fails_safe_without_reopen_pg

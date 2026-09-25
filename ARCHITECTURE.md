@@ -732,8 +732,7 @@ src/
 │   │   │   │   ├── stall_alert.rs
 │   │   │   │   ├── stall_watchdog_task.rs
 │   │   │   │   ├── stop_result.rs
-│   │   │   │   ├── watchdog_decisions.rs
-│   │   │   │   └── watchdog_unread_tail_tests.rs
+│   │   │   │   └── watchdog_decisions.rs
 │   │   │   ├── relay_auto_heal/
 │   │   │   │   └── orphan_token_tests.rs
 │   │   │   ├── snapshot/
