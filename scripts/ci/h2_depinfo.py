@@ -42,29 +42,56 @@ def root_lib_depinfo(root: Path, lines) -> Path:
         raise m.MeasureError(f"root lib dep-info {depinfo} does not exist")
     return depinfo
 
-def parse_depinfo(text: str) -> set[str]:
-    """Every prerequisite of every Makefile rule; `\\ ` unescapes to a space, `#` lines are skipped."""
-    deps = set()
+def parse_depinfo(text: str, depinfo: Path) -> list[tuple[str, set[str]]]:
+    """(target, prerequisites) of every Makefile rule; `\\ ` unescapes to a space, `#` lines are skipped."""
+    rules = []
     for line in text.splitlines():
         if not line.strip() or line.startswith("#"):
             continue
         target, sep, rest = line.partition(": ")
         if not sep and line.endswith(":"):
-            continue  # an empty per-file rule
-        deps.update(token.replace("\\ ", " ") for token in re.split(r"(?<!\\)\s+", rest.strip()) if token)
-    return deps
+            target, rest = line[:-1], ""  # an empty per-file rule
+        elif not sep:
+            raise m.MeasureError(f"root lib dep-info {depinfo} has an unsupported line {line[:120]!r}")
+        split = re.split(r"(?<!\\)\s+", rest.strip())
+        rules.append((target.replace("\\ ", " "), {token.replace("\\ ", " ") for token in split if token}))
+    return rules
 
-def classify(root: Path, deps) -> tuple[set[str], set[str]]:
-    """(repo-relative posix paths, absolute paths outside the repo), symlinks and `..` resolved."""
+def depinfo_inputs(root: Path, depinfo: Path) -> set[str]:
+    """Every prerequisite of a readable dep-info whose own compile rule reads src/lib.rs."""
+    try:
+        text = depinfo.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise m.MeasureError(f"cannot read root lib dep-info {depinfo}: {exc}") from exc
+    rules = parse_depinfo(text, depinfo)
+    # rustc names the .d and the .rmeta/.rlib it emits by absolute path; match by file name
+    own = {depinfo.name, f"lib{depinfo.stem}.rmeta", f"lib{depinfo.stem}.rlib"}
+    lib = os.path.realpath(root / "src/lib.rs")
+    if not any(Path(target).name in own and lib in {os.path.realpath(root / dep) for dep in deps} for target, deps in rules):
+        raise m.MeasureError(f"root lib dep-info {depinfo} has no compile rule reading src/lib.rs")
+    return set().union(*(deps for _, deps in rules))
+
+def classify(root: Path, deps) -> tuple[dict[str, str], set[str]]:
+    """({repo-relative realpath: path as written, `..` collapsed}, realpaths outside the repo)."""
     real_root = Path(os.path.realpath(root))
-    inside, outside = set(), set()
-    for dep in deps:
+    inside, outside = {}, set()
+    for dep in sorted(deps):
         path = Path(os.path.realpath(root / dep))  # an absolute dep replaces root
         try:
-            inside.add(path.relative_to(real_root).as_posix())
+            rel = path.relative_to(real_root).as_posix()
         except ValueError:
             outside.add(path.as_posix())
+            continue
+        written = Path(os.path.normpath(root / dep))
+        inside.setdefault(rel, next((written.relative_to(r).as_posix() for r in (root, real_root)
+                                     if written.is_relative_to(r)), rel))
     return inside, outside
+
+def canonical_modules(root: Path) -> set[str]:
+    """The module tree as repo-relative realpaths, so a symlinked module matches the file rustc read."""
+    real_root = Path(os.path.realpath(root))
+    paths = (Path(os.path.realpath(root / rel)) for rel in m._module_table(root))
+    return {path.relative_to(real_root).as_posix() for path in paths if path.is_relative_to(real_root)}
 
 def duplicate_mod_problems(lines) -> list[str]:
     problems = []
@@ -79,16 +106,18 @@ def duplicate_mod_problems(lines) -> list[str]:
     return problems
 
 def ro_problems(root: Path, lines) -> list[str]:
-    """R-O over the lib compile inputs and duplicate_mod; a missing or ambiguous dep-info is itself a problem."""
+    """R-O over the lib compile inputs and duplicate_mod; a missing, unreadable or invalid dep-info is itself a problem."""
     problems = duplicate_mod_problems(lines)
     try:
-        depinfo = root_lib_depinfo(root, lines)
+        inside, outside = classify(root, depinfo_inputs(root, root_lib_depinfo(root, lines)))
     except m.MeasureError as exc:
         return problems + [f"R-O: {exc}"]
-    inside, outside = classify(root, parse_depinfo(depinfo.read_text(encoding="utf-8")))
-    modules = m._module_table(root)
+    modules = canonical_modules(root)
     problems += [f"R-O: lib compile input {path} is outside the repo" for path in sorted(outside)]
-    problems += [f"R-O: {rel} is compiled into the lib but is not in the module tree" if rel.endswith(".rs")
-                 else f"R-O: lib compile input {rel} is not in the data allowlist"
-                 for rel in sorted(inside) if rel not in modules and not DATA_INPUT_RE.fullmatch(rel)]
+    for rel, written in sorted(inside.items()):
+        # `.rs` must be a module; anything else must be data even when `#[path]` mounts it
+        if rel.endswith(".rs") and rel not in modules:
+            problems.append(f"R-O: {written} is compiled into the lib but is not in the module tree")
+        elif not rel.endswith(".rs") and not DATA_INPUT_RE.fullmatch(rel):
+            problems.append(f"R-O: lib compile input {written} is not in the data allowlist")
     return problems
