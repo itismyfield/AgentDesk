@@ -1826,7 +1826,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=d653e3eee8d2daba31a4cbd1bf20967c0d8ec825eb2aa3e9fdada7570ee40ece
+          expected=6c82f7fe90366dd2d44b7a033a29de427ed19a93c4acafe27afb5df0e2b99f4a
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -1983,7 +1983,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=d653e3eee8d2daba31a4cbd1bf20967c0d8ec825eb2aa3e9fdada7570ee40ece
+          expected=6c82f7fe90366dd2d44b7a033a29de427ed19a93c4acafe27afb5df0e2b99f4a
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

@@ -1335,9 +1335,8 @@ def can_render_context?(name, context)
     (context.start_with?(matrix_name[1]) && context.end_with?(matrix_name[2]))
 end
 
-# GitHub publishes an unnamed job under its job ID, and appends
-# " (<matrix values>)" to a matrix job whose name has no expression. Matrix
-# values are not enumerated: any such suffix fails closed.
+# Effective check name: an unnamed job publishes its job ID; a matrix job
+# without a name expression may add any " (<values>)" suffix (fails closed).
 def publishes_context?(job_id, job, context)
   return false unless job.is_a?(Hash)
 

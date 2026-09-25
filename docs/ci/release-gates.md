@@ -373,7 +373,7 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scri
 | --- | --- | --- | --- |
 | Full tests 개별 케이스 red | `<mod>::<test>` (e.g. `pipeline::tests::…`) | `cargo test -p agentdesk <identifier> -- --exact --nocapture` | `agent:project-agentdesk` |
 | PG tests 개별 케이스 red | `<mod>::…_pg_…` / `postgres_…` | `cargo test -p agentdesk <identifier> -- --exact --nocapture` | `agent:project-agentdesk` |
-| High-risk recovery job 자체 red (로그에서 test id 추출 실패) | `job::High-risk recovery (main)` | `_job-level failure; see failing workflow job_` | `agent:project-agentdesk` |
+| High-risk recovery job 자체 red (로그에서 test id 추출 실패) | `job::High-risk recovery` (job 이름의 ` (main)` 접미사는 식별자에서 제거) | `_job-level failure; see failing workflow job_` | `agent:project-agentdesk` |
 | High-risk recovery 개별 시나리오 red | `high_risk_recovery::<submod>::scenario_…` | `cargo test -p agentdesk <identifier> -- --exact --nocapture` | `agent:project-agentdesk` |
 | 인프라 종료(job-level, test id 추출 실패 + SIGTERM/signal 15/exit 143/cancel, **real-failure 신호 없음**) | **미기록 — flaky skip** | (없음, ci-red 미승격) | (없음) |
 | Job-level red + 공유 술어 `scripts/ci/real-failure-predicate.sh` 의 real-failure 신호 — SIGTERM 노이즈 혼재 여부 무관 | `job::<name>` | `_job-level failure; see failing workflow job_` | `agent:project-agentdesk` |

@@ -19,7 +19,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "d653e3eee8d2daba31a4cbd1bf20967c0d8ec825eb2aa3e9fdada7570ee40ece"
+    "6c82f7fe90366dd2d44b7a033a29de427ed19a93c4acafe27afb5df0e2b99f4a"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Path-filtered required contexts: (mirror job, required name, runner job,
@@ -1585,7 +1585,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                         result.stderr,
                     )
 
-        # Effective check names (#5083 P2-2): an unnamed job publishes its ID,
+        # Effective check names: an unnamed job publishes its ID,
         # and a matrix job without a name expression gets a value suffix.
         unnamed_jobs = (
             "  Lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"
@@ -1606,7 +1606,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     result.stderr,
                 )
 
-        # Other workflows, on any trigger (#5083 P2-1), must not publish a
+        # Other workflows, on any trigger, must not publish a
         # required name; workflow names do not namespace check names.
         probes = {
             "named-lint.yml": ("pull_request:", "probe", "    name: Lint\n", "Lint"),
