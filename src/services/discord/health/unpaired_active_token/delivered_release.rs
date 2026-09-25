@@ -1,16 +1,5 @@
-//! L1 / §I20 / I21 grade 2: a rowless mailbox anchor whose answer was delivered
-//! may be released even when its release event was lost. The verdict needs a
-//! conjunction of positive, measured terms that name THIS episode:
-//! (1) the completed-turn ledger holds the anchor's exact user message id;
-//! (2) the delivery record holds an authoritative receipt whose nonce is the
-//! mailbox nonce, whose session is the token's session, and whose delivery and
-//! offset-authority channels are this channel;
-//! (3) `provider_session_is_proven_idle` holds for that session, probed after the
-//! grace and just before the second read.
-//! No wall clock decides; age only defers through a monotonic owner-finish grace.
-//! Absence proves nothing: a missing or unreadable ledger, record or row keeps the
-//! anchor. Nothing is decided before this runtime's boot reconcile completed.
-//! Inert: this module decides and never releases.
+//! Inert verdict: may a rowless mailbox anchor whose answer was delivered be released?
+//! Only episode-exact positive evidence past a monotonic grace decides; absence keeps it.
 
 use std::collections::HashMap;
 use std::io;

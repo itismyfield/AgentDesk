@@ -119,7 +119,7 @@ impl Episode {
     }
 }
 
-/// The #5996 shape: a rowless, aged anchor (M, N) on session S with three queued messages.
+/// A rowless, aged anchor (M, N) on session S with three queued messages.
 async fn seed(channel: u64, token: CancelToken) -> Episode {
     let lock = acquire_shared_test_env_lock();
     let root = tempfile::tempdir().unwrap();
@@ -181,7 +181,7 @@ enum Flip {
     RestoredNonce,
 }
 
-/// Applies one flip to the #5996 shape; returns the token that must survive, or None to skip.
+/// Applies one flip to the seeded shape; returns the token that must survive, or None to skip.
 async fn flip_one(episode: &Episode, flip: Flip) -> Option<Arc<CancelToken>> {
     let nonce = episode.token.turn_nonce().unwrap_or("legacy");
     let predecessor = matches!(flip, Flip::PredecessorNonce);
