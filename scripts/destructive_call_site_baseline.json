@@ -22,6 +22,7 @@
         "src/services/discord/recovery_engine/manual_rebind/post_adoption_guard_tests.rs": 2,
         "src/services/discord/relay_recovery/tests.rs": 2,
         "src/services/discord/relay_recovery/tests/circuit_breaker_apply.rs": 2,
+        "src/services/discord/relay_recovery/tests/unread_tail_seed.rs": 2,
         "src/services/discord/router/message_handler/provider_isolation.rs": 1,
         "src/services/discord/tmux_reaper.rs": 4,
         "src/services/discord/tmux_watcher/placeholder_reclaim.rs": 1,

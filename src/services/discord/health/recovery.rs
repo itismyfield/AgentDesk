@@ -46,7 +46,6 @@ pub(crate) use watchdog_decisions::{
     STALL_WATCHDOG_LIVENESS_FRESHNESS_SECS, STALL_WATCHDOG_THRESHOLD_SECS,
     completed_stale_no_answer_orphan_should_clean, inflight_completed_stale_leak_detected,
     stale_idle_foreground_queue_detected, stall_watchdog_should_force_clean,
-    stall_watchdog_should_force_clean_orphan_explicit_background_work,
 };
 
 mod stop_result;
@@ -1780,19 +1779,11 @@ pub(crate) async fn run_stall_watchdog_pass(
             continue;
         }
 
-        if stall_watchdog_should_force_clean_orphan_explicit_background_work(
-            snapshot.relay_stall_state,
-            snapshot.attached,
-            snapshot.watcher_owner_channel_id,
+        if watchdog_decisions::explicit_background_force_clean_decided(
+            provider,
             channel_id.get(),
-            snapshot.desynced,
-            snapshot.inflight_state_present,
-            snapshot.inflight_updated_at.as_deref(),
-            snapshot.tmux_session_alive,
-            snapshot.unread_bytes,
-            snapshot.relay_health.last_outbound_activity_ms,
+            &snapshot,
             now_unix_secs,
-            STALL_WATCHDOG_THRESHOLD_SECS,
         ) && watchdog_axis_b_warrants(provider, &snapshot, AxisBSite::WatchdogExplicitBackground)
         {
             let ts = chrono::Local::now().format("%H:%M:%S");

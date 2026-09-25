@@ -5,6 +5,10 @@ use crate::services::discord::relay_recovery::{self, RelayRecoveryActionKind};
 use crate::services::discord::{self as discord};
 use crate::services::provider::ProviderKind;
 
+#[cfg(all(test, unix))]
+#[path = "watchdog_unread_tail_tests.rs"]
+mod watchdog_unread_tail_tests;
+
 pub(crate) fn idle_tmux_repair_ready_for_input(
     provider: &ProviderKind,
     channel_id: u64,
@@ -242,6 +246,44 @@ pub(crate) fn stall_watchdog_should_force_clean_orphan_explicit_background_work(
     };
     let age_secs = now_unix_secs.saturating_sub(updated_at_unix);
     age_secs >= 0 && (age_secs as u64) >= threshold_secs
+}
+
+/// The explicit-background force-clean decision read off one watchdog snapshot.
+/// #5996 P-L2a (I20): when the UNMEASURED tail is the conjunct that refused it —
+/// a drained tail would have been admitted — the refusal is recorded. The
+/// decision itself is unchanged.
+pub(crate) fn explicit_background_force_clean_decided(
+    provider: &ProviderKind,
+    channel_id: u64,
+    snapshot: &WatcherStateSnapshot,
+    now_unix_secs: i64,
+) -> bool {
+    let decide = |unread_bytes| {
+        stall_watchdog_should_force_clean_orphan_explicit_background_work(
+            snapshot.relay_stall_state,
+            snapshot.attached,
+            snapshot.watcher_owner_channel_id,
+            channel_id,
+            snapshot.desynced,
+            snapshot.inflight_state_present,
+            snapshot.inflight_updated_at.as_deref(),
+            snapshot.tmux_session_alive,
+            unread_bytes,
+            snapshot.relay_health.last_outbound_activity_ms,
+            now_unix_secs,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+        )
+    };
+    let force_clean = decide(snapshot.unread_bytes);
+    if !force_clean && decide(Some(0)) {
+        relay_recovery::record_unmeasured_tail_refusal_for_snapshot(
+            provider,
+            channel_id,
+            snapshot,
+            relay_recovery::UNREAD_TAIL_SITE_WATCHDOG_EXPLICIT_BACKGROUND,
+        );
+    }
+    force_clean
 }
 
 /// No tmux evidence off unix, so the warrant abstains and the structural predicate alone decides.
