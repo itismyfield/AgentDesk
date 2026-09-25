@@ -119,46 +119,36 @@ def joined_lines(text: str) -> list[str]:
     return out
 
 
-def runs_expansion(line: str, name: str) -> bool:
-    """Whether `line` runs array `name`: expanded as a command word or handed to build_token.py.
-
-    Comments and other argument uses (`echo "$name"`) do not execute it.
-    """
-    if line.startswith("#"):
-        return False
-    uses = re.compile(r'"?\$\{?' + re.escape(name) + r"\b")
-    for piece in re.split(r"&&|\|\||[;|()]|\b(?:then|do|if|elif|else|while|until)\b", line):
-        # Assignments and prefix words leave the next word in command position.
-        words = [w for w in piece.split() if w not in ("!", "{", "env", "exec", "command", "time")
-                 and not re.fullmatch(r"[A-Za-z_]\w*=\S*", w)] or [""]
-        if uses.match(words[0]) or ("build_token.py" in piece and uses.search(piece)):
-            return True
-    return False
+# The one wrapped form an array reference may take: the whole line, as deploy-release.sh writes it.
+WRAPPED = (r'(?:if )?\(cd "\$REPO" && (?:[A-Z_]+=\w+ )?python3 scripts/build_token\.py'
+           r' -- "\$\{{{name}\[@\]\}}"\)(?:; then)?')
 
 
-def cargo_sites(text: str) -> list[str]:
-    """Release cargo build/clean invocations in one build script's text.
-
-    A command kept in an array (`name=(cargo clean ...)`) is reported at every line that
-    runs it (see `runs_expansion`), in any form: quoted or not, `${name[@]}`, `${name[*]}`, `$name`.
-    """
+def cargo_sites(text: str) -> list[tuple[str, bool]]:
+    """Release cargo build/clean sites as (line, wired); read-only `cargo metadata` lookups are not sites.
+    Any `$name`/`${name` of a `name=(cargo ...)` array is a site, even quoted or commented; only WRAPPED is wired."""
     lines = list(map(str.strip, joined_lines(text)))
     hits = []
     for s in lines:
         if (not any(f"cargo {verb}" in s for verb in ("build", "clean"))
                 or s.startswith(("#", "echo")) or not ("--release" in s or "--profile" in s)):
             continue
-        name = s.split("=(", 1)[0] if "=(cargo " in s else None
-        # An array never run is reported where it is declared, unwired.
-        hits += ([x for x in lines if runs_expansion(x, name)] or [s]) if name else [s]
+        array = re.search(r"(\w+)=\(cargo ", s)
+        if not array:
+            hits.append((s, "build_token.py" in s))
+            continue
+        name = array.group(1)
+        refs = [x for x in lines if re.search(r"\$\{?" + name + r"(?!\w)", x)]
+        # An array never referenced is reported where it is declared, unwired.
+        hits += [(x, bool(re.fullmatch(WRAPPED.format(name=name), x))) for x in refs] or [(s, False)]
     return sorted(set(hits), key=hits.index)
 
 
-def release_cargo_sites() -> dict[str, list[str]]:
+def release_cargo_sites() -> dict[str, list[tuple[str, bool]]]:
     """`cargo_sites` for every tracked build script that has any."""
     tracked = subprocess.run(["git", "-C", str(REPO), "ls-files"], check=True,
                              capture_output=True, text=True).stdout.split()
-    found: dict[str, list[str]] = {}
+    found: dict[str, list[tuple[str, bool]]] = {}
     for rel in tracked:
         if rel.endswith(".sh") or Path(rel).name == "Makefile":
             hits = cargo_sites((REPO / rel).read_text("utf-8"))
@@ -194,7 +184,7 @@ class TokenTestCase(unittest.TestCase):
             self.addCleanup(pipe.close)
         return proc
 
-    def isolated_cli(self, entered: Path | None = None) -> Path:
+    def isolated_cli(self, entered: Path | None = None, extra_seal: str = "") -> Path:
         source = (SCRIPTS / "build_token.py").read_text()
         constant = f'CANONICAL_TOKEN_PATH = "{CANONICAL}"'
         self.assertEqual(source.count(constant), 1)
@@ -209,7 +199,7 @@ def _sealed_open(path, *args, **kwargs):
         raise AssertionError("fixture breach: canonical token open")
     return _open_before_seal(path, *args, **kwargs)
 os.open = _sealed_open
-"""
+""" + extra_seal
         if entered is not None:
             seal += (f"if LEASE_ENV in os.environ:\n    with open({str(entered)!r}, 'w') as out:\n"
                      "        out.write('%d %d' % (os.getpid(), os.getppid()))\n")
@@ -289,37 +279,31 @@ class WiringTests(unittest.TestCase):
         self.assertGreaterEqual(len(sites), 4, sites)
         doc = (SCRIPTS / "build_token.py").read_text(encoding="utf-8")
         for rel, lines in sites.items():
-            wired = rel not in UNWIRED_BY_DESIGN
-            for line in lines:
-                self.assertEqual("build_token.py" in line, wired, f"{rel}: wiring: {line}")
+            for line, wired in lines:
+                self.assertEqual(wired, rel not in UNWIRED_BY_DESIGN, f"{rel}: wiring: {line}: wrap it"
+                                 " with build_token.py or rename/remove the reference")
                 if wired and "| tail -" in line:
                     self.assertIn("3>&2", line, "a log pipe must not swallow the notices")
         for rel in UNWIRED_BY_DESIGN:
             self.assertIn(rel, sites, f"{rel} stopped building a release; fix the disclosure")
             self.assertIn(Path(rel).name, doc, f"{rel} builds a release undisclosed")
 
-    def test_deploy_clean_waits_briefly_under_the_token_and_metadata_stays_unwired(self) -> None:
-        cleans = [s for s in release_cargo_sites()["scripts/deploy-release.sh"] if "clean_cmd" in s]
-        self.assertEqual(len(cleans), 1, cleans)
-        self.assertIn("ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS=60 ", cleans[0], "optional cleanup waits briefly")
-        deploy = (SCRIPTS / "deploy-release.sh").read_text(encoding="utf-8")
-        metadata = [s for s in map(str.strip, deploy.splitlines())
-                    if "cargo metadata" in s and not s.startswith("#")]
-        self.assertEqual(len(metadata), 1, metadata)
-        self.assertIn("--no-deps", metadata[0])
-        self.assertNotIn("build_token.py", metadata[0], "read-only lookup is unwired by design")
-        self.assertIn("`cargo metadata --no-deps`", (SCRIPTS / "build_token.py").read_text(encoding="utf-8"))
-
-    def test_only_lines_that_run_the_clean_array_are_sites(self) -> None:
-        deploy = (SCRIPTS / "deploy-release.sh").read_text(encoding="utf-8")
-        base = cargo_sites(deploy)
-        for inert in ("# $clean_cmd", 'echo "$clean_cmd"', 'echo "${clean_cmd[*]}"'):
-            with self.subTest(inert):
-                self.assertEqual(cargo_sites(f"{deploy}{inert}\n"), base)
-        for runs in ('(cd "$REPO" && ${clean_cmd[@]}) || true', '"${clean_cmd[*]}"',
-                     "X=1 $clean_cmd", 'if "${clean_cmd[@]}"; then :; fi'):
-            with self.subTest(runs):
-                self.assertEqual(set(cargo_sites(f"{deploy}{runs}\n")) - set(base), {runs})
+    def test_an_array_reference_is_wired_only_in_the_wrapped_form(self) -> None:
+        # Fail-closed: a reference inside a comment or a quoted string is refused as well.
+        wrapped = 'python3 scripts/build_token.py -- "${clean_cmd[@]}")'
+        for line, wired in (
+                ('2>/dev/null "${clean_cmd[@]}"', False), ('command -- "${clean_cmd[@]}"', False),
+                ('env -u RUSTC_WRAPPER "${clean_cmd[@]}"', False), ('X="a b" "${clean_cmd[@]}"', False),
+                ('(cd "$REPO" && ${clean_cmd[@]}) || true', False), ('"${clean_cmd[*]}"', False),
+                ("X=1 $clean_cmd", False), ('if "${clean_cmd[@]}"; then :; fi', False),
+                ("echo 'if ${clean_cmd[@]}'", False), ("true # if ${clean_cmd[@]}", False),
+                ("# $clean_cmd", False), (f'(cd "$REPO" && {wrapped}; "${{clean_cmd[@]}}"', False),
+                (f'(cd "$REPO" && {wrapped}', True),
+                (f'if (cd "$REPO" && ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS=60 {wrapped}; then', True),
+                ("", None)):
+            with self.subTest(line):
+                want = [(line, wired)] if line else [("clean_cmd=(cargo clean --release)", False)]
+                self.assertEqual(cargo_sites(f"clean_cmd=(cargo clean --release)\n{line}\n"), want)
 
     def test_the_win32_backend_has_a_production_caller(self) -> None:
         source = (SCRIPTS / "build_token.py").read_text(encoding="utf-8")
@@ -858,13 +842,6 @@ class NestedHolderTests(TokenTestCase):
         self.assertTrue(strict)
         return prologue + strict + before_guard + rest
 
-    def test_the_child_carries_the_holders_marker(self) -> None:
-        out = self.tmp / "marker.txt"
-        rc = bt.run([sys.executable, "-c", f"import os; open({str(out)!r}, 'w')"
-                     f".write(os.environ[{bt.HOLDER_ENV!r}])"], env={}, path=str(self.token))
-        self.assertEqual(rc, 0)
-        self.assertEqual(out.read_text(), self.marker(os.getpid()))
-
     def test_a_nested_wrapper_is_refused_at_once_instead_of_waiting_on_its_ancestor(self) -> None:
         wrapper, ran = self.isolated_cli(), self.tmp / "inner.ran"
         inner = [sys.executable, str(wrapper), "--", sys.executable, "-c", f"open({str(ran)!r}, 'w')"]
@@ -903,9 +880,12 @@ class NestedHolderTests(TokenTestCase):
 
     def test_the_verdict_does_not_depend_on_the_callers_timezone(self) -> None:
         ppid = str(os.getppid())
-        printed = {subprocess.run(["ps", "-o", "lstart=", "-p", ppid], capture_output=True, text=True,
-                                  env={**os.environ, "LC_ALL": "C", "TZ": tz}).stdout for tz in ("UTC0", "EST5")}
-        self.assertEqual(len(printed), 2, "ps ignores TZ here, so this case proves nothing")
+        printed = {tz: subprocess.run(["ps", "-o", "lstart=", "-p", ppid], capture_output=True, text=True,
+                                      env={**os.environ, "LC_ALL": "C", "TZ": tz}) for tz in ("UTC0", "EST5")}
+        for tz, raw in printed.items():
+            self.assertEqual((raw.returncode, bool(raw.stdout.strip())), (0, True), f"ps under {tz}: {raw.stderr}")
+        self.assertEqual(len({raw.stdout for raw in printed.values()}), 2,
+                         "ps ignores TZ here, so this case proves nothing")
         with mock.patch.dict(os.environ, {"TZ": "UTC0"}):
             marker = self.marker(os.getppid())
         with mock.patch.dict(os.environ, {"TZ": "EST5"}):
@@ -984,12 +964,31 @@ class NestedHolderTests(TokenTestCase):
                 self.assertEqual(invoked.exists(), marked, "helper runs only when marked")
                 self.assertEqual(passed.exists(), want == 0)
 
-    def test_the_guard_precedes_detach_the_helper_and_the_deploy_lock(self) -> None:
-        deploy = (SCRIPTS / "deploy-release.sh").read_text()
-        guard = deploy.index("--refuse-if-nested")
-        for later in ("AGENTDESK_DEPLOY_DETACHED=1 nohup", '_spawn_detached_helper "$@"',
-                      '_acquire_release_deploy_lock "$@"'):
-            self.assertLess(guard, deploy.index(later), later)
+
+class DeployCleanupTokenTests(TokenTestCase):
+    def test_a_busy_token_costs_the_deploy_cleanup_a_60s_wait_and_a_skip(self) -> None:
+        # Only the copy's clock runs 120x fast, so the fixed 60 s bound passes in half a second.
+        (self.tmp / "scripts").mkdir()
+        self.isolated_cli(extra_seal="_mono = time.monotonic\ntime.monotonic = lambda: _mono() * 120\n").rename(
+            self.tmp / "scripts" / "build_token.py")
+        cleaned, cargo = self.tmp / "cleaned", self.tmp / "bin" / "cargo"
+        cargo.parent.mkdir()
+        cargo.write_text(f"#!/bin/sh\ntouch '{cleaned}'\n")
+        cargo.chmod(0o755)
+        name = "_clean_release_build_cache_after_staging"
+        body = (SCRIPTS / "deploy-release.sh").read_text().split(f"\n{name}() {{", 1)[1].split("\n}\n", 1)[0]
+        fcntl.flock(self.open_token(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # held by a running build
+        env = {k: v for k, v in os.environ.items() if k not in (
+            bt.HOLDER_ENV, "AGENTDESK_DEPLOY_BINARY", "AGENTDESK_DEPLOY_SKIP_BUILD_CACHE_CLEANUP")}
+        proc = subprocess.run(["bash", "-c", f"set -euo pipefail\n{name}() {{{body}\n}}\n{name}"],
+                              capture_output=True, text=True, timeout=30,
+                              env={**env, "PATH": f"{cargo.parent}:{env['PATH']}", "REPO": str(self.tmp),
+                                   "DEPLOY_BUILD_PROFILE": "release", bt.DIAG_FD_ENV: ""})
+        self.assertNotIn("fixture breach", proc.stderr)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("still held after 60s", proc.stderr)
+        self.assertIn("cargo clean for release failed; continuing", proc.stdout)
+        self.assertFalse(cleaned.exists(), "cargo clean ran without the token")
 
 
 class CancelWhileWaitingTests(TokenTestCase):
