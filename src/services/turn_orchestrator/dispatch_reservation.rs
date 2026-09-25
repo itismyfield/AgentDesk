@@ -8,7 +8,7 @@ use serenity::{ChannelId, MessageId};
 use super::active_source_dedup::strip_source_message_id_from_intervention;
 use super::pending_queue_persistence::{
     load_channel_pending_dispatch_marker, load_channel_pending_queue,
-    remove_channel_pending_dispatch_marker,
+    load_channel_pending_queue_checked, remove_channel_pending_dispatch_marker,
 };
 use super::{
     ChannelMailboxState, DispatchLease, HydratePendingQueueResult, Intervention, InterventionMode,
@@ -353,15 +353,30 @@ pub(super) fn merge_pending_dispatch_marker_into_state(
     }
 }
 
-/// Absorbs the channel's disk queue before an arm rewrites the whole file from memory, so a
-/// backlog left only on disk (an unrestored restitution) is kept, not overwritten.
+/// Absorbs the disk queue before an arm rewrites the whole file, so a disk-only backlog is kept;
+/// a failed read comes back as `persistence_error` and the caller stops before its write.
 pub(super) fn absorb_disk_queue(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
     persistence: &QueuePersistenceContext,
 ) -> HydratePendingQueueResult {
-    let (items, over) =
-        load_channel_pending_queue(&persistence.provider, &persistence.token_hash, channel_id);
+    let loaded = load_channel_pending_queue_checked(
+        &persistence.provider,
+        &persistence.token_hash,
+        channel_id,
+    );
+    let (items, over) = match loaded {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            tracing::error!(channel_id = channel_id.get(), error = %error, "pending queue read failed");
+            return HydratePendingQueueResult {
+                absorbed: 0,
+                queue_len_after: state.intervention_queue.len(),
+                restored_override: None,
+                persistence_error: Some(error),
+            };
+        }
+    };
     let mut persistence = persistence.clone();
     persistence.dispatch_role_override =
         persistence.dispatch_role_override.or(over.map(|c| c.get()));

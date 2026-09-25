@@ -774,15 +774,37 @@ pub(super) fn load_channel_pending_queue(
     token_hash: &str,
     channel_id: ChannelId,
 ) -> (Vec<Intervention>, Option<ChannelId>) {
-    let Some(path) = pending_queue_file_path(provider, token_hash, channel_id) else {
-        return (Vec::new(), None);
+    load_channel_pending_queue_checked(provider, token_hash, channel_id).unwrap_or_default()
+}
+
+/// Like `load_channel_pending_queue`, but only a missing file reads as empty; a root, read or
+/// parse failure is an error, so a caller never rewrites a queue it could not read.
+pub(super) fn load_channel_pending_queue_checked(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: ChannelId,
+) -> Result<(Vec<Intervention>, Option<ChannelId>), String> {
+    let path = pending_queue_file_path(provider, token_hash, channel_id).ok_or_else(|| {
+        format!(
+            "pending queue root unavailable for provider={} token_hash={token_hash} channel_id={}",
+            provider.as_str(),
+            channel_id.get()
+        )
+    })?;
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), None));
+        }
+        Err(error) => {
+            return Err(format!(
+                "read pending queue file {}: {error}",
+                path.display()
+            ));
+        }
     };
-    let Ok(content) = fs::read_to_string(&path) else {
-        return (Vec::new(), None);
-    };
-    let Ok(items) = serde_json::from_str::<Vec<PendingQueueItem>>(&content) else {
-        return (Vec::new(), None);
-    };
+    let items = serde_json::from_str::<Vec<PendingQueueItem>>(&content)
+        .map_err(|error| format!("parse pending queue file {}: {error}", path.display()))?;
     let restored_override = items
         .iter()
         .find_map(|item| item.override_channel_id)
@@ -791,7 +813,7 @@ pub(super) fn load_channel_pending_queue(
     let reference_wall_time = SystemTime::now();
     let interventions =
         pending_queue_items_to_interventions(items, reference_wall_time, reference_instant);
-    (interventions, restored_override)
+    Ok((interventions, restored_override))
 }
 
 /// Log a structured warning for legacy pending queue files at the old flat path.
