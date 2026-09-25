@@ -41,7 +41,6 @@ PATTERN_SAMPLES = {
     "tests/e2e/**": "tests/e2e/tui_relay/scenarios/E-1-single-prompt.yaml",
     "routines/**": "routines/sample/routine.js",
     "docs/relay-state-contract.md": "docs/relay-state-contract.md",
-    "scripts/relay_authority_rollout_report.py": "scripts/relay_authority_rollout_report.py",
     "scripts/ci-timeout.py": "scripts/ci-timeout.py",
     "scripts/ci-macos-fresh-user-smoke.sh": "scripts/ci-macos-fresh-user-smoke.sh",
     "scripts/operator-init-portable.py": "scripts/operator-init-portable.py",

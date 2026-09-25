@@ -38,8 +38,6 @@ RUST_INPUTS = (
     "routines/**",
     # ci-pr.yml's relay_contract filter compiles against this doc.
     "docs/relay-state-contract.md",
-    # Executed by Rust tests (current_message_anchor, rowless_receipt_tests).
-    "scripts/relay_authority_rollout_report.py",
     # Invoked by the macOS jobs' own steps.
     "scripts/ci-timeout.py",
     "scripts/ci-macos-fresh-user-smoke.sh",

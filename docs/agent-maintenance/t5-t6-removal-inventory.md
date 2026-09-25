@@ -311,7 +311,7 @@ tests net **+5,828**, generated net **+337**, tooling net **+6**이다.
 테스트 호출지점이 컴파일되지 않으므로 한 커밋으로 착지해야 하고 되돌릴 때도 한 덩어리다.
 D1 은 다른 슬라이스를 선행으로 요구하지 않는다.
 
-**부수 효과 1건(중립):** 롤백 런북 `docs/runbooks/relay-authority-acceptance-rollback.md` 가
+**부수 효과 1건(중립):** 롤백 런북 `relay-authority-acceptance-rollback.md`(T6-4 에서 삭제) 가
 기록한 "다이얼이 무음으로 `Legacy/0` 으로 복귀해 `AuthorityLost` 가 부활한다"는 위험은 D1 이후
 **스트림 게이트에 한해** 구조적으로 소멸한다(무조건 `Suppressed`). 진입 게이트(S7a) 쪽 같은
 위험은 그대로 남는다.
@@ -444,8 +444,8 @@ base `origin/main cfeff89307`. T6-1 이 네 게이트를 무조건화하고 T6-2
 보존하지만, whole-`Config` `save_to_path` writer 8곳("두 항목의 A6 판정" 절에 기록)을 한 번 거치면 두 키는
 사라진다. 두 키는 더 이상 어떤 판정에도 쓰이지 않으므로 사라져도 무해하다.
 
-**남은 참조(T6-4 몫):** 롤백 런북의 다이얼·`relay_authority_rollout` 조회 절차,
-`scripts/relay_authority_rollout_report.py` 와 그 테스트. CI 레인 이름
+**남은 참조(T6-4 에서 삭제):** 롤백 런북, `scripts/relay_authority_rollout_report.py` 와 그 테스트,
+`relay-report-evidence.yml` 워크플로. CI 레인 이름
 `t5-s4-missing-row-cohort-lifecycle` 은 선택자 계약이라 이름만 남는다.
 
 **철거·예산 경계:** `git diff --numstat origin/main -- src/` 기준 **+34/−806 = 순증 −772줄**이다.
