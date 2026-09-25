@@ -1871,17 +1871,14 @@ fn watcher_should_yield_to_inflight_state(
     if state.tmux_session_name.as_deref() != Some(tmux_session_name) {
         return false;
     }
+    if super::recovery_engine::restored_claude_sbr_turn(state, data_start_offset, current_offset) {
+        return false;
+    }
     match state.effective_relay_owner_kind() {
         super::inflight::RelayOwnerKind::Watcher => return false,
-        super::inflight::RelayOwnerKind::StandbyRelay => {
-            return current_offset > data_start_offset;
-        }
-        super::inflight::RelayOwnerKind::SessionBoundRelay => {
-            return current_offset > data_start_offset;
-        }
-        super::inflight::RelayOwnerKind::Unknown => {
-            return current_offset > data_start_offset;
-        }
+        super::inflight::RelayOwnerKind::StandbyRelay
+        | super::inflight::RelayOwnerKind::SessionBoundRelay
+        | super::inflight::RelayOwnerKind::Unknown => return current_offset > data_start_offset,
         super::inflight::RelayOwnerKind::None => {}
     }
 
@@ -2029,6 +2026,58 @@ mod active_bridge_turn_guard_tests {
                 Some(&state),
                 "AgentDesk-codex-adk-cdx",
                 0,
+                2_019_364,
+            ));
+        });
+    }
+
+    // Claude TUI only ends a turn with a soft stop_hook_summary, which the sink never closes.
+    #[test]
+    fn claude_tui_planned_restart_session_bound_turn_does_not_yield() {
+        with_ownerless_codex_tui_state(|mut state| {
+            state.runtime_kind =
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+            state.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+            state.set_restart_mode(InflightRestartMode::DrainRestart);
+
+            assert!(!watcher_should_yield_to_inflight_state(
+                Some(&state),
+                "AgentDesk-codex-adk-cdx",
+                0,
+                2_019_364,
+            ));
+
+            state.terminal_delivery_committed = true;
+            assert!(watcher_should_yield_to_inflight_state(
+                Some(&state),
+                "AgentDesk-codex-adk-cdx",
+                0,
+                2_019_364,
+            ));
+
+            state.terminal_delivery_committed = false;
+            state.clear_restart_mode();
+            assert!(watcher_should_yield_to_inflight_state(
+                Some(&state),
+                "AgentDesk-codex-adk-cdx",
+                0,
+                2_019_364,
+            ));
+        });
+    }
+
+    #[test]
+    fn claude_tui_planned_restart_session_bound_later_range_still_yields() {
+        with_ownerless_codex_tui_state(|mut state| {
+            state.runtime_kind =
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+            state.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+            state.set_restart_mode(InflightRestartMode::DrainRestart);
+
+            assert!(watcher_should_yield_to_inflight_state(
+                Some(&state),
+                "AgentDesk-codex-adk-cdx",
+                10,
                 2_019_364,
             ));
         });

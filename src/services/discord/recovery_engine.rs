@@ -123,6 +123,7 @@ mod crash_resume_guard;
 #[cfg(unix)]
 pub(in crate::services::discord) use self::crash_resume_guard::{
     crash_readopt_live_relay_resume_required, guard_readopt_relay_resume_or_dead_letter,
+    restored_claude_sbr_turn,
 };
 
 // Re-import moved items so existing call sites stay byte-identical.

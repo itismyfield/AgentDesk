@@ -109,6 +109,23 @@ pub(in crate::services::discord) fn readopt_relay_black_hole_dead_letter_require
     crash_readopt_real_user_live_turn(state) && !state.readopted_from_inflight
 }
 
+/// The session-bound sink closes a turn only on a hard `result`, but Claude TUI ends on a soft
+/// stop_hook_summary, so a restored uncommitted session-bound Claude turn needs the watcher.
+pub(in crate::services::discord) fn restored_claude_sbr_turn(
+    state: &InflightTurnState,
+    data_start_offset: u64,
+    current_offset: u64,
+) -> bool {
+    let turn_start_offset = state.turn_start_offset.unwrap_or(state.last_offset);
+    state.effective_relay_owner_kind() == RelayOwnerKind::SessionBoundRelay
+        && state.runtime_kind
+            == Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui)
+        && state.restart_mode.is_some()
+        && !state.terminal_delivery_committed
+        && data_start_offset <= turn_start_offset
+        && turn_start_offset < current_offset
+}
+
 /// #4380 backstop: WARN + durable dead-letter for a re-adopted real-user live turn
 /// whose relay-resume guard could NOT be armed (the `readopted_from_inflight`
 /// marker did not durably persist), so the recovered watcher will yield to the dead
