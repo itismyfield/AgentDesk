@@ -4812,6 +4812,7 @@ services::discord::relay_recovery::tests::idle_tmux_repair_guard_detects_tail_an
 services::discord::relay_recovery::tests::idle_tmux_repair_guard_silent_when_partial_text_has_no_terminal_result
 services::discord::relay_recovery::tests::idle_tmux_repair_guard_silent_when_tail_empty
 services::discord::relay_recovery::tests::idle_tmux_snapshot_missing_output_path_denies_claude_tui_but_keeps_legacy_pane_fallback
+services::discord::relay_recovery::tests::incarnation_follow_up::a_foreign_actor_spawn_never_hides_the_recovery_done_wake
 services::discord::relay_recovery::tests::incarnation_follow_up::accepted_wrapper_follow_up_never_latches_a_successor_recovery
 services::discord::relay_recovery::tests::incarnation_follow_up::cancelled_finish_is_bound_to_the_expected_actor
 services::discord::relay_recovery::tests::incarnation_follow_up::force_purge_finish_never_reaches_a_successor_actor
