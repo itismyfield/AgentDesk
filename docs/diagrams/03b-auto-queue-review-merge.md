@@ -9,7 +9,6 @@ skinparam NoteFontSize 10
 title Auto-Queue — 리뷰 & 머지
 
 |#LightGreen|JS (Policy Engine)|
-|#LightYellow|GitHub / Git|
 
 |JS (Policy Engine)|
 start
@@ -55,39 +54,9 @@ else (yes)
 endif
 
 |JS (Policy Engine)|
-:onCardTerminal fires
-(merge-automation.js);
-
-if (merge enabled?) then (yes)
-  :resolveTerminalMergeCandidate();
-
-  if (Tracked PR in merge state?) then (yes)
-    |GitHub / Git|
-    :enableAutoMerge()
-    gh pr merge --auto;
-  else (no)
-    :tryDirectMergeOrTrackPr();
-
-    |GitHub / Git|
-    :Cherry-pick commits onto main;
-
-    if (Success?) then (yes)
-      :git push origin main;
-    else (conflict)
-      :cherry-pick --abort
-      Create PR as fallback;
-      :Track PR state = wait-ci;
-
-      note right
-        OnTick5min:
-        processTrackedMergeQueue()
-        detectConflictingPrs()
-        cleanupMergedWorktrees()
-      end note
-    endif
-  endif
-else (no)
-endif
+:No policy merge. Review pass dispatches create-pr
+(review-automation.js), then an agent babysits the PR,
+merging after CI and review pass and repairing on failure;
 
 stop
 

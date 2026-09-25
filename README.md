@@ -192,7 +192,7 @@ Business logic lives in JavaScript files under `policies/`, hot-reloaded without
 |--------|---------|
 | `00-escalation.js` | Manual-intervention routing, PM cooldown management, escalation flush loop |
 | `00-pr-tracking.js` | Card→PR linkage cache and PR sync helpers |
-| `kanban-rules.js` | Core lifecycle: dispatch completion, PM decision gates, worktree auto-merge |
+| `kanban-rules.js` | Core lifecycle: dispatch completion, PM decision gates |
 | `review-automation.js` | Counter-model review dispatch, verdict processing, review state sync |
 | `auto-queue.js` | Batch-phased card queuing, phase gate dispatch, slot management |
 | `phase_gate.js` | Phase gate verification before opening the next batch |
@@ -200,7 +200,8 @@ Business logic lives in JavaScript files under `policies/`, hot-reloaded without
 | `timeouts.js` (+ `timeouts/` modules) | Stale card detection, deadlock recovery, idle session kill, branch guard, dispatch maintenance |
 | `triage-rules.js` | GitHub issue auto-classification and agent assignment |
 | `pipeline.js` | Multi-stage workflow progression |
-| `merge-automation.js` | PR auto-merge, worktree cleanup after merge |
+
+No policy merges pull requests. Every merge goes through a PR that an agent babysits: it confirms CI and review, then merges, and repairs the PR on failure.
 
 Repository policy files under `policies/` are canonical for shipped behavior. Release copies under `~/.adk/release/policies/` are deployment replicas, and operator-local policy directories are extensions selected by `policies.dir`. For the complete policy/config source map, see [`docs/source-of-truth.md`](docs/source-of-truth.md).
 
@@ -281,7 +282,7 @@ AgentDesk can run multiple release instances against one PostgreSQL control plan
 - **Capability-aware routing** — Dispatch claims compare required labels/providers/MCP health against registered runner capabilities and record routing diagnostics when a node is ineligible.
 - **Lease-backed work claims** — `task_dispatches` and dispatch outbox rows use PG claim owner, expiry, and idempotency fields so multiple nodes do not process the same work item concurrently.
 - **Exclusive resource locks** — `/api/cluster/resource-locks*` serializes node-local resources such as Unreal Editor, MCP endpoints, and project-level test execution.
-- **Issue-as-spec phase evidence** — `issue_specs`, `test_phase_runs`, and `test_results` connect GitHub issue acceptance criteria to deterministic phase runs, and `policies/merge-automation.js` blocks merge when required phase evidence is missing for the current PR head SHA.
+- **Issue-as-spec phase evidence** — `issue_specs`, `test_phase_runs`, and `test_results` connect GitHub issue acceptance criteria to deterministic phase runs, and `/api/cluster/test-phase-runs/evidence` returns the latest passing evidence for a phase and PR head SHA. No policy gates merges on it.
 - **Regression coverage** — `.github/workflows/ci-nightly.yml` runs the `multinode_regression` job; the physical MacBook + Mac mini smoke plan lives in `docs/agent-maintenance/multinode-two-node-smoke.md`.
 
 ## Configuration
@@ -444,7 +445,7 @@ AgentDesk keeps settings in multiple surfaces on purpose. The contract is per-su
 |---------|------------------|----------------------|-----------------------------------|-----|
 | Company settings | General settings UI / callers that own the merged JSON | `kv_meta['settings']` only. No YAML baseline. | Persists until replaced. `PUT /api/settings` is full replace, so callers must merge hidden keys before saving. Retired legacy keys are stripped server-side. | `GET/PUT /api/settings` |
 | Runtime config | Dashboard live-runtime controls | Hardcoded defaults < `agentdesk.yaml` `runtime:` < `kv_meta['runtime-config']` override JSON | Applies immediately. On reboot, YAML-backed keys are re-applied; saved keys without YAML baselines persist unless `runtime.reset_overrides_on_restart=true`, in which case the whole surface resets to baseline. | `GET/PUT /api/settings/runtime-config` |
-| Policy/config keys | Dashboard policy controls and automation helpers | Hardcoded defaults < YAML sections (`review:`, `runtime:`, `automation:`, `kanban:`) < individual `kv_meta` rows | `PATCH` writes live overrides, including merge policy keys like `merge_strategy_mode`. YAML-backed keys are re-seeded on restart, while hardcoded-only keys keep their DB override unless the reset flag is on. `server_port` is surfaced as read-only config metadata. | `GET/PATCH /api/settings/config` |
+| Policy/config keys | Dashboard policy controls and automation helpers | Hardcoded defaults < YAML sections (`review:`, `runtime:`, `kanban:`) < individual `kv_meta` rows | `PATCH` writes live overrides. YAML-backed keys are re-seeded on restart, while hardcoded-only keys keep their DB override unless the reset flag is on. `server_port` is surfaced as read-only config metadata. | `GET/PATCH /api/settings/config` |
 | Escalation routing | Dashboard escalation panel and Discord `!escalation` command | `escalation:` config baseline plus fallback owner/channel defaults, overridden by `kv_meta['escalation-settings-override']` | Override persists until changed back to defaults. When `runtime.reset_overrides_on_restart=true`, the stored escalation override is cleared on boot. | `GET/PUT /api/settings/escalation` |
 | Onboarding/secrets | Dedicated onboarding wizard | Dedicated onboarding keys and flows | Tokens and setup secrets stay outside the general settings form. | `/api/onboarding/*` |
 | Channel provider rules | `onboarding.provider_suffix_map` / `default_provider` | Registry defaults, then YAML entries: add a key, replace its provider, or set its value to `null` to remove that suffix. An empty section preserves registry behavior. | Applied from the server config snapshot (including successful hot reload); offline `show session-name` reads the same YAML. Explicit provider selections win. | Channel dispatch and onboarding |

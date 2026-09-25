@@ -17,6 +17,9 @@ The orchestration rule-surface rows (lane caps, campaign execution rules) were a
 - Legacy snapshots (`*.pre-*`, `*.bak`, `*.migrated`) are archive-only. They belong under `~/.adk/release/config/.backups/YYYY-MM-DD/`, not next to canonical files.
 - Compatibility seams such as `role_map.json`, `bot_settings.json`, the root-level legacy `agentdesk.yaml`, and `_shared.md` aliases are not canonical write targets.
 - Older docs with deprecated front matter are retained for history. Their config and policy lists are not write targets unless they point back here.
+- Merges into `main` always go through a pull request that an agent babysits: it confirms CI and review, then merges, and repairs the PR on failure. No policy merges automatically.
+- `main` branch protection requires a pull request and the required status checks, and `enforce_admins` applies it to administrators too (decided 2026-09-25), so no one pushes directly to `main` or merges past a failing required check.
+- Branch protection is the enforcement mechanism for these merge rules. `.githooks/pre-push` enforces inventory-doc freshness (it exits 1 when inventory generation fails or generated docs drift without `GIT_AUTO_REGEN_DOCS=1`), but it does not reject a push because its destination is `main`.
 
 ## Matrix
 

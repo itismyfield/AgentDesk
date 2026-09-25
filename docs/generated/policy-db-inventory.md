@@ -55,11 +55,11 @@ migration debt total.
 - **Long-turn cleanup slice**: `policies/timeouts/long-turn-monitor.js` batches
   stale tier and watchdog-extension exact-key deletes through
   `agentdesk.kv.deleteMany`, removing two scalar raw-DB mutation callsites.
-- **Capability-manifest first rollout**: `policies/review-automation.js` and
-  `policies/merge-automation.js` still have adjacent `*.cap.yaml` manifests in
-  `db.raw_sql.mode: legacy` with pinned `no_silent_growth` baselines.
+- **Capability-manifest first rollout**: `policies/review-automation.js` still
+  has an adjacent `*.cap.yaml` manifest in `db.raw_sql.mode: legacy` with a
+  pinned `no_silent_growth` baseline.
 - **Next candidates (mutation-heavy)**: `review-automation.js`,
-  `merge-automation.js`, `kanban-rules.js`, and the `auto-queue` lib modules
+  `kanban-rules.js`, and the `auto-queue` lib modules
   (`lib/auto-queue-phase-gate.js`, `lib/auto-queue-lifecycle.js`).
 - **Escape hatch**: callers that still require legacy `agentdesk.db.*` must
   annotate the SQL with

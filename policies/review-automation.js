@@ -1039,11 +1039,11 @@ function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
   var repoId = precheckRepoId;
   if (!repoId) return { status: "noop", reason: "no_repo" };
 
-  // We have a work target AND a repo, so a PR was expected. From here on,
-  // inability to dispatch is a genuine error that the retry loop should see.
+  // A work target and repo mean a PR was expected, so failing to dispatch is
+  // a genuine error the caller hands off via markPrCreateFailed (no retry).
   if (!latestWorkTarget.branch) {
-    // Seed pr_tracking with whatever we have so the retry loop can try again
-    // once the branch recovers (e.g. worktree re-discovered).
+    // Seed pr_tracking with whatever we have so the failure keeps its cause
+    // when markPrCreateFailed hands the card to an agent or operator.
     upsertPrTracking(
       cardId,
       repoId,
@@ -1078,9 +1078,8 @@ function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
     );
     return { status: "dispatched", generation: handoff.generation, reused: !!handoff.reused };
   } catch (e) {
-    // handoff threw before any stamp was committed — the JS catch path
-    // calls markPrCreateFailed(null stampGen) which seeds a retry row via
-    // recordPrCreateFailure's INSERT-if-missing branch.
+    // Handoff committed no stamp; the caller's markPrCreateFailed(null stampGen)
+    // seeds pr_tracking via recordPrCreateFailure's INSERT-if-missing path.
     agentdesk.log.warn("[review] handoffCreatePr failed for card " + cardId + ": " + e);
     return { status: "error", reason: "dispatch_failed: " + String(e) };
   }
