@@ -17,7 +17,7 @@ import {
   normalizeAutoQueueStatus,
   shouldClearSuppressedAutoQueueRun,
 } from "./auto-queue-panel-state";
-import { buildRequestGenerateGroups } from "./auto-queue-actions";
+import { buildRequestGenerateGroups, resetAutoQueueForSelection } from "./auto-queue-actions";
 import type { AutoQueueRequestProgress } from "./auto-queue-panel-ctx";
 import AutoQueuePanelView from "./AutoQueuePanelView";
 import { useSortableReorder } from "./AutoQueueSortableRows";
@@ -247,21 +247,15 @@ export default function AutoQueuePanel({
     setNoReadyCards(false);
     suppressedRunIdRef.current = status?.run?.id ?? null;
     try {
-      const targets = resolveResetAgentTargets();
-      if (targets.length === 0) {
-        throw new Error(
-          tr(
-            "초기화할 에이전트를 찾지 못했습니다. 상단 필터에서 에이전트를 선택하세요.",
-            "No agent to reset. Select an agent from the filter above.",
-          ),
-        );
-      }
-      for (const agentId of targets) {
-        await api.resetAutoQueue({
-          runId: status?.run?.id ?? null,
-          repo: selectedRepo || null,
-          agentId,
-        });
+      const reset = await resetAutoQueueForSelection(
+        api,
+        selectedRepo || null,
+        selectedAgentId ?? status?.run?.agent_id,
+        status?.run?.id,
+      );
+      if (!reset) {
+        setError(tr("초기화할 run이 없습니다", "No run to reset"));
+        return;
       }
       resetPanelState();
     } catch (e) {
@@ -357,16 +351,6 @@ export default function AutoQueuePanel({
   const run = status?.run ?? null;
   const entries = status?.entries ?? [];
   const phaseGates = status?.phase_gates ?? [];
-  const resetAgentId = selectedAgentId ?? run?.agent_id ?? null;
-  const resolveResetAgentTargets = (): string[] => {
-    if (resetAgentId) return [resetAgentId];
-    const fromEntries = Array.from(
-      new Set(entries.map((e) => e.agent_id).filter((id): id is string => Boolean(id))),
-    );
-    if (fromEntries.length > 0) return fromEntries;
-    const fromStats = Object.keys(status?.agents ?? {});
-    return fromStats;
-  };
   const gatesByPhase = new Map<number, PhaseGateInfo[]>();
   for (const gate of phaseGates) {
     const list = gatesByPhase.get(gate.phase) ?? [];
