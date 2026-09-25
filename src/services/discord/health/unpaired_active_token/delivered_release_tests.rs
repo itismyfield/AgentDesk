@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::MutexGuard;
 use std::sync::atomic::Ordering::{Relaxed, SeqCst};
 use std::time::Duration;
@@ -21,7 +22,7 @@ use crate::services::tmux_common::session_temp_path;
 const PROVIDER: ProviderKind = ProviderKind::Codex;
 const PAST_GRACE: Duration = Duration::from_secs(61);
 
-type Seam = (SessionPresence, Option<bool>, usize);
+type Seam = (SessionPresence, Option<bool>, usize, Option<PathBuf>);
 static PANE_SEAMS: LazyLock<Mutex<HashMap<String, Seam>>> = LazyLock::new(Default::default);
 
 fn seams() -> MutexGuard<'static, HashMap<String, Seam>> {
@@ -33,12 +34,20 @@ pub(super) fn pane_seam(session: &str) -> Option<(SessionPresence, Option<bool>)
     let mut seams = seams();
     let seam = seams.get_mut(session)?;
     seam.2 += 1;
+    if let Some(row) = seam.3.take() {
+        write_row(&row);
+    }
     Some((seam.0, seam.1))
 }
 
 fn set_pane(session: &str, presence: SessionPresence, proven_idle: Option<bool>) {
     let calls = seams().get(session).map_or(0, |seam| seam.2);
-    seams().insert(session.to_owned(), (presence, proven_idle, calls));
+    seams().insert(session.to_owned(), (presence, proven_idle, calls, None));
+}
+
+fn write_row(row: &Path) {
+    std::fs::create_dir_all(row.parent().unwrap()).unwrap();
+    std::fs::write(row, "{torn").unwrap();
 }
 
 struct Episode {
@@ -95,6 +104,16 @@ impl Episode {
         if ledger {
             delivery_record::record_pinned_delivery_metadata(&source, "answer", self.anchor.get());
         }
+    }
+
+    /// Restores the same anchor under a successor token with a fresh nonce.
+    async fn restore_successor(&self) -> Arc<CancelToken> {
+        let successor = Arc::new(CancelToken::new());
+        successor.bind_unmanaged_session_name(&self.session);
+        let mailbox = self.shared.mailbox(self.channel);
+        let restore = mailbox.restore_active_turn(successor.clone(), UserId::new(7), self.anchor);
+        restore.await;
+        successor
     }
 
     async fn pass(&self) -> Verdict {
@@ -203,11 +222,7 @@ async fn flip_one(episode: &Episode, flip: Flip) -> Option<Arc<CancelToken>> {
             );
             std::fs::write(ledger, entry).unwrap();
         }
-        Flip::RowPresent => {
-            let row = inflight_state_path(&root, &PROVIDER, channel);
-            std::fs::create_dir_all(row.parent().unwrap()).unwrap();
-            std::fs::write(row, "{torn").unwrap();
-        }
+        Flip::RowPresent => write_row(&inflight_state_path(&root, &PROVIDER, channel)),
         #[cfg(unix)]
         Flip::RowUnmeasurable => {
             use std::os::unix::fs::PermissionsExt;
@@ -222,12 +237,7 @@ async fn flip_one(episode: &Episode, flip: Flip) -> Option<Arc<CancelToken>> {
         Flip::RowUnmeasurable => return None,
         Flip::RestoredNonce => {
             let before = discord::mailbox_snapshot(&episode.shared, episode.channel).await;
-            let successor = Arc::new(CancelToken::new());
-            successor.bind_unmanaged_session_name(&episode.session);
-            let mailbox = episode.shared.mailbox(episode.channel);
-            let restore =
-                mailbox.restore_active_turn(successor.clone(), UserId::new(7), episode.anchor);
-            restore.await;
+            let successor = episode.restore_successor().await;
             let after = discord::mailbox_snapshot(&episode.shared, episode.channel).await;
             assert_eq!(after.turn_started_at, before.turn_started_at);
             assert_ne!(after.active_turn_nonce, before.active_turn_nonce);
@@ -272,6 +282,41 @@ async fn production_pane_probe_without_a_binding_holds() {
     assert_eq!(episode.two_passes().await, (Defer, Hold(PaneNotProvenIdle)));
     assert!(episode.grace_armed(), "a pane hold keeps the grace");
     episode.assert_inert(&episode.token).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_row_written_during_the_pane_probe_blocks_the_release() {
+    let episode = seed(5_996_711, CancelToken::new()).await;
+    episode.deliver(episode.token.turn_nonce().unwrap(), true);
+    let root = discord::inflight::inflight_runtime_root().unwrap();
+    let row = inflight_state_path(&root, &PROVIDER, episode.channel.get());
+    seams().get_mut(&episode.session).unwrap().3 = Some(row);
+    assert_eq!(episode.two_passes().await, (Defer, NotApplicable));
+    assert_eq!(episode.pane_calls(), 1);
+    episode.assert_inert(&episode.token).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refusal_or_a_new_episode_restarts_the_grace() {
+    let episode = seed(5_996_712, CancelToken::new()).await;
+    let nonce = episode.token.turn_nonce().unwrap();
+    episode.deliver(nonce, true);
+    assert_eq!(episode.pass().await, Defer);
+    let channel = episode.channel.get();
+    std::fs::remove_file(completed_turn_ledger::ledger_path(&PROVIDER, channel).unwrap()).unwrap();
+    tokio::time::advance(PAST_GRACE).await;
+    assert_eq!(episode.pass().await, Refuse(NoLedgerWitness));
+    assert!(!episode.grace_armed(), "a refusal ends the grace");
+    episode.deliver(nonce, true);
+    assert_eq!(episode.pass().await, Defer, "after a refusal");
+
+    let successor = episode.restore_successor().await;
+    episode.deliver(successor.turn_nonce().unwrap(), true);
+    tokio::time::advance(PAST_GRACE).await;
+    assert_eq!(episode.pass().await, Defer, "new (M, N)");
+    tokio::time::advance(PAST_GRACE).await;
+    assert_eq!(episode.pass().await, Release);
+    episode.assert_inert(&successor).await;
 }
 
 #[tokio::test(start_paused = true)]

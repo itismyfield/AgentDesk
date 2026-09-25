@@ -3185,6 +3185,8 @@ services::discord::health::transcript_binding_stall::tests::a_superseded_binding
 services::discord::health::transcript_binding_stall::tests::a_transcript_that_grew_recently_is_healthy_even_mid_rotation
 services::discord::health::transcript_binding_stall::tests::an_idle_channel_is_never_alerted_on
 services::discord::health::transcript_binding_stall::tests::an_unresolvable_bound_transcript_is_not_this_verdict
+services::discord::health::unpaired_active_token::delivered_release::tests::a_refusal_or_a_new_episode_restarts_the_grace
+services::discord::health::unpaired_active_token::delivered_release::tests::a_row_written_during_the_pane_probe_blocks_the_release
 services::discord::health::unpaired_active_token::delivered_release::tests::decide_orders_the_gates_and_maps_every_reason
 services::discord::health::unpaired_active_token::delivered_release::tests::delivered_rowless_anchor_defers_then_would_release_without_mutation
 services::discord::health::unpaired_active_token::delivered_release::tests::each_single_flip_of_the_delivered_shape_keeps_the_anchor
