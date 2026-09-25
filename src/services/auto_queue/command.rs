@@ -679,9 +679,8 @@ mod reset_run_scope_pg_tests {
 
     const AGENT_ID: &str = "agent-reset-scope";
 
-    /// Seed one run holding one entry owned by the run's own agent.
-    /// `agent_id`/`repo` are nullable so the legacy NULL-scoped run that #4880
-    /// P1-2 must keep resettable can be seeded through the same helper.
+    /// Seed one run holding one entry owned by the run's own agent; nullable
+    /// `agent_id`/`repo` also seed a legacy NULL-scoped run.
     async fn seed_run(
         pool: &PgPool,
         run_id: &str,

@@ -104,11 +104,8 @@ pub(super) fn reset_error_status(error: &str) -> StatusCode {
     }
 }
 
-/// POST /api/queue/reset
-/// Reset a single auto-queue run. Requires `run_id`; `agent_id`/`repo` only
-/// narrow the target further (#4880). The one neighbouring reset route is
-/// `POST /api/queue/reset-global`; no agent-wide reset endpoint exists.
-/// A run that still owns live work gets 409 with its end/cancel route.
+/// POST /api/queue/reset: reset the one `run_id` run (`agent_id`/`repo` only narrow it).
+/// A run that still owns live work gets 409 naming its end/cancel route.
 pub async fn reset(
     State(state): State<AppState>,
     body: Bytes,
