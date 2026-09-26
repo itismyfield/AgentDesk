@@ -200,7 +200,7 @@ fn channel_identifier_matches(left: &str, right: &str) -> bool {
     }
 }
 
-fn channel_override_is_allowed(
+pub(super) fn channel_override_is_allowed(
     override_channel: &str,
     bindings: &crate::db::agents::AgentChannelBindings,
 ) -> bool {
@@ -811,116 +811,20 @@ pub async fn start_agent_turn(
             Json(json!({"ok": false, "error": "postgres pool unavailable"})),
         );
     };
-    let (provider, primary_channel) = {
-        match agent_exists_pg(pool, &id).await {
-            Ok(true) => {}
-            Ok(false) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"ok": false, "error": "agent not found"})),
-                );
-            }
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"ok": false, "error": format!("query: {error}")})),
-                );
-            }
-        }
-
-        let Some(bindings) = crate::db::agents::load_agent_channel_bindings_pg(pool, &id)
-            .await
-            .map_err(|error| error.to_string())
-            .ok()
-            .flatten()
-        else {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"ok": false, "error": "agent channel binding not found"})),
-            );
-        };
-
-        if let Some(channel_override) = channel_override.as_deref()
-            && !channel_override_is_allowed(channel_override, &bindings)
-        {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({
-                    "ok": false,
-                    "error": format!(
-                        "channel override {} is not allowed for agent {}",
-                        channel_override,
-                        id
-                    ),
-                })),
-            );
-        }
-
-        let provider = match provider_override.as_deref() {
-            Some(raw) => match ProviderKind::from_str(raw) {
-                Some(kind) => kind,
-                None => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "ok": false,
-                            "error": format!("unsupported provider override: {raw}"),
-                        })),
-                    );
-                }
-            },
-            None => {
-                let Some(kind) = bindings.resolved_primary_provider_kind() else {
-                    return (
-                        StatusCode::CONFLICT,
-                        Json(
-                            json!({"ok": false, "error": "agent primary provider is not configured"}),
-                        ),
-                    );
-                };
-                kind
-            }
-        };
-
-        let primary_channel = if let Some(chan) = channel_override.clone() {
-            chan
-        } else if provider_override.is_some() {
-            let Some(chan) = bindings.channel_for_provider(provider_override.as_deref()) else {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(json!({
-                        "ok": false,
-                        "error": format!(
-                            "agent has no channel bound for provider {}",
-                            provider_override.as_deref().unwrap_or("")
-                        ),
-                    })),
-                );
-            };
-            chan
-        } else {
-            let Some(chan) = bindings.primary_channel() else {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(json!({"ok": false, "error": "agent primary channel is not configured"})),
-                );
-            };
-            chan
-        };
-
-        (provider, primary_channel)
-    };
-
-    let Some(channel_id_num) = super::dispatches::resolve_channel_alias_pub(&primary_channel)
-        .or_else(|| primary_channel.parse::<u64>().ok())
-    else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "ok": false,
-                "error": format!("agent primary channel is invalid: {}", primary_channel),
-            })),
-        );
+    let super::agents_turn_target::AgentTurnTarget {
+        provider,
+        primary_channel,
+        channel_id: channel_id_num,
+    } = match super::agents_turn_target::resolve_agent_turn_target(
+        pool,
+        &id,
+        provider_override.as_deref(),
+        channel_override.as_deref(),
+    )
+    .await
+    {
+        Ok(target) => target,
+        Err(response) => return response,
     };
 
     let Some(registry) = state.health_registry.as_deref() else {
