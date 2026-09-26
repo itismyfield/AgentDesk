@@ -264,10 +264,6 @@ class DegradationTests(FairnessTestCase):
 
 
 class WiringTests(unittest.TestCase):
-    def test_ci_runs_this_suite(self) -> None:
-        checks = (SCRIPTS / "ci-script-checks.sh").read_text(encoding="utf-8")
-        self.assertIn("tests.test_build_token_fairness_5968", checks)
-
     def test_the_callers_interface_is_unchanged(self) -> None:
         # The lane scripts, CI and deploy-release.sh drive this file through its
         # CLI and its env vars only; the queue must stay invisible to them.

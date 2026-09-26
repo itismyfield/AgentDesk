@@ -328,10 +328,6 @@ class WiringTests(unittest.TestCase):
         self.assertIn("supervise_windows", source)
         self.assertIn('sys.platform == "win32"', source)
 
-    def test_ci_runs_this_suite(self) -> None:
-        checks = (SCRIPTS / "ci-script-checks.sh").read_text(encoding="utf-8")
-        self.assertIn("tests.test_build_token_serialization_5663", checks)
-
 
 class DeployPreflightTokenTests(unittest.TestCase):
     def test_source_build_queues_but_artifact_and_host_pressure_refuse(self) -> None:

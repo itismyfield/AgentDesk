@@ -182,6 +182,7 @@ NON_PG_FILTER_REPLAY=(
   db::campaigns::tests::campaign_checkpoint_normalizes_optional_groups_without_inference
   db::campaigns::tests::campaign_validation_rejects_false_completion_and_bad_identity
   db::campaigns::tests::campaign_validation_rejects_missing_duplicate_and_cyclic_dependencies
+  db::campaigns::tests::legacy_node_documents_load_without_glance_fields_and_keep_their_time
   db::dispatched_session_canonical_identity::pg_tests::canonical_identity_conflict_is_http_409_ready
   db::dispatches::delivery_events::tests::dispatch_delivery_event_serde_roundtrips_snake_case_status
   db::dispatches::metadata::tests::parse_pg_dispatch_context_ignores_empty_context

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""H2 admission gate: one-shot admissions, R-W, R-E inventory and the 0-rules.
+"""H2 admission gate: one-shot admissions, R-W, R-E inventory, the 0-rules and R-O compile inputs.
 
 Inert until the baseline lands: without scripts/ci/h2_baseline_*.toml it does nothing.
 """
@@ -16,6 +16,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import h2_depinfo  # noqa: E402
 import h2_measure as m  # noqa: E402
 import rust_lex  # noqa: E402  (h2_measure put scripts/ on sys.path)
 
@@ -339,6 +340,7 @@ def evaluate(root: Path, lane: str, base_rev: str, lines: list[str]) -> list[str
     config = m.load_config(root / "clippy.toml")
     result = m.measure(root, lines, config)
     problems = zero_rules(root) + owner_shape_problems(root) + untagged_entries(root / "clippy.toml")
+    problems += h2_depinfo.ro_problems(root, lines)
     problems += m.compare(result["rows"], head, lane)
     if result["total"] < m.LIVENESS_FLOOR:
         problems.append(f"only {result['total']} H2 diagnostics (< liveness floor {m.LIVENESS_FLOOR})")
@@ -377,7 +379,7 @@ def main(argv=None) -> int:
         print(("::warning::h2-admission: " if args.inert else "h2-admission: ") + problem, file=sys.stderr)
     if problems:
         return 0 if args.inert else 1
-    print(f"h2-admission: {args.lane} admissions, R-W, R-E and 0-rules hold")
+    print(f"h2-admission: {args.lane} admissions, R-W, R-E, 0-rules and R-O compile inputs hold")
     return 0
 
 if __name__ == "__main__":

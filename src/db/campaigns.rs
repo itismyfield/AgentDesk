@@ -59,6 +59,11 @@ pub struct NodeInput {
     pub evidence: Vec<String>,
     pub next_action: Option<String>,
     pub blocker: Option<String>,
+    /// Plain-language one-line gist and expected benefit for the dashboard's first screen.
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub benefit: Option<String>,
     #[serde(default)]
     pub details: String,
     #[serde(default)]

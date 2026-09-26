@@ -4,6 +4,7 @@ import { WidgetState } from "../common/WidgetState";
 import CampaignNodeDetails, { type CampaignDraft } from "./CampaignNodeDetails";
 import CampaignNeighborhood from "./CampaignNeighborhood";
 import CampaignGroupOverview from "./CampaignGroupOverview";
+import CampaignGlance from "./CampaignGlance";
 import { EMPTY_FILTERS, NODE_STATUSES, campaignIssueLabel, filterCampaignNodes, groupCampaignNodes, type CampaignFilters } from "./campaignModel";
 import { Badge, LABELS, type Tr } from "./campaignPresentation";
 
@@ -33,9 +34,9 @@ export default function CampaignExplorer({ campaign, tr, onSaved, drafts, onDraf
     const matches = groupCampaignNodes(filterCampaignNodes(campaign.nodes, next));
     setCollapsed((current) => { const expanded = new Set(current); matches.forEach((group) => expanded.delete(group.key)); return expanded; });
   };
-  const selectNode = (id: string) => {
+  const selectNode = (id: string, reveal = false) => {
     setSelectedId(id);
-    if (window.matchMedia?.("(max-width: 900px)").matches) window.requestAnimationFrame(() => inspectorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    if (reveal || window.matchMedia?.("(max-width: 900px)").matches) window.requestAnimationFrame(() => inspectorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
   };
   const toggleGroup = (key: string) => setCollapsed((current) => { const next = new Set(current); if (next.has(key)) next.delete(key); else next.add(key); return next; });
   const navigateRows = (event: KeyboardEvent, id: string) => {
@@ -45,6 +46,7 @@ export default function CampaignExplorer({ campaign, tr, onSaved, drafts, onDraf
   };
   const hiddenDependencies = selected?.dependencies.filter((id) => !visibleIds.has(id)) ?? [];
   return <div className="campaign-explorer">
+    <CampaignGlance nodes={campaign.nodes} tr={tr} onOpen={(id) => selectNode(id, true)} />
     <div className={`campaign-toolbar ${filtersOpen ? "filters-open" : ""}`}>
       <label className="campaign-search"><span>{tr("작업 검색", "Search tasks")}</span><input type="search" aria-label={tr("작업 검색", "Search tasks")} placeholder={tr("제목, 번호, 담당, 세션…", "Title, ID, assignee, session…")} value={filters.query} onChange={(event) => patchFilters({ query: event.target.value })} /></label>
       <button className="campaign-filter-toggle" aria-expanded={filtersOpen} onClick={() => setFiltersOpen((current) => !current)}>{tr("필터", "Filters")}{(filters.status !== "all" || filters.group !== null || filters.hideCompleted) ? " •" : ""}</button>

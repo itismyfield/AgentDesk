@@ -16,11 +16,17 @@ matching column-zero line can still be nested in shell control flow. The
 hardening guard owns the parsed effective-execution contract; this checker pins
 the guard's aggregate and external-step assertions so either observer cannot
 be removed independently.
+
+It also requires every Python test module that defines a ``unittest.TestCase``
+subclass to be named, by dotted module or by path, outside comments in the CI
+entry points; a module nobody runs cannot report its own absence.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -149,6 +155,50 @@ def check_hardening_text(text: str) -> list[str]:
     return errors
 
 
+def _defines_test_case(path: Path) -> bool:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return True
+    local_cases: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for base in node.bases:
+            name = base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "")
+            if name.endswith("TestCase") or name in local_cases:
+                local_cases.add(node.name)
+    return bool(local_cases)
+
+
+def check_test_module_wiring(repo_root: Path) -> list[str]:
+    """Return test modules that no CI entry point names outside a comment."""
+    ci_files = [repo_root / CI_SCRIPT]
+    ci_files += sorted((repo_root / ".github/workflows").glob("*.yml"))
+    ci_files += sorted((repo_root / "tests").glob("*.sh"))
+    # Full-line and whitespace-led trailing comments do not run anything.
+    ci_text = "\n".join(
+        re.sub(r"(^|\s)#.*$", "", line)
+        for path in ci_files
+        if path.is_file()
+        for line in path.read_text(encoding="utf-8").splitlines()
+    )
+    candidates = sorted((repo_root / "tests").glob("test_*.py"))
+    candidates += sorted((repo_root / "scripts").rglob("test_*.py"))
+    errors: list[str] = []
+    for path in candidates:
+        if not _defines_test_case(path):
+            continue
+        relative = path.relative_to(repo_root).as_posix()
+        module = relative.removesuffix(".py").replace("/", ".")
+        if not any(
+            re.search(rf"(?<![\w.]){re.escape(token)}(?!\w)", ci_text)
+            for token in (module, relative)
+        ):
+            errors.append(f"test module {module} is not run by any CI entry point")
+    return errors
+
+
 def check(repo_root: Path) -> list[str]:
     path = repo_root / CI_SCRIPT
     try:
@@ -163,6 +213,7 @@ def check(repo_root: Path) -> list[str]:
         errors.append(f"cannot read scripts/check-ci-runner-hardening.sh: {error}")
     else:
         errors.extend(check_hardening_text(hardening_text))
+    errors.extend(check_test_module_wiring(repo_root))
     return errors
 
 
@@ -185,7 +236,8 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "writer gate CI wiring check passed: "
         f"{len(REQUIRED_INVOCATIONS)} exact aggregate invocations and "
-        f"{len(REQUIRED_HARDENING_SNIPPETS)} effective-execution assertions protected"
+        f"{len(REQUIRED_HARDENING_SNIPPETS)} effective-execution assertions protected; "
+        "every TestCase module is wired"
     )
     return 0
 

@@ -370,6 +370,7 @@ db::campaigns::tests::campaign_checkpoint_keeps_unchanged_node_time_and_resume_c
 db::campaigns::tests::campaign_checkpoint_normalizes_optional_groups_without_inference
 db::campaigns::tests::campaign_validation_rejects_false_completion_and_bad_identity
 db::campaigns::tests::campaign_validation_rejects_missing_duplicate_and_cyclic_dependencies
+db::campaigns::tests::legacy_node_documents_load_without_glance_fields_and_keep_their_time
 db::campaigns::tests::postgres_campaign_concurrent_cas_and_reconnect_preserve_canonical_history_pg
 db::campaigns::tests::postgres_campaign_revision_history_stays_bounded_by_retention_pg
 db::campaigns::tests::postgres_campaign_revision_prune_keeps_newest_by_rank_across_gaps_pg

@@ -226,6 +226,7 @@ fi
 
 if run_check guards "Postgres migration checksum guard"; then
 "$PYTHON" scripts/check_postgres_migration_checksums.py
+"$PYTHON" -m unittest tests.test_postgres_migration_checksum_guard
 fi
 
 if run_check guards "message_outbox validated-insert guard (#4424)"; then
@@ -244,6 +245,7 @@ fi
 
 if run_check guards "State/lint hardening guard"; then
 "$PYTHON" scripts/audit_state_lint_hardening.py
+"$PYTHON" -m unittest tests.test_audit_state_lint_hardening
 fi
 
 if run_check guards "Policy DB capability manifest guard (#3734)"; then
@@ -375,6 +377,7 @@ if run_check guards "Inflight blind-save ratchet guard (#4259)"; then
 "$PYTHON" -m unittest tests.test_inflight_blind_save_ratchet
 
 "$PYTHON" -m unittest tests.test_refresh_release_launchd_plist
+"$PYTHON" -m unittest tests.test_manage_dawn_launchdaemons
 fi
 
 if run_check guards "CI runner hardening guard"; then
@@ -425,6 +428,7 @@ if run_check guards "TUI relay e2e harness unit tests (#5065/#5997)"; then
   scripts.e2e.tui_relay.test_known_gap \
   scripts.e2e.tui_relay.test_matrix_runner \
   scripts.e2e.tui_relay.test_post_deploy_relay_continuity
+"$PYTHON" -m unittest scripts.e2e.test_voice_live_media_smoke
 "$PYTHON" -m unittest tests.test_e2e_scenario_lane_wiring
 fi
 
@@ -459,6 +463,7 @@ if run_check cargo "Test-target integrity gate (#5003/#5008)"; then
 "$PYTHON" -m unittest tests.test_check_test_target_integrity
 "$PYTHON" -m unittest tests.test_target_empty_identity
 AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
+"$PYTHON" -m unittest tests.test_non_pg_test_filter
 fi
 
 if run_check contracts "PostgreSQL test-lane membership gate (#4979, enforced)"; then
@@ -579,7 +584,10 @@ if run_check contracts "Portable deployable path lint"; then
   tests.test_portable_path_lint \
   tests.test_install_bootstrap_portable \
   tests.test_script_python_policy \
-  tests.test_analyze_prs
+  tests.test_analyze_prs \
+  tests.test_portable_docs_examples \
+  tests.test_operator_init_portable \
+  tests.test_portable_operator_migration
 fi
 
 if run_check contracts "CI macOS Trusted Rust path filter"; then
@@ -635,6 +643,7 @@ if run_check cargo "Generate inventory docs (refresh workspace; gate source-of-t
 # Giant deadlines have one selector/evaluator. It refreshes inventories only
 # after its fail-closed main or strict PR-progress verdict succeeds.
 GFP_REFRESH_DOCS=1 "$PYTHON" scripts/giant_file_progress.py
+"$PYTHON" -m unittest tests.test_refresh_giant_file_issue_metadata
 fi
 
 if run_check cargo "Generate env + CLI reference docs (README source-of-truth tables)"; then
