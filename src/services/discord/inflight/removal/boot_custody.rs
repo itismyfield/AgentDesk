@@ -14,12 +14,14 @@ use std::path::PathBuf;
 const SEGMENT_COPY_CAP: u64 = 64 << 20;
 const HEAD_HASH_BYTES: u64 = 64 << 10;
 
-/// Kind, source path, bytes or read error of one file seen this boot, and the turn it names.
+/// Kind, source path, bytes or read error of one file seen this boot, the turn it names, and
+/// why its content could not be parsed.
 struct Item(
     &'static str,
     PathBuf,
     Result<Vec<u8>, String>,
     Option<(PathBuf, u64)>,
+    Option<&'static str>,
 );
 
 /// Copied digests and each transcript's latest copy across an episode's published revisions.
@@ -78,13 +80,13 @@ fn preserve_episode(dir: &Path, key: Value, items: Vec<Item>, boot: u64) -> Resu
     if !marker.exists() {
         let tui_direct = items
             .iter()
-            .any(|Item(kind, .., seg)| *kind != "row" || seg.is_some());
+            .any(|Item(kind, .., seg, _)| *kind != "row" || seg.is_some());
         let marker_json = json!({ "episode": key, "tui_direct": tui_direct, "first_boot": boot });
         runtime_store::atomic_write(&marker, &marker_json.to_string())?;
     }
     let (rev, (digests, transcripts)) = held_copies(dir)?;
     let (mut entries, mut segments) = (Vec::new(), BTreeMap::new());
-    for Item(kind, source, bytes, segment) in items {
+    for Item(kind, source, bytes, segment, unparsed) in items {
         if let Some((transcript, offset)) = segment {
             let start = segments.entry(transcript).or_insert(offset);
             *start = offset.min(*start);
@@ -98,9 +100,10 @@ fn preserve_episode(dir: &Path, key: Value, items: Vec<Item>, boot: u64) -> Resu
         }
         let name = format!("{}-{kind}.json", entries.len());
         let copy = bytes.and_then(|bytes| write_synced(&rev, &name, &bytes).map(|()| name));
+        let error = copy.as_ref().err().map(String::as_str).or(unparsed);
         entries.push(
             json!({ "kind": kind, "source": source.to_string_lossy(), "sha256": digest,
-            "copy": copy.as_ref().ok(), "error": copy.as_ref().err() }),
+            "copy": copy.as_ref().ok(), "error": error }),
         );
     }
     for (source, offset) in segments {
@@ -122,7 +125,7 @@ fn preserve_episode(dir: &Path, key: Value, items: Vec<Item>, boot: u64) -> Resu
     match complete {
         true => Ok(()),
         false => Err(format!(
-            "incomplete, retried next boot: {}",
+            "incomplete, retried by a boot that still finds its row or record: {}",
             errors.join("; ")
         )),
     }
@@ -142,8 +145,9 @@ fn held_copies(dir: &Path) -> Result<(PathBuf, Held), String> {
         let manifest = fs::read(dir.join(format!("rev-{index:04}/manifest.json")));
         let manifest: Option<Value> = manifest.ok().and_then(|m| serde_json::from_slice(&m).ok());
         let entries = manifest.and_then(|manifest| manifest["entries"].as_array().cloned());
-        for entry in entries.unwrap_or_default() {
+        for mut entry in entries.unwrap_or_default() {
             if entry["copy"].is_string() && entry["kind"] == "transcript" {
+                entry["rev"] = format!("rev-{index:04}").into();
                 let source = entry["source"].as_str().unwrap_or_default().to_string();
                 held.1.insert(source, entry);
             } else if entry["copy"].is_string() {
@@ -204,7 +208,7 @@ fn row_item(
     let Some(row) = text.and_then(|text| parse_inflight_state_content(text).ok()) else {
         return (
             unparsed_key(provider, &source, &bytes),
-            Item("row", source, bytes, None),
+            Item("row", source, bytes, None, Some("the row does not parse")),
         );
     };
     let owner = crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
@@ -216,7 +220,7 @@ fn row_item(
     });
     let anchorless = (row.user_msg_id == 0).then(|| json!([row.started_at, row.turn_start_offset]));
     let key = episode_key(provider, [row.channel_id, row.user_msg_id], anchorless);
-    (key, Item("row", source, bytes, segment))
+    (key, Item("row", source, bytes, segment, None))
 }
 
 /// Records of another provider are left to that provider's reaper pass.
@@ -229,11 +233,18 @@ fn pending_item(
     let record =
         record.and_then(|bytes| serde_json::from_slice::<TuiDirectPendingStart>(bytes).ok());
     let Some(record) = record else {
-        let name = source.file_name()?.to_string_lossy();
-        name.starts_with(&format!("{}_", provider.as_str()))
-            .then_some(())?;
-        let key = unparsed_key(provider, &source, &bytes);
-        return Some((key, Item("pending_start", source, bytes, None)));
+        let name = source.file_stem()?.to_string_lossy().into_owned();
+        let ids = name.strip_prefix(&format!("{}_", provider.as_str()))?;
+        // The writer names a record `<provider>_<channel>_<anchor>.json`.
+        let ids = ids
+            .split_once('_')
+            .and_then(|(channel, anchor)| Some([channel.parse().ok()?, anchor.parse().ok()?]));
+        let key = match ids {
+            Some(ids) => episode_key(provider, ids, None),
+            None => unparsed_key(provider, &source, &bytes),
+        };
+        let unparsed = Some("the record does not parse");
+        return Some((key, Item("pending_start", source, bytes, None, unparsed)));
     };
     (record.provider == provider.as_str()).then_some(())?;
     let key = episode_key(
@@ -244,7 +255,7 @@ fn pending_item(
     let segment = record
         .captured_source
         .map(|(path, offset)| (path.into(), offset));
-    Some((key, Item("pending_start", source, bytes, segment)))
+    Some((key, Item("pending_start", source, bytes, segment, None)))
 }
 
 /// The row claimed from a pending-start record keeps its anchor as `user_msg_id`, so both
@@ -310,14 +321,18 @@ fn copy_segment(
         prior_head.is_some_and(|bytes| prior["head_sha256"] == sha(bytes))
     };
     let same_file = |prior: &&Value| prior["dev"] == dev && prior["ino"] == ino && same_head(prior);
-    let resume = prior
-        .filter(same_file)
-        .and_then(|prior| prior["to"].as_u64());
-    let resume = resume.filter(|to| *to <= size);
+    let kept = prior.filter(same_file);
+    let kept = kept.filter(|prior| prior["to"].as_u64().is_some_and(|to| to <= size));
+    // Earlier copies cover this turn only when they start at or before its offset.
+    let start = kept.and_then(|prior| prior["start"].as_u64());
+    let start = start.filter(|start| *start <= offset);
+    let resume = start.and(kept).and_then(|prior| prior["to"].as_u64());
     let from = resume.unwrap_or(offset);
+    let supersedes = prior.filter(|_| resume.is_none());
     let fields = json!({ "dev": dev, "ino": ino, "size": size, "head_len": head.len(),
-        "head_sha256": sha(&head), "from": from, "to": size,
-        "source_changed": prior.is_some() && resume.is_none() });
+        "head_sha256": sha(&head), "start": start.unwrap_or(offset), "from": from, "to": size,
+        "source_changed": prior.is_some() && kept.is_none(),
+        "supersedes": supersedes.map(|prior| json!([prior["rev"], prior["copy"]])) });
     if let (Some(entry), Value::Object(fields)) = (entry.as_object_mut(), fields) {
         entry.extend(fields);
     }
