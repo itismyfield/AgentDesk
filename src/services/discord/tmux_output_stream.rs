@@ -679,7 +679,9 @@ fn terminal_kind_for_json_evidence(value: &serde_json::Value) -> Option<WatcherT
     }
 }
 
-fn watcher_user_event_is_prompt_boundary(value: &serde_json::Value) -> bool {
+pub(in crate::services::discord) fn watcher_user_event_is_prompt_boundary(
+    value: &serde_json::Value,
+) -> bool {
     if value
         .get("isMeta")
         .and_then(serde_json::Value::as_bool)

@@ -205,7 +205,11 @@ pub(in crate::services::discord) use self::restore_inflight::{
     finish_recovered_turn_mailbox, restore_inflight_turns,
 };
 use self::restore_persist_outcome::{RestorePersistOutcome, restore_codex_rollout_output_path};
-pub(super) use self::runtime::reregister_active_turn_from_inflight;
+#[cfg(unix)]
+pub(super) use self::runtime::retire_restart_row_past_its_turn;
+pub(super) use self::runtime::{
+    reregister_active_turn_from_inflight, reregister_restart_adopted_turn_from_inflight,
+};
 pub(in crate::services::discord) use self::terminal_text_idempotency::RecoveryDeliveryContext;
 use self::tmux_probe::tmux_session_alive_with_retry;
 // #3479: re-import the analytics + transcript helpers so root call sites stay

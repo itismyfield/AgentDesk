@@ -157,6 +157,7 @@ pub(super) async fn run_stream_loop(
                     crate::services::discord::inflight::patch_restart_mode_if_matches_identity(
                         &inflight_state,
                         &stream_tick_expected_identity,
+                        None,
                         previous_restart_mode,
                         previous_restart_generation,
                         "turn_bridge::stream_loop::cancel_restart_mode",

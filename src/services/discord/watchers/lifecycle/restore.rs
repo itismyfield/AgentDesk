@@ -477,8 +477,11 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         let mut restored_turn = None;
         let mut thread_parent = None;
         let initial_offset = if let Some(state) =
-            super::super::super::inflight::load_inflight_state(&provider, channel_id.get())
-        {
+            super::super::super::inflight::load_inflight_state(&provider, channel_id.get()).filter(
+                |state| {
+                    !super::super::super::recovery::retire_restart_row_past_its_turn(&shared, state)
+                },
+            ) {
             thread_parent = thread_follow_up_parent_channel_id(
                 *channel_id,
                 state.logical_channel_id,
@@ -500,7 +503,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                     continue;
                 }
                 let finish_mailbox_on_completion =
-                    super::super::super::recovery::reregister_active_turn_from_inflight(
+                    super::super::super::recovery::reregister_restart_adopted_turn_from_inflight(
                         &shared, &state,
                     )
                     .await;

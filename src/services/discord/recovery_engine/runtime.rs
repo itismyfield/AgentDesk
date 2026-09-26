@@ -186,10 +186,120 @@ pub(super) fn mark_readopted_from_inflight(
     outcome
 }
 
+/// Releases the predecessor generation's `drain_restart` marker under the identity and
+/// episode (nonce) CAS; any other mode, generation or unnamed episode keeps its marker.
+fn release_restart_marker(
+    shared: &SharedData,
+    state: &inflight::InflightTurnState,
+    caller: &'static str,
+) -> Option<inflight::GuardedSaveOutcome> {
+    let predecessor = state
+        .restart_generation
+        .and_then(|generation| generation.checked_add(1));
+    if state.restart_mode != Some(InflightRestartMode::DrainRestart)
+        || predecessor != Some(shared.restart.current_generation)
+        || state.turn_nonce.is_none()
+    {
+        return None;
+    }
+    let mut released = state.clone();
+    released.clear_restart_mode();
+    let identity = inflight::InflightTurnIdentity::from_state(state);
+    let episode = inflight::InflightEpisodePin::from_state(state);
+    let (mode, generation) = (state.restart_mode, state.restart_generation);
+    let outcome = inflight::patch_restart_mode_if_matches_identity(
+        &released,
+        &identity,
+        Some(&episode),
+        mode,
+        generation,
+        caller,
+    );
+    tracing::info!(
+        channel_id = state.channel_id,
+        caller,
+        ?outcome,
+        "restart marker release"
+    );
+    Some(outcome)
+}
+
+/// Boot closes a marked TUI-direct or watcher row, instead of adopting it, once its
+/// transcript holds a later prompt: its placeholder may show that later turn by now.
+pub(in crate::services::discord) fn retire_restart_row_past_its_turn(
+    shared: &SharedData,
+    state: &inflight::InflightTurnState,
+) -> bool {
+    if state.restart_mode.is_none()
+        || state.rebind_origin
+        || readopt_marker_eligible_real_user(state)
+        || !transcript_prompt_after_row(state)
+    {
+        return false;
+    }
+    let caller = "recovery_engine::runtime::retire_restart_row_past_its_turn";
+    let Some(released) = release_restart_marker(shared, state, caller) else {
+        return false;
+    };
+    if let (inflight::GuardedSaveOutcome::Saved, Some(provider)) = (released, state.provider_kind())
+    {
+        let identity = inflight::InflightTurnIdentity::from_state(state);
+        let nonce = state.turn_nonce.as_deref();
+        let cleared = inflight::clear_inflight_state_for_captured_episode(
+            &provider,
+            state.channel_id,
+            &identity,
+            nonce,
+        );
+        tracing::info!(
+            channel_id = state.channel_id,
+            ?cleared,
+            "closed a turn-ended restart row"
+        );
+    }
+    true
+}
+
+/// Boot recovery leaves a row whose channel intake is elsewhere, and otherwise a
+/// restart row past its turn, which it closes here.
+pub(super) async fn restore_leaves_row(
+    provider: &ProviderKind,
+    shared: &SharedData,
+    state: &inflight::InflightTurnState,
+) -> bool {
+    let channel = state.channel_id.to_string();
+    let intake = crate::services::agent_recovery::channel_recovery_intake(provider, &channel).await;
+    matches!(
+        intake,
+        Some(crate::services::agent_recovery::RecoveryIntake::Skip)
+    ) || retire_restart_row_past_its_turn(shared, state)
+}
+
+#[cfg(not(unix))]
+fn transcript_prompt_after_row(_state: &inflight::InflightTurnState) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn transcript_prompt_after_row(state: &inflight::InflightTurnState) -> bool {
+    use super::super::tmux::tmux_output_stream::watcher_user_event_is_prompt_boundary as prompt;
+    use std::io::{BufRead, Seek, SeekFrom};
+    let Some(Ok(mut file)) = state.output_path.as_deref().map(std::fs::File::open) else {
+        return false;
+    };
+    let lines = |file| std::io::BufReader::new(file).lines().map_while(Result::ok);
+    file.seek(SeekFrom::Start(state.last_offset)).is_ok()
+        && lines(file).any(|line| {
+            serde_json::from_str::<serde_json::Value>(&line)
+                .is_ok_and(|event| event["type"] == "user" && prompt(&event))
+        })
+}
+
 async fn reregister_active_turn_from_inflight_inner(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
     persist_durable_marker: bool,
+    boot_handoff: bool,
 ) -> bool {
     let Some(finalizer_msg_id) =
         super::inflight::opt_message_id(state.effective_finalizer_turn_id())
@@ -291,6 +401,8 @@ async fn reregister_active_turn_from_inflight_inner(
                     state,
                     persist_durable_marker,
                 );
+            } else if boot_handoff {
+                release_restart_marker(shared, state, ADOPTED);
             }
         }
         return restored;
@@ -305,6 +417,9 @@ async fn reregister_active_turn_from_inflight_inner(
             state.effective_relay_owner_kind(),
             state.turn_nonce.as_deref(),
         );
+        if boot_handoff {
+            release_restart_marker(shared, state, ADOPTED);
+        }
         return false;
     }
 
@@ -362,6 +477,8 @@ async fn reregister_active_turn_from_inflight_inner(
                 state,
                 persist_durable_marker,
             );
+        } else if boot_handoff {
+            release_restart_marker(shared, state, ADOPTED);
         }
     }
     started
@@ -371,7 +488,18 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
 ) -> bool {
-    reregister_active_turn_from_inflight_inner(shared, state, true).await
+    reregister_active_turn_from_inflight_inner(shared, state, true, false).await
+}
+
+const ADOPTED: &str = "recovery_engine::runtime::reregister_restart_adopted_turn_from_inflight";
+
+/// Boot recovery's adoption. It runs once, after this process won the gateway lease, so
+/// a row the predecessor generation marked for this restart is this process's to release.
+pub(in crate::services::discord) async fn reregister_restart_adopted_turn_from_inflight(
+    shared: &Arc<SharedData>,
+    state: &inflight::InflightTurnState,
+) -> bool {
+    reregister_active_turn_from_inflight_inner(shared, state, true, true).await
 }
 
 /// Automatic reattach holds the canonical episode flock across mailbox and
@@ -383,7 +511,7 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight_u
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
 ) -> bool {
-    reregister_active_turn_from_inflight_inner(shared, state, false).await
+    reregister_active_turn_from_inflight_inner(shared, state, false, false).await
 }
 
 #[cfg(test)]
@@ -1463,5 +1591,173 @@ mod released_episode_mint_fence_tests {
             restored && token_present,
             "without a nonce the row cannot name the released episode, so the fence stays open"
         );
+    }
+}
+
+#[cfg(test)]
+mod restart_marker_adoption_tests {
+    use super::SharedData as Shared;
+    use super::inflight::{self, InflightTurnState as Row};
+    use crate::services::discord::InflightRestartMode::{DrainRestart, HotSwapHandoff};
+    use crate::services::provider::ProviderKind::Claude;
+    use std::sync::Arc;
+
+    const CHANNEL: u64 = 6_294_001;
+    const BOOT: u64 = 7;
+    const RELEASED: (bool, bool, u64) = (true, false, 128);
+    const KEPT: (bool, bool, u64) = (true, true, 128);
+
+    /// An injected (TUI-direct) turn the generation before `BOOT` marked for its restart.
+    fn with(edit: fn(&mut Row)) -> Row {
+        let owner = crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
+        let (tmux, path) = ("AgentDesk-claude-probe", "/tmp/restart-marker-probe.jsonl");
+        let mut row = Row::new(
+            Claude,
+            CHANNEL,
+            None,
+            owner,
+            6_294_101,
+            6_294_201,
+            String::new(),
+            None,
+            Some(tmux.to_string()),
+            Some(path.to_string()),
+            None,
+            128,
+        );
+        row.turn_nonce = Some("episode-a".to_string());
+        (row.restart_mode, row.restart_generation) = (Some(DrainRestart), Some(BOOT - 1));
+        edit(&mut row);
+        row
+    }
+
+    /// Runs `body` in a process of generation `BOOT` whose runtime root holds `on_disk`;
+    /// returns its result and the durable row afterwards.
+    fn booted<T>(on_disk: &Row, body: impl FnOnce(&Arc<Shared>) -> T) -> (T, Option<Row>) {
+        let env_lock = crate::config::shared_test_env_lock();
+        let _lock = env_lock.lock().unwrap_or_else(|p| p.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        inflight::save_inflight_state(on_disk).expect("durable row");
+        let mut shared = super::super::make_shared_data_for_tests_with_storage(None);
+        let fresh = Arc::get_mut(&mut shared).expect("fresh shared data");
+        fresh.restart.current_generation = BOOT;
+        let result = body(&shared);
+        (result, inflight::load_inflight_state(&Claude, CHANNEL))
+    }
+
+    #[derive(Clone, Copy)]
+    enum Entry {
+        Boot,
+        BootAfterRebind,
+        BootBehindAnotherEpisode,
+        Rebind,
+        RebindUnderEpisodeGuard,
+    }
+
+    /// Adopts `snapshot` through `entry` while `on_disk` is the durable row; returns
+    /// (adopted, marker kept, durable last_offset).
+    fn adopt(entry: Entry, on_disk: &Row, snapshot: &Row) -> (bool, bool, u64) {
+        let other = with(|row| row.turn_nonce = Some("episode-other".to_string()));
+        let (adopted, row) = booted(on_disk, |shared| {
+            let boot = super::reregister_restart_adopted_turn_from_inflight;
+            let rebind = super::reregister_active_turn_from_inflight;
+            let guarded = super::reregister_active_turn_from_inflight_under_episode_guard;
+            let adoption = async {
+                match entry {
+                    Entry::Boot => boot(shared, snapshot).await,
+                    Entry::BootAfterRebind => {
+                        rebind(shared, snapshot).await && boot(shared, snapshot).await
+                    }
+                    Entry::BootBehindAnotherEpisode => {
+                        rebind(shared, &other).await && boot(shared, snapshot).await
+                    }
+                    Entry::Rebind => rebind(shared, snapshot).await,
+                    Entry::RebindUnderEpisodeGuard => guarded(shared, snapshot).await,
+                }
+            };
+            let mut runtime = tokio::runtime::Builder::new_current_thread();
+            runtime
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(adoption)
+        });
+        let row = row.expect("adoption never clears the row");
+        (adopted, row.restart_mode.is_some(), row.last_offset)
+    }
+
+    #[test]
+    fn boot_adoption_releases_only_the_predecessors_drain_marker_on_the_same_episode_6294() {
+        const ADVANCED: (bool, bool, u64) = (true, false, 4_096);
+        const HELD: (bool, bool, u64) = (false, true, 128);
+        const OWNERLESS: (bool, bool, u64) = (false, false, 128);
+        let row = with(|_| {});
+        let same = |entry| adopt(entry, &row, &row);
+        let marked = |edit: fn(&mut Row)| {
+            let row = with(edit);
+            adopt(Entry::Boot, &row, &row)
+        };
+        // The durable row is the snapshot edited, so only the edited field can differ.
+        let replaced = |edit: fn(&mut Row)| {
+            let mut on_disk = row.clone();
+            edit(&mut on_disk);
+            adopt(Entry::Boot, &on_disk, &row)
+        };
+        // Each case is (adopted, marker kept, durable last_offset).
+        let actual = [
+            same(Entry::Boot),                                 // started
+            same(Entry::BootAfterRebind),                      // restored
+            replaced(|r| r.last_offset = 4_096),               // same episode, advanced
+            same(Entry::BootBehindAnotherEpisode),             // adoption failed
+            marked(|r| r.request_owner_user_id = 0),           // watcher row, no mailbox
+            same(Entry::Rebind),                               // runtime rebind
+            same(Entry::RebindUnderEpisodeGuard),              // no durable marker
+            marked(|r| r.restart_generation = Some(BOOT)),     // current generation
+            marked(|r| r.restart_generation = Some(BOOT + 1)), // future generation
+            marked(|r| r.restart_generation = None),           // unknown generation
+            marked(|r| r.restart_mode = Some(HotSwapHandoff)), // hot-swap handoff
+            marked(|r| r.turn_nonce = None),                   // episode without nonce
+            replaced(|r| r.turn_start_offset = Some(4_000)),   // identity-only successor
+            replaced(|r| r.turn_nonce = Some("b".into())),     // nonce-only successor
+        ];
+        let want = [
+            RELEASED, RELEASED, ADVANCED, HELD, OWNERLESS, KEPT, KEPT, KEPT, KEPT, KEPT, KEPT,
+            KEPT, KEPT, KEPT,
+        ];
+        assert_eq!(actual, want);
+    }
+
+    /// Boot closes a marked row instead of adopting it only once its transcript holds a
+    /// later prompt; its own tool traffic, a current marker or a real owner keep it.
+    #[test]
+    fn boot_closes_a_marked_row_whose_transcript_moved_past_its_turn_6294() {
+        const CLOSED: (bool, Option<bool>) = (true, None);
+        const LEFT: (bool, Option<bool>) = (false, Some(true));
+        let dir = tempfile::TempDir::new().expect("transcript dir");
+        let transcript = dir.path().join("transcript.jsonl");
+        let retire = |after: &str, edit: fn(&mut Row)| {
+            let own_turn = format!("{}\n", "x".repeat(127));
+            std::fs::write(&transcript, format!("{own_turn}{after}\n")).expect("transcript");
+            let mut row = with(edit);
+            row.output_path = Some(transcript.display().to_string());
+            let retire = super::retire_restart_row_past_its_turn;
+            let (retired, row) = booted(&row, |shared| retire(shared, &row));
+            (retired, row.map(|row| row.restart_mode.is_some()))
+        };
+        let user = |content| format!(r#"{{"type":"user","message":{{"content":{content}}}}}"#);
+        let tool = user(r#"[{"type":"tool_result","content":"ok"}]"#);
+        let prompt = user(r#""next""#);
+        let actual = [
+            retire(&tool, |_| {}),
+            retire(&prompt, |_| {}),
+            retire(&prompt, |r| r.restart_generation = Some(BOOT)),
+            retire(&prompt, |r| r.request_owner_user_id = 6_294),
+            retire(&prompt, |r| r.rebind_origin = true),
+        ];
+        assert_eq!(actual, [LEFT, CLOSED, LEFT, LEFT, LEFT]);
     }
 }

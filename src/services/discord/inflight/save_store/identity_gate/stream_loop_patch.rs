@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::discord::inflight::InflightEpisodePin;
 use crate::services::discord::inflight::store::persist_under_lock_with_snapshot;
 
 fn apply_local_change_if_durable_unchanged<T: Clone + PartialEq>(
@@ -460,9 +461,12 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
     }
 }
 
+/// With `episode`, it also refuses unless the durable row is still that episode (same
+/// nonce and birth axes); the episode's own progress since the snapshot is kept.
 pub(in crate::services::discord) fn patch_restart_mode_if_matches_identity(
     state: &InflightTurnState,
     expected: &InflightTurnIdentity,
+    episode: Option<&InflightEpisodePin>,
     previous_restart_mode: Option<InflightRestartMode>,
     previous_restart_generation: Option<u64>,
     caller: &'static str,
@@ -474,6 +478,7 @@ pub(in crate::services::discord) fn patch_restart_mode_if_matches_identity(
         &root,
         state,
         expected,
+        episode,
         previous_restart_mode,
         previous_restart_generation,
         caller,
@@ -484,6 +489,7 @@ fn patch_restart_mode_if_matches_identity_in_root(
     root: &Path,
     state: &InflightTurnState,
     expected: &InflightTurnIdentity,
+    episode: Option<&InflightEpisodePin>,
     previous_restart_mode: Option<InflightRestartMode>,
     previous_restart_generation: Option<u64>,
     caller: &'static str,
@@ -517,6 +523,8 @@ fn patch_restart_mode_if_matches_identity_in_root(
     }
     if on_disk.rebind_origin
         || !expected.matches_state(&on_disk)
+        || episode
+            .is_some_and(|pin| !pin.is_same_episode_as(&InflightEpisodePin::from_state(&on_disk)))
         || on_disk.restart_mode != previous_restart_mode
         || on_disk.restart_generation != previous_restart_generation
     {
@@ -1308,6 +1316,7 @@ mod tests {
                 &expected,
                 None,
                 None,
+                None,
                 "test::cancel_restart_first_populate",
             ),
             GuardedSaveOutcome::Saved,
@@ -1341,6 +1350,7 @@ mod tests {
                 &expected,
                 None,
                 None,
+                None,
                 "test::cancel_restart_reowner",
             )
             .is_identity_mismatch_legacy()
@@ -1358,6 +1368,7 @@ mod tests {
                 root.path(),
                 &cancelled,
                 &expected,
+                None,
                 None,
                 None,
                 "test::cancel_restart_authority",
@@ -1384,6 +1395,7 @@ mod tests {
                 root.path(),
                 &cancelled,
                 &expected,
+                None,
                 None,
                 None,
                 "test::cancel_restart_missing",
