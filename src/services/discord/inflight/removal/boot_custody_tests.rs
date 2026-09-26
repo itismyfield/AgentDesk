@@ -300,6 +300,44 @@ async fn an_unparseable_pending_start_keeps_its_channel_and_is_not_complete() {
     assert!(record["error"].is_string(), "{record}");
 }
 
+// Contract: after its row is reaped, an episode's transcript turn is still preserved at later
+// boots, a copy that failed is retried there, and a failure that only repeats publishes nothing.
+#[tokio::test]
+async fn a_reaped_rows_turn_keeps_being_preserved_at_later_boots() {
+    let env = Env::new();
+    let (out, offset) = transcript(&env, "revisit.jsonl", "old\n", "turn\n");
+    let [late, gone] = ["late.jsonl", "gone.jsonl"].map(|name| env.dir().with_file_name(name));
+    let rows = [
+        (5_997_091, &out, offset),
+        (5_997_092, &late, 0),
+        (5_997_093, &gone, 0),
+    ];
+    let paths =
+        rows.map(|(channel, path, offset)| env.seed(&tui_direct_row(channel, path, offset), STALE));
+    boot().await;
+    assert!(paths.iter().all(|path| !path.exists()));
+
+    append(&out, "later\n");
+    fs::write(&late, "recovered\n").unwrap();
+    boot().await;
+    let episodes = episodes(&env);
+    let copies = [5_997_091, 5_997_092].map(|channel| copy_of(&episodes[&channel], "transcript"));
+    assert_eq!(
+        copies,
+        [
+            Some(b"turn\nlater\n".to_vec()),
+            Some(b"recovered\n".to_vec())
+        ]
+    );
+    let manifests = tree(&episodes[&5_997_093]).into_keys();
+    assert_eq!(
+        manifests
+            .filter(|path| path.ends_with("manifest.json"))
+            .count(),
+        1
+    );
+}
+
 // Contract: a transcript cut short between the stat and the copy is recorded as an
 // incomplete copy, and the next boot copies the turn again instead of treating it as held.
 #[tokio::test]

@@ -3456,6 +3456,7 @@ services::discord::inflight::recovery_relay_attempts_tests::restart_marker_skips
 services::discord::inflight::recovery_relay_attempts_tests::saturated_counter_does_not_weaken_pane_alive_stale_guard
 services::discord::inflight::removal::boot_custody_tests::a_later_boot_preserves_output_appended_since_the_last_copy
 services::discord::inflight::removal::boot_custody_tests::a_pending_start_and_the_row_claimed_from_it_are_one_episode
+services::discord::inflight::removal::boot_custody_tests::a_reaped_rows_turn_keeps_being_preserved_at_later_boots
 services::discord::inflight::removal::boot_custody_tests::a_transcript_cut_short_during_the_copy_is_recorded_incomplete_and_retried
 services::discord::inflight::removal::boot_custody_tests::a_transcript_turn_over_the_copy_cap_is_recorded_not_copied
 services::discord::inflight::removal::boot_custody_tests::an_earlier_turn_start_on_an_unchanged_transcript_is_preserved
