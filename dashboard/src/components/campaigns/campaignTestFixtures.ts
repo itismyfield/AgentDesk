@@ -5,7 +5,7 @@ export function makeCampaignNode(id: string, patch: Partial<CampaignNode> = {}):
   return {
     id, title: id, status: "pending", stage: "implement", group: null, round: 1,
     assignee: null, session_id: null, provider: null, dependencies: [], issue_url: null, pr_url: null,
-    head_sha: null, evidence: [], next_action: "Inspect the latest diff", blocker: null,
+    head_sha: null, evidence: [], next_action: "Inspect the latest diff", blocker: null, summary: null, benefit: null,
     updated_at: "2026-09-20T00:00:00Z", details: "", acceptance: [], findings: [], evidence_records: [], ...patch,
   };
 }
