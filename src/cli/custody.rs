@@ -1,15 +1,13 @@
-//! `adk custody`: read-only views of the boot-custody ledger under the runtime root.
-
 use clap::{Args, Subcommand};
 
 #[derive(Args)]
 pub(crate) struct CustodyArgs {
     #[command(subcommand)]
-    pub(crate) action: CustodyAction,
+    action: CustodyAction,
 }
 
 #[derive(Subcommand)]
-pub(crate) enum CustodyAction {
+enum CustodyAction {
     /// Print each episode's preserved and missing transcript bytes and last attempt.
     Status {
         /// Only this provider's custody directory (for example `claude`).
@@ -21,9 +19,6 @@ pub(crate) enum CustodyAction {
 }
 
 pub(crate) fn run(args: CustodyArgs) -> Result<(), String> {
-    match args.action {
-        CustodyAction::Status { provider, episode } => {
-            crate::services::discord_custody::cmd_status(provider.as_deref(), episode.as_deref())
-        }
-    }
+    let CustodyAction::Status { provider, episode } = args.action;
+    crate::services::discord_custody::cmd_status(provider.as_deref(), episode.as_deref())
 }
