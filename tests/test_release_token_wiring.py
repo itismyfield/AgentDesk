@@ -10,7 +10,6 @@ import unittest
 from unittest import mock
 
 from scripts.check_release_token_wiring import REPO, observe
-from tests.test_build_token_serialization_5663 import cargo_sites
 
 VARIANTS = {
     "invocation_arguments": 'dry_cmd=(cargo clean)\n"${dry_cmd[@]}" --profile release',
@@ -60,13 +59,12 @@ class ReleaseTokenWiringTests(unittest.TestCase):
         for script in ("build-release.sh", "deploy-release.sh"):
             for name, command in VARIANTS.items():
                 with self.subTest(script=script, variant=name):
-                    source = self.inject(script, command)
-                    self.assertTrue(all(wired for _, wired in cargo_sites(source)), name)
+                    self.inject(script, command)
                     report = observe(self.repo, script, "release")
                     self.assertTrue(report["errors"], report)
                     self.assertTrue(all(e.startswith("release cargo outside build token:")
                                         for e in report["errors"]), report)
-                    print(json.dumps({"script": script, "variant": name, "old_static": "PASS",
+                    print(json.dumps({"script": script, "variant": name,
                                       "runtime": "FAIL", "reason": report["errors"]}))
 
     def test_cleanup_soft_failure_and_forged_markers_cannot_hide_unheld_calls(self):
