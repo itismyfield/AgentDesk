@@ -704,6 +704,8 @@ mod boot_reaper;
 pub(in crate::services::discord) use boot_reaper::reap_inflight_rows_at_boot_blocking;
 #[cfg(test)]
 use boot_reaper::*;
+#[cfg(test)]
+mod boot_custody_tests;
 
 #[cfg(test)]
 mod loader_gate_observation_tests {
@@ -1087,12 +1089,12 @@ mod nondestructive_loader_tests {
     use super::*;
     use std::path::PathBuf;
 
-    const G: u64 = 59_960;
-    const STALE: i64 = INFLIGHT_MAX_AGE_SECS as i64 + 1;
-    const CLAUDE: ProviderKind = ProviderKind::Claude;
+    pub(super) const G: u64 = 59_960;
+    pub(super) const STALE: i64 = INFLIGHT_MAX_AGE_SECS as i64 + 1;
+    pub(super) const CLAUDE: ProviderKind = ProviderKind::Claude;
 
     /// Pinned generation, no live tmux pane, rows under `AGENTDESK_ROOT_DIR`.
-    struct Env {
+    pub(super) struct Env {
         root: tempfile::TempDir,
         _root_env: crate::config::TestEnvVarGuard,
         _env_lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
@@ -1100,7 +1102,7 @@ mod nondestructive_loader_tests {
     }
 
     impl Env {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let tmux = super::super::stall_recovery_tests::stale_override_test_mutex()
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
@@ -1120,12 +1122,12 @@ mod nondestructive_loader_tests {
             }
         }
 
-        fn dir(&self) -> PathBuf {
+        pub(super) fn dir(&self) -> PathBuf {
             self.root.path().join("runtime").join("discord_inflight")
         }
 
         /// Writes `state` verbatim into the Claude directory, `age` seconds old.
-        fn seed(&self, state: &InflightTurnState, age: i64) -> PathBuf {
+        pub(super) fn seed(&self, state: &InflightTurnState, age: i64) -> PathBuf {
             let path = inflight_state_path(&self.dir(), &CLAUDE, state.channel_id);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             rewrite(&path, state, age);
@@ -1144,7 +1146,7 @@ mod nondestructive_loader_tests {
         }
     }
 
-    fn row(channel_id: u64, tmux: Option<&str>) -> InflightTurnState {
+    pub(super) fn row(channel_id: u64, tmux: Option<&str>) -> InflightTurnState {
         let (owner, msg, text) = (42, channel_id + 1, "prompt".to_string());
         let (tmux, out) = (tmux.map(str::to_string), Some("/tmp/out.jsonl".to_string()));
         let mut state = InflightTurnState::new(
