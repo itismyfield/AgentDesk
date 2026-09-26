@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use super::schema::{ChunkReceipt, ExactRange, Publication, SourceToken};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +24,7 @@ pub(in crate::services::discord) enum SourceObs {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(in crate::services::discord) struct URevision(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::services::discord) enum HandoffState {
     Admitted { intent_written: bool },
     Issuing,
@@ -41,7 +43,7 @@ pub(in crate::services::discord) struct FlightHandoff {
     pub state: HandoffState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::services::discord) enum TransportOutcome {
     NotIssued,
     FirstRejected,
