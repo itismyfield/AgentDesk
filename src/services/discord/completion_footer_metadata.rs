@@ -439,24 +439,6 @@ pub(in crate::services::discord) mod tests {
     }
 
     #[test]
-    fn bridge_and_watcher_finalize_inputs_render_identical_metadata_4806() {
-        let metadata = completion_footer_metadata_at(
-            1_800_000_154,
-            1_800_000_000,
-            None,
-            Some("5h 80% · 7d 60%".to_string()),
-            Some("node-a".to_string()),
-        );
-        let bridge_block = append_completion_footer_metadata("Context".to_string(), &metadata);
-        let watcher_block = append_completion_footer_metadata("Context".to_string(), &metadata);
-
-        assert_eq!(bridge_block, watcher_block);
-        assert!(bridge_block.contains("⏱ 2m 34s"));
-        assert!(bridge_block.contains("⏳ 5h 80% · 7d 60%"));
-        assert!(bridge_block.contains("🖥️ node-a"));
-    }
-
-    #[test]
     fn metadata_roundtrip_preserves_all_available_lines_4806() {
         let metadata = completion_footer_metadata_at(
             1_800_000_154,

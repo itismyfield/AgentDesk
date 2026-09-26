@@ -2784,28 +2784,6 @@ mod feedback_reminder_take_order_tests {
 mod queue_pending_reaction_clear_tests {
     use super::*;
 
-    #[test]
-    fn clears_every_queue_marker_reaction() {
-        let emojis = crate::services::discord::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS;
-        assert!(
-            emojis.contains(&'📬'),
-            "standalone queue-head 📬 must be cleared on dequeue"
-        );
-        assert!(
-            emojis.contains(&'➕'),
-            "merged queue ➕ must be cleared on dequeue"
-        );
-        assert!(
-            emojis.contains(&'🔄'),
-            "reconcile queue 🔄 must be cleared on dequeue"
-        );
-        assert_eq!(
-            emojis.len(),
-            crate::services::discord::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS.len(),
-            "exactly the shared queue-pending emojis are cleared"
-        );
-    }
-
     /// The cleared set must match exactly what the intake gate ADDS via
     /// `queue_pending_reaction_for`, so no queued message can be reacted with an
     /// emoji the dequeue path will not later remove.

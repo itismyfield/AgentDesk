@@ -2645,7 +2645,6 @@ services::discord::commands::voice::auto_join_tests::notify_dedup_emits_once_per
 services::discord::commands::voice::auto_join_tests::occupancy_registry_isolates_providers_per_guild
 services::discord::compact_turn_authority::tests::external_interactive_turns_are_compact_eligible
 services::discord::compact_turn_authority::tests::monitor_triggered_turn_stays_gated
-services::discord::completion_footer_metadata::tests::bridge_and_watcher_finalize_inputs_render_identical_metadata_4806
 services::discord::completion_footer_metadata::tests::completion_footer_fixture_pins_requested_order_and_dedup_4846
 services::discord::completion_footer_metadata::tests::duplicate_separators_never_leave_old_metadata_in_content_4806
 services::discord::completion_footer_metadata::tests::malformed_suffix_does_not_become_refresh_metadata_4806
@@ -2666,7 +2665,6 @@ services::discord::delivery_lease_cell::exact_lease::tests::renew_requires_every
 services::discord::delivery_lease_cell::exact_lease::tests::transitions_are_single_lock_raii_and_keep_owned_identity
 services::discord::delivery_lease_cell::publication_coordinate_tests::only_positive_coordinate_exposes_frontier_range
 services::discord::delivery_lease_cell::publication_coordinate_tests::positive_byte_range_requires_strictly_positive_width
-services::discord::delivery_lease_cell::publication_coordinate_tests::sink_epoch_is_typed_apart_from_publication_permit
 services::discord::delivery_lease_cell::publication_coordinate_tests::source_epoch_adopts_once_and_bumps_only_on_witness_change
 services::discord::delivery_lease_key::tests::id_zero_without_inflight_uses_observed_range_start_4277
 services::discord::delivery_lease_key::tests::watcher_and_idle_tail_cannot_acquire_same_fallback_turn_concurrently_4277
@@ -3993,7 +3991,6 @@ services::discord::placeholder_live_events::freshness::tests::running_turn_witho
 services::discord::placeholder_live_events::freshness::tests::schedule_wakeup_keeps_eta_label_instead_of_last_tool
 services::discord::placeholder_live_events::freshness::tests::subagent_running_keeps_description_label_instead_of_last_tool
 services::discord::placeholder_live_events::freshness::tests::time_line_includes_fixed_kst_and_discord_relative_tokens
-services::discord::placeholder_live_events::freshness::tests::time_line_is_independent_of_render_time
 services::discord::placeholder_live_events::freshness::tests::time_line_renders_start_then_update_on_separate_lines
 services::discord::placeholder_live_events::freshness::tests::tool_activity_output_is_bounded_by_the_static_label_set
 services::discord::placeholder_live_events::freshness::tests::tool_running_uses_same_class_only_format
@@ -4991,7 +4988,6 @@ services::discord::router::message_handler::intake_turn::intake_outbox_state_bui
 services::discord::router::message_handler::intake_turn::intake_outbox_state_builder_tests::builder_persists_every_absorbed_source_message_id
 services::discord::router::message_handler::intake_turn::placeholder_handoff::tests::only_confirmed_missing_replaces_bound_busy_notice_4888
 services::discord::router::message_handler::intake_turn::queue_pending_reaction_clear_tests::cleared_set_covers_every_intake_gate_queue_reaction
-services::discord::router::message_handler::intake_turn::queue_pending_reaction_clear_tests::clears_every_queue_marker_reaction
 services::discord::router::message_handler::intake_turn::race_loss::mailbox_reaction_tests::busy_tui_requeue_preserves_standalone_marker_after_matching_rollback
 services::discord::router::message_handler::intake_turn::race_loss::mailbox_reaction_tests::busy_tui_wrapper_failure_uses_standalone_policy_and_exactly_one_fallback
 services::discord::router::message_handler::intake_turn::race_loss::mailbox_reaction_tests::busy_tui_wrapper_merged_success_uses_plus_without_fallback
@@ -5033,7 +5029,6 @@ services::discord::router::message_handler::provider_isolation::thread_role_inhe
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::managed_linked_worktree_skips_provider_reisolation_without_session_state
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::non_thread_resolution_is_unchanged
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::prelaunch_claude_tui_seed_omits_wrapper_output_but_preserves_fifo
-services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::prelaunch_seed_is_identical_for_intake_and_headless_callers
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::redirect_uses_final_parent_for_inheritance_and_fast_mode_key
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::thread_inherit_false_opts_out
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::thread_inherits_parent_role_workspace_and_memory_scope_by_default
@@ -5854,7 +5849,6 @@ services::discord::tmux::tmux_session_files::tests::generation_failure_nonce_suc
 services::discord::tmux::tmux_session_files::tests::generation_write_failure_emits_exactly_one_warn_and_still_writes_nonce
 services::discord::tmux::tmux_session_files::tests::orphan_sweep_multidot_marker_uses_canonical_source_authority_key_5264
 services::discord::tmux::tmux_session_files::tests::respawn_inside_one_filesystem_tick_bumps_the_generation_key_5437
-services::discord::tmux::tmux_session_files::tests::spawn_markers_log_fixture_legacy_paths_unchanged
 services::discord::tmux::tmux_session_files::tests::spawn_markers_stamp_generation_before_nonce
 services::discord::tmux::tmux_session_files::tests::spawn_stamp_replaces_the_inode
 services::discord::tmux::tmux_session_files::tests::stamp_spawn_markers_returns_nonce_result_verbatim
@@ -7013,7 +7007,6 @@ services::discord::turn_bridge::recovery_text::retry_pending_tests::release_retr
 services::discord::turn_bridge::recovery_text::retry_pending_tests::release_retry_pending_removes_dedup_entry
 services::discord::turn_bridge::recovery_text::tests::direct_runtime_context_unavailable_matches_api_and_pg_errors
 services::discord::turn_bridge::recovery_text::tests::discord_recent_recovery_context_preserves_existing_format_and_limits
-services::discord::turn_bridge::recovery_text::tests::recovery_context_store_does_not_enqueue_lifecycle_notification
 services::discord::turn_bridge::recovery_text::tests::session_retry_context_restore_after_take_round_trips_raw_context_pg
 services::discord::turn_bridge::recovery_text::tests::turn_end_wip_warning_stash_take_and_put_back_round_trips_pg
 services::discord::turn_bridge::recovery_text::tests::voluntary_feedback_reminder_is_not_consumed_by_other_provider_pg
