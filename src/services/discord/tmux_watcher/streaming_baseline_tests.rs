@@ -145,9 +145,9 @@ async fn rowless_turn_after_another_relay_committed_part_or_all_baseline() {
 
     let (h, f) = rowless_turn(13).await;
     let t1 = finish_turn(&h, TAIL).await;
+    assert_eq!(h.unowned_drops(), 1, "all after, before the commit");
     h.commit(f, t1);
     assert_eq!(h.observe(&[HEAD, TAIL]), expected, "all after");
-    assert_eq!(h.unowned_drops(), 1, "all after");
 }
 
 /// R6292b: a read rewound to `F` below a live row that starts at `r > F` drops

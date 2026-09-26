@@ -168,6 +168,7 @@ impl Discord {
 struct Controls {
     cancel: Arc<AtomicBool>,
     resume: Arc<Mutex<Option<u64>>>,
+    beat: Arc<AtomicI64>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -245,8 +246,10 @@ impl Harness {
 
     /// Sets the fake pane and checks the production tmux adapter now reports it.
     pub(super) fn pane(&self, state: &str) {
+        // Renamed into place so a concurrent fake `tmux` never reads a torn state.
         let root = std::env::var("AGENTDESK_ROOT_DIR").unwrap();
-        std::fs::write(format!("{root}/pane"), format!("{state}\n")).unwrap();
+        std::fs::write(format!("{root}/pane.next"), format!("{state}\n")).unwrap();
+        std::fs::rename(format!("{root}/pane.next"), format!("{root}/pane")).unwrap();
         if state == "dead" {
             let marker = crate::services::tmux_common::session_dead_marker_path(&self.tmux);
             std::fs::write(marker, "dead").unwrap();
@@ -328,12 +331,13 @@ impl Harness {
             resume.clone(),
             epoch,
             delivered,
-            beat,
+            beat.clone(),
             None,
         ));
         self.watcher = Some(Controls {
             cancel,
             resume,
+            beat,
             task,
         });
     }
@@ -406,15 +410,12 @@ impl Harness {
     pub(super) async fn until(&self, what: &str, done: impl Fn(&Self) -> bool) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         while !done(self) {
-            let row = self
-                .row()
-                .map(|row| (row.turn_start_offset, row.turn_nonce));
-            let visible = self.discord.lock().unwrap().visible.clone();
-            let frames = self.frames();
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "timed out waiting for {what}: {frames:?} {row:?} {visible:?}"
-            );
+            if tokio::time::Instant::now() >= deadline {
+                let row = self.row().map(|r| (r.turn_start_offset, r.turn_nonce));
+                let visible = self.discord.lock().unwrap().visible.clone();
+                let frames = self.frames();
+                panic!("timed out on {what}: {frames:?} {row:?} {visible:?}");
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
@@ -430,13 +431,22 @@ impl Harness {
         frames.chain(idles).collect()
     }
 
-    /// Waits until the watcher reports reading through everything appended so far, then for quiet.
+    /// Waits until the watcher has read through everything appended so far and has come back
+    /// to its poll loop after handling that read, then for quiet.
     pub(super) async fn drained(&self, what: &str) -> u64 {
         let end = self.len();
         self.until(what, |h| h.read_ends().iter().any(|&read| read >= end))
             .await;
+        // The watcher stores its heartbeat only while polling for input, not while handling a read.
+        let read_seen = crate::services::discord::tmux_watcher_now_ms();
+        self.until("poll loop return", |h| h.heartbeat() > read_seen)
+            .await;
         self.settle().await;
         end
+    }
+
+    fn heartbeat(&self) -> i64 {
+        self.watcher.as_ref().unwrap().beat.load(Ordering::Acquire)
     }
 
     /// Waits until neither Discord nor the relay plan has moved for two seconds.
