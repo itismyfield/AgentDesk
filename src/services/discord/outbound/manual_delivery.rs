@@ -836,7 +836,7 @@ mod manual_v3_delivery_tests {
     }
 
     // Contract: a custody notice for a DM under a long runtime root is one post from the provider
-    // bot.
+    // bot that keeps the fixed line, the episode id and the failed-copy line.
     #[tokio::test]
     async fn a_custody_notice_under_a_long_root_is_one_provider_bot_post() {
         let (client, root) = (MockManualOutboundClient::default(), "r".repeat(3000));
@@ -850,7 +850,10 @@ mod manual_v3_delivery_tests {
             &client, &dedup, "5998091", &text, "claude", source, None, None, false,
         )
         .await;
-        assert_eq!(client.posts.lock().unwrap().len(), 1);
+        let (posts, episode) = (client.posts.lock().unwrap().clone(), "e".repeat(64));
+        let kept = ["재시작으로 이 턴 출력 일부가", &episode, "보존 실패"];
+        assert_eq!(posts.len(), 1);
+        assert!(kept.iter().all(|line| posts[0].contains(line)), "{posts:?}");
     }
 
     #[tokio::test]
