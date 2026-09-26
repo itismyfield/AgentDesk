@@ -56,7 +56,7 @@ fn pending_start(provider: &str, channel_id: u64, source: Option<(&Path, u64)>) 
 }
 
 async fn boot() -> BootReapReport {
-    reap_inflight_rows_at_boot_with_guard(&BootReapOnce::default(), &CLAUDE).await
+    reap_inflight_rows_at_boot_with_guard(&BootReapOnce::default(), &CLAUDE, None).await
 }
 
 fn custody_root(env: &Env) -> PathBuf {

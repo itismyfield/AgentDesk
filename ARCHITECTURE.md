@@ -777,7 +777,9 @@ src/
 │   │   │   ├── removal/
 │   │   │   │   ├── boot_custody.rs
 │   │   │   │   ├── boot_custody_tests.rs
-│   │   │   │   └── boot_reaper.rs
+│   │   │   │   ├── boot_reaper.rs
+│   │   │   │   ├── custody_notice.rs
+│   │   │   │   └── custody_notice_tests.rs
 │   │   │   ├── save_store/
 │   │   │   │   ├── identity_gate/
 │   │   │   │   │   ├── runtime_stamp/

@@ -25412,6 +25412,33 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/inflight/removal/custody_notice.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:5d5708edc0c7e682a9f211090ebdebf380489397537c11b3369d87d6394e17a7"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/inflight/removal/custody_notice_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b7daad8519a057f2f1727fbb373fab307006b9264d44d54d2423c41f3a8ead9e"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/inflight/removal/custody_notice_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:2a70852c94d3ca0a05e317ab2e870a069f396aaa805f8ac9d7818cfa9176086f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/internal_api.rs",
       "api": "sqlx::query",
       "symbol": "query",
