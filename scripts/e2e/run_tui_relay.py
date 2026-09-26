@@ -1862,8 +1862,10 @@ def local_control_then_prompt(
     started = time.monotonic()
     deadline = started + float(params.get("admission_timeout_s", 30))
     while True:
-        row, box = inflight(), mailbox()
+        row, observed_at, box = inflight(), time.monotonic(), mailbox()
         if row is not None:
+            if observed_at > deadline:
+                raise assertions.AssertionError(f"prompt {prompt_id} not admitted within the admission bound")
             owner = str(row.get("user_msg_id") or "")
             if owner != prompt_id:
                 raise assertions.AssertionError(
@@ -1874,7 +1876,7 @@ def local_control_then_prompt(
                 raise assertions.AssertionError(f"prompt admitted with merged sources {row['source_message_ids']}")
             if any(depth := queue_depth(box)):
                 raise assertions.AssertionError(f"queue not empty when admission was observed: {depth}")
-            evidence.update(admission_latency_s=round(time.monotonic() - started, 3), queue_depth_at_admission=0)
+            evidence.update(admission_latency_s=round(observed_at - started, 3), queue_depth_at_admission=0)
             return evidence
         active = box.get("active_user_message_id")
         if _truthy_identity(active) and str(active) != prompt_id:

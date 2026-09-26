@@ -3738,7 +3738,7 @@ class E37CodexModelLocalControl(unittest.TestCase):
     NOTICE = "`/model` 은 로컬에서 끝나는 Codex 컨트롤이라 provider 턴을 만들지 않았습니다."
     REQUEST_S = 0.05
 
-    def run_e37(self, fault: str | None = None) -> dict:
+    def run_e37(self, fault: str | None = None, request_s: float = REQUEST_S) -> dict:
         scenario = driver.yaml.safe_load(
             (ROOT / "tests/e2e/tui_relay/scenarios/E-37-codex-model-local-control.yaml").read_text()
         )
@@ -3754,7 +3754,7 @@ class E37CodexModelLocalControl(unittest.TestCase):
 
         def request() -> float:
             started = clock[0]
-            clock[0] += self.REQUEST_S
+            clock[0] += request_s
             return started
 
         class Client:
@@ -3775,7 +3775,9 @@ class E37CodexModelLocalControl(unittest.TestCase):
                     if fault == "prompt_behind_model_turn":
                         turn(sent["/model"], now, now + 0.5)
                     admitted = now + {"prompt_behind_model_turn": 0.5, "prompt_behind_active_owner": 1.5,
-                                      "slow_admission": 100.0}.get(fault, 0.1)
+                                      "slow_admission": 100.0,
+                                      "admission_just_before_deadline": request_s + 29.9,
+                                      "admission_just_after_deadline": request_s + 30.05}.get(fault, 0.1)
                     merged = [int(sent["/model"]), int(mid)] if fault == "merged_sources" else None
                     turn(mid, admitted, admitted + 1.0, sources=merged)
                     if fault == "extra_reply":
@@ -3844,6 +3846,13 @@ class E37CodexModelLocalControl(unittest.TestCase):
         driver._merge_record_into_result(result, record)  # the CLI report keeps the step evidence
         self.assertEqual(result["local_control"]["prompt_message_id"], record["local_control"]["prompt_message_id"])
         self.assertIn("max_read_gap_s", result["local_control"])
+
+    def test_admission_bound_uses_the_observation_time_near_the_deadline(self):
+        # 0.07s requests make reads land at 29.92s and 30.09s, with the loop's own deadline check at 29.99s.
+        record = self.run_e37("admission_just_before_deadline", request_s=0.07)
+        self.assertLessEqual(record["local_control"]["admission_latency_s"], 30)
+        with self.assertRaisesRegex(assertions.AssertionError, "not admitted within"):
+            self.run_e37("admission_just_after_deadline", request_s=0.07)
 
     def test_fails_on_each_wrong_model_turn_queue_or_reply_that_a_read_can_see(self):
         for fault, reason in (
