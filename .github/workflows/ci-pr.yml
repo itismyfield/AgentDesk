@@ -1687,7 +1687,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
-          components: clippy
+          components: clippy, rustc-dev  # rustc-dev: tools/modmap-driver for the H2 module map step
 
       - name: Setup sccache for lib inventory
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -1790,6 +1790,13 @@ jobs:
       # H2 tmux boundary ratchet, Linux lane; inert (no-op / warn-only) until activation.
       - name: H2 tmux boundary measurement (linux, inert)
         run: bash scripts/ci/h2_measure.sh --lane linux --inert
+
+      # H2 R-O module map, Linux lane: the driver canary always runs, the repo map is inert until activation.
+      # sccache cannot wrap the driver, and a cached compile would skip writing the map.
+      - name: H2 module map (linux, inert)
+        env:
+          RUSTC_WRAPPER: ""
+        run: python3 scripts/ci/h2_modmap.py --inert --canary
 
       - name: Upload maintainability audit artifact
         if: always()
