@@ -207,9 +207,8 @@ fn ledger_shapes_fold_to_their_obligation_state() {
     }
 }
 
-// Contract: intent and outcome records keep what an attempt saw: the EOF seen after a copy
-// catches a later shrink, an unfinished attempt keeps its lower requirement, and a deferred
-// attempt is reported as the last attempt while `current` still reads the source.
+// Contract: intent and outcome records keep what an attempt saw (post-copy EOF, an unfinished
+// attempt's lower requirement), and a deferred attempt is the last attempt beside `current`.
 #[test]
 fn attempt_records_keep_their_observations_across_a_reload() {
     let fx = Fx::new(BYTES);
