@@ -387,49 +387,81 @@ fn a_soft_terminal_batch_carries_the_next_turn_baseline_6292() {
     );
 }
 
-/// the chunk nonce is a function of the turn key and chunk index only, so
-/// two different bodies sent under one key share nonce 0.
+/// the watcher's turn-key selection keys on the inflight turn identity, so
+/// two ranges with different bodies in one turn share chunk 0's nonce.
 #[test]
-fn r3_1_chunk_nonce_ignores_the_body_and_range_baseline_6292() {
-    use crate::services::discord::task_notification_delivery::response_chunk_nonce;
-    let key = "owed:claude:6292:1790406292000000000:100:300";
-    let first_range_chunk = response_chunk_nonce(key, 0);
-    let second_range_chunk = response_chunk_nonce(key, 0);
+fn r3_1_one_inflight_turn_gives_two_ranges_one_chunk_nonce_baseline_6292() {
+    use crate::services::discord::task_notification_delivery::{
+        durable_response_turn_key, response_chunk_nonce_for_generation,
+    };
+    let (channel, tmux) = (6_292_301, "AgentDesk-claude-i6292-nonce");
+    let started_at = "2026-09-27T00:00:00Z";
+    let chunk0 = |user_msg_id: u64, lease_end: u64, body: &str| {
+        let key = durable_response_turn_key(
+            channel,
+            "claude",
+            tmux,
+            user_msg_id,
+            started_at,
+            Some(100),
+            lease_end,
+            body,
+        );
+        response_chunk_nonce_for_generation(&key, 1, 0)
+    };
     assert_eq!(
-        first_range_chunk, second_range_chunk,
-        "a [100,200) body and a [200,300) body under one origin key collide on chunk 0"
+        chunk0(6_292, 200, "turn A body for [100,200)"),
+        chunk0(6_292, 300, "turn B body for [200,300)"),
+        "one inflight turn: the [100,200) and [200,300) deliveries collide on chunk 0"
     );
-    assert_ne!(first_range_chunk, response_chunk_nonce(key, 1));
+    // Without an inflight identity the fallback key includes END and body.
+    let fallback = |lease_end: u64, body: &str| {
+        let key = durable_response_turn_key(channel, "claude", tmux, 0, "", None, lease_end, body);
+        response_chunk_nonce_for_generation(&key, 1, 0)
+    };
+    assert_ne!(
+        fallback(200, "turn A body for [100,200)"),
+        fallback(300, "turn B body for [200,300)")
+    );
 }
 
-/// the only anchor a ranged recovery can find is the frontier commit's;
-/// a delivered range below the frontier's commit has no findable anchor.
+/// the recovery reader returns only the frontier commit's anchor, so a
+/// delivered range below the frontier's commit has no findable anchor.
 #[test]
 fn r3_4_recovery_anchor_is_only_the_frontier_commit_baseline_6292() {
+    use crate::services::discord::outbound::delivery_frontier_probe::{
+        CurrentGenerationAnchor, current_generation_delivered_anchor,
+    };
     let fx =
         StrandedFrontierFixture::new(6_292_304, "AgentDesk-claude-i6292-anchor", 1_790_406_304);
     fx.commit((0, 100), "turn 0");
     fx.drop_terminal(100, 200, 100, "turn A body the watcher dropped");
     fx.commit((200, 300), "turn B");
     let anchor = || {
-        crate::services::discord::outbound::delivery_frontier_probe::delivered_frontier_current_generation(
+        current_generation_delivered_anchor(
             &ProviderKind::Claude,
             fx.channel,
             fx.tmux,
             Some(u64::MAX / 2),
         )
-        .map(|commit| commit.range)
+    };
+    let anchor_for = |range: (u64, u64)| CurrentGenerationAnchor {
+        panel_msg_id: range.1,
+        panel_channel_id: fx.channel.get(),
+        range,
     };
     assert_eq!(
         anchor(),
-        Some((200, 300)),
-        "B is the frontier commit on main"
+        Some(anchor_for((200, 300))),
+        "B's commit is the recovery anchor on main"
     );
     fx.commit((300, 400), "turn C");
+    assert_eq!(anchor(), Some(anchor_for((300, 400))));
+    // Recovery reuses an anchor only when its range equals the owed range.
     assert_eq!(
-        anchor(),
-        Some((300, 400)),
-        "after C, B's range no longer matches the one recorded anchor"
+        anchor().filter(|found| found.range == (200, 300)),
+        None,
+        "loss: after C, B's anchor is no longer findable"
     );
 }
 
