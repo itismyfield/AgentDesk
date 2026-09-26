@@ -85,7 +85,6 @@ const PipelineStateNodeView = memo(function PipelineStateNodeView({
     : [
         node.hookCount > 0 ? `${node.hookCount}h` : null,
         node.hasClock ? "clock" : null,
-        node.hasTimeout ? "timeout" : null,
       ]
         .filter(Boolean)
         .join(" · ") || tr("속성 없음", "No extras");

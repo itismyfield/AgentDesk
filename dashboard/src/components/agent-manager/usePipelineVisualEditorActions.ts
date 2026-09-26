@@ -176,40 +176,6 @@ export function usePipelineVisualEditorActions(params: Params) {
     });
   }
 
-  function updateStateTimeout(
-    stateId: string,
-    patch: Partial<PipelineConfigFull["timeouts"][string]>,
-  ) {
-    setPipelineDraft((current) => {
-      if (!current) {
-        return current;
-      }
-      const next = clonePipelineConfig(current);
-      next.timeouts[stateId] = {
-        duration: patch.duration ?? next.timeouts[stateId]?.duration ?? "",
-        clock: patch.clock ?? next.timeouts[stateId]?.clock ?? "",
-        max_retries: patch.max_retries ?? next.timeouts[stateId]?.max_retries,
-        on_exhaust: patch.on_exhaust ?? next.timeouts[stateId]?.on_exhaust,
-        condition: patch.condition ?? next.timeouts[stateId]?.condition,
-      };
-      if (next.timeouts[stateId].max_retries === undefined) delete next.timeouts[stateId].max_retries;
-      if (!next.timeouts[stateId].on_exhaust) delete next.timeouts[stateId].on_exhaust;
-      if (!next.timeouts[stateId].condition) delete next.timeouts[stateId].condition;
-      return next;
-    });
-  }
-
-  function clearStateTimeout(stateId: string) {
-    setPipelineDraft((current) => {
-      if (!current) {
-        return current;
-      }
-      const next = clonePipelineConfig(current);
-      delete next.timeouts[stateId];
-      return next;
-    });
-  }
-
   function addState() {
     let nextStateId = "";
     setPipelineDraft((current) => {
@@ -238,7 +204,6 @@ export function usePipelineVisualEditorActions(params: Params) {
       );
       delete next.hooks[stateId];
       delete next.clocks[stateId];
-      delete next.timeouts[stateId];
       return next;
     });
     setSelection({ kind: "phase_gate" });
@@ -530,7 +495,6 @@ export function usePipelineVisualEditorActions(params: Params) {
     addTransitionBetween,
     clearStateClock,
     clearStateHooks,
-    clearStateTimeout,
     handleClearOverride,
     handleClearStages,
     handleExportJson,
@@ -551,7 +515,6 @@ export function usePipelineVisualEditorActions(params: Params) {
     updateState,
     updateStateClock,
     updateStateHooks,
-    updateStateTimeout,
     updateTransition,
     updateTransitionGates,
   };
