@@ -39,7 +39,8 @@ fallback. The environment is constructed from scratch, excluding ambient shell,
 Python, token-holder and release overrides. Filesystem doubles resolve paths
 inside the fixture before creating/copying; rm and rsync never delete anything.
 Network and service commands cannot reach their real executables. Unknown stub
-calls and missing commands leave a failure record, including ignored errors.
+calls leave a failure record, including ignored errors; missing commands do too
+under Bash 4+ (CI), while macOS Bash 3.2 only fails the command itself.
 The shell's builtin kill is shadowed by a refusal function.
 
 Only Bash, the Python interpreter and the copied build-token helper execute real
