@@ -300,6 +300,24 @@ async fn an_unparseable_pending_start_keeps_its_channel_and_is_not_complete() {
     assert!(record["error"].is_string(), "{record}");
 }
 
+// Contract: a recopy the boot copy budget stops is recorded with that error and supersedes
+// nothing, so the earlier copy stays the valid one.
+#[tokio::test]
+async fn a_recopy_past_the_boot_copy_budget_is_recorded_and_supersedes_nothing() {
+    let env = Env::new();
+    let prior = format!("old\n{}\n", "p".repeat(40));
+    let (out, offset) = transcript(&env, "budget.jsonl", &prior, "turn\n");
+    let mut state = tui_direct_row(5_997_101, &out, offset);
+    for start in [offset, 4] {
+        state.turn_start_offset = Some(start);
+        env.seed(&state, 0);
+        boot().await;
+    }
+    let stop = &entries(&episodes(&env)[&5_997_101]).pop().unwrap().1;
+    assert_eq!(stop["error"], "boot copy budget exhausted");
+    assert!(stop["copy"].is_null() && stop["supersedes"].is_null());
+}
+
 // Contract: a transcript cut short between the stat and the copy is recorded as an
 // incomplete copy, and the next boot copies the turn again instead of treating it as held.
 #[tokio::test]
