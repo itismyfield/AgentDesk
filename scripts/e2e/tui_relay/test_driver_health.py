@@ -3732,5 +3732,76 @@ class PhasePartialEvidenceContract(_OutcomeFixture, unittest.TestCase):
                 self.assertEqual(self.client.send_control.call_count, 1)
 
 
+class E37CodexModelLocalControl(unittest.TestCase):
+    """Runs the shipped E-37 YAML against a simulated Codex channel."""
+
+    NOTICE = "`/model` 은 로컬에서 끝나는 Codex 컨트롤이라 provider 턴을 만들지 않았습니다."
+
+    def run_e37(self, *, model_opens_turn: bool) -> dict:
+        scenario = driver.yaml.safe_load(
+            (ROOT / "tests/e2e/tui_relay/scenarios/E-37-codex-model-local-control.yaml").read_text()
+        )
+        messages: list[dict] = []
+        # A wrongly opened turn is busy for one health read, then finishes.
+        state = {"busy_reads": 0}
+
+        def post(content: str) -> None:
+            messages.append({"id": str(100 + len(messages)), "content": content,
+                             "author": {"id": "7", "bot": True}, "type": 0})
+
+        class Client:
+            base_url = "http://agentdesk.test"
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                return {"id": "1"}
+
+            def send(self, channel_id, content):  # noqa: ARG002
+                if content == "/model":
+                    post(E37CodexModelLocalControl.NOTICE)
+                    state["busy_reads"] = int(model_opens_turn)
+                else:
+                    post(content.removeprefix("Reply with exactly ").split(" ")[0])
+                return {"id": "2"}
+
+            def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                return [m for m in messages if int(m["id"]) > int(after_id or 0)]
+
+            def wait_for_message(self, channel_id, *, predicate, after_id=None, **_):
+                observed = self.fetch_messages(channel_id, after_id=after_id)
+                return next((m for m in observed if predicate(m)), None), observed
+
+        client = Client()
+
+        def fake_wait(**kwargs):
+            observed = client.fetch_messages(kwargs["channel_id"], after_id=kwargs["after_id"])
+            return next((m for m in observed if kwargs["needle"] in m["content"]), None), observed
+
+        def fake_api(base_url, path, *, timeout=5.0):  # noqa: ARG001
+            if path == "/api/health":
+                return 200, {"status": "healthy", "ok": True, "fully_recovered": True, "degraded_reasons": []}
+            busy, state["busy_reads"] = state["busy_reads"] > 0, max(state["busy_reads"] - 1, 0)
+            return 200, _health_detail(_busy_mailbox("42", "codex") if busy else _idle_mailbox("42", "codex"))
+
+        args = Namespace(cell="codex-pipe", channel_id="42", thread_channel_id=None,
+                         queue_runtime_root="/tmp/agentdesk-e2e-test-runtime")
+        with (
+            patch("run_tui_relay.time.sleep", return_value=None),
+            patch("run_tui_relay._read_api_json", side_effect=fake_api),
+            patch("run_tui_relay.wait_for_discord_text_with_tui_idle_draft_guard", side_effect=fake_wait),
+            patch("run_tui_relay.assert_cell_idle", return_value={"status": "idle", "mailboxes_seen": 1}),
+        ):
+            return driver.run_one_cell(scenario=scenario, cell="codex-pipe", channel_id="42", client=client,
+                                       run_id="run-1", dry_run=False, args=args)
+
+    def test_passes_when_model_stays_local(self):
+        record = self.run_e37(model_opens_turn=False)
+        self.assertEqual(len(record["health_assertions"]), 3)
+        self.assertTrue(all(row["passed"] for row in record["assertions"]))
+
+    def test_fails_when_model_opens_a_provider_turn(self):
+        with self.assertRaisesRegex(assertions.AssertionError, "busy"):
+            self.run_e37(model_opens_turn=True)
+
+
 if __name__ == "__main__":
     unittest.main()
