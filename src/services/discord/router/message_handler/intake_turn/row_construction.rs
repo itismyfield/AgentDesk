@@ -90,3 +90,6 @@ impl RefusedStart {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;
