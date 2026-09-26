@@ -1,0 +1,12 @@
+[package]
+name = "modmap-canary"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# A name and crate types unlike agentdesk's: the driver must pick the root lib by path, not by either.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Nested in the driver package, so it declares its own workspace.
+[workspace]
