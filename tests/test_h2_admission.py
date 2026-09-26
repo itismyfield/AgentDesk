@@ -73,10 +73,20 @@ def diag_lines(sources: dict[str, str]) -> list[str]:
     return [diag(file, *locate(sources[file], needle), callee, lint=lint or "clippy::disallowed_methods")
             for file, needle, callee, lint in NEEDLES if needle in sources[file]]
 
-def artifact(root: Path, digest: str, *, name: str = "agentdesk", src: str = "src/lib.rs", test: bool = False) -> str:
+def artifact(root: Path, digest: str, *, name: str = "agentdesk", src: str = "src/lib.rs", test: bool = False,
+             features: tuple[str, ...] = ()) -> str:
     """A cargo `compiler-artifact` line for a lib whose dep-info is `target/debug/deps/<name>-<digest>.d`."""
     return json.dumps({"reason": "compiler-artifact", "target": {"kind": ["lib"], "name": name, "src_path": str(root / src)},
-                       "profile": {"test": test}, "filenames": [str(root / f"target/debug/deps/lib{name}-{digest}.rmeta")]})
+                       "profile": {"test": test}, "features": list(features),
+                       "filenames": [str(root / f"target/debug/deps/lib{name}-{digest}.rmeta")]})
+
+# `rustc --print cfg` of a Linux host; fixtures stand it in for the toolchain call.
+HOST_CFG = 'debug_assertions\npanic="unwind"\ntarget_family="unix"\ntarget_os="linux"\nunix\n'
+
+def host_cfg(case: unittest.TestCase) -> None:
+    patcher = mock.patch.object(h2_depinfo, "rustc_cfg", return_value=HOST_CFG, create=True)
+    patcher.start()
+    case.addCleanup(patcher.stop)
 
 def write_depinfo(root: Path, digest: str, deps) -> Path:
     """A rustc-shaped dep-info: `.d` and `.rmeta` rules, per-file empty rules, env-dep comments."""
@@ -108,6 +118,7 @@ class Tree(unittest.TestCase):
             patcher = mock.patch.object(adm, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        host_cfg(self)
         self.sources, self.extra = dict(SOURCES), []
         self.write(self.sources)
         (self.root / "scripts/ci").mkdir(parents=True)
@@ -344,22 +355,30 @@ class EndToEnd(Tree):
                     depinfo.chmod(0o644)
 
 class DepInfo(unittest.TestCase):
-    """R-O over the root lib dep-info of a two-module crate."""
+    """R-O over the root lib dep-info of a small crate; BASE is what rustc reads for the base lib.rs."""
+
+    BASE = ("src/lib.rs", "src/a.rs", "src/sp ace.rs", "src/한글.rs")
 
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
-        lib = 'mod a;\n#[path = "sp ace.rs"]\nmod s;\n#[path = "한글.rs"]\nmod k;\n#[path = "payload.inc"]\nmod payload;\n'
+        lib = 'mod a;\n#[path = "sp ace.rs"]\nmod s;\n#[path = "한글.rs"]\nmod k;\n'
         files = {"src/lib.rs": lib, "src/a.rs": "", "src/sp ace.rs": "", "src/한글.rs": "", "src/b.rs": "", "src/payload.inc": ""}
         for rel, text in files.items():
             (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
             (self.root / rel).write_text(text, encoding="utf-8")
         h2._MODULE_TABLES.clear()
         self.addCleanup(h2._MODULE_TABLES.clear)
+        host_cfg(self)
+
+    def mount(self, decls: str, rel: str = "src/lib.rs") -> None:
+        with (self.root / rel).open("a", encoding="utf-8") as file:
+            file.write(decls)
+        h2._MODULE_TABLES.clear()
 
     def problems(self, *extra: str, lines: list[str] | None = None) -> list[str]:
-        write_depinfo(self.root, "c0ffee", ["src/lib.rs", "src/a.rs", *extra])
+        write_depinfo(self.root, "c0ffee", [*self.BASE, *extra])
         return h2_depinfo.ro_problems(self.root, [artifact(self.root, "c0ffee")] if lines is None else lines)
 
     def test_rust_input_must_be_in_the_module_tree(self) -> None:
@@ -377,10 +396,12 @@ class DepInfo(unittest.TestCase):
         with tempfile.TemporaryDirectory() as elsewhere:
             (outside := Path(elsewhere) / "g.rs").write_text("")
             self.assertIn("outside the repo", self.problems(str(outside))[0])
-        # src/payload.inc is mounted by `#[path]`, so it is in the module tree yet still not data
-        for extra in ("src/payload.inc", "src/shared.inc", "migrations/postgres/sub/x.sql", "vendor/migrations/postgres/x.sql", "assets/a.html"):
+        for extra in ("src/shared.inc", "migrations/postgres/sub/x.sql", "vendor/migrations/postgres/x.sql", "assets/a.html"):
             with self.subTest(extra=extra):
                 self.assertEqual(self.problems(extra), [f"R-O: lib compile input {extra} is not in the data allowlist"])
+        # mounted by `#[path]`, so in the module tree, yet still not data
+        self.mount('#[path = "payload.inc"]\nmod payload;\n')
+        self.assertEqual(self.problems("src/payload.inc"), ["R-O: lib compile input src/payload.inc is not in the data allowlist"])
 
     def test_paths_are_unescaped_and_normalized(self) -> None:
         # `\ ` escapes, UTF-8, canonical absolute spelling and `..` all name module-tree files
@@ -393,19 +414,40 @@ class DepInfo(unittest.TestCase):
             (self.root / "src/real.rs").write_text("")
             (self.root / "src/sym.rs").symlink_to("real.rs")
             (self.root / "src/out.rs").symlink_to(outside)
-            with (self.root / "src/lib.rs").open("a", encoding="utf-8") as lib:
-                lib.write("mod sym;\nmod out;\n")
+            self.mount("mod sym;\nmod out;\n")
             self.assertEqual(self.problems("src/sym.rs", "src/x/../sym.rs"), [])
             # `..` right after a directory symlink resolves on disk, for the module and its children
             (self.root / "shared/nested").mkdir(parents=True)
             (self.root / "shared/payload.rs").write_text("mod inner;\n")
             (self.root / "shared/inner.rs").write_text("")
             (self.root / "src/jump").symlink_to("../shared/nested")
-            with (self.root / "src/lib.rs").open("a", encoding="utf-8") as lib:
-                lib.write('#[path = "jump/../payload.rs"]\nmod hop;\n')
-            h2._MODULE_TABLES.clear()
-            self.assertEqual(self.problems("src/jump/../payload.rs", "src/jump/../inner.rs"), [])
-            self.assertEqual(self.problems("src/out.rs"), [f"R-O: lib compile input {outside.as_posix()} is outside the repo"])
+            self.mount('#[path = "jump/../payload.rs"]\nmod hop;\n')
+            hop = ("src/sym.rs", "src/jump/../payload.rs", "src/jump/../inner.rs")
+            self.assertEqual(self.problems(*hop), [])
+            self.assertEqual(self.problems(*hop, "src/out.rs"), [f"R-O: lib compile input {outside.as_posix()} is outside the repo"])
+
+    def test_module_identity_is_the_real_file(self) -> None:
+        # two files whose `..`-collapsed spellings collide are both modules, whichever is declared first
+        (self.root / "shared/nested").mkdir(parents=True)
+        (self.root / "shared/foo.rs").write_text("")
+        (self.root / "src/foo.rs").write_text("")
+        (self.root / "src/jump").symlink_to("../shared/nested")
+        lib = (self.root / "src/lib.rs").read_text(encoding="utf-8")
+        for decls in ('mod foo;\n#[path = "jump/../foo.rs"]\nmod hop;\n', '#[path = "jump/../foo.rs"]\nmod hop;\nmod foo;\n'):
+            with self.subTest(decls=decls):
+                (self.root / "src/lib.rs").write_text(lib, encoding="utf-8")
+                self.mount(decls)
+                self.assertEqual(self.problems("src/foo.rs", "src/jump/../foo.rs"), [])
+                table = h2._module_table(self.root)
+                self.assertEqual((table["src/foo.rs"], table["shared/foo.rs"]), ("agentdesk::foo", "agentdesk::hop"))
+        # a spelling that leaves the repo lexically but lands inside it on disk is a module, and so is its child
+        (self.root / "deep/a/b/c").mkdir(parents=True)
+        (self.root / "deep/far.rs").write_text("mod kid;\n")
+        (self.root / "deep/kid.rs").write_text("")
+        (self.root / "src/down").symlink_to("../deep/a/b/c")
+        (self.root / "src/lib.rs").write_text(lib, encoding="utf-8")
+        self.mount('#[path = "down/../../../far.rs"]\nmod far;\n')
+        self.assertEqual(self.problems("src/down/../../../far.rs", "src/down/../../../kid.rs"), [])
 
     def test_aliases_keep_the_rule_of_each_spelling(self) -> None:
         (self.root / "src/payload.inc").unlink()
@@ -416,16 +458,67 @@ class DepInfo(unittest.TestCase):
         (self.root / "src/alias.rs").symlink_to("../migrations/postgres/1.sql")
         (self.root / "src/data.inc").write_text("")
         (self.root / "src/sym.rs").symlink_to("data.inc")
-        with (self.root / "src/lib.rs").open("a", encoding="utf-8") as lib:
-            lib.write("mod sym;\n")
+        lib = (self.root / "src/lib.rs").read_text(encoding="utf-8")
         data, code = "R-O: lib compile input {} is not in the data allowlist", "R-O: {} is compiled into the lib but is not in the module tree"
-        for extra, expected in (
-                (("src/payload.inc",), data.format("src/payload.inc")),  # non-Rust spelling of a module file
-                (("src/payload.inc", "src/real.rs"), data.format("src/payload.inc")),
-                (("src/alias.rs",), code.format("src/alias.rs")),  # Rust spelling of allowlisted data
-                (("src/sym.rs",), data.format("src/sym.rs"))):  # mounted Rust spelling of non-allowlisted data
+        payload = '#[path = "payload.inc"]\nmod payload;\n'
+        for decls, extra, expected in (
+                (payload, ("src/payload.inc",), data.format("src/payload.inc")),  # non-Rust spelling of a module file
+                (payload, ("src/payload.inc", "src/real.rs"), data.format("src/payload.inc")),
+                ("", ("src/alias.rs",), code.format("src/alias.rs")),  # Rust spelling of allowlisted data
+                ("mod sym;\n", ("src/sym.rs",), data.format("src/sym.rs"))):  # mounted Rust spelling of non-allowlisted data
             with self.subTest(extra=extra):
+                (self.root / "src/lib.rs").write_text(lib + decls, encoding="utf-8")
+                h2._MODULE_TABLES.clear()
                 self.assertEqual(self.problems(*extra), [expected])
+
+    def test_inactive_declarations_do_not_explain_a_compiled_file(self) -> None:
+        # rustc compiled src/shared.rs (say an owner mounted it); only an active declaration explains it
+        (self.root / "src/shared.rs").write_text("")
+        (self.root / "src/m").mkdir()
+        (self.root / "src/gate.rs").write_text('#![cfg(any())]\n#[path = "shared.rs"]\nmod shared;\n')
+        lib = (self.root / "src/lib.rs").read_text(encoding="utf-8")
+        unexplained = ["R-O: src/shared.rs is compiled into the lib but is not in the module tree"]
+        for decls, want in (
+                ("#[cfg(any())]\nmod shared;\n", unexplained),
+                ("#[cfg(\n    any()\n)]\nmod shared;\n", unexplained),
+                ("#[cfg(windows)] mod shared;\n", unexplained),
+                ("#[cfg_attr(all(), cfg(any()))]\nmod shared;\n", unexplained),
+                ('#[cfg(test)]\nmod m {\n    #[path = "../shared.rs"]\n    mod shared;\n}\n', unexplained),
+                ('#[cfg(test)]\nfn f() {\n    #[path = "shared.rs"]\n    mod shared;\n}\n', unexplained),
+                ("/*\nmod shared;\n*/\n", unexplained),
+                ('const S: &str = r#"\nmod shared;\n"#;\n', unexplained),
+                ("macro_rules! decoy {\n    () => {\n        mod shared;\n    };\n}\n", unexplained),
+                ("mod gate;\n", unexplained),  # the file is read, its `#![cfg]` drops its children
+                ("#[cfg(unix)]\nmod shared;\n", []),
+                ("#[cfg(all(unix, not(test), target_os = \"linux\"))]\nmod shared;\n", []),
+                ('#[cfg_attr(unix, path = "shared.rs")]\nmod other;\n', [])):
+            with self.subTest(decls=decls):
+                (self.root / "src/lib.rs").write_text(lib + decls, encoding="utf-8")
+                h2._MODULE_TABLES.clear()
+                self.assertEqual(self.problems("src/shared.rs", *(["src/gate.rs"] if "gate" in decls else [])), want)
+        # features come from the root lib artifact of the same clippy run
+        (self.root / "src/lib.rs").write_text(lib + '#[cfg(feature = "tls")]\nmod shared;\n', encoding="utf-8")
+        h2._MODULE_TABLES.clear()
+        write_depinfo(self.root, "c0ffee", [*self.BASE, "src/shared.rs"])
+        self.assertEqual(h2_depinfo.ro_problems(self.root, [artifact(self.root, "c0ffee", features=("tls",))]), [])
+        self.assertEqual(h2_depinfo.ro_problems(self.root, [artifact(self.root, "c0ffee", features=("other",))]), unexplained)
+
+    def test_unevaluable_cfg_is_a_problem(self) -> None:
+        (self.root / "src/shared.rs").write_text("")
+        lib = (self.root / "src/lib.rs").read_text(encoding="utf-8")
+        for pred in ("tokio_unstable", 'version("1.80")', "unix = ", "not(unix, windows)", "all(unix"):
+            with self.subTest(pred=pred):
+                (self.root / "src/lib.rs").write_text(f"{lib}#[cfg({pred})]\nmod shared;\n", encoding="utf-8")
+                h2._MODULE_TABLES.clear()
+                self.assertEqual([p[:len("R-O: src/lib.rs: cannot evaluate cfg")] for p in self.problems()],
+                                 ["R-O: src/lib.rs: cannot evaluate cfg"])
+
+    def test_active_modules_rustc_did_not_read_are_a_problem(self) -> None:
+        # an evaluator that calls a module active which rustc never read is wrong, so the gate says so
+        (self.root / "src/t.rs").write_text("")
+        self.mount("#[cfg(test)]\nmod t;\n")
+        self.BASE = ("src/lib.rs", "src/sp ace.rs", "src/한글.rs")
+        self.assertEqual(self.problems(), ["R-O: cfg evaluation puts src/a.rs in the lib build but rustc did not read it"])
 
     def test_invalid_dep_info_is_a_problem(self) -> None:
         depinfo = write_depinfo(self.root, "c0ffee", ["src/lib.rs", "src/a.rs"])
@@ -437,6 +530,18 @@ class DepInfo(unittest.TestCase):
                 problems = h2_depinfo.ro_problems(self.root, [artifact(self.root, "c0ffee")])
                 self.assertEqual([p[:len(f"R-O: root lib dep-info {depinfo}")] for p in problems],
                                  [f"R-O: root lib dep-info {depinfo}"])
+
+    def test_selecting_the_dep_info_fails_closed_on_every_python(self) -> None:
+        # Python 3.14's is_file() swallows OSError, so a chmod cannot reach this boundary there; raise at the call
+        depinfo, is_file, hits = write_depinfo(self.root, "c0ffee", self.BASE), Path.is_file, []
+        def failing(path: Path) -> bool:
+            if path == depinfo:
+                hits.append(path)
+                raise PermissionError(13, "Permission denied", str(path))
+            return is_file(path)
+        with mock.patch.object(Path, "is_file", failing):
+            problems = h2_depinfo.ro_problems(self.root, [artifact(self.root, "c0ffee")])
+        self.assertEqual((hits, problems), ([depinfo], [f"R-O: cannot read root lib dep-info: [Errno 13] Permission denied: '{depinfo}'"]))
 
     def test_dep_info_is_matched_by_the_root_lib_hash(self) -> None:
         decoy = write_depinfo(self.root, "deadbeef", ["src/lib.rs", "src/b.rs"])
@@ -567,6 +672,16 @@ class ZeroRules(unittest.TestCase):
         host = {"src/services/session_host.rs": 'macro_rules! mount { ($attr:meta) => { #[$attr] mod escape; }; }\n'
                                                 'mount!(path = "../outside_owner.rs");\n'}
         self.assertEqual(self.rules(host, roster=frozenset(host)), ["R-O", "R-O"])
+
+
+    def test_owner_macros_inside_attributes_are_not_code(self) -> None:
+        # a doc attribute's value macro is attribute input, not an item-level macro of the owner file
+        host = {"src/services/session_host.rs": '#![doc = include_str!("../../README.md")]\n'
+                                                '#[doc = concat!("x", "y")]\npub fn f() {}\n'
+                                                '#[doc = include_str!(\n    "../data.sql"\n)]\npub struct S;\n'}
+        self.assertEqual(self.rules(host, roster=frozenset(host)), [])
+        tail = {k: v + 'concat!("a", "b");\n' for k, v in host.items()}
+        self.assertEqual(self.rules(tail, roster=frozenset(tail)), ["R-O"])
 
 ESCAPE = {"src/services/platform/tmux.rs": '#[path = "pty_escape.rs"]\npub(crate) mod escape;\npub fn has_session() {}\n'}
 
