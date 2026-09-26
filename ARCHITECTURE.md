@@ -841,7 +841,9 @@ src/
 │   │   │   │   ├── reader.rs
 │   │   │   │   ├── reader_tests.rs
 │   │   │   │   ├── schema.rs
-│   │   │   │   └── state.rs
+│   │   │   │   ├── state.rs
+│   │   │   │   ├── validation.rs
+│   │   │   │   └── validation_tests.rs
 │   │   │   ├── manual_delivery/
 │   │   │   │   ├── headless_nonce.rs
 │   │   │   │   └── production_nonce_tests.rs
