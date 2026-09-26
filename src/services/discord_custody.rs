@@ -2,6 +2,7 @@
 //! source, printed by `adk custody status`. Transcripts are assumed to be append-only.
 
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -29,27 +30,21 @@ pub(crate) struct Observation {
     pub(crate) g_prefix_sha: Option<String>,
 }
 
-/// `intent.json`, written before an attempt copies anything.
+/// `intent.json` (written before a copy) and `outcome.json` (after it, published or not).
 #[derive(Deserialize)]
-struct Intent {
-    sources: Vec<IntentSource>,
+struct Records<T> {
+    sources: Vec<T>,
 }
 
 #[derive(Deserialize)]
-struct IntentSource {
+struct Intent {
     source: String,
     required_from: u64,
     pre: Option<Observation>,
 }
 
-/// `outcome.json`, written after an attempt, also when no manifest is published.
 #[derive(Deserialize)]
 struct Outcome {
-    sources: Vec<OutcomeSource>,
-}
-
-#[derive(Deserialize)]
-struct OutcomeSource {
     source: String,
     result: String,
     post: Option<Observation>,
@@ -57,6 +52,9 @@ struct OutcomeSource {
     from: u64,
     to: u64,
 }
+
+/// A copy of source bytes `[from, to)` and where it is.
+type Copy = Option<(u64, u64, PathBuf)>;
 
 /// One transcript source's obligation and what the ledger and the source show now.
 #[derive(Debug, Default)]
@@ -91,34 +89,30 @@ impl EpisodeStatus {
     }
 }
 
+fn name(path: &Path) -> String {
+    let name = path.file_name().unwrap_or_default();
+    name.to_string_lossy().into_owned()
+}
+
 /// Folds every episode of one provider's custody directory; an unlistable directory is an error.
 pub(crate) fn provider_status(dir: &Path) -> Result<Vec<EpisodeStatus>, String> {
     let entries = fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
     let mut dirs: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+    dirs.retain(|dir| dir.is_dir());
     dirs.sort();
-    Ok(dirs
-        .iter()
-        .filter(|dir| dir.is_dir())
-        .map(|dir| episode_status(dir))
-        .collect())
+    Ok(dirs.iter().map(|dir| episode_status(dir)).collect())
 }
 
 fn episode_status(dir: &Path) -> EpisodeStatus {
-    let id = dir
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned());
-    let mut episode = EpisodeStatus {
-        id: id.unwrap_or_default(),
-        ..Default::default()
-    };
-    let marker = fs::read(dir.join("episode.json")).ok();
-    match marker.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()) {
-        Some(marker) => episode.channel_id = marker["episode"]["channel_id"].as_u64(),
-        None => _ = episode.flags.insert("inventory_unresolved"),
+    let mut episode = EpisodeStatus::default();
+    episode.id = name(dir);
+    match ledger_file::<Value>(&dir.join("episode.json")) {
+        Some(Ok(marker)) => episode.channel_id = marker["episode"]["channel_id"].as_u64(),
+        _ => _ = episode.flags.insert("inventory_unresolved"),
     }
-    let revisions = match revisions(dir) {
-        Ok(revisions) => revisions,
-        Err(_) => return flagged(episode, "unreadable_episode"),
+    let Ok(revisions) = revisions(dir) else {
+        episode.flags.insert("unreadable_episode");
+        return episode;
     };
     if revisions.is_empty() {
         episode.flags.insert("inventory_unresolved");
@@ -130,14 +124,7 @@ fn episode_status(dir: &Path) -> EpisodeStatus {
     if !failed_bytes.is_empty() {
         episode.flags.insert("bytes_copy_failed");
     }
-    for status in &mut episode.sources {
-        judge_now(status);
-    }
-    episode
-}
-
-fn flagged(mut episode: EpisodeStatus, flag: &'static str) -> EpisodeStatus {
-    episode.flags.insert(flag);
+    episode.sources.iter_mut().for_each(judge_now);
     episode
 }
 
@@ -145,33 +132,28 @@ fn revisions(dir: &Path) -> std::io::Result<Vec<String>> {
     let mut revisions = Vec::new();
     for entry in fs::read_dir(dir)? {
         let name = entry?.file_name().to_string_lossy().into_owned();
-        let index = name
-            .strip_prefix("rev-")
-            .and_then(|index| index.parse::<u32>().ok());
-        revisions.extend(index.map(|index| (index, name)));
+        let index = name.strip_prefix("rev-").map(str::parse::<u32>);
+        revisions.extend(index.and_then(Result::ok).map(|index| (index, name)));
     }
     revisions.sort();
     Ok(revisions.into_iter().map(|(_, name)| name).collect())
 }
 
 /// Reads one optional ledger file: `None` when absent, `Some(Err)` when present but unusable.
-fn ledger_file<T: serde::de::DeserializeOwned>(path: &Path) -> Option<Result<T, ()>> {
-    match fs::read(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        bytes => Some(
-            bytes
-                .ok()
-                .and_then(|b| serde_json::from_slice(&b).ok())
-                .ok_or(()),
-        ),
+fn ledger_file<T: DeserializeOwned>(path: &Path) -> Option<Result<T, ()>> {
+    let bytes = fs::read(path);
+    if matches!(&bytes, Err(error) if error.kind() == std::io::ErrorKind::NotFound) {
+        return None;
     }
+    let parsed = bytes.ok().and_then(|b| serde_json::from_slice(&b).ok());
+    Some(parsed.ok_or(()))
 }
 
 /// Applies one revision in ledger order: intent, then the published manifest, then the outcome.
 fn fold_revision(ep: &mut EpisodeStatus, failed: &mut BTreeSet<String>, dir: &Path, rev: &str) {
-    let intent = ledger_file::<Intent>(&dir.join("intent.json"));
+    let intent = ledger_file::<Records<Intent>>(&dir.join("intent.json"));
     let manifest = ledger_file::<Value>(&dir.join("manifest.json"));
-    let outcome = ledger_file::<Outcome>(&dir.join("outcome.json"));
+    let outcome = ledger_file::<Records<Outcome>>(&dir.join("outcome.json"));
     if intent.is_none() && manifest.is_none() {
         ep.flags.insert("inventory_unresolved");
     }
@@ -197,66 +179,43 @@ fn fold_revision(ep: &mut EpisodeStatus, failed: &mut BTreeSet<String>, dir: &Pa
             continue;
         }
         let status = source_mut(ep, source);
-        let observed = serde_json::from_value::<Observation>(entry.clone()).ok();
-        status.see(
-            entry["offset"].as_u64(),
-            observed.as_ref(),
-            entry["source_changed"] == true,
-        );
-        let copy = entry["copy"]
-            .as_str()
-            .map(|copy| (&entry["from"], &entry["to"], copy));
-        let copy = copy.and_then(|(from, to, copy)| Some((from.as_u64()?, to.as_u64()?, copy)));
-        status.done(
-            rev,
-            entry["error"].as_str().unwrap_or("ok"),
-            None,
-            copy,
-            dir,
-        );
+        let seen = serde_json::from_value::<Observation>(entry.clone()).ok();
+        let changed = entry["source_changed"] == true;
+        status.see(entry["offset"].as_u64(), seen.as_ref(), changed);
+        let (from, to, copy) = (entry["from"].as_u64(), entry["to"].as_u64(), &entry["copy"]);
+        let copy = copy.as_str().and_then(|c| Some((from?, to?, dir.join(c))));
+        status.done(rev, entry["error"].as_str().unwrap_or("ok"), None, copy);
     }
     match outcome {
-        Some(Ok(outcome)) => outcome.sources.iter().for_each(|source| {
-            let copy = source.copy.as_deref().filter(|_| source.result == "ok");
-            let copy = copy.map(|copy| (source.from, source.to, copy));
-            source_mut(ep, &source.source).done(
-                rev,
-                &source.result,
-                source.post.as_ref(),
-                copy,
-                dir,
-            )
-        }),
-        Some(Err(())) => _ = ep.flags.insert("history_unresolved"),
+        Some(Ok(outcome)) => {
+            for source in outcome.sources {
+                let copy = source.copy.filter(|_| source.result == "ok");
+                let copy = copy.map(|copy| (source.from, source.to, dir.join(copy)));
+                let status = source_mut(ep, &source.source);
+                status.done(rev, &source.result, source.post.as_ref(), copy);
+            }
+        }
+        // Without outcomes the last attempts, and so the fairness order, are unknown.
+        Some(Err(())) => ep.flags.extend(["history_unresolved", "fairness_lost"]),
         None => {}
     }
 }
 
 fn source_mut<'a>(episode: &'a mut EpisodeStatus, source: &str) -> &'a mut SourceStatus {
-    let index = episode
-        .sources
-        .iter()
-        .position(|status| status.source == source);
-    let index = index.unwrap_or_else(|| {
-        let status = SourceStatus {
-            source: source.to_string(),
-            ..Default::default()
-        };
+    let found = episode.sources.iter().position(|s| s.source == source);
+    let index = found.unwrap_or(episode.sources.len());
+    if index == episode.sources.len() {
+        let mut status = SourceStatus::default();
+        status.source = source.to_string();
         episode.sources.push(status);
-        episode.sources.len() - 1
-    });
+    }
     &mut episode.sources[index]
 }
 
 impl SourceStatus {
     /// Adds a requirement and an observation; any evidence against append-only growth of the
     /// first observed generation is sticky.
-    fn see(
-        &mut self,
-        required_from: Option<u64>,
-        seen: Option<&Observation>,
-        legacy_changed: bool,
-    ) {
+    fn see(&mut self, required_from: Option<u64>, seen: Option<&Observation>, changed: bool) {
         if let Some(from) = required_from {
             self.required_from = Some(self.required_from.map_or(from, |min| min.min(from)));
         }
@@ -274,32 +233,26 @@ impl SourceStatus {
             }
         };
         let moved = (seen.dev, seen.ino) != (generation.dev, generation.ino);
-        if legacy_changed || moved || seen.size < self.max_eof || !prefix_kept {
+        if changed || moved || seen.size < self.max_eof || !prefix_kept {
             self.flags.insert(CHANGED);
         }
         self.max_eof = self.max_eof.max(seen.size);
     }
 
     /// Records an attempt's result; its copy counts only when it has the claimed length and no
-    /// change was seen up to and including this attempt.
-    fn done(
-        &mut self,
-        rev: &str,
-        result: &str,
-        post: Option<&Observation>,
-        copy: Option<(u64, u64, &str)>,
-        dir: &Path,
-    ) {
+    /// change was seen up to and including this attempt. A failed post-copy check is a change.
+    fn done(&mut self, rev: &str, result: &str, post: Option<&Observation>, copy: Copy) {
+        if result == "verify_failed" {
+            self.flags.insert(CHANGED);
+        }
         if post.is_some() {
             self.see(None, post, false);
         }
         self.last_attempt = Some(format!("{rev}: {result}"));
-        let Some((from, to, name)) = copy.filter(|_| !self.flags.contains(CHANGED)) else {
+        let Some((from, to, path)) = copy.filter(|_| !self.flags.contains(CHANGED)) else {
             return;
         };
-        let path = dir.join(name);
-        let held = fs::metadata(&path).is_ok_and(|meta| Some(meta.len()) == to.checked_sub(from));
-        if held {
+        if fs::metadata(&path).is_ok_and(|meta| Some(meta.len()) == to.checked_sub(from)) {
             self.max_eof = self.max_eof.max(to);
             self.copies.push((from, to, path));
         }
@@ -309,23 +262,13 @@ impl SourceStatus {
 /// Opens the source once and judges it against the first observed generation: head prefix,
 /// size and the last preserved `JOIN_WINDOW`; interior bytes are not re-read.
 fn judge_now(status: &mut SourceStatus) {
-    status.preserved = union(
-        status
-            .copies
-            .iter()
-            .map(|(from, to, _)| (*from, *to))
-            .collect(),
-    );
-    let generation = status.generation.clone();
-    let seen = match generation
-        .as_ref()
-        .filter(|_| !status.flags.contains(CHANGED))
-    {
-        Some(generation) => observe(status, generation),
-        None => Ok(None),
-    };
-    let eof = seen.as_ref().ok().copied().flatten();
-    let end = status.max_eof.max(eof.unwrap_or(0));
+    let ranges = status.copies.iter().map(|copy| (copy.0, copy.1));
+    status.preserved = union(ranges.collect());
+    let (generation, changed) = (status.generation.clone(), status.flags.contains(CHANGED));
+    let live = generation.as_ref().filter(|_| !changed);
+    let seen = live.map_or(Ok(None), |generation| observe(status, generation));
+    let now = seen.as_ref().ok().copied().flatten();
+    let end = status.max_eof.max(now.unwrap_or(0));
     let required_from = status.required_from.unwrap_or(end);
     if generation.is_some() && required_from > end {
         status.flags.insert("required_past_eof");
@@ -344,11 +287,12 @@ fn judge_now(status: &mut SourceStatus) {
 
 /// `Ok(Some(size))` when the source still extends the generation append-only.
 fn observe(status: &mut SourceStatus, generation: &Observation) -> Result<Option<u64>, String> {
-    let mut file = fs::File::open(&status.source).map_err(|error| error.kind().to_string())?;
-    let meta = file.metadata().map_err(|error| error.kind().to_string())?;
+    let kind = |error: std::io::Error| error.kind().to_string();
+    let mut file = fs::File::open(&status.source).map_err(kind)?;
+    let meta = file.metadata().map_err(kind)?;
     let mut head = Vec::new();
-    let head_read = (&mut file).take(generation.head_len).read_to_end(&mut head);
-    head_read.map_err(|error| error.kind().to_string())?;
+    let read = (&mut file).take(generation.head_len).read_to_end(&mut head);
+    read.map_err(kind)?;
     status.verify_read += head.len() as u64;
     let kept = identity(&meta) == (generation.dev, generation.ino)
         && meta.len() >= status.max_eof
@@ -415,27 +359,18 @@ pub(crate) fn status_report(
     provider: Option<&str>,
     episode: Option<&str>,
 ) -> Result<String, String> {
+    let listed = || fs::read_dir(root).map_err(|error| format!("{}: {error}", root.display()));
     let mut providers: Vec<PathBuf> = match provider {
         Some(provider) => vec![root.join(provider)],
-        None => fs::read_dir(root)
-            .map_err(|e| format!("{}: {e}", root.display()))?
-            .flatten()
-            .map(|entry| entry.path())
-            .collect(),
+        None => listed()?.flatten().map(|entry| entry.path()).collect(),
     };
     providers.sort();
     let mut out = String::new();
     for dir in providers {
-        let name = dir
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        for status in provider_status(&dir)?
-            .iter()
-            .filter(|s| episode.is_none_or(|e| s.id == e))
-        {
-            render(&mut out, &name, status);
+        let episodes = provider_status(&dir)?;
+        let wanted = |status: &&EpisodeStatus| episode.is_none_or(|id| status.id == id);
+        for status in episodes.iter().filter(wanted) {
+            render(&mut out, &name(&dir), status);
         }
     }
     Ok(out)
@@ -443,25 +378,23 @@ pub(crate) fn status_report(
 
 fn render(out: &mut String, provider: &str, ep: &EpisodeStatus) {
     use std::fmt::Write;
-    let verdict = if ep.complete() {
-        "complete_to_eof"
-    } else {
-        "incomplete"
-    };
+    let verdict = ["incomplete", "complete_to_eof"][usize::from(ep.complete())];
+    let (id, flags) = (&ep.id, &ep.flags);
     let channel = ep.channel_id.map_or("?".into(), |id| id.to_string());
-    let _ = writeln!(
-        out,
-        "{provider}/{} channel={channel} {verdict} flags={:?}",
-        ep.id, ep.flags
-    );
+    let _ = writeln!(out, "{provider}/{id} channel={channel} {verdict} {flags:?}");
     for s in &ep.sources {
-        let _ = writeln!(
-            out,
-            "  {} required_from={:?} preserved={:?} missing={:?} flags={:?}",
-            s.source, s.required_from, s.preserved, s.missing, s.flags
-        );
+        let (from, preserved, missing) = (s.required_from, &s.preserved, &s.missing);
+        let _ = writeln!(out, "  {} required_from={from:?}", s.source);
+        let _ = writeln!(out, "    preserved={preserved:?} missing={missing:?}");
+        // The file at the path now, which an unresolved obligation no longer follows.
+        let now = match fs::metadata(&s.source) {
+            Ok(meta) => format!("(dev, ino)={:?} size={}", identity(&meta), meta.len()),
+            Err(error) => error.kind().to_string(),
+        };
+        let (flags, current) = (&s.flags, &s.current);
         let last = s.last_attempt.as_deref().unwrap_or("none");
-        let _ = writeln!(out, "    current: {}\n    last_attempt: {last}", s.current);
+        let _ = writeln!(out, "    flags={flags:?} current: {current}");
+        let _ = writeln!(out, "    now: {now}\n    last_attempt: {last}");
         let _ = writeln!(out, "    internal: unverified (append-only assumed)");
     }
 }

@@ -32,16 +32,12 @@ impl Fx {
 
     /// The source as a copier observes it now.
     fn seen(&self) -> Value {
-        let (bytes, meta) = (
-            fs::read(self.source()).unwrap(),
-            fs::metadata(self.source()),
-        );
+        let bytes = fs::read(self.source()).unwrap();
+        let (dev, ino) = identity(&fs::metadata(self.source()).unwrap());
         let head = &bytes[..bytes.len().min(64 << 10)];
-        let ((dev, ino), sha) = (
-            identity(&meta.unwrap()),
-            format!("{:x}", Sha256::digest(head)),
-        );
-        json!({ "dev": dev, "ino": ino, "size": bytes.len(), "head_len": head.len(), "head_sha256": sha })
+        let sha = format!("{:x}", Sha256::digest(head));
+        json!({ "dev": dev, "ino": ino, "size": bytes.len(), "head_len": head.len(),
+            "head_sha256": sha })
     }
 
     fn write(&self, rev: u32, file: &str, content: &[u8]) {
@@ -50,21 +46,23 @@ impl Fx {
         fs::write(dir.join(file), content).unwrap();
     }
 
+    /// Writes `{"sources": [record]}` for this source, as intent and outcome files hold it.
+    fn record(&self, rev: u32, file: &str, mut record: Value) {
+        record["source"] = json!(self.source());
+        let records = json!({ "sources": [record] }).to_string();
+        self.write(rev, file, records.as_bytes());
+    }
+
     /// A one-entry manifest shaped like the boot copier's, with `patch` over a plain attempt.
     fn legacy(&self, rev: u32, offset: u64, patch: Value) {
         let mut entry = self.seen();
-        entry["kind"] = json!("transcript");
-        (entry["source"], entry["offset"]) = (json!(self.source()), json!(offset));
-        patch
-            .as_object()
-            .unwrap()
-            .iter()
-            .for_each(|(k, v)| entry[k] = v.clone());
-        self.write(
-            rev,
-            "manifest.json",
-            json!({ "entries": [entry] }).to_string().as_bytes(),
-        );
+        (entry["kind"], entry["offset"]) = (json!("transcript"), json!(offset));
+        entry["source"] = json!(self.source());
+        for (key, value) in patch.as_object().unwrap() {
+            entry[key] = value.clone();
+        }
+        let manifest = json!({ "entries": [entry] }).to_string();
+        self.write(rev, "manifest.json", manifest.as_bytes());
     }
 
     /// A successful copy of source bytes `[from, to)` for a turn starting at `offset`.
@@ -105,7 +103,7 @@ type Want = (
 // it, and none of them reads as complete: change evidence, unresolved ledger, gap, bad range.
 #[test]
 fn ledger_shapes_fold_to_their_obligation_state() {
-    let rows: [(&str, fn(&Fx), Want); 9] = [
+    let rows: [(&str, fn(&Fx), Want); 11] = [
         (
             "shrink evidence is sticky",
             |fx| {
@@ -113,6 +111,19 @@ fn ledger_shapes_fold_to_their_obligation_state() {
                 fx.legacy(1, 0, json!({ "size": 20, "source_changed": true }));
             },
             (&[], &[CHANGED], CHANGED, &[]),
+        ),
+        (
+            "a failed post-copy check is a change and its copy is not held",
+            |fx| {
+                (fx.held(0, 0, (0, 20)), fx.write(1, "c", &BYTES[20..]));
+                let mut failed =
+                    json!({ "result": "verify_failed", "copy": "c", "from": 20, "to": 28 });
+                failed["post"] = fx.seen();
+                fx.record(1, "outcome.json", failed);
+                let intent = json!({ "required_from": 0, "pre": fx.seen() });
+                fx.record(1, "intent.json", intent);
+            },
+            (&[], &[CHANGED], CHANGED, &[(20, 28)]),
         ),
         (
             "copied after an identity-less failure",
@@ -141,8 +152,18 @@ fn ledger_shapes_fold_to_their_obligation_state() {
             (&[HISTORY], &[], "", &[]),
         ),
         (
+            "outcome not JSON",
+            |fx| {
+                fx.held(0, 0, (0, 28));
+                fx.write(0, "outcome.json", b"{torn");
+            },
+            (&[HISTORY, "fairness_lost"], &[], "complete_to_eof", &[]),
+        ),
+        (
             "entries not a list",
-            |fx| fx.write(0, "manifest.json", b"{\"entries\":5}"),
+            |fx| {
+                fx.write(0, "manifest.json", b"{\"entries\":5}");
+            },
             (&[HISTORY], &[], "", &[]),
         ),
         (
@@ -156,16 +177,16 @@ fn ledger_shapes_fold_to_their_obligation_state() {
         ),
         (
             "requirement past EOF",
-            |fx| fx.legacy(0, 50, json!({ "error": "turn start is past EOF" })),
+            |fx| {
+                fx.legacy(0, 50, json!({ "error": "turn start is past EOF" }));
+            },
             (&[], &["required_past_eof"], "complete_to_eof", &[]),
         ),
         (
             "copy cap from the first missing byte",
             |fx| {
-                (
-                    fx.held(0, 0, (0, 10)),
-                    truncate(&fx.source(), (64 << 20) + 11),
-                );
+                fx.held(0, 0, (0, 10));
+                truncate(&fx.source(), (64 << 20) + 11);
             },
             (&[], &[], "over_cap from 10", &[(10, (64 << 20) + 11)]),
         ),
@@ -177,14 +198,12 @@ fn ledger_shapes_fold_to_their_obligation_state() {
         assert!(!status.complete(), "{name}: {status:?}");
         assert_eq!(status.flags, set(episode), "{name}");
         let Some(got) = status.sources.first() else {
-            return assert!(current.is_empty(), "{name}: {status:?}");
+            assert!(current.is_empty(), "{name}: {status:?}");
+            continue;
         };
         let want = (set(flags), current, missing.to_vec());
-        assert_eq!(
-            (got.flags.clone(), got.current.as_str(), got.missing.clone()),
-            want,
-            "{name}"
-        );
+        let got = (got.flags.clone(), got.current.as_str(), got.missing.clone());
+        assert_eq!(got, want, "{name}");
     }
 }
 
@@ -194,22 +213,13 @@ fn ledger_shapes_fold_to_their_obligation_state() {
 #[test]
 fn attempt_records_keep_their_observations_across_a_reload() {
     let fx = Fx::new(BYTES);
-    let (mut pre, source) = (fx.seen(), fx.source());
+    let mut pre = fx.seen();
     pre["size"] = json!(20);
-    let intent = |from: u64, pre: Value| json!({ "sources": [{ "source": source, "required_from": from, "pre": pre }] });
-    fx.write(0, "intent.json", intent(4, pre).to_string().as_bytes());
+    fx.record(0, "intent.json", json!({ "required_from": 4, "pre": pre }));
     fx.write(0, "c", &BYTES[4..20]);
-    let ok = json!({ "source": fx.source(), "result": "ok", "post": fx.seen(), "copy": "c", "from": 4, "to": 20 });
-    fx.write(
-        0,
-        "outcome.json",
-        json!({ "sources": [ok] }).to_string().as_bytes(),
-    );
-    fx.write(
-        1,
-        "intent.json",
-        intent(2, Value::Null).to_string().as_bytes(),
-    );
+    let ok = json!({ "result": "ok", "post": fx.seen(), "copy": "c", "from": 4, "to": 20 });
+    fx.record(0, "outcome.json", ok);
+    fx.record(1, "intent.json", json!({ "required_from": 2, "pre": null }));
     let source = fx.status().sources.remove(0);
     assert_eq!(
         (source.max_eof, source.missing),
@@ -220,13 +230,8 @@ fn attempt_records_keep_their_observations_across_a_reload() {
         "rev-0001: incomplete (no outcome)"
     );
 
-    let deferred =
-        json!({ "source": fx.source(), "result": "deferred_budget", "from": 2, "to": 28 });
-    fx.write(
-        1,
-        "outcome.json",
-        json!({ "sources": [deferred] }).to_string().as_bytes(),
-    );
+    let deferred = json!({ "result": "deferred_budget", "from": 2, "to": 28 });
+    fx.record(1, "outcome.json", deferred);
     let source = fx.status().sources.remove(0);
     assert_eq!(source.current, "missing readable from 2");
     assert_eq!(source.last_attempt.unwrap(), "rev-0001: deferred_budget");
@@ -259,8 +264,8 @@ fn current_reads_only_the_head_and_the_last_preserved_window() {
     }
 }
 
-// Contract: the status report shows the current state apart from the last attempt and leaves
-// every custody file as it found it.
+// Contract: the status report shows the current state apart from the last attempt, names the
+// file now at the source path, and leaves every custody file as it found it.
 #[test]
 fn the_status_report_separates_current_from_last_attempt_and_writes_nothing() {
     let fx = Fx::new(BYTES);
@@ -268,14 +273,14 @@ fn the_status_report_separates_current_from_last_attempt_and_writes_nothing() {
     fx.legacy(1, 4, json!({ "error": "boot copy budget exhausted" }));
     let before = tree(&fx.custody());
     let report = status_report(&fx.custody(), Some("claude"), None).unwrap();
-    assert!(
-        report.contains("current: missing readable from 12"),
-        "{report}"
-    );
-    assert!(
-        report.contains("last_attempt: rev-0001: boot copy budget exhausted"),
-        "{report}"
-    );
+    let (dev, ino) = identity(&fs::metadata(fx.source()).unwrap());
+    for line in [
+        "current: missing readable from 12".to_string(),
+        "last_attempt: rev-0001: boot copy budget exhausted".to_string(),
+        format!("now: (dev, ino)=({dev}, {ino}) size=28"),
+    ] {
+        assert!(report.contains(&line), "{report}");
+    }
     assert_eq!(tree(&fx.custody()), before);
 }
 
