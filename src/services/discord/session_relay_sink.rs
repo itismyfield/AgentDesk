@@ -1476,4 +1476,4 @@ fn delivery_lease_key_for_frame(
 #[cfg(test)]
 mod delivery_orchestration_tests;
 #[cfg(test)]
-mod tests;
+pub(in crate::services::discord) mod tests;

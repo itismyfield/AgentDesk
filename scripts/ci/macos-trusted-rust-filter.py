@@ -38,14 +38,15 @@ RUST_INPUTS = (
     "routines/**",
     # ci-pr.yml's relay_contract filter compiles against this doc.
     "docs/relay-state-contract.md",
-    # Executed by Rust tests (current_message_anchor, rowless_receipt_tests).
-    "scripts/relay_authority_rollout_report.py",
     # Invoked by the macOS jobs' own steps.
     "scripts/ci-timeout.py",
     "scripts/ci-macos-fresh-user-smoke.sh",
     "scripts/operator-init-portable.py",
     ".github/workflows/ci-macos-trusted.yml",
     "scripts/ci/macos-trusted-rust-filter.py",
+    # H2 tmux-boundary ratchet: lint config, measurer, admissions and baselines.
+    "clippy.toml",
+    "scripts/ci/h2_*",
 )
 
 

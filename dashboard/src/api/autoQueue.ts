@@ -4,7 +4,7 @@ export interface AutoQueueRun {
   id: string;
   repo: string | null;
   agent_id: string | null;
-  status: "generated" | "pending" | "active" | "paused" | "completed" | "cancelled";
+  status: "generated" | "pending" | "active" | "paused" | "restoring" | "completed" | "cancelled";
   ai_model: string | null;
   ai_rationale: string | null;
   timeout_minutes: number;
@@ -40,6 +40,8 @@ export interface DispatchQueueEntry {
   retry_count?: number;
   thread_group?: number;
   batch_phase?: number;
+  /** Catalog id of the gate that follows this entry's batch_phase (server defaults it to `pr-confirm`). */
+  phase_gate_kind?: string;
   thread_links?: AutoQueueThreadLink[];
   card_status?: string;
   review_round?: number;
@@ -259,10 +261,11 @@ export async function reorderAutoQueueEntries(
   });
 }
 
+/** `runId` pins every server write; `repo`/`agentId` only narrow it. */
 export interface AutoQueueResetScope {
-  runId?: string | null;
+  runId: string;
   repo?: string | null;
-  agentId: string;
+  agentId?: string | null;
 }
 
 export async function resetAutoQueue(
@@ -271,9 +274,9 @@ export async function resetAutoQueue(
   return request("/api/queue/reset", {
     method: "POST",
     body: JSON.stringify({
-      run_id: scope.runId ?? undefined,
+      run_id: scope.runId,
       repo: scope.repo ?? undefined,
-      agent_id: scope.agentId,
+      agent_id: scope.agentId ?? undefined,
     }),
   });
 }

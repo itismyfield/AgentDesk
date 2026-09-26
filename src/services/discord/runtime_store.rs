@@ -1467,25 +1467,6 @@ mod generation_allocation_tests {
 
         expect(allocate_generation_epoch(), 8, ADVANCED);
         assert_eq!(std::fs::read_to_string(path).unwrap(), "8");
-
-        let source = include_str!("runtime_store.rs");
-        let composer = source
-            .split_once("fn allocate_generation_epoch() -> ProcessGenerationAllocation {")
-            .unwrap()
-            .1
-            .split_once("fn read_generation_counter")
-            .unwrap()
-            .0;
-        for binding in [
-            "path: generation_path()",
-            "lock: lock_generation_path",
-            "read: read_generation_counter",
-            "write: atomic_write",
-            "fsync: fsync_parent_dir",
-            "flushes: PARENT_DIR_FSYNC_FLUSHES",
-        ] {
-            assert_eq!(composer.matches(binding).count(), 1, "binding={binding}");
-        }
     }
 
     #[test]

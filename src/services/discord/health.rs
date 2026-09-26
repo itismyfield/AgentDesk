@@ -53,6 +53,7 @@ mod stall_verdict;
 mod transcript_binding_stall;
 mod unpaired_active_token;
 mod watcher_respawn;
+pub(in crate::services::discord) use watcher_respawn::reclaim_watcherless_session_bound_relay;
 
 // `HeadlessAgentTurnReservation` has no external referent today (callers
 // destructure the reserve/start tuple); kept re-exported for the reserve→start

@@ -670,7 +670,7 @@ mod yaml_write_back_secret_tests {
         fs::write(
             &path,
             format!(
-                "{FIXTURE}runtime:\n  relay_authority_cohort_percent: 25\n  \
+                "{FIXTURE}runtime:\n  delivery_journal_cohort_percent: 25\n  \
 relay_authority_dial_from_a_newer_binary: enforce\n"
             ),
         )
@@ -684,7 +684,7 @@ relay_authority_dial_from_a_newer_binary: enforce\n"
         let document: serde_yaml::Value =
             serde_yaml::from_str(&rendered).expect("the written yaml parses");
         assert_eq!(
-            document["runtime"]["relay_authority_cohort_percent"].as_u64(),
+            document["runtime"]["delivery_journal_cohort_percent"].as_u64(),
             Some(25),
             "the fixture's MODELLED runtime key must survive, which is what puts \
              this test in the nested regime at all, got:\n{rendered}"

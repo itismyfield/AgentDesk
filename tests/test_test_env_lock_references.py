@@ -194,10 +194,9 @@ class FileReferencePolicy(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'canonical mutex'):
             canonical_owners(sources)
 
-    def test_ci_wiring_runs_checker_and_tests(self):
+    def test_ci_wiring_runs_checker(self):
         source = (Path(__file__).resolve().parents[1] / 'scripts/ci-script-checks.sh').read_text()
         self.assertIn('"$PYTHON" scripts/check_test_env_lock_references.py\n', source)
-        self.assertIn('"$PYTHON" -m unittest tests.test_test_env_lock_references\n', source)
 
 
 if __name__ == '__main__':

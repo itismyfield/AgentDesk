@@ -2022,19 +2022,6 @@ class RuntimePgProbeTests(unittest.TestCase):
         self.assertEqual(verdict.state, PG_UNKNOWN)
         self.assertEqual(len(calls), 1)
 
-    def test_dcserver_alert_stamp_is_read_fail_open(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            rt = Runtime(
-                Config(channels=(TICK_CHANNEL,), pg_realert_secs=900), Path(tmp)
-            )
-            rt.dcserver_pg_alert_state.parent.mkdir(parents=True)
-            rt.dcserver_pg_alert_state.write_text("1000", encoding="utf-8")
-            self.assertTrue(rt.recent_dcserver_pg_alert(1899))
-            self.assertFalse(rt.recent_dcserver_pg_alert(1900))
-            self.assertFalse(rt.recent_dcserver_pg_alert(999))
-            rt.dcserver_pg_alert_state.write_text("rolled-back", encoding="utf-8")
-            self.assertFalse(rt.recent_dcserver_pg_alert(1001))
-
 
 class RuntimeCoverageProbeTests(unittest.TestCase):
     def make_rt(self) -> Runtime:
@@ -2287,7 +2274,6 @@ class FakePgRuntime(Runtime):
         )
         super().__init__(cfg, Path(self._tmp.name))
         self.verdict = verdict
-        self.dcserver_recent = False
         self.alert_ok = True
         self.alerts: list[tuple[str, bool]] = []
         self.log_lines: list[str] = []
@@ -2297,9 +2283,6 @@ class FakePgRuntime(Runtime):
 
     def pg_health(self):
         return self.verdict
-
-    def recent_dcserver_pg_alert(self, now: float) -> bool:
-        return self.dcserver_recent
 
     def dcserver_snapshot(self) -> str:
         return "stub-pg-snapshot"
@@ -2389,16 +2372,21 @@ class TickPgTunnelTests(unittest.TestCase):
         self.assertFalse(trigger_turn)
         self.assertEqual(state[PG_STATE_KEY], {"last_alert": self.NOW - 60})
 
-    def test_recent_dcserver_alert_defers_exactly_one_tick(self):
+    def write_legacy_dcserver_alert_stamp(self, rt: FakePgRuntime) -> None:
+        # #5993: dcserver no longer sends a Discord DB-down alert, so a stamp
+        # left behind by an older build must not hold the watchdog back.
+        stamp = rt.root / "logs/dcserver-pg-alert.state"
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(str(int(self.NOW) - 10), encoding="utf-8")
+
+    def test_legacy_dcserver_alert_stamp_does_not_defer_pg_alert(self):
         rt = self.make_rt(evaluate_pg_health(False, False))
-        rt.dcserver_recent = True
+        self.write_legacy_dcserver_alert_stamp(rt)
         state = {PG_STATE_KEY: {"unhealthy_since": self.NOW - 300}}
         tick_pg_tunnel(rt, state, self.NOW)
-        self.assertEqual(rt.alerts, [])
-        self.assertTrue(state[PG_STATE_KEY]["dedup_deferred"])
-        tick_pg_tunnel(rt, state, self.NOW + rt.cfg.poll_secs)
-        self.assertEqual(len(rt.alerts), 1)
-        self.assertIn("1 tick 보류", rt.alerts[0][0])
+        self.assertEqual(len(rt.alerts), 1, "first tick past threshold alerts")
+        self.assertNotIn("1 tick 보류", rt.alerts[0][0])
+        self.assertTrue(state[PG_STATE_KEY]["alerting"])
 
     def test_unknown_health_breaks_pending_timer_but_not_active_alert(self):
         rt = self.make_rt(evaluate_pg_health(None, False))
@@ -2557,29 +2545,20 @@ class TickRuntimeObservabilityTests(unittest.TestCase):
                     self.assertNotIn(forbidden, body)
                 self.assertEqual(state[PG_STATE_KEY], {}, "no PG verdict recorded")
 
-    def test_recent_dcserver_boot_alert_defers_exactly_one_tick(self):
-        """#4379 shares the 900s cadence: hold one tick, then say so."""
+    def test_legacy_dcserver_alert_stamp_does_not_defer_unobservable_alert(self):
+        """#5993: no dcserver boot alert to ride, so the first tick alerts."""
         rt = self.make_rt(evaluate_pg_health(None, None))
-        rt.dcserver_recent = True
+        stamp = rt.root / "logs/dcserver-pg-alert.state"
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(str(int(self.NOW) - 10), encoding="utf-8")
         state: dict = {RUNTIME_HEALTH_STATE_KEY: {"since": self.NOW - 300}}
         tick_pg_tunnel(rt, state, self.NOW)
         obs = state[RUNTIME_HEALTH_STATE_KEY]
-        self.assertEqual(rt.alerts, [], "must not double dcserver's boot alert")
-        self.assertTrue(obs["dedup_deferred"])
-        self.assertNotIn("last_alert", obs, "a deferral must not spend the cooldown")
-        self.assertEqual(state[PG_STATE_KEY], {}, "PG dedup keys stay untouched")
-
-        # The very next tick sends anyway: de-duplication can never be silence.
-        tick_pg_tunnel(rt, state, self.NOW + rt.cfg.poll_secs)
         self.assertEqual(len(rt.alerts), 1)
         self.assertIn("관측 불가", rt.alerts[0][0])
-        self.assertIn("1 tick 보류", rt.alerts[0][0])
-        self.assertNotIn("dedup_deferred", obs, "cleared once the alert landed")
-
-        # A re-alert after the cooldown is not a first alert: no second hold.
-        tick_pg_tunnel(rt, state, self.NOW + rt.cfg.poll_secs + rt.cfg.pg_realert_secs)
-        self.assertEqual(len(rt.alerts), 2)
-        self.assertNotIn("1 tick 보류", rt.alerts[1][0])
+        self.assertNotIn("1 tick 보류", rt.alerts[0][0])
+        self.assertEqual(obs["last_alert"], self.NOW)
+        self.assertEqual(state[PG_STATE_KEY], {}, "no PG verdict recorded")
 
     def test_recovery_notice_retries_until_it_is_delivered(self):
         """A dropped close leaves the incident open on the operator's screen."""
@@ -8952,15 +8931,8 @@ class AlertFallbackTests(unittest.TestCase):
 
 
 class DeploymentWiringTests(unittest.TestCase):
-    """#4372 lesson: a test that CI never runs is a graveyard, and a script the
-    deploy never ships evaporates (the 06-29 relay-gap-watch, the 07-09
-    prototype). Pin the wiring itself."""
-
-    def test_ci_script_checks_runs_this_suite(self):
-        script = (REPO_ROOT / "scripts" / "ci-script-checks.sh").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("tests.test_relay_watchdog", script)
+    """#4372 lesson: a script the deploy never ships evaporates (the 06-29
+    relay-gap-watch, the 07-09 prototype). Pin the wiring itself."""
 
     def test_main_loop_runs_independent_pg_tunnel_tick(self):
         script = (REPO_ROOT / "scripts/relay_watchdog.py").read_text(

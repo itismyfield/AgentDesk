@@ -13,7 +13,6 @@ title Auto-Queue Lifecycle — AgentDesk
 
 |#LightBlue|Rust (API / DB)|
 |#LightGreen|JS (Policy Engine)|
-|#LightYellow|GitHub / Git|
 
 ' ============================================================
 ' 1. QUEUE CREATION
@@ -229,57 +228,13 @@ else (yes)
 endif
 
 ' ============================================================
-' 6. AUTO-MERGE
+' 6. MERGE (PR + agent babysitting)
 ' ============================================================
 
 |JS (Policy Engine)|
-:onCardTerminal fires
-(merge-automation.js);
-
-if (merge_automation_enabled?) then (yes)
-
-  |JS (Policy Engine)|
-  :Load PR tracking for card
-  resolveTerminalMergeCandidate();
-
-  if (Tracked PR exists in 'merge' state?) then (yes)
-    :Check allowed author;
-    if (Allowed?) then (yes)
-      |GitHub / Git|
-      :enableAutoMerge()
-      gh pr merge --auto;
-    else (no)
-      :Skip auto-merge;
-    endif
-  else (no)
-    |JS (Policy Engine)|
-    :tryDirectMergeOrTrackPr();
-
-    |GitHub / Git|
-    :attemptDirectMerge()
-    cherry-pick commits onto main;
-
-    if (Cherry-pick succeeds?) then (yes)
-      :git push origin main
-      Track as "closed";
-    else (conflict)
-      :cherry-pick --abort
-      createOrLocateConflictPr();
-
-      :Track PR state = "wait-ci"
-      blocked_reason = "ci:waiting";
-
-      note right
-        OnTick5min later:
-        - processTrackedMergeQueue()
-        - detectConflictingPrs()
-           -> dispatch rebase
-        - cleanupMergedWorktrees()
-      end note
-    endif
-  endif
-else (no)
-endif
+:No policy merge. Review pass dispatches create-pr
+(review-automation.js), then an agent babysits the PR,
+merging after CI and review pass and repairing on failure;
 
 ' ============================================================
 ' 7. CONTINUATION (onCardTerminal — auto-queue.js)

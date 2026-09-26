@@ -786,6 +786,9 @@ async fn retry_pending_watcher_respawn(
     let expected_episode = discord::inflight::load_inflight_state(provider, channel_id.get())
         .as_ref()
         .map(discord::inflight::InflightEpisodePin::from_state);
+    if let Some(pin) = expected_episode.as_ref() {
+        reclaim_watcherless_session_bound_relay(registry, provider, channel_id, pin).await;
+    }
     let spawned = respawn_watcher_after_force_clean(
         registry,
         provider,
@@ -814,6 +817,39 @@ async fn retry_pending_watcher_respawn(
         );
     }
     true
+}
+
+/// No runtime owns a watcher for this pinned episode, so a `SessionBoundRelay` row it left behind
+/// can never be delivered by the sink; hand it back to ownerless recovery.
+pub(in crate::services::discord) async fn reclaim_watcherless_session_bound_relay(
+    registry: &HealthRegistry,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    pin: &discord::inflight::InflightEpisodePin,
+) {
+    let shared = match registry
+        .shared_for_provider_on_channel(provider, channel_id)
+        .await
+    {
+        Some(shared) => shared,
+        None => match registry.shared_for_provider(provider).await {
+            Some(shared) => shared,
+            None => return,
+        },
+    };
+    let outcome = discord::inflight::reclaim_watcherless_session_bound_relay_owner(
+        &shared,
+        provider,
+        channel_id.get(),
+        pin,
+    );
+    if outcome == discord::inflight::OrphanRelayReclaimOutcome::Downgraded {
+        tracing::warn!(
+            channel_id = channel_id.get(),
+            provider = provider.as_str(),
+            "watcherless SessionBoundRelay row downgraded to ownerless recovery (#6210)"
+        );
+    }
 }
 
 /// Backoff and give-up gate for the retry queue. Due when the channel is still

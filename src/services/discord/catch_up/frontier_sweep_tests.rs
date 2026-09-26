@@ -197,7 +197,11 @@ impl Fixture {
     async fn new() -> Self {
         let root = scoped_runtime_root();
         let shared = discord::make_shared_data_for_tests();
-        shared.settings.write().await.allow_all_users = true;
+        {
+            let mut settings = shared.settings.write().await;
+            settings.owner_user_id = Some(OWNER_ID);
+            settings.allow_all_users = true;
+        }
         Self {
             root,
             shared,

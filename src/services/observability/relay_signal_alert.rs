@@ -22,8 +22,7 @@
 //!     `idle_cleanup_preserved` event. Neither depends on operator
 //!     configuration, so neither can be silently dropped.
 
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
@@ -172,125 +171,48 @@ pub(super) fn idle_cleanup_preserved_summary(
     )
 }
 
-/// Per-session warn gate. Every preservation is an event; the WARN line for one
-/// session is due at most once per interval so the 5-minute idle-kill tick
-/// cannot repeat it while the session stays preserved.
-/// Process-local (a restart forgets it; events are the durable record) and hard-bounded at `CAPACITY`:
-/// expired entries are swept once per interval and when a new session finds it full, else the oldest
-/// is evicted. A dropped entry's non-zero `suppressed` count is returned for reporting, never lost.
-#[derive(Debug, Default)]
-struct PreservedWarnGate {
-    by_session: HashMap<String, PreservedTally>,
-    next_sweep_at: Option<Instant>,
-}
-
-#[derive(Debug)]
-struct PreservedTally {
-    warned_at: Instant,
-    suppressed: u64,
-    total: u64,
-}
-
-impl PreservedWarnGate {
-    const CAPACITY: usize = 1024;
-
-    /// Returns the warn due now (`Some(n)`: `n` preservations of this session
-    /// were not warned since the last one) and the `(session, suppressed)`
-    /// pairs dropped from the gate with preservations still unreported.
-    fn admit(&mut self, session_key: &str, now: Instant) -> (Option<u64>, Vec<(String, u64)>) {
-        let within = |warned_at: Instant| {
-            now.saturating_duration_since(warned_at) < IDLE_CLEANUP_PRESERVED_WARN_INTERVAL
-        };
-        let mut flushed = Vec::new();
-        let full =
-            self.by_session.len() >= Self::CAPACITY && !self.by_session.contains_key(session_key);
-        if full || self.next_sweep_at.is_none_or(|at| now >= at) {
-            // The admitted session is exempt: its held-back count rides on its own warn.
-            self.by_session.retain(|key, tally| {
-                let keep = key == session_key || within(tally.warned_at);
-                if !keep && tally.suppressed > 0 {
-                    flushed.push((key.clone(), tally.suppressed));
-                }
-                keep
-            });
-            self.next_sweep_at = Some(now + IDLE_CLEANUP_PRESERVED_WARN_INTERVAL);
-        }
-        let warn_due = match self.by_session.get_mut(session_key) {
-            Some(tally) if within(tally.warned_at) => {
-                tally.total = tally.total.saturating_add(1);
-                tally.suppressed = tally.suppressed.saturating_add(1);
-                None
-            }
-            Some(tally) => {
-                tally.total = tally.total.saturating_add(1);
-                tally.warned_at = now;
-                Some(std::mem::take(&mut tally.suppressed))
-            }
-            None => {
-                let full = self.by_session.len() >= Self::CAPACITY;
-                let by_age = full.then(|| self.by_session.iter().min_by_key(|(_, t)| t.warned_at));
-                if let Some(key) = by_age.flatten().map(|(key, _)| key.clone())
-                    && let Some(dropped) = self.by_session.remove(&key)
-                    && dropped.suppressed > 0
-                {
-                    flushed.push((key, dropped.suppressed));
-                }
-                let fresh = PreservedTally {
-                    warned_at: now,
-                    suppressed: 0,
-                    total: 1,
-                };
-                self.by_session.insert(session_key.to_string(), fresh);
-                Some(0)
-            }
-        };
-        (warn_due, flushed)
-    }
-}
-
-fn preserved_warn_gate() -> &'static Mutex<PreservedWarnGate> {
-    static GATE: OnceLock<Mutex<PreservedWarnGate>> = OnceLock::new();
-    GATE.get_or_init(|| Mutex::new(PreservedWarnGate::default()))
-}
+/// When the last idle-cleanup WARN went out, and how many preservations were
+/// recorded as events only since. One global slot, no per-session state: the
+/// 5-minute idle-kill tick can re-preserve any number of sessions, but the log
+/// gets at most one line per interval. Events are the full record.
+static PRESERVED_WARN: Mutex<(Option<Instant>, u64)> = Mutex::new((None, 0));
 
 /// #5993: idle cleanup kept a session it could not prove idle. Always records an
-/// `idle_cleanup_preserved` event; warns at most once per session per interval.
+/// `idle_cleanup_preserved` event; warns at most once per interval process-wide.
 pub(crate) fn record_idle_cleanup_preserved(
     session_key: &str,
     channel: &str,
     preserved_reason: &str,
     unobserved_minutes: Option<u64>,
 ) {
-    record_idle_cleanup_preserved_with(
-        preserved_warn_gate(),
-        session_key,
-        channel,
-        preserved_reason,
-        unobserved_minutes,
-        Instant::now(),
-    );
+    let now = Instant::now();
+    let (key, reason, minutes) = (session_key, preserved_reason, unobserved_minutes);
+    record_idle_cleanup_preserved_with(&PRESERVED_WARN, now, key, channel, reason, minutes);
 }
 
 fn record_idle_cleanup_preserved_with(
-    gate: &Mutex<PreservedWarnGate>,
+    last_warn: &Mutex<(Option<Instant>, u64)>,
+    now: Instant,
     session_key: &str,
     channel: &str,
     preserved_reason: &str,
     unobserved_minutes: Option<u64>,
-    now: Instant,
 ) {
-    let (warn_due, flushed) = gate
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .admit(session_key, now);
-    for (dropped_key, suppressed) in &flushed {
-        tracing::warn!(
-            session_key = dropped_key.as_str(),
-            suppressed_since_last_warn = suppressed,
-            "[relay-signal] idle 자동 정리 보류: 세션 `{dropped_key}` 경고 게이트 정리 — 미보고 보류 {suppressed}건"
-        );
-    }
-    if let Some(suppressed) = warn_due {
+    let suppressed = {
+        let mut last = last_warn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match last.0 {
+            Some(at)
+                if now.saturating_duration_since(at) < IDLE_CLEANUP_PRESERVED_WARN_INTERVAL =>
+            {
+                last.1 += 1;
+                None
+            }
+            _ => Some(std::mem::replace(&mut *last, (Some(now), 0)).1),
+        }
+    };
+    if let Some(suppressed) = suppressed {
         let summary = idle_cleanup_preserved_summary(channel, preserved_reason, unobserved_minutes);
         tracing::warn!(
             session_key,
@@ -318,16 +240,14 @@ fn record_idle_cleanup_preserved_with(
     );
 }
 
-/// Preservations recorded for `session_key` by this process (tests only; the
-/// durable record is the `idle_cleanup_preserved` event stream).
+/// `idle_cleanup_preserved` events recorded for `session_key` (tests only).
 #[cfg(test)]
-pub(crate) fn idle_cleanup_preserved_count(session_key: &str) -> u64 {
-    preserved_warn_gate()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .by_session
-        .get(session_key)
-        .map_or(0, |tally| tally.total)
+pub(crate) fn idle_cleanup_preserved_count(session_key: &str) -> usize {
+    super::events::recent(10_000)
+        .into_iter()
+        .filter(|event| event.event_type == IDLE_CLEANUP_PRESERVED_EVENT_TYPE)
+        .filter(|event| event.payload["session_key"] == session_key)
+        .count()
 }
 
 #[cfg(test)]
@@ -396,144 +316,30 @@ mod tests {
         assert!(idle_cleanup_preserved_summary("c", "r", None).contains("알 수 없음"));
     }
 
-    /// #5993: the 5-minute idle-kill tick re-preserves the same session; the warn
-    /// repeats once per interval and reports what it held back.
+    /// #5993: every idle-cleanup preservation is an `idle_cleanup_preserved`
+    /// event, but a burst of them logs one WARN line per interval, not one each.
     #[test]
-    fn preserved_warn_gate_warns_once_per_interval_per_session() {
-        let mut gate = PreservedWarnGate::default();
-        let t0 = Instant::now();
-        let tick = Duration::from_secs(5 * 60);
-        assert_eq!(gate.admit("s1", t0).0, Some(0));
-        for i in 1..=3u32 {
-            assert_eq!(gate.admit("s1", t0 + tick * i).0, None, "tick {i}");
-        }
-        assert_eq!(
-            gate.admit("s2", t0 + tick).0,
-            Some(0),
-            "sessions warn independently"
-        );
-        assert_eq!(
-            gate.admit("s1", t0 + IDLE_CLEANUP_PRESERVED_WARN_INTERVAL),
-            (Some(3), vec![]),
-            "after the interval the warn repeats with the suppressed count"
-        );
-    }
-
-    /// Fills `gate` to capacity: `s0` first at `at` holding `held` preservations
-    /// back, every other session one second later holding none.
-    fn fill_gate(gate: &mut PreservedWarnGate, at: Instant, held: u64) {
-        for _ in 0..=held {
-            gate.admit("s0", at);
-        }
-        let late = at + Duration::from_secs(1);
-        for i in 1..PreservedWarnGate::CAPACITY {
-            assert_eq!(gate.admit(&format!("s{i}"), late).0, Some(0));
-        }
-        assert_eq!(gate.by_session.len(), PreservedWarnGate::CAPACITY);
-    }
-
-    /// #5993 r1: a hard bound. With nothing expired, a new session evicts the one
-    /// warned longest ago, whose held-back count is flushed rather than lost.
-    #[test]
-    fn preserved_warn_gate_evicts_oldest_at_capacity_and_flushes_its_count() {
-        let mut gate = PreservedWarnGate::default();
-        let t0 = Instant::now();
-        fill_gate(&mut gate, t0, 2);
-        let t1 = t0 + Duration::from_secs(60);
-        for i in 1..PreservedWarnGate::CAPACITY {
-            assert_eq!(gate.admit(&format!("s{i}"), t1).0, None);
-        }
-        assert_eq!(
-            gate.admit("new", t1),
-            (Some(0), vec![("s0".to_string(), 2)])
-        );
-        assert_eq!(gate.by_session.len(), PreservedWarnGate::CAPACITY);
-
-        // A burst of new sessions pushes every older one out; each `s{i}` held one back.
-        let mut flushed = Vec::new();
-        for i in 0..PreservedWarnGate::CAPACITY {
-            let (warn_due, dropped) =
-                gate.admit(&format!("burst-{i}"), t1 + Duration::from_secs(60));
-            assert_eq!(warn_due, Some(0));
-            flushed.extend(dropped);
-            assert!(gate.by_session.len() <= PreservedWarnGate::CAPACITY);
-        }
-        assert_eq!(flushed.len(), PreservedWarnGate::CAPACITY - 1);
-        assert!(
-            flushed
-                .iter()
-                .all(|(key, n)| key.starts_with('s') && *n == 1)
-        );
-        assert!(gate.by_session.keys().all(|key| key.starts_with("burst-")));
-    }
-
-    /// #5993 r1: expiry. The admitted session keeps its own held-back count for
-    /// its warn even when the gate is full; other expired sessions are swept
-    /// (below capacity too, once per interval) and their counts flushed.
-    #[test]
-    fn preserved_warn_gate_sweeps_expired_sessions_without_losing_counts() {
-        let mut gate = PreservedWarnGate::default();
-        let t0 = Instant::now();
-        fill_gate(&mut gate, t0, 3);
-        assert_eq!(gate.admit("s1", t0 + Duration::from_secs(1)).0, None);
-        let later = t0 + IDLE_CLEANUP_PRESERVED_WARN_INTERVAL + Duration::from_secs(1);
-        assert_eq!(
-            gate.admit("s0", later),
-            (Some(3), vec![("s1".to_string(), 1)])
-        );
-        assert_eq!(gate.by_session.len(), 1);
-
-        gate.admit("held", later);
-        gate.admit("held", later + Duration::from_secs(60));
-        gate.admit("fresh", later + Duration::from_secs(120));
-        let (_, flushed) = gate.admit("other", later + IDLE_CLEANUP_PRESERVED_WARN_INTERVAL);
-        assert_eq!(flushed, vec![("held".to_string(), 1)]);
-        let mut left: Vec<_> = gate.by_session.keys().cloned().collect();
-        left.sort();
-        assert_eq!(left, ["fresh", "other"]);
-    }
-
-    /// #5993 r1: a flushed count reaches the log as its own WARN line.
-    #[test]
-    fn idle_cleanup_preserved_warns_the_flushed_count_of_an_evicted_session() {
+    fn idle_cleanup_preserved_burst_warns_once_per_interval_and_records_every_event() {
         let _runtime = crate::services::observability::test_runtime_lock();
         let (captured, dispatch) = capture_logs();
         let _guard = tracing::dispatcher::set_default(&dispatch);
-        let (gate, t0) = (Mutex::new(PreservedWarnGate::default()), Instant::now());
-        fill_gate(&mut gate.lock().unwrap(), t0, 4);
-        let newcomer = format!("newcomer-{}", uuid::Uuid::new_v4().simple());
-        let now = t0 + Duration::from_secs(2);
-        record_idle_cleanup_preserved_with(&gate, &newcomer, "adk-cc", "probe_failed", None, now);
-
-        let warns = warn_lines(&captured, "`s0`");
-        assert_eq!(warns.len(), 1, "{warns:?}");
-        assert!(warns[0].contains("미보고 보류 4건"), "{warns:?}");
-        assert!(
-            warns[0].contains("suppressed_since_last_warn=4"),
-            "{warns:?}"
-        );
-        assert_eq!(warn_lines(&captured, &newcomer).len(), 1);
-    }
-
-    /// #5993 (decision 2026-09-25): an idle-cleanup preservation used to reach
-    /// the operator only through the retired alert channel. It must now leave a
-    /// WARN line and an `idle_cleanup_preserved` event on every occurrence.
-    #[test]
-    fn idle_cleanup_preserved_warns_and_records_every_occurrence_as_event() {
-        let _runtime = crate::services::observability::test_runtime_lock();
-        let (captured, dispatch) = capture_logs();
-        let _guard = tracing::dispatcher::set_default(&dispatch);
+        let (last_warn, t0) = (Mutex::new((None, 0)), Instant::now());
         let session_key = format!("host:AgentDesk-claude-{}", uuid::Uuid::new_v4().simple());
-        for _ in 0..3 {
-            record_idle_cleanup_preserved(
+        let record = |now| {
+            let reason = "transcript_unresolved";
+            record_idle_cleanup_preserved_with(
+                &last_warn,
+                now,
                 &session_key,
                 "adk-cc",
-                "transcript_unresolved",
+                reason,
                 Some(435),
             );
+        };
+        for i in 0..50 {
+            record(t0 + Duration::from_secs(i * 60));
         }
 
-        assert_eq!(idle_cleanup_preserved_count(&session_key), 3);
         let warns = warn_lines(&captured, &session_key);
         assert_eq!(warns.len(), 1, "{warns:?}");
         for part in [
@@ -544,20 +350,23 @@ mod tests {
         ] {
             assert!(warns[0].contains(part), "{warns:?}");
         }
-        let events: Vec<_> = recent_events(IDLE_CLEANUP_PRESERVED_EVENT_TYPE)
-            .into_iter()
-            .filter(|event| event.payload["session_key"] == session_key.as_str())
-            .collect();
-        assert_eq!(
-            events.len(),
-            3,
-            "every preservation is an observability event"
+        assert_eq!(idle_cleanup_preserved_count(&session_key), 50);
+
+        record(t0 + Duration::from_secs(50 * 60) + IDLE_CLEANUP_PRESERVED_WARN_INTERVAL);
+        let warns = warn_lines(&captured, &session_key);
+        assert_eq!(warns.len(), 2, "{warns:?}");
+        assert!(
+            warns[1].contains("suppressed_since_last_warn=49"),
+            "{warns:?}"
         );
-        for event in events {
-            assert_eq!(event.payload["status"], "transcript_unresolved");
-            assert_eq!(event.payload["channel"], "adk-cc");
-            assert_eq!(event.payload["unobserved_minutes"], 435);
-        }
+        let events = recent_events(IDLE_CLEANUP_PRESERVED_EVENT_TYPE);
+        let event = events
+            .iter()
+            .find(|event| event.payload["session_key"] == session_key.as_str());
+        let payload = &event.expect("preservation event").payload;
+        assert_eq!(payload["status"], "transcript_unresolved");
+        assert_eq!(payload["channel"], "adk-cc");
+        assert_eq!(payload["unobserved_minutes"], 435);
     }
 
     /// #5993: each crossed signal is one WARN line and one

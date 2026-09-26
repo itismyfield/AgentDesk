@@ -18,7 +18,6 @@ CI_PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 TUI_RELAY_TESTS = REPO_ROOT / "scripts/e2e/tui_relay"
 UNCONDITIONAL_JOB = "relay-authority-contract"
 CENSUS_TARGET = "services::discord::tui_prompt_relay::tests::scenario_census_e2e"
-SELF_MODULE = "tests.test_e2e_scenario_lane_wiring"
 
 
 def executable_lines(text: str) -> list[str]:
@@ -68,9 +67,6 @@ class E2eScenarioLaneWiring(unittest.TestCase):
         for module in sorted(modules):
             with self.subTest(module=module):
                 self.assertIn(module, body, f"{module} is not executed by ci-script-checks.sh")
-
-    def test_ci_script_checks_runs_this_wiring_contract(self) -> None:
-        self.assertIn(SELF_MODULE, "\n".join(executable_lines(self.script)))
 
     def test_scenario_census_runner_is_wired_into_the_unconditional_job(self) -> None:
         block = job_block(self.workflow, UNCONDITIONAL_JOB)

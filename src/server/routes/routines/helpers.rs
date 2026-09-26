@@ -1,7 +1,6 @@
 use axum::http::StatusCode;
 use serde_json::Value;
 
-use crate::config::Config;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::routines::{
     RoutineAgentExecutor, RoutineDiscordLogger, RoutineScriptLoader, RoutineSessionController,
@@ -110,7 +109,6 @@ pub(super) fn routine_discord_logger(state: &AppState) -> AppResult<RoutineDisco
     Ok(RoutineDiscordLogger::new_with_health_registry(
         std::sync::Arc::new(pool),
         state.health_registry.clone(),
-        routine_health_target(&state.config),
     ))
 }
 
@@ -230,16 +228,6 @@ pub(super) async fn validate_agent_id_request(
 }
 
 pub(super) use crate::services::agent_recovery::validate_distinct_fallback_agent;
-
-fn routine_health_target(config: &Config) -> Option<String> {
-    config
-        .kanban
-        .human_alert_channel_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| format!("channel:{value}"))
-}
 
 #[cfg(test)]
 mod tests {

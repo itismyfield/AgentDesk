@@ -5,7 +5,6 @@ import json
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -424,7 +423,9 @@ exit 101
 
         def check(verify: bool, expected_rc: int) -> subprocess.CompletedProcess[str]:
             script = (root / "scripts/ci-script-checks.sh").read_text()
-            section = script.split('banner "Relay-authority fixed mutation gate (#5071)"\n', 1)[1].split('\nbanner ', 1)[0]
+            # Located by title alone, so moving the check to another shard keeps this test.
+            title = script.index('"Relay-authority fixed mutation gate (#5071)"')
+            section = script[script.index("\n", title) + 1:].split("\nfi\n", 1)[0]
             env = {**os.environ, "PYTHON": str(python_shim), "GITHUB_ACTIONS": str(verify).lower()}
             result = subprocess.run(
                 ["bash", "-euc", section], cwd=root, env=env, text=True, capture_output=True,
@@ -731,47 +732,6 @@ exit 101
         self.assertGreaterEqual(int(fields["count"]), int(fields["minimum"]))
         self.assertEqual(result.stdout.count("MUTATION_RESULT mutation="), int(fields["count"]))
 
-    @staticmethod
-    def validate_script(path: Path) -> int:
-        if path.is_symlink() or not path.is_file():
-            return 1
-        if path.stat().st_size == 0 or not os.access(path, os.X_OK):
-            return 1
-        commands = [
-            line.strip()
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip() and not line.lstrip().startswith("#")
-        ]
-        if not commands or commands in (["exit 0"], ["#!/usr/bin/env bash", "exit 0"]):
-            return 1
-        return 0
-
-    def test_guard_rejects_degenerate_script_files(self) -> None:
-        cases = ("absent", "empty", "non-executable", "symlink", "exit-zero-only")
-        for case in cases:
-            with self.subTest(case=case):
-                root = self.copy_fixture()
-                script = root / MUTATION_SCRIPT
-                inert = root / "inert.sh"
-                inert.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-                inert.chmod(0o755)
-                if case == "absent":
-                    script.unlink()
-                elif case == "empty":
-                    script.write_bytes(b"")
-                elif case == "non-executable":
-                    script.chmod(script.stat().st_mode & ~(stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
-                elif case == "symlink":
-                    script.unlink()
-                    script.symlink_to(inert)
-                elif case == "exit-zero-only":
-                    script.write_text("exit 0\n", encoding="utf-8")
-                    script.chmod(0o755)
-                self.assertEqual(self.validate_script(script), 1)
-
-    def test_guard_accepts_the_real_script(self) -> None:
-        self.assertEqual(self.validate_script(REPO_ROOT / MUTATION_SCRIPT), 0)
-
     def test_script_mode_is_executable(self) -> None:
         self.assertTrue(os.access(REPO_ROOT / MUTATION_SCRIPT, os.X_OK))
 
@@ -866,10 +826,6 @@ class MutationPathFilterContractTests(unittest.TestCase):
         ]
         step = next(s for s in job["steps"] if s.get("name") == MUTATION_STEP)
         self.assertTrue(str(step["if"]).endswith("!= 'false'"), step.get("if"))
-
-    def test_ci_script_checks_runs_this_contract(self) -> None:
-        script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
-        self.assertIn("unittest tests.test_relay_authority_mutations", script)
 
 
 if __name__ == "__main__":

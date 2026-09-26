@@ -58,7 +58,7 @@ cluster:
   # ordering silently decides where sessions live. Set it to pin the gateway to
   # one instance: a non-preferred node yields the lease when this node is
   # online, and takes it when this node is offline (failover is unchanged).
-  # gateway_preferred_instance_id: "mac-book-release"
+  # gateway_preferred_instance_id: "example-main-node"
   # gateway_yield_grace_secs: 90
 
 discord:
@@ -373,7 +373,6 @@ data:
 kanban:
   manager_channel_id: "123456789012345678"
   deadlock_manager_channel_id: "223456789012345678"
-  human_alert_channel_id: "323456789012345678"
   pm_decision_gate_enabled: true
 
 review:

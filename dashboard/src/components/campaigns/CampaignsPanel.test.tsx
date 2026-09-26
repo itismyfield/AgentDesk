@@ -19,7 +19,7 @@ const campaign: Campaign = {
   created_at: "2026-09-20T00:00:00Z", updated_at: "2026-09-20T00:00:00Z",
   nodes: [{ id: "review", title: "Review current head", status: "running", stage: "review", group: null, round: 3,
     assignee: "reviewer", session_id: "session-42", provider: "codex", dependencies: [], issue_url: null, pr_url: null,
-    head_sha: "abc123", evidence: ["Unit tests passed"], next_action: "Inspect the latest diff", blocker: null, updated_at: "2026-09-20T00:00:00Z", details: "", acceptance: [], findings: [], evidence_records: [] }],
+    head_sha: "abc123", evidence: ["Unit tests passed"], next_action: "Inspect the latest diff", blocker: null, summary: null, benefit: null, updated_at: "2026-09-20T00:00:00Z", details: "", acceptance: [], findings: [], evidence_records: [] }],
 };
 let container: HTMLDivElement;
 let root: Root;
@@ -226,4 +226,12 @@ it("never regresses a newer polled revision when an older save response arrives"
   vi.mocked(updateCampaignNode).mockResolvedValue(latest);
   await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
   expect(vi.mocked(updateCampaignNode).mock.calls[1][0].revision).toBe(9);
+});
+
+it("opens the existing task details from a running card on the first screen", async () => {
+  await render();
+  expect(container.querySelector(".campaign-node-detail")).toBeNull();
+  await act(async () => container.querySelector<HTMLButtonElement>('[data-glance-id="review"]')!.click());
+  expect(container.querySelector(".campaign-node-detail h3")?.textContent).toBe("Review current head");
+  expect(container.textContent).toContain("session-42");
 });

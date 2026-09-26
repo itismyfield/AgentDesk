@@ -128,8 +128,12 @@ pub(super) async fn reclaim_orphaned_session_bound_relay_if_dead(
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::idle_relay_harness::{IdleRelayHarness, PAYLOAD};
     use super::should_reclaim_orphaned_session_bound_relay as decide;
     use super::*;
+    use crate::services::discord::SharedData;
+    use inflight::InflightEpisodePin as Pin;
+    use inflight::OrphanRelayReclaimOutcome as Outcome;
     use serde_json::json;
 
     fn local_timestamp(unix: i64) -> String {
@@ -402,5 +406,95 @@ mod tests {
             "the send-point re-gate delivers only the uncommitted tail — no duplicate of the \
              delivered prefix"
         );
+    }
+    fn reclaim(shared: &SharedData, channel_id: u64, pin: &Pin) -> Outcome {
+        let claude = ProviderKind::Claude;
+        inflight::reclaim_watcherless_session_bound_relay_owner(shared, &claude, channel_id, pin)
+    }
+
+    /// A stale, lease-less `SessionBoundRelay` row over the harness transcript, then the
+    /// undelivered tail, held past the idle relay's new-session grace.
+    async fn black_holed_row(
+        harness: &mut IdleRelayHarness,
+        channel_id: u64,
+        session: &str,
+        root: &std::path::Path,
+    ) -> Pin {
+        let mut row = stale_session_bound_relay_row(channel_id, session);
+        row.output_path = Some(harness.transcript.to_str().expect("utf8 path").to_string());
+        row.turn_start_offset = Some(0);
+        row.ensure_finalizer_turn_id();
+        write_inflight_row_verbatim(root, &ProviderKind::Claude, channel_id, &row);
+        std::fs::write(&harness.transcript, PAYLOAD).expect("undelivered tail");
+        tokio::time::sleep(std::time::Duration::from_millis(11_000)).await;
+        assert!(harness.sent().is_empty(), "no watcher feeds the sink");
+        let row = inflight::load_inflight_state(&ProviderKind::Claude, channel_id).expect("row");
+        Pin::from_state(&row)
+    }
+
+    /// #6210 T3: a watcherless `SessionBoundRelay` row black-holes until the pinned reclaim;
+    /// then the idle relay sends the undelivered tail exactly once, with no rebind.
+    #[tokio::test]
+    async fn pinned_watcherless_reclaim_lets_the_idle_relay_recover_the_undelivered_tail() {
+        let temp = tempfile::TempDir::new().expect("temp runtime root");
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+        let provider = ProviderKind::Claude;
+        let channel_id = 6_210_301_u64;
+        let session = format!("AgentDesk-claude-6210-t3-{}", std::process::id());
+        let mut harness = IdleRelayHarness::start(temp.path(), channel_id, &session).await;
+        let pin = black_holed_row(&mut harness, channel_id, &session, temp.path()).await;
+        let shared = harness.shared.clone();
+        assert_eq!(reclaim(&shared, channel_id, &pin), Outcome::Downgraded);
+        tokio::time::sleep(std::time::Duration::from_millis(3_000)).await;
+
+        let sent = harness.sent();
+        assert_eq!(sent.len(), 1, "exactly one send: {sent:?}");
+        assert_eq!(sent[0].relay_range, Some((0, PAYLOAD.len() as u64)));
+        assert_eq!(sent[0].payload, PAYLOAD);
+        let row = inflight::load_inflight_state(&provider, channel_id).expect("row survives");
+        assert_eq!(
+            (row.turn_start_offset, row.last_offset),
+            (Some(0), 0),
+            "cursor not fenced"
+        );
+        harness.stop().await;
+    }
+
+    /// #6210 P1-1: a watermark inside the turn (turn_start < committed < EOF) is not delivery;
+    /// the pinned reclaim still downgrades and the idle relay sends only the suffix, once.
+    #[tokio::test]
+    async fn pinned_reclaim_recovers_the_suffix_past_a_partial_watermark() {
+        let temp = tempfile::TempDir::new().expect("temp runtime root");
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+        let provider = ProviderKind::Claude;
+        let channel_id = 6_210_302_u64;
+        let session = format!("AgentDesk-claude-6210-p11-{}", std::process::id());
+        let mut harness = IdleRelayHarness::start(temp.path(), channel_id, &session).await;
+        let pin = black_holed_row(&mut harness, channel_id, &session, temp.path()).await;
+        let shared = harness.shared.clone();
+        let partial = (PAYLOAD.find('\n').expect("init line") + 1) as u64;
+        (shared
+            .tmux_relay_coord(ChannelId::new(channel_id))
+            .confirmed_end_offset)
+            .store(partial, std::sync::atomic::Ordering::SeqCst);
+
+        assert_eq!(
+            reclaim(&shared, channel_id, &pin),
+            Outcome::Downgraded,
+            "a partial watermark leaves an undelivered suffix"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(3_000)).await;
+        let sent = harness.sent();
+        assert_eq!(sent.len(), 1, "exactly one send: {sent:?}");
+        assert_eq!(sent[0].relay_range, Some((partial, PAYLOAD.len() as u64)));
+        assert_eq!(sent[0].payload, &PAYLOAD[partial as usize..]);
+
+        // A watermark at EOF is whole delivery: the next episode is left alone.
+        let mut row = inflight::load_inflight_state(&provider, channel_id).expect("row");
+        row.set_relay_owner_kind(inflight::RelayOwnerKind::SessionBoundRelay);
+        write_inflight_row_verbatim(temp.path(), &provider, channel_id, &row);
+        let pin = Pin::from_state(&row);
+        assert_eq!(reclaim(&shared, channel_id, &pin), Outcome::Skipped);
+        harness.stop().await;
     }
 }

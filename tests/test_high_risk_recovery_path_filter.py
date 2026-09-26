@@ -209,10 +209,6 @@ class HighRiskRecoveryPathFilterTests(unittest.TestCase):
         self.assertEqual(select(self.filters, [p for a in areas for p in a]), union)
         self.assertLessEqual({"dashboard", LANE, "pg_db"}, union)
 
-    def test_ci_script_checks_runs_this_contract(self) -> None:
-        script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
-        self.assertIn("unittest tests.test_high_risk_recovery_path_filter", script)
-
 
 if __name__ == "__main__":
     unittest.main()

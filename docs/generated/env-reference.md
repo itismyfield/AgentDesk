@@ -44,7 +44,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_CODEX_REASONING_EFFORT` | `src/services/codex.rs:203` |  |
 | `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex.rs:1244` |  |
 | `AGENTDESK_CODEX_TUI_WARM_FOLLOWUP` | `src/services/codex_tui/warm_followup.rs:14` (+1 more) |  |
-| `AGENTDESK_CONFIG` | `src/config.rs:2936` (+6 more) | The on-disk config path the running server loaded from, resolved with the same precedence as [`load`] (`$AGENTDESK_CONFIG` → runtime root → cwd → home). |
+| `AGENTDESK_CONFIG` | `src/config.rs:2799` (+6 more) | The on-disk config path the running server loaded from, resolved with the same precedence as [`load`] (`$AGENTDESK_CONFIG` → runtime root → cwd → home). |
 | `AGENTDESK_CSWAP_PATH` | `src/services/cswap.rs:22` (+1 more) |  |
 | `AGENTDESK_DCSERVER_LABEL` | `src/cli/dcserver.rs:18` (+2 more) |  |
 | `AGENTDESK_DCSERVER_LOG_MAX_BYTES` | `src/logging.rs:225` |  |
@@ -122,19 +122,19 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `GEMINI_CLIENT_ID` | `src/server/mod.rs:1439` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
 | `GEMINI_CLIENT_SECRET` | `src/server/mod.rs:1440` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
 | `GEMINI_CLI_HOME` | `src/services/mcp_config.rs:708` |  |
-| `HOME` | `src/cli/doctor/orchestrator.rs:463` (+9 more) | #2655: handler for the `install-memento-session-hook` CLI surface. |
+| `HOME` | `src/cli/doctor/orchestrator.rs:462` (+9 more) | #2655: handler for the `install-memento-session-hook` CLI surface. |
 | `HOSTNAME` | `src/server/outbox_worker.rs:24` (+2 more) |  |
 | `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs:1098` (+2 more) |  |
 | `MEMENTO_WORKSPACE` | `src/server/routes/memory_api.rs:200` (+1 more) |  |
 | `OPENAI_API_KEY` | `src/server/rate_limit_sync.rs:115` | --- Codex: ~/.codex/auth.json (CLI subscription), else OPENAI_API_KEY --- |
-| `PATH` | `src/cli/doctor/orchestrator.rs:1547` (+5 more) | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
+| `PATH` | `src/cli/doctor/orchestrator.rs:1545` (+5 more) | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
 | `POSTGRES_TEST_ADMIN_DB` | `src/db/auto_queue/test_support.rs:16` (+4 more) |  |
 | `POSTGRES_TEST_DATABASE_URL_BASE` | `src/db/postgres.rs:1023` | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
-| `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs:479` (+1 more) |  |
-| `QWEN_CODE_SYSTEM_SETTINGS_PATH` | `src/cli/doctor/orchestrator.rs:485` (+1 more) |  |
-| `QWEN_HOME` | `src/cli/doctor/orchestrator.rs:457` (+2 more) |  |
+| `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs:478` (+1 more) |  |
+| `QWEN_CODE_SYSTEM_SETTINGS_PATH` | `src/cli/doctor/orchestrator.rs:484` (+1 more) |  |
+| `QWEN_HOME` | `src/cli/doctor/orchestrator.rs:456` (+2 more) |  |
 | `REQUIRE_WAKE_WORD` | `src/voice/config.rs:103` | A live yaml with `wake_words: []` plus `REQUIRE_WAKE_WORD=1` would otherwise make EVERY utterance fail the (impossible-to-satisfy) gate and be silently dropped. |
 | `RUST_LOG` | `src/logging.rs:29` | The directive every shipped dcserver process adds on top of `RUST_LOG`. |
 | `SHELL` | `src/services/platform/binary_resolver.rs:1277` |  |
-| `USERPROFILE` | `src/cli/doctor/orchestrator.rs:467` (+6 more) |  |
+| `USERPROFILE` | `src/cli/doctor/orchestrator.rs:466` (+6 more) |  |
 | `VOICE_AUDIO_DEBUG_DIR` | `src/voice/receiver.rs:72` |  |

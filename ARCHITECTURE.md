@@ -30,8 +30,7 @@ src/
 │   │   ├── orchestrator/
 │   │   │   ├── config_dir_checks.rs
 │   │   │   ├── health_snapshot.rs
-│   │   │   ├── provider_credentials.rs
-│   │   │   └── relay_notifications.rs
+│   │   │   └── provider_credentials.rs
 │   │   ├── contract.rs
 │   │   ├── health.rs
 │   │   ├── mailbox.rs
@@ -955,7 +954,6 @@ src/
 │   │   │   │   ├── circuit_breaker_apply.rs
 │   │   │   │   └── orphan_token_finish.rs
 │   │   │   ├── apply.rs
-│   │   │   ├── cohort.rs
 │   │   │   ├── decision.rs
 │   │   │   ├── destructive_warrant.rs
 │   │   │   ├── idle_tmux.rs
@@ -1652,6 +1650,11 @@ src/
 │   │   │   ├── voice_cache_sweep.rs
 │   │   │   └── worktree_orphan_sweep.rs
 │   │   └── mod.rs
+│   ├── manual_steer/
+│   │   ├── action_handle.rs
+│   │   ├── admission_intent.rs
+│   │   ├── operation.rs
+│   │   └── record.rs
 │   ├── memory/
 │   │   ├── local.rs
 │   │   ├── memento.rs
@@ -1894,6 +1897,7 @@ src/
 │   ├── kakao_message.rs
 │   ├── kanban.rs
 │   ├── kanban_cards.rs
+│   ├── manual_steer.rs
 │   ├── mcp_config.rs
 │   ├── message_outbox.rs
 │   ├── message_outbox_circuit_authority.rs
