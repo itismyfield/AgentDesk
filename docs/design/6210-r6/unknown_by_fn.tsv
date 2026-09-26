@@ -1,0 +1,382 @@
+도달 사유	모듈	file::함수	행수	범주
+Discord 발 큐 턴; 관리 채널 큐 공유 여부 판정 필요	discord	src/services/discord/queue_dispatch.rs::mailbox_front_requeue_outcome	1	A
+Discord 발 큐 턴; 관리 채널 큐 공유 여부 판정 필요	discord	src/services/discord/queue_dispatch.rs::mailbox_take_soft_intervention	2	A
+Discord 발 큐 턴; 관리 채널 큐 공유 여부 판정 필요	discord	src/services/discord/queue_io.rs::kick_idle_queue_channel_if_context_available	1	A
+Discord 발 큐 턴; 관리 채널 큐 공유 여부 판정 필요	discord	src/services/discord/queue_io.rs::mailbox_cancel_queued_primary_message	1	A
+Discord 발 큐 턴; 관리 채널 큐 공유 여부 판정 필요	discord	src/services/discord/queue_io.rs::race_loss_requeue_snapshot_has_idle_kickable_backlog	1	B
+Discord 발 큐 턴; 관리 채널 큐 공유 여부 판정 필요	discord	src/services/discord/queue_io.rs::schedule_post_enqueue_idle_queue_kick	1	B
+Discord 발 큐 턴; 관리 채널 큐 공유 여부 판정 필요	discord	src/services/discord/queue_marker.rs::note_exit_feedback_added	1	A
+Discord 발 큐 턴; 관리 채널 큐 공유 여부 판정 필요	discord	src/services/discord/queue_marker.rs::note_removed_via_shared_generation	1	A
+Discord 발 큐 턴; 관리 채널 큐 공유 여부 판정 필요	queue_dispatch	src/services/discord/queue_dispatch/kickoff.rs::kickoff_idle_queue_channel	3	AB
+Discord 발 큐 턴; 관리 채널 큐 공유 여부 판정 필요	queue_dispatch	src/services/discord/queue_dispatch/kickoff.rs::kickoff_idle_queues_with_deps	1	A
+Discord 발 큐 턴; 관리 채널 큐 공유 여부 판정 필요	queue_io	src/services/discord/queue_io/turn_admission.rs::mailbox_try_start_turn_ordered	1	A
+Discord 발 턴 placeholder와 공용; 관리 턴 경로 사용 여부 호출자 추적 필요	discord	src/services/discord/placeholder_controller.rs::edit_message_with_retry	1	A
+Discord 발 턴 placeholder와 공용; 관리 턴 경로 사용 여부 호출자 추적 필요	discord	src/services/discord/placeholder_controller.rs::ensure_active_incarnation	1	A
+Discord 발 턴 placeholder와 공용; 관리 턴 경로 사용 여부 호출자 추적 필요	discord	src/services/discord/placeholder_controller.rs::ensure_active_incarnation_inner	1	A
+Discord 발 턴 placeholder와 공용; 관리 턴 경로 사용 여부 호출자 추적 필요	discord	src/services/discord/placeholder_controller.rs::ensure_active_inner	1	A
+Discord 발 턴 placeholder와 공용; 관리 턴 경로 사용 여부 호출자 추적 필요	discord	src/services/discord/placeholder_controller.rs::ensure_queued	1	A
+Discord 발 턴 placeholder와 공용; 관리 턴 경로 사용 여부 호출자 추적 필요	discord	src/services/discord/placeholder_controller.rs::transition	1	A
+Discord 발 턴 placeholder와 공용; 관리 턴 경로 사용 여부 호출자 추적 필요	placeholder_controller	src/services/discord/placeholder_controller/queued_card_gate.rs::delete	1	A
+Discord 발 턴 placeholder와 공용; 관리 턴 경로 사용 여부 호출자 추적 필요	placeholder_controller	src/services/discord/placeholder_controller/queued_card_gate.rs::teardown_delete	1	A
+Discord 발 턴 placeholder와 공용; 관리 턴 경로 사용 여부 호출자 추적 필요	placeholder_controller	src/services/discord/placeholder_controller/queued_card_gate.rs::teardown_exit_body	2	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/abandon_request_store.rs::current_drain_ownership	1	B
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/abandon_request_store.rs::drain	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/adk_session.rs::emit_context_compacted_lifecycle_for_inflight	1	B
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/agent_handoff.rs::send_agent_handoff	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/compact_turn_authority.rs::capture	1	D
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/delivery_lease_key.rs::new_for_site	1	D
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/delivery_lease_key.rs::new_for_site_with_fallback_offset	4	D
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/destructive_cancel_gate.rs::evaluate	1	B
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/destructive_cancel_gate.rs::from_pinned_state	3	D
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/destructive_cancel_gate.rs::from_state	2	D
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/e2e_control.rs::delete_message	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/gateway.rs::delete_message	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/gateway.rs::dispatch_queued_turn	2	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/gateway.rs::edit_message	2	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/gateway.rs::post_message	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/gateway.rs::post_message_with_nonce	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/gateway.rs::post_message_with_reference	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/gateway.rs::post_message_with_reference_and_nonce	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/gateway.rs::replace_message_deferred	2	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/gateway.rs::replace_message_with_outcome	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/gateway.rs::send_long_message_with_rollback	3	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/gateway.rs::send_message	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/idle_detector.rs::run_pass	1	B
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/mailbox_finish.rs::mailbox_finish_cancelled_turn	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/mailbox_finish.rs::mailbox_finish_owned_turn	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/mailbox_finish.rs::mailbox_finish_turn	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/mailbox_finish.rs::mailbox_finish_turn_if_matches	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/mailbox_finish.rs::mailbox_finish_turn_if_matches_episode_started_before_inner	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/monitoring_status.rs::deliver_monitoring_status	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/monitoring_status.rs::edit_message	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/monitoring_status.rs::post_message	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/monitoring_status.rs::render_channel_monitoring_from_registry	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/monitoring_status.rs::render_channel_monitoring_from_store	3	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/readopted_mailbox_ledger.rs::from_state	1	D
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/readopted_mailbox_ledger.rs::mark_readopted_mailbox_owner_finished_for_episode	1	D
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/readopted_mailbox_ledger.rs::record_readopted_mailbox_owner_for_episode	1	D
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/relay_health.rs::observe	4	D
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/startup_reclaim.rs::reclaim_frozen_panels	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/startup_reclaim.rs::reclaim_orphan_placeholders	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/startup_reclaim.rs::run_delayed_reclaim_pass	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/startup_reclaim.rs::run_startup_reclaim_sweep	2	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/startup_reclaim.rs::spawn_startup_reclaim_sweep	2	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/terminal_coordinate.rs::external	1	D
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/terminal_coordinate.rs::message	1	D
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/terminal_ui_obligation.rs::reconcile_terminal_ui_obligation	2	AD
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/terminal_ui_obligation.rs::resolve_terminal_ui_session	3	BD
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/terminal_ui_obligation.rs::spawn_terminal_ui_obligation_sweeper	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/terminal_ui_obligation.rs::sweep_terminal_ui_obligations	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/terminal_ui_obligation.rs::terminal_ui_snapshot_from_inflight	1	D
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/tmux_kill_policy.rs::provider_native_output_offset_for_stop	1	B
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/turn_end_wip_warning.rs::load_matching_inflight_state	1	B
+discord 기타 모듈; 채널 선택 인자 추적 필요	discord	src/services/discord/zombie_foreground_release.rs::inflight_episode_lookup_for_tmux_name	2	BD
+discord 기타 모듈; 채널 선택 인자 추적 필요	gateway	src/services/discord/gateway/outbound_messages.rs::edit_intake_placeholder	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	gateway	src/services/discord/gateway/outbound_messages.rs::edit_outbound_message	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	gateway	src/services/discord/gateway/outbound_messages.rs::edit_outbound_message_classified	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	gateway	src/services/discord/gateway/outbound_messages.rs::send_intake_placeholder	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	gateway	src/services/discord/gateway/outbound_messages.rs::send_outbound_message	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	gateway	src/services/discord/gateway/outbound_messages.rs::send_outbound_message_with_nonce_classified	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	relay_health	src/services/discord/relay_health/frontier.rs::frontier_token	1	D
+discord 기타 모듈; 채널 선택 인자 추적 필요	relay_health	src/services/discord/relay_health/frontier.rs::relay_frontier_token	1	D
+discord 기타 모듈; 채널 선택 인자 추적 필요	relay_health	src/services/discord/relay_health/frontier.rs::reset_confirmed_frontier	1	D
+discord 기타 모듈; 채널 선택 인자 추적 필요	tmux_placeholder_suppression	src/services/discord/tmux_placeholder_suppression/ops.rs::apply_placeholder_suppression	4	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	tmux_placeholder_suppression	src/services/discord/tmux_placeholder_suppression/ops.rs::delete_nonterminal_placeholder	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	tmux_placeholder_suppression	src/services/discord/tmux_placeholder_suppression/ops.rs::delete_nonterminal_placeholder_unless_delivered	2	AD
+discord 기타 모듈; 채널 선택 인자 추적 필요	tmux_placeholder_suppression	src/services/discord/tmux_placeholder_suppression/ops.rs::delete_placeholder_unless_delivered	5	AD
+discord 기타 모듈; 채널 선택 인자 추적 필요	tmux_placeholder_suppression	src/services/discord/tmux_placeholder_suppression/ops.rs::delete_placeholder_with_operation	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	tmux_placeholder_suppression	src/services/discord/tmux_placeholder_suppression/ops.rs::delete_terminal_placeholder	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	tmux_placeholder_suppression	src/services/discord/tmux_placeholder_suppression/ops.rs::delete_terminal_placeholder_unless_delivered	2	AD
+discord 기타 모듈; 채널 선택 인자 추적 필요	tmux_placeholder_suppression	src/services/discord/tmux_placeholder_suppression/ops.rs::delete_watcher_rollover_frozen_prefixes	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	tmux_placeholder_suppression	src/services/discord/tmux_placeholder_suppression/ops.rs::edit_placeholder_with_operation	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	tmux_placeholder_suppression	src/services/discord/tmux_placeholder_suppression/ops.rs::edit_preserve_placeholder	1	A
+discord 기타 모듈; 채널 선택 인자 추적 필요	tmux_placeholder_suppression	src/services/discord/tmux_placeholder_suppression/ops.rs::edit_terminal_placeholder	1	A
+services 기타; 호출 채널 추적 필요	agent_recovery	src/services/agent_recovery/admission.rs::allows	1	D
+services 기타; 호출 채널 추적 필요	agent_recovery	src/services/agent_recovery/checkpoint.rs::commit_recovery_transition	1	D
+services 기타; 호출 채널 추적 필요	agent_recovery	src/services/agent_recovery/durable.rs::lease_for_provider	1	D
+services 기타; 호출 채널 추적 필요	agent_recovery	src/services/agent_recovery/durable/operations.rs::pending_operation	1	D
+services 기타; 호출 채널 추적 필요	agent_recovery	src/services/agent_recovery/durable/provider_errors.rs::apply_provider_error	1	D
+services 기타; 호출 채널 추적 필요	auto_queue	src/services/auto_queue/activate_command.rs::activate_with_deps_pg	1	C
+services 기타; 호출 채널 추적 필요	auto_queue	src/services/auto_queue/activate_route.rs::activate	2	CD
+services 기타; 호출 채널 추적 필요	auto_queue	src/services/auto_queue/cancel_run.rs::cancel_and_release_runs_with_pg	1	C
+services 기타; 호출 채널 추적 필요	auto_queue	src/services/auto_queue/cancel_run.rs::cancel_selected_runs_with_pg	1	C
+services 기타; 호출 채널 추적 필요	auto_queue	src/services/auto_queue/cancel_run.rs::end_run_with_pg	1	C
+services 기타; 호출 채널 추적 필요	auto_queue	src/services/auto_queue/cancel_run.rs::terminalize_selected_runs_with_pg	1	C
+services 기타; 호출 채널 추적 필요	auto_queue	src/services/auto_queue/cleanup_tasks.rs::drain_run_cleanup_task_by_id_pg	1	C
+services 기타; 호출 채널 추적 필요	auto_queue	src/services/auto_queue/cleanup_tasks.rs::drain_run_cleanup_task_pg	1	C
+services 기타; 호출 채널 추적 필요	auto_queue	src/services/auto_queue/cleanup_tasks.rs::replay_pending_run_cleanup_tasks_pg	1	C
+services 기타; 호출 채널 추적 필요	auto_queue	src/services/auto_queue/command.rs::force_pause_with_pg	1	C
+services 기타; 호출 채널 추적 필요	auto_queue	src/services/auto_queue/fsm.rs::activate_with_bridge_pg	1	C
+services 기타; 호출 채널 추적 필요	auto_queue	src/services/auto_queue/route_request_generate.rs::request_generate	1	A
+services 기타; 호출 채널 추적 필요	auto_queue	src/services/auto_queue/runtime.rs::archive_slot_threads	1	A
+services 기타; 호출 채널 추적 필요	auto_queue	src/services/auto_queue/runtime.rs::clear_slot_threads_for_slot_pg	1	C
+services 기타; 호출 채널 추적 필요	auto_queue	src/services/auto_queue/runtime.rs::reset_slot_thread_bindings_excluding_pg	1	A
+services 기타; 호출 채널 추적 필요	auto_queue	src/services/auto_queue/view_admin_routes.rs::restore_run_with_pg	1	D
+services 기타; 호출 채널 추적 필요	cluster	src/services/cluster/node_registry.rs::bootstrap	1	D
+services 기타; 호출 채널 추적 필요	cluster	src/services/cluster/node_registry.rs::spawn_heartbeat_loop	1	D
+services 기타; 호출 채널 추적 필요	cluster	src/services/cluster/stream_relay.rs::push_drop_oldest	1	D
+services 기타; 호출 채널 추적 필요	cluster	src/services/cluster/stream_relay.rs::try_send_frame_with_sequence	1	D
+services 기타; 호출 채널 추적 필요	cluster	src/services/cluster/stream_relay.rs::try_send_request	1	D
+services 기타; 호출 채널 추적 필요	cluster	src/services/cluster/stream_relay/frame_admission.rs::try_send_frame_inner	2	D
+services 기타; 호출 채널 추적 필요	cluster	src/services/cluster/stream_relay/identity.rs::from_frame	1	D
+services 기타; 호출 채널 추적 필요	codex	src/services/codex/followup_reader.rs::send_followup_to_tmux	3	D
+services 기타; 호출 채널 추적 필요	codex	src/services/codex/process_session_launch.rs::execute_streaming_local_process_codex	4	CD
+services 기타; 호출 채널 추적 필요	codex_tui	src/services/codex_tui/rollout_tail.rs::tail_idle_rollout_for_tmux	1	D
+services 기타; 호출 채널 추적 필요	codex_tui	src/services/codex_tui/rollout_tail.rs::tail_latest_rollout_for_cwd_with_handoff_options	1	D
+services 기타; 호출 채널 추적 필요	codex_tui	src/services/codex_tui/rollout_tail.rs::tail_resumed_rollout_for_session_with_handoff_options	1	D
+services 기타; 호출 채널 추적 필요	codex_tui	src/services/codex_tui/rollout_tail.rs::tail_rollout_file_from_offset_with_pane_busy_probe	1	D
+services 기타; 호출 채널 추적 필요	codex_tui	src/services/codex_tui/rollout_tail.rs::tail_rollout_file_until_assistant_response	1	D
+services 기타; 호출 채널 추적 필요	codex_tui	src/services/codex_tui/rollout_tail.rs::tail_rollout_file_until_assistant_response_with_pane_busy_probe	1	D
+services 기타; 호출 채널 추적 필요	codex_tui	src/services/codex_tui/rollout_tail.rs::tail_warm_followup_rollout_for_tmux	1	D
+services 기타; 호출 채널 추적 필요	codex_tui	src/services/codex_tui/session.rs::advance_codex_tui_runtime_binding_and_marker_offset	1	D
+services 기타; 호출 채널 추적 필요	codex_tui	src/services/codex_tui/warm_followup.rs::try_codex_tui_warm_followup	1	D
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/discord_delivery/guard.rs::send_dispatch_with_delivery_guard	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/discord_delivery/guard.rs::send_dispatch_within_deadline	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/discord_delivery/orchestration.rs::apply_dispatch_status_reaction_state	7	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/discord_delivery/orchestration.rs::send_dispatch	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/discord_delivery/orchestration.rs::send_dispatch_to_discord_inner_with_context_pg	4	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/discord_delivery/orchestration.rs::send_dispatch_to_discord_with_pg_result	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/discord_delivery/orchestration.rs::send_review_followup	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/discord_delivery/orchestration.rs::send_review_result_message_via_http	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/discord_delivery/orchestration.rs::send_review_result_to_primary_with_context_and_transport	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/discord_delivery/orchestration.rs::send_review_result_to_primary_with_transport	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/discord_delivery/orchestration.rs::sync_dispatch_status_reaction_with_pg	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/discord_delivery/orchestration.rs::update_dispatch_reaction_presence	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/discord_delivery/thread_reuse.rs::try_reuse_thread	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/discord_delivery/thread_reuse.rs::validate_channel_thread_maps_on_startup_with_backends	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/discord_delivery/transport.rs::<module>	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/discord_delivery/transport.rs::edit_raw_message_once	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/discord_delivery/transport.rs::post_dispatch_message_to_channel_with_delivery	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/discord_delivery/transport.rs::post_raw_message_once	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/outbox_queue.rs::dispatch_outbox_loop	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/outbox_queue.rs::notify_dispatch	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/outbox_queue.rs::process_outbox_batch_with_pg	2	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/outbox_queue.rs::sync_status_reaction	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/outbox_route.rs::handle_completed_dispatch_followups_internal	2	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/outbox_route.rs::handle_completed_dispatch_followups_with_pg	1	A
+services 기타; 호출 채널 추적 필요	dispatches	src/services/dispatches/outbox_route.rs::post_dispatch_completion_summary	1	A
+services 기타; 호출 채널 추적 필요	observability	src/services/observability/emit.rs::emit_turn_finished_with_dispatch_kind	1	D
+services 기타; 호출 채널 추적 필요	observability	src/services/observability/metrics.rs::record_success	1	D
+services 기타; 호출 채널 추적 필요	onboarding	src/services/onboarding/channel.rs::channels	1	A
+services 기타; 호출 채널 추적 필요	onboarding	src/services/onboarding/channel.rs::channels_post	1	A
+services 기타; 호출 채널 추적 필요	onboarding	src/services/onboarding/channel.rs::load_channels	2	A
+services 기타; 호출 채널 추적 필요	onboarding	src/services/onboarding/channel.rs::validate_token	1	A
+services 기타; 호출 채널 추적 필요	onboarding	src/services/onboarding/mod.rs::<module>	1	A
+services 기타; 호출 채널 추적 필요	opencode	src/services/opencode/streaming_entry.rs::execute_command_streaming	1	D
+services 기타; 호출 채널 추적 필요	provider	src/services/provider/output_reader.rs::poll_output_file_until_result	2	D
+services 기타; 호출 채널 추적 필요	qwen	src/services/qwen/followup_reader.rs::send_followup_to_tmux	5	D
+services 기타; 호출 채널 추적 필요	qwen	src/services/qwen/session_lifecycle.rs::execute_streaming_local_process	4	CD
+services 기타; 호출 채널 추적 필요	qwen	src/services/qwen/session_lifecycle.rs::execute_streaming_local_tmux	10	CD
+services 기타; 호출 채널 추적 필요	routines	src/services/routines/agent_executor.rs::create_routine_thread	1	A
+services 기타; 호출 채널 추적 필요	routines	src/services/routines/agent_executor.rs::resolve_or_create_routine_thread	1	A
+services 기타; 호출 채널 추적 필요	routines	src/services/routines/discord_log.rs::create_routine_thread	1	A
+services 기타; 호출 채널 추적 필요	routines	src/services/routines/discord_log.rs::log_run_js_action	1	A
+services 기타; 호출 채널 추적 필요	routines	src/services/routines/discord_log.rs::log_run_js_inputs	1	A
+services 기타; 호출 채널 추적 필요	routines	src/services/routines/discord_log.rs::log_run_outcome	1	A
+services 기타; 호출 채널 추적 필요	routines	src/services/routines/discord_log.rs::log_run_section	1	A
+services 기타; 호출 채널 추적 필요	routines	src/services/routines/discord_log.rs::log_run_started	1	A
+services 기타; 호출 채널 추적 필요	routines	src/services/routines/discord_log.rs::resolve_or_create_log_thread	1	A
+services 기타; 호출 채널 추적 필요	routines	src/services/routines/discord_log.rs::send_or_edit_run_log	2	A
+services 기타; 호출 채널 추적 필요	routines	src/services/routines/session_control.rs::control_persistent_session	1	C
+services 기타; 호출 채널 추적 필요	services/auto_queue	src/services/auto_queue.rs::assemble_status_response	1	D
+services 기타; 호출 채널 추적 필요	services/auto_queue	src/services/auto_queue.rs::build_entry_view_pg	1	D
+services 기타; 호출 채널 추적 필요	services/auto_queue	src/services/auto_queue.rs::from	1	D
+services 기타; 호출 채널 추적 필요	services/auto_queue	src/services/auto_queue.rs::run_view_with_pg	1	D
+services 기타; 호출 채널 추적 필요	services/codex	src/services/codex.rs::codex_tui_idle_relay_binding	1	D
+services 기타; 호출 채널 추적 필요	services/codex	src/services/codex.rs::emit_codex_tui_post_tail_handoff	1	D
+services 기타; 호출 채널 추적 필요	services/codex	src/services/codex.rs::execute_command_streaming	5	CD
+services 기타; 호출 채널 추적 필요	services/codex	src/services/codex.rs::execute_streaming_local_tmux	9	CD
+services 기타; 호출 채널 추적 필요	services/codex	src/services/codex.rs::execute_streaming_local_tui_tmux	6	CD
+services 기타; 호출 채널 추적 필요	services/codex	src/services/codex.rs::register_codex_tui_idle_relay_binding	1	D
+services 기타; 호출 채널 추적 필요	services/github_issue_creation	src/services/github_issue_creation.rs::sync_issue_announcement	2	A
+services 기타; 호출 채널 추적 필요	services/issue_announcements	src/services/issue_announcements.rs::complete_issue_announcement_pg	1	A
+services 기타; 호출 채널 추적 필요	services/issue_announcements	src/services/issue_announcements.rs::create_issue_announcement_pg	1	A
+services 기타; 호출 채널 추적 필요	services/issue_announcements	src/services/issue_announcements.rs::send_issue_announcement_message	2	A
+services 기타; 호출 채널 추적 필요	services/provider	src/services/provider.rs::tmux_followup_fallback_after_read_error	1	D
+services 기타; 호출 채널 추적 필요	services/provider_exec	src/services/provider_exec.rs::execute_simple_blocking_inner	1	D
+services 기타; 호출 채널 추적 필요	services/provider_exec	src/services/provider_exec.rs::execute_structured_with_context	1	D
+services 기타; 호출 채널 추적 필요	services/qwen	src/services/qwen.rs::execute_command_streaming	4	CD
+services 기타; 호출 채널 추적 필요	services/qwen	src/services/qwen.rs::qwen_read_output_file_until_result_tracked	1	D
+services 기타; 호출 채널 추적 필요	services/qwen	src/services/qwen.rs::register_qwen_tmux_runtime_binding	1	D
+services 기타; 호출 채널 추적 필요	services/qwen_tmux_wrapper	src/services/qwen_tmux_wrapper.rs::rewind_output_to_checkpoint	1	C
+services 기타; 호출 채널 추적 필요	services/qwen_tmux_wrapper	src/services/qwen_tmux_wrapper.rs::run_turn	1	C
+services 기타; 호출 채널 추적 필요	services/session_backend	src/services/session_backend.rs::new	1	D
+services 기타; 호출 채널 추적 필요	services/session_backend	src/services/session_backend.rs::read_output_file_until_result_with_harvest	1	D
+services 기타; 호출 채널 추적 필요	services/session_resume	src/services/session_resume.rs::dispatch_resume_previous	1	B
+services 기타; 호출 채널 추적 필요	services/session_resume	src/services/session_resume.rs::perform_resume_rebind	1	B
+services 기타; 호출 채널 추적 필요	services/stale_turn_reconciler	src/services/stale_turn_reconciler.rs::channel_inflight_observation	1	D
+services 기타; 호출 채널 추적 필요	services/termination_audit	src/services/termination_audit.rs::build_record	1	D
+services 기타; 호출 채널 추적 필요	services/termination_audit	src/services/termination_audit.rs::record_termination	1	D
+services 기타; 호출 채널 추적 필요	services/termination_audit	src/services/termination_audit.rs::record_termination_with_handles	1	D
+services 기타; 호출 채널 추적 필요	tui_prompt_dedupe	src/services/tui_prompt_dedupe/runtime_binding.rs::adopt_claude_continuation_session	1	D
+services 기타; 호출 채널 추적 필요	tui_prompt_dedupe	src/services/tui_prompt_dedupe/runtime_binding.rs::advance_tmux_runtime_binding_offset	1	D
+services 기타; 호출 채널 추적 필요	tui_prompt_dedupe	src/services/tui_prompt_dedupe/runtime_binding.rs::advance_tmux_runtime_binding_offset_under_source_authority	1	D
+services 기타; 호출 채널 추적 필요	writer_protocol	src/services/writer_protocol/authority.rs::from_catalog	1	D
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	cli/dcserver	src/cli/dcserver.rs::handle_dcserver	4	AB
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	cli/direct	src/cli/direct.rs::cmd_discord_read	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	cli/direct	src/cli/direct.rs::cmd_discord_thread_create	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	cli/direct	src/cli/direct.rs::cmd_send	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	cli/direct	src/cli/direct.rs::cmd_send_to_agent	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	cli/discord	src/cli/discord.rs::send	3	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	cli/discord	src/cli/discord.rs::send_channel_message	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	cli/discord	src/cli/discord.rs::send_file	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	cli/discord	src/cli/discord.rs::send_user_message	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	cli/discord_thread_create	src/cli/discord_thread_create.rs::create	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	cli/init	src/cli/init.rs::<module>	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	db/postgres	src/db/postgres.rs::acquire_startup_advisory_lock	1	D
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	engine/ops	src/engine/ops.rs::register_globals_pg_only	1	B
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	engine/ops	src/engine/ops/exec_ops.rs::register_exec_ops	1	B
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	github/sync	src/github/sync.rs::sync_loaded_github_issues_for_repo_pg	2	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/mod	src/server/mod.rs::dm_reply_retry_loop	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/mod	src/server/mod.rs::policy_tick_loop	1	C
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/mod	src/server/mod.rs::try_acquire_pg_singleton_lock	1	D
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/outbox_actionable_delivery	src/server/outbox_actionable_delivery.rs::deliver	2	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/outbox_actionable_delivery	src/server/outbox_actionable_delivery.rs::deliver_with_bot	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/agents.rs::agent_message	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/auto_queue.rs::request_generate	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/discord.rs::channel_info	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/discord.rs::channel_messages	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/discord.rs::ensure_channel_is_role_mapped	2	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/discord.rs::fetch_discord_channel_info	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/domains/agents.rs::router	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/domains/integrations.rs::router	3	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/domains/onboarding.rs::router	2	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/domains/ops.rs::router	8	AB
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/domains/runtime.rs::router	4	AB
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/e2e_control.rs::delete_discord_message	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/escalation.rs::<module>	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/escalation.rs::deliver_pm_fallback	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/escalation.rs::emit_escalation	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/escalation.rs::emit_escalation_with_base_url	5	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/escalation.rs::send_channel_message	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/escalation.rs::try_reuse_escalation_thread	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/health_api.rs::rebind_inflight_handler	1	B
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/health_api.rs::relay_recovery_handler	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/health_api.rs::send_handler	2	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/health_api.rs::send_to_agent_handler	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/health_api.rs::senddm_handler	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/health_api.rs::stale_mailbox_repair_handler	2	B
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/idle_recap.rs::post_idle_recap	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/idle_recap.rs::run_idle_recap_post_job	7	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/mod.rs::compose_api_router	3	AB
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/onboarding.rs::channels_post	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/onboarding.rs::validate_token	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/routes	src/server/routes/routines/handlers.rs::control_routine_session	1	C
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/worker_registry	src/server/worker_registry/registry.rs::start_stage	1	A
+services 밖(서버 라우트·CLI 등); 대상 채널 인자 추적 필요	server/worker_registry	src/server/worker_registry/registry.rs::start_worker	2	AC
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	discord	src/services/discord/discord_io.rs::retry_failed_dm_notifications	1	A
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	formatting	src/services/discord/formatting/long_send_rollback.rs::send_long_message_raw_with_reference_rollback	1	A
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	formatting	src/services/discord/formatting/long_send_rollback.rs::send_long_message_raw_with_required_reference_rollback	1	A
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/delivery.rs::deliver_single	2	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/delivery.rs::deliver_split	1	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/delivery.rs::retry_minimal_fallback	1	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/delivery_record.rs::append_completed_turn_if_nonzero	1	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/delivery_record.rs::persist_confirmed_frontier_and_receipt	1	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/delivery_record.rs::record_delivered_frontier_with_body	1	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/delivery_record.rs::record_long_chunk_terminal_delivery	1	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/delivery_record.rs::record_pinned_delivery_metadata	1	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/delivery_record.rs::record_recovery_terminal_delivery	1	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/delivery_record.rs::record_watcher_terminal_delivery	1	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/delivery_record.rs::shadow_mirror_delivered_frontier	1	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/delivery_record.rs::shadow_mirror_delivered_frontier_inner	3	BD
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/delivery_record.rs::write_confirmed_delivery_at_with_lock_authority	1	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/delivery_record.rs::write_confirmed_frontier_guarded_at_with_before_lock	1	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/delivery_record.rs::write_confirmed_frontier_guarded_at_with_lock_authority	3	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/receipt_index.rs::from_record	1	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/receipt_index.rs::read_receipt_index_at	1	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/turn_output_controller.rs::commit_and_finalize	2	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/turn_output_controller.rs::commit_not_delivered_and_release	2	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/turn_output_controller.rs::deliver_turn_output	1	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/turn_output_controller.rs::deliver_turn_output_with_fallback_revalidation	9	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/turn_output_controller.rs::drop	1	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/turn_output_controller.rs::reclaim_if_expired	1	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/turn_output_controller.rs::release_and_disarm	1	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/turn_output_controller.rs::try_acquire	1	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/turn_output_controller/fresh_send.rs::deliver	10	D
+wrapper 내부인데 추적된 호출자가 없음(이름 제외 목록 또는 간접 호출)	outbound	src/services/discord/outbound/turn_output_controller/fresh_send.rs::record_success	2	D
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/intake_dispatch.rs::dispatch_text_intake	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/intake_dispatch.rs::finish_text_intake_admission	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/intake_dispatch/attachment.rs::prepare_admitted_live_attachments	2	AB
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/intake_dispatch/notice.rs::notify_blocked_intake	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/intake_dispatch/queued.rs::admit_queued_intake	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/intake_gate.rs::handle_event	24	ABC
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/intake_gate/component_events.rs::handle_model_picker_component_if_applicable	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/intake_gate/queue_effects.rs::notify_pending_reaction_failure	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/intake_gate/queue_effects.rs::notify_pending_reaction_failure_http	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/intake_gate/queue_effects.rs::render_visible_queued_ack	7	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/intake_gate/queue_effects.rs::reuse_any_queued_placeholder_for_channel	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/intake_gate/queue_effects.rs::reuse_merged_queued_placeholder	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/intake_gate/stale_turn.rs::classify_channel_stale_active_turn_proof	1	B
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/intake_gate/stale_turn.rs::mailbox_has_live_active_turn_or_cleanup_stale_proof	1	B
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/intake_gate/stale_turn.rs::release_queue_blocked_stale_active_turn	1	B
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/intake_gate/stale_turn.rs::thread_guard_force_clean_stale_thread	1	B
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/intake_queue_transaction.rs::commit_soft_intervention_transaction	3	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler.rs::finish_admitted_local	4	ABCD
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/attachments.rs::prepare_admitted_local_attachment	4	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/busy_retry.rs::finalize_enqueue	3	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/control.rs::handle_shell_command_raw	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/control.rs::handle_text_command	3	AC
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/goal_lifecycle.rs::consume_codex_goal_lifecycle_command	2	AC
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/goal_lifecycle.rs::send_codex_goal_lifecycle_notice	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/headless_turn.rs::start_reserved_headless_turn_with_owner	12	ABCD
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/headless_turn/entrypoints.rs::start_reserved_headless_turn	3	BCD
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/headless_turn/entrypoints.rs::start_voice_headless_turn	3	BCD
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/intake_turn.rs::handle_text_message	26	ABCD
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/intake_turn/placeholder_handoff.rs::reuse_bound_busy_notice	2	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/intake_turn/race_loss.rs::handle_race_loss_enqueue	6	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/intake_turn/race_loss/mailbox_reaction.rs::note_busy_tui_pre_submit_queue_pending	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/intake_turn/race_loss/mailbox_reaction.rs::note_queue_pending	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/intake_turn/runtime_transition.rs::acquire_after_redirect_or_requeue	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/intake_turn/stale_dispatch_guard.rs::abort_terminal_dispatch_at_turn_start	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/intake_turn/worker_entry.rs::execute_intake_turn_core	4	ABCD
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/pre_admission_control.rs::resolve	3	AC
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/pre_admission_control.rs::send_pre_admission_notice	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/provider_dispatch.rs::execute	1	D
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/provider_isolation.rs::ensure_provider_worktree_isolation	2	B
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/provider_isolation.rs::reconcile_managed_tmux_runtime_kind_for_config	1	C
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/provider_isolation.rs::reconstruct_unowned_managed_worktree	1	B
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/tui_followup.rs::apply_tui_busy_enqueue_refusal	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/tui_followup.rs::tui_busy_followup_diagnostic	1	B
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/typing_indicator.rs::broadcast_typing	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/typing_indicator.rs::run_native_typing_indicator	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/typing_indicator.rs::spawn_typing_indicator_task	1	A
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/watchdog.rs::attach_paused_turn_watcher	1	D
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/watchdog.rs::attach_paused_turn_watcher_for_inflight	2	BD
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/watchdog.rs::attach_paused_turn_watcher_inner	1	D
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/message_handler/watchdog.rs::schedule_pending_paused_turn_watcher_attach	1	D
+같은 채널의 Discord 발 턴; 합성 턴 행·ID와의 상호작용 판정 필요	router	src/services/discord/router/thread_binding.rs::verify_thread_accessible	1	A
+관리 채널에 recap을 올리는지 채널 선택 인자 추적 필요	discord	src/services/discord/idle_recap.rs::clear_specific_idle_recap_card	1	A
+관리 채널에 recap을 올리는지 채널 선택 인자 추적 필요	discord	src/services/discord/idle_recap.rs::inflight_has_active_turn	1	B
+관리 채널에 recap을 올리는지 채널 선택 인자 추적 필요	discord	src/services/discord/idle_recap.rs::spawn_clear_captured_idle_recap_for_channel	1	A
+관리 채널에 recap을 올리는지 채널 선택 인자 추적 필요	discord	src/services/discord/idle_recap_interaction.rs::edit_deferred_ephemeral	1	A
+관리 채널에 recap을 올리는지 채널 선택 인자 추적 필요	discord	src/services/discord/idle_recap_interaction.rs::handle_idle_recap_clear_interaction	4	AC
+관리 채널에 recap을 올리는지 채널 선택 인자 추적 필요	discord	src/services/discord/idle_recap_interaction.rs::handle_idle_recap_compact_interaction	6	A
+관리 채널에 recap을 올리는지 채널 선택 인자 추적 필요	discord	src/services/discord/idle_recap_interaction.rs::handle_idle_recap_interaction	5	AC
+관리 채널에 recap을 올리는지 채널 선택 인자 추적 필요	discord	src/services/discord/idle_recap_interaction.rs::handle_idle_recap_relay_diag_interaction	6	A
+관리 채널에 recap을 올리는지 채널 선택 인자 추적 필요	discord	src/services/discord/idle_recap_interaction.rs::handle_idle_recap_suggest_interaction	7	A
+관리 채널에 recap을 올리는지 채널 선택 인자 추적 필요	idle_recap	src/services/discord/idle_recap/card.rs::delete_older_recorded_recaps_for_channel	1	A
+관리 채널에 recap을 올리는지 채널 선택 인자 추적 필요	idle_recap	src/services/discord/idle_recap/card.rs::delete_previous_card	1	A
+관리 채널에 recap을 올리는지 채널 선택 인자 추적 필요	idle_recap	src/services/discord/idle_recap/card.rs::delete_recorded_recap_cards	1	A
+관리 채널에 recap을 올리는지 채널 선택 인자 추적 필요	idle_recap	src/services/discord/idle_recap/card.rs::post_recap_card	2	A
+사용자 메시지 reaction; 합성 턴 prompt anchor 대상 여부 판정 필요	discord	src/services/discord/reaction_lifecycle.rs::apply_reaction_action_detailed	2	A
+사용자 메시지 reaction; 합성 턴 prompt anchor 대상 여부 판정 필요	discord	src/services/discord/reaction_lifecycle.rs::try_add_reaction_raw_with_shared_detailed	1	A
+사용자 메시지 reaction; 합성 턴 prompt anchor 대상 여부 판정 필요	discord	src/services/discord/reaction_lifecycle.rs::try_reaction_raw_on_channel_detailed	2	A
+사용자 메시지 reaction; 합성 턴 prompt anchor 대상 여부 판정 필요	discord	src/services/discord/reaction_lifecycle.rs::try_reaction_raw_once_on_channel_detailed	1	A
+사용자 메시지 reaction; 합성 턴 prompt anchor 대상 여부 판정 필요	discord	src/services/discord/reaction_lifecycle.rs::try_reaction_raw_with_shared_detailed	3	A
+사용자 메시지 reaction; 합성 턴 prompt anchor 대상 여부 판정 필요	discord	src/services/discord/reaction_lifecycle.rs::try_remove_reaction_raw_with_shared_detailed	1	A
+호출자 도달이 불명 포함(불명)	discord	src/services/discord/discord_io.rs::deliver_channel_message	1	A
+호출자 도달이 불명 포함(불명)	discord	src/services/discord/discord_io.rs::notify_source_agent	1	A
+호출자 도달이 불명 포함(불명)	discord	src/services/discord/discord_io.rs::send_file_to_channel	1	A
+호출자 도달이 불명 포함(불명)	discord	src/services/discord/discord_io.rs::send_message_to_channel	1	A
+호출자 도달이 불명 포함(불명)	discord	src/services/discord/discord_io.rs::send_message_to_user	1	A
+호출자 도달이 불명 포함(불명)	discord	src/services/discord/discord_io.rs::try_handle_pending_dm_reply	1	A
+호출자 도달이 불명 포함(불명)	discord	src/services/discord/http.rs::edit_channel_message_with_components	1	A
+호출자 도달이 불명 포함(불명)	discord	src/services/discord/http.rs::send_channel_message_with_components	1	A
+호출자 도달이 불명 포함(불명)	formatting	src/services/discord/formatting/replace_long_message.rs::replace_long_message_raw_deferred	1	A
+호출자 도달이 불명 포함(불명)	outbound	src/services/discord/outbound/manual_delivery.rs::deliver_manual_dm_notification	2	A
+호출자 도달이 불명 포함(불명)	outbound	src/services/discord/outbound/reaction_control.rs::send_reaction_control_reply	1	A
+호출자 도달이 불명 포함(불명)	outbound	src/services/discord/outbound/send_api.rs::handle_senddm	1	A
+호출자 도달이 불명 포함(불명)	outbound	src/services/discord/outbound/send_gate.rs::send_message_with_backends	1	A
+호출자 도달이 불명 포함(불명)	outbound	src/services/discord/outbound/send_gate.rs::send_message_with_backends_and_delivery_options	1	A
+호출자 도달이 불명 포함(불명)	outbound	src/services/discord/outbound/send_to_agent.rs::handle_send_to_agent	1	A
+호출자 도달이 불명 포함(불명,아니오)	outbound	src/services/discord/outbound/send_gate.rs::send_message_with_backends_and_delivery_id	1	A

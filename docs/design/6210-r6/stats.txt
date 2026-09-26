@@ -1,0 +1,8 @@
+rows 3128 A=1228 B=720 C=133 D=1047
+A: seed {'raw-rest': 18, 'serenity-method': 295, 'serenity-model': 1, 'unnamed-fn-caller': 260, 'wrapper-call': 654} | reach {'불명': 370, '아니오': 335, '예': 523} | 누락 1133 (리뷰 태그도 없음 1084) | fn 629 (S 태그 fn 없음 606)
+B: seed {'deferred-clear-request': 6, 'inflight-scope': 27, 'raw-row-path-literal': 1, 'unnamed-fn-caller': 274, 'wrapper-call': 412} | reach {'불명': 52, '예': 668} | 누락 615 (리뷰 태그도 없음 530) | fn 476 (S 태그 fn 없음 441)
+C: seed {'fn-mentions-source': 41, 'generation-rename': 2, 'named-seed': 13, 'truncate': 2, 'unnamed-fn-caller': 46, 'wrapper-call': 29} | reach {'불명': 64, '아니오': 12, '예': 57} | 누락 125 (리뷰 태그도 없음 97) | fn 82 (S 태그 fn 없음 76)
+D: seed {'atomic': 3, 'ctor': 6, 'deref-assign': 18, 'field-assign': 80, 'frontier-gate-symbol': 49, 'lease-state-write': 4, 'lease-transition': 45, 'local-assign': 68, 'struct-init': 220, 'unnamed-fn-caller': 554} | reach {'불명': 175, '아니오': 1, '예': 871} | 누락 888 (리뷰 태그도 없음 819) | fn 494 (S 태그 fn 없음 454)
+files 438; 인용 전혀 없음 363; S 적중 없음 406
+누락 2761; 불명 661
+citation rows 121; zero-hit 25
