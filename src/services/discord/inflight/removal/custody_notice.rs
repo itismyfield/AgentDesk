@@ -1,8 +1,8 @@
 //! Boot custody notice: one channel message per TUI-direct custody episode. A post whose result
 //! is unknown is settled by its nonce inside Discord's retry window, by the body token outside it.
 
-use crate::services::discord::ProviderKind;
 use crate::services::discord::task_notification_delivery::nonce_retry_allowed;
+use crate::services::discord::{DiscordBotSettings, ProviderKind};
 use crate::services::discord::{SharedData, rate_limit_wait, runtime_store};
 use chrono::{DateTime, Utc};
 use poise::serenity_prelude as serenity;
@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 const STATE_FILE: &str = "notice.json";
 const HISTORY_PAGES: usize = 10;
@@ -26,6 +27,19 @@ enum NoticeState {
     Sent {
         message_id: u64,
     },
+}
+
+/// The provider's bots, each by its token hash with its settings, in token hash order.
+pub(super) type Bots = [(String, DiscordBotSettings)];
+
+/// One bot's notice pass: its token hash, the provider's bots, and the clock.
+pub(super) struct NoticePass<'a> {
+    pub(super) http: &'a serenity::Http,
+    pub(super) shared: &'a Arc<SharedData>,
+    pub(super) provider: &'a ProviderKind,
+    pub(super) bot: &'a str,
+    pub(super) bots: &'a Bots,
+    pub(super) clock: &'a (dyn Fn() -> DateTime<Utc> + Sync),
 }
 
 struct Notice {
@@ -49,12 +63,27 @@ pub(in crate::services::discord) fn spawn_boot_custody_notice(
     }
     let (shared, provider) = (shared.clone(), provider.clone());
     crate::services::discord::task_supervisor::spawn_observed("boot_custody_notice", async move {
-        notify_custody_episodes(&http, &shared, &provider, Utc::now()).await;
+        let (http, shared, provider) = (&http, &shared, &provider);
+        let (bot, bots, clock) = ("", &[], &Utc::now);
+        let pass = NoticePass {
+            http,
+            shared,
+            provider,
+            bot,
+            bots,
+            clock,
+        };
+        notify_with_retries(&pass, &[Duration::ZERO]).await;
     });
 }
 
+pub(super) async fn notify_with_retries(pass: &NoticePass<'_>, _delays: &[Duration]) {
+    let (http, shared, provider) = (pass.http, pass.shared, pass.provider);
+    notify_custody_episodes(http, shared, provider, (pass.clock)()).await;
+}
+
 /// One pass over the provider's custody episodes; an unsettled notice waits for the next boot.
-pub(super) async fn notify_custody_episodes(
+async fn notify_custody_episodes(
     http: &serenity::Http,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
