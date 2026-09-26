@@ -1213,6 +1213,10 @@ impl PipelineConfig {
         // Timeouts are retired config nothing acts on, so their state and clock
         // keys are not cross-checked: an inherited map must not block a save.
         for (key, timeout) in &self.timeouts {
+            // Condition-based timeouts have always been exempt from the retry check.
+            if timeout.condition.is_some() {
+                continue;
+            }
             // #1082: max_retries must be >= 1 when explicitly set.
             if let Some(mr) = timeout.max_retries {
                 if mr == 0 {
@@ -1915,5 +1919,43 @@ mod schema_strictness_tests {
                 });
             }
         }
+    }
+
+    /// Condition-based timeouts keep their exemption from the max_retries check,
+    /// both in a loaded manifest and when an editor save inherits them.
+    #[test]
+    fn conditional_timeout_with_zero_retries_still_validates() {
+        let default_yaml = default_pipeline_yaml();
+        let yaml = default_yaml.replace(
+            "condition: review_status = 'awaiting_dod'\n    max_retries: 1",
+            "condition: review_status = 'awaiting_dod'\n    max_retries: 0",
+        );
+        assert_ne!(yaml, default_yaml, "awaiting_dod timeout was not rewritten");
+        let parent: PipelineConfig = serde_yaml::from_str(&yaml).expect("manifest parses");
+        parent
+            .validate()
+            .expect("manifest with a conditional zero-retry timeout validates");
+
+        let ovr = parse_override_strict(&visual_editor_save_without_timeouts(|_| {}))
+            .expect("strict parse")
+            .expect("override is not empty");
+        parent
+            .merge(&ovr)
+            .validate()
+            .expect("editor save inheriting the conditional timeout validates");
+
+        let mut unconditional = parent;
+        unconditional
+            .timeouts
+            .get_mut("awaiting_dod")
+            .expect("awaiting_dod timeout")
+            .condition = None;
+        let error = unconditional
+            .validate()
+            .expect_err("unconditional zero-retry timeout is rejected");
+        assert!(
+            error.to_string().contains("has max_retries=0"),
+            "unexpected rejection: {error}"
+        );
     }
 }
