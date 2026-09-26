@@ -3465,13 +3465,15 @@ services::discord::inflight::removal::boot_custody_tests::reaped_live_pane_tui_d
 services::discord::inflight::removal::custody_notice_tests::a_dm_sessions_notice_is_delivered_by_the_provider_bot
 services::discord::inflight::removal::custody_notice_tests::a_dm_turn_held_only_as_a_pending_start_is_sent_by_the_provider_bot_pg
 services::discord::inflight::removal::custody_notice_tests::a_failed_notice_row_is_enqueued_again_by_the_next_boot_pg
+services::discord::inflight::removal::custody_notice_tests::a_root_reading_the_dm_session_readdresses_an_unclaimed_notice_pg
 services::discord::inflight::removal::custody_notice_tests::a_row_without_persisted_turn_ids_is_one_row_across_boots_and_backfill_pg
 services::discord::inflight::removal::custody_notice_tests::a_tui_direct_turn_is_one_outbox_row_across_boots_pg
-services::discord::inflight::removal::custody_notice_tests::an_earlier_builds_episode_of_a_turn_is_one_row_of_its_own_pg
+services::discord::inflight::removal::custody_notice_tests::an_earlier_builds_episode_of_a_turn_shares_its_row_pg
 services::discord::inflight::removal::custody_notice_tests::an_episode_is_one_row_whatever_copies_its_root_holds_pg
 services::discord::inflight::removal::custody_notice_tests::an_unreadable_or_garbled_marker_is_warned_and_skipped
 services::discord::inflight::removal::custody_notice_tests::anchorless_turns_started_in_the_same_second_are_two_rows_pg
 services::discord::inflight::removal::custody_notice_tests::custody_without_a_tui_direct_turn_enqueues_nothing_pg
+services::discord::inflight::removal::custody_notice_tests::earlier_build_turns_sharing_a_start_time_are_two_rows_pg
 services::discord::inflight::removal::custody_notice_tests::the_boot_reaper_starts_the_notice_pass_pg
 services::discord::inflight::removal::custody_notice_tests::the_notice_reports_a_failed_copy_and_promises_nothing_more
 services::discord::inflight::removal::custody_notice_tests::without_postgres_the_notice_waits_for_the_next_boot_pg

@@ -25421,6 +25421,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/inflight/removal/custody_notice.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:5d5708edc0c7e682a9f211090ebdebf380489397537c11b3369d87d6394e17a7"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/inflight/removal/custody_notice_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
