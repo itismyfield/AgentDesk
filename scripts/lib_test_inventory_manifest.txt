@@ -3452,6 +3452,16 @@ services::discord::inflight::recovery_relay_attempts_tests::restart_marker_rmw_p
 services::discord::inflight::recovery_relay_attempts_tests::restart_marker_skips_corrupt_row_3860
 services::discord::inflight::recovery_relay_attempts_tests::restart_marker_skips_deleted_row_3860
 services::discord::inflight::recovery_relay_attempts_tests::saturated_counter_does_not_weaken_pane_alive_stale_guard
+services::discord::inflight::removal::boot_custody_tests::a_later_boot_preserves_output_appended_since_the_last_copy
+services::discord::inflight::removal::boot_custody_tests::a_pending_start_and_the_row_claimed_from_it_are_one_episode
+services::discord::inflight::removal::boot_custody_tests::a_recopy_past_the_boot_copy_budget_is_recorded_and_supersedes_nothing
+services::discord::inflight::removal::boot_custody_tests::a_transcript_cut_short_during_the_copy_is_recorded_incomplete_and_retried
+services::discord::inflight::removal::boot_custody_tests::a_transcript_turn_over_the_copy_cap_is_recorded_not_copied
+services::discord::inflight::removal::boot_custody_tests::an_earlier_turn_start_on_an_unchanged_transcript_is_preserved
+services::discord::inflight::removal::boot_custody_tests::an_unparseable_pending_start_keeps_its_channel_and_is_not_complete
+services::discord::inflight::removal::boot_custody_tests::an_unwritable_custody_root_does_not_stop_the_reaper
+services::discord::inflight::removal::boot_custody_tests::custody_copies_every_tui_direct_turn_and_only_the_bytes_of_other_rows
+services::discord::inflight::removal::boot_custody_tests::reaped_live_pane_tui_direct_row_leaves_a_custody_copy
 services::discord::inflight::removal::loader_gate_observation_tests::allocation_route_is_observed_but_never_changes_loader_preservation
 services::discord::inflight::removal::loader_gate_observation_tests::loader_allow_event_carries_the_generation_and_name_filter
 services::discord::inflight::removal::loader_gate_observation_tests::loader_allow_event_marks_the_unnamed_current_generation_row
