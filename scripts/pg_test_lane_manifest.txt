@@ -1000,6 +1000,7 @@ services::maintenance::jobs::db_retention::tests::db_retention_keeps_skill_usage
 services::maintenance::jobs::db_retention::tests::db_retention_preserves_permanent_outbox_dedupe_sentinels
 services::maintenance::jobs::db_retention::tests::db_retention_prunes_old_rows_archives_turns_and_is_idempotent
 services::maintenance::jobs::db_retention::tests::db_retention_turns_window_is_strict_with_no_archive_less_delete
+services::maintenance::jobs::db_retention::tests::intake_outbox_candidate_count_operator_abort_is_an_error
 services::maintenance::jobs::db_retention::tests::intake_outbox_candidate_count_timeout_is_reported_not_fatal
 services::maintenance::jobs::db_retention::tests::intake_outbox_candidates_exclude_rows_with_live_family_or_children
 services::maintenance::jobs::db_retention::tests::intake_outbox_candidates_use_exact_status_windows_and_allowlist
