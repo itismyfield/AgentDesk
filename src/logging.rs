@@ -138,10 +138,6 @@ mod tests {
                 "api caller production filter marker"
             );
             tracing::info!(
-                target: crate::engine::ops::TIMEOUT_SHADOW_LOG_TARGET,
-                "timeout shadow production filter marker"
-            );
-            tracing::info!(
                 target: "policy",
                 "policy production filter marker"
             );
@@ -153,14 +149,6 @@ mod tests {
         );
         assert!(
             logs.contains(crate::api_caller_observability::LOG_TARGET),
-            "logs={logs}"
-        );
-        assert!(
-            logs.contains("timeout shadow production filter marker"),
-            "logs={logs}"
-        );
-        assert!(
-            logs.contains(crate::engine::ops::TIMEOUT_SHADOW_LOG_TARGET),
             "logs={logs}"
         );
         assert!(
