@@ -84,7 +84,7 @@ def artifact(root: Path, digest: str, *, name: str = "agentdesk", src: str = "sr
 HOST_CFG = 'debug_assertions\npanic="unwind"\ntarget_family="unix"\ntarget_os="linux"\nunix\n'
 
 def host_cfg(case: unittest.TestCase) -> None:
-    patcher = mock.patch.object(h2_depinfo, "rustc_cfg", return_value=HOST_CFG, create=True)
+    patcher = mock.patch.object(h2_depinfo, "rustc_cfg", return_value=HOST_CFG)
     patcher.start()
     case.addCleanup(patcher.stop)
 
@@ -485,6 +485,9 @@ class DepInfo(unittest.TestCase):
                 ("#[cfg_attr(all(), cfg(any()))]\nmod shared;\n", unexplained),
                 ('#[cfg(test)]\nmod m {\n    #[path = "../shared.rs"]\n    mod shared;\n}\n', unexplained),
                 ('#[cfg(test)]\nfn f() {\n    #[path = "shared.rs"]\n    mod shared;\n}\n', unexplained),
+                # a comma, macro or const block between the gate and the body still leaves the body gated
+                ('#[cfg(test)]\nfn f<A, B>(_: [u8; m!(3)]) -> [u8; { 3 }] {\n    #[path = "shared.rs"]\n    mod shared;\n}\n',
+                 unexplained),
                 ("/*\nmod shared;\n*/\n", unexplained),
                 ('const S: &str = r#"\nmod shared;\n"#;\n', unexplained),
                 ("macro_rules! decoy {\n    () => {\n        mod shared;\n    };\n}\n", unexplained),

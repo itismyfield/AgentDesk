@@ -138,10 +138,13 @@ def owner_shape_problems(root: Path) -> list[str]:
             continue
         code = production_views(root / rel)[0]
         items = m.SourceFile(code).items
+        # a macro inside an attribute (`#[doc = include_str!(..)]`) is its input; an unclosed attribute hides nothing
+        attrs = [(start, end) for start, end in attr_spans(code) if end is not None]
         problems += [f"{'R-E' if rel in INVENTORY_FILES else 'R-O'}: {rel} uses item-level macro "
                      f"`{call.group(1) or call.group(2)}!`; owner files must be plain items"
                      for call in ITEM_MACRO_RE.finditer(code)
-                     if call.group(1) or not any(s <= call.start() <= e for s, e, _, _ in items)]
+                     if not any(s <= call.start() < e for s, e in attrs)
+                     and (call.group(1) or not any(s <= call.start() <= e for s, e, _, _ in items))]
         if rel not in INVENTORY_FILES:
             continue
         # a fn with a body whose parent scope is a trait declared here is a default method
@@ -156,19 +159,22 @@ def tmux_literal_sites(code: str, mixed: str, literals: list[tuple[int, str]]) -
     line = lambda pos: " ".join(mixed[mixed.rfind("\n", 0, pos) + 1:(mixed.find("\n", pos) + 1 or len(mixed) + 1) - 1].split())
     return collections.Counter((src.enclosing(pos)[0], line(pos)) for pos, text in literals if TMUX_LITERAL_RE.match(text))
 
-def has_path_attr(code: str) -> bool:
-    """True if a `#[..]`/`#![..]` attribute names `path =` anywhere inside it, cfg_attr and multi-line included.
-    Review r5: the span ends at the depth-matched `]`, so a nested `[..]` before `path =` cannot cut it short."""
+def attr_spans(code: str):
+    """(start, end) of each `#[..]`/`#![..]` attribute body, ending at the depth-matched `]`; end None when unclosed."""
     for opener in re.finditer(r"#\s*!?\s*\[", code):
-        depth, end = 0, len(code)
+        depth = 0
         for i in range(opener.end() - 1, len(code)):
             depth += {"[": 1, "]": -1}.get(code[i], 0)
             if depth == 0:
-                end = i
+                yield opener.end(), i
                 break
-        if re.search(r"\bpath\s*=", code[opener.end():end]):
-            return True
-    return False
+        else:
+            yield opener.end(), None
+
+def has_path_attr(code: str) -> bool:
+    """True if a `#[..]`/`#![..]` attribute names `path =` anywhere inside it, cfg_attr and multi-line included.
+    Review r5: the span ends at the depth-matched `]`, so a nested `[..]` before `path =` cannot cut it short."""
+    return any(re.search(r"\bpath\s*=", code[start:len(code) if end is None else end]) for start, end in attr_spans(code))
 
 def zero_rules(root: Path) -> list[str]:
     """R-C, R-C2, R-F over non-owner prod Rust; R-O roster, Cargo.lock (H4) and H9 files."""

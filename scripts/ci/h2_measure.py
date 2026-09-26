@@ -158,53 +158,159 @@ def _registrable(stack, name: str) -> tuple[str, ...]:
             parts.append(frame_name)
     return tuple(parts + [name])
 
-_MODULE_TABLES: dict[Path, tuple[dict[str, str], list[Path]]] = {}
-MOD_DECL_RE = re.compile(r"^([ \t]*)(?:pub(?:\([^)]*\))?[ \t]+)?mod[ \t]+([A-Za-z_]\w*)[ \t]*(;|\{)", re.M)
-PATH_ATTR_RE = re.compile(r"#\[path\s*=\s*\"([^\"]+)\"\]\s*$")
+_MODULE_TABLES: dict[Path, tuple[dict[str, str], list[Path], list[str]]] = {}
+# attribute opener, macro token tree (skipped: its `mod` is not a declaration), `mod` declaration, punctuation
+WALK_RE = re.compile(r"#\s*(!?)\s*\[|\bmacro_rules\s*!\s*[A-Za-z_]\w*\s*(?=[({\[])"
+                     r"|\b(?!(?:if|while|match|return|in|else|let|break)\b)[A-Za-z_]\w*\s*!\s*(?=[({\[])"
+                     r"|\bmod\s+([A-Za-z_]\w*)\s*([;{])|[{}()\[\];]")
+ATTR_TOKEN_RE = re.compile(r'r(#*)"[\s\S]*?"\1|"(?:[^"\\]|\\.)*"|[A-Za-z_]\w*|\S')
+
+class CfgError(ValueError):
+    pass
 
 def _module_table(root: Path) -> dict[str, str]:
     """{src file: crate module path}, following `mod` / `#[path]` from src/lib.rs."""
     return _module_walk(root)[0]
 
-def _module_walk(root: Path) -> tuple[dict[str, str], list[Path]]:
-    """(module table keyed by `..`-collapsed path, module files as opened). Files are opened and searched
-    at the joined path so `..` after a directory symlink resolves on disk, as it does for rustc."""
-    if root in _MODULE_TABLES:
+def _views(text: str) -> tuple[str, str]:
+    """(code only, comments blanked) views of `text`, both aligned with it offset for offset."""
+    state, code, lit = rust_lex.StripState(), [], []
+    for line in text.split("\n"):
+        for kind, part in rust_lex.lex_segments(line, state):
+            blank = " " * len(part)
+            code.append(part if kind in (rust_lex.CODE, rust_lex.SPACE) else blank)
+            lit.append(blank if kind == rust_lex.COMMENT else part)
+        code.append("\n")
+        lit.append("\n")
+    return "".join(code), "".join(lit)
+
+def _matched(code: str, start: int, brackets: str) -> int:
+    """Offset just past the bracket closing the one at `start`; `len(code)` when it never closes."""
+    depth = 0
+    for i in range(start, len(code)):
+        depth += (code[i] in brackets[0::2]) - (code[i] in brackets[1::2])
+        if depth == 0:
+            return i + 1
+    return len(code)
+
+def _args(tokens: list[str]) -> list[list[str]] | None:
+    """Top-level comma-separated arguments of `( .. )`; None when `tokens` is not one balanced group."""
+    if tokens[:1] != ["("]:
+        return None
+    args, depth = [[]], 0
+    for index, token in enumerate(tokens):
+        depth += (token in "([{") - (token in ")]}")
+        if depth == 0:
+            return [a for a in args if a] if index == len(tokens) - 1 else None
+        if index and not (depth == 1 and token == ","):
+            args[-1].append(token)
+        elif index:
+            args.append([])
+    return None
+
+def _attr_effects(tokens: list[str], guards: tuple = ()) -> list[tuple[tuple, str, object]]:
+    """[(cfg_attr guards, "cfg" | "path", predicate tokens | path)] of one attribute body, cfg_attr unfolded."""
+    if tokens[:1] == ["cfg"]:
+        return [(guards, "cfg", tuple(tokens[1:]))]
+    if tokens[:1] == ["cfg_attr"]:
+        args = _args(tokens[1:])
+        if args is None or len(args) < 2:  # malformed: an unevaluable predicate reports it
+            return [(guards, "cfg", tuple(tokens))]
+        guard = ("(", *args[0], ")")
+        return [effect for attr in args[1:] for effect in _attr_effects(attr, (*guards, guard))]
+    if len(tokens) == 3 and tokens[:2] == ["path", "="] and tokens[2][-1:] == '"':
+        raw = re.fullmatch(r'r(#*)"([\s\S]*)"\1', tokens[2])
+        return [(guards, "path", raw.group(2) if raw else re.sub(r"\\(.)", r"\1", tokens[2][1:-1]))]
+    return []
+
+def _module_walk(root: Path, holds=None) -> tuple[dict[str, str], list[Path], list[str]]:
+    """(module table, files as opened, cfg problems) over the `mod` declarations `holds` keeps (None: all of them).
+    Files open at the joined path as rustc does; identity is the real file, the key its `..`-collapsed spelling if that is it."""
+    if holds is None and root in _MODULE_TABLES:
         return _MODULE_TABLES[root]
+    real_root = Path(os.path.realpath(root))
     table: dict[str, str] = {}
     opened: list[Path] = []
+    problems: dict[str, None] = {}
+    seen: set[tuple[str, str]] = set()
     queue = [(root / "src/lib.rs", CRATE, False)]
     while queue:
         path, modpath, owned = queue.pop()
-        rel = Path(os.path.normpath(path)).relative_to(root).as_posix()
-        if rel in table or not path.exists():
+        own_dir = path.parent if owned or path.stem in ("mod", "lib", "main") else path.parent / path.stem
+        real = Path(os.path.realpath(path))
+        if (str(real), os.path.realpath(own_dir)) in seen or not real.is_file():
             continue
-        table[rel] = modpath
+        seen.add((str(real), os.path.realpath(own_dir)))
+        lexical = Path(os.path.normpath(path))
+        if lexical.is_relative_to(root) and Path(os.path.realpath(lexical)) == real:
+            rel = lexical.relative_to(root).as_posix()
+        else:
+            rel = real.relative_to(real_root).as_posix() if real.is_relative_to(real_root) else real.as_posix()
+        table.setdefault(rel, modpath)
         opened.append(path)
-        lines = path.read_text(encoding="utf-8").splitlines()
-        inline: list[tuple[str, str]] = []
-        for index, line in enumerate(lines):
-            while inline and line.startswith(inline[-1][0] + "}"):
-                inline.pop()
-            match = MOD_DECL_RE.match(line)
-            if match is None:
-                continue
-            indent, name, opener = match.groups()
-            if opener == "{":
-                inline.append((indent, name))
-                continue
-            chain = [n for _, n in inline]
-            run = itertools.takewhile(lambda l: l.startswith("#["), (l.strip() for l in reversed(lines[:index])))
-            attr = next((m.group(1) for m in map(PATH_ATTR_RE.search, run) if m), None)  # nearest #[path]
-            own_dir = path.parent if owned or path.stem in ("mod", "lib", "main") else path.parent / path.stem
-            base = own_dir.joinpath(*chain)
-            if attr:
-                child = (base if chain else path.parent) / attr
-            else:
-                child = next((c for c in (base / f"{name}.rs", base / name / "mod.rs") if c.exists()), base / f"{name}.rs")
-            queue.append((child, "::".join([modpath, *chain, name]), bool(attr)))
-    _MODULE_TABLES[root] = table, opened
-    return table, opened
+
+        def active(conds: list) -> bool:
+            if holds is None:
+                return True
+            try:
+                return all(all(map(holds, (*guards, pred))) for guards, pred in conds)
+            except CfgError as exc:
+                problems[f"{rel}: cannot evaluate cfg: {exc}"] = None
+                return False
+
+        code, lit = _views(path.read_text(encoding="utf-8"))
+        # scope: [inline mod name, inherited cfg, ( and [ depth, outer pending to restore]; pending: [(attr effects, depth)].
+        # Pending clears only at `;`, `}` or a body `{`: clearing earlier would make a gated item's inner `mod` look active.
+        scopes, pending, pos = [[None, [], 0, []]], [], 0
+        while match := WALK_RE.search(code, pos):
+            token, pos, scope = match.group(0), match.end(), scopes[-1]
+            if token[0] == "#":
+                pos = _matched(code, match.end() - 1, "[]")
+                effects = _attr_effects([t.group(0) for t in ATTR_TOKEN_RE.finditer(lit[match.end():pos - 1])])
+                if match.group(1):
+                    scope[1] += [(g, v) for g, kind, v in effects if kind == "cfg"]
+                else:
+                    pending.append((effects, scope[2]))
+            elif "!" in token:
+                pos = _matched(code, pos, "()[]{}")
+            elif match.group(2):
+                effects = [e for effects, _ in pending for e in effects]
+                conds = scope[1] + [(g, v) for g, kind, v in effects if kind == "cfg"]
+                pending = []
+                if match.group(3) == "{":
+                    scopes.append([match.group(2), conds, 0, []])
+                    continue
+                if not active(conds):
+                    continue
+                paths = [(g, v) for g, kind, v in effects if kind == "path"]
+                chain = [scope[0] for scope in scopes[1:] if scope[0]]
+                base = own_dir.joinpath(*chain)
+                default = next((c for c in (base / f"{match.group(2)}.rs", base / match.group(2) / "mod.rs") if c.exists()),
+                               base / f"{match.group(2)}.rs")
+                if holds is None:
+                    targets = [v for g, v in paths if not g][-1:] or [None, *(v for _, v in paths)]
+                else:
+                    targets = [next((v for g, v in reversed(paths) if active([(g, ("(", "true", ")"))])), None)]
+                for attr in targets:
+                    child = (base if chain else path.parent) / attr if attr else default
+                    queue.append((child, "::".join([modpath, *chain, match.group(2)]), bool(attr)))
+            elif token in "([":
+                scope[2] += 1
+            elif token in ")]":
+                scope[2] -= 1
+                pending = [(e, d) for e, d in pending if d <= scope[2]]
+            elif token == "{":
+                # a block inside ( or [ (a const expression) leaves the attributes to the item's own body
+                conds = scope[1] + [(g, v) for effects, _ in pending for g, kind, v in effects if kind == "cfg"]
+                scopes.append([None, conds, 0, pending if scope[2] else []])
+                pending = []
+            elif token == "}":
+                pending = scopes.pop()[3] if len(scopes) > 1 else []
+            elif scope[2] == 0:  # `;` ends the item the attributes belonged to
+                pending = []
+    if holds is None:
+        _MODULE_TABLES[root] = table, opened, []
+    return table, opened, list(problems)
 
 def h2_tag(entry, key: str) -> tuple[str, frozenset[str]] | None:
     """(SET, lanes) of an `H2 <SET> <lane>` reason; None when not H2-tagged, error when malformed."""
