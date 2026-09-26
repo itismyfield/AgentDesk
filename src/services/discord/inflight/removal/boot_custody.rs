@@ -222,7 +222,9 @@ fn row_item(
         let transcript = PathBuf::from(row.output_path.clone().unwrap_or_default());
         (transcript, row.turn_start_offset.unwrap_or(0))
     });
-    let anchorless = (row.user_msg_id == 0).then(|| json!(row.effective_finalizer_turn_id()));
+    let started = || json!([row.started_at, row.turn_start_offset]);
+    let turn = row.turn_nonce.clone().filter(|nonce| !nonce.is_empty());
+    let anchorless = (row.user_msg_id == 0).then(|| turn.map_or_else(started, Value::from));
     let key = episode_key(provider, [row.channel_id, row.user_msg_id], anchorless);
     (key, Item("row", source, bytes, segment, None))
 }
@@ -262,8 +264,8 @@ fn pending_item(
     Some((key, Item("pending_start", source, bytes, segment, None)))
 }
 
-/// A claimed row keeps its pending record's anchor as `user_msg_id`, so both share this key; an
-/// anchorless row adds its persisted finalizer turn id, which an offset rewrite keeps.
+/// The row claimed from a pending-start record keeps its anchor as `user_msg_id`, so both
+/// share this key; an anchorless row is told apart by its turn nonce, else start and offset.
 fn episode_key(provider: &ProviderKind, ids: [u64; 2], anchorless: Option<Value>) -> Value {
     let [channel_id, anchor_id] = ids;
     let provider = provider.as_str();

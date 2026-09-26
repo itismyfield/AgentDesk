@@ -414,11 +414,8 @@ async fn the_routing_bot_sends_and_a_new_sender_settles_another_bots_posting() {
     let h = harness(&[Post::LoseResponse]).await;
     tui_direct(&h.env, 5_998_101, true);
     let bot = |token: &str, channel: u64| {
-        let allowed_channel_ids = vec![channel];
-        let settings = DiscordBotSettings {
-            allowed_channel_ids,
-            ..Default::default()
-        };
+        let mut settings = DiscordBotSettings::default();
+        settings.allowed_channel_ids = vec![channel];
         (token.to_string(), settings)
     };
     let now = Utc::now();
