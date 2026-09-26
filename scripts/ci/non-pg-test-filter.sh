@@ -99,6 +99,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::cluster::intake_worker::dispatch_stamp_tests
   --skip services::cluster::machine_resources::store::tests
   --skip services::discord::catch_up::too_old_notice::tests
+  --skip services::discord::commands::control::clear_persist_failure_tests
   --skip services::discord::health::recovery::stall_alert::tests
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
   --skip services::discord::idle_cleanup_selector_tests
@@ -287,6 +288,11 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::intake_router_hook::owner_record::tests::advisory_lock_key_is_stable
   services::cluster::intake_router_hook::owner_record::tests::idempotency_key_is_composed_and_normalized
   services::cluster::machine_resources::store::tests::recorder_queue_is_bounded_without_waiting_for_the_database
+  services::discord::commands::control::clear_persist_failure_tests::clear_callers_propagate_a_failed_clear_before_their_success_effect
+  services::discord::commands::control::clear_persist_failure_tests::failed_clear_holds_the_transition_through_the_stop_and_one_restored_turn_runs
+  services::discord::commands::control::clear_persist_failure_tests::failed_clear_persist_is_not_reported_as_cleared_and_keeps_the_session
+  services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_managed_process
+  services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_session_and_arms_no_kick
   services::discord::health::recovery::stall_alert::tests::owner_zero_and_tui_sentinel_never_render_mentions
   services::discord::health::recovery::stall_alert::tests::producer_liveness_suppresses_stall_page
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::idle_tmux_stale_turn_clear_refusal_preserves_mailbox_and_session

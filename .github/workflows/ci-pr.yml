@@ -284,6 +284,7 @@ jobs:
               - 'src/services/cluster/intake_worker/dispatch_stamp_tests.rs'
               - 'src/services/cluster/machine_resources/store.rs'
               - 'src/services/discord/catch_up/too_old_notice.rs'
+              - 'src/services/discord/commands/control.rs'
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/stall_alert.rs'
               - 'src/services/discord/idle_recap_interaction.rs'
