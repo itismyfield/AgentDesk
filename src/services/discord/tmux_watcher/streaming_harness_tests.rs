@@ -20,10 +20,12 @@ const CHILD: &str = "ADK_STREAMING_HARNESS_CHILD";
 const CLAUDE: ProviderKind = ProviderKind::Claude;
 static LOG: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
-// `$1` after global flags; the pane file holds busy, idle or dead.
+// `$1` after global flags. Builtins only: a failed read or an unknown state is recorded,
+// never mistaken for another pane state.
 const FAKE_TMUX: &str = r#"#!/bin/sh
 while [ "${1#-}" != "$1" ]; do shift; done
-state=$(cat "PANE" 2>/dev/null)
+read -r state < "ROOT/pane" || state="unreadable"
+case "$state" in busy|idle|dead) ;; *) echo "$* on pane '$state'" >> "ROOT/tmux-errors"; exit 97 ;; esac
 case "$1" in
   has-session) [ "$state" = dead ] && { echo "can't find session" >&2; exit 1; }; exit 0 ;;
   list-panes) [ "$state" = dead ] && echo 1 || echo 0; exit 0 ;;
@@ -53,7 +55,8 @@ pub(super) fn isolated(test: &str) -> bool {
             .without_time()
             .with_env_filter(
                 "agentdesk::relay_flight_recorder=info,agentdesk::inflight_remove=warn,\
-                 agentdesk::services::discord::tmux::tmux_watcher::cancel_handoff=info",
+                 agentdesk::services::discord::tmux::tmux_watcher::cancel_handoff=info,\
+                 agentdesk::services::discord::tmux::tmux_watcher::turn_stream_collector=info",
             )
             .with_writer(|| Capture)
             .finish();
@@ -63,8 +66,8 @@ pub(super) fn isolated(test: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();
     let tmux = root.path().join("tmux");
-    let pane = root.path().join("pane").display().to_string();
-    std::fs::write(&tmux, FAKE_TMUX.replace("PANE", &pane)).unwrap();
+    let dir = root.path().display().to_string();
+    std::fs::write(&tmux, FAKE_TMUX.replace("ROOT", &dir)).unwrap();
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
     let module = module_path!().split_once("::").unwrap().1;
     let exact = format!("{module}::streaming_baseline_tests::{test}");
@@ -83,6 +86,8 @@ pub(super) fn isolated(test: &str) -> bool {
         stdout.contains("1 passed; 0 failed"),
         "child {test}:\n{stdout}"
     );
+    let errors = std::fs::read_to_string(root.path().join("tmux-errors")).unwrap_or_default();
+    assert!(errors.is_empty(), "fake tmux in {test}:\n{errors}");
     false
 }
 
@@ -238,13 +243,18 @@ impl Harness {
         harness
     }
 
+    /// Sets the fake pane and checks the production tmux adapter now reports it.
     pub(super) fn pane(&self, state: &str) {
         let root = std::env::var("AGENTDESK_ROOT_DIR").unwrap();
-        std::fs::write(format!("{root}/pane"), state).unwrap();
+        std::fs::write(format!("{root}/pane"), format!("{state}\n")).unwrap();
         if state == "dead" {
             let marker = crate::services::tmux_common::session_dead_marker_path(&self.tmux);
             std::fs::write(marker, "dead").unwrap();
         }
+        let live = crate::services::tmux_diagnostics::tmux_session_has_live_pane(&self.tmux);
+        let busy = super::super::liveness::watcher_pane_actively_streaming(&self.tmux);
+        let expected = (state != "dead", state == "busy");
+        assert_eq!((live, busy), expected, "fake tmux {state}");
     }
 
     /// Records `[start, end)` as durably delivered, as a committing relay would.
@@ -364,6 +374,20 @@ impl Harness {
             .collect()
     }
 
+    /// Captured lines for this channel containing `needle`.
+    pub(super) fn events(&self, needle: &str) -> Vec<String> {
+        let channel = format!(" channel_id={} ", self.channel.get());
+        let lines = Self::logged(needle).into_iter();
+        lines.filter(|line| line.contains(&channel)).collect()
+    }
+
+    /// Soft terminals this channel dropped with no committed owner for their bytes.
+    pub(super) fn unowned_drops(&self) -> u64 {
+        let rows = crate::services::observability::metrics::snapshot().into_iter();
+        let rows = rows.filter(|row| row.channel_id == self.channel.get());
+        rows.map(|row| row.relay_terminal_authority_denied).sum()
+    }
+
     pub(super) fn frames(&self) -> Vec<(u64, u64, String)> {
         let tmux = format!("tmux_session={}", self.tmux);
         Self::logged("relay flight recorder")
@@ -393,6 +417,26 @@ impl Harness {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    /// Offsets this session's watcher reported reading through: terminal frames and idle exits.
+    fn read_ends(&self) -> Vec<u64> {
+        let idle = format!("ready-for-input idle for {} at offset ", self.tmux);
+        let idles = Self::logged(&idle).into_iter().filter_map(|line| {
+            let at = line.split(&idle).nth(1)?;
+            at.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+        });
+        let frames = self.frames().into_iter().map(|frame| frame.1);
+        frames.chain(idles).collect()
+    }
+
+    /// Waits until the watcher reports reading through everything appended so far, then for quiet.
+    pub(super) async fn drained(&self, what: &str) -> u64 {
+        let end = self.len();
+        self.until(what, |h| h.read_ends().iter().any(|&read| read >= end))
+            .await;
+        self.settle().await;
+        end
     }
 
     /// Waits until neither Discord nor the relay plan has moved for two seconds.
