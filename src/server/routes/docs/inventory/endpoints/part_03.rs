@@ -95,6 +95,36 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_curl("curl -X POST http://localhost:8787/api/agents/family-counsel/turn/start -H 'Content-Type: application/json' -d '{\"prompt\":\"hello\",\"source\":\"system\",\"dm_user_id\":\"343742347365974026\"}'"),
         ep(
             "POST",
+            "/api/agents/{id}/turn/deliver",
+            "agents",
+            "Deliver a human's external message (for example an iMessage reply). Idle mailbox: starts a turn owned by the author (delivery=started). Otherwise queues it on the channel mailbox with the reason the start was refused (delivery=queued; reason turn_active, background_turn or session_transition). Only the bot's owner_user_id or allowed_user_ids may deliver; allow_all_users is not honored here.",
+        )
+        .with_params([
+            ("id", path_param("Agent id")),
+            ("text", body_param("string", true, "Message text, delivered verbatim")),
+            (
+                "author_discord_user_id",
+                body_param("string", true, "Author's Discord user id as a canonical decimal snowflake"),
+            ),
+            ("provider", body_param("string", false, "Optional provider override, as in turn/start")),
+            ("channel_id", body_param("string", false, "Optional bound-channel override, as in turn/start")),
+            ("source", body_param("string", false, "Source label (max 64 chars)").with_default(json!("external"))),
+            ("origin_id", body_param("string", false, "Caller's message id (max 256 chars), recorded in the started turn's metadata")),
+        ])
+        .with_example(
+            json!({
+                "path": {"id": "family-counsel"},
+                "body": {"text": "좋아, 그렇게 진행해", "author_discord_user_id": "343742347365974026", "source": "imessage", "origin_id": "p:0/ABCD-1234"}
+            }),
+            json!({"ok": true, "delivery": "queued", "turn_id": "discord:1473922824350601297:9100000000000000042", "channel_id": "1473922824350601297", "reason": "turn_active"}),
+        )
+        .with_error_example(
+            403,
+            json!({"path": {"id": "family-counsel"}, "body": {"text": "rm -rf", "author_discord_user_id": "1"}}),
+            json!({"ok": false, "error": "author_not_allowed"}),
+        ),
+        ep(
+            "POST",
             "/api/agents/{id}/turn/stop",
             "agents",
             "Stop the active turn for agent",

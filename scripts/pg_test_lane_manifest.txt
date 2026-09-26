@@ -40,6 +40,7 @@ src/server/issue_specs.rs
 src/server/mod.rs
 src/server/multinode_regression.rs
 src/server/resource_locks.rs
+src/server/routes/agents_turn_deliver.rs
 src/server/routes/auto_queue_lifecycle_pg_tests.rs
 src/server/routes/campaigns.rs
 src/server/routes/dispatched_sessions_tests.rs
@@ -170,6 +171,7 @@ server::issue_specs::issue_specs_pg_tests
 server::message_outbox_retry_tests
 server::multinode_regression::multinode_regression_pg_tests
 server::resource_locks::resource_locks_pg_tests
+server::routes::agents_turn_deliver::pg_tests
 server::routes::auto_queue_lifecycle_pg_tests::tests
 server::routes::auto_queue_preflight_harness_tests
 server::routes::campaigns::tests
@@ -614,6 +616,7 @@ server::multinode_regression::multinode_regression_pg_tests::multinode_single_le
 server::multinode_regression::multinode_regression_pg_tests::multinode_unreal_resource_lock_is_exclusive
 server::resource_locks::resource_locks_pg_tests::resource_lock_allows_only_one_active_holder
 server::resource_locks::resource_locks_pg_tests::resource_lock_reclaims_expired_holder
+server::routes::agents_turn_deliver::pg_tests::target_and_author_gates_run_at_the_route_boundary_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::manual_rebind_accepts_every_canonical_live_status_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_completed_is_rejected_and_performs_no_lifecycle_side_effects_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_pending_start_and_metadata_updates_remain_supported_pg
