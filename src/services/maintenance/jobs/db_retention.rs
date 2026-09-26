@@ -769,7 +769,7 @@ async fn count_intake_outbox_candidates_bounded(
     let counted = count_intake_outbox_candidates(&mut *tx, report).await;
     tx.rollback().await?;
     match counted {
-        Err(error) if is_query_canceled(&error) => {
+        Err(error) if is_statement_timeout(&error) => {
             tracing::warn!(
                 statement_timeout,
                 "[db_retention] intake_outbox candidate count timed out; backlog unknown"
@@ -785,10 +785,12 @@ async fn count_intake_outbox_candidates_bounded(
     }
 }
 
-fn is_query_canceled(error: &anyhow::Error) -> bool {
+// 57014 also covers pg_cancel_backend; only PostgreSQL's (English) timeout message takes the soft path.
+fn is_statement_timeout(error: &anyhow::Error) -> bool {
     matches!(
         error.downcast_ref::<sqlx::Error>(),
         Some(sqlx::Error::Database(db)) if db.code().as_deref() == Some("57014")
+            && db.message() == "canceling statement due to statement timeout"
     )
 }
 
@@ -1752,6 +1754,62 @@ mod tests {
                 .is_none()
         );
 
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// An operator cancel (also SQLSTATE 57014) surfaces as an error and is not
+    /// recorded as a timeout.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn intake_outbox_candidate_count_operator_abort_is_an_error() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_intake_outbox_cancel",
+            "db_retention intake_outbox count cancel",
+        )
+        .await;
+        let pool = db.connect_and_migrate_with_max_connections(3).await;
+        seed_intake(&pool, ("u-done", "m", 1), "done", "10 days", None).await;
+        let mut blocker = pool.begin().await.expect("begin blocker");
+        sqlx::query("LOCK TABLE intake_outbox IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .expect("lock intake_outbox");
+
+        let mut report = RetentionReport::default();
+        // Polls from autocommit pool connections: pg_stat_activity is snapshotted per transaction.
+        let cancel = async {
+            loop {
+                let cancelled: bool = sqlx::query_scalar(
+                    "SELECT COALESCE(bool_or(pg_cancel_backend(pid)), false) FROM pg_stat_activity \
+                     WHERE datname = current_database() AND pid <> pg_backend_pid() \
+                       AND wait_event_type = 'Lock' \
+                       AND query LIKE '%FROM intake_outbox io%'",
+                )
+                .fetch_one(&pool)
+                .await
+                .expect("cancel waiting count");
+                if cancelled {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        };
+        let (counted, ()) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            tokio::join!(
+                count_intake_outbox_candidates_bounded(&pool, "60s", &mut report),
+                cancel
+            )
+        })
+        .await
+        .expect("cancel must end the blocked COUNT");
+        assert!(counted.is_err(), "user cancel must surface as an error");
+        assert!(
+            report
+                .get("intake_outbox", "candidates_timed_out")
+                .is_none()
+        );
+
+        blocker.rollback().await.expect("release lock");
         pool.close().await;
         db.drop().await;
     }
