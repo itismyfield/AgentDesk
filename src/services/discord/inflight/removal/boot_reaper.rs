@@ -56,14 +56,20 @@ impl BootReapOnce {
     }
 }
 
-pub(crate) async fn reap_inflight_rows_at_boot_blocking(provider: &ProviderKind) -> BootReapReport {
+pub(crate) async fn reap_inflight_rows_at_boot_blocking(
+    provider: &ProviderKind,
+    pg_pool: Option<sqlx::PgPool>,
+) -> BootReapReport {
     static ONCE: std::sync::OnceLock<BootReapOnce> = std::sync::OnceLock::new();
-    reap_inflight_rows_at_boot_with_guard(ONCE.get_or_init(BootReapOnce::default), provider).await
+    let guard = ONCE.get_or_init(BootReapOnce::default);
+    reap_inflight_rows_at_boot_with_guard(guard, provider, pg_pool).await
 }
 
+/// The first caller of a provider's pass also starts its custody notice pass.
 pub(super) async fn reap_inflight_rows_at_boot_with_guard(
     guard: &BootReapOnce,
     provider: &ProviderKind,
+    pg_pool: Option<sqlx::PgPool>,
 ) -> BootReapReport {
     let owned = provider.clone();
     let reap = move || {
@@ -73,6 +79,7 @@ pub(super) async fn reap_inflight_rows_at_boot_with_guard(
             .unwrap_or_default()
     };
     let report = guard.run_once(provider, reap).await;
+    let _ = pg_pool;
     let provider = provider.as_str();
     tracing::info!(
         provider,

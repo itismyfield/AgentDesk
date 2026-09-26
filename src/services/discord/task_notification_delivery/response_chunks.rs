@@ -429,10 +429,7 @@ pub(in crate::services::discord) async fn send_task_response_chunks_with_card_re
     }
 }
 
-pub(in crate::services::discord) fn nonce_retry_allowed(
-    attempt_started_at: DateTime<Utc>,
-    now: DateTime<Utc>,
-) -> bool {
+fn nonce_retry_allowed(attempt_started_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
     let age = now.signed_duration_since(attempt_started_at);
     age >= chrono::Duration::seconds(-NONCE_CLOCK_SKEW_SECONDS)
         && age < chrono::Duration::seconds(NONCE_RETRY_TTL_SECONDS)

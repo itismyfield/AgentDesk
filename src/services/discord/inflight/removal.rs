@@ -706,7 +706,6 @@ mod custody_notice;
 pub(in crate::services::discord) use boot_reaper::reap_inflight_rows_at_boot_blocking;
 #[cfg(test)]
 use boot_reaper::*;
-pub(in crate::services::discord) use custody_notice::spawn_boot_custody_notice;
 #[cfg(test)]
 mod boot_custody_tests;
 #[cfg(test)]
@@ -1459,13 +1458,13 @@ mod nondestructive_loader_tests {
         let env = Env::new();
         let path = env.seed(&row(5_996_081, None), STALE);
         let guard = BootReapOnce::default();
-        let first = reap_inflight_rows_at_boot_with_guard(&guard, &CLAUDE).await;
+        let first = reap_inflight_rows_at_boot_with_guard(&guard, &CLAUDE, None).await;
         assert_eq!(
             (first.already_ran, first.reaped_stale, path.exists()),
             (false, 1, false)
         );
         env.seed(&row(5_996_081, None), STALE);
-        let second = reap_inflight_rows_at_boot_with_guard(&guard, &CLAUDE).await;
+        let second = reap_inflight_rows_at_boot_with_guard(&guard, &CLAUDE, None).await;
         assert_eq!((second.already_ran, path.exists()), (true, true));
     }
 }

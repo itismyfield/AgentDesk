@@ -180,9 +180,6 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
     shared_for_tmux: &Arc<SharedData>,
     provider_for_setup: &ProviderKind,
 ) {
-    // Every runtime branch starts this poller after caching the bot token, so the
-    // one-shot boot custody notice starts here too.
-    super::super::inflight::spawn_boot_custody_notice(shared_for_tmux, provider_for_setup);
     let shared_for_deferred = shared_for_tmux.clone();
     let provider_for_deferred = provider_for_setup.clone();
     tokio::spawn(async move {
