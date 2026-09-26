@@ -46,6 +46,7 @@ src/
 │   ├── args.rs
 │   ├── channel_provider.rs
 │   ├── client.rs
+│   ├── custody.rs
 │   ├── dcserver.rs
 │   ├── dcserver_pg_bootstrap.rs
 │   ├── dcserver_restart_marker.rs
@@ -1606,6 +1607,8 @@ src/
 │   │   ├── voice_routing.rs
 │   │   ├── voice_sensitivity.rs
 │   │   └── zombie_foreground_release.rs
+│   ├── discord_custody/
+│   │   └── tests.rs
 │   ├── dispatch_gate/
 │   │   ├── auth_profiles/
 │   │   │   └── selection_tests.rs
@@ -1888,6 +1891,7 @@ src/
 │   ├── codex_tmux_wrapper.rs
 │   ├── cswap.rs
 │   ├── discord_config_audit.rs
+│   ├── discord_custody.rs
 │   ├── discord_dm_reply_store.rs
 │   ├── disk_monitor.rs
 │   ├── dispatch_gate.rs

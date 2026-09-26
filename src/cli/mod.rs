@@ -1,5 +1,6 @@
 pub(crate) mod args;
 pub(crate) mod client;
+pub(crate) mod custody;
 pub(crate) mod dcserver;
 pub(crate) mod dcserver_pg_bootstrap;
 pub(crate) mod dcserver_restart_marker;
