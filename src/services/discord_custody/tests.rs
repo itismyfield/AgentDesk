@@ -4,6 +4,7 @@ use super::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::os::unix::fs::symlink;
 
 /// A custody root holding one `claude` episode for a transcript beside it.
 struct Fx(tempfile::TempDir);
@@ -42,11 +43,13 @@ impl Fx {
         fs::write(dir.join(file), content).unwrap();
     }
 
-    /// Writes `{"sources": [record]}` for this source, as intent and outcome files hold it.
-    fn record(&self, rev: u32, file: &str, mut record: Value) {
-        record["source"] = json!(self.source());
-        let records = json!({ "sources": [record] }).to_string();
-        self.write(rev, file, records.as_bytes());
+    /// Writes `{"sources": [..]}` of `record` (or of each record listed) for this source.
+    fn record(&self, rev: u32, file: &str, record: Value) {
+        let mut records = json!({ "sources": record.as_array().cloned().unwrap_or(vec![record]) });
+        for record in records["sources"].as_array_mut().unwrap() {
+            record["source"] = json!(self.source());
+        }
+        self.write(rev, file, records.to_string().as_bytes());
     }
 
     fn manifest(&self, rev: u32, entries: Value) {
@@ -94,10 +97,10 @@ fn truncate(path: &Path, len: u64) {
 
 /// Episode flags, then the first source's flags (both sorted), `current` and missing ranges.
 type Flags = &'static [&'static str];
-type Want = (Flags, Flags, &'static str, &'static [(u64, u64)]);
+type Want<'a> = (Flags, Flags, &'static str, &'a [(u64, u64)]);
 
 /// Folds the ledger `setup` leaves beside the 28-byte transcript; no shape reads as complete.
-fn check(name: &str, (episode, flags, current, missing): Want, setup: impl Fn(&Fx)) {
+fn check(name: &str, (episode, flags, current, missing): Want<'_>, setup: impl Fn(&Fx)) {
     let fx = Fx::new(BYTES);
     setup(&fx);
     let status = fx.status();
@@ -133,8 +136,22 @@ fn ledger_shapes_fold_to_their_obligation_state() {
     check("failed attempt copy", (&[HISTORY], &[], "missing readable from 20", &[(20, 28)]), |fx| {
         (failed(fx, "copy_failed"), fx.legacy(1, 0, json!({ "copy": "c", "from": 20, "to": 28 })));
     });
+    // One outcome that names the source twice: no entry may skip the manifest check.
+    check("doubled outcome entry", (&[HISTORY], &[], "missing readable from 0", &[(0, 20)]), |fx| {
+        (fx.held(0, 0, (20, 28)), fx.write(1, "c", &BYTES[..20]));
+        fx.legacy(1, 0, json!({ "error": "copy_failed" }));
+        let ok = json!({ "result": "ok", "copy": "c", "from": 0, "to": 20 });
+        fx.record(1, "outcome.json", json!([{ "result": "copy_failed", "from": 0, "to": 0 }, ok]));
+    });
     check("an unreadable turn start", (&[], &[START], "missing readable from 0", &[(0, 28)]),
         |fx| fx.legacy(0, 0, json!({ "offset": null })));
+    // A source an outcome names first keeps start 0; a later intent does not raise it.
+    check("outcome-only start", (&[], &[START], "missing readable from 0", &[(0, 4)]), |fx| {
+        (fx.manifest(0, json!([])), fx.write(0, "c", &BYTES[4..]));
+        let ok = json!({ "result": "ok", "post": fx.seen(), "copy": "c", "from": 4, "to": 28 });
+        fx.record(0, "outcome.json", ok);
+        fx.record(1, "intent.json", json!({ "required_from": 4, "pre": fx.seen() }));
+    });
     check("torn copy result", (&[HISTORY], &[], "missing readable from 0", &[(0, 28)]), |fx| {
         fx.write(0, "c", BYTES);
         fx.legacy(0, 0, json!({ "copy": "c", "from": 0, "to": 28, "error": 7 }));
@@ -154,12 +171,21 @@ fn ledger_shapes_fold_to_their_obligation_state() {
         |fx| _ = (fx.held(0, 0, (0, 28)), fx.write(1, "c", b"partial")));
     check("marker with no revision", (&["inventory_unresolved"], &[], "", &[]), |_| {});
     check("torn manifest", (&[HISTORY], &[], "", &[]), |fx| fx.write(0, "manifest.json", b"{"));
-    // The copy of an attempt whose outcome is unreadable is not held.
-    check("torn outcome", (&["fairness_lost", HISTORY], &[], "missing readable from 0", &[(0, 28)]),
-        |fx| _ = (fx.held(0, 0, (0, 28)), fx.write(0, "outcome.json", b"{")));
+    // The copy of an attempt whose outcome is torn, or a dangling link, is not held.
+    let lost: Want = (&["fairness_lost", HISTORY], &[], "missing readable from 0", &[(0, 28)]);
+    let outcome = |fx: &Fx| (fx.held(0, 0, (0, 28)), fx.episode().join("rev-0000/outcome.json")).1;
+    check("torn outcome", lost, |fx| fs::write(outcome(fx), b"{").unwrap());
+    check("dangling outcome link", lost, |fx| symlink("gone", outcome(fx)).unwrap());
     check("short copy leaves a gap", (&[], &[], "missing readable from 12", &[(12, 20)]), |fx| {
         (fx.held(0, 4, (4, 12)), fx.held(2, 4, (20, 28)), fx.write(1, "c", b"bad"));
         fx.legacy(1, 4, json!({ "copy": "c", "from": 12, "to": 20 }));
+    });
+    // A directory the length of its claim is no copy, even before a held tail.
+    let n = fs::metadata(tempfile::tempdir().unwrap().path()).unwrap().len();
+    check("directory as a copy", (&[], &[], "missing readable from 0", &[(0, n)]), |fx| {
+        fs::create_dir_all(fx.episode().join("rev-0000/d")).unwrap();
+        (truncate(&fx.source(), n + 8), fx.held(1, 0, (n, n + 8)));
+        fx.legacy(0, 0, json!({ "copy": "d", "from": 0, "to": n }));
     });
     check("requirement past EOF", (&[], &["required_past_eof"], "complete_to_eof", &[]),
         |fx| fx.legacy(0, 50, json!({ "error": "turn start is past EOF" })));
@@ -184,8 +210,8 @@ fn attempt_records_keep_their_observations_across_a_reload() {
     let mut pre = fx.seen();
     pre["size"] = json!(20);
     fx.record(0, "intent.json", json!({ "required_from": 4, "pre": pre }));
-    fx.write(0, "c", &BYTES[4..20]);
     let ok = json!({ "result": "ok", "post": fx.seen(), "copy": "c", "from": 4, "to": 20 });
+    fx.write(0, "c", &BYTES[4..20]);
     fx.record(0, "outcome.json", ok);
     fx.record(1, "intent.json", json!({ "required_from": 2, "pre": null }));
     // The manifest copy of an attempt that has no outcome yet is not held.
@@ -219,14 +245,11 @@ fn current_reads_only_the_head_and_the_last_preserved_window() {
     ] {
         let fx = Fx::new(&bytes);
         fx.held(0, 0, (0, 80 << 10));
-        let mut rewritten = bytes.clone();
-        rewritten[at] = b'#';
-        fs::write(fx.source(), &rewritten).unwrap();
-        let status = fx.status();
-        let source = &status.sources[0];
-        let got = (source.current.as_str(), source.verify_read);
-        assert_eq!(got, (current, (64 << 10) + (8 << 10)));
-        assert_eq!(status.complete(), current == "complete_to_eof");
+        fs::write(fx.source(), [&bytes[..at], b"#", &bytes[at + 1..]].concat()).unwrap();
+        let (status, window) = (fx.status(), (64 << 10) + (8 << 10));
+        let s = &status.sources[0];
+        let got = (s.current.as_str(), s.verify_read, status.complete());
+        assert_eq!(got, (current, window, current == "complete_to_eof"));
     }
     for replaced in [true, false] {
         let fx = Fx::new(&bytes);
@@ -250,10 +273,8 @@ fn the_status_report_separates_current_from_last_attempt_and_writes_nothing() {
     let fx = Fx::new(BYTES);
     fx.held(0, 4, (4, 12));
     fx.legacy(1, 4, json!({ "error": "boot copy budget exhausted" }));
-    let (custody, stray) = (
-        fx.0.path().join("custody"),
-        fx.0.path().join("custody/.DS_Store"),
-    );
+    let custody = fx.0.path().join("custody");
+    let stray = custody.join(".DS_Store");
     fs::write(&stray, b"").unwrap();
     let before = tree(&custody);
     let report = status_report(&custody, None, None).unwrap();

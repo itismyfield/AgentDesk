@@ -131,10 +131,10 @@ fn revisions(dir: &Path) -> io::Result<Vec<String>> {
     Ok(revisions.into_iter().map(|(_, name)| name).collect())
 }
 
-/// Reads one optional ledger file: `None` when absent, `Some(Err)` when present but unusable.
+/// Reads one optional ledger file: `None` when no entry is there, else `Some(Err)` if unusable.
 fn ledger_file<T: DeserializeOwned>(path: &Path) -> Option<Result<T, ()>> {
-    let bytes = fs::read(path);
-    if matches!(&bytes, Err(error) if error.kind() == io::ErrorKind::NotFound) {
+    let bytes = fs::read(path).map_err(|_| fs::symlink_metadata(path));
+    if matches!(&bytes, Err(Err(error)) if error.kind() == io::ErrorKind::NotFound) {
         return None;
     }
     let parsed = bytes.ok().and_then(|b| serde_json::from_slice(&b).ok());
@@ -190,14 +190,20 @@ fn fold_revision(ep: &mut EpisodeStatus, dir: &Path, rev: &str) {
     }
     match outcome {
         Some(Ok(outcome)) => {
+            let listed: Vec<_> = outcome.sources.iter().map(|s| s.source.clone()).collect();
             for source in outcome.sources {
                 let copy = source.copy.filter(|_| source.result == "ok");
                 let copy = copy.map(|copy| (source.from, source.to, dir.join(copy)));
-                // A manifest entry of the same attempt must claim the same held copy.
+                // Held only for a source listed once, whose manifest entry, if any, claims it.
+                let once = listed.iter().filter(|s| **s == source.source).count() == 1;
                 let claim = claims.remove(&source.source);
-                let agrees = claim.is_none_or(|claim| claim == copy);
+                let agrees = once && claim.is_none_or(|claim| claim == copy);
                 ep.flags.extend((!agrees).then_some(HISTORY));
                 let (status, copy) = (source_mut(ep, &source.source), copy.filter(|_| agrees));
+                // A source first named here has an unknown start: byte 0 stands in, flagged.
+                let unknown = status.required_from.is_none();
+                status.flags.extend(unknown.then_some(START));
+                status.required_from.get_or_insert(0);
                 status.done(rev, &source.result, source.post.as_ref(), copy);
             }
             ep.flags.extend((!claims.is_empty()).then_some(HISTORY));
