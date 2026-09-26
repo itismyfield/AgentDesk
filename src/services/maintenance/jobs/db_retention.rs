@@ -105,6 +105,8 @@ const CONTEXT_SNAPSHOT_RETENTION_DAYS: i32 = 30;
 const INTAKE_OUTBOX_DONE_RETENTION_DAYS: i32 = 7;
 // unknown/failed rows are evidence for relay and intake loss investigations.
 const INTAKE_OUTBOX_FAILED_RETENTION_DAYS: i32 = 30;
+// Server-side cap on the candidate COUNT so a large backlog cannot stall the serial scheduler.
+const INTAKE_OUTBOX_COUNT_STATEMENT_TIMEOUT: &str = "30s";
 
 /// Run the full retention pass. Returns a per-table report. When
 /// `dry_run = true` no DML is executed — only SELECT COUNT(*) probes.
@@ -133,7 +135,12 @@ pub async fn db_retention_job(pool: &PgPool, dry_run: bool) -> Result<RetentionR
     // 9. scheduled_message_context_snapshots (all refs terminal + aged). #4658/#4723
     retain_context_snapshots(pool, dry_run, &mut report).await?;
     // 10. intake_outbox: counts delete candidates only; nothing is deleted yet.
-    count_intake_outbox_candidates(pool, &mut report).await?;
+    count_intake_outbox_candidates_bounded(
+        pool,
+        INTAKE_OUTBOX_COUNT_STATEMENT_TIMEOUT,
+        &mut report,
+    )
+    .await?;
 
     tracing::info!(
         dry_run,
@@ -744,6 +751,44 @@ fn intake_outbox_candidate_predicate() -> String {
                AND NOT {family}) \
          AND NOT EXISTS (SELECT 1 FROM intake_outbox c \
              WHERE c.parent_outbox_id = io.id AND NOT {child})"
+    )
+}
+
+/// Runs the candidate COUNT under a transaction-local `statement_timeout`; a
+/// timeout is reported as `candidates_timed_out` instead of failing the pass.
+async fn count_intake_outbox_candidates_bounded(
+    pool: &PgPool,
+    statement_timeout: &str,
+    report: &mut RetentionReport,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT set_config('statement_timeout', $1, true)")
+        .bind(statement_timeout)
+        .execute(&mut *tx)
+        .await?;
+    let counted = count_intake_outbox_candidates(&mut *tx, report).await;
+    tx.rollback().await?;
+    match counted {
+        Err(error) if is_query_canceled(&error) => {
+            tracing::warn!(
+                statement_timeout,
+                "[db_retention] intake_outbox candidate count timed out; backlog unknown"
+            );
+            report.push(TableReport {
+                table_name: "intake_outbox",
+                action: "candidates_timed_out",
+                rows_affected: 0,
+            });
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+fn is_query_canceled(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<sqlx::Error>(),
+        Some(sqlx::Error::Database(db)) if db.code().as_deref() == Some("57014")
     )
 }
 
@@ -1628,6 +1673,18 @@ mod tests {
         let a1 = seed_intake(&pool, ("c-chain", "m", 1), pre, old, None).await;
         let a2 = seed_intake(&pool, ("c-chain", "m", 2), pre, old, Some(a1)).await;
         seed_intake(&pool, ("c-chain", "m", 3), "pending", "0 days", Some(a2)).await;
+        let xyoung = seed_intake(&pool, ("c-xyoung", "m", 1), pre, old, None).await;
+        seed_intake(
+            &pool,
+            ("c-xyoung-other", "m", 1),
+            "done",
+            "1 day",
+            Some(xyoung),
+        )
+        .await;
+        let g1 = seed_intake(&pool, ("c-grand", "m", 1), pre, old, None).await;
+        let g2 = seed_intake(&pool, ("c-grand", "m", 2), pre, old, Some(g1)).await;
+        seed_intake(&pool, ("c-grand", "m", 3), "done", "1 day", Some(g2)).await;
         let gone = seed_intake(&pool, ("c-gone", "m", 1), pre, old, None).await;
         seed_intake(&pool, ("c-gone", "m", 2), post, old, Some(gone)).await;
 
@@ -1644,6 +1701,55 @@ mod tests {
         assert_eq!(
             candidates(&report, "intake_outbox.failed_post_accept"),
             Some(1)
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// A COUNT that exceeds its statement_timeout is reported as timed out and
+    /// the pass continues; the same call counts normally once unblocked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn intake_outbox_candidate_count_timeout_is_reported_not_fatal() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_intake_outbox_timeout",
+            "db_retention intake_outbox count timeout",
+        )
+        .await;
+        let pool = db.connect_and_migrate_with_max_connections(2).await;
+        seed_intake(&pool, ("t-done", "m", 1), "done", "10 days", None).await;
+        let mut blocker = pool.begin().await.expect("begin blocker");
+        sqlx::query("LOCK TABLE intake_outbox IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .expect("lock intake_outbox");
+
+        let mut report = RetentionReport::default();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            count_intake_outbox_candidates_bounded(&pool, "200ms", &mut report),
+        )
+        .await
+        .expect("statement_timeout must bound the blocked COUNT")
+        .expect("a timed-out count is not fatal");
+        assert!(
+            report
+                .get("intake_outbox", "candidates_timed_out")
+                .is_some()
+        );
+        assert_eq!(candidates(&report, "intake_outbox"), None);
+        assert_eq!(report.total_candidates(), 0);
+
+        blocker.rollback().await.expect("release lock");
+        let mut report = RetentionReport::default();
+        count_intake_outbox_candidates_bounded(&pool, "200ms", &mut report)
+            .await
+            .expect("unblocked count");
+        assert_eq!(candidates(&report, "intake_outbox"), Some(1));
+        assert!(
+            report
+                .get("intake_outbox", "candidates_timed_out")
+                .is_none()
         );
 
         pool.close().await;
