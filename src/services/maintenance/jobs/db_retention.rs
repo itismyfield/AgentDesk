@@ -13,7 +13,7 @@
 //! | `skill_usage`                           | 90 days   | DELETE (on `used_at`)             |
 //! | `turns`                                 | 90 days   | Archive-table copy, then DELETE   |
 //! | `scheduled_message_context_snapshots`   | 30 days   | DELETE (all refs terminal + aged) |
-//! | `intake_outbox` (terminal statuses)     | 7 / 30 d  | Batched DELETE (count-only now)   |
+//! | `intake_outbox` (terminal statuses)     | 7 / 30 d  | COUNT candidates only, no DELETE  |
 //!
 //! `kanban_cards` is explicitly **not** touched — done cards are permanent
 //! history. See `docs/source-of-truth.md` §retention for the policy rationale.
@@ -42,7 +42,7 @@ pub struct TableReport {
 }
 
 /// Full report for one run of [`db_retention_job`]: one entry per table plus
-/// aggregate/archive writes and the per-status `intake_outbox.<status>` counts.
+/// aggregate/archive writes and the `intake_outbox` `candidates` counts.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct RetentionReport {
     pub dry_run: bool,
@@ -60,6 +60,15 @@ impl RetentionReport {
             .iter()
             .map(|t| format!("{}:{}={}", t.table_name, t.action, t.rows_affected))
             .collect()
+    }
+
+    /// Retention candidates counted but never deleted (the `intake_outbox` policy).
+    pub fn total_candidates(&self) -> i64 {
+        self.tables
+            .iter()
+            .filter(|t| t.action == "candidates")
+            .map(|t| t.rows_affected)
+            .sum()
     }
 
     /// Total rows deleted across all operations (excludes aggregate inserts).
@@ -96,11 +105,6 @@ const CONTEXT_SNAPSHOT_RETENTION_DAYS: i32 = 30;
 const INTAKE_OUTBOX_DONE_RETENTION_DAYS: i32 = 7;
 // unknown/failed rows are evidence for relay and intake loss investigations.
 const INTAKE_OUTBOX_FAILED_RETENTION_DAYS: i32 = 30;
-const INTAKE_OUTBOX_DELETE_BATCH: i64 = 1_000;
-const INTAKE_OUTBOX_MAX_BATCHES: u32 = 50;
-/// The scheduled job only counts intake_outbox candidates until the first
-/// production report confirms the delete volume.
-const INTAKE_OUTBOX_COUNT_ONLY: bool = true;
 
 /// Run the full retention pass. Returns a per-table report. When
 /// `dry_run = true` no DML is executed — only SELECT COUNT(*) probes.
@@ -128,12 +132,13 @@ pub async fn db_retention_job(pool: &PgPool, dry_run: bool) -> Result<RetentionR
     retain_turns(pool, dry_run, &mut report).await?;
     // 9. scheduled_message_context_snapshots (all refs terminal + aged). #4658/#4723
     retain_context_snapshots(pool, dry_run, &mut report).await?;
-    // 10. intake_outbox (terminal statuses, per-status window, batched).
-    retain_intake_outbox(pool, dry_run || INTAKE_OUTBOX_COUNT_ONLY, &mut report).await?;
+    // 10. intake_outbox: counts delete candidates only; nothing is deleted yet.
+    count_intake_outbox_candidates(pool, &mut report).await?;
 
     tracing::info!(
         dry_run,
         total_deleted = report.total_deleted(),
+        total_candidates = report.total_candidates(),
         table_count = report.tables.len(),
         "[db_retention] pass complete"
     );
@@ -714,7 +719,7 @@ async fn retain_context_snapshots(
     Ok(())
 }
 
-// 10. intake_outbox: a row is deleted only when it, its whole (channel_id,
+// 10. intake_outbox: a row is a candidate only when it, its whole (channel_id,
 // user_msg_id) attempt family, and every child are allowlisted terminal and aged.
 fn intake_outbox_aged_terminal(alias: &str) -> String {
     format!(
@@ -726,7 +731,7 @@ fn intake_outbox_aged_terminal(alias: &str) -> String {
     )
 }
 
-fn intake_outbox_retainable_predicate() -> String {
+fn intake_outbox_candidate_predicate() -> String {
     let (row, family, child) = (
         intake_outbox_aged_terminal("io"),
         intake_outbox_aged_terminal("f"),
@@ -742,93 +747,46 @@ fn intake_outbox_retainable_predicate() -> String {
     )
 }
 
-async fn retain_intake_outbox(
-    pool: &PgPool,
-    dry_run: bool,
+/// Reports the uncapped candidate backlog, in total and per status, as seen by
+/// one statement snapshot. Always runs, dry-run or not, and never deletes.
+async fn count_intake_outbox_candidates<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
     report: &mut RetentionReport,
 ) -> Result<()> {
-    retain_intake_outbox_batched(
-        pool,
-        dry_run,
-        INTAKE_OUTBOX_DELETE_BATCH,
-        INTAKE_OUTBOX_MAX_BATCHES,
-        report,
-    )
-    .await
-}
-
-async fn retain_intake_outbox_batched(
-    pool: &PgPool,
-    dry_run: bool,
-    batch_size: i64,
-    max_batches: u32,
-    report: &mut RetentionReport,
-) -> Result<()> {
-    let predicate = intake_outbox_retainable_predicate();
-    if dry_run {
-        let row = sqlx::query(&format!(
-            "SELECT COUNT(*)::BIGINT AS total, \
-                    COUNT(*) FILTER (WHERE io.status = 'done')::BIGINT AS done, \
-                    COUNT(*) FILTER (WHERE io.status = 'unknown')::BIGINT AS unknown, \
-                    COUNT(*) FILTER (WHERE io.status = 'failed_pre_accept')::BIGINT AS failed_pre, \
-                    COUNT(*) FILTER (WHERE io.status = 'failed_post_accept')::BIGINT AS failed_post \
-             FROM intake_outbox io WHERE {predicate}"
-        ))
-        .bind(INTAKE_OUTBOX_DONE_RETENTION_DAYS)
-        .bind(INTAKE_OUTBOX_FAILED_RETENTION_DAYS)
-        .fetch_one(pool)
-        .await?;
-        for (table_name, action, column) in [
-            ("intake_outbox", "delete_would", "total"),
-            ("intake_outbox.done", "status_would", "done"),
-            ("intake_outbox.unknown", "status_would", "unknown"),
-            (
-                "intake_outbox.failed_pre_accept",
-                "status_would",
-                "failed_pre",
-            ),
-            (
-                "intake_outbox.failed_post_accept",
-                "status_would",
-                "failed_post",
-            ),
-        ] {
-            report.push(TableReport {
-                table_name,
-                action,
-                rows_affected: row.try_get(column).unwrap_or(0),
-            });
-        }
-        return Ok(());
+    let row = sqlx::query(&format!(
+        "SELECT COUNT(*)::BIGINT AS total, \
+                COUNT(*) FILTER (WHERE io.status = 'done')::BIGINT AS done, \
+                COUNT(*) FILTER (WHERE io.status = 'unknown')::BIGINT AS unknown, \
+                COUNT(*) FILTER (WHERE io.status = 'failed_pre_accept')::BIGINT AS failed_pre, \
+                COUNT(*) FILTER (WHERE io.status = 'failed_post_accept')::BIGINT AS failed_post \
+         FROM intake_outbox io WHERE {}",
+        intake_outbox_candidate_predicate()
+    ))
+    .bind(INTAKE_OUTBOX_DONE_RETENTION_DAYS)
+    .bind(INTAKE_OUTBOX_FAILED_RETENTION_DAYS)
+    .fetch_one(executor)
+    .await?;
+    for (table_name, action, column) in [
+        ("intake_outbox", "candidates", "total"),
+        ("intake_outbox.done", "status_candidates", "done"),
+        ("intake_outbox.unknown", "status_candidates", "unknown"),
+        (
+            "intake_outbox.failed_pre_accept",
+            "status_candidates",
+            "failed_pre",
+        ),
+        (
+            "intake_outbox.failed_post_accept",
+            "status_candidates",
+            "failed_post",
+        ),
+    ] {
+        report.push(TableReport {
+            table_name,
+            action,
+            rows_affected: row.try_get(column)?,
+        });
     }
-
-    // Oldest-first batches over the 0113 index bound lock time and WAL per run.
-    let delete_sql = format!(
-        "DELETE FROM intake_outbox WHERE id = ANY(ARRAY( \
-             SELECT io.id FROM intake_outbox io \
-             WHERE {predicate} \
-             ORDER BY io.updated_at, io.id LIMIT $3 \
-         ))"
-    );
-    let mut deleted = 0_i64;
-    for _ in 0..max_batches {
-        let n = sqlx::query(&delete_sql)
-            .bind(INTAKE_OUTBOX_DONE_RETENTION_DAYS)
-            .bind(INTAKE_OUTBOX_FAILED_RETENTION_DAYS)
-            .bind(batch_size)
-            .execute(pool)
-            .await?
-            .rows_affected() as i64;
-        deleted += n;
-        if n < batch_size {
-            break;
-        }
-    }
-    report.push(TableReport {
-        table_name: "intake_outbox",
-        action: "delete",
-        rows_affected: deleted,
-    });
     Ok(())
 }
 
@@ -1553,13 +1511,13 @@ mod tests {
         db.drop().await;
     }
 
-    /// Seeds one intake_outbox row aged `age_hours` (set at INSERT because the
-    /// BEFORE UPDATE trigger would reset `updated_at`).
-    async fn seed_intake(
-        pool: &PgPool,
+    /// Seeds one intake_outbox row whose created/updated_at is `NOW() - age` (set
+    /// at INSERT because the BEFORE UPDATE trigger would reset `updated_at`).
+    async fn seed_intake<'e, E: sqlx::PgExecutor<'e>>(
+        executor: E,
         (channel, msg, attempt): (&str, &str, i32),
         status: &str,
-        age_hours: i32,
+        age: &str,
         parent: Option<i64>,
     ) -> i64 {
         sqlx::query_scalar(
@@ -1569,8 +1527,7 @@ mod tests {
                   parent_outbox_id, dispatched_at, created_at, updated_at) \
              VALUES ('node', 'leader', $1, $2, 'owner', 'text', 'normal', 'agent', $3, $4, $5, \
                      CASE WHEN $3 = 'dispatched' THEN NOW() END, \
-                     NOW() - ($6::INT || ' hours')::INTERVAL, \
-                     NOW() - ($6::INT || ' hours')::INTERVAL) \
+                     NOW() - $6::INTERVAL, NOW() - $6::INTERVAL) \
              RETURNING id",
         )
         .bind(channel)
@@ -1578,229 +1535,150 @@ mod tests {
         .bind(status)
         .bind(attempt)
         .bind(parent)
-        .bind(age_hours)
-        .fetch_one(pool)
+        .bind(age)
+        .fetch_one(executor)
         .await
         .unwrap_or_else(|err| panic!("seed intake_outbox {channel}/{msg}: {err}"))
     }
 
-    async fn intake_survivors(pool: &PgPool) -> Vec<String> {
-        sqlx::query_scalar("SELECT channel_id || '/' || user_msg_id FROM intake_outbox ORDER BY 1")
-            .fetch_all(pool)
-            .await
-            .expect("list intake_outbox survivors")
+    fn candidates(report: &RetentionReport, table: &str) -> Option<i64> {
+        let action = if table.contains('.') {
+            "status_candidates"
+        } else {
+            "candidates"
+        };
+        report.get(table, action).map(|e| e.rows_affected)
     }
 
-    /// Only allowlisted terminal rows past their own status window are deleted;
-    /// every other status, case variant, and in-window row survives.
+    /// Only allowlisted terminal rows strictly older than their own status
+    /// window count; seeding and counting share one transaction, so one NOW().
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn intake_outbox_retention_deletes_only_aged_allowlisted_terminal_rows() {
+    async fn intake_outbox_candidates_use_exact_status_windows_and_allowlist() {
         let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
             "agentdesk_db_retention_intake_outbox_window",
             "db_retention intake_outbox status windows",
         )
         .await;
         let pool = db.connect_and_migrate().await;
+        let mut tx = pool.begin().await.expect("begin");
         // Stand-in for a future migration adding statuses the allowlist must not match.
         sqlx::query("ALTER TABLE intake_outbox DROP CONSTRAINT intake_outbox_status_check")
-            .execute(&pool)
+            .execute(&mut *tx)
             .await
             .expect("drop status check");
 
-        let (day, month) = (7 * 24, 30 * 24);
+        let (over_7, over_30) = ("7 days 1 microsecond", "30 days 1 microsecond");
         let rows = [
-            ("done-old", "done", day + 2),
-            ("done-new", "done", day - 2),
-            ("unknown-old", "unknown", month + 2),
-            ("unknown-new", "unknown", month - 2),
-            ("fpre-old", "failed_pre_accept", month + 2),
-            ("fpre-new", "failed_pre_accept", month - 2),
-            ("fpost-old", "failed_post_accept", month + 2),
-            ("fpost-8d", "failed_post_accept", day + 24),
-            ("pending", "pending", 60 * 24),
-            ("claimed", "claimed", 60 * 24),
-            ("accepted", "accepted", 60 * 24),
-            ("spawned", "spawned", 60 * 24),
-            ("dispatched", "dispatched", 60 * 24),
-            ("upper-done", "DONE", 60 * 24),
-            ("padded-done", "done ", 60 * 24),
-            ("future", "archived", 60 * 24),
+            ("done-over", "done", over_7),
+            ("done-at", "done", "7 days"),
+            ("unknown-over", "unknown", over_30),
+            ("unknown-at", "unknown", "30 days"),
+            ("fpre-over", "failed_pre_accept", over_30),
+            ("fpre-at", "failed_pre_accept", "30 days"),
+            ("fpost-over", "failed_post_accept", over_30),
+            ("fpost-at", "failed_post_accept", "30 days"),
+            ("fpost-8d", "failed_post_accept", "8 days"),
+            ("pending", "pending", "60 days"),
+            ("claimed", "claimed", "60 days"),
+            ("accepted", "accepted", "60 days"),
+            ("spawned", "spawned", "60 days"),
+            ("dispatched", "dispatched", "60 days"),
+            ("upper-done", "DONE", "60 days"),
+            ("padded-done", "done ", "60 days"),
+            ("future", "archived", "60 days"),
         ];
         for (key, status, age) in rows {
-            seed_intake(&pool, (key, key, 1), status, age, None).await;
+            seed_intake(&mut *tx, (key, key, 1), status, age, None).await;
         }
 
         let mut report = RetentionReport::default();
-        retain_intake_outbox(&pool, false, &mut report)
+        count_intake_outbox_candidates(&mut *tx, &mut report)
             .await
-            .expect("intake_outbox retention");
+            .expect("count intake_outbox candidates");
 
-        assert_eq!(
-            report
-                .get("intake_outbox", "delete")
-                .map(|e| e.rows_affected),
-            Some(4)
-        );
-        let mut expected: Vec<String> = rows
-            .iter()
-            .map(|(key, _, _)| format!("{key}/{key}"))
-            .filter(|k| !k.ends_with("-old"))
-            .collect();
-        expected.sort();
-        assert_eq!(intake_survivors(&pool).await, expected);
+        assert_eq!(candidates(&report, "intake_outbox"), Some(4));
+        for status in ["done", "unknown", "failed_pre_accept", "failed_post_accept"] {
+            let table = format!("intake_outbox.{status}");
+            assert_eq!(candidates(&report, &table), Some(1), "{table}");
+        }
 
+        tx.rollback().await.expect("rollback");
         pool.close().await;
         db.drop().await;
     }
 
-    /// A row is kept while any attempt in its family, or any row naming it as
-    /// parent, is non-terminal or still inside its window.
+    /// A row is not a candidate while any attempt in its family, or any row
+    /// naming it as parent, is non-terminal or still inside its window.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn intake_outbox_retention_keeps_parents_with_live_family_or_children() {
+    async fn intake_outbox_candidates_exclude_rows_with_live_family_or_children() {
         let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
             "agentdesk_db_retention_intake_outbox_family",
             "db_retention intake_outbox parent/child preservation",
         )
         .await;
         let pool = db.connect_and_migrate().await;
-        let old = 60 * 24;
+        let (old, pre, post) = ("60 days", "failed_pre_accept", "failed_post_accept");
 
-        let live = seed_intake(&pool, ("c-live", "m", 1), "failed_pre_accept", old, None).await;
-        seed_intake(&pool, ("c-live", "m", 2), "pending", 0, Some(live)).await;
-        let young = seed_intake(&pool, ("c-young", "m", 1), "failed_pre_accept", old, None).await;
-        seed_intake(&pool, ("c-young", "m", 2), "done", 24, Some(young)).await;
-        let cross = seed_intake(&pool, ("c-cross", "m", 1), "failed_post_accept", old, None).await;
-        seed_intake(&pool, ("c-other", "m", 1), "claimed", 0, Some(cross)).await;
-        let a1 = seed_intake(&pool, ("c-chain", "m", 1), "failed_pre_accept", old, None).await;
-        let a2 = seed_intake(
-            &pool,
-            ("c-chain", "m", 2),
-            "failed_pre_accept",
-            old,
-            Some(a1),
-        )
-        .await;
-        seed_intake(&pool, ("c-chain", "m", 3), "pending", 0, Some(a2)).await;
-        let gone = seed_intake(&pool, ("c-gone", "m", 1), "failed_pre_accept", old, None).await;
-        seed_intake(
-            &pool,
-            ("c-gone", "m", 2),
-            "failed_post_accept",
-            old,
-            Some(gone),
-        )
-        .await;
+        let live = seed_intake(&pool, ("c-live", "m", 1), pre, old, None).await;
+        seed_intake(&pool, ("c-live", "m", 2), "pending", "0 days", Some(live)).await;
+        let young = seed_intake(&pool, ("c-young", "m", 1), pre, old, None).await;
+        seed_intake(&pool, ("c-young", "m", 2), "done", "1 day", Some(young)).await;
+        let cross = seed_intake(&pool, ("c-cross", "m", 1), post, old, None).await;
+        seed_intake(&pool, ("c-other", "m", 1), "claimed", "0 days", Some(cross)).await;
+        let a1 = seed_intake(&pool, ("c-chain", "m", 1), pre, old, None).await;
+        let a2 = seed_intake(&pool, ("c-chain", "m", 2), pre, old, Some(a1)).await;
+        seed_intake(&pool, ("c-chain", "m", 3), "pending", "0 days", Some(a2)).await;
+        let gone = seed_intake(&pool, ("c-gone", "m", 1), pre, old, None).await;
+        seed_intake(&pool, ("c-gone", "m", 2), post, old, Some(gone)).await;
 
         let mut report = RetentionReport::default();
-        retain_intake_outbox(&pool, false, &mut report)
+        count_intake_outbox_candidates(&pool, &mut report)
             .await
-            .expect("intake_outbox retention");
+            .expect("count intake_outbox candidates");
 
+        assert_eq!(candidates(&report, "intake_outbox"), Some(2));
         assert_eq!(
-            report
-                .get("intake_outbox", "delete")
-                .map(|e| e.rows_affected),
-            Some(2)
+            candidates(&report, "intake_outbox.failed_pre_accept"),
+            Some(1)
         );
         assert_eq!(
-            intake_survivors(&pool).await,
-            [
-                "c-chain/m",
-                "c-chain/m",
-                "c-chain/m",
-                "c-cross/m",
-                "c-live/m",
-                "c-live/m",
-                "c-other/m",
-                "c-young/m",
-                "c-young/m"
-            ]
+            candidates(&report, "intake_outbox.failed_post_accept"),
+            Some(1)
         );
-        let live_child_parent: Option<i64> = sqlx::query_scalar(
-            "SELECT parent_outbox_id FROM intake_outbox WHERE channel_id = 'c-live' AND attempt_no = 2",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("live child parent link");
-        assert_eq!(live_child_parent, Some(live));
 
         pool.close().await;
         db.drop().await;
     }
 
-    /// One pass deletes at most `batch × max_batches` rows, oldest first.
+    /// The scheduled job reports intake_outbox candidates apart from deletions
+    /// and leaves every row in place.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn intake_outbox_retention_respects_batch_cap_oldest_first() {
-        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
-            "agentdesk_db_retention_intake_outbox_batch",
-            "db_retention intake_outbox batch cap",
-        )
-        .await;
-        let pool = db.connect_and_migrate().await;
-        for (i, key) in ["b1", "b2", "b3", "b4", "b5"].into_iter().enumerate() {
-            seed_intake(&pool, (key, key, 1), "done", 20 * 24 - i as i32, None).await;
-        }
-
-        let mut report = RetentionReport::default();
-        retain_intake_outbox_batched(&pool, false, 2, 2, &mut report)
-            .await
-            .expect("capped pass");
-        assert_eq!(
-            report
-                .get("intake_outbox", "delete")
-                .map(|e| e.rows_affected),
-            Some(4)
-        );
-        assert_eq!(intake_survivors(&pool).await, ["b5/b5"]);
-
-        pool.close().await;
-        db.drop().await;
-    }
-
-    /// The scheduled job only reports per-status would-delete counts for
-    /// intake_outbox and leaves every row in place.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn db_retention_job_counts_intake_outbox_without_deleting() {
+    async fn db_retention_job_reports_intake_outbox_candidates_without_deleting() {
         let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
             "agentdesk_db_retention_intake_outbox_count_only",
             "db_retention intake_outbox count-only wiring",
         )
         .await;
         let pool = db.connect_and_migrate().await;
-        seed_intake(&pool, ("j-done", "m", 1), "done", 10 * 24, None).await;
-        seed_intake(
-            &pool,
-            ("j-fpost1", "m", 1),
-            "failed_post_accept",
-            40 * 24,
-            None,
-        )
-        .await;
-        seed_intake(
-            &pool,
-            ("j-fpost2", "m", 1),
-            "failed_post_accept",
-            40 * 24,
-            None,
-        )
-        .await;
-        seed_intake(&pool, ("j-new", "m", 1), "done", 1, None).await;
+        let post = "failed_post_accept";
+        seed_intake(&pool, ("j-done", "m", 1), "done", "10 days", None).await;
+        seed_intake(&pool, ("j-fpost1", "m", 1), post, "40 days", None).await;
+        seed_intake(&pool, ("j-fpost2", "m", 1), post, "40 days", None).await;
+        seed_intake(&pool, ("j-new", "m", 1), "done", "1 hour", None).await;
 
         let report = db_retention_job(&pool, false)
             .await
             .expect("retention pass");
 
-        let counted =
-            |table: &str, action: &str| report.get(table, action).map(|e| e.rows_affected);
-        assert_eq!(counted("intake_outbox", "delete_would"), Some(3));
-        assert_eq!(counted("intake_outbox.done", "status_would"), Some(1));
-        assert_eq!(counted("intake_outbox.unknown", "status_would"), Some(0));
+        assert_eq!(report.total_candidates(), 3);
+        assert_eq!(report.total_deleted(), 0);
+        assert_eq!(candidates(&report, "intake_outbox.done"), Some(1));
         assert_eq!(
-            counted("intake_outbox.failed_post_accept", "status_would"),
+            candidates(&report, "intake_outbox.failed_post_accept"),
             Some(2)
         );
-        assert_eq!(counted("intake_outbox", "delete"), None);
-        assert_eq!(intake_survivors(&pool).await.len(), 4);
+        let remaining = count(&pool, "SELECT COUNT(*)::BIGINT AS n FROM intake_outbox").await;
+        assert_eq!(remaining, 4);
 
         pool.close().await;
         db.drop().await;
