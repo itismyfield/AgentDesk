@@ -15,6 +15,18 @@ struct Witness {
 static CLAIMS: LazyLock<Mutex<std::collections::HashMap<(String, u64), Witness>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
+/// What the claim is, decided from the row read before it takes the slot (I21).
+#[derive(Clone, Debug)]
+pub(super) enum AdmissionClass {
+    /// No row for this anchor: a new episode.
+    Construction,
+    /// A row for this anchor exists: re-adopting its episode, whatever token.
+    PersistedAdoption {
+        pin: InflightEpisodePin,
+        row_nonce: Option<String>,
+    },
+}
+
 #[cfg(test)]
 pub(in crate::services::discord::tui_prompt_relay) static ADMISSION_PAUSE: Mutex<
     Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
@@ -22,8 +34,17 @@ pub(in crate::services::discord::tui_prompt_relay) static ADMISSION_PAUSE: Mutex
 
 #[cfg(test)]
 pub(super) async fn pause_after_admission_for_test(channel: ChannelId) {
+    pause_for_test(&ADMISSION_PAUSE, channel).await;
+}
+
+/// One-shot test pause: parks `channel`'s claim until the test resumes it.
+#[cfg(test)]
+pub(super) async fn pause_for_test(
+    slot: &Mutex<Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+    channel: ChannelId,
+) {
     let pause = {
-        let mut slot = ADMISSION_PAUSE.lock().unwrap();
+        let mut slot = slot.lock().unwrap();
         if slot.as_ref().is_some_and(|(id, _, _)| *id == channel.get()) {
             slot.take()
         } else {
@@ -53,8 +74,16 @@ pub(super) async fn actor_is_current(
 pub(super) fn refresh_actor_matches(
     row: &InflightTurnState,
     actor: Option<&Arc<CancelToken>>,
-    freshly_admitted: bool,
+    admission: (bool, &AdmissionClass),
 ) -> bool {
+    let (freshly_admitted, class) = admission;
+    // A fresh slot refreshes only the episode it classified before claiming.
+    if freshly_admitted
+        && !matches!(class, AdmissionClass::PersistedAdoption { pin, .. }
+            if pin.is_same_episode_as(&InflightEpisodePin::from_state(row)))
+    {
+        return false;
+    }
     if row.effective_relay_owner_kind() != RelayOwnerKind::None {
         return true;
     }
@@ -82,27 +111,89 @@ pub(super) async fn capture_session_pin(
     }
 }
 
+#[cfg(test)]
+pub(in crate::services::discord::tui_prompt_relay) static PREPARE_PAUSE: Mutex<
+    Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+> = Mutex::new(None);
+
+type Prepared = (
+    Arc<CancelToken>,
+    Option<HookSessionActorPin>,
+    AdmissionClass,
+);
+
 /// Preserve a detached live allocation before entering a mailbox slot.
+/// Construction only while no row for this anchor exists; a retained or fresh
+/// token over such a row is a re-adoption of the row's episode (I21).
 pub(super) async fn prepare_admission(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel: ChannelId,
     anchor: MessageId,
     lease: &ExternalInputRelayLease,
-) -> Result<(Arc<CancelToken>, Option<HookSessionActorPin>), String> {
+) -> Result<Prepared, String> {
     let pg_pin = capture_session_pin(shared, lease.session_key.as_deref()).await?;
-    let retained =
-        super::super::super::inflight::load_inflight_state_read_only(provider, channel.get())
-            .filter(|row| row.user_msg_id == anchor.get())
-            .map(|row| retained_actor(&row))
-            .transpose()
-            .map_err(|()| "synthetic original actor proof changed")?;
+    let row = super::super::super::inflight::load_inflight_state_read_only(provider, channel.get())
+        .filter(|row| row.user_msg_id == anchor.get());
+    let retained = row
+        .as_ref()
+        .map(retained_actor)
+        .transpose()
+        .map_err(|()| "synthetic original actor proof changed")?;
+    let class = match row {
+        Some(row) => AdmissionClass::PersistedAdoption {
+            pin: InflightEpisodePin::from_state(&row),
+            row_nonce: row.turn_nonce,
+        },
+        None => AdmissionClass::Construction,
+    };
+    // The caller admits right after this returns, with no await in between.
+    #[cfg(test)]
+    pause_for_test(&PREPARE_PAUSE, channel).await;
     Ok((
         retained
             .flatten()
             .unwrap_or_else(|| Arc::new(CancelToken::new())),
         pg_pin,
+        class,
     ))
+}
+
+/// Enter the slot as a background turn. A re-adoption is fenced on the row's
+/// episode in the claim's own actor step; a construction is not fenced.
+pub(super) async fn admit_kinded(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    token: Arc<CancelToken>,
+    owner: serenity::UserId,
+    anchor: MessageId,
+    class: &AdmissionClass,
+) -> bool {
+    let background = crate::services::turn_orchestrator::ActiveTurnKind::Background;
+    let AdmissionClass::PersistedAdoption { row_nonce, .. } = class else {
+        return super::super::super::mailbox_try_start_turn_kinded(
+            shared, channel, token, owner, anchor, background,
+        )
+        .await;
+    };
+    let admission = super::super::super::queue_io::mailbox_try_start_turn_adopting(
+        shared,
+        channel,
+        token,
+        owner,
+        anchor,
+        background,
+        row_nonce.clone(),
+    )
+    .await;
+    if admission.refused_released_episode {
+        tracing::warn!(
+            channel_id = channel.get(),
+            anchor_message_id = anchor.get(),
+            "refused re-adoption of a released TUI-direct episode"
+        );
+    }
+    admission.started
 }
 
 pub(super) async fn refresh_existing(

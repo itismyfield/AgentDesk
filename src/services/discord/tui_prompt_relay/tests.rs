@@ -6546,3 +6546,6 @@ mod relayerless_claim_tests {
         harness.stop().await;
     }
 }
+
+#[cfg(unix)]
+mod fenced_admission_tests;
