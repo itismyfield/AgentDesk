@@ -10,50 +10,28 @@ pub(super) fn apply_stale_mailbox_fixes_with_post(
     };
     mailbox::classify_mailbox_findings(body)
         .into_iter()
-        .filter(|finding| {
-            if matches!(options.run_context, RunContext::StartupOnce) {
-                !finding.live_work_present
-            } else {
-                true
-            }
-        })
-        .map(|finding| {
-            if finding.live_work_present {
-                return FixAction::skipped(
-                    finding.id,
-                    "Stale Mailbox Repair",
-                    "skipped stale mailbox repair because live work evidence exists",
-                    FixSafety::ExplicitRestartRequired,
-                    "live tmux/process/dispatch evidence present",
-                )
-                .with_evidence(finding.evidence);
-            }
-            let Some(channel_id) = finding
-                .evidence
-                .get("mailbox")
-                .and_then(|mailbox| mailbox.get("channel_id"))
-                .and_then(Value::as_u64)
-            else {
-                return FixAction::skipped(
-                    finding.id,
-                    "Stale Mailbox Repair",
-                    "stale mailbox finding has no channel id for local repair",
-                    FixSafety::SafeLocalRepair,
-                    "channel evidence missing",
-                )
-                .with_safety_gate("missing_channel_evidence")
-                .with_evidence(finding.evidence);
+        .filter_map(|finding| {
+            let request = match repair_decision(body, &finding) {
+                Err(issue) => {
+                    let mut action = FixAction::skipped(finding.id, "Stale Mailbox Repair",
+                        "measurement unavailable; automatic repair withheld", FixSafety::NotFixable, issue.describe())
+                        .with_safety_gate("measurement_unavailable")
+                        .with_evidence(json!({"finding": finding.evidence, "measurement_issue": issue}));
+                    action.requires_explicit_consent = false;
+                    return Some(action);
+                }
+                Ok(None) => {
+                    if options.run_context == RunContext::StartupOnce { return None; }
+                    return Some(FixAction::skipped(finding.id, "Stale Mailbox Repair",
+                        "skipped stale mailbox repair because live work evidence exists",
+                        FixSafety::ExplicitRestartRequired, "live tmux/process/dispatch evidence present")
+                        .with_evidence(finding.evidence));
+                }
+                Ok(Some(request)) => request,
             };
-            let expected_has_cancel_token = finding
-                .evidence
-                .get("mailbox")
-                .and_then(|mailbox| mailbox.get("has_cancel_token"))
-                .and_then(Value::as_bool);
-            let request = json!({
-                "channel_id": channel_id,
-                "expected_has_cancel_token": expected_has_cancel_token
-            });
-            match post("/api/doctor/stale-mailbox/repair", request)
+            let channel_id = request.channel_id;
+            let request = json!(request);
+            Some(match post("/api/doctor/stale-mailbox/repair", request)
             {
                 Ok(response) => {
                     let status = stale_mailbox_repair_response_status(&response);
@@ -106,7 +84,22 @@ pub(super) fn apply_stale_mailbox_fixes_with_post(
                 )
                 .with_safety_gate("protected_repair_failed")
                 .with_evidence(finding.evidence),
-            }
+            })
         })
         .collect()
+}
+
+fn repair_decision(
+    body: &Value,
+    finding: &mailbox::MailboxFinding,
+) -> health::measurement::Measurement<Option<mailbox::RepairRequest>> {
+    health::degraded_reasons(body)?;
+    if finding.live_work_present.clone()? {
+        return Ok(None);
+    }
+    finding
+        .request
+        .clone()
+        .map(Some)
+        .ok_or_else(|| health::measurement::FieldIssue::new("channel_id", None, "positive u64"))
 }

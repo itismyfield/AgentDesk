@@ -27,10 +27,17 @@ src/
 │   ├── dcserver/
 │   │   └── startup.rs
 │   ├── doctor/
+│   │   ├── health/
+│   │   │   └── measurement.rs
+│   │   ├── mailbox/
+│   │   │   └── observation.rs
 │   │   ├── orchestrator/
 │   │   │   ├── config_dir_checks.rs
 │   │   │   ├── health_snapshot.rs
-│   │   │   └── provider_credentials.rs
+│   │   │   ├── observation_checks.rs
+│   │   │   ├── observation_tests.rs
+│   │   │   ├── provider_credentials.rs
+│   │   │   └── stale_mailbox_repair.rs
 │   │   ├── contract.rs
 │   │   ├── health.rs
 │   │   ├── mailbox.rs
