@@ -755,8 +755,8 @@ fn intake_outbox_candidate_predicate() -> String {
     )
 }
 
-/// Runs the candidate COUNT under a transaction-local `statement_timeout`; a
-/// timeout is reported as `candidates_timed_out` instead of failing the pass.
+/// Runs the candidate COUNT under a transaction-local `statement_timeout`. Any
+/// cancel (timeout or operator) is reported as `candidates_cancelled`, not an error.
 async fn count_intake_outbox_candidates_bounded(
     pool: &PgPool,
     statement_timeout: std::time::Duration,
@@ -767,20 +767,18 @@ async fn count_intake_outbox_candidates_bounded(
         .bind(format!("{}ms", statement_timeout.as_millis()))
         .execute(&mut *tx)
         .await?;
-    let started = std::time::Instant::now();
     let counted = count_intake_outbox_candidates(&mut *tx, report).await;
-    let elapsed = started.elapsed();
     tx.rollback().await?;
     match counted {
-        Err(error) if is_statement_timeout(&error, elapsed, statement_timeout) => {
+        Err(error) if is_query_canceled(&error) => {
             tracing::warn!(
                 timeout_ms = statement_timeout.as_millis() as u64,
-                elapsed_ms = elapsed.as_millis() as u64,
-                "[db_retention] intake_outbox candidate count timed out; backlog unknown"
+                "[db_retention] intake_outbox candidate count not completed \
+                 (statement timeout or cancellation); backlog unknown"
             );
             report.push(TableReport {
                 table_name: "intake_outbox",
-                action: "candidates_timed_out",
+                action: "candidates_cancelled",
                 rows_affected: 0,
             });
             Ok(())
@@ -789,18 +787,12 @@ async fn count_intake_outbox_candidates_bounded(
     }
 }
 
-// 57014 also covers pg_cancel_backend and the message is localized, so only a
-// cancel after at least 90% of the timeout counts as the timeout firing.
-fn is_statement_timeout(
-    error: &anyhow::Error,
-    elapsed: std::time::Duration,
-    timeout: std::time::Duration,
-) -> bool {
-    elapsed >= timeout.mul_f64(0.9)
-        && matches!(
-            error.downcast_ref::<sqlx::Error>(),
-            Some(sqlx::Error::Database(db)) if db.code().as_deref() == Some("57014")
-        )
+// 57014 means timeout or pg_cancel_backend; the two cannot be told apart reliably.
+fn is_query_canceled(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<sqlx::Error>(),
+        Some(sqlx::Error::Database(db)) if db.code().as_deref() == Some("57014")
+    )
 }
 
 /// Reports the uncapped candidate backlog, in total and per status, as seen by
@@ -1719,8 +1711,25 @@ mod tests {
         db.drop().await;
     }
 
-    /// A COUNT that exceeds its statement_timeout is reported as timed out and
-    /// the pass continues; the same call counts normally once unblocked.
+    /// Asserts the neutral "count not completed" outcome with no count and no timeout claim.
+    fn assert_count_not_completed(report: &RetentionReport) {
+        assert!(
+            report
+                .get("intake_outbox", "candidates_cancelled")
+                .is_some()
+        );
+        assert_eq!(candidates(report, "intake_outbox"), None);
+        assert_eq!(report.total_candidates(), 0);
+        assert!(
+            report
+                .tables
+                .iter()
+                .all(|t| !t.action.contains("timed_out"))
+        );
+    }
+
+    /// A COUNT that exceeds its statement_timeout is reported as not completed
+    /// and the pass continues; the same call counts normally once unblocked.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn intake_outbox_candidate_count_timeout_is_reported_not_fatal() {
         let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
@@ -1744,23 +1753,17 @@ mod tests {
         .await
         .expect("statement_timeout must bound the blocked COUNT")
         .expect("a timed-out count is not fatal");
-        assert!(
-            report
-                .get("intake_outbox", "candidates_timed_out")
-                .is_some()
-        );
-        assert_eq!(candidates(&report, "intake_outbox"), None);
-        assert_eq!(report.total_candidates(), 0);
+        assert_count_not_completed(&report);
 
         blocker.rollback().await.expect("release lock");
         let mut report = RetentionReport::default();
-        count_intake_outbox_candidates_bounded(&pool, Duration::from_millis(200), &mut report)
+        count_intake_outbox_candidates_bounded(&pool, Duration::from_secs(60), &mut report)
             .await
             .expect("unblocked count");
         assert_eq!(candidates(&report, "intake_outbox"), Some(1));
         assert!(
             report
-                .get("intake_outbox", "candidates_timed_out")
+                .get("intake_outbox", "candidates_cancelled")
                 .is_none()
         );
 
@@ -1768,10 +1771,10 @@ mod tests {
         db.drop().await;
     }
 
-    /// An operator cancel (also SQLSTATE 57014) surfaces as an error and is not
-    /// recorded as a timeout.
+    /// An operator's pg_cancel_backend on the running COUNT, well before the
+    /// timeout, gets the same neutral not-completed outcome and is not fatal.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn intake_outbox_candidate_count_operator_abort_is_an_error() {
+    async fn intake_outbox_candidate_count_operator_abort_is_reported_not_completed() {
         let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
             "agentdesk_db_retention_intake_outbox_cancel",
             "db_retention intake_outbox count cancel",
@@ -1812,19 +1815,40 @@ mod tests {
         })
         .await
         .expect("cancel must end the blocked COUNT");
-        let error = counted.expect_err("operator abort must surface as an error");
+        counted.expect("an aborted count is not fatal");
+        assert_count_not_completed(&report);
+
+        blocker.rollback().await.expect("release lock");
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// A COUNT failure other than SQLSTATE 57014 still fails the pass.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn intake_outbox_candidate_count_other_db_error_surfaces() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_intake_outbox_db_error",
+            "db_retention intake_outbox count db error",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        sqlx::query("ALTER TABLE intake_outbox RENAME COLUMN updated_at TO updated_at_moved")
+            .execute(&pool)
+            .await
+            .expect("rename updated_at");
+
+        let mut report = RetentionReport::default();
+        let error =
+            count_intake_outbox_candidates_bounded(&pool, Duration::from_secs(60), &mut report)
+                .await
+                .expect_err("undefined column must fail the count");
         let code = match error.downcast_ref::<sqlx::Error>() {
             Some(sqlx::Error::Database(db)) => db.code().map(|code| code.into_owned()),
             _ => None,
         };
-        assert_eq!(code.as_deref(), Some("57014"), "operator abort: {error:#}");
-        assert!(
-            report
-                .get("intake_outbox", "candidates_timed_out")
-                .is_none()
-        );
+        assert_eq!(code.as_deref(), Some("42703"), "{error:#}");
+        assert!(report.tables.is_empty());
 
-        blocker.rollback().await.expect("release lock");
         pool.close().await;
         db.drop().await;
     }
