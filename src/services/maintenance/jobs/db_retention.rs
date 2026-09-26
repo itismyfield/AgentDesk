@@ -106,7 +106,8 @@ const INTAKE_OUTBOX_DONE_RETENTION_DAYS: i32 = 7;
 // unknown/failed rows are evidence for relay and intake loss investigations.
 const INTAKE_OUTBOX_FAILED_RETENTION_DAYS: i32 = 30;
 // Server-side cap on the candidate COUNT so a large backlog cannot stall the serial scheduler.
-const INTAKE_OUTBOX_COUNT_STATEMENT_TIMEOUT: &str = "30s";
+const INTAKE_OUTBOX_COUNT_STATEMENT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
 
 /// Run the full retention pass. Returns a per-table report. When
 /// `dry_run = true` no DML is executed — only SELECT COUNT(*) probes.
@@ -758,20 +759,23 @@ fn intake_outbox_candidate_predicate() -> String {
 /// timeout is reported as `candidates_timed_out` instead of failing the pass.
 async fn count_intake_outbox_candidates_bounded(
     pool: &PgPool,
-    statement_timeout: &str,
+    statement_timeout: std::time::Duration,
     report: &mut RetentionReport,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT set_config('statement_timeout', $1, true)")
-        .bind(statement_timeout)
+        .bind(format!("{}ms", statement_timeout.as_millis()))
         .execute(&mut *tx)
         .await?;
+    let started = std::time::Instant::now();
     let counted = count_intake_outbox_candidates(&mut *tx, report).await;
+    let elapsed = started.elapsed();
     tx.rollback().await?;
     match counted {
-        Err(error) if is_statement_timeout(&error) => {
+        Err(error) if is_statement_timeout(&error, elapsed, statement_timeout) => {
             tracing::warn!(
-                statement_timeout,
+                timeout_ms = statement_timeout.as_millis() as u64,
+                elapsed_ms = elapsed.as_millis() as u64,
                 "[db_retention] intake_outbox candidate count timed out; backlog unknown"
             );
             report.push(TableReport {
@@ -785,13 +789,18 @@ async fn count_intake_outbox_candidates_bounded(
     }
 }
 
-// 57014 also covers pg_cancel_backend; only PostgreSQL's (English) timeout message takes the soft path.
-fn is_statement_timeout(error: &anyhow::Error) -> bool {
-    matches!(
-        error.downcast_ref::<sqlx::Error>(),
-        Some(sqlx::Error::Database(db)) if db.code().as_deref() == Some("57014")
-            && db.message() == "canceling statement due to statement timeout"
-    )
+// 57014 also covers pg_cancel_backend and the message is localized, so only a
+// cancel after at least 90% of the timeout counts as the timeout firing.
+fn is_statement_timeout(
+    error: &anyhow::Error,
+    elapsed: std::time::Duration,
+    timeout: std::time::Duration,
+) -> bool {
+    elapsed >= timeout.mul_f64(0.9)
+        && matches!(
+            error.downcast_ref::<sqlx::Error>(),
+            Some(sqlx::Error::Database(db)) if db.code().as_deref() == Some("57014")
+        )
 }
 
 /// Reports the uncapped candidate backlog, in total and per status, as seen by
@@ -850,6 +859,7 @@ async fn count_intake_outbox_candidates<'e, E: sqlx::PgExecutor<'e>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// Token value larger than INT32::MAX (2_147_483_647). The `turns` token
     /// columns were widened to BIGINT in 0008; the stale row carries this so the
@@ -1729,7 +1739,7 @@ mod tests {
         let mut report = RetentionReport::default();
         tokio::time::timeout(
             std::time::Duration::from_secs(20),
-            count_intake_outbox_candidates_bounded(&pool, "200ms", &mut report),
+            count_intake_outbox_candidates_bounded(&pool, Duration::from_millis(200), &mut report),
         )
         .await
         .expect("statement_timeout must bound the blocked COUNT")
@@ -1744,7 +1754,7 @@ mod tests {
 
         blocker.rollback().await.expect("release lock");
         let mut report = RetentionReport::default();
-        count_intake_outbox_candidates_bounded(&pool, "200ms", &mut report)
+        count_intake_outbox_candidates_bounded(&pool, Duration::from_millis(200), &mut report)
             .await
             .expect("unblocked count");
         assert_eq!(candidates(&report, "intake_outbox"), Some(1));
@@ -1796,13 +1806,18 @@ mod tests {
         };
         let (counted, ()) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
             tokio::join!(
-                count_intake_outbox_candidates_bounded(&pool, "60s", &mut report),
+                count_intake_outbox_candidates_bounded(&pool, Duration::from_secs(60), &mut report),
                 cancel
             )
         })
         .await
         .expect("cancel must end the blocked COUNT");
-        assert!(counted.is_err(), "user cancel must surface as an error");
+        let error = counted.expect_err("operator abort must surface as an error");
+        let code = match error.downcast_ref::<sqlx::Error>() {
+            Some(sqlx::Error::Database(db)) => db.code().map(|code| code.into_owned()),
+            _ => None,
+        };
+        assert_eq!(code.as_deref(), Some("57014"), "operator abort: {error:#}");
         assert!(
             report
                 .get("intake_outbox", "candidates_timed_out")
