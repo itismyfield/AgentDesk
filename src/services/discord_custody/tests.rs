@@ -234,14 +234,9 @@ fn attempt_records_keep_their_observations_across_a_reload() {
     fx.record(0, "outcome.json", ok);
     fx.record(1, "intent.json", json!({ "required_from": 2, "pre": null }));
     let source = fx.status().sources.remove(0);
-    assert_eq!(
-        (source.max_eof, source.missing),
-        (28, vec![(2, 4), (20, 28)])
-    );
-    assert_eq!(
-        source.last_attempt.unwrap(),
-        "rev-0001: incomplete (no outcome)"
-    );
+    let got = (source.max_eof, source.missing, source.last_attempt.unwrap());
+    let incomplete = "rev-0001: incomplete (no outcome)".to_string();
+    assert_eq!(got, (28, vec![(2, 4), (20, 28)], incomplete));
 
     let deferred = json!({ "result": "deferred_budget", "from": 2, "to": 28 });
     fx.record(1, "outcome.json", deferred);
@@ -253,8 +248,8 @@ fn attempt_records_keep_their_observations_across_a_reload() {
     assert_eq!(fx.status().sources[0].current, "source_changed_now");
 }
 
-// Contract: `current` checks the head and the last preserved 4 KiB and reads no more than
-// that; a rewrite inside those windows is reported, one outside them is not detected.
+// Contract: `current` checks the file's identity, size, head and last preserved 4 KiB, reading no
+// more; a change there is reported and stays once recorded, one outside those windows is not.
 #[test]
 fn current_reads_only_the_head_and_the_last_preserved_window() {
     let bytes: Vec<u8> = (0..80 << 10).map(|i| b'a' + (i % 26) as u8).collect();
@@ -269,12 +264,23 @@ fn current_reads_only_the_head_and_the_last_preserved_window() {
         rewritten[at] = b'#';
         fs::write(fx.source(), &rewritten).unwrap();
         let status = fx.status();
-        let got = (
-            status.sources[0].current.as_str(),
-            status.sources[0].verify_read,
-        );
+        let source = &status.sources[0];
+        let got = (source.current.as_str(), source.verify_read);
         assert_eq!(got, (current, (64 << 10) + (8 << 10)));
         assert_eq!(status.complete(), current == "complete_to_eof");
+    }
+    for replaced in [true, false] {
+        let fx = Fx::new(&bytes);
+        let other = fx.0.path().join("new");
+        fx.held(0, 0, (0, 70 << 10));
+        match replaced {
+            true => fs::write(&other, &bytes).and_then(|()| fs::rename(&other, fx.source())),
+            false => Ok(truncate(&fx.source(), 75 << 10)),
+        }
+        .unwrap();
+        assert_eq!(fx.status().sources[0].current, "source_changed_now");
+        fx.legacy(1, 0, json!({}));
+        assert_eq!(fx.status().sources[0].current, CHANGED, "{replaced}");
     }
 }
 
@@ -299,12 +305,8 @@ fn the_status_report_separates_current_from_last_attempt_and_writes_nothing() {
 }
 
 fn tree(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
-    let mut files = Vec::new();
-    for path in fs::read_dir(dir)
-        .unwrap()
-        .flatten()
-        .map(|entry| entry.path())
-    {
+    let (mut files, entries) = (Vec::new(), fs::read_dir(dir).unwrap().flatten());
+    for path in entries.map(|entry| entry.path()) {
         match path.is_dir() {
             true => files.extend(tree(&path)),
             false => files.push((path.clone(), fs::read(&path).unwrap())),

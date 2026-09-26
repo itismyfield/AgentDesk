@@ -1,8 +1,7 @@
 //! Read-only fold of the boot-custody ledger into one preservation obligation per transcript
 //! source, printed by `adk custody status`. Transcripts are assumed to be append-only.
 
-use serde::Deserialize;
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
