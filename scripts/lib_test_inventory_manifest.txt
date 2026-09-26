@@ -3463,14 +3463,17 @@ services::discord::inflight::removal::boot_custody_tests::an_unwritable_custody_
 services::discord::inflight::removal::boot_custody_tests::custody_copies_every_tui_direct_turn_and_only_the_bytes_of_other_rows
 services::discord::inflight::removal::boot_custody_tests::reaped_live_pane_tui_direct_row_leaves_a_custody_copy
 services::discord::inflight::removal::custody_notice_tests::a_dm_sessions_notice_is_delivered_by_the_provider_bot
+services::discord::inflight::removal::custody_notice_tests::a_dm_turn_held_only_as_a_pending_start_is_sent_by_the_provider_bot_pg
 services::discord::inflight::removal::custody_notice_tests::a_failed_notice_row_is_enqueued_again_by_the_next_boot_pg
 services::discord::inflight::removal::custody_notice_tests::a_row_without_persisted_turn_ids_is_one_row_across_boots_and_backfill_pg
 services::discord::inflight::removal::custody_notice_tests::a_tui_direct_turn_is_one_outbox_row_across_boots_pg
-services::discord::inflight::removal::custody_notice_tests::an_anchorless_turn_is_one_row_beside_an_earlier_builds_episode_pg
+services::discord::inflight::removal::custody_notice_tests::an_earlier_builds_episode_of_a_turn_is_one_row_of_its_own_pg
+services::discord::inflight::removal::custody_notice_tests::an_episode_is_one_row_whatever_copies_its_root_holds_pg
+services::discord::inflight::removal::custody_notice_tests::an_unreadable_or_garbled_marker_is_warned_and_skipped
 services::discord::inflight::removal::custody_notice_tests::anchorless_turns_started_in_the_same_second_are_two_rows_pg
 services::discord::inflight::removal::custody_notice_tests::custody_without_a_tui_direct_turn_enqueues_nothing_pg
 services::discord::inflight::removal::custody_notice_tests::the_boot_reaper_starts_the_notice_pass_pg
-services::discord::inflight::removal::custody_notice_tests::the_notice_is_one_bounded_message_that_promises_nothing_more
+services::discord::inflight::removal::custody_notice_tests::the_notice_reports_a_failed_copy_and_promises_nothing_more
 services::discord::inflight::removal::custody_notice_tests::without_postgres_the_notice_waits_for_the_next_boot_pg
 services::discord::inflight::removal::loader_gate_observation_tests::allocation_route_is_observed_but_never_changes_loader_preservation
 services::discord::inflight::removal::loader_gate_observation_tests::loader_allow_event_carries_the_generation_and_name_filter
@@ -3853,6 +3856,7 @@ services::discord::outbound::manual_delivery::headless_nonce::tests::durable_row
 services::discord::outbound::manual_delivery::headless_nonce::tests::flag_is_compiled_default_off_and_only_explicitly_enabled
 services::discord::outbound::manual_delivery::headless_nonce::tests::inline_nonce_is_stable_by_parsed_durable_row_across_retry_variations
 services::discord::outbound::manual_delivery::headless_nonce::tests::nonce_requires_flag_source_and_complete_durable_identity
+services::discord::outbound::manual_delivery::manual_v3_delivery_tests::a_custody_notice_under_a_long_root_is_one_provider_bot_post
 services::discord::outbound::manual_delivery::manual_v3_delivery_tests::api_send_rejects_user_supplied_voice_delivery_id_namespace
 services::discord::outbound::manual_delivery::manual_v3_delivery_tests::manual_delivery_log_emoji_preserves_legacy_mapping
 services::discord::outbound::manual_delivery::manual_v3_delivery_tests::manual_dm_notification_uses_v3_dm_target_and_dedupes_before_resolve
