@@ -7,6 +7,8 @@ use std::sync::atomic::Ordering;
 
 #[path = "tests/circuit_breaker_apply.rs"]
 mod circuit_breaker_apply;
+#[path = "tests/incarnation_follow_up.rs"]
+mod incarnation_follow_up;
 #[path = "tests/orphan_token_finish.rs"]
 pub(in crate::services::discord) mod orphan_token_finish;
 

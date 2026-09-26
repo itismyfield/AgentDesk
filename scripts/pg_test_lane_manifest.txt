@@ -995,10 +995,16 @@ services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::reassign
 services::dispatches::wait_queue::tests::wake_waiting_dispatch_outbox_pg_reassigns_wait_rows_fifo
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_pg_reference_gate
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_terminal_reclaim
+services::maintenance::jobs::db_retention::tests::db_retention_job_reports_intake_outbox_candidates_without_deleting
 services::maintenance::jobs::db_retention::tests::db_retention_keeps_skill_usage_rows_with_null_used_at
 services::maintenance::jobs::db_retention::tests::db_retention_preserves_permanent_outbox_dedupe_sentinels
 services::maintenance::jobs::db_retention::tests::db_retention_prunes_old_rows_archives_turns_and_is_idempotent
 services::maintenance::jobs::db_retention::tests::db_retention_turns_window_is_strict_with_no_archive_less_delete
+services::maintenance::jobs::db_retention::tests::intake_outbox_candidate_count_operator_abort_is_reported_not_completed
+services::maintenance::jobs::db_retention::tests::intake_outbox_candidate_count_other_db_error_surfaces
+services::maintenance::jobs::db_retention::tests::intake_outbox_candidate_count_timeout_is_reported_not_fatal
+services::maintenance::jobs::db_retention::tests::intake_outbox_candidates_exclude_rows_with_live_family_or_children
+services::maintenance::jobs::db_retention::tests::intake_outbox_candidates_use_exact_status_windows_and_allowlist
 services::maintenance::jobs::worktree_orphan_sweep::active_dispatch_worktree_keep_set_pg_tests::active_dispatch_worktree_paths_are_collected
 services::maintenance::jobs::worktree_orphan_sweep::active_dispatch_worktree_keep_set_pg_tests::pr_tracking_worktree_path_is_collected
 services::maintenance::jobs::worktree_orphan_sweep::keep_set_query_failure_fail_closed_pg_tests::closed_pool_keep_set_query_error_skips_all_deletions

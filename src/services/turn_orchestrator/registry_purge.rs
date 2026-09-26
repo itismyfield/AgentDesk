@@ -249,11 +249,16 @@ impl ChannelMailboxRegistry {
         }
         // Unlink the instance maps only when they still hold the exact
         // entries this purge verified: the handle that was snapshotted and
-        // the signal Arcs the instance owns.
+        // the signal Arcs the instance owns. The recovery signal belongs to
+        // the verified incarnation (#5951), so only that one is unlinked. The
+        // channel's re-mint fence cell (`remint_fences`) is kept: the next
+        // incarnation inherits it.
         self.handles.remove_if(&channel_id, |_, current| {
             current.sender.same_channel(&handle.sender)
         });
-        let removed_recovery_done = self.recovery_done.remove(&channel_id);
+        self.recovery_done.remove_if(&channel_id, |_, signal| {
+            Arc::ptr_eq(signal, handle.recovery_done())
+        });
         let removed_turn_finished = self.turn_finished.remove(&channel_id);
         // #3297 finding 5: the GLOBAL_* maps are process-wide single slots —
         // another registry instance may have published a DIFFERENT (possibly
@@ -272,10 +277,9 @@ impl ChannelMailboxRegistry {
                 "global mailbox mirror points at a different actor — mirror unlink skipped"
             );
         }
-        if let Some((_, signal)) = removed_recovery_done {
-            GLOBAL_RECOVERY_DONE_SIGNALS
-                .remove_if(&channel_id, |_, mirrored| Arc::ptr_eq(mirrored, &signal));
-        }
+        GLOBAL_RECOVERY_DONE_SIGNALS.remove_if(&channel_id, |_, mirrored| {
+            Arc::ptr_eq(mirrored, handle.recovery_done())
+        });
         if let Some((_, signal)) = removed_turn_finished {
             GLOBAL_TURN_FINISHED_SIGNALS
                 .remove_if(&channel_id, |_, mirrored| Arc::ptr_eq(mirrored, &signal));

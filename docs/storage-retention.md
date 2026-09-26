@@ -64,6 +64,7 @@ Each row is a (vector × action × job) tuple. If a vector is not in this table,
 | PG `turn_lifecycle_events`                | 30 days                                     | `DELETE` (on `created_at`)                                   | `storage.db_retention`            | Weekly   |
 | PG `skill_usage`                          | 90 days                                     | `DELETE` (on `used_at`)                                      | `storage.db_retention`            | Weekly   |
 | PG `turns`                                | 90 days                                     | Copy to `turns_archive` table, then `DELETE` (on `finished_at`) | `storage.db_retention`            | Weekly   |
+| PG `intake_outbox` (terminal statuses)    | `done` 7 days; `unknown`/`failed_pre_accept`/`failed_post_accept` 30 days | Count candidates only (`intake_outbox:candidates=N`, per-status `status_candidates`; a COUNT ended by its 30 s `statement_timeout` or an operator cancel reports `candidates_cancelled`); no `DELETE` yet | `storage.db_retention` | Weekly |
 | PG `prompt_manifest_layers`               | 30 days                                     | `UPDATE full_content = NULL, is_truncated = TRUE` (preserves hashes) | `storage.prompt_manifest_retention`| Daily    |
 | PG `kanban_cards`                         | **Forever**                                 | None — intentional permanent history                         | —                                 | —        |
 | `dcserver.stdout.log`                         | 100 MB × 10 files by default            | Internal dcserver tracing writer rotates before append; launchd stdout/stderr are bootstrap-only | Built into `logging.rs` startup    | Continuous |
@@ -204,8 +205,8 @@ weekly tick is cheaper than a manual step. Still, on the very first deploy:
     ```
 
 - **Postgres**: `storage.db_retention` runs weekly and is self-bootstrapping.
-  No manual DELETEs recommended — if you need to force it, trigger via the
-  cron-jobs API (`POST /api/cron-jobs/run/storage.db_retention`).
+  No manual DELETEs recommended. There is no manual-trigger API
+  (`/api/cron-jobs` is read-only); wait for the next scheduled run.
 
 ---
 
@@ -311,9 +312,9 @@ Expected on a fresh DB. If persisting beyond a week:
 - Confirm Postgres pool is wired — `mod.rs` logs
   `"storage.db_retention skipped (postgres pool unavailable)"` when the pool is
   `None`.
-- Force a dry-run to inspect candidate rows:
-  `POST /api/cron-jobs/run/storage.db_retention?dry_run=1` (if exposed) or call
-  `db_retention_job(&pool, true)` from an admin shell.
+- To inspect candidate rows, run the job's `WHERE` predicates as read-only
+  `SELECT COUNT(*)` queries; no dry-run trigger is exposed at runtime
+  (`db_retention_job(&pool, true)` is only reachable from tests).
 
 ### 6.4 Host disk keeps growing despite all jobs running green
 
