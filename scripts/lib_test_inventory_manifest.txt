@@ -3741,6 +3741,9 @@ services::discord::outbound::delivery::tests::v3_referenced_send_preserves_refer
 services::discord::outbound::delivery::tests::v3_split_delivery_limits_supplementary_payload_chunks_by_units_5177
 services::discord::outbound::delivery::tests::v3_split_delivery_stops_between_chunks_when_cancelled
 services::discord::outbound::delivery::tests::v3_split_duplicate_preserves_ordered_chunk_metadata
+services::discord::outbound::delivery_obligation::state::proof_tests::whole_proof_binds_complete_chunks_to_the_durable_attempt
+services::discord::outbound::delivery_obligation::state::proof_tests::whole_proof_rejects_empty_duplicate_partial_and_unproven_cleanup
+services::discord::outbound::delivery_obligation::state::proof_tests::whole_proof_rejects_unbound_epoch_attempt_revision_and_invalid_plans
 services::discord::outbound::delivery_record::relay_state_contract_refs::contract_symbols_exist
 services::discord::outbound::delivery_record::tests::anchor_msg_id_recorded_as_panel_msg_id_3610
 services::discord::outbound::delivery_record::tests::anchor_none_records_null_panel_pair_3610
