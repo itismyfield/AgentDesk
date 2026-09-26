@@ -300,22 +300,23 @@ async fn an_unparseable_pending_start_keeps_its_channel_and_is_not_complete() {
     assert!(record["error"].is_string(), "{record}");
 }
 
-// Contract: a recopy the boot copy budget stops is recorded with that error and supersedes
-// nothing, so the earlier copy stays the valid one.
+// Contract: the copies of one boot share one budget; the recopy it stops records that error
+// and supersedes nothing, so the earlier copy stays the valid one.
 #[tokio::test]
 async fn a_recopy_past_the_boot_copy_budget_is_recorded_and_supersedes_nothing() {
     let env = Env::new();
-    let prior = format!("old\n{}\n", "p".repeat(40));
-    let (out, offset) = transcript(&env, "budget.jsonl", &prior, "turn\n");
-    let mut state = tui_direct_row(5_997_101, &out, offset);
-    for start in [offset, 4] {
-        state.turn_start_offset = Some(start);
-        env.seed(&state, 0);
+    let channels = [5_997_101, 5_997_102];
+    for start in [15, 0] {
+        for channel in channels {
+            let (out, _) = transcript(&env, &channel.to_string(), "earlier output\n", "turn\n");
+            env.seed(&tui_direct_row(channel, &out, start), 0);
+        }
         boot().await;
     }
-    let stop = &entries(&episodes(&env)[&5_997_101]).pop().unwrap().1;
-    assert_eq!(stop["error"], "boot copy budget exhausted");
-    assert!(stop["copy"].is_null() && stop["supersedes"].is_null());
+    let mut last = channels.map(|ch| entries(&episodes(&env)[&ch]).pop().unwrap().1);
+    last.sort_by_key(|entry| entry["copy"].is_null());
+    assert_eq!(last[1]["error"], "boot copy budget exhausted");
+    assert!(last[1]["copy"].is_null() && last[1]["supersedes"].is_null());
 }
 
 // Contract: a transcript cut short between the stat and the copy is recorded as an
@@ -385,6 +386,7 @@ async fn a_transcript_turn_over_the_copy_cap_is_recorded_not_copied() {
             .is_some_and(|hash| hash.len() == 64)
     );
     assert!(segment["copy"].is_null(), "{segment}");
+    assert_eq!(segment["error"], "turn exceeds the copy cap");
     let parts = tree(episode)
         .into_keys()
         .filter(|path| path.extension() == Some("part".as_ref()));
