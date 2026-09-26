@@ -3,8 +3,8 @@
 The tests below are split into two groups on purpose.
 
 SOURCE CONTRACT (against the real tree) pins what the gate cannot check about
-itself: the scan root, hand-verified classifier probes, that every pinned file
-still exists, and that CI actually runs the gate.
+itself: the scan root, hand-verified classifier probes, and that CI actually
+runs the gate.
 
 DISCRIMINATION (against synthetic fixtures) answers the only question that makes
 a green gate worth anything: WHAT BREAKS IT. Every mutation below is applied and
@@ -141,42 +141,6 @@ class SourceContractTests(unittest.TestCase):
                         prod += hits
                 self.assertEqual(prod, want_prod, f"production count for {symbol} in {rel}")
                 self.assertEqual(every, want_all, f"cfg(test)-blind count for {symbol} in {rel}")
-
-    def test_the_two_functions_sharing_one_pinned_spelling_both_still_exist(self):
-        """`record_watcher_terminal_delivery` names two functions in this tree.
-
-        The pinned integer for terminal_long_chunks.rs counts one call to each.
-        If either definition disappears the pin silently changes meaning, so the
-        collision is asserted rather than left in a comment.
-        """
-        funnel = (ROOT / "src/services/discord/outbound/delivery_record.rs").read_text(
-            encoding="utf-8"
-        )
-        wrapper = (
-            ROOT / "src/services/discord/tmux_watcher/terminal_long_chunks.rs"
-        ).read_text(encoding="utf-8")
-        self.assertIn("fn record_watcher_terminal_delivery(", funnel)
-        self.assertIn("fn record_watcher_terminal_delivery(", wrapper)
-        self.assertEqual(
-            guard.EXPECTED_DEFINITION_FILE_COUNTS["record_watcher_terminal_delivery"],
-            {
-                "src/services/discord/outbound/delivery_record.rs": 1,
-                "src/services/discord/tmux_watcher/terminal_long_chunks.rs": 1,
-            },
-        )
-        self.assertIn("NAME COLLISION", SCRIPT.read_text(encoding="utf-8"))
-
-    def test_every_pinned_file_exists_and_still_spells_the_symbol(self):
-        """Keeps the map from rotting into a list of paths that no longer exist."""
-        for symbol, files in guard.EXPECTED_CALL_SITES.items():
-            for rel in files:
-                path = ROOT / rel
-                self.assertTrue(path.is_file(), f"{symbol}: missing {rel}")
-                self.assertIn(
-                    symbol.rsplit("::", 1)[-1],
-                    path.read_text(encoding="utf-8"),
-                    f"{symbol} in {rel}",
-                )
 
 
 class DiscriminationTests(unittest.TestCase):

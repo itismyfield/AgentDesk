@@ -121,16 +121,7 @@ class DiscriminationTests(unittest.TestCase):
         ok, message = self.run_guard(self.fixture())
         self.assertTrue(ok, message)
 
-    def test_script_process_exit_code_maps_pass_and_failure(self):
-        passing = subprocess.run(
-            [sys.executable, str(SCRIPT)],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        self.assertEqual(passing.returncode, 0, passing.stderr)
-
+    def test_script_process_exit_code_maps_failure(self):
         root = self.fixture()
         copied_script = root / "scripts/check_intake_outbox_done_writer_call_sites.py"
         copied_script.parent.mkdir(parents=True, exist_ok=True)

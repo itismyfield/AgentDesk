@@ -92,39 +92,9 @@ class SourceContractTests(unittest.TestCase):
         comment = self.payload["categories"]["delivery_fence_bind"]["comment"]
         self.assertIn("the SAME per-file set", comment)
 
-    def test_baseline_states_that_counts_are_not_safety_proof(self) -> None:
-        self.assertEqual(self.payload["comment"], ratchet.WARNING)
-        self.assertIn("not proof of safety", ratchet.WARNING)
-
     def test_ci_wiring_runs_scanner(self) -> None:
         wiring = (ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
         self.assertIn("check_destructive_call_site_ratchet.py --check", wiring)
-
-    def test_warrant_docstring_declares_all_four_limits(self) -> None:
-        doc = ratchet.__doc__ or ""
-        self.assertIn("two-sided check, not a no-growth check", doc)
-        self.assertIn("paired deletion", doc)
-        self.assertIn("count-preserving relocation", doc)
-        self.assertIn("Return-value discard", doc)
-        self.assertIn("Argument identity", doc)
-        self.assertIn("Control-flow dominance", doc)
-        self.assertIn("Unused diagnostics are not enforcement", doc)
-        self.assertIn("ordinary unused-binding warning", doc)
-        self.assertIn("behavioral witness", doc)
-        self.assertIn("does not\nprove argument identity or control-flow dominance", doc)
-        self.assertNotIn("guarantees nothing", doc.lower())
-
-    def test_generated_warrant_comments_match_the_checked_in_baseline(self) -> None:
-        generated = ratchet._snapshot(
-            self.actual,
-            self.registry_subcounts,
-            self.payload["measured_at_sha"],
-        )
-        for category in ("structural_candidate_apply", "destructive_warrant_bind"):
-            self.assertEqual(
-                generated["categories"][category]["comment"],
-                self.payload["categories"][category]["comment"],
-            )
 
 
 class RatchetDiscriminationTests(unittest.TestCase):

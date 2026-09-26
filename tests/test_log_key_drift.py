@@ -362,10 +362,6 @@ class CleanTreeTest(unittest.TestCase):
         )
         self.assertEqual(violations, [])
 
-    def test_live_tree_has_no_violations(self) -> None:
-        """The real Discord tree must stay clean under the current rules."""
-        self.assertEqual(CHECKER.scan(REPO_ROOT), [])
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -41,6 +41,9 @@ case "$url" in
       active-review-clock-missing)
         printf '%s\n' '{"run":{"id":"run-1","status":"active"},"entries":[{"id":"entry-anomaly","github_issue_number":4448,"status":"dispatched","card_status":"implementation","dispatch_history":["dispatch-1"],"created_at":1},{"id":"entry-stuck","github_issue_number":4449,"status":"dispatched","card_status":"implementation","dispatch_history":["dispatch-2"],"created_at":1},{"id":"entry-review","github_issue_number":4450,"status":"pending","card_status":"review","review_round":2,"dispatch_history":[],"created_at":1}]}'
         ;;
+      anomaly-only)
+        printf '%s\n' '{"run":{"id":"run-1","status":"active"},"entries":[{"id":"entry-anomaly","github_issue_number":4448,"status":"dispatched","card_status":"implementation","dispatch_history":["dispatch-1"],"created_at":1}]}'
+        ;;
       stuck-only)
         printf '%s\n' '{"run":{"id":"run-1","status":"active"},"entries":[{"id":"entry-stuck","github_issue_number":4449,"status":"dispatched","card_status":"implementation","dispatch_history":["dispatch-2"],"created_at":1}]}'
         ;;
@@ -83,6 +86,10 @@ case "$url" in
     ;;
   */api/message-outbox/monitor-alerts)
     if [ "${FAKE_FAIL_POST:-0}" = "1" ]; then
+      exit 22
+    fi
+    # The route answers 400 unless the body names the incident kind.
+    if ! printf '%s' "$body" | jq -e '.kind | IN("STUCK", "ANOMALY", "REVIEW_LONG")' >/dev/null; then
       exit 22
     fi
     if [ -n "${FAKE_NOTIFY_DELAY:-}" ]; then
@@ -190,7 +197,10 @@ assert_notify_count 6
 jq -s -e '
   all(.[];
     (.action_id | test("^[0-9a-f]{32}$"))
-    and (.action == "alert" or .action == "recovery")) and
+    and (.action == "alert" or .action == "recovery")
+    and (. as $row | $row.content
+      | startswith("[auto-queue monitor] " + $row.kind + ":")
+        or startswith("[auto-queue monitor] RECOVERED: " + $row.kind + " "))) and
   any(.[]; .content | contains("ANOMALY")) and
   any(.[]; .content | contains("STUCK")) and
   any(.[]; .content | contains("REVIEW_LONG")) and
@@ -260,25 +270,27 @@ assert_notify_count 3
 # the API/PG path is down, a direct Discord post preserves human visibility and
 # commits the same durable action ID. REVIEW_LONG remains informational and
 # must not enter the direct fallback.
-rm -f "$STATE_FILE" "$STATE_FILE.lock" "$FAKE_NOTIFY_LOG" "$FAKE_DIRECT_LOG"
-echo stuck-only > "$FAKE_MODE_FILE"
-FAKE_FAIL_POST=1 run_once
-[ "$(wc -l < "$FAKE_DIRECT_LOG" | tr -d ' ')" -eq 1 ] || {
-  echo "STUCK API failure must use exactly one direct fallback" >&2
-  exit 1
-}
-grep -q 'discord-sendmessage.*STUCK' "$FAKE_DIRECT_LOG" || {
-  echo "direct fallback must retain the actionable STUCK body" >&2
-  exit 1
-}
-grep -q -- '--key discord_test_notify' "$FAKE_DIRECT_LOG" || {
-  echo "direct fallback must pin the notify bot credential" >&2
-  exit 1
-}
-jq -e '.pending_action == null' "$STATE_FILE" >/dev/null || {
-  echo "successful direct fallback must commit the durable action" >&2
-  exit 1
-}
+for kind in STUCK ANOMALY; do
+  rm -f "$STATE_FILE" "$STATE_FILE.lock" "$FAKE_NOTIFY_LOG" "$FAKE_DIRECT_LOG"
+  echo "$(printf '%s' "$kind" | tr '[:upper:]' '[:lower:]')-only" > "$FAKE_MODE_FILE"
+  FAKE_FAIL_POST=1 run_once
+  [ "$(wc -l < "$FAKE_DIRECT_LOG" | tr -d ' ')" -eq 1 ] || {
+    echo "$kind API failure must use exactly one direct fallback" >&2
+    exit 1
+  }
+  grep -q "discord-sendmessage.*] $kind:" "$FAKE_DIRECT_LOG" || {
+    echo "direct fallback must retain the actionable $kind body" >&2
+    exit 1
+  }
+  grep -q -- '--key discord_test_notify' "$FAKE_DIRECT_LOG" || {
+    echo "direct fallback must pin the notify bot credential" >&2
+    exit 1
+  }
+  jq -e '.pending_action == null' "$STATE_FILE" >/dev/null || {
+    echo "successful direct fallback must commit the durable action" >&2
+    exit 1
+  }
+done
 
 rm -f "$STATE_FILE" "$STATE_FILE.lock" "$FAKE_NOTIFY_LOG" "$FAKE_DIRECT_LOG"
 echo review-old-only > "$FAKE_MODE_FILE"
