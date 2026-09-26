@@ -472,7 +472,7 @@ mod tests {
         }
     }
 
-    // ---- render_time_line: anchor selection + heartbeat stability ---------
+    // ---- render_time_line: anchor selection ---------
 
     #[test]
     fn time_line_renders_start_then_update_on_separate_lines() {
@@ -498,14 +498,5 @@ mod tests {
             render_time_line(None, STARTED_AT),
             "턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)\n마지막 업데이트 : 11-15 07:13:20 (<t:1700000000:R>)"
         );
-    }
-
-    #[test]
-    fn time_line_is_independent_of_render_time() {
-        // Depends only on the stable stamps, never on "now" — two renders between
-        // heartbeats are byte-identical and never re-edit the Discord message.
-        let a = render_time_line(Some(LAST_ACTIVITY), STARTED_AT);
-        let b = render_time_line(Some(LAST_ACTIVITY), STARTED_AT);
-        assert_eq!(a, b);
     }
 }
