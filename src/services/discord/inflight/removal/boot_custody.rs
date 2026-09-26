@@ -13,6 +13,8 @@ use std::path::PathBuf;
 /// A transcript turn longer than this keeps only its path, offset and head hash.
 const SEGMENT_COPY_CAP: u64 = 64 << 20;
 const HEAD_HASH_BYTES: u64 = 64 << 10;
+/// How long after its first preservation an episode's transcript turns are revisited.
+const REVISIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Kind, source path, bytes or read error of one file seen this boot, the turn it names, and
 /// why its content could not be parsed.
@@ -24,8 +26,14 @@ struct Item(
     Option<&'static str>,
 );
 
-/// Copied digests and each transcript's latest copy across an episode's published revisions.
-type Held = (BTreeSet<String>, BTreeMap<String, Value>);
+/// Across an episode's published revisions: copied digests, each transcript's latest copy and
+/// requested offset, and the offset and error of each source whose latest entry failed.
+type Held = (
+    BTreeSet<String>,
+    BTreeMap<String, Value>,
+    BTreeMap<String, u64>,
+    BTreeMap<String, Value>,
+);
 
 /// Fail-open: a custody error or panic is only logged, so the reaper still runs.
 pub(super) fn preserve_before_boot_reap(inflight_root: &Path, provider: &ProviderKind) {
@@ -64,6 +72,13 @@ fn preserve(inflight_root: &Path, provider: &ProviderKind) {
             add(item);
         }
     }
+    // An episode no source names any more keeps its transcript turns preserved for a while.
+    for dir in fs::read_dir(&custody).into_iter().flatten().flatten() {
+        let digest = dir.file_name().to_string_lossy().into_owned();
+        if let Some(key) = revisit_key(&dir.path()).filter(|_| !episodes.contains_key(&digest)) {
+            episodes.insert(digest, (key, Vec::new()));
+        }
+    }
     let boot_generation = runtime_store::process_generation_binding().generation;
     for (digest, (key, items)) in episodes {
         let dir = custody.join(digest);
@@ -84,7 +99,7 @@ fn preserve_episode(dir: &Path, key: Value, items: Vec<Item>, boot: u64) -> Resu
         let marker_json = json!({ "episode": key, "tui_direct": tui_direct, "first_boot": boot });
         runtime_store::atomic_write(&marker, &marker_json.to_string())?;
     }
-    let (rev, (digests, transcripts)) = held_copies(dir)?;
+    let (rev, (digests, transcripts, turns, failed)) = held_copies(dir)?;
     let (mut entries, mut segments) = (Vec::new(), BTreeMap::new());
     for Item(kind, source, bytes, segment, unparsed) in items {
         if let Some((transcript, offset)) = segment {
@@ -106,6 +121,10 @@ fn preserve_episode(dir: &Path, key: Value, items: Vec<Item>, boot: u64) -> Resu
             "copy": copy.as_ref().ok(), "error": error }),
         );
     }
+    for (source, offset) in turns {
+        let start = segments.entry(PathBuf::from(source)).or_insert(offset);
+        *start = offset.min(*start);
+    }
     for (source, offset) in segments {
         let name = format!("{}-transcript.part", entries.len());
         let prior = transcripts.get(source.to_string_lossy().as_ref());
@@ -116,7 +135,13 @@ fn preserve_episode(dir: &Path, key: Value, items: Vec<Item>, boot: u64) -> Resu
         .filter_map(|entry| entry["error"].as_str())
         .collect();
     let complete = errors.is_empty();
-    if !entries.is_empty() {
+    // A boot that meets only failures already on record publishes nothing new.
+    let repeated = |entry: &Value| {
+        let source = entry["source"].as_str().unwrap_or_default();
+        entry["copy"].is_null()
+            && failed.get(source) == Some(&json!([entry["offset"], entry["error"]]))
+    };
+    if !entries.iter().all(repeated) {
         let now = chrono::Utc::now().to_rfc3339();
         let manifest = json!({ "boot_generation": boot, "preserved_at": now,
             "complete": complete, "entries": entries });
@@ -125,7 +150,7 @@ fn preserve_episode(dir: &Path, key: Value, items: Vec<Item>, boot: u64) -> Resu
     match complete {
         true => Ok(()),
         false => Err(format!(
-            "incomplete, retried by a boot that still finds its row or record: {}",
+            "incomplete, retried at later boots while the source remains: {}",
             errors.join("; ")
         )),
     }
@@ -146,17 +171,39 @@ fn held_copies(dir: &Path) -> Result<(PathBuf, Held), String> {
         let manifest: Option<Value> = manifest.ok().and_then(|m| serde_json::from_slice(&m).ok());
         let entries = manifest.and_then(|manifest| manifest["entries"].as_array().cloned());
         for mut entry in entries.unwrap_or_default() {
-            if entry["copy"].is_string() && entry["kind"] == "transcript" {
+            let source = entry["source"].as_str().unwrap_or_default().to_string();
+            held.2.extend(
+                entry["offset"]
+                    .as_u64()
+                    .map(|offset| (source.clone(), offset)),
+            );
+            if entry["copy"].is_null() {
+                held.3
+                    .insert(source, json!([entry["offset"], entry["error"]]));
+            } else if entry["kind"] == "transcript" {
+                held.3.remove(&source);
                 entry["rev"] = format!("rev-{index:04}").into();
-                let source = entry["source"].as_str().unwrap_or_default().to_string();
                 held.1.insert(source, entry);
-            } else if entry["copy"].is_string() {
+            } else {
+                held.3.remove(&source);
                 held.0.extend(entry["sha256"].as_str().map(str::to_string));
             }
         }
     }
     let next = revisions.last().map_or(0, |last| last + 1);
     Ok((dir.join(format!("rev-{next:04}")), held))
+}
+
+/// The key of a TUI-direct episode first preserved inside the revisit window.
+fn revisit_key(dir: &Path) -> Option<Value> {
+    let marker = dir.join("episode.json");
+    let age = fs::metadata(&marker)
+        .and_then(|meta| meta.modified())
+        .ok()?
+        .elapsed()
+        .ok()?;
+    let marker: Value = serde_json::from_slice(&fs::read(marker).ok()?).ok()?;
+    (age < REVISIT_WINDOW && marker["tui_direct"] == true).then(|| marker["episode"].clone())
 }
 
 fn sha(bytes: &[u8]) -> String {
