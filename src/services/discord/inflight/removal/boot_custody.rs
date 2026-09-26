@@ -163,7 +163,7 @@ fn held_copies(dir: &Path) -> Result<(PathBuf, Held), String> {
     Ok((dir.join(format!("rev-{next:04}")), held))
 }
 
-fn sha(bytes: &[u8]) -> String {
+pub(super) fn sha(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
