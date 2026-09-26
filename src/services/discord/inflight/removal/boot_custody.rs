@@ -1,20 +1,29 @@
-//! Boot custody: before the boot reaper may unlink anything, copy every row's raw
-//! bytes, pending-start records and TUI-direct transcript turns into `discord_custody`.
+//! Boot custody: before the boot reaper may unlink anything, copy into `discord_custody` what
+//! each row, pending-start record and TUI-direct turn holds that no earlier boot preserved.
 
 use super::*;
 use crate::services::discord::runtime_store;
 use crate::services::discord::tui_direct_pending_start::TuiDirectPendingStart;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
-use std::io::{Read, Seek, SeekFrom};
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 /// A transcript turn longer than this keeps only its path, offset and head hash.
 const SEGMENT_COPY_CAP: u64 = 64 << 20;
 const HEAD_HASH_BYTES: u64 = 64 << 10;
 
-/// Kind, source path and raw bytes of one file to copy, plus the transcript turn it names.
-struct Item(&'static str, PathBuf, Vec<u8>, Option<(PathBuf, u64)>);
+/// Kind, source path, bytes or read error of one file seen this boot, and the turn it names.
+struct Item(
+    &'static str,
+    PathBuf,
+    Result<Vec<u8>, String>,
+    Option<(PathBuf, u64)>,
+);
+
+/// Copied digests and each transcript's latest copy across an episode's published revisions.
+type Held = (BTreeSet<String>, BTreeMap<String, Value>);
 
 /// Fail-open: a custody error or panic is only logged, so the reaper still runs.
 pub(super) fn preserve_before_boot_reap(inflight_root: &Path, provider: &ProviderKind) {
@@ -29,28 +38,27 @@ fn preserve(inflight_root: &Path, provider: &ProviderKind) {
         return;
     };
     let custody = root.join("discord_custody").join(provider.as_str());
-    let mut episodes: BTreeMap<String, (serde_json::Value, Vec<Item>)> = BTreeMap::new();
-    let mut add = |(key, item): (serde_json::Value, Item)| {
-        let digest = format!("{:x}", Sha256::digest(key.to_string()));
-        episodes
-            .entry(digest)
-            .or_insert_with(|| (key, Vec::new()))
-            .1
-            .push(item);
+    let mut episodes: BTreeMap<String, (Value, Vec<Item>)> = BTreeMap::new();
+    let mut add = |(key, item): (Value, Item)| {
+        let entry = episodes.entry(sha(key.to_string().as_bytes()));
+        entry.or_insert_with(|| (key, Vec::new())).1.push(item);
     };
-    for path in json_files(&inflight_provider_dir(inflight_root, provider)) {
-        let bytes = {
-            let _lock = lock_inflight_state_path(&path).ok();
-            fs::read(&path)
-        };
-        if let Ok(bytes) = bytes {
+    for path in json_files(&inflight_provider_dir(inflight_root, provider), provider) {
+        let lock = lock_inflight_state_path(&path);
+        if let Err(error) = &lock {
+            let path = path.display();
+            tracing::warn!(provider = provider.as_str(), %path, %error, "custody read a row unlocked");
+        }
+        let bytes = read_source(&path);
+        drop(lock);
+        if let Some(bytes) = bytes {
             add(row_item(provider, path, bytes));
         }
     }
     let pending = runtime_store::tui_direct_pending_start_root();
-    for path in pending.map(|dir| json_files(&dir)).unwrap_or_default() {
-        let item = fs::read(&path).ok();
-        if let Some(item) = item.and_then(|bytes| pending_item(provider, path, bytes)) {
+    for path in pending.map_or_else(Vec::new, |dir| json_files(&dir, provider)) {
+        let bytes = read_source(&path);
+        if let Some(item) = bytes.and_then(|bytes| pending_item(provider, path, bytes)) {
             add(item);
         }
     }
@@ -64,60 +72,138 @@ fn preserve(inflight_root: &Path, provider: &ProviderKind) {
     }
 }
 
-/// Writes the copies, then the manifest; the manifest doubles as the episode marker.
-fn preserve_episode(
-    dir: &Path,
-    key: serde_json::Value,
-    items: Vec<Item>,
-    boot_generation: u64,
-) -> Result<(), String> {
-    let manifest_path = dir.join("manifest.json");
-    if manifest_path.exists() {
-        return Ok(());
+/// Publishes the episode marker once, then one revision with what no earlier one holds.
+fn preserve_episode(dir: &Path, key: Value, items: Vec<Item>, boot: u64) -> Result<(), String> {
+    let marker = dir.join("episode.json");
+    if !marker.exists() {
+        let tui_direct = items
+            .iter()
+            .any(|Item(kind, .., seg)| *kind != "row" || seg.is_some());
+        let marker_json = json!({ "episode": key, "tui_direct": tui_direct, "first_boot": boot });
+        runtime_store::atomic_write(&marker, &marker_json.to_string())?;
     }
-    fs::create_dir_all(dir).map_err(|error| error.to_string())?;
-    let mut entries = Vec::new();
+    let (rev, (digests, transcripts)) = held_copies(dir)?;
+    let (mut entries, mut segments) = (Vec::new(), BTreeMap::new());
     for Item(kind, source, bytes, segment) in items {
-        let name = format!("{}-{kind}.json", entries.len());
-        let written = fs::write(dir.join(&name), bytes).map(|()| name);
-        entries.push(copy_entry(kind, &source, written));
         if let Some((transcript, offset)) = segment {
-            let name = format!("{}-transcript.part", entries.len());
-            entries.push(segment_entry(dir, name, &transcript, offset));
+            let start = segments.entry(transcript).or_insert(offset);
+            *start = offset.min(*start);
         }
+        let digest = bytes.as_deref().ok().map(sha);
+        if digest
+            .as_ref()
+            .is_some_and(|digest| digests.contains(digest))
+        {
+            continue;
+        }
+        let name = format!("{}-{kind}.json", entries.len());
+        let copy = bytes.and_then(|bytes| write_synced(&rev, &name, &bytes).map(|()| name));
+        entries.push(
+            json!({ "kind": kind, "source": source.to_string_lossy(), "sha256": digest,
+            "copy": copy.as_ref().ok(), "error": copy.as_ref().err() }),
+        );
     }
-    let manifest = serde_json::json!({
-        "episode": key,
-        "boot_generation": boot_generation,
-        "preserved_at": chrono::Utc::now().to_rfc3339(),
-        "entries": entries,
-    });
-    let text = serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?;
-    runtime_store::atomic_write(&manifest_path, &text)
+    for (source, offset) in segments {
+        let name = format!("{}-transcript.part", entries.len());
+        let prior = transcripts.get(source.to_string_lossy().as_ref());
+        entries.extend(segment_entry(&rev, name, (&source, offset), prior));
+    }
+    let errors: Vec<&str> = entries
+        .iter()
+        .filter_map(|entry| entry["error"].as_str())
+        .collect();
+    let complete = errors.is_empty();
+    if !entries.is_empty() {
+        let now = chrono::Utc::now().to_rfc3339();
+        let manifest = json!({ "boot_generation": boot, "preserved_at": now,
+            "complete": complete, "entries": entries });
+        runtime_store::atomic_write(&rev.join("manifest.json"), &manifest.to_string())?;
+    }
+    match complete {
+        true => Ok(()),
+        false => Err(format!(
+            "incomplete, retried next boot: {}",
+            errors.join("; ")
+        )),
+    }
 }
 
-fn json_files(dir: &Path) -> Vec<PathBuf> {
-    let entries = fs::read_dir(dir).into_iter().flatten().flatten();
-    let paths = entries.map(|entry| entry.path());
+/// The next revision directory and what published ones hold; an unlistable episode is skipped.
+fn held_copies(dir: &Path) -> Result<(PathBuf, Held), String> {
+    let mut revisions = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|error| error.to_string())? {
+        let name = entry.map_err(|error| error.to_string())?.file_name();
+        let name = name.to_str().and_then(|name| name.strip_prefix("rev-"));
+        revisions.extend(name.and_then(|index| index.parse::<u32>().ok()));
+    }
+    revisions.sort_unstable();
+    let mut held = Held::default();
+    for index in &revisions {
+        let manifest = fs::read(dir.join(format!("rev-{index:04}/manifest.json")));
+        let manifest: Option<Value> = manifest.ok().and_then(|m| serde_json::from_slice(&m).ok());
+        let entries = manifest.and_then(|manifest| manifest["entries"].as_array().cloned());
+        for entry in entries.unwrap_or_default() {
+            if entry["copy"].is_string() && entry["kind"] == "transcript" {
+                let source = entry["source"].as_str().unwrap_or_default().to_string();
+                held.1.insert(source, entry);
+            } else if entry["copy"].is_string() {
+                held.0.extend(entry["sha256"].as_str().map(str::to_string));
+            }
+        }
+    }
+    let next = revisions.last().map_or(0, |last| last + 1);
+    Ok((dir.join(format!("rev-{next:04}")), held))
+}
+
+fn sha(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// `None` when the file vanished after listing; any other read failure is kept for the manifest.
+fn read_source(path: &Path) -> Option<Result<Vec<u8>, String>> {
+    match fs::read(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        read => Some(read.map_err(|error| error.to_string())),
+    }
+}
+
+/// Lists `*.json` in `dir`; a listing failure other than a missing directory is logged.
+fn json_files(dir: &Path, provider: &ProviderKind) -> Vec<PathBuf> {
+    let warn = |error: std::io::Error| {
+        let (provider, dir) = (provider.as_str(), dir.display());
+        tracing::warn!(provider, %dir, %error, "boot custody could not list sources");
+    };
+    let entries = match fs::read_dir(dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        entries => entries.map_err(warn).into_iter().flatten(),
+    };
+    let paths = entries.filter_map(|entry| entry.map_err(warn).ok().map(|entry| entry.path()));
     paths
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
         .collect()
 }
 
-/// Unparseable bytes are keyed by their own hash, so each distinct content is one episode.
-fn malformed_key(provider: &ProviderKind, path: &Path, bytes: &[u8]) -> serde_json::Value {
-    serde_json::json!({
+/// Unparseable bytes are keyed by their own hash and an unreadable file by its name.
+fn unparsed_key(provider: &ProviderKind, path: &Path, bytes: &Result<Vec<u8>, String>) -> Value {
+    json!({
         "provider": provider.as_str(),
         "malformed": path.file_name().map(|name| name.to_string_lossy()),
-        "sha256": format!("{:x}", Sha256::digest(bytes)),
+        "sha256": bytes.as_deref().ok().map(sha),
     })
 }
 
-fn row_item(provider: &ProviderKind, source: PathBuf, bytes: Vec<u8>) -> (serde_json::Value, Item) {
-    let text = std::str::from_utf8(&bytes).ok();
+fn row_item(
+    provider: &ProviderKind,
+    source: PathBuf,
+    bytes: Result<Vec<u8>, String>,
+) -> (Value, Item) {
+    let text = bytes
+        .as_deref()
+        .ok()
+        .and_then(|bytes| std::str::from_utf8(bytes).ok());
     let Some(row) = text.and_then(|text| parse_inflight_state_content(text).ok()) else {
         return (
-            malformed_key(provider, &source, &bytes),
+            unparsed_key(provider, &source, &bytes),
             Item("row", source, bytes, None),
         );
     };
@@ -128,13 +214,8 @@ fn row_item(provider: &ProviderKind, source: PathBuf, bytes: Vec<u8>) -> (serde_
         let transcript = PathBuf::from(row.output_path.clone().unwrap_or_default());
         (transcript, row.turn_start_offset.unwrap_or(0))
     });
-    let key = episode_key(
-        provider,
-        [row.channel_id, row.user_msg_id],
-        row.turn_start_offset,
-        row.external_turn_id.as_deref(),
-        row.output_path.as_deref(),
-    );
+    let anchorless = (row.user_msg_id == 0).then(|| json!([row.started_at, row.turn_start_offset]));
+    let key = episode_key(provider, [row.channel_id, row.user_msg_id], anchorless);
     (key, Item("row", source, bytes, segment))
 }
 
@@ -142,85 +223,125 @@ fn row_item(provider: &ProviderKind, source: PathBuf, bytes: Vec<u8>) -> (serde_
 fn pending_item(
     provider: &ProviderKind,
     source: PathBuf,
-    bytes: Vec<u8>,
-) -> Option<(serde_json::Value, Item)> {
-    let kind = "pending_start";
-    let Ok(record) = serde_json::from_slice::<TuiDirectPendingStart>(&bytes) else {
+    bytes: Result<Vec<u8>, String>,
+) -> Option<(Value, Item)> {
+    let record = bytes.as_deref().ok();
+    let record =
+        record.and_then(|bytes| serde_json::from_slice::<TuiDirectPendingStart>(bytes).ok());
+    let Some(record) = record else {
         let name = source.file_name()?.to_string_lossy();
-        let prefix = format!("{}_", provider.as_str());
-        name.starts_with(&prefix).then_some(())?;
-        let key = malformed_key(provider, &source, &bytes);
-        return Some((key, Item(kind, source, bytes, None)));
+        name.starts_with(&format!("{}_", provider.as_str()))
+            .then_some(())?;
+        let key = unparsed_key(provider, &source, &bytes);
+        return Some((key, Item("pending_start", source, bytes, None)));
     };
     (record.provider == provider.as_str()).then_some(())?;
-    let captured = record.captured_source.as_ref();
     let key = episode_key(
         provider,
         [record.channel_id, record.anchor_message_id],
-        captured.map(|(_, offset)| *offset),
-        record.lease_turn_id.as_deref(),
-        captured.map(|(path, _)| path.as_str()),
+        None,
     );
     let segment = record
         .captured_source
         .map(|(path, offset)| (path.into(), offset));
-    Some((key, Item(kind, source, bytes, segment)))
+    Some((key, Item("pending_start", source, bytes, segment)))
 }
 
-/// A claimed row and the pending-start record it was claimed from share this key.
-fn episode_key(
-    provider: &ProviderKind,
-    [channel_id, anchor_id]: [u64; 2],
-    turn_start_offset: Option<u64>,
-    external_turn_id: Option<&str>,
-    output_path: Option<&str>,
-) -> serde_json::Value {
-    serde_json::json!({
-        "provider": provider.as_str(),
-        "channel_id": channel_id,
-        "anchor_id": anchor_id,
-        "turn_start_offset": turn_start_offset,
-        "external_turn_id": external_turn_id,
-        "output_path": output_path,
-    })
+/// The row claimed from a pending-start record keeps its anchor as `user_msg_id`, so both
+/// share this key; an anchorless row is told apart by its start time and turn offset.
+fn episode_key(provider: &ProviderKind, ids: [u64; 2], anchorless: Option<Value>) -> Value {
+    let [channel_id, anchor_id] = ids;
+    let provider = provider.as_str();
+    json!({ "provider": provider, "channel_id": channel_id, "anchor_id": anchor_id,
+        "anchorless": anchorless })
 }
 
-fn copy_entry(kind: &str, source: &Path, copy: std::io::Result<String>) -> serde_json::Value {
-    let (copy, error) = match copy {
-        Ok(name) => (Some(name), None),
-        Err(error) => (None, Some(error.to_string())),
+fn write_synced(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
+    let write = || -> std::io::Result<()> {
+        fs::create_dir_all(dir)?;
+        let mut file = fs::File::create(dir.join(name))?;
+        file.write_all(bytes)?;
+        file.sync_all()
     };
-    let source = source.to_string_lossy();
-    serde_json::json!({ "kind": kind, "source": source, "copy": copy, "error": error })
+    write().map_err(|error| error.to_string())
 }
 
-/// Copies transcript bytes `[offset, EOF)` as of the stat and records the source identity.
-fn segment_entry(dir: &Path, name: String, source: &Path, offset: u64) -> serde_json::Value {
-    let mut entry = serde_json::json!({ "offset": offset });
-    let mut copy = || -> std::io::Result<String> {
-        let mut file = fs::File::open(source)?;
-        let (metadata, mut head) = (file.metadata()?, Vec::new());
-        (&mut file).take(HEAD_HASH_BYTES).read_to_end(&mut head)?;
-        let ((dev, ino), size) = (file_identity(&metadata), metadata.len());
-        let head_sha256 = format!("{:x}", Sha256::digest(&head));
-        entry = serde_json::json!({ "offset": offset, "dev": dev, "ino": ino, "size": size,
-            "head_sha256": head_sha256 });
-        let len = size.checked_sub(offset);
-        let len = len.ok_or_else(|| std::io::Error::other("turn start is past EOF"))?;
-        if len > SEGMENT_COPY_CAP {
-            return Err(std::io::Error::other("turn exceeds the copy cap"));
+/// Copies what `[offset, EOF)` holds past the latest copy of the same file; `None` if nothing
+/// is new. A replaced, truncated or rewritten file is copied again and flagged as changed.
+fn segment_entry(
+    dir: &Path,
+    name: String,
+    turn: (&Path, u64),
+    prior: Option<&Value>,
+) -> Option<Value> {
+    let (source, offset) = turn;
+    let mut entry = json!({ "kind": "transcript", "source": source.to_string_lossy(),
+        "offset": offset, "copy": null, "error": null });
+    match copy_segment(dir, &name, turn, prior, &mut entry) {
+        Ok(false) => return None,
+        Ok(true) if entry["source_changed"] == true => {
+            entry["copy"] = name.into();
+            entry["error"] = "the transcript changed since the last copy".into();
         }
-        #[cfg(test)]
-        super::boot_custody_tests::before_segment_copy(source);
-        file.seek(SeekFrom::Start(offset))?;
-        std::io::copy(&mut file.take(len), &mut fs::File::create(dir.join(&name))?)?;
-        Ok(name.clone())
-    };
-    let copied = copy_entry("transcript", source, copy());
-    if let (Some(fields), serde_json::Value::Object(copied)) = (entry.as_object_mut(), copied) {
-        fields.extend(copied);
+        Ok(true) => entry["copy"] = name.into(),
+        Err(error) => entry["error"] = error.to_string().into(),
     }
-    entry
+    Some(entry)
+}
+
+/// Resumes at the latest copy's end while the file keeps its identity and head; `false` when
+/// nothing is new.
+fn copy_segment(
+    dir: &Path,
+    name: &str,
+    (source, offset): (&Path, u64),
+    prior: Option<&Value>,
+    entry: &mut Value,
+) -> std::io::Result<bool> {
+    let mut file = fs::File::open(source)?;
+    let (metadata, mut head) = (file.metadata()?, Vec::new());
+    (&mut file).take(HEAD_HASH_BYTES).read_to_end(&mut head)?;
+    let ((dev, ino), size) = (file_identity(&metadata), metadata.len());
+    let same_head = |prior: &Value| {
+        let len = prior["head_len"]
+            .as_u64()
+            .and_then(|len| usize::try_from(len).ok());
+        let prior_head = len.and_then(|len| head.get(..len));
+        prior_head.is_some_and(|bytes| prior["head_sha256"] == sha(bytes))
+    };
+    let same_file = |prior: &&Value| prior["dev"] == dev && prior["ino"] == ino && same_head(prior);
+    let resume = prior
+        .filter(same_file)
+        .and_then(|prior| prior["to"].as_u64());
+    let resume = resume.filter(|to| *to <= size);
+    let from = resume.unwrap_or(offset);
+    let fields = json!({ "dev": dev, "ino": ino, "size": size, "head_len": head.len(),
+        "head_sha256": sha(&head), "from": from, "to": size,
+        "source_changed": prior.is_some() && resume.is_none() });
+    if let (Some(entry), Value::Object(fields)) = (entry.as_object_mut(), fields) {
+        entry.extend(fields);
+    }
+    if resume == Some(size) {
+        return Ok(false);
+    }
+    let len = size.checked_sub(from);
+    let len = len.ok_or_else(|| std::io::Error::other("turn start is past EOF"))?;
+    if len > SEGMENT_COPY_CAP {
+        return Err(std::io::Error::other("turn exceeds the copy cap"));
+    }
+    #[cfg(test)]
+    super::boot_custody_tests::before_segment_copy(source);
+    file.seek(SeekFrom::Start(from))?;
+    fs::create_dir_all(dir)?;
+    let mut copy = fs::File::create(dir.join(name))?;
+    let copied = std::io::copy(&mut file.take(len), &mut copy)?;
+    copy.sync_all()?;
+    match copied == len {
+        true => Ok(true),
+        false => Err(std::io::Error::other(format!(
+            "short copy: {copied} of {len} bytes"
+        ))),
+    }
 }
 
 #[cfg(unix)]
