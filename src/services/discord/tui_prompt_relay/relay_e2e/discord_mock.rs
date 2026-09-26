@@ -46,9 +46,7 @@ pub(super) struct DiscordMockState {
     pub(super) history_queries: Arc<Mutex<Vec<HistoryQuery>>>,
     /// Every message the mock minted, in id order, as `(reply_to, latest content)`.
     pub(super) messages: Arc<Mutex<MintedMessages>>,
-    /// Ids a `DELETE` removed; `messages` keeps their last content.
-    pub(super) deleted: Arc<Mutex<std::collections::BTreeSet<u64>>>,
-    pub(super) next_response_id: Arc<AtomicU64>,
+    next_response_id: Arc<AtomicU64>,
 }
 
 impl DiscordMockState {
@@ -62,7 +60,6 @@ impl DiscordMockState {
             history: Arc::new(Mutex::new(Vec::new())),
             history_queries: Arc::new(Mutex::new(Vec::new())),
             messages: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
-            deleted: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
             next_response_id: Arc::new(AtomicU64::new(FIRST_RESPONSE_MESSAGE_ID)),
         }
     }
@@ -352,9 +349,6 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
     if method == Method::DELETE
         && path.starts_with(&format!("/api/v10/channels/{CHANNEL_ID}/messages/"))
     {
-        if let Some(id) = path.rsplit('/').next().and_then(|tail| tail.parse().ok()) {
-            state.deleted.lock().expect("mock deletions").insert(id);
-        }
         return StatusCode::NO_CONTENT.into_response();
     }
     // `catch_up` resolves the bot identity here and skips every candidate whose
