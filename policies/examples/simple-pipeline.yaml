@@ -60,9 +60,3 @@ clocks:
     set: started_at
   done:
     set: completed_at
-
-timeouts:
-  in_progress:
-    duration: 4h
-    clock: started_at
-    on_exhaust: done
