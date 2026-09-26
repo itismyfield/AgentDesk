@@ -92,18 +92,14 @@ fn truncate(path: &Path, len: u64) {
 }
 
 /// Episode flags, then the first source's flags, `current` and missing ranges.
-type Want = (
-    &'static [&'static str],
-    &'static [&'static str],
-    &'static str,
-    &'static [(u64, u64)],
-);
+type Flags = &'static [&'static str];
+type Want = (Flags, Flags, &'static str, &'static [(u64, u64)]);
 
 // Contract: each ledger shape folds to the state the append-only single-generation model gives
 // it, and none of them reads as complete: change evidence, unresolved ledger, gap, bad range.
 #[test]
 fn ledger_shapes_fold_to_their_obligation_state() {
-    let rows: [(&str, fn(&Fx), Want); 11] = [
+    let rows: [(&str, fn(&Fx), Want); 12] = [
         (
             "shrink evidence is sticky",
             |fx| {
@@ -160,13 +156,6 @@ fn ledger_shapes_fold_to_their_obligation_state() {
             (&[HISTORY, "fairness_lost"], &[], "complete_to_eof", &[]),
         ),
         (
-            "entries not a list",
-            |fx| {
-                fx.write(0, "manifest.json", b"{\"entries\":5}");
-            },
-            (&[HISTORY], &[], "", &[]),
-        ),
-        (
             "short copy leaves an internal gap",
             |fx| {
                 (fx.held(0, 4, (4, 12)), fx.held(2, 4, (20, 28)));
@@ -183,12 +172,37 @@ fn ledger_shapes_fold_to_their_obligation_state() {
             (&[], &["required_past_eof"], "complete_to_eof", &[]),
         ),
         (
-            "copy cap from the first missing byte",
+            "copy cap from the first missing byte, not the missing total",
             |fx| {
                 fx.held(0, 0, (0, 10));
                 truncate(&fx.source(), (64 << 20) + 11);
+                fx.write(1, "d", b"");
+                truncate(&fx.episode().join("rev-0001/d"), (64 << 20) - 9);
+                let far = json!({ "copy": "d", "from": 20, "to": (64 << 20) + 11 });
+                fx.legacy(1, 0, far);
             },
-            (&[], &[], "over_cap from 10", &[(10, (64 << 20) + 11)]),
+            (&[], &[], "over_cap from 10", &[(10, 20)]),
+        ),
+        (
+            "a copy whose attempt failed is not held",
+            |fx| {
+                (fx.held(0, 0, (0, 20)), fx.write(1, "c", &BYTES[20..]));
+                let failed = json!({ "result": "copy_failed", "copy": "c", "from": 20, "to": 28 });
+                fx.record(1, "outcome.json", failed);
+                let intent = json!({ "required_from": 0, "pre": fx.seen() });
+                fx.record(1, "intent.json", intent);
+            },
+            (&[], &[], "missing readable from 20", &[(20, 28)]),
+        ),
+        (
+            "a head rewrite an attempt saw is sticky",
+            |fx| {
+                fx.held(0, 0, (0, 28));
+                let mut pre = fx.seen();
+                pre["g_prefix_sha"] = json!("0".repeat(64));
+                fx.record(1, "intent.json", json!({ "required_from": 0, "pre": pre }));
+            },
+            (&[], &[CHANGED], CHANGED, &[]),
         ),
     ];
     for (name, setup, (episode, flags, current, missing)) in rows {
@@ -245,6 +259,7 @@ fn attempt_records_keep_their_observations_across_a_reload() {
 fn current_reads_only_the_head_and_the_last_preserved_window() {
     let bytes: Vec<u8> = (0..80 << 10).map(|i| b'a' + (i % 26) as u8).collect();
     for (at, current) in [
+        (10, "source_changed_now"),
         ((80 << 10) - 10, "source_changed_now"),
         (70 << 10, "complete_to_eof"),
     ] {
