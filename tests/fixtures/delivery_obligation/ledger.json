@@ -2,7 +2,10 @@
   "ledger_schema": 1,
   "ledger_protocol": 1,
   "delivered_frontier": {
-    "range": [0, 100],
+    "range": [
+      0,
+      100
+    ],
     "generation_mtime_ns": 42,
     "attempts": 1,
     "panel_msg_id": 501,
@@ -12,36 +15,95 @@
     "publication": {
       "epoch": {
         "generation_mtime_ns": 42,
-        "identity": { "source_dev": 7, "source_ino": 9 },
-        "serial": 1
+        "serial": 1,
+        "source_dev": 7,
+        "source_ino": 9,
+        "reset_incarnation": 1
       },
       "extent_end": 300,
-      "digest": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+      "digest": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16
+      ],
       "rev": 5
     },
-    "open": [{
-      "range": [100, 200],
-      "origin": [100, 200],
-      "class": "Owed",
-      "attempt": {
-        "key": "epoch-42-7-9-1:origin-100-200:exact-100-200",
-        "range": [100, 200],
-        "prepared_at_ms": 1000,
-        "started_ms": 1000,
-        "chunk_nonces": ["chunk-0", "chunk-1"],
-        "chunk_total": 2,
-        "receipts": [{ "chunk": 0, "message_id": 502, "cleanup": "Unknown" }]
-      },
-      "unresolved": true,
-      "unresolved_since_ms": 1001,
-      "redrive_capped": {
-        "range": [100, 200],
-        "capped_at_ms": 2000,
-        "next_rearm_at_ms": 3602000,
-        "last_rejection": "turn_start_outside_frame"
+    "open": [
+      {
+        "range": [
+          100,
+          200
+        ],
+        "origin": [
+          100,
+          200
+        ],
+        "class": "Owed",
+        "attempt": {
+          "key": "epoch-42-7-9-1:origin-100-200:exact-100-200",
+          "range": [
+            100,
+            200
+          ],
+          "prepared_at_ms": 1000,
+          "chunk_nonces": [
+            "chunk-0",
+            "chunk-1"
+          ],
+          "chunk_total": 2,
+          "receipts": [
+            {
+              "chunk": 0,
+              "message_id": 502,
+              "cleanup": "Unknown"
+            }
+          ]
+        },
+        "unresolved": true,
+        "unresolved_since_ms": 1001,
+        "redrive_capped": {
+          "range": [
+            100,
+            200
+          ],
+          "capped_at_ms": 2000,
+          "next_rearm_at_ms": 3602000,
+          "last_rejection": "turn_start_outside_frame"
+        }
       }
-    }],
+    ],
     "held": [],
-    "intents": [[200, 300]]
-  }
+    "intents": [
+      [
+        200,
+        300
+      ]
+    ]
+  },
+  "future_section": {
+    "opaque": {
+      "items": [
+        1,
+        true,
+        "retained"
+      ],
+      "nested": {
+        "value": null
+      }
+    }
+  },
+  "future_scalar": "opaque extension"
 }

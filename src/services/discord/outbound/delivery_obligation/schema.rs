@@ -3,22 +3,18 @@ use super::super::delivery_record::DeliveredCommit;
 pub(in crate::services::discord) type ExactRange = (u64, u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::services::discord) struct SourceIdentity {
+pub(in crate::services::discord) struct SourceToken {
+    pub generation_mtime_ns: i64,
     pub source_dev: u64,
     pub source_ino: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::services::discord) struct SourceEpoch {
-    pub generation_mtime_ns: i64,
-    pub identity: SourceIdentity,
     pub serial: u64,
+    pub reset_incarnation: u64,
 }
 
 /// The prefix digest checks byte continuity, never delivery completion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) struct Publication {
-    pub epoch: SourceEpoch,
+    pub epoch: SourceToken,
     pub extent_end: u64,
     pub digest: [u8; 16],
     pub rev: u64,
@@ -61,7 +57,6 @@ pub(in crate::services::discord) struct Attempt {
     pub key: String,
     pub range: ExactRange,
     pub prepared_at_ms: Option<u64>,
-    pub started_ms: u64,
     pub chunk_nonces: Option<Vec<String>>,
     pub chunk_total: Option<u32>,
     pub receipts: Vec<ChunkReceipt>,
@@ -89,9 +84,4 @@ pub(in crate::services::discord) struct RedriveCapped {
     pub capped_at_ms: u64,
     pub next_rearm_at_ms: u64,
     pub last_rejection: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::services::discord) struct LedgerFence {
-    pub rev: u64,
 }

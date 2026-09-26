@@ -3,7 +3,7 @@
 The obligation ledger belongs to the existing delivery record. This slice adds
 types only: no production caller, writer, lease, owner, deduper or sender changes.
 `LEDGER_PROTOCOL` stays at 0 until every required writer and consumer is wired.
-The serde/read-only loader slice follows locally using the same fixture at
+The later serde/read-only loader slices use the same fixture at
 `tests/fixtures/delivery_obligation/ledger.json`.
 
 ## Publication and identity
@@ -14,6 +14,10 @@ The extent covers the frontier, every held whole commit, every open range and
 every intent; it never shrinks within an epoch. Digest calculation and publication
 must recheck the source/coord token under the existing record flock and coord
 mutex. The digest checks continuity of `[0, extent_end)`, not delivery success.
+`SourceToken` is the single token shared by publication, source observations,
+identity-state classification and lease handoff: generation, device, inode,
+serial and reset incarnation. Follow-up source evidence reuses this type.
+Legacy frontiers never acquire a current token through deserialization.
 `SourceObs` carries the publication captured before hashing with its measured
 digest, allowing the loader to reject a changed epoch, extent, digest or revision.
 
@@ -28,6 +32,12 @@ variants without rewriting the record. Fence presence is a deny-only input;
 its revision is diagnostic and need not equal the ledger revision. Missing fence
 for an active ledger requires repair; empty ledger with a fence is IncompleteClear.
 The read-only loader reports those states without repairing either file.
+Unknown top-level fields and sections must survive document roundtrips and any
+later rewrite. Unknown fields inside the understood ledger fail closed.
+All source evidence is valid only for its recorded publication (epoch, E, digest,
+rev); a revision advanced by an unaware writer invalidates that evidence and the
+reader must refuse restoration. Empty-ledger evidence fields and semantics remain
+follow-up work.
 
 ## Lease and settlement
 
@@ -37,13 +47,16 @@ The eventual Issuing transition and removal from `fresh` share one synchronous
 coord critical section. Release hands off before releasing the lease, ignores
 stale tokens and performs no await, I/O or detached task. Settled and Released
 never recreate Unknown work. Controller, sink and no-anchor recovery guards
-must all use this contract when wired.
+must all use this contract when wired, including the admission-pinned
+`transport_nonce`: an Issuing flight enters `empty_unknowns` only when the ledger
+was empty and this nonce is absent. An attempt key is not a nonce-presence flag.
 
 `u_rev` is a separate in-memory safety revision. Pending, coord generation,
 unavailable and reset-pending changes increment it immediately under the coord
 mutex, including failed publications. U changes increment it at successful
-publication. Neither an unchanged revision nor a blocked state permits discard
-without rechecking U and pending under that same mutex.
+publication. `suppress_begin` creates no candidate while unavailable or
+reset_pending is set. Under the same mutex, `suppress_finish` requires all four:
+unchanged revision, no overlap with U or pending, !unavailable and !reset_pending.
 
 Protocol 1 conservatively keeps ambiguous errors, including HTTP 4xx, Unknown.
 It enables neither redrive nor operator settlement. Its intent withdrawal is
@@ -51,12 +64,18 @@ limited to pre-POST cancellation and write-ahead failure. Protocol 2 typed
 NotIssued/FirstRejected outcomes can prove non-delivery; MaybePosted cannot.
 WholeProof requires all planned chunks for the same epoch/attempt, no cleanup,
 and an unchanged epoch/attempt/revision at settlement. ChunkProof and Ambiguous
-remain unresolved. No operator retry permit exists.
+remain unresolved. No operator retry permit exists. Whole-attempt payloads and
+EvidenceSnapshot have private fields, no deserialization bypass, and only a
+validated constructor. The constructor checks the complete durable chunk plan,
+unique complete chunk numbers, nonce/receipt/cleanup and publication/attempt
+binding. Settlement must still recheck the publication under its lock in the
+later settlement slice.
 
 ## Durable diagnostics
 
 Attempt preparation time is `prepared_at_ms`, recorded at write-ahead; it does
-not claim transport was issued. Unobserved timestamps and unknown chunk plans
+not claim transport was issued. The duplicate `started_ms` field is omitted;
+no separate transport-start timestamp is inferred. Unobserved timestamps and unknown chunk plans
 stay absent. Receipts retain chunk numbers, message IDs and cleanup state.
 `unresolved_since_ms` is recorded in the publication entering Unresolved.
 
@@ -71,7 +90,8 @@ slice does not emit alerts or implement that later runtime gate.
 
 ## Limits
 
-The split is S0a-1 public dormant types, then S0a-2 serde, fence classification and
-read-only load. No intermediate loader is activated. Record writer integration,
+The split is S0a-1a storage types, S0a-1b sealed state types, then local S0a-2
+pieces for validated construction, serde, fence and read-only load. Each piece
+adds at most 100 production Rust lines. No intermediate loader is activated. Record writer integration,
 restart durability barriers, source digest I/O and all runtime transitions are
 later slices. The fixture is a schema example, not permission to activate it.
