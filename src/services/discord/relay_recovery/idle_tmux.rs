@@ -1,5 +1,12 @@
 use super::*;
 
+use std::collections::{HashMap, VecDeque};
+use std::sync::{LazyLock, Mutex};
+
+#[cfg(test)]
+#[path = "tests/unread_tail_seed.rs"]
+pub(crate) mod unread_tail_seed;
+
 #[derive(Clone, Debug)]
 pub(super) struct RelayRecoveryInflightClearPin {
     identity: super::inflight::InflightTurnIdentity,
@@ -375,4 +382,191 @@ pub(crate) fn idle_tmux_repair_has_unrelayed_tail_answer(
     }
     let tail = super::recovery::extract_response_from_output_pub(output_path, state.last_offset);
     !tail.trim().is_empty()
+}
+
+/// The decision sites that read `unread_bytes` as destructive permission, as the refusal record names them.
+pub(crate) const UNREAD_TAIL_SITE_MANUAL_REATTACH: &str = "manual_reattach_idle_clear";
+pub(crate) const UNREAD_TAIL_SITE_STALE_MAILBOX: &str = "stale_mailbox_idle_tmux";
+
+/// Why a tail is UNMEASURED, from the published coordinates; `None` when measured.
+/// A consumer may name the cause but never rebuild a tail from it.
+pub(crate) fn unmeasured_tail_reason(
+    unread_bytes: Option<u64>,
+    last_capture_offset: Option<u64>,
+    last_relay_offset: u64,
+) -> Option<&'static str> {
+    if unread_bytes.is_some() {
+        return None;
+    }
+    Some(match last_capture_offset {
+        None => "tail_not_measured",
+        Some(capture) if capture < last_relay_offset => "saturated_tail",
+        Some(capture) if capture == last_relay_offset => "zero_not_attributable",
+        Some(_) => "unattributed_tail",
+    })
+}
+
+type UnmeasuredTailSite = (String, u64, &'static str);
+/// A graded refusal's episode: the mailbox turn (user message id, nonce).
+type UnmeasuredTailEpisode = (Option<u64>, Option<String>);
+
+/// Recent episodes graded per channel and site, so a wedge a site keeps
+/// refusing is recorded once per episode rather than once per call.
+const UNMEASURED_TAIL_EPISODES_KEPT: usize = 8;
+static UNMEASURED_TAIL_REFUSALS_GRADED: LazyLock<
+    Mutex<HashMap<UnmeasuredTailSite, VecDeque<UnmeasuredTailEpisode>>>,
+> = LazyLock::new(Default::default);
+
+/// The manual reattach idle-clear's tail conjunct; an UNMEASURED refusal keeps
+/// the turn and is recorded when every other conjunct admits.
+pub(super) fn reattach_idle_clear_tail_admits(
+    provider: &ProviderKind,
+    decision: &RelayRecoveryDecision,
+    tmux_session: &str,
+) -> bool {
+    let evidence = &decision.evidence;
+    if evidence.unread_bytes.is_some() {
+        return unread_tail_is_proven_drained(evidence.unread_bytes); // a backlog is no wedge
+    }
+    // Judged on a read-only load so the refusal writes nothing.
+    let (channel, ready) = (decision.channel_id, idle_tmux_repair_pane_ready_for_input);
+    let others_admit = super::inflight::load_inflight_state_read_only(provider, channel)
+        .filter(super::inflight::inflight_state_allows_idle_tmux_repair_state)
+        .filter(|row| {
+            idle_tmux_repair_snapshot_ready_for_input(provider, channel, tmux_session, row, ready)
+        })
+        .is_some_and(|state| !idle_tmux_repair_has_unrelayed_tail_answer(&state));
+    if !others_admit {
+        return false;
+    }
+    record_unmeasured_tail_refusal(
+        provider,
+        decision.channel_id,
+        UNREAD_TAIL_SITE_MANUAL_REATTACH,
+        decision.affected.tmux_session.as_deref(),
+        (
+            evidence.unread_bytes,
+            evidence.last_capture_offset,
+            evidence.last_relay_offset,
+        ),
+        (evidence.watcher_attached, evidence.tmux_alive),
+        // The row loaded here is not the observation the tail came from, so it never keys.
+        (
+            decision.affected.mailbox_active_user_msg_id,
+            decision.affected.mailbox_active_turn_nonce.clone(),
+        ),
+    );
+    false
+}
+
+/// The stale-mailbox repair route's tail conjunct, kept aligned with the
+/// `ReattachWatcher` lane; records the refusal when `others_admit`.
+pub(crate) fn stale_mailbox_idle_tail_admits(
+    provider: &ProviderKind,
+    snapshot: &super::health::WatcherStateSnapshot,
+    others_admit: bool,
+) -> bool {
+    let admits = unread_tail_is_proven_drained(snapshot.unread_bytes);
+    if !admits && others_admit {
+        let channel_id = snapshot.relay_health.channel_id;
+        let site = UNREAD_TAIL_SITE_STALE_MAILBOX;
+        record_unmeasured_tail_refusal_for_snapshot(provider, channel_id, snapshot, site);
+    }
+    admits
+}
+
+/// [`unmeasured_tail_reason`] read off a watcher-state snapshot.
+pub(crate) fn unmeasured_tail_of(
+    snapshot: &super::health::WatcherStateSnapshot,
+) -> Option<&'static str> {
+    let relay = &snapshot.relay_health;
+    unmeasured_tail_reason(
+        relay.unread_bytes,
+        relay.last_capture_offset,
+        relay.last_relay_offset,
+    )
+}
+
+/// The snapshot sites' record, for a caller that already knows the tail alone refused.
+pub(crate) fn record_unmeasured_tail_refusal_for_snapshot(
+    provider: &ProviderKind,
+    channel_id: u64,
+    snapshot: &super::health::WatcherStateSnapshot,
+    site: &'static str,
+) {
+    let relay = &snapshot.relay_health;
+    let mailbox = (
+        snapshot.mailbox_active_user_msg_id,
+        snapshot.mailbox_active_turn_nonce.clone(),
+    );
+    record_unmeasured_tail_refusal(
+        provider,
+        channel_id,
+        site,
+        snapshot.tmux_session.as_deref(),
+        (
+            relay.unread_bytes,
+            relay.last_capture_offset,
+            relay.last_relay_offset,
+        ),
+        (relay.watcher_attached, relay.tmux_alive),
+        mailbox,
+    );
+}
+
+fn record_unmeasured_tail_refusal(
+    provider: &ProviderKind,
+    channel_id: u64,
+    site: &'static str,
+    tmux_session: Option<&str>,
+    (unread_bytes, last_capture_offset, last_relay_offset): (Option<u64>, Option<u64>, u64),
+    (watcher_attached, tmux_alive): (bool, Option<bool>),
+    mailbox: UnmeasuredTailEpisode,
+) {
+    // A measured backlog is the invariant working, not a wedge.
+    let Some(decided_by) =
+        unmeasured_tail_reason(unread_bytes, last_capture_offset, last_relay_offset)
+    else {
+        return;
+    };
+    let user_msg_id = mailbox.0;
+    // Without a mailbox turn nothing names the episode, so the refusal is never folded.
+    if mailbox != (None, None) {
+        let mut graded = UNMEASURED_TAIL_REFUSALS_GRADED
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let recent = graded
+            .entry((provider.as_str().to_string(), channel_id, site))
+            .or_default();
+        if recent.contains(&mailbox) {
+            return;
+        }
+        if recent.len() == UNMEASURED_TAIL_EPISODES_KEPT {
+            recent.pop_front();
+        }
+        recent.push_back(mailbox);
+    }
+    crate::services::observability::record_invariant_check(
+        false,
+        crate::services::observability::InvariantViolation {
+            provider: Some(provider.as_str()),
+            channel_id: Some(channel_id),
+            dispatch_id: None,
+            session_key: tmux_session,
+            turn_id: None,
+            invariant: crate::services::observability::LIVE_TURN_PROVEN_BY_PROGRESS_INVARIANT,
+            code_location: "src/services/discord/relay_recovery/idle_tmux.rs:record_unmeasured_tail_refusal",
+            message: "destructive idle clear refused because its unread tail was never measured",
+            details: serde_json::json!({
+                "decided_by": decided_by,
+                "site": site,
+                "last_capture_offset": last_capture_offset,
+                "last_relay_offset": last_relay_offset,
+                "watcher_attached": watcher_attached,
+                "tmux_alive": tmux_alive,
+                "mailbox_active_user_msg_id": user_msg_id,
+                "retired": false,
+            }),
+        },
+    );
 }

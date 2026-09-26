@@ -202,6 +202,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/mailbox_finish/closed_actor_tests.rs",
         "src/services/discord/queue_io/turn_admission_tests.rs",
         "src/services/discord/health/relay_auto_heal/orphan_token_tests.rs",
+        "src/server/routes/health_api/unread_tail_attribution_tests.rs",
     }
 )
 
@@ -227,6 +228,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/relay_recovery/tests/circuit_breaker_apply.rs",
         "src/services/discord/relay_recovery/tests/incarnation_follow_up.rs",
         "src/services/discord/relay_recovery/tests/orphan_token_finish.rs",
+        "src/services/discord/relay_recovery/tests/unread_tail_seed.rs",
         "src/services/discord/session_relay_sink/tests/stream_frame_fixtures.rs",
         "src/services/discord/tui_prompt_relay/local_model_queue_wake_e2e.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/catch_up_pagination_e2e.rs",
