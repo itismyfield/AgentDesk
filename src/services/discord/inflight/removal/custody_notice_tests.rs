@@ -100,18 +100,26 @@ fn tui_direct(env: &Env, channel_id: u64, transcript: bool) -> InflightTurnState
     state
 }
 
-/// Writes an earlier build's episode of `turn`, keyed by its start time and offset 0.
-fn earlier_build_episode(env: &Env, turn: &InflightTurnState, episode: &str) {
-    let (dir, row) = (
-        custody(env).join(episode),
-        serde_json::to_vec(turn).unwrap(),
-    );
+/// Writes into `root` an earlier build's episode of `turn`, keyed by its start time and offset 0.
+fn earlier_build_episode(root: &Path, turn: &InflightTurnState, episode: &str) {
+    let (dir, row) = (root.join(episode), serde_json::to_vec(turn).unwrap());
     let marker = json!({ "episode": { "provider": "claude", "channel_id": turn.channel_id,
         "anchor_id": 0, "anchorless": [turn.started_at, 0] }, "tui_direct": true });
     fs::create_dir_all(dir.join("rev-0000")).unwrap();
     fs::write(dir.join("episode.json"), marker.to_string()).unwrap();
     fs::write(dir.join("rev-0000/0-row.json"), row).unwrap();
     fs::write(dir.join("rev-0000/manifest.json"), r#"{"complete":true}"#).unwrap();
+}
+
+/// Another node's custody root holding only this root's episode markers.
+fn markers_only(env: &Env) -> PathBuf {
+    let other = env.dir().with_file_name("other_node");
+    for dir in episode_dirs(env) {
+        fs::create_dir_all(other.join(name(&dir))).unwrap();
+        let marker = other.join(name(&dir)).join("episode.json");
+        fs::copy(dir.join("episode.json"), marker).unwrap();
+    }
+    other
 }
 
 /// Seeds a pending-start record for `tmux`, as the writer persists one before any inflight row.
@@ -239,22 +247,41 @@ async fn anchorless_turns_started_in_the_same_second_are_two_rows_pg() {
     finish(db, pool).await;
 }
 
-// Contract: an earlier build's episode of an anchorless turn, keyed by start time, is one row of
-// its own beside the turn's current episode, which stays one row after its offset is rewritten.
+// Contract: an earlier build's episode of an anchorless turn, keyed by start time, shares the
+// turn's row through its copy's nonce, and the turn stays one row after an offset rewrite.
 #[tokio::test(flavor = "current_thread")]
-async fn an_earlier_builds_episode_of_a_turn_is_one_row_of_its_own_pg() {
+async fn an_earlier_builds_episode_of_a_turn_shares_its_row_pg() {
     let Some((env, db, pool)) = harness("boot custody notice earlier build").await else {
         return;
     };
     let mut turn = tui_direct(&env, 5_998_031, true);
     turn.user_msg_id = 0;
-    earlier_build_episode(&env, &turn, &"0".repeat(64));
+    earlier_build_episode(&custody(&env), &turn, &"0".repeat(64));
     for offset in [0, 1] {
         turn.turn_start_offset = Some(offset);
         env.seed(&turn, 0);
         boot(&env, Some(&pool)).await;
     }
-    assert_eq!((episode_dirs(&env).len(), rows(&pool).await.len()), (2, 2));
+    assert_eq!((episode_dirs(&env).len(), rows(&pool).await.len()), (2, 1));
+    finish(db, pool).await;
+}
+
+// Contract: two turns an earlier build keyed by one start time and offset are two rows when their
+// copies name different turn nonces.
+#[tokio::test(flavor = "current_thread")]
+async fn earlier_build_turns_sharing_a_start_time_are_two_rows_pg() {
+    let Some((env, db, pool)) = harness("boot custody notice legacy key").await else {
+        return;
+    };
+    let mut turn = row(5_998_131, None);
+    turn.user_msg_id = 0;
+    for node in ["node_a", "node_b"] {
+        let root = env.dir().with_file_name(node);
+        turn.turn_nonce = Some(node.to_string());
+        earlier_build_episode(&root, &turn, &"0".repeat(64));
+        enqueue_custody_notices(&root, &CLAUDE, Some(&pool)).await;
+    }
+    assert_eq!(rows(&pool).await.len(), 2);
     finish(db, pool).await;
 }
 
@@ -396,30 +423,24 @@ async fn an_episode_is_one_row_whatever_copies_its_root_holds_pg() {
     anchorless.user_msg_id = 0;
     env.seed(&anchorless, 0);
     reap_inflight_rows_at_boot_with_guard(&BootReapOnce::default(), &CLAUDE, None).await;
-    let (dirs, markers_only) = (episode_dirs(&env), env.dir().with_file_name("other_node"));
-    for dir in &dirs {
-        let other = markers_only.join(name(dir));
-        fs::create_dir_all(&other).unwrap();
-        fs::copy(dir.join("episode.json"), other.join("episode.json")).unwrap();
-    }
-    enqueue_custody_notices(&markers_only, &CLAUDE, Some(&pool)).await;
+    let dirs = episode_dirs(&env);
+    enqueue_custody_notices(&markers_only(&env), &CLAUDE, Some(&pool)).await;
     settle(&pool, "sent").await;
     boot(&env, Some(&pool)).await;
-    let revs = dirs
-        .iter()
-        .flat_map(|dir| fs::read_dir(dir).unwrap().flatten());
-    let revs: Vec<PathBuf> = revs
-        .map(|rev| rev.path())
-        .filter(|rev| rev.is_dir())
-        .collect();
-    for (n, rev) in revs.iter().enumerate() {
-        fs::rename(rev, env.dir().with_file_name(format!("moved-{n}"))).unwrap();
+    for (n, dir) in dirs.iter().enumerate() {
+        fs::rename(
+            dir.join("rev-0000"),
+            env.dir().with_file_name(format!("moved-{n}")),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_dir(dir).unwrap().count(),
+            1,
+            "only the marker is left"
+        );
     }
     enqueue_custody_notices(&custody(&env), &CLAUDE, Some(&pool)).await;
-    assert_eq!(
-        (dirs.len(), revs.is_empty(), rows(&pool).await.len()),
-        (2, false, 2)
-    );
+    assert_eq!((dirs.len(), rows(&pool).await.len()), (2, 2));
     finish(db, pool).await;
 }
 
@@ -449,4 +470,24 @@ async fn an_unreadable_or_garbled_marker_is_warned_and_skipped() {
             .find(|line| line.contains(&dir.display().to_string()));
         assert!(line.is_some_and(|line| line.contains(step)), "{logs}");
     }
+}
+
+// Contract: a DM notice staged by a root with no copies is re-addressed to the provider bot by a
+// root that reads the DM session while the row is unclaimed, and left alone once claimed.
+#[tokio::test(flavor = "current_thread")]
+async fn a_root_reading_the_dm_session_readdresses_an_unclaimed_notice_pg() {
+    let Some((env, db, pool)) = harness("boot custody notice readdress").await else {
+        return;
+    };
+    pending_start(5_998_141, "AgentDesk-claude-dm-343742347");
+    reap_inflight_rows_at_boot_with_guard(&BootReapOnce::default(), &CLAUDE, None).await;
+    enqueue_custody_notices(&markers_only(&env), &CLAUDE, Some(&pool)).await;
+    let mut bots = Vec::new();
+    for status in ["processing", "pending"] {
+        settle(&pool, status).await;
+        enqueue_custody_notices(&custody(&env), &CLAUDE, Some(&pool)).await;
+        bots.extend(rows(&pool).await.into_iter().map(|row| row.1));
+    }
+    assert_eq!(bots, ["notify", "claude"]);
+    finish(db, pool).await;
 }
