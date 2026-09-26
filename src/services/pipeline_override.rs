@@ -5,8 +5,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 
 use crate::pipeline::{
-    ClockConfig, GateConfig, HookBindings, PhaseGateConfig, StateConfig, TimeoutConfig,
-    TransitionConfig,
+    ClockConfig, GateConfig, HookBindings, PhaseGateConfig, StateConfig, TransitionConfig,
 };
 
 /// A partial pipeline config used for repo/agent-level overrides.
@@ -36,8 +35,9 @@ pub struct PipelineOverride {
     pub events: Option<HashMap<String, Vec<String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clocks: Option<HashMap<String, ClockConfig>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeouts: Option<HashMap<String, TimeoutConfig>>,
+    /// Retired `timeouts` section: stored rows and older dashboard saves still carry it.
+    #[serde(default, rename = "timeouts", skip_serializing)]
+    pub(crate) _retired_timeouts: Option<serde::de::IgnoredAny>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase_gate: Option<PhaseGateConfig>,
     /// Visual-editor edge metadata (#5718 review r2). The dashboard FSM editor
@@ -525,6 +525,24 @@ mod cross_layer_read_tests {
         assert!(
             message.contains("stage_failure_policy"),
             "the 400 must name the rejected key, got: {message}"
+        );
+    }
+
+    /// A stored row still carrying the retired `timeouts` key reads with its other
+    /// sections and never reaches the undeclared-key drop (and its warning).
+    #[test]
+    fn stored_row_with_retired_timeouts_reads_without_an_undeclared_key() {
+        let row = r#"{"timeouts":{"review":{"duration":"30m"}},"gates":{}}"#;
+        assert!(
+            split_undeclared_override_keys(row).is_none(),
+            "timeouts must count as a declared key"
+        );
+        let parsed = parse_override(row)
+            .expect("row reads")
+            .expect("row is not empty");
+        assert!(
+            parsed.gates.is_some(),
+            "the row's other sections must still apply"
         );
     }
 }
