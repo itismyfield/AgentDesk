@@ -588,7 +588,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_error_example(
             409,
             json!({"path": {"id": "adk-dashboard"}, "body": {"from_agent_id": "project-agentdesk", "prompt": "do it"}}),
-            json!({"error": "turn already active for this agent mailbox", "status": "conflict"}),
+            json!({"error": "agent mailbox is busy for channel 1473922824350601297", "status": "conflict"}),
         )
         .with_curl("curl -X POST http://localhost:8787/api/agents/adk-dashboard/handoff -H 'Content-Type: application/json' -d '{\"from_agent_id\":\"project-agentdesk\",\"prompt\":\"리뷰 반영해줘\",\"channel_kind\":\"cc\",\"expect_reply\":true}'"),
         ep(
