@@ -482,6 +482,29 @@ def ordered_text_present(window: Window, *, needles: Sequence[str]) -> None:
             )
 
 
+def relay_bodies_limited_to(
+    window: Window, *, after_id: int, containing: Sequence[str], exact: Sequence[str]
+) -> None:
+    """Every relay body after ``after_id`` must contain an allowed needle or equal an allowed body.
+
+    Catches an extra distinct reply (for example a provider answer to a local control) that
+    subsequence and duplicate checks accept.
+    """
+
+    for message in window.messages:
+        if int(str(message.get("id") or "0")) <= after_id:
+            continue
+        body = relay_body(message)
+        if body is not None and (
+            body.strip() in exact or any(needle in body for needle in containing)
+        ):
+            continue
+        raise AssertionError(
+            f"unexpected relay body after {after_id}: id={message.get('id')} "
+            f"body={(body if body is not None else message.get('content') or '')[:120]!r}"
+        )
+
+
 def no_duplicate_marker(window: Window, *, marker: str) -> None:
     """Fail if a stable E2E marker appears in more than one relay message.
 

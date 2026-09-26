@@ -3733,21 +3733,36 @@ class PhasePartialEvidenceContract(_OutcomeFixture, unittest.TestCase):
 
 
 class E37CodexModelLocalControl(unittest.TestCase):
-    """Runs the shipped E-37 YAML against a simulated Codex channel."""
+    """Runs the shipped E-37 YAML against a simulated Codex channel on a fake clock."""
 
     NOTICE = "`/model` 은 로컬에서 끝나는 Codex 컨트롤이라 provider 턴을 만들지 않았습니다."
 
-    def run_e37(self, *, model_opens_turn: bool) -> dict:
+    def run_e37(self, fault: str | None = None) -> dict:
         scenario = driver.yaml.safe_load(
             (ROOT / "tests/e2e/tui_relay/scenarios/E-37-codex-model-local-control.yaml").read_text()
         )
-        messages: list[dict] = []
-        # A wrongly opened turn is busy for one health read, then finishes.
-        state = {"busy_reads": 0}
+        clock, messages, sent = [1000.0], [], {}
 
-        def post(content: str) -> None:
-            messages.append({"id": str(100 + len(messages)), "content": content,
-                             "author": {"id": "7", "bot": True}, "type": 0})
+        def post(content: str, author: str = "7") -> str:
+            mid = str(100 + len(messages))
+            messages.append({"id": mid, "content": content, "author": {"id": author, "bot": True}, "type": 0})
+            return mid
+
+        def row_at(now: float) -> dict | None:
+            """Inflight row the product holds at ``now``; faults add a turn for /model."""
+            tm, tp = sent.get("/model"), sent.get("prompt")
+            model_turn = {"early_turn": (0.05, 0.4), "late_turn": (2.0, 2.4)}.get(fault)
+            if tm and model_turn and tm[0] + model_turn[0] <= now < tm[0] + model_turn[1]:
+                return {"channel_id": "42", "user_msg_id": tm[1]}
+            if tp is None:
+                return None
+            start = tp[0] + {"queued": 1.0, "slow_admission": 40.0}.get(fault, 0.3)
+            if fault == "queued" and tp[0] <= now < start:
+                return {"channel_id": "42", "user_msg_id": tm[1]}
+            if start <= now < start + 1.7:
+                sources = [int(tm[1]), int(tp[1])] if fault == "merged" else [int(tp[1])]
+                return {"channel_id": "42", "user_msg_id": tp[1], "source_message_ids": sources}
+            return None
 
         class Client:
             base_url = "http://agentdesk.test"
@@ -3756,19 +3771,22 @@ class E37CodexModelLocalControl(unittest.TestCase):
                 return {"id": "1"}
 
             def send(self, channel_id, content):  # noqa: ARG002
+                mid = post(content, author=assertions.OUR_BOT_ID)
                 if content == "/model":
+                    sent["/model"] = (clock[0], mid)
                     post(E37CodexModelLocalControl.NOTICE)
-                    state["busy_reads"] = int(model_opens_turn)
+                elif "AFTER-MODEL" in content:
+                    sent["prompt"] = (clock[0], mid)
+                    if fault == "extra_reply":
+                        post("GPT-5.6 Codex임.")
+                    prefix = "GPT-5.6 Codex임.\n" if fault == "reply_merged" else ""
+                    post(prefix + "[E2E:E37:AFTER-MODEL]")
                 else:
-                    post(content.removeprefix("Reply with exactly ").split(" ")[0])
-                return {"id": "2"}
+                    post("[E2E:E37:WARM]")
+                return {"message_id": mid}
 
             def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
                 return [m for m in messages if int(m["id"]) > int(after_id or 0)]
-
-            def wait_for_message(self, channel_id, *, predicate, after_id=None, **_):
-                observed = self.fetch_messages(channel_id, after_id=after_id)
-                return next((m for m in observed if predicate(m)), None), observed
 
         client = Client()
 
@@ -3779,28 +3797,51 @@ class E37CodexModelLocalControl(unittest.TestCase):
         def fake_api(base_url, path, *, timeout=5.0):  # noqa: ARG001
             if path == "/api/health":
                 return 200, {"status": "healthy", "ok": True, "fully_recovered": True, "degraded_reasons": []}
-            busy, state["busy_reads"] = state["busy_reads"] > 0, max(state["busy_reads"] - 1, 0)
-            return 200, _health_detail(_busy_mailbox("42", "codex") if busy else _idle_mailbox("42", "codex"))
+            mailbox, row = _idle_mailbox("42", "codex"), row_at(clock[0])
+            if row is not None:
+                mailbox.update(agent_turn_status="active", inflight_state_present=True,
+                               active_user_message_id=int(row["user_msg_id"]))
+            queued = (fault == "model_queued" and "/model" in sent and "prompt" not in sent) or (
+                fault == "queue_at_admission" and row is not None and "prompt" in sent)
+            if queued:
+                mailbox["queue_depth"] = mailbox["relay_health"]["queue_depth"] = 1
+            return 200, _health_detail(mailbox)
+
+        def sleep(seconds):
+            clock[0] += seconds
 
         args = Namespace(cell="codex-pipe", channel_id="42", thread_channel_id=None,
                          queue_runtime_root="/tmp/agentdesk-e2e-test-runtime")
         with (
-            patch("run_tui_relay.time.sleep", return_value=None),
+            patch("run_tui_relay.time.sleep", side_effect=sleep),
+            patch("run_tui_relay.time.monotonic", side_effect=lambda: clock[0]),
             patch("run_tui_relay._read_api_json", side_effect=fake_api),
+            patch("run_tui_relay._read_provider_inflight", side_effect=lambda path: row_at(clock[0])),
             patch("run_tui_relay.wait_for_discord_text_with_tui_idle_draft_guard", side_effect=fake_wait),
             patch("run_tui_relay.assert_cell_idle", return_value={"status": "idle", "mailboxes_seen": 1}),
         ):
             return driver.run_one_cell(scenario=scenario, cell="codex-pipe", channel_id="42", client=client,
                                        run_id="run-1", dry_run=False, args=args)
 
-    def test_passes_when_model_stays_local(self):
-        record = self.run_e37(model_opens_turn=False)
-        self.assertEqual(len(record["health_assertions"]), 3)
+    def test_passes_when_model_stays_local_and_prompt_is_admitted_first(self):
+        record = self.run_e37()
+        self.assertEqual(record["local_control"]["queue_depth_at_admission"], 0)
         self.assertTrue(all(row["passed"] for row in record["assertions"]))
 
-    def test_fails_when_model_opens_a_provider_turn(self):
-        with self.assertRaisesRegex(assertions.AssertionError, "busy"):
-            self.run_e37(model_opens_turn=True)
+    def test_fails_on_every_wrong_model_turn_or_reply(self):
+        for fault, reason in (
+            ("early_turn", "provider turn active"),  # ends before a post-send probe could run
+            ("late_turn", "provider turn active"),  # starts after the notice was observed
+            ("model_queued", "still queued"),
+            ("queued", "not admitted first"),
+            ("queue_at_admission", "queue not empty at prompt admission"),
+            ("merged", "merged sources"),
+            ("slow_admission", "not admitted within"),
+            ("extra_reply", "unexpected relay body"),
+            ("reply_merged", "unexpected relay body"),
+        ):
+            with self.subTest(fault=fault), self.assertRaisesRegex(assertions.AssertionError, reason):
+                self.run_e37(fault)
 
 
 if __name__ == "__main__":

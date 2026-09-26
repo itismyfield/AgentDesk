@@ -73,6 +73,7 @@ REAL_PROVIDER_STEP_KEYS: tuple[str, ...] = (
     "send_timed_response_prompt",
     "send_prompts_concurrent",
     "send_keys",
+    "local_control_then_prompt",
 )
 CONTROLLED_HARNESS_STEP_KEYS: tuple[str, ...] = (
     "restart_dcserver",
@@ -1763,6 +1764,134 @@ def wait_for_provider_hold_state(
         "timeout waiting for provider hold state before cancel: "
         f"path={path} last_state={last_state}"
     )
+
+
+def _read_provider_inflight(path: Path) -> dict[str, Any] | None:
+    """One inflight-row read; a torn write reads as absent and is retried by the poller."""
+    try:
+        row = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return row if isinstance(row, dict) else None
+
+
+def _target_mailbox(base_url: str, *, channel_id: str, provider: str) -> dict[str, Any]:
+    detail = _read_health_detail(base_url)
+    boxes = [
+        box for box in detail.get("mailboxes") or []
+        if isinstance(box, dict)
+        and _mailbox_channel_id(box) == channel_id and _mailbox_provider(box) == provider
+    ]
+    if len(boxes) != 1:
+        raise HarnessEvidenceError(
+            f"local control needs exactly one {provider}:{channel_id} mailbox; got {len(boxes)}"
+        )
+    return boxes[0]
+
+
+def local_control_then_prompt(
+    params: dict[str, Any],
+    *,
+    client: Any,
+    channel_id: str,
+    cell: str,
+    runtime_root: str | Path,
+    mark_sent: Callable[[], None],
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Send a local control, prove no turn opens for it, then prove the next prompt is admitted first.
+
+    The inflight row is polled continuously from the control send until the prompt's own
+    admission, so a wrong turn that ends early or starts late is still seen.
+    """
+    provider = cell_provider(cell)
+    path = provider_inflight_state_path(runtime_root=runtime_root, provider=provider, channel_id=channel_id)
+    poll_s = float(params.get("poll_interval_s", 0.1))
+    every = max(1, int(params.get("mailbox_every_polls", 5)))
+    discord_every = max(1, int(params.get("discord_every_polls", 10)))
+    control, notice = str(params["control"]), str(params["notice"])
+
+    def send(text: str) -> str:
+        mark_sent()
+        response = client.send(channel_id, text)
+        return turn_identity_from_send_response(response, channel_id=channel_id)["user_msg_id"]
+
+    def mailbox() -> dict[str, Any]:
+        return _target_mailbox(client.base_url, channel_id=channel_id, provider=provider)
+
+    control_id = send(control)
+    evidence.update(control=control, control_message_id=control_id)
+    sent_at = time.monotonic()
+    deadline = sent_at + float(params.get("notice_timeout_s", 60))
+    quiet_until: float | None = None
+    polls = 0
+    while True:
+        row = _read_provider_inflight(path)
+        if row is not None:
+            raise assertions.AssertionError(
+                f"local control {control!r} ran with a provider turn active: {_state_identity_summary(row)}"
+            )
+        if polls % every == 0:
+            # queue_depth is left out: an idle intake may pass through the mailbox queue briefly.
+            reasons = [r for r in _mailbox_busy_reasons(mailbox()) if "queue_depth" not in r]
+            if reasons:
+                raise assertions.AssertionError(
+                    f"local control {control!r} left the mailbox busy: {reasons}"
+                )
+        if polls % discord_every == 0:
+            if quiet_until is None and any(
+                notice in (message.get("content") or "") and not assertions.is_our_send(message)
+                for message in client.fetch_messages(channel_id, after_id=control_id, limit=100)
+            ):
+                evidence["notice_after_s"] = round(time.monotonic() - sent_at, 3)
+                quiet_until = time.monotonic() + float(params.get("quiet_s", 5))
+        polls += 1
+        if quiet_until is not None and time.monotonic() >= quiet_until:
+            box = mailbox()
+            depth = (_as_nonnegative_int(box.get("queue_depth")),
+                     _as_nonnegative_int(_relay_health(box).get("queue_depth")))
+            if any(depth):
+                raise assertions.AssertionError(f"local control {control!r} is still queued: {depth}")
+            break
+        if quiet_until is None and time.monotonic() >= deadline:
+            raise assertions.AssertionError(f"local control notice {notice!r} not observed")
+        time.sleep(poll_s)
+    evidence["control_polls"] = polls
+
+    prompt_id = send(str(params["prompt"]))
+    evidence["prompt_message_id"] = prompt_id
+    started = time.monotonic()
+    deadline = started + float(params.get("admission_timeout_s", 30))
+    polls = 0
+    while True:
+        row = _read_provider_inflight(path)
+        if row is not None:
+            owner = str(row.get("user_msg_id") or "")
+            if owner != prompt_id:
+                raise assertions.AssertionError(
+                    f"prompt {prompt_id} was not admitted first; inflight owner={owner} control={control_id}"
+                )
+            sources = row.get("source_message_ids")
+            if sources is not None and [str(source) for source in sources] != [prompt_id]:
+                raise assertions.AssertionError(f"prompt admitted with merged sources {sources}")
+            box = mailbox()
+            depth = (_as_nonnegative_int(box.get("queue_depth")),
+                     _as_nonnegative_int(_relay_health(box).get("queue_depth")))
+            if any(depth):
+                raise assertions.AssertionError(f"queue not empty at prompt admission: {depth}")
+            evidence.update(admission_latency_s=round(time.monotonic() - started, 3),
+                            queue_depth_at_admission=0, admission_polls=polls)
+            return evidence
+        if polls % every == 0:
+            active = mailbox().get("active_user_message_id")
+            if _truthy_identity(active) and str(active) != prompt_id:
+                raise assertions.AssertionError(f"prompt {prompt_id} queued behind message {active}")
+        polls += 1
+        if time.monotonic() >= deadline:
+            raise assertions.AssertionError(f"prompt {prompt_id} not admitted within the admission bound")
+        time.sleep(poll_s)
 
 
 def scenario_teardown_marker(scenario_id: str, *, cell: str, run_id: str) -> str:
@@ -3530,6 +3659,16 @@ def run_one_cell(
             for _ in batch:
                 window.mark_prompt_sent()
             record.setdefault("concurrent_prompt_batches", []).append(batch)
+        elif "local_control_then_prompt" in step:
+            _prepare_first_prompt_window()
+            params = step["local_control_then_prompt"]
+            local_control_then_prompt(
+                params, client=client, channel_id=channel_id, cell=cell,
+                runtime_root=args.queue_runtime_root, mark_sent=window.mark_prompt_sent,
+                evidence=record.setdefault("local_control", {}),
+            )
+            last_sent_prompt = str(params["prompt"])
+            _mark_real_provider_contacted(record, declared_agent_mode=declared_agent_mode, dry_run=dry_run)
         elif "wait_idle_s" in step:
             time.sleep(float(step["wait_idle_s"]))
         elif "wait_for_discord_text" in step:
@@ -4386,6 +4525,17 @@ def run_assertion(
             )
         else:
             assertions.marker_absent(window, marker=str(params))
+    elif "relay_bodies_after_local_control" in spec:
+        params = spec["relay_bodies_after_local_control"] or {}
+        control_id = ((record or {}).get("local_control") or {}).get("control_message_id")
+        if not control_id:
+            raise assertions.AssertionError("relay_bodies_after_local_control needs a local_control_then_prompt step")
+        assertions.relay_bodies_limited_to(
+            window,
+            after_id=int(control_id),
+            containing=[str(n) for n in params.get("containing") or []],
+            exact=[str(n) for n in params.get("exact") or []],
+        )
     elif "ordered_text_present" in spec:
         # #2838 (P0-2): completeness + ordering of multiple expected fragments.
         needles = spec["ordered_text_present"]

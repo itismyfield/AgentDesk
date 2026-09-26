@@ -1,18 +1,19 @@
 id: E-37
-title: Codex /model completes locally, then an ordinary message is answered exactly once
+title: Codex /model completes locally, then an ordinary message is admitted at once and answered exactly once
 agent_mode: real_live
 coverage_class: live
 cells: [codex-pipe, codex-tui]
 isolation: required
 acceptance_criteria:
   - Warm the Codex channel and wait until the target mailbox is idle.
-  - Send a content-only `/model` through Discord and observe the local-control notice.
-  - Right after the notice, the target mailbox is still idle (no inflight, no active turn, queue 0).
-  - Send an ordinary message; its answer is relayed exactly once after the notice.
+  - Send a content-only `/model` through Discord; the local-control notice arrives and no inflight row exists at any poll until the quiet period ends with queue 0.
+  - Send an ordinary message; the first inflight row is its own, with no merged sources and queue 0 at admission, within the admission bound.
+  - After `/model`, the only relay bodies are the notice and the ordinary answer, each exactly once.
   - The target mailbox drains back to idle with queue 0.
 notes: |
-  The post-notice health probe is deliberately a single attempt: polling would
-  wait out a provider turn that `/model` wrongly opened and hide it.
+  local_control_then_prompt polls the provider inflight row every 0.1s from the
+  `/model` send to the ordinary admission, so a wrong turn that ends early or
+  starts late is still observed; a turn shorter than one poll is not.
 steps:
   - send_discord_prompt: "Reply with exactly [E2E:E37:WARM] and nothing else."
   - wait_for_discord_text: "[E2E:E37:WARM]"
@@ -23,13 +24,13 @@ steps:
       poll_interval_s: 1
       global_active_max: 0
       global_finalizing_max: 0
-  - send_discord_prompt: "/model"
-  - wait_for_raw_discord_text: "provider 턴을 만들지 않았습니다"
-    timeout_s: 60
-  - assert_health:
-      global_active_max: 0
-      global_finalizing_max: 0
-  - send_discord_prompt: "Reply with exactly [E2E:E37:AFTER-MODEL] and nothing else."
+  - local_control_then_prompt:
+      control: "/model"
+      notice: "provider 턴을 만들지 않았습니다"
+      prompt: "Reply with exactly [E2E:E37:AFTER-MODEL] and nothing else."
+      notice_timeout_s: 60
+      quiet_s: 5
+      admission_timeout_s: 30
   - wait_for_discord_text: "[E2E:E37:AFTER-MODEL]"
     timeout_s: 240
   - wait_idle_s: 3
@@ -42,10 +43,14 @@ assertions:
   - chrome_count:
       text: "provider 턴을 만들지 않았습니다"
       exact: 1
+  - relay_bodies_after_local_control:
+      containing: ["provider 턴을 만들지 않았습니다"]
+      exact: ["[E2E:E37:AFTER-MODEL]"]
   - ordered_text_present:
       - "[E2E:E37:WARM]"
       - "provider 턴을 만들지 않았습니다"
       - "[E2E:E37:AFTER-MODEL]"
+  - text_present: "[E2E:E37:AFTER-MODEL]"
   - no_duplicate_marker: "[E2E:E37:WARM]"
   - no_duplicate_marker: "[E2E:E37:AFTER-MODEL]"
   - no_duplicate_content: true
