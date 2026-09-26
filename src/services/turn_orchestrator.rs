@@ -45,13 +45,13 @@ pub(crate) use dispatch_reservation::{
     PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER, VALVE_CLEARED_DISPATCH_MARKER_GRACE,
 };
 use dispatch_reservation::{
-    abandon_pending_dispatch_reservation, clear_pending_user_dispatch,
-    clear_stale_pending_dispatch_reservation, consume_pending_dispatch_marker_if_matches,
-    delete_pending_dispatch_marker_with_persistence, hydrate_pending_queue_from_disk_if_present,
-    hydrate_pending_queue_into_state, merge_pending_dispatch_marker_into_state,
-    pending_dispatch_lease_is_orphaned, reconcile_pending_dispatch_marker_before_take_next,
-    record_valve_cleared_pending_dispatch, set_pending_user_dispatch,
-    settle_pending_dispatch_on_claim,
+    abandon_pending_dispatch_reservation, absorb_disk_queue, absorb_disk_queue_error,
+    clear_pending_user_dispatch, clear_stale_pending_dispatch_reservation,
+    consume_pending_dispatch_marker_if_matches, delete_pending_dispatch_marker_with_persistence,
+    hydrate_pending_queue_from_disk_if_present, hydrate_pending_queue_into_state,
+    merge_pending_dispatch_marker_into_state, pending_dispatch_lease_is_orphaned,
+    reconcile_pending_dispatch_marker_before_take_next, record_valve_cleared_pending_dispatch,
+    set_pending_user_dispatch, settle_pending_dispatch_on_claim,
 };
 use episode_identity::{TurnNonceGuard, matching_cancel_token, persist_queue_or_restore};
 use front_requeue::requeue_intervention_front;
@@ -65,7 +65,7 @@ pub(crate) use overflow::SoftInterventionProbe;
 use overflow::drain_head_overflow;
 #[cfg(test)]
 use pending_queue_persistence::load_channel_pending_queue;
-use pending_queue_persistence::save_channel_pending_dispatch_marker;
+pub(crate) use pending_queue_persistence::save_channel_pending_dispatch_marker;
 pub(crate) use pending_queue_persistence::{
     PendingQueueItem, cleanup_stale_pending_queue_tmp_files_all_tokens,
     load_channel_pending_dispatch_marker, load_pending_dispatch_markers, load_pending_queues,
@@ -76,6 +76,7 @@ pub(crate) use pending_queue_persistence::{
 use pending_queue_persistence::{
     cleanup_stale_pending_queue_tmp_files_in_dir, cleanup_stale_pending_queue_tmp_files_under_root,
 };
+use pending_queue_persistence::{log_queue_persistence_rollback, persist_queue};
 #[cfg(test)]
 use queue_cancellation::cancel_soft_intervention_by_message_id;
 pub(crate) use queue_cancellation::has_soft_intervention_at;
@@ -1671,36 +1672,6 @@ struct ChannelMailboxState {
     remint_fence: remint_fence::FenceCell,
 }
 
-fn persist_queue(
-    channel_id: ChannelId,
-    queue: &[Intervention],
-    persistence: &QueuePersistenceContext,
-) -> Result<(), String> {
-    save_channel_queue(
-        &persistence.provider,
-        &persistence.token_hash,
-        channel_id,
-        queue,
-        persistence.dispatch_role_override,
-    )
-}
-
-fn log_queue_persistence_rollback(
-    operation: &str,
-    channel_id: ChannelId,
-    persistence: &QueuePersistenceContext,
-    error: &str,
-) {
-    tracing::error!(
-        operation,
-        provider = persistence.provider.as_str(),
-        token_hash = %persistence.token_hash,
-        channel_id = channel_id.get(),
-        error = %error,
-        "rolled back in-memory pending queue mutation after durable persistence failed"
-    );
-}
-
 fn finalize_turn_state(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
@@ -2340,6 +2311,12 @@ fn spawn_channel_mailbox(
                     reply,
                 } => {
                     state.last_persistence = Some(persistence.clone());
+                    if let Some(error) =
+                        absorb_disk_queue_error(&mut state, channel_id, &persistence)
+                    {
+                        let _ = reply.send(RequeueInterventionResult::absorb_failed(error));
+                        continue;
+                    }
                     let identity_ids = front_requeue::intervention_identity_ids(&intervention);
                     let authorized_pending_restore = dispatch_lease.as_ref().and_then(|lease| {
                         let pending = state.pending_user_dispatch?;
@@ -2747,6 +2724,11 @@ fn spawn_channel_mailbox(
                         });
                         continue;
                     }
+                    let absorbed = absorb_disk_queue(&mut state, channel_id, &persistence);
+                    if absorbed.persistence_error.is_some() {
+                        let _ = reply.send(absorbed);
+                        continue;
+                    }
                     let mut effective_persistence = persistence.clone();
                     if effective_persistence.dispatch_role_override.is_none() {
                         effective_persistence.dispatch_role_override =
@@ -2765,7 +2747,12 @@ fn spawn_channel_mailbox(
                 ChannelMailboxMsg::RestartDrain { persistence, reply } => {
                     state.last_persistence = Some(persistence.clone());
                     let persistence_error =
-                        persist_queue(channel_id, &state.intervention_queue, &persistence).err();
+                        absorb_disk_queue_error(&mut state, channel_id, &persistence).or_else(
+                            || {
+                                persist_queue(channel_id, &state.intervention_queue, &persistence)
+                                    .err()
+                            },
+                        );
                     let _ = reply.send(RestartDrainResult {
                         queued_count: if persistence_error.is_some() {
                             0
@@ -6420,7 +6407,7 @@ mod persistence_tests {
     }
 
     #[test]
-    fn take_next_soft_persist_failure_restores_queue_and_keeps_marker() {
+    fn take_next_soft_unreadable_queue_keeps_queue_and_writes_no_marker() {
         let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         let _env_guard = EnvGuard::set_root(tmp.path());
@@ -6452,9 +6439,72 @@ mod persistence_tests {
                 head.message_id
             );
             assert!(
-                marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
-                "marker remains the durable backstop when queue-without-head persistence fails"
+                !marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
+                "an unreadable queue file stops the take before any head is dequeued"
             );
+        });
+    }
+
+    /// The queue read and marker save succeed but the final queue write fails, as a tail
+    /// replacement and as an empty-tail unlink: the head stays queued behind its durable marker.
+    #[test]
+    fn take_next_soft_final_persist_failure_restores_head_and_keeps_marker() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "dispatch-marker-final-persist-fail";
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let registry = ChannelMailboxRegistry::default();
+            for (channel, ids) in [
+                (4_024_254, vec![4_024_255, 4_024_256]),
+                (4_024_257, vec![4_024_258]),
+            ] {
+                let channel_id = ChannelId::new(channel);
+                let handle = registry.handle(channel_id);
+                let queue: Vec<Intervention> = ids
+                    .iter()
+                    .map(|id| make_intervention(*id, "queued", None))
+                    .collect();
+                handle.replace_queue(queue, persistence.clone()).await;
+                let ids_of = |queue: &[Intervention]| -> Vec<u64> {
+                    queue.iter().map(|item| item.message_id.get()).collect()
+                };
+                let disk_ids =
+                    || ids_of(&load_channel_pending_queue(&provider, token_hash, channel_id).0);
+                let marker_id = || {
+                    load_channel_pending_dispatch_marker(&provider, token_hash, channel_id)
+                        .map(|(marker, _)| marker.message_id.get())
+                };
+
+                pending_queue_persistence::save_fault::fail_next(channel_id);
+                let taken = handle.take_next_soft(persistence.clone()).await;
+
+                assert!(taken.intervention.is_none(), "{channel}");
+                assert!(taken.dispatch_lease.is_none(), "{channel}");
+                assert!(taken.queue_exit_events.is_empty(), "{channel}");
+                assert!(taken.persistence_error.is_some(), "{channel}");
+                let snapshot = handle.snapshot().await;
+                assert_eq!(
+                    ids_of(&snapshot.intervention_queue),
+                    ids,
+                    "{channel} memory"
+                );
+                assert_eq!(snapshot.pending_user_dispatch, None, "{channel}");
+                assert_eq!(disk_ids(), ids, "{channel} disk");
+                assert_eq!(marker_id(), Some(ids[0]), "{channel} marker");
+
+                let retried = handle.take_next_soft(persistence.clone()).await;
+                assert_eq!(
+                    retried.intervention.map(|item| item.message_id.get()),
+                    Some(ids[0])
+                );
+                assert!(retried.dispatch_lease.is_some() && retried.persistence_error.is_none());
+                assert_eq!(disk_ids(), ids[1..], "{channel} disk after retry");
+                assert_eq!(marker_id(), Some(ids[0]), "{channel} marker after retry");
+            }
         });
     }
 

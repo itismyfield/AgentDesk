@@ -6,7 +6,8 @@ use std::time::{Duration, Instant, SystemTime};
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
 use super::{
-    Intervention, InterventionMode, SourceMessageQueuedGeneration, SourceMessageTextSegment,
+    Intervention, InterventionMode, QueuePersistenceContext, SourceMessageQueuedGeneration,
+    SourceMessageTextSegment,
 };
 use crate::services::provider::ProviderKind;
 
@@ -415,6 +416,13 @@ pub(crate) fn save_channel_queue(
             channel_id.get()
         ));
     };
+    #[cfg(test)]
+    if save_fault::take(channel_id) {
+        return Err(format!(
+            "injected pending queue save failure {}",
+            path.display()
+        ));
+    }
     if queue.is_empty() {
         return match fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -457,7 +465,37 @@ pub(crate) fn save_channel_queue(
     crate::services::discord::runtime_store::critical_atomic_write(&path, &json, context)
 }
 
-pub(super) fn save_channel_pending_dispatch_marker(
+pub(super) fn persist_queue(
+    channel_id: ChannelId,
+    queue: &[Intervention],
+    persistence: &QueuePersistenceContext,
+) -> Result<(), String> {
+    save_channel_queue(
+        &persistence.provider,
+        &persistence.token_hash,
+        channel_id,
+        queue,
+        persistence.dispatch_role_override,
+    )
+}
+
+pub(super) fn log_queue_persistence_rollback(
+    operation: &str,
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+    error: &str,
+) {
+    tracing::error!(
+        operation,
+        provider = persistence.provider.as_str(),
+        token_hash = %persistence.token_hash,
+        channel_id = channel_id.get(),
+        error = %error,
+        "rolled back in-memory pending queue mutation after durable persistence failed"
+    );
+}
+
+pub(crate) fn save_channel_pending_dispatch_marker(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: ChannelId,
@@ -774,15 +812,37 @@ pub(super) fn load_channel_pending_queue(
     token_hash: &str,
     channel_id: ChannelId,
 ) -> (Vec<Intervention>, Option<ChannelId>) {
-    let Some(path) = pending_queue_file_path(provider, token_hash, channel_id) else {
-        return (Vec::new(), None);
+    load_channel_pending_queue_checked(provider, token_hash, channel_id).unwrap_or_default()
+}
+
+/// Like `load_channel_pending_queue`, but only a missing file reads as empty; a root, read or
+/// parse failure is an error, so a caller never rewrites a queue it could not read.
+pub(super) fn load_channel_pending_queue_checked(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: ChannelId,
+) -> Result<(Vec<Intervention>, Option<ChannelId>), String> {
+    let path = pending_queue_file_path(provider, token_hash, channel_id).ok_or_else(|| {
+        format!(
+            "pending queue root unavailable for provider={} token_hash={token_hash} channel_id={}",
+            provider.as_str(),
+            channel_id.get()
+        )
+    })?;
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), None));
+        }
+        Err(error) => {
+            return Err(format!(
+                "read pending queue file {}: {error}",
+                path.display()
+            ));
+        }
     };
-    let Ok(content) = fs::read_to_string(&path) else {
-        return (Vec::new(), None);
-    };
-    let Ok(items) = serde_json::from_str::<Vec<PendingQueueItem>>(&content) else {
-        return (Vec::new(), None);
-    };
+    let items = serde_json::from_str::<Vec<PendingQueueItem>>(&content)
+        .map_err(|error| format!("parse pending queue file {}: {error}", path.display()))?;
     let restored_override = items
         .iter()
         .find_map(|item| item.override_channel_id)
@@ -791,7 +851,7 @@ pub(super) fn load_channel_pending_queue(
     let reference_wall_time = SystemTime::now();
     let interventions =
         pending_queue_items_to_interventions(items, reference_wall_time, reference_instant);
-    (interventions, restored_override)
+    Ok((interventions, restored_override))
 }
 
 /// Log a structured warning for legacy pending queue files at the old flat path.
@@ -814,6 +874,28 @@ pub(crate) fn warn_legacy_pending_queue_files(provider: &ProviderKind) {
                 path.display()
             );
         }
+    }
+}
+
+/// Test-only: fail a channel's next queue save before the file is touched, once.
+#[cfg(test)]
+pub(super) mod save_fault {
+    use poise::serenity_prelude::ChannelId;
+    use std::sync::Mutex;
+
+    static ARMED: Mutex<Vec<ChannelId>> = Mutex::new(Vec::new());
+
+    pub(in crate::services::turn_orchestrator) fn fail_next(channel_id: ChannelId) {
+        ARMED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(channel_id);
+    }
+
+    pub(super) fn take(channel_id: ChannelId) -> bool {
+        let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
+        let index = armed.iter().position(|armed| *armed == channel_id);
+        index.map(|index| armed.swap_remove(index)).is_some()
     }
 }
 
