@@ -183,7 +183,7 @@ impl Harness {
 }
 
 /// Seeds an owner-1 ExternalInput row whose transcript turn exists or is missing.
-fn tui_direct(env: &Env, channel_id: u64, transcript: bool) {
+fn tui_direct(env: &Env, channel_id: u64, transcript: bool) -> InflightTurnState {
     let mut state = row(channel_id, Some("AgentDesk-claude-notice"));
     (state.request_owner_user_id, state.turn_source) = (1, TurnSource::ExternalInput);
     let out = env.dir().with_file_name(format!("{channel_id}.jsonl"));
@@ -193,6 +193,7 @@ fn tui_direct(env: &Env, channel_id: u64, transcript: bool) {
     }
     (state.output_path, state.turn_start_offset) = (Some(out.display().to_string()), Some(0));
     env.seed(&state, 0);
+    state
 }
 
 fn after(now: DateTime<Utc>, seconds: i64) -> DateTime<Utc> {
@@ -314,4 +315,23 @@ async fn an_episode_whose_copy_failed_is_announced_as_a_preservation_failure() {
 
     let [text] = h.contents().try_into().unwrap();
     assert!(text.contains("보존 실패"), "{text}");
+}
+
+// Contract: an anchorless turn whose start offset is rewritten between boots is announced once,
+// and another anchorless turn started in the same second is announced on its own.
+#[tokio::test]
+async fn an_anchorless_turn_is_announced_once_and_apart_from_a_same_second_turn() {
+    let h = harness(&[]).await;
+    let mut turn = tui_direct(&h.env, 5_998_071, true);
+    turn.user_msg_id = 0;
+    for offset in [0, 1] {
+        turn.turn_start_offset = Some(offset);
+        h.env.seed(&turn, 0);
+        h.boot(Utc::now()).await;
+    }
+    assert_eq!(h.contents().len(), 1);
+    turn.finalizer_turn_id += 1;
+    h.env.seed(&turn, 0);
+    h.boot(Utc::now()).await;
+    assert_eq!(h.contents().len(), 2);
 }

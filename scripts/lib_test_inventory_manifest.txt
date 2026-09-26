@@ -3465,6 +3465,7 @@ services::discord::inflight::removal::boot_custody_tests::reaped_live_pane_tui_d
 services::discord::inflight::removal::custody_notice_tests::a_crash_after_the_posting_record_is_settled_by_the_next_boot
 services::discord::inflight::removal::custody_notice_tests::a_lost_response_inside_the_nonce_window_is_retried_with_the_same_nonce
 services::discord::inflight::removal::custody_notice_tests::a_tui_direct_episode_is_announced_once_across_boots
+services::discord::inflight::removal::custody_notice_tests::an_anchorless_turn_is_announced_once_and_apart_from_a_same_second_turn
 services::discord::inflight::removal::custody_notice_tests::an_episode_whose_copy_failed_is_announced_as_a_preservation_failure
 services::discord::inflight::removal::custody_notice_tests::an_episode_without_a_tui_direct_turn_is_not_announced
 services::discord::inflight::removal::custody_notice_tests::outside_the_window_a_notice_found_in_history_is_settled_without_a_post
