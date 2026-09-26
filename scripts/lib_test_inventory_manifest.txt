@@ -6483,8 +6483,11 @@ services::discord::tui_direct_pending_start::tests::restart_orphan_requires_froz
 services::discord::tui_direct_pending_start::tests::restart_orphan_requires_generation_boundary
 services::discord::tui_direct_pending_start::tests::restart_orphan_requires_ready_for_input
 services::discord::tui_direct_pending_start::tests::restart_request_window_sidecar_keeps_old_process_epoch
+services::discord::tui_direct_pending_start::tests::retire_tests::restored_finished_records_retire_without_claim_or_abort
+services::discord::tui_direct_pending_start::tests::retire_tests::restored_record_behind_live_prior_is_probed_once_at_claim_and_claims
 services::discord::tui_direct_pending_start::tests::retire_tests::retire_during_final_orphan_reclaim_skips_the_abort
 services::discord::tui_direct_pending_start::tests::retire_tests::retired_waiting_worker_exits_without_claim_and_keeps_sibling_gate
+services::discord::tui_direct_pending_start::tests::retire_tests::same_generation_record_claims_even_when_provider_idle
 services::discord::tui_direct_pending_start::tests::retire_tests::visibly_completed_anchor_retires_record_and_stops_its_worker
 services::discord::tui_direct_pending_start::tests::stale_foreign_death_gate_clears_rebind_origin_lifecycle_row
 services::discord::tui_direct_pending_start::tests::stale_foreign_demote_cancels_and_removes_current_watcher

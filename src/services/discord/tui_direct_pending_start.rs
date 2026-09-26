@@ -42,6 +42,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 mod watcher_cancel;
 
+mod restore_gate;
+
 mod state;
 
 pub(super) use state::{
@@ -810,6 +812,9 @@ async fn run_worker_inner(
         }
 
         // ---- Claim. Only delete the durable record on a SUCCESSFUL claim. ----
+        if restore_gate::already_finished(&shared, &record).await && take_retired(&record) {
+            return;
+        }
         let claimed = claim_fn(&shared, &record).await;
         if claimed {
             tracing::info!(
