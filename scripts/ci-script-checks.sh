@@ -153,6 +153,7 @@ banner "Writer namespace Windows exact-target runner fixtures (#5670)"
 
 banner "Postgres migration checksum guard"
 "$PYTHON" scripts/check_postgres_migration_checksums.py
+"$PYTHON" -m unittest tests.test_postgres_migration_checksum_guard
 
 banner "message_outbox validated-insert guard (#4424)"
 "$PYTHON" scripts/check_message_outbox_inserts.py
@@ -167,6 +168,7 @@ banner "Alert dedupe/authority/routing wiring contract (#4448/#4449)"
 
 banner "State/lint hardening guard"
 "$PYTHON" scripts/audit_state_lint_hardening.py
+"$PYTHON" -m unittest tests.test_audit_state_lint_hardening
 
 banner "Policy DB capability manifest guard (#3734)"
 "$PYTHON" scripts/check_policy_db_capabilities.py --no-silent-growth \
@@ -281,6 +283,7 @@ banner "Inflight blind-save ratchet guard (#4259)"
 "$PYTHON" -m unittest tests.test_inflight_blind_save_ratchet
 
 "$PYTHON" -m unittest tests.test_refresh_release_launchd_plist
+"$PYTHON" -m unittest tests.test_manage_dawn_launchdaemons
 
 banner "CI runner hardening guard"
 ./scripts/check-ci-runner-hardening.sh
@@ -325,6 +328,7 @@ banner "TUI relay e2e harness unit tests (#5065/#5997)"
   scripts.e2e.tui_relay.test_known_gap \
   scripts.e2e.tui_relay.test_matrix_runner \
   scripts.e2e.tui_relay.test_post_deploy_relay_continuity
+"$PYTHON" -m unittest scripts.e2e.test_voice_live_media_smoke
 "$PYTHON" -m unittest tests.test_e2e_scenario_lane_wiring
 
 banner "Relay-authority named-target floor contract (#5071)"
@@ -351,6 +355,7 @@ banner "Test-target integrity gate (#5003/#5008)"
 "$PYTHON" -m unittest tests.test_check_test_target_integrity
 "$PYTHON" -m unittest tests.test_target_empty_identity
 AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
+"$PYTHON" -m unittest tests.test_non_pg_test_filter
 
 banner "PostgreSQL test-lane membership gate (#4979, enforced)"
 # The default mode also verifies the generated `pg_db` region of ci-pr.yml
@@ -461,7 +466,10 @@ banner "Portable deployable path lint"
   tests.test_portable_path_lint \
   tests.test_install_bootstrap_portable \
   tests.test_script_python_policy \
-  tests.test_analyze_prs
+  tests.test_analyze_prs \
+  tests.test_portable_docs_examples \
+  tests.test_operator_init_portable \
+  tests.test_portable_operator_migration
 
 banner "CI macOS Trusted Rust path filter"
 "$PYTHON" -m unittest tests.test_macos_trusted_rust_filter
@@ -511,6 +519,7 @@ banner "Generate inventory docs (refresh workspace; gate source-of-truth invaria
 # Giant deadlines have one selector/evaluator. It refreshes inventories only
 # after its fail-closed main or strict PR-progress verdict succeeds.
 GFP_REFRESH_DOCS=1 "$PYTHON" scripts/giant_file_progress.py
+"$PYTHON" -m unittest tests.test_refresh_giant_file_issue_metadata
 
 banner "Generate env + CLI reference docs (README source-of-truth tables)"
 # README links to these instead of carrying hand-written tables. Both
