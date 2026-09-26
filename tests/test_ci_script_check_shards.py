@@ -96,6 +96,7 @@ class ScriptCheckShardOwnership(unittest.TestCase):
             "bare banner": source + '\nbanner "unassigned fixture"\ntrue\n',
             "unknown shard": source
             + '\nif run_check nowhere "unassigned fixture"; then\ntrue\nfi\n',
+            "unregistered command": source + '\necho "unassigned fixture"\n',
         }
         shards = sorted(set(workflow_shards(load_jobs()).values()))
         with tempfile.TemporaryDirectory(prefix="script-check-shards-") as tmp:
@@ -107,6 +108,7 @@ class ScriptCheckShardOwnership(unittest.TestCase):
                         result = list_checks(script, shard)
                         self.assertNotEqual(result.returncode, 0, result.stdout)
                         self.assertIn("unassigned fixture", result.stderr)
+                        self.assertNotIn("unassigned fixture", result.stdout.splitlines())
 
 
 class ScriptChecksMirrorAggregation(unittest.TestCase):

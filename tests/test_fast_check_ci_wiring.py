@@ -19,7 +19,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "6755c0cacf1f99d6a36b6e212d752391284e133f9eef2a7e6fb631b5c8b9b593"
+    "7bd901bd5806c738982265abcdc4e6be2143aba3ef18335f2b6711dca805ffdf"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Path-filtered required contexts: (mirror job, required name, runner job,

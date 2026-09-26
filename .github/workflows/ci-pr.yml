@@ -1806,6 +1806,7 @@ jobs:
     name: Script checks runner (guards)
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1841,6 +1842,7 @@ jobs:
     name: Script checks runner (contracts)
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1901,7 +1903,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=6755c0cacf1f99d6a36b6e212d752391284e133f9eef2a7e6fb631b5c8b9b593
+          expected=7bd901bd5806c738982265abcdc4e6be2143aba3ef18335f2b6711dca805ffdf
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2079,7 +2081,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=6755c0cacf1f99d6a36b6e212d752391284e133f9eef2a7e6fb631b5c8b9b593
+          expected=7bd901bd5806c738982265abcdc4e6be2143aba3ef18335f2b6711dca805ffdf
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

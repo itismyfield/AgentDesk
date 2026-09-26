@@ -131,6 +131,7 @@ run_check() {
     echo "ERROR: check '$2' names unknown shard '$1' (known: ${SCRIPT_CHECK_SHARDS[*]})" >&2
     exit 1
   fi
+  script_check_active=""
   if [ -n "$SCRIPT_CHECK_SHARD" ] && [ "$SCRIPT_CHECK_SHARD" != "$1" ]; then
     return 1
   fi
@@ -139,7 +140,28 @@ run_check() {
     return 1
   fi
   script_check_selected=1
+  script_check_active=1
   banner "$2"
+}
+
+# DEBUG trap for sharded and list runs: outside a selected run_check block, only
+# a literal run_check call may run, so an unregistered command fails before it runs.
+script_check_active=""
+script_check_last_command=""
+script_check_guard() {
+  local registration='^run_check [a-z]+ "[^"$`\\]*"$' previous="$script_check_last_command"
+  script_check_last_command="$BASH_COMMAND"
+  # Inside the ERR/EXIT trap, BASH_COMMAND still names the command that was
+  # interrupted, which this guard already admitted on its previous event.
+  if [ -n "$script_check_active" ] || [ "${FUNCNAME[1]:-main}" != main ] ||
+     [[ "$BASH_COMMAND" =~ $registration ]] || [ "$BASH_COMMAND" = "$previous" ]; then
+    return 0
+  fi
+  echo "ERROR: '$BASH_COMMAND' runs outside a run_check block; open it with run_check <shard> \"<title>\"" >&2
+  CURRENT_CHECK="unregistered command"
+  # A subshell cannot fail the run through its own exit status alone.
+  [ "$BASH_SUBSHELL" -eq 0 ] || kill -s TERM "$$"
+  exit 1
 }
 
 report_script_check_failure() {
@@ -173,6 +195,11 @@ trap 'report_script_check_failure "$?"' ERR EXIT
 if [ -n "$SCRIPT_CHECK_SHARD" ] && ! is_script_check_shard "$SCRIPT_CHECK_SHARD"; then
   echo "ERROR: SCRIPT_CHECK_SHARD='$SCRIPT_CHECK_SHARD' is not one of: ${SCRIPT_CHECK_SHARDS[*]}" >&2
   exit 1
+fi
+if [ -n "$SCRIPT_CHECK_SHARD$SCRIPT_CHECK_LIST" ]; then
+  # -T carries the guard into subshells and command substitutions.
+  set -T
+  trap script_check_guard DEBUG
 fi
 
 if run_check guards "shellcheck scripts"; then

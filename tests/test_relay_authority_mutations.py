@@ -423,7 +423,9 @@ exit 101
 
         def check(verify: bool, expected_rc: int) -> subprocess.CompletedProcess[str]:
             script = (root / "scripts/ci-script-checks.sh").read_text()
-            section = script.split('if run_check guards "Relay-authority fixed mutation gate (#5071)"; then\n', 1)[1].split('\nfi\n', 1)[0]
+            # Located by title alone, so moving the check to another shard keeps this test.
+            title = script.index('"Relay-authority fixed mutation gate (#5071)"')
+            section = script[script.index("\n", title) + 1:].split("\nfi\n", 1)[0]
             env = {**os.environ, "PYTHON": str(python_shim), "GITHUB_ACTIONS": str(verify).lower()}
             result = subprocess.run(
                 ["bash", "-euc", section], cwd=root, env=env, text=True, capture_output=True,

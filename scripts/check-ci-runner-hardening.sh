@@ -683,35 +683,35 @@ unless evidence_steps == [{"name" => "Upload giant-file progress evidence", "if"
   exit 1
 end
 
-# The other shard jobs run the same aggregate under the same execution contract;
-# only SCRIPT_CHECK_SHARD differs, and the protected #5308 pair stays in `scripts`.
+# The other shard jobs run the same aggregate under the same execution contract.
+# The #5308 pair stays in `scripts`, so each shard pins its whole raw job instead:
+# checkout provenance, every step before the aggregate, action refs and timeout.
 script_check_shard_jobs.each do |job_id, shard|
   next if job_id == "scripts"
 
-  shard_job = jobs[job_id]
-  unless shard_job.is_a?(Hash) && !shard_job.key?("if") && !shard_job.key?("continue-on-error") &&
-         (shard_job["needs"] == "changes" || shard_job["needs"] == ["changes"])
-    warn "#{path}: Script checks shard job #{job_id} must exist with exact needs: changes and no if/continue-on-error"
+  expected_shard_step_env = expected_script_check_execution["step_env"].merge("SCRIPT_CHECK_SHARD" => shard)
+  expected_raw_shard_job = {
+    "name" => "Script checks runner (#{shard})",
+    "needs" => "changes",
+    "runs-on" => "ubuntu-latest",
+    "timeout-minutes" => "30",
+    "steps" => [
+      {"uses" => "actions/checkout@v4", "with" => {"fetch-depth" => "0"}},
+      {"name" => "Setup Python for script checks", "uses" => "actions/setup-python@v5", "with" => {"python-version" => "3.11"}},
+      {"name" => "Install script-test Python deps", "run" => "python3 -m pip install --disable-pip-version-check pyyaml"},
+      {"name" => "Install shellcheck", "run" => "sudo apt-get install -y shellcheck zsh"},
+      {"name" => "Run script checks", "shell" => "bash", "run" => "./scripts/ci-script-checks.sh", "env" => expected_shard_step_env},
+    ],
+  }
+  unless raw_jobs.is_a?(Hash) && raw_jobs[job_id] == expected_raw_shard_job
+    warn "#{path}: Script checks shard job #{job_id} must retain the exact fixed job surface (raw YAML scalars; checkout/setup/install/run inventory, action refs, timeout-minutes 30, no permissions/env/defaults/if/continue-on-error)"
     exit 1
   end
-  shard_steps = Array(shard_job["steps"])
-  shard_run_steps = shard_steps.select { |step| step.is_a?(Hash) && step["name"] == "Run script checks" }
-  shard_run_step = shard_run_steps.first
-  shard_run_commands = if shard_run_step && shard_run_step["run"].is_a?(String)
-    shard_run_step["run"].lines.map(&:strip).reject(&:empty?)
-  else
-    []
-  end
-  unless shard_run_steps.length == 1 && !shard_run_step.key?("if") &&
-         !shard_run_step.key?("continue-on-error") && shard_run_commands == ["./scripts/ci-script-checks.sh"]
-    warn "#{path}: Script checks shard job #{job_id} must retain exactly one unconditional \"Run script checks\" step running exactly ./scripts/ci-script-checks.sh"
-    exit 1
-  end
-  shard_execution = effective_execution(document, job_id, shard_steps.index(shard_run_step))
+  shard_execution = effective_execution(document, job_id, expected_raw_shard_job["steps"].length - 1)
   shard_execution.delete("protected_step_inventory")
   expected_shard_execution = expected_script_check_execution.reject { |key, _| key == "protected_step_inventory" }
   expected_shard_execution = expected_shard_execution.merge(
-    "step_env" => expected_shard_execution["step_env"].merge("SCRIPT_CHECK_SHARD" => shard),
+    "step_env" => expected_shard_step_env,
     "effective_env" => expected_shard_execution["effective_env"].merge("SCRIPT_CHECK_SHARD" => shard),
   )
   unless canonical_yaml(shard_execution) == canonical_yaml(expected_shard_execution)

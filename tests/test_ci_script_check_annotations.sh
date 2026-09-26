@@ -7,7 +7,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 "${PYTHON:-python3}" - "$SCRIPT_DIR/../scripts/ci-script-checks.sh" <<'PY'
 import os
 from pathlib import Path
-import re
 import shlex
 import subprocess
 import sys
@@ -73,11 +72,6 @@ class ScriptCheckAnnotations(unittest.TestCase):
         self.assertEqual(decode(properties["title"], properties=True), name)
         self.assertEqual(decode(message), f"FAIL: {name}")
         self.assertNotIn("UNREACHABLE", result.stdout)
-
-    def test_all_check_banners_use_helper(self):
-        self.assertIsNone(re.search(r'(?m)^\s*echo [\'"]=== ', source))
-        self.assertIsNotNone(re.search(r'(?m)^if run_check \w+ "PG audit guard"; then$', source))
-        self.assertIsNotNone(re.search(r'(?m)^if run_check \w+ "Maintainability audit"; then$', source))
 
     def test_current_banner_and_success_output(self):
         result, summary = self.run_fixture(
