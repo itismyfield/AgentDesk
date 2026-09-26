@@ -1138,6 +1138,7 @@ mod tests {
             "release-migrate-postgres",
             "provider-cli",
             "show",
+            "custody",
             "health",
             "machine-compare",
             "activity",
