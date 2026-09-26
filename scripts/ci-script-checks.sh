@@ -144,8 +144,8 @@ run_check() {
   banner "$2"
 }
 
-# DEBUG trap for sharded and list runs: outside a selected run_check block, only
-# a literal run_check call may run, so an unregistered command fails before it runs.
+# DEBUG trap for sharded and list runs: an unregistered top-level command fails every run
+# except the shard owning the block just before it, so required Script checks goes red.
 script_check_active=""
 script_check_last_command=""
 script_check_guard() {

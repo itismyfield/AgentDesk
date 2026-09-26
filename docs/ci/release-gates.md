@@ -332,8 +332,8 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scri
 ### Script checks 샤드
 
 - PR CI는 `ci-script-checks.sh`의 각 검사를 `if run_check <shard> "<title>"; then … fi`로 `guards`·`contracts`·`cargo` 샤드 중 하나에 고정하고, 샤드마다 별도 잡(`scripts_guards`, `scripts_contracts`, `cargo`는 기존 `scripts`)이 `SCRIPT_CHECK_SHARD`로 자기 샤드만 실행한다. Rust toolchain·캐시는 `cargo` 샤드 잡에만 있다. 새 샤드 잡의 raw job 전체(checkout·setup·install·run, `timeout-minutes: 30`)는 `check-ci-runner-hardening.sh`가 고정한다.
-- 샤드가 없는 검사(`banner`만 연 검사), 모르는 샤드 이름, `run_check` 블록 밖 최상위 명령은 샤드·목록 실행에서 실패한다(DEBUG trap이 실행 전에 막는다). `SCRIPT_CHECK_LIST=1`은 `shard<TAB>title` 목록만 출력하고, `SCRIPT_CHECK_SHARD` 미설정 로컬 실행은 전 검사를 돈다(main `Main script checks`도 동일).
-- 이 가드가 CI에서 막는 것은 배정 누락·미등록 banner·목록 밖 추가 명령이다. 등록된 검사 본문을 조건으로 건너뛰는 형태(`if run_check … && false; then`, 본문 안 `if false`)는 기계로 막지 않으며 리뷰 대상이다.
+- 샤드가 없는 검사(`banner`만 연 검사)와 모르는 샤드 이름은 모든 샤드·목록 실행에서 실패한다. `run_check` 블록 밖 최상위 명령은 DEBUG trap이 실행 전에 막지만, 바로 앞 블록을 소유한 샤드에서는 그 블록 안으로 간주돼 실행된다. 다른 샤드와 목록 실행은 실패하므로 보장은 필수 `Script checks` 컨텍스트가 red가 되는 것이다. `SCRIPT_CHECK_LIST=1`은 `shard<TAB>title` 목록만 출력하고, `SCRIPT_CHECK_SHARD` 미설정 로컬 실행은 전 검사를 돈다(main `Main script checks`도 동일).
+- 이 가드가 필수 `Script checks`를 red로 만드는 것은 배정 누락·미등록 banner·목록 밖 추가 명령이다. 등록된 검사 본문을 조건으로 건너뛰는 형태(`if run_check … && false; then`, 본문 안 `if false`)는 기계로 막지 않으며 리뷰 대상이다.
 - 필수 `Script checks` 컨텍스트는 샤드 잡마다 `required-check-mirror.sh`를 한 번씩 실행하므로 한 샤드라도 success가 아니면 실패한다. `tests/test_ci_script_check_shards.py`가 샤드 소유와 미러 집계를 검사한다.
 - 로컬에서 `python3` 이 3.10 이하이면 `PYTHON=/path/to/python3.11 ./scripts/ci-script-checks.sh` 로 같은 정책을 재현한다. 지원하지 않는 Python 은 check 본문 실행 전에 명확한 오류로 실패해야 한다.
 
