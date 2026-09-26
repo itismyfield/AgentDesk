@@ -532,8 +532,6 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         action: ShowAction,
     },
-    /// Boot-custody preservation state; reads files only (no server, DB or network).
-    Custody(super::custody::CustodyArgs),
     /// Show consolidated health snapshot of the current node (server status,
     /// dcserver pid, last deploy time, queue lag, Discord/disk/outbox).
     Health,
@@ -1138,7 +1136,6 @@ mod tests {
             "release-migrate-postgres",
             "provider-cli",
             "show",
-            "custody",
             "health",
             "machine-compare",
             "activity",
