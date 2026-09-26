@@ -81,6 +81,7 @@ src/services/discord/catch_up/too_old_notice.rs
 src/services/discord/health/recovery.rs
 src/services/discord/health/recovery/stall_alert.rs
 src/services/discord/idle_recap_interaction.rs
+src/services/discord/inflight/removal/custody_notice_tests.rs
 src/services/discord/mod.rs
 src/services/discord/relay_recovery_circuit_alert_producer.rs
 src/services/discord/relay_recovery_circuit_breaker.rs
@@ -215,6 +216,7 @@ services::discord::health::recovery::stall_alert::tests
 services::discord::health::recovery::stall_watchdog_auto_heal_tests
 services::discord::idle_cleanup_selector_tests
 services::discord::idle_recap_interaction::tests
+services::discord::inflight::removal::custody_notice_tests
 services::discord::relay_recovery::circuit_breaker::tests
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
 services::discord::router::intake_dispatch::tests
@@ -821,6 +823,14 @@ services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backsto
 services::discord::idle_cleanup_selector_tests::idle_cleanup_preserves_provider_selector_columns_pg
 services::discord::idle_recap_interaction::tests::concurrent_recap_compact_claim_pg_consumes_exactly_once
 services::discord::idle_recap_interaction::tests::recap_compact_claim_pg_rejects_owner_handoff_without_consuming_pointer
+services::discord::inflight::removal::custody_notice_tests::a_failed_notice_row_is_enqueued_again_by_the_next_boot_pg
+services::discord::inflight::removal::custody_notice_tests::a_row_without_persisted_turn_ids_is_one_row_across_boots_and_backfill_pg
+services::discord::inflight::removal::custody_notice_tests::a_tui_direct_turn_is_one_outbox_row_across_boots_pg
+services::discord::inflight::removal::custody_notice_tests::an_anchorless_turn_is_one_row_beside_an_earlier_builds_episode_pg
+services::discord::inflight::removal::custody_notice_tests::anchorless_turns_started_in_the_same_second_are_two_rows_pg
+services::discord::inflight::removal::custody_notice_tests::custody_without_a_tui_direct_turn_enqueues_nothing_pg
+services::discord::inflight::removal::custody_notice_tests::the_boot_reaper_starts_the_notice_pass_pg
+services::discord::inflight::removal::custody_notice_tests::without_postgres_the_notice_waits_for_the_next_boot_pg
 services::discord::relay_recovery::circuit_breaker::tests::pg_alert_is_actionable_and_durably_one_shot_per_episode
 services::discord::relay_recovery::circuit_breaker::tests::progress_during_pg_stage_cancels_stale_alert_and_reopen_is_distinct
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::activate_unknown_status_fails_safe_without_reopen_pg

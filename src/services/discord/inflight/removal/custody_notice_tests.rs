@@ -34,17 +34,26 @@ async fn boot(env: &Env, pool: Option<&PgPool>) -> usize {
 }
 
 async fn rows(pool: &PgPool) -> Vec<Row> {
-    let query = "SELECT target, bot, source, reason_code, session_key, content, status
-        FROM message_outbox WHERE source = 'boot_custody_notice' ORDER BY id";
-    sqlx::query_as(query).fetch_all(pool).await.unwrap()
+    sqlx::query_as(
+        "SELECT target, bot, source, reason_code, session_key, content, status
+         FROM message_outbox WHERE source = 'boot_custody_notice' ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
 }
 
 /// Marks every notice row `status`, created ten minutes ago, past any rolling dedupe window.
 async fn settle(pool: &PgPool, status: &str) {
-    let query = "UPDATE message_outbox SET status = $1,
-        created_at = created_at - INTERVAL '10 minutes',
-        dedupe_expires_at = dedupe_expires_at - INTERVAL '10 minutes'";
-    sqlx::query(query).bind(status).execute(pool).await.unwrap();
+    sqlx::query(
+        "UPDATE message_outbox SET status = $1,
+         created_at = created_at - INTERVAL '10 minutes',
+         dedupe_expires_at = dedupe_expires_at - INTERVAL '10 minutes'",
+    )
+    .bind(status)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 fn custody(env: &Env) -> PathBuf {

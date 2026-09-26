@@ -103,6 +103,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
   --skip services::discord::idle_cleanup_selector_tests
   --skip services::discord::idle_recap_interaction::tests
+  --skip services::discord::inflight::removal::custody_notice_tests
   --skip services::discord::relay_recovery::circuit_breaker::tests
   --skip services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
   --skip services::discord::router::intake_dispatch::tests
@@ -309,6 +310,8 @@ NON_PG_FILTER_REPLAY=(
   services::discord::idle_recap_interaction::tests::recap_prompt_route_rejects_unrelated_custom_ids
   services::discord::idle_recap_interaction::tests::recap_prompt_route_sends_suggest_to_internal_followup_handler
   services::discord::idle_recap_interaction::tests::recap_prompt_sent_ephemeral_includes_actual_prompt_text
+  services::discord::inflight::removal::custody_notice_tests::a_dm_sessions_notice_is_delivered_by_the_provider_bot
+  services::discord::inflight::removal::custody_notice_tests::the_notice_is_one_bounded_message_that_promises_nothing_more
   services::discord::relay_recovery::circuit_breaker::tests::alert_enqueue_failure_stays_pending_and_retry_marks_only_alert_flag
   services::discord::relay_recovery::circuit_breaker::tests::alert_marker_is_exact_episode_scoped
   services::discord::relay_recovery::circuit_breaker::tests::crash_after_local_alert_commit_resumes_same_held_row_without_reenqueue
