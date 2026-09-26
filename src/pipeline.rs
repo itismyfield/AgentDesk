@@ -788,7 +788,7 @@ pub struct TimeoutConfig {
     /// Backoff policy between retries (#1082).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backoff: Option<BackoffPolicy>,
-    /// Typed failure policy (#1082). Parsed only; no Rust or JS path reads it.
+    /// Typed failure policy. Parsed only; no Rust or JS path reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_failure: Option<OnFailurePolicy>,
     /// Target state for `on_failure: fallback-stage` (#1082).
