@@ -7956,14 +7956,13 @@ services::kakao_message::tests::text_template_contains_only_the_configured_publi
 services::kakao_message::tests::validation_rejects_private_or_credentialed_urls
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_pg_reference_gate
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_terminal_reclaim
-services::maintenance::jobs::db_retention::tests::db_retention_job_counts_intake_outbox_without_deleting
+services::maintenance::jobs::db_retention::tests::db_retention_job_reports_intake_outbox_candidates_without_deleting
 services::maintenance::jobs::db_retention::tests::db_retention_keeps_skill_usage_rows_with_null_used_at
 services::maintenance::jobs::db_retention::tests::db_retention_preserves_permanent_outbox_dedupe_sentinels
 services::maintenance::jobs::db_retention::tests::db_retention_prunes_old_rows_archives_turns_and_is_idempotent
 services::maintenance::jobs::db_retention::tests::db_retention_turns_window_is_strict_with_no_archive_less_delete
-services::maintenance::jobs::db_retention::tests::intake_outbox_retention_deletes_only_aged_allowlisted_terminal_rows
-services::maintenance::jobs::db_retention::tests::intake_outbox_retention_keeps_parents_with_live_family_or_children
-services::maintenance::jobs::db_retention::tests::intake_outbox_retention_respects_batch_cap_oldest_first
+services::maintenance::jobs::db_retention::tests::intake_outbox_candidates_exclude_rows_with_live_family_or_children
+services::maintenance::jobs::db_retention::tests::intake_outbox_candidates_use_exact_status_windows_and_allowlist
 services::maintenance::jobs::memento_consolidation::receipt_tests::maintenance_invalidates_other_credentials_before_and_after_success_or_lost_reply
 services::maintenance::jobs::memento_consolidation::receipt_tests::maintenance_receipt_failure_stops_before_dispatch
 services::maintenance::jobs::target_sweep::tests::target_walk_runs_off_runtime_and_preserves_report
