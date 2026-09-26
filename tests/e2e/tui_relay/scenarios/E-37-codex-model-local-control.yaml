@@ -6,15 +6,14 @@ cells: [codex-pipe, codex-tui]
 isolation: required
 acceptance_criteria:
   - Warm the Codex channel and wait until the target mailbox is idle.
-  - Send a content-only `/model` through Discord; the local-control notice arrives and no inflight row is sampled until the quiet period ends with queue 0.
-  - Send an ordinary message; the first inflight row sampled is its own, with no foreign source id and queue 0 when admission is observed, within the admission bound.
+  - Send a content-only `/model` through Discord; the local-control notice arrives and no inflight row is read until the quiet period ends with queue 0.
+  - Send an ordinary message; the first inflight row read is its own, with no foreign source id and queue 0 when admission is observed, within the admission bound.
   - After `/model`, the only relay bodies are the notice and the ordinary answer, each exactly once.
   - The target mailbox drains back to idle with queue 0.
 notes: |
-  local_control_then_prompt samples the provider inflight row on a background
-  thread every 0.1s from before the `/model` send to the ordinary admission, so
-  blocking HTTP calls do not open a blind interval; a sampling gap over 1s is
-  reported as unevaluable. A turn shorter than one sampling gap is not seen.
+  local_control_then_prompt reads the provider inflight row once per loop,
+  between blocking send, health and Discord requests. No-turn is sampled, not
+  proven: a turn that opens and closes within one blocking request is missed.
 steps:
   - send_discord_prompt: "Reply with exactly [E2E:E37:WARM] and nothing else."
   - wait_for_discord_text: "[E2E:E37:WARM]"

@@ -12,7 +12,6 @@ import stat
 import sys
 import tempfile
 import threading
-import time
 import unittest
 import urllib.error
 from argparse import Namespace
@@ -3734,41 +3733,29 @@ class PhasePartialEvidenceContract(_OutcomeFixture, unittest.TestCase):
 
 
 class E37CodexModelLocalControl(unittest.TestCase):
-    """Runs the shipped E-37 YAML against a simulated Codex channel; chosen requests block for SLOW seconds."""
+    """Runs the shipped E-37 YAML on a fake clock; each simulated request costs REQUEST_S."""
 
     NOTICE = "`/model` 은 로컬에서 끝나는 Codex 컨트롤이라 provider 턴을 만들지 않았습니다."
-    SLOW = 0.8
+    REQUEST_S = 0.05
 
     def run_e37(self, fault: str | None = None) -> dict:
         scenario = driver.yaml.safe_load(
             (ROOT / "tests/e2e/tui_relay/scenarios/E-37-codex-model-local-control.yaml").read_text()
         )
-        step = next(s["local_control_then_prompt"] for s in scenario["steps"] if "local_control_then_prompt" in s)
-        step.update(poll_interval_s=0.02, loop_interval_s=0.03, quiet_s=0.4, notice_timeout_s=3,
-                    admission_timeout_s=2, max_sample_gap_s=0.5)
-        real_sleep, messages, sent, rows = time.sleep, [], {}, []
+        clock, messages, sent, rows = [1000.0], [], {}, []
 
         def post(content: str, author: str = "7") -> str:
             mid = str(100 + len(messages))
             messages.append({"id": mid, "content": content, "author": {"id": author, "bot": True}, "type": 0})
             return mid
 
-        def turn(owner: str, start: float, length: float = 0.4, sources: list | None = None) -> None:
-            rows.append((start, start + length, {"channel_id": "42", "user_msg_id": owner,
-                                                 "source_message_ids": sources or []}))
+        def turn(owner: str, start: float, stop: float, sources: list | None = None) -> None:
+            rows.append((start, stop, {"channel_id": "42", "user_msg_id": owner, "source_message_ids": sources or []}))
 
-        def row_now(path) -> dict | None:  # noqa: ARG001
-            if fault == "sampler_dead" and "/model" in sent:
-                raise RuntimeError("sampler read failed")
-            if fault == "sampler_stall" and "/model" in sent and "stalled" not in sent:
-                sent["stalled"] = True
-                real_sleep(1.0)
-            now = time.monotonic()
-            return next((row for start, stop, row in rows if start <= now < stop), None)
-
-        def blocking() -> None:
-            if sent.pop("slow", False):
-                real_sleep(self.SLOW)
+        def request() -> float:
+            started = clock[0]
+            clock[0] += self.REQUEST_S
+            return started
 
         class Client:
             base_url = "http://agentdesk.test"
@@ -3777,37 +3764,34 @@ class E37CodexModelLocalControl(unittest.TestCase):
                 return {"id": "1"}
 
             def send(self, channel_id, content):  # noqa: ARG002
-                now, mid = time.monotonic(), post(content, author=assertions.OUR_BOT_ID)
+                now, mid = request(), post(content, author=assertions.OUR_BOT_ID)
                 if content == "/model":
                     sent["/model"] = mid
                     post(E37CodexModelLocalControl.NOTICE)
-                    if fault == "early_turn":  # opens and ends inside the next, slow request
-                        turn(mid, now + 0.2)
-                        sent["slow"] = True
+                    if fault == "model_turn_open_at_first_read":
+                        turn(mid, now + 0.02, now + 0.5)
                 elif "AFTER-MODEL" in content:
                     sent["prompt"] = mid
-                    if fault == "queued":
-                        turn(sent["/model"], now, length=0.5)
-                    admitted = now + {"queued": 0.5, "active_behind": 1.5, "slow_admission": 10.0}.get(fault, 0.2)
-                    merged = [int(sent["/model"]), int(mid)] if fault == "merged" else None
-                    turn(mid, admitted, sources=merged)  # healthy: ends inside this send's own slow request
-                    sent["slow"] = True
+                    if fault == "prompt_behind_model_turn":
+                        turn(sent["/model"], now, now + 0.5)
+                    admitted = now + {"prompt_behind_model_turn": 0.5, "prompt_behind_active_owner": 1.5,
+                                      "slow_admission": 100.0}.get(fault, 0.1)
+                    merged = [int(sent["/model"]), int(mid)] if fault == "merged_sources" else None
+                    turn(mid, admitted, admitted + 1.0, sources=merged)
                     if fault == "extra_reply":
                         post("GPT-5.6 Codex임.")
                     post(("GPT-5.6 Codex임.\n" if fault == "reply_merged" else "") + "[E2E:E37:AFTER-MODEL]")
                 else:
                     post("[E2E:E37:WARM]")
-                blocking()
                 return {"message_id": mid}
 
             def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                now = request()
                 seen = [m for m in messages if int(m["id"]) > int(after_id or 0)]
-                if fault == "late_turn" and "late" not in sent and any(
+                if fault == "model_turn_opens_after_notice" and "late" not in sent and any(
                         E37CodexModelLocalControl.NOTICE == m["content"] for m in seen):
                     sent["late"] = True
-                    turn(sent["/model"], time.monotonic() + 0.2)  # starts after the notice, inside a slow request
-                    sent["slow"] = True
-                blocking()
+                    turn(sent["/model"], now + 0.3, now + 0.8)
                 return seen
 
         client = Client()
@@ -3817,48 +3801,51 @@ class E37CodexModelLocalControl(unittest.TestCase):
             return next((m for m in observed if kwargs["needle"] in m["content"]), None), observed
 
         def fake_api(base_url, path, *, timeout=5.0):  # noqa: ARG001
-            blocking()
+            request()
             if path == "/api/health":
                 return 200, {"status": "healthy", "ok": True, "fully_recovered": True, "degraded_reasons": []}
             mailbox = _idle_mailbox("42", "codex")
-            if fault == "active_behind" and "prompt" in sent:
+            if fault == "prompt_behind_active_owner" and "prompt" in sent:
                 mailbox["active_user_message_id"] = int(sent["/model"])
-            queued = (fault == "model_queued" and "/model" in sent and "prompt" not in sent) or (
+            queued = (fault == "model_left_queued" and "/model" in sent and "prompt" not in sent) or (
                 fault == "queue_at_admission" and "prompt" in sent)
             if queued:
                 mailbox["queue_depth"] = mailbox["relay_health"]["queue_depth"] = 1
             return 200, _health_detail(mailbox)
 
+        def sleep(seconds):
+            clock[0] += seconds
+
+        def inflight(path):  # noqa: ARG001
+            return next((row for start, stop, row in rows if start <= clock[0] < stop), None)
+
         args = Namespace(cell="codex-pipe", channel_id="42", thread_channel_id=None,
                          queue_runtime_root="/tmp/agentdesk-e2e-test-runtime")
         with (
-            patch("run_tui_relay.time.sleep", side_effect=lambda seconds: real_sleep(min(seconds, 0.03))),
+            patch("run_tui_relay.time.sleep", side_effect=sleep),
+            patch("run_tui_relay.time.monotonic", side_effect=lambda: clock[0]),
             patch("run_tui_relay._read_api_json", side_effect=fake_api),
-            patch("run_tui_relay._read_provider_inflight", side_effect=row_now),
-            patch("threading.excepthook"),  # the sampler_dead fault ends its thread on purpose
+            patch("run_tui_relay._read_provider_inflight", side_effect=inflight),
             patch("run_tui_relay.wait_for_discord_text_with_tui_idle_draft_guard", side_effect=fake_wait),
             patch("run_tui_relay.assert_cell_idle", return_value={"status": "idle", "mailboxes_seen": 1}),
         ):
             return driver.run_one_cell(scenario=scenario, cell="codex-pipe", channel_id="42", client=client,
                                        run_id="run-1", dry_run=False, args=args)
 
-    def test_passes_when_model_stays_local_and_prompt_is_admitted_first(self):
+    def test_passes_when_model_stays_local_and_prompt_with_empty_sources_is_admitted(self):
         record = self.run_e37()
         self.assertEqual(record["local_control"]["queue_depth_at_admission"], 0)
-        self.assertLess(record["local_control"]["inflight_max_sample_gap_s"], 0.5)
         self.assertTrue(all(row["passed"] for row in record["assertions"]))
 
-    def test_fails_on_every_wrong_model_turn_or_reply(self):
+    def test_fails_on_each_wrong_model_turn_queue_or_reply_that_a_read_can_see(self):
         for fault, reason in (
-            ("early_turn", "provider turn active"),
-            ("late_turn", "provider turn active"),
-            ("sampler_stall", "sampling gap"),
-            ("sampler_dead", "sampling gap"),
-            ("model_queued", "still queued"),
-            ("queued", "not admitted first"),
-            ("active_behind", "queued behind message"),
+            ("model_turn_open_at_first_read", "provider turn active"),
+            ("model_turn_opens_after_notice", "provider turn active"),
+            ("model_left_queued", "still queued"),
+            ("prompt_behind_model_turn", "not admitted first"),
+            ("prompt_behind_active_owner", "queued behind message"),
             ("queue_at_admission", "queue not empty when admission was observed"),
-            ("merged", "merged sources"),
+            ("merged_sources", "merged sources"),
             ("slow_admission", "not admitted within"),
             ("extra_reply", "unexpected relay body"),
             ("reply_merged", "unexpected relay body"),

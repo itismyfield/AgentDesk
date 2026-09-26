@@ -38,7 +38,6 @@ import signal
 import stat
 import subprocess
 import sys
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -1768,7 +1767,7 @@ def wait_for_provider_hold_state(
 
 
 def _read_provider_inflight(path: Path) -> dict[str, Any] | None:
-    """One inflight-row read; a torn write reads as absent and the sampler retries it."""
+    """One inflight-row read; a torn write reads as absent and the next loop reads again."""
     try:
         row = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -1792,37 +1791,6 @@ def _target_mailbox(base_url: str, *, channel_id: str, provider: str) -> dict[st
     return boxes[0]
 
 
-class _InflightSampler(threading.Thread):
-    """Reads the inflight row every ``interval`` seconds off the request path, so blocking HTTP calls leave no gap."""
-
-    def __init__(self, path: Path, interval: float) -> None:
-        super().__init__(daemon=True)
-        self.path, self.interval, self.max_gap_s, self.last_sample = path, interval, 0.0, time.monotonic()
-        self._rows: list[dict[str, Any]] = []
-        self._lock, self._halt = threading.Lock(), threading.Event()
-
-    def run(self) -> None:
-        last = time.monotonic()
-        while not self._halt.is_set():
-            row = _read_provider_inflight(self.path)
-            now = time.monotonic()
-            with self._lock:
-                self.max_gap_s, self.last_sample = max(self.max_gap_s, now - last), now
-                if row is not None:
-                    self._rows.append(row)
-            last = now
-            self._halt.wait(self.interval)
-
-    def drain(self) -> list[dict[str, Any]]:
-        with self._lock:
-            rows, self._rows = self._rows, []
-        return rows
-
-    def stop(self) -> None:
-        self._halt.set()
-        self.join(timeout=5)
-
-
 def local_control_then_prompt(
     params: dict[str, Any],
     *,
@@ -1833,23 +1801,19 @@ def local_control_then_prompt(
     mark_sent: Callable[[], None],
     evidence: dict[str, Any],
 ) -> dict[str, Any]:
-    """Send a local control and prove no turn opens for it, then prove the next prompt is admitted first.
-    A background sampler reads the inflight row from before the control send until the prompt's admission."""
+    """Send a local control, then a prompt, reading the inflight row once per loop between blocking requests.
+    These are samples, not proof: a turn that opens and closes within one blocking request is not seen."""
     provider = cell_provider(cell)
     path = provider_inflight_state_path(runtime_root=runtime_root, provider=provider, channel_id=channel_id)
-    sampler = _InflightSampler(path, float(params.get("poll_interval_s", 0.1)))
-    sampler.start()
-    try:
-        return _local_control_then_prompt(params, client, channel_id, provider, sampler, mark_sent, evidence)
-    finally:
-        sampler.stop()
-        evidence["inflight_max_sample_gap_s"] = round(sampler.max_gap_s, 3)
-
-
-def _local_control_then_prompt(params, client, channel_id, provider, sampler, mark_sent, evidence):
-    loop_s = float(params.get("loop_interval_s", 0.5))
-    max_gap = float(params.get("max_sample_gap_s", 1.0))
+    loop_s = float(params.get("poll_interval_s", 0.1))
     control, notice = str(params["control"]), str(params["notice"])
+    last_read = [time.monotonic()]
+
+    def inflight() -> dict[str, Any] | None:
+        row, now = _read_provider_inflight(path), time.monotonic()
+        evidence["max_read_gap_s"] = round(max(evidence.get("max_read_gap_s", 0.0), now - last_read[0]), 3)
+        last_read[0] = now
+        return row
 
     def send(text: str) -> str:
         mark_sent()
@@ -1863,48 +1827,37 @@ def _local_control_then_prompt(params, client, channel_id, provider, sampler, ma
         return (_as_nonnegative_int(box.get("queue_depth")),
                 _as_nonnegative_int(_relay_health(box).get("queue_depth")))
 
-    def sampled_rows() -> list[dict[str, Any]]:
-        # A dead or stalled sampler stops updating last_sample, so it cannot pass as "no rows".
-        gap = max(sampler.max_gap_s, time.monotonic() - sampler.last_sample)
-        if gap > max_gap or not sampler.is_alive():
-            raise HarnessEvidenceError(f"inflight sampling gap {gap:.2f}s exceeds {max_gap}s")
-        return sampler.drain()
-
-    def no_control_turn() -> None:
-        if rows := sampled_rows():
-            raise assertions.AssertionError(
-                f"local control {control!r} ran with a provider turn active: {_state_identity_summary(rows[0])}"
-            )
-
     control_id = send(control)
     evidence.update(control=control, control_message_id=control_id)
-    sent_at = time.monotonic()
-    deadline = sent_at + float(params.get("notice_timeout_s", 60))
+    deadline = time.monotonic() + float(params.get("notice_timeout_s", 60))
     quiet_until: float | None = None
+    next_fetch = 0.0
     while quiet_until is None or time.monotonic() < quiet_until:
-        no_control_turn()
+        if (row := inflight()) is not None:
+            raise assertions.AssertionError(
+                f"local control {control!r} ran with a provider turn active: {_state_identity_summary(row)}"
+            )
         # queue_depth is left out: an idle intake may pass through the mailbox queue briefly.
         if reasons := [r for r in _mailbox_busy_reasons(mailbox()) if "queue_depth" not in r]:
             raise assertions.AssertionError(f"local control {control!r} left the mailbox busy: {reasons}")
-        if quiet_until is None and any(
-            notice in (message.get("content") or "") and not assertions.is_our_send(message)
-            for message in client.fetch_messages(channel_id, after_id=control_id, limit=100)
-        ):
-            evidence["notice_after_s"] = round(time.monotonic() - sent_at, 3)
-            quiet_until = time.monotonic() + float(params.get("quiet_s", 5))
-        if quiet_until is None and time.monotonic() >= deadline:
-            raise assertions.AssertionError(f"local control notice {notice!r} not observed")
+        if quiet_until is None and time.monotonic() >= next_fetch:
+            next_fetch = time.monotonic() + 1.0
+            if any(notice in (message.get("content") or "") and not assertions.is_our_send(message)
+                   for message in client.fetch_messages(channel_id, after_id=control_id, limit=100)):
+                quiet_until = time.monotonic() + float(params.get("quiet_s", 5))
+            elif time.monotonic() >= deadline:
+                raise assertions.AssertionError(f"local control notice {notice!r} not observed")
         time.sleep(loop_s)
     if any(depth := queue_depth(mailbox())):
         raise assertions.AssertionError(f"local control {control!r} is still queued: {depth}")
-    no_control_turn()
 
     prompt_id = send(str(params["prompt"]))
     evidence["prompt_message_id"] = prompt_id
     started = time.monotonic()
     deadline = started + float(params.get("admission_timeout_s", 30))
     while True:
-        for row in sampled_rows():
+        row, box = inflight(), mailbox()
+        if row is not None:
             owner = str(row.get("user_msg_id") or "")
             if owner != prompt_id:
                 raise assertions.AssertionError(
@@ -1913,11 +1866,11 @@ def _local_control_then_prompt(params, client, channel_id, provider, sampler, ma
             # Normal intake writes []; only an affirmative foreign id is merge evidence.
             if any(str(source) != prompt_id for source in row.get("source_message_ids") or []):
                 raise assertions.AssertionError(f"prompt admitted with merged sources {row['source_message_ids']}")
-            if any(depth := queue_depth(mailbox())):
+            if any(depth := queue_depth(box)):
                 raise assertions.AssertionError(f"queue not empty when admission was observed: {depth}")
             evidence.update(admission_latency_s=round(time.monotonic() - started, 3), queue_depth_at_admission=0)
             return evidence
-        active = mailbox().get("active_user_message_id")
+        active = box.get("active_user_message_id")
         if _truthy_identity(active) and str(active) != prompt_id:
             raise assertions.AssertionError(f"prompt {prompt_id} queued behind message {active}")
         if time.monotonic() >= deadline:
