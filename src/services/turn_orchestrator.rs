@@ -2057,9 +2057,8 @@ fn spawn_channel_mailbox(
                             // dequeue gates can treat a background turn as
                             // non-blocking.
                             state.active_turn_kind = turn_kind;
-                            // #3167 BLOCKER-2 — retire the dequeue→claim
-                            // reservation only when this claim is the one it
-                            // reserved. (#5937: a claim is not drain progress.)
+                            // #3167 BLOCKER-2 — retire only this claim's own reservation
+                            // (#5937: a claim is not drain progress).
                             if turn_kind == ActiveTurnKind::UserOrAgent {
                                 settle_pending_dispatch_on_claim(
                                     &mut state,
@@ -2072,6 +2071,7 @@ fn spawn_channel_mailbox(
                             state.turn_started_instant = Some(Instant::now());
                             true
                         },
+                        absorbed_source_ids: state.active_absorbed_source_ids.clone(),
                         queue_exit_events,
                         persistence_error,
                     });

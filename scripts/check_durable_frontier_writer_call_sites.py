@@ -302,8 +302,19 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
     # completed-turn ledger itself. Both remaining sites are the funnel's own --
     # the unknown-generation branch and the post-persist branch -- which is the
     # ordering (D5) the slice was about.
+    # The post-persist branch now calls `append_completed_episode`; the
+    # pinned-metadata sink calls this directly -- still 2.
     "append_completed_turn": {
         "src/services/discord/outbound/delivery_record.rs": 2,
+    },
+    # The funnel's post-persist branch and the nonce-less wrapper.
+    "append_completed_episode": {
+        "src/services/discord/outbound/completed_turn_ledger.rs": 1,
+        "src/services/discord/outbound/delivery_record.rs": 1,
+    },
+    # The claim-side merged-head alias, written before the claim reports.
+    "record_merged_alias": {
+        "src/services/discord/queue_io/turn_admission.rs": 1,
     },
     # -- store 3: in-memory watermark CAS ------------------------------------
     "advance_watcher_confirmed_end": {
