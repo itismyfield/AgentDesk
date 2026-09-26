@@ -30,6 +30,7 @@ mod recovery_kickoff;
 #[cfg(test)]
 mod recovery_kickoff_tests;
 pub(crate) mod registry_purge;
+pub(crate) use registry_purge::PurgeQueueResult;
 mod remint_fence;
 mod reply_results;
 mod source_generation;
@@ -64,12 +65,14 @@ pub(crate) use overflow::SoftInterventionProbe;
 use overflow::drain_head_overflow;
 #[cfg(test)]
 use pending_queue_persistence::load_channel_pending_queue;
-use pending_queue_persistence::save_channel_pending_dispatch_marker;
 pub(crate) use pending_queue_persistence::{
     PendingQueueItem, cleanup_stale_pending_queue_tmp_files_all_tokens,
     load_channel_pending_dispatch_marker, load_pending_dispatch_markers, load_pending_queues,
     remove_channel_pending_queue_files_all_tokens, save_channel_queue,
     warn_legacy_pending_queue_files,
+};
+use pending_queue_persistence::{
+    channel_queue_files_present, save_channel_pending_dispatch_marker,
 };
 #[cfg(test)]
 use pending_queue_persistence::{
@@ -438,20 +441,6 @@ pub(crate) struct CancelActiveTurnResult {
     pub(crate) already_stopping: bool,
 }
 
-/// #3029(D): outcome of a `PurgeQueue` request.
-#[derive(Debug, Default, Clone, Eq, PartialEq)]
-pub(crate) struct PurgeQueueResult {
-    /// Number of intervention-queue entries drained.
-    pub(crate) drained: usize,
-    /// Number of persisted pending-queue/dispatch files removed across token
-    /// namespaces for this channel.
-    pub(crate) disk_files_removed: usize,
-    /// Whether the request also released a *cancelled* active-turn anchor
-    /// (only possible when `clear_cancelled_active_anchor` was requested and
-    /// the anchored token was already cancelled).
-    pub(crate) cleared_active_anchor: bool,
-}
-
 /// #2728: identifies which guard in `enqueue_intervention` produced an
 /// `enqueued = false` outcome. Callers surface this through the producer-exit
 /// diagnostic JSON so the next adk-cc-style incident is one log line away from
@@ -560,9 +549,7 @@ impl ChannelMailboxHandle {
     }
 
     pub(crate) async fn snapshot(&self) -> ChannelMailboxSnapshot {
-        self.request(|reply| ChannelMailboxMsg::Snapshot { reply })
-            .await
-            .unwrap_or_default()
+        self.try_snapshot().await.unwrap_or_default()
     }
 
     pub(crate) async fn has_active_turn(&self) -> Result<bool, MailboxUnreachable> {
@@ -1066,13 +1053,9 @@ impl ChannelMailboxHandle {
         persistence: QueuePersistenceContext,
         clear_cancelled_active_anchor: bool,
     ) -> PurgeQueueResult {
-        self.request(|reply| ChannelMailboxMsg::PurgeQueue {
-            persistence,
-            clear_cancelled_active_anchor,
-            reply,
-        })
-        .await
-        .unwrap_or_default()
+        self.try_purge_queue(persistence, clear_cancelled_active_anchor)
+            .await
+            .unwrap_or_default()
     }
 
     // #3864: test-only queue seeding; production uses the race-safe merge.
@@ -1095,7 +1078,7 @@ impl ChannelMailboxHandle {
         &self,
         persistence: QueuePersistenceContext,
     ) -> HydratePendingQueueResult {
-        self.request(|reply| ChannelMailboxMsg::HydratePendingQueueFromDisk { persistence, reply })
+        self.try_hydrate_pending_queue_from_disk(persistence)
             .await
             .unwrap_or_default()
     }
@@ -2643,6 +2626,11 @@ fn spawn_channel_mailbox(
                         &persistence.provider,
                         channel_id,
                     );
+                    let own_files_present = channel_queue_files_present(
+                        &persistence.provider,
+                        &persistence.token_hash,
+                        channel_id,
+                    );
                     let previous_queue = state.intervention_queue.clone();
                     let drained = state.intervention_queue.drain(..).count();
                     let purge_persisted = persist_queue_or_restore(
@@ -2670,6 +2658,12 @@ fn spawn_channel_mailbox(
                         drained,
                         disk_files_removed,
                         cleared_active_anchor,
+                        own_files_removed: if purge_persisted {
+                            own_files_present
+                        } else {
+                            Some(0)
+                        },
+                        queue_len_after: state.intervention_queue.len(),
                     });
                 }
                 #[cfg(test)]

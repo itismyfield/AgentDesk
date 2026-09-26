@@ -36,10 +36,11 @@ use std::sync::Arc;
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
 use super::{
-    ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxRegistry, ChannelMailboxState,
-    EnqueueInterventionResult, EnqueueRefusalReason, GLOBAL_CHANNEL_MAILBOXES,
-    GLOBAL_RECOVERY_DONE_SIGNALS, GLOBAL_TURN_FINISHED_SIGNALS, Intervention,
-    QueuePersistenceContext, RecoveryKickoffResult, TryStartTurnResult,
+    ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxRegistry, ChannelMailboxSnapshot,
+    ChannelMailboxState, EnqueueInterventionResult, EnqueueRefusalReason, GLOBAL_CHANNEL_MAILBOXES,
+    GLOBAL_RECOVERY_DONE_SIGNALS, GLOBAL_TURN_FINISHED_SIGNALS, HydratePendingQueueResult,
+    Intervention, MailboxUnreachable, QueuePersistenceContext, RecoveryKickoffResult,
+    TryStartTurnResult,
 };
 use crate::services::provider::CancelToken;
 
@@ -190,7 +191,56 @@ impl ChannelMailboxRegistry {
     }
 }
 
+/// #3029(D): outcome of a `PurgeQueue` request.
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub(crate) struct PurgeQueueResult {
+    /// Number of intervention-queue entries drained.
+    pub(crate) drained: usize,
+    /// Number of persisted pending-queue/dispatch files removed across token
+    /// namespaces for this channel.
+    pub(crate) disk_files_removed: usize,
+    /// Whether the request also released a *cancelled* active-turn anchor
+    /// (only possible when `clear_cancelled_active_anchor` was requested and
+    /// the anchored token was already cancelled).
+    pub(crate) cleared_active_anchor: bool,
+    /// Own queue/marker entries the empty save and marker delete could unlink; `None` = unknown.
+    #[allow(dead_code)]
+    pub(crate) own_files_removed: Option<usize>,
+    /// In-memory queue length when the purge replied, after any rollback.
+    #[allow(dead_code)]
+    pub(crate) queue_len_after: usize,
+}
+
 impl ChannelMailboxHandle {
+    /// Like `snapshot`, but an actor that never answered is an error, not an empty queue.
+    pub(crate) async fn try_snapshot(&self) -> Result<ChannelMailboxSnapshot, MailboxUnreachable> {
+        self.request(|reply| ChannelMailboxMsg::Snapshot { reply })
+            .await
+    }
+
+    /// Like `purge_queue`, but an actor that never answered is an error, not zero counts.
+    pub(crate) async fn try_purge_queue(
+        &self,
+        persistence: QueuePersistenceContext,
+        clear_cancelled_active_anchor: bool,
+    ) -> Result<PurgeQueueResult, MailboxUnreachable> {
+        self.request(|reply| ChannelMailboxMsg::PurgeQueue {
+            persistence,
+            clear_cancelled_active_anchor,
+            reply,
+        })
+        .await
+    }
+
+    /// Like `hydrate_pending_queue_from_disk`, but an unreachable actor is an error.
+    pub(crate) async fn try_hydrate_pending_queue_from_disk(
+        &self,
+        persistence: QueuePersistenceContext,
+    ) -> Result<HydratePendingQueueResult, MailboxUnreachable> {
+        self.request(|reply| ChannelMailboxMsg::HydratePendingQueueFromDisk { persistence, reply })
+            .await
+    }
+
     /// Ask the actor to verify it is idle and, if so, tombstone itself
     /// (`Ok(())` ⇒ purgeable; `Err(reason)` ⇒ live work, purge refused).
     /// A dead actor (mailbox closed / reply dropped) can never start work
