@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "551b3c1d54b7db923b899bd330b5b9e496fb48f6",
+  "measured_at_sha": "262ce9fef1da2ec54dd7a1157fab14db8bf5bcda",
   "records": [
     {
       "root": "migrations/postgres",
@@ -2638,6 +2638,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:26e41040740cf7b1555364a82c9e3373b48bcbf726f4ec2038b13045d7843c70"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/agents.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:bd53ecef499a1b5d0dbf5e1252511e133159f1e0e875967a8924b1bd90456512"
     },
     {
       "root": "src",

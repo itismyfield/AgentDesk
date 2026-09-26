@@ -405,3 +405,23 @@ pub async fn resolve_agent_dispatch_channel_pg(
             }
         }))
 }
+
+/// Seeds a Claude-primary agent row with the given cc/cdx channel bindings.
+#[cfg(test)]
+pub(crate) async fn insert_agent_channels_for_tests(
+    pool: &PgPool,
+    agent_id: &str,
+    cc: Option<&str>,
+    cdx: Option<&str>,
+) {
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, discord_channel_cc, discord_channel_cdx)
+         VALUES ($1, $1, 'claude', $2, $3)",
+    )
+    .bind(agent_id)
+    .bind(cc)
+    .bind(cdx)
+    .execute(pool)
+    .await
+    .expect("seed agent channels"); // agentdesk-audit: allow-unwrap — #[cfg(test)] seed helper; a failed insert must abort the test
+}

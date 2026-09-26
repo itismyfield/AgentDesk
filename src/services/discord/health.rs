@@ -51,6 +51,7 @@ mod stall_liveness;
 mod stall_verdict;
 // #5188 (R5/R6): a delivery binding pointed at a transcript Claude abandoned.
 mod transcript_binding_stall;
+mod turn_deliver;
 mod unpaired_active_token;
 mod watcher_respawn;
 pub(in crate::services::discord) use watcher_respawn::reclaim_watcherless_session_bound_relay;
@@ -78,6 +79,11 @@ pub use headless_turn::{
     start_reserved_headless_agent_turn_with_owner_channel,
 };
 pub use mailbox::purge_idle_channel_mailbox_registry_entry;
+#[cfg(test)]
+pub(crate) use turn_deliver::register_bot_auth_for_tests;
+pub use turn_deliver::{
+    HumanInputDelivery, HumanInputError, HumanInputRequest, deliver_human_input,
+};
 // #5147: re-exported as a module (not as loose constants) so a consumer reads
 // `self_watchdog::TCP_TIMEOUT` — a name that says which timeout — rather than a
 // bare `TCP_TIMEOUT` at the health root.

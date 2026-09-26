@@ -246,6 +246,7 @@ jobs:
               - 'src/server/mod.rs'
               - 'src/server/multinode_regression.rs'
               - 'src/server/resource_locks.rs'
+              - 'src/server/routes/agents_turn_deliver.rs'
               - 'src/server/routes/auto_queue_lifecycle_pg_tests.rs'
               - 'src/server/routes/campaigns.rs'
               - 'src/server/routes/dispatched_sessions_tests.rs'

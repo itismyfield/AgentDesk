@@ -1,9 +1,9 @@
 //! Node-local execution, health, hooks and session control shared by all profiles.
 //! Configuration and orchestration administration is composed separately.
 use super::super::{
-    ApiRouter, AppState, agents, agents_crud, cluster, dispatched_sessions, dispatches, dm_reply,
-    health_api, hooks, idle_recap, monitoring, protected_api_domain, provider_cli_api, queue_api,
-    termination_events, turn_lease,
+    ApiRouter, AppState, agents, agents_crud, agents_turn_deliver, cluster, dispatched_sessions,
+    dispatches, dm_reply, health_api, hooks, idle_recap, monitoring, protected_api_domain,
+    provider_cli_api, queue_api, termination_events, turn_lease,
 };
 use axum::{
     Router,
@@ -134,6 +134,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             )
             .route("/agents/{id}/turn", get(agents::agent_turn))
             .route("/agents/{id}/turn/start", post(agents::start_agent_turn))
+            .route(
+                "/agents/{id}/turn/deliver",
+                post(agents_turn_deliver::deliver_turn_input),
+            )
             .route("/agents/{id}/turn/stop", post(agents::stop_agent_turn))
             .route("/agents/{id}/transcripts", get(agents::agent_transcripts))
             .route("/agents/{id}/timeline", get(agents::agent_timeline))
