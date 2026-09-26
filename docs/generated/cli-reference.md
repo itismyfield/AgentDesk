@@ -11,8 +11,8 @@ subcommand starts the server.
 
 Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this file drifts.
 
-- Top-level commands: 54
-- Commands including nested subcommands: 96
+- Top-level commands: 55
+- Commands including nested subcommands: 98
 
 ## Global options
 
@@ -119,6 +119,8 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk provider-cli resume`](#agentdesk-provider-cli-resume) | Resume migration from the current persisted state |  |
 | [`agentdesk show`](#agentdesk-show) | Inspect deterministic session-binding values (epic #2285 E1). |  |
 | [`agentdesk show session-name`](#agentdesk-show-session-name) | Print the expected tmux session name for a Discord channel. |  |
+| [`agentdesk custody`](#agentdesk-custody) | Boot-custody preservation state; reads files only (no server, DB or network). |  |
+| [`agentdesk custody status`](#agentdesk-custody-status) | Print each episode's preserved and missing transcript bytes and last attempt. |  |
 | [`agentdesk health`](#agentdesk-health) | Show consolidated health snapshot of the current node (server status, dcserver pid, last deploy time, queue lag, Discord/disk/outbox). |  |
 | [`agentdesk machine-compare`](#agentdesk-machine-compare) | Compare release/main/dev state across every registered worker node (`mac-mini`, `mac-book`, …). Renders a side-by-side table with dcserver pid, last deploy, queue lag, and a `diff` column. |  |
 | [`agentdesk activity`](#agentdesk-activity) | Time-windowed activity report: commits / closed issues / merged PRs / deploys / incidents in a single table. Uses gh + git + AgentDesk API. |  |
@@ -1212,6 +1214,27 @@ Usage: `agentdesk show session-name [OPTIONS]`
 |---|---|---|---|
 | `--channel <CHANNEL>` (required) | `String` |  | Discord channel id (or stable channel identifier) — same value AgentDesk uses when composing the tmux session name. |
 | `--provider <PROVIDER>` | `String` |  | Provider to encode in the session name. Required unless the channel name ends in a registered provider suffix (`-cc`, `-cdx`, `-gm`, `-oc`, `-qw`). The CLI deliberately does not read live channel bindings — operator output must be reproducible from arguments alone. |
+
+## `agentdesk custody`
+
+Boot-custody preservation state; reads files only (no server, DB or network).
+
+Usage: `agentdesk custody <COMMAND>`
+
+Subcommands:
+
+- `status` — Print each episode's preserved and missing transcript bytes and last attempt.
+
+### `agentdesk custody status`
+
+Print each episode's preserved and missing transcript bytes and last attempt.
+
+Usage: `agentdesk custody status [OPTIONS] [EPISODE]`
+
+| Argument | Value | Default | Description |
+|---|---|---|---|
+| `--provider <PROVIDER>` | `String` |  | Only this provider's custody directory (for example `claude`). |
+| `[EPISODE]` | `String` |  | Only this episode id. |
 
 ## `agentdesk health`
 
