@@ -835,6 +835,24 @@ mod manual_v3_delivery_tests {
         }
     }
 
+    // Contract: a custody notice for a DM under a long runtime root is one post from the provider
+    // bot.
+    #[tokio::test]
+    async fn a_custody_notice_under_a_long_root_is_one_provider_bot_post() {
+        let (client, root) = (MockManualOutboundClient::default(), "r".repeat(3000));
+        let dir = std::path::Path::new("/")
+            .join(root)
+            .join("discord_custody/claude");
+        let dir = dir.join("e".repeat(64));
+        let text = crate::services::discord::inflight::custody_notice_text(&dir, "claude");
+        let (dedup, source) = (OutboundDeduper::new(), "boot_custody_notice");
+        deliver_manual_notification(
+            &client, &dedup, "5998091", &text, "claude", source, None, None, false,
+        )
+        .await;
+        assert_eq!(client.posts.lock().unwrap().len(), 1);
+    }
+
     #[tokio::test]
     async fn manual_dm_notification_uses_v3_dm_target_and_dedupes_before_resolve() {
         let client = MockManualOutboundClient::default();

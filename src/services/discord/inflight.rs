@@ -86,6 +86,8 @@ use self::rebind_reap::{
     should_reap_dead_watcher_rebind_origin,
 };
 mod removal;
+#[cfg(test)]
+pub(in crate::services::discord) use self::removal::custody_notice_text;
 pub(crate) use self::removal::invalidate_stale_generation;
 pub(in crate::services::discord) use self::removal::load_inflight_states_for_probe_from_root;
 use self::removal::load_inflight_states_from_root;

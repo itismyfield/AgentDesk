@@ -15,6 +15,16 @@ use std::path::{Path, PathBuf};
 const FAILED: &str =
     "보존 실패: 일부 사본을 남기지 못했습니다. 경로의 manifest에 원본 위치와 오류가 있습니다.";
 
+/// One custody episode's notice: its outbox target, session key, sending bot and text.
+#[derive(Debug)]
+pub(super) struct Notice {
+    pub(super) target: String,
+    pub(super) session: String,
+    pub(super) bot: String,
+    pub(super) text: String,
+    pub(super) dir: PathBuf,
+}
+
 /// Starts the notice pass off the boot path over the provider's custody.
 pub(super) fn spawn_boot_custody_notice(provider: &ProviderKind, pool: Option<PgPool>) {
     let Some(root) = runtime_store::runtime_root() else {
@@ -45,11 +55,18 @@ pub(super) async fn enqueue_custody_notices(
         return 0;
     };
     let mut enqueued = 0;
-    for (target, session, content) in &notices {
+    for Notice {
+        target,
+        session,
+        bot,
+        text: content,
+        ..
+    } in &notices
+    {
         let message = OutboxMessage {
             target,
             content,
-            bot: UtilityBotRole::Notify.alias(),
+            bot,
             source: "boot_custody_notice",
             reason_code: Some("boot_custody.notice"),
             session_key: Some(session),
@@ -64,7 +81,7 @@ pub(super) async fn enqueue_custody_notices(
 
 /// Target, session key and text of each TUI-direct turn in custody. The key names the turn: an
 /// anchorless turn's nonce, which every key build shares, else its episode directory.
-pub(super) fn notices(custody: &Path, provider: &ProviderKind) -> Vec<(String, String, String)> {
+pub(super) fn notices(custody: &Path, provider: &ProviderKind) -> Vec<Notice> {
     let entries = match fs::read_dir(custody) {
         Ok(entries) => entries.flatten().map(|entry| entry.path()),
         Err(error) => {
@@ -93,7 +110,16 @@ pub(super) fn notices(custody: &Path, provider: &ProviderKind) -> Vec<(String, S
             None => session,
         };
         let text = notice_text(&dirs);
-        notices.extend(text.map(|text| (format!("channel:{channel}"), session, text)));
+        let (bot, dir) = (UtilityBotRole::Notify.alias().to_string(), dirs[0].clone());
+        let target = format!("channel:{channel}");
+        let notice = text.map(|text| Notice {
+            target,
+            session,
+            bot,
+            text,
+            dir,
+        });
+        notices.extend(notice);
     }
     notices
 }
@@ -159,4 +185,10 @@ fn preserved_completely(dir: &Path) -> bool {
     let newest = manifests.last().and_then(|m| fs::read(m).ok());
     let newest = newest.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
     newest.is_some_and(|manifest| manifest["complete"] == true)
+}
+
+/// The notice text for one episode directory.
+#[cfg(test)]
+pub(in crate::services::discord) fn custody_notice_text(dir: &Path, _provider: &str) -> String {
+    notice_text(&[dir.to_path_buf()]).unwrap_or_default()
 }

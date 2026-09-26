@@ -2,13 +2,14 @@
 //! row in a real PostgreSQL message_outbox.
 
 use super::custody_notice::{enqueue_custody_notices, notices};
-use super::nondestructive_loader_tests::{CLAUDE, Env, row};
+use super::nondestructive_loader_tests::{CLAUDE, Env, G, row};
 use super::*;
 use crate::dispatch::test_support::DispatchPostgresTestDb;
 use crate::services::message_outbox::delivery_bot_for_target_session;
 use serde_json::json;
 use sqlx::PgPool;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// target, bot, source, reason code, session key, content and status of one outbox row.
@@ -113,8 +114,45 @@ fn earlier_build_episode(env: &Env, turn: &InflightTurnState, episode: &str) {
     fs::write(dir.join("rev-0000/manifest.json"), r#"{"complete":true}"#).unwrap();
 }
 
-// Contract: a TUI-direct turn in custody is one notify-bot row for its channel naming the episode
-// and its path, and boots after that row was sent, past any rolling window, add none.
+/// Seeds a pending-start record for `tmux`, as the writer persists one before any inflight row.
+fn pending_start(channel_id: u64, tmux: &str) {
+    let root = crate::services::discord::runtime_store::tui_direct_pending_start_root().unwrap();
+    let record = json!({ "provider": "claude", "channel_id": channel_id, "tmux_session_name": tmux,
+        "prompt_text": "queued", "anchor_message_id": channel_id + 1,
+        "lease_relay_owner": "watcher", "generation": G, "created_at_ms": 1, "observed_at_ms": 1 });
+    let name = format!("claude_{channel_id}_{}.json", channel_id + 1);
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join(name), record.to_string()).unwrap();
+}
+
+#[derive(Clone, Default)]
+struct Logs(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Logs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Runs `run` with this thread's warnings captured as text.
+fn warnings<T>(run: impl FnOnce() -> T) -> (T, String) {
+    let (logs, fmt) = (Logs::default(), tracing_subscriber::fmt().with_ansi(false));
+    let writer = logs.clone();
+    let subscriber = fmt.with_max_level(tracing::Level::WARN);
+    let subscriber = subscriber.with_writer(move || writer.clone()).finish();
+    crate::logging::test_capture::pin_callsite_interest();
+    let out = tracing::subscriber::with_default(subscriber, run);
+    let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    (out, text)
+}
+
+// Contract: a TUI-direct turn in custody is one notify-bot row for its channel naming the episode,
+// and boots after that row was sent, past any rolling window, add none.
 #[tokio::test(flavor = "current_thread")]
 async fn a_tui_direct_turn_is_one_outbox_row_across_boots_pg() {
     let Some((env, db, pool)) = harness("boot custody notice across boots").await else {
@@ -145,9 +183,10 @@ async fn a_tui_direct_turn_is_one_outbox_row_across_boots_pg() {
         delivery_bot_for_target_session(&target, &bot, Some(&session)),
         "notify"
     );
-    let preserved = [name(&dir), dir.display().to_string()];
-    assert!(preserved.iter().all(|part| text.contains(part)), "{text}");
-    assert!(!text.contains("보존 실패"), "{text}");
+    assert!(
+        text.contains(&name(&dir)) && !text.contains("보존 실패"),
+        "{text}"
+    );
     finish(db, pool).await;
 }
 
@@ -200,10 +239,10 @@ async fn anchorless_turns_started_in_the_same_second_are_two_rows_pg() {
     finish(db, pool).await;
 }
 
-// Contract: an anchorless turn is one row while an earlier build's episode of it is in custody,
-// and stays one after its offset is rewritten; the notice counts the other episode.
+// Contract: an earlier build's episode of an anchorless turn, keyed by start time, is one row of
+// its own beside the turn's current episode, which stays one row after its offset is rewritten.
 #[tokio::test(flavor = "current_thread")]
-async fn an_anchorless_turn_is_one_row_beside_an_earlier_builds_episode_pg() {
+async fn an_earlier_builds_episode_of_a_turn_is_one_row_of_its_own_pg() {
     let Some((env, db, pool)) = harness("boot custody notice earlier build").await else {
         return;
     };
@@ -215,9 +254,7 @@ async fn an_anchorless_turn_is_one_row_beside_an_earlier_builds_episode_pg() {
         env.seed(&turn, 0);
         boot(&env, Some(&pool)).await;
     }
-    let [row] = rows(&pool).await.try_into().unwrap();
-    assert_eq!(episode_dirs(&env).len(), 2);
-    assert!(row.5.contains("같은 턴의 보존본 1개"), "{}", row.5);
+    assert_eq!((episode_dirs(&env).len(), rows(&pool).await.len()), (2, 2));
     finish(db, pool).await;
 }
 
@@ -298,32 +335,27 @@ async fn the_boot_reaper_starts_the_notice_pass_pg() {
     finish(db, pool).await;
 }
 
-// Contract: the notice is one message under Discord's limit however many earlier-build episodes
-// hold the turn, reports a failed copy, and promises no retry or later action.
+// Contract: the notice says output may be missing, names the episode, reports a failed copy,
+// and promises no retry or later action.
 #[tokio::test]
-async fn the_notice_is_one_bounded_message_that_promises_nothing_more() {
+async fn the_notice_reports_a_failed_copy_and_promises_nothing_more() {
     let env = Env::new();
-    let mut turn = tui_direct(&env, 5_998_081, false);
-    turn.user_msg_id = 0;
-    env.seed(&turn, 0);
+    tui_direct(&env, 5_998_081, false);
     reap_inflight_rows_at_boot_with_guard(&BootReapOnce::default(), &CLAUDE, None).await;
-    for episode in 0..60 {
-        earlier_build_episode(&env, &turn, &format!("{episode:064}"));
-    }
-    let [(_, _, text)] = notices(&custody(&env), &CLAUDE).try_into().unwrap();
-    assert!(text.contains("재시작으로 이 턴 출력 일부가 전달되지 않았을 수 있음"));
-    assert!(
-        text.contains("같은 턴의 보존본 60개") && text.contains("보존 실패"),
-        "{text}"
-    );
-    assert!(text.chars().count() < 2000, "{text}");
+    let [notice] = notices(&custody(&env), &CLAUDE).try_into().unwrap();
+    let ([dir], text) = (episode_dirs(&env).try_into().unwrap(), notice.text);
+    let lines = [
+        "재시작으로 이 턴 출력 일부가 전달되지 않았을 수 있음",
+        &name(&dir),
+        "보존 실패",
+    ];
+    assert!(lines.iter().all(|line| text.contains(line)), "{text}");
     for promise in ["재시도", "다시 보", "나중에", "확인하겠", "상태"] {
         assert!(!text.contains(promise), "{text}");
     }
 }
 
-// Contract: a DM session's notice keeps its tmux session in the key, so the outbox delivers it
-// from the provider bot that owns the DM.
+// Contract: a DM session's notice is sent by the provider bot that owns the DM.
 #[tokio::test]
 async fn a_dm_sessions_notice_is_delivered_by_the_provider_bot() {
     let env = Env::new();
@@ -331,10 +363,90 @@ async fn a_dm_sessions_notice_is_delivered_by_the_provider_bot() {
     turn.tmux_session_name = Some("AgentDesk-claude-dm-343742347".to_string());
     env.seed(&turn, 0);
     reap_inflight_rows_at_boot_with_guard(&BootReapOnce::default(), &CLAUDE, None).await;
-    let [(target, session, _)] = notices(&custody(&env), &CLAUDE).try_into().unwrap();
-    assert_eq!(target, "channel:5998091");
+    let [notice] = notices(&custody(&env), &CLAUDE).try_into().unwrap();
+    assert_eq!(notice.target, "channel:5998091");
+    let bot = delivery_bot_for_target_session(&notice.target, &notice.bot, Some(&notice.session));
+    assert_eq!(bot, "claude");
+}
+
+// Contract: a DM turn that custody holds only as its pending-start record is enqueued for the
+// provider bot that owns the DM.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dm_turn_held_only_as_a_pending_start_is_sent_by_the_provider_bot_pg() {
+    let Some((env, db, pool)) = harness("boot custody notice pending-start dm").await else {
+        return;
+    };
+    pending_start(5_998_111, "AgentDesk-claude-dm-343742347");
+    assert_eq!(boot(&env, Some(&pool)).await, 1);
+    let [(target, bot, _, _, session, ..)] = rows(&pool).await.try_into().unwrap();
+    let bot = delivery_bot_for_target_session(&target, &bot, Some(&session));
+    assert_eq!(bot, "claude");
+    finish(db, pool).await;
+}
+
+// Contract: an episode is one row whatever copies a custody root holds: another node's root with
+// only the same markers, and this root with its copies gone, add none.
+#[tokio::test(flavor = "current_thread")]
+async fn an_episode_is_one_row_whatever_copies_its_root_holds_pg() {
+    let Some((env, db, pool)) = harness("boot custody notice copy availability").await else {
+        return;
+    };
+    tui_direct(&env, 5_998_101, true);
+    let mut anchorless = tui_direct(&env, 5_998_102, true);
+    anchorless.user_msg_id = 0;
+    env.seed(&anchorless, 0);
+    reap_inflight_rows_at_boot_with_guard(&BootReapOnce::default(), &CLAUDE, None).await;
+    let (dirs, markers_only) = (episode_dirs(&env), env.dir().with_file_name("other_node"));
+    for dir in &dirs {
+        let other = markers_only.join(name(dir));
+        fs::create_dir_all(&other).unwrap();
+        fs::copy(dir.join("episode.json"), other.join("episode.json")).unwrap();
+    }
+    enqueue_custody_notices(&markers_only, &CLAUDE, Some(&pool)).await;
+    settle(&pool, "sent").await;
+    boot(&env, Some(&pool)).await;
+    let revs = dirs
+        .iter()
+        .flat_map(|dir| fs::read_dir(dir).unwrap().flatten());
+    let revs: Vec<PathBuf> = revs
+        .map(|rev| rev.path())
+        .filter(|rev| rev.is_dir())
+        .collect();
+    for (n, rev) in revs.iter().enumerate() {
+        fs::rename(rev, env.dir().with_file_name(format!("moved-{n}"))).unwrap();
+    }
+    enqueue_custody_notices(&custody(&env), &CLAUDE, Some(&pool)).await;
     assert_eq!(
-        delivery_bot_for_target_session(&target, "notify", Some(&session)),
-        "claude"
+        (dirs.len(), revs.is_empty(), rows(&pool).await.len()),
+        (2, false, 2)
     );
+    finish(db, pool).await;
+}
+
+// Contract: an episode whose marker cannot be read or parsed is a warning naming its path and
+// the failed step; the other episodes still get their notice and custody is left as it was.
+#[tokio::test]
+async fn an_unreadable_or_garbled_marker_is_warned_and_skipped() {
+    let env = Env::new();
+    tui_direct(&env, 5_998_121, true);
+    let (unreadable, garbled) = (
+        custody(&env).join("a".repeat(64)),
+        custody(&env).join("b".repeat(64)),
+    );
+    fs::create_dir_all(unreadable.join("episode.json")).unwrap();
+    fs::create_dir_all(&garbled).unwrap();
+    fs::write(garbled.join("episode.json"), "{not json").unwrap();
+    reap_inflight_rows_at_boot_with_guard(&BootReapOnce::default(), &CLAUDE, None).await;
+    let before = snapshot(&custody(&env));
+    let (found, logs) = warnings(|| notices(&custody(&env), &CLAUDE));
+    assert_eq!((found.len(), snapshot(&custody(&env)) == before), (1, true));
+    for (dir, step) in [
+        (&unreadable, "read episode.json"),
+        (&garbled, "parse episode.json"),
+    ] {
+        let line = logs
+            .lines()
+            .find(|line| line.contains(&dir.display().to_string()));
+        assert!(line.is_some_and(|line| line.contains(step)), "{logs}");
+    }
 }

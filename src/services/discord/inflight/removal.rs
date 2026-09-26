@@ -707,6 +707,8 @@ pub(in crate::services::discord) use boot_reaper::reap_inflight_rows_at_boot_blo
 #[cfg(test)]
 use boot_reaper::*;
 #[cfg(test)]
+pub(in crate::services::discord) use custody_notice::custody_notice_text;
+#[cfg(test)]
 mod boot_custody_tests;
 #[cfg(test)]
 mod custody_notice_tests;
