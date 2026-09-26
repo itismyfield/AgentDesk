@@ -17,12 +17,14 @@ pub(crate) use intake_dispatch::{
     prepare_admitted_live_attachments, resolve_attachment_admission,
 };
 pub(super) use intake_gate::{handle_event, should_process_turn_message};
+#[cfg(unix)]
+pub(super) use message_handler::hosted_tui_transcript_busy;
 #[cfg(test)]
 pub(super) use message_handler::set_hosted_tui_promote_busy_for_tests;
 pub(super) use message_handler::{
     IntakeDeps, defer_promoted_dispatch_if_hosted_tui_busy, hosted_tui_promote_readiness_blocked,
     mailbox_try_start_turn_with_terminal_marker_cleanup, start_headless_turn,
-    start_reserved_headless_turn,
+    start_reserved_headless_turn, start_reserved_headless_turn_for_author,
 };
 pub(crate) use message_handler::{IntakeRequest, execute_intake_turn_core};
 pub(in crate::services::discord) use queue_status_presentation::queue_status_card_enabled;

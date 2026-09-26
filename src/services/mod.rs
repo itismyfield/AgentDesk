@@ -150,8 +150,8 @@ pub(crate) mod writer_protocol;
 pub(crate) mod tui_prompt_control;
 #[allow(dead_code)]
 pub(crate) mod tui_prompt_dedupe;
-// #4754 Slice 1 removes the automatic intake call site; retain this helper
-// module for the subsequent manual-steering slice without dead-code noise.
+// Busy-turn TUI steering primitives; the human-input entry uses them and some
+// helpers stay unused until the manual-steering button path lands.
 #[allow(dead_code)]
 pub(crate) mod tui_steering;
 pub(crate) mod tui_turn_state;

@@ -64,6 +64,39 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
     .await
 }
 
+/// Reserved headless turn owned by a verified human author instead of the system owner.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::services::discord) async fn start_reserved_headless_turn_for_author(
+    ctx: &serenity::Context,
+    channel_id: ChannelId,
+    prompt: &str,
+    author_name: &str,
+    author: UserId,
+    shared: &Arc<SharedData>,
+    token: &str,
+    source: Option<&str>,
+    metadata: Option<serde_json::Value>,
+    channel_name_hint: Option<String>,
+    reservation: HeadlessTurnReservation,
+) -> Result<HeadlessTurnStartOutcome, HeadlessTurnStartError> {
+    start_reserved_headless_turn_with_owner(
+        ctx,
+        channel_id,
+        prompt,
+        author_name,
+        author,
+        shared,
+        token,
+        source,
+        metadata,
+        channel_name_hint,
+        None,
+        None,
+        reservation,
+    )
+    .await
+}
+
 #[allow(dead_code)] // #3034: exported voice entry point, wired-but-dormant (no live dispatch yet).
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn start_voice_headless_turn(

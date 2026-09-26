@@ -256,7 +256,8 @@ pub(super) use self::attachments::{
 pub(super) use self::control::{handle_shell_command_raw, handle_text_command};
 #[allow(unused_imports)]
 pub(in crate::services::discord) use self::headless_turn::{
-    start_headless_turn, start_reserved_headless_turn, start_voice_headless_turn,
+    start_headless_turn, start_reserved_headless_turn, start_reserved_headless_turn_for_author,
+    start_voice_headless_turn,
 };
 pub(in crate::services::discord) use self::intake_turn::IntakeDeps;
 pub(crate) use self::intake_turn::{IntakeRequest, execute_intake_turn_core};
@@ -293,3 +294,25 @@ mod session_strategy_lifecycle_tests;
 
 mod turn_context;
 use turn_context::TurnContext;
+
+/// True when the busy-followup probe sees the hosted TUI pane mid-turn by its transcript.
+#[cfg(unix)]
+pub(in crate::services::discord) fn hosted_tui_transcript_busy(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    tmux_session_name: &str,
+    current_path: Option<&str>,
+    session_id: Option<&str>,
+) -> bool {
+    tui_busy_followup_diagnostic(
+        shared,
+        provider,
+        channel_id,
+        Some(tmux_session_name),
+        false,
+        current_path,
+        session_id,
+    )
+    .is_some_and(|diagnostic| diagnostic.transcript_turn_state.is_busy())
+}

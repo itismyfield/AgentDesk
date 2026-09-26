@@ -49,7 +49,10 @@ pub(crate) fn classify_steering_snapshot(snapshot: &SteeringSnapshot) -> Result<
     }
 }
 
-fn capture_snapshot(provider: &ProviderKind, session_name: &str) -> Option<SteeringSnapshot> {
+pub(crate) fn capture_snapshot(
+    provider: &ProviderKind,
+    session_name: &str,
+) -> Option<SteeringSnapshot> {
     match provider {
         ProviderKind::Claude => Some(SteeringSnapshot::Claude(
             claude_tui::input::prompt_readiness_snapshot(session_name),
@@ -61,7 +64,11 @@ fn capture_snapshot(provider: &ProviderKind, session_name: &str) -> Option<Steer
     }
 }
 
-fn inject_once(provider: &ProviderKind, session_name: &str, prompt: &str) -> Result<(), String> {
+pub(crate) fn inject_once(
+    provider: &ProviderKind,
+    session_name: &str,
+    prompt: &str,
+) -> Result<(), String> {
     match provider {
         ProviderKind::Claude => claude_tui::input::inject_steering_prompt(session_name, prompt),
         ProviderKind::Codex => codex_tui::input::inject_steering_prompt(session_name, prompt),
@@ -72,7 +79,7 @@ fn inject_once(provider: &ProviderKind, session_name: &str, prompt: &str) -> Res
     }
 }
 
-fn inject_with_bounded_retry_using<C, I>(
+pub(crate) fn inject_with_bounded_retry_using<C, I>(
     selection: &ProviderSessionSelection,
     mut capture: C,
     mut inject: I,

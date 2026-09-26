@@ -8,11 +8,19 @@ pub(super) fn queued_intervention_request_owner(
 ) -> UserId {
     if intervention.voice_announcement.is_some()
         || crate::voice::prompt::is_readable_voice_transcript_announcement(&intervention.text)
+        || is_queued_human_input(intervention)
     {
         intervention.author_id
     } else {
         fallback_request_owner
     }
+}
+
+/// Human input queued over HTTP carries a synthetic id and its verified author.
+fn is_queued_human_input(intervention: &Intervention) -> bool {
+    !intervention.author_is_bot
+        && intervention.author_id != UserId::new(1)
+        && super::is_synthetic_headless_message_id_raw(intervention.message_id.get())
 }
 
 #[cfg(test)]
@@ -59,6 +67,29 @@ mod tests {
             control_channel_id: Some(300),
             stt_mode: Some("file".to_string()),
             stt_latency_ms: Some(120),
+        }
+    }
+
+    #[test]
+    fn queued_human_input_keeps_its_verified_author_at_drain() {
+        let fallback = UserId::new(7);
+        let mut human = queued_intervention(343, "status?", None);
+        human.author_is_bot = false;
+        human.message_id = MessageId::new(9_100_000_000_000_000_123);
+        assert_eq!(
+            queued_intervention_request_owner(&human, fallback),
+            UserId::new(343)
+        );
+
+        let mut system_headless = human.clone();
+        system_headless.author_id = UserId::new(1);
+        let mut discord_message = human.clone();
+        discord_message.message_id = MessageId::new(1_500_000_000_000_000_000);
+        for other in [system_headless, discord_message] {
+            assert_eq!(
+                queued_intervention_request_owner(&other, fallback),
+                fallback
+            );
         }
     }
 
