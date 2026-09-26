@@ -68,16 +68,34 @@ pub(super) async fn enqueue_custody_notices(
             session_key: Some(session),
         };
         // The text names the episode only; its full path is logged here.
-        match enqueue(pool, message).await {
-            Ok(_) => enqueued += 1,
+        let id = match enqueue(pool, message).await {
+            Ok(id) => id,
             Err(error) => {
                 tracing::warn!(provider, %session, %dir, %error, "custody notice not enqueued");
                 continue;
             }
-        }
+        };
+        enqueued += 1;
         tracing::info!(provider, %session, %dir, "custody notice held by the outbox");
+        if notice.bot != UtilityBotRole::Notify.alias() {
+            readdress(pool, id, &notice.bot).await;
+        }
     }
     enqueued
+}
+
+/// Moves a row a copy-less pass staged for the notify bot to the provider bot while no worker has
+/// claimed or retried it; a claimed row keeps its bot.
+async fn readdress(pool: &PgPool, id: i64, bot: &str) {
+    let updated = sqlx::query(
+        "UPDATE message_outbox SET bot = $2
+         WHERE id = $1 AND status = 'pending' AND retry_count = 0 AND bot = $3",
+    );
+    let notify = UtilityBotRole::Notify.alias();
+    let updated = updated.bind(id).bind(bot).bind(notify).execute(pool).await;
+    if let Err(error) = updated {
+        tracing::warn!(id, %error, "custody notice bot not updated");
+    }
 }
 
 /// The notice of each TUI-direct episode in custody; an episode whose marker fails is logged
@@ -107,8 +125,8 @@ pub(super) fn notices(custody: &Path, provider: &ProviderKind) -> Vec<Notice> {
     notices
 }
 
-/// A TUI-direct episode's notice. Its key comes from the marker alone: the turn nonce a current
-/// anchorless marker records, else the digest of the marker's episode key.
+/// A TUI-direct episode's notice, keyed by the turn nonce its marker records (or, for an earlier
+/// build's anchorless marker, a copy names), else the digest of the marker's episode key.
 fn episode_notice(
     dir: &Path,
     provider: &ProviderKind,
@@ -123,9 +141,16 @@ fn episode_notice(
     let episode = &marker["episode"];
     let channel = episode["channel_id"].as_u64().filter(|id| *id != 0);
     let channel = channel.ok_or(("find channel_id", "episode.json names none".to_string()))?;
-    let nonce = episode["anchorless"].as_str().filter(|n| !n.is_empty());
-    let turn = nonce.map_or_else(|| sha(episode.to_string().as_bytes()), str::to_string);
-    let (target, tmux) = (format!("channel:{channel}"), copied_tmux(dir));
+    let nonce = match &episode["anchorless"] {
+        Value::String(nonce) => Some(nonce.clone()).filter(|n| !n.is_empty()),
+        // An earlier build's start-time key can be two turns' key; a copied nonce parts them, and
+        // an episode whose copies cannot be read then may split from its row.
+        Value::Array(_) => copied(dir, "turn_nonce"),
+        _ => None,
+    };
+    let turn = nonce.unwrap_or_else(|| sha(episode.to_string().as_bytes()));
+    let target = format!("channel:{channel}");
+    let tmux = copied(dir, "tmux_session_name");
     let bot =
         delivery_bot_for_target_session(&target, UtilityBotRole::Notify.alias(), tmux.as_deref());
     let session = format!("boot_custody/{}/{turn}", provider.as_str());
@@ -140,9 +165,8 @@ fn episode_notice(
     }))
 }
 
-/// The tmux session of the episode's first row or pending-start copy that names one; it only
-/// picks the sending bot.
-fn copied_tmux(dir: &Path) -> Option<String> {
+/// `field` of the episode's first row or pending-start copy that names it.
+fn copied(dir: &Path, field: &str) -> Option<String> {
     let revisions = fs::read_dir(dir).into_iter().flatten().flatten();
     let copies = revisions.flat_map(|rev| fs::read_dir(rev.path()).into_iter().flatten().flatten());
     let mut copies: Vec<PathBuf> = copies.map(|copy| copy.path()).collect();
@@ -151,8 +175,8 @@ fn copied_tmux(dir: &Path) -> Option<String> {
     copies.sort();
     copies.iter().find_map(|copy| {
         let copy: Value = serde_json::from_slice(&fs::read(copy).ok()?).ok()?;
-        let tmux = copy["tmux_session_name"].as_str()?;
-        (!tmux.is_empty()).then(|| tmux.to_string())
+        let value = copy[field].as_str()?;
+        (!value.is_empty()).then(|| value.to_string())
     })
 }
 
