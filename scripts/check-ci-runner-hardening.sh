@@ -683,9 +683,8 @@ unless evidence_steps == [{"name" => "Upload giant-file progress evidence", "if"
   exit 1
 end
 
-# The other shard jobs run the same aggregate under the same execution contract.
-# The #5308 pair stays in `scripts`, so each shard pins its whole raw job instead:
-# checkout provenance, every step before the aggregate, action refs and timeout.
+# Other shards run the same aggregate without the writer-gate pair, so each pins its whole
+# raw job (checkout provenance, pre-aggregate steps, action refs, timeout).
 script_check_shard_jobs.each do |job_id, shard|
   next if job_id == "scripts"
 
