@@ -610,6 +610,7 @@ if run_check contracts "Build token serialization tests (#5663)"; then
 "$PYTHON" -m unittest tests.test_package_release
 # Observe executed Cargo calls; the older scanner remains a repository inventory.
 "$PYTHON" scripts/check_release_token_wiring.py
+"$PYTHON" -m unittest tests.test_release_token_wiring
 "$PYTHON" -m unittest tests.test_build_token_serialization_5663
 fi
 

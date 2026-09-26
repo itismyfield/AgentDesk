@@ -2,6 +2,8 @@
 
 `python3 scripts/check_release_token_wiring.py --evidence /tmp/release-token-evidence`
 runs both release scripts with stub Cargo for `release` and `release-fast`.
+Build uses an explicit supported target (also avoiding Bash 3.2's nounset
+error on the current script's empty native-target array).
 Every Cargo invocation records argv, the holder marker and a check of the
 temporary token's inode, parent holder PID and live exclusive-lock contention.
 Any release invocation outside the holder fails the aggregate check, even when
@@ -27,7 +29,7 @@ Before implementing the fixture, the release scripts' external commands were aud
 | Script | External commands and entry points |
 | --- | --- |
 | build-release.sh | dirname, Python, rustc, sed, cargo, bash; checksum, dashboard and packaging helpers |
-| deploy-release.sh | uname, dirname, mkdir, nohup, security, cat, codesign, grep, head, tail, tr, sed, awk, cargo, jq, find, sort, shasum, sha256sum, date, git, gh, bash, node, npm, Python, mv, cp, rm, chmod, touch, rsync, stat, strings, mktemp, xattr, curl, ssh, tmux, env, lockf, flock, sleep, id, launchctl, lsof, chflags, ruby, psql, cksum, install; staged binary and helper scripts |
+| deploy-release.sh | uname, dirname, basename, mkdir, nohup, security, cat, codesign, grep, head, tail, tr, sed, awk, cargo, jq, find, sort, shasum, sha256sum, date, git, gh, bash, node, npm, Python, mv, cp, rm, chmod, touch, rsync, stat, strings, mktemp, xattr, curl, ssh, tmux, env, lockf, flock, sleep, id, launchctl, lsof, chflags, ruby, psql, cksum, install, ln, wc, hostname, cmp; staged binary and helper scripts |
 
 The sourced `_defaults.sh` also probes host resources and can prepend Homebrew
 to PATH. The fixture replaces it with deployment-environment doubles. It copies

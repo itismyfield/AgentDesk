@@ -30,7 +30,8 @@ readonly -f kill command_not_found_handle
 STUBS = """cargo python3 bash rustc dirname uname sed git curl jq npm node mkdir
 cp rm rsync chmod touch mktemp xattr codesign ps launchctl ssh tmux nohup env
 lockf flock security gh cat head tail tr awk find sort shasum sha256sum date
-mv stat strings sleep id lsof chflags ruby psql cksum install pgrep pkill""".split()
+mv stat strings sleep id lsof chflags ruby psql cksum install pgrep pkill
+basename ln wc hostname cmp""".split()
 
 
 def prepare(root: Path, repo: Path, script: str) -> dict[str, str]:
@@ -57,7 +58,7 @@ def prepare(root: Path, repo: Path, script: str) -> dict[str, str]:
     stub = (Path(__file__).with_name("release_token_dry_stub.py")).read_text()
     for name in STUBS:
         path = root / "bin" / name
-        path.write_text(f"#!{sys.executable}\n" + stub)
+        path.write_text(f"#!{sys.executable} -I\n" + stub)
         path.chmod(0o700)
     return {
         "HOME": str(root / "home"), "PATH": str(root / "bin"),
@@ -79,13 +80,13 @@ def observe(repo: Path, script: str, profile: str, *, evidence: Path | None = No
         env = prepare(root, repo, script)
         args = ["--fast"] if profile == "release-fast" else []
         if script == "build-release.sh":
-            args = ["--profile", profile]
-            if target:
-                args += ["--target", target]
+            target = target or "aarch64-apple-darwin"
+            args = ["--profile", profile, "--target", target]
         result = subprocess.run(["/bin/bash", str(root / "repo/scripts" / script), *args],
                                 cwd=root / "repo", env=env, text=True,
                                 capture_output=True, timeout=30)
-        events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
+        log = root / "events.jsonl"
+        events = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
         cargo = [event for event in events if event["command"] == "cargo"]
         errors = []
         if result.returncode or not (root / "completed").exists():

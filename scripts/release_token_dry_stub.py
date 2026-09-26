@@ -59,7 +59,8 @@ if NAME == "cargo":
     elif ARGS[0] == "build":
         profile = profile or "release"
         target = ARGS[ARGS.index("--target") + 1] if "--target" in ARGS else ""
-        binary = local(ROOT / "target" / target / profile / "agentdesk")
+        name = "agentdesk.exe" if target.endswith("windows-msvc") else "agentdesk"
+        binary = local(ROOT / "target" / target / profile / name)
         binary.parent.mkdir(parents=True, exist_ok=True)
         binary.write_text('#!/bin/bash\nprintf \'{"checks":[{"id":"postgres_connection","status":"pass"}]}\\n\'\n')
         binary.chmod(0o700)
