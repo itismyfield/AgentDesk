@@ -13,6 +13,9 @@ use std::path::PathBuf;
 /// A transcript turn longer than this keeps only its path, offset and head hash.
 const SEGMENT_COPY_CAP: u64 = 64 << 20;
 const HEAD_HASH_BYTES: u64 = 64 << 10;
+/// Transcript bytes one provider's boot pass may copy (tiny under test so tests reach it).
+const BOOT_COPY_BUDGET: u64 = if cfg!(test) { 32 } else { 512 << 20 };
+thread_local!(static BUDGET: std::cell::Cell<u64> = const { std::cell::Cell::new(0) });
 
 /// Kind, source path, bytes or read error of one file seen this boot, the turn it names, and
 /// why its content could not be parsed.
@@ -40,6 +43,7 @@ fn preserve(inflight_root: &Path, provider: &ProviderKind) {
         return;
     };
     let custody = root.join("discord_custody").join(provider.as_str());
+    BUDGET.set(BOOT_COPY_BUDGET);
     let mut episodes: BTreeMap<String, (Value, Vec<Item>)> = BTreeMap::new();
     let mut add = |(key, item): (Value, Item)| {
         let entry = episodes.entry(sha(key.to_string().as_bytes()));
@@ -295,7 +299,7 @@ fn segment_entry(
             entry["error"] = "the transcript changed since the last copy".into();
         }
         Ok(true) => entry["copy"] = name.into(),
-        Err(error) => entry["error"] = error.to_string().into(),
+        Err(e) => (entry["error"], entry["supersedes"]) = (e.to_string().into(), Value::Null),
     }
     Some(entry)
 }
@@ -344,6 +348,9 @@ fn copy_segment(
     if len > SEGMENT_COPY_CAP {
         return Err(std::io::Error::other("turn exceeds the copy cap"));
     }
+    let left = BUDGET.get().checked_sub(len);
+    let left = left.ok_or("boot copy budget exhausted");
+    BUDGET.set(left.map_err(std::io::Error::other)?);
     #[cfg(test)]
     super::boot_custody_tests::before_segment_copy(source);
     file.seek(SeekFrom::Start(from))?;
