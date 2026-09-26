@@ -667,7 +667,9 @@ fn should_skip_pre_turn_line(
     )
 }
 
-fn terminal_kind_for_json_evidence(value: &serde_json::Value) -> Option<WatcherTerminalKind> {
+pub(in crate::services::discord) fn terminal_kind_for_json_evidence(
+    value: &serde_json::Value,
+) -> Option<WatcherTerminalKind> {
     match value.get("type").and_then(|t| t.as_str()) {
         Some("result") => Some(WatcherTerminalKind::HardResult),
         Some("system")

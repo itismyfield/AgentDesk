@@ -186,6 +186,17 @@ pub(super) fn mark_readopted_from_inflight(
     outcome
 }
 
+/// The predecessor generation of the `drain_restart` marker a named episode (nonce) carries.
+fn predecessor_drain_marker(
+    shared: &SharedData,
+    state: &inflight::InflightTurnState,
+) -> Option<u64> {
+    let generation = state.restart_generation?;
+    let predecessor = generation.checked_add(1) == Some(shared.restart.current_generation);
+    let drain = state.restart_mode == Some(InflightRestartMode::DrainRestart);
+    (drain && predecessor && state.turn_nonce.is_some()).then_some(generation)
+}
+
 /// Releases the predecessor generation's `drain_restart` marker under the identity and
 /// episode (nonce) CAS; any other mode, generation or unnamed episode keeps its marker.
 fn release_restart_marker(
@@ -193,15 +204,7 @@ fn release_restart_marker(
     state: &inflight::InflightTurnState,
     caller: &'static str,
 ) -> Option<inflight::GuardedSaveOutcome> {
-    let predecessor = state
-        .restart_generation
-        .and_then(|generation| generation.checked_add(1));
-    if state.restart_mode != Some(InflightRestartMode::DrainRestart)
-        || predecessor != Some(shared.restart.current_generation)
-        || state.turn_nonce.is_none()
-    {
-        return None;
-    }
+    predecessor_drain_marker(shared, state)?;
     let mut released = state.clone();
     released.clear_restart_mode();
     let identity = inflight::InflightTurnIdentity::from_state(state);
@@ -224,74 +227,121 @@ fn release_restart_marker(
     Some(outcome)
 }
 
-/// Boot closes a marked TUI-direct or watcher row, instead of adopting it, once its
-/// transcript holds a later prompt: its placeholder may show that later turn by now.
+/// Closes, instead of adopting, a marked TUI-direct or watcher row whose turn ended before a
+/// later prompt (its placeholder may show that turn); `None` adopts, a failed clear keeps it.
 pub(in crate::services::discord) fn retire_restart_row_past_its_turn(
     shared: &SharedData,
     state: &inflight::InflightTurnState,
-) -> bool {
-    if state.restart_mode.is_none()
-        || state.rebind_origin
+) -> Option<inflight::GuardedClearOutcome> {
+    let generation = predecessor_drain_marker(shared, state)?;
+    let provider = state.provider_kind()?;
+    if state.rebind_origin
         || readopt_marker_eligible_real_user(state)
-        || !transcript_prompt_after_row(state)
+        || !transcript_turn_ended_before_a_prompt(state)
     {
-        return false;
+        return None;
     }
-    let caller = "recovery_engine::runtime::retire_restart_row_past_its_turn";
-    let Some(released) = release_restart_marker(shared, state, caller) else {
-        return false;
-    };
-    if let (inflight::GuardedSaveOutcome::Saved, Some(provider)) = (released, state.provider_kind())
-    {
-        let identity = inflight::InflightTurnIdentity::from_state(state);
-        let nonce = state.turn_nonce.as_deref();
-        let cleared = inflight::clear_inflight_state_for_captured_episode(
-            &provider,
-            state.channel_id,
-            &identity,
-            nonce,
-        );
-        tracing::info!(
-            channel_id = state.channel_id,
-            ?cleared,
-            "closed a turn-ended restart row"
-        );
-    }
-    true
+    let cleared = inflight::clear_restart_marked_episode(
+        &provider,
+        state.channel_id,
+        &inflight::InflightTurnIdentity::from_state(state),
+        &inflight::InflightEpisodePin::from_state(state),
+        (InflightRestartMode::DrainRestart, generation),
+    );
+    tracing::info!(
+        channel_id = state.channel_id,
+        ?cleared,
+        "closing a turn-ended restart row"
+    );
+    Some(cleared)
 }
 
-/// Boot recovery leaves a row whose channel intake is elsewhere, and otherwise a
-/// restart row past its turn, which it closes here.
+/// What boot recovery does with a channel's inflight row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) enum BootRow {
+    Adopt,
+    /// Closed here as a restart row past its turn.
+    Retired,
+    /// Left as it is, with its channel: another intake owns it or its retirement failed.
+    Leave,
+}
+
+/// Boot recovery's single decision for a row, shared by the inflight and watcher restores.
+pub(in crate::services::discord) async fn boot_row_decision(
+    provider: &ProviderKind,
+    shared: &SharedData,
+    state: &inflight::InflightTurnState,
+) -> BootRow {
+    if channel_intake_elsewhere(provider, state.channel_id).await {
+        return BootRow::Leave;
+    }
+    match retire_restart_row_past_its_turn(shared, state) {
+        None => BootRow::Adopt,
+        Some(inflight::GuardedClearOutcome::Cleared) => BootRow::Retired,
+        Some(_) => BootRow::Leave,
+    }
+}
+
+/// Whether boot recovery leaves this row out of adoption.
 pub(super) async fn restore_leaves_row(
     provider: &ProviderKind,
     shared: &SharedData,
     state: &inflight::InflightTurnState,
 ) -> bool {
-    let channel = state.channel_id.to_string();
+    boot_row_decision(provider, shared, state).await != BootRow::Adopt
+}
+
+/// Channels whose recovery intake a test places elsewhere.
+#[cfg(test)]
+static INTAKE_ELSEWHERE_FOR_TESTS: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
+async fn channel_intake_elsewhere(provider: &ProviderKind, channel_id: u64) -> bool {
+    #[cfg(test)]
+    if INTAKE_ELSEWHERE_FOR_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&channel_id)
+    {
+        return true;
+    }
+    let channel = channel_id.to_string();
     let intake = crate::services::agent_recovery::channel_recovery_intake(provider, &channel).await;
     matches!(
         intake,
         Some(crate::services::agent_recovery::RecoveryIntake::Skip)
-    ) || retire_restart_row_past_its_turn(shared, state)
+    )
 }
 
 #[cfg(not(unix))]
-fn transcript_prompt_after_row(_state: &inflight::InflightTurnState) -> bool {
+fn transcript_turn_ended_before_a_prompt(_state: &inflight::InflightTurnState) -> bool {
     false
 }
 
+/// A terminal event at or after `turn_start_offset` is this row's own, as the watcher credits
+/// it; a prompt after it starts a later turn. No such pair, no proof.
 #[cfg(unix)]
-fn transcript_prompt_after_row(state: &inflight::InflightTurnState) -> bool {
-    use super::super::tmux::tmux_output_stream::watcher_user_event_is_prompt_boundary as prompt;
+fn transcript_turn_ended_before_a_prompt(state: &inflight::InflightTurnState) -> bool {
+    use super::super::tmux::tmux_output_stream::{
+        terminal_kind_for_json_evidence as terminal,
+        watcher_user_event_is_prompt_boundary as prompt,
+    };
     use std::io::{BufRead, Seek, SeekFrom};
-    let Some(Ok(mut file)) = state.output_path.as_deref().map(std::fs::File::open) else {
+    let (Some(start), Some(Ok(mut file))) = (
+        state.turn_start_offset,
+        state.output_path.as_deref().map(std::fs::File::open),
+    ) else {
         return false;
     };
+    let mut ended = false;
     let lines = |file| std::io::BufReader::new(file).lines().map_while(Result::ok);
-    file.seek(SeekFrom::Start(state.last_offset)).is_ok()
+    file.seek(SeekFrom::Start(start)).is_ok()
         && lines(file).any(|line| {
-            serde_json::from_str::<serde_json::Value>(&line)
-                .is_ok_and(|event| event["type"] == "user" && prompt(&event))
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
+                return false;
+            };
+            let later_prompt = ended && event["type"] == "user" && prompt(&event);
+            ended |= terminal(&event).is_some();
+            later_prompt
         })
 }
 
@@ -1731,33 +1781,148 @@ mod restart_marker_adoption_tests {
         assert_eq!(actual, want);
     }
 
-    /// Boot closes a marked row instead of adopting it only once its transcript holds a
-    /// later prompt; its own tool traffic, a current marker or a real owner keep it.
+    const TERMINAL: &str = r#"{"type":"system","subtype":"stop_hook_summary"}"#;
+    const PROMPT: &str = r#"{"type":"user","message":{"role":"user","content":"next"}}"#;
+    const TOOL_USE: &str = r#"{"type":"assistant","message":{"content":[{"type":"tool_use"}]}}"#;
+    const TOOL_RESULT: &str =
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#;
+
+    /// Writes a transcript whose first 128 bytes (`before`, padded) precede the row's turn.
+    fn transcript(dir: &tempfile::TempDir, before: &str, turn: &[&str]) -> String {
+        let path = dir.path().join("transcript.jsonl");
+        let body: String = turn.iter().map(|line| format!("{line}\n")).collect();
+        std::fs::write(&path, format!("{before:<127}\n{body}")).expect("transcript");
+        path.display().to_string()
+    }
+
+    /// The durable row's bytes under `booted`'s runtime root.
+    fn row_bytes() -> Option<Vec<u8>> {
+        let root = std::path::PathBuf::from(std::env::var_os("AGENTDESK_ROOT_DIR")?);
+        let dir = root.join("runtime").join("discord_inflight").join("claude");
+        std::fs::read(dir.join(format!("{CHANNEL}.json"))).ok()
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        let mut runtime = tokio::runtime::Builder::new_current_thread();
+        runtime
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(future)
+    }
+
+    /// Boots over `row` and decides it; returns the decision and whether the row's bytes stayed.
+    fn decide(row: &Row) -> (super::BootRow, bool) {
+        let (decided, _) = booted(row, |shared| {
+            let before = row_bytes();
+            let decision = block_on(super::boot_row_decision(&Claude, shared, row));
+            (decision, row_bytes() == before)
+        });
+        decided
+    }
+
+    /// Boot closes a marked row only once a terminal at or after its turn start is followed
+    /// by a prompt; its own prompt, an earlier turn's terminal or a current marker keep it.
     #[test]
-    fn boot_closes_a_marked_row_whose_transcript_moved_past_its_turn_6294() {
-        const CLOSED: (bool, Option<bool>) = (true, None);
-        const LEFT: (bool, Option<bool>) = (false, Some(true));
+    fn boot_closes_a_marked_row_only_after_its_terminal_and_a_later_prompt_6294() {
+        use super::BootRow::{Adopt, Retired};
         let dir = tempfile::TempDir::new().expect("transcript dir");
-        let transcript = dir.path().join("transcript.jsonl");
-        let retire = |after: &str, edit: fn(&mut Row)| {
-            let own_turn = format!("{}\n", "x".repeat(127));
-            std::fs::write(&transcript, format!("{own_turn}{after}\n")).expect("transcript");
+        let close = |before: &str, turn: &[&str], edit: fn(&mut Row)| {
             let mut row = with(edit);
-            row.output_path = Some(transcript.display().to_string());
-            let retire = super::retire_restart_row_past_its_turn;
-            let (retired, row) = booted(&row, |shared| retire(shared, &row));
-            (retired, row.map(|row| row.restart_mode.is_some()))
+            row.output_path = Some(transcript(&dir, before, turn));
+            decide(&row)
         };
-        let user = |content| format!(r#"{{"type":"user","message":{{"content":{content}}}}}"#);
-        let tool = user(r#"[{"type":"tool_result","content":"ok"}]"#);
-        let prompt = user(r#""next""#);
+        let ended = [TOOL_USE, TERMINAL, PROMPT];
         let actual = [
-            retire(&tool, |_| {}),
-            retire(&prompt, |_| {}),
-            retire(&prompt, |r| r.restart_generation = Some(BOOT)),
-            retire(&prompt, |r| r.request_owner_user_id = 6_294),
-            retire(&prompt, |r| r.rebind_origin = true),
+            close("", &[TOOL_USE, TOOL_RESULT], |_| {}),
+            close("", &ended, |_| {}),
+            close("", &[PROMPT, TOOL_USE], |_| {}),
+            close(TERMINAL, &[PROMPT, TOOL_USE], |_| {}),
+            close("", &ended, |r| r.restart_generation = Some(BOOT)),
+            close("", &ended, |r| r.request_owner_user_id = 6_294),
+            close("", &ended, |r| r.rebind_origin = true),
         ];
-        assert_eq!(actual, [LEFT, CLOSED, LEFT, LEFT, LEFT]);
+        let kept = (Adopt, true);
+        let want = [kept, (Retired, false), kept, kept, kept, kept, kept];
+        assert_eq!(actual, want);
+    }
+
+    /// A TUI-direct row born at or before its own prompt, still running at the restart,
+    /// is adopted with its row, nonce, target and unrelayed range as they were.
+    #[test]
+    fn a_running_synthetic_row_born_before_its_prompt_is_adopted_intact_6294() {
+        use crate::services::tui_prompt_dedupe::ExternalInputRelayLease;
+        use poise::serenity_prelude::{ChannelId, MessageId};
+        let build = crate::services::discord::tui_prompt_relay::synthetic_start::build_tui_direct_synthetic_inflight_state;
+        let dir = tempfile::TempDir::new().expect("transcript dir");
+        let path = transcript(&dir, "", &[PROMPT, TOOL_USE]);
+        let mut lease = ExternalInputRelayLease::unassigned(Some(CHANNEL));
+        lease.turn_id = Some(format!("external:claude:{CHANNEL}:probe:1"));
+        let decided = [0, 128].map(|start| {
+            let (channel, anchor) = (ChannelId::new(CHANNEL), MessageId::new(6_294_101));
+            let target = Some(MessageId::new(6_294_201));
+            let (tmux, output) = ("AgentDesk-claude-probe", Some(std::path::Path::new(&path)));
+            let owner = inflight::RelayOwnerKind::Watcher;
+            let mut row = build(
+                Claude, channel, anchor, target, "next", tmux, output, start, &lease, owner,
+            );
+            row.turn_nonce = Some("episode-a".to_string());
+            (row.restart_mode, row.restart_generation) = (Some(DrainRestart), Some(BOOT - 1));
+            decide(&row)
+        });
+        assert_eq!(decided, [(super::BootRow::Adopt, true); 2]);
+    }
+
+    /// A retirement whose removal fails leaves the row as the previous process marked it:
+    /// not adopted now, and hidden from the next boot's loader after a crash.
+    #[test]
+    fn a_failed_retirement_leaves_the_marked_row_unadopted_6294() {
+        let dir = tempfile::TempDir::new().expect("transcript dir");
+        let mut row = with(|_| {});
+        row.output_path = Some(transcript(&dir, "", &[TOOL_USE, TERMINAL, PROMPT]));
+        let (outcome, _) = booted(&row, |shared| {
+            let before = row_bytes();
+            inflight::FAIL_NEXT_IDENTITY_REMOVE.with(|fail| fail.set(true));
+            let decision = block_on(super::boot_row_decision(&Claude, shared, &row));
+            inflight::FAIL_NEXT_IDENTITY_REMOVE.with(|fail| fail.set(false));
+            let same = row_bytes() == before;
+            let root = std::path::PathBuf::from(std::env::var_os("AGENTDESK_ROOT_DIR").unwrap());
+            let next = (BOOT + 1).to_string();
+            std::fs::write(root.join("runtime").join("generation"), next).expect("generation");
+            (
+                decision,
+                same,
+                inflight::load_inflight_states(&Claude).len(),
+            )
+        });
+        assert_eq!(outcome, (super::BootRow::Leave, true, 0));
+    }
+
+    /// A row whose channel intake is elsewhere is left, bytes and all, by the inflight
+    /// restore and then by the watcher restore.
+    #[test]
+    fn a_row_another_intake_owns_is_left_by_both_boot_restores_6294() {
+        struct Elsewhere;
+        impl Drop for Elsewhere {
+            fn drop(&mut self) {
+                let mut skipped = super::INTAKE_ELSEWHERE_FOR_TESTS.lock().unwrap();
+                skipped.retain(|channel| *channel != CHANNEL);
+            }
+        }
+        let dir = tempfile::TempDir::new().expect("transcript dir");
+        let mut row = with(|_| {});
+        row.output_path = Some(transcript(&dir, "", &[TOOL_USE, TERMINAL, PROMPT]));
+        let (outcome, _) = booted(&row, |shared| {
+            let before = row_bytes();
+            let _elsewhere = Elsewhere;
+            super::INTAKE_ELSEWHERE_FOR_TESTS
+                .lock()
+                .unwrap()
+                .push(CHANNEL);
+            let inflight_left = block_on(super::restore_leaves_row(&Claude, shared, &row));
+            let watcher = block_on(super::boot_row_decision(&Claude, shared, &row));
+            (inflight_left, watcher, row_bytes() == before)
+        });
+        assert_eq!(outcome, (true, super::BootRow::Leave, true));
     }
 }

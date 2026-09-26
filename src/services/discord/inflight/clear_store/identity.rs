@@ -83,6 +83,13 @@ fn guarded_identity_clear_outcome(
     GuardedClearOutcome::Cleared
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Fails this thread's next identity-matched removal, as an I/O error or crash would.
+    pub(in crate::services::discord) static FAIL_NEXT_IDENTITY_REMOVE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 fn remove_identity_matched_state(
     path: &std::path::Path,
     provider: &ProviderKind,
@@ -91,6 +98,10 @@ fn remove_identity_matched_state(
     state: InflightTurnState,
     reason: &'static str,
 ) -> (GuardedClearOutcome, Option<InflightTurnState>) {
+    #[cfg(test)]
+    if FAIL_NEXT_IDENTITY_REMOVE.with(|fail| fail.replace(false)) {
+        return (GuardedClearOutcome::IoError, None);
+    }
     log_inflight_remove(provider, channel_id, state.user_msg_id, reason, path);
     match fs::remove_file(path) {
         Ok(()) => (GuardedClearOutcome::Cleared, Some(state)),
@@ -245,6 +256,42 @@ pub(in crate::services::discord) fn clear_inflight_state_for_captured_episode(
         super::reconcile_gate::ReconcileClearOutcome::Delegated(outcome) => outcome,
         _ => unreachable!("captured episode clear does not use reconcile generation policy"),
     }
+}
+
+/// Removes a restart-marked episode in one locked step, only while the row still carries
+/// `marker`, `expected`'s identity and `episode`; no markerless row is saved on the way.
+pub(in crate::services::discord) fn clear_restart_marked_episode(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    episode: &super::super::InflightEpisodePin,
+    marker: (super::super::InflightRestartMode, u64),
+) -> GuardedClearOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedClearOutcome::Missing;
+    };
+    let path = inflight_state_path(&root, provider, channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return GuardedClearOutcome::IoError;
+    };
+    let Some(state) = fs::read_to_string(&path)
+        .ok()
+        .and_then(|data| serde_json::from_str::<InflightTurnState>(&data).ok())
+    else {
+        return GuardedClearOutcome::Missing;
+    };
+    let marked = (state.restart_mode, state.restart_generation) == (Some(marker.0), Some(marker.1));
+    let on_disk = super::super::InflightEpisodePin::from_state(&state);
+    if !marked
+        || state.rebind_origin
+        || expected.is_unnameable()
+        || !expected.matches_state(&state)
+        || !episode.is_same_episode_as(&on_disk)
+    {
+        return GuardedClearOutcome::UserMsgMismatch;
+    }
+    let reason = "clear_restart_marked_episode";
+    remove_identity_matched_state(&path, provider, channel_id, expected, state, reason).0
 }
 
 fn clear_rebind_origin_inflight_state_if_matches_identity_impl_in_root(

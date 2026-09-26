@@ -206,7 +206,7 @@ pub(in crate::services::discord) use self::restore_inflight::{
 };
 use self::restore_persist_outcome::{RestorePersistOutcome, restore_codex_rollout_output_path};
 #[cfg(unix)]
-pub(super) use self::runtime::retire_restart_row_past_its_turn;
+pub(super) use self::runtime::{BootRow, boot_row_decision};
 pub(super) use self::runtime::{
     reregister_active_turn_from_inflight, reregister_restart_adopted_turn_from_inflight,
 };
