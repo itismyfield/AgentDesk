@@ -42,7 +42,7 @@ struct RecordIn {
     operation: ManualSteerOperation,
 }
 
-/// Refuses an operation over the source budget so no written record is unreadable.
+/// Refuses only an operation over the source budget; identity is validated on decode, not here.
 pub(crate) fn encode_record(operation: &ManualSteerOperation) -> Result<Vec<u8>, RecordError> {
     check_source_budget(operation)?;
     Ok(serde_json::to_vec(&record_out(operation))
