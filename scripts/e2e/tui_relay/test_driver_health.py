@@ -3788,10 +3788,10 @@ class E37CodexModelLocalControl(unittest.TestCase):
             def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
                 now = request()
                 seen = [m for m in messages if int(m["id"]) > int(after_id or 0)]
-                if fault == "model_turn_opens_after_notice" and "late" not in sent and any(
-                        E37CodexModelLocalControl.NOTICE == m["content"] for m in seen):
-                    sent["late"] = True
-                    turn(sent["/model"], now + 0.3, now + 0.8)
+                if "notice_seen" not in sent and any(E37CodexModelLocalControl.NOTICE == m["content"] for m in seen):
+                    sent["notice_seen"] = clock[0]
+                    if fault == "model_turn_opens_after_notice":
+                        turn(sent["/model"], now + 0.3, now + 0.8)
                 return seen
 
         client = Client()
@@ -3801,12 +3801,16 @@ class E37CodexModelLocalControl(unittest.TestCase):
             return next((m for m in observed if kwargs["needle"] in m["content"]), None), observed
 
         def fake_api(base_url, path, *, timeout=5.0):  # noqa: ARG001
-            request()
+            now = request()
             if path == "/api/health":
                 return 200, {"status": "healthy", "ok": True, "fully_recovered": True, "degraded_reasons": []}
             mailbox = _idle_mailbox("42", "codex")
             if fault == "prompt_behind_active_owner" and "prompt" in sent:
                 mailbox["active_user_message_id"] = int(sent["/model"])
+            # Only the pre-prompt read starts after the 5s quiet period; no inflight read sees this turn.
+            quiet_end = sent.get("notice_seen", float("inf")) + 5.0
+            if fault == "model_owner_at_boundary_only" and "prompt" not in sent and now >= quiet_end:
+                mailbox.update(agent_turn_status="active", active_user_message_id=int(sent["/model"]))
             queued = (fault == "model_left_queued" and "/model" in sent and "prompt" not in sent) or (
                 fault == "queue_at_admission" and "prompt" in sent)
             if queued:
@@ -3836,12 +3840,17 @@ class E37CodexModelLocalControl(unittest.TestCase):
         record = self.run_e37()
         self.assertEqual(record["local_control"]["queue_depth_at_admission"], 0)
         self.assertTrue(all(row["passed"] for row in record["assertions"]))
+        result = {"assertions": []}
+        driver._merge_record_into_result(result, record)  # the CLI report keeps the step evidence
+        self.assertEqual(result["local_control"]["prompt_message_id"], record["local_control"]["prompt_message_id"])
+        self.assertIn("max_read_gap_s", result["local_control"])
 
     def test_fails_on_each_wrong_model_turn_queue_or_reply_that_a_read_can_see(self):
         for fault, reason in (
             ("model_turn_open_at_first_read", "provider turn active"),
             ("model_turn_opens_after_notice", "provider turn active"),
             ("model_left_queued", "still queued"),
+            ("model_owner_at_boundary_only", "left the mailbox busy"),
             ("prompt_behind_model_turn", "not admitted first"),
             ("prompt_behind_active_owner", "queued behind message"),
             ("queue_at_admission", "queue not empty when admission was observed"),

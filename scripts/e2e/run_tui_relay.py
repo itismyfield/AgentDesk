@@ -143,6 +143,7 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "provider_hold_states",
     "cancel_turns",
     "health_assertions",
+    "local_control",
     "deleted_status_panels",
     "discord_failure_injections",
     "discord_failure_clears",
@@ -1823,6 +1824,10 @@ def local_control_then_prompt(
     def mailbox() -> dict[str, Any]:
         return _target_mailbox(client.base_url, channel_id=channel_id, provider=provider)
 
+    def turn_witnesses(box: dict[str, Any]) -> list[str]:
+        # queue_depth is left out: an idle intake may pass through the mailbox queue briefly.
+        return [r for r in _mailbox_busy_reasons(box) if "queue_depth" not in r]
+
     def queue_depth(box: dict[str, Any]) -> tuple[int, int]:
         return (_as_nonnegative_int(box.get("queue_depth")),
                 _as_nonnegative_int(_relay_health(box).get("queue_depth")))
@@ -1837,8 +1842,7 @@ def local_control_then_prompt(
             raise assertions.AssertionError(
                 f"local control {control!r} ran with a provider turn active: {_state_identity_summary(row)}"
             )
-        # queue_depth is left out: an idle intake may pass through the mailbox queue briefly.
-        if reasons := [r for r in _mailbox_busy_reasons(mailbox()) if "queue_depth" not in r]:
+        if reasons := turn_witnesses(mailbox()):
             raise assertions.AssertionError(f"local control {control!r} left the mailbox busy: {reasons}")
         if quiet_until is None and time.monotonic() >= next_fetch:
             next_fetch = time.monotonic() + 1.0
@@ -1848,7 +1852,9 @@ def local_control_then_prompt(
             elif time.monotonic() >= deadline:
                 raise assertions.AssertionError(f"local control notice {notice!r} not observed")
         time.sleep(loop_s)
-    if any(depth := queue_depth(mailbox())):
+    if reasons := turn_witnesses(box := mailbox()):
+        raise assertions.AssertionError(f"local control {control!r} left the mailbox busy: {reasons}")
+    if any(depth := queue_depth(box)):
         raise assertions.AssertionError(f"local control {control!r} is still queued: {depth}")
 
     prompt_id = send(str(params["prompt"]))
