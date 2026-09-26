@@ -3744,6 +3744,7 @@ services::discord::outbound::delivery::tests::v3_split_duplicate_preserves_order
 services::discord::outbound::delivery_obligation::codec_tests::frontier_serde_preserves_absence_and_rejects_explicit_null_identity
 services::discord::outbound::delivery_obligation::codec_tests::protocol_one_preserves_unknown_and_handoff_states_roundtrip
 services::discord::outbound::delivery_obligation::codec_tests::schema_roundtrip_retains_cap_token_and_unknown_diagnostics
+services::discord::outbound::delivery_obligation::reader_tests::document_rewrite_preserves_unknown_fields_and_rejects_unknown_obligation_fields
 services::discord::outbound::delivery_obligation::state::proof_tests::whole_proof_binds_complete_chunks_to_the_durable_attempt
 services::discord::outbound::delivery_obligation::state::proof_tests::whole_proof_rejects_empty_duplicate_partial_and_unproven_cleanup
 services::discord::outbound::delivery_obligation::state::proof_tests::whole_proof_rejects_unbound_epoch_attempt_revision_and_invalid_plans

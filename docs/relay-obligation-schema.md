@@ -33,7 +33,7 @@ its revision is diagnostic and need not equal the ledger revision. Missing fence
 for an active ledger requires repair; empty ledger with a fence is IncompleteClear.
 The read-only loader reports those states without repairing either file.
 Unknown top-level fields and sections must survive document roundtrips and any
-later rewrite. Unknown fields inside the understood ledger fail closed.
+later rewrite. Unknown fields in understood publication, obligation and attempt sections fail closed.
 All source evidence is valid only for its recorded publication (epoch, E, digest,
 rev); a revision advanced by an unaware writer invalidates that evidence and the
 reader must refuse restoration. Empty-ledger evidence fields and semantics remain

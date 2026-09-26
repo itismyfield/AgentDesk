@@ -11,3 +11,7 @@ pub(in crate::services::discord) const REDRIVE_CAPPED_SIGNAL: &str =
 mod codec_tests;
 pub(in crate::services::discord) mod fence;
 pub(in crate::services::discord) mod protocol;
+
+pub(in crate::services::discord) mod reader;
+#[cfg(test)]
+mod reader_tests;
