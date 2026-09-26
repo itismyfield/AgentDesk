@@ -5372,3 +5372,7 @@ mod a0_characterization_tests {
         assert!(should_send(true, &"a".repeat(2001)));
     }
 }
+
+#[cfg(unix)]
+#[path = "streaming_harness_tests.rs"]
+mod streaming_harness_tests;
