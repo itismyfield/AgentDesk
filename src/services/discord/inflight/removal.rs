@@ -700,6 +700,7 @@ pub(in crate::services::discord) fn load_inflight_states_for_probe_from_root(
     InflightProbeLoad { states, complete }
 }
 
+mod boot_custody;
 mod boot_reaper;
 pub(in crate::services::discord) use boot_reaper::reap_inflight_rows_at_boot_blocking;
 #[cfg(test)]
