@@ -189,6 +189,9 @@ jobs:
       PGUSER: postgres
       PGPASSWORD: postgres
       AGENTDESK_REQUIRE_PG: "1"
+      # Full test debuginfo pushes the lib test link past the hosted runner's memory.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
 
