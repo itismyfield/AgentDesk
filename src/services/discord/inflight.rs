@@ -90,6 +90,7 @@ pub(crate) use self::removal::invalidate_stale_generation;
 pub(in crate::services::discord) use self::removal::load_inflight_states_for_probe_from_root;
 use self::removal::load_inflight_states_from_root;
 pub(in crate::services::discord) use self::removal::reap_inflight_rows_at_boot_blocking;
+pub(in crate::services::discord) use self::removal::spawn_boot_custody_notice;
 #[cfg(test)]
 use self::removal::{
     invalidate_stale_generation_in_root, set_test_tmux_alive_override, stale_removal_reason,

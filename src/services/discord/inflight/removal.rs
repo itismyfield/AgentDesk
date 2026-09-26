@@ -702,11 +702,15 @@ pub(in crate::services::discord) fn load_inflight_states_for_probe_from_root(
 
 mod boot_custody;
 mod boot_reaper;
+mod custody_notice;
 pub(in crate::services::discord) use boot_reaper::reap_inflight_rows_at_boot_blocking;
 #[cfg(test)]
 use boot_reaper::*;
+pub(in crate::services::discord) use custody_notice::spawn_boot_custody_notice;
 #[cfg(test)]
 mod boot_custody_tests;
+#[cfg(test)]
+mod custody_notice_tests;
 
 #[cfg(test)]
 mod loader_gate_observation_tests {

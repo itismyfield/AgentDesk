@@ -3462,6 +3462,13 @@ services::discord::inflight::removal::boot_custody_tests::an_unparseable_pending
 services::discord::inflight::removal::boot_custody_tests::an_unwritable_custody_root_does_not_stop_the_reaper
 services::discord::inflight::removal::boot_custody_tests::custody_copies_every_tui_direct_turn_and_only_the_bytes_of_other_rows
 services::discord::inflight::removal::boot_custody_tests::reaped_live_pane_tui_direct_row_leaves_a_custody_copy
+services::discord::inflight::removal::custody_notice_tests::a_crash_after_the_posting_record_is_settled_by_the_next_boot
+services::discord::inflight::removal::custody_notice_tests::a_lost_response_inside_the_nonce_window_is_retried_with_the_same_nonce
+services::discord::inflight::removal::custody_notice_tests::a_tui_direct_episode_is_announced_once_across_boots
+services::discord::inflight::removal::custody_notice_tests::an_episode_whose_copy_failed_is_announced_as_a_preservation_failure
+services::discord::inflight::removal::custody_notice_tests::an_episode_without_a_tui_direct_turn_is_not_announced
+services::discord::inflight::removal::custody_notice_tests::outside_the_window_a_notice_found_in_history_is_settled_without_a_post
+services::discord::inflight::removal::custody_notice_tests::outside_the_window_a_notice_missing_from_history_is_posted_again
 services::discord::inflight::removal::loader_gate_observation_tests::allocation_route_is_observed_but_never_changes_loader_preservation
 services::discord::inflight::removal::loader_gate_observation_tests::loader_allow_event_carries_the_generation_and_name_filter
 services::discord::inflight::removal::loader_gate_observation_tests::loader_allow_event_marks_the_unnamed_current_generation_row
