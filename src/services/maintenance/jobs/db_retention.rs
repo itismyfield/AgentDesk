@@ -1,6 +1,6 @@
 //! DB retention job (#1093 / 909-4; extended in #3865).
 //!
-//! Nine retention policies across the AgentDesk postgres backbone:
+//! Ten retention policies across the AgentDesk postgres backbone:
 //!
 //! | Table                                   | Retention | Strategy                          |
 //! |-----------------------------------------|-----------|-----------------------------------|
@@ -13,6 +13,7 @@
 //! | `skill_usage`                           | 90 days   | DELETE (on `used_at`)             |
 //! | `turns`                                 | 90 days   | Archive-table copy, then DELETE   |
 //! | `scheduled_message_context_snapshots`   | 30 days   | DELETE (all refs terminal + aged) |
+//! | `intake_outbox` (terminal statuses)     | 7 / 30 d  | COUNT candidates only, no DELETE  |
 //!
 //! `kanban_cards` is explicitly **not** touched — done cards are permanent
 //! history. See `docs/source-of-truth.md` §retention for the policy rationale.
@@ -40,9 +41,8 @@ pub struct TableReport {
     pub rows_affected: i64,
 }
 
-/// Full report for one run of [`db_retention_job`]. Eight table entries plus
-/// any aggregate-write / archive-write entries (turn_analytics, task_dispatches,
-/// session_transcripts_archive, turns_archive).
+/// Full report for one run of [`db_retention_job`]: one entry per table plus
+/// aggregate/archive writes and the `intake_outbox` `candidates` counts.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct RetentionReport {
     pub dry_run: bool,
@@ -60,6 +60,15 @@ impl RetentionReport {
             .iter()
             .map(|t| format!("{}:{}={}", t.table_name, t.action, t.rows_affected))
             .collect()
+    }
+
+    /// Retention candidates counted but never deleted (the `intake_outbox` policy).
+    pub fn total_candidates(&self) -> i64 {
+        self.tables
+            .iter()
+            .filter(|t| t.action == "candidates")
+            .map(|t| t.rows_affected)
+            .sum()
     }
 
     /// Total rows deleted across all operations (excludes aggregate inserts).
@@ -93,6 +102,12 @@ const TURNS_RETENTION_DAYS: i32 = 90; // token/cost analytics → archive before
 // pointer is nulled with provenance kept, then the snapshot is deleted), so a
 // live recurring reservation's snapshot is never reclaimed.
 const CONTEXT_SNAPSHOT_RETENTION_DAYS: i32 = 30;
+const INTAKE_OUTBOX_DONE_RETENTION_DAYS: i32 = 7;
+// unknown/failed rows are evidence for relay and intake loss investigations.
+const INTAKE_OUTBOX_FAILED_RETENTION_DAYS: i32 = 30;
+// Server-side cap on the candidate COUNT so a large backlog cannot stall the serial scheduler.
+const INTAKE_OUTBOX_COUNT_STATEMENT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
 
 /// Run the full retention pass. Returns a per-table report. When
 /// `dry_run = true` no DML is executed — only SELECT COUNT(*) probes.
@@ -120,10 +135,18 @@ pub async fn db_retention_job(pool: &PgPool, dry_run: bool) -> Result<RetentionR
     retain_turns(pool, dry_run, &mut report).await?;
     // 9. scheduled_message_context_snapshots (all refs terminal + aged). #4658/#4723
     retain_context_snapshots(pool, dry_run, &mut report).await?;
+    // 10. intake_outbox: counts delete candidates only; nothing is deleted yet.
+    count_intake_outbox_candidates_bounded(
+        pool,
+        INTAKE_OUTBOX_COUNT_STATEMENT_TIMEOUT,
+        &mut report,
+    )
+    .await?;
 
     tracing::info!(
         dry_run,
         total_deleted = report.total_deleted(),
+        total_candidates = report.total_candidates(),
         table_count = report.tables.len(),
         "[db_retention] pass complete"
     );
@@ -704,6 +727,117 @@ async fn retain_context_snapshots(
     Ok(())
 }
 
+// 10. intake_outbox: a row is a candidate only when it, its whole (channel_id,
+// user_msg_id) attempt family, and every child are allowlisted terminal and aged.
+fn intake_outbox_aged_terminal(alias: &str) -> String {
+    format!(
+        "({alias}.status IN ('done', 'unknown', 'failed_pre_accept', 'failed_post_accept') \
+          AND (({alias}.status = 'done' \
+                AND {alias}.updated_at < NOW() - ($1::INT || ' days')::INTERVAL) \
+               OR ({alias}.status IN ('unknown', 'failed_pre_accept', 'failed_post_accept') \
+                AND {alias}.updated_at < NOW() - ($2::INT || ' days')::INTERVAL)))"
+    )
+}
+
+fn intake_outbox_candidate_predicate() -> String {
+    let (row, family, child) = (
+        intake_outbox_aged_terminal("io"),
+        intake_outbox_aged_terminal("f"),
+        intake_outbox_aged_terminal("c"),
+    );
+    format!(
+        "{row} \
+         AND NOT EXISTS (SELECT 1 FROM intake_outbox f \
+             WHERE f.channel_id = io.channel_id AND f.user_msg_id = io.user_msg_id \
+               AND NOT {family}) \
+         AND NOT EXISTS (SELECT 1 FROM intake_outbox c \
+             WHERE c.parent_outbox_id = io.id AND NOT {child})"
+    )
+}
+
+/// Runs the candidate COUNT under a transaction-local `statement_timeout`. Any
+/// cancel (timeout or operator) is reported as `candidates_cancelled`, not an error.
+async fn count_intake_outbox_candidates_bounded(
+    pool: &PgPool,
+    statement_timeout: std::time::Duration,
+    report: &mut RetentionReport,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT set_config('statement_timeout', $1, true)")
+        .bind(format!("{}ms", statement_timeout.as_millis()))
+        .execute(&mut *tx)
+        .await?;
+    let counted = count_intake_outbox_candidates(&mut *tx, report).await;
+    tx.rollback().await?;
+    match counted {
+        Err(error) if is_query_canceled(&error) => {
+            tracing::warn!(
+                timeout_ms = statement_timeout.as_millis() as u64,
+                "[db_retention] intake_outbox candidate count not completed \
+                 (statement timeout or cancellation); backlog unknown"
+            );
+            report.push(TableReport {
+                table_name: "intake_outbox",
+                action: "candidates_cancelled",
+                rows_affected: 0,
+            });
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+// 57014 means timeout or pg_cancel_backend; the two cannot be told apart reliably.
+fn is_query_canceled(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<sqlx::Error>(),
+        Some(sqlx::Error::Database(db)) if db.code().as_deref() == Some("57014")
+    )
+}
+
+/// Reports the uncapped candidate backlog, in total and per status, as seen by
+/// one statement snapshot. Always runs, dry-run or not, and never deletes.
+async fn count_intake_outbox_candidates<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    report: &mut RetentionReport,
+) -> Result<()> {
+    let row = sqlx::query(&format!(
+        "SELECT COUNT(*)::BIGINT AS total, \
+                COUNT(*) FILTER (WHERE io.status = 'done')::BIGINT AS done, \
+                COUNT(*) FILTER (WHERE io.status = 'unknown')::BIGINT AS unknown, \
+                COUNT(*) FILTER (WHERE io.status = 'failed_pre_accept')::BIGINT AS failed_pre, \
+                COUNT(*) FILTER (WHERE io.status = 'failed_post_accept')::BIGINT AS failed_post \
+         FROM intake_outbox io WHERE {}",
+        intake_outbox_candidate_predicate()
+    ))
+    .bind(INTAKE_OUTBOX_DONE_RETENTION_DAYS)
+    .bind(INTAKE_OUTBOX_FAILED_RETENTION_DAYS)
+    .fetch_one(executor)
+    .await?;
+    for (table_name, action, column) in [
+        ("intake_outbox", "candidates", "total"),
+        ("intake_outbox.done", "status_candidates", "done"),
+        ("intake_outbox.unknown", "status_candidates", "unknown"),
+        (
+            "intake_outbox.failed_pre_accept",
+            "status_candidates",
+            "failed_pre",
+        ),
+        (
+            "intake_outbox.failed_post_accept",
+            "status_candidates",
+            "failed_post",
+        ),
+    ] {
+        report.push(TableReport {
+            table_name,
+            action,
+            rows_affected: row.try_get(column)?,
+        });
+    }
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // #3865 — regression coverage for the three new retention policies.
 //
@@ -717,6 +851,7 @@ async fn retain_context_snapshots(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// Token value larger than INT32::MAX (2_147_483_647). The `turns` token
     /// columns were widened to BIGINT in 0008; the stale row carries this so the
@@ -1420,6 +1555,333 @@ mod tests {
             archived, deleted,
             "every deleted turns row must be archived in the same pass"
         );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// Seeds one intake_outbox row whose created/updated_at is `NOW() - age` (set
+    /// at INSERT because the BEFORE UPDATE trigger would reset `updated_at`).
+    async fn seed_intake<'e, E: sqlx::PgExecutor<'e>>(
+        executor: E,
+        (channel, msg, attempt): (&str, &str, i32),
+        status: &str,
+        age: &str,
+        parent: Option<i64>,
+    ) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO intake_outbox \
+                 (target_instance_id, forwarded_by_instance_id, channel_id, user_msg_id, \
+                  request_owner_id, user_text, turn_kind, agent_id, status, attempt_no, \
+                  parent_outbox_id, dispatched_at, created_at, updated_at) \
+             VALUES ('node', 'leader', $1, $2, 'owner', 'text', 'normal', 'agent', $3, $4, $5, \
+                     CASE WHEN $3 = 'dispatched' THEN NOW() END, \
+                     NOW() - $6::INTERVAL, NOW() - $6::INTERVAL) \
+             RETURNING id",
+        )
+        .bind(channel)
+        .bind(msg)
+        .bind(status)
+        .bind(attempt)
+        .bind(parent)
+        .bind(age)
+        .fetch_one(executor)
+        .await
+        .unwrap_or_else(|err| panic!("seed intake_outbox {channel}/{msg}: {err}"))
+    }
+
+    fn candidates(report: &RetentionReport, table: &str) -> Option<i64> {
+        let action = if table.contains('.') {
+            "status_candidates"
+        } else {
+            "candidates"
+        };
+        report.get(table, action).map(|e| e.rows_affected)
+    }
+
+    /// Only allowlisted terminal rows strictly older than their own status
+    /// window count; seeding and counting share one transaction, so one NOW().
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn intake_outbox_candidates_use_exact_status_windows_and_allowlist() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_intake_outbox_window",
+            "db_retention intake_outbox status windows",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        let mut tx = pool.begin().await.expect("begin");
+        // Stand-in for a future migration adding statuses the allowlist must not match.
+        sqlx::query("ALTER TABLE intake_outbox DROP CONSTRAINT intake_outbox_status_check")
+            .execute(&mut *tx)
+            .await
+            .expect("drop status check");
+
+        let (over_7, over_30) = ("7 days 1 microsecond", "30 days 1 microsecond");
+        let rows = [
+            ("done-over", "done", over_7),
+            ("done-at", "done", "7 days"),
+            ("unknown-over", "unknown", over_30),
+            ("unknown-at", "unknown", "30 days"),
+            ("fpre-over", "failed_pre_accept", over_30),
+            ("fpre-at", "failed_pre_accept", "30 days"),
+            ("fpost-over", "failed_post_accept", over_30),
+            ("fpost-at", "failed_post_accept", "30 days"),
+            ("fpost-8d", "failed_post_accept", "8 days"),
+            ("pending", "pending", "60 days"),
+            ("claimed", "claimed", "60 days"),
+            ("accepted", "accepted", "60 days"),
+            ("spawned", "spawned", "60 days"),
+            ("dispatched", "dispatched", "60 days"),
+            ("upper-done", "DONE", "60 days"),
+            ("padded-done", "done ", "60 days"),
+            ("future", "archived", "60 days"),
+        ];
+        for (key, status, age) in rows {
+            seed_intake(&mut *tx, (key, key, 1), status, age, None).await;
+        }
+
+        let mut report = RetentionReport::default();
+        count_intake_outbox_candidates(&mut *tx, &mut report)
+            .await
+            .expect("count intake_outbox candidates");
+
+        assert_eq!(candidates(&report, "intake_outbox"), Some(4));
+        for status in ["done", "unknown", "failed_pre_accept", "failed_post_accept"] {
+            let table = format!("intake_outbox.{status}");
+            assert_eq!(candidates(&report, &table), Some(1), "{table}");
+        }
+
+        tx.rollback().await.expect("rollback");
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// A row is not a candidate while any attempt in its family, or any row
+    /// naming it as parent, is non-terminal or still inside its window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn intake_outbox_candidates_exclude_rows_with_live_family_or_children() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_intake_outbox_family",
+            "db_retention intake_outbox parent/child preservation",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        let (old, pre, post) = ("60 days", "failed_pre_accept", "failed_post_accept");
+
+        let live = seed_intake(&pool, ("c-live", "m", 1), pre, old, None).await;
+        seed_intake(&pool, ("c-live", "m", 2), "pending", "0 days", Some(live)).await;
+        let young = seed_intake(&pool, ("c-young", "m", 1), pre, old, None).await;
+        seed_intake(&pool, ("c-young", "m", 2), "done", "1 day", Some(young)).await;
+        let cross = seed_intake(&pool, ("c-cross", "m", 1), post, old, None).await;
+        seed_intake(&pool, ("c-other", "m", 1), "claimed", "0 days", Some(cross)).await;
+        let a1 = seed_intake(&pool, ("c-chain", "m", 1), pre, old, None).await;
+        let a2 = seed_intake(&pool, ("c-chain", "m", 2), pre, old, Some(a1)).await;
+        seed_intake(&pool, ("c-chain", "m", 3), "pending", "0 days", Some(a2)).await;
+        let xyoung = seed_intake(&pool, ("c-xyoung", "m", 1), pre, old, None).await;
+        seed_intake(
+            &pool,
+            ("c-xyoung-other", "m", 1),
+            "done",
+            "1 day",
+            Some(xyoung),
+        )
+        .await;
+        let g1 = seed_intake(&pool, ("c-grand", "m", 1), pre, old, None).await;
+        let g2 = seed_intake(&pool, ("c-grand", "m", 2), pre, old, Some(g1)).await;
+        seed_intake(&pool, ("c-grand", "m", 3), "done", "1 day", Some(g2)).await;
+        let gone = seed_intake(&pool, ("c-gone", "m", 1), pre, old, None).await;
+        seed_intake(&pool, ("c-gone", "m", 2), post, old, Some(gone)).await;
+
+        let mut report = RetentionReport::default();
+        count_intake_outbox_candidates(&pool, &mut report)
+            .await
+            .expect("count intake_outbox candidates");
+
+        assert_eq!(candidates(&report, "intake_outbox"), Some(2));
+        assert_eq!(
+            candidates(&report, "intake_outbox.failed_pre_accept"),
+            Some(1)
+        );
+        assert_eq!(
+            candidates(&report, "intake_outbox.failed_post_accept"),
+            Some(1)
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// Asserts the neutral "count not completed" outcome with no count and no timeout claim.
+    fn assert_count_not_completed(report: &RetentionReport) {
+        assert!(
+            report
+                .get("intake_outbox", "candidates_cancelled")
+                .is_some()
+        );
+        assert_eq!(candidates(report, "intake_outbox"), None);
+        assert_eq!(report.total_candidates(), 0);
+        assert!(
+            report
+                .tables
+                .iter()
+                .all(|t| !t.action.contains("timed_out"))
+        );
+    }
+
+    /// A COUNT that exceeds its statement_timeout is reported as not completed
+    /// and the pass continues; the same call counts normally once unblocked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn intake_outbox_candidate_count_timeout_is_reported_not_fatal() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_intake_outbox_timeout",
+            "db_retention intake_outbox count timeout",
+        )
+        .await;
+        let pool = db.connect_and_migrate_with_max_connections(2).await;
+        seed_intake(&pool, ("t-done", "m", 1), "done", "10 days", None).await;
+        let mut blocker = pool.begin().await.expect("begin blocker");
+        sqlx::query("LOCK TABLE intake_outbox IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .expect("lock intake_outbox");
+
+        let mut report = RetentionReport::default();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            count_intake_outbox_candidates_bounded(&pool, Duration::from_millis(200), &mut report),
+        )
+        .await
+        .expect("statement_timeout must bound the blocked COUNT")
+        .expect("a timed-out count is not fatal");
+        assert_count_not_completed(&report);
+
+        blocker.rollback().await.expect("release lock");
+        let mut report = RetentionReport::default();
+        count_intake_outbox_candidates_bounded(&pool, Duration::from_secs(60), &mut report)
+            .await
+            .expect("unblocked count");
+        assert_eq!(candidates(&report, "intake_outbox"), Some(1));
+        assert!(
+            report
+                .get("intake_outbox", "candidates_cancelled")
+                .is_none()
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// An operator's pg_cancel_backend on the running COUNT, well before the
+    /// timeout, gets the same neutral not-completed outcome and is not fatal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn intake_outbox_candidate_count_operator_abort_is_reported_not_completed() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_intake_outbox_cancel",
+            "db_retention intake_outbox count cancel",
+        )
+        .await;
+        let pool = db.connect_and_migrate_with_max_connections(3).await;
+        seed_intake(&pool, ("u-done", "m", 1), "done", "10 days", None).await;
+        let mut blocker = pool.begin().await.expect("begin blocker");
+        sqlx::query("LOCK TABLE intake_outbox IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .expect("lock intake_outbox");
+
+        let mut report = RetentionReport::default();
+        // Polls from autocommit pool connections: pg_stat_activity is snapshotted per transaction.
+        let cancel = async {
+            loop {
+                let cancelled: bool = sqlx::query_scalar(
+                    "SELECT COALESCE(bool_or(pg_cancel_backend(pid)), false) FROM pg_stat_activity \
+                     WHERE datname = current_database() AND pid <> pg_backend_pid() \
+                       AND wait_event_type = 'Lock' \
+                       AND query LIKE '%FROM intake_outbox io%'",
+                )
+                .fetch_one(&pool)
+                .await
+                .expect("cancel waiting count");
+                if cancelled {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        };
+        let (counted, ()) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            tokio::join!(
+                count_intake_outbox_candidates_bounded(&pool, Duration::from_secs(60), &mut report),
+                cancel
+            )
+        })
+        .await
+        .expect("cancel must end the blocked COUNT");
+        counted.expect("an aborted count is not fatal");
+        assert_count_not_completed(&report);
+
+        blocker.rollback().await.expect("release lock");
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// A COUNT failure other than SQLSTATE 57014 still fails the pass.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn intake_outbox_candidate_count_other_db_error_surfaces() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_intake_outbox_db_error",
+            "db_retention intake_outbox count db error",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        sqlx::query("ALTER TABLE intake_outbox RENAME COLUMN updated_at TO updated_at_moved")
+            .execute(&pool)
+            .await
+            .expect("rename updated_at");
+
+        let mut report = RetentionReport::default();
+        let error =
+            count_intake_outbox_candidates_bounded(&pool, Duration::from_secs(60), &mut report)
+                .await
+                .expect_err("undefined column must fail the count");
+        let code = match error.downcast_ref::<sqlx::Error>() {
+            Some(sqlx::Error::Database(db)) => db.code().map(|code| code.into_owned()),
+            _ => None,
+        };
+        assert_eq!(code.as_deref(), Some("42703"), "{error:#}");
+        assert!(report.tables.is_empty());
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// The scheduled job reports intake_outbox candidates apart from deletions
+    /// and leaves every row in place.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn db_retention_job_reports_intake_outbox_candidates_without_deleting() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_intake_outbox_count_only",
+            "db_retention intake_outbox count-only wiring",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        let post = "failed_post_accept";
+        seed_intake(&pool, ("j-done", "m", 1), "done", "10 days", None).await;
+        seed_intake(&pool, ("j-fpost1", "m", 1), post, "40 days", None).await;
+        seed_intake(&pool, ("j-fpost2", "m", 1), post, "40 days", None).await;
+        seed_intake(&pool, ("j-new", "m", 1), "done", "1 hour", None).await;
+
+        let report = db_retention_job(&pool, false)
+            .await
+            .expect("retention pass");
+
+        assert_eq!(report.total_candidates(), 3);
+        assert_eq!(report.total_deleted(), 0);
+        assert_eq!(candidates(&report, "intake_outbox.done"), Some(1));
+        assert_eq!(
+            candidates(&report, "intake_outbox.failed_post_accept"),
+            Some(2)
+        );
+        let remaining = count(&pool, "SELECT COUNT(*)::BIGINT AS n FROM intake_outbox").await;
+        assert_eq!(remaining, 4);
 
         pool.close().await;
         db.drop().await;
