@@ -116,7 +116,8 @@ fn command_supports_json(command: &Commands) -> bool {
         | Commands::Deploy
         | Commands::Migrate { .. }
         | Commands::ReleaseMigratePostgres
-        | Commands::Show { .. } => false,
+        | Commands::Show { .. }
+        | Commands::Custody(..) => false,
 
         Commands::TmuxWrapper { .. }
         | Commands::CodexTmuxWrapper { .. }
@@ -702,6 +703,7 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
         )),
         Commands::ProviderCli(args) => exit_for_cli(super::provider_cli::cmd_provider_cli(args)),
         Commands::Show { action } => exit_for_cli(handle_show(action)),
+        Commands::Custody(args) => exit_for_cli(super::custody::run(args)),
         Commands::Health => exit_for_cli(super::client::cmd_health(json)),
         Commands::MachineCompare => exit_for_cli(super::client::cmd_machine_compare(json)),
         Commands::Activity {
