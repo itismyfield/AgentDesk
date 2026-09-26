@@ -21,7 +21,11 @@ fn history(channel_id: ChannelId, ids: [MessageId; 3]) -> Vec<serenity::Message>
 /// A process restarted at `checkpoint` over the same runtime root.
 async fn restarted(channel_id: ChannelId, checkpoint: MessageId) -> Arc<SharedData> {
     let shared = discord::make_shared_data_for_tests();
-    shared.settings.write().await.allow_all_users = true;
+    {
+        let mut settings = shared.settings.write().await;
+        settings.owner_user_id = Some(OWNER_ID);
+        settings.allow_all_users = true;
+    }
     shared.last_message_ids.insert(channel_id, checkpoint.get());
     shared
 }
@@ -32,11 +36,9 @@ fn append_episode(fx: &Fixture, channel_id: ChannelId, primary: MessageId, nonce
 }
 
 /// P's episode absorbed H and was delivered, so the next scan settles H with no
-/// enqueue and advances, and a restarted process agrees.
-#[tokio::test(flavor = "current_thread")]
-async fn t_s1_a_delivered_episode_settles_what_it_absorbed() {
+/// enqueue and advances; a restart agrees only while the ledger survives.
+async fn assert_restart_after_delivered_episode(channel_id: ChannelId, ledger_kept: bool) {
     let fx = Fixture::new().await;
-    let channel_id = ChannelId::new(4_603_552);
     let (checkpoint, h, p) = (id(1, 600), id(2, 150), id(3, 120));
     fx.seed_checkpoint(channel_id, checkpoint);
     let nonce = absorb_and_claim(&fx.shared, &fx.provider, channel_id, &[h], p).await;
@@ -59,10 +61,21 @@ async fn t_s1_a_delivered_episode_settles_what_it_absorbed() {
 
     // A crash before the advance persisted: the restart rescans H and P.
     fx.seed_checkpoint(channel_id, checkpoint);
+    if !ledger_kept {
+        let path = completed_turn_ledger::ledger_path(&fx.provider, channel_id.get());
+        std::fs::remove_file(path.expect("ledger path")).expect("remove ledger");
+    }
     let shared = restarted(channel_id, checkpoint).await;
     let api = StrictApi::new(&shared).with_history(channel_id, history);
     run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &fx.provider)).await;
     assert_phase1_read(&api, after(checkpoint), &[h, p]);
+    if !ledger_kept {
+        // Negative control: without the ledger evidence both ids are recovered.
+        let recovered = accepted(&api);
+        let both = recovered.contains(&h.get()) && recovered.contains(&p.get());
+        assert!(both, "{:?}", api.enqueue_log());
+        return;
+    }
     assert_eq!(
         api.enqueue_log(),
         Vec::<EnqueueRecord>::new(),
@@ -70,6 +83,16 @@ async fn t_s1_a_delivered_episode_settles_what_it_absorbed() {
     );
     let memory = shared.last_message_ids.get(&channel_id).map(|id| *id);
     assert_eq!(memory, Some(p.get()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn t_s1_a_delivered_episode_settles_what_it_absorbed() {
+    assert_restart_after_delivered_episode(ChannelId::new(4_603_552), true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn t_s1_a_restart_without_the_ledger_recovers_h_and_p() {
+    assert_restart_after_delivered_episode(ChannelId::new(4_603_560), false).await;
 }
 
 /// P's delivered episode n1 row, appended before or after the alias, cannot
