@@ -78,7 +78,7 @@ pub(in crate::services::discord) fn queued_message_ids(
 ///
 /// - the canonical predicate also requires `cancel_token.is_none()`. Omitted
 ///   here because a live `cancel_token` implies `active_user_message_id` is
-///   set, and [`recovery_known_message_ids`] already covers that id.
+///   set, and [`recovery_known_arms_and_ids`] already covers that id.
 /// - a reservation with no `since` timestamp reads as NOT live here, while the
 ///   canonical predicate treats a missing timestamp as age 0. The setter always
 ///   writes both, so this only fires on a state we believe unreachable.
@@ -106,8 +106,8 @@ fn live_pending_dispatch_message_ids(snapshot: &ChannelMailboxSnapshot) -> Vec<M
 
 /// The known-id union, each id carrying the arm that answered for it.
 ///
-/// [`recovery_known_message_ids`] is this map's key set, so the three sources
-/// are walked once and the two views cannot drift apart.
+/// [`recovery_known_arms_and_ids`] returns this map with its key set from one
+/// walk, so the scan's membership and provenance views cannot drift apart.
 fn recovery_known_id_arms(
     snapshot: &ChannelMailboxSnapshot,
 ) -> std::collections::HashMap<u64, RecoveryKnownIdArm> {

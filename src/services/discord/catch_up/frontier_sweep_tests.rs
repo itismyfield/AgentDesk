@@ -7,8 +7,9 @@ use std::io::Write;
 use super::super::CatchUpRetryState;
 use super::*;
 use crate::services::discord::outbound::completed_turn_ledger;
+use crate::services::discord::queue_io::mailbox_enqueue_observed_intervention as observed_enqueue;
 use crate::services::discord::{self as discord, MailboxEnqueueOutcome, SharedData};
-use crate::services::turn_orchestrator::EnqueueRefusalReason;
+use crate::services::turn_orchestrator::{ClaimObservation, EnqueueRefusalReason};
 
 #[derive(Clone, Copy)]
 enum Hook {
@@ -18,6 +19,15 @@ enum Hook {
     /// #6035: the given primary's merged head absorbs the id and claims its
     /// turn between the scan snapshot and the enqueue.
     AbsorbInto(MessageId),
+    /// Like `AbsorbInto`, then the turn ends (delivered or not)
+    /// before the enqueue lands.
+    AbsorbAndEnd {
+        primary: MessageId,
+        delivered: bool,
+    },
+    /// The channel's actor is purged first, so a fresh actor runs
+    /// the undelivered `AbsorbAndEnd`.
+    PurgeAbsorbAndEnd(MessageId),
 }
 
 #[derive(Debug)]
@@ -151,8 +161,13 @@ impl CatchUpDiscordApi for StrictApi {
         provider: &ProviderKind,
         channel_id: ChannelId,
         intervention: Intervention,
+        observed: ClaimObservation,
     ) -> MailboxEnqueueOutcome {
         let message_id = intervention.message_id;
+        let enqueue = |intervention| {
+            let observed = Some(observed);
+            observed_enqueue(shared, provider, channel_id, intervention, observed)
+        };
         let hook =
             (self.hooks.lock().unwrap().get_mut(&message_id.get())).and_then(VecDeque::pop_front);
         let outcome = match hook {
@@ -164,8 +179,7 @@ impl CatchUpDiscordApi for StrictApi {
             },
             Some(Hook::PreQueue) => {
                 queue(shared, provider, channel_id, message_id).await;
-                discord::mailbox_enqueue_intervention(shared, provider, channel_id, intervention)
-                    .await
+                enqueue(intervention).await
             }
             Some(Hook::AbsorbInto(primary)) => {
                 let absorbed = [message_id];
@@ -173,13 +187,20 @@ impl CatchUpDiscordApi for StrictApi {
                     shared, provider, channel_id, &absorbed, primary,
                 )
                 .await;
-                discord::mailbox_enqueue_intervention(shared, provider, channel_id, intervention)
-                    .await
+                enqueue(intervention).await
             }
-            None => {
-                discord::mailbox_enqueue_intervention(shared, provider, channel_id, intervention)
-                    .await
+            Some(Hook::AbsorbAndEnd { primary, delivered }) => {
+                let end = claim_cas_tests::absorb_and_end;
+                end(shared, provider, channel_id, message_id, primary, delivered).await;
+                enqueue(intervention).await
             }
+            Some(Hook::PurgeAbsorbAndEnd(primary)) => {
+                claim_cas_tests::purge(shared, channel_id).await;
+                let end = claim_cas_tests::absorb_and_end;
+                end(shared, provider, channel_id, message_id, primary, false).await;
+                enqueue(intervention).await
+            }
+            None => enqueue(intervention).await,
         };
         let record = (message_id.get(), outcome.enqueued, outcome.refusal_reason);
         self.enqueues.lock().unwrap().push(record);
@@ -828,6 +849,41 @@ async fn t9b_clear_during_a_synthetic_active_turn_keeps_later_messages_visible()
     assert_eq!(api.enqueue_log(), [(n.get(), true, None)]);
 }
 
+/// A `/clear` whose persist fails restores the queue, so it keeps the retry and
+/// the checkpoint: advancing past the released turn would leap queued M.
+#[tokio::test(flavor = "current_thread")]
+async fn t9c_clear_that_fails_to_persist_keeps_the_retry_and_checkpoint() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(4_603_525);
+    let (checkpoint, m, active) = (id(1, 600), id(2, 120), id(3, 60));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    fx.queue(channel_id, m).await;
+    let token = Arc::new(crate::services::provider::CancelToken::new());
+    let owner = serenity::UserId::new(HUMAN_ID);
+    assert!(discord::mailbox_try_start_turn(&fx.shared, channel_id, token, owner, active).await);
+    let retry = CatchUpRetryState::new(checkpoint.get());
+    fx.shared.catch_up_retry_pending.insert(channel_id, retry);
+    // A directory in the queue file's place makes the emptied queue's removal fail.
+    let queue_file = crate::services::discord::runtime_store::discord_pending_queue_root()
+        .expect("queue root")
+        .join(fx.provider.as_str())
+        .join(&fx.shared.token_hash)
+        .join(format!("{}.json", channel_id.get()));
+    std::fs::remove_file(&queue_file).unwrap();
+    std::fs::create_dir(&queue_file).unwrap();
+
+    let discard = super::super::retry_state::clear_channel_discarding_catch_up_backlog;
+    let cleared = discard(&fx.shared, &fx.provider, channel_id).await;
+
+    assert!(cleared.persistence_error.is_some(), "the clear must fail");
+    let held = (Some(checkpoint.get()), Some(checkpoint.get()));
+    assert_eq!(fx.surfaces(channel_id), held, "checkpoint leapt queued M");
+    assert_eq!(
+        fx.pending(channel_id).map(|p| p.checkpoint),
+        Some(checkpoint.get())
+    );
+}
+
 /// T10: without an earlier barrier, active-turn and terminal messages advance.
 #[tokio::test(flavor = "current_thread")]
 async fn t10_active_turn_and_terminal_messages_still_advance() {
@@ -1068,3 +1124,5 @@ impl Write for LogWriter {
 
 #[path = "absorbed_active_tests.rs"]
 mod absorbed_active_tests;
+#[path = "claim_cas_tests.rs"]
+mod claim_cas_tests;

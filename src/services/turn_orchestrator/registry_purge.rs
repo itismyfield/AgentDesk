@@ -37,7 +37,7 @@ use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
 use super::{
     ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxRegistry, ChannelMailboxState,
-    EnqueueInterventionResult, EnqueueRefusalReason, GLOBAL_CHANNEL_MAILBOXES,
+    ClaimObservation, EnqueueInterventionResult, EnqueueRefusalReason, GLOBAL_CHANNEL_MAILBOXES,
     GLOBAL_RECOVERY_DONE_SIGNALS, GLOBAL_TURN_FINISHED_SIGNALS, Intervention,
     QueuePersistenceContext, RecoveryKickoffResult, TryStartTurnResult,
 };
@@ -138,11 +138,12 @@ impl ChannelMailboxRegistry {
         channel_id: ChannelId,
         intervention: Intervention,
         persistence: QueuePersistenceContext,
+        observed: Option<ClaimObservation>,
     ) -> EnqueueInterventionResult {
         for attempt in 1..=CLOSED_RETRY_ATTEMPTS {
             let result = self
                 .handle(channel_id)
-                .enqueue(intervention.clone(), persistence.clone())
+                .enqueue_observed(intervention.clone(), persistence.clone(), observed)
                 .await;
             if result.refusal_reason != Some(EnqueueRefusalReason::MailboxClosed) {
                 return result;
@@ -247,6 +248,7 @@ impl ChannelMailboxRegistry {
         if let Err(refusal) = handle.close_if_idle().await {
             return MailboxPurgeOutcome::RefusedLiveWork(refusal);
         }
+        super::claim_observation::note_purge(channel_id);
         // Unlink the instance maps only when they still hold the exact
         // entries this purge verified: the handle that was snapshotted and
         // the signal Arcs the instance owns.
@@ -703,6 +705,7 @@ mod tests {
                     channel,
                     make_intervention(12, "retry onto fresh actor"),
                     test_persistence("registry-purge-r3-retry"),
+                    None,
                 )
                 .await;
             assert!(
@@ -742,6 +745,7 @@ mod tests {
                 channel,
                 make_intervention(13, "never accepted"),
                 test_persistence("registry-purge-r3-bounded"),
+                None,
             )
             .await;
         assert!(!enqueue.enqueued);

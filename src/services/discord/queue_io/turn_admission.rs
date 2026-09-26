@@ -1,6 +1,8 @@
 //! One mailbox/token admission boundary shared by chat, headless and routine turns.
 use super::*;
-use crate::services::turn_orchestrator::{TryStartTurnResult, TurnAdmissionOrder};
+use crate::services::turn_orchestrator::{
+    ClaimObservation, TryStartTurnResult, TurnAdmissionOrder,
+};
 
 pub(in crate::services::discord) async fn mailbox_try_start_turn_kinded_with_feedback(
     shared: &SharedData,
@@ -182,3 +184,43 @@ pub(in crate::services::discord) async fn mailbox_recovery_kickoff(
 #[cfg(test)]
 #[path = "turn_admission_tests.rs"]
 mod tests;
+
+/// `observed` is the claim observation of the snapshot that
+/// classified `intervention` (catch-up); `None` for live intake.
+pub(in crate::services::discord) async fn mailbox_enqueue_observed_intervention(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    intervention: Intervention,
+    observed: Option<ClaimObservation>,
+) -> MailboxEnqueueOutcome {
+    // Tombstone refusal ⇒ retry on a fresh registered actor
+    // instead of orphaning the queue on a purged one.
+    let result = shared
+        .mailboxes
+        .enqueue_with_closed_retry(
+            channel_id,
+            intervention,
+            queue_persistence_context(shared, provider, channel_id),
+            observed,
+        )
+        .await;
+    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    if let Some(error) = result.persistence_error.as_ref() {
+        tracing::error!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            error = %error,
+            "mailbox enqueue failed durable pending-queue persistence"
+        );
+    }
+    if result.enqueued && result.persistence_error.is_none() {
+        schedule_post_enqueue_idle_queue_kick(shared.clone(), provider.clone(), channel_id);
+    }
+    MailboxEnqueueOutcome {
+        enqueued: result.enqueued,
+        merged: result.merged,
+        refusal_reason: result.refusal_reason,
+        persistence_error: result.persistence_error,
+    }
+}

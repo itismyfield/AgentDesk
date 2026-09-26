@@ -643,6 +643,7 @@ src/
 │   │   ├── catch_up/
 │   │   │   ├── absorbed_active_tests.rs
 │   │   │   ├── api.rs
+│   │   │   ├── claim_cas_tests.rs
 │   │   │   ├── classification.rs
 │   │   │   ├── classification_order_tests.rs
 │   │   │   ├── frontier_evidence.rs
@@ -1837,6 +1838,7 @@ src/
 │   │   └── completion_scan.rs
 │   ├── turn_orchestrator/
 │   │   ├── active_source_dedup.rs
+│   │   ├── claim_observation.rs
 │   │   ├── clear_channel.rs
 │   │   ├── dispatch_cleanup.rs
 │   │   ├── dispatch_reservation.rs

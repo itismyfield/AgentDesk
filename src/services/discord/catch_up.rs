@@ -1053,12 +1053,10 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 }
             };
             let mid = msg.id.get();
-            // Codex P2 round 2 on #1301: check the cap BEFORE recording the
-            // recover, otherwise `stats.recovered` would tally a message we
-            // refused to enqueue and the log would lie about the queue
-            // contents. Stopping iteration keeps the checkpoint pinned at
-            // the last actually-queued message — newer entries that we
-            // declined are still > `after_msg` for the next pass.
+            // Check the cap before recording the recover, so `stats.recovered`
+            // never tallies a message we refused to enqueue. Stopping here keeps
+            // the checkpoint at the last queued message; the declined newer ids
+            // stay past `after_msg` for the next pass.
             if outcome == CatchUpClassification::Recover && stats.recovered >= remaining_capacity {
                 frontier.seal(mid);
                 let retry_after = frontier.retry_after(scan_checkpoint, mid);
@@ -1147,6 +1145,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     pending_uploads: Vec::new(),
                     voice_announcement: None,
                 },
+                known_snapshot.claim_observation,
             )
             .await;
             match classify_phase2_enqueue_commit(&enqueue) {
@@ -1538,6 +1537,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     pending_uploads: Vec::new(),
                     voice_announcement: None,
                 },
+                mailbox.claim_observation,
             )
             .await;
             match classify_phase2_enqueue_commit(&enqueue) {

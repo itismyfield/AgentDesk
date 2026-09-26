@@ -22,8 +22,10 @@ pub(super) enum Phase2EnqueueCommit {
     /// id, which says accepted, not dispatched. #5996 keeps it apart from the
     /// arm above for that reason alone; both still skip.
     DuplicateQueued,
-    /// #6035 `AbsorbedByActiveTurn` — the id runs inside a turn that may still
+    /// `AbsorbedByActiveTurn` — the id runs inside a turn that may still
     /// end undelivered, so the enqueue is skipped but the id stays open.
+    /// `ClaimedSinceObservation` — a claim after the classifying snapshot may
+    /// have taken the id; the retry re-classifies it from a fresh snapshot.
     NotYetEvidenced,
     LastItemDedup,
     Deferred,
@@ -47,7 +49,10 @@ pub(super) fn classify_phase2_enqueue_commit(
             Some(EnqueueRefusalReason::SourceIdAlreadyQueued) => {
                 return Phase2EnqueueCommit::DuplicateQueued;
             }
-            Some(EnqueueRefusalReason::AbsorbedByActiveTurn) => {
+            Some(
+                EnqueueRefusalReason::AbsorbedByActiveTurn
+                | EnqueueRefusalReason::ClaimedSinceObservation,
+            ) => {
                 return Phase2EnqueueCommit::NotYetEvidenced;
             }
             _ => {}
@@ -72,7 +77,7 @@ pub(super) fn advance_phase2_checkpoint(checkpoint: Option<u64>, message_id: u64
     Some(checkpoint.map_or(message_id, |saved| saved.max(message_id)))
 }
 
-/// #6035: phase 2's frontier. The first id this scan leaves open is a barrier
+/// Phase 2's frontier. The first id this scan leaves open is a barrier
 /// like phase 1's, so no later accepted id carries the durable checkpoint or a
 /// retry cursor past it.
 #[derive(Debug, Clone, Copy)]
@@ -109,11 +114,8 @@ impl Phase2Frontier {
         self.max_recovered = advance_phase2_checkpoint(self.max_recovered, message_id);
     }
 
-    /// #5996 / I20: skip and advance are not one decision. The skip is retried
-    /// on the next scan; the advance forecloses the message. An id no arm
-    /// claims resolves to no-advance — the retryable side. This is never
-    /// reached for an id the same scan inserted, because each message in the
-    /// slice is visited once.
+    /// A skip is retried on the next scan, an advance forecloses the id, so an
+    /// id no arm claims resolves to no-advance.
     pub(super) fn after_membership_skip(
         &mut self,
         checkpoint: Option<u64>,
@@ -125,7 +127,7 @@ impl Phase2Frontier {
         self.after_skip(evidence, checkpoint, message_id)
     }
 
-    /// #5996/#6035: only a refusal naming THIS message as the active turn advances.
+    /// Only a refusal naming THIS message as the active turn advances.
     pub(super) fn after_duplicate_commit(
         &mut self,
         commit: Phase2EnqueueCommit,

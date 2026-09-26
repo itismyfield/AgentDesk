@@ -1333,7 +1333,7 @@ use queue_dispatch::persistence_context as queue_persistence_context;
 async fn mailbox_snapshot(shared: &SharedData, channel_id: ChannelId) -> ChannelMailboxSnapshot {
     match shared.mailbox_peek(channel_id) {
         Some(handle) => handle.snapshot().await,
-        None => ChannelMailboxSnapshot::default(),
+        None => ChannelMailboxSnapshot::no_actor(channel_id),
     }
 }
 
@@ -1657,38 +1657,14 @@ async fn mailbox_enqueue_intervention(
     channel_id: ChannelId,
     intervention: Intervention,
 ) -> MailboxEnqueueOutcome {
-    // #3297 r3 — tombstone refusal ⇒ retry on a fresh registered actor
-    // instead of orphaning the queue on a purged one.
-    let result = shared
-        .mailboxes
-        .enqueue_with_closed_retry(
-            channel_id,
-            intervention,
-            queue_persistence_context(shared, provider, channel_id),
-        )
-        .await;
-    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
-    if let Some(error) = result.persistence_error.as_ref() {
-        tracing::error!(
-            provider = provider.as_str(),
-            channel_id = channel_id.get(),
-            error = %error,
-            "mailbox enqueue failed durable pending-queue persistence"
-        );
-    }
-    if result.enqueued && result.persistence_error.is_none() {
-        queue_io::schedule_post_enqueue_idle_queue_kick(
-            shared.clone(),
-            provider.clone(),
-            channel_id,
-        );
-    }
-    MailboxEnqueueOutcome {
-        enqueued: result.enqueued,
-        merged: result.merged,
-        refusal_reason: result.refusal_reason,
-        persistence_error: result.persistence_error,
-    }
+    queue_io::mailbox_enqueue_observed_intervention(
+        shared,
+        provider,
+        channel_id,
+        intervention,
+        None,
+    )
+    .await
 }
 
 pub(in crate::services::discord) fn queue_exit_feedback_emoji(kind: QueueExitKind) -> char {
