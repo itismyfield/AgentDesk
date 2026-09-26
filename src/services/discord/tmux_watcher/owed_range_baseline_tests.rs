@@ -425,8 +425,8 @@ fn r3_1_one_inflight_turn_gives_two_ranges_one_chunk_nonce_baseline_6292() {
     );
 }
 
-/// the recovery reader returns only the frontier commit's anchor, so a
-/// delivered range below the frontier's commit has no findable anchor.
+/// the recovery reader returns only the frontier commit's anchor; the reuse
+/// decision this feeds is pinned in terminal_text_idempotency's tests.
 #[test]
 fn r3_4_recovery_anchor_is_only_the_frontier_commit_baseline_6292() {
     use crate::services::discord::outbound::delivery_frontier_probe::{
@@ -456,12 +456,10 @@ fn r3_4_recovery_anchor_is_only_the_frontier_commit_baseline_6292() {
         "B's commit is the recovery anchor on main"
     );
     fx.commit((300, 400), "turn C");
-    assert_eq!(anchor(), Some(anchor_for((300, 400))));
-    // Recovery reuses an anchor only when its range equals the owed range.
     assert_eq!(
-        anchor().filter(|found| found.range == (200, 300)),
-        None,
-        "loss: after C, B's anchor is no longer findable"
+        anchor(),
+        Some(anchor_for((300, 400))),
+        "C's commit replaces B's as the only readable anchor"
     );
 }
 

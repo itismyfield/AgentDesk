@@ -1647,4 +1647,83 @@ mod tests {
                 .contains(&99_505)
         );
     }
+
+    /// #6292 main baseline: recovery's reuse decision for a delivered range B
+    /// finds B's durable anchor only while B is the frontier commit.
+    #[test]
+    fn owed_range_baseline_r3_4_reuse_decision_loses_b_after_c_6292() {
+        use crate::services::discord::outbound::delivery_record as dr;
+        use crate::services::discord::tmux::tmux_watcher::terminal_long_chunks as chunks;
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (temp, _reset) = set_runtime_root();
+        let provider = ProviderKind::Claude;
+        let (channel, tmux) = (6_292_314_u64, "AgentDesk-claude-i6292-reuse");
+        write_generation_marker(tmux);
+        let transcript = temp.path().join("i6292-reuse.jsonl");
+        std::fs::write(&transcript, vec![b'x'; 512]).expect("transcript past every range end");
+        let shared = make_shared_data_for_tests();
+        let commit = |range: (u64, u64), body: &str| {
+            let identity = chunks::watcher_delivery_identity(
+                dr::current_generation_mtime_ns(tmux),
+                shared
+                    .relay_frontier_token(ChannelId::new(channel))
+                    .reset_incarnation,
+                None,
+            );
+            let target = crate::services::discord::tmux::WatcherDeliveryTarget {
+                shared: &shared,
+                provider: &provider,
+                channel_id: ChannelId::new(channel),
+                tmux_session_name: tmux,
+            };
+            assert_eq!(
+                chunks::record_watcher_terminal_delivery(
+                    target,
+                    identity,
+                    range,
+                    Some(range.1),
+                    body
+                ),
+                chunks::GuardedWatcherDeliveryResult::Persisted,
+                "fixture commit {range:?}"
+            );
+        };
+        // No inflight row is saved, so only the durable anchor can be reused.
+        let state = inflight::InflightTurnState::new(
+            provider.clone(),
+            channel,
+            Some("i6292".to_string()),
+            6_292,
+            6_292,
+            0,
+            "turn B".to_string(),
+            None,
+            Some(tmux.to_string()),
+            Some(transcript.to_string_lossy().into_owned()),
+            None,
+            200,
+        );
+        let decision_for_b = || {
+            RecoveryDeliveryContext::from_state(&shared, &provider, &state, Some((200, 300)), 42)
+                .expect("non-zero test channel id")
+                .anchor_reuse_decision()
+        };
+        commit((0, 100), "turn 0");
+        commit((200, 300), "turn B");
+        assert_eq!(
+            decision_for_b(),
+            Some(RecoveryAnchorReuse::DurableAlreadyDelivered(
+                MessageId::new(300)
+            )),
+            "before C, recovery reuses B's durable anchor"
+        );
+        commit((300, 400), "turn C");
+        assert_eq!(
+            decision_for_b(),
+            None,
+            "loss: after C, recovery finds no anchor for B and would send it again"
+        );
+    }
 }
