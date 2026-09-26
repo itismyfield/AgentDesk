@@ -1761,6 +1761,7 @@ jobs:
           # Required Script checks only run on protected PR candidates. Their
           # synthetic merge first parent is the exact immutable base snapshot.
           TEST_LANE_BASELINE_REF: HEAD^1
+          SCRIPT_CHECK_SHARD: cargo
 
       - name: Upload giant-file progress evidence
         if: always()
@@ -1799,11 +1800,87 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # Parallel Script checks shards without cargo. ci-script-checks.sh assigns
+  # every check to one shard, and the result mirror below requires all of them.
+  scripts_guards:
+    name: Script checks runner (guards)
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python for script checks
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install script-test Python deps
+        run: python3 -m pip install --disable-pip-version-check pyyaml
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck zsh
+
+      - name: Run script checks
+        shell: bash
+        run: ./scripts/ci-script-checks.sh
+        env:
+          BASH_ENV: /dev/null
+          PYTHON: python3
+          GFP_EVENT_NAME: ${{ github.event_name }}
+          GFP_REPOSITORY: ${{ github.repository }}
+          GFP_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          GFP_CANDIDATE_SHA: ${{ github.sha }}
+          GFP_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GFP_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TEST_LANE_BASELINE_REF: HEAD^1
+          SCRIPT_CHECK_SHARD: guards
+
+  scripts_contracts:
+    name: Script checks runner (contracts)
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python for script checks
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install script-test Python deps
+        run: python3 -m pip install --disable-pip-version-check pyyaml
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck zsh
+
+      - name: Run script checks
+        shell: bash
+        run: ./scripts/ci-script-checks.sh
+        env:
+          BASH_ENV: /dev/null
+          PYTHON: python3
+          GFP_EVENT_NAME: ${{ github.event_name }}
+          GFP_REPOSITORY: ${{ github.repository }}
+          GFP_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          GFP_CANDIDATE_SHA: ${{ github.sha }}
+          GFP_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GFP_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TEST_LANE_BASELINE_REF: HEAD^1
+          SCRIPT_CHECK_SHARD: contracts
+
   scripts_required_context:
     name: Script checks
     needs:
       - changes
       - scripts
+      - scripts_guards
+      - scripts_contracts
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -1826,7 +1903,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=6c82f7fe90366dd2d44b7a033a29de427ed19a93c4acafe27afb5df0e2b99f4a
+          expected=503881cce0ed2fe2482efe338b3355f4c8260677db1a86e0e41d12f3fcf94e15
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -1836,9 +1913,8 @@ jobs:
           python3 scripts/check_writer_gate_ci_wiring.py
 
       # Keep the branch-protection context on an unconditional result mirror.
-      # required-check-mirror.sh fails closed when either `changes` or the
-      # execution job is skipped, failed, or cancelled, regardless of which
-      # upstream primitive caused that result.
+      # required-check-mirror.sh fails closed when `changes` or any shard job is
+      # skipped, failed, or cancelled, regardless of which primitive caused it.
       - name: Mirror script checks result for branch protection
         env:
           BASH_ENV: /dev/null
@@ -1848,6 +1924,28 @@ jobs:
           FILTER_OUTPUT: true
           UPSTREAM_JOB_NAME: scripts
           UPSTREAM_RESULT: ${{ needs.scripts.result }}
+        run: ./scripts/required-check-mirror.sh
+
+      - name: Mirror script checks guards shard result for branch protection
+        env:
+          BASH_ENV: /dev/null
+          PYTHON: python3
+          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
+          FILTER_NAME: scripts
+          FILTER_OUTPUT: true
+          UPSTREAM_JOB_NAME: scripts_guards
+          UPSTREAM_RESULT: ${{ needs.scripts_guards.result }}
+        run: ./scripts/required-check-mirror.sh
+
+      - name: Mirror script checks contracts shard result for branch protection
+        env:
+          BASH_ENV: /dev/null
+          PYTHON: python3
+          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
+          FILTER_NAME: scripts
+          FILTER_OUTPUT: true
+          UPSTREAM_JOB_NAME: scripts_contracts
+          UPSTREAM_RESULT: ${{ needs.scripts_contracts.result }}
         run: ./scripts/required-check-mirror.sh
 
   # #5071 T0: this required-context candidate is intentionally unconditional.
@@ -1983,7 +2081,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=6c82f7fe90366dd2d44b7a033a29de427ed19a93c4acafe27afb5df0e2b99f4a
+          expected=503881cce0ed2fe2482efe338b3355f4c8260677db1a86e0e41d12f3fcf94e15
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
