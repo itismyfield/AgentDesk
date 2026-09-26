@@ -50,7 +50,9 @@ pub(crate) use watchdog_decisions::{
 };
 
 mod stop_result;
-pub use stop_result::{IdleTmuxStaleTurnRepairResult, RuntimeTurnStopResult};
+pub use stop_result::{
+    FinishCancelledMailboxResult, IdleTmuxStaleTurnRepairResult, RuntimeTurnStopResult,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct IdleTmuxStaleTurnInflightPin {
@@ -735,14 +737,6 @@ impl Default for HardStopRuntimeResult {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct FinishCancelledMailboxResult {
-    pub cleared_active_turn: bool,
-    pub global_active_decremented: bool,
-    pub has_pending_queue: bool,
-    pub runtime_session_cleared: bool,
-}
-
 struct RuntimeChannelMatch {
     provider: ProviderKind,
     shared: Arc<SharedData>,
@@ -1284,11 +1278,14 @@ pub(crate) async fn release_zombie_foreground_turn_by_tmux_name(
     .await
 }
 
+/// `expected_actor` binds the finish to the mailbox incarnation that accepted
+/// the caller's earlier request (#5951); `None` finishes whichever is live.
 pub async fn finish_cancelled_provider_channel_mailbox(
     registry: Option<&HealthRegistry>,
     provider_name: Option<&str>,
     channel_id: Option<u64>,
     stop_source: &'static str,
+    expected_actor: Option<&crate::services::turn_orchestrator::ChannelMailboxHandle>,
 ) -> FinishCancelledMailboxResult {
     let Some(registry) = registry else {
         return FinishCancelledMailboxResult::default();
@@ -1305,7 +1302,9 @@ pub async fn finish_cancelled_provider_channel_mailbox(
     let before = runtime.shared.restart.global_active.load(Ordering::Acquire);
     let owned_role_override =
         discord::turn_finalizer::cleanup::snapshot_role_override(&runtime.shared, channel_id);
-    let finish = discord::mailbox_finish_cancelled_turn(&runtime.shared, channel_id).await;
+    let finish =
+        discord::mailbox_finish_cancelled_turn_on(&runtime.shared, channel_id, expected_actor)
+            .await;
     if finish.removed_token.is_none() {
         return FinishCancelledMailboxResult {
             cleared_active_turn: false,
@@ -6009,6 +6008,7 @@ mod hard_stop_completion_event_tests {
             Some(provider.as_str()),
             Some(channel.get()),
             "provider_known_cancelled_sibling_ownership_test",
+            None,
         )
         .await;
 

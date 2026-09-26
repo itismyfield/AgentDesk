@@ -265,8 +265,8 @@ impl OperatorRelease {
         if key.user_msg_id == 0 {
             return None;
         }
-        let result = shared
-            .mailbox_peek(key.channel_id)?
+        let handle = shared.mailbox_peek(key.channel_id)?;
+        let result = handle
             .release_turn_lease_if_matches(
                 MessageId::new(key.user_msg_id),
                 self.request.expected.turn_nonce.clone(),
@@ -275,7 +275,7 @@ impl OperatorRelease {
             )
             .await;
         result.removed_token.as_ref()?;
-        shared.mailboxes.recovery_done(key.channel_id).mark_done();
+        handle.recovery_done().mark_done();
         let cleared = match row.as_ref() {
             Some(row) => inflight::clear_inflight_state_for_captured_episode(
                 provider,

@@ -20,3 +20,11 @@ pub struct IdleTmuxStaleTurnRepairResult {
     pub persistent_inflight_cleared: bool,
     pub runtime_session_cleared: bool,
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FinishCancelledMailboxResult {
+    pub cleared_active_turn: bool,
+    pub global_active_decremented: bool,
+    pub has_pending_queue: bool,
+    pub runtime_session_cleared: bool,
+}

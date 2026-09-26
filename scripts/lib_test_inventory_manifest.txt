@@ -2819,6 +2819,7 @@ services::discord::health::mailbox::tests::agent_turn_status_separates_releasabl
 services::discord::health::provider_probe::tests::classifier_preserves_healthy_provider
 services::discord::health::provider_probe::tests::classifier_reports_probe_degradation_reasons
 services::discord::health::provider_probe::tests::mixed_gateway_and_standby_is_not_classified_as_cluster_standby
+services::discord::health::provider_probe::tests::provider_health_counts_fence_cells_that_outlive_their_actor
 services::discord::health::provider_probe::tests::registered_idle_standby_is_degraded_but_http_ready
 services::discord::health::provider_probe::tests::stalled_reconcile_keeps_the_in_progress_health_axes
 services::discord::health::provider_probe::tests::standby_live_and_finalizing_evidence_remains_visible_for_fail_closed_restart
@@ -4799,6 +4800,10 @@ services::discord::relay_recovery::tests::idle_tmux_repair_guard_detects_tail_an
 services::discord::relay_recovery::tests::idle_tmux_repair_guard_silent_when_partial_text_has_no_terminal_result
 services::discord::relay_recovery::tests::idle_tmux_repair_guard_silent_when_tail_empty
 services::discord::relay_recovery::tests::idle_tmux_snapshot_missing_output_path_denies_claude_tui_but_keeps_legacy_pane_fallback
+services::discord::relay_recovery::tests::incarnation_follow_up::a_foreign_actor_spawn_never_hides_the_recovery_done_wake
+services::discord::relay_recovery::tests::incarnation_follow_up::accepted_wrapper_follow_up_never_latches_a_successor_recovery
+services::discord::relay_recovery::tests::incarnation_follow_up::cancelled_finish_is_bound_to_the_expected_actor
+services::discord::relay_recovery::tests::incarnation_follow_up::force_purge_finish_never_reaches_a_successor_actor
 services::discord::relay_recovery::tests::live_agentdesk_tmux_relay_dead_can_reattach_watcher_when_evidence_is_complete
 services::discord::relay_recovery::tests::live_agentdesk_tmux_relay_dead_without_mailbox_token_can_adopt_ownerless_inflight
 services::discord::relay_recovery::tests::manual_relay_recovery_plans_and_admits_on_one_captured_instant
@@ -7552,6 +7557,7 @@ services::discord::turn_lease::tests::inspect_row_read_leaves_the_sidecar_bytes_
 services::discord::turn_lease::tests::late_projection_sweep_clears_only_this_episodes_row
 services::discord::turn_lease::tests::operator_release_cas_then_successor_keeps_new_turn_and_row
 services::discord::turn_lease::tests::operator_release_commits_without_any_inflight_row
+services::discord::turn_lease::tests::operator_release_follow_up_never_latches_a_successor_recovery
 services::discord::turn_lease::tests::operator_release_preserves_queue_and_provider_and_is_idempotent
 services::discord::turn_lease::tests::operator_release_rejects_changed_identity_or_generation_without_effects
 services::discord::turn_lease::tests::operator_release_strict_clear_preserves_nonce_less_successor
@@ -9386,6 +9392,10 @@ services::turn_orchestrator::registry_purge::tests::remove_idle_entry_noops_when
 services::turn_orchestrator::registry_purge::tests::remove_idle_entry_refuses_live_cancel_token
 services::turn_orchestrator::registry_purge::tests::remove_idle_entry_skips_global_mirrors_owned_by_another_instance
 services::turn_orchestrator::registry_purge::tests::remove_idle_entry_unlinks_all_six_maps_when_idle
+services::turn_orchestrator::remint_fence::remint_fence_tests::a_recreated_actor_still_refuses_an_episode_released_before_the_purge
+services::turn_orchestrator::remint_fence::remint_fence_tests::a_release_on_one_channel_never_fences_another
+services::turn_orchestrator::remint_fence::remint_fence_tests::every_incarnation_of_a_channel_shares_one_fence
+services::turn_orchestrator::remint_fence::remint_fence_tests::fence_cells_outlive_purges_and_pass_to_successors
 services::turn_orchestrator::remint_fence::remint_fence_tests::only_a_finish_naming_the_exact_episode_fences_its_remint
 services::turn_orchestrator::remint_fence::remint_fence_tests::only_the_episode_started_since_the_last_release_is_recoverable
 services::turn_orchestrator::turn_finished_signal_tests::turn_finished_latch_short_circuits_late_subscribers

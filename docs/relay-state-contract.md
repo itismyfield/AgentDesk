@@ -509,9 +509,12 @@ that retires turn-lifetime state.
   not certify it fenced. A pending-start replay is construction under the same
   test — only while no matching row exists. This is an enumeration, not a
   survey (see I20). The current re-mint fence proves only a release seen by
-  the current process's current mailbox actor incarnation, so today only
-  runtime/manual rebind within that incarnation's history is fenced. Known
-  gaps (#5951): restart `RecoveryKickoff` is a compare-and-set on slot
+  the current process: the mailbox registry keeps one fence cell per channel
+  for the life of the process and hands it to every actor incarnation it
+  spawns for that channel, so today only runtime/manual rebind within this
+  process's history is fenced. The cell is never removed, so the number of
+  cells grows with the distinct channels the process has served; the provider
+  health detail reports it as `remint_fence_cells`. Known gaps (#5951): restart `RecoveryKickoff` is a compare-and-set on slot
   occupancy only and never consults the re-mint fence; the fence is in-memory,
   so the restart pane-alive and boot watcher reattach refuse only releases
   the new process itself saw and cannot refuse an episode a prior process
@@ -519,12 +522,11 @@ that retires turn-lifetime state.
   release before it clears the durable row, so a process death between the
   two leaves a row for an already-released episode that the next boot
   re-adopts; dormant resumption and TUI-direct admission over a matching row,
-  retained or fresh, are admitted through the unfenced claim; the re-mint
+  retained or fresh, are admitted through the unfenced claim; and the re-mint
   fence is raised only by an exact-nonce release, so an episode ended by a
-  channel-scoped release can be re-minted from a row that outlived it; and
-  the fence lives in the mailbox actor, so a registry purge that recreates
-  the actor forgets it. Fenced restart re-adoption needs a durable release
-  authority that outlives the process.
+  channel-scoped release can be re-minted from a row that outlived it. Fenced
+  restart re-adoption needs a durable release authority that outlives the
+  process.
 - Episode identity: `(user_msg_id ≠ 0, turn_nonce, start cutoff)`. The nonce
   compares exactly; `None` is an exact legacy value, never a wildcard (I8). The
   cutoff is an `Instant` captured BEFORE the observation the writer decided on,
@@ -619,8 +621,9 @@ that retires turn-lifetime state.
   pointer-bound watcher cleanup under reuse, value-bound thread-parent cleanup,
   mutations accepted by a purged actor, channel-keyed wrapper follow-up that
   runs even when the request reached a closed actor (the `recovery_done`
-  signal, completion events, queue-exit feedback), accepted wrapper follow-up
-  re-resolved by channel, side effects of a pending thread-parent or watcher
+  signal, completion events, queue-exit feedback), a completion event
+  published after an accepted finish, which names the channel rather than the
+  incarnation, side effects of a pending thread-parent or watcher
   successor, restart `RecoveryKickoff` without a re-mint check, restart
   reattach that cannot see a prior process's release, TUI-direct admission
   over a matching row through the unfenced claim, and the other admission
