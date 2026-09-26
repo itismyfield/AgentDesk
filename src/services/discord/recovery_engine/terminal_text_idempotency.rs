@@ -1650,6 +1650,7 @@ mod tests {
 
     /// main baseline: recovery's reuse decision for a delivered range B
     /// finds B's durable anchor only while B is the frontier commit.
+    #[cfg(unix)]
     #[test]
     fn owed_range_baseline_r3_4_reuse_decision_loses_b_after_c_6292() {
         use crate::services::discord::outbound::delivery_record as dr;
