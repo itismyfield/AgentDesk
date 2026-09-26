@@ -46,8 +46,8 @@ impl<'de> Deserialize<'de> for Bytes256 {
     }
 }
 
-/// Hands the input string to `parse` without building an owned `String`, so an overlong value
-/// is refused by its length check rather than copied first.
+/// Validates the borrowed string without creating an extra owned `String`; the deserializer
+/// may still buffer escaped input first.
 pub(super) fn deserialize_fixed_str<'de, D: Deserializer<'de>, T>(
     deserializer: D,
     expecting: &'static str,
