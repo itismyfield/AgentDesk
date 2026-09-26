@@ -95,6 +95,38 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_curl("curl -X POST http://localhost:8787/api/agents/family-counsel/turn/start -H 'Content-Type: application/json' -d '{\"prompt\":\"hello\",\"source\":\"system\",\"dm_user_id\":\"343742347365974026\"}'"),
         ep(
             "POST",
+            "/api/agents/{id}/turn/deliver",
+            "agents",
+            "Deliver a human's external message (for example an iMessage reply). Idle mailbox: starts a turn owned by the author (delivery=started). Busy hosted Claude/Codex TUI turn: steers the input into the running turn under the strict modal/draft snapshot veto (delivery=injected). Otherwise queues it on the channel mailbox with a reason (delivery=queued). Only the bot's owner_user_id or allowed_user_ids may deliver; allow_all_users is not honored here. 202 delivery=unconfirmed means steering failed after the pane may already hold the input: the caller must not retry.",
+        )
+        .with_params([
+            ("id", path_param("Agent id")),
+            ("text", body_param("string", true, "Message text, delivered verbatim")),
+            (
+                "author_discord_user_id",
+                body_param("string", true, "Author's Discord user id as a canonical decimal snowflake"),
+            ),
+            ("provider", body_param("string", false, "Optional provider override, as in turn/start")),
+            ("channel_id", body_param("string", false, "Optional bound-channel override, as in turn/start")),
+            ("source", body_param("string", false, "Source label (max 64 chars)").with_default(json!("external"))),
+            ("origin_id", body_param("string", false, "Caller's message id (max 256 chars), recorded in the started turn's metadata")),
+            ("reply_contract", body_param("object", false, "Accepted for the reply-obligation follow-up; currently ignored")),
+        ])
+        .with_example(
+            json!({
+                "path": {"id": "family-counsel"},
+                "body": {"text": "좋아, 그렇게 진행해", "author_discord_user_id": "343742347365974026", "source": "imessage", "origin_id": "p:0/ABCD-1234"}
+            }),
+            json!({"ok": true, "delivery": "queued", "turn_id": "discord:1473922824350601297:9100000000000000042", "channel_id": "1473922824350601297", "reason": "unsafe:interactive modal"}),
+        )
+        .with_error_example(
+            403,
+            json!({"path": {"id": "family-counsel"}, "body": {"text": "rm -rf", "author_discord_user_id": "1"}}),
+            json!({"ok": false, "error": "author_not_allowed"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/agents/family-counsel/turn/deliver -H 'Content-Type: application/json' -d '{\"text\":\"hello\",\"author_discord_user_id\":\"343742347365974026\",\"source\":\"imessage\"}'"),
+        ep(
+            "POST",
             "/api/agents/{id}/turn/stop",
             "agents",
             "Stop the active turn for agent",
