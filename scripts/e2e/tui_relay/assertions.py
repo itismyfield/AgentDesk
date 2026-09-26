@@ -486,10 +486,7 @@ def relay_bodies_limited_to(
     window: Window, *, after_id: int, containing: Sequence[str], exact: Sequence[str]
 ) -> None:
     """Every relay body after ``after_id`` must contain an allowed needle or equal an allowed body.
-
-    Catches an extra distinct reply (for example a provider answer to a local control) that
-    subsequence and duplicate checks accept.
-    """
+    Rejects an extra distinct reply, such as a provider answer to a local control."""
 
     for message in window.messages:
         if int(str(message.get("id") or "0")) <= after_id:
