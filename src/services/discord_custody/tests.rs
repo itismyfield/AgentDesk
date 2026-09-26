@@ -100,9 +100,14 @@ type Flags = &'static [&'static str];
 type Want<'a> = (Flags, Flags, &'static str, &'a [(u64, u64)]);
 
 /// Folds the ledger `setup` leaves beside the 28-byte transcript; no shape reads as complete.
-fn check(name: &str, (episode, flags, current, missing): Want<'_>, setup: impl Fn(&Fx)) {
+fn check(name: &str, want: Want<'_>, setup: impl Fn(&Fx)) {
     let fx = Fx::new(BYTES);
     setup(&fx);
+    judge(name, want, &fx);
+}
+
+/// Folds `fx`'s ledger and compares it with `want`.
+fn judge(name: &str, (episode, flags, current, missing): Want<'_>, fx: &Fx) {
     let status = fx.status();
     assert!(!status.complete(), "{name}: {status:?}");
     assert!(status.flags.iter().eq(episode), "{name}: {status:?}");
@@ -180,13 +185,14 @@ fn ledger_shapes_fold_to_their_obligation_state() {
         (fx.held(0, 4, (4, 12)), fx.held(2, 4, (20, 28)), fx.write(1, "c", b"bad"));
         fx.legacy(1, 4, json!({ "copy": "c", "from": 12, "to": 20 }));
     });
-    // A directory the length of its claim is no copy, even before a held tail.
-    let n = fs::metadata(tempfile::tempdir().unwrap().path()).unwrap().len();
-    check("directory as a copy", (&[], &[], "missing readable from 0", &[(0, n)]), |fx| {
-        fs::create_dir_all(fx.episode().join("rev-0000/d")).unwrap();
-        (truncate(&fx.source(), n + 8), fx.held(1, 0, (n, n + 8)));
-        fx.legacy(0, 0, json!({ "copy": "d", "from": 0, "to": n }));
-    });
+    // A directory claiming exactly its own length is no copy, even before a held tail.
+    let (fx, copy) = (Fx::new(BYTES), Path::new("rev-0000/d"));
+    fs::create_dir_all(fx.episode().join(copy).join("sentinel")).unwrap();
+    let n = fs::metadata(fx.episode().join(copy)).unwrap().len();
+    assert!(n > 0, "a directory with an entry must claim a nonempty range");
+    (truncate(&fx.source(), n + 8), fx.held(1, 0, (n, n + 8)));
+    fx.legacy(0, 0, json!({ "copy": "d", "from": 0, "to": n }));
+    judge("directory as a copy", (&[], &[], "missing readable from 0", &[(0, n)]), &fx);
     check("requirement past EOF", (&[], &["required_past_eof"], "complete_to_eof", &[]),
         |fx| fx.legacy(0, 50, json!({ "error": "turn start is past EOF" })));
     check("cap from the first missing byte", (&[], &[], "over_cap from 10", &[(10, 20)]), |fx| {
