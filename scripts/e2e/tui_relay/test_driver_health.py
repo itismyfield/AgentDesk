@@ -3732,5 +3732,145 @@ class PhasePartialEvidenceContract(_OutcomeFixture, unittest.TestCase):
                 self.assertEqual(self.client.send_control.call_count, 1)
 
 
+class E37CodexModelLocalControl(unittest.TestCase):
+    """Runs the shipped E-37 YAML on a fake clock; each simulated request costs REQUEST_S."""
+
+    NOTICE = "`/model` 은 로컬에서 끝나는 Codex 컨트롤이라 provider 턴을 만들지 않았습니다."
+    REQUEST_S = 0.05
+
+    def run_e37(self, fault: str | None = None, request_s: float = REQUEST_S) -> dict:
+        scenario = driver.yaml.safe_load(
+            (ROOT / "tests/e2e/tui_relay/scenarios/E-37-codex-model-local-control.yaml").read_text()
+        )
+        clock, messages, sent, rows = [1000.0], [], {}, []
+
+        def post(content: str, author: str = "7") -> str:
+            mid = str(100 + len(messages))
+            messages.append({"id": mid, "content": content, "author": {"id": author, "bot": True}, "type": 0})
+            return mid
+
+        def turn(owner: str, start: float, stop: float, sources: list | None = None) -> None:
+            rows.append((start, stop, {"channel_id": "42", "user_msg_id": owner, "source_message_ids": sources or []}))
+
+        def request() -> float:
+            started = clock[0]
+            clock[0] += request_s
+            return started
+
+        class Client:
+            base_url = "http://agentdesk.test"
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                return {"id": "1"}
+
+            def send(self, channel_id, content):  # noqa: ARG002
+                now, mid = request(), post(content, author=assertions.OUR_BOT_ID)
+                if content == "/model":
+                    sent["/model"] = mid
+                    post(E37CodexModelLocalControl.NOTICE)
+                    if fault == "model_turn_open_at_first_read":
+                        turn(mid, now + 0.02, now + 0.5)
+                elif "AFTER-MODEL" in content:
+                    sent["prompt"] = mid
+                    if fault == "prompt_behind_model_turn":
+                        turn(sent["/model"], now, now + 0.5)
+                    admitted = now + {"prompt_behind_model_turn": 0.5, "prompt_behind_active_owner": 1.5,
+                                      "slow_admission": 100.0,
+                                      "admission_just_before_deadline": request_s + 29.9,
+                                      "admission_just_after_deadline": request_s + 30.05}.get(fault, 0.1)
+                    merged = [int(sent["/model"]), int(mid)] if fault == "merged_sources" else None
+                    turn(mid, admitted, admitted + 1.0, sources=merged)
+                    if fault == "extra_reply":
+                        post("GPT-5.6 Codex임.")
+                    post(("GPT-5.6 Codex임.\n" if fault == "reply_merged" else "") + "[E2E:E37:AFTER-MODEL]")
+                else:
+                    post("[E2E:E37:WARM]")
+                return {"message_id": mid}
+
+            def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                now = request()
+                seen = [m for m in messages if int(m["id"]) > int(after_id or 0)]
+                if "notice_seen" not in sent and any(E37CodexModelLocalControl.NOTICE == m["content"] for m in seen):
+                    sent["notice_seen"] = clock[0]
+                    if fault == "model_turn_opens_after_notice":
+                        turn(sent["/model"], now + 0.3, now + 0.8)
+                return seen
+
+        client = Client()
+
+        def fake_wait(**kwargs):
+            observed = client.fetch_messages(kwargs["channel_id"], after_id=kwargs["after_id"])
+            return next((m for m in observed if kwargs["needle"] in m["content"]), None), observed
+
+        def fake_api(base_url, path, *, timeout=5.0):  # noqa: ARG001
+            now = request()
+            if path == "/api/health":
+                return 200, {"status": "healthy", "ok": True, "fully_recovered": True, "degraded_reasons": []}
+            mailbox = _idle_mailbox("42", "codex")
+            if fault == "prompt_behind_active_owner" and "prompt" in sent:
+                mailbox["active_user_message_id"] = int(sent["/model"])
+            # Only the pre-prompt read starts after the 5s quiet period; no inflight read sees this turn.
+            quiet_end = sent.get("notice_seen", float("inf")) + 5.0
+            if fault == "model_owner_at_boundary_only" and "prompt" not in sent and now >= quiet_end:
+                mailbox.update(agent_turn_status="active", active_user_message_id=int(sent["/model"]))
+            queued = (fault == "model_left_queued" and "/model" in sent and "prompt" not in sent) or (
+                fault == "queue_at_admission" and "prompt" in sent)
+            if queued:
+                mailbox["queue_depth"] = mailbox["relay_health"]["queue_depth"] = 1
+            return 200, _health_detail(mailbox)
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        def inflight(path):  # noqa: ARG001
+            return next((row for start, stop, row in rows if start <= clock[0] < stop), None)
+
+        args = Namespace(cell="codex-pipe", channel_id="42", thread_channel_id=None,
+                         queue_runtime_root="/tmp/agentdesk-e2e-test-runtime")
+        with (
+            patch("run_tui_relay.time.sleep", side_effect=sleep),
+            patch("run_tui_relay.time.monotonic", side_effect=lambda: clock[0]),
+            patch("run_tui_relay._read_api_json", side_effect=fake_api),
+            patch("run_tui_relay._read_provider_inflight", side_effect=inflight),
+            patch("run_tui_relay.wait_for_discord_text_with_tui_idle_draft_guard", side_effect=fake_wait),
+            patch("run_tui_relay.assert_cell_idle", return_value={"status": "idle", "mailboxes_seen": 1}),
+        ):
+            return driver.run_one_cell(scenario=scenario, cell="codex-pipe", channel_id="42", client=client,
+                                       run_id="run-1", dry_run=False, args=args)
+
+    def test_passes_when_model_stays_local_and_prompt_with_empty_sources_is_admitted(self):
+        record = self.run_e37()
+        self.assertEqual(record["local_control"]["queue_depth_at_admission"], 0)
+        self.assertTrue(all(row["passed"] for row in record["assertions"]))
+        result = {"assertions": []}
+        driver._merge_record_into_result(result, record)  # the CLI report keeps the step evidence
+        self.assertEqual(result["local_control"]["prompt_message_id"], record["local_control"]["prompt_message_id"])
+        self.assertIn("max_read_gap_s", result["local_control"])
+
+    def test_admission_bound_uses_the_observation_time_near_the_deadline(self):
+        # 0.07s requests make reads land at 29.92s and 30.09s, with the loop's own deadline check at 29.99s.
+        record = self.run_e37("admission_just_before_deadline", request_s=0.07)
+        self.assertLessEqual(record["local_control"]["admission_latency_s"], 30)
+        with self.assertRaisesRegex(assertions.AssertionError, "not admitted within"):
+            self.run_e37("admission_just_after_deadline", request_s=0.07)
+
+    def test_fails_on_each_wrong_model_turn_queue_or_reply_that_a_read_can_see(self):
+        for fault, reason in (
+            ("model_turn_open_at_first_read", "provider turn active"),
+            ("model_turn_opens_after_notice", "provider turn active"),
+            ("model_left_queued", "still queued"),
+            ("model_owner_at_boundary_only", "left the mailbox busy"),
+            ("prompt_behind_model_turn", "not admitted first"),
+            ("prompt_behind_active_owner", "queued behind message"),
+            ("queue_at_admission", "queue not empty when admission was observed"),
+            ("merged_sources", "merged sources"),
+            ("slow_admission", "not admitted within"),
+            ("extra_reply", "unexpected relay body"),
+            ("reply_merged", "unexpected relay body"),
+        ):
+            with self.subTest(fault=fault), self.assertRaisesRegex(assertions.AssertionError, reason):
+                self.run_e37(fault)
+
+
 if __name__ == "__main__":
     unittest.main()

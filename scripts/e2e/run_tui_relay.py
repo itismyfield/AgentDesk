@@ -73,6 +73,7 @@ REAL_PROVIDER_STEP_KEYS: tuple[str, ...] = (
     "send_timed_response_prompt",
     "send_prompts_concurrent",
     "send_keys",
+    "local_control_then_prompt",
 )
 CONTROLLED_HARNESS_STEP_KEYS: tuple[str, ...] = (
     "restart_dcserver",
@@ -142,6 +143,7 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "provider_hold_states",
     "cancel_turns",
     "health_assertions",
+    "local_control",
     "deleted_status_panels",
     "discord_failure_injections",
     "discord_failure_clears",
@@ -1763,6 +1765,125 @@ def wait_for_provider_hold_state(
         "timeout waiting for provider hold state before cancel: "
         f"path={path} last_state={last_state}"
     )
+
+
+def _read_provider_inflight(path: Path) -> dict[str, Any] | None:
+    """One inflight-row read; a torn write reads as absent and the next loop reads again."""
+    try:
+        row = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return row if isinstance(row, dict) else None
+
+
+def _target_mailbox(base_url: str, *, channel_id: str, provider: str) -> dict[str, Any]:
+    detail = _read_health_detail(base_url)
+    boxes = [
+        box for box in detail.get("mailboxes") or []
+        if isinstance(box, dict)
+        and _mailbox_channel_id(box) == channel_id and _mailbox_provider(box) == provider
+    ]
+    if len(boxes) != 1:
+        raise HarnessEvidenceError(
+            f"local control needs exactly one {provider}:{channel_id} mailbox; got {len(boxes)}"
+        )
+    return boxes[0]
+
+
+def local_control_then_prompt(
+    params: dict[str, Any],
+    *,
+    client: Any,
+    channel_id: str,
+    cell: str,
+    runtime_root: str | Path,
+    mark_sent: Callable[[], None],
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Send a local control, then a prompt, reading the inflight row once per loop between blocking requests.
+    These are samples, not proof: a turn that opens and closes within one blocking request is not seen."""
+    provider = cell_provider(cell)
+    path = provider_inflight_state_path(runtime_root=runtime_root, provider=provider, channel_id=channel_id)
+    loop_s = float(params.get("poll_interval_s", 0.1))
+    control, notice = str(params["control"]), str(params["notice"])
+    last_read = [time.monotonic()]
+
+    def inflight() -> dict[str, Any] | None:
+        row, now = _read_provider_inflight(path), time.monotonic()
+        evidence["max_read_gap_s"] = round(max(evidence.get("max_read_gap_s", 0.0), now - last_read[0]), 3)
+        last_read[0] = now
+        return row
+
+    def send(text: str) -> str:
+        mark_sent()
+        response = client.send(channel_id, text)
+        return turn_identity_from_send_response(response, channel_id=channel_id)["user_msg_id"]
+
+    def mailbox() -> dict[str, Any]:
+        return _target_mailbox(client.base_url, channel_id=channel_id, provider=provider)
+
+    def turn_witnesses(box: dict[str, Any]) -> list[str]:
+        # queue_depth is left out: an idle intake may pass through the mailbox queue briefly.
+        return [r for r in _mailbox_busy_reasons(box) if "queue_depth" not in r]
+
+    def queue_depth(box: dict[str, Any]) -> tuple[int, int]:
+        return (_as_nonnegative_int(box.get("queue_depth")),
+                _as_nonnegative_int(_relay_health(box).get("queue_depth")))
+
+    control_id = send(control)
+    evidence.update(control=control, control_message_id=control_id)
+    deadline = time.monotonic() + float(params.get("notice_timeout_s", 60))
+    quiet_until: float | None = None
+    next_fetch = 0.0
+    while quiet_until is None or time.monotonic() < quiet_until:
+        if (row := inflight()) is not None:
+            raise assertions.AssertionError(
+                f"local control {control!r} ran with a provider turn active: {_state_identity_summary(row)}"
+            )
+        if reasons := turn_witnesses(mailbox()):
+            raise assertions.AssertionError(f"local control {control!r} left the mailbox busy: {reasons}")
+        if quiet_until is None and time.monotonic() >= next_fetch:
+            next_fetch = time.monotonic() + 1.0
+            if any(notice in (message.get("content") or "") and not assertions.is_our_send(message)
+                   for message in client.fetch_messages(channel_id, after_id=control_id, limit=100)):
+                quiet_until = time.monotonic() + float(params.get("quiet_s", 5))
+            elif time.monotonic() >= deadline:
+                raise assertions.AssertionError(f"local control notice {notice!r} not observed")
+        time.sleep(loop_s)
+    if reasons := turn_witnesses(box := mailbox()):
+        raise assertions.AssertionError(f"local control {control!r} left the mailbox busy: {reasons}")
+    if any(depth := queue_depth(box)):
+        raise assertions.AssertionError(f"local control {control!r} is still queued: {depth}")
+
+    prompt_id = send(str(params["prompt"]))
+    evidence["prompt_message_id"] = prompt_id
+    started = time.monotonic()
+    deadline = started + float(params.get("admission_timeout_s", 30))
+    while True:
+        row, observed_at, box = inflight(), time.monotonic(), mailbox()
+        if row is not None:
+            if observed_at > deadline:
+                raise assertions.AssertionError(f"prompt {prompt_id} not admitted within the admission bound")
+            owner = str(row.get("user_msg_id") or "")
+            if owner != prompt_id:
+                raise assertions.AssertionError(
+                    f"prompt {prompt_id} was not admitted first; inflight owner={owner} control={control_id}"
+                )
+            # Normal intake writes []; only an affirmative foreign id is merge evidence.
+            if any(str(source) != prompt_id for source in row.get("source_message_ids") or []):
+                raise assertions.AssertionError(f"prompt admitted with merged sources {row['source_message_ids']}")
+            if any(depth := queue_depth(box)):
+                raise assertions.AssertionError(f"queue not empty when admission was observed: {depth}")
+            evidence.update(admission_latency_s=round(observed_at - started, 3), queue_depth_at_admission=0)
+            return evidence
+        active = box.get("active_user_message_id")
+        if _truthy_identity(active) and str(active) != prompt_id:
+            raise assertions.AssertionError(f"prompt {prompt_id} queued behind message {active}")
+        if time.monotonic() >= deadline:
+            raise assertions.AssertionError(f"prompt {prompt_id} not admitted within the admission bound")
+        time.sleep(loop_s)
 
 
 def scenario_teardown_marker(scenario_id: str, *, cell: str, run_id: str) -> str:
@@ -3530,6 +3651,16 @@ def run_one_cell(
             for _ in batch:
                 window.mark_prompt_sent()
             record.setdefault("concurrent_prompt_batches", []).append(batch)
+        elif "local_control_then_prompt" in step:
+            _prepare_first_prompt_window()
+            params = step["local_control_then_prompt"]
+            local_control_then_prompt(
+                params, client=client, channel_id=channel_id, cell=cell,
+                runtime_root=args.queue_runtime_root, mark_sent=window.mark_prompt_sent,
+                evidence=record.setdefault("local_control", {}),
+            )
+            last_sent_prompt = str(params["prompt"])
+            _mark_real_provider_contacted(record, declared_agent_mode=declared_agent_mode, dry_run=dry_run)
         elif "wait_idle_s" in step:
             time.sleep(float(step["wait_idle_s"]))
         elif "wait_for_discord_text" in step:
@@ -4386,6 +4517,17 @@ def run_assertion(
             )
         else:
             assertions.marker_absent(window, marker=str(params))
+    elif "relay_bodies_after_local_control" in spec:
+        params = spec["relay_bodies_after_local_control"] or {}
+        control_id = ((record or {}).get("local_control") or {}).get("control_message_id")
+        if not control_id:
+            raise assertions.AssertionError("relay_bodies_after_local_control needs a local_control_then_prompt step")
+        assertions.relay_bodies_limited_to(
+            window,
+            after_id=int(control_id),
+            containing=[str(n) for n in params.get("containing") or []],
+            exact=[str(n) for n in params.get("exact") or []],
+        )
     elif "ordered_text_present" in spec:
         # #2838 (P0-2): completeness + ordering of multiple expected fragments.
         needles = spec["ordered_text_present"]
