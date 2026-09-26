@@ -40,15 +40,32 @@ fn unavailable_cases() -> Vec<(Value, String)> {
         "queue_depth",
         "channel_id",
     ] {
-        for value in [None, Some(Value::Null), Some(json!("wrong"))] {
-            let mut body = fixture();
-            let code = match value.as_ref() {
-                None => "missing",
-                Some(Value::Null) => "null",
-                _ => "wrong_type",
-            };
-            replace(&mut body["mailboxes"][0], key, value);
-            cases.push((body, format!("{key}/{code}")));
+        for (cancel, queue, tmux, inflight, record) in [
+            (true, 0, false, true, false),
+            (false, 0, false, true, false),
+            (false, 0, false, false, true),
+            (true, 3, true, true, false),
+        ] {
+            for value in [None, Some(Value::Null), Some(json!("wrong"))] {
+                let mut body = fixture();
+                for (key, value) in [
+                    ("has_cancel_token", json!(cancel)),
+                    ("queue_depth", json!(queue)),
+                    ("tmux_present", json!(tmux)),
+                    ("inflight_state_present", json!(inflight)),
+                    ("session_record_present", json!(record)),
+                    ("session_status", json!("working")),
+                ] {
+                    body["mailboxes"][0][key] = value;
+                }
+                let code = match value.as_ref() {
+                    None => "missing",
+                    Some(Value::Null) => "null",
+                    _ => "wrong_type",
+                };
+                replace(&mut body["mailboxes"][0], key, value);
+                cases.push((body, format!("{key}/{code}")));
+            }
         }
     }
     for value in [json!(-1), json!(0.5)] {

@@ -1,9 +1,4 @@
-mod observation_checks;
-use observation_checks::check_mailbox_consistency;
 mod health_snapshot;
-#[cfg(test)]
-mod observation_tests;
-mod stale_mailbox_repair;
 use health_snapshot::fetch_health_snapshot;
 mod provider_credentials;
 use provider_credentials::{check_claude_cswap_global_conflict, check_credential_permissions};
@@ -2103,6 +2098,12 @@ fn stale_mailbox_repair_fix_safety(response: &Value) -> FixSafety {
         _ => FixSafety::SafeLocalRepair,
     }
 }
+
+mod observation_checks;
+use observation_checks::check_mailbox_consistency;
+#[cfg(test)]
+mod observation_tests;
+mod stale_mailbox_repair;
 
 fn apply_stale_mailbox_fixes(snapshot: &HealthSnapshot, options: &DoctorOptions) -> Vec<FixAction> {
     stale_mailbox_repair::apply_stale_mailbox_fixes_with_post(

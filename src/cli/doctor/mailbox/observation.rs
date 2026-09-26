@@ -31,6 +31,7 @@ fn measured_snapshot(snapshot: &Value) -> Measurement<Option<MailboxFinding>> {
         }
     };
     let active = dispatch || session_dispatch;
+    // Queued input can outlive its worker, so queue depth is not evidence of live work.
     let live = tmux || process || active;
     let (id, detail) = if cancel && !live {
         (
@@ -128,7 +129,11 @@ pub(crate) fn classify_mailbox_findings(body: &Value) -> Vec<MailboxFinding> {
         Ok((global, actual))
     })();
     match aggregate {
-        Err(issue) => findings.push(unavailable(body, issue)),
+        Err(issue) => {
+            let mut finding = unavailable(&Value::Null, issue.clone());
+            finding.evidence = json!({"measurement_issue": issue});
+            findings.push(finding);
+        }
         Ok((global, actual)) if global > actual => findings.push(MailboxFinding {
             id: "global_active_without_active_turn",
             detail: format!("global_active={global} exceeds actual active mailbox turns={actual}"),
