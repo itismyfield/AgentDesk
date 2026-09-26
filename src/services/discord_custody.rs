@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 pub(crate) const CUSTODY_DIR: &str = "discord_custody";
+const CHANGED: &str = "unresolved_source_changed";
 
 /// A source's identity as one attempt saw it; `g_prefix_sha` hashes the first bytes of the
 /// obligation's generation when the writer knew that generation.
@@ -73,3 +74,17 @@ pub(crate) fn cmd_status(provider: Option<&str>, episode: Option<&str>) -> Resul
     print!("{}", status_report(&custody, provider, episode)?);
     Ok(())
 }
+
+#[cfg(unix)]
+fn identity(meta: &std::fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    (meta.dev(), meta.ino())
+}
+
+#[cfg(not(unix))]
+fn identity(_meta: &std::fs::Metadata) -> (u64, u64) {
+    (0, 0)
+}
+
+#[cfg(test)]
+mod tests;
