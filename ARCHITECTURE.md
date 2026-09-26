@@ -226,8 +226,7 @@ src/
 │   ├── slow_hook_warn.rs
 │   ├── sql_guard.rs
 │   ├── transition.rs
-│   ├── transition_executor_pg.rs
-│   └── transition_timeout.rs
+│   └── transition_executor_pg.rs
 ├── github/
 │   ├── sync/
 │   │   ├── card_state.rs
@@ -343,6 +342,7 @@ src/
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
 │   │   ├── agents_setup.rs
+│   │   ├── agents_turn_target.rs
 │   │   ├── analytics.rs
 │   │   ├── auth.rs
 │   │   ├── auto_queue.rs
@@ -816,6 +816,8 @@ src/
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   └── watcher_state.rs
+│   │   ├── mailbox_finish/
+│   │   │   └── closed_actor_tests.rs
 │   │   ├── meeting_orchestrator/
 │   │   │   ├── lifecycle.rs
 │   │   │   ├── records.rs
@@ -1840,8 +1842,11 @@ src/
 │   ├── tui_turn_state/
 │   │   └── completion_scan.rs
 │   ├── turn_orchestrator/
+│   │   ├── registry_purge/
+│   │   │   └── closed_gate_tests.rs
 │   │   ├── active_source_dedup.rs
 │   │   ├── clear_channel.rs
+│   │   ├── closed_verdict.rs
 │   │   ├── dispatch_cleanup.rs
 │   │   ├── dispatch_reservation.rs
 │   │   ├── episode_identity.rs

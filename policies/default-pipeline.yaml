@@ -203,8 +203,8 @@ clocks:
 # (e.g. `requested_timeout_min`, default 45) via `getTimeoutInterval` in
 # `policies/lib/timeouts-helpers.js`.
 #
-# Its only reader, the preview-only Rust `decide_timeout` reducer behind `agentdesk.timeouts.previewTimeoutDecision`, has no
-# caller now that the JS `shadowTimeoutDecision` producer and `scripts/timeout-shadow-gate.mjs` are retired; that API and this block remain until a follow-up removes them.
+# Nothing acts on this block; it is only parsed and validated. The schema and
+# this block remain until a follow-up removes them.
 
 timeouts:
   # #1082: max_retries >= 1, backoff: exponential (1m→5m→15m),
