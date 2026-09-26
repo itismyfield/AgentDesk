@@ -355,6 +355,7 @@ banner "Test-target integrity gate (#5003/#5008)"
 "$PYTHON" -m unittest tests.test_check_test_target_integrity
 "$PYTHON" -m unittest tests.test_target_empty_identity
 AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
+"$PYTHON" -m unittest tests.test_non_pg_test_filter
 
 banner "PostgreSQL test-lane membership gate (#4979, enforced)"
 # The default mode also verifies the generated `pg_db` region of ci-pr.yml
@@ -367,7 +368,6 @@ banner "PostgreSQL test-lane membership gate (#4979, enforced)"
 "$PYTHON" scripts/check_pg_test_lane_membership.py --write-pg-db-paths
 git diff --exit-code HEAD -- .github/workflows/ci-pr.yml
 "$PYTHON" -m unittest tests.test_check_pg_test_lane_membership
-"$PYTHON" -m unittest tests.test_non_pg_test_filter
 
 banner "New production file comment-ratio gate"
 # The 999-line blind spot: hotfile_ratchet only stops an ALREADY-huge file from
