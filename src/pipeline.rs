@@ -1210,27 +1210,9 @@ impl PipelineConfig {
             }
         }
 
-        // Timeout entries: state-keyed timeouts must reference valid states.
-        // Condition-based timeouts (e.g. awaiting_dod) are pseudo-state timeouts
-        // that manage their own clock columns — skip all cross-reference checks.
-        let known_clock_fields: Vec<&str> = self.clocks.values().map(|c| c.set.as_str()).collect();
+        // Timeouts are retired config nothing acts on, so their state and clock
+        // keys are not cross-checked: an inherited map must not block a save.
         for (key, timeout) in &self.timeouts {
-            // Condition-based timeouts are self-contained; skip validation
-            if timeout.condition.is_some() {
-                continue;
-            }
-            if !state_ids.contains(&key.as_str()) {
-                anyhow::bail!("timeout for unknown state: {}", key);
-            }
-            if !self.clocks.contains_key(&timeout.clock)
-                && !known_clock_fields.contains(&timeout.clock.as_str())
-            {
-                anyhow::bail!(
-                    "timeout '{}' references unknown clock: {}",
-                    key,
-                    timeout.clock
-                );
-            }
             // #1082: max_retries must be >= 1 when explicitly set.
             if let Some(mr) = timeout.max_retries {
                 if mr == 0 {
@@ -1573,7 +1555,7 @@ mod schema_strictness_tests {
     /// The exact body the dashboard's visual pipeline editor PUTs after an
     /// operator picks `on_error` for the `review -> failed` edge, transcribed from
     /// `buildOverridePayload` (dashboard/src/components/agent-manager/
-    /// pipeline-visual-editor-model.ts): the eight visual sections it always
+    /// pipeline-visual-editor-model.ts): the seven visual sections it always
     /// emits, the preserved `fsm_edge_bindings` extra, and the `events` entry
     /// `updateFsmTransitionEvent` creates alongside the binding.
     fn dashboard_fsm_editor_save_payload() -> &'static str {
@@ -1598,15 +1580,6 @@ mod schema_strictness_tests {
             "hooks": { "review": { "on_enter": ["OnReviewEnter"], "on_exit": [] } },
             "events": { "on_error": [] },
             "clocks": { "review": { "set": "on_enter", "mode": "reset" } },
-            "timeouts": {
-                "review": {
-                    "duration": "2h",
-                    "clock": "review",
-                    "max_retries": null,
-                    "on_exhaust": "failed",
-                    "condition": null
-                }
-            },
             "phase_gate": {
                 "dispatch_to": "reviewer",
                 "dispatch_type": "phase-gate",
@@ -1866,5 +1839,81 @@ mod schema_strictness_tests {
             "the health warning must name the rejected key, got: {:?}",
             report.warnings
         );
+    }
+
+    /// The body the dashboard visual editor saves: every visual section of the
+    /// default pipeline and no `timeouts`, after `edit` has changed it.
+    fn visual_editor_save_without_timeouts(edit: impl FnOnce(&mut serde_json::Value)) -> String {
+        let base: PipelineConfig =
+            serde_yaml::from_str(&default_pipeline_yaml()).expect("default pipeline parses");
+        let full = serde_json::to_value(&base).expect("default pipeline serializes");
+        let mut payload = serde_json::json!({});
+        for key in [
+            "states",
+            "transitions",
+            "gates",
+            "hooks",
+            "events",
+            "clocks",
+            "phase_gate",
+        ] {
+            payload[key] = full[key].clone();
+        }
+        edit(&mut payload);
+        payload.to_string()
+    }
+
+    /// Deleting a state or clock named by the parent's inherited `timeouts` map
+    /// must still save, whether the override omits `timeouts` or sends `{}`.
+    #[test]
+    fn inherited_timeouts_do_not_block_a_state_or_clock_deletion() {
+        fn delete_requested(payload: &mut serde_json::Value) {
+            payload["states"]
+                .as_array_mut()
+                .expect("states array")
+                .retain(|state| state["id"] != "requested");
+            payload["transitions"]
+                .as_array_mut()
+                .expect("transitions array")
+                .retain(|t| t["from"] != "requested" && t["to"] != "requested");
+            payload["hooks"]
+                .as_object_mut()
+                .expect("hooks")
+                .remove("requested");
+            payload["clocks"]
+                .as_object_mut()
+                .expect("clocks")
+                .remove("requested");
+        }
+        fn delete_review_clock(payload: &mut serde_json::Value) {
+            payload["clocks"]
+                .as_object_mut()
+                .expect("clocks")
+                .remove("review");
+        }
+        type Edit = fn(&mut serde_json::Value);
+
+        let base: PipelineConfig =
+            serde_yaml::from_str(&default_pipeline_yaml()).expect("default pipeline parses");
+        let cases: [(&str, Edit); 2] = [
+            ("state deletion", delete_requested),
+            ("clock deletion", delete_review_clock),
+        ];
+        for (case, edit) in cases {
+            for explicit_empty in [false, true] {
+                let payload = visual_editor_save_without_timeouts(|payload| {
+                    edit(payload);
+                    if explicit_empty {
+                        payload["timeouts"] = serde_json::json!({});
+                    }
+                });
+                let ovr = parse_override_strict(&payload)
+                    .unwrap_or_else(|error| panic!("{case}: strict parse failed: {error}"))
+                    .expect("override is not empty");
+                base.merge(&ovr).validate().unwrap_or_else(|error| {
+                    panic!("{case} (explicit empty timeouts: {explicit_empty}): {error}")
+                });
+            }
+        }
     }
 }
