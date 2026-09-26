@@ -79,7 +79,9 @@ pub(super) async fn reap_inflight_rows_at_boot_with_guard(
             .unwrap_or_default()
     };
     let report = guard.run_once(provider, reap).await;
-    let _ = pg_pool;
+    if !report.already_ran {
+        super::custody_notice::spawn_boot_custody_notice(provider, pg_pool);
+    }
     let provider = provider.as_str();
     tracing::info!(
         provider,

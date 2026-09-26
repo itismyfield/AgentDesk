@@ -269,7 +269,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // passes here after the generation is allocated and before any mint surface.
     // Only the utility branch leaves earlier: it builds no runtime or mint surface. Its
     // doctor handles only health-registered runtimes, which register after their reaper.
-    super::inflight::reap_inflight_rows_at_boot_blocking(&provider, None).await;
+    super::inflight::reap_inflight_rows_at_boot_blocking(&provider, shared.pg_pool.clone()).await;
     super::tui_prompt_relay::spawn_tui_prompt_relay(shared.clone(), provider.clone());
 
     // Phase 5.2 of intake-node-routing (issue #2009): populate
