@@ -261,6 +261,45 @@ async fn a_pending_start_and_the_row_claimed_from_it_are_one_episode() {
     assert_eq!(copy_of(episode, "transcript"), Some(b"turn\n".to_vec()));
 }
 
+// Contract: a turn whose start offset moves earlier between boots gets the bytes between the
+// new and the old offset preserved, though the transcript itself is unchanged.
+#[tokio::test]
+async fn an_earlier_turn_start_on_an_unchanged_transcript_is_preserved() {
+    let env = Env::new();
+    let (out, offset) = transcript(&env, "moved.jsonl", "old\nearlier\n", "turn\n");
+    let mut state = tui_direct_row(5_997_051, &out, offset);
+    env.seed(&state, 0);
+    boot().await;
+    state.turn_start_offset = Some(4);
+    env.seed(&state, 0);
+    boot().await;
+
+    let copies = copy_of(&episodes(&env)[&5_997_051], "transcript").unwrap();
+    assert!(
+        copies.windows(8).any(|bytes| bytes == b"earlier\n"),
+        "{copies:?}"
+    );
+}
+
+// Contract: a pending-start record that no longer parses is filed under the channel and
+// anchor its file name carries, and is recorded as not understood instead of complete.
+#[tokio::test]
+async fn an_unparseable_pending_start_keeps_its_channel_and_is_not_complete() {
+    let env = Env::new();
+    let root = crate::services::discord::runtime_store::tui_direct_pending_start_root().unwrap();
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("claude_5997081_5997082.json"), b"{torn").unwrap();
+    boot().await;
+
+    let episode = &episodes(&env)[&5_997_081];
+    let marker: serde_json::Value =
+        serde_json::from_slice(&fs::read(episode.join("episode.json")).unwrap()).unwrap();
+    assert_eq!(marker["episode"]["anchor_id"], 5_997_082);
+    assert_eq!(copy_of(episode, "pending_start"), Some(b"{torn".to_vec()));
+    let record = entry(episode, "pending_start").unwrap();
+    assert!(record["error"].is_string(), "{record}");
+}
+
 // Contract: a transcript cut short between the stat and the copy is recorded as an
 // incomplete copy, and the next boot copies the turn again instead of treating it as held.
 #[tokio::test]
