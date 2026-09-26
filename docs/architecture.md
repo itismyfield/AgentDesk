@@ -641,7 +641,7 @@ rate_limits:
   - hardcoded default < `agentdesk.yaml runtime:` < `kv_meta['runtime-config']` override 순서로 해석
   - `/api/settings/runtime-config`는 `current`와 `defaults`를 함께 돌려준다
 - 개별 `kv_meta` 키
-  - 리뷰, 타임아웃, context compact, merge automation, Discord 채널 ID
+  - 리뷰, 타임아웃, context compact, Discord 채널 ID
   - `/api/settings/config` whitelist를 통해서만 노출/수정
   - 응답에는 `baseline`, `override_active`, `editable`, `restart_behavior`가 포함되어 baseline과 live override를 구분한다
   - YAML-backed key는 재시작 시 YAML baseline이 다시 seed되고, hardcoded-only key는 reset flag가 꺼져 있으면 기존 override를 유지한다

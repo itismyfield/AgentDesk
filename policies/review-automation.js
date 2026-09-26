@@ -1039,11 +1039,11 @@ function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
   var repoId = precheckRepoId;
   if (!repoId) return { status: "noop", reason: "no_repo" };
 
-  // We have a work target AND a repo, so a PR was expected. From here on,
-  // inability to dispatch is a genuine error that the retry loop should see.
+  // A work target and repo mean a PR was expected, so failing to dispatch is
+  // a genuine error the caller hands off via markPrCreateFailed (no retry).
   if (!latestWorkTarget.branch) {
-    // Seed pr_tracking with whatever we have so the retry loop can try again
-    // once the branch recovers (e.g. worktree re-discovered).
+    // Seed pr_tracking with whatever we have so the failure keeps its cause
+    // when markPrCreateFailed hands the card to an agent or operator.
     upsertPrTracking(
       cardId,
       repoId,
@@ -1078,9 +1078,8 @@ function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
     );
     return { status: "dispatched", generation: handoff.generation, reused: !!handoff.reused };
   } catch (e) {
-    // handoff threw before any stamp was committed — the JS catch path
-    // calls markPrCreateFailed(null stampGen) which seeds a retry row via
-    // recordPrCreateFailure's INSERT-if-missing branch.
+    // Handoff committed no stamp; the caller's markPrCreateFailed(null stampGen)
+    // seeds pr_tracking via recordPrCreateFailure's INSERT-if-missing path.
     agentdesk.log.warn("[review] handoffCreatePr failed for card " + cardId + ": " + e);
     return { status: "error", reason: "dispatch_failed: " + String(e) };
   }
@@ -1212,7 +1211,7 @@ function handOffPrCreateFailure(cardId, errorMsg, retryCount, generation) {
   );
   if (!delivered) {
     agentdesk.log.error("[review] Create-PR handoff alert for card " + cardId +
-      " was NOT delivered (no alert channel, or the outbox enqueue failed) — leaving the row for the next sweep");
+      " was NOT delivered (the deadlock-channel outbox enqueue failed) — leaving the row for the next sweep");
     return false;
   }
   // #5716 r7: the alert is enqueued from here on, so a throw in the dedup/marker bookkeeping must NOT be
@@ -1231,8 +1230,9 @@ function handOffPrCreateFailure(cardId, errorMsg, retryCount, generation) {
 // blocked_reason was lost to a crash before the marker UPDATE — and dropping
 // the global terminalState equality covers per-card pipeline overrides and
 // multi-terminal pipelines. The 30-day floor is a ROLLING window on updated_at, not a removal boundary: it
-// caps the deploy-time page storm from historical failures, and it also expires a failure nobody could
-// alert (no alert channel) 30 days after its last write — see the PR body.
+// caps the deploy-time page storm from historical failures, and it also expires a failure whose
+// deadlock-channel enqueue kept failing 30 days after its last write. Without a deadlock channel the
+// handoff settles on its human-alert WARN log line (#5993) unless recording the handoff fails.
 function sweepStrandedPrCreateFailures() {
   var rows = agentdesk.db.query(
     "SELECT card_id, last_error, retry_count, dispatch_generation FROM pr_tracking " +

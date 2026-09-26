@@ -81,7 +81,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::auto_queue::route::command::tests
   --skip services::auto_queue::route::fsm::tests
   --skip services::auto_queue::route::phase_gate::tests
-  --skip services::auto_queue::route::planning::failed_entry_alert_tests
+  --skip services::auto_queue::route::planning::record_entry_dispatch_failure_tests
   --skip services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests
   --skip services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests
   --skip services::auto_queue::tests
@@ -183,6 +183,7 @@ NON_PG_FILTER_REPLAY=(
   db::campaigns::tests::campaign_checkpoint_normalizes_optional_groups_without_inference
   db::campaigns::tests::campaign_validation_rejects_false_completion_and_bad_identity
   db::campaigns::tests::campaign_validation_rejects_missing_duplicate_and_cyclic_dependencies
+  db::campaigns::tests::legacy_node_documents_load_without_glance_fields_and_keep_their_time
   db::dispatched_session_canonical_identity::pg_tests::canonical_identity_conflict_is_http_409_ready
   db::dispatches::delivery_events::tests::dispatch_delivery_event_serde_roundtrips_snake_case_status
   db::dispatches::metadata::tests::parse_pg_dispatch_context_ignores_empty_context
@@ -270,10 +271,6 @@ NON_PG_FILTER_REPLAY=(
   services::auto_queue::route::control_routes::phase_gate_repair_route_tests::repair_caller_audit_label_uses_verified_principal_when_pg_resolved
   services::auto_queue::route::fsm::tests::clamp_retry_limit_bounds
   services::auto_queue::route::phase_gate::tests::sandbox_preflight_metadata_disables_external_side_effects_only_when_safe
-  services::auto_queue::route::planning::failed_entry_alert_tests::failed_entry_alert_dedupe_ignores_rendered_cause
-  services::auto_queue::route::planning::failed_entry_alert_tests::failed_entry_alert_identity_is_scoped_per_durable_failure_transition
-  services::auto_queue::route::planning::failed_entry_alert_tests::failed_entry_alert_reason_code_is_stable
-  services::auto_queue::route::planning::failed_entry_alert_tests::failed_entry_alert_ttl_is_at_least_thirty_minutes
   services::auto_queue::tests::auto_queue_status_entry_normalizes_github_repo_url
   services::auto_queue::tests::auto_queue_status_omits_diagnostics_without_slot_invariant_violation
   services::auto_queue::tests::auto_queue_status_reports_actionable_slot_invariant_diagnostics
@@ -436,7 +433,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::intake_settlement::tests::terminal_outcome_delivery_awaits_one_settlement_call_with_branch_flags
   services::discord::turn_bridge::recovery_text::tests::direct_runtime_context_unavailable_matches_api_and_pg_errors
   services::discord::turn_bridge::recovery_text::tests::discord_recent_recovery_context_preserves_existing_format_and_limits
-  services::discord::turn_bridge::recovery_text::tests::recovery_context_store_does_not_enqueue_lifecycle_notification
   services::discord::turn_bridge::resume_pin_tests::c1_actual_postlude_resume_pin_runtime_proof
   services::discord::turn_bridge::resume_pin_tests::c1_both_late_writers_consume_pin_without_registry_backfill
   services::discord::turn_bridge::resume_pin_tests::c1_cancelled_registered_pin_leaves_all_effects_untouched

@@ -59,7 +59,7 @@ transitional flows.
 | `kv_meta` | Stores live runtime overrides, cooldowns, migration markers, and policy bookkeeping. Bad writes can silently change behavior across restarts. | Prefer `agentdesk.kv.*`; split high-value keys into named typed facades before table-level blocking. |
 | `dispatch_outbox` and delivery tables | Own outbound Discord/API side effects and retry state. Bad writes can duplicate, suppress, or misroute messages. | Keep writes behind outbox service APIs; only allow diagnostic reads in policies. |
 | `sessions` and session activity tables | Own tmux lifecycle, provider resume state, and idle cleanup decisions. Bad writes can kill or orphan active work. | Route lifecycle mutations through session/recovery services before blocking raw writes. |
-| `github_*` sync/cache tables | Feed merge automation and issue/PR state decisions. Bad writes can cause stale or incorrect merge behavior. | Keep policy access read-heavy; writes should come from the GitHub sync service. |
+| `github_*` sync/cache tables | Feed issue/PR state decisions. Bad writes can cause stale or incorrect issue and PR state. | Keep policy access read-heavy; writes should come from the GitHub sync service. |
 
 ## Capability Manifest MVP
 
@@ -69,13 +69,13 @@ Example:
 
 ```yaml
 version: 1
-policy: merge-automation
+policy: example-policy
 trust: trusted-automation
 source_events:
   - onCardCompleted
   - onTick
 include_files:
-  - policies/lib/merge-notification-dispatcher.js
+  - policies/lib/example-helper.js
 db:
   read:
     tables:
@@ -91,8 +91,8 @@ db:
   raw_sql:
     mode: audited
     capabilities:
-      - merge_candidate_inspection
-      - merge_request_tracking
+      - card_state_inspection
+      - dispatch_tracking
     markers_required: true
 exec:
   allow:
@@ -132,8 +132,7 @@ The CI/script guard is:
 ```bash
 python3 scripts/check_policy_db_capabilities.py --no-silent-growth \
   --require-manifest policies/timeouts/active-monitor.cap.yaml \
-  --require-manifest policies/review-automation.cap.yaml \
-  --require-manifest policies/merge-automation.cap.yaml
+  --require-manifest policies/review-automation.cap.yaml
 ```
 
 `scripts/ci-script-checks.sh` runs the guard with those required first-rollout
@@ -161,11 +160,9 @@ The first rollout manifests are checked in for:
 
 - `policies/timeouts/active-monitor.cap.yaml`
 - `policies/review-automation.cap.yaml`
-- `policies/merge-automation.cap.yaml`
 
-`review-automation` and `merge-automation` remain in `legacy` raw SQL mode with
-pinned baselines. `timeouts/active-monitor` has been migrated to typed timeout
-facades and now uses `forbidden` raw SQL mode, so any new `agentdesk.db.*`
+`review-automation` remains in `legacy` raw SQL mode with a pinned baseline.
+`timeouts/active-monitor` has been migrated to typed timeout facades and now uses `forbidden` raw SQL mode, so any new `agentdesk.db.*`
 callsite in that file fails the static check. This prevents silent growth in
 the highest-risk policy files while keeping the runtime guard behavior
 unchanged.

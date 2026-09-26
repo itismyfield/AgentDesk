@@ -36,8 +36,8 @@ Campaign fields: `id`, `title`, `description`, `status`, `round`, `revision`,
 
 Node fields: `id`, `title`, `status`, `stage`, `group`, `round`, `assignee`, `session_id`,
 `provider`, `dependencies`, `issue_url`, `pr_url`, `head_sha`, `evidence`,
-`next_action`, `blocker`, `details`, `acceptance`, `findings`, `evidence_records`,
-`updated_at`. Status is `pending`, `running`, `blocked`, `completed`, `failed`, or
+`next_action`, `blocker`, `summary`, `benefit`, `details`, `acceptance`, `findings`,
+`evidence_records`, `updated_at`. Status is `pending`, `running`, `blocked`, `completed`, `failed`, or
 `skipped`. Stage is a separate free-text workflow label. Optional scalar fields
 may be null; arrays default to empty. `details` defaults to an empty string.
 `group` is an optional, caller-supplied organizational label independent of
@@ -45,6 +45,9 @@ stage and status. Surrounding whitespace is trimmed; blank, null or omitted
 values become null (unclassified). Existing documents without this field stay
 unclassified; no group is inferred from titles, stages, or statuses. Group
 changes use the same revision CAS and durable history as other node changes.
+`summary` (one-line plain-language gist) and `benefit` (expected effect once done)
+are optional text for the dashboard's first screen; documents written before they
+existed read them as null, and writers that omit them are unaffected.
 Evidence records contain a required `summary` and optional `command`, `result`,
 `head_sha`, `recorded_at` (RFC3339), and `references` (string array).
 
@@ -69,7 +72,14 @@ callers must verify their evidence before marking work complete.
 
 ## Dashboard navigation
 
-The default campaign view is a compact, collapsible list organized by the stored
+The first screen leads with running, then blocked, tasks as cards: gist (`summary`,
+else the title), a seven-step bar (investigate → design → implement → review → fix →
+merge → deploy check) inferred from the free-text `stage` by the stage keyword
+written first (unmatched stages show their short text), `benefit`, and `blocker`
+when present. Other statuses appear as counts that expand into a list. Commits,
+evidence and findings stay in the task details.
+
+Below it, the campaign view is a compact, collapsible list organized by the stored
 `group`, intended for campaigns with hundreds of issues. Group labels describe
 work areas; they are independent of workflow stage and status. Missing labels
 remain ungrouped rather than being inferred from titles. Search and status/group

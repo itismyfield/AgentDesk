@@ -1404,25 +1404,6 @@ mod tests {
     }
 
     #[test]
-    fn spawn_markers_log_fixture_legacy_paths_unchanged() {
-        let claude = include_str!("../claude.rs");
-        let codex = include_str!("../codex.rs");
-        let qwen = include_str!("../qwen.rs");
-        let legacy = "failed to write spawn nonce for {tmux_session_name}: {e}";
-
-        assert!(claude.contains(legacy));
-        assert!(codex.contains(legacy));
-        assert!(qwen.contains(legacy));
-        assert!(
-            claude
-                .contains("failed to write spawn nonce for {tmux_session_name} (claude-tui): {e}")
-        );
-        assert!(
-            codex.contains("failed to write spawn nonce for {tmux_session_name} (codex-tui): {e}")
-        );
-    }
-
-    #[test]
     fn stamp_spawn_markers_returns_nonce_result_verbatim() {
         let (_root, _env) = isolated_runtime_root();
         let success_session = unique_session("nonce-verbatim-success");

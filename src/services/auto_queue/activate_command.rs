@@ -644,13 +644,8 @@ pub(crate) async fn activate_with_deps_pg(
 
                 let failure_result = record_entry_dispatch_failure(
                     deps,
-                    &run_id,
                     &entry_id,
-                    &card_id,
-                    &agent_id,
-                    *group,
                     "activate_dispatch_create_failed_pg",
-                    &error.to_string(),
                 );
                 crate::auto_queue_log!(
                     warn,

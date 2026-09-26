@@ -1649,6 +1649,11 @@ src/
 │   │   │   ├── voice_cache_sweep.rs
 │   │   │   └── worktree_orphan_sweep.rs
 │   │   └── mod.rs
+│   ├── manual_steer/
+│   │   ├── action_handle.rs
+│   │   ├── admission_intent.rs
+│   │   ├── operation.rs
+│   │   └── record.rs
 │   ├── memory/
 │   │   ├── local.rs
 │   │   ├── memento.rs
@@ -1891,6 +1896,7 @@ src/
 │   ├── kakao_message.rs
 │   ├── kanban.rs
 │   ├── kanban_cards.rs
+│   ├── manual_steer.rs
 │   ├── mcp_config.rs
 │   ├── message_outbox.rs
 │   ├── message_outbox_circuit_authority.rs

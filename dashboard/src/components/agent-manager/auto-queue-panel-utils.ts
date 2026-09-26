@@ -58,6 +58,21 @@ export function batchPhaseLabel(phase: number): string {
   return `P${phase}`;
 }
 
+export const DEPLOY_GATE_KIND = "deploy-gate";
+
+/** Phase → gate kind from the entries' `phase_gate_kind`; a phase is deploy-gate if any of its entries is. */
+export function deriveGateKindByPhase(entries: DispatchQueueEntryType[]): Map<number, string> {
+  const byPhase = new Map<number, string>();
+  for (const entry of entries) {
+    const kind = entry.phase_gate_kind;
+    if (!kind) continue;
+    const phase = entry.batch_phase ?? 0;
+    if (byPhase.get(phase) === DEPLOY_GATE_KIND) continue;
+    byPhase.set(phase, kind);
+  }
+  return byPhase;
+}
+
 export function isCompletedEntry(entry: DispatchQueueEntryType): boolean {
   return (
     entry.status === "done"

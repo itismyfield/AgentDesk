@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Under a build-token holder, refuse before detach and the deploy lock: waiting for the lock
+# would deadlock against a deploy that holds it and waits for the token. Only 73 refuses.
+if [ -n "${ADK_BUILD_TOKEN_HOLDER:-}" ]; then
+    _adk_nested_rc=0
+    python3 "$(dirname "$0")/build_token.py" --refuse-if-nested || _adk_nested_rc=$?
+    if [ "$_adk_nested_rc" -eq 73 ]; then
+        echo "✗ Refusing release deploy: an ancestor holds the build token; run deploy-release.sh unwrapped" >&2
+        exit 73
+    fi
+fi
+
 # --- macOS: always run detached (decouple from the invoking shell/session) ---
 # On macOS the deploy restarts the release dcserver mid-run. When invoked from a
 # tmux/agent session's shell, that restart can perturb the caller and, worse,
@@ -644,13 +655,14 @@ _clean_release_build_cache_after_staging() {
     [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] || return 0
 
     local -a clean_cmd
-    echo "▸ Cleaning ${DEPLOY_BUILD_PROFILE} build cache after staging binary..."
+    echo "▸ Cleaning ${DEPLOY_BUILD_PROFILE} build cache after staging binary (under build token)..."
     if [ "$DEPLOY_BUILD_PROFILE" = "release" ]; then
         clean_cmd=(cargo clean --release)
     else
         clean_cmd=(cargo clean --profile "$DEPLOY_BUILD_PROFILE")
     fi
-    if (cd "$REPO" && "${clean_cmd[@]}"); then
+    # Cleanup is optional, so a busy token costs a short wait and a skip, not the deploy.
+    if (cd "$REPO" && ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS=60 python3 scripts/build_token.py -- "${clean_cmd[@]}"); then
         echo "  ✓ ${DEPLOY_BUILD_PROFILE} build cache cleaned"
     else
         echo "⚠ cargo clean for ${DEPLOY_BUILD_PROFILE} failed; continuing with staged release artifact"

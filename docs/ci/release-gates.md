@@ -44,7 +44,7 @@ postgres`가 제거하는 것만 뺀 나머지를 `scripts/run_test_lane.py`를 
 > `[files]`가 `# BEGIN/END generated pg_db source paths` 구간으로 렌더링되고, 재생성은
 > `python3 scripts/check_pg_test_lane_membership.py --write-pg-db-paths`다. 구간 밖의 수작업 글롭·비소스
 > 트리거(`migrations/**`, `justfile`, `Cargo.*` 등)와 주석은 보존된다. 기본 게이트가 구간 동기화를 함께
-> 검사하고, 무조건 실행되는 `scripts` 잡의 `ci-script-checks.sh`가 재생성 후 `git diff --exit-code`로
+> 검사하고, 무조건 실행되는 `scripts_contracts` 잡의 `ci-script-checks.sh`(`contracts` 샤드)가 재생성 후 `git diff --exit-code`로
 > **커밋된 트리**가 생성 결과와 같은지 확인한다. dorny/paths-filter는 패턴을 각각 picomatch로 컴파일해
 > 전부 OR(`matchers.some`; 이 워크플로는 `predicate-quantifier` 미설정)하므로 `!`는 제외가 아니라 "그 외
 > 전부"를 고르는 양성 매처다(#5232) — `pg_db` 안의 `!`는 구간 앞뒤 무관하게 rc=2이고, 구간 누락·중복·역순도
@@ -249,7 +249,7 @@ bytewise UTF-8 오름차순이어야 하고, 파일은 UTF-8/LF/최종 LF 형식
   이 대조를 생략한 재생성 성공만으로 inventory가 완전하다고 판정하면 안 된다.
 
 `--verify-lib-inventory`는 `cargo test --manifest-path Cargo.toml --lib -- --list`를
-실행하므로 전체 lib 크레이트 컴파일이 필요하다. 이를 호출하는 PR `Script checks runner`와
+실행하므로 전체 lib 크레이트 컴파일이 필요하다. 이를 호출하는 PR `Script checks runner`(`cargo` 샤드)와
 main `Main script checks` job은 모두 Rust 1.94.1 toolchain, sccache, Cargo dependency
 cache를 먼저 설치한다. 이 wiring을 바꾸면 해당 workflow setup과 이 문서의 재현 명령을
 함께 검토한다.
@@ -279,8 +279,9 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scri
 
 ### Always-on (필터 없음)
 
-- **Full tests** / **PostgreSQL tests** / **High-risk recovery** 는 path filter 없이 `main` push 시 무조건 실행. 이 세 gate는 `changes` job의 outputs에 의존하지 않으며 `if:` 조건 없이 정의된다 — `ci-main.yml`에는 `changes` job 자체가 없다(#5232 R3).
+- **Full tests** / **PostgreSQL tests** / **High-risk recovery (main)** 는 path filter 없이 `main` push 시 무조건 실행. 이 세 gate는 `changes` job의 outputs에 의존하지 않으며 `if:` 조건 없이 정의된다 — `ci-main.yml`에는 `changes` job 자체가 없다(#5232 R3).
 - 즉, 커밋이 어떤 파일만 건드리든 이 셋은 실행되고 red면 merge 차단에 준하는 신호다.
+- main/nightly job 이름은 PR 필수 context(`Lint`, `High-risk recovery`, `Dashboard (Node 22)`)와 겹치지 않는다. 워크플로 이름은 check 이름을 구분하지 않아 같은 SHA에 경쟁 게시가 생기므로, `check-ci-runner-hardening.sh`가 트리거와 무관하게 유효 이름(job ID·matrix 접미사 포함)으로 강제한다(#5083).
 
 ### Conditional (`high_risk_recovery` path filter — `ci-pr.yml` 전용)
 
@@ -326,7 +327,14 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scri
 ### Script checks Python runtime
 
 - `scripts/ci-script-checks.sh` 는 Python 3.11+ 를 최소 런타임으로 요구한다. 이는 `tomllib` 같은 Python 3.11 표준 라이브러리 사용과 `scripts/audit_maintainability.py` 정책에 맞춘다.
-- CI의 PR `Script checks runner`와 main `Main script checks` job은 `actions/setup-python`으로 Python 3.11을 명시적으로 설치한다.
+- CI의 PR `Script checks runner`(샤드 잡 전부)와 main `Main script checks` job은 `actions/setup-python`으로 Python 3.11을 명시적으로 설치한다.
+
+### Script checks 샤드
+
+- PR CI는 `ci-script-checks.sh`의 각 검사를 `if run_check <shard> "<title>"; then … fi`로 `guards`·`contracts`·`cargo` 샤드 중 하나에 고정하고, 샤드마다 별도 잡(`scripts_guards`, `scripts_contracts`, `cargo`는 기존 `scripts`)이 `SCRIPT_CHECK_SHARD`로 자기 샤드만 실행한다. Rust toolchain·캐시는 `cargo` 샤드 잡에만 있다. 새 샤드 잡의 raw job 전체(checkout·setup·install·run, `timeout-minutes: 30`)는 `check-ci-runner-hardening.sh`가 고정한다.
+- 샤드가 없는 검사(`banner`만 연 검사)와 모르는 샤드 이름은 모든 샤드·목록 실행에서 실패한다. `run_check` 블록 밖 최상위 명령은 DEBUG trap이 실행 전에 막지만, 바로 앞 블록을 소유한 샤드에서는 그 블록 안으로 간주돼 실행된다. 다른 샤드와 목록 실행은 실패하므로 보장은 필수 `Script checks` 컨텍스트가 red가 되는 것이다. `SCRIPT_CHECK_LIST=1`은 `shard<TAB>title` 목록만 출력하고, `SCRIPT_CHECK_SHARD` 미설정 로컬 실행은 전 검사를 돈다(main `Main script checks`도 동일).
+- 이 가드가 필수 `Script checks`를 red로 만드는 것은 배정 누락·미등록 banner·목록 밖 추가 명령이다. 등록된 검사 본문을 조건으로 건너뛰는 형태(`if run_check … && false; then`, 본문 안 `if false`)는 기계로 막지 않으며 리뷰 대상이다.
+- 필수 `Script checks` 컨텍스트는 샤드 잡마다 `required-check-mirror.sh`를 한 번씩 실행하므로 한 샤드라도 success가 아니면 실패한다. `tests/test_ci_script_check_shards.py`가 샤드 소유와 미러 집계를 검사한다.
 - 로컬에서 `python3` 이 3.10 이하이면 `PYTHON=/path/to/python3.11 ./scripts/ci-script-checks.sh` 로 같은 정책을 재현한다. 지원하지 않는 Python 은 check 본문 실행 전에 명확한 오류로 실패해야 한다.
 
 ## 3. High-risk recovery lane test axes
@@ -372,7 +380,7 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scri
 | --- | --- | --- | --- |
 | Full tests 개별 케이스 red | `<mod>::<test>` (e.g. `pipeline::tests::…`) | `cargo test -p agentdesk <identifier> -- --exact --nocapture` | `agent:project-agentdesk` |
 | PG tests 개별 케이스 red | `<mod>::…_pg_…` / `postgres_…` | `cargo test -p agentdesk <identifier> -- --exact --nocapture` | `agent:project-agentdesk` |
-| High-risk recovery job 자체 red (로그에서 test id 추출 실패) | `job::High-risk recovery` | `_job-level failure; see failing workflow job_` | `agent:project-agentdesk` |
+| High-risk recovery job 자체 red (로그에서 test id 추출 실패) | `job::High-risk recovery` (job 이름의 ` (main)` 접미사는 식별자에서 제거) | `_job-level failure; see failing workflow job_` | `agent:project-agentdesk` |
 | High-risk recovery 개별 시나리오 red | `high_risk_recovery::<submod>::scenario_…` | `cargo test -p agentdesk <identifier> -- --exact --nocapture` | `agent:project-agentdesk` |
 | 인프라 종료(job-level, test id 추출 실패 + SIGTERM/signal 15/exit 143/cancel, **real-failure 신호 없음**) | **미기록 — flaky skip** | (없음, ci-red 미승격) | (없음) |
 | Job-level red + 공유 술어 `scripts/ci/real-failure-predicate.sh` 의 real-failure 신호 — SIGTERM 노이즈 혼재 여부 무관 | `job::<name>` | `_job-level failure; see failing workflow job_` | `agent:project-agentdesk` |

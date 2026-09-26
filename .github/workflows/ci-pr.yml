@@ -655,8 +655,9 @@ jobs:
               - 'routines/**'
             win32_build_token: ['scripts/build_token_win32.py', 'tests/test_build_token_win32_5663.py', '.github/workflows/ci-pr.yml']
 
+  # The required `Dashboard (Node 22)` context is published by dashboard_required_context.
   dashboard:
-    name: Dashboard (Node 22)
+    name: Dashboard (Node 22) runner
     needs: changes
     if: needs.changes.outputs.dashboard == 'true'
     runs-on: ubuntu-latest
@@ -908,7 +909,7 @@ jobs:
         run: ./scripts/required-check-mirror.sh
 
   dashboard_required_context:
-    name: Dashboard required context (ubuntu-latest)
+    name: Dashboard (Node 22)
     needs:
       - changes
       - dashboard
@@ -917,8 +918,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The required context runs this helper, so pin its bytes before use.
+      - name: Pin required-check mirror helper (#5321)
+        env:
+          BASH_ENV: /dev/null
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          helper_path=scripts/required-check-mirror.sh
+          expected=57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d
+          actual="$(sha256sum "$helper_path" | cut -d ' ' -f 1)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error file=$helper_path::content hash mismatch: expected $expected, found $actual; review the helper and update every #5321 helper pin together"
+            exit 1
+          fi
+
       - name: Mirror dashboard result for branch protection
         env:
+          BASH_ENV: /dev/null
           CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
           FILTER_NAME: dashboard
           FILTER_OUTPUT: ${{ needs.changes.outputs.dashboard }}
@@ -1072,8 +1089,9 @@ jobs:
         if: always()
         run: sccache --show-stats || true
 
+  # The required `High-risk recovery` context is published by high_risk_recovery_required_context.
   high-risk-recovery:
-    name: High-risk recovery
+    name: High-risk recovery runner
     needs: changes
     if: needs.changes.outputs.high_risk_recovery == 'true'
     runs-on: ubuntu-latest
@@ -1217,7 +1235,7 @@ jobs:
         run: sccache --show-stats || true
 
   high_risk_recovery_required_context:
-    name: High-risk recovery path-filter mirror (ubuntu-latest)
+    name: High-risk recovery
     needs:
       - changes
       - high-risk-recovery
@@ -1226,8 +1244,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The required context runs this helper, so pin its bytes before use.
+      - name: Pin required-check mirror helper (#5321)
+        env:
+          BASH_ENV: /dev/null
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          helper_path=scripts/required-check-mirror.sh
+          expected=57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d
+          actual="$(sha256sum "$helper_path" | cut -d ' ' -f 1)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error file=$helper_path::content hash mismatch: expected $expected, found $actual; review the helper and update every #5321 helper pin together"
+            exit 1
+          fi
+
       - name: Mirror high-risk recovery result across path-filter skips
         env:
+          BASH_ENV: /dev/null
           CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
           FILTER_NAME: high_risk_recovery
           FILTER_OUTPUT: ${{ needs.changes.outputs.high_risk_recovery }}
@@ -1524,8 +1558,9 @@ jobs:
           UPSTREAM_RESULT: ${{ needs.library_sweep.result }}
         run: ./scripts/required-check-mirror.sh
 
+  # The required `Lint` context is published by lint_required_context.
   lint:
-    name: Lint
+    name: Lint runner
     needs: changes
     # Match check_fast's composite gate so relay-contract-only changes retain
     # fmt/clippy coverage after duplicate linting was removed from that job.
@@ -1568,7 +1603,7 @@ jobs:
         run: sccache --show-stats || true
 
   lint_required_context:
-    name: Lint required context (ubuntu-latest)
+    name: Lint
     needs:
       - changes
       - lint
@@ -1577,8 +1612,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The required context runs this helper, so pin its bytes before use.
+      - name: Pin required-check mirror helper (#5321)
+        env:
+          BASH_ENV: /dev/null
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          helper_path=scripts/required-check-mirror.sh
+          expected=57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d
+          actual="$(sha256sum "$helper_path" | cut -d ' ' -f 1)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error file=$helper_path::content hash mismatch: expected $expected, found $actual; review the helper and update every #5321 helper pin together"
+            exit 1
+          fi
+
       - name: Mirror lint result for branch protection
         env:
+          BASH_ENV: /dev/null
           CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
           FILTER_NAME: rust_or_policy_or_relay_contract
           FILTER_OUTPUT: ${{ needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true' }}
@@ -1711,6 +1762,7 @@ jobs:
           # Required Script checks only run on protected PR candidates. Their
           # synthetic merge first parent is the exact immutable base snapshot.
           TEST_LANE_BASELINE_REF: HEAD^1
+          SCRIPT_CHECK_SHARD: cargo
 
       - name: Upload giant-file progress evidence
         if: always()
@@ -1749,11 +1801,87 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # Parallel Script checks shards without cargo. ci-script-checks.sh assigns
+  # every check to one shard, and the result mirror below requires all of them.
+  scripts_guards:
+    name: Script checks runner (guards)
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python for script checks
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install script-test Python deps
+        run: python3 -m pip install --disable-pip-version-check pyyaml
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck zsh
+
+      - name: Run script checks
+        shell: bash
+        run: ./scripts/ci-script-checks.sh
+        env:
+          BASH_ENV: /dev/null
+          PYTHON: python3
+          GFP_EVENT_NAME: ${{ github.event_name }}
+          GFP_REPOSITORY: ${{ github.repository }}
+          GFP_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          GFP_CANDIDATE_SHA: ${{ github.sha }}
+          GFP_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GFP_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TEST_LANE_BASELINE_REF: HEAD^1
+          SCRIPT_CHECK_SHARD: guards
+
+  scripts_contracts:
+    name: Script checks runner (contracts)
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python for script checks
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install script-test Python deps
+        run: python3 -m pip install --disable-pip-version-check pyyaml
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck zsh
+
+      - name: Run script checks
+        shell: bash
+        run: ./scripts/ci-script-checks.sh
+        env:
+          BASH_ENV: /dev/null
+          PYTHON: python3
+          GFP_EVENT_NAME: ${{ github.event_name }}
+          GFP_REPOSITORY: ${{ github.repository }}
+          GFP_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          GFP_CANDIDATE_SHA: ${{ github.sha }}
+          GFP_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GFP_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TEST_LANE_BASELINE_REF: HEAD^1
+          SCRIPT_CHECK_SHARD: contracts
+
   scripts_required_context:
     name: Script checks
     needs:
       - changes
       - scripts
+      - scripts_guards
+      - scripts_contracts
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -1776,7 +1904,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=d5a67ffc96a91e7787e256561101ff4e7195498b8c9f4f0da9ed00970653f695
+          expected=503881cce0ed2fe2482efe338b3355f4c8260677db1a86e0e41d12f3fcf94e15
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -1786,9 +1914,8 @@ jobs:
           python3 scripts/check_writer_gate_ci_wiring.py
 
       # Keep the branch-protection context on an unconditional result mirror.
-      # required-check-mirror.sh fails closed when either `changes` or the
-      # execution job is skipped, failed, or cancelled, regardless of which
-      # upstream primitive caused that result.
+      # required-check-mirror.sh fails closed when `changes` or any shard job is
+      # skipped, failed, or cancelled, regardless of which primitive caused it.
       - name: Mirror script checks result for branch protection
         env:
           BASH_ENV: /dev/null
@@ -1798,6 +1925,28 @@ jobs:
           FILTER_OUTPUT: true
           UPSTREAM_JOB_NAME: scripts
           UPSTREAM_RESULT: ${{ needs.scripts.result }}
+        run: ./scripts/required-check-mirror.sh
+
+      - name: Mirror script checks guards shard result for branch protection
+        env:
+          BASH_ENV: /dev/null
+          PYTHON: python3
+          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
+          FILTER_NAME: scripts
+          FILTER_OUTPUT: true
+          UPSTREAM_JOB_NAME: scripts_guards
+          UPSTREAM_RESULT: ${{ needs.scripts_guards.result }}
+        run: ./scripts/required-check-mirror.sh
+
+      - name: Mirror script checks contracts shard result for branch protection
+        env:
+          BASH_ENV: /dev/null
+          PYTHON: python3
+          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
+          FILTER_NAME: scripts
+          FILTER_OUTPUT: true
+          UPSTREAM_JOB_NAME: scripts_contracts
+          UPSTREAM_RESULT: ${{ needs.scripts_contracts.result }}
         run: ./scripts/required-check-mirror.sh
 
   # #5071 T0: this required-context candidate is intentionally unconditional.
@@ -1933,7 +2082,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=d5a67ffc96a91e7787e256561101ff4e7195498b8c9f4f0da9ed00970653f695
+          expected=503881cce0ed2fe2482efe338b3355f4c8260677db1a86e0e41d12f3fcf94e15
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

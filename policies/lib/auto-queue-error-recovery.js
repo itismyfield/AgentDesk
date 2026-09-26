@@ -3,8 +3,8 @@
  * #1078: Extracted from auto-queue.js as part of the policy modularization pass.
  *
  * Failure/escalation helpers driven from the tick recovery path:
- *   - `notifyAutoQueueEntryFailure(stuck, failure)` raises a human-facing
- *     Discord alert when an entry transitions to `failed` because of stuck
+ *   - `notifyAutoQueueEntryFailure(stuck, failure)` raises a human-alert
+ *     WARN log line when an entry transitions to `failed` because of stuck
  *     dispatches (orphan/cancelled/failed/phantom).
  *   - `_createConsultationDispatch(entry, agentId, preflightMeta)` creates
  *     a counterpart-provider consultation dispatch when preflight asks for

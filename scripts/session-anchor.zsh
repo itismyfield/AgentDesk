@@ -11,12 +11,18 @@ _adk_anchor_cli() {
     command "$@"
   fi
 }
-cc() { _adk_anchor_cli claude --dangerously-skip-permissions "$@" }
+# claude 는 백그라운드 세션 명령을 첫 인자일 때만 인식하므로 앞에 옵션을 붙이지 않는다.
+_adk_claude_bg_cmd() { case ${1-} in attach|logs|stop|kill|rm|respawn) return 0 ;; esac; return 1 }
+cc() {
+  _adk_claude_bg_cmd "$@" && { command claude "$@"; return }
+  _adk_anchor_cli claude --dangerously-skip-permissions "$@"
+}
 # bare `claude`: bypass 모드를 Shift+Tab 순회에 "선택지로만" 노출한다.
 # 기본 모드는 settings.json의 permissions.defaultMode(auto) 그대로 유지된다.
 # 이미 권한 관련 플래그가 붙은 호출(cc 등)에는 중복으로 넣지 않는다.
 claude() {
   local a
+  _adk_claude_bg_cmd "$@" && { command claude "$@"; return }
   for a in "$@"; do
     case $a in
       --dangerously-skip-permissions|--allow-dangerously-skip-permissions|--permission-mode)
