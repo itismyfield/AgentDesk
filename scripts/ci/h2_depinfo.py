@@ -11,6 +11,7 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 import h2_measure as m
 
@@ -19,6 +20,23 @@ import h2_measure as m
 DATA_INPUTS = ("migrations/postgres/*.sql", "Cargo.toml", "clippy.toml", "defaults.json", "assets/runner-entry.html")
 DATA_INPUT_RE = re.compile("|".join(re.escape(p).replace(r"\*", "[^/]*") for p in DATA_INPUTS))
 ARTIFACT_RE = re.compile(r"lib(\w+)-([0-9a-f]+)\.(?:rmeta|rlib)")
+# The driver's map (tools/modmap-driver/src/modmap.rs): a header, the root lib, then a row per module (`file` or
+# `inline`), per file `include!` splices into a body (`include`) and per macro-made module with hand-written items.
+MODMAP_HEADER = "file\tmodpath\titem_ctx\tident_ctx\tnested\tparent_file\tdecl_span\tattrs\tkind"
+MODMAP_ROOT = "src/lib.rs\tcrate\t#0\t#0\troot\t-\t-\t-\tfile"
+MODMAP_KINDS = ("file", "inline", "include", "wrapped")
+# `name#ctx` per attribute, `path` with its Debug-quoted value; the whole cell must parse, so a `,` in a value is safe.
+ATTR = r'([^#,\[\]\s]+)#(\d+)(?:\["(?:[^"\\]|\\.)*"\])?'
+ATTR_RE, ATTRS_RE = re.compile(ATTR), re.compile(rf"-|{ATTR}(?:,{ATTR})*")
+
+class ModRow(NamedTuple):
+    file: str
+    modpath: str
+    ctx: tuple[int, int]  # SyntaxContext of the item and of its name; 0 is hand-written source
+    nested: str
+    parent_file: str
+    attrs: tuple[tuple[str, int], ...]
+    kind: str
 
 def root_lib_depinfo(root: Path, lines) -> Path:
     """The `deps/<crate>-<hash>.d` whose hash matches the root lib artifact of this clippy run."""
@@ -89,6 +107,50 @@ def canonical_modules(root: Path) -> set[str]:
     real_root = Path(os.path.realpath(root))
     paths = (Path(os.path.realpath(path)) for path in m._module_walk(root)[1])
     return {path.relative_to(real_root).as_posix() for path in paths if path.is_relative_to(real_root)}
+
+def load_modmap(path: Path) -> list[ModRow]:
+    """The rows after the root; a map in any other shape (truncated, reordered, a cell short or extra) raises."""
+    lines = path.read_text(encoding="utf-8").split("\n")
+    if lines[:2] != [MODMAP_HEADER, MODMAP_ROOT] or lines[-1] != "":
+        raise m.MeasureError(f"module map {path} lacks the header and root lib rows or its final newline")
+    rows = []
+    for number, line in enumerate(lines[2:-1], start=3):
+        cells = line.split("\t")
+        if (len(cells) != 9 or not all(cells) or not all(re.fullmatch(r"#\d+", c) for c in cells[2:4])
+                or not ATTRS_RE.fullmatch(cells[7]) or cells[8] not in MODMAP_KINDS):
+            raise m.MeasureError(f"module map {path}:{number} is malformed: {line[:160]!r}")
+        attrs = tuple((name, int(ctx)) for name, ctx in ATTR_RE.findall(cells[7]))
+        rows.append(ModRow(cells[0], cells[1], (int(cells[2][1:]), int(cells[3][1:])), cells[4], cells[5], attrs, cells[8]))
+    return rows
+
+def modmap_problems(rows) -> list[str]:
+    """R-O per file module: hand-written, directly in a module body, a repo `.rs` file, and no `#[path]` in owners.
+    An inline module holding file modules is hand-written with no owner `#[path]` too; `include!` splices nothing, and
+    no macro-made module wraps hand-written items."""
+    problems = []
+    files = [row for row in rows if row.kind == "file"]
+    holders = {"::".join(parts[:n]) for parts in (row.modpath.split("::") for row in files) for n in range(1, len(parts))}
+    for row in rows:
+        if row.kind in ("include", "wrapped"):
+            problems.append(f"R-O: include! splices {row.file} into {row.modpath}" if row.kind == "include"
+                            else f"R-O: macro-made module {row.modpath} wraps hand-written items from {row.file}")
+        if row.kind in ("include", "wrapped") or row.kind == "inline" and row.modpath not in holders:
+            continue
+        file = row.kind == "file"
+        where = f"file module {row.modpath} ({row.file})" if file else f"inline module {row.modpath}"
+        if any(row.ctx):
+            problems.append(f"R-O: {where} is declared by a macro expansion")
+        # an inline mod in a fn body is `module` but not its parent; a holder there leaves `{` in its files' paths
+        if file and (row.nested != "module" or "{" in row.modpath):
+            problems.append(f"R-O: {where} is declared inside {row.nested if row.nested != 'module' else 'an item body'}")
+        if any(ctx for _, ctx in row.attrs):
+            problems.append(f"R-O: {where} carries a macro-made attribute")
+        owner = row.parent_file in m.OWNER_FILES or row.parent_file.startswith(m.OWNER_PREFIXES)
+        if owner and any(name == "path" for name, _ in row.attrs):
+            problems.append(f"R-O: owner file {row.parent_file} mounts {row.file if file else where} via #[path]")
+        if file and (Path(row.file).is_absolute() or not row.file.endswith(".rs")):
+            problems.append(f"R-O: {where} is not a .rs file inside the repo")
+    return problems
 
 def duplicate_mod_problems(lines) -> list[str]:
     problems = []

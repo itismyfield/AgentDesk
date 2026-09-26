@@ -1,0 +1,11 @@
+[package]
+name = "modmap-driver"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[profile.release]
+opt-level = 1
+
+# Its own workspace: rustc_private does not build on stable, so the agentdesk build never includes it.
+[workspace]
