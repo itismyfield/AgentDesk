@@ -6,9 +6,20 @@ use super::*;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 const PANE: &str = "AgentDesk-claude-custody";
-type Episode = (PathBuf, serde_json::Value);
+
+/// Truncates the named transcript to a length between the copier's stat and its read.
+static CUT_BEFORE_COPY: Mutex<Option<(PathBuf, u64)>> = Mutex::new(None);
+
+pub(super) fn before_segment_copy(source: &Path) {
+    let cut = CUT_BEFORE_COPY.lock().unwrap().clone();
+    if let Some((path, len)) = cut.filter(|(path, _)| path == source) {
+        let file = fs::File::options().write(true).open(path).unwrap();
+        file.set_len(len).unwrap();
+    }
+}
 
 /// An owner-1 ExternalInput row whose turn starts at `offset` in `transcript`.
 fn tui_direct_row(channel_id: u64, transcript: &Path, offset: u64) -> InflightTurnState {
@@ -29,13 +40,13 @@ fn transcript(env: &Env, name: &str, prior: &str, turn: &str) -> (PathBuf, u64) 
 }
 
 /// Writes a pending-start record for `provider` and returns its bytes.
-fn pending_start(provider: &str, channel_id: u64, source: &Path, offset: u64) -> Vec<u8> {
+fn pending_start(provider: &str, channel_id: u64, source: Option<(&Path, u64)>) -> Vec<u8> {
     let root = crate::services::discord::runtime_store::tui_direct_pending_start_root().unwrap();
     let record = serde_json::json!({
         "provider": provider, "channel_id": channel_id, "tmux_session_name": PANE,
         "prompt_text": "queued", "anchor_message_id": channel_id + 1,
-        "lease_relay_owner": "watcher", "lease_turn_id": "queued-turn", "generation": G,
-        "created_at_ms": 1, "observed_at_ms": 1, "captured_source": [source, offset],
+        "lease_relay_owner": "watcher", "lease_turn_id": format!("turn-{channel_id}"),
+        "generation": G, "created_at_ms": 1, "observed_at_ms": 1, "captured_source": source,
     });
     let bytes = serde_json::to_vec_pretty(&record).unwrap();
     fs::create_dir_all(&root).unwrap();
@@ -52,41 +63,71 @@ fn custody_root(env: &Env) -> PathBuf {
     env.dir().with_file_name("discord_custody").join("claude")
 }
 
-/// Each preserved episode's directory and manifest, keyed by its channel.
-fn episodes(env: &Env) -> BTreeMap<u64, Episode> {
+/// Every file under `dir`, recursively, with its bytes.
+fn tree(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(tree(&path));
+        } else {
+            files.insert(path.clone(), fs::read(&path).unwrap());
+        }
+    }
+    files
+}
+
+/// Each episode directory, keyed by the channel its marker names.
+fn episodes(env: &Env) -> BTreeMap<u64, PathBuf> {
     let dirs = fs::read_dir(custody_root(env))
         .into_iter()
         .flatten()
         .flatten();
-    dirs.filter_map(|dir| {
-        let manifest = fs::read(dir.path().join("manifest.json")).ok()?;
-        let manifest: serde_json::Value = serde_json::from_slice(&manifest).ok()?;
-        Some((
-            manifest["episode"]["channel_id"].as_u64()?,
-            (dir.path(), manifest),
-        ))
-    })
-    .collect()
-}
-
-fn entry<'a>(episode: &'a Episode, kind: &str) -> Option<&'a serde_json::Value> {
-    let entries = episode.1["entries"].as_array()?;
-    entries.iter().find(|entry| entry["kind"] == kind)
-}
-
-/// Bytes of the copy the `kind` entry points at, if it made one.
-fn copy_of(episode: &Episode, kind: &str) -> Option<Vec<u8>> {
-    let copy = entry(episode, kind)?["copy"].as_str()?;
-    fs::read(episode.0.join(copy)).ok()
-}
-
-/// Every file under the provider's custody root with its bytes.
-fn custody_tree(env: &Env) -> BTreeMap<PathBuf, Vec<u8>> {
-    let dirs = fs::read_dir(custody_root(env)).unwrap().flatten();
-    let files = dirs.flat_map(|dir| fs::read_dir(dir.path()).unwrap().flatten());
-    files
-        .map(|file| (file.path(), fs::read(file.path()).unwrap()))
+    let channel = |dir: &Path| {
+        let marker = ["episode.json", "manifest.json"].map(|name| fs::read(dir.join(name)));
+        let marker: serde_json::Value =
+            serde_json::from_slice(marker.iter().flatten().next()?).ok()?;
+        marker["episode"]["channel_id"].as_u64()
+    };
+    dirs.filter_map(|dir| Some((channel(&dir.path())?, dir.path())))
         .collect()
+}
+
+/// Every manifest entry of an episode with the directory its copy lives in, oldest first.
+fn entries(episode: &Path) -> Vec<(PathBuf, serde_json::Value)> {
+    let manifests = tree(episode).into_iter();
+    let manifests = manifests.filter(|(path, _)| path.ends_with("manifest.json"));
+    manifests
+        .flat_map(|(path, bytes)| {
+            let manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let dir = path.parent().unwrap().to_path_buf();
+            let entries = manifest["entries"].as_array().cloned().unwrap_or_default();
+            entries.into_iter().map(move |entry| (dir.clone(), entry))
+        })
+        .collect()
+}
+
+fn entry(episode: &Path, kind: &str) -> Option<serde_json::Value> {
+    let entries = entries(episode).into_iter();
+    entries
+        .map(|(_, entry)| entry)
+        .find(|entry| entry["kind"] == kind)
+}
+
+/// Bytes of every copy the `kind` entries made, concatenated oldest first.
+fn copy_of(episode: &Path, kind: &str) -> Option<Vec<u8>> {
+    let copies = entries(episode)
+        .into_iter()
+        .filter(|(_, entry)| entry["kind"] == kind);
+    let copies: Vec<Vec<u8>> = copies
+        .filter_map(|(dir, entry)| fs::read(dir.join(entry["copy"].as_str()?)).ok())
+        .collect();
+    (!copies.is_empty()).then(|| copies.concat())
+}
+
+fn append(path: &Path, bytes: &str) {
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    file.write_all(bytes.as_bytes()).unwrap();
 }
 
 // Contract: a live-pane TUI-direct row the reaper unlinks leaves its bytes, its
@@ -111,7 +152,7 @@ async fn reaped_live_pane_tui_direct_row_leaves_a_custody_copy() {
     let episodes = episodes(&env);
     let episode = episodes
         .get(&5_997_001)
-        .expect("custody manifest for the reaped row");
+        .expect("custody marker for the reaped row");
     assert_eq!(copy_of(episode, "row"), Some(bytes));
     assert_eq!(
         copy_of(episode, "transcript"),
@@ -141,8 +182,8 @@ async fn custody_copies_every_tui_direct_turn_and_only_the_bytes_of_other_rows()
         env.seed(state, 0);
     }
     let (queued, queued_offset) = transcript(&env, "queued.jsonl", "old\n", "queued turn\n");
-    let record = pending_start("claude", 5_997_014, &queued, queued_offset);
-    pending_start("codex", 5_997_015, &queued, queued_offset);
+    let record = pending_start("claude", 5_997_014, Some((&queued, queued_offset)));
+    pending_start("codex", 5_997_015, Some((&queued, queued_offset)));
 
     boot().await;
     let episodes = episodes(&env);
@@ -167,29 +208,89 @@ async fn custody_copies_every_tui_direct_turn_and_only_the_bytes_of_other_rows()
     );
 }
 
-// Contract: a later boot that meets an episode already in custody adds nothing and
-// leaves the first copy and its marker untouched.
+// Contract: a boot that finds nothing new adds nothing, and output appended after an
+// earlier copy is preserved before a later boot reaps the row.
 #[tokio::test]
-async fn a_later_boot_does_not_duplicate_an_episode_already_in_custody() {
+async fn a_later_boot_preserves_output_appended_since_the_last_copy() {
     let env = Env::new();
-    let (out, offset) = transcript(&env, "kept.jsonl", "old\n", "turn\n");
-    env.seed(&tui_direct_row(5_997_021, &out, offset), 0);
+    set_test_tmux_alive_override(Some(&[PANE]));
+    let (out, offset) = transcript(&env, "grow.jsonl", "old\n", "turn\n");
+    let mut state = tui_direct_row(5_997_021, &out, offset);
+    state.set_restart_mode(InflightRestartMode::DrainRestart);
+    (state.born_generation, state.restart_generation) = (G - 3, Some(G - 1));
+    let path = env.seed(&state, 0);
     assert_eq!(boot().await.kept, 1);
-    let first = custody_tree(&env);
+    let first = tree(&custody_root(&env));
     assert!(!first.is_empty());
-
-    let mut appended = fs::OpenOptions::new().append(true).open(&out).unwrap();
-    appended.write_all(b"later\n").unwrap();
-    crate::services::discord::runtime_store::set_process_generation_for_tests(Some(G + 1));
     assert_eq!(boot().await.kept, 1);
-    assert_eq!(custody_tree(&env), first);
+    assert_eq!(tree(&custody_root(&env)), first);
+
+    append(&out, "later\n");
+    crate::services::discord::runtime_store::set_process_generation_for_tests(Some(G + 1));
+    let report = boot().await;
+    assert_eq!(
+        (report.reaped_stale, path.exists()),
+        (1, false),
+        "{report:?}"
+    );
+    let episodes = episodes(&env);
+    assert_eq!(episodes.len(), 1);
+    assert_eq!(
+        copy_of(&episodes[&5_997_021], "transcript"),
+        Some(b"turn\nlater\n".to_vec())
+    );
+}
+
+// Contract: a pending-start record without a captured source and the row later claimed
+// from it are one episode.
+#[tokio::test]
+async fn a_pending_start_and_the_row_claimed_from_it_are_one_episode() {
+    let env = Env::new();
+    let (out, offset) = transcript(&env, "claimed.jsonl", "old\n", "turn\n");
+    let record = pending_start("claude", 5_997_031, None);
+    boot().await;
+
+    let root = crate::services::discord::runtime_store::tui_direct_pending_start_root().unwrap();
+    fs::remove_dir_all(root).unwrap();
+    env.seed(&tui_direct_row(5_997_031, &out, offset), 0);
+    boot().await;
+    let dirs = fs::read_dir(custody_root(&env)).unwrap().count();
+    let episode = &episodes(&env)[&5_997_031];
+    assert_eq!(dirs, 1);
+    assert_eq!(copy_of(episode, "pending_start"), Some(record));
+    assert_eq!(copy_of(episode, "transcript"), Some(b"turn\n".to_vec()));
+}
+
+// Contract: a transcript cut short between the stat and the copy is recorded as an
+// incomplete copy, and the next boot copies the turn again instead of treating it as held.
+#[tokio::test]
+async fn a_transcript_cut_short_during_the_copy_is_recorded_incomplete_and_retried() {
+    let env = Env::new();
+    let (out, offset) = transcript(&env, "cut.jsonl", "old\n", "turn body\n");
+    env.seed(&tui_direct_row(5_997_041, &out, offset), 0);
+    *CUT_BEFORE_COPY.lock().unwrap() = Some((out.clone(), offset + 4));
+    boot().await;
+    *CUT_BEFORE_COPY.lock().unwrap() = None;
+    let episode = episodes(&env)[&5_997_041].clone();
+    let segment = entry(&episode, "transcript").unwrap();
+    assert!(
+        segment["copy"].is_null() && segment["error"].is_string(),
+        "{segment}"
+    );
+
+    fs::write(&out, "old\nturn body\n").unwrap();
+    boot().await;
+    assert_eq!(
+        copy_of(&episode, "transcript"),
+        Some(b"turn body\n".to_vec())
+    );
 }
 
 // Contract: when custody cannot be written, the reaper still retires rows and boot goes on.
 #[tokio::test]
 async fn an_unwritable_custody_root_does_not_stop_the_reaper() {
     let env = Env::new();
-    let path = env.seed(&row(5_997_031, None), STALE);
+    let path = env.seed(&row(5_997_061, None), STALE);
     let blocker = env.dir().with_file_name("discord_custody");
     fs::write(&blocker, "not a directory").unwrap();
 
@@ -214,11 +315,10 @@ async fn a_transcript_turn_over_the_copy_cap_is_recorded_not_copied() {
         .unwrap()
         .set_len((64 << 20) + 1)
         .unwrap();
-    env.seed(&tui_direct_row(5_997_041, &out, 0), 0);
+    env.seed(&tui_direct_row(5_997_071, &out, 0), 0);
 
     boot().await;
-    let episodes = episodes(&env);
-    let episode = &episodes[&5_997_041];
+    let episode = &episodes(&env)[&5_997_071];
     let segment = entry(episode, "transcript").unwrap();
     assert_eq!(segment["source"].as_str(), out.to_str());
     assert_eq!(segment["offset"].as_u64(), Some(0));
@@ -228,6 +328,11 @@ async fn a_transcript_turn_over_the_copy_cap_is_recorded_not_copied() {
             .is_some_and(|hash| hash.len() == 64)
     );
     assert!(segment["copy"].is_null(), "{segment}");
-    let files = fs::read_dir(&episode.0).unwrap().count();
-    assert_eq!((files, copy_of(episode, "row").is_some()), (2, true));
+    let parts = tree(episode)
+        .into_keys()
+        .filter(|path| path.extension() == Some("part".as_ref()));
+    assert_eq!(
+        (parts.count(), copy_of(episode, "row").is_some()),
+        (0, true)
+    );
 }

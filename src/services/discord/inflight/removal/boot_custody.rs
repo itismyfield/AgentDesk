@@ -210,6 +210,8 @@ fn segment_entry(dir: &Path, name: String, source: &Path, offset: u64) -> serde_
         if len > SEGMENT_COPY_CAP {
             return Err(std::io::Error::other("turn exceeds the copy cap"));
         }
+        #[cfg(test)]
+        super::boot_custody_tests::before_segment_copy(source);
         file.seek(SeekFrom::Start(offset))?;
         std::io::copy(&mut file.take(len), &mut fs::File::create(dir.join(&name))?)?;
         Ok(name.clone())
