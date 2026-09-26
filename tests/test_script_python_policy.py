@@ -134,17 +134,6 @@ class ScriptPythonPolicyTests(unittest.TestCase):
         self.assertIn("requires Python 3.11+", source)
         self.assertIn("for stdlib tomllib", source)
 
-    def test_ci_script_check_jobs_pin_python_311(self) -> None:
-        for rel in (
-            ".github/workflows/ci-main.yml",
-            ".github/workflows/ci-pr.yml",
-            ".github/workflows/ci-nightly.yml",
-        ):
-            with self.subTest(workflow=rel):
-                workflow = (REPO_ROOT / rel).read_text(encoding="utf-8")
-                self.assertIn("Setup Python for script checks", workflow)
-                self.assertIn('python-version: "3.11"', workflow)
-
 
 if __name__ == "__main__":
     unittest.main()

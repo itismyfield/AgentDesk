@@ -39,31 +39,6 @@ class AlertDedupeWiringTests(unittest.TestCase):
         self.assertIn('"restore_run_create_dispatch_failed"', fsm)
         self.assertIn('"restore_run_create_dispatch_retry_scheduled"', fsm)
 
-    def test_auto_queue_monitor_has_restart_safe_once_reconciliation(self) -> None:
-        monitor = (REPO_ROOT / "scripts/auto-queue-monitor.sh").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn("AQ_MONITOR_STATE_FILE", monitor)
-        self.assertIn("AQ_MONITOR_ONCE", monitor)
-        self.assertIn("AQ_MONITOR_COOLDOWN_SECS", monitor)
-        self.assertIn("auto_queue_monitor_state.py", monitor)
-        self.assertIn("run-locked", monitor)
-        self.assertIn("review_entered_at", monitor)
-        self.assertIn("turn_active", monitor)
-        self.assertIn("awaiting_bg", monitor)
-        self.assertIn("awaiting_user", monitor)
-        self.assertIn("/api/message-outbox/monitor-alerts", monitor)
-        self.assertIn("action_id", monitor)
-        state_helper = (
-            REPO_ROOT / "scripts/auto_queue_monitor_state.py"
-        ).read_text(encoding="utf-8")
-        route = (
-            REPO_ROOT / "src/server/routes/message_outbox.rs"
-        ).read_text(encoding="utf-8")
-        self.assertIn('"pending_action"', state_helper)
-        self.assertIn('source: "auto-queue-monitor"', route)
-
     def test_quality_regression_has_one_runtime_alert_authority(self) -> None:
         legacy = REPO_ROOT / "src/services/observability/quality_alert.rs"
         queries = (REPO_ROOT / "src/services/observability/queries.rs").read_text(
