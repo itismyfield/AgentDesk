@@ -5,6 +5,7 @@ import {
   buildOverridePayload,
   buildPipelineGraph,
   buildStageSavePayload,
+  clonePipelineConfig,
   extractOverrideExtras,
   normalizeStageTrigger,
   stageDraftFromApi,
@@ -45,13 +46,6 @@ function makePipeline(): PipelineConfigFull {
     clocks: {
       review: {
         set: "review_entered_at",
-      },
-    },
-    timeouts: {
-      review: {
-        duration: "30m",
-        clock: "review_entered_at",
-        on_exhaust: "review",
       },
     },
     phase_gate: {
@@ -152,6 +146,26 @@ describe("pipeline-visual-editor-model", () => {
     expect(payload.note).toBe("keep me");
     expect(payload.states).toHaveLength(6);
     expect(payload.phase_gate?.dispatch_type).toBe("phase-gate");
+  });
+
+  it("drops a stored timeouts section instead of saving it back", () => {
+    const extras = extractOverrideExtras({
+      timeouts: { review: { duration: "30m", clock: "review_entered_at" } },
+      note: "keep me",
+    });
+    const payload = buildOverridePayload(makePipeline(), extras);
+
+    expect(payload).not.toHaveProperty("timeouts");
+    expect(payload.note).toBe("keep me");
+  });
+
+  it("clones and saves a GET response that has no timeouts section", () => {
+    const pipeline = makePipeline();
+    expect(pipeline).not.toHaveProperty("timeouts");
+
+    const clone = clonePipelineConfig(pipeline);
+    expect(clone).toEqual(pipeline);
+    expect(buildOverridePayload(clone)).not.toHaveProperty("timeouts");
   });
 
   it("does not throw when the pipeline has no events map (runtime payload may omit it)", () => {
