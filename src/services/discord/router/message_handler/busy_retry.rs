@@ -24,6 +24,7 @@ pub(super) struct FinalizeEnqueueContext<'a> {
         Option<&'a crate::services::discord::router::turn_start::FormattedSessionRetryContext>,
     pub(super) feedback_reminder: Option<&'a str>,
     pub(super) wip_warning: Option<&'a str>,
+    pub(super) notice_override: Option<&'static str>,
 }
 
 pub(super) async fn finalize_enqueue(
@@ -41,6 +42,7 @@ pub(super) async fn finalize_enqueue(
         session_retry_context,
         feedback_reminder,
         wip_warning,
+        notice_override,
     } = context;
     let accepted = present_or_accepted(outcome);
     if outcome.enqueued {
@@ -76,6 +78,7 @@ pub(super) async fn finalize_enqueue(
             feedback_reminder,
             wip_warning,
             outcome.refusal_reason,
+            notice_override,
         )
         .await;
         crate::services::discord::turn_view_reconciler::note_intake_turn_cleared_current(

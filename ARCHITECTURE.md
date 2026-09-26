@@ -1010,6 +1010,7 @@ src/
 │   │   │   │   │   ├── intake_dispatch.rs
 │   │   │   │   │   ├── placeholder_handoff.rs
 │   │   │   │   │   ├── race_loss.rs
+│   │   │   │   │   ├── row_construction.rs
 │   │   │   │   │   ├── runtime_transition.rs
 │   │   │   │   │   ├── stale_dispatch_guard.rs
 │   │   │   │   │   ├── voice_intake.rs

@@ -13,6 +13,7 @@ mod dispatch_stamp;
 pub(crate) mod inflight_create_log;
 mod placeholder_handoff;
 pub(super) mod race_loss;
+mod row_construction;
 mod runtime_transition;
 mod stale_dispatch_guard;
 mod voice_intake;
@@ -2050,6 +2051,38 @@ pub(super) async fn handle_text_message(
             None
         }
     };
+    let finalize_ctx = |notice_override| busy_retry::FinalizeEnqueueContext {
+        shared,
+        http,
+        provider: &provider,
+        channel_id,
+        user_msg_id,
+        placeholder_msg_id,
+        turn_start_attempt,
+        session_retry_context: session_retry_context.as_ref(),
+        feedback_reminder: feedback_reminder.as_deref(),
+        wip_warning: wip_warning.as_deref(),
+        notice_override,
+    };
+    let post_awaiting_user = || {
+        post_adk_session_status(
+            adk_session_key.as_deref(),
+            adk_session_name.as_deref(),
+            Some(provider.as_str()),
+            "awaiting_user",
+            &provider,
+            Some(&adk_session_info),
+            None,
+            Some(&current_path),
+            dispatch_id.as_deref(),
+            adk_thread_channel_id,
+            Some(channel_id),
+            role_binding
+                .as_ref()
+                .map(|binding| binding.role_id.as_str()),
+            shared.api_port,
+        )
+    };
     #[cfg(unix)]
     if let Some(diagnostic) = tui_busy_diagnostic {
         let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
@@ -2079,22 +2112,8 @@ pub(super) async fn handle_text_message(
                 .await
                 .intervention_queue
                 .len();
-        let retry_present_or_accepted = busy_retry::finalize_enqueue(
-            busy_retry::FinalizeEnqueueContext {
-                shared,
-                http,
-                provider: &provider,
-                channel_id,
-                user_msg_id,
-                placeholder_msg_id,
-                turn_start_attempt,
-                session_retry_context: session_retry_context.as_ref(),
-                feedback_reminder: feedback_reminder.as_deref(),
-                wip_warning: wip_warning.as_deref(),
-            },
-            &enqueue_outcome,
-        )
-        .await;
+        let retry_present_or_accepted =
+            busy_retry::finalize_enqueue(finalize_ctx(None), &enqueue_outcome).await;
         let queued_card_rendered = false;
         let queue_kickoff_scheduled =
             queue_kickoff_scheduled_by_release || retry_present_or_accepted;
@@ -2146,26 +2165,8 @@ pub(super) async fn handle_text_message(
             "claude_tui_followup_busy_pre_submit",
             diagnostic_json,
         );
-        super::super::super::saturating_decrement_global_active(shared);
-        shared.turn_start_times.remove(&channel_id);
-        post_adk_session_status(
-            adk_session_key.as_deref(),
-            adk_session_name.as_deref(),
-            Some(provider.as_str()),
-            "awaiting_user",
-            &provider,
-            Some(&adk_session_info),
-            None,
-            Some(&current_path),
-            dispatch_id.as_deref(),
-            adk_thread_channel_id,
-            Some(channel_id),
-            role_binding
-                .as_ref()
-                .map(|binding| binding.role_id.as_str()),
-            shared.api_port,
-        )
-        .await;
+        row_construction::abandon_claimed_start(shared, channel_id, &cancel_token);
+        post_awaiting_user().await;
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
             "  [{ts}] 📬 Claude TUI busy follow-up queued before prompt submission (channel {}, enqueued={}, merged={}, depth={}, card_rendered={}, queue_kickoff_scheduled={})",
@@ -2176,9 +2177,6 @@ pub(super) async fn handle_text_message(
             queued_card_rendered,
             queue_kickoff_scheduled
         );
-        cancel_token
-            .cancelled
-            .store(true, std::sync::atomic::Ordering::Relaxed);
         // #3813 Phase 1a: prep done but input deferred pre-submit (TUI busy) —
         // emit the partial span (input/total render `-`); the retry re-enters
         // intake and emits its own `submitted` span.
@@ -2247,10 +2245,7 @@ pub(super) async fn handle_text_message(
             .unwrap_or((None, None, None))
     };
     inflight_state.set_worktree_context(worktree_path, worktree_branch, base_commit);
-    // FIX #6 (Codex P2): persist the originating Intervention's follow-up
-    // requeue context so a PRE-submit busy-timeout requeue
-    // (`mailbox_requeue_inflight_for_followup_retry`) can rebuild the retry
-    // Intervention without losing reply context / attachments / voice metadata.
+    // Lets any pre-submit requeue rebuild the Intervention with its full follow-up context.
     inflight_state.set_followup_requeue_context(
         reply_context.clone(),
         has_reply_boundary,
@@ -2267,12 +2262,17 @@ pub(super) async fn handle_text_message(
     }
     inflight_state.session_key = adk_session_key.clone();
     inflight_state.dispatch_id = dispatch_id.clone();
-    inflight_create_log::record_turn_start_origin(&provider, channel_id, &inflight_state).await;
-    inflight_create_log::log_create_new_inflight_outcome(
-        super::super::super::inflight::save_inflight_state_create_new(&inflight_state),
+    let construction = row_construction::construct_or_refuse(
+        shared,
         &provider,
-        &inflight_state,
+        &cancel_token,
+        original_request_owner,
+        inflight_state,
     );
+    let mut inflight_state = match construction.await {
+        Ok(row) => row,
+        Err(refused) => return refused.abandon(finalize_ctx, post_awaiting_user).await,
+    };
 
     // Create channel for streaming
     let (tx, rx) = mpsc::channel();

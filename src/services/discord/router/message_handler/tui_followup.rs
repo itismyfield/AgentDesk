@@ -9,6 +9,8 @@ pub(super) const CLAUDE_TUI_BUSY_FOLLOWUP_DEDUP_NOTICE: &str =
     "📬 방금 동일한 메시지가 큐에 적재되어 중복으로 무시했습니다. 큐 결과를 기다려 주세요.";
 pub(super) const CLAUDE_TUI_BUSY_FOLLOWUP_QUEUE_UNREACHABLE_NOTICE: &str =
     "⚠ 내부 처리 큐에 접근하지 못해 이 메시지를 적재하지 못했습니다. 잠시 후 다시 보내 주세요.";
+pub(super) const INTAKE_START_REFUSED_NOTICE: &str =
+    "⚠ 시작 전에 채널 턴이 정리되어 이 메시지는 처리되지 않았습니다. 다시 보내 주세요.";
 pub(super) fn claude_tui_busy_followup_refusal_notice(
     reason: Option<crate::services::turn_orchestrator::EnqueueRefusalReason>,
 ) -> &'static str {
@@ -1172,6 +1174,7 @@ pub(super) async fn apply_tui_busy_enqueue_refusal(
     feedback_reminder: Option<&str>,
     wip_warning: Option<&str>,
     refusal_reason: Option<crate::services::turn_orchestrator::EnqueueRefusalReason>,
+    notice_override: Option<&'static str>,
 ) {
     put_back_session_retry_context(
         shared,
@@ -1203,7 +1206,8 @@ pub(super) async fn apply_tui_busy_enqueue_refusal(
         feedback_reminder,
         refusal_reason.map(|reason| reason.as_str()),
     );
-    let notice = claude_tui_busy_followup_refusal_notice(refusal_reason);
+    let notice =
+        notice_override.unwrap_or_else(|| claude_tui_busy_followup_refusal_notice(refusal_reason));
     let _ = super::super::super::http::edit_channel_message(
         http,
         channel_id,
