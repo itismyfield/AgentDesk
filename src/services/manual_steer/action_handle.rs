@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use super::operation::deserialize_fixed_str;
+
 const CUSTOM_ID_PREFIX: &str = "msteer:";
 const CUSTOM_ID_VERSION: &str = "v1";
 const HANDLE_BYTES: usize = 16;
@@ -76,8 +78,11 @@ impl Serialize for ActionHandle {
 
 impl<'de> Deserialize<'de> for ActionHandle {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(deserializer)?;
-        Self::from_hex(&text).ok_or_else(|| serde::de::Error::custom("invalid action handle"))
+        deserialize_fixed_str(
+            deserializer,
+            "a nonzero 128-bit lowercase hex handle",
+            Self::from_hex,
+        )
     }
 }
 

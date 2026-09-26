@@ -1,15 +1,25 @@
-//! Versioned durable encoding of a manual-steer operation. Decoding fails closed: an unknown
-//! version, unknown or missing field, or invalid identity is an error, never a default.
+//! Versioned durable encoding of a manual-steer operation. Decoding fails closed: an oversized or
+//! noncanonical record, unknown version, unknown or missing field, or invalid identity is an error.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::operation::ManualSteerOperation;
 
 pub(crate) const RECORD_SCHEMA_VERSION: u32 = 1;
 
+/// Queue merging folds consecutive same-author messages without a count limit; this is far past
+/// any human burst and bounds what one operation may name.
+pub(crate) const MAX_SOURCES: usize = 1024;
+
+/// A source encodes to at most 77 bytes (budgeted at 80); 2 KiB covers every fixed field.
+const MAX_RECORD_BYTES: usize = 2048 + MAX_SOURCES * 80;
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RecordError {
     UnsupportedVersion(u32),
+    /// Over the byte budget (refused before any parse) or the source budget.
+    TooLarge,
     Malformed(String),
 }
 
@@ -32,23 +42,49 @@ struct RecordIn {
     operation: ManualSteerOperation,
 }
 
-pub(crate) fn encode_record(operation: &ManualSteerOperation) -> Vec<u8> {
-    serde_json::to_vec(&RecordOut {
-        schema_version: RECORD_SCHEMA_VERSION,
-        operation,
-    })
-    .expect("manual-steer record contains only JSON-safe values")
+/// Refuses an operation over the source budget so no written record is unreadable.
+pub(crate) fn encode_record(operation: &ManualSteerOperation) -> Result<Vec<u8>, RecordError> {
+    check_source_budget(operation)?;
+    Ok(serde_json::to_vec(&record_out(operation))
+        .expect("manual-steer record contains only JSON-safe values"))
 }
 
 pub(crate) fn decode_record(bytes: &[u8]) -> Result<ManualSteerOperation, RecordError> {
+    if bytes.len() > MAX_RECORD_BYTES {
+        return Err(RecordError::TooLarge);
+    }
     let malformed = |err: serde_json::Error| RecordError::Malformed(err.to_string());
     let probe: VersionProbe = serde_json::from_slice(bytes).map_err(malformed)?;
     if probe.schema_version != RECORD_SCHEMA_VERSION {
         return Err(RecordError::UnsupportedVersion(probe.schema_version));
     }
+    // Typed parse runs on the raw bytes so duplicate keys stay an error.
     let record: RecordIn = serde_json::from_slice(bytes).map_err(malformed)?;
+    check_source_budget(&record.operation)?;
     validate_identity(&record.operation)?;
+    // Serde also accepts positional arrays for structs; only the object form re-encodes equal.
+    let canonical = serde_json::to_value(record_out(&record.operation))
+        .expect("manual-steer record contains only JSON-safe values");
+    if serde_json::from_slice::<Value>(bytes).map_err(malformed)? != canonical {
+        return Err(RecordError::Malformed(
+            "noncanonical record shape".to_string(),
+        ));
+    }
     Ok(record.operation)
+}
+
+fn record_out(operation: &ManualSteerOperation) -> RecordOut<'_> {
+    RecordOut {
+        schema_version: RECORD_SCHEMA_VERSION,
+        operation,
+    }
+}
+
+fn check_source_budget(operation: &ManualSteerOperation) -> Result<(), RecordError> {
+    if operation.identity.sources.len() > MAX_SOURCES {
+        return Err(RecordError::TooLarge);
+    }
+    Ok(())
 }
 
 fn validate_identity(operation: &ManualSteerOperation) -> Result<(), RecordError> {
@@ -111,7 +147,7 @@ mod tests {
     }
 
     fn encoded_json(operation: &ManualSteerOperation) -> Value {
-        serde_json::from_slice(&encode_record(operation)).unwrap()
+        serde_json::from_slice(&encode_record(operation).unwrap()).unwrap()
     }
 
     fn decode_json(value: &Value) -> Result<ManualSteerOperation, RecordError> {
@@ -147,7 +183,10 @@ mod tests {
         );
         for stage in stages {
             let bare = operation(stage);
-            assert_eq!(decode_record(&encode_record(&bare)), Ok(bare.clone()));
+            assert_eq!(
+                decode_record(&encode_record(&bare).unwrap()),
+                Ok(bare.clone())
+            );
 
             let mut observed = bare;
             observed.evidence = EvidenceState {
@@ -157,8 +196,61 @@ mod tests {
                 no_evidence_since_ms: Some(1_700_000_000_500),
             };
             observed.wire_digest = Some(Bytes256::digest_of(b"wire"));
-            assert_eq!(decode_record(&encode_record(&observed)), Ok(observed));
+            assert_eq!(
+                decode_record(&encode_record(&observed).unwrap()),
+                Ok(observed)
+            );
         }
+    }
+
+    #[test]
+    fn record_budget_admits_the_widest_record_and_rejects_past_each_limit() {
+        let mut widest = operation(OperationStage::Retired(Settlement::Unresolved(
+            UnresolvedReason::ConsumptionUnknown,
+        )));
+        let identity = &mut widest.identity;
+        identity.channel_id = u64::MAX;
+        identity.entry_id = u64::MAX;
+        identity.entry_version = u64::MAX;
+        identity.ordinal = u64::MAX;
+        identity.runtime_incarnation = u64::MAX;
+        identity.card = CardBinding {
+            card_message_id: u64::MAX,
+            epoch: u64::MAX,
+        };
+        let widest_source = SourceRef {
+            message_id: u64::MAX,
+            queued_generation: u64::MAX,
+        };
+        identity.sources = vec![widest_source; MAX_SOURCES];
+        widest.evidence = EvidenceState {
+            consumed_in_a: true,
+            a_episode_ended: true,
+            delivery_failed: true,
+            no_evidence_since_ms: Some(i64::MIN),
+        };
+        widest.permit_expires_at_ms = i64::MIN;
+        widest.wire_digest = Some(Bytes256::digest_of(b"wire"));
+        let mut bytes = encode_record(&widest).unwrap();
+        assert!(bytes.len() <= MAX_RECORD_BYTES);
+        bytes.resize(MAX_RECORD_BYTES, b' ');
+        assert_eq!(decode_record(&bytes), Ok(widest.clone()));
+        bytes.push(b' ');
+        assert_eq!(decode_record(&bytes), Err(RecordError::TooLarge));
+
+        let mut crowded = operation(OperationStage::Queued);
+        crowded.identity.sources = (1..=MAX_SOURCES as u64 + 1)
+            .map(|message_id| SourceRef {
+                message_id,
+                queued_generation: 1,
+            })
+            .collect();
+        assert_eq!(encode_record(&crowded), Err(RecordError::TooLarge));
+        let mut value = encoded_json(&operation(OperationStage::Queued));
+        value["operation"]["identity"]["sources"] = json!(crowded.identity.sources);
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert!(bytes.len() <= MAX_RECORD_BYTES);
+        assert_eq!(decode_record(&bytes), Err(RecordError::TooLarge));
     }
 
     #[test]
@@ -234,6 +326,18 @@ mod tests {
             ("zero card id", |v| {
                 v["operation"]["identity"]["card"]["card_message_id"] = json!(0);
             }),
+            ("positional evidence", |v| {
+                v["operation"]["evidence"] = json!([true, false, false, null]);
+            }),
+            ("positional card binding", |v| {
+                v["operation"]["identity"]["card"] = json!([33, 1])
+            }),
+            ("positional source", |v| {
+                v["operation"]["identity"]["sources"][0] = json!([22, 4])
+            }),
+            ("positional stage fields", |v| {
+                v["operation"]["stage"] = json!({"mutation_armed": [true]})
+            }),
         ];
         assert!(
             decode_json(&base).is_ok(),
@@ -247,5 +351,15 @@ mod tests {
                 "{label} must be rejected"
             );
         }
+        // A repeated key is rejected, never resolved last-wins.
+        let text = serde_json::to_string(&base).unwrap().replacen(
+            "\"channel_id\":11",
+            "\"channel_id\":0,\"channel_id\":11",
+            1,
+        );
+        assert!(matches!(
+            decode_record(text.as_bytes()),
+            Err(RecordError::Malformed(_))
+        ));
     }
 }

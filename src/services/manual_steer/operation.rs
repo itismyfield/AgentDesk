@@ -1,5 +1,8 @@
 //! Durable manual-steer operation: a queue work receipt, never a turn owner.
 
+use std::fmt;
+
+use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::action_handle::ActionHandle;
@@ -35,9 +38,35 @@ impl Serialize for Bytes256 {
 
 impl<'de> Deserialize<'de> for Bytes256 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(deserializer)?;
-        Self::from_hex(&text).ok_or_else(|| serde::de::Error::custom("invalid 256-bit hex value"))
+        deserialize_fixed_str(
+            deserializer,
+            "a 256-bit lowercase hex value",
+            Self::from_hex,
+        )
     }
+}
+
+/// Hands the input string to `parse` without building an owned `String`, so an overlong value
+/// is refused by its length check rather than copied first.
+pub(super) fn deserialize_fixed_str<'de, D: Deserializer<'de>, T>(
+    deserializer: D,
+    expecting: &'static str,
+    parse: fn(&str) -> Option<T>,
+) -> Result<T, D::Error> {
+    struct FixedStr<T> {
+        expecting: &'static str,
+        parse: fn(&str) -> Option<T>,
+    }
+    impl<T> Visitor<'_> for FixedStr<T> {
+        type Value = T;
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str(self.expecting)
+        }
+        fn visit_str<E: de::Error>(self, text: &str) -> Result<T, E> {
+            (self.parse)(text).ok_or_else(|| E::custom(format_args!("expected {}", self.expecting)))
+        }
+    }
+    deserializer.deserialize_str(FixedStr { expecting, parse })
 }
 
 /// One Discord source message folded into the entry, at the generation it was queued.
