@@ -325,6 +325,7 @@ src/
 │   │   ├── health_api/
 │   │   │   ├── public_projection.rs
 │   │   │   ├── runtime_profile.rs
+│   │   │   ├── session_repair.rs
 │   │   │   └── unread_tail_attribution_tests.rs
 │   │   ├── review_verdict/
 │   │   │   ├── decision_route.rs
@@ -1652,6 +1653,8 @@ src/
 │   │   ├── repo_resolver.rs
 │   │   ├── runner.rs
 │   │   └── worktree_resolver.rs
+│   ├── health_diagnostics/
+│   │   └── session_state.rs
 │   ├── kakao/
 │   │   ├── account.rs
 │   │   ├── calendar.rs

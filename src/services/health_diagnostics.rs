@@ -352,13 +352,16 @@ pub async fn is_recent_cluster_worker(
         == Some("worker")
 }
 
+mod session_state;
+
 pub async fn load_channel_session_state(
     pg_pool: Option<&PgPool>,
     channel_id: u64,
-) -> Option<ChannelSessionState> {
+) -> Result<Option<ChannelSessionState>, String> {
+    let pool = pg_pool.ok_or_else(|| "postgres pool unavailable".to_string())?;
     let channel_id = channel_id.to_string();
-    if let Some(pool) = pg_pool {
-        let row = sqlx::query(
+    session_state::load_with(
+        sqlx::query(
             "SELECT agent_id, provider, status, active_dispatch_id, thread_channel_id
                FROM sessions
               WHERE thread_channel_id = $1
@@ -366,19 +369,10 @@ pub async fn load_channel_session_state(
               LIMIT 1",
         )
         .bind(&channel_id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()?;
-        return Some(ChannelSessionState {
-            agent_id: row.try_get("agent_id").ok(),
-            provider: row.try_get("provider").ok(),
-            status: row.try_get("status").ok(),
-            active_dispatch_id: row.try_get("active_dispatch_id").ok(),
-            thread_channel_id: row.try_get("thread_channel_id").ok(),
-        });
-    }
-    None
+        .fetch_optional(pool),
+        |row, field| row.try_get::<Option<String>, _>(field),
+    )
+    .await
 }
 
 /// #2049 Finding 16: match the handler-layer definition of "no live work".
@@ -406,39 +400,10 @@ pub async fn mark_channel_sessions_disconnected(
 }
 
 pub async fn enrich_mailbox_session_state(json: &mut serde_json::Value, pg_pool: Option<&PgPool>) {
-    let Some(mailboxes) = json
-        .get_mut("mailboxes")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return;
-    };
-    for mailbox in mailboxes {
-        let Some(channel_id) = mailbox
-            .get("channel_id")
-            .and_then(serde_json::Value::as_u64)
-        else {
-            continue;
-        };
-        if let Some(session) = load_channel_session_state(pg_pool, channel_id).await {
-            let active_dispatch_present = session
-                .active_dispatch_id
-                .as_deref()
-                .is_some_and(|id| !id.trim().is_empty());
-            mailbox["session_record_present"] = serde_json::json!(true);
-            mailbox["session_agent_id"] = serde_json::json!(session.agent_id);
-            mailbox["session_provider"] = serde_json::json!(session.provider);
-            mailbox["session_status"] = serde_json::json!(session.status);
-            mailbox["session_active_dispatch_id"] = serde_json::json!(session.active_dispatch_id);
-            mailbox["session_thread_channel_id"] = serde_json::json!(session.thread_channel_id);
-            if active_dispatch_present {
-                mailbox["active_dispatch_present"] = serde_json::json!(true);
-            }
-        } else {
-            mailbox["session_record_present"] = serde_json::json!(false);
-            mailbox["session_status"] = serde_json::Value::Null;
-            mailbox["session_active_dispatch_id"] = serde_json::Value::Null;
-        }
-    }
+    session_state::enrich_with(json, |channel_id| {
+        load_channel_session_state(pg_pool, channel_id)
+    })
+    .await;
 }
 
 pub async fn build_active_session_audit(
