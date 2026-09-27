@@ -10,6 +10,7 @@ pub mod root;
 // Observe-side modules (tap, diff, report, metrics) are declared below.
 pub mod diff;
 pub mod metrics;
+pub mod report;
 pub mod tap;
 
 use std::path::PathBuf;
