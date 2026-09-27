@@ -172,7 +172,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     match bot_settings.owner_user_id {
         Some(owner_id) => tracing::info!("  ✓ Owner: {owner_id}"),
         None => tracing::info!(
-            "  ⚠ No owner registered — configure discord.owner_id (or allow_all_users) before use"
+            "  ⚠ Human-user authorization is disabled until discord.owner_id is configured (including in allow-all mode)"
         ),
     }
 

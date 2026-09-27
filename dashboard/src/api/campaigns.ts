@@ -36,6 +36,8 @@ export const campaignNodeSchema = z.looseObject({
   evidence: textList,
   next_action: nullableText,
   blocker: nullableText,
+  summary: nullableText,
+  benefit: nullableText,
   updated_at: timestampSchema,
   details: z.string().default(""),
   acceptance: textList,

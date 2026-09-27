@@ -1946,19 +1946,21 @@ class PgDbCiWiring(unittest.TestCase):
             rc = membership.check_pg_db_generated_block(self.PR_WORKFLOW, manifest)
         self.assertEqual(rc, 0)
 
-    PG_BANNER = 'banner "PostgreSQL test-lane membership gate'
+    PG_TITLE = '"PostgreSQL test-lane membership gate'
 
     def run_pg_gate_section(self, py_rc: int = 0, git_rc: int = 0) -> tuple[int, list[str]]:
-        """Run this gate's shipped banner section with `$PYTHON` and `git` shadowed
+        """Run this gate's shipped check block with `$PYTHON` and `git` shadowed
         by recording stubs: a comment, an `echo` or a disabled `if` reaches none."""
-        _, banner, rest = self.script_checks.partition(self.PG_BANNER)
-        self.assertTrue(banner, "the PG membership gate lost its banner")
+        # Located by title alone, so moving the check to another shard keeps this test.
+        title = self.script_checks.find(self.PG_TITLE)
+        self.assertNotEqual(title, -1, "the PG membership gate lost its title")
+        block = self.script_checks[self.script_checks.rfind("\n", 0, title) + 1:]
         done = subprocess.run(
-            ["bash", "-euo", "pipefail", "-c", "banner() { :; }\n"
+            ["bash", "-euo", "pipefail", "-c", "run_check() { :; }\n"
              f"py() {{ echo \"py $*\"; return {py_rc}; }}\n"
              f"git() {{ echo \"git $*\"; return {git_rc}; }}\n"
              "PYTHON=py TEST_LANE_BASELINE_REF=fixture-ref\n"
-             + banner + rest.partition("\nbanner ")[0]],
+             + block.partition("\nfi\n")[0] + "\nfi\n"],
             cwd=tempfile.gettempdir(), capture_output=True, text=True)
         return done.returncode, done.stdout.splitlines()
 

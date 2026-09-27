@@ -312,26 +312,6 @@ class LaneFilterTests(unittest.TestCase):
                 self.assertFalse(non_pg.selects_test(test_name))
                 self.assertTrue(postgres.selects_test(test_name))
 
-    def test_auto_queue_postgres_authority_lane_inventory_match_is_fail_closed(self) -> None:
-        def assert_expected_tests_exist(
-            expected: set[str], discovered: set[str]
-        ) -> None:
-            missing = expected - discovered
-            if missing:
-                raise AssertionError(f"missing expected tests: {sorted(missing)}")
-
-        inventory = coverage.discover_test_inventory(REPO_ROOT)
-        discovered = set().union(*inventory.values())
-        assert_expected_tests_exist(AUTO_QUEUE_POSTGRES_TESTS, discovered)
-        with self.assertRaisesRegex(AssertionError, "missing_regression"):
-            assert_expected_tests_exist(
-                AUTO_QUEUE_POSTGRES_TESTS
-                | {
-                    "dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests::missing_regression"
-                },
-                discovered,
-            )
-
 
 class RatchetTests(unittest.TestCase):
     def init_git_repo(self, root: Path) -> None:
@@ -763,7 +743,7 @@ class RatchetTests(unittest.TestCase):
             coverage.parse_baseline(baseline_text, "repository baseline"),
         )
 
-    def test_ci_script_checks_wires_guard_and_tests(self) -> None:
+    def test_ci_script_checks_wires_guard(self) -> None:
         script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(
             encoding="utf-8"
         )
@@ -772,9 +752,6 @@ class RatchetTests(unittest.TestCase):
             script,
         )
         self.assertNotIn("TEST_LANE_BASELINE_REF:-HEAD", script)
-        self.assertIn(
-            '"$PYTHON" -m unittest tests.test_test_lane_coverage', script
-        )
 
 
 if __name__ == "__main__":

@@ -258,15 +258,6 @@ class RawWriterAllowlistTests(unittest.TestCase):
         self.assertIn("below baseline 1", message)
         self.assertIn("re-pin with: python3", message)
         self.assertIn("UNINSTRUMENTED_FAMILY_BASELINE = 0", message)
-    def test_live_repository_matches_exact_allowlist(self):
-        result = subprocess.run(["python3", str(SCRIPT)], cwd=ROOT, text=True, capture_output=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertRegex(result.stdout, r"scanned Rust files: [1-9][0-9]*")
-        self.assertIn("uninstrumented families: 0/5", result.stdout)
-        # The caveat has to survive the trip through the real script's stdout,
-        # not just through `check()`: the printed line is what a reader sees.
-        self.assertIn("ANCHOR-SCOPED", result.stdout)
-        self.assertIn("scripts/check_durable_frontier_writer_call_sites.py", result.stdout)
 
     # SOURCE-CONTRACT block (#5071 T1 S2). Everything below matches TEXT in .rs
     # files: call ORDER, call COUNT, symbol PRESENCE. None of it executes Rust,

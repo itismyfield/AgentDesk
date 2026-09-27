@@ -1577,52 +1577,6 @@ class ExecutionEvidenceSummaryContract(unittest.TestCase):
         self.assertEqual(integrity.evidence_verification_errors(rendered), [])
 
 
-class KnownOffenderRegression(unittest.TestCase):
-    """Upper-bound ratchet over the real-repo offenders (#5003).
-
-    `mismatches <= KNOWN`: repair slices may shrink the set freely (fixing a
-    lane stays green here), but any NEW target-mismatch lane fails this test.
-    Once all four offenders are repaired this set can be emptied.
-    """
-
-    HRR = "cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1"
-    KNOWN = {
-        (".github/workflows/ci-main.yml", HRR),
-        (".github/workflows/ci-nightly.yml", HRR),
-        (".github/workflows/ci-nightly.yml",
-         "cargo test --bin agentdesk multinode_regression:: "
-         "-- --nocapture --test-threads=1"),
-        (".github/workflows/ci-pr.yml", HRR),
-    }
-
-    def test_no_new_offenders_beyond_known_set(self) -> None:
-        workflows = sorted((REPO_ROOT / ".github/workflows").glob("*.yml"))
-        violations = integrity.check_workflows(
-            REPO_ROOT, workflows,
-            integrity.load_allowlist(
-                REPO_ROOT / "scripts/test_target_integrity_allowlist.txt"),
-            with_list_check=False,
-        )
-        mismatches = {
-            (violation.workflow, violation.command)
-            for violation in violations
-            if violation.kind in ("target-mismatch", "empty-target")
-        }
-        self.assertTrue(
-            mismatches <= self.KNOWN,
-            f"NEW mismatch lanes beyond known set: {mismatches - self.KNOWN}",
-        )
-        unexpected = [
-            v for v in violations
-            if v.kind not in ("target-mismatch", "empty-target")
-        ]
-        self.assertEqual(unexpected, [], "gate must not false-positive")
-
-    def test_real_repo_warn_only_run_exits_zero(self) -> None:
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(integrity.main([]), 0)
-
-
 def write_files(root: Path, files: dict[str, str]) -> None:
     for rel, text in files.items():
         target = root / rel

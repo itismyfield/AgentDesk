@@ -1085,3 +1085,7 @@ async fn a_body_the_duplicate_guard_already_saw_is_not_admitted_to_the_record_59
         "a body the duplicate guard found already on the channel is not a loss and must not page"
     );
 }
+
+// Main-behaviour baselines for a dropped terminal body under a later commit.
+#[path = "owed_range_baseline_tests.rs"]
+mod owed_range_baseline_tests;

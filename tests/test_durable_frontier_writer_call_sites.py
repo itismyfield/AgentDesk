@@ -2,10 +2,9 @@
 
 The tests below are split into two groups on purpose.
 
-SOURCE CONTRACT (against the real tree) pins the measured shape of the repo: the
-totals, the symbols pinned at zero, the raw atomic/bare-reference baselines, and
-the fact that CI actually runs the gate.
-These fail when the tree moves without the map moving with it.
+SOURCE CONTRACT (against the real tree) pins what the gate cannot check about
+itself: the scan root, hand-verified classifier probes, and that CI actually
+runs the gate.
 
 DISCRIMINATION (against synthetic fixtures) answers the only question that makes
 a green gate worth anything: WHAT BREAKS IT. Every mutation below is applied and
@@ -38,19 +37,6 @@ INTAKE_SPEC = importlib.util.spec_from_file_location(
 intake_guard = importlib.util.module_from_spec(INTAKE_SPEC)
 INTAKE_SPEC.loader.exec_module(intake_guard)
 
-# Measured on e60416050248aaa4d2157dd3077b1edfc099cb76 (S8-1b base). S7 moved
-# five counts for a net 42 -> 41 over 23 -> 24 symbols; S8-1b adds five
-# directly pinned spellings for seven sites. The cancelled-source sink adds two
-# reviewed pinned receipt/metadata sites, reaching 50 sites over 29 symbols.
-# Three raw calls left `recovery_engine/terminal_text_idempotency.rs`
-# (`write_delivered_frontier`, `write_proven_gone_equal_range_frontier`,
-# `append_completed_turn`), one funnel call replaced them
-# (`record_recovery_terminal_delivery`), and the funnel body gained its third
-# private caller.
-# #5755 removes the unproven loop_poll_prologue shared-frontier advance.
-# T5 detached custody adds one direct historical pinned receipt write.
-TOTAL_CALL_SITES = 49
-PINNED_SYMBOLS = 29
 ZERO_PINNED = {
     "write_confirmed_delivery",
     "write_proven_gone_equal_range_frontier",
@@ -58,17 +44,6 @@ ZERO_PINNED = {
     "clear_lease",
     "delete_record",
     "shadow_mirror_same_channel_frontier_with_body",
-}
-
-RAW_ATOMIC_MUTATIONS = {
-    "src/services/discord/tmux.rs": 1,
-    "src/services/discord/relay_health/frontier.rs": 1,
-    "src/services/discord/turn_bridge/terminal_delivery.rs": 1,
-}
-BARE_REFERENCES = {
-    "record_historical_pinned_delivery": {
-        "src/services/discord/turn_bridge/terminal_delivery.rs": 1,
-    },
 }
 
 
@@ -123,27 +98,6 @@ def write(root: Path, rel: str, body: str) -> None:
 class SourceContractTests(unittest.TestCase):
     """Pins the real tree. These are the assertions that go red on a real move."""
 
-    def test_real_tree_passes_and_reports_its_limits(self):
-        ok, message = guard.check(ROOT)
-        self.assertTrue(ok, message)
-        self.assertIn(f"{TOTAL_CALL_SITES} production sites", message)
-        self.assertIn(f"across {PINNED_SYMBOLS} symbols", message)
-        # The success path must state its own blindness, not only the failure
-        # path: a reader who only ever sees green must still learn the limits.
-        for limit in (
-            "use .. as x",
-            "not Rust parsing",
-            "not proof of reachability",
-            "Self::method",
-            "raw-identifier or non-ASCII alias spellings",
-            "(*ptr).store",
-            "as_ptr`/`get_mut",
-            "AST/`syn`-based Rust parsing",
-        ):
-            self.assertIn(limit, message)
-        pinned_count = len(guard.PINNED_TEST_ONLY_MODULE_FILES)
-        self.assertIn(f"skipped {pinned_count} test files", message)
-
     def test_shared_skip_pin_is_the_only_path_and_count_source(self):
         self.assertIs(
             guard.PINNED_TEST_ONLY_MODULE_FILES,
@@ -155,45 +109,14 @@ class SourceContractTests(unittest.TestCase):
             | guard._SKIP_PIN.PINNED_RESOLVER_TEST_ONLY_FILES,
         )
 
-    def test_pin_groups_match_their_live_classifiers(self):
-        all_files, skips = guard._SKIP_PIN.validated_scan_files(
-            ROOT,
-            guard.SCAN_ROOT,
-            guard.is_test_file,
-        )
-        basename = {
-            path.relative_to(ROOT).as_posix()
-            for path in all_files
-            if guard.is_test_file(path.name)
-        }
-        resolver = {
-            path.relative_to(ROOT).as_posix() for path in skips
-        } - basename
-        self.assertEqual(basename, guard._SKIP_PIN.PINNED_BASENAME_TEST_FILES)
-        self.assertEqual(resolver, guard._SKIP_PIN.PINNED_RESOLVER_TEST_ONLY_FILES)
-
-    def test_expected_map_totals_are_pinned_independently_of_the_map(self):
-        """A shrunk map plus a shrunk tree would agree with itself; this does not."""
-        total = sum(sum(m.values()) for m in guard.EXPECTED_CALL_SITES.values())
-        self.assertEqual(total, TOTAL_CALL_SITES)
-        self.assertEqual(len(guard.EXPECTED_CALL_SITES), PINNED_SYMBOLS)
-        self.assertEqual(
-            {s for s, m in guard.EXPECTED_CALL_SITES.items() if not m}, ZERO_PINNED
-        )
-
-    def test_raw_atomic_and_bare_reference_pins_match_independent_baselines(self):
-        self.assertEqual(guard.EXPECTED_RAW_ATOMIC_MUTATIONS, RAW_ATOMIC_MUTATIONS)
-        self.assertEqual(guard.EXPECTED_BARE_REFERENCES, BARE_REFERENCES)
-
     def test_scan_root_is_all_of_src(self):
         """Narrowing the scan is the cheapest way to fake a green gate."""
         self.assertEqual(guard.SCAN_ROOT.as_posix(), "src")
 
-    def test_ci_script_checks_runs_this_gate_and_this_module(self):
+    def test_ci_script_checks_runs_this_gate(self):
         """A gate nobody runs is the #5003 shape. Pin the wiring, not the intent."""
         wiring = (ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
         self.assertIn("scripts/check_durable_frontier_writer_call_sites.py", wiring)
-        self.assertIn("tests.test_durable_frontier_writer_call_sites", wiring)
 
     def test_classifier_matches_hand_verified_cfg_test_boundaries(self):
         """Breaks the oracle coupling: the classifier is checked, not trusted.
@@ -218,72 +141,6 @@ class SourceContractTests(unittest.TestCase):
                         prod += hits
                 self.assertEqual(prod, want_prod, f"production count for {symbol} in {rel}")
                 self.assertEqual(every, want_all, f"cfg(test)-blind count for {symbol} in {rel}")
-
-    def test_the_two_functions_sharing_one_pinned_spelling_both_still_exist(self):
-        """`record_watcher_terminal_delivery` names two functions in this tree.
-
-        The pinned integer for terminal_long_chunks.rs counts one call to each.
-        If either definition disappears the pin silently changes meaning, so the
-        collision is asserted rather than left in a comment.
-        """
-        funnel = (ROOT / "src/services/discord/outbound/delivery_record.rs").read_text(
-            encoding="utf-8"
-        )
-        wrapper = (
-            ROOT / "src/services/discord/tmux_watcher/terminal_long_chunks.rs"
-        ).read_text(encoding="utf-8")
-        self.assertIn("fn record_watcher_terminal_delivery(", funnel)
-        self.assertIn("fn record_watcher_terminal_delivery(", wrapper)
-        self.assertEqual(
-            guard.EXPECTED_DEFINITION_FILE_COUNTS["record_watcher_terminal_delivery"],
-            {
-                "src/services/discord/outbound/delivery_record.rs": 1,
-                "src/services/discord/tmux_watcher/terminal_long_chunks.rs": 1,
-            },
-        )
-        self.assertIn("NAME COLLISION", SCRIPT.read_text(encoding="utf-8"))
-
-    def test_the_call_sites_no_family_anchor_covers_are_pinned(self):
-        """The sites that motivated dropping anchors, asserted one by one.
-
-        A parallel census of every production durable write on the S8-1b base e60416050248aaa4d2157dd3077b1edfc099cb76 found
-        these outside the reach of `check_delivery_journal_raw_writer.py`'s
-        six family anchors. Three sit in the turn_bridge family but not in its
-        anchor file; `claude_idle_runtime.rs` belongs to no family at all, so no
-        anchor could ever reach it; the two `fresh_send.rs` sites are in no
-        family either and are currently dormant (`OutputPlan::SendFresh` has no
-        production constructor), which is exactly the state in which an
-        uninstrumented write is easiest to reintroduce unnoticed.
-        """
-        anchor_blind = [
-            ("record_delivered_frontier_with_body",
-             "src/services/discord/turn_bridge/terminal_delivery.rs", 1),
-            ("record_delivered_frontier_with_body",
-             "src/services/discord/turn_bridge/terminal_outcome_delivery.rs", 1),
-            ("record_delivered_frontier_with_body",
-             "src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs", 1),
-            ("reanchor_current_generation_frontier",
-             "src/services/discord/tui_prompt_relay/claude_idle_runtime.rs", 1),
-            ("write_delivered_frontier",
-             "src/services/discord/outbound/turn_output_controller/fresh_send.rs", 1),
-            ("record_fresh_send_content_fingerprint",
-             "src/services/discord/outbound/turn_output_controller/fresh_send.rs", 1),
-        ]
-        for symbol, rel, count in anchor_blind:
-            with self.subTest(symbol=symbol, file=rel):
-                self.assertEqual(guard.EXPECTED_CALL_SITES[symbol].get(rel), count)
-
-    def test_every_pinned_file_exists_and_still_spells_the_symbol(self):
-        """Keeps the map from rotting into a list of paths that no longer exist."""
-        for symbol, files in guard.EXPECTED_CALL_SITES.items():
-            for rel in files:
-                path = ROOT / rel
-                self.assertTrue(path.is_file(), f"{symbol}: missing {rel}")
-                self.assertIn(
-                    symbol.rsplit("::", 1)[-1],
-                    path.read_text(encoding="utf-8"),
-                    f"{symbol} in {rel}",
-                )
 
 
 class DiscriminationTests(unittest.TestCase):

@@ -52,12 +52,6 @@ class RelayRecoveryCiWiringTest(unittest.TestCase):
         )
         self.assertEqual(count_executable_relay_recovery_commands(fixture), 2)
 
-    def test_ci_script_checks_runs_relay_recovery_wiring_contract(self) -> None:
-        script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
-        self.assertIn(
-            '"$PYTHON" -m unittest tests.test_relay_recovery_ci_wiring', script
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

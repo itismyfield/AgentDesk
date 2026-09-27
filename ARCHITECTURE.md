@@ -27,10 +27,19 @@ src/
 │   ├── dcserver/
 │   │   └── startup.rs
 │   ├── doctor/
+│   │   ├── health/
+│   │   │   └── measurement.rs
+│   │   ├── mailbox/
+│   │   │   └── observation.rs
 │   │   ├── orchestrator/
 │   │   │   ├── config_dir_checks.rs
 │   │   │   ├── health_snapshot.rs
-│   │   │   └── provider_credentials.rs
+│   │   │   ├── observation_checks.rs
+│   │   │   ├── observation_tests.rs
+│   │   │   ├── provider_credentials.rs
+│   │   │   ├── repair_response.rs
+│   │   │   ├── report_display.rs
+│   │   │   └── stale_mailbox_repair.rs
 │   │   ├── contract.rs
 │   │   ├── health.rs
 │   │   ├── mailbox.rs
@@ -226,8 +235,7 @@ src/
 │   ├── slow_hook_warn.rs
 │   ├── sql_guard.rs
 │   ├── transition.rs
-│   ├── transition_executor_pg.rs
-│   └── transition_timeout.rs
+│   └── transition_executor_pg.rs
 ├── github/
 │   ├── sync/
 │   │   ├── card_state.rs
@@ -316,7 +324,8 @@ src/
 │   │   │   └── runtime.rs
 │   │   ├── health_api/
 │   │   │   ├── public_projection.rs
-│   │   │   └── runtime_profile.rs
+│   │   │   ├── runtime_profile.rs
+│   │   │   └── unread_tail_attribution_tests.rs
 │   │   ├── review_verdict/
 │   │   │   ├── decision_route.rs
 │   │   │   ├── mod.rs
@@ -343,6 +352,7 @@ src/
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
 │   │   ├── agents_setup.rs
+│   │   ├── agents_turn_target.rs
 │   │   ├── analytics.rs
 │   │   ├── auth.rs
 │   │   ├── auto_queue.rs
@@ -776,6 +786,8 @@ src/
 │   │   │   │   ├── serde_adapters.rs
 │   │   │   │   └── turn_kinds.rs
 │   │   │   ├── removal/
+│   │   │   │   ├── boot_custody.rs
+│   │   │   │   ├── boot_custody_tests.rs
 │   │   │   │   └── boot_reaper.rs
 │   │   │   ├── save_store/
 │   │   │   │   ├── identity_gate/
@@ -814,6 +826,8 @@ src/
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   └── watcher_state.rs
+│   │   ├── mailbox_finish/
+│   │   │   └── closed_actor_tests.rs
 │   │   ├── meeting_orchestrator/
 │   │   │   ├── lifecycle.rs
 │   │   │   ├── records.rs
@@ -952,9 +966,10 @@ src/
 │   │   ├── relay_recovery/
 │   │   │   ├── tests/
 │   │   │   │   ├── circuit_breaker_apply.rs
-│   │   │   │   └── orphan_token_finish.rs
+│   │   │   │   ├── incarnation_follow_up.rs
+│   │   │   │   ├── orphan_token_finish.rs
+│   │   │   │   └── unread_tail_seed.rs
 │   │   │   ├── apply.rs
-│   │   │   ├── cohort.rs
 │   │   │   ├── decision.rs
 │   │   │   ├── destructive_warrant.rs
 │   │   │   ├── idle_tmux.rs
@@ -1184,6 +1199,7 @@ src/
 │   │   │   ├── no_result_exits.rs
 │   │   │   ├── orphan_status_panel_cleanup.rs
 │   │   │   ├── orphan_terminal_frame.rs
+│   │   │   ├── owed_range_baseline_tests.rs
 │   │   │   ├── panel_decisions.rs
 │   │   │   ├── panel_decisions_tests.rs
 │   │   │   ├── placeholder_reclaim.rs
@@ -1198,6 +1214,8 @@ src/
 │   │   │   ├── single_message_footer.rs
 │   │   │   ├── single_message_footer_tests.rs
 │   │   │   ├── stall_exit.rs
+│   │   │   ├── streaming_baseline_tests.rs
+│   │   │   ├── streaming_harness_tests.rs
 │   │   │   ├── streaming_session_banner.rs
 │   │   │   ├── streaming_status_tick.rs
 │   │   │   ├── supervisor_relay.rs
@@ -1251,6 +1269,7 @@ src/
 │   │   │   │   ├── claim.rs
 │   │   │   │   └── stale_reclaim.rs
 │   │   │   ├── tests/
+│   │   │   │   ├── fenced_admission_tests.rs
 │   │   │   │   ├── scenario_census_e2e.rs
 │   │   │   │   ├── synthetic_bridge_handoff_pg_tests.rs
 │   │   │   │   └── synthetic_terminal_ordering_tests.rs
@@ -1651,6 +1670,11 @@ src/
 │   │   │   ├── voice_cache_sweep.rs
 │   │   │   └── worktree_orphan_sweep.rs
 │   │   └── mod.rs
+│   ├── manual_steer/
+│   │   ├── action_handle.rs
+│   │   ├── admission_intent.rs
+│   │   ├── operation.rs
+│   │   └── record.rs
 │   ├── memory/
 │   │   ├── local.rs
 │   │   ├── memento.rs
@@ -1833,14 +1857,18 @@ src/
 │   ├── tui_turn_state/
 │   │   └── completion_scan.rs
 │   ├── turn_orchestrator/
+│   │   ├── registry_purge/
+│   │   │   └── closed_gate_tests.rs
 │   │   ├── active_source_dedup.rs
 │   │   ├── claim_observation.rs
 │   │   ├── clear_channel.rs
+│   │   ├── closed_verdict.rs
 │   │   ├── dispatch_cleanup.rs
 │   │   ├── dispatch_reservation.rs
 │   │   ├── episode_identity.rs
 │   │   ├── front_requeue.rs
 │   │   ├── inbound_order.rs
+│   │   ├── incarnation.rs
 │   │   ├── intervention.rs
 │   │   ├── lease_release.rs
 │   │   ├── mailbox_unreachable_tests.rs
@@ -1894,6 +1922,7 @@ src/
 │   ├── kakao_message.rs
 │   ├── kanban.rs
 │   ├── kanban_cards.rs
+│   ├── manual_steer.rs
 │   ├── mcp_config.rs
 │   ├── message_outbox.rs
 │   ├── message_outbox_circuit_authority.rs

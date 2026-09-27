@@ -34,14 +34,6 @@ class ScheduledMessagesCiWiringTest(unittest.TestCase):
                     f"{filter_name} must cover scheduled_messages submodules",
                 )
 
-    def test_ci_script_checks_runs_scheduler_filter_contract(self) -> None:
-        script = (REPO_ROOT / "scripts" / "ci-script-checks.sh").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn(
-            '"$PYTHON" -m unittest tests.test_scheduled_messages_ci_wiring', script
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

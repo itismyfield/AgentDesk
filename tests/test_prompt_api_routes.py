@@ -210,10 +210,3 @@ class PromptRoutes(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertNotIn('inspected_files=', result.stdout)
         self.assertIn('SENTINEL', result.stdout)
-
-    def test_ci_discovery(self):
-        self.assertIn('tests/*.sh', (REPO / 'scripts/ci-script-checks.sh').read_text())
-        self.assertIn('python3 -m unittest tests.test_prompt_api_routes', (REPO / 'tests/test_prompt_api_routes.sh').read_text())
-        workflow = (REPO / '.github/workflows/ci-pr.yml').read_text()
-        self.assertIn('scripts/**', workflow)
-        self.assertIn('tests/**', workflow)

@@ -36,7 +36,6 @@ use crate::services::discord::relay_health::{
     DurableFrontierObservation, FrontierProvenanceReport, RelayActiveTurn, RelayHealthSnapshot,
     RelayStallClassifier, RelayStallState,
 };
-use crate::services::discord::relay_recovery::cohort::{self, RelayAuthorityRolloutReport};
 use crate::services::provider::ProviderKind;
 #[cfg(unix)]
 use relay_probe::{
@@ -232,15 +231,6 @@ pub struct DiscordHealthSnapshot {
     expired_relay_ledgers: Vec<String>,
     providers: Vec<ProviderHealthSnapshot>,
     mailboxes: Vec<MailboxHealthSnapshot>,
-    /// #5464 T5 S1: live position of the AC2-R relay-authority dial (mode,
-    /// cohort width, fingerprint).
-    ///
-    /// Detail-only, by the same rule the mailbox probes follow: the public
-    /// `/api/health` payload is an allowlist an operator dashboard depends on,
-    /// and a rollout dial is triage data, not a liveness signal. `None` on the
-    /// public build keeps the key absent rather than publishing a null.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    relay_authority_rollout: Option<RelayAuthorityRolloutReport>,
 }
 
 impl DiscordHealthSnapshot {
@@ -1087,7 +1077,6 @@ pub(super) async fn build_health_snapshot_with_options(
         expired_relay_ledgers,
         providers: provider_entries,
         mailboxes: mailbox_entries,
-        relay_authority_rollout: include_mailbox_details.then(cohort::rollout_report),
     }
 }
 
@@ -1305,61 +1294,6 @@ mod tests {
         }
     }
 
-    /// #5464 T5 S1: the rollout dial rides the detail axis only, and it reports
-    /// the dormant position with no operator config loaded.
-    ///
-    /// Both halves matter. Publishing on the public build would put a rollout
-    /// knob into the allowlisted payload an unauthenticated dashboard reads;
-    /// omitting it from the detail build would leave the S2 observation slice
-    /// with no live way to confirm which dial a node is answering under.
-    #[tokio::test]
-    async fn relay_authority_rollout_is_published_on_the_detail_build_only() {
-        let registry = HealthRegistry::new();
-
-        let public = serde_json::to_value(build_public_health_snapshot(&registry).await)
-            .expect("serialize public snapshot");
-        assert!(
-            public.get("relay_authority_rollout").is_none(),
-            "the rollout dial must not reach the public health allowlist"
-        );
-
-        let detail = serde_json::to_value(build_health_snapshot(&registry).await)
-            .expect("serialize detail snapshot");
-        let rollout = detail
-            .get("relay_authority_rollout")
-            .expect("detail health publishes the rollout dial");
-        assert_eq!(rollout.get("mode").and_then(|v| v.as_str()), Some("legacy"));
-        assert_eq!(
-            rollout.get("cohort_percent").and_then(|v| v.as_u64()),
-            Some(0)
-        );
-        // #5071 T5 A6: both widths reach the registry branch too. The clamp
-        // flag is the operator-facing half — `cohort_percent` alone cannot
-        // distinguish a deliberate `100` from a typo that was widened to it.
-        assert_eq!(
-            rollout
-                .get("cohort_percent_configured")
-                .and_then(|v| v.as_u64()),
-            Some(0)
-        );
-        assert_eq!(
-            rollout
-                .get("cohort_percent_clamped")
-                .and_then(|v| v.as_bool()),
-            Some(false)
-        );
-        assert_eq!(
-            rollout.get("cohort_fingerprint").and_then(|v| v.as_str()),
-            Some(
-                crate::services::discord::relay_recovery::cohort::cohort_fingerprint(
-                    crate::config::RelayAuthorityMode::Legacy,
-                    0,
-                )
-                .as_str()
-            )
-        );
-    }
-
     /// The retired relay-authority observation blocks stay off both registry
     /// snapshot builds. The standalone `/health` assembly point (no registry)
     /// is a separate attachment site, covered instead by
@@ -1373,7 +1307,11 @@ mod tests {
         let detail = serde_json::to_value(build_health_snapshot(&registry).await)
             .expect("serialize detail snapshot");
         for (build, json) in [("public", &public), ("detail", &detail)] {
-            for key in ["relay_authority_observation", "axis_b_observation"] {
+            for key in [
+                "relay_authority_observation",
+                "relay_authority_rollout",
+                "axis_b_observation",
+            ] {
                 assert!(json.get(key).is_none(), "{build} health publishes {key}");
             }
         }
@@ -1390,7 +1328,7 @@ mod tests {
     /// is the summary that every monitor polls, so the miss was fail-open.
     ///
     /// Both halves matter. The verdict polarity must be identical across the two
-    /// builds, and the detail-only payload (mailbox entries, the rollout dial)
+    /// builds, and the detail-only payload (mailbox entries)
     /// must still stay off the public allowlist: this raises the judgement, not
     /// the evidence behind it. (The relay-authority observation blocks this
     /// comment used to name here were retired in T6-2.)
@@ -1466,10 +1404,8 @@ mod tests {
             );
             let public_json = serde_json::to_value(public).expect("serialize public snapshot");
             assert!(
-                public_json.get("relay_authority_rollout").is_none()
-                    && public_json.get("axis_b_observation").is_none(),
-                "the rollout dial must stay detail-only and the retired \
-                 axis_b_observation block must never resurface"
+                public_json.get("axis_b_observation").is_none(),
+                "the retired axis_b_observation block must never resurface"
             );
         });
     }

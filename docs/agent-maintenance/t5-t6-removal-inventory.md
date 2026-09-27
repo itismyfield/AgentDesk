@@ -289,7 +289,7 @@ tests net **+5,828**, generated net **+337**, tooling net **+6**이다.
 | S4 배선(tick): `turn_bridge/stream_tick.rs` | tick 진입 1회 코호트 읽기(`let cohort_admits = stream_loop_suppression_cohort_admits(channel_id.get())`)와 게이트 호출부 2곳의 인자, 그리고 import 이름을 철거했다. | 16개 `authorize_visible_mutation!` 사이트와 dirty flush 의 판정 경로 자체는 불변이다. |
 | S4 배선(tool-arm): `turn_bridge/stream_loop/tool_arms/authority.rs` | restart fence 와 terminal tool-result fence 의 코호트 문의 2곳(`let cohort_admits = …`)과 게이트 인자 2곳, use 블록의 술어 import 를 철거했다. | `stream_tool_outcome_after_restart_authority` 와 `terminal_tool_result_transition_permission` 의 매핑은 불변이다. `Missing` 이 `Suppressed` 가 되면서 restart arm 은 `AuthorityLost` 대신 `Continue` 로 귀결된다. |
 | **D1 범위 밖, T6-1 에서 철거** — 술어 본체 `guarded_persist.rs` 의 `stream_loop_suppression_cohort_admits` | D1 시점에는 S7a 진입 게이트(`bridge_entry_rowless_cohort_admits`)가 위임 호출해 남겼다. | T6-1 이 진입 게이트와 함께 본체와 전용 테스트 `the_shipped_dial_admits_no_channel_to_the_stream_loop_enforcement_cohort` 를 철거했다(§12-2 추가 참조). |
-| **D1 범위 밖** — 공용 rollout 다이얼 `relay_authority_mode`/`relay_authority_cohort_percent`, `relay_recovery/cohort.rs`, `relay_recovery/authority_observation.rs`, `relay_recovery/authority_retention.rs` | 없음. | 전부 S9 회수 경계다. 관측 두 모듈은 T6-2 가 철거했고(§12-3 추가), 다이얼과 `cohort.rs` 는 T6-3 몫이다. |
+| **D1 범위 밖** — 공용 rollout 다이얼 `relay_authority_mode`/`relay_authority_cohort_percent`, `relay_recovery/cohort.rs`, `relay_recovery/authority_observation.rs`, `relay_recovery/authority_retention.rs` | 없음. | 전부 S9 회수 경계다. 관측 두 모듈은 T6-2 가 철거했고(§12-3 추가), 다이얼과 `cohort.rs` 는 T6-3 가 철거했다(§12-4 추가). |
 | **철거하지 않음** — `WatcherStateSnapshot.reachability_observation`, `axis_b_exact_episode_required` 등 `skipped_reason` 문자열 | 없음. | 이름이 observation/axis_b 라 관측처럼 보이나 전자는 `relay_recovery/destructive_warrant.rs` 가 소비하는 **증거 입력**이고 후자는 **집행 거부 사유**다. 둘 다 영구 보존이다. |
 
 **테스트 처분:** `guarded_persist_tests.rs` 의 어휘 pin
@@ -311,7 +311,7 @@ tests net **+5,828**, generated net **+337**, tooling net **+6**이다.
 테스트 호출지점이 컴파일되지 않으므로 한 커밋으로 착지해야 하고 되돌릴 때도 한 덩어리다.
 D1 은 다른 슬라이스를 선행으로 요구하지 않는다.
 
-**부수 효과 1건(중립):** 롤백 런북 `docs/runbooks/relay-authority-acceptance-rollback.md` 가
+**부수 효과 1건(중립):** 롤백 런북 `relay-authority-acceptance-rollback.md`(T6-4 에서 삭제) 가
 기록한 "다이얼이 무음으로 `Legacy/0` 으로 복귀해 `AuthorityLost` 가 부활한다"는 위험은 D1 이후
 **스트림 게이트에 한해** 구조적으로 소멸한다(무조건 `Suppressed`). 진입 게이트(S7a) 쪽 같은
 위험은 그대로 남는다.
@@ -413,6 +413,42 @@ registry·standalone 두 조립점을 함께 고정하는
 `consults_cohort`), `relay_recovery/cohort.rs` 의 `cohort_bucket`·`admits`). Python 리포트·그 테스트·
 롤백 런북의 `authority_observation`/`authority_retention` 언급은 T6-4 가 파일째 정리한다.
 `ARCHITECTURE.md` 트리는 `regen-docs.yml` 이 main 에서 재생성한다.
+
+## §12-4 추가 — T6-3 공용 rollout 다이얼·cohort 철거 (2026-09-25)
+
+base `origin/main cfeff89307`. T6-1 이 네 게이트를 무조건화하고 T6-2 가 관측 기록을 철거한 뒤
+다이얼을 읽는 곳은 `/api/health/detail` 의 보고 블록뿐이었다. 판정에 쓰이는 소비자가 없었으므로
+배달·게이트 동작 변화는 없다. 경로는 `src/` 기준이다.
+
+| 범위 | 철거한 것 | 남긴 것·후속 |
+|---|---|---|
+| config 다이얼 | `config.rs` 의 `RelayAuthorityMode` enum·3술어(`records_authority_observations`/`governs_destructive_authority`/`consults_cohort`)·`is_legacy_relay_authority_mode`, `config/runtime_settings.rs` 의 `relay_authority_mode`/`relay_authority_cohort_percent` 필드와 `is_empty` 두 항 | `RuntimeSettingsConfig` 는 `deny_unknown_fields` 가 없어 배포 yaml 에 남은 두 키는 무시된다. `retired_relay_authority_dial_keys_are_ignored_on_parse` 가 `load_from_path` 로 고정한다. |
+| cohort | `services/discord/relay_recovery/cohort.rs` 전량(`cohort_bucket`·`admits`·`cohort_fingerprint`·`rollout_report`)과 mod 선언 | `session_relay_sink/journal.rs` 의 `cohort_bucket` 은 delivery journal 전용 별개 함수라 그대로다. |
+| health | `/api/health/detail` 의 `relay_authority_rollout` 블록(registry 스냅샷 필드·standalone 조립점) | 부재는 기존 두 retired-block 테스트의 키 목록에 추가해 고정한다. |
+
+**호출 그래프 증명:** base 에서 `cargo build --lib` 의 rustc dead_code 경고가 이 표면에 3건
+(`config.rs` 3술어, `cohort.rs` 의 `cohort_bucket`·`admits`)이었다. 나머지 공개 심볼
+(`cohort_fingerprint`·`rollout_report`)과 두 필드의 비테스트 소비자는 `rg` 기준
+`health/snapshot.rs`·`routes/health_api.rs` 의 보고 블록과 `runtime_settings.rs::is_empty` 뿐이었다.
+철거 후 전체 경고는 343 → 340, never-used 계열은 226 → 223 이고 새 경고는 없다.
+
+**테스트 처분:** `cohort.rs` 테스트 12개, `relay_authority_dial_defaults_dormant_and_round_trips_each_knob_alone`,
+`relay_authority_rollout_is_published_on_the_detail_build_only`,
+`standalone_relay_authority_rollout_publishes_the_whole_dormant_block` 를 삭제했다.
+`bot_settings_write_back_preserves_unknown_keys_inside_modelled_sections` 의 modelled 키는
+`delivery_journal_cohort_percent` 로, native collector 테스트의 설치 config 는 기본값으로 바꿨다.
+
+**운영 config:** `~/.adk/release/config/agentdesk.yaml` 의 `runtime:` 에
+`relay_authority_mode: enforce` / `relay_authority_cohort_percent: 100` 이 남아 있다. 새 바이너리는
+두 키를 무시하므로 수정하지 않았다. bot-settings 의 `serde_yaml::Value` patch writer 는 두 키를
+보존하지만, whole-`Config` `save_to_path` writer 8곳("두 항목의 A6 판정" 절에 기록)을 한 번 거치면 두 키는
+사라진다. 두 키는 더 이상 어떤 판정에도 쓰이지 않으므로 사라져도 무해하다.
+
+**남은 참조(T6-4 에서 삭제):** 롤백 런북, `scripts/relay_authority_rollout_report.py` 와 그 테스트,
+`relay-report-evidence.yml` 워크플로. CI 레인 이름
+`t5-s4-missing-row-cohort-lifecycle` 은 선택자 계약이라 이름만 남는다.
+
+**철거·예산 경계:** `git diff --numstat origin/main -- src/` 기준 **+34/−806 = 순증 −772줄**이다.
 
 ## §12-2 추가 — T6 도달 불가 분기(슬라이스 3) **철거 보류(HOLD)** (2026-09-17)
 

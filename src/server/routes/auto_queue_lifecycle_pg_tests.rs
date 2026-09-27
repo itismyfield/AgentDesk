@@ -124,6 +124,57 @@ mod tests {
             .expect("load scalar")
     }
 
+    /// Seed one entry of `run_id` on its own card, optionally linked to a
+    /// dispatch, the way the generator and dispatcher write it.
+    async fn seed_entry(
+        pool: &sqlx::PgPool,
+        run_id: &str,
+        entry_id: &str,
+        status: &str,
+        dispatch_id: Option<&str>,
+    ) {
+        let card_id = format!("card-{entry_id}");
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id)
+             VALUES ($1, 'Reset Route Card', 'todo', 'agent-1')",
+        )
+        .bind(&card_id)
+        .execute(pool)
+        .await
+        .expect("seed reset card");
+        if let Some(dispatch_id) = dispatch_id {
+            sqlx::query(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status)
+                 VALUES ($1, $2, 'agent-1', 'implementation', 'pending')",
+            )
+            .bind(dispatch_id)
+            .bind(&card_id)
+            .execute(pool)
+            .await
+            .expect("seed reset dispatch");
+        }
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id)
+             VALUES ($1, $2, $3, 'agent-1', $4, $5)",
+        )
+        .bind(entry_id)
+        .bind(run_id)
+        .bind(&card_id)
+        .bind(status)
+        .bind(dispatch_id)
+        .execute(pool)
+        .await
+        .expect("seed reset entry");
+    }
+
+    async fn entry_count(pool: &sqlx::PgPool, run_id: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM auto_queue_entries WHERE run_id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await
+            .expect("count run entries")
+    }
+
     async fn wait_for_rebind_advisory_lock_waiter(pool: &sqlx::PgPool) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
@@ -462,6 +513,254 @@ mod tests {
             );
         }
 
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// The body `resetAutoQueue` sends: `run_id` always, `repo`/`agent_id`
+    /// only when set, since `JSON.stringify` drops `undefined` fields.
+    #[tokio::test]
+    async fn reset_http_resets_only_the_selected_run_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+        seed_agent(&pool).await;
+        seed_run(&pool, "run-reset-x", "generated").await;
+        seed_run(&pool, "run-reset-w", "pending").await;
+        seed_run(&pool, "run-reset-y", "active").await;
+        seed_entry(&pool, "run-reset-x", "entry-x-1", "pending", None).await;
+        seed_entry(&pool, "run-reset-x", "entry-x-2", "pending", None).await;
+        seed_entry(&pool, "run-reset-w", "entry-w-1", "pending", None).await;
+        seed_entry(&pool, "run-reset-y", "entry-y-1", "pending", None).await;
+        let app = test_router(pool.clone());
+
+        let (status, response) = request_json_response(
+            &app,
+            Method::POST,
+            "/queue/reset",
+            Some(json!({"run_id": "run-reset-x", "repo": "repo-1", "agent_id": "agent-1"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["run_id"], "run-reset-x");
+        assert_eq!(response["deleted_entries"], 2);
+        assert_eq!(response["completed_runs"], 1);
+
+        let (status, response) = request_json_response(
+            &app,
+            Method::POST,
+            "/queue/reset",
+            Some(json!({"run_id": "run-reset-w", "agent_id": "agent-1"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["deleted_entries"], 1);
+
+        for run_id in ["run-reset-x", "run-reset-w"] {
+            assert_eq!(entry_count(&pool, run_id).await, 0, "{run_id}");
+            assert_eq!(run_status(&pool, run_id).await, "completed", "{run_id}");
+        }
+        assert_eq!(entry_count(&pool, "run-reset-y").await, 1);
+        assert_eq!(run_status(&pool, "run-reset-y").await, "active");
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn reset_http_rejects_scope_mismatch_and_unknown_run_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+        seed_agent(&pool).await;
+        seed_run(&pool, "run-reset-scope", "generated").await;
+        seed_entry(&pool, "run-reset-scope", "entry-scope-1", "pending", None).await;
+        let app = test_router(pool.clone());
+
+        for body in [
+            json!({"run_id": "run-reset-scope", "repo": "repo-1", "agent_id": "agent-other"}),
+            json!({"run_id": "run-reset-scope", "repo": "repo-other", "agent_id": "agent-1"}),
+        ] {
+            let (status, response) =
+                request_json_response(&app, Method::POST, "/queue/reset", Some(body.clone())).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{body} -> {response}");
+            assert!(
+                response["context"].get("status").is_none(),
+                "a scope refusal carries no run status: {response}"
+            );
+        }
+        let (status, _response) = request_json_response(
+            &app,
+            Method::POST,
+            "/queue/reset",
+            Some(json!({"run_id": "run-reset-absent", "agent_id": "agent-1"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        assert_eq!(entry_count(&pool, "run-reset-scope").await, 1);
+        assert_eq!(run_status(&pool, "run-reset-scope").await, "generated");
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn reset_http_rejects_malformed_body_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+        seed_agent(&pool).await;
+        seed_run(&pool, "run-reset-body", "generated").await;
+        seed_entry(&pool, "run-reset-body", "entry-body-1", "pending", None).await;
+        let app = test_router(pool.clone());
+
+        for body in [
+            json!({"repo": "repo-1", "agent_id": "agent-1"}),
+            json!({"run_id": "   ", "agent_id": "agent-1"}),
+            json!({"run_id": "run-reset-body", "agent": "agent-1"}),
+        ] {
+            let (status, response) =
+                request_json_response(&app, Method::POST, "/queue/reset", Some(body.clone())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body} -> {response}");
+        }
+        let (_status, response) = request_json_response(
+            &app,
+            Method::POST,
+            "/queue/reset",
+            Some(json!({"run_id": "   "})),
+        )
+        .await;
+        assert_eq!(response["error"], "run_id is required for reset");
+
+        assert_eq!(entry_count(&pool, "run-reset-body").await, 1);
+        assert_eq!(run_status(&pool, "run-reset-body").await, "generated");
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// A live run is refused with no writes, and the `end` it points at is the
+    /// canonical exit: once it has run, the same reset request succeeds.
+    #[tokio::test]
+    async fn reset_http_refuses_live_run_until_it_is_ended_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+        seed_agent(&pool).await;
+        seed_run(&pool, "run-reset-live", "active").await;
+        seed_entry(
+            &pool,
+            "run-reset-live",
+            "entry-live-1",
+            "dispatched",
+            Some("dispatch-live-1"),
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO auto_queue_slots
+                (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map)
+             VALUES ('agent-1', 0, 'run-reset-live', 0, '{}'::jsonb)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed live reset slot");
+        let app = test_router(pool.clone());
+        let reset_body =
+            json!({"run_id": "run-reset-live", "repo": "repo-1", "agent_id": "agent-1"});
+        let dispatch_state = || {
+            scalar_i64(
+                &pool,
+                "SELECT COUNT(*)::BIGINT FROM task_dispatches
+                 WHERE id = 'dispatch-live-1' AND status = 'pending'",
+            )
+        };
+
+        let (status, response) =
+            request_json_response(&app, Method::POST, "/queue/reset", Some(reset_body.clone()))
+                .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{response}");
+        assert_eq!(response["context"]["run_id"], "run-reset-live");
+        assert_eq!(response["context"]["status"], "active");
+        let error = response["error"].as_str().expect("refusal message");
+        assert!(
+            error.contains("POST /api/queue/runs/run-reset-live/end"),
+            "refusal must point at end: {error}"
+        );
+        assert_eq!(entry_count(&pool, "run-reset-live").await, 1);
+        assert_eq!(run_status(&pool, "run-reset-live").await, "active");
+        assert_eq!(
+            dispatch_state().await,
+            1,
+            "refused reset left the dispatch live"
+        );
+        assert_eq!(slot_run(&pool).await.as_deref(), Some("run-reset-live"));
+
+        let status = request_json(&app, Method::POST, "/queue/runs/run-reset-live/end", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(run_status(&pool, "run-reset-live").await, "completed");
+        assert_eq!(dispatch_state().await, 0, "end cancelled the live dispatch");
+        assert_eq!(slot_run(&pool).await, None);
+
+        let (status, response) =
+            request_json_response(&app, Method::POST, "/queue/reset", Some(reset_body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["deleted_entries"], 1);
+        assert_eq!(response["completed_runs"], 0);
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// `end` refuses a restoring run, so the refusal points at per-run cancel.
+    #[tokio::test]
+    async fn reset_http_points_restoring_run_at_cancel_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+        seed_agent(&pool).await;
+        seed_run(&pool, "run-reset-restoring", "restoring").await;
+        seed_entry(
+            &pool,
+            "run-reset-restoring",
+            "entry-restoring-1",
+            "pending",
+            None,
+        )
+        .await;
+        let app = test_router(pool.clone());
+        let reset_body = json!({"run_id": "run-reset-restoring", "agent_id": "agent-1"});
+
+        let (status, response) =
+            request_json_response(&app, Method::POST, "/queue/reset", Some(reset_body.clone()))
+                .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{response}");
+        assert_eq!(response["context"]["run_id"], "run-reset-restoring");
+        assert_eq!(response["context"]["status"], "restoring");
+        let error = response["error"].as_str().expect("refusal message");
+        assert!(
+            error.contains("POST /api/queue/cancel?run_id=run-reset-restoring")
+                && !error.contains("/end"),
+            "restoring refusal must point at cancel only: {error}"
+        );
+        assert_eq!(entry_count(&pool, "run-reset-restoring").await, 1);
+
+        let status = request_json(
+            &app,
+            Method::POST,
+            "/queue/runs/run-reset-restoring/end",
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "end does not select restoring runs"
+        );
+        let status = request_json(
+            &app,
+            Method::POST,
+            "/queue/cancel?run_id=run-reset-restoring",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(run_status(&pool, "run-reset-restoring").await, "cancelled");
+
+        let (status, response) =
+            request_json_response(&app, Method::POST, "/queue/reset", Some(reset_body)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
         pool.close().await;
         pg_db.drop().await;
     }

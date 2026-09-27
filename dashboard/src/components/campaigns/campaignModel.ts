@@ -20,7 +20,7 @@ export function filterCampaignNodes(nodes: CampaignNode[], filters: CampaignFilt
   return nodes.filter((node) => (!filters.hideCompleted || node.status !== "completed")
     && (filters.status === "all" || node.status === filters.status)
     && (filters.group === null || campaignGroup(node) === filters.group)
-    && (!query || [node.id, campaignIssueLabel(node), node.title, node.stage, node.group, node.assignee, node.session_id].some((value) => value?.toLocaleLowerCase().includes(query))));
+    && (!query || [node.id, campaignIssueLabel(node), node.title, node.summary, node.stage, node.group, node.assignee, node.session_id].some((value) => value?.toLocaleLowerCase().includes(query))));
 }
 export function groupCampaignNodes(nodes: CampaignNode[]) {
   const groups = new Map<string, CampaignNode[]>();
@@ -64,4 +64,38 @@ export function safeCampaignLink(value: string | null): string | undefined {
     const url = new URL(value);
     return ["https:", "http:"].includes(url.protocol) ? url.href : undefined;
   } catch { return undefined; }
+}
+
+export const CAMPAIGN_STAGES: Array<{ key: string; label: [string, string]; keywords: string[] }> = [
+  { key: "investigate", label: ["조사", "Investigate"], keywords: ["audit", "investigat", "research", "triage", "조사", "감사", "진단", "재판정"] },
+  { key: "design", label: ["설계", "Design"], keywords: ["design", "설계", "계획"] },
+  { key: "implement", label: ["구현", "Build"], keywords: ["impl", "구현"] },
+  { key: "review", label: ["리뷰", "Review"], keywords: ["review", "ready_for_pr", "리뷰", "검토"] },
+  { key: "repair", label: ["수리", "Fix"], keywords: ["fix", "repair", "rework", "review_fix", "수리", "리뷰 반영", "재작업"] },
+  { key: "merge", label: ["머지", "Merge"], keywords: ["merge", "ready(held)", "review_clean", "ci", "머지"] },
+  { key: "deploy", label: ["배포 확인", "Deploy check"], keywords: ["deploy", "rollout", "observ", "post-merge", "post_merge", "merged", "머지됨", "머지 완료", "배포", "관측"] },
+];
+
+/** Stage is free text: the stage keyword written first wins, and a longer keyword wins a tie. */
+export function campaignStageStep(stage: string): { index: number; raw: string } {
+  const text = stage.toLocaleLowerCase();
+  let best = { index: -1, at: Infinity, length: 0 };
+  CAMPAIGN_STAGES.forEach(({ keywords }, index) => {
+    for (const keyword of keywords) {
+      // English keywords must start a word so "suffix" is not "fix"; "ci" must also end one.
+      const at = /^[a-z]/.test(keyword) ? text.search(new RegExp(`(?<![a-z])${keyword.replace(/[()]/g, "\\$&")}${keyword === "ci" ? "(?![a-z])" : ""}`)) : text.indexOf(keyword);
+      if (at >= 0 && (at < best.at || (at === best.at && keyword.length > best.length))) best = { index, at, length: keyword.length };
+    }
+  });
+  const plain = stage.replace(/\b[0-9a-f]{7,40}\b/gi, "").replace(/\s+/g, " ").trim();
+  return { index: best.index, raw: plain.length > 28 ? `${plain.slice(0, 27)}…` : plain };
+}
+
+/** Running then blocked work leads the first screen; every other status is only counted. */
+export function campaignGlance(nodes: CampaignNode[]) {
+  const active = [...nodes.filter((node) => node.status === "running"), ...nodes.filter((node) => node.status === "blocked")];
+  const buckets = (["pending", "completed", "skipped", "failed"] as const)
+    .map((status) => ({ status, nodes: nodes.filter((node) => node.status === status) }))
+    .filter((bucket) => bucket.nodes.length > 0);
+  return { active, running: active.filter((node) => node.status === "running").length, buckets };
 }

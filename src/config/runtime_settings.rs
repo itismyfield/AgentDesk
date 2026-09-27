@@ -18,13 +18,6 @@ pub struct RuntimeSettingsConfig {
     pub publication_permit_mode: PublicationPermitMode,
     #[serde(default, skip_serializing_if = "is_structural_relay_verdict_source")]
     pub relay_verdict_source: RelayVerdictSource,
-    /// #5464 T5 S1: rollout stage for the AC2-R relay-authority warrant.
-    #[serde(default, skip_serializing_if = "is_legacy_relay_authority_mode")]
-    pub relay_authority_mode: RelayAuthorityMode,
-    /// Channel cohort percentage: 0 admits none, 100 admits all.
-    /// Values above 100 clamp at admission rather than wrapping.
-    #[serde(default, skip_serializing_if = "is_zero_u8")]
-    pub relay_authority_cohort_percent: u8,
     /// Heartbeat-absence TTL for stale dispatched debt; unset defaults to 1800 seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intake_delivery_sweep_dispatched_cutoff_secs: Option<u64>,
@@ -150,8 +143,6 @@ impl RuntimeSettingsConfig {
             && self.execution_identity_mode == ExecutionIdentityMode::Legacy
             && self.publication_permit_mode == PublicationPermitMode::Legacy
             && self.relay_verdict_source == RelayVerdictSource::Structural
-            && self.relay_authority_mode == RelayAuthorityMode::Legacy
-            && self.relay_authority_cohort_percent == 0
             && self.intake_delivery_sweep_dispatched_cutoff_secs.is_none()
             && self.intake_delivery_sweep_spawned_cutoff_secs.is_none()
             && self.intake_delivery_sweep_batch_limit.is_none()

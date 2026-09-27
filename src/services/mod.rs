@@ -55,6 +55,7 @@ pub mod kanban_cards;
 // live on clean sibling modules. Remove during maintenance dead-code cleanup.
 #[allow(dead_code)]
 pub mod maintenance;
+pub(crate) mod manual_steer;
 pub mod mcp_config;
 pub mod memory;
 // #3034: 1 residual dead-code items; scoped here so the lint stays

@@ -186,6 +186,34 @@ class WriterGateCiWiringTests(unittest.TestCase):
         self.assertNotEqual(failing.returncode, 0)
         self.assertIn("found 0", failing.stderr)
 
+    def module_wiring_errors(self, extra_ci_text: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "scripts").mkdir()
+            (root / "tests").mkdir()
+            (root / "scripts/ci-script-checks.sh").write_text(
+                self.fixture_text() + extra_ci_text, encoding="utf-8"
+            )
+            (root / "tests/test_fixture_wiring.py").write_text(
+                "import unittest\n\n\nclass Fixture(unittest.TestCase):\n    pass\n",
+                encoding="utf-8",
+            )
+            return guard.check_test_module_wiring(root)
+
+    def test_unwired_test_module_fails(self) -> None:
+        for extra in ("", '# "$PYTHON" -m unittest tests.test_fixture_wiring\n'):
+            with self.subTest(extra=extra):
+                errors = self.module_wiring_errors(extra)
+                self.assertTrue(any("tests.test_fixture_wiring" in e for e in errors), errors)
+
+    def test_wired_test_module_passes(self) -> None:
+        for extra in (
+            '"$PYTHON" -m unittest tests.test_fixture_wiring\n',
+            '"$PYTHON" -m unittest tests/test_fixture_wiring.py\n',
+        ):
+            with self.subTest(extra=extra):
+                self.assertEqual(self.module_wiring_errors(extra), [])
+
 
 if __name__ == "__main__":
     unittest.main()

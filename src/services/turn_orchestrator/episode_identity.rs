@@ -59,13 +59,36 @@ impl ChannelMailboxHandle {
         user_message_id: MessageId,
         persistence: QueuePersistenceContext,
     ) -> TryStartTurnResult {
+        let episode = cancel_token.turn_nonce().map(str::to_owned);
+        self.try_start_turn_adopting(
+            cancel_token,
+            request_owner,
+            user_message_id,
+            ActiveTurnKind::UserOrAgent,
+            episode,
+            persistence,
+        )
+        .await
+    }
+
+    /// Re-adoption of a persisted episode under a possibly different token:
+    /// the fence judges `episode_nonce`, the installed token is what starts.
+    pub(crate) async fn try_start_turn_adopting(
+        &self,
+        cancel_token: Arc<CancelToken>,
+        request_owner: UserId,
+        user_message_id: MessageId,
+        turn_kind: ActiveTurnKind,
+        episode_nonce: Option<String>,
+        persistence: QueuePersistenceContext,
+    ) -> TryStartTurnResult {
         self.request(|reply| ChannelMailboxMsg::TryStartTurn {
             cancel_token,
             request_owner,
             user_message_id,
-            turn_kind: ActiveTurnKind::UserOrAgent,
+            turn_kind,
             admission_order: TurnAdmissionOrder::Immediate,
-            refuse_released_episode: true,
+            fence_episode: Some(episode_nonce),
             persistence: Some(persistence),
             reply,
         })

@@ -25,7 +25,6 @@ box "Policies (priority order)" #F0F8FF
   participant "review-automation\n(p=50)" as P50
   participant "timeouts\n(p=100)" as P100
   participant "pipeline\n(p=200)" as P200
-  participant "merge-automation\n(p=200)" as P200m
   participant "auto-queue\n(p=500)" as P500
 end box
 
@@ -144,16 +143,6 @@ activate P10
 P10 -> DB : UPDATE completed_at,\nrecord XP
 P10 --> JS
 deactivate P10
-JS --> Engine
-deactivate JS
-
-Engine -> JS : Call merge-automation.onCardTerminal(payload)
-activate JS
-JS -> P200m : onCardTerminal(payload)
-activate P200m
-P200m -> DB : Check PR merge status,\ntrigger merge if ready
-P200m --> JS
-deactivate P200m
 JS --> Engine
 deactivate JS
 
@@ -308,11 +297,6 @@ group Every 300s (count % 10 == 0)
   P100 -> DB : Non-critical reconciliation\n[R][B][F][G][H][M][O],\nidle session cleanup
   P100 --> JS
   deactivate P100
-  JS -> P200m : merge-automation.onTick5min()
-  activate P200m
-  P200m -> DB : Poll PR merge status
-  P200m --> JS
-  deactivate P200m
   JS --> Engine
   deactivate Engine
   Tick -> Kanban : drain_hook_side_effects(db, engine)
@@ -426,15 +410,6 @@ note right of Engine #FFCCCC
   to the next policy.
 end note
 
-Engine -> JS : Call merge-automation.onCardTerminal(payload)
-activate JS
-JS -> P200m : onCardTerminal(payload)
-activate P200m
-P200m --> JS : OK (runs normally)
-deactivate P200m
-JS --> Engine
-deactivate JS
-
 Engine -> JS : Call auto-queue.onCardTerminal(payload)
 activate JS
 JS -> P500 : onCardTerminal(payload)
@@ -468,7 +443,7 @@ legend bottom
   **Policy Registration (priority order):**
   pr-tracking (1) | kanban-rules (10) | deploy-pipeline (45)
   ci-recovery (46) | review-automation (50) | timeouts (100)
-  pipeline (200) | merge-automation (200) | triage-rules (300) | auto-queue (500)
+  pipeline (200) | triage-rules (300) | auto-queue (500)
 end legend
 
 @enduml

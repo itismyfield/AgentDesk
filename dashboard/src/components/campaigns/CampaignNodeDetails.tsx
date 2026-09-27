@@ -42,9 +42,12 @@ export default function CampaignNodeDetails({ campaign, node, tr, onSaved, editi
       <label>{tr("선행 작업 (여러 개 선택 가능)", "Dependencies (multiple selection)")}<select multiple size={Math.min(5, Math.max(2, campaign.nodes.length - 1))} value={draft.dependencies} onChange={(event) => patch({ dependencies: Array.from(event.target.selectedOptions, (option) => option.value) })}>{campaign.nodes.filter((candidate) => candidate.id !== node.id).map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.title}</option>)}</select></label>
       <label>{tr("다음 행동", "Next action")}<textarea rows={3} value={draft.next_action ?? ""} onChange={(event) => patch({ next_action: event.target.value || null })} /></label>
       <label>{tr("막힌 이유", "Blocker")}<textarea rows={2} value={draft.blocker ?? ""} onChange={(event) => patch({ blocker: event.target.value || null })} /></label>
+      <label>{tr("한 줄 요지", "One-line gist")}<input value={draft.summary ?? ""} onChange={(event) => patch({ summary: event.target.value || null })} /></label>
+      <label>{tr("기대효과", "Expected benefit")}<input value={draft.benefit ?? ""} onChange={(event) => patch({ benefit: event.target.value || null })} /></label>
       {error && <WidgetState kind="error" title={error} compact />}
       <div className="campaign-actions"><button type="submit" disabled={saving}>{saving ? tr("저장 중…", "Saving…") : tr("저장", "Save")}</button><button type="button" disabled={saving} onClick={() => { onDraftChange(null); setError(null); }}>{tr("취소", "Cancel")}</button></div>
     </form> : <>
+      {(node.summary || node.benefit) && <p className="campaign-description">{node.summary}{node.summary && node.benefit && "\n"}{node.benefit && `${tr("기대효과", "Benefit")}: ${node.benefit}`}</p>}
       {node.details && <p className="campaign-description">{node.details}</p>}
       <dl className="campaign-detail-grid">
         <div><dt>{tr("단계 · 라운드", "Stage · round")}</dt><dd>{node.stage || "—"} · {node.round}</dd></div>

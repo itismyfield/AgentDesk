@@ -46,6 +46,7 @@ export interface AutoQueueRequestProgress {
 export interface AutoQueuePhaseRendererCtx {
   currentBatchPhase: number | null;
   gatesByPhase: Map<number, PhaseGateInfo[]>;
+  gateKindByPhase: Map<number, string>;
   hasBatchPhases: boolean;
   handleEntryStatusUpdate: (entryId: string, status: "pending" | "skipped") => void;
   locale: UiLanguage;

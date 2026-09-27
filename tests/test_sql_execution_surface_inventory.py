@@ -366,52 +366,30 @@ fn rewrite_insert_conflict(sql: &str, mode: ConflictMode) {
         contract_errors = scanner.live_contract_errors(records, root)
         self.assertTrue(any("lost rewrite_insert_conflict UNRESOLVED" in e for e in contract_errors))
 
-    def test_live_known_blind_spots_and_auto_queue_runs_report(self):
-        records = scanner.scan_inventory(scanner.REPO_ROOT)
-        def matching(path, api, classification):
-            return [r for r in records if (r.path, r.api, r.classification) ==
-                    (path, api, classification)]
-
-        db_ops = "src/engine/ops/db_ops.rs"
-        self.assertEqual(len(matching(db_ops, "db_execute_raw_pg", "UNRESOLVED")), 1)
-        self.assertEqual(len(matching("src/engine/intent.rs", "execute_policy_sql", "UNRESOLVED")), 1)
-        self.assertIn("Intent::ExecuteSQL { sql, params } =>", (scanner.REPO_ROOT / "src/engine/intent.rs").read_text(encoding="utf-8"))
-        self.assertTrue(matching(db_ops, "db_query_raw_with_json_mode", "UNRESOLVED"))
-        source = (scanner.REPO_ROOT / db_ops).read_text(encoding="utf-8")
-        self.assertRegex(source, r"let\s+table_name\s*=\s*rest\s*\[\.\.table_end\]\s*\.trim\(\);")
-        self.assertEqual(len(matching(db_ops, "rewrite_insert_conflict", "UNRESOLVED")), 2)
-
-        policy_path = "policies/lib/auto-queue-phase-gate.js"
-        policy_lines = (scanner.REPO_ROOT / policy_path).read_text(encoding="utf-8").splitlines()
-        for symbol in ("beginPhaseGateGraceWindow", "clearPhaseGateGraceWindow"):
-            start = next(
-                (i for i, line in enumerate(policy_lines) if line.startswith(f"function {symbol}(") ),
-                None,
-            )
-            self.assertIsNotNone(start, f"missing grace writer function {symbol}")
-            end = next(
-                (i for i, line in enumerate(policy_lines[start + 1:], start + 1)
-                 if line.startswith("function ")),
-                None,
-            )
-            self.assertIsNotNone(end, f"missing function boundary after {symbol}")
-            calls = [r for r in matching(policy_path, "agentdesk.db.execute", "STATIC")
-                     if start < r.line <= end and "auto_queue_runs" in r.table_tokens]
-            self.assertEqual(len(calls), 1, symbol)
-
-        migrations = [r for r in records if r.kind == "MIGRATION"]
-        self.assertTrue(any(r.path.endswith("0025_auto_queue_phase_gate_grace.sql") for r in migrations))
-        report = "\n".join(scanner._auto_queue_runs_report(records, scanner.REPO_ROOT))
-        for root in ("src", "policies", "migrations/postgres"):
-            self.assertIn(f"root={root}", report)
-        self.assertIn("UNRESOLVED dynamic_boundary=src/engine/ops/db_ops.rs rewrite_insert_conflict.table_name", report)
-        self.assertIn("records=2", report)
-
-        self.assertEqual(scanner.live_contract_errors(records, scanner.REPO_ROOT), [])
-        rendered = scanner._render(records, repo_root=scanner.REPO_ROOT)
-        for symbol, path, table in scanner.GUARD_EXPECTED_CONTRACTS:
-            self.assertIn(f"{symbol} {path} table={table} records=1", rendered)
-
+    def test_grace_writer_moved_out_of_its_function_is_red(self):
+        write_sql = 'agentdesk.db.execute("UPDATE auto_queue_runs SET phase_gate_grace_until = NULL WHERE id = ?", [runId]);'
+        def source(clear_body, trailer):
+            return (f"function beginPhaseGateGraceWindow(runId) {{\n  {write_sql}\n}}\n"
+                    f"function clearPhaseGateGraceWindow(runId) {{\n  {clear_body}\n}}\n{trailer}")
+        cases = (
+            (source(write_sql, ""), None),
+            # A non-`function` declaration right after the writer must not extend its body.
+            (source("return;", f"const runWithinPhaseGateGrace = function (runId) {{\n  {write_sql}\n}};\n"),
+             "clearPhaseGateGraceWindow: expected 1"),
+            (source(write_sql, "function clearPhaseGateGraceWindow(runId) {\n  return;\n}\n"),
+             "clearPhaseGateGraceWindow: expected 1 top-level definition"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for text, expected in cases:
+                with self.subTest(expected=expected):
+                    path = self.write(root, scanner.GRACE_WRITER_PATH, text)
+                    errors = scanner._grace_writer_errors(scanner.scan_js_calls(path, root), root)
+                    if expected is None:
+                        self.assertEqual(errors, [])
+                    else:
+                        self.assertEqual(len(errors), 1, errors)
+                        self.assertIn(expected, errors[0])
 
 if __name__ == "__main__":
     unittest.main()

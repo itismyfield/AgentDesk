@@ -109,9 +109,6 @@ pub(super) fn routine_discord_logger(state: &AppState) -> AppResult<RoutineDisco
     Ok(RoutineDiscordLogger::new_with_health_registry(
         std::sync::Arc::new(pool),
         state.health_registry.clone(),
-        // #5993: no operator health target; stale-paused stalls fall back to
-        // a WARN log and recovery notices to the routine's own thread.
-        None,
     ))
 }
 

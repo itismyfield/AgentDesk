@@ -64,6 +64,13 @@ sanitize_filename() {
   printf '%s' "$raw"
 }
 
+# Main-only jobs carry a " (main)" suffix to stay distinct from PR required
+# contexts; strip it so triage identity survives the rename across runs.
+triage_job_identity() {
+  local job_name="$1"
+  printf '%s' "${job_name% (main)}"
+}
+
 identifier_title() {
   local identifier="$1"
   printf '[ci-red] %s 실패 (main)' "$identifier"
@@ -271,13 +278,13 @@ collect_failed_identifiers() {
         # consecutive runs) can still be escalated. A single/double occurrence
         # accumulates here but is never promoted, preserving the anti-flake intent.
         if [[ "$prefix" == "current" ]]; then
-          record_infra_identifier "$run_id" "infra::job::$job_name" "$job_name" "$job_id" "$job_url" "$log_path" 1
+          record_infra_identifier "$run_id" "infra::job::$(triage_job_identity "$job_name")" "$job_name" "$job_id" "$job_url" "$log_path" 1
         else
-          record_infra_identifier "$run_id" "infra::job::$job_name" "$job_name" "$job_id" "$job_url" "$log_path" 0
+          record_infra_identifier "$run_id" "infra::job::$(triage_job_identity "$job_name")" "$job_name" "$job_id" "$job_url" "$log_path" 0
         fi
         continue
       fi
-      identifier="job::$job_name"
+      identifier="job::$(triage_job_identity "$job_name")"
       record_failed_identifier "$prefix" "$identifier" "$job_name" "$job_id" "$job_url" "$log_path"
     fi
   done < <(jq -c '.jobs[] | select(.conclusion == "failure")' <<<"$jobs_json")
@@ -310,7 +317,7 @@ collect_infra_identifiers_only() {
       continue
     fi
     if log_has_infra_termination "$log_path" && ! log_has_real_failure "$log_path"; then
-      record_infra_identifier "$run_id" "infra::job::$job_name" "$job_name" "$job_id" "$job_url" "$log_path" 0
+      record_infra_identifier "$run_id" "infra::job::$(triage_job_identity "$job_name")" "$job_name" "$job_id" "$job_url" "$log_path" 0
     fi
   done < <(jq -c '.jobs[] | select(.conclusion == "failure")' <<<"$jobs_json")
 }
@@ -337,7 +344,7 @@ collect_passed_identifiers() {
     done < <(parse_passed_identifiers_from_log "$log_path")
 
     if [[ "$matched" == "0" ]]; then
-      record_passed_identifier "$prefix" "job::$job_name"
+      record_passed_identifier "$prefix" "job::$(triage_job_identity "$job_name")"
     fi
 
     # #4245: A successful job clears any persistent infra-termination streak for
@@ -345,7 +352,7 @@ collect_passed_identifiers() {
     # a recovered infra job may pass with per-test `... ok` lines, so `matched`
     # cannot gate this) so an escalated `infra::job::…` ci-red issue auto-closes
     # after two consecutive green runs, symmetric to the escalation.
-    record_passed_identifier "$prefix" "infra::job::$job_name"
+    record_passed_identifier "$prefix" "infra::job::$(triage_job_identity "$job_name")"
   done < <(jq -c '.jobs[] | select(.conclusion == "success")' <<<"$jobs_json")
 }
 
@@ -1182,6 +1189,72 @@ EOF
   assert_contains "issue close 9471 --repo test/repo" "$scenario_dir/issue-close.txt"
 }
 
+scenario_main_suffix_rename_keeps_failure_streak() {
+  # A main-only job renamed with a " (main)" suffix keeps its triage identity:
+  # old-name previous + new-name current red updates the existing issue.
+  local scenario_dir="$TMP_DIR/selftest-rename-streak"
+  mkdir -p "$scenario_dir"
+  install_mock_gh "$scenario_dir"
+  write_event_payload "$scenario_dir/event.json"
+  cat >"$scenario_dir/workflow-runs.json" <<'EOF'
+{"workflow_runs":[{"id":200,"conclusion":"failure"},{"id":199,"conclusion":"failure"}]}
+EOF
+  cat >"$scenario_dir/current-jobs.json" <<'EOF'
+{"jobs":[{"id":661,"name":"High-risk recovery (main)","conclusion":"failure","html_url":"https://example.com/jobs/661"}]}
+EOF
+  cat >"$scenario_dir/previous-jobs.json" <<'EOF'
+{"jobs":[{"id":662,"name":"High-risk recovery","conclusion":"failure","html_url":"https://example.com/jobs/662"}]}
+EOF
+  echo 'error: could not compile agentdesk (lib) due to 1 previous error' >"$scenario_dir/log-200-661.txt"
+  cp "$scenario_dir/log-200-661.txt" "$scenario_dir/log-199-662.txt"
+  cat >"$scenario_dir/open-issues.json" <<'EOF'
+[{"number":9480,"title":"[ci-red] job::High-risk recovery 실패 (main)"}]
+EOF
+
+  PATH="$scenario_dir:$PATH" \
+    GITHUB_REPOSITORY="test/repo" \
+    GITHUB_EVENT_PATH="$scenario_dir/event.json" \
+    GH_TOKEN="test-token" \
+    bash "$0"
+
+  assert_contains "issue comment 9480 --repo test/repo" "$scenario_dir/issue-comment.txt"
+  if [[ -f "$scenario_dir/issue-create.txt" ]]; then
+    echo "assertion failed: renamed job must not open a second ci-red issue" >&2
+    exit 1
+  fi
+}
+
+scenario_main_suffix_rename_recovery_closes_issues() {
+  # Recovery across the same rename closes both the job-level and infra issues.
+  local scenario_dir="$TMP_DIR/selftest-rename-recover"
+  mkdir -p "$scenario_dir"
+  install_mock_gh "$scenario_dir"
+  write_success_event_payload "$scenario_dir/event.json"
+  cat >"$scenario_dir/workflow-runs.json" <<'EOF'
+{"workflow_runs":[{"id":200,"conclusion":"success"},{"id":199,"conclusion":"success"}]}
+EOF
+  cat >"$scenario_dir/current-jobs.json" <<'EOF'
+{"jobs":[{"id":671,"name":"High-risk recovery (main)","conclusion":"success","html_url":"https://example.com/jobs/671"}]}
+EOF
+  cat >"$scenario_dir/previous-jobs.json" <<'EOF'
+{"jobs":[{"id":672,"name":"High-risk recovery","conclusion":"success","html_url":"https://example.com/jobs/672"}]}
+EOF
+  echo '    Finished test profile in 200s' >"$scenario_dir/log-200-671.txt"
+  cp "$scenario_dir/log-200-671.txt" "$scenario_dir/log-199-672.txt"
+  cat >"$scenario_dir/open-issues.json" <<'EOF'
+[{"number":9481,"title":"[ci-red] job::High-risk recovery 실패 (main)"},{"number":9482,"title":"[ci-red] infra::job::High-risk recovery 실패 (main)"}]
+EOF
+
+  PATH="$scenario_dir:$PATH" \
+    GITHUB_REPOSITORY="test/repo" \
+    GITHUB_EVENT_PATH="$scenario_dir/event.json" \
+    GH_TOKEN="test-token" \
+    bash "$0"
+
+  assert_contains "issue close 9481 --repo test/repo" "$scenario_dir/issue-close.txt"
+  assert_contains "issue close 9482 --repo test/repo" "$scenario_dir/issue-close.txt"
+}
+
 scenario_cancelled_run_does_not_close_issue() {
   local scenario_dir="$TMP_DIR/selftest-cancelled"
   mkdir -p "$scenario_dir"
@@ -1728,6 +1801,8 @@ run_self_test() {
   scenario_existing_issue_triggers_immediate_sync
   scenario_two_run_green_closes_issue
   scenario_recovered_infra_job_closes_issue
+  scenario_main_suffix_rename_keeps_failure_streak
+  scenario_main_suffix_rename_recovery_closes_issues
   scenario_cancelled_run_does_not_close_issue
   scenario_skipped_lane_does_not_close_issue
   scenario_single_failure_stays_pending

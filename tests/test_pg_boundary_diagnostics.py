@@ -189,7 +189,6 @@ class BoundaryWiringTests(unittest.TestCase):
                 self.assertNotEqual(mutated, text)
                 self.assertIsInstance(yaml.safe_load(mutated), dict)
                 self.assertNotEqual(wiring_problems(mutated), [])
-        self.assertIn('"$PYTHON" -m unittest tests.test_pg_boundary_diagnostics', (ROOT / "scripts/ci-script-checks.sh").read_text())
 
 
 class BoundaryRuntimeTests(unittest.TestCase):

@@ -45,11 +45,27 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 ),
             ),
             (
+                "provider",
+                body_param(
+                    "string",
+                    false,
+                    "Optional provider override (claude or codex); runs on that provider's bound channel",
+                ),
+            ),
+            (
+                "channel_id",
+                body_param(
+                    "string",
+                    false,
+                    "Optional channel override; must be one of the agent's bound channels (403 otherwise)",
+                ),
+            ),
+            (
                 "dm_user_id",
                 body_param(
                     "string",
                     false,
-                    "Optional Discord user id. When set, the turn is bound to that user's DM channel with the agent's primary bot.",
+                    "Optional Discord user id. When set, the turn is bound to that user's DM channel with the agent's primary bot. Cannot be combined with provider or channel_id.",
                 ),
             ),
         ])
@@ -74,7 +90,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_error_example(
             409,
             json!({"path": {"id": "family-counsel"}, "body": {"prompt": "do it"}}),
-            json!({"error": "turn already active for this agent mailbox", "active_turn_id": "discord:1473922824350601297:9000000000000000000"}),
+            json!({"ok": false, "error": "agent mailbox is busy for channel 1473922824350601297", "status": "conflict"}),
         )
         .with_curl("curl -X POST http://localhost:8787/api/agents/family-counsel/turn/start -H 'Content-Type: application/json' -d '{\"prompt\":\"hello\",\"source\":\"system\",\"dm_user_id\":\"343742347365974026\"}'"),
         ep(

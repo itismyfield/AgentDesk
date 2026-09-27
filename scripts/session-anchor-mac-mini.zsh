@@ -11,7 +11,12 @@ _adk_anchor_cli() {
     command "$@"
   fi
 }
-cc() { _adk_anchor_cli claude --dangerously-skip-permissions "$@" }
+# claude 는 백그라운드 세션 명령을 첫 인자일 때만 인식하므로 앞에 옵션을 붙이지 않는다.
+_adk_claude_bg_cmd() { case ${1-} in attach|logs|stop|kill|rm|respawn) return 0 ;; esac; return 1 }
+cc() {
+  _adk_claude_bg_cmd "$@" && { command claude "$@"; return }
+  _adk_anchor_cli claude --dangerously-skip-permissions "$@"
+}
 alias codex='command codex --no-alt-screen'
 cdx() { _adk_anchor_cli codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox "$@" }
 # Claude Code in tmux (cct = Anthropic 직결).

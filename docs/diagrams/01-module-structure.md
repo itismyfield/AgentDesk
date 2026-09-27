@@ -112,7 +112,6 @@ package "JS Policies  (policies/)" as PoliciesPkg #LemonChiffon {
     [kanban-rules.js] as PKanban
     [review-automation.js] as PReview
     [auto-queue.js] as PAutoQueue
-    [merge-automation.js] as PMerge
     [timeouts.js] as PTimeouts
     [deploy-pipeline.js] as PDeploy
     [ci-recovery.js] as PCiRecovery

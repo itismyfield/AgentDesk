@@ -4,8 +4,8 @@ mod turn_admission;
 use transport::QueueTransport;
 pub(super) use turn_admission::{
     mailbox_enqueue_observed_intervention, mailbox_recovery_kickoff,
-    mailbox_try_start_turn_behind_queue, mailbox_try_start_turn_kinded_with_feedback,
-    mailbox_try_start_turn_unless_released,
+    mailbox_try_start_turn_adopting, mailbox_try_start_turn_behind_queue,
+    mailbox_try_start_turn_kinded_with_feedback, mailbox_try_start_turn_unless_released,
 };
 
 /// #2044 F3: RAII guard that ensures `deferred_hook_backlog` is

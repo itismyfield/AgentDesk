@@ -14,11 +14,13 @@ use crate::services::provider::{CancelToken, ProviderKind};
 mod active_source_dedup;
 mod claim_observation;
 mod clear_channel;
+mod closed_verdict;
 mod dispatch_cleanup;
 mod dispatch_reservation;
 mod episode_identity;
 mod front_requeue;
 mod inbound_order;
+mod incarnation;
 mod intervention;
 mod lease_release;
 #[cfg(test)]
@@ -46,13 +48,13 @@ pub(crate) use dispatch_reservation::{
     PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER, VALVE_CLEARED_DISPATCH_MARKER_GRACE,
 };
 use dispatch_reservation::{
-    abandon_pending_dispatch_reservation, clear_pending_user_dispatch,
-    clear_stale_pending_dispatch_reservation, consume_pending_dispatch_marker_if_matches,
-    delete_pending_dispatch_marker_with_persistence, hydrate_pending_queue_from_disk_if_present,
-    hydrate_pending_queue_into_state, merge_pending_dispatch_marker_into_state,
-    pending_dispatch_lease_is_orphaned, reconcile_pending_dispatch_marker_before_take_next,
-    record_valve_cleared_pending_dispatch, set_pending_user_dispatch,
-    settle_pending_dispatch_on_claim,
+    abandon_pending_dispatch_reservation, absorb_disk_queue, absorb_disk_queue_error,
+    clear_pending_user_dispatch, clear_stale_pending_dispatch_reservation,
+    consume_pending_dispatch_marker_if_matches, delete_pending_dispatch_marker_with_persistence,
+    hydrate_pending_queue_from_disk_if_present, hydrate_pending_queue_into_state,
+    merge_pending_dispatch_marker_into_state, pending_dispatch_lease_is_orphaned,
+    reconcile_pending_dispatch_marker_before_take_next, record_valve_cleared_pending_dispatch,
+    set_pending_user_dispatch, settle_pending_dispatch_on_claim,
 };
 use episode_identity::{TurnNonceGuard, matching_cancel_token, persist_queue_or_restore};
 use front_requeue::requeue_intervention_front;
@@ -66,7 +68,7 @@ pub(crate) use overflow::SoftInterventionProbe;
 use overflow::drain_head_overflow;
 #[cfg(test)]
 use pending_queue_persistence::load_channel_pending_queue;
-use pending_queue_persistence::save_channel_pending_dispatch_marker;
+pub(crate) use pending_queue_persistence::save_channel_pending_dispatch_marker;
 pub(crate) use pending_queue_persistence::{
     PendingQueueItem, cleanup_stale_pending_queue_tmp_files_all_tokens,
     load_channel_pending_dispatch_marker, load_pending_dispatch_markers, load_pending_queues,
@@ -77,6 +79,7 @@ pub(crate) use pending_queue_persistence::{
 use pending_queue_persistence::{
     cleanup_stale_pending_queue_tmp_files_in_dir, cleanup_stale_pending_queue_tmp_files_under_root,
 };
+use pending_queue_persistence::{log_queue_persistence_rollback, persist_queue};
 #[cfg(test)]
 use queue_cancellation::cancel_soft_intervention_by_message_id;
 pub(crate) use queue_cancellation::has_soft_intervention_at;
@@ -425,6 +428,7 @@ pub(crate) struct FinishTurnResult {
     pub(crate) persistence_error: Option<String>,
 }
 
+#[derive(Default)]
 pub(crate) struct ClearChannelResult {
     pub(crate) removed_token: Option<Arc<CancelToken>>,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
@@ -548,6 +552,9 @@ static GLOBAL_CHANNEL_MAILBOXES: LazyLock<dashmap::DashMap<ChannelId, ChannelMai
 #[derive(Clone)]
 pub(crate) struct ChannelMailboxHandle {
     sender: mpsc::UnboundedSender<ChannelMailboxMsg>,
+    /// This incarnation's own signal, so follow-up to an accepted request never
+    /// reaches a successor minted by a purge.
+    recovery_done: Arc<RecoveryDoneSignal>,
 }
 
 impl ChannelMailboxHandle {
@@ -798,7 +805,7 @@ impl ChannelMailboxHandle {
             user_message_id,
             turn_kind,
             admission_order,
-            refuse_released_episode: false,
+            fence_episode: None,
             persistence,
             reply,
         })
@@ -880,10 +887,9 @@ impl ChannelMailboxHandle {
         .unwrap_or(RecoveryKickoffResult::Unavailable)
     }
 
+    #[cfg(test)]
     pub(crate) async fn clear_recovery_marker(&self) {
-        let _ = self
-            .request(|reply| ChannelMailboxMsg::ClearRecoveryMarker { reply })
-            .await;
+        let _ = self.clear_recovery_marker_or_refused().await;
     }
 
     pub(crate) async fn has_pending_soft_queue(
@@ -899,6 +905,7 @@ impl ChannelMailboxHandle {
             })
     }
 
+    #[cfg(test)]
     pub(crate) async fn take_next_soft(
         &self,
         persistence: QueuePersistenceContext,
@@ -906,25 +913,22 @@ impl ChannelMailboxHandle {
         self.take_soft_matching(persistence, None).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn take_soft_matching(
         &self,
         persistence: QueuePersistenceContext,
         primary_message_id: Option<MessageId>,
     ) -> TakeNextSoftResult {
-        self.request(|reply| ChannelMailboxMsg::TakeNextSoft {
-            persistence,
-            primary_message_id,
-            reply,
-        })
-        .await
-        .unwrap_or(TakeNextSoftResult {
-            intervention: None,
-            dispatch_lease: None,
-            has_more: false,
-            queue_len_after: 0,
-            queue_exit_events: Vec::new(),
-            persistence_error: None,
-        })
+        self.take_soft_matching_or_refused(persistence, primary_message_id)
+            .await
+            .unwrap_or(TakeNextSoftResult {
+                intervention: None,
+                dispatch_lease: None,
+                has_more: false,
+                queue_len_after: 0,
+                queue_exit_events: Vec::new(),
+                persistence_error: None,
+            })
     }
 
     pub(crate) async fn requeue_front(
@@ -1024,8 +1028,9 @@ impl ChannelMailboxHandle {
             })
     }
 
+    #[cfg(test)]
     pub(crate) async fn clear(&self, persistence: QueuePersistenceContext) -> ClearChannelResult {
-        self.request(|reply| ChannelMailboxMsg::Clear { persistence, reply })
+        self.clear_or_refused(persistence)
             .await
             .unwrap_or(ClearChannelResult {
                 removed_token: None,
@@ -1074,44 +1079,38 @@ impl ChannelMailboxHandle {
             .await;
     }
 
+    #[cfg(test)]
     pub(crate) async fn hydrate_pending_queue_from_disk(
         &self,
         persistence: QueuePersistenceContext,
     ) -> HydratePendingQueueResult {
-        self.request(|reply| ChannelMailboxMsg::HydratePendingQueueFromDisk { persistence, reply })
+        self.hydrate_pending_queue_from_disk_or_refused(persistence)
             .await
             .unwrap_or_default()
     }
 
     /// #3864: actor-serialized dedup/merge/persist of restored queue items.
+    #[cfg(test)]
     pub(crate) async fn merge_restored_queue_items(
         &self,
         items: Vec<Intervention>,
         persistence: QueuePersistenceContext,
     ) -> HydratePendingQueueResult {
-        self.request(|reply| ChannelMailboxMsg::MergeRestoredQueueItems {
-            items,
-            persistence,
-            reply,
-        })
-        .await
-        .unwrap_or_default()
+        self.merge_restored_queue_items_or_refused(items, persistence)
+            .await
+            .unwrap_or_default()
     }
 
+    #[cfg(test)]
     pub(crate) async fn merge_restored_dispatch_marker(
         &self,
         marker: Intervention,
         restored_override: Option<ChannelId>,
         persistence: QueuePersistenceContext,
     ) -> HydratePendingQueueResult {
-        self.request(|reply| ChannelMailboxMsg::MergeRestoredDispatchMarker {
-            marker,
-            restored_override,
-            persistence,
-            reply,
-        })
-        .await
-        .unwrap_or_default()
+        self.merge_restored_dispatch_marker_or_refused(marker, restored_override, persistence)
+            .await
+            .unwrap_or_default()
     }
 
     pub(crate) async fn restart_drain(
@@ -1230,52 +1229,15 @@ pub(crate) struct ChannelMailboxRegistry {
     /// deferred monitor auto-turn. Stored beside `recovery_done` so callers
     /// can clone the signal without actor round-trips.
     turn_finished: Arc<dashmap::DashMap<ChannelId, Arc<TurnFinishedSignal>>>,
+    /// #5951 — one re-mint fence per channel, never removed (`remint_fence.rs`).
+    remint_fences: Arc<dashmap::DashMap<ChannelId, remint_fence::FenceCell>>,
 }
 
 impl ChannelMailboxRegistry {
-    pub(crate) fn handle(&self, channel_id: ChannelId) -> ChannelMailboxHandle {
-        if let Some(existing) = self.handles.get(&channel_id) {
-            return existing.clone();
-        }
-
-        let handle = spawn_channel_mailbox(channel_id);
-        let resolved = match self.handles.entry(channel_id) {
-            dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(handle.clone());
-                handle
-            }
-        };
-        GLOBAL_CHANNEL_MAILBOXES.insert(channel_id, resolved.clone());
-        resolved
-    }
-
     pub(crate) fn global_handle(channel_id: ChannelId) -> Option<ChannelMailboxHandle> {
         GLOBAL_CHANNEL_MAILBOXES
             .get(&channel_id)
             .map(|entry| entry.value().clone())
-    }
-
-    /// #2443 — fetch or create the recovery-done signal for this channel.
-    /// Cloning the `Arc` is cheap; the signal lives for the lifetime of the
-    /// registry. The same `Arc` is mirrored into `GLOBAL_RECOVERY_DONE_SIGNALS`
-    /// so callers that only have a `ChannelId` (no registry handle, e.g.
-    /// helper free functions outside `SharedData`) can resolve via
-    /// `global_recovery_done`.
-    pub(crate) fn recovery_done(&self, channel_id: ChannelId) -> Arc<RecoveryDoneSignal> {
-        if let Some(existing) = self.recovery_done.get(&channel_id) {
-            return existing.clone();
-        }
-        let signal = Arc::new(RecoveryDoneSignal::new());
-        let resolved = match self.recovery_done.entry(channel_id) {
-            dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(signal.clone());
-                signal
-            }
-        };
-        GLOBAL_RECOVERY_DONE_SIGNALS.insert(channel_id, resolved.clone());
-        resolved
     }
 
     /// #2443 — globally resolvable variant. Returns `None` only when no
@@ -1359,21 +1321,8 @@ impl ChannelMailboxRegistry {
     }
 }
 
-// #3297 r3 (codex) — tombstone classification, enforced for EVERY arm by
-// `registry_purge::gate_closed_arm` ahead of the actor's match. Once
-// `CloseIfIdle` sets `state.closed` (actor about to be unlinked):
-//  (a) START-LIKE arms — anything that binds an active turn / recovery marker
-//      or accepts NEW work (`TryStartTurn`, `RestoreActiveTurn`,
-//      `RecoveryKickoff`, `Enqueue`) — are REFUSED with that arm's existing
-//      "cannot start" reply (`TryStartTurn` ⇒ `false`); callers re-resolve a
-//      fresh actor via the registry `*_with_closed_retry` helpers and replay.
-//  (b) everything else stays ALLOWED — reads, cancels, finishes, drains, and
-//      queue RESTITUTION (`RequeueFront`/`ReplaceQueue`/hydrate, which
-//      re-persist already-accepted work to disk for a successor actor to
-//      hydrate — refusing those would drop user messages).
-//  (c) CommitCapturedReadyDelivery refuses closed actors in its own arm;
-//      replay on a successor would discard the captured actor's authority.
-// New arms must be classified here and (if start-like) gated there.
+// Once `CloseIfIdle` sets `state.closed`, the exhaustive `registry_purge::gate_closed_arm` passes
+// reads and refuses every other arm; CommitCapturedReadyDelivery refuses closed actors in its own arm.
 enum ChannelMailboxMsg {
     CommitCapturedReadyDelivery {
         commit: Box<crate::services::discord::CapturedReadyDeliveryCommit>,
@@ -1444,8 +1393,9 @@ enum ChannelMailboxMsg {
         turn_kind: ActiveTurnKind,
         /// #5937 — whether this claim may overtake queued inbound work.
         admission_order: TurnAdmissionOrder,
-        /// Refuse, in this same step, an episode `remint_fence` refuses.
-        refuse_released_episode: bool,
+        /// `Some(n)`: refuse, in this same step, when `remint_fence` refuses
+        /// episode `(user_message_id, n)` — the row's, not the token installed.
+        fence_episode: Option<Option<String>>,
         persistence: Option<QueuePersistenceContext>,
         reply: oneshot::Sender<TryStartTurnResult>,
     },
@@ -1466,7 +1416,7 @@ enum ChannelMailboxMsg {
         reply: oneshot::Sender<RecoveryKickoffResult>,
     },
     ClearRecoveryMarker {
-        reply: oneshot::Sender<()>,
+        reply: closed_verdict::VerdictReply<()>,
     },
     Enqueue {
         intervention: Intervention,
@@ -1481,7 +1431,7 @@ enum ChannelMailboxMsg {
     TakeNextSoft {
         persistence: QueuePersistenceContext,
         primary_message_id: Option<MessageId>,
-        reply: oneshot::Sender<TakeNextSoftResult>,
+        reply: closed_verdict::VerdictReply<TakeNextSoftResult>,
     },
     RequeueFront {
         intervention: Intervention,
@@ -1529,7 +1479,7 @@ enum ChannelMailboxMsg {
     },
     Clear {
         persistence: QueuePersistenceContext,
-        reply: oneshot::Sender<ClearChannelResult>,
+        reply: closed_verdict::VerdictReply<ClearChannelResult>,
     },
     /// #2706: drain the intervention queue without touching the active
     /// `cancel_token`. Used by `cancel_turn(force=true)` so the in-memory
@@ -1563,7 +1513,7 @@ enum ChannelMailboxMsg {
     },
     HydratePendingQueueFromDisk {
         persistence: QueuePersistenceContext,
-        reply: oneshot::Sender<HydratePendingQueueResult>,
+        reply: closed_verdict::VerdictReply<HydratePendingQueueResult>,
     },
     /// #3864: merge SIGTERM-restored disk queue items into the LIVE queue
     /// inside the actor, in one serialized step. Unlike `ReplaceQueue` — a
@@ -1575,13 +1525,13 @@ enum ChannelMailboxMsg {
     MergeRestoredQueueItems {
         items: Vec<Intervention>,
         persistence: QueuePersistenceContext,
-        reply: oneshot::Sender<HydratePendingQueueResult>,
+        reply: closed_verdict::VerdictReply<HydratePendingQueueResult>,
     },
     MergeRestoredDispatchMarker {
         marker: Intervention,
         restored_override: Option<ChannelId>,
         persistence: QueuePersistenceContext,
-        reply: oneshot::Sender<HydratePendingQueueResult>,
+        reply: closed_verdict::VerdictReply<HydratePendingQueueResult>,
     },
     RestartDrain {
         persistence: QueuePersistenceContext,
@@ -1709,37 +1659,7 @@ struct ChannelMailboxState {
     /// that must distinguish a stale active claim from a fresh same-id claim.
     turn_started_instant: Option<Instant>,
     /// Which persisted episode a recovery re-mint may still re-open.
-    remint_fence: remint_fence::RemintFence,
-}
-
-fn persist_queue(
-    channel_id: ChannelId,
-    queue: &[Intervention],
-    persistence: &QueuePersistenceContext,
-) -> Result<(), String> {
-    save_channel_queue(
-        &persistence.provider,
-        &persistence.token_hash,
-        channel_id,
-        queue,
-        persistence.dispatch_role_override,
-    )
-}
-
-fn log_queue_persistence_rollback(
-    operation: &str,
-    channel_id: ChannelId,
-    persistence: &QueuePersistenceContext,
-    error: &str,
-) {
-    tracing::error!(
-        operation,
-        provider = persistence.provider.as_str(),
-        token_hash = %persistence.token_hash,
-        channel_id = channel_id.get(),
-        error = %error,
-        "rolled back in-memory pending queue mutation after durable persistence failed"
-    );
+    remint_fence: remint_fence::FenceCell,
 }
 
 fn finalize_turn_state(
@@ -1872,16 +1792,22 @@ mod turn_finished_signal_tests {
     }
 }
 
-fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
+fn spawn_channel_mailbox(
+    channel_id: ChannelId,
+    fence: remint_fence::FenceCell,
+    recovery_done: Arc<RecoveryDoneSignal>,
+) -> ChannelMailboxHandle {
     let (tx, mut rx) = mpsc::unbounded_channel();
+    let own_recovery_done = recovery_done.clone();
     tokio::spawn(async move {
         let mut state = ChannelMailboxState {
             claim_log: claim_observation::ClaimLog::spawned(channel_id),
-            ..ChannelMailboxState::default()
+            remint_fence: fence,
+            ..Default::default()
         };
         while let Some(msg) = rx.recv().await {
-            // #3297 r3 — tombstoned actor refuses start-like arms (enum docs).
-            let Some(msg) = registry_purge::gate_closed_arm(&state, msg) else {
+            // A tombstoned actor serves only reads (enum docs).
+            let Some(msg) = registry_purge::gate_closed_arm(&state, channel_id, msg) else {
                 continue;
             };
             match msg {
@@ -2039,17 +1965,16 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     user_message_id,
                     turn_kind,
                     admission_order,
-                    refuse_released_episode,
+                    fence_episode,
                     persistence,
                     reply,
                 } => {
                     // #3167 BLOCKER-2 / #5937 — a claim yields to work that was
                     // queued or reserved before it; see `inbound_order`. A
                     // claim that cannot start must disturb neither gate.
-                    let refused_released_episode = refuse_released_episode
-                        && state
-                            .remint_fence
-                            .refuses(user_message_id, cancel_token.turn_nonce());
+                    let fence = &state.remint_fence;
+                    let refused_released_episode = fence_episode
+                        .is_some_and(|episode| fence.refuses(user_message_id, episode.as_deref()));
                     let idle = state.cancel_token.is_none() && !refused_released_episode;
                     let yields = idle
                         && claim_yields(&mut state, turn_kind, user_message_id, admission_order);
@@ -2151,6 +2076,8 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         let _ = reply.send(refusal);
                         continue;
                     }
+                    // #5951 — the watcher resolves the signal by channel: publish the recovering actor's own.
+                    GLOBAL_RECOVERY_DONE_SIGNALS.insert(channel_id, own_recovery_done.clone());
                     reset_activation_signals(channel_id);
                     let activated_turn = state.cancel_token.is_none();
                     state.active_turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
@@ -2378,6 +2305,12 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     reply,
                 } => {
                     state.last_persistence = Some(persistence.clone());
+                    if let Some(error) =
+                        absorb_disk_queue_error(&mut state, channel_id, &persistence)
+                    {
+                        let _ = reply.send(RequeueInterventionResult::absorb_failed(error));
+                        continue;
+                    }
                     let identity_ids = front_requeue::intervention_identity_ids(&intervention);
                     let authorized_pending_restore = dispatch_lease.as_ref().and_then(|lease| {
                         let pending = state.pending_user_dispatch?;
@@ -2785,6 +2718,11 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         });
                         continue;
                     }
+                    let absorbed = absorb_disk_queue(&mut state, channel_id, &persistence);
+                    if absorbed.persistence_error.is_some() {
+                        let _ = reply.send(absorbed);
+                        continue;
+                    }
                     let mut effective_persistence = persistence.clone();
                     if effective_persistence.dispatch_role_override.is_none() {
                         effective_persistence.dispatch_role_override =
@@ -2803,7 +2741,12 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 ChannelMailboxMsg::RestartDrain { persistence, reply } => {
                     state.last_persistence = Some(persistence.clone());
                     let persistence_error =
-                        persist_queue(channel_id, &state.intervention_queue, &persistence).err();
+                        absorb_disk_queue_error(&mut state, channel_id, &persistence).or_else(
+                            || {
+                                persist_queue(channel_id, &state.intervention_queue, &persistence)
+                                    .err()
+                            },
+                        );
                     let _ = reply.send(RestartDrainResult {
                         queued_count: if persistence_error.is_some() {
                             0
@@ -2847,7 +2790,10 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
             }
         }
     });
-    ChannelMailboxHandle { sender: tx }
+    ChannelMailboxHandle {
+        sender: tx,
+        recovery_done,
+    }
 }
 
 // #3167 BLOCKER-3 — a SINGLE process-wide lock shared by EVERY test in this
@@ -6460,7 +6406,7 @@ mod persistence_tests {
     }
 
     #[test]
-    fn take_next_soft_persist_failure_restores_queue_and_keeps_marker() {
+    fn take_next_soft_unreadable_queue_keeps_queue_and_writes_no_marker() {
         let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         let _env_guard = EnvGuard::set_root(tmp.path());
@@ -6492,9 +6438,72 @@ mod persistence_tests {
                 head.message_id
             );
             assert!(
-                marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
-                "marker remains the durable backstop when queue-without-head persistence fails"
+                !marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
+                "an unreadable queue file stops the take before any head is dequeued"
             );
+        });
+    }
+
+    /// The queue read and marker save succeed but the final queue write fails, as a tail
+    /// replacement and as an empty-tail unlink: the head stays queued behind its durable marker.
+    #[test]
+    fn take_next_soft_final_persist_failure_restores_head_and_keeps_marker() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "dispatch-marker-final-persist-fail";
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let registry = ChannelMailboxRegistry::default();
+            for (channel, ids) in [
+                (4_024_254, vec![4_024_255, 4_024_256]),
+                (4_024_257, vec![4_024_258]),
+            ] {
+                let channel_id = ChannelId::new(channel);
+                let handle = registry.handle(channel_id);
+                let queue: Vec<Intervention> = ids
+                    .iter()
+                    .map(|id| make_intervention(*id, "queued", None))
+                    .collect();
+                handle.replace_queue(queue, persistence.clone()).await;
+                let ids_of = |queue: &[Intervention]| -> Vec<u64> {
+                    queue.iter().map(|item| item.message_id.get()).collect()
+                };
+                let disk_ids =
+                    || ids_of(&load_channel_pending_queue(&provider, token_hash, channel_id).0);
+                let marker_id = || {
+                    load_channel_pending_dispatch_marker(&provider, token_hash, channel_id)
+                        .map(|(marker, _)| marker.message_id.get())
+                };
+
+                pending_queue_persistence::save_fault::fail_next(channel_id);
+                let taken = handle.take_next_soft(persistence.clone()).await;
+
+                assert!(taken.intervention.is_none(), "{channel}");
+                assert!(taken.dispatch_lease.is_none(), "{channel}");
+                assert!(taken.queue_exit_events.is_empty(), "{channel}");
+                assert!(taken.persistence_error.is_some(), "{channel}");
+                let snapshot = handle.snapshot().await;
+                assert_eq!(
+                    ids_of(&snapshot.intervention_queue),
+                    ids,
+                    "{channel} memory"
+                );
+                assert_eq!(snapshot.pending_user_dispatch, None, "{channel}");
+                assert_eq!(disk_ids(), ids, "{channel} disk");
+                assert_eq!(marker_id(), Some(ids[0]), "{channel} marker");
+
+                let retried = handle.take_next_soft(persistence.clone()).await;
+                assert_eq!(
+                    retried.intervention.map(|item| item.message_id.get()),
+                    Some(ids[0])
+                );
+                assert!(retried.dispatch_lease.is_some() && retried.persistence_error.is_none());
+                assert_eq!(disk_ids(), ids[1..], "{channel} disk after retry");
+                assert_eq!(marker_id(), Some(ids[0]), "{channel} marker after retry");
+            }
         });
     }
 

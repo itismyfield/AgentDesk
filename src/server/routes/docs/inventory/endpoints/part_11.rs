@@ -28,7 +28,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("description", body_param("string", false, "Durable objective and context.")),
             ("status", body_param("string", true, "planned|active|paused|completed|cancelled")),
             ("round", body_param("integer", true, "Positive campaign round.")),
-            ("nodes", body_param("array", false, "Full DAG: id/title/status/stage/group/round, dependencies, assignee/session_id/provider, issue_url/pr_url/head_sha, details/acceptance/findings/evidence/evidence_records/next_action/blocker. Optional group is trimmed; blank/omitted/null stays unclassified, independent of stage/status. See docs/campaign-ledger.md.")),
+            ("nodes", body_param("array", false, "Full DAG: id/title/status/stage/group/round, dependencies, assignee/session_id/provider, issue_url/pr_url/head_sha, details/acceptance/findings/evidence/evidence_records/next_action/blocker, optional summary/benefit. Optional group is trimmed; blank/omitted/null stays unclassified, independent of stage/status. See docs/campaign-ledger.md.")),
         ])
         .with_example(
             json!({"body": {"id": "release-a", "title": "Release A", "status": "planned", "round": 1, "nodes": []}}),

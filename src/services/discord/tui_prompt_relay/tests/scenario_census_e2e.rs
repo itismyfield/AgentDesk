@@ -28,7 +28,7 @@ const RUNNABLE_CLASS: &str = "fixture";
 // Pinned on purpose. Derive these from the scan instead and the census becomes
 // an identity that stays green when a scenario file is deleted or added.
 const CENSUS_FIXTURE: usize = 2;
-const CENSUS_LIVE: usize = 30;
+const CENSUS_LIVE: usize = 31;
 const CENSUS_UNSUPPORTED: usize = 3;
 const CENSUS_TOTAL: usize = CENSUS_FIXTURE + CENSUS_LIVE + CENSUS_UNSUPPORTED;
 

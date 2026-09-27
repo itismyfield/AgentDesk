@@ -31,7 +31,7 @@ here against a synthetic repo root that reproduces exactly one defect at a time:
     globs, its required statements, ghost paths, and a tree file no declared
     glob covers.
 
-The live-repo cases at the end pin that the gate is actually wired into
+The live-repo cases at the end pin that the gate command is actually wired into
 `scripts/ci-script-checks.sh`, that the checked-in tree passes it, and that its
 third-file half is not inert here — the real `src/` does contain re-exports of
 the inflight module, so the closure has something to close over.
@@ -821,9 +821,6 @@ class LiveRepoTest(unittest.TestCase):
         text = CI_SCRIPT.read_text(encoding="utf-8")
         self.assertIn(
             '"$PYTHON" scripts/check_reachability_row_independence.py', text
-        )
-        self.assertIn(
-            '"$PYTHON" -m unittest tests.test_reachability_row_independence', text
         )
 
     def test_the_live_launder_closure_is_not_vacuous(self) -> None:

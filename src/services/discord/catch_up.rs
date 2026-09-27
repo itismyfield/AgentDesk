@@ -1053,10 +1053,8 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 }
             };
             let mid = msg.id.get();
-            // Check the cap before recording the recover, so `stats.recovered`
-            // never tallies a message we refused to enqueue. Stopping here keeps
-            // the checkpoint at the last queued message; the declined newer ids
-            // stay past `after_msg` for the next pass.
+            // Check the cap before counting a recover so refused work is not tallied.
+            // Keep the checkpoint at the last queued message so newer ids stay retryable.
             if outcome == CatchUpClassification::Recover && stats.recovered >= remaining_capacity {
                 frontier.seal(mid);
                 let retry_after = frontier.retry_after(scan_checkpoint, mid);
@@ -1685,6 +1683,10 @@ mod catch_up_recovery_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
+
+    /// Satisfies the owner requirement without being any author, so fixtures
+    /// stay authorized through `allow_all_users`.
+    const OTHER_OWNER_ID: u64 = 343_742_347_365_974_030;
 
     fn too_old_drop(author_id: u64, text: &str) -> CatchUpTooOldDrop {
         CatchUpTooOldDrop {
@@ -2475,7 +2477,11 @@ mod catch_up_recovery_tests {
         // settings. Without this the fresh human message classifies
         // `NotAllowed` and the sweep never reaches the behaviour this test
         // exists to pin.
-        shared.settings.write().await.allow_all_users = true;
+        {
+            let mut settings = shared.settings.write().await;
+            settings.owner_user_id = Some(OTHER_OWNER_ID);
+            settings.allow_all_users = true;
+        }
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(1479671298497183835);
         let author_id = 343742347365974026;
@@ -2564,7 +2570,11 @@ mod catch_up_recovery_tests {
         // settings. Without this the fresh human message classifies
         // `NotAllowed` and the sweep never reaches the behaviour this test
         // exists to pin.
-        shared.settings.write().await.allow_all_users = true;
+        {
+            let mut settings = shared.settings.write().await;
+            settings.owner_user_id = Some(OTHER_OWNER_ID);
+            settings.allow_all_users = true;
+        }
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(1479671298497183835);
         let author_id = 343742347365974026;
@@ -2678,7 +2688,11 @@ mod catch_up_recovery_tests {
         // settings. Without this the fresh human message classifies
         // `NotAllowed` and the sweep never reaches the behaviour this test
         // exists to pin.
-        shared.settings.write().await.allow_all_users = true;
+        {
+            let mut settings = shared.settings.write().await;
+            settings.owner_user_id = Some(OTHER_OWNER_ID);
+            settings.allow_all_users = true;
+        }
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(1479671298497183835);
         let author_id = 343742347365974026;
@@ -2725,7 +2739,11 @@ mod catch_up_recovery_tests {
         // settings. Without this the fresh human message classifies
         // `NotAllowed` and the sweep never reaches the behaviour this test
         // exists to pin.
-        shared.settings.write().await.allow_all_users = true;
+        {
+            let mut settings = shared.settings.write().await;
+            settings.owner_user_id = Some(OTHER_OWNER_ID);
+            settings.allow_all_users = true;
+        }
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(1479671298497183835);
         let author_id = 343742347365974026;

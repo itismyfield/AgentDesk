@@ -21,14 +21,11 @@ Coverage:
 - `lease reclaim`: an expired dispatch claim is reclaimed by a second worker.
 - `resource lock exclusive`: two workers contend for the same
   `unreal:project:<repo>` lock; only one holder is accepted.
-- `tested head merge gate`: merge automation blocks when a required phase is
-  missing for the current PR head SHA.
 
 Local command:
 
 ```bash
 cargo test --bin agentdesk multinode_regression:: -- --nocapture --test-threads=1
-node --test policies/__tests__/merge-automation.test.js
 ```
 
 ## Physical Smoke
@@ -110,7 +107,8 @@ Expected:
 - `/api/cluster/issue-specs?card_id=smoke-card` shows `unreal-smoke`
 - `/api/cluster/test-phase-runs/evidence?phase_key=unreal-smoke&head_sha=smoke-head`
   returns the passing evidence
-- merge automation blocks a different PR head SHA until fresh evidence exists
+- the same query with a different `head_sha` returns 404 until a passing run
+  for that head is recorded
 
 ## Evidence To Record
 

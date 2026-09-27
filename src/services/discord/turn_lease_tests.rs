@@ -931,3 +931,66 @@ async fn late_projection_sweep_clears_only_this_episodes_row() {
     })
     .await;
 }
+
+/// #5951 C3t-0i (T-E3x, W12) — the old actor accepts the operator's exact
+/// release, goes idle and is purged, and a successor starts its own recovery
+/// before the claim resumes. The claim's `recovery_done` mark belongs to the
+/// actor that released the lease, so it must not wake the successor's waiter.
+#[tokio::test]
+async fn operator_release_follow_up_never_latches_a_successor_recovery() {
+    with_isolated_runtime_root(|| async {
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
+        let channel = ChannelId::new(575415);
+        let old = shared.mailbox(channel);
+        let request = seed(&shared, channel).await;
+        let key = TurnKey::new(channel, 123, request.expected.generation)
+            .with_episode_nonce(Some(&request.expected.turn_nonce));
+        let operator = OperatorRelease {
+            request,
+            observed_before: Instant::now(),
+            clear_outcome: Default::default(),
+        };
+        let claim = operator.claim(&shared, &PROVIDER, key);
+        tokio::pin!(claim);
+        // FIFO: each probe snapshot is answered after whatever the claim sent.
+        for _ in 0..8 {
+            assert!(futures::poll!(claim.as_mut()).is_pending());
+            if old.snapshot().await.cancel_token.is_none() {
+                break;
+            }
+        }
+        assert!(
+            old.snapshot().await.cancel_token.is_none(),
+            "the old actor accepted the exact release"
+        );
+        assert_eq!(
+            shared.mailboxes.remove_idle_entry(channel).await,
+            crate::services::turn_orchestrator::registry_purge::MailboxPurgeOutcome::Removed
+        );
+        let successor_signal = shared.mailboxes.recovery_done(channel);
+        let kickoff = shared
+            .mailbox(channel)
+            .recovery_kickoff(Arc::new(CancelToken::new()), UserId::new(7), None)
+            .await;
+        assert!(kickoff.activated_turn(), "{kickoff:?}");
+
+        assert!(
+            claim
+                .await
+                .is_some_and(|result| result.removed_token.is_some())
+        );
+        assert!(
+            shared
+                .mailbox(channel)
+                .snapshot()
+                .await
+                .recovery_started_at
+                .is_some()
+        );
+        assert!(
+            futures::FutureExt::now_or_never(successor_signal.wait()).is_none(),
+            "the accepted release latched the successor's recovery_done"
+        );
+    })
+    .await;
+}

@@ -10,10 +10,7 @@ use super::runs::{
 };
 
 mod dispatch_failure;
-pub use dispatch_failure::{
-    EntryDispatchFailureAlert, record_entry_dispatch_failure_on_pg,
-    record_entry_dispatch_failure_with_alert_on_pg,
-};
+pub use dispatch_failure::record_entry_dispatch_failure_on_pg;
 
 pub const ENTRY_STATUS_PENDING: &str = "pending";
 pub const ENTRY_STATUS_DISPATCHED: &str = "dispatched";

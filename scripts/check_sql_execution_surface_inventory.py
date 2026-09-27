@@ -94,6 +94,10 @@ GUARD_EXPECTED_CONTRACTS = (
     ("rotateActiveRunSweepCursor", "policies/lib/auto-queue-dispatch.js", "auto_queue_entries"),
     ("timeouts._section_E review auto-accept", "policies/timeouts/review-auto-accept.js", "task_dispatches"),
 )
+# Each grace-window writer must keep its own auto_queue_runs write; a move to
+# another function in the file keeps every fingerprint, so the baseline cannot see it.
+GRACE_WRITER_PATH = "policies/lib/auto-queue-phase-gate.js"
+GRACE_WRITER_SYMBOLS = ("beginPhaseGateGraceWindow", "clearPhaseGateGraceWindow")
 TABLE_TOKEN_RE = re.compile(
     r"\b(?:from|join|into|update|delete\s+from|insert\s+into)\s+"
     r"[\"'`]?([A-Za-z_][A-Za-z0-9_$]*(?:\.[A-Za-z_][A-Za-z0-9_$]*)?)[\"'`]?",
@@ -626,6 +630,37 @@ def _guard_expected_matches(
     ]
 
 
+def _grace_writer_errors(records: Sequence[SurfaceRecord], repo_root: Path) -> list[str]:
+    """Require one static auto_queue_runs write inside each top-level grace writer body."""
+    try:
+        lines = (repo_root / GRACE_WRITER_PATH).read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        return [f"grace writer source cannot be read: {GRACE_WRITER_PATH}: {exc}"]
+    writes = _guard_expected_matches(records, GRACE_WRITER_PATH, "auto_queue_runs")
+    errors = []
+    for symbol in GRACE_WRITER_SYMBOLS:
+        headers = [n for n, line in enumerate(lines, 1) if line.startswith(f"function {symbol}(")]
+        if len(headers) != 1:
+            errors.append(
+                f"grace writer {symbol}: expected 1 top-level definition in "
+                f"{GRACE_WRITER_PATH}, observed {len(headers)}"
+            )
+            continue
+        start = headers[0]
+        # The body ends at the next column-0 line, normally the closing brace.
+        end = next(
+            (n for n, line in enumerate(lines[start:], start + 1) if line[:1] not in ("", " ", "\t")),
+            len(lines) + 1,
+        )
+        inside = [record for record in writes if record.line is not None and start <= record.line < end]
+        if len(inside) != 1:
+            errors.append(
+                f"grace writer {symbol}: expected 1 {GRACE_WRITER_PATH} write to "
+                f"auto_queue_runs, observed {len(inside)}"
+            )
+    return errors
+
+
 def live_contract_errors(records: Sequence[SurfaceRecord], repo_root: Path) -> list[str]:
     """Pin live known-blind-spot and already-blocked writer observations."""
     errors = []
@@ -642,6 +677,7 @@ def live_contract_errors(records: Sequence[SurfaceRecord], repo_root: Path) -> l
                 f"GUARD_EXPECTED=blocked {symbol}: expected 1 {path} write to {table}, "
                 f"observed {len(matches)}"
             )
+    errors.extend(_grace_writer_errors(records, repo_root))
     return errors
 
 

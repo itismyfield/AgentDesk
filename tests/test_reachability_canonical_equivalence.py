@@ -44,7 +44,7 @@ defect at a time:
     nobody would notice);
   * a `warn_bound` introduced inside the tree (4987 §10 NO-GO).
 
-The live-repo cases at the end pin that the gate is wired into
+The live-repo cases at the end pin that the gate command is wired into
 `scripts/ci-script-checks.sh`, that the checked-in tree passes it, and that the
 declared Rust mutations still anchor on text that exists — a `--with-rust` run
 needs a compiler and does not belong in the fast lane, but a Rust mutation
@@ -671,7 +671,6 @@ class LiveRepoTests(unittest.TestCase):
     def test_the_gate_is_wired_into_ci_script_checks(self):
         body = CI_SCRIPT.read_text(encoding="utf-8")
         self.assertIn("scripts/check_reachability_canonical_equivalence.py", body)
-        self.assertIn("tests.test_reachability_canonical_equivalence", body)
 
     def test_every_declared_rust_mutation_still_anchors_on_real_source(self):
         """A `--with-rust` run needs cargo and stays out of the fast lane, but a

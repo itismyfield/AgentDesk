@@ -845,27 +845,6 @@ mod thread_role_inheritance_tests {
     }
 
     #[test]
-    fn prelaunch_seed_is_identical_for_intake_and_headless_callers() {
-        let intake = prelaunch_inflight_runtime_seed_from_paths(
-            "AgentDesk-claude-symmetric",
-            "/runtime/wrapper-stream.log".to_string(),
-            "/runtime/input.fifo".to_string(),
-            true,
-            Some(RuntimeHandoffKind::ClaudeTui),
-            None,
-        );
-        let headless = prelaunch_inflight_runtime_seed_from_paths(
-            "AgentDesk-claude-symmetric",
-            "/runtime/wrapper-stream.log".to_string(),
-            "/runtime/input.fifo".to_string(),
-            true,
-            Some(RuntimeHandoffKind::ClaudeTui),
-            None,
-        );
-        assert_eq!(intake, headless);
-    }
-
-    #[test]
     fn codex_tui_raw_seed_requires_exact_live_marker_binding_evidence() {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), b"complete\n").unwrap();

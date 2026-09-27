@@ -59,7 +59,7 @@ jobs:
               echo "group="
               echo 'labels=[]'
             } >> "$GITHUB_OUTPUT"
-            echo "MACOS_RUNNER is unset; using GitHub-hosted macos-latest."
+            echo "MACOS_RUNNER is unset; using GitHub-hosted macos-15."
             echo "macOS route: hosted (MACOS_RUNNER unset)" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -105,7 +105,7 @@ jobs:
             {
               echo "mode=hosted"
               echo "group="
-              echo 'labels=["macos-latest"]'
+              echo 'labels=["macos-15"]'
             } >> "$GITHUB_OUTPUT"
             echo "macOS route: hosted (self-hosted runners saturated)" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
@@ -123,7 +123,9 @@ jobs:
     name: Trusted macOS check (hosted)
     needs: resolve_macos_runner
     if: needs.resolve_macos_runner.outputs.mode == 'hosted'
-    runs-on: macos-latest
+    # Pinned arm64 label for the H2 measurement (#5340 r9 §3); h2_measure.sh's
+    # host-triple check stays the last line of defence if the image changes.
+    runs-on: macos-15
     steps:
       # Overflow can route a docs-only push here, so gate the same heavy steps
       # as the self-hosted job. They skip only when the filter succeeded with run=false.
@@ -182,6 +184,11 @@ jobs:
       - name: H2 tmux boundary measurement (macos, inert)
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         run: bash scripts/ci/h2_measure.sh --lane macos --inert
+
+      # H2 R-O module map, macOS lane; a no-op (no rustc-dev install) until the baseline lands.
+      - name: H2 module map (macos, inert)
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
+        run: python3 scripts/ci/h2_modmap.py --inert
 
       - name: cargo test (non-PG, targeted subset)
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
@@ -329,6 +336,12 @@ jobs:
       - name: H2 tmux boundary measurement (macos, inert)
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         run: nice -n 10 bash scripts/ci/h2_measure.sh --lane macos --inert
+
+      # H2 R-O module map, macOS lane; a no-op (no rustc-dev install) until the baseline lands.
+      # The map step clears RUSTC_WRAPPER itself: sccache cannot wrap the driver.
+      - name: H2 module map (macos, inert)
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
+        run: nice -n 10 python3 scripts/ci/h2_modmap.py --inert
 
       - name: cargo test (non-PG, targeted subset)
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'

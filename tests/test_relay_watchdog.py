@@ -8931,15 +8931,8 @@ class AlertFallbackTests(unittest.TestCase):
 
 
 class DeploymentWiringTests(unittest.TestCase):
-    """#4372 lesson: a test that CI never runs is a graveyard, and a script the
-    deploy never ships evaporates (the 06-29 relay-gap-watch, the 07-09
-    prototype). Pin the wiring itself."""
-
-    def test_ci_script_checks_runs_this_suite(self):
-        script = (REPO_ROOT / "scripts" / "ci-script-checks.sh").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("tests.test_relay_watchdog", script)
+    """#4372 lesson: a script the deploy never ships evaporates (the 06-29
+    relay-gap-watch, the 07-09 prototype). Pin the wiring itself."""
 
     def test_main_loop_runs_independent_pg_tunnel_tick(self):
         script = (REPO_ROOT / "scripts/relay_watchdog.py").read_text(

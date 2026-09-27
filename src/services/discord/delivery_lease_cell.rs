@@ -125,13 +125,6 @@ impl PublicationCoordinate {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(in crate::services::discord) struct SinkEpoch(u64);
 
-impl SinkEpoch {
-    #[cfg(test)]
-    fn for_test(value: u64) -> Self {
-        Self(value)
-    }
-}
-
 #[cfg(test)]
 mod publication_coordinate_tests {
     use super::*;
@@ -180,12 +173,6 @@ mod publication_coordinate_tests {
         let generation_changed = stamp(12, 1, 3, 100); assert!(generation_changed.epoch > payload_file_changed.epoch);
         let nonce_changed = stamp(12, 2, 3, 100); assert!(nonce_changed.epoch > generation_changed.epoch);
         super::source_epoch_observer::assert_bounded_cache_eviction();
-    }
-
-    #[test]
-    fn sink_epoch_is_typed_apart_from_publication_permit() {
-        assert_eq!(SinkEpoch::for_test(7), SinkEpoch::for_test(7));
-        assert_ne!(SinkEpoch::for_test(7), SinkEpoch::for_test(8));
     }
 }
 

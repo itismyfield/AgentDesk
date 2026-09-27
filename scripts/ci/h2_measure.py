@@ -35,6 +35,8 @@ SECTIONS = ("exec", "w", "types", "subproc", "subproc_w_callers")
 SET_SECTION = {"EXEC": "exec", "W": "w", "TYPES": "types", "SUBPROC": "subproc", "SUBPROC_W": "subproc_w_callers"}
 DERIVED_SETS = ("W", "SUBPROC_W")
 LINTS = ("clippy::disallowed_methods", "clippy::disallowed_types")
+# R-O lints forced in the same pass; diagnostics() skips them so they never become measured rows.
+RO_LINTS = ("clippy::duplicate_mod",)
 # Raised by the activation PR; 0 keeps the measurer inert until then.
 LIVENESS_FLOOR = 0
 MAX_REGEN_ITERATIONS = 20
@@ -71,6 +73,11 @@ class SourceFile:
         self.stripped = "\n".join(rust_lex.strip_line(line, state).ljust(len(line)) for line in lines)
         self.line_offsets = [0, *itertools.accumulate(len(line) + 1 for line in lines)]
         self.items = _item_ranges(self.stripped)
+        self.item_names = collections.Counter("::".join(names) for _, _, names, _ in self.items)
+
+    def ambiguous(self, item: str) -> bool:
+        """H8: `<module>` or a name shared by several items (`const _`, cfg twins) folds sites."""
+        return item == "<module>" or self.item_names[item] > 1
 
     def offset(self, line: int, column: int) -> int:
         return self.line_offsets[line - 1] + column - 1
@@ -151,22 +158,29 @@ def _registrable(stack, name: str) -> tuple[str, ...]:
             parts.append(frame_name)
     return tuple(parts + [name])
 
-_MODULE_TABLES: dict[Path, dict[str, str]] = {}
+_MODULE_TABLES: dict[Path, tuple[dict[str, str], list[Path]]] = {}
 MOD_DECL_RE = re.compile(r"^([ \t]*)(?:pub(?:\([^)]*\))?[ \t]+)?mod[ \t]+([A-Za-z_]\w*)[ \t]*(;|\{)", re.M)
 PATH_ATTR_RE = re.compile(r"#\[path\s*=\s*\"([^\"]+)\"\]\s*$")
 
 def _module_table(root: Path) -> dict[str, str]:
     """{src file: crate module path}, following `mod` / `#[path]` from src/lib.rs."""
+    return _module_walk(root)[0]
+
+def _module_walk(root: Path) -> tuple[dict[str, str], list[Path]]:
+    """(module table keyed by `..`-collapsed path, module files as opened). Files are opened and searched
+    at the joined path so `..` after a directory symlink resolves on disk, as it does for rustc."""
     if root in _MODULE_TABLES:
         return _MODULE_TABLES[root]
     table: dict[str, str] = {}
+    opened: list[Path] = []
     queue = [(root / "src/lib.rs", CRATE, False)]
     while queue:
         path, modpath, owned = queue.pop()
-        rel = path.relative_to(root).as_posix()
+        rel = Path(os.path.normpath(path)).relative_to(root).as_posix()
         if rel in table or not path.exists():
             continue
         table[rel] = modpath
+        opened.append(path)
         lines = path.read_text(encoding="utf-8").splitlines()
         inline: list[tuple[str, str]] = []
         for index, line in enumerate(lines):
@@ -185,12 +199,24 @@ def _module_table(root: Path) -> dict[str, str]:
             own_dir = path.parent if owned or path.stem in ("mod", "lib", "main") else path.parent / path.stem
             base = own_dir.joinpath(*chain)
             if attr:
-                child = Path(os.path.normpath((base if chain else path.parent) / attr))
+                child = (base if chain else path.parent) / attr
             else:
                 child = next((c for c in (base / f"{name}.rs", base / name / "mod.rs") if c.exists()), base / f"{name}.rs")
             queue.append((child, "::".join([modpath, *chain, name]), bool(attr)))
-    _MODULE_TABLES[root] = table
-    return table
+    _MODULE_TABLES[root] = table, opened
+    return table, opened
+
+def h2_tag(entry, key: str) -> tuple[str, frozenset[str]] | None:
+    """(SET, lanes) of an `H2 <SET> <lane>` reason; None when not H2-tagged, error when malformed."""
+    reason = entry.get("reason", "") if isinstance(entry, dict) else ""
+    if not str(reason).startswith("H2"):
+        return None
+    parts = str(reason).split()
+    lanes = frozenset(LANES) if parts[2:] == ["both"] else frozenset(parts[2:])
+    if (len(parts) != 3 or parts[0] != "H2" or parts[1] not in SET_SECTION or not lanes <= set(LANES)
+            or (key == "disallowed-types") != (parts[1] == "TYPES") or not isinstance(entry.get("path"), str)):
+        raise MeasureError(f"bad H2 entry in clippy.toml {key}: {entry}")
+    return parts[1], lanes
 
 def load_config(clippy_toml: Path) -> dict[str, tuple[str, frozenset[str]]]:
     """{path: (SET, lanes)} for every H2-tagged disallowed-methods/types entry."""
@@ -201,14 +227,11 @@ def load_config(clippy_toml: Path) -> dict[str, tuple[str, frozenset[str]]]:
     config = {}
     for key in ("disallowed-methods", "disallowed-types"):
         for entry in data.get(key, []):
-            reason = entry.get("reason", "") if isinstance(entry, dict) else ""
-            parts = reason.split()
-            if len(parts) != 3 or parts[0] != "H2" or parts[1] not in SET_SECTION:
+            if (tag := h2_tag(entry, key)) is None:
                 continue
-            lanes = frozenset(LANES) if parts[2] == "both" else frozenset({parts[2]})
-            if (key == "disallowed-types") != (parts[1] == "TYPES") or not lanes <= set(LANES):
-                raise MeasureError(f"bad H2 entry in {clippy_toml}: {entry}")
-            config[entry["path"]] = (parts[1], lanes)
+            if entry["path"] in config:  # a later duplicate would silently override the first
+                raise MeasureError(f"duplicate H2 path in {clippy_toml}: {entry['path']}")
+            config[entry["path"]] = tag
     return config
 
 def diagnostics(lines) -> list[tuple[str, int, int, str, str]]:
@@ -234,12 +257,12 @@ def diagnostics(lines) -> list[tuple[str, int, int, str, str]]:
     return sorted(seen)
 
 def run_clippy(root: Path, conf_dir: Path | None) -> list[str]:
-    """Lint only the lib target. Touching lib.rs forces a re-lint instead of a cache replay;
-    `--cap-lints warn` stops unrelated deny lints from aborting it (force-warn is uncapped)."""
+    """Lint only the lib target. Touching lib.rs forces a re-lint (and a fresh dep-info) instead of a
+    cache replay; `--cap-lints warn` stops unrelated deny lints from aborting it (force-warn is uncapped)."""
     (root / "src/lib.rs").touch()
     env = dict(os.environ, CARGO_INCREMENTAL="0", **({"CLIPPY_CONF_DIR": str(conf_dir)} if conf_dir else {}))
     command = ["cargo", "clippy", "--lib", "--message-format=json", "--", "--cap-lints", "warn",
-               *itertools.chain.from_iterable(("--force-warn", lint) for lint in LINTS)]
+               *itertools.chain.from_iterable(("--force-warn", lint) for lint in LINTS + RO_LINTS)]
     proc = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True)
     if proc.returncode != 0:
         raise MeasureError(f"cargo clippy failed ({proc.returncode}):\n{proc.stderr[-4000:]}")
@@ -288,6 +311,7 @@ def measure(root: Path, lines, config) -> dict:
     sources: dict[str, SourceFile] = {}
     rows = {section: collections.Counter() for section in SECTIONS}
     derived = {"W": set(), "SUBPROC_W": set(), "unregistrable": set()}
+    sites = {section: collections.defaultdict(list) for section in SECTIONS}  # H8 aux, key unchanged
     total = 0
     type_names = {p.rsplit("::", 1)[-1] for p, (s, _) in config.items() if s == "TYPES"}
     for file, line, col, _code, callee in diagnostics(lines):
@@ -301,6 +325,8 @@ def measure(root: Path, lines, config) -> dict:
         item, parts, item_range = src.enclosing(pos)
         set_name = config[callee][0]
         rows[SET_SECTION[set_name]][(file, item, callee)] += 1
+        if src.ambiguous(item):
+            sites[SET_SECTION[set_name]][(file, item, callee)].append(line)
         target = "W" if set_name in ("EXEC", "W", "TYPES") else None
         if set_name == "SUBPROC" and subproc_seed(src, pos, item_range):
             target = "SUBPROC_W"
@@ -313,7 +339,8 @@ def measure(root: Path, lines, config) -> dict:
             continue  # a registered Self type already covers its trait-impl bodies
         else:
             derived["unregistrable"].add(f"{file}::{item}")
-    return {"rows": rows, "derived": derived, "total": total}
+    sites = {section: {key: sorted(v) for key, v in found.items()} for section, found in sites.items()}
+    return {"rows": rows, "derived": derived, "total": total, "sites": sites}
 
 def load_baseline(root: Path) -> dict | None:
     present = [root / rel for rel in BASELINE_FILES if (root / rel).exists()]
@@ -435,8 +462,9 @@ def main(argv=None) -> int:
         lines = args.json.read_text(encoding="utf-8").splitlines() if args.json else run_clippy(root, None)
         result = measure(root, lines, config)
         if not args.check:
-            rows = {s: [dict(zip(("file", "item", "callee"), k), count=v) for k, v in sorted(r.items())]
-                    for s, r in result["rows"].items()}
+            rows = {s: [dict(zip(("file", "item", "callee"), k), count=v,
+                             **({"lines": result["sites"][s][k]} if k in result["sites"][s] else {}))
+                        for k, v in sorted(r.items())] for s, r in result["rows"].items()}
             derived = {k: sorted(v) for k, v in result["derived"].items()}
             print(json.dumps({"lane": args.lane, "total": result["total"], "rows": rows, "derived": derived}, indent=1))
             return 0

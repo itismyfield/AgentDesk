@@ -7,7 +7,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 "${PYTHON:-python3}" - "$SCRIPT_DIR/../scripts/ci-script-checks.sh" <<'PY'
 import os
 from pathlib import Path
-import re
 import shlex
 import subprocess
 import sys
@@ -17,9 +16,7 @@ import unittest
 
 source = Path(os.environ.get("CI_SCRIPT_CHECKS_TEST_SOURCE", sys.argv[1])).read_text()
 # Cut before the first real check; never run the aggregate, even on a red tree.
-prefix, separator, _ = source.partition(
-    '\nif command -v shellcheck >/dev/null 2>&1; then\n'
-)
+prefix, separator, _ = source.partition('\nif run_check ')
 if not separator:
     raise SystemExit("could not isolate the script-checks reporting prefix")
 
@@ -43,6 +40,9 @@ class ScriptCheckAnnotations(unittest.TestCase):
             env = {**os.environ, "PYTHON": sys.executable, "TMPDIR": tmp}
             # Never append expected failures to the enclosing CI step's summary.
             env.pop("GITHUB_STEP_SUMMARY", None)
+            # Fixtures use bare banners, which a sharded enclosing run would reject.
+            env.pop("SCRIPT_CHECK_SHARD", None)
+            env.pop("SCRIPT_CHECK_LIST", None)
             if summary == "file":
                 env["GITHUB_STEP_SUMMARY"] = str(summary_path)
                 if initial:
@@ -72,11 +72,6 @@ class ScriptCheckAnnotations(unittest.TestCase):
         self.assertEqual(decode(properties["title"], properties=True), name)
         self.assertEqual(decode(message), f"FAIL: {name}")
         self.assertNotIn("UNREACHABLE", result.stdout)
-
-    def test_all_check_banners_use_helper(self):
-        self.assertIsNone(re.search(r'(?m)^\s*echo [\'"]=== ', source))
-        self.assertIsNotNone(re.search(r'(?m)^\s*banner "PG audit guard"$', source))
-        self.assertIsNotNone(re.search(r'(?m)^\s*banner "Maintainability audit"$', source))
 
     def test_current_banner_and_success_output(self):
         result, summary = self.run_fixture(

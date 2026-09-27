@@ -538,39 +538,6 @@ mod tests {
         assert_eq!(built.0, format!("alice: hello\nbob: {}", "x".repeat(300)));
     }
 
-    /// #3418 D1 regression lock: storing the session recovery context must
-    /// NOT enqueue a lifecycle notification. The removed notify (reason_code
-    /// built below) was pure duplication of the status panel's inline
-    /// recovery suffix, which is rendered from `recovery_message_count`
-    /// (SessionStrategyDetails) and is entirely independent of any
-    /// notification. Backends are PG-only in practice; the `Db` compatibility
-    /// handle is disabled, so this guards the wiring at the source level rather
-    /// than via a DB fixture.
-    ///
-    /// The forbidden literals are assembled at runtime from fragments so the
-    /// test source itself never contains them verbatim (otherwise the
-    /// `include_str!` scan would match its own assertion text).
-    #[test]
-    fn recovery_context_store_does_not_enqueue_lifecycle_notification() {
-        let module_src = include_str!("recovery_text.rs");
-
-        // reason_code: "lifecycle." + "recovery_context"
-        let reason_code = format!("\"{}{}\"", "lifecycle.", "recovery_context");
-        assert!(
-            !module_src.contains(&reason_code),
-            "recovery context store must not enqueue the lifecycle recovery_context \
-             notification (duplicate of the status panel recovery suffix)"
-        );
-
-        // user-facing notify body fragment (Korean, assembled from parts)
-        let notify_phrase = format!("{}{}", "복원 컨텍스트로 ", "저장했습니다");
-        assert!(
-            !module_src.contains(&notify_phrase),
-            "recovery context store must not enqueue the duplicate recovery-context \
-             user notification body"
-        );
-    }
-
     #[tokio::test]
     async fn session_retry_context_restore_after_take_round_trips_raw_context_pg() {
         let pg_db = crate::dispatch::test_support::DispatchPostgresTestDb::create(

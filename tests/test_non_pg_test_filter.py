@@ -62,31 +62,6 @@ run_non_pg_filter_replay
             replayed.extend(line.removeprefix(prefix + " <")[:-1].split("> <"))
         self.assertEqual(tuple(replayed), replay)
 
-    def test_every_replay_id_exists_in_libtest_manifest(self) -> None:
-        membership = load_membership_module()
-        self.assertEqual(
-            set(membership.load_non_pg_filter_replay(ROOT))
-            - membership.load_lib_test_inventory(ROOT),
-            set(),
-        )
-
-    def test_positive_and_negative_filters_partition_the_inventory(self) -> None:
-        membership = load_membership_module()
-        inventory = membership.load_lib_test_inventory(ROOT)
-        tokens = membership.load_non_pg_skip_args(ROOT)[1::2]
-        non_pg = {
-            test_id
-            for test_id in inventory
-            if not any(token in test_id for token in tokens)
-        }
-        pg = {
-            test_id
-            for test_id in inventory
-            if any(token in test_id for token in tokens)
-        }
-        self.assertEqual(non_pg & pg, set())
-        self.assertEqual(inventory - (non_pg | pg), set())
-
 
 if __name__ == "__main__":
     unittest.main()

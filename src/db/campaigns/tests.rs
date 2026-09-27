@@ -308,3 +308,43 @@ async fn postgres_campaign_revision_prune_keeps_newest_by_rank_across_gaps_pg() 
     pool.close().await;
     fixture.drop().await;
 }
+
+#[test]
+fn legacy_node_documents_load_without_glance_fields_and_keep_their_time() {
+    let mut first = checkpoint("glance".into(), input(), None);
+    let old = Utc::now() - chrono::Duration::days(1);
+    first.nodes[1].updated_at = old;
+    // Documents stored before summary/benefit existed carry neither key.
+    let mut document = serde_json::to_value(&first).unwrap();
+    for node in document["nodes"].as_array_mut().unwrap() {
+        let node = node.as_object_mut().unwrap();
+        node.remove("summary");
+        node.remove("benefit");
+    }
+    let restored: Campaign = serde_json::from_value(document).unwrap();
+    assert!(
+        restored
+            .nodes
+            .iter()
+            .all(|node| node.input.summary.is_none() && node.input.benefit.is_none())
+    );
+    let serialized = serde_json::to_value(&restored).unwrap();
+    assert!(
+        serialized["nodes"][1]["summary"].is_null() && serialized["nodes"][1]["benefit"].is_null()
+    );
+
+    // An old writer resubmitting unchanged content keeps the node time; adding a gist is a change.
+    let unchanged = checkpoint("glance".into(), input(), Some(&restored));
+    assert_eq!(unchanged.nodes[1].updated_at, old);
+    let mut next = input();
+    next.nodes[1].summary = Some("Resume work without rereading logs".into());
+    next.nodes[1].benefit = Some("No lost progress after a restart".into());
+    let described = checkpoint("glance".into(), next, Some(&restored));
+    assert!(described.nodes[1].updated_at > old);
+    let round_trip: Campaign =
+        serde_json::from_value(serde_json::to_value(&described).unwrap()).unwrap();
+    assert_eq!(
+        round_trip.nodes[1].input.benefit.as_deref(),
+        Some("No lost progress after a restart")
+    );
+}

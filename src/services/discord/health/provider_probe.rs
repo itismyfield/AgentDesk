@@ -19,6 +19,9 @@ pub(super) struct ProviderHealthSnapshot {
     sessions: usize,
     restart_pending: bool,
     last_turn_at: Option<String>,
+    /// #5951 — per-channel re-mint fence cells; never pruned, so this only
+    /// grows with the distinct channels the runtime has served.
+    remint_fence_cells: usize,
 }
 
 pub(super) struct ProviderProbe {
@@ -131,6 +134,7 @@ pub(super) async fn probe_provider(entry: &ProviderEntry) -> ProviderProbe {
             sessions: session_count,
             restart_pending,
             last_turn_at,
+            remint_fence_cells: entry.shared.mailboxes.remint_fence_cells(),
         },
         status: classification.status,
         fully_recovered: classification.fully_recovered,
@@ -343,6 +347,23 @@ mod tests {
             json["degraded_reasons"],
             serde_json::json!(["provider:codex:gateway_standby"])
         );
+    }
+
+    /// #5951 — the fence cell of a purged channel stays, and health says so.
+    #[tokio::test]
+    async fn provider_health_counts_fence_cells_that_outlive_their_actor() {
+        let registry = HealthRegistry::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        registry.register("codex".to_string(), shared.clone()).await;
+        let channel = ChannelId::new(NEXT_STANDBY_TEST_CHANNEL.fetch_add(1, Ordering::Relaxed));
+        let _ = shared.mailbox(channel);
+        assert_eq!(
+            shared.mailboxes.remove_idle_entry(channel).await,
+            crate::services::turn_orchestrator::registry_purge::MailboxPurgeOutcome::Removed
+        );
+
+        let json = serde_json::to_value(build_health_snapshot(&registry).await).unwrap();
+        assert_eq!(json["providers"][0]["remint_fence_cells"], 1);
     }
 
     #[tokio::test]

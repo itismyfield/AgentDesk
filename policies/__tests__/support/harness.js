@@ -170,7 +170,6 @@ function createAgentdeskMock(options) {
     timeoutTerminationRecords: [],
     timeoutInactiveCounterCleanups: 0,
     timeoutHistoryCleanupCalls: [],
-    timeoutPreviewCalls: [],
     retrospectiveCalls: [],
     runtimeSignals: [],
     httpPosts: [],
@@ -406,21 +405,6 @@ function createAgentdeskMock(options) {
           return clone(timeouts.cleanupDeadlockHistoryBefore(cutoffMs, state));
         }
         return { ok: true, deleted: 0 };
-      },
-      previewTimeoutDecision(payload) {
-        state.timeoutPreviewCalls.push(clone(payload || {}));
-        if (typeof timeouts.previewTimeoutDecision === "function") {
-          return clone(timeouts.previewTimeoutDecision(payload || {}, state));
-        }
-        return {
-          would_retry: false,
-          would_exhaust: false,
-          resolution: "incomparable",
-          attempt: payload && Object.prototype.hasOwnProperty.call(payload, "attempt") ? payload.attempt : null,
-          delay: null,
-          incomparable: true,
-          reason: "mock preview"
-        };
       }
     },
     http: {

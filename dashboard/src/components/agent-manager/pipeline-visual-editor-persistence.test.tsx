@@ -61,7 +61,6 @@ function makePipeline(): PipelineConfigFull {
     hooks: {},
     events: {},
     clocks: {},
-    timeouts: {},
     phase_gate: {
       dispatch_to: "self",
       dispatch_type: "phase-gate",
