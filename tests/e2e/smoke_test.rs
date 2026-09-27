@@ -20,11 +20,79 @@ struct TestServer {
     child: Mutex<Child>,
     port: u16,
     temp_dir: PathBuf,
+    database: SmokeDatabase,
+}
+
+/// The server refuses to boot without PostgreSQL, so the shared server gets a
+/// database of its own on the same fixture server the lib PG tests use.
+struct SmokeDatabase {
+    admin_url: String,
+    name: String,
+    url: String,
+}
+
+impl SmokeDatabase {
+    /// `None` only when no fixture base is configured. Like the lib fixtures
+    /// (#5218) there is no host fallback, and `AGENTDESK_REQUIRE_PG=1` turns a
+    /// missing base into a failure instead of a skip.
+    fn create() -> Option<Self> {
+        let base = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty());
+        let Some(base) = base else {
+            assert_ne!(
+                std::env::var("AGENTDESK_REQUIRE_PG").as_deref(),
+                Ok("1"),
+                "PG required but POSTGRES_TEST_DATABASE_URL_BASE unset"
+            );
+            return None;
+        };
+        let admin_db =
+            std::env::var("POSTGRES_TEST_ADMIN_DB").unwrap_or_else(|_| "postgres".to_string());
+        let name = format!("agentdesk_e2e_smoke_{}", uuid::Uuid::new_v4().simple());
+        let database = Self {
+            admin_url: format!("{base}/{admin_db}"),
+            url: format!("{base}/{name}"),
+            name,
+        };
+        database
+            .admin(format!("CREATE DATABASE \"{}\"", database.name))
+            .expect("failed to create smoke-test database");
+        Some(database)
+    }
+
+    fn drop_database(&self) {
+        let _ = self.admin(format!(
+            "DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)",
+            self.name
+        ));
+    }
+
+    /// Runs one statement on its own thread and runtime, because callers sit
+    /// inside a test's runtime or an atexit hook where blocking is not allowed.
+    fn admin(&self, sql: String) -> Result<(), sqlx::Error> {
+        let admin_url = self.admin_url.clone();
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build admin runtime")
+                .block_on(async move {
+                    use sqlx::Connection;
+                    let mut connection = sqlx::PgConnection::connect(&admin_url).await?;
+                    sqlx::raw_sql(&sql).execute(&mut connection).await?;
+                    connection.close().await
+                })
+        })
+        .join()
+        .expect("admin statement thread panicked")
+    }
 }
 
 impl TestServer {
     /// Start an isolated AgentDesk server on a random available port.
-    fn start() -> Self {
+    fn start(database: SmokeDatabase) -> Self {
         let port = get_free_port();
         let temp_dir = create_server_temp_dir();
         let data_dir = temp_dir.join("data");
@@ -51,6 +119,8 @@ policies:
 data:
   dir: "{data}"
   db_name: "test.sqlite"
+database:
+  enabled: true
 "#,
             port = port,
             policies = policies_dir.display(),
@@ -62,6 +132,7 @@ data:
         let child = Command::new(binary)
             .env("AGENTDESK_CONFIG", &config_path)
             .env("AGENTDESK_ROOT_DIR", &temp_dir)
+            .env("DATABASE_URL", &database.url)
             .env("RUST_LOG", "agentdesk=warn")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -72,6 +143,7 @@ data:
             child: Mutex::new(child),
             port,
             temp_dir,
+            database,
         }
     }
 
@@ -131,30 +203,34 @@ data:
     }
 }
 
-static SHARED_SERVER: OnceLock<TestServer> = OnceLock::new();
+static SHARED_SERVER: OnceLock<Option<TestServer>> = OnceLock::new();
 static SHARED_SERVER_CLEANUP: Once = Once::new();
 static SHARED_SERVER_STARTS: AtomicUsize = AtomicUsize::new(0);
 static RESOURCE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 extern "C" fn cleanup_shared_server() {
-    if let Some(server) = SHARED_SERVER.get() {
+    if let Some(Some(server)) = SHARED_SERVER.get() {
         if let Ok(mut child) = server.child.lock() {
             let _ = child.kill();
             let _ = child.wait();
         }
+        server.database.drop_database();
         let _ = std::fs::remove_dir_all(&server.temp_dir);
     }
 }
 
-fn shared_server() -> &'static TestServer {
-    SHARED_SERVER.get_or_init(|| {
-        SHARED_SERVER_CLEANUP.call_once(|| unsafe {
-            let _ = libc::atexit(cleanup_shared_server);
-        });
-        SHARED_SERVER_STARTS.fetch_add(1, Ordering::SeqCst);
-        TestServer::start()
-    })
+fn shared_server() -> Option<&'static TestServer> {
+    SHARED_SERVER
+        .get_or_init(|| {
+            let database = SmokeDatabase::create()?;
+            SHARED_SERVER_CLEANUP.call_once(|| unsafe {
+                let _ = libc::atexit(cleanup_shared_server);
+            });
+            SHARED_SERVER_STARTS.fetch_add(1, Ordering::SeqCst);
+            Some(TestServer::start(database))
+        })
+        .as_ref()
 }
 
 async fn suite_lock() -> tokio::sync::MutexGuard<'static, ()> {
@@ -224,9 +300,10 @@ struct TestContext {
 }
 
 impl TestContext {
-    async fn new(prefix: &str) -> Self {
+    /// `None` when no PostgreSQL fixture base is configured (see [`SmokeDatabase::create`]).
+    async fn new(prefix: &str) -> Option<Self> {
         let guard = suite_lock().await;
-        let server = shared_server();
+        let server = shared_server()?;
         server.wait_ready().await;
         assert_eq!(
             SHARED_SERVER_STARTS.load(Ordering::SeqCst),
@@ -234,12 +311,12 @@ impl TestContext {
             "shared smoke-test server should start exactly once"
         );
 
-        Self {
+        Some(Self {
             _guard: guard,
             client: Client::new(),
             server,
             prefix: next_resource_name(prefix),
-        }
+        })
     }
 
     fn title(&self, suffix: &str) -> String {
@@ -521,7 +598,9 @@ fn find_by_id<'a>(items: &'a [Value], id: &str) -> Option<&'a Value> {
     ignore = "server startup unreliable on Windows CI"
 )]
 async fn smoke_health_and_agents() {
-    let ctx = TestContext::new("smoke-health-and-agents").await;
+    let Some(ctx) = TestContext::new("smoke-health-and-agents").await else {
+        return;
+    };
 
     let (status, body) = json_response(
         ctx.client
@@ -590,7 +669,9 @@ async fn smoke_health_and_agents() {
 )]
 #[ignore = "requires PG-aware smoke server boot; create_dispatch_with_options is PG-only after R4"]
 async fn smoke_cards_and_dispatches() {
-    let ctx = TestContext::new("smoke-cards-and-dispatches").await;
+    let Some(ctx) = TestContext::new("smoke-cards-and-dispatches").await else {
+        return;
+    };
 
     let agent_id = create_agent(&ctx, "dispatch").await;
     let card_title = ctx.title("Implement Feature X");
@@ -685,7 +766,9 @@ async fn smoke_cards_and_dispatches() {
     ignore = "server startup unreliable on Windows CI"
 )]
 async fn smoke_settings_and_errors() {
-    let ctx = TestContext::new("smoke-settings-and-errors").await;
+    let Some(ctx) = TestContext::new("smoke-settings-and-errors").await else {
+        return;
+    };
 
     let (status, original_settings) = get_settings(&ctx).await;
     assert_eq!(status, StatusCode::OK);

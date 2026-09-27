@@ -241,6 +241,9 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # 30 minutes is the old 15 + 15 arithmetic budget, not measured runtime: selected lib tests grow 385 -> 636 and PG-connected tests 276 -> 422 under `--test-threads=1`.
+      # `--lib` like main's `just test-postgres`: the PG filter selects nothing in the bin target,
+      # e2e has its own step below, and building every target at once got the runner killed
+      # for memory mid-build (exit 143, as in #4245).
       - name: cargo test (PostgreSQL bootstrap and routes)
         id: pg_cargo_test
         timeout-minutes: 30
@@ -281,7 +284,12 @@ jobs:
             fi
           fi
           source scripts/ci/non-pg-test-filter.sh
-          cargo test --all-targets -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1
+          cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1
+
+      # The server refuses to boot without PostgreSQL, so the e2e smoke suite runs here.
+      - name: cargo test (e2e smoke against PostgreSQL)
+        timeout-minutes: 20
+        run: cargo test --test e2e -- --test-threads=1
 
       - name: Verify PostgreSQL resource diagnostics
         if: always() && github.event_name == 'workflow_dispatch' && inputs.resource_diagnostics == true
