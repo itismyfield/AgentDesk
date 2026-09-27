@@ -239,6 +239,10 @@ if run_check guards "Directory fsync single-path guard"; then
 "$PYTHON" -m unittest tests.test_dir_fsync_single_path
 fi
 
+if run_check guards "TUI output shadow write-zero census"; then
+"$PYTHON" scripts/check_o_shadow_write_zero.py
+fi
+
 if run_check guards "Alert dedupe/authority/routing wiring contract (#4448/#4449)"; then
 "$PYTHON" -m unittest tests.test_alert_dedupe_4448 tests.test_auto_queue_monitor tests.test_actionable_ops_alert_routing
 fi
@@ -267,8 +271,8 @@ if run_check guards "Destructive call-site per-file ratchet (#5071 T3-A4)"; then
 fi
 
 if run_check guards "H2 tmux boundary measurer and admission self-tests"; then
-# Both are inert in CI until the baseline lands; their unit tests run now.
-"$PYTHON" -m unittest tests.test_h2_measure tests.test_h2_admission
+# The gates are inert in CI until the baseline lands; their unit tests, module map included, run now.
+"$PYTHON" -m unittest tests.test_h2_measure tests.test_h2_admission tests.test_h2_modmap tests.test_h2_cfg_compare
 fi
 
 if run_check guards "Reachability row-independence + change-surface gate (#5071 T4-B1)"; then
@@ -608,11 +612,9 @@ fi
 
 if run_check contracts "Build token serialization tests (#5663)"; then
 "$PYTHON" -m unittest tests.test_package_release
-# scripts/build_token.py serializes the two release scripts' cargo sites; the
-# Makefile target and install.sh's source install stay outside it by design.
-# It is Python, so neither shellcheck nor cargo covers it; this unittest run is
-# its ONLY CI gate, and it scans every tracked *.sh and Makefile for release
-# cargo sites, so a dropped wiring or a new unserialized one cannot pass silently.
+# Observe executed Cargo calls; the older scanner remains a repository inventory.
+"$PYTHON" scripts/check_release_token_wiring.py
+"$PYTHON" -m unittest tests.test_release_token_wiring
 "$PYTHON" -m unittest tests.test_build_token_serialization_5663
 fi
 
@@ -687,6 +689,7 @@ if run_check cargo "Contract symbol-ref doc<->code sync gate (#4268)"; then
 # game (raw strings / macros / cfg can't fool a real compile), and deriving the
 # anchor set from the compiled code (not `// sym:` comments) is what killed the
 # r3 comment-decoupling bypass.
+# It also matches docs/contracts/h2-tmux-boundary-ratchet.md anchors to imported H2 Python functions.
 "$PYTHON" scripts/check_contract_symbol_refs.py
 "$PYTHON" -m unittest tests.test_contract_symbol_refs
 fi

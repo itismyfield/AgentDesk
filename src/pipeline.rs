@@ -9,7 +9,7 @@
 //!   **default** → **repo** → **agent**
 //!
 //! Each level can override specific sections (states, transitions, gates,
-//! hooks, clocks, timeouts). Omitted sections inherit from the parent.
+//! hooks, events, clocks, phase_gate). Omitted sections inherit from the parent.
 //! `resolve()` merges the chain into a single effective `PipelineConfig`.
 
 use anyhow::{Context, Result};
@@ -336,15 +336,6 @@ fn build_replace_warnings(
             dropped_items(base.clocks.keys().cloned(), clocks.keys().cloned()),
         );
     }
-    if let Some(timeouts) = override_cfg.timeouts.as_ref() {
-        push_replace_warning(
-            &mut warnings,
-            layer,
-            target_id,
-            "timeouts",
-            dropped_items(base.timeouts.keys().cloned(), timeouts.keys().cloned()),
-        );
-    }
     if let Some(phase_gate) = override_cfg.phase_gate.as_ref() {
         push_replace_warning(
             &mut warnings,
@@ -625,8 +616,9 @@ pub struct PipelineConfig {
     pub events: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub clocks: HashMap<String, ClockConfig>,
-    #[serde(default)]
-    pub timeouts: HashMap<String, TimeoutConfig>,
+    /// Retired `timeouts:` section: accepted and ignored so older manifests still load.
+    #[serde(default, rename = "timeouts", skip_serializing)]
+    pub(crate) _retired_timeouts: Option<serde::de::IgnoredAny>,
     #[serde(default)]
     pub phase_gate: PhaseGateConfig,
     /// Visual-editor edge metadata carried up from the override layers.
@@ -714,90 +706,6 @@ pub struct ClockConfig {
     pub mode: Option<String>,
 }
 
-/// Backoff policy for stage retries (#1082).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum BackoffPolicy {
-    /// Fixed 1m → 5m → 15m exponential schedule.
-    Exponential,
-    /// Linear 5m between retries.
-    Linear,
-    /// No backoff — immediate retry by the next tick.
-    None,
-}
-
-impl Default for BackoffPolicy {
-    fn default() -> Self {
-        BackoffPolicy::Exponential
-    }
-}
-
-/// `on_failure` policy for stages/states (#1082).
-// Parsed and validated only; nothing acts on it. Live timeout moves are the JS
-// sweeps in policies/timeouts/*.js.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum OnFailurePolicy {
-    /// Escalate to manual intervention / PM channel.
-    Escalate,
-    /// Retry according to `backoff` schedule until `max_retries` is reached.
-    RetryWithBackoff,
-    /// Fall back to the stage named by `on_failure_target`.
-    FallbackStage,
-    /// Fail the card immediately (backward-compatible default).
-    Fail,
-}
-
-impl Default for OnFailurePolicy {
-    fn default() -> Self {
-        OnFailurePolicy::Fail
-    }
-}
-
-/// `on_exhaust` policy for timeouts (#1082).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum OnExhaustPolicy {
-    /// Escalate to PM / manual intervention after retries exhausted.
-    Escalate,
-    /// Notify watchers without state change.
-    Notify,
-    /// Fail the card.
-    Fail,
-}
-
-impl Default for OnExhaustPolicy {
-    fn default() -> Self {
-        OnExhaustPolicy::Escalate
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TimeoutConfig {
-    pub duration: String,
-    pub clock: String,
-    #[serde(default)]
-    pub max_retries: Option<u32>,
-    /// Legacy free-form on_exhaust (state id to transition to).
-    /// Preferred: use `on_exhaust_policy` for typed behavior.
-    #[serde(default)]
-    pub on_exhaust: Option<String>,
-    /// Typed exhaust policy (#1082). When set, overrides legacy string behavior.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_exhaust_policy: Option<OnExhaustPolicy>,
-    /// Backoff policy between retries (#1082).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backoff: Option<BackoffPolicy>,
-    /// Typed failure policy. Parsed only; no Rust or JS path reads it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_failure: Option<OnFailurePolicy>,
-    /// Target state for `on_failure: fallback-stage` (#1082).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_failure_target: Option<String>,
-    #[serde(default)]
-    pub condition: Option<String>,
-}
-
 fn default_phase_gate_dispatch_to() -> String {
     "self".to_string()
 }
@@ -880,11 +788,7 @@ impl PipelineConfig {
                 .as_ref()
                 .cloned()
                 .unwrap_or_else(|| self.clocks.clone()),
-            timeouts: ovr
-                .timeouts
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| self.timeouts.clone()),
+            _retired_timeouts: None,
             phase_gate: ovr
                 .phase_gate
                 .clone()
@@ -1210,21 +1114,6 @@ impl PipelineConfig {
             }
         }
 
-        // Timeouts are retired config nothing acts on, so their state and clock
-        // keys are not cross-checked: an inherited map must not block a save.
-        for (key, timeout) in &self.timeouts {
-            // Condition-based timeouts have always been exempt from the retry check.
-            if timeout.condition.is_some() {
-                continue;
-            }
-            // #1082: max_retries must be >= 1 when explicitly set.
-            if let Some(mr) = timeout.max_retries {
-                if mr == 0 {
-                    anyhow::bail!("timeout '{}' has max_retries=0; must be >= 1", key);
-                }
-            }
-        }
-
         if self.phase_gate.dispatch_to.trim().is_empty() {
             anyhow::bail!("phase_gate.dispatch_to must not be empty");
         }
@@ -1254,7 +1143,6 @@ impl PipelineConfig {
                     "terminal": s.terminal,
                     "has_hooks": self.hooks.contains_key(&s.id),
                     "has_clock": self.clocks.contains_key(&s.id),
-                    "has_timeout": self.timeouts.contains_key(&s.id),
                 })
             })
             .collect();
@@ -1298,7 +1186,7 @@ mod state_slug_contract_tests {
             hooks: HashMap::new(),
             events: HashMap::new(),
             clocks: HashMap::new(),
-            timeouts: HashMap::new(),
+            _retired_timeouts: None,
             phase_gate: PhaseGateConfig::default(),
             fsm_edge_bindings: None,
         };
@@ -1334,7 +1222,7 @@ mod gate_validation_tests {
             hooks: HashMap::new(),
             events: HashMap::new(),
             clocks: HashMap::new(),
-            timeouts: HashMap::new(),
+            _retired_timeouts: None,
             phase_gate: PhaseGateConfig::default(),
             fsm_edge_bindings: None,
         }
@@ -1530,14 +1418,68 @@ mod schema_strictness_tests {
             .expect("to_json output must deserialize back into PipelineConfig");
         assert_eq!(restored.name, config.name);
         assert_eq!(restored.states.len(), config.states.len());
-        assert_eq!(restored.timeouts.len(), config.timeouts.len());
+        assert!(config.to_json().get("timeouts").is_none());
+    }
+
+    /// The retired `timeouts:` section (what a rolled-back or operator-copied
+    /// manifest still carries) must load and must not reappear in `to_json`.
+    #[test]
+    fn manifest_with_retired_timeouts_block_loads_and_drops_it_from_to_json() {
+        let content = format!(
+            "{}\ntimeouts:\n  review:\n    duration: 30m\n    clock: review_entered_at\n    max_retries: 0\n",
+            default_pipeline_yaml()
+        );
+        let config: PipelineConfig =
+            serde_yaml::from_str(&content).expect("a retired timeouts block must still load");
+        config
+            .validate()
+            .expect("the retired block must not affect validation");
+        let json = config.to_json();
+        assert!(
+            json.get("timeouts").is_none(),
+            "to_json must drop it: {json}"
+        );
+        serde_json::from_value::<PipelineConfig>(json).expect("to_json output parses back");
+    }
+
+    /// A stored override or an older dashboard save carrying `timeouts` must pass
+    /// the strict write/health parse and lose the key on re-serialization.
+    #[test]
+    fn override_with_retired_timeouts_parses_strictly_and_serializes_without_it() {
+        let payload =
+            r#"{"timeouts":{"review":{"duration":"30m","clock":"review_entered_at"}},"gates":{}}"#;
+        let parsed = parse_override_strict(payload)
+            .expect("a retired timeouts key must not fail the strict parse")
+            .expect("override is not empty");
+        assert!(parsed.gates.is_some(), "declared sections must still apply");
+        let reserialized = serde_json::to_value(&parsed).expect("override serializes");
+        assert!(
+            reserialized.get("timeouts").is_none(),
+            "re-serialization must drop it: {reserialized}"
+        );
+
+        let base: PipelineConfig =
+            serde_yaml::from_str(&default_pipeline_yaml()).expect("default pipeline parses");
+        let report = build_override_health_report(
+            &base,
+            &[OverrideSourceRow {
+                layer: "repo",
+                target_id: "acme/widgets".to_string(),
+                json: payload.to_string(),
+            }],
+        );
+        assert!(
+            report.parse_failures.is_empty(),
+            "a retired key must not register as a parse failure, got: {:?}",
+            report.parse_failures
+        );
     }
 
     /// Overrides carrying only declared sections must keep parsing — the deny
     /// must not turn every stored override into a parse failure.
     #[test]
     fn override_with_known_sections_still_parses() {
-        let parsed = parse_override(r#"{"timeouts":{},"gates":{}}"#)
+        let parsed = parse_override(r#"{"clocks":{},"gates":{}}"#)
             .expect("a known-fields override must parse");
         assert!(parsed.is_some(), "override must not be treated as empty");
     }
@@ -1561,7 +1503,8 @@ mod schema_strictness_tests {
     /// `buildOverridePayload` (dashboard/src/components/agent-manager/
     /// pipeline-visual-editor-model.ts): the seven visual sections it always
     /// emits, the preserved `fsm_edge_bindings` extra, and the `events` entry
-    /// `updateFsmTransitionEvent` creates alongside the binding.
+    /// `updateFsmTransitionEvent` creates alongside the binding. It keeps the
+    /// `timeouts` section an older bundle still sends, which must be accepted.
     fn dashboard_fsm_editor_save_payload() -> &'static str {
         r#"{
             "fsm_edge_bindings": { "review->failed": { "event": "on_error" } },
@@ -1584,6 +1527,15 @@ mod schema_strictness_tests {
             "hooks": { "review": { "on_enter": ["OnReviewEnter"], "on_exit": [] } },
             "events": { "on_error": [] },
             "clocks": { "review": { "set": "on_enter", "mode": "reset" } },
+            "timeouts": {
+                "review": {
+                    "duration": "2h",
+                    "clock": "review",
+                    "max_retries": null,
+                    "on_exhaust": "failed",
+                    "condition": null
+                }
+            },
             "phase_gate": {
                 "dispatch_to": "reviewer",
                 "dispatch_type": "phase-gate",
@@ -1715,7 +1667,7 @@ mod schema_strictness_tests {
 
     /// #5718 r3 (R1): reading such a row must keep its valid sections. Dropping
     /// the layer instead silently resolved the card against the parent pipeline
-    /// — every gate, timeout and transition the operator had configured gone,
+    /// — every gate and transition the operator had configured gone,
     /// with only a log line to say so.
     #[test]
     fn stored_override_with_an_undeclared_key_keeps_its_valid_sections() {
@@ -1842,120 +1794,6 @@ mod schema_strictness_tests {
                 .any(|warning| warning.contains("stage_failure_policy")),
             "the health warning must name the rejected key, got: {:?}",
             report.warnings
-        );
-    }
-
-    /// The body the dashboard visual editor saves: every visual section of the
-    /// default pipeline and no `timeouts`, after `edit` has changed it.
-    fn visual_editor_save_without_timeouts(edit: impl FnOnce(&mut serde_json::Value)) -> String {
-        let base: PipelineConfig =
-            serde_yaml::from_str(&default_pipeline_yaml()).expect("default pipeline parses");
-        let full = serde_json::to_value(&base).expect("default pipeline serializes");
-        let mut payload = serde_json::json!({});
-        for key in [
-            "states",
-            "transitions",
-            "gates",
-            "hooks",
-            "events",
-            "clocks",
-            "phase_gate",
-        ] {
-            payload[key] = full[key].clone();
-        }
-        edit(&mut payload);
-        payload.to_string()
-    }
-
-    /// Deleting a state or clock named by the parent's inherited `timeouts` map
-    /// must still save, whether the override omits `timeouts` or sends `{}`.
-    #[test]
-    fn inherited_timeouts_do_not_block_a_state_or_clock_deletion() {
-        fn delete_requested(payload: &mut serde_json::Value) {
-            payload["states"]
-                .as_array_mut()
-                .expect("states array")
-                .retain(|state| state["id"] != "requested");
-            payload["transitions"]
-                .as_array_mut()
-                .expect("transitions array")
-                .retain(|t| t["from"] != "requested" && t["to"] != "requested");
-            payload["hooks"]
-                .as_object_mut()
-                .expect("hooks")
-                .remove("requested");
-            payload["clocks"]
-                .as_object_mut()
-                .expect("clocks")
-                .remove("requested");
-        }
-        fn delete_review_clock(payload: &mut serde_json::Value) {
-            payload["clocks"]
-                .as_object_mut()
-                .expect("clocks")
-                .remove("review");
-        }
-        type Edit = fn(&mut serde_json::Value);
-
-        let base: PipelineConfig =
-            serde_yaml::from_str(&default_pipeline_yaml()).expect("default pipeline parses");
-        let cases: [(&str, Edit); 2] = [
-            ("state deletion", delete_requested),
-            ("clock deletion", delete_review_clock),
-        ];
-        for (case, edit) in cases {
-            for explicit_empty in [false, true] {
-                let payload = visual_editor_save_without_timeouts(|payload| {
-                    edit(payload);
-                    if explicit_empty {
-                        payload["timeouts"] = serde_json::json!({});
-                    }
-                });
-                let ovr = parse_override_strict(&payload)
-                    .unwrap_or_else(|error| panic!("{case}: strict parse failed: {error}"))
-                    .expect("override is not empty");
-                base.merge(&ovr).validate().unwrap_or_else(|error| {
-                    panic!("{case} (explicit empty timeouts: {explicit_empty}): {error}")
-                });
-            }
-        }
-    }
-
-    /// Condition-based timeouts keep their exemption from the max_retries check,
-    /// both in a loaded manifest and when an editor save inherits them.
-    #[test]
-    fn conditional_timeout_with_zero_retries_still_validates() {
-        let default_yaml = default_pipeline_yaml();
-        let yaml = default_yaml.replace(
-            "condition: review_status = 'awaiting_dod'\n    max_retries: 1",
-            "condition: review_status = 'awaiting_dod'\n    max_retries: 0",
-        );
-        assert_ne!(yaml, default_yaml, "awaiting_dod timeout was not rewritten");
-        let parent: PipelineConfig = serde_yaml::from_str(&yaml).expect("manifest parses");
-        parent
-            .validate()
-            .expect("manifest with a conditional zero-retry timeout validates");
-
-        let ovr = parse_override_strict(&visual_editor_save_without_timeouts(|_| {}))
-            .expect("strict parse")
-            .expect("override is not empty");
-        parent
-            .merge(&ovr)
-            .validate()
-            .expect("editor save inheriting the conditional timeout validates");
-
-        let mut unconditional = parent;
-        unconditional
-            .timeouts
-            .get_mut("awaiting_dod")
-            .expect("awaiting_dod timeout")
-            .condition = None;
-        let error = unconditional
-            .validate()
-            .expect_err("unconditional zero-retry timeout is rejected");
-        assert!(
-            error.to_string().contains("has max_retries=0"),
-            "unexpected rejection: {error}"
         );
     }
 }

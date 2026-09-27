@@ -86,7 +86,7 @@
 
 use std::collections::HashSet;
 use std::process::Output;
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::services::provider::{CancelToken, cancel_requested};
@@ -98,19 +98,11 @@ use tokio::sync::Notify;
 // about a visible, still-stranded composer draft without ever double-submitting.
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 
-static CODEX_COMPOSER_MUTATION_LOCKS: LazyLock<dashmap::DashMap<String, Arc<Mutex<()>>>> =
-    LazyLock::new(dashmap::DashMap::new);
+mod composer_lock;
+#[allow(unused_imports)]
+pub(crate) use composer_lock::try_with_composer_mutation_lock;
+use composer_lock::with_composer_mutation_lock;
 
-fn with_composer_mutation_lock<R>(session_name: &str, operation: impl FnOnce() -> R) -> R {
-    let composer_lock = CODEX_COMPOSER_MUTATION_LOCKS
-        .entry(session_name.to_string())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone();
-    let _composer_guard = composer_lock
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    operation()
-}
 const PROMPT_INPUT_BEFORE_ENTER_SETTLE: Duration = Duration::from_millis(200);
 const PROMPT_SUBMIT_INITIAL_SETTLE: Duration = Duration::from_millis(150);
 const PROMPT_SUBMIT_DRAFT_RECHECK_SETTLE: Duration = Duration::from_millis(250);
@@ -1920,6 +1912,58 @@ mod tests {
     #[cfg(windows)]
     use std::os::windows::process::ExitStatusExt;
     use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+
+    #[test]
+    fn try_composer_lock_rejects_held_and_poisoned_lock() {
+        let session = format!("composer-try-{}", uuid::Uuid::new_v4());
+        let (sent, received) = mpsc::channel();
+        let result = with_composer_mutation_lock(&session, || {
+            let session = session.clone();
+            std::thread::spawn(move || {
+                let _ = sent.send(try_with_composer_mutation_lock(&session, || 7));
+            });
+            received.recv_timeout(Duration::from_secs(1))
+        });
+        assert_eq!(result, Ok(None));
+        let _ = std::panic::catch_unwind(|| {
+            with_composer_mutation_lock(&session, || panic!("poison composer"));
+        });
+        assert_eq!(try_with_composer_mutation_lock(&session, || 7), None);
+        assert_eq!(with_composer_mutation_lock(&session, || 7), 7);
+    }
+
+    #[test]
+    fn try_composer_lock_serializes_existing_writer() {
+        let session = format!("composer-try-writer-{}", uuid::Uuid::new_v4());
+        let (started_tx, started_rx) = mpsc::channel();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let mut writer = None;
+        let result = try_with_composer_mutation_lock(&session, || {
+            let session = session.clone();
+            writer = Some(std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                inject_steering_prompt_using(
+                    &session,
+                    "fence probe",
+                    |_| submit_snapshot(true, true, true, false),
+                    |_, _, _| {},
+                    |_, _, _| {},
+                    |_, _| {
+                        let _ = entered_tx.send(());
+                        CodexFollowupPromptSubmitOutcome::Submitted
+                    },
+                )
+                .unwrap();
+            }));
+            started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            entered_rx.recv_timeout(Duration::from_millis(100))
+        });
+        assert_eq!(result, Some(Err(mpsc::RecvTimeoutError::Timeout)));
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        writer.unwrap().join().unwrap();
+        assert_eq!(try_with_composer_mutation_lock(&session, || 7), Some(7));
+    }
 
     #[test]
     fn followup_timeout_falls_back_to_default_without_live_config() {
