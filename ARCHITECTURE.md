@@ -843,7 +843,8 @@ src/
 │   │   ├── outbound/
 │   │   │   ├── delivery_obligation/
 │   │   │   │   ├── mod.rs
-│   │   │   │   └── schema.rs
+│   │   │   │   ├── schema.rs
+│   │   │   │   └── state.rs
 │   │   │   ├── manual_delivery/
 │   │   │   │   ├── headless_nonce.rs
 │   │   │   │   └── production_nonce_tests.rs
