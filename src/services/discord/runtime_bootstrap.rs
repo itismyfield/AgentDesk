@@ -372,7 +372,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     #[cfg(unix)]
     spawns::run_bot_spawn_reachability_observation(&shared, &provider);
     run_bot_maybe_spawn_intake_worker(&shared, &provider);
-    crate::services::tui_o::shadow::tap::spawn_if_enabled(boot_config.tui_o.as_ref());
+    crate::services::tui_o::shadow_host::spawn_if_enabled(boot_config.tui_o.as_ref());
 
     run_bot_start_gateway_runtime(
         token,

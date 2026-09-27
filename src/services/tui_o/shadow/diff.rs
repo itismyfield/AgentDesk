@@ -1,6 +1,7 @@
 //! Correlates sealed O units with Legacy bot messages; measurement only, never an effect input.
 
 use std::collections::{BTreeMap, HashMap};
+use std::ops::Range;
 
 use chrono::{DateTime, Duration, Utc};
 use sha2::{Digest, Sha256};
@@ -20,6 +21,8 @@ struct LegacyState {
     exact_for: Option<UnitKey>,
     duplicate_of: Option<UnitKey>,
     contained: bool,
+    /// Normalized-text ranges already matched by containment; one occurrence serves one piece.
+    claimed: Vec<Range<usize>>,
 }
 
 /// A unit is decided one window after sealing; a Legacy message two windows after its
@@ -89,6 +92,16 @@ impl WindowDiff {
         }
     }
 
+    /// Decides, in sealing order, the pending units whose window end satisfies `due`.
+    fn decide_due(&mut self, due: impl Fn(DateTime<Utc>) -> bool) -> Vec<DiffRecord> {
+        let window = self.window;
+        let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending)
+            .into_iter()
+            .partition(|u| due(u.sealed_at + window));
+        self.pending = waiting;
+        ready.into_iter().map(|unit| self.decide(unit)).collect()
+    }
+
     /// Exact payload match first; only then normalized containment in a Legacy message.
     fn decide(&mut self, unit: ShadowUnit) -> DiffRecord {
         let key = unit.unit_key;
@@ -98,7 +111,11 @@ impl WindowDiff {
         for piece in &unit.pieces {
             let exact = self
                 .candidates(channel, since)
-                .find(|(_, l)| l.exact_for.is_none() && l.msg.content_sha256 == piece.sha256)
+                .find(|(_, l)| {
+                    l.exact_for.is_none()
+                        && l.claimed.is_empty()
+                        && l.msg.content_sha256 == piece.sha256
+                })
                 .map(|(id, _)| *id);
             if let Some(id) = exact {
                 self.claim_exact(id, &key, since);
@@ -106,13 +123,14 @@ impl WindowDiff {
                 continue;
             }
             exact_all = false;
-            let contained = self
-                .candidates(channel, since)
-                .find(|(_, l)| contains_piece(&l.content, piece))
-                .map(|(id, _)| *id);
-            match contained.and_then(|id| self.legacy.get_mut(&id).map(|l| (id, l))) {
-                Some((id, l)) => {
+            let contained = (self.candidates(channel, since))
+                .filter(|(_, l)| l.exact_for.is_none())
+                .find_map(|(id, l)| Some((*id, contains_piece(&l.content, piece, &l.claimed)?)));
+            match contained.and_then(|(id, range)| self.legacy.get_mut(&id).map(|l| (id, l, range)))
+            {
+                Some((id, l, range)) => {
                     l.contained = true;
+                    l.claimed.push(range);
                     ids.push(id);
                 }
                 None => missing = true,
@@ -160,6 +178,12 @@ impl ShadowDiff for WindowDiff {
     }
 
     fn observe_legacy(&mut self, event: &LegacyTapEvent) {
+        let (LegacyTapEvent::Created { at, .. }
+        | LegacyTapEvent::Updated { at, .. }
+        | LegacyTapEvent::Deleted { at, .. }) = event;
+        // Units whose window closed before this event are judged on the state before it.
+        let decided = self.decide_due(|deadline| deadline < *at);
+        self.ready.extend(decided);
         match event {
             LegacyTapEvent::Created {
                 channel_id,
@@ -182,6 +206,7 @@ impl ShadowDiff for WindowDiff {
                     exact_for: None,
                     duplicate_of: None,
                     contained: false,
+                    claimed: Vec::new(),
                 });
             }
             LegacyTapEvent::Updated {
@@ -224,13 +249,7 @@ impl ShadowDiff for WindowDiff {
     fn drain_ready(&mut self, now: DateTime<Utc>) -> Vec<DiffRecord> {
         let mut out = std::mem::take(&mut self.ready);
         let window = self.window;
-        let (due, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending)
-            .into_iter()
-            .partition(|u| u.sealed_at + window <= now);
-        self.pending = waiting;
-        for unit in due {
-            out.push(self.decide(unit));
-        }
+        out.extend(self.decide_due(|deadline| deadline <= now));
         let expired: Vec<u64> = self
             .legacy
             .iter()
@@ -287,8 +306,12 @@ fn normalize_legacy(content: &str) -> String {
     content.replace("\r\n", "\n").replace('\u{200b}', "")
 }
 
-/// True when a substring of the normalized Legacy text has the piece's UTF-16 length and sha256.
-fn contains_piece(content: &str, piece: &PieceDigest) -> bool {
+/// First unclaimed substring of the normalized Legacy text with the piece's UTF-16 length and sha256.
+fn contains_piece(
+    content: &str,
+    piece: &PieceDigest,
+    claimed: &[Range<usize>],
+) -> Option<Range<usize>> {
     let text = normalize_legacy(content);
     let target = piece.units as usize;
     let mut bounds = vec![(0usize, 0usize)];
@@ -304,15 +327,17 @@ fn contains_piece(content: &str, piece: &PieceDigest) -> bool {
             end += 1;
         }
         if end == bounds.len() {
-            return false;
+            return None;
         }
-        if bounds[end].1 == want
-            && sha256_hex(&text[bounds[start].0..bounds[end].0]) == piece.sha256
-        {
-            return true;
+        let range = bounds[start].0..bounds[end].0;
+        let free = claimed
+            .iter()
+            .all(|c| c.end <= range.start || range.end <= c.start);
+        if bounds[end].1 == want && free && sha256_hex(&text[range.clone()]) == piece.sha256 {
+            return Some(range);
         }
     }
-    false
+    None
 }
 
 #[cfg(test)]
@@ -451,6 +476,37 @@ mod tests {
             (OrderDiff, vec![1], DiffCause::Unknown),
         ];
         assert_eq!(rows(&mut diff, 300), expected);
+    }
+
+    #[test]
+    fn one_legacy_occurrence_is_consumed_by_one_unit_only() {
+        let mut diff = WindowDiff::default();
+        seal(&mut diff, "a", 0, &["same answer"]);
+        seal(&mut diff, "b", 1, &["same answer"]);
+        post(&mut diff, 1, 0, "same answer");
+        let missing = (LegacyMissing, vec![], DiffCause::Unknown);
+        let exact = vec![(Match, vec![1], DiffCause::Expected), missing.clone()];
+        assert_eq!(rows(&mut diff, 301), exact);
+        let mut diff = WindowDiff::default();
+        seal(&mut diff, "c", 0, &["one"]);
+        seal(&mut diff, "d", 1, &["one"]);
+        seal(&mut diff, "e", 1, &["two"]);
+        post(&mut diff, 2, 0, "one\ntwo");
+        let format_only = |ids| (FormatOnly, ids, DiffCause::Expected);
+        let contained = vec![format_only(vec![2]), missing, format_only(vec![2])];
+        assert_eq!(rows(&mut diff, 301), contained);
+    }
+
+    #[test]
+    fn a_post_after_the_unit_window_misses_even_when_the_observer_drains_late() {
+        let mut diff = WindowDiff::default();
+        seal(&mut diff, "late", 0, &["answer"]);
+        seal(&mut diff, "edge", 0, &["edge"]);
+        post(&mut diff, 1, 300, "edge");
+        post(&mut diff, 2, 301, "answer");
+        let decided = rows(&mut diff, 301);
+        assert_eq!(decided[0], (LegacyMissing, vec![], DiffCause::Unknown));
+        assert_eq!(decided[1], (Match, vec![1], DiffCause::Expected));
     }
 
     #[test]

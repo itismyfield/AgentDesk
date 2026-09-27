@@ -798,6 +798,28 @@ pub(crate) fn runtime_bindings_for_kind(
         .collect()
 }
 
+/// Live sessions of `kinds` with their cached owner channel, copied without purging relay state;
+/// `None` when the lock is busy.
+pub(crate) fn peek_tui_session_channels(
+    kinds: &[RuntimeHandoffKind],
+) -> Option<Vec<(String, u64)>> {
+    let state = match STATE.try_lock() {
+        Ok(state) => state,
+        Err(std::sync::TryLockError::Poisoned(poison)) => poison.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return None,
+    };
+    let live = |at: &Instant| at.elapsed() <= SESSION_MAPPING_TTL;
+    let sessions = state
+        .runtime_by_tmux
+        .iter()
+        .filter(|(_, entry)| kinds.contains(&entry.value.runtime_kind) && live(&entry.recorded_at));
+    let owned = sessions.filter_map(|(tmux, _)| {
+        let owner = state.channel_by_tmux.get(tmux)?;
+        live(&owner.recorded_at).then(|| (tmux.clone(), owner.value))
+    });
+    Some(owned.collect())
+}
+
 pub(crate) fn advance_tmux_runtime_binding_offset(
     tmux_session_name: &str,
     output_path: &str,
@@ -841,4 +863,140 @@ pub(crate) fn advance_tmux_runtime_binding_offset_under_source_authority(
         entry.recorded_at = Instant::now();
         true
     })
+}
+
+#[cfg(test)]
+mod shadow_session_tests {
+    use super::*;
+
+    /// Every map `purge_expired` prunes, rendered so any removed or refreshed entry shows.
+    fn relay_state() -> Vec<String> {
+        let state = STATE.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut rows: Vec<String> = Vec::new();
+        rows.extend(
+            state
+                .channel_by_tmux
+                .iter()
+                .map(|e| format!("channel {e:?}")),
+        );
+        rows.extend(
+            state
+                .runtime_by_tmux
+                .iter()
+                .map(|e| format!("runtime {e:?}")),
+        );
+        rows.extend(
+            state
+                .pending_by_tmux
+                .iter()
+                .map(|e| format!("pending {e:?}")),
+        );
+        let leases = state.external_input_relay_lease_by_tmux.iter();
+        rows.extend(leases.map(|e| format!("lease {e:?}")));
+        let relayed = state.relayed_entry_ids_by_tmux.iter();
+        rows.extend(relayed.map(|e| format!("relayed {e:?}")));
+        rows.sort();
+        rows
+    }
+
+    #[test]
+    fn observer_discovery_lists_live_sessions_without_changing_relay_state() {
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        reset_state_for_tests();
+        let expired = Instant::now() - SESSION_MAPPING_TTL - Duration::from_secs(1);
+        let binding = |runtime_kind| TuiRuntimeBinding {
+            runtime_kind,
+            output_path: "/t/s.jsonl".into(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        };
+        {
+            let mut state = STATE.lock().unwrap_or_else(|poison| poison.into_inner());
+            let rows = [
+                (
+                    "live",
+                    7,
+                    RuntimeHandoffKind::ClaudeTui,
+                    Instant::now(),
+                    Instant::now(),
+                ),
+                (
+                    "other",
+                    9,
+                    RuntimeHandoffKind::CodexTui,
+                    Instant::now(),
+                    Instant::now(),
+                ),
+                (
+                    "stale-binding",
+                    7,
+                    RuntimeHandoffKind::CodexTui,
+                    expired,
+                    Instant::now(),
+                ),
+                (
+                    "stale-owner",
+                    7,
+                    RuntimeHandoffKind::ClaudeTui,
+                    Instant::now(),
+                    expired,
+                ),
+            ];
+            for (name, channel, kind, bound_at, owned_at) in rows {
+                let value = binding(kind);
+                let runtime = TimedValue {
+                    value,
+                    recorded_at: bound_at,
+                };
+                state.runtime_by_tmux.insert(name.to_string(), runtime);
+                let owner = TimedValue {
+                    value: channel,
+                    recorded_at: owned_at,
+                };
+                state.channel_by_tmux.insert(name.to_string(), owner);
+            }
+            let victim = PromptKey::new("claude", "stale-binding");
+            let pending = TimedValue {
+                value: "p".to_string(),
+                recorded_at: expired,
+            };
+            state
+                .pending_by_tmux
+                .insert(victim.clone(), VecDeque::from([pending]));
+            let lease = ExternalInputRelayLease::unassigned(Some(7));
+            let lease = TimedValue {
+                value: lease,
+                recorded_at: expired,
+            };
+            state
+                .external_input_relay_lease_by_tmux
+                .insert(victim.clone(), lease);
+            let entry = TimedValue {
+                value: "e".to_string(),
+                recorded_at: expired,
+            };
+            state
+                .relayed_entry_ids_by_tmux
+                .insert(victim, VecDeque::from([entry]));
+        }
+        let before = relay_state();
+        let targets = crate::services::tui_o::shadow_host::discover_targets(&[7]);
+        let after = relay_state();
+        reset_state_for_tests();
+        let listed: Vec<(u64, &str)> = targets
+            .iter()
+            .map(|t| (t.channel_id, t.tmux_session.as_str()))
+            .collect();
+        assert_eq!(listed, [(7, "live")]);
+        assert_eq!(
+            (before.len(), &after),
+            (11, &before),
+            "discovery must not touch relay state"
+        );
+    }
 }

@@ -187,11 +187,16 @@ async fn report(
         observed_kinds: observed.into_iter().collect(),
     };
     let aux = vec![report::bound_kinds(&records, from, to, now), s3];
-    let snapshot = population(&config, file, aux, now, &resolve);
     let allowlist = config
         .tui_o
-        .map(|t| t.shadow.channel_allowlist)
+        .as_ref()
+        .map(|t| t.shadow.channel_allowlist.clone())
         .unwrap_or_default();
+    let threads: Vec<(u64, String)> = report::bound_channels(&records, to)
+        .into_iter()
+        .filter(|(channel_id, _)| allowlist.contains(channel_id))
+        .collect();
+    let snapshot = population(&config, file, aux, now, &resolve, &threads);
     let outcome = report::evaluate(&ReportInput {
         records: &records,
         manifest: &manifest,
@@ -295,6 +300,7 @@ fn population(
     aux: Vec<PopulationSource>,
     taken_at: DateTime<Utc>,
     resolve: TuiResolver,
+    threads: &[(u64, String)],
 ) -> PopulationSnapshot {
     let raw = |id: &str| {
         let found = config
@@ -338,6 +344,20 @@ fn population(
                 warnings.push(format!("ignored_name_only: {provider}/{name}"));
             }
             None => {}
+        }
+    }
+    // An allowlisted channel with no config entry (a thread) takes the provider it was bound to.
+    for (channel_id, provider) in threads {
+        let configured = channels.iter().any(|c| c.channel_id == *channel_id);
+        if !configured && resolve(provider, Some(*channel_id)) {
+            let (channel_id, provider) = (*channel_id, provider.clone());
+            let (effective_tui, basis) = (true, "resolver".to_string());
+            channels.push(PopulationChannel {
+                channel_id,
+                provider,
+                effective_tui,
+                basis,
+            });
         }
     }
     let defaults = providers
@@ -392,7 +412,7 @@ mod tests {
             sha256: String::new(),
             mtime: None,
         };
-        let snapshot = population(&config, file, Vec::new(), Utc::now(), &resolve);
+        let snapshot = population(&config, file, Vec::new(), Utc::now(), &resolve, &[]);
         assert_eq!(snapshot.profiles, ["claude_tui", "codex_tui"]);
         assert_eq!(
             snapshot
@@ -403,5 +423,28 @@ mod tests {
             [11]
         );
         assert_eq!(snapshot.warnings, ["ignored_name_only: claude/only-name"]);
+    }
+
+    #[test]
+    fn an_allowlisted_thread_bound_to_a_default_tui_provider_covers_its_profile() {
+        let yaml = "server: {}\nagents:\n  - id: a\n    name: A\n    channels:\n      claude: {id: \"7\"}\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        // Claude defaults to TUI; channel 9 is a thread whose parent overrides nothing.
+        let resolve =
+            |provider: &str, channel: Option<u64>| provider == "claude" && channel != Some(7);
+        let file = || ConfigFile {
+            path: String::new(),
+            sha256: String::new(),
+            mtime: None,
+        };
+        let threads = [(9, "claude".to_string()), (7, "claude".to_string())];
+        let snapshot = population(&config, file(), Vec::new(), Utc::now(), &resolve, &threads);
+        let covered: Vec<(u64, &str)> = (snapshot.channels.iter())
+            .map(|c| (c.channel_id, c.provider.as_str()))
+            .collect();
+        assert_eq!(covered, [(9, "claude")]);
+        let codex = [(9, "codex".to_string())];
+        let snapshot = population(&config, file(), Vec::new(), Utc::now(), &resolve, &codex);
+        assert!(snapshot.channels.is_empty());
     }
 }

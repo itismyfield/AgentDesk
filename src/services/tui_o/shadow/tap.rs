@@ -8,7 +8,6 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
-use poise::serenity_prelude as serenity;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -26,7 +25,6 @@ use super::{
     ShadowDerive, ShadowDiff, ShadowProvider, ShadowRecord, ShadowSink, SourceBinding, SourceId,
     TAP_CAPACITY, WindowStartSource,
 };
-use crate::services::agent_protocol::RuntimeHandoffKind;
 
 /// The `tui_o:` config section; absent means every output-track feature is off.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,54 +72,9 @@ impl GatewayTap {
     }
 }
 
-/// Called by the gateway event handler before dispatch; a no-op while the shadow is off.
-pub fn observe(ctx: &serenity::Context, event: &serenity::FullEvent) {
-    let Some(tap) = TAP.get() else { return };
-    let channel_id = match event {
-        serenity::FullEvent::Message { new_message } => new_message.channel_id,
-        serenity::FullEvent::MessageUpdate { event, .. } => event.channel_id,
-        serenity::FullEvent::MessageDelete { channel_id, .. } => *channel_id,
-        _ => return,
-    };
-    if tap.watches(channel_id.get()) {
-        if let Some(copy) = tap_event(ctx.cache.current_user().id.get(), event) {
-            tap.offer(copy);
-        }
-    }
-}
-
-/// Own-bot messages only; authorless updates and deletes pass because the diff ignores unseen ids.
-fn tap_event(bot_id: u64, event: &serenity::FullEvent) -> Option<LegacyTapEvent> {
-    match event {
-        serenity::FullEvent::Message { new_message: m } if m.author.id.get() == bot_id => {
-            Some(LegacyTapEvent::Created {
-                channel_id: m.channel_id.get(),
-                msg_id: m.id.get(),
-                at: *m.timestamp,
-                content: m.content.clone(),
-            })
-        }
-        serenity::FullEvent::MessageUpdate { event: e, .. }
-            if e.author.as_ref().is_none_or(|a| a.id.get() == bot_id) =>
-        {
-            Some(LegacyTapEvent::Updated {
-                channel_id: e.channel_id.get(),
-                msg_id: e.id.get(),
-                at: e.edited_timestamp.map_or_else(Utc::now, |t| *t),
-                content: e.content.clone(),
-            })
-        }
-        serenity::FullEvent::MessageDelete {
-            channel_id,
-            deleted_message_id,
-            ..
-        } => Some(LegacyTapEvent::Deleted {
-            channel_id: channel_id.get(),
-            msg_id: deleted_message_id.get(),
-            at: Utc::now(),
-        }),
-        _ => None,
-    }
+/// The tap installed by `start`; `None` while the shadow is off.
+pub fn installed() -> Option<&'static GatewayTap> {
+    TAP.get()
 }
 
 /// Derive-side hooks; one instance serves every source so keys seen on another source stay visible.
@@ -151,6 +104,8 @@ pub struct Observer {
     feeds: HashMap<u64, Feed>,
     open_capture: CaptureOpener,
     link: Box<dyn DeriveLink>,
+    /// Batches read this tick, derived next tick after the loop applies any WindowStart it read.
+    captured: Vec<(SourceBinding, CaptureBatch)>,
 }
 
 impl Observer {
@@ -171,6 +126,7 @@ impl Observer {
             feeds,
             open_capture,
             link,
+            captured: Vec::new(),
         }
     }
 
@@ -226,7 +182,7 @@ impl Observer {
         self.link.window_start(t0, sources);
     }
 
-    /// Binding changes, one capture poll per feed, then tap events and whatever the diff decided.
+    /// Binding changes, last tick's captures derived, one capture poll per feed, then tap events and diffs.
     pub fn tick(
         &mut self,
         now: DateTime<Utc>,
@@ -241,12 +197,20 @@ impl Observer {
             }
             self.persist(ShadowRecord::Binding { change });
         }
-        let (mut outputs, mut anomalies, mut lags) = (Vec::new(), Vec::new(), Vec::new());
+        let captured = std::mem::take(&mut self.captured);
+        let outputs: Vec<DeriveOutput> = (captured.iter())
+            .flat_map(|(binding, batch)| self.link.derive(binding, batch))
+            .collect();
+        for output in outputs {
+            self.diff.observe_derived(&output, now);
+            self.persist(ShadowRecord::Derived { output });
+        }
+        let (mut anomalies, mut lags) = (Vec::new(), Vec::new());
         for feed in self.feeds.values_mut() {
             match feed.capture.poll(MAX_READ_BYTES) {
                 CaptureOutcome::Batch(batch) if !batch.records.is_empty() => {
                     lags.extend(capture_lag_ms(&feed.binding.source.path, now));
-                    outputs.extend(self.link.derive(&feed.binding, &batch));
+                    self.captured.push((feed.binding.clone(), batch));
                 }
                 CaptureOutcome::Batch(_) => {}
                 CaptureOutcome::Anomaly(anomaly) => {
@@ -259,10 +223,6 @@ impl Observer {
         for (channel_id, anomaly) in anomalies {
             self.feeds.remove(&channel_id);
             self.persist(ShadowRecord::Anomaly { anomaly });
-        }
-        for output in outputs {
-            self.diff.observe_derived(&output, now);
-            self.persist(ShadowRecord::Derived { output });
         }
         legacy
             .iter()
@@ -388,20 +348,17 @@ impl WindowStartTail {
     }
 }
 
-/// Starts the shadow once per process when `tui_o.shadow.enabled`; it never blocks intake.
-pub fn spawn_if_enabled(config: Option<&TuiOConfig>) {
+/// Lists allowlisted channels with a live TUI binding; supplied by the host, which may read relay state.
+pub type TargetDiscovery = fn(&[u64]) -> Vec<ShadowTarget>;
+
+/// Starts the shadow once per process; the caller checks `enabled`, and intake never waits on it.
+pub fn start(config: &ShadowConfig, runtime_root: &Path, discover: TargetDiscovery) {
     static STARTED: OnceLock<()> = OnceLock::new();
-    let Some(config) = config.map(|c| &c.shadow).filter(|c| c.enabled) else {
-        return;
-    };
     if STARTED.set(()).is_err() {
         return;
     }
-    let store = crate::config::runtime_root()
-        .ok_or_else(|| io::Error::other("runtime root unresolved"))
-        .and_then(|runtime_root| {
-            ShadowStore::open(ShadowRoot::under(&runtime_root)?, DISK_CAP_BYTES)
-        });
+    let store =
+        ShadowRoot::under(runtime_root).and_then(|root| ShadowStore::open(root, DISK_CAP_BYTES));
     let store = match store {
         Ok(store) => store,
         Err(error) => return tracing::warn!(%error, "o-shadow: store unavailable; not started"),
@@ -419,7 +376,7 @@ pub fn spawn_if_enabled(config: Option<&TuiOConfig>) {
     let allowlist = config.channel_allowlist.clone();
     let spawned = std::thread::Builder::new()
         .name("o-shadow".into())
-        .spawn(move || run(observer, tail, gateway_rx, allowlist));
+        .spawn(move || run(observer, tail, gateway_rx, allowlist, discover));
     if let Err(error) = spawned {
         tracing::warn!(%error, "o-shadow: observe thread did not start");
     }
@@ -430,12 +387,13 @@ fn run(
     mut tail: WindowStartTail,
     mut gateway_rx: mpsc::Receiver<LegacyTapEvent>,
     allowlist: Vec<u64>,
+    discover: TargetDiscovery,
 ) {
     let mut readers: HashMap<(u64, String), BindingReader> = HashMap::new();
     observer.start(Utc::now());
     for tick in 0u64.. {
         std::thread::sleep(POLL_INTERVAL);
-        for target in discover_targets(&allowlist) {
+        for target in discover(&allowlist) {
             let key = (target.channel_id, target.tmux_session.clone());
             readers
                 .entry(key)
@@ -455,24 +413,6 @@ fn run(
             tracing::info!(metrics = ?observer.metrics(), "o-shadow: metrics");
         }
     }
-}
-
-/// Allowlisted channels that currently have a TUI binding in the in-memory registry.
-fn discover_targets(allowlist: &[u64]) -> Vec<ShadowTarget> {
-    use crate::services::tui_prompt_dedupe::{
-        owner_channel_for_tmux_session, runtime_bindings_for_kind,
-    };
-    [RuntimeHandoffKind::ClaudeTui, RuntimeHandoffKind::CodexTui]
-        .into_iter()
-        .flat_map(runtime_bindings_for_kind)
-        .filter_map(|(tmux_session, _)| {
-            let channel_id = owner_channel_for_tmux_session(&tmux_session)?;
-            allowlist.contains(&channel_id).then_some(ShadowTarget {
-                channel_id,
-                tmux_session,
-            })
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -508,33 +448,6 @@ mod tests {
             Ok(LegacyTapEvent::Created { msg_id: 1, .. })
         ));
         assert!(tap.watches(7) && !tap.watches(8));
-    }
-
-    #[test]
-    fn tap_copies_own_bot_messages_and_authorless_edits_only() {
-        let mut own = serenity::Message::default();
-        own.author.id = serenity::UserId::new(1);
-        own.channel_id = serenity::ChannelId::new(7);
-        own.id = serenity::MessageId::new(9);
-        let mut other = own.clone();
-        other.author.id = serenity::UserId::new(2);
-        let message = |new_message| serenity::FullEvent::Message { new_message };
-        assert!(matches!(
-            tap_event(1, &message(own)),
-            Some(LegacyTapEvent::Created { msg_id: 9, .. })
-        ));
-        assert!(tap_event(1, &message(other)).is_none());
-        let update = |author: serde_json::Value| serenity::FullEvent::MessageUpdate {
-            old_if_available: None,
-            new: None,
-            event: serde_json::from_value(serde_json::json!({
-                "id": "9", "channel_id": "7", "content": "x", "author": author,
-            }))
-            .unwrap(),
-        };
-        let user = |id: &str| serde_json::json!({"id": id, "username": "u", "discriminator": "0"});
-        assert!(tap_event(1, &update(serde_json::Value::Null)).is_some());
-        assert!(tap_event(1, &update(user("2"))).is_none());
     }
 
     #[derive(Clone, Default)]
@@ -673,7 +586,7 @@ mod tests {
             })
             .collect();
         let expected = [
-            "header", "attach", "binding", "derived", "tap_gap", "diff", "anomaly", "diff",
+            "header", "attach", "binding", "tap_gap", "diff", "derived", "anomaly", "diff",
             "legacy",
         ];
         assert_eq!(kinds, expected);
@@ -725,6 +638,7 @@ mod tests {
             .unwrap();
         std::io::Write::write_all(&mut file, lines[3..10].concat().as_bytes()).unwrap();
         observer.tick(at, vec![], vec![], 0);
+        observer.tick(at, vec![], vec![], 0);
         let records = sink.0.lock().unwrap();
         let (opener_at, extent) = (lines[0].len() as u64, lines[..3].concat().len() as u64);
         assert!(records.iter().any(|r| matches!(r,
@@ -771,5 +685,71 @@ mod tests {
         assert_eq!(polled.len(), 1);
         assert_eq!(polled[0].0.to_rfc3339(), "2026-09-27T12:02:00+00:00");
         assert!(tail.poll().is_empty());
+    }
+
+    fn race_clock() -> DateTime<Utc> {
+        "2026-09-27T12:06:05.750Z".parse().unwrap()
+    }
+
+    #[test]
+    fn a_window_start_applied_after_a_capture_still_reaches_what_it_captured() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tui_o_shadow");
+        let fixture = std::fs::read_to_string(format!("{path}/derive_claude_tui.jsonl")).unwrap();
+        let lines: Vec<String> = fixture.lines().map(|line| format!("{line}\n")).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("race.jsonl");
+        std::fs::write(&transcript, lines[..3].concat()).unwrap();
+        let source = source_id_for("s-claude", &transcript).unwrap();
+        let (channel_id, provider) = (7, ShadowProvider::Claude);
+        let binding = SourceBinding {
+            channel_id,
+            provider,
+            source: source.clone(),
+        };
+        let extent = lines[..3].concat().len() as u64;
+        let sink = Records::default();
+        let opener: CaptureOpener = Box::new(|binding, start| {
+            let capture = SourceCapture::open(binding.source.clone(), start)?;
+            Ok(Box::new(capture) as Box<dyn CaptureSource>)
+        });
+        let link = Box::new(TranscriptDerive::with_clock(race_clock));
+        let mut observer = Observer::new(Box::new(sink.clone()), opener, link);
+        let attached_at: DateTime<Utc> = "2026-09-27T12:05:00Z".parse().unwrap();
+        let change = BindingChange {
+            channel_id,
+            old: None,
+            new: Some(binding),
+            at: attached_at,
+        };
+        observer.tick(attached_at, vec![change], vec![], 0);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        std::io::Write::write_all(&mut file, lines[3..10].concat().as_bytes()).unwrap();
+        // The CLI appended WindowStart after this tick's tail read, so the capture comes first.
+        observer.tick(race_clock(), vec![], vec![], 0);
+        let t0: DateTime<Utc> = "2026-09-27T12:06:05Z".parse().unwrap();
+        let window_start_extent = extent;
+        observer.window_start(
+            t0,
+            &[WindowStartSource {
+                source,
+                window_start_extent,
+            }],
+        );
+        observer.tick(race_clock(), vec![], vec![], 0);
+        let records = sink.0.lock().unwrap();
+        let turns: Vec<&ShadowTurn> = records
+            .iter()
+            .filter_map(|r| match r {
+                ShadowRecord::Derived {
+                    output: DeriveOutput::TurnClosed(turn),
+                } => Some(turn),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].live, "{turns:?}");
     }
 }

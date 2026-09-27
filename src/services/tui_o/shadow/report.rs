@@ -89,6 +89,25 @@ pub fn bound_kinds(
     }
 }
 
+/// Channels bound when `to` was reached, with the provider serving each; a new run rebinds from empty.
+pub fn bound_channels(records: &[ShadowRecord], to: DateTime<Utc>) -> BTreeMap<u64, String> {
+    let mut bound = BTreeMap::new();
+    for record in records {
+        match record {
+            ShadowRecord::Header { started_at, .. } if *started_at <= to => bound.clear(),
+            ShadowRecord::Binding { change } if change.at <= to => {
+                let provider = change.new.as_ref().map(|b| provider_id(b.provider));
+                match provider {
+                    Some(provider) => bound.insert(change.channel_id, provider.to_string()),
+                    None => bound.remove(&change.channel_id),
+                };
+            }
+            _ => {}
+        }
+    }
+    bound
+}
+
 /// Sources the latest observer run still has attached, with their attach time: cleared by a new
 /// header, dropped when rebound away or broken by an anomaly.
 pub fn attached_sources(records: &[ShadowRecord]) -> Vec<(SourceId, DateTime<Utc>)> {
@@ -184,6 +203,7 @@ pub struct ReportOutcome {
 fn record_time(
     record: &ShadowRecord,
     units: &HashMap<&UnitKey, &ShadowUnit>,
+    legacy: &HashMap<u64, DateTime<Utc>>,
 ) -> Option<DateTime<Utc>> {
     match record {
         ShadowRecord::Header { started_at: at, .. }
@@ -202,21 +222,25 @@ fn record_time(
         ShadowRecord::Derived {
             output: DeriveOutput::TurnClosed(turn),
         } => Some(turn.closed_at),
-        ShadowRecord::Diff { diff } => diff
-            .unit_key
-            .as_ref()
-            .and_then(|k| units.get(k))
-            .map(|u| u.sealed_at),
+        // A diff belongs to the sample it judges: its unit's sealing, else its Legacy post.
+        ShadowRecord::Diff { diff } => match &diff.unit_key {
+            Some(key) => units.get(key).map(|u| u.sealed_at),
+            None => diff
+                .legacy_msg_ids
+                .iter()
+                .filter_map(|id| legacy.get(id))
+                .min()
+                .copied(),
+        },
         _ => None,
     }
 }
 
 pub fn evaluate(input: &ReportInput) -> ReportOutcome {
     let (mut failures, mut warnings) = (Vec::new(), Vec::new());
-    let t1 = input.to;
     let starts: Vec<_> = (input.records.iter().enumerate())
         .filter_map(|(at, r)| match r {
-            ShadowRecord::WindowStart { t0, sources } if (input.from..=t1).contains(t0) => {
+            ShadowRecord::WindowStart { t0, sources } if (input.from..=input.to).contains(t0) => {
                 Some((at, *t0, sources))
             }
             _ => None,
@@ -229,14 +253,36 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
         ));
     }
     let t0 = starts.first().map_or(input.from, |(_, t0, _)| *t0);
+    // The window is fixed at two hours from the recorded t0; `--to` must name that instant.
+    let t1 = t0 + Duration::minutes(WINDOW_MINUTES);
+    if (input.to - t1).abs() >= Duration::seconds(1) {
+        failures.push(format!(
+            "window end {} is not t0 + {WINDOW_MINUTES} minutes ({t1})",
+            input.to
+        ));
+    }
     // Closers at or below this extent were on disk before t0 (or before a mid-window attach).
     let mut boundary: HashMap<&SourceId, u64> = HashMap::new();
     if let Some((at, t0, sources)) = starts.first() {
         boundary.extend(sources.iter().map(|s| (&s.source, s.window_start_extent)));
+        // Attach rows from before t0 may land after the WindowStart line; the run's later rows count too.
+        let later = input.records[at + 1..].iter();
+        let later = later.take_while(|r| !matches!(r, ShadowRecord::Header { .. }));
+        let later = later.filter_map(|r| match r {
+            ShadowRecord::Attach {
+                source,
+                attached_at,
+                ..
+            } => Some((source.clone(), *attached_at)),
+            _ => None,
+        });
         let missed = attached_sources(&input.records[..*at])
             .into_iter()
+            .chain(later)
             .filter(|(source, attached_at)| attached_at < t0 && !boundary.contains_key(source))
-            .count();
+            .map(|(source, _)| source)
+            .collect::<HashSet<_>>()
+            .len();
         if missed > 0 {
             failures.push(format!(
                 "window_start missed {missed} source(s) attached before t0"
@@ -244,6 +290,7 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
         }
     }
     let mut units: HashMap<&UnitKey, &ShadowUnit> = HashMap::new();
+    let (mut excluded, mut legacy) = (HashSet::new(), HashMap::new());
     let mut turns: Vec<&ShadowTurn> = Vec::new();
     for record in input.records {
         match record {
@@ -263,15 +310,20 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
             ShadowRecord::Derived {
                 output: DeriveOutput::TurnClosed(turn),
             } => turns.push(turn),
+            ShadowRecord::Derived {
+                output: DeriveOutput::Excluded { unit_key, .. },
+            } => {
+                excluded.insert(unit_key);
+            }
+            ShadowRecord::Legacy { msg } => {
+                legacy.insert(msg.msg_id, msg.created_at);
+            }
             _ => {}
         }
     }
 
     // Version mix and in-window totals; timeless rows take the latest earlier timestamp.
     let late = t1 + Duration::seconds(2 * MATCH_WINDOW.as_secs() as i64);
-    if t1 - t0 > Duration::minutes(WINDOW_MINUTES) {
-        failures.push(format!("window is longer than {WINDOW_MINUTES} minutes"));
-    }
     // Units and Legacy rows near t1 are judged only after two match windows.
     if input.reported_at < late {
         failures.push(format!(
@@ -291,14 +343,14 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
         {
             header = Some((*schema_version, *identity_version));
         }
-        let own = record_time(record, &units);
+        let own = record_time(record, &units, &legacy);
         clock = clock.max(own);
         if let ShadowRecord::Diff { diff } = record {
             if let Some(key) = &diff.unit_key {
                 classes.insert(key, diff.class);
             }
         }
-        if own.or(clock).is_some_and(|at| t0 <= at && at <= late) {
+        if own.or(clock).is_some_and(|at| t0 <= at && at <= t1) {
             stale += usize::from(header != Some((SCHEMA_VERSION, IDENTITY_VERSION)));
             metrics.record(record);
             if let ShadowRecord::Diff { diff } = record {
@@ -336,8 +388,16 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
         *uncounted.entry(reason).or_insert(0) += 1;
     }
 
+    // A turn open across t0 can carry warm-up units; only units sealed past the boundary are samples.
+    let sampled = |key: &UnitKey| {
+        units.get(key).is_some_and(|u| {
+            let bound = boundary.get(&u.source_range.source);
+            (t0..=t1).contains(&u.sealed_at) && bound.is_some_and(|b| u.source_range.start >= *b)
+        })
+    };
     let is_split = |key: &UnitKey| {
         key.kind == UnitKind::Body
+            && sampled(key)
             && units.get(key).is_some_and(|u| u.pieces.len() >= 2)
             && !matches!(
                 classes.get(key),
@@ -356,7 +416,8 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
             .entry(profile_of(provider_id(turn.provider)))
             .or_default();
         counts.turns += 1;
-        counts.tool_turns += usize::from(turn.unit_keys.iter().any(|k| k.kind == UnitKind::Tool));
+        let tool = |k: &UnitKey| k.kind == UnitKind::Tool && sampled(k);
+        counts.tool_turns += usize::from(turn.unit_keys.iter().any(tool));
         counts.split_turns += usize::from(turn.unit_keys.iter().any(is_split));
         counts.synthetic_turns += usize::from(
             turn.synthetic_tokens
@@ -443,6 +504,33 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
             "total live turns {} < {MIN_TOTAL_TURNS}",
             counted.len()
         ));
+    }
+    // Completion is proven per unit by a terminal diff, never inferred from elapsed time.
+    let decided: HashSet<&UnitKey> = (input.records.iter())
+        .filter_map(|r| match r {
+            ShadowRecord::Diff { diff } => diff.unit_key.as_ref(),
+            _ => None,
+        })
+        .collect();
+    let undecided = (units.values())
+        .filter(|u| (t0..=t1).contains(&u.sealed_at) && !decided.contains(&u.unit_key))
+        .count();
+    let unsealed = (counted.iter().flat_map(|t| &t.unit_keys))
+        .filter(|k| !units.contains_key(k) && !excluded.contains(k))
+        .collect::<HashSet<_>>()
+        .len();
+    let windowless = uncounted.get("no_window").copied().unwrap_or(0) as u64;
+    for (count, what) in [
+        (undecided as u64, "window units without a terminal diff"),
+        (unsealed as u64, "units of counted turns never sealed"),
+        (
+            windowless,
+            "turns closed before the observer applied the window",
+        ),
+    ] {
+        if count > 0 {
+            failures.push(format!("{count} {what}"));
+        }
     }
     let judged = classify(&window_diffs, input.classify, &mut failures);
     let after = |cause| judged.causes_after.get(&label(cause)).copied().unwrap_or(0) as u64;
@@ -645,8 +733,8 @@ mod tests {
         };
         let source_range = SourceRange {
             source: src(1),
-            start: 0,
-            end: 1,
+            start: 150,
+            end: 151,
         };
         let (kind, pieces) = (key.kind, (0..pieces).map(digest).collect());
         let unit = ShadowUnit {
@@ -703,11 +791,34 @@ mod tests {
         }
     }
 
+    fn matched(unit_key: UnitKey) -> ShadowRecord {
+        let (unit_key, class, cause) = (Some(unit_key), DiffClass::Match, DiffCause::Expected);
+        ShadowRecord::Diff {
+            diff: DiffRecord {
+                channel_id: 7,
+                unit_key,
+                class,
+                legacy_msg_ids: vec![1],
+                cause,
+            },
+        }
+    }
+
+    /// A unit sealed past the window-start extent and its terminal diff.
+    fn decided(key: UnitKey, pieces: u32) -> [ShadowRecord; 2] {
+        [sealed(key.clone(), pieces), matched(key)]
+    }
+
     /// 30 live claude turns closing past extent 100; three use tools, one has a two-piece body.
     fn passing() -> Vec<ShadowRecord> {
         let (single, split) = (key(0, UnitKind::Body), key(1, UnitKind::Body));
         let mut records = vec![header(IDENTITY_VERSION), window_start(100)];
-        records.extend([sealed(single.clone(), 1), sealed(split.clone(), 2)]);
+        records.extend(
+            decided(single.clone(), 1)
+                .into_iter()
+                .chain(decided(split.clone(), 2)),
+        );
+        records.extend((11..14).flat_map(|n| decided(key(n, UnitKind::Tool), 1)));
         for n in 0..30 {
             let units = match n {
                 0 => vec![single.clone(), split.clone()],
@@ -768,7 +879,8 @@ mod tests {
     #[test]
     fn a_complete_window_passes_counting_turns_not_units_and_skipping_backlog() {
         let mut records = passing();
-        let tools = (97..100).map(|n| key(n, UnitKind::Tool)).collect();
+        let tools: Vec<UnitKey> = (97..100).map(|n| key(n, UnitKind::Tool)).collect();
+        records.extend(tools.iter().flat_map(|k| decided(k.clone(), 1)));
         records.push(turn(99, 500, &[], tools));
         records.extend((40..45).map(|n| turn(n, 100, &[], vec![key(n, UnitKind::Tool)])));
         let outcome = judge(&records, &[], &claude());
@@ -805,8 +917,26 @@ mod tests {
         let mut stale = passing();
         stale.extend([header(IDENTITY_VERSION - 1), turn(80, 900, &[], Vec::new())]);
         assert!(judge(&stale, &[], &claude()).failures[0].starts_with("stale samples"));
-        let long = judge_at(&passing(), &[], &claude(), t(121), t(131)).failures;
-        assert!(long.iter().any(|f| f.contains("longer than")), "{long:?}");
+        for to in [t(10), t(121)] {
+            let failures = judge_at(&passing(), &[], &claude(), to, to + Duration::minutes(10));
+            let failures = failures.failures;
+            assert!(
+                failures.iter().any(|f| f.contains("t0 + 120 minutes")),
+                "{failures:?}"
+            );
+        }
+        let mut late_attach = passing();
+        late_attach.push(ShadowRecord::Attach {
+            source: src(2),
+            attach_extent: 0,
+            capture_start: 0,
+            attached_at: t(-2),
+        });
+        let failures = judge(&late_attach, &[], &claude()).failures;
+        assert!(
+            failures.iter().any(|f| f.contains("missed 1 source")),
+            "{failures:?}"
+        );
         let early = judge_at(&passing(), &[], &claude(), t(120), t(129)).failures;
         assert!(
             early.iter().any(|f| f.starts_with("reported before")),
@@ -868,11 +998,11 @@ mod tests {
         };
         assert_eq!(
             done.causes_before,
-            count(&[("OOnlyTool", 1), ("Unknown", 2)])
+            count(&[("Expected", 5), ("OOnlyTool", 1), ("Unknown", 2)])
         );
         assert_eq!(
             done.causes_after,
-            count(&[("Expected", 1), ("Legacy_defect", 1), ("OOnlyTool", 1)])
+            count(&[("Expected", 6), ("Legacy_defect", 1), ("OOnlyTool", 1)])
         );
         assert_eq!(
             done.reclassified,
@@ -913,6 +1043,81 @@ mod tests {
                 .iter()
                 .any(|f| f.starts_with("classify:"))
         );
+    }
+
+    #[test]
+    fn samples_count_only_units_sealed_inside_the_window_boundary() {
+        // A turn open across t0 keeps its warm-up tool and split units out of this window's bars.
+        let warm_up = [key(1, UnitKind::Body), key(11, UnitKind::Tool)];
+        let mut records = passing();
+        for record in &mut records {
+            if let ShadowRecord::Derived {
+                output: DeriveOutput::Sealed(unit),
+            } = record
+            {
+                if warm_up.contains(&unit.unit_key) {
+                    unit.sealed_at = t(-1);
+                    (unit.source_range.start, unit.source_range.end) = (50, 60);
+                }
+            }
+        }
+        let outcome = judge(&records, &[], &claude());
+        let counts = &outcome.profiles["claude_tui"];
+        assert_eq!((counts.tool_turns, counts.split_turns), (2, 0));
+        assert!(!outcome.pass);
+        // A unit sealed after t1 belongs to no sample of this window, whatever its diff says.
+        let mut records = passing();
+        let late = key(900, UnitKind::Body);
+        let ShadowRecord::Derived {
+            output: DeriveOutput::Sealed(mut unit),
+        } = sealed(late.clone(), 1)
+        else {
+            unreachable!()
+        };
+        unit.sealed_at = t(120) + Duration::seconds(1);
+        records.push(ShadowRecord::Derived {
+            output: DeriveOutput::Sealed(unit),
+        });
+        records.push(ShadowRecord::Diff {
+            diff: DiffRecord {
+                channel_id: 7,
+                unit_key: Some(late),
+                class: DiffClass::LegacyMissing,
+                legacy_msg_ids: vec![],
+                cause: DiffCause::Unknown,
+            },
+        });
+        let outcome = judge(&records, &[], &claude());
+        assert!(outcome.pass, "{:?}", outcome.failures);
+    }
+
+    #[test]
+    fn undecided_unsealed_or_windowless_samples_fail_the_window() {
+        let fails_with = |records: &[ShadowRecord], text: &str| {
+            let failures = judge(records, &[], &claude()).failures;
+            assert!(
+                failures.iter().any(|f| f.contains(text)),
+                "{text}: {failures:?}"
+            );
+        };
+        let undecided: Vec<_> = passing()
+            .into_iter()
+            .filter(|r| !matches!(r, ShadowRecord::Diff { .. }))
+            .collect();
+        fails_with(&undecided, "without a terminal diff");
+        let mut unsealed = passing();
+        unsealed.push(turn(70, 700, &[], vec![key(70, UnitKind::Tool)]));
+        fails_with(&unsealed, "never sealed");
+        let mut windowless = passing();
+        let mut closed = turn(71, 701, &[], Vec::new());
+        if let ShadowRecord::Derived {
+            output: DeriveOutput::TurnClosed(turn),
+        } = &mut closed
+        {
+            (turn.live, turn.excluded_reason) = (false, Some("no_window".into()));
+        }
+        windowless.push(closed);
+        fails_with(&windowless, "before the observer applied the window");
     }
 
     #[test]
