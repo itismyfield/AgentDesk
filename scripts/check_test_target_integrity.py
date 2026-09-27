@@ -96,6 +96,7 @@ LIB_INVENTORY_STATIC_ONLY_BASE = frozenset({
 })
 LIB_INVENTORY_STATIC_ONLY_BY_PLATFORM = {
     "darwin": frozenset({
+        "cli::doctor::orchestrator::profile_filter_tests::non_macos_fd_probes_are_empty",
         "services::process::simple_cancel_watcher_tests::linux_proc_stat_parser_handles_comm_with_spaces_and_parens",
     }),
     "linux": frozenset({

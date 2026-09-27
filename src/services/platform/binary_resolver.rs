@@ -16,7 +16,10 @@ use crate::runtime_layout::expand_user_path;
 
 mod grok;
 mod resolution;
+mod runtime_path;
 use resolution::finalize_resolution;
+pub(crate) use runtime_path::prepared_runtime_path;
+use runtime_path::runtime_path_entries;
 #[cfg(any(windows, test))]
 mod windows_codex;
 const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(3);
@@ -1014,19 +1017,6 @@ fn build_exec_path(resolved_path: &Path, canonical_path: Option<&Path>) -> Optio
 fn exec_path_for_binary(binary_path: &Path) -> Option<String> {
     let canonical = std::fs::canonicalize(binary_path).ok();
     build_exec_path(binary_path, canonical.as_deref())
-}
-
-fn runtime_path_entries() -> Vec<PathBuf> {
-    let mut entries = Vec::new();
-    let mut seen = BTreeSet::new();
-
-    extend_split_paths(std::env::var_os("PATH"), &mut entries, &mut seen);
-    extend_split_paths(resolve_login_shell_path_os(), &mut entries, &mut seen);
-    for dir in standard_fallback_dirs() {
-        push_unique_path(dir, &mut entries, &mut seen);
-    }
-
-    entries
 }
 
 fn exec_path_entries(resolved_path: &Path, canonical_path: Option<&Path>) -> Vec<PathBuf> {
