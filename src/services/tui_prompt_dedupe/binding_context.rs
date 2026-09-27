@@ -517,6 +517,11 @@ pub(crate) mod tests {
             HookBindingEnvelope::capture("claude").context,
             CapturedContext::Absent(AbsentReason::EnvUnset)
         );
+        crate::services::discord::stamp_spawn_markers(&p.context.tmux_session, Some(&p)).unwrap();
+        assert_eq!(
+            HookBindingEnvelope::capture("claude").context,
+            CapturedContext::Absent(AbsentReason::EnvUnset)
+        );
         child_context(&p.env_lines(), Some(&p.path));
         let p = PreparedIncarnation {
             path: p.path.with_file_name("quote' space.json"),
