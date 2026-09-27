@@ -844,6 +844,7 @@ class OwnerDocAttributes(unittest.TestCase):
             '#[my_attr(doc = gen!())]',
             '#[my_attr(nested(doc = gen!()))]',
             '#[my_attr(#[doc = gen!()])]',
+            '#[my_attr(\n#[doc = gen!()]',
             '#[cfg_attr(unix, my_attr(doc = gen!()))]',
             '#[cfg_attr(unix, my_attr(cfg_attr(unix, doc = gen!())))]',
             '#[cfg_attr(doc = gen!(), doc = accepted!())]',
