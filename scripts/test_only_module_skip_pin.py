@@ -35,6 +35,7 @@ from pathlib import Path
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
         "src/services/discord/outbound/delivery_obligation/state/proof_tests.rs",
+        "src/cli/doctor/orchestrator/observation_tests.rs",
         "src/services/cluster/attachment_transfer/storage_tests.rs",
         "src/services/cluster/intake_router_hook/attachment_tests.rs",
         "src/services/cluster/execution_capacity/tests.rs",

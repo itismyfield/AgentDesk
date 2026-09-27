@@ -814,22 +814,11 @@ fn highest_reason_severity(reasons: &[health::ClassifiedReason]) -> Severity {
 }
 
 fn highest_reason_fix_safety(reasons: &[health::ClassifiedReason]) -> FixSafety {
-    let mut result = FixSafety::ReadOnly;
-    for reason in reasons {
-        result =
-            match (result, reason.fix_safety) {
-                (FixSafety::NotFixable, _) | (_, FixSafety::NotFixable) => FixSafety::NotFixable,
-                (FixSafety::ExplicitDbRepairRequired, _)
-                | (_, FixSafety::ExplicitDbRepairRequired) => FixSafety::ExplicitDbRepairRequired,
-                (FixSafety::ExplicitRestartRequired, _)
-                | (_, FixSafety::ExplicitRestartRequired) => FixSafety::ExplicitRestartRequired,
-                (FixSafety::SafeLocalRepair, _) | (_, FixSafety::SafeLocalRepair) => {
-                    FixSafety::SafeLocalRepair
-                }
-                _ => FixSafety::ReadOnly,
-            };
-    }
-    result
+    reasons
+        .iter()
+        .map(|reason| reason.fix_safety)
+        .max_by_key(|safety| safety.restriction_rank())
+        .unwrap_or(FixSafety::ReadOnly)
 }
 
 fn stale_zero_byte_db_candidates(
@@ -1734,8 +1723,9 @@ fn build_json_report(
     checks: &[Check],
     actions: &[FixAction],
 ) -> DoctorReport {
-    let summary = summarize_checks(checks);
-    let sections = build_doctor_sections(checks);
+    let checks = [checks, &repair_response::verification_checks(actions)].concat();
+    let summary = summarize_checks(&checks);
+    let sections = build_doctor_sections(&checks);
     let checks = checks
         .iter()
         .map(|check| DoctorCheckReport {
@@ -2057,153 +2047,21 @@ fn apply_service_fix(snapshot: &HealthSnapshot, options: &DoctorOptions) -> Vec<
     Vec::new()
 }
 
-fn stale_mailbox_repair_response_status(response: &Value) -> &str {
-    response
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| {
-            if response.get("ok").and_then(Value::as_bool) == Some(true) {
-                "applied"
-            } else if response.get("skipped").and_then(Value::as_bool) == Some(true)
-                || response.get("safety_gate").is_some()
-            {
-                "skipped"
-            } else {
-                "partial_repair"
-            }
-        })
-}
+mod repair_response;
+mod report_display;
 
-fn stale_mailbox_repair_safety_gate(response: &Value) -> &'static str {
-    match response
-        .get("safety_gate")
-        .and_then(Value::as_str)
-        .unwrap_or("repair_skipped")
-    {
-        "mailbox_not_found" => "mailbox_not_found",
-        "expected_evidence_mismatch" => "expected_evidence_mismatch",
-        "queue_not_empty" => "queue_not_empty",
-        "active_dispatch_present" => "active_dispatch_present",
-        "tmux_present" => "tmux_present",
-        _ => "repair_skipped",
-    }
-}
-
-fn stale_mailbox_repair_fix_safety(response: &Value) -> FixSafety {
-    match response.get("fix_safety").and_then(Value::as_str) {
-        Some("explicit_restart_required") => FixSafety::ExplicitRestartRequired,
-        Some("explicit_db_repair_required") => FixSafety::ExplicitDbRepairRequired,
-        Some("not_fixable") => FixSafety::NotFixable,
-        Some("read_only") => FixSafety::ReadOnly,
-        _ => FixSafety::SafeLocalRepair,
-    }
-}
+mod observation_checks;
+use observation_checks::check_mailbox_consistency;
+#[cfg(test)]
+mod observation_tests;
+mod stale_mailbox_repair;
 
 fn apply_stale_mailbox_fixes(snapshot: &HealthSnapshot, options: &DoctorOptions) -> Vec<FixAction> {
-    let Some(body) = snapshot.body.as_ref() else {
-        return Vec::new();
-    };
-    mailbox::classify_mailbox_findings(body)
-        .into_iter()
-        .filter(|finding| {
-            if matches!(options.run_context, RunContext::StartupOnce) {
-                !finding.live_work_present
-            } else {
-                true
-            }
-        })
-        .map(|finding| {
-            if finding.live_work_present {
-                return FixAction::skipped(
-                    finding.id,
-                    "Stale Mailbox Repair",
-                    "skipped stale mailbox repair because live work evidence exists",
-                    FixSafety::ExplicitRestartRequired,
-                    "live tmux/process/dispatch evidence present",
-                )
-                .with_evidence(finding.evidence);
-            }
-            let Some(channel_id) = finding
-                .evidence
-                .get("mailbox")
-                .and_then(|mailbox| mailbox.get("channel_id"))
-                .and_then(Value::as_u64)
-            else {
-                return FixAction::skipped(
-                    finding.id,
-                    "Stale Mailbox Repair",
-                    "stale mailbox finding has no channel id for local repair",
-                    FixSafety::SafeLocalRepair,
-                    "channel evidence missing",
-                )
-                .with_safety_gate("missing_channel_evidence")
-                .with_evidence(finding.evidence);
-            };
-            let expected_has_cancel_token = finding
-                .evidence
-                .get("mailbox")
-                .and_then(|mailbox| mailbox.get("has_cancel_token"))
-                .and_then(Value::as_bool);
-            let request = json!({
-                "channel_id": channel_id,
-                "expected_has_cancel_token": expected_has_cancel_token
-            });
-            match crate::cli::client::post_json_value("/api/doctor/stale-mailbox/repair", request)
-            {
-                Ok(response) => {
-                    let status = stale_mailbox_repair_response_status(&response);
-                    let evidence = json!({
-                        "finding": finding.evidence,
-                        "repair": response
-                    });
-                    match status {
-                        "applied" => FixAction::ok(
-                            finding.id,
-                            "Stale Mailbox Repair",
-                            format!("cleared stale mailbox state for channel {channel_id}"),
-                        )
-                        .with_safety_gate("no_live_work_evidence")
-                        .with_evidence(evidence),
-                        "partial_repair" => FixAction::partial(
-                            finding.id,
-                            "Stale Mailbox Repair",
-                            format!(
-                                "partial stale mailbox repair for channel {channel_id}; operator follow-up required"
-                            ),
-                        )
-                        .with_evidence(evidence),
-                        "skipped" => {
-                            FixAction::skipped(
-                                finding.id,
-                                "Stale Mailbox Repair",
-                                format!("skipped stale mailbox repair for channel {channel_id}"),
-                                stale_mailbox_repair_fix_safety(&response),
-                                response
-                                    .get("skipped_reason")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("repair safety gate skipped the request"),
-                            )
-                            .with_safety_gate(stale_mailbox_repair_safety_gate(&response))
-                            .with_evidence(evidence)
-                        }
-                        _ => FixAction::fail(
-                            finding.id,
-                            "Stale Mailbox Repair",
-                            format!("stale mailbox repair returned status={status}"),
-                        )
-                        .with_evidence(evidence),
-                    }
-                }
-                Err(error) => FixAction::fail(
-                    finding.id,
-                    "Stale Mailbox Repair",
-                    format!("protected stale mailbox repair failed: {error}"),
-                )
-                .with_safety_gate("protected_repair_failed")
-                .with_evidence(finding.evidence),
-            }
-        })
-        .collect()
+    stale_mailbox_repair::apply_stale_mailbox_fixes_with_post(
+        snapshot,
+        options,
+        crate::cli::client::post_json_value,
+    )
 }
 
 fn print_fix_actions(actions: &[FixAction]) {
@@ -2272,7 +2130,8 @@ fn discord_bot_check_from_health(base: &str, body: &Value) -> Check {
                 format!("{}/{} connected", connected.len(), total),
             );
         }
-        let reasons = health::degraded_reasons(body);
+        let observation = health::degraded_reasons(body);
+        let reasons = observation.as_deref().unwrap_or(&[]);
         let provider_reasons: Vec<_> = reasons
             .iter()
             .filter(|reason| reason.subsystem == "provider_runtime")
@@ -2327,14 +2186,15 @@ fn discord_bot_check_from_health(base: &str, body: &Value) -> Check {
             CheckGroup::Core,
             "Discord Bot",
             format!(
-                "overall={overall}, connected={}/{}, offline={}",
+                "overall={overall}, connected={}/{}, offline={}{}",
                 connected.len(),
                 total,
                 if disconnected.is_empty() {
                     "-".to_string()
                 } else {
                     disconnected.join(", ")
-                }
+                },
+                observation.as_ref().err().map(|issue| format!("; reasons={}", issue.describe())).unwrap_or_default()
             ),
             "Check Discord tokens, gateway connection status, and dcserver stdout logs for offline providers.",
         )
@@ -2762,8 +2622,11 @@ fn check_server_running(snapshot: &HealthSnapshot) -> Check {
                         format!("status={status}"),
                     )
             } else {
-                let reasons = health::degraded_reasons(body);
-                let reason_detail = if reasons.is_empty() {
+                let observation = health::degraded_reasons(body);
+                let reasons = observation.as_deref().unwrap_or(&[]);
+                let reason_detail = if let Err(issue) = observation.as_ref() {
+                    format!("{detail}; reasons={}", issue.describe())
+                } else if reasons.is_empty() {
                     detail.clone()
                 } else {
                     format!(
@@ -2787,7 +2650,10 @@ fn check_server_running(snapshot: &HealthSnapshot) -> Check {
                 .with_severity(highest_reason_severity(&reasons))
                 .with_fix_safety(highest_reason_fix_safety(&reasons))
                 .with_security_exposure(SecurityExposure::OperationalMetadata)
-                .with_evidence(health::reasons_evidence(&reasons))
+                .with_evidence(match &observation {
+                    Ok(reasons) => health::reasons_evidence(reasons),
+                    Err(issue) => json!({"measurement_issue": issue}),
+                })
                 .with_path(health_endpoint(&snapshot.base))
                 .with_expected_actual(
                     "reachable healthy health endpoint",
@@ -2895,7 +2761,12 @@ fn check_degraded_reasons(snapshot: &HealthSnapshot) -> Check {
         .with_security_exposure(SecurityExposure::OperationalMetadata)
         .with_fix_safety(FixSafety::NotFixable);
     };
-    let reasons = health::degraded_reasons(body);
+    let reasons = match health::degraded_reasons(body) {
+        Ok(reasons) => reasons,
+        Err(issue) => {
+            return observation_checks::unmeasured_check("health_degraded_reasons", &issue);
+        }
+    };
     if reasons.is_empty() {
         return Check::ok(
             "health_degraded_reasons",
@@ -2958,42 +2829,6 @@ fn check_degraded_reasons(snapshot: &HealthSnapshot) -> Check {
         .with_expected_actual("no degraded reasons", detail)
         .with_next_steps(next_steps);
     check
-}
-
-fn check_mailbox_consistency(snapshot: &HealthSnapshot) -> Vec<Check> {
-    let Some(body) = snapshot.body.as_ref() else {
-        return Vec::new();
-    };
-    mailbox::classify_mailbox_findings(body)
-        .into_iter()
-        .map(|finding| {
-            let fix_safety = if finding.live_work_present {
-                FixSafety::ExplicitRestartRequired
-            } else {
-                FixSafety::SafeLocalRepair
-            };
-            Check::fail(
-                finding.id,
-                CheckGroup::ProviderRuntime,
-                "Turn Mailbox Consistency",
-                finding.detail,
-                if finding.live_work_present {
-                    "operator verification is required because live work evidence exists, skipping auto-cleanup."
-                } else {
-                    "protected stale-mailbox repair can be applied since no live work evidence is present."
-                },
-            )
-            .with_subsystem("provider_runtime")
-            .with_severity(Severity::Error)
-            .with_fix_safety(fix_safety)
-            .with_security_exposure(SecurityExposure::OperationalMetadata)
-            .with_evidence(finding.evidence)
-            .with_next_steps(vec![
-                "agentdesk doctor --fix".to_string(),
-                "POST /api/doctor/stale-mailbox/repair".to_string(),
-            ])
-        })
-        .collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -4080,69 +3915,14 @@ pub fn cmd_doctor(options: DoctorOptions) -> Result<(), String> {
             let actions = report
                 .fixes
                 .iter()
-                .map(|action| FixAction {
-                    id: action.id,
-                    name: action.name,
-                    status: action.status,
-                    ok: action.ok,
-                    detail: action.detail.clone(),
-                    skipped: action.skipped,
-                    requires_explicit_consent: action.requires_explicit_consent,
-                    fix_safety: match action.fix_safety {
-                        "read_only" => FixSafety::ReadOnly,
-                        "safe_local_repair" => FixSafety::SafeLocalRepair,
-                        "explicit_restart_required" => FixSafety::ExplicitRestartRequired,
-                        "explicit_db_repair_required" => FixSafety::ExplicitDbRepairRequired,
-                        _ => FixSafety::NotFixable,
-                    },
-                    safety_gate: action.safety_gate,
-                    skipped_reason: action.skipped_reason.clone(),
-                    evidence: action.evidence.clone(),
-                })
+                .map(report_display::fix_action)
                 .collect::<Vec<_>>();
             print_fix_actions(&actions);
         }
         let checks = report
             .checks
             .iter()
-            .map(|check| Check {
-                id: check.id,
-                group: check_group_from_report(check.group),
-                name: check.name,
-                status: match check.status {
-                    "pass" => CheckStatus::Pass,
-                    "warn" => CheckStatus::Warn,
-                    _ => CheckStatus::Fail,
-                },
-                severity: match check.severity {
-                    "info" => Severity::Info,
-                    "warning" => Severity::Warning,
-                    "critical" => Severity::Critical,
-                    _ => Severity::Error,
-                },
-                subsystem: check.subsystem,
-                detail: check.detail.clone(),
-                guidance: check.guidance.clone(),
-                path: check.path.clone(),
-                expected: check.expected.clone(),
-                actual: check.actual.clone(),
-                next_steps: check.next_steps.clone(),
-                evidence: check.evidence.clone(),
-                fix_safety: match check.fix_safety {
-                    "read_only" => FixSafety::ReadOnly,
-                    "safe_local_repair" => FixSafety::SafeLocalRepair,
-                    "explicit_restart_required" => FixSafety::ExplicitRestartRequired,
-                    "explicit_db_repair_required" => FixSafety::ExplicitDbRepairRequired,
-                    _ => FixSafety::NotFixable,
-                },
-                security_exposure: match check.security_exposure {
-                    "local_path" => SecurityExposure::LocalPath,
-                    "operational_metadata" => SecurityExposure::OperationalMetadata,
-                    "credential_metadata" => SecurityExposure::CredentialMetadata,
-                    "public_surface" => SecurityExposure::PublicSurface,
-                    _ => SecurityExposure::None,
-                },
-            })
+            .map(report_display::check)
             .collect::<Vec<_>>();
         for (group, label) in [
             (CheckGroup::Core, "Core"),
@@ -4192,10 +3972,13 @@ mod profile_filter_tests {
         let snapshot = HealthSnapshot {
             base: "http://localhost:8787".to_string(),
             body: Some(json!({
+                "global_active": 0,
                 "mailboxes": [{
                     "channel_id": 42,
                     "has_cancel_token": true,
                     "queue_depth": 0,
+                    "watcher_attached": false,
+                    "inflight_state_present": false,
                     "tmux_present": false,
                     "process_present": false,
                     "active_dispatch_present": false
@@ -4207,6 +3990,8 @@ mod profile_filter_tests {
         let checks = check_mailbox_consistency(&snapshot);
 
         assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].id, "mailbox_busy_without_active_turn");
+        assert_eq!(checks[0].fix_safety, super::FixSafety::SafeLocalRepair);
         assert_eq!(checks[0].group, CheckGroup::ProviderRuntime);
         assert_eq!(checks[0].subsystem, "provider_runtime");
     }
