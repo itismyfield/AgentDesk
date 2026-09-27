@@ -58,12 +58,15 @@ pub(super) fn discord_turn_id(channel_id: ChannelId, user_msg_id: MessageId) -> 
 pub(crate) enum HeadlessTurnStartError {
     Conflict(String),
     Internal(String),
+    InvalidTarget(String),
 }
 
 impl std::fmt::Display for HeadlessTurnStartError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Conflict(message) | Self::Internal(message) => f.write_str(message),
+            Self::Conflict(message) | Self::Internal(message) | Self::InvalidTarget(message) => {
+                f.write_str(message)
+            }
         }
     }
 }
