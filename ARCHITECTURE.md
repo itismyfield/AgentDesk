@@ -740,7 +740,8 @@ src/
 │   │   │   ├── stall_liveness/
 │   │   │   │   └── redrive_grace.rs
 │   │   │   ├── watcher_respawn/
-│   │   │   │   └── idle_relay_absence.rs
+│   │   │   │   ├── idle_relay_absence.rs
+│   │   │   │   └── restart_marker_tests.rs
 │   │   │   ├── headless_turn.rs
 │   │   │   ├── liveness_authority.rs
 │   │   │   ├── mailbox.rs

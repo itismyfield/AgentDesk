@@ -139,9 +139,6 @@ fn boot_leave_then_watchdog(clear_io_error: bool) {
         let attempted = WATCHER_ABSENCE
             .get(&WatcherAbsenceKey::new(&provider, channel))
             .map(|state| state.failed_attempts);
-        if let Some((_, watcher)) = shared.tmux_watchers.remove(&channel) {
-            watcher.cancel.store(true, Ordering::Relaxed);
-        }
         clear_watcher_absence(&provider, channel);
         server.abort();
         assert!(
