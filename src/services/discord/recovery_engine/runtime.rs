@@ -197,8 +197,8 @@ fn predecessor_drain_marker(
     (drain && predecessor && state.turn_nonce.is_some()).then_some(generation)
 }
 
-/// Closes, instead of adopting, a marked TUI-direct or watcher row whose turn ended before a
-/// later prompt (its placeholder may show that turn); `None` adopts, a failed clear keeps it.
+/// Closes a durably completed marked turn after a later prompt. Transcript boundaries
+/// without the row's own terminal commit are ambiguous, so they leave its marker intact.
 pub(in crate::services::discord) fn retire_restart_row_past_its_turn(
     shared: &SharedData,
     state: &inflight::InflightTurnState,
@@ -210,6 +210,9 @@ pub(in crate::services::discord) fn retire_restart_row_past_its_turn(
         || !transcript_turn_ended_before_a_prompt(state)
     {
         return None;
+    }
+    if !state.terminal_delivery_committed {
+        return Some(inflight::GuardedClearOutcome::PlannedRestartSkipped);
     }
     let cleared = inflight::clear_restart_marked_episode(
         &provider,
@@ -287,8 +290,8 @@ fn transcript_turn_ended_before_a_prompt(_state: &inflight::InflightTurnState) -
     false
 }
 
-/// A terminal event at or after `turn_start_offset` is this row's own, as the watcher credits
-/// it; a prompt after it starts a later turn. No such pair, no proof.
+/// Detects transcript ordering only; a lagging birth frontier can include a prior turn's
+/// terminal, so the caller must separately require this durable turn's terminal commit.
 #[cfg(unix)]
 fn transcript_turn_ended_before_a_prompt(state: &inflight::InflightTurnState) -> bool {
     use super::super::tmux::tmux_output_stream::{
@@ -1926,11 +1929,11 @@ mod restart_marker_adoption_tests {
         decided
     }
 
-    /// Boot closes a marked row only once a terminal at or after its turn start is followed
-    /// by a prompt; its own prompt, an earlier turn's terminal or a current marker keep it.
+    /// Only a durable completion plus a later transcript prompt permits retirement;
+    /// an uncommitted row with the same transcript boundaries remains ambiguous.
     #[test]
     fn boot_closes_a_marked_row_only_after_its_terminal_and_a_later_prompt_6294() {
-        use super::BootRow::{Adopt, Retired};
+        use super::BootRow::{Adopt, Leave, Retired};
         let dir = tempfile::TempDir::new().expect("transcript dir");
         let close = |before: &str, turn: &[&str], edit: fn(&mut Row)| {
             let mut row = with(edit);
@@ -1940,6 +1943,7 @@ mod restart_marker_adoption_tests {
         let ended = [TOOL_USE, TERMINAL, PROMPT];
         let actual = [
             close("", &[TOOL_USE, TOOL_RESULT], |_| {}),
+            close("", &ended, |r| r.terminal_delivery_committed = true),
             close("", &ended, |_| {}),
             close("", &[PROMPT, TOOL_USE], |_| {}),
             close(TERMINAL, &[PROMPT, TOOL_USE], |_| {}),
@@ -1948,7 +1952,16 @@ mod restart_marker_adoption_tests {
             close("", &ended, |r| r.rebind_origin = true),
         ];
         let kept = (Adopt, true);
-        let want = [kept, (Retired, false), kept, kept, kept, kept, kept];
+        let want = [
+            kept,
+            (Retired, false),
+            (Leave, true),
+            kept,
+            kept,
+            kept,
+            kept,
+            kept,
+        ];
         assert_eq!(actual, want);
     }
 
@@ -1983,7 +1996,7 @@ mod restart_marker_adoption_tests {
     #[test]
     fn a_failed_retirement_leaves_the_marked_row_unadopted_6294() {
         let dir = tempfile::TempDir::new().expect("transcript dir");
-        let mut row = with(|_| {});
+        let mut row = with(|r| r.terminal_delivery_committed = true);
         row.output_path = Some(transcript(&dir, "", &[TOOL_USE, TERMINAL, PROMPT]));
         let (outcome, _) = booted(&row, |shared| {
             let before = row_bytes();
@@ -2003,6 +2016,21 @@ mod restart_marker_adoption_tests {
         assert_eq!(outcome, (super::BootRow::Leave, true, 0));
     }
 
+    #[test]
+    fn restart_retirement_rechecks_durable_completion_under_the_episode_lock() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut row = with(|_| {});
+        row.output_path = Some(transcript(&dir, "", &[TOOL_USE, TERMINAL, PROMPT]));
+        let mut snapshot = row.clone();
+        snapshot.terminal_delivery_committed = true;
+        let (outcome, _) = booted(&row, |shared| {
+            let before = row_bytes();
+            let decision = block_on(super::boot_row_decision(&Claude, shared, &snapshot));
+            (decision, row_bytes() == before)
+        });
+        assert_eq!(outcome, (super::BootRow::Leave, true));
+    }
+
     /// A row whose channel intake is elsewhere is left, bytes and all, by the inflight
     /// restore and then by the watcher restore.
     #[test]
@@ -2015,7 +2043,7 @@ mod restart_marker_adoption_tests {
             }
         }
         let dir = tempfile::TempDir::new().expect("transcript dir");
-        let mut row = with(|_| {});
+        let mut row = with(|r| r.terminal_delivery_committed = true);
         row.output_path = Some(transcript(&dir, "", &[TOOL_USE, TERMINAL, PROMPT]));
         let (outcome, _) = booted(&row, |shared| {
             let before = row_bytes();
