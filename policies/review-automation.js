@@ -1507,45 +1507,25 @@ function processVerdict(cardId, verdict, result, options) {
       return;
     }
 
-    // Review passed — check for next pipeline stage, otherwise terminal (#110)
-    // Look for the next stage AFTER current pipeline_stage_id (stage_order based),
-    // OR the first review_pass stage if card has no current pipeline stage.
+    // Review passed — move to the next pipeline stage, otherwise terminal (#110).
+    // advanceStage picks and assigns it under the repo stage lock that stage saves
+    // take: the stage after the current one, or the first review_pass stage.
     var cardInfo = agentdesk.cards.get(cardId);
+    var stageMove = null;
     var nextStage = null;
     if (cardInfo && cardInfo.repo_id) {
-      var repoId = cardInfo.repo_id;
-      var currentStageId = cardInfo.pipeline_stage_id;
-
-      if (currentStageId) {
-        // Has current stage — find next stage by stage_order
-        var currentStageInfo = agentdesk.db.query(
-          "SELECT stage_order FROM pipeline_stages WHERE id = ?",
-          [currentStageId]
+      stageMove = agentdesk.pipeline.advanceStage(cardId, "review_pass");
+      if (stageMove.status === "missing") {
+        // The card's stage row is gone, so which stages remain is unknown.
+        // Reading that as "no stages left" would skip them and open the PR.
+        escalateToManualIntervention(
+          cardId,
+          "Pipeline stage " + cardInfo.pipeline_stage_id + " no longer exists; the next stage is unknown",
+          { review: true }
         );
-        if (currentStageInfo.length > 0) {
-          var stages = agentdesk.db.query(
-            "SELECT id, stage_name, agent_override_id, provider, skip_condition FROM pipeline_stages WHERE repo_id = ? AND stage_order > ? ORDER BY stage_order ASC LIMIT 1",
-            [repoId, currentStageInfo[0].stage_order]
-          );
-          if (stages.length > 0) nextStage = stages[0];
-        } else {
-          // The card's stage row is gone, so which stages remain is unknown.
-          // Reading that as "no stages left" would skip them and open the PR.
-          escalateToManualIntervention(
-            cardId,
-            "Pipeline stage " + currentStageId + " no longer exists; the next stage is unknown",
-            { review: true }
-          );
-          return;
-        }
-      } else {
-        // No current stage — check for first review_pass triggered stage
-        var stages = agentdesk.db.query(
-          "SELECT id, stage_name, agent_override_id, provider, skip_condition FROM pipeline_stages WHERE repo_id = ? AND trigger_after = 'review_pass' ORDER BY stage_order ASC LIMIT 1",
-          [repoId]
-        );
-        if (stages.length > 0) nextStage = stages[0];
+        return;
       }
+      nextStage = stageMove.stage;
     }
 
     if (nextStage) {
@@ -1582,11 +1562,6 @@ function processVerdict(cardId, verdict, result, options) {
           );
         }
       } else {
-        // Assign pipeline stage to card
-        agentdesk.db.execute(
-          "UPDATE kanban_cards SET pipeline_stage_id = ?, updated_at = datetime('now') WHERE id = ?",
-          [nextStage.id, cardId]
-        );
         agentdesk.log.info("[review] Card " + cardId + " passed review, entering pipeline stage: " + nextStage.stage_name);
 
         // #197: Counter-model stage (e2e-test) — dispatch only if DoD contains e2e item
@@ -1664,12 +1639,15 @@ function processVerdict(cardId, verdict, result, options) {
         }
       }
     } else {
-      // No more stages — clear pipeline_stage_id and mark terminal.
-      if (cardInfo && cardInfo.pipeline_stage_id) {
+      // No more stages — advanceStage already cleared the binding; a card with
+      // no repo has no stages to walk, so clear it here.
+      if (!stageMove && cardInfo && cardInfo.pipeline_stage_id) {
         agentdesk.db.execute(
           "UPDATE kanban_cards SET pipeline_stage_id = NULL, updated_at = datetime('now') WHERE id = ?",
           [cardId]
         );
+      }
+      if (cardInfo && cardInfo.pipeline_stage_id) {
         agentdesk.log.info("[review] Card " + cardId + " completed all pipeline stages");
       }
 

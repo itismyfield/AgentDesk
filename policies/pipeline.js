@@ -41,11 +41,9 @@ var pipeline = {
     var card = agentdesk.cards.get(payload.card_id);
     if (!card) return;
 
-    var stages = agentdesk.db.query(
-      "SELECT id, stage_name, agent_override_id FROM pipeline_stages WHERE repo_id = ? AND trigger_after = ? ORDER BY stage_order ASC LIMIT 1",
-      [card.repo_id, payload.to]
-    );
-    if (stages.length === 0) {
+    // Picks and assigns the stage under the repo stage lock that stage saves take.
+    var moved = agentdesk.pipeline.enterStage(payload.card_id, payload.to);
+    if (!moved.stage) {
       // No stages bound to this state — fast path. Emit a diagnostic only
       // when the state was dispatchable by config but had no stages; that
       // mismatch usually indicates a pipeline_stages misconfiguration.
@@ -66,16 +64,12 @@ var pipeline = {
       agentdesk.log.warn(
         "[pipeline] Card " + payload.card_id + " state '" + payload.to +
         "' has registered pipeline_stages but no gated outbound transitions " +
-        "and no `dispatchable: true` flag — assigning stage anyway based on " +
+        "and no `dispatchable: true` flag — assigned stage anyway based on " +
         "registered stages; consider marking the state dispatchable in YAML"
       );
     }
 
-    agentdesk.db.execute(
-      "UPDATE kanban_cards SET pipeline_stage_id = ?, updated_at = datetime('now') WHERE id = ?",
-      [stages[0].id, payload.card_id]
-    );
-    agentdesk.log.info("[pipeline] Card " + payload.card_id + " assigned to stage: " + stages[0].stage_name);
+    agentdesk.log.info("[pipeline] Card " + payload.card_id + " assigned to stage: " + moved.stage.stage_name);
   },
 
   // Dispatch completed — NO automatic stage advance.

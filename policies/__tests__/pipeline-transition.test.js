@@ -2,20 +2,6 @@ const { test } = require("node:test");
 const assert = require("node:assert");
 const fs = require("fs");
 
-function createSqlRouter(routes) {
-  return function dbQuery(sql, params) {
-    for (let r of routes) {
-      if (typeof r.match === "string" && sql.includes(r.match)) {
-        return typeof r.result === "function" ? r.result(params) : r.result || [];
-      }
-      if (r.match instanceof RegExp && r.match.test(sql)) {
-        return typeof r.result === "function" ? r.result(params) : r.result || [];
-      }
-    }
-    return [];
-  };
-}
-
 function loadPolicy(path, mockContext) {
   const code = fs.readFileSync(path, "utf8");
   let registered = null;
@@ -30,22 +16,17 @@ function loadPolicy(path, mockContext) {
 }
 
 test("pipeline onCardTransition uses typed facade agentdesk.cards.get", () => {
-  let executeCalls = [];
+  let moves = [];
   const { module } = loadPolicy("policies/pipeline.js", {
-    db: {
-      query: createSqlRouter([
-        {
-          match: "SELECT id, stage_name, agent_override_id FROM pipeline_stages",
-          result: [{ id: "stage-1", stage_name: "deploy", agent_override_id: null }]
-        }
-      ]),
-      execute: (sql, params) => { executeCalls.push({ sql, params }); }
-    },
     pipeline: {
       resolveForCard: (cardId) => ({
         states: [{ id: "ready", terminal: false }],
         transitions: [{ from: "ready", type: "gated" }]
-      })
+      }),
+      enterStage: (cardId, triggerAfter) => {
+        moves.push({ cardId, triggerAfter });
+        return { status: "entered", stage: { id: 1, stage_name: "deploy" } };
+      }
     },
     cards: {
       get: (cardId) => {
@@ -57,9 +38,8 @@ test("pipeline onCardTransition uses typed facade agentdesk.cards.get", () => {
   });
 
   module.onCardTransition({ card_id: "card-missing", to: "ready" });
-  assert.equal(executeCalls.length, 0);
+  assert.equal(moves.length, 0);
 
   module.onCardTransition({ card_id: "card-1", to: "ready" });
-  assert.equal(executeCalls.length, 1);
-  assert.ok(executeCalls[0].sql.includes("UPDATE kanban_cards SET pipeline_stage_id"));
+  assert.deepEqual(moves, [{ cardId: "card-1", triggerAfter: "ready" }]);
 });

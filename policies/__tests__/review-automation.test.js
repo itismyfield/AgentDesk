@@ -298,14 +298,11 @@ test("review-automation holds a card whose pipeline stage row is gone", () => {
         result: [{ context: JSON.stringify({ review_mode: "normal" }) }]
       },
       {
-        match: "SELECT stage_order FROM pipeline_stages WHERE id = ?",
-        result: []
-      },
-      {
         match: "AND dispatch_type IN ('implementation', 'rework')",
         result: []
       }
-    ])
+    ]),
+    stageMove: () => ({ status: "missing", stage: null })
   });
 
   module.__test.processVerdict(
