@@ -9,12 +9,10 @@ use routine_metadata::{
 use routine_metadata::persist_boundary_before_provider_clear;
 
 mod entrypoints;
-pub(in crate::services::discord) use entrypoints::{
-    start_headless_turn, start_reserved_headless_turn, start_voice_headless_turn,
-};
+pub(in crate::services::discord) use entrypoints::*;
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn start_reserved_headless_turn_with_owner(
+pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owner(
     ctx: &serenity::Context,
     channel_id: ChannelId,
     prompt: &str,

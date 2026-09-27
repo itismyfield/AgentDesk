@@ -355,6 +355,7 @@ src/
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
 │   │   ├── agents_setup.rs
+│   │   ├── agents_turn_deliver.rs
 │   │   ├── agents_turn_target.rs
 │   │   ├── analytics.rs
 │   │   ├── auth.rs
@@ -774,6 +775,7 @@ src/
 │   │   │   ├── stall_liveness.rs
 │   │   │   ├── stall_verdict.rs
 │   │   │   ├── transcript_binding_stall.rs
+│   │   │   ├── turn_deliver.rs
 │   │   │   ├── unpaired_active_token.rs
 │   │   │   └── watcher_respawn.rs
 │   │   ├── idle_recap/
