@@ -83,6 +83,7 @@ fn guarded_identity_clear_outcome(
     GuardedClearOutcome::Cleared
 }
 
+/// Remove an already-validated row while the caller retains its canonical sidecar lock.
 pub(in crate::services::discord) fn remove_identity_matched_state(
     path: &std::path::Path,
     provider: &ProviderKind,
