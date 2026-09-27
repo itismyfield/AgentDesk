@@ -14,6 +14,7 @@
 
 mod catch_up_pagination_e2e;
 mod discord_mock;
+mod headless_turn_provider_tests;
 mod stale_resume_retry_e2e;
 
 use std::path::PathBuf;

@@ -37,12 +37,22 @@ fn seed_context(seed: &str, row: InflightTurnState) -> TurnBridgeContext {
     }
 }
 
-fn seed_row() -> InflightTurnState {
+#[tokio::test]
+async fn headless_entry_abort_releases_mailbox_without_touching_durable_owner() {
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    for (waiter, successor) in [(true, false), (false, false), (true, true)] {
+        run_abort_case(waiter, successor).await;
+    }
+}
+
+async fn run_abort_case(waiter: bool, successor: bool) {
+    let shared = discord::make_shared_data_for_tests();
     let mut row = InflightTurnState::new(
-        ProviderKind::Codex,
-        5_938_031,
+        shared.provider.clone(),
+        6_333_001,
         None,
-        343_742_347_365_974_026,
+        1,
         77_013,
         18,
         String::new(),
@@ -52,18 +62,6 @@ fn seed_row() -> InflightTurnState {
         None,
         0,
     );
-    row.dispatch_id = Some("dispatch-5938-seed".to_string());
-    row
-}
-
-#[tokio::test]
-async fn headless_entry_abort_releases_mailbox_without_touching_durable_owner() {
-    let root = tempfile::tempdir().unwrap();
-    let _env = crate::config::set_agentdesk_root_for_test(root.path());
-    let shared = discord::make_shared_data_for_tests();
-    let mut row = seed_row();
-    row.provider = shared.provider.as_str().to_string();
-    row.dispatch_id = None;
     let channel = ChannelId::new(row.channel_id);
     let message = MessageId::new(row.user_msg_id);
     let cancel = Arc::new(CancelToken::new());
@@ -87,21 +85,76 @@ async fn headless_entry_abort_releases_mailbox_without_touching_durable_owner() 
     bridge.provider = shared.provider.clone();
     bridge.user_msg_id = Some(message);
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-    bridge.completion_tx = Some(completion_tx);
+    bridge.completion_tx = waiter.then_some(completion_tx);
     let (_tx, rx) = mpsc::channel();
-    spawn_turn_bridge(shared.clone(), cancel, rx, bridge);
-    assert_eq!(
-        tokio::time::timeout(std::time::Duration::from_secs(5), completion_rx)
+    let replacement = Arc::new(CancelToken::from_persisted_turn_nonce(
+        cancel.turn_nonce().map(str::to_owned),
+    ));
+    if successor {
+        discord::mailbox_finish_turn(&shared, &shared.provider, channel).await;
+        assert!(
+            discord::mailbox_try_start_turn(
+                &shared,
+                channel,
+                replacement.clone(),
+                UserId::new(1),
+                message
+            )
             .await
-            .unwrap()
-            .unwrap(),
-        BridgeCompletionSignal::EntryAborted
-    );
+        );
+    }
+    let mut signals = shared.inflight_signals.subscribe();
+    spawn_turn_bridge(shared.clone(), cancel.clone(), rx, bridge);
+    if waiter {
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), completion_rx)
+                .await
+                .unwrap()
+                .unwrap(),
+            BridgeCompletionSignal::EntryAborted
+        );
+    }
+    if successor {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while Arc::strong_count(&cancel) > 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("aborted bridge task must finish");
+        let snapshot = discord::mailbox_snapshot(&shared, channel).await;
+        assert!(Arc::ptr_eq(
+            snapshot.cancel_token.as_ref().unwrap(),
+            &replacement
+        ));
+        assert!(
+            !replacement
+                .cancelled
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        assert_eq!(
+            shared
+                .restart
+                .global_active
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        assert!(signals.try_recv().is_err());
+        return;
+    }
     // The bridge reports abort before its asynchronous mailbox unwind finishes.
     let idle = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let snapshot = discord::mailbox_snapshot(&shared, channel).await;
-            if snapshot.cancel_token.is_none() {
+            if snapshot.cancel_token.is_none()
+                && cancel.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+                && shared
+                    .restart
+                    .global_active
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    == 0
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -112,6 +165,8 @@ async fn headless_entry_abort_releases_mailbox_without_touching_durable_owner() 
         idle.is_ok(),
         "EntryAborted must release the headless mailbox cancel token"
     );
+    assert!(cancel.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+    assert!(signals.try_recv().is_err());
     let snapshot = discord::mailbox_snapshot(&shared, channel).await;
     assert_eq!(
         mailbox_agent_turn_status(snapshot.cancel_token.is_some(), ResidualOccupancy::None),

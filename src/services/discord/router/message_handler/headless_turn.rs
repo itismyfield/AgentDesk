@@ -72,7 +72,14 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
             early_channel_name
                 .as_deref()
                 .or(channel_name_hint.as_deref())
-                .or(early_resolved_channel_name.as_deref()),
+                .or(early_resolved_channel_name.as_deref())
+                .or(
+                    super::super::super::adk_session::registered_channel_fallback_name(
+                        channel_id,
+                        &settings_provider,
+                    )
+                    .as_deref(),
+                ),
             early_thread_parent.as_ref(),
         )
     };
