@@ -1433,6 +1433,19 @@ fn unread_tail_is_proven_drained_only_for_a_measured_zero() {
     );
 }
 
+/// `decided_by` names why a tail is UNMEASURED from the published coordinates;
+/// a measured tail has no reason at all.
+#[test]
+fn unmeasured_tail_reason_derives_from_the_published_coordinates() {
+    assert_eq!(unmeasured_tail_reason(Some(0), Some(8), 8), None);
+    assert_eq!(unmeasured_tail_reason(Some(4), Some(12), 8), None);
+    let reason = |capture| unmeasured_tail_reason(None, capture, 8);
+    assert_eq!(reason(None), Some("tail_not_measured"));
+    assert_eq!(reason(Some(4)), Some("saturated_tail"));
+    assert_eq!(reason(Some(8)), Some("zero_not_attributable"));
+    assert_eq!(reason(Some(12)), Some("unattributed_tail"));
+}
+
 /// #5071 relay-tail S2: the same table driven through the whole
 /// `ReattachWatcher` legacy manual lane, because the polarity that matters is
 /// whether the DESTRUCTIVE branch opens — not what the predicate returns.
@@ -1488,6 +1501,13 @@ async fn reattach_idle_tmux_clear_requires_a_measured_drained_tail() {
         );
         state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
         super::super::inflight::save_inflight_state(&state).expect("save idle-clear inflight");
+        // A legacy row without a finalizer id: a refusal must not backfill it.
+        let row_path = unread_tail_seed::edit_persisted_row(&provider, channel.get(), |row| {
+            if !expect_cleared {
+                row.as_object_mut().unwrap().remove("finalizer_turn_id");
+            }
+        });
+        let legacy_row = std::fs::read_to_string(&row_path).expect("read legacy row");
 
         let snapshot = RelayHealthSnapshot {
             provider: provider.as_str().to_string(),
@@ -1537,6 +1557,8 @@ async fn reattach_idle_tmux_clear_requires_a_measured_drained_tail() {
                 "{label}: the destructive lane clears the row it retired"
             );
         } else {
+            let row = std::fs::read_to_string(&row_path).expect("read refused row");
+            assert_eq!(row, legacy_row, "{label}: a refused clear must not write");
             assert_ne!(
                 result.status, "cleared_idle_tmux_stale_turn",
                 "{label}: the destructive lane must stay closed"
@@ -1553,6 +1575,24 @@ async fn reattach_idle_tmux_clear_requires_a_measured_drained_tail() {
                 super::super::inflight::load_inflight_state(&provider, channel.get()).is_some(),
                 "{label}: the inflight row must survive for the non-destructive path"
             );
+        }
+        // Only the UNMEASURED refusal is a recorded wedge, once per episode
+        // however often the manual lane runs again.
+        let refusals = || unread_tail_seed::unmeasured_tail_refusals(channel.get());
+        assert_eq!(
+            refusals().len(),
+            usize::from(unread_bytes.is_none()),
+            "{label}: {:?}",
+            refusals()
+        );
+        if unread_bytes.is_none() {
+            assert_eq!(refusals()[0]["site"], UNREAD_TAIL_SITE_MANUAL_REATTACH);
+            assert_eq!(refusals()[0]["decided_by"], "zero_not_attributable");
+            assert_eq!(refusals()[0]["retired"], false);
+            let source = RelayRecoveryApplySource::ProbeAutoHeal;
+            apply_relay_recovery_decision(&registry, &shared, &provider, &decision, None, source)
+                .await;
+            assert_eq!(refusals().len(), 1, "{label}: one episode is graded once");
         }
     }
 }

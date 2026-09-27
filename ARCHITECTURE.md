@@ -27,10 +27,20 @@ src/
 │   ├── dcserver/
 │   │   └── startup.rs
 │   ├── doctor/
+│   │   ├── health/
+│   │   │   └── measurement.rs
+│   │   ├── mailbox/
+│   │   │   └── observation.rs
 │   │   ├── orchestrator/
 │   │   │   ├── config_dir_checks.rs
+│   │   │   ├── fd_usage.rs
 │   │   │   ├── health_snapshot.rs
-│   │   │   └── provider_credentials.rs
+│   │   │   ├── observation_checks.rs
+│   │   │   ├── observation_tests.rs
+│   │   │   ├── provider_credentials.rs
+│   │   │   ├── repair_response.rs
+│   │   │   ├── report_display.rs
+│   │   │   └── stale_mailbox_repair.rs
 │   │   ├── contract.rs
 │   │   ├── health.rs
 │   │   ├── mailbox.rs
@@ -196,6 +206,9 @@ src/
 │   └── types.rs
 ├── engine/
 │   ├── ops/
+│   │   ├── exec_ops/
+│   │   │   ├── exec_allowlist_tests.rs
+│   │   │   └── session_liveness_tests.rs
 │   │   ├── agent_ops.rs
 │   │   ├── auto_queue_ops.rs
 │   │   ├── cards_ops.rs
@@ -315,7 +328,9 @@ src/
 │   │   │   └── runtime.rs
 │   │   ├── health_api/
 │   │   │   ├── public_projection.rs
-│   │   │   └── runtime_profile.rs
+│   │   │   ├── runtime_profile.rs
+│   │   │   ├── session_repair.rs
+│   │   │   └── unread_tail_attribution_tests.rs
 │   │   ├── review_verdict/
 │   │   │   ├── decision_route.rs
 │   │   │   ├── mod.rs
@@ -342,6 +357,7 @@ src/
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
 │   │   ├── agents_setup.rs
+│   │   ├── agents_turn_deliver.rs
 │   │   ├── agents_turn_target.rs
 │   │   ├── analytics.rs
 │   │   ├── auth.rs
@@ -538,6 +554,7 @@ src/
 │   │   ├── hook_bundle.rs
 │   │   ├── hook_output_guard.rs
 │   │   ├── hook_output_guard_tests.rs
+│   │   ├── hook_payload_fixture_tests.rs
 │   │   ├── hook_registry.rs
 │   │   ├── hook_relay.rs
 │   │   ├── hook_server.rs
@@ -548,6 +565,7 @@ src/
 │   │   ├── mod.rs
 │   │   ├── prompt_readiness.rs
 │   │   ├── session.rs
+│   │   ├── source_verify.rs
 │   │   ├── startup_dialog.rs
 │   │   ├── transcript_tail.rs
 │   │   └── tui_relay.rs
@@ -627,6 +645,8 @@ src/
 │   ├── codex_tmux_wrapper/
 │   │   └── input.rs
 │   ├── codex_tui/
+│   │   ├── input/
+│   │   │   └── composer_lock.rs
 │   │   ├── rollout_tail/
 │   │   │   └── parser.rs
 │   │   ├── session/
@@ -757,6 +777,7 @@ src/
 │   │   │   ├── stall_liveness.rs
 │   │   │   ├── stall_verdict.rs
 │   │   │   ├── transcript_binding_stall.rs
+│   │   │   ├── turn_deliver.rs
 │   │   │   ├── unpaired_active_token.rs
 │   │   │   └── watcher_respawn.rs
 │   │   ├── idle_recap/
@@ -769,6 +790,7 @@ src/
 │   │   │   │   ├── abandon.rs
 │   │   │   │   ├── identity.rs
 │   │   │   │   ├── mod.rs
+│   │   │   │   ├── operator_disposition.rs
 │   │   │   │   └── reconcile_gate.rs
 │   │   │   ├── model/
 │   │   │   │   ├── identity.rs
@@ -827,6 +849,24 @@ src/
 │   │   │   ├── bounded_cache_file.rs
 │   │   │   └── claude.rs
 │   │   ├── outbound/
+│   │   │   ├── delivery_obligation/
+│   │   │   │   ├── state/
+│   │   │   │   │   ├── proof_access.rs
+│   │   │   │   │   ├── proof_input.rs
+│   │   │   │   │   ├── proof_tests.rs
+│   │   │   │   │   └── whole_proof.rs
+│   │   │   │   ├── codec_tests.rs
+│   │   │   │   ├── fence.rs
+│   │   │   │   ├── load.rs
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── protocol.rs
+│   │   │   │   ├── reader.rs
+│   │   │   │   ├── reader_tests.rs
+│   │   │   │   ├── schema.rs
+│   │   │   │   ├── state.rs
+│   │   │   │   ├── tests.rs
+│   │   │   │   ├── validation.rs
+│   │   │   │   └── validation_tests.rs
 │   │   │   ├── manual_delivery/
 │   │   │   │   ├── headless_nonce.rs
 │   │   │   │   └── production_nonce_tests.rs
@@ -956,7 +996,8 @@ src/
 │   │   │   ├── tests/
 │   │   │   │   ├── circuit_breaker_apply.rs
 │   │   │   │   ├── incarnation_follow_up.rs
-│   │   │   │   └── orphan_token_finish.rs
+│   │   │   │   ├── orphan_token_finish.rs
+│   │   │   │   └── unread_tail_seed.rs
 │   │   │   ├── apply.rs
 │   │   │   ├── decision.rs
 │   │   │   ├── destructive_warrant.rs
@@ -1187,6 +1228,7 @@ src/
 │   │   │   ├── no_result_exits.rs
 │   │   │   ├── orphan_status_panel_cleanup.rs
 │   │   │   ├── orphan_terminal_frame.rs
+│   │   │   ├── owed_range_baseline_tests.rs
 │   │   │   ├── panel_decisions.rs
 │   │   │   ├── panel_decisions_tests.rs
 │   │   │   ├── placeholder_reclaim.rs
@@ -1201,6 +1243,8 @@ src/
 │   │   │   ├── single_message_footer.rs
 │   │   │   ├── single_message_footer_tests.rs
 │   │   │   ├── stall_exit.rs
+│   │   │   ├── streaming_baseline_tests.rs
+│   │   │   ├── streaming_harness_tests.rs
 │   │   │   ├── streaming_session_banner.rs
 │   │   │   ├── streaming_status_tick.rs
 │   │   │   ├── supervisor_relay.rs
@@ -1372,6 +1416,7 @@ src/
 │   │   │   ├── context_window.rs
 │   │   │   ├── current_message_anchor.rs
 │   │   │   ├── early_tui_completion.rs
+│   │   │   ├── entry_abort_mailbox_tests.rs
 │   │   │   ├── finalize_epilogue.rs
 │   │   │   ├── followup_requeue.rs
 │   │   │   ├── guards.rs
@@ -1642,6 +1687,8 @@ src/
 │   │   ├── repo_resolver.rs
 │   │   ├── runner.rs
 │   │   └── worktree_resolver.rs
+│   ├── health_diagnostics/
+│   │   └── session_state.rs
 │   ├── kakao/
 │   │   ├── account.rs
 │   │   ├── calendar.rs
@@ -1708,9 +1755,13 @@ src/
 │   │   ├── binary_resolver/
 │   │   │   ├── grok.rs
 │   │   │   ├── resolution.rs
+│   │   │   ├── runtime_path.rs
 │   │   │   └── windows_codex.rs
 │   │   ├── tmux/
-│   │   │   └── availability.rs
+│   │   │   ├── liveness/
+│   │   │   │   └── tests.rs
+│   │   │   ├── availability.rs
+│   │   │   └── liveness.rs
 │   │   ├── binary_resolver.rs
 │   │   ├── dump_tool.rs
 │   │   ├── mod.rs
@@ -1835,11 +1886,19 @@ src/
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
 │   │   └── tests_pg.rs
+│   ├── tui_o/
+│   │   └── shadow/
+│   │       ├── binding_reader.rs
+│   │       ├── capture.rs
+│   │       ├── mod.rs
+│   │       └── root.rs
 │   ├── tui_prompt_dedupe/
+│   │   ├── binding_context.rs
 │   │   ├── extract.rs
 │   │   ├── observation.rs
 │   │   ├── runtime_binding.rs
 │   │   ├── session_rotation.rs
+│   │   ├── shadow_peek.rs
 │   │   ├── state.rs
 │   │   ├── synthetic_prompt.rs
 │   │   └── tests.rs

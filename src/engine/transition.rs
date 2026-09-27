@@ -850,7 +850,7 @@ mod gate_fail_closed_tests {
             hooks: HashMap::new(),
             events: HashMap::new(),
             clocks: HashMap::new(),
-            timeouts: HashMap::new(),
+            _retired_timeouts: None,
             phase_gate: PhaseGateConfig::default(),
             fsm_edge_bindings: None,
         }
@@ -1077,7 +1077,7 @@ mod dispatch_attached_tests {
             hooks: HashMap::new(),
             events: HashMap::new(),
             clocks: HashMap::new(),
-            timeouts: HashMap::new(),
+            _retired_timeouts: None,
             phase_gate: PhaseGateConfig::default(),
             fsm_edge_bindings: None,
         }
