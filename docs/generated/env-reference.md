@@ -112,7 +112,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | Variable | Defined at | Description |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | `src/server/rate_limit_sync.rs:203` (+1 more) | Priority: 1) OAuth token (Claude Code subscription), 2) ANTHROPIC_API_KEY. |
-| `APPDATA` | `src/services/platform/binary_resolver.rs:1170` |  |
+| `APPDATA` | `src/services/platform/binary_resolver.rs:1160` |  |
 | `CARGO_MANIFEST_DIR` | `src/services/maintenance/jobs/target_sweep.rs:55` | Order matters: `CARGO_MANIFEST_DIR` is set by cargo during dev/test runs (resolving the actual checkout) but is UNSET in the deployed release binary, so it cle… |
 | `CLAUDE_CONFIG_DIR` | `src/services/claude_tui/hook_output_guard.rs:57` (+3 more) | The Claude home this host reads rollout transcripts under, honouring the `CLAUDE_CONFIG_DIR` override. |
 | `CODEX_HOME` | `src/services/codex_tui/rollout_tail.rs:173` | The Codex home this host reads rollouts under, honouring the `CODEX_HOME` override. |
@@ -124,7 +124,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `GEMINI_CLI_HOME` | `src/services/mcp_config.rs:708` |  |
 | `HOME` | `src/cli/doctor/orchestrator.rs:462` (+9 more) | #2655: handler for the `install-memento-session-hook` CLI surface. |
 | `HOSTNAME` | `src/server/outbox_worker.rs:24` (+2 more) |  |
-| `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs:1098` (+2 more) |  |
+| `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs:1088` (+2 more) |  |
 | `MEMENTO_WORKSPACE` | `src/server/routes/memory_api.rs:200` (+1 more) |  |
 | `OPENAI_API_KEY` | `src/server/rate_limit_sync.rs:115` | --- Codex: ~/.codex/auth.json (CLI subscription), else OPENAI_API_KEY --- |
 | `PATH` | `src/cli/doctor/orchestrator.rs:1534` (+5 more) | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
@@ -135,6 +135,6 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `QWEN_HOME` | `src/cli/doctor/orchestrator.rs:456` (+2 more) |  |
 | `REQUIRE_WAKE_WORD` | `src/voice/config.rs:103` | A live yaml with `wake_words: []` plus `REQUIRE_WAKE_WORD=1` would otherwise make EVERY utterance fail the (impossible-to-satisfy) gate and be silently dropped. |
 | `RUST_LOG` | `src/logging.rs:29` | The directive every shipped dcserver process adds on top of `RUST_LOG`. |
-| `SHELL` | `src/services/platform/binary_resolver.rs:1277` |  |
+| `SHELL` | `src/services/platform/binary_resolver.rs:1267` |  |
 | `USERPROFILE` | `src/cli/doctor/orchestrator.rs:466` (+6 more) |  |
 | `VOICE_AUDIO_DEBUG_DIR` | `src/voice/receiver.rs:72` |  |

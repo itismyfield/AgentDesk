@@ -732,6 +732,9 @@ engine::ops::exec_ops::bridge_deadline_tests::session_tmux_timeout_is_unbounded_
 engine::ops::exec_ops::bridge_deadline_tests::session_tmux_timeout_returns_error_after_deadline_elapses
 engine::ops::exec_ops::bridge_deadline_tests::session_tmux_timeout_uses_remaining_budget_when_armed
 engine::ops::exec_ops::inflight_list_tests::inflight_list_exposes_synthetic_rebind_fields
+engine::ops::exec_ops::session_liveness_tests::cold_snapshot_returns_unknown_without_discovery
+engine::ops::exec_ops::session_liveness_tests::js_liveness_honors_bridge_budget_and_blank_input
+engine::ops::exec_ops::session_liveness_tests::js_liveness_preserves_owner_live_dead_and_unknown
 engine::ops::http_ops::tests::build_response_rejects_truncated_content_length
 engine::ops::http_ops::tests::chunked_response_is_rejected_explicitly
 engine::ops::http_ops::tests::connect_first_reachable_falls_through_to_second_address
@@ -8306,6 +8309,8 @@ services::platform::tmux::live_pane_tests::dead_marker_hook_writes_marker_on_pan
 services::platform::tmux::live_pane_tests::has_live_pane_reports_live_tmux_session
 services::platform::tmux::live_pane_tests::marker_env_panic_restores_absent_environment
 services::platform::tmux::live_pane_tests::marker_env_panic_restores_present_environment
+services::platform::tmux::liveness::tests::bounded_probe_shares_budget_and_stops_before_expired_spawn
+services::platform::tmux::liveness::tests::legacy_probe_keeps_two_seconds_for_each_command
 services::platform::tmux::paste_tests::paste_buffer_args_request_bracketed_lf_preserving_paste
 services::platform::tmux::paste_tests::paste_buffer_raw_args_do_not_request_bracketed_paste
 services::platform::tmux::session_server_tests::parse_sessions_with_server_pid_skips_empty_names_and_defaults_bad_pids
