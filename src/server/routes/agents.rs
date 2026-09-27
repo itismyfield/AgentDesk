@@ -834,12 +834,6 @@ pub async fn start_agent_turn(
         );
     };
 
-    let channel_name_hint = primary_channel
-        .chars()
-        .all(|ch| ch.is_ascii_digit())
-        .then_some(None)
-        .unwrap_or_else(|| Some(primary_channel.clone()));
-
     let start_result = if let Some(dm_user_id_num) = dm_user_id_num {
         let metadata = metadata_with_parent_channel_id(body.metadata, channel_id_num);
         crate::services::discord::health::start_headless_agent_turn_in_dm(
@@ -852,26 +846,29 @@ pub async fn start_agent_turn(
             metadata,
         )
         .await
+        .map(|outcome| (outcome.turn_id, outcome.status.as_str()))
     } else {
-        crate::services::discord::health::start_headless_agent_turn(
+        super::agents_turn_target::start_headless_turn_on_target(
             registry,
-            poise::serenity_prelude::ChannelId::new(channel_id_num),
-            provider,
+            super::agents_turn_target::AgentTurnTarget {
+                provider,
+                primary_channel,
+                channel_id: channel_id_num,
+            },
             prompt.to_string(),
             body.source,
             body.metadata,
-            channel_name_hint,
         )
         .await
     };
 
     match start_result {
-        Ok(outcome) => (
+        Ok((turn_id, status)) => (
             StatusCode::OK,
             Json(json!({
                 "ok": true,
-                "turn_id": outcome.turn_id,
-                "status": outcome.status.as_str(),
+                "turn_id": turn_id,
+                "status": status,
             })),
         ),
         Err(crate::services::discord::HeadlessTurnStartError::Conflict(error)) => (
