@@ -678,9 +678,8 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     continue;
                 }
 
-                // Spawn the tmux watcher immediately rather than deferring to
-                // restore_tmux_watchers(): the "watcher will adopt" approach raced
-                // — the session could die in the ~50s gap and lose the response.
+                // Attach now so the tmux session cannot exit before deferred watcher
+                // restoration begins and leave its remaining output unread.
                 if let Some(ref tmux_session_name) = tmux_name {
                     if let Some((output_path, initial_offset, current_len, truncated)) =
                         restart_report_watcher_start(tmux_session_name, &state)
@@ -1815,13 +1814,8 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 continue;
             }
 
-            // #4380 backstop: `reregister_active_turn_from_inflight` stamps
-            // `readopted_from_inflight`, which the watcher-yield escape hatch honours
-            // to resume relay for this re-adopted live turn. If that marker did NOT
-            // durably persist (IoError), the recovered watcher will still yield to
-            // the dead bridge and drop the remaining output silently — dead-letter it
-            // so the loss is observable/recoverable instead of a silent wedge. No-op
-            // on the normal path (marker present).
+            // Surface undelivered real-user crash output when its durable readoption
+            // marker is missing, because the recovered watcher yields to the dead bridge.
             #[cfg(unix)]
             super::guard_readopt_relay_resume_or_dead_letter(shared, provider, channel_id);
 
