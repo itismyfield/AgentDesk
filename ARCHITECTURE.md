@@ -33,6 +33,7 @@ src/
 │   │   │   └── observation.rs
 │   │   ├── orchestrator/
 │   │   │   ├── config_dir_checks.rs
+│   │   │   ├── fd_usage.rs
 │   │   │   ├── health_snapshot.rs
 │   │   │   ├── observation_checks.rs
 │   │   │   ├── observation_tests.rs
@@ -206,6 +207,7 @@ src/
 ├── engine/
 │   ├── ops/
 │   │   ├── exec_ops/
+│   │   │   ├── exec_allowlist_tests.rs
 │   │   │   └── session_liveness_tests.rs
 │   │   ├── agent_ops.rs
 │   │   ├── auto_queue_ops.rs

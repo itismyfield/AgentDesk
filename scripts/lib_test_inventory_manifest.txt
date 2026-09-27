@@ -132,6 +132,7 @@ cli::doctor::orchestrator::observation_tests::repair_responses_preserve_measured
 cli::doctor::orchestrator::observation_tests::repair_responses_preserve_unmeasured_results
 cli::doctor::orchestrator::profile_filter_tests::json_report_exposes_portable_readiness_sections
 cli::doctor::orchestrator::profile_filter_tests::mailbox_consistency_findings_use_provider_runtime_group
+cli::doctor::orchestrator::profile_filter_tests::non_macos_fd_probes_are_empty
 cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_detail_includes_applied_and_resolved_hashes
 cli::doctor::orchestrator::profile_filter_tests::quick_profile_keeps_dispatch_outbox_checks
 cli::doctor::orchestrator::profile_filter_tests::quick_profile_keeps_portable_optional_state_checks
@@ -731,6 +732,7 @@ engine::ops::exec_ops::bridge_deadline_tests::clamp_shortens_to_remaining_budget
 engine::ops::exec_ops::bridge_deadline_tests::session_tmux_timeout_is_unbounded_without_armed_deadline
 engine::ops::exec_ops::bridge_deadline_tests::session_tmux_timeout_returns_error_after_deadline_elapses
 engine::ops::exec_ops::bridge_deadline_tests::session_tmux_timeout_uses_remaining_budget_when_armed
+engine::ops::exec_ops::exec_allowlist_tests::public_and_raw_exec_enforce_allowlist_before_runner
 engine::ops::exec_ops::inflight_list_tests::inflight_list_exposes_synthetic_rebind_fields
 engine::ops::exec_ops::session_liveness_tests::cold_snapshot_returns_unknown_without_discovery
 engine::ops::exec_ops::session_liveness_tests::js_liveness_honors_bridge_budget_and_blank_input

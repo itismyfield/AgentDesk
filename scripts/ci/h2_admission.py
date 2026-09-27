@@ -61,7 +61,6 @@ R_C_GRANDFATHERED: dict[str, dict[tuple[str, str], int]] = {
         ("check_tmux", ".with_expected_actual(\"tmux available in PATH\", \"tmux available\"),"): 2,
         ("check_tmux", ".with_expected_actual(\"tmux available in PATH\", \"tmux not found\")"): 2, ("check_tmux", ".with_path(\"tmux\")"): 2,
         ("check_tmux", "Ok(ver) => Check::ok(\"tmux\", CheckGroup::Core, \"tmux\", ver)"): 2},
-    "src/engine/ops/exec_ops.rs": {("register_exec_ops", "let allowed = [\"gh\", \"git\", \"tmux\"];"): 1},
     "src/services/claude.rs": {("execute_streaming_local_tmux", "return Err(format!(\"tmux error: {}\", stderr));"): 1,
         ("send_followup_to_tmux", "debug_log(\"tmux session died after streaming partial follow-up output — suppress replay\");"): 1,
         ("send_followup_to_tmux", "debug_log(\"tmux session died during follow-up before new output — requesting recreation\");"): 1},

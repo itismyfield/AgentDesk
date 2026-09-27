@@ -14,6 +14,8 @@ use std::time::Duration;
 const DEFAULT_EXEC_TIMEOUT_MS: u64 = 30_000;
 
 #[cfg(test)]
+mod exec_allowlist_tests;
+#[cfg(test)]
 mod session_liveness_tests;
 
 fn exec_override_env_var(cmd: &str) -> String {
@@ -152,15 +154,22 @@ fn register_session_liveness_op<'js>(
 }
 
 pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
+    register_exec_ops_with_runner(ctx, run_exec_command)
+}
+
+fn register_exec_ops_with_runner<'js>(
+    ctx: &Ctx<'js>,
+    runner: impl Fn(&str, &OsStr, &[String], u64) -> Result<Output, String> + 'js,
+) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
 
     ad.set(
         "__execRaw",
         Function::new(
             ctx.clone(),
-            |cmd: String, args_json: String, timeout_ms: Option<u64>| -> String {
-                // Only allow safe commands (tmux for read-only session queries)
-                let allowed = ["gh", "git", "tmux"];
+            move |cmd: String, args_json: String, timeout_ms: Option<u64>| -> String {
+                // Check the exact command name before resolving or running it.
+                let allowed = ["gh", "git"];
                 if !allowed.contains(&cmd.as_str()) {
                     return format!("ERROR: command '{}' not allowed", cmd);
                 }
@@ -180,8 +189,7 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
                         Ok(ms) => ms,
                         Err(message) => return format!("ERROR: {}", message),
                     };
-                match run_exec_command(&cmd, command_path.as_os_str(), &args, effective_timeout_ms)
-                {
+                match runner(&cmd, command_path.as_os_str(), &args, effective_timeout_ms) {
                     Ok(output) if output.status.success() => {
                         String::from_utf8_lossy(&output.stdout).trim().to_string()
                     }
