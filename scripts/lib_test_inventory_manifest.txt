@@ -1551,6 +1551,8 @@ services::claude_compact_trigger::tests::window_switch_invalidates_old_worker_an
 services::claude_e::process::tests::claude_e_command_receives_authoritative_launch_env
 services::claude_tui::composer_lock::claude_tui_composer_lock_tests::compact_composer_lock_proceeds_while_turn_lifetime_lock_is_held
 services::claude_tui::composer_lock::claude_tui_composer_lock_tests::composer_mutation_lock_serializes_two_mutations
+services::claude_tui::composer_lock::claude_tui_composer_lock_tests::try_composer_lock_rejects_held_and_poisoned_lock
+services::claude_tui::composer_lock::claude_tui_composer_lock_tests::try_composer_lock_serializes_existing_writer
 services::claude_tui::composer_lock::claude_tui_composer_lock_tests::turn_lock_serializes_concurrent_callbacks
 services::claude_tui::composer_lock::claude_tui_composer_lock_tests::turn_locks_are_shared_per_session_only
 services::claude_tui::hook_bundle::tests::codex_hook_command_uses_stable_session_id_for_trust_identity
@@ -2286,6 +2288,8 @@ services::codex_tui::input::tests::stale_composer_scrolled_deep_into_history_is_
 services::codex_tui::input::tests::steering_snapshot_requires_composer_and_rejects_modal
 services::codex_tui::input::tests::submit_confirmation_allows_fallback_only_after_two_live_draft_snapshots
 services::codex_tui::input::tests::taking_composer_ready_signal_is_one_shot
+services::codex_tui::input::tests::try_composer_lock_rejects_held_and_poisoned_lock
+services::codex_tui::input::tests::try_composer_lock_serializes_existing_writer
 services::codex_tui::input::tests::wait_reports_cancel_not_session_dead_when_token_is_set_before_first_probe
 services::codex_tui::input::tests::wait_returns_cancelled_immediately_when_token_is_pre_cancelled
 services::codex_tui::input::tests::wait_returns_cancelled_when_token_flips_mid_wait_even_with_no_pane
@@ -3338,6 +3342,8 @@ services::discord::inflight::budget::tests::bump_persists_attempts_on_restart_ma
 services::discord::inflight::budget::tests::bump_persists_attempts_on_tui_direct_row
 services::discord::inflight::budget::tests::bump_refuses_row_owned_by_newer_turn
 services::discord::inflight::budget::tests::bump_refuses_tui_direct_row_without_offset_proof
+services::discord::inflight::clear_store::identity::operator_disposition::tests::operator_disposition_pin_mismatch_never_unlinks
+services::discord::inflight::clear_store::identity::operator_disposition::tests::operator_disposition_rereads_guarded_bytes_and_removes_rebind_row
 services::discord::inflight::clear_store::identity::tests::captured_episode_clears_its_matching_row
 services::discord::inflight::clear_store::identity::tests::captured_episode_preserves_a_foreign_nonce
 services::discord::inflight::clear_store::identity::tests::captured_episode_preserves_every_changed_identity_field
@@ -9122,6 +9128,9 @@ services::tui_prompt_dedupe::tests::evict_dead_tmux_mirror_drops_runtime_and_cha
 services::tui_prompt_dedupe::tests::expired_pending_prompt_publishes_as_direct_input
 services::tui_prompt_dedupe::tests::external_input_relay_lease_can_be_bound_to_channel_after_observation
 services::tui_prompt_dedupe::tests::external_input_turn_lease_carries_owner_and_trace_fields
+services::tui_prompt_dedupe::tests::external_lease_fence_preserves_failure_and_clears_success
+services::tui_prompt_dedupe::tests::external_lease_fence_rejects_absent_changed_and_other_channel
+services::tui_prompt_dedupe::tests::external_lease_fence_serializes_writer_and_rejects_stale_capture
 services::tui_prompt_dedupe::tests::extract_returns_stable_top_level_uuid
 services::tui_prompt_dedupe::tests::extract_yields_none_entry_id_when_uuid_absent
 services::tui_prompt_dedupe::tests::extracts_claude_transcript_user_message_text
