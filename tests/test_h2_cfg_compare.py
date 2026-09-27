@@ -83,7 +83,7 @@ class CfgCompareTest(unittest.TestCase):
                 proc = self.run_cli(raw, 'foo="a"\nb="c"\n')
                 self.assertEqual(proc.returncode, 2, proc.stdout)
                 self.assertEqual(proc.stdout, "")
-                self.assertIn("raw --print cfg is ambiguous", proc.stderr)
+                self.assertIn("expected structured cfg JSON: Expecting value", proc.stderr)
                 self.assert_report(
                     [["foo", 'a"' + separator + 'b="c']], [["foo", "a"], ["b", "c"]], 1,
                     {"common": [], "linux_only": [["foo", 'a"' + separator + 'b="c']],
@@ -123,6 +123,24 @@ class CfgCompareTest(unittest.TestCase):
                 self.assertEqual(proc.stdout, "")
                 self.assertIn("h2-cfg-compare: linux:", proc.stderr)
                 self.assertNotIn("Traceback", proc.stderr)
+
+    def test_malformed_json_reports_input_errors_with_the_actual_cause(self):
+        for case, data, diagnostic in (
+            ("deep nesting", "[" * 200000 + "]" * 200000, "RecursionError"),
+            ("BOM", '\ufeff[["unix"]]', "UTF-8 BOM"),
+            ("truncated", '[["unix"]', "Expecting ',' delimiter"),
+        ):
+            for lane in ("linux", "macos"):
+                with self.subTest(case=case, lane=lane):
+                    snapshots = {"linux": [["unix"]], "macos": [["unix"]]}
+                    snapshots[lane] = data
+                    proc = self.run_cli(**snapshots)
+                    self.assertEqual(proc.returncode, 2, proc.stderr)
+                    self.assertEqual(proc.stdout, "")
+                    self.assertIn(f"h2-cfg-compare: {lane}:", proc.stderr)
+                    self.assertIn(diagnostic, proc.stderr)
+                    self.assertNotIn("raw --print cfg is ambiguous", proc.stderr)
+                    self.assertNotIn("Traceback", proc.stderr)
 
     def test_empty_missing_and_non_utf8_inputs_are_errors_not_equal_lists(self):
         for data, diagnostic in (("[]", "expected a nonempty cfg array"), (" \n", "expected structured cfg JSON"),
