@@ -42,6 +42,7 @@ fn pipeline_route_error_response(
             })),
         )),
         PipelineRouteError::NotFound(error) => Err(AppError::not_found(error)),
+        PipelineRouteError::Conflict(error) => Err(AppError::conflict(error)),
         PipelineRouteError::Database(error) => {
             Err(AppError::internal(error).with_code(ErrorCode::Database))
         }

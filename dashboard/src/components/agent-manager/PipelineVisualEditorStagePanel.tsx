@@ -103,8 +103,8 @@ function StageCard({ ctx, actions, stage, index }: Props & { stage: StageDraft; 
         />
         <SelectField
           label={tr("실행 방식", "Provider")}
-          value={stage.provider}
-          onChange={(value) => actions.updateStage(index, { provider: value as StageDraft["provider"] })}
+          value={stage.provider === "counter" ? "counter" : ""}
+          onChange={(value) => actions.updateStage(index, { provider: value })}
           options={[
             ["", tr("담당 에이전트", "Assigned agent")],
             ["counter", tr("교차 모델 (e2e 항목이 있을 때만)", "Counter model (only with an e2e item)")],
@@ -113,8 +113,8 @@ function StageCard({ ctx, actions, stage, index }: Props & { stage: StageDraft; 
         <AgentSelect ctx={ctx} label={tr("담당 에이전트 지정", "Agent override")} value={stage.agent_override_id} emptyLabel={tr("카드 담당자", "Card assignee")} onChange={(value) => actions.updateStage(index, { agent_override_id: value })} />
         <SelectField
           label={tr("건너뛰기", "Skip")}
-          value={stage.skip_condition}
-          onChange={(value) => actions.updateStage(index, { skip_condition: value as StageDraft["skip_condition"] })}
+          value={stage.skip_condition === "no_rs_changes" ? "no_rs_changes" : ""}
+          onChange={(value) => actions.updateStage(index, { skip_condition: value })}
           options={[
             ["", tr("건너뛰지 않음", "Never")],
             ["no_rs_changes", tr("Rust 변경이 없으면", "When no Rust files changed")],

@@ -3,7 +3,6 @@ import type {
   PipelineConfigFull,
   PipelineOverride,
   PipelineStage,
-  PipelineStageSkipCondition,
 } from "../../types";
 import { MOBILE_LAYOUT_BREAKPOINT_PX } from "../../app/breakpoints";
 
@@ -23,10 +22,11 @@ export interface FsmEdgeBinding {
 
 export interface StageDraft {
   stage_name: string;
-  // Only "counter" changes behaviour (review-automation.js); anything else runs on the assigned agent.
-  provider: "" | "counter";
+  // Only "counter" and "no_rs_changes" change behaviour (review-automation.js). Other stored
+  // values are kept as they are so a save does not rewrite them.
+  provider: string;
   agent_override_id: string;
-  skip_condition: PipelineStageSkipCondition | "";
+  skip_condition: string;
   trigger_after: StageTrigger;
 }
 
@@ -128,9 +128,9 @@ export function normalizeStageTrigger(
 export function stageDraftFromApi(stage: PipelineStage): StageDraft {
   return {
     stage_name: stage.stage_name,
-    provider: stage.provider === "counter" ? "counter" : "",
+    provider: stage.provider ?? "",
     agent_override_id: stage.agent_override_id ?? "",
-    skip_condition: stage.skip_condition === "no_rs_changes" ? "no_rs_changes" : "",
+    skip_condition: stage.skip_condition ?? "",
     trigger_after: normalizeStageTrigger(stage.trigger_after),
   };
 }
@@ -155,7 +155,8 @@ export function stageInputFromDraft(stage: StageDraft) {
   };
 }
 
-// Stages belong to the repo as a whole; saving replaces the repo's full list.
+// Stages belong to the repo as a whole; saving replaces the repo's full list. The server keeps
+// each stage's id and its unedited settings (timeouts, retries) as long as the name stays.
 export function buildStageSavePayload(stageDrafts: StageDraft[]) {
   return stageDrafts
     .filter((stage) => stage.stage_name.trim())

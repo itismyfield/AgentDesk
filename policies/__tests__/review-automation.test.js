@@ -282,6 +282,46 @@ test("review-automation clears a completed pipeline stage after cards.get migrat
   );
 });
 
+test("review-automation holds a card whose pipeline stage row is gone", () => {
+  const { module, state } = loadPolicy("policies/review-automation.js", {
+    cards: {
+      "card-missing-stage": {
+        id: "card-missing-stage",
+        status: "review",
+        pipeline_stage_id: "101",
+        repo_id: "itismyfield/AgentDesk"
+      }
+    },
+    dbQuery: createSqlRouter([
+      {
+        match: "WHERE id = ? AND kanban_card_id = ? AND dispatch_type = 'review' LIMIT 1",
+        result: [{ context: JSON.stringify({ review_mode: "normal" }) }]
+      },
+      {
+        match: "SELECT stage_order FROM pipeline_stages WHERE id = ?",
+        result: []
+      },
+      {
+        match: "AND dispatch_type IN ('implementation', 'rework')",
+        result: []
+      }
+    ])
+  });
+
+  module.__test.processVerdict(
+    "card-missing-stage",
+    "pass",
+    { verdict: "pass" },
+    { review_dispatch_id: "review-missing-stage" }
+  );
+
+  assert.equal(state.manualInterventions.length, 1);
+  assert.match(state.manualInterventions[0].reason, /Pipeline stage 101 no longer exists/);
+  assert.deepEqual(state.statusCalls, []);
+  assert.equal(state.dispatchCreates.length, 0);
+  assert.equal(state.executions.some(({ sql }) => sql.includes("SET pipeline_stage_id = NULL")), false);
+});
+
 test("review-automation skips create-pr when reviewed work is already on origin mainline", () => {
   const { module, state } = loadPolicy("policies/review-automation.js", {
     cards: {

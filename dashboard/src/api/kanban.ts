@@ -384,7 +384,7 @@ export interface PipelineStageInput {
   stage_name: string;
   provider?: string | null;
   agent_override_id?: string | null;
-  skip_condition?: import("../types").PipelineStageSkipCondition | null;
+  skip_condition?: string | null;
   trigger_after?: "ready" | "review_pass";
 }
 

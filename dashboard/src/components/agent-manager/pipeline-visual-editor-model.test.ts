@@ -56,7 +56,7 @@ function makePipeline(): PipelineConfigFull {
 }
 
 describe("pipeline-visual-editor-model", () => {
-  it("normalizes stored stages to the values the runtime reads", () => {
+  it("keeps stored stage values the editor does not offer", () => {
     const stage = stageDraftFromApi({
       id: "stage-1",
       repo: "itismyfield/AgentDesk",
@@ -64,12 +64,13 @@ describe("pipeline-visual-editor-model", () => {
       stage_order: 0,
       provider: "codex",
       agent_override_id: null,
-      skip_condition: "label:hotfix" as PipelineStage["skip_condition"],
+      skip_condition: "label:hotfix",
       trigger_after: null as unknown as PipelineStage["trigger_after"],
     });
 
     expect(normalizeStageTrigger(undefined)).toBe("ready");
-    expect(stage).toMatchObject({ trigger_after: "ready", provider: "", skip_condition: "" });
+    expect(stage).toMatchObject({ trigger_after: "ready", provider: "codex", skip_condition: "label:hotfix" });
+    expect(buildStageSavePayload([stage])[0]).toMatchObject({ provider: "codex", skip_condition: "label:hotfix" });
   });
 
   it("saves the repo's full stage list with only runtime fields", () => {

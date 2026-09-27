@@ -1528,6 +1528,15 @@ function processVerdict(cardId, verdict, result, options) {
             [repoId, currentStageInfo[0].stage_order]
           );
           if (stages.length > 0) nextStage = stages[0];
+        } else {
+          // The card's stage row is gone, so which stages remain is unknown.
+          // Reading that as "no stages left" would skip them and open the PR.
+          escalateToManualIntervention(
+            cardId,
+            "Pipeline stage " + currentStageId + " no longer exists; the next stage is unknown",
+            { review: true }
+          );
+          return;
         }
       } else {
         // No current stage — check for first review_pass triggered stage

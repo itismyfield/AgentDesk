@@ -578,7 +578,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "Replace all pipeline stages",
         )
         .with_example(
-            json!({"body": {"repo": "itismyfield/AgentDesk", "stages": [{"stage_name": "e2e-test", "stage_order": 1, "trigger_after": "review_pass", "provider": "counter", "skip_condition": "no_rs_changes"}]}}),
+            json!({"body": {"repo": "itismyfield/AgentDesk", "stages": [{"stage_name": "implementation", "stage_order": 1, "provider": "codex", "timeout_minutes": 60, "on_failure": "fail"}]}}),
             json!({"stages": [{"repo_id": "itismyfield/AgentDesk", "stage_name": "implementation", "stage_order": 1}]}),
         ),
         ep(

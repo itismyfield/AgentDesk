@@ -199,7 +199,8 @@ export interface KanbanCard {
 }
 
 // Pipeline
-// Only fields the runtime reads (policies/pipeline.js, review-automation.js).
+// Fields the runtime reads (policies/pipeline.js, review-automation.js). The API also returns
+// retired settings the dashboard neither shows nor sends.
 export interface PipelineStage {
   id: string;
   repo: string;
@@ -207,11 +208,9 @@ export interface PipelineStage {
   stage_order: number;
   provider: string | null;
   agent_override_id: string | null;
-  skip_condition: PipelineStageSkipCondition | null;
+  skip_condition: string | null;
   trigger_after: "ready" | "review_pass";
 }
-
-export type PipelineStageSkipCondition = "no_rs_changes";
 
 export interface PipelineHistoryEntry {
   id: string;

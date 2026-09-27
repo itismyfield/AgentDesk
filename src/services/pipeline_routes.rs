@@ -1,19 +1,51 @@
+use std::collections::{HashMap, HashSet};
+
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::utils::api::clamp_api_limit;
 
-/// The only `skip_condition` the runtime evaluates (policies/review-automation.js).
-pub const STAGE_SKIP_CONDITIONS: &[&str] = &["no_rs_changes"];
+/// Accepted `on_failure` values for a `pipeline_stages` row.
+pub const STAGE_ON_FAILURE_VALUES: &[&str] =
+    &["escalate", "retry-with-backoff", "fallback-stage", "fail"];
 
+/// #1082 -- accepted `backoff` policy values.
+pub const STAGE_BACKOFF_VALUES: &[&str] = &["exponential", "linear", "none"];
+
+/// `replace_stages` upsert, keyed on `uq_pipeline_stages_repo_stage` so a stage
+/// that keeps its name keeps the `id` cards hold in `pipeline_stage_id`.
+/// `backoff` ($14) added by #3868 so the validated value is persisted instead of
+/// silently dropped. Column order MUST match the `.bind(...)` chain in
+/// `replace_stages`.
 const INSERT_STAGE_SQL: &str = "INSERT INTO pipeline_stages (
-    repo_id, stage_name, stage_order, trigger_after, skip_condition, provider, agent_override_id
- ) VALUES ($1, $2, $3, $4, $5, $6, $7)";
+    repo_id, stage_name, stage_order, trigger_after, entry_skill,
+    timeout_minutes, on_failure, skip_condition, provider, agent_override_id,
+    on_failure_target, max_retries, parallel_with, backoff
+ ) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+ )
+ ON CONFLICT (repo_id, stage_name) DO UPDATE SET
+    stage_order = EXCLUDED.stage_order,
+    trigger_after = EXCLUDED.trigger_after,
+    entry_skill = EXCLUDED.entry_skill,
+    timeout_minutes = EXCLUDED.timeout_minutes,
+    on_failure = EXCLUDED.on_failure,
+    skip_condition = EXCLUDED.skip_condition,
+    provider = EXCLUDED.provider,
+    agent_override_id = EXCLUDED.agent_override_id,
+    on_failure_target = EXCLUDED.on_failure_target,
+    max_retries = EXCLUDED.max_retries,
+    parallel_with = EXCLUDED.parallel_with,
+    backoff = EXCLUDED.backoff";
 
+/// `list_pipeline_stages_pg` projection. `backoff` added by #3868 so it
+/// round-trips back through the list/GET path. Column order MUST match
+/// `pg_stage_row_to_json`.
 const SELECT_STAGES_SQL: &str =
-    "SELECT id, repo_id, stage_name, stage_order, trigger_after, skip_condition, provider,
-        agent_override_id
+    "SELECT id, repo_id, stage_name, stage_order, trigger_after, entry_skill,
+        timeout_minutes, on_failure, skip_condition, provider,
+        agent_override_id, on_failure_target, max_retries, parallel_with, backoff
  FROM pipeline_stages
  WHERE ($1::text IS NULL OR repo_id = $1)
    AND ($2::text IS NULL OR agent_override_id = $2)
@@ -23,19 +55,47 @@ const SELECT_STAGES_SQL: &str =
 pub enum PipelineRouteError {
     BadRequest { stage: String, error: String },
     NotFound(String),
+    Conflict(String),
     Database(String),
 }
 
-/// Fields the runtime reads (policies/pipeline.js, review-automation.js).
-/// Older clients may still send the retired metadata fields; serde ignores them.
+/// `entry_skill`, `timeout_minutes`, `on_failure`, `on_failure_target`,
+/// `max_retries`, `backoff` and `parallel_with` are declarative metadata no
+/// executor reads. A save that leaves one out keeps the stored value, so a
+/// client that edits only the runtime fields never erases them.
 #[derive(Debug, Deserialize)]
 pub struct PipelineStageInput {
     pub stage_name: String,
     pub stage_order: Option<i64>,
     pub trigger_after: Option<String>,
+    pub entry_skill: Option<String>,
     pub provider: Option<String>,
     pub agent_override_id: Option<String>,
+    pub timeout_minutes: Option<i64>,
+    pub on_failure: Option<String>,
+    pub on_failure_target: Option<String>,
+    pub max_retries: Option<i64>,
+    /// #1082 backoff policy. One of STAGE_BACKOFF_VALUES. Persisted as
+    /// declarative stage metadata so it round-trips through GET; no executor
+    /// reads these per-stage columns.
+    pub backoff: Option<String>,
     pub skip_condition: Option<String>,
+    pub parallel_with: Option<String>,
+}
+
+/// A repo's stored stage row, locked for the length of a save.
+#[derive(Clone, Default, sqlx::FromRow)]
+struct StoredStage {
+    id: i64,
+    stage_name: Option<String>,
+    stage_order: Option<i64>,
+    entry_skill: Option<String>,
+    timeout_minutes: Option<i64>,
+    on_failure: Option<String>,
+    on_failure_target: Option<String>,
+    max_retries: Option<i64>,
+    parallel_with: Option<String>,
+    backoff: Option<String>,
 }
 
 pub struct CardPipelineState {
@@ -75,23 +135,64 @@ impl<'a> PipelineRouteService<'a> {
             .await
             .map_err(|error| PipelineRouteError::Database(format!("begin tx: {error}")))?;
 
-        sqlx::query("DELETE FROM pipeline_stages WHERE repo_id = $1")
-            .bind(repo)
+        let stored = lock_repo_stages(&mut tx, repo).await?;
+        let orders: HashMap<&str, i64> = stages
+            .iter()
+            .enumerate()
+            .map(|(idx, stage)| {
+                let order = stage.stage_order.unwrap_or(idx as i64 + 1);
+                (stage.stage_name.as_str(), order)
+            })
+            .collect();
+        ensure_cards_keep_their_path(&mut tx, &stored, &orders).await?;
+
+        let removed: Vec<i64> = stored
+            .iter()
+            .filter(|row| {
+                !row.stage_name
+                    .as_deref()
+                    .is_some_and(|name| orders.contains_key(name))
+            })
+            .map(|row| row.id)
+            .collect();
+        sqlx::query("DELETE FROM pipeline_stages WHERE id = ANY($1)")
+            .bind(&removed)
             .execute(&mut *tx)
             .await
             .map_err(|error| PipelineRouteError::Database(format!("delete: {error}")))?;
 
-        for (idx, stage) in stages.iter().enumerate() {
-            let order = stage.stage_order.unwrap_or(idx as i64 + 1);
+        for stage in stages {
+            let kept = stored
+                .iter()
+                .find(|row| row.stage_name.as_deref() == Some(stage.stage_name.as_str()))
+                .cloned()
+                .unwrap_or_default();
+            let backoff = match stage.backoff.as_deref() {
+                Some(value) => normalize_optional(Some(value)).map(str::to_string),
+                None => kept.backoff,
+            };
 
             sqlx::query(INSERT_STAGE_SQL)
                 .bind(repo)
                 .bind(&stage.stage_name)
-                .bind(order)
+                .bind(orders[stage.stage_name.as_str()])
                 .bind(stage.trigger_after.as_deref())
-                .bind(normalize_optional(stage.skip_condition.as_deref()))
-                .bind(normalize_optional(stage.provider.as_deref()))
-                .bind(normalize_optional(stage.agent_override_id.as_deref()))
+                .bind(stage.entry_skill.clone().or(kept.entry_skill))
+                .bind(stage.timeout_minutes.or(kept.timeout_minutes).unwrap_or(60))
+                .bind(
+                    stage
+                        .on_failure
+                        .clone()
+                        .or(kept.on_failure)
+                        .unwrap_or_else(|| "fail".to_string()),
+                )
+                .bind(stage.skip_condition.as_deref())
+                .bind(stage.provider.as_deref())
+                .bind(stage.agent_override_id.as_deref())
+                .bind(stage.on_failure_target.clone().or(kept.on_failure_target))
+                .bind(stage.max_retries.or(kept.max_retries).unwrap_or(0))
+                .bind(stage.parallel_with.clone().or(kept.parallel_with))
+                .bind(backoff)
                 .execute(&mut *tx)
                 .await
                 .map_err(|error| {
@@ -110,11 +211,21 @@ impl<'a> PipelineRouteService<'a> {
     }
 
     pub async fn delete_stages(&self, repo: &str) -> Result<u64, PipelineRouteError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| PipelineRouteError::Database(format!("begin tx: {error}")))?;
+        let stored = lock_repo_stages(&mut tx, repo).await?;
+        ensure_cards_keep_their_path(&mut tx, &stored, &HashMap::new()).await?;
         let result = sqlx::query("DELETE FROM pipeline_stages WHERE repo_id = $1")
             .bind(repo)
-            .execute(self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(database_error)?;
+        tx.commit()
+            .await
+            .map_err(|error| PipelineRouteError::Database(format!("commit: {error}")))?;
         Ok(result.rows_affected())
     }
 
@@ -308,39 +419,203 @@ impl<'a> PipelineRouteService<'a> {
     }
 }
 
+/// Validate a stage's `on_failure` string. Returns `Err(value)` with the
+/// offending value when unknown, `Ok(())` otherwise (including None/empty).
+pub fn validate_on_failure(value: Option<&str>) -> Result<(), String> {
+    match value {
+        None => Ok(()),
+        Some(v) if v.is_empty() => Ok(()),
+        Some(v) if STAGE_ON_FAILURE_VALUES.iter().any(|a| *a == v) => Ok(()),
+        Some(v) => Err(format!(
+            "on_failure='{}' is invalid; expected one of {:?}",
+            v, STAGE_ON_FAILURE_VALUES
+        )),
+    }
+}
+
+/// Map `None` or an empty/whitespace-only string to `None` so it persists as
+/// SQL NULL (rather than an empty string). Used for the optional `backoff`
+/// column (#3868) so an omitted/blank policy round-trips back as `null`.
 fn normalize_optional(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|v| !v.is_empty())
+    value.filter(|v| !v.trim().is_empty())
+}
+
+/// Validate a stage's `backoff` string.
+pub fn validate_backoff(value: Option<&str>) -> Result<(), String> {
+    match value {
+        None => Ok(()),
+        Some(v) if v.is_empty() => Ok(()),
+        Some(v) if STAGE_BACKOFF_VALUES.iter().any(|a| *a == v) => Ok(()),
+        Some(v) => Err(format!(
+            "backoff='{}' is invalid; expected one of {:?}",
+            v, STAGE_BACKOFF_VALUES
+        )),
+    }
+}
+
+async fn lock_repo_stages(
+    tx: &mut Transaction<'_, Postgres>,
+    repo: &str,
+) -> Result<Vec<StoredStage>, PipelineRouteError> {
+    sqlx::query_as::<_, StoredStage>(
+        "SELECT id, stage_name, stage_order, entry_skill, timeout_minutes, on_failure,
+                on_failure_target, max_retries, parallel_with, backoff
+           FROM pipeline_stages
+          WHERE repo_id = $1
+          FOR UPDATE",
+    )
+    .bind(repo)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| PipelineRouteError::Database(format!("load stages: {error}")))
+}
+
+/// Cards hold their stage in `kanban_cards.pipeline_stage_id`, and
+/// review-automation.js picks the next stage by `stage_order`. A save may not
+/// remove a stage an open card is in, or move a kept stage to the other side of
+/// it: either would skip or repeat work for that card.
+async fn ensure_cards_keep_their_path(
+    tx: &mut Transaction<'_, Postgres>,
+    stored: &[StoredStage],
+    orders: &HashMap<&str, i64>,
+) -> Result<(), PipelineRouteError> {
+    let ids: Vec<String> = stored.iter().map(|row| row.id.to_string()).collect();
+    let occupied = sqlx::query_as::<_, (String, i64)>(
+        "SELECT pipeline_stage_id, COUNT(*)
+           FROM kanban_cards
+          WHERE pipeline_stage_id = ANY($1)
+            AND COALESCE(status, '') NOT IN ('done', 'cancelled')
+          GROUP BY pipeline_stage_id",
+    )
+    .bind(&ids)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| PipelineRouteError::Database(format!("load stage cards: {error}")))?;
+
+    for (stage_id, cards) in occupied {
+        let Some(stage) = stored.iter().find(|row| row.id.to_string() == stage_id) else {
+            continue;
+        };
+        let name = stage.stage_name.as_deref().unwrap_or_default();
+        let Some(&order) = orders.get(name) else {
+            return Err(PipelineRouteError::Conflict(format!(
+                "stage '{name}' has {cards} open card(s) in it; finish or move them before removing the stage"
+            )));
+        };
+        for other in stored {
+            let Some(other_name) = other.stage_name.as_deref() else {
+                continue;
+            };
+            let Some(&other_order) = orders.get(other_name) else {
+                continue;
+            };
+            if other.stage_order.cmp(&stage.stage_order) != other_order.cmp(&order) {
+                return Err(PipelineRouteError::Conflict(format!(
+                    "stage '{name}' has {cards} open card(s) in it; moving '{other_name}' to its other side would skip or repeat work for them"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_pipeline_stages(stages: &[PipelineStageInput]) -> Result<(), PipelineRouteError> {
+    let mut names = HashSet::new();
     for stage in stages {
-        if let Some(condition) = normalize_optional(stage.skip_condition.as_deref())
-            && !STAGE_SKIP_CONDITIONS.contains(&condition)
+        if !names.insert(stage.stage_name.as_str()) {
+            return Err(PipelineRouteError::BadRequest {
+                stage: stage.stage_name.clone(),
+                error: "stage names must be unique within a repo".to_string(),
+            });
+        }
+        if let Err(error) = validate_on_failure(stage.on_failure.as_deref()) {
+            return Err(PipelineRouteError::BadRequest {
+                stage: stage.stage_name.clone(),
+                error,
+            });
+        }
+        // Validate the *normalized* value so a blank/whitespace-only backoff is
+        // treated identically to absent (both persist as NULL), instead of an
+        // empty string passing but "   " erroring — consistent with the INSERT,
+        // which also binds `normalize_optional(stage.backoff)`.
+        if let Err(error) = validate_backoff(normalize_optional(stage.backoff.as_deref())) {
+            return Err(PipelineRouteError::BadRequest {
+                stage: stage.stage_name.clone(),
+                error,
+            });
+        }
+        if let Some(max_retries) = stage.max_retries
+            && max_retries < 0
         {
             return Err(PipelineRouteError::BadRequest {
                 stage: stage.stage_name.clone(),
-                error: format!(
-                    "skip_condition='{condition}' is not evaluated by the runtime; expected one of {STAGE_SKIP_CONDITIONS:?}"
-                ),
+                error: format!("max_retries={max_retries} must be >= 0"),
             });
         }
     }
     Ok(())
 }
 
-fn pg_stage_row_to_json(row: &sqlx::postgres::PgRow) -> Result<Value, sqlx::Error> {
-    let repo_id = row.try_get::<Option<String>, _>("repo_id")?;
-    Ok(json!({
-        "id": row.try_get::<i64, _>("id")?,
+#[allow(clippy::too_many_arguments)]
+fn stage_json(
+    id: i64,
+    repo_id: Option<String>,
+    stage_name: Option<String>,
+    stage_order: i64,
+    trigger_after: Option<String>,
+    entry_skill: Option<String>,
+    timeout_minutes: i64,
+    on_failure: Option<String>,
+    skip_condition: Option<String>,
+    provider: Option<String>,
+    agent_override_id: Option<String>,
+    on_failure_target: Option<String>,
+    max_retries: Option<i64>,
+    parallel_with: Option<String>,
+    backoff: Option<String>,
+) -> Value {
+    json!({
+        "id": id,
         "repo_id": repo_id,
         "repo": repo_id,
-        "stage_name": row.try_get::<Option<String>, _>("stage_name")?,
-        "stage_order": row.try_get::<i64, _>("stage_order")?,
-        "trigger_after": row.try_get::<Option<String>, _>("trigger_after")?,
-        "skip_condition": row.try_get::<Option<String>, _>("skip_condition")?,
-        "provider": row.try_get::<Option<String>, _>("provider")?,
-        "agent_override_id": row.try_get::<Option<String>, _>("agent_override_id")?,
-    }))
+        "stage_name": stage_name,
+        "stage_order": stage_order,
+        "trigger_after": trigger_after,
+        "entry_skill": entry_skill,
+        "timeout_minutes": timeout_minutes,
+        "on_failure": on_failure,
+        "skip_condition": skip_condition,
+        "provider": provider,
+        "agent_override_id": agent_override_id,
+        "on_failure_target": on_failure_target,
+        "max_retries": max_retries,
+        "parallel_with": parallel_with,
+        "backoff": backoff,
+    })
+}
+
+fn pg_stage_row_to_json(row: &sqlx::postgres::PgRow) -> Result<Value, sqlx::Error> {
+    let stage_order = row.try_get::<i64, _>("stage_order")?;
+    let timeout_minutes = row.try_get::<i64, _>("timeout_minutes")?;
+    let max_retries = row.try_get::<Option<i64>, _>("max_retries")?;
+
+    Ok(stage_json(
+        row.try_get::<i64, _>("id")?,
+        row.try_get::<Option<String>, _>("repo_id")?,
+        row.try_get::<Option<String>, _>("stage_name")?,
+        stage_order,
+        row.try_get::<Option<String>, _>("trigger_after")?,
+        row.try_get::<Option<String>, _>("entry_skill")?,
+        timeout_minutes,
+        row.try_get::<Option<String>, _>("on_failure")?,
+        row.try_get::<Option<String>, _>("skip_condition")?,
+        row.try_get::<Option<String>, _>("provider")?,
+        row.try_get::<Option<String>, _>("agent_override_id")?,
+        row.try_get::<Option<String>, _>("on_failure_target")?,
+        max_retries,
+        row.try_get::<Option<String>, _>("parallel_with")?,
+        row.try_get::<Option<String>, _>("backoff")?,
+    ))
 }
 
 async fn list_pipeline_stages_pg(
@@ -506,8 +781,10 @@ fn find_current_stage(stages: &[Value], history: &[Value]) -> Value {
     stages
         .iter()
         .find(|stage| {
+            let skill = stage["entry_skill"].as_str().unwrap_or("");
             let name = stage["stage_name"].as_str().unwrap_or("");
-            !name.is_empty() && (name == dispatch_type || name == title)
+            (!skill.is_empty() && (skill == dispatch_type || skill == title))
+                || (!name.is_empty() && (name == dispatch_type || name == title))
         })
         .cloned()
         .unwrap_or(Value::Null)
@@ -521,28 +798,204 @@ fn database_error(error: sqlx::Error) -> PipelineRouteError {
 mod tests {
     use super::*;
 
-    fn stage(skip_condition: Option<&str>) -> PipelineStageInput {
+    fn stage_with_backoff(backoff: Option<&str>) -> PipelineStageInput {
         PipelineStageInput {
-            stage_name: "e2e".to_string(),
-            stage_order: None,
-            trigger_after: Some("review_pass".to_string()),
-            provider: Some("counter".to_string()),
+            stage_name: "build".to_string(),
+            stage_order: Some(1),
+            trigger_after: None,
+            entry_skill: None,
+            provider: None,
             agent_override_id: None,
-            skip_condition: skip_condition.map(str::to_string),
+            timeout_minutes: Some(60),
+            on_failure: Some("retry-with-backoff".to_string()),
+            on_failure_target: None,
+            max_retries: Some(2),
+            backoff: backoff.map(str::to_string),
+            skip_condition: None,
+            parallel_with: None,
         }
     }
 
+    /// The persistence SQL must carry the `backoff` column on BOTH the write and
+    /// read paths. This is the direct regression guard for the #3868 silent drop
+    /// (INSERT used to omit the column / SELECT used to never read it). The bind
+    /// count must also reach `$14` so the value is actually written.
     #[test]
-    fn only_runtime_skip_conditions_validate() {
-        validate_pipeline_stages(&[stage(None), stage(Some(" ")), stage(Some("no_rs_changes"))])
-            .expect("absent, blank and no_rs_changes are accepted");
-        let err = validate_pipeline_stages(&[stage(Some("label:hotfix"))])
-            .expect_err("a condition the runtime never evaluates is rejected");
-        assert!(matches!(err, PipelineRouteError::BadRequest { .. }));
+    fn persistence_sql_includes_backoff_column() {
+        assert!(
+            INSERT_STAGE_SQL.contains("backoff"),
+            "INSERT must persist backoff: {INSERT_STAGE_SQL}"
+        );
+        assert!(
+            INSERT_STAGE_SQL.contains("$14"),
+            "INSERT must bind backoff as $14: {INSERT_STAGE_SQL}"
+        );
+        assert!(
+            SELECT_STAGES_SQL.contains("backoff"),
+            "SELECT must read backoff back: {SELECT_STAGES_SQL}"
+        );
     }
 
-    /// Migrations used to mark `pipeline_stages` file-canonical, so every write
-    /// through this service failed with 405 on a real install.
+    /// Serialization unit guard: `stage_json` emits the `backoff` it is given
+    /// (this is the JSON the DB row feeds through `pg_stage_row_to_json`). The
+    /// end-to-end DB round-trip is covered by
+    /// `replace_stages_persists_backoff_round_trip_pg`.
+    #[test]
+    fn stage_json_emits_backoff_field() {
+        let value = stage_json(
+            1,
+            Some("repo".to_string()),
+            Some("build".to_string()),
+            1,
+            None,
+            None,
+            60,
+            Some("retry-with-backoff".to_string()),
+            None,
+            None,
+            None,
+            None,
+            Some(2),
+            None,
+            Some("exponential".to_string()),
+        );
+        assert_eq!(value["backoff"], json!("exponential"));
+    }
+
+    /// Absent backoff serializes as JSON null (no spurious default).
+    #[test]
+    fn stage_json_absent_backoff_is_null() {
+        let value = stage_json(
+            1, None, None, 1, None, None, 60, None, None, None, None, None, None, None, None,
+        );
+        assert_eq!(value["backoff"], Value::Null);
+    }
+
+    /// A valid backoff passes validation; an unknown value is rejected as
+    /// BadRequest (the API contract stays intact after persistence wiring).
+    #[test]
+    fn invalid_backoff_is_bad_request() {
+        validate_pipeline_stages(&[stage_with_backoff(Some("exponential"))])
+            .expect("known backoff value should validate");
+        // Blank/whitespace-only is treated like absent (normalized to NULL),
+        // NOT a BadRequest — consistent with the empty-string and None cases.
+        validate_pipeline_stages(&[stage_with_backoff(Some(""))])
+            .expect("empty backoff should validate (normalizes to NULL)");
+        validate_pipeline_stages(&[stage_with_backoff(Some("   "))])
+            .expect("whitespace-only backoff should validate (normalizes to NULL)");
+
+        let err = validate_pipeline_stages(&[stage_with_backoff(Some("bogus"))])
+            .expect_err("unknown backoff value must be rejected");
+        match err {
+            PipelineRouteError::BadRequest { stage, error } => {
+                assert_eq!(stage, "build");
+                assert!(
+                    error.contains("backoff"),
+                    "error should name backoff: {error}"
+                );
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    /// Empty/whitespace backoff normalizes to NULL so it round-trips as `null`
+    /// rather than an empty string; a real value passes through unchanged.
+    #[test]
+    fn normalize_optional_blanks_to_none() {
+        assert_eq!(normalize_optional(None), None);
+        assert_eq!(normalize_optional(Some("")), None);
+        assert_eq!(normalize_optional(Some("   ")), None);
+        assert_eq!(normalize_optional(Some("exponential")), Some("exponential"));
+    }
+
+    /// End-to-end DB round-trip against a real Postgres: write stages via
+    /// `replace_stages` and read them back via `list_stages`, proving the
+    /// `backoff` value actually survives the persistence layer. This is the
+    /// regression test for the #3868 silent drop — it would have FAILED before
+    /// the INSERT/SELECT/column wiring. Skips cleanly when no local Postgres is
+    /// reachable. Also covers absent->null, whitespace-only->NULL, and
+    /// invalid->BadRequest through the same write path.
+    #[tokio::test]
+    async fn replace_stages_persists_backoff_round_trip_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_pipeline_backoff",
+            "pipeline stage backoff persistence",
+        )
+        .await
+        else {
+            return; // no local Postgres available — skip.
+        };
+        let pool = pg_db.connect_and_migrate().await;
+
+        let service = PipelineRouteService::new(&pool);
+
+        // (1) A real backoff written via replace_stages reads back identically
+        // through list_stages — the direct #3868 silent-drop guard.
+        let written = service
+            .replace_stages("repo-rt", &[stage_with_backoff(Some("exponential"))])
+            .await
+            .expect("replace_stages with backoff should succeed");
+        assert_eq!(written[0]["backoff"], json!("exponential"));
+        let listed = service
+            .list_stages(Some("repo-rt"), None)
+            .await
+            .expect("list_stages should succeed");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["backoff"], json!("exponential"));
+
+        // (2) A save that leaves backoff out keeps the stored value.
+        let listed = service
+            .replace_stages("repo-rt", &[stage_with_backoff(None)])
+            .await
+            .expect("replace_stages without backoff should succeed");
+        assert_eq!(listed[0]["backoff"], json!("exponential"));
+        assert_eq!(listed[0]["id"], written[0]["id"]);
+
+        // (3) Whitespace-only backoff clears it to NULL, neither a BadRequest
+        // nor a stored "   ".
+        let listed = service
+            .replace_stages("repo-rt", &[stage_with_backoff(Some("   "))])
+            .await
+            .expect("whitespace-only backoff should normalize to NULL, not error");
+        assert_eq!(listed[0]["backoff"], Value::Null);
+
+        // (4) Invalid backoff is rejected before any write; the prior good row
+        // (NULL from case 3) stays intact (validation precedes the tx).
+        let err = service
+            .replace_stages("repo-rt", &[stage_with_backoff(Some("bogus"))])
+            .await
+            .expect_err("invalid backoff must be rejected");
+        assert!(matches!(err, PipelineRouteError::BadRequest { .. }));
+        let listed = service
+            .list_stages(Some("repo-rt"), None)
+            .await
+            .expect("list_stages should succeed");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["backoff"], Value::Null);
+
+        pg_db.drop().await;
+    }
+
+    fn dashboard_stage(name: &str) -> PipelineStageInput {
+        PipelineStageInput {
+            stage_name: name.to_string(),
+            stage_order: None,
+            trigger_after: Some("review_pass".to_string()),
+            entry_skill: None,
+            provider: None,
+            agent_override_id: None,
+            timeout_minutes: None,
+            on_failure: None,
+            on_failure_target: None,
+            max_retries: None,
+            backoff: None,
+            skip_condition: None,
+            parallel_with: None,
+        }
+    }
+
+    /// Migrations mark `pipeline_stages` file-canonical in `db_table_metadata`,
+    /// and the old write guard turned every save on a real install into a 405.
     #[tokio::test]
     async fn replace_stages_writes_on_a_migrated_database_pg() {
         let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
@@ -556,23 +1009,113 @@ mod tests {
         let pool = pg_db.connect_and_migrate().await;
         let service = PipelineRouteService::new(&pool);
 
-        let written = service
-            .replace_stages("repo-rt", &[stage(Some("no_rs_changes"))])
+        let first = service
+            .replace_stages(
+                "repo-rt",
+                &[PipelineStageInput {
+                    timeout_minutes: Some(120),
+                    ..dashboard_stage("qa")
+                }],
+            )
             .await
-            .expect("replace_stages succeeds without any source-of-truth override");
-        assert_eq!(written.len(), 1);
-        assert_eq!(written[0]["stage_order"], json!(1));
-        assert_eq!(written[0]["skip_condition"], json!("no_rs_changes"));
-        assert_eq!(written[0]["provider"], json!("counter"));
+            .expect("replace_stages succeeds on a migrated database");
+        assert_eq!(first[0]["timeout_minutes"], json!(120));
 
-        assert_eq!(service.delete_stages("repo-rt").await.expect("delete"), 1);
-        assert!(
-            service
-                .list_stages(Some("repo-rt"), None)
+        // The dashboard sends only the runtime fields; ids and metadata stay.
+        let second = service
+            .replace_stages(
+                "repo-rt",
+                &[
+                    dashboard_stage("build"),
+                    PipelineStageInput {
+                        provider: Some("counter".to_string()),
+                        ..dashboard_stage("qa")
+                    },
+                ],
+            )
+            .await
+            .expect("second save");
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[1]["stage_name"], json!("qa"));
+        assert_eq!(second[1]["id"], first[0]["id"]);
+        assert_eq!(second[1]["stage_order"], json!(2));
+        assert_eq!(second[1]["provider"], json!("counter"));
+        assert_eq!(second[1]["timeout_minutes"], json!(120));
+
+        assert_eq!(service.delete_stages("repo-rt").await.expect("delete"), 2);
+        pg_db.drop().await;
+    }
+
+    /// A card in a stage keeps pointing at that stage's id; a save must not
+    /// strand it or reroute it past stages it has not run.
+    #[tokio::test]
+    async fn stage_saves_refuse_to_strand_open_cards_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_pipeline_stage_cards",
+            "pipeline stage card guard",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        let service = PipelineRouteService::new(&pool);
+        let names = |names: &[&str]| {
+            names
+                .iter()
+                .copied()
+                .map(dashboard_stage)
+                .collect::<Vec<_>>()
+        };
+
+        let stages = service
+            .replace_stages("repo-rt", &names(&["lint", "e2e", "qa"]))
+            .await
+            .expect("seed stages");
+        let e2e_id = stages[1]["id"].as_i64().expect("e2e id");
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, repo_id, title, status, pipeline_stage_id)
+             VALUES ('card-e2e', 'repo-rt', 'in e2e', 'review', $1)",
+        )
+        .bind(e2e_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("seed card");
+
+        for (label, attempt) in [
+            ("remove e2e", names(&["lint", "qa"])),
+            ("rename e2e", names(&["lint", "e2e-v2", "qa"])),
+            ("move qa before e2e", names(&["lint", "qa", "e2e"])),
+            ("move lint after e2e", names(&["e2e", "lint", "qa"])),
+        ] {
+            let err = service
+                .replace_stages("repo-rt", &attempt)
                 .await
-                .expect("list")
-                .is_empty()
-        );
+                .expect_err(label);
+            assert!(
+                matches!(err, PipelineRouteError::Conflict(_)),
+                "{label}: {err:?}"
+            );
+        }
+        assert!(matches!(
+            service.delete_stages("repo-rt").await,
+            Err(PipelineRouteError::Conflict(_))
+        ));
+
+        let saved = service
+            .replace_stages("repo-rt", &names(&["lint", "e2e", "smoke", "qa"]))
+            .await
+            .expect("adding a stage leaves the card's path intact");
+        assert_eq!(saved[1]["id"], json!(e2e_id));
+
+        sqlx::query("UPDATE kanban_cards SET status = 'done' WHERE id = 'card-e2e'")
+            .execute(&pool)
+            .await
+            .expect("close card");
+        service
+            .replace_stages("repo-rt", &names(&["qa"]))
+            .await
+            .expect("closed cards do not hold stages");
 
         pg_db.drop().await;
     }
