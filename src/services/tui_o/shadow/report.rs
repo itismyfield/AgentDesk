@@ -6,6 +6,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::metrics::MetricsSnapshot;
+use super::root::StoredRecord;
 use super::{
     DeriveOutput, DiffCause, DiffClass, DiffRecord, IDENTITY_VERSION, MATCH_WINDOW,
     PopulationSnapshot, PopulationSource, REPORT_VERSION, SCHEMA_VERSION, ShadowProvider,
@@ -59,8 +60,8 @@ fn provider_id(provider: ShadowProvider) -> &'static str {
 }
 
 /// S2: TUI kinds the shadow bound in the run live at `from` and any later run up to `to`.
-pub fn bound_kinds(
-    records: &[ShadowRecord],
+pub fn bound_kinds<'r>(
+    records: impl IntoIterator<Item = &'r ShadowRecord>,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
     read_at: DateTime<Utc>,
@@ -89,28 +90,47 @@ pub fn bound_kinds(
     }
 }
 
-/// Channels bound when `to` was reached, with the provider serving each; a new run rebinds from empty.
-pub fn bound_channels(records: &[ShadowRecord], to: DateTime<Utc>) -> BTreeMap<u64, String> {
-    let mut bound = BTreeMap::new();
+/// Channels bound to a provider at any moment of `[from, to]`, kept after an unbind or restart.
+pub fn bound_channels<'r>(
+    records: impl IntoIterator<Item = &'r ShadowRecord>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Vec<(u64, String)> {
+    let mut live: BTreeMap<u64, (&'static str, DateTime<Utc>)> = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    // A binding lasts until its channel changes or the run ends at the next header.
+    let mut close = |channel, (provider, start): (&'static str, _), end| {
+        if start <= to && from <= end {
+            seen.insert((channel, provider));
+        }
+    };
     for record in records {
         match record {
-            ShadowRecord::Header { started_at, .. } if *started_at <= to => bound.clear(),
-            ShadowRecord::Binding { change } if change.at <= to => {
-                let provider = change.new.as_ref().map(|b| provider_id(b.provider));
-                match provider {
-                    Some(provider) => bound.insert(change.channel_id, provider.to_string()),
-                    None => bound.remove(&change.channel_id),
-                };
+            ShadowRecord::Header { started_at, .. } => (std::mem::take(&mut live).into_iter())
+                .for_each(|(channel, bound)| close(channel, bound, *started_at)),
+            ShadowRecord::Binding { change } => {
+                if let Some(bound) = live.remove(&change.channel_id) {
+                    close(change.channel_id, bound, change.at);
+                }
+                if let Some(b) = &change.new {
+                    live.insert(change.channel_id, (provider_id(b.provider), change.at));
+                }
             }
             _ => {}
         }
     }
-    bound
+    live.into_iter()
+        .for_each(|(channel, bound)| close(channel, bound, to));
+    (seen.into_iter())
+        .map(|(channel, provider)| (channel, provider.to_string()))
+        .collect()
 }
 
 /// Sources the latest observer run still has attached, with their attach time: cleared by a new
 /// header, dropped when rebound away or broken by an anomaly.
-pub fn attached_sources(records: &[ShadowRecord]) -> Vec<(SourceId, DateTime<Utc>)> {
+pub fn attached_sources<'r>(
+    records: impl IntoIterator<Item = &'r ShadowRecord>,
+) -> Vec<(SourceId, DateTime<Utc>)> {
     let mut attached: Vec<(SourceId, DateTime<Utc>)> = Vec::new();
     for record in records {
         match record {
@@ -156,7 +176,8 @@ pub struct DiffEntry {
 }
 
 pub struct ReportInput<'a> {
-    pub records: &'a [ShadowRecord],
+    /// Records with their storage time, which dates the rows that carry no time of their own.
+    pub records: &'a [StoredRecord],
     pub manifest: &'a [SyntheticEntry],
     pub population: &'a PopulationSnapshot,
     pub allowlist: &'a [u64],
@@ -238,7 +259,8 @@ fn record_time(
 
 pub fn evaluate(input: &ReportInput) -> ReportOutcome {
     let (mut failures, mut warnings) = (Vec::new(), Vec::new());
-    let starts: Vec<_> = (input.records.iter().enumerate())
+    let records: Vec<&ShadowRecord> = input.records.iter().map(|s| &s.record).collect();
+    let starts: Vec<_> = (records.iter().enumerate())
         .filter_map(|(at, r)| match r {
             ShadowRecord::WindowStart { t0, sources } if (input.from..=input.to).contains(t0) => {
                 Some((at, *t0, sources))
@@ -266,7 +288,7 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
     if let Some((at, t0, sources)) = starts.first() {
         boundary.extend(sources.iter().map(|s| (&s.source, s.window_start_extent)));
         // Attach rows from before t0 may land after the WindowStart line; the run's later rows count too.
-        let later = input.records[at + 1..].iter();
+        let later = records[at + 1..].iter();
         let later = later.take_while(|r| !matches!(r, ShadowRecord::Header { .. }));
         let later = later.filter_map(|r| match r {
             ShadowRecord::Attach {
@@ -276,7 +298,7 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
             } => Some((source.clone(), *attached_at)),
             _ => None,
         });
-        let missed = attached_sources(&input.records[..*at])
+        let missed = attached_sources(records[..*at].iter().copied())
             .into_iter()
             .chain(later)
             .filter(|(source, attached_at)| attached_at < t0 && !boundary.contains_key(source))
@@ -292,7 +314,7 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
     let mut units: HashMap<&UnitKey, &ShadowUnit> = HashMap::new();
     let (mut excluded, mut legacy) = (HashSet::new(), HashMap::new());
     let mut turns: Vec<&ShadowTurn> = Vec::new();
-    for record in input.records {
+    for record in records.iter().copied() {
         match record {
             ShadowRecord::Attach {
                 source,
@@ -322,19 +344,21 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
         }
     }
 
-    // Version mix and in-window totals; timeless rows take the latest earlier timestamp.
-    let late = t1 + Duration::seconds(2 * MATCH_WINDOW.as_secs() as i64);
+    // Version mix and in-window totals; timeless rows take their storage time.
+    let window = Duration::seconds(MATCH_WINDOW.as_secs() as i64);
+    let late = t1 + window * 2;
     // Units and Legacy rows near t1 are judged only after two match windows.
     if input.reported_at < late {
         failures.push(format!(
             "reported before {late}, when the last diffs are judged"
         ));
     }
-    let (mut header, mut clock, mut stale) = (None, None, 0);
+    let (mut header, mut stale) = (None, 0);
     let mut metrics = MetricsSnapshot::default();
     let mut classes: HashMap<&UnitKey, DiffClass> = HashMap::new();
     let mut window_diffs: Vec<&DiffRecord> = Vec::new();
-    for record in input.records {
+    for line in input.records {
+        let record = &line.record;
         if let ShadowRecord::Header {
             schema_version,
             identity_version,
@@ -343,14 +367,20 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
         {
             header = Some((*schema_version, *identity_version));
         }
-        let own = record_time(record, &units, &legacy);
-        clock = clock.max(own);
+        let at = record_time(record, &units, &legacy).unwrap_or(line.at);
         if let ShadowRecord::Diff { diff } = record {
             if let Some(key) = &diff.unit_key {
                 classes.insert(key, diff.class);
             }
         }
-        if own.or(clock).is_some_and(|at| t0 <= at && at <= t1) {
+        // A gap may hide events window units are judged on, from W before t0 until `late`.
+        let gap = match record {
+            ShadowRecord::TapGap { .. } => true,
+            ShadowRecord::Diff { diff } => diff.class == DiffClass::TapGap,
+            _ => false,
+        };
+        let (start, end) = if gap { (t0 - window, late) } else { (t0, t1) };
+        if start <= at && at <= end {
             stale += usize::from(header != Some((SCHEMA_VERSION, IDENTITY_VERSION)));
             metrics.record(record);
             if let ShadowRecord::Diff { diff } = record {
@@ -506,7 +536,7 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
         ));
     }
     // Completion is proven per unit by a terminal diff, never inferred from elapsed time.
-    let decided: HashSet<&UnitKey> = (input.records.iter())
+    let decided: HashSet<&UnitKey> = (records.iter())
         .filter_map(|r| match r {
             ShadowRecord::Diff { diff } => diff.unit_key.as_ref(),
             _ => None,
