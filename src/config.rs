@@ -11,7 +11,7 @@ pub use runtime_settings::RuntimeSettingsConfig;
 
 mod agent_channels;
 pub use agent_channels::AgentChannels;
-mod runtime_profile;
+pub(crate) mod runtime_profile;
 pub use runtime_profile::{ClusterConfig, ClusterIntakeRoutingConfig, RuntimeProfile};
 mod cluster_role;
 pub use cluster_role::ClusterRole;

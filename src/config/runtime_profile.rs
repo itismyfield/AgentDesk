@@ -161,6 +161,26 @@ mod tests {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
+pub struct GatewayHandbackBreakerConfig {
+    pub enabled: bool,
+    pub window_secs: u64,
+    pub max_empty: usize,
+    pub suppress_secs: u64,
+}
+
+impl Default for GatewayHandbackBreakerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            window_secs: 600,
+            max_empty: 2,
+            suppress_secs: 1800,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct ClusterConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -190,6 +210,7 @@ pub struct ClusterConfig {
     /// online and advertising gateway intent.
     #[serde(default = "default_gateway_yield_grace_secs")]
     pub gateway_yield_grace_secs: u64,
+    pub gateway_handback_breaker: GatewayHandbackBreakerConfig,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
@@ -239,6 +260,7 @@ impl Default for ClusterConfig {
             api_base_url: None,
             gateway_preferred_instance_id: None,
             gateway_yield_grace_secs: default_gateway_yield_grace_secs(),
+            gateway_handback_breaker: GatewayHandbackBreakerConfig::default(),
             labels: Vec::new(),
             capabilities: serde_json::Map::new(),
             nodes: BTreeMap::new(),
