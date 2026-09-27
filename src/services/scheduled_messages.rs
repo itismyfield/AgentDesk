@@ -425,6 +425,11 @@ async fn start_agent_turn(
         ));
     }
 
+    #[cfg(test)]
+    let _ = postgres_tests::START_TARGET.try_with(|target| {
+        *target.borrow_mut() = Some((provider.clone(), owner_channel.get(), turn_channel.get()));
+    });
+
     let outcome = start_reserved_headless_agent_turn_with_owner_channel(
         health_registry,
         owner_channel,
