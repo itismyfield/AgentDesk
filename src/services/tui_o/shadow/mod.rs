@@ -183,6 +183,7 @@ pub enum SourceAnomalyKind {
     Shrunk,
     PrefixMismatch,
     Unreadable,
+    Oversized,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -7,9 +7,7 @@ use std::path::Path;
 use super::capture::file_identity;
 use super::{BindingChange, ShadowProvider, SourceBinding, SourceId};
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::tui_prompt_dedupe::{
-    TuiRuntimeBinding, runtime_binding_for_tmux_session_under_source_authority as read_binding,
-};
+use crate::services::tui_prompt_dedupe::{TuiRuntimeBinding, peek_tmux_runtime_binding};
 
 /// A channel the shadow watches and the tmux session that serves it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,13 +44,12 @@ pub fn view_from_binding(binding: &TuiRuntimeBinding) -> Option<BindingView> {
     })
 }
 
-/// Production lookup; a busy source lock yields `None` instead of blocking the relay.
+/// Production lookup: copies without purging relay state and skips a poll when the lock is busy.
 pub struct LiveBindingLookup;
 
 impl BindingLookup for LiveBindingLookup {
     fn lookup(&self, tmux_session: &str) -> Option<BindingView> {
-        crate::services::tmux_common::try_with_tmux_source_authority(tmux_session, read_binding)
-            .flatten()
+        peek_tmux_runtime_binding(tmux_session)
             .as_ref()
             .and_then(view_from_binding)
     }

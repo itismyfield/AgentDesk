@@ -1878,6 +1878,7 @@ src/
 │   │   ├── observation.rs
 │   │   ├── runtime_binding.rs
 │   │   ├── session_rotation.rs
+│   │   ├── shadow_peek.rs
 │   │   ├── state.rs
 │   │   ├── synthetic_prompt.rs
 │   │   └── tests.rs
