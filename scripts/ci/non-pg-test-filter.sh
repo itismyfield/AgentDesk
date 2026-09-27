@@ -450,7 +450,11 @@ NON_PG_FILTER_REPLAY=(
   services::message_outbox::postgres_source_contract_tests::typed_outbox_core_preserves_cancel_at_the_observation_site
   services::message_outbox::postgres_source_contract_tests::typed_outbox_outcomes_fold_to_the_legacy_option_contract
   services::observability::cancellation_observability_tests::turn_cancelled_emit_records_normalized_payload_without_pg
-  services::pipeline_routes::tests::only_runtime_skip_conditions_validate
+  services::pipeline_routes::tests::invalid_backoff_is_bad_request
+  services::pipeline_routes::tests::normalize_optional_blanks_to_none
+  services::pipeline_routes::tests::persistence_sql_includes_backoff_column
+  services::pipeline_routes::tests::stage_json_absent_backoff_is_null
+  services::pipeline_routes::tests::stage_json_emits_backoff_field
   services::scheduled_messages::postgres_tests::postgres_precision_normalizes_linux_nanosecond_timestamps
   services::session_forwarding::tests::cancel_retry_accepts_ack_and_authenticated_structured_not_found
   services::session_forwarding::tests::cancel_retry_reloads_owner_only_for_conflict
