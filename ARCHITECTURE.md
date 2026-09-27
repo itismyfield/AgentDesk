@@ -847,7 +847,10 @@ src/
 │   │   │   │   │   ├── proof_input.rs
 │   │   │   │   │   ├── proof_tests.rs
 │   │   │   │   │   └── whole_proof.rs
+│   │   │   │   ├── codec_tests.rs
+│   │   │   │   ├── fence.rs
 │   │   │   │   ├── mod.rs
+│   │   │   │   ├── protocol.rs
 │   │   │   │   ├── schema.rs
 │   │   │   │   └── state.rs
 │   │   │   ├── manual_delivery/
