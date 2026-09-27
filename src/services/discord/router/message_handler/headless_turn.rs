@@ -1,3 +1,4 @@
+use super::super::super::mailbox_finish::unwind_unstarted_turn;
 use super::*;
 
 mod routine_metadata;
@@ -40,12 +41,6 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
         ));
     }
 
-    shared.record_channel_speaker(
-        channel_id,
-        request_owner,
-        request_owner_name,
-        is_dm_hint.unwrap_or(false),
-    );
     let user_msg_id = reservation.user_msg_id;
     let placeholder_msg_id = reservation.placeholder_msg_id;
     let (settings_provider, allowed_tools) = {
@@ -69,42 +64,53 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
     } else {
         None
     };
-    let early_role_binding = routine_role_binding
-        .clone()
-        .or_else(|| {
-            resolve_thread_role_binding(
-                channel_id,
-                early_channel_name
-                    .as_deref()
-                    .or(channel_name_hint.as_deref())
-                    .or(early_resolved_channel_name.as_deref()),
-                early_thread_parent.as_ref(),
-            )
-            .role_binding
-        })
-        .or_else(|| {
-            early_thread_parent.is_none().then(|| {
-                metadata_parent_channel_id(metadata.as_ref())
-                    .and_then(|parent_id| resolve_role_binding(parent_id, None))
-            })?
-        });
-    let early_provider = early_role_binding
+    let mut resolved_role_binding = if let Some(binding) = routine_role_binding {
+        ResolvedThreadRoleBinding::direct(Some(binding))
+    } else {
+        resolve_thread_role_binding(
+            channel_id,
+            early_channel_name
+                .as_deref()
+                .or(channel_name_hint.as_deref())
+                .or(early_resolved_channel_name.as_deref()),
+            early_thread_parent.as_ref(),
+        )
+    };
+    if resolved_role_binding.role_binding.is_none() && early_thread_parent.is_none() {
+        resolved_role_binding.role_binding = metadata_parent_channel_id(metadata.as_ref())
+            .and_then(|parent_id| resolve_role_binding(parent_id, None));
+    }
+    let memory_scope_channel_id = resolved_role_binding.memory_channel_id(channel_id);
+    let role_binding = resolved_role_binding.role_binding.take();
+    let provider = role_binding
         .as_ref()
         .and_then(|binding| binding.provider.clone())
-        .unwrap_or_else(|| settings_provider.clone());
+        .unwrap_or(settings_provider);
+    if provider != shared.provider {
+        return Err(HeadlessTurnStartError::Internal(format!(
+            "headless provider mismatch: mailbox={} execution={}",
+            shared.provider.as_str(),
+            provider.as_str()
+        )));
+    }
+    shared.record_channel_speaker(
+        channel_id,
+        request_owner,
+        request_owner_name,
+        is_dm_hint.unwrap_or(false),
+    );
     let resolved_channel_name_for_session = channel_name_hint
         .clone()
         .or_else(|| early_resolved_channel_name.clone())
         .or_else(|| {
             super::super::super::adk_session::registered_channel_fallback_name(
-                channel_id,
-                &early_provider,
+                channel_id, &provider,
             )
         });
     let early_fast_mode_channel_id =
         effective_fast_mode_channel_id(channel_id, early_thread_parent.clone());
     if let GoalCommandKind::Lifecycle(command) = classify_codex_goal_command_for_provider(
-        &early_provider,
+        &provider,
         prompt,
         super::super::super::commands::channel_codex_goals_setting(
             shared,
@@ -115,7 +121,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
         consume_codex_goal_lifecycle_command(
             &ctx.http,
             shared,
-            &early_provider,
+            &provider,
             channel_id,
             command,
             early_stale_session_id,
@@ -138,10 +144,8 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
         })?;
     let cancel_token = Arc::new(CancelToken::new());
     let started = crate::services::agent_recovery::admission::with_turn_identity(
-        early_provider.clone(),
-        early_role_binding
-            .as_ref()
-            .map(|binding| binding.role_id.clone()),
+        provider.clone(),
+        role_binding.as_ref().map(|binding| binding.role_id.clone()),
         super::super::super::mailbox_try_start_turn(
             shared,
             channel_id,
@@ -157,6 +161,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
             channel_id.get()
         )));
     }
+    crate::services::discord::increment_global_active(shared, "headless_turn_start");
     // Compute the routine continuity policy once at the turn-start boundary.
     // The shared `/goal fresh` machinery below clears every provider restore path
     // and leaves memento (caseId) as the only cross-run continuity.
@@ -188,23 +193,13 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
             let workspace = match workspace {
                 Ok(workspace) => workspace,
                 Err(error) => {
-                    let _ = release_mailbox_after_placeholder_post_failure(
-                        shared,
-                        &early_provider,
-                        channel_id,
-                    )
-                    .await;
+                    unwind_unstarted_turn(shared, channel_id, &cancel_token).await;
                     return Err(error);
                 }
             };
             let workspace_path = std::path::Path::new(&workspace);
             if !workspace_path.is_dir() {
-                let _ = release_mailbox_after_placeholder_post_failure(
-                    shared,
-                    &early_provider,
-                    channel_id,
-                )
-                .await;
+                unwind_unstarted_turn(shared, channel_id, &cancel_token).await;
                 return Err(HeadlessTurnStartError::Internal(format!(
                     "resolved workspace does not exist for headless turn: {workspace}"
                 )));
@@ -264,30 +259,6 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
     };
 
     let turn_id = reservation.turn_id(channel_id);
-    let mut resolved_role_binding = {
-        let data = shared.core.lock().await;
-        let channel_name = data
-            .sessions
-            .get(&channel_id)
-            .and_then(|session| session.channel_name.as_deref());
-        if let Some(binding) = routine_role_binding.clone() {
-            ResolvedThreadRoleBinding::direct(Some(binding))
-        } else {
-            let mut resolved =
-                resolve_thread_role_binding(channel_id, channel_name, early_thread_parent.as_ref());
-            if resolved.role_binding.is_none() && early_thread_parent.is_none() {
-                resolved.role_binding = metadata_parent_channel_id(metadata.as_ref())
-                    .and_then(|parent_id| resolve_role_binding(parent_id, None));
-            }
-            resolved
-        }
-    };
-    let memory_scope_channel_id = resolved_role_binding.memory_channel_id(channel_id);
-    let role_binding = resolved_role_binding.role_binding.take();
-    let provider = role_binding
-        .as_ref()
-        .and_then(|binding| binding.provider.clone())
-        .unwrap_or(settings_provider);
     let routine_metadata_agent_id = routine_metadata_agent_id(metadata.as_ref());
     let routine_targets_resolved_role = routine_metadata_agent_id
         .zip(
@@ -318,8 +289,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
         )
         .await
         {
-            let _ =
-                release_mailbox_after_placeholder_post_failure(shared, &provider, channel_id).await;
+            unwind_unstarted_turn(shared, channel_id, &cancel_token).await;
             return Err(HeadlessTurnStartError::Internal(format!(
                 "failed to persist routine agent identity context boundary: {error}"
             )));
@@ -485,7 +455,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
             session_id.clone(),
         )
         .await;
-        let _ = release_mailbox_after_placeholder_post_failure(shared, &provider, channel_id).await;
+        unwind_unstarted_turn(shared, channel_id, &cancel_token).await;
         return Ok(HeadlessTurnStartOutcome {
             turn_id: reservation.turn_id(channel_id),
             status: HeadlessTurnStartStatus::Consumed,
@@ -528,7 +498,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
     )
     .await;
     if let Err(error) = severance {
-        let _ = release_mailbox_after_placeholder_post_failure(shared, &provider, channel_id).await;
+        unwind_unstarted_turn(shared, channel_id, &cancel_token).await;
         return Err(HeadlessTurnStartError::Internal(format!(
             "failed to persist fresh-session context boundary: {error}"
         )));
@@ -638,7 +608,6 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
         adk_session_key.as_deref(),
     )
     .await;
-    crate::services::discord::increment_global_active(shared, "headless_turn_start");
     shared
         .turn_start_times
         .insert(channel_id, std::time::Instant::now());
@@ -691,12 +660,19 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
         session_retry_context.as_ref(),
     )
     .await;
-    let materialized_uploads = crate::services::cluster::attachment_transfer::materialize::prepare(
-        &pending_uploads,
-        shared.pg_pool.as_ref(),
-    )
-    .await
-    .map_err(HeadlessTurnStartError::Internal)?;
+    let materialized_uploads =
+        match crate::services::cluster::attachment_transfer::materialize::prepare(
+            &pending_uploads,
+            shared.pg_pool.as_ref(),
+        )
+        .await
+        {
+            Ok(uploads) => uploads,
+            Err(error) => {
+                unwind_unstarted_turn(shared, channel_id, &cancel_token).await;
+                return Err(HeadlessTurnStartError::Internal(error));
+            }
+        };
     let context_prompt = TurnContext {
         provider: &provider,
         session_id: session_id.as_deref(),

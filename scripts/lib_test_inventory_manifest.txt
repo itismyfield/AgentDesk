@@ -6827,6 +6827,7 @@ services::discord::tui_task_card::tests::parses_tool_use_id_and_derives_kind_fro
 services::discord::tui_task_card::tests::single_subagent_completion_card_previews_not_dumps
 services::discord::tui_task_card::tests::task_card_clamps_many_short_headings_under_discord_limit
 services::discord::tui_task_card::tests::task_card_footer_snapshot_uses_elapsed_icon_and_omits_tokens_4822
+services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::headless_entry_abort_releases_mailbox_without_touching_durable_owner
 services::discord::turn_bridge::bridge_entry_persist::tests::a_reconcile_that_changes_nothing_records_nothing
 services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals
 services::discord::turn_bridge::bridge_entry_persist::tests::adopting_a_self_duplicated_body_raises_a_correlated_invariant_violation
