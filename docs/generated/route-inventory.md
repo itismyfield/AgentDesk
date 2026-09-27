@@ -51,10 +51,10 @@
 | `GET` | `/api/automation-candidates/{card_id}/iterations` | `automation_candidates::list_iterations` | `src/server/routes/automation_candidates.rs:190` | `src/server/routes/domains/kanban.rs:69` |
 | `POST` | `/api/automation-candidates/{card_id}/prepare-worktree` | `automation_candidates::prepare_worktree` | `src/server/routes/automation_candidates.rs:286` | `src/server/routes/domains/kanban.rs:81` |
 | `GET` | `/api/campaigns` | `campaigns::list` | `src/server/routes/campaigns.rs:80` | `src/server/routes/domains/admin.rs:18` |
-| `POST` | `/api/campaigns` | `campaigns::create` | `src/server/routes/campaigns.rs:109` | `src/server/routes/domains/admin.rs:18` |
-| `GET` | `/api/campaigns/{id}` | `campaigns::get` | `src/server/routes/campaigns.rs:94` | `src/server/routes/domains/admin.rs:19` |
-| `PUT` | `/api/campaigns/{id}` | `campaigns::replace` | `src/server/routes/campaigns.rs:120` | `src/server/routes/domains/admin.rs:19` |
-| `GET` | `/api/campaigns/{id}/history` | `campaigns::history` | `src/server/routes/campaigns.rs:100` | `src/server/routes/domains/admin.rs:23` |
+| `POST` | `/api/campaigns` | `campaigns::create` | `src/server/routes/campaigns.rs:115` | `src/server/routes/domains/admin.rs:18` |
+| `GET` | `/api/campaigns/{id}` | `campaigns::get` | `src/server/routes/campaigns.rs:96` | `src/server/routes/domains/admin.rs:19` |
+| `PUT` | `/api/campaigns/{id}` | `campaigns::replace` | `src/server/routes/campaigns.rs:126` | `src/server/routes/domains/admin.rs:19` |
+| `GET` | `/api/campaigns/{id}/history` | `campaigns::history` | `src/server/routes/campaigns.rs:106` | `src/server/routes/domains/admin.rs:23` |
 | `GET` | `/api/channels/{channel_id}/monitoring` | `monitoring::list_monitoring` | `src/server/routes/monitoring.rs:69` | `src/server/routes/domains/runtime.rs:118` |
 | `POST` | `/api/channels/{channel_id}/monitoring` | `monitoring::upsert_monitoring` | `src/server/routes/monitoring.rs:19` | `src/server/routes/domains/runtime.rs:118` |
 | `DELETE` | `/api/channels/{channel_id}/monitoring/{key}` | `monitoring::remove_monitoring` | `src/server/routes/monitoring.rs:52` | `src/server/routes/domains/runtime.rs:122` |

@@ -348,3 +348,73 @@ fn legacy_node_documents_load_without_glance_fields_and_keep_their_time() {
         Some("No lost progress after a restart")
     );
 }
+
+#[tokio::test]
+async fn postgres_live_status_reads_the_issue_card_without_touching_the_ledger_pg() {
+    let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    for statement in [
+        "INSERT INTO kanban_cards (id, title, status, repo_id, github_issue_number)
+         VALUES ('card-7', 'Seven', 'in_progress', 'Owner/Repo', 7)",
+        "INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status, created_at)
+         VALUES ('d-old', 'card-7', 'implementation', 'completed', NOW() - INTERVAL '1 hour'),
+                ('d-new', 'card-7', 'review', 'dispatched', NOW())",
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+         VALUES ('run-1', 'Owner/Repo', 'agent-1', 'active')",
+        "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, status)
+         VALUES ('entry-1', 'run-1', 'card-7', 'dispatched')",
+        "INSERT INTO sessions (session_key, status, active_dispatch_id, last_heartbeat)
+         VALUES ('session-7', 'turn_active', 'd-new', NOW())",
+    ] {
+        sqlx::query(statement)
+            .execute(&pool)
+            .await
+            .expect("seed live status");
+    }
+    let mut document = input();
+    document.nodes[0].issue_url = Some("https://github.com/owner/repo/issues/7".into());
+    document.nodes[1].issue_url = Some("https://github.com/owner/repo/issues/8".into());
+    let campaign = create(&pool, "live".into(), document)
+        .await
+        .expect("create");
+
+    let live = live_status(&pool, std::slice::from_ref(&campaign))
+        .await
+        .expect("live status");
+    let nodes = &live["live"];
+    assert_eq!(nodes.len(), 1, "issue 8 has no card");
+    let status = &nodes["implement"];
+    assert_eq!(
+        NodeLiveStatus {
+            session_seen_at: None,
+            ..status.clone()
+        },
+        NodeLiveStatus {
+            card_id: "card-7".into(),
+            card_status: "in_progress".into(),
+            dispatch_type: Some("review".into()),
+            dispatch_status: Some("dispatched".into()),
+            session_status: Some("turn_active".into()),
+            session_seen_at: None,
+            running: true,
+            queue_status: Some("dispatched".into()),
+        }
+    );
+    assert!(status.session_seen_at.is_some());
+
+    // A dispatched row whose session went quiet is not running work.
+    sqlx::query("UPDATE sessions SET last_heartbeat = NOW() - INTERVAL '1 hour'")
+        .execute(&pool)
+        .await
+        .expect("age heartbeat");
+    let live = live_status(&pool, std::slice::from_ref(&campaign))
+        .await
+        .expect("live status");
+    assert!(!live["live"]["implement"].running);
+    assert_eq!(
+        get(&pool, "live").await.expect("ledger").revision,
+        campaign.revision
+    );
+    pool.close().await;
+    fixture.drop().await;
+}

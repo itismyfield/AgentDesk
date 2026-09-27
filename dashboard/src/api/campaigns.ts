@@ -57,8 +57,22 @@ export const campaignSchema = z.looseObject({
   updated_at: timestampSchema,
 });
 
+// Read from the node's issue card on every request; never sent back on save.
+export const campaignNodeLiveSchema = z.looseObject({
+  card_id: z.string(),
+  card_status: z.string(),
+  dispatch_type: nullableText,
+  dispatch_status: nullableText,
+  session_status: nullableText,
+  session_seen_at: nullableText,
+  running: z.boolean().default(false),
+  queue_status: nullableText,
+});
+const nodeLiveMapSchema = z.record(z.string(), campaignNodeLiveSchema);
+
 const campaignListResponseSchema = z.looseObject({
   campaigns: z.array(campaignSchema),
+  live: z.record(z.string(), nodeLiveMapSchema).default({}),
   limit: z.number().int().positive().max(500),
   offset: z.number().int().nonnegative(),
 });
@@ -68,14 +82,19 @@ export type CampaignStatus = z.infer<typeof campaignStatusSchema>;
 export type CampaignNodeStatus = z.infer<typeof campaignNodeStatusSchema>;
 export type CampaignNode = z.infer<typeof campaignNodeSchema>;
 export type Campaign = z.infer<typeof campaignSchema>;
+export type CampaignNodeLive = z.infer<typeof campaignNodeLiveSchema>;
+/** Campaign id, then node id. */
+export type CampaignLive = Record<string, Record<string, CampaignNodeLive>>;
 
-export async function getCampaigns(): Promise<Campaign[]> {
+export async function getCampaigns(): Promise<{ campaigns: Campaign[]; live: CampaignLive }> {
   const campaigns = new Map<string, Campaign>();
+  const live: CampaignLive = {};
   const limit = 100;
   for (let offset = 0; ; offset += limit) {
     const result = await request(`/api/campaigns?limit=${limit}&offset=${offset}`, { suppressErrorToast: true }, campaignListResponseSchema);
     for (const campaign of result.campaigns) campaigns.set(campaign.id, campaign);
-    if (result.campaigns.length < limit) return Array.from(campaigns.values());
+    Object.assign(live, result.live);
+    if (result.campaigns.length < limit) return { campaigns: Array.from(campaigns.values()), live };
   }
 }
 

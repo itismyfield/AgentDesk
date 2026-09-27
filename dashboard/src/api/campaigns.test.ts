@@ -20,11 +20,13 @@ afterEach(() => vi.unstubAllGlobals());
 
 it("includes older campaigns beyond the first page with validated pagination metadata", async () => {
   const first = Array.from({ length: 100 }, (_, id) => ({ ...campaignPayload, id: String(id) }));
-  fetchMock.mockResolvedValueOnce(response({ campaigns: first, limit: 100, offset: 0 }))
+  const live = { card_id: "card-7", card_status: "in_progress", dispatch_type: "review", dispatch_status: "dispatched", session_status: "turn_active", session_seen_at: "2026-09-27T12:00:00Z", running: true, queue_status: null };
+  fetchMock.mockResolvedValueOnce(response({ campaigns: first, live: { "0": { review: live } }, limit: 100, offset: 0 }))
     .mockResolvedValueOnce(response({ campaigns: [{ ...campaignPayload, id: "older-campaign" }], limit: 100, offset: 100 }));
   const result = await getCampaigns();
-  expect(result).toHaveLength(101);
-  expect(result.at(-1)?.id).toBe("older-campaign");
+  expect(result.campaigns).toHaveLength(101);
+  expect(result.campaigns.at(-1)?.id).toBe("older-campaign");
+  expect(result.live).toEqual({ "0": { review: live } });
   expect(fetchMock.mock.calls[1][0]).toBe("/api/campaigns?limit=100&offset=100");
 });
 
