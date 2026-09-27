@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "489398249be6a9aa2d494910097163537c04ea8e",
+  "measured_at_sha": "21de14566519abbc598e238b6689466d450cf5bb",
   "records": [
     {
       "root": "migrations/postgres",
@@ -25804,6 +25804,60 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:e58b03fd7352ae714b090f5e845238f809ef57c7a77dd7ee21b6ab4779f3d8d0"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:0b60aae84b88574ca1834d239bbadfd17c7cfab30214ede1fab05250b622e407"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:23f55a95bbbf838c6b732f24a59993436bfb43253af66b33a17d87ec49e9a918"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:5b4dd6c29f75ac9c96391e2be9572bdfaf270dba9c14a8248c632a40c5147215"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:117b9dfa09025d7df82ed47cd9a44f12b7ad0a9e2b193a7e978f7a2be9782e17"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:1b449fa10d4144831c7c6d849d309bae1f745cbd45a6d1c97a5881da217ef254"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:725bf72f63ec07ce0d0601fe93c7b863f4f3606a6a8b0d2fd69289a6cdc2944f"
     },
     {
       "root": "src",
