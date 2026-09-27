@@ -1,3 +1,15 @@
+mod observation;
+use super::health::measurement::{FieldIssue, Measurement};
+pub(crate) use observation::classify_mailbox_findings;
+#[cfg(test)]
+use observation::classify_mailbox_snapshot;
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub(crate) struct RepairRequest {
+    pub(crate) channel_id: u64,
+    pub(crate) expected_has_cancel_token: bool,
+}
+
 use serde_json::{Value, json};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -5,15 +17,8 @@ pub(crate) struct MailboxFinding {
     pub(crate) id: &'static str,
     pub(crate) detail: String,
     pub(crate) evidence: Value,
-    pub(crate) live_work_present: bool,
-}
-
-fn value_bool(value: &Value, key: &str) -> bool {
-    value.get(key).and_then(Value::as_bool).unwrap_or(false)
-}
-
-fn value_usize(value: &Value, key: &str) -> usize {
-    value.get(key).and_then(Value::as_u64).unwrap_or(0) as usize
+    pub(crate) live_work_present: Measurement<bool>,
+    pub(crate) request: Option<RepairRequest>,
 }
 
 /// #5071 relay-tail S1 (I-4): the frontier provenance the health entry
@@ -42,222 +47,6 @@ pub(crate) fn frontier_provenance_evidence(snapshot: &Value) -> Value {
         "durable_observation": field("durable_observation"),
         "hypothesis": field("hypothesis"),
     })
-}
-
-pub(crate) fn classify_mailbox_snapshot(snapshot: &Value) -> Option<MailboxFinding> {
-    let channel_id = snapshot.get("channel_id").and_then(Value::as_u64);
-    let has_cancel_token = value_bool(snapshot, "has_cancel_token");
-    let queue_depth = value_usize(snapshot, "queue_depth");
-    let watcher_attached = value_bool(snapshot, "watcher_attached");
-    let inflight_state_present = value_bool(snapshot, "inflight_state_present");
-    let tmux_present = value_bool(snapshot, "tmux_present");
-    let process_present = value_bool(snapshot, "process_present");
-    let session_active_dispatch_present = snapshot
-        .get("session_active_dispatch_id")
-        .and_then(Value::as_str)
-        .is_some_and(|id| !id.trim().is_empty());
-    let active_dispatch_present =
-        value_bool(snapshot, "active_dispatch_present") || session_active_dispatch_present;
-    let session_record_present = value_bool(snapshot, "session_record_present");
-    let session_status = snapshot
-        .get("session_status")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let agent_turn_status = snapshot
-        .get("agent_turn_status")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    // #5996 S3a: depth is not evidence of live work. A queue stuck behind a dead
-    // turn reads identically to one a live turn is draining, so this term
-    // suppressed the finding for exactly the shape that needed it. `tmux_present`
-    // stays: the route's graded tmux gate is the decider for that shape and is
-    // not wired yet, so widening into it here would pre-empt the route.
-    let live_work_present = tmux_present || process_present || active_dispatch_present;
-
-    if has_cancel_token && !live_work_present {
-        return Some(MailboxFinding {
-            id: "mailbox_busy_without_active_turn",
-            detail: format!(
-                "channel {} has mailbox cancel token without live tmux/process/dispatch evidence",
-                channel_id
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
-            ),
-            evidence: json!({
-                "mailbox": snapshot,
-                // #5071 relay-tail S1 (I-4): read-only, decides nothing.
-                "frontier_provenance": frontier_provenance_evidence(snapshot),
-                "turn_state_sources": {
-                    "agent_turn_status": agent_turn_status,
-                    "queue_depth": queue_depth,
-                    "tmux_present": tmux_present,
-                    "process_present": process_present,
-                    "watcher_attached": watcher_attached,
-                    "inflight_state_present": inflight_state_present,
-                    "active_dispatch_present": active_dispatch_present
-                },
-                "session": {
-                    "record_present": session_record_present,
-                    "status": session_status,
-                    "active_dispatch_present": session_active_dispatch_present
-                }
-            }),
-            live_work_present,
-        });
-    }
-
-    // #5996 S3b: `health/mailbox.rs::mailbox_agent_turn_status` is four-valued —
-    // "active" from a bare cancel token, "residual"/"residual_held" for a
-    // finished turn still holding something, "idle" only otherwise — and reads
-    // "unknown" here on a dcserver predating the field. Demanding "idle" thus
-    // declined on the anchor's mere existence, on every residual state, and on
-    // every older server. Dropping the term only widens the candidate set; the
-    // route still decides. What is left in the three arms below is structural.
-    if queue_depth == 0 && !watcher_attached && inflight_state_present {
-        return Some(MailboxFinding {
-            id: "stale_watcher_inflight_without_active_turn",
-            detail: format!(
-                "channel {} has inflight watcher state with no watcher attached and an empty queue",
-                channel_id
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
-            ),
-            evidence: json!({
-                "mailbox": snapshot,
-                // #5071 relay-tail S1 (I-4): read-only, decides nothing.
-                "frontier_provenance": frontier_provenance_evidence(snapshot),
-                "turn_state_sources": {
-                    "agent_turn_status": agent_turn_status,
-                    "queue_depth": queue_depth,
-                    "tmux_present": tmux_present,
-                    "process_present": process_present,
-                    "watcher_attached": watcher_attached,
-                    "inflight_state_present": inflight_state_present,
-                    "active_dispatch_present": active_dispatch_present
-                },
-                "session": {
-                    "record_present": session_record_present,
-                    "status": session_status,
-                    "active_dispatch_present": session_active_dispatch_present
-                }
-            }),
-            live_work_present,
-        });
-    }
-
-    if queue_depth == 0
-        && session_record_present
-        && matches!(session_status, "turn_active" | "working")
-        && !tmux_present
-        && !active_dispatch_present
-    {
-        return Some(MailboxFinding {
-            id: "tmux_missing_with_session_record",
-            detail: format!(
-                "channel {} has a working session record but no live tmux/process evidence",
-                channel_id
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
-            ),
-            evidence: json!({
-                "mailbox": snapshot,
-                // #5071 relay-tail S1 (I-4): read-only, decides nothing.
-                "frontier_provenance": frontier_provenance_evidence(snapshot),
-                "turn_state_sources": {
-                    "agent_turn_status": agent_turn_status,
-                    "queue_depth": queue_depth,
-                    "tmux_present": tmux_present,
-                    "process_present": process_present,
-                    "watcher_attached": watcher_attached,
-                    "inflight_state_present": inflight_state_present,
-                    "active_dispatch_present": active_dispatch_present,
-                    "session_status": session_status,
-                    "session_record_present": session_record_present
-                }
-            }),
-            live_work_present,
-        });
-    }
-
-    // `tmux_present` keeps `live_work_present` true here, so the orchestrator
-    // reports this arm as SKIPPED rather than posting. That is still the repair:
-    // doctor names the stuck channel instead of staying silent. Carrying a
-    // tmux-present channel to the route is the graded gate's job, not the CLI's.
-    if tmux_present && !watcher_attached && inflight_state_present {
-        return Some(MailboxFinding {
-            id: "completed_output_not_relayed",
-            detail: format!(
-                "channel {} has a tmux session and stale inflight state but no active watcher",
-                channel_id
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
-            ),
-            evidence: json!({
-                "mailbox": snapshot,
-                // #5071 relay-tail S1 (I-4): read-only, decides nothing.
-                "frontier_provenance": frontier_provenance_evidence(snapshot),
-                "turn_state_sources": {
-                    "agent_turn_status": agent_turn_status,
-                    "queue_depth": queue_depth,
-                    "tmux_present": tmux_present,
-                    "process_present": process_present,
-                    "watcher_attached": watcher_attached,
-                    "inflight_state_present": inflight_state_present,
-                    "active_dispatch_present": active_dispatch_present,
-                    "session_status": session_status,
-                    "session_record_present": session_record_present
-                },
-                "delivery_completed": false,
-                "rebind_spawned": snapshot
-                    .get("rebind_spawned")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-            }),
-            live_work_present,
-        });
-    }
-
-    None
-}
-
-pub(crate) fn classify_mailbox_findings(body: &Value) -> Vec<MailboxFinding> {
-    let mut findings = body
-        .get("mailboxes")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(classify_mailbox_snapshot)
-        .collect::<Vec<_>>();
-
-    let global_active = value_usize(body, "global_active");
-    let actual_active_turns = body
-        .get("mailboxes")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|snapshot| {
-            value_bool(snapshot, "has_cancel_token")
-                || snapshot.get("agent_turn_status").and_then(Value::as_str) == Some("active")
-        })
-        .count();
-    if global_active > actual_active_turns {
-        findings.push(MailboxFinding {
-            id: "global_active_without_active_turn",
-            detail: format!(
-                "global_active={} exceeds actual active mailbox turns={}",
-                global_active, actual_active_turns
-            ),
-            evidence: json!({
-                "turn_state_sources": {
-                    "global_active": global_active,
-                    "actual_active_turns": actual_active_turns
-                }
-            }),
-            live_work_present: true,
-        });
-    }
-
-    findings
 }
 
 #[cfg(test)]
@@ -360,7 +149,7 @@ mod tests {
 
         assert_eq!(
             verdicts[0],
-            Some(("mailbox_busy_without_active_turn", false))
+            Some(("mailbox_busy_without_active_turn", Ok(false)))
         );
         assert_eq!(verdicts[0], verdicts[1]);
         assert_eq!(verdicts[0], verdicts[2]);
@@ -380,7 +169,7 @@ mod tests {
 
         assert_eq!(finding.id, "mailbox_busy_without_active_turn");
         // False is what carries the candidate to the route. The route decides.
-        assert!(!finding.live_work_present);
+        assert_eq!(finding.live_work_present, Ok(false));
     }
 
     /// The subtraction is bounded to `queue_depth`. Each structural term still
@@ -395,7 +184,7 @@ mod tests {
 
             if let Some(finding) = classify_mailbox_snapshot(&snapshot) {
                 assert!(
-                    finding.live_work_present,
+                    finding.live_work_present == Ok(true),
                     "{key} must still count as live work, got finding {}",
                     finding.id
                 );
@@ -428,7 +217,10 @@ mod tests {
             mutate(&mut snapshot);
             let finding =
                 classify_mailbox_snapshot(&snapshot).expect("a named finding, not silence");
-            (finding.id, finding.live_work_present)
+            (
+                finding.id,
+                finding.live_work_present.expect("measured live work"),
+            )
         }
 
         // Token held (so the status is reachable), live evidence elsewhere.
@@ -473,14 +265,7 @@ mod tests {
         );
     }
 
-    /// Pins the production call site these predicates hang from:
-    /// `classify_mailbox_findings` is what `apply_stale_mailbox_fixes` and
-    /// `check_mailbox_consistency` call, and it reaches the per-mailbox verdict
-    /// through one `filter_map`. Deleting that reaches this test.
-    ///
-    /// It does not reach the two call sites above it, which need a live
-    /// `HealthSnapshot` and an HTTP client; that wiring predates this change and
-    /// stays unpinned.
+    // The aggregate classifier preserves per-mailbox findings and their reasons.
     #[test]
     fn classify_mailbox_findings_carries_the_per_mailbox_verdict() {
         let mut wedged = mailbox_with_provenance(e2_provenance());
@@ -511,7 +296,10 @@ mod tests {
         };
 
         let drained = verdict_with(json!(0));
-        assert_eq!(drained, Some(("mailbox_busy_without_active_turn", false)));
+        assert_eq!(
+            drained,
+            Some(("mailbox_busy_without_active_turn", Ok(false)))
+        );
         assert_eq!(drained, verdict_with(json!(8_192)));
         assert_eq!(drained, verdict_with(Value::Null));
     }
