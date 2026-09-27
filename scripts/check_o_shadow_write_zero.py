@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Fail when non-test shadow code can reach an effect: an effect-capable std/external path,
-an unaudited crate item, or a file writer outside root.rs's writer functions."""
+"""Fail when non-test shadow code can reach an effect outside o_shadow; see CRATE_ALLOW, ROOT_ONLY, DENIED."""
 
 import re
 import sys
+from itertools import accumulate
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -18,7 +18,7 @@ CRATE_ALLOW = {
 EXTERNAL_ROOTS = {"std", "core", "alloc", "chrono", "serde", "serde_json", "sha2", "hex", "tokio", "tracing", "libc"}
 PRIMITIVE = re.compile(r"[iu](8|16|32|64|128|size)|f32|f64|bool|char|str")
 READ_ONLY = {"std::fs::File", "std::fs::File::open", "std::fs::Metadata", "std::fs::metadata", "std::fs::symlink_metadata",
-             "std::os::unix::fs::MetadataExt"}
+             "std::os::unix::fs::MetadataExt", "std::os::unix::fs::MetadataExt::nlink"}
 # Writer items allowed only in root.rs; their constructors must sit inside ROOT_WRITERS functions.
 ROOT_ONLY = ("std::fs::OpenOptions", "std::fs::DirBuilder", "std::os::unix::fs::OpenOptionsExt", "libc::O_NOFOLLOW", "std::io::Write")
 ROOT_WRITERS = {"under", "open"}
@@ -28,24 +28,18 @@ TOKENS = [
     ("discord http", r"\.http\b|\b(send|edit|delete)_message\b|\bSharedData\b"),
     ("tmux mutation", r"send-keys|(paste|load)-buffer|kill-(session|server|pane)"),
     ("relay state", r"(?i)mailbox|inflight|\bsave_channel_queue\b|\badvance_last_message_checkpoint\b"),
-    ("unchecked escape", r"\bunsafe\b|\bextern\b|#\[path\b|\bset_(len|permissions|modified|times)\b"),
+    ("unchecked escape", r"\bunsafe\b|\bextern\b|#\[path\b|\binclude!|::\s*$|^\s*::|\bset_(len|permissions|modified|times)\b"),
 ]
 TOKEN = re.compile(r'//[^\n]*|/\*.*?\*/|r(#*)".*?"\1|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\\n])\'', re.S)
 TEST_MOD = re.compile(r"#\[cfg\(test\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{")
 USE = re.compile(r"\buse\s+([^;]+);")
 USE_GROUP = re.compile(r"((?:\w+::)*)\{([^{}]*)\}")
-PATH = re.compile(r"(?<![\w:])(?:[A-Za-z_]\w*::)+[A-Za-z_*]\w*")
+PATH = re.compile(r"(?<![\w:])(?:::)?(?:[A-Za-z_]\w*::)+[A-Za-z_*]\w*")
 
-def blank(text: str) -> str:
-    return re.sub(r"[^\n]", " ", text)
-
+blank = lambda text: re.sub(r"[^\n]", " ", text)  # noqa: E731
 def brace_end(text: str, open_at: int) -> int:
-    depth = 0
-    for index in range(open_at, len(text)):
-        depth += {"{": 1, "}": -1}.get(text[index], 0)
-        if depth == 0:
-            return index
-    return len(text) - 1
+    depths = accumulate({"{": 1, "}": -1}.get(char, 0) for char in text[open_at:])
+    return open_at + next((index for index, depth in enumerate(depths) if depth == 0), len(text) - open_at - 1)
 
 def expand(tree: str) -> list[tuple[str, str]]:
     """(path, local name) pairs of one `use` tree, flattened innermost braces first."""
@@ -61,14 +55,10 @@ def resolve(path: str, module: str, aliases: dict[str, str]) -> str:
     segments = path.split("::")
     if segments[0] in aliases:
         segments = aliases[segments[0]].split("::") + segments[1:]
-    if segments[0] == "self":
-        segments = module.split("::") + segments[1:]
-    if segments[0] == "super":
-        base = module.split("::")
-        while segments[0] == "super":
-            base, segments = base[:-1], segments[1:]
-        segments = base + segments
-    return "::".join(segments)
+    base = module.split("::") if segments[0] in ("self", "super") else []
+    while segments[:1] == ["super"]:
+        base, segments = base[:-1], segments[1:]
+    return "::".join(base + (segments[1:] if segments[:1] == ["self"] else segments))
 
 def verdict(path: str, in_root: bool) -> str | None:
     if path == SHADOW_MODULE or path.startswith(SHADOW_MODULE + "::"):
@@ -102,12 +92,12 @@ def scan_text(name: str, text: str, module: str, in_root: bool) -> list[str]:
         for path, local in expand(match.group(1)):
             aliases[local] = resolve(path, module, aliases)
             uses.append((match.start(), aliases[local]))
-    body = USE.sub(lambda m: blank(m.group(0)), bare)
+    body = re.sub(r"[ \t]*::[ \t]*", "::", USE.sub(lambda m: blank(m.group(0)), bare))
     for match in PATH.finditer(body):
-        first = match.group(0).split("::")[0]
-        if PRIMITIVE.fullmatch(first) or first[0].isupper() and first not in aliases:
+        path = match.group(0).removeprefix("::")
+        if PRIMITIVE.fullmatch(first := path.split("::")[0]) or first[0].isupper() and first not in aliases:
             continue
-        uses.append((match.start(), resolve(match.group(0), module, aliases)))
+        uses.append((match.start(), resolve(path, module, aliases)))
     hits += [f"{name}:{line(offset)}: {reason}: {path}"
              for offset, path in uses if (reason := verdict(path, in_root))]
     if in_root:
@@ -132,13 +122,15 @@ BAD = [
     ("fn f() { let _ = File::create(p); }\nuse std::fs::File;", False),
     ("use std::fs::OpenOptions;\nfn append() { let _ = OpenOptions::new(); }", True),
     ("fn f() { save_channel_queue(); }", False),
+    ("fn f() { let _ = ::std::fs::write(p, b); }", False),
+    ("fn f() { let _ = std :: fs :: write(p, b); }", False),
+    ('include!("../../elsewhere.rs");', False),
     ("#[cfg(test)]\nmod tests {\n}\nfn f() { std::fs::write(p, b); }\n", False),
 ]
 GOOD = [
     ("use std::fs::OpenOptions;\nfn open() { let _ = OpenOptions::new(); }", True),
     ("use crate::services::tui_prompt_dedupe::{TuiRuntimeBinding, peek_tmux_runtime_binding as peek};\n"
-     "use super::root::file_identity;\nuse std::io;\nfn f() { let _ = std::fs::File::open(p); let _ = io::Error::other(e); }",
-     False),
+     "use super::root::file_identity;\nuse std::io;\nfn f() { let _ = std::fs::File::open(p); let _ = io::Error::other(e); }", False),
     ("// Http, mailbox and std::fs::write appear only in comments\nfn f() {}", False),
     ('#[cfg(test)]\nmod tests {\n    fn t() { std::fs::write(p, "}"); }\n}\n', False),
 ]
