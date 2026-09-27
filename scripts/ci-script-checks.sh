@@ -268,7 +268,7 @@ fi
 
 if run_check guards "H2 tmux boundary measurer and admission self-tests"; then
 # The gates are inert in CI until the baseline lands; their unit tests, module map included, run now.
-"$PYTHON" -m unittest tests.test_h2_measure tests.test_h2_admission tests.test_h2_modmap
+"$PYTHON" -m unittest tests.test_h2_measure tests.test_h2_admission tests.test_h2_modmap tests.test_h2_cfg_compare
 fi
 
 if run_check guards "Reachability row-independence + change-surface gate (#5071 T4-B1)"; then
@@ -675,16 +675,8 @@ if run_check contracts "API docs coverage gate (#3719)"; then
 fi
 
 if run_check cargo "Contract symbol-ref doc<->code sync gate (#4268)"; then
-# docs/relay-state-contract.md anchors code with `sym:` symbol paths. This check
-# verifies the doc's `sym:` anchors exactly match the references PARSED FROM THE
-# CODE in the relay_state_contract_refs blocks (use / field / assoc-fn forms,
-# never comments) — it does NOT judge whether a symbol exists. Symbol EXISTENCE
-# is proven by the compiler: those reference blocks fail
-# `cargo check --workspace --all-targets` (a required gate) if a symbol is
-# renamed/moved/removed. Splitting it this way is what killed the regex-bypass
-# game (raw strings / macros / cfg can't fool a real compile), and deriving the
-# anchor set from the compiled code (not `// sym:` comments) is what killed the
-# r3 comment-decoupling bypass.
+# Match relay-state anchors to compiler-checked Rust references and H2 anchors to Python imports.
+# Both documents must agree with the referenced symbols; Rust existence is checked by cargo.
 "$PYTHON" scripts/check_contract_symbol_refs.py
 "$PYTHON" -m unittest tests.test_contract_symbol_refs
 fi

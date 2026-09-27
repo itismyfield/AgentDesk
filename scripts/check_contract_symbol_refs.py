@@ -1,90 +1,13 @@
 #!/usr/bin/env python3
 
-"""Doc<->code sync gate for relay-state contract symbol anchors (#4268).
-
-Background: ``docs/relay-state-contract.md`` used ``file:line`` hard references
-that module decomposition silently broke. Symbol-path references fixed the line
-drift, but a *text* gate that judged whether a Rust symbol still exists kept
-losing to raw strings, macros, cfg-gated items, and trait/impl matching — every
-round found a new regex bypass. Judging Rust definitions with regex is the wrong
-tool.
-
-Round-3 review found the deeper hole: the previous version derived the Rust
-anchor SET from ``// sym:`` *comments*. A comment is not compiled, so you could
-comment out (or ``use super::*;``-replace) the real reference and keep the
-``// sym:`` label — the set comparison still passed and ``cargo check`` no longer
-proved anything. The label and the compiled reference were unbound.
-
-This gate closes that: it parses the anchor set **from the compiler-checked code
-itself**, never from comments. There are no ``// sym:`` labels anymore.
-
-* **Existence is proven by the compiler.** Each anchor is a real Rust reference
-  inside a ``#[cfg(test)] mod relay_state_contract_refs`` block:
-
-  - ``use <path> as _;`` for functions/items,
-  - ``let _ = <Type>::<assoc_fn>;`` for associated functions,
-  - ``let _ = |x: &<Type>| { let _ = &x.<field>; };`` for fields (``use`` cannot
-    name a field).
-
-  Each fails to COMPILE if its symbol is renamed/moved/removed.
-  ``cargo check --workspace --all-targets`` — an already-required CI gate —
-  compiles those blocks, so the compiler is the source of truth for existence.
-  Raw strings, macros, and cfg items cannot fool a real compile.
-
-* **The anchor NAME is parsed from that same code**, not a comment. The parser
-  reads the ``use`` path / field expression, resolves ``super::`` /
-  ``crate::services::`` to the canonical doc path (with the historical
-  ``discord::`` segment omitted), and that resolved path is the anchor. Comment
-  out the reference and the anchor vanishes with it;
-  the set comparison then fails. There is no label left to lie.
-
-* **Block cfg and item attributes are byte-exact whitelists, not parsed.** The
-  block's gate must be one of ``_ALLOWED_ANCHOR_CFGS`` (``#[cfg(test)]`` or
-  ``#[cfg(all(test, unix))]``) and every attribute INSIDE the block must be
-  ``#[test]`` (``_ALLOWED_ITEM_ATTRS``). ``unix`` is allowed because the only
-  required PR Rust compile is ``check_fast`` (ubuntu-latest), where ``cfg(unix)``
-  is true, so that required job compiles the block. Anything else fails loudly —
-  a windows/non-ubuntu gate (compiled by no required job), a malformed cfg, or an
-  item-level ``#[cfg(feature = "never")]`` that would drop one reference while
-  the block survives. There is no cfg grammar/evaluator: this PR's history is
-  that every added cfg parser sprouted a new bypass within a round, so we removed
-  interpretation and enumerate the exact allowed spellings instead.
-
-* **All Rust-source matching runs on comment/string-stripped text** (r6).
-  ``_strip_comments_and_strings`` blanks ``//`` comments, nested ``/* */``
-  comments, and (raw) string literals with same-length whitespace before block
-  discovery, the attribute walk, and reference matching. So a comment cannot
-  break the attribute walk (rustc attaches attributes through comments/blank
-  lines — an illegal cfg hidden above a comment is still collected and fails), a
-  fake block inside a raw string/block comment cannot shadow the real one, and a
-  block-commented reference stops counting as an anchor (set mismatch, loud
-  FAIL).
-
-* **Doc<->code agreement is proven here** by a cheap, exact set comparison: the
-  distinct ``sym:`` anchors in the doc must equal the distinct anchors parsed
-  from the reference blocks. This script never parses Rust *definitions*, only
-  the reference expressions, so there is nothing for a raw string / macro / cfg
-  to bypass.
-
-The round-2 "mislabeled comment" limitation is GONE: the anchor is now the
-symbol the code actually references, so a wrong label is impossible — there is
-no label.
-
-Threat model (r7 — read before "hardening" this further): this gate defends
-against DRIFT and honest mistakes — decomposition moves, renames, accidental
-comment-outs, refactors that nest the anchor module under a cfg'd parent. It
-does NOT defend against a deliberate in-repo saboteur: anyone who can commit
-adversarial Rust (macro decoys, lexer traps) can just as easily edit this
-checker, the whitelists, or the doc itself, so an in-repo gate cannot beat an
-in-repo attacker even in principle. Do not grow this checker to chase such
-constructs; see PR #4388's seven review rounds for why every added parser layer
-became new attack surface.
-"""
+"""Sync relay-state Rust references and H2 Python imports with their contract docs.
+Rust symbol existence is compiler-checked; Python references are imported by this gate."""
 
 from __future__ import annotations
 
 import argparse
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -92,6 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DISCORD_ROOT = REPO_ROOT / "src" / "services" / "discord"
 
 DEFAULT_DOC = REPO_ROOT / "docs" / "relay-state-contract.md"
+H2_DOC = REPO_ROOT / "docs" / "contracts" / "h2-tmux-boundary-ratchet.md"
 
 # Rust files hosting a `#[cfg(test)] mod relay_state_contract_refs` block, mapped
 # to the module path (from `src/services/discord/`) of the FILE that hosts the
@@ -639,6 +563,26 @@ def format_report(report: ContractRefReport) -> str:
     return "\n".join(lines)
 
 
+def check_h2_contract(doc: Path = H2_DOC) -> list[str]:
+    """Bind the H2 doc to imported Python functions without parsing Rust definitions."""
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "ci"))
+    try:
+        from h2_admission import evaluate, rw_problem
+        from h2_cfg_compare import compare_cfgs
+        from h2_depinfo import ro_problems, walker_problems
+        from h2_measure import measure, regen
+        from h2_modmap import map_modules
+
+        refs = (evaluate, rw_problem, compare_cfgs, ro_problems, walker_problems, measure, regen, map_modules)
+        anchors = {f"{ref.__module__}::{ref.__name__}" for ref in refs}
+        documented = extract_doc_anchors(doc.read_text(encoding="utf-8"))
+    except (ImportError, AttributeError, OSError, UnicodeError) as exc:
+        return [f"H2 contract reference unavailable: {exc}"]
+    errors = [f"H2 contract: sym:{a} has no imported reference" for a in sorted(documented - anchors)]
+    errors += [f"H2 contract: imported {a} is not documented" for a in sorted(anchors - documented)]
+    return errors
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Contract symbol-ref sync gate (#4268).")
     parser.add_argument("--doc", type=Path, default=DEFAULT_DOC, help="Contract doc path.")
@@ -649,7 +593,9 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     report = build_report(doc=args.doc)
     print(format_report(report))
-    return 0 if report.is_clean() else 1
+    h2_errors = check_h2_contract()
+    print("\n".join(h2_errors) if h2_errors else "H2 contract symbol-ref check passed (Python imports in sync)")
+    return 0 if report.is_clean() and not h2_errors else 1
 
 
 if __name__ == "__main__":
