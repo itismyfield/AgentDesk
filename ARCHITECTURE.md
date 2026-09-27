@@ -27,10 +27,19 @@ src/
 │   ├── dcserver/
 │   │   └── startup.rs
 │   ├── doctor/
+│   │   ├── health/
+│   │   │   └── measurement.rs
+│   │   ├── mailbox/
+│   │   │   └── observation.rs
 │   │   ├── orchestrator/
 │   │   │   ├── config_dir_checks.rs
 │   │   │   ├── health_snapshot.rs
-│   │   │   └── provider_credentials.rs
+│   │   │   ├── observation_checks.rs
+│   │   │   ├── observation_tests.rs
+│   │   │   ├── provider_credentials.rs
+│   │   │   ├── repair_response.rs
+│   │   │   ├── report_display.rs
+│   │   │   └── stale_mailbox_repair.rs
 │   │   ├── contract.rs
 │   │   ├── health.rs
 │   │   ├── mailbox.rs
@@ -316,6 +325,7 @@ src/
 │   │   ├── health_api/
 │   │   │   ├── public_projection.rs
 │   │   │   ├── runtime_profile.rs
+│   │   │   ├── session_repair.rs
 │   │   │   └── unread_tail_attribution_tests.rs
 │   │   ├── review_verdict/
 │   │   │   ├── decision_route.rs
@@ -628,6 +638,8 @@ src/
 │   ├── codex_tmux_wrapper/
 │   │   └── input.rs
 │   ├── codex_tui/
+│   │   ├── input/
+│   │   │   └── composer_lock.rs
 │   │   ├── rollout_tail/
 │   │   │   └── parser.rs
 │   │   ├── session/
@@ -770,6 +782,7 @@ src/
 │   │   │   │   ├── abandon.rs
 │   │   │   │   ├── identity.rs
 │   │   │   │   ├── mod.rs
+│   │   │   │   ├── operator_disposition.rs
 │   │   │   │   └── reconcile_gate.rs
 │   │   │   ├── model/
 │   │   │   │   ├── identity.rs
@@ -1650,6 +1663,8 @@ src/
 │   │   ├── repo_resolver.rs
 │   │   ├── runner.rs
 │   │   └── worktree_resolver.rs
+│   ├── health_diagnostics/
+│   │   └── session_state.rs
 │   ├── kakao/
 │   │   ├── account.rs
 │   │   ├── calendar.rs
