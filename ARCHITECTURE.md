@@ -27,10 +27,19 @@ src/
 │   ├── dcserver/
 │   │   └── startup.rs
 │   ├── doctor/
+│   │   ├── health/
+│   │   │   └── measurement.rs
+│   │   ├── mailbox/
+│   │   │   └── observation.rs
 │   │   ├── orchestrator/
 │   │   │   ├── config_dir_checks.rs
 │   │   │   ├── health_snapshot.rs
-│   │   │   └── provider_credentials.rs
+│   │   │   ├── observation_checks.rs
+│   │   │   ├── observation_tests.rs
+│   │   │   ├── provider_credentials.rs
+│   │   │   ├── repair_response.rs
+│   │   │   ├── report_display.rs
+│   │   │   └── stale_mailbox_repair.rs
 │   │   ├── contract.rs
 │   │   ├── health.rs
 │   │   ├── mailbox.rs
@@ -196,6 +205,8 @@ src/
 │   └── types.rs
 ├── engine/
 │   ├── ops/
+│   │   ├── exec_ops/
+│   │   │   └── session_liveness_tests.rs
 │   │   ├── agent_ops.rs
 │   │   ├── auto_queue_ops.rs
 │   │   ├── cards_ops.rs
@@ -316,6 +327,7 @@ src/
 │   │   ├── health_api/
 │   │   │   ├── public_projection.rs
 │   │   │   ├── runtime_profile.rs
+│   │   │   ├── session_repair.rs
 │   │   │   └── unread_tail_attribution_tests.rs
 │   │   ├── review_verdict/
 │   │   │   ├── decision_route.rs
@@ -540,6 +552,7 @@ src/
 │   │   ├── hook_bundle.rs
 │   │   ├── hook_output_guard.rs
 │   │   ├── hook_output_guard_tests.rs
+│   │   ├── hook_payload_fixture_tests.rs
 │   │   ├── hook_registry.rs
 │   │   ├── hook_relay.rs
 │   │   ├── hook_server.rs
@@ -550,6 +563,7 @@ src/
 │   │   ├── mod.rs
 │   │   ├── prompt_readiness.rs
 │   │   ├── session.rs
+│   │   ├── source_verify.rs
 │   │   ├── startup_dialog.rs
 │   │   ├── transcript_tail.rs
 │   │   └── tui_relay.rs
@@ -629,6 +643,8 @@ src/
 │   ├── codex_tmux_wrapper/
 │   │   └── input.rs
 │   ├── codex_tui/
+│   │   ├── input/
+│   │   │   └── composer_lock.rs
 │   │   ├── rollout_tail/
 │   │   │   └── parser.rs
 │   │   ├── session/
@@ -772,6 +788,7 @@ src/
 │   │   │   │   ├── abandon.rs
 │   │   │   │   ├── identity.rs
 │   │   │   │   ├── mod.rs
+│   │   │   │   ├── operator_disposition.rs
 │   │   │   │   └── reconcile_gate.rs
 │   │   │   ├── model/
 │   │   │   │   ├── identity.rs
@@ -830,6 +847,24 @@ src/
 │   │   │   ├── bounded_cache_file.rs
 │   │   │   └── claude.rs
 │   │   ├── outbound/
+│   │   │   ├── delivery_obligation/
+│   │   │   │   ├── state/
+│   │   │   │   │   ├── proof_access.rs
+│   │   │   │   │   ├── proof_input.rs
+│   │   │   │   │   ├── proof_tests.rs
+│   │   │   │   │   └── whole_proof.rs
+│   │   │   │   ├── codec_tests.rs
+│   │   │   │   ├── fence.rs
+│   │   │   │   ├── load.rs
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── protocol.rs
+│   │   │   │   ├── reader.rs
+│   │   │   │   ├── reader_tests.rs
+│   │   │   │   ├── schema.rs
+│   │   │   │   ├── state.rs
+│   │   │   │   ├── tests.rs
+│   │   │   │   ├── validation.rs
+│   │   │   │   └── validation_tests.rs
 │   │   │   ├── manual_delivery/
 │   │   │   │   ├── headless_nonce.rs
 │   │   │   │   └── production_nonce_tests.rs
@@ -1191,6 +1226,7 @@ src/
 │   │   │   ├── no_result_exits.rs
 │   │   │   ├── orphan_status_panel_cleanup.rs
 │   │   │   ├── orphan_terminal_frame.rs
+│   │   │   ├── owed_range_baseline_tests.rs
 │   │   │   ├── panel_decisions.rs
 │   │   │   ├── panel_decisions_tests.rs
 │   │   │   ├── placeholder_reclaim.rs
@@ -1205,6 +1241,8 @@ src/
 │   │   │   ├── single_message_footer.rs
 │   │   │   ├── single_message_footer_tests.rs
 │   │   │   ├── stall_exit.rs
+│   │   │   ├── streaming_baseline_tests.rs
+│   │   │   ├── streaming_harness_tests.rs
 │   │   │   ├── streaming_session_banner.rs
 │   │   │   ├── streaming_status_tick.rs
 │   │   │   ├── supervisor_relay.rs
@@ -1642,6 +1680,8 @@ src/
 │   │   ├── repo_resolver.rs
 │   │   ├── runner.rs
 │   │   └── worktree_resolver.rs
+│   ├── health_diagnostics/
+│   │   └── session_state.rs
 │   ├── kakao/
 │   │   ├── account.rs
 │   │   ├── calendar.rs
@@ -1708,9 +1748,13 @@ src/
 │   │   ├── binary_resolver/
 │   │   │   ├── grok.rs
 │   │   │   ├── resolution.rs
+│   │   │   ├── runtime_path.rs
 │   │   │   └── windows_codex.rs
 │   │   ├── tmux/
-│   │   │   └── availability.rs
+│   │   │   ├── liveness/
+│   │   │   │   └── tests.rs
+│   │   │   ├── availability.rs
+│   │   │   └── liveness.rs
 │   │   ├── binary_resolver.rs
 │   │   ├── dump_tool.rs
 │   │   ├── mod.rs

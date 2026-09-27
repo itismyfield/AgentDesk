@@ -60,7 +60,7 @@
 | `DELETE` | `/api/channels/{channel_id}/monitoring/{key}` | `monitoring::remove_monitoring` | `src/server/routes/monitoring.rs:52` | `src/server/routes/domains/runtime.rs:122` |
 | `PATCH` | `/api/channels/{id}` | `provider_auth_profiles::patch_channel_auth_profile` | `src/server/routes/provider_auth_profiles.rs:366` | `src/server/routes/domains/integrations.rs:70` |
 | `GET` | `/api/channels/{id}/queue` | `queue_api::list_channel_queue` | `src/server/routes/queue_api.rs:21` | `src/server/routes/domains/runtime.rs:109` |
-| `POST` | `/api/channels/{id}/relay-recovery` | `health_api::relay_recovery_handler` | `src/server/routes/health_api.rs:1478` | `src/server/routes/domains/runtime.rs:114` |
+| `POST` | `/api/channels/{id}/relay-recovery` | `health_api::relay_recovery_handler` | `src/server/routes/health_api.rs:1432` | `src/server/routes/domains/runtime.rs:114` |
 | `GET` | `/api/channels/{id}/watcher-state` | `queue_api::get_watcher_state` | `src/server/routes/queue_api.rs:246` | `src/server/routes/domains/runtime.rs:110` |
 | `GET` | `/api/claude-accounts` | `claude_accounts_api::get_claude_accounts` | `src/server/routes/claude_accounts_api.rs:16` | `src/server/routes/domains/integrations.rs:42` |
 | `POST` | `/api/claude-accounts/switch` | `claude_accounts_api::switch_claude_account` | `src/server/routes/claude_accounts_api.rs:47` | `src/server/routes/domains/integrations.rs:46` |
@@ -88,12 +88,12 @@
 | `DELETE` | `/api/departments/{id}` | `departments::delete_department` | `src/server/routes/departments.rs:166` | `src/server/routes/domains/admin.rs:58` |
 | `PATCH` | `/api/departments/{id}` | `departments::update_department` | `src/server/routes/departments.rs:112` | `src/server/routes/domains/admin.rs:58` |
 | `GET` | `/api/discord/bindings` | `discord::list_bindings` | `src/server/routes/discord.rs:19` | `src/server/routes/domains/integrations.rs:92` |
-| `POST` | `/api/discord/bot-tokens/reload` | `health_api::reload_discord_bot_tokens_handler` | `src/server/routes/health_api.rs:1596` | `src/server/routes/domains/ops.rs:37` |
+| `POST` | `/api/discord/bot-tokens/reload` | `health_api::reload_discord_bot_tokens_handler` | `src/server/routes/health_api.rs:1550` | `src/server/routes/domains/ops.rs:37` |
 | `GET` | `/api/discord/channels/{id}` | `discord::channel_info` | `src/server/routes/discord.rs:407` | `src/server/routes/domains/integrations.rs:97` |
 | `GET` | `/api/discord/channels/{id}/messages` | `discord::channel_messages` | `src/server/routes/discord.rs:182` | `src/server/routes/domains/integrations.rs:93` |
-| `POST` | `/api/discord/send` | `health_api::send_handler` | `src/server/routes/health_api.rs:1544` | `src/server/routes/domains/ops.rs:36` |
-| `POST` | `/api/discord/send-dm` | `health_api::senddm_handler` | `src/server/routes/health_api.rs:1741` | `src/server/routes/domains/ops.rs:46` |
-| `POST` | `/api/discord/send-to-agent` | `health_api::send_to_agent_handler` | `src/server/routes/health_api.rs:1699` | `src/server/routes/domains/ops.rs:42` |
+| `POST` | `/api/discord/send` | `health_api::send_handler` | `src/server/routes/health_api.rs:1498` | `src/server/routes/domains/ops.rs:36` |
+| `POST` | `/api/discord/send-dm` | `health_api::senddm_handler` | `src/server/routes/health_api.rs:1695` | `src/server/routes/domains/ops.rs:46` |
+| `POST` | `/api/discord/send-to-agent` | `health_api::send_to_agent_handler` | `src/server/routes/health_api.rs:1653` | `src/server/routes/domains/ops.rs:42` |
 | `GET` | `/api/dispatch-outbox/failed` | `health_api::list_dispatch_outbox_failures_handler` | `src/server/routes/health_api.rs:883` | `src/server/routes/domains/ops.rs:22` |
 | `POST` | `/api/dispatch-outbox/failed` | `health_api::ack_dispatch_outbox_failures_handler` | `src/server/routes/health_api.rs:906` | `src/server/routes/domains/ops.rs:22` |
 | `GET` | `/api/dispatched-sessions` | `dispatched_sessions::list_dispatched_sessions` | `src/server/routes/dispatched_sessions.rs:17` | `src/server/routes/domains/runtime.rs:53` |
@@ -140,7 +140,7 @@
 | `POST` | `/api/hook/reset-status` | `hooks::reset_status` | `src/server/routes/hooks.rs:36` | `src/server/routes/domains/runtime.rs:146` |
 | `DELETE` | `/api/hook/session/{sessionKey}` | `hooks::disconnect_session` | `src/server/routes/hooks.rs:72` | `src/server/routes/domains/runtime.rs:148` |
 | `POST` | `/api/hook/skill-usage` | `hooks::skill_usage` | `src/server/routes/hooks.rs:55` | `src/server/routes/domains/runtime.rs:147` |
-| `POST` | `/api/inflight/rebind` | `health_api::rebind_inflight_handler` | `src/server/routes/health_api.rs:1663` | `src/server/routes/domains/runtime.rs:26` |
+| `POST` | `/api/inflight/rebind` | `health_api::rebind_inflight_handler` | `src/server/routes/health_api.rs:1617` | `src/server/routes/domains/runtime.rs:26` |
 | `GET` | `/api/internal/card-thread` | `dispatches::get_card_thread` | `src/server/routes/dispatches/thread_reuse.rs:59` | `src/server/routes/domains/runtime.rs:48` |
 | `POST` | `/api/internal/escalation/emit` | `escalation::emit_escalation` | `src/server/routes/escalation.rs:1355` | `src/server/routes/domains/admin.rs:88` |
 | `POST` | `/api/internal/link-dispatch-thread` | `dispatches::link_dispatch_thread` | `src/server/routes/dispatches/thread_reuse.rs:37` | `src/server/routes/domains/runtime.rs:44` |

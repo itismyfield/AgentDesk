@@ -47,8 +47,8 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_CONFIG` | `src/config.rs:2799` (+6 more) | The on-disk config path the running server loaded from, resolved with the same precedence as [`load`] (`$AGENTDESK_CONFIG` → runtime root → cwd → home). |
 | `AGENTDESK_CSWAP_PATH` | `src/services/cswap.rs:22` (+1 more) |  |
 | `AGENTDESK_DCSERVER_LABEL` | `src/cli/dcserver.rs:18` (+2 more) |  |
-| `AGENTDESK_DCSERVER_LOG_MAX_BYTES` | `src/logging.rs:213` |  |
-| `AGENTDESK_DCSERVER_LOG_MAX_FILES` | `src/logging.rs:221` |  |
+| `AGENTDESK_DCSERVER_LOG_MAX_BYTES` | `src/logging.rs:264` |  |
+| `AGENTDESK_DCSERVER_LOG_MAX_FILES` | `src/logging.rs:272` |  |
 | `AGENTDESK_DELIVERY_RECORD_AUTHORITY` | `src/services/discord/outbound/delivery_record.rs:1282` | #3089 B2b read-authority flag (`AGENTDESK_DELIVERY_RECORD_AUTHORITY`, OnceLock, compiled default ON since #5071 T1 S8-2). |
 | `AGENTDESK_DELIVERY_RECORD_SHADOW` | `src/services/discord/outbound/delivery_record.rs:1211` | #3089 B1 shadow-write flag (`AGENTDESK_DELIVERY_RECORD_SHADOW`, OnceLock, default OFF), with its provenance. |
 | `AGENTDESK_DISCORD_API_BASE_URL` | `src/services/dispatches/discord_delivery/transport.rs:192` |  |
@@ -112,7 +112,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | Variable | Defined at | Description |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | `src/server/rate_limit_sync.rs:203` (+1 more) | Priority: 1) OAuth token (Claude Code subscription), 2) ANTHROPIC_API_KEY. |
-| `APPDATA` | `src/services/platform/binary_resolver.rs:1170` |  |
+| `APPDATA` | `src/services/platform/binary_resolver.rs:1160` |  |
 | `CARGO_MANIFEST_DIR` | `src/services/maintenance/jobs/target_sweep.rs:55` | Order matters: `CARGO_MANIFEST_DIR` is set by cargo during dev/test runs (resolving the actual checkout) but is UNSET in the deployed release binary, so it cle… |
 | `CLAUDE_CONFIG_DIR` | `src/services/claude_tui/hook_output_guard.rs:57` (+3 more) | The Claude home this host reads rollout transcripts under, honouring the `CLAUDE_CONFIG_DIR` override. |
 | `CODEX_HOME` | `src/services/codex_tui/rollout_tail.rs:173` | The Codex home this host reads rollouts under, honouring the `CODEX_HOME` override. |
@@ -124,10 +124,10 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `GEMINI_CLI_HOME` | `src/services/mcp_config.rs:708` |  |
 | `HOME` | `src/cli/doctor/orchestrator.rs:462` (+9 more) | #2655: handler for the `install-memento-session-hook` CLI surface. |
 | `HOSTNAME` | `src/server/outbox_worker.rs:24` (+2 more) |  |
-| `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs:1098` (+2 more) |  |
+| `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs:1088` (+2 more) |  |
 | `MEMENTO_WORKSPACE` | `src/server/routes/memory_api.rs:200` (+1 more) |  |
 | `OPENAI_API_KEY` | `src/server/rate_limit_sync.rs:115` | --- Codex: ~/.codex/auth.json (CLI subscription), else OPENAI_API_KEY --- |
-| `PATH` | `src/cli/doctor/orchestrator.rs:1545` (+5 more) | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
+| `PATH` | `src/cli/doctor/orchestrator.rs:1534` (+5 more) | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
 | `POSTGRES_TEST_ADMIN_DB` | `src/db/auto_queue/test_support.rs:16` (+4 more) |  |
 | `POSTGRES_TEST_DATABASE_URL_BASE` | `src/db/postgres.rs:1023` | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
 | `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs:478` (+1 more) |  |
@@ -135,6 +135,6 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `QWEN_HOME` | `src/cli/doctor/orchestrator.rs:456` (+2 more) |  |
 | `REQUIRE_WAKE_WORD` | `src/voice/config.rs:103` | A live yaml with `wake_words: []` plus `REQUIRE_WAKE_WORD=1` would otherwise make EVERY utterance fail the (impossible-to-satisfy) gate and be silently dropped. |
 | `RUST_LOG` | `src/logging.rs:29` | The directive every shipped dcserver process adds on top of `RUST_LOG`. |
-| `SHELL` | `src/services/platform/binary_resolver.rs:1277` |  |
+| `SHELL` | `src/services/platform/binary_resolver.rs:1267` |  |
 | `USERPROFILE` | `src/cli/doctor/orchestrator.rs:466` (+6 more) |  |
 | `VOICE_AUDIO_DEBUG_DIR` | `src/voice/receiver.rs:72` |  |
