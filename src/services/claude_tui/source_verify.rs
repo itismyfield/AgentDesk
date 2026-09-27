@@ -99,7 +99,7 @@ pub(crate) fn observe_transcript(path: &Path) -> io::Result<OpenedTranscript> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SourceVerdict {
-    /// The hook is about the bound source and its file is unchanged.
+    /// The hook is about the bound source; same path, (dev, ino) and first record.
     Current,
     /// The bound session's file is now verified; record this identity for it.
     Confirm(ClaudeSource),
@@ -157,7 +157,9 @@ pub(crate) fn verify_claude_source(
         OpenedTranscript::Opened { file, first } => (*file, first),
     };
     if let Some((bound, bound_file)) = pinned {
-        let same = bound.path == hook.transcript_path && bound_file == file;
+        // A verified file rewritten or truncated in place keeps its inode, so its first record is rechecked.
+        let own_first = matches!(first, FirstRecord::Session(id) if *id == hook.session_id);
+        let same = bound.path == hook.transcript_path && bound_file == file && own_first;
         return if same { Current } else { Anomaly };
     }
     match first {
@@ -477,6 +479,33 @@ mod tests {
                 .collect::<Vec<_>>(),
             [B, C]
         );
+    }
+
+    #[test]
+    fn a_bound_file_rewritten_in_place_is_an_anomaly() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut history = bound_chain(root, &[C]);
+        let bound = transcript(root, C);
+        let stop = hook("Stop", C, &bound, None);
+        let pinned = history[0].file;
+        // Another session's record, then an empty file, written over the same inode.
+        for (body, first) in [
+            (first_row(A), FirstRecord::Session(A.to_string())),
+            (String::new(), FirstRecord::NotWritten),
+        ] {
+            std::fs::write(&bound, &body).unwrap();
+            let opened = observe_transcript(&bound).unwrap();
+            assert_eq!(
+                opened,
+                OpenedTranscript::Opened {
+                    file: pinned.unwrap(),
+                    first
+                }
+            );
+            assert_eq!(feed(root, &mut history, &stop), SourceVerdict::Anomaly);
+        }
+        assert_eq!(history.len(), 1);
     }
 
     #[test]

@@ -1857,6 +1857,7 @@ services::claude_tui::session::tests::successful_continuation_persistence_is_cac
 services::claude_tui::session::tests::tui_args_do_not_use_print_mode
 services::claude_tui::session::tests::tui_args_omit_model_when_provider_default_is_requested
 services::claude_tui::session::tests::tui_args_resume_existing_session_by_id
+services::claude_tui::source_verify::tests::a_bound_file_rewritten_in_place_is_an_anomaly
 services::claude_tui::source_verify::tests::a_late_hook_from_a_left_session_never_rebinds_it
 services::claude_tui::source_verify::tests::a_newer_mtime_alone_never_binds_a_transcript
 services::claude_tui::source_verify::tests::a_session_start_before_its_transcript_is_written_waits
