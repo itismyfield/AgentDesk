@@ -1,0 +1,96 @@
+{
+ "schema": "agentdesk-hook-payload-fixture/v1",
+ "provider": "codex",
+ "cli_version": "codex-cli 0.157.1",
+ "provenance": "captured",
+ "captured_at": "2026-09-27T21:02:00+09:00/2026-09-27T21:06:00+09:00",
+ "capture": {
+  "host": "MacBook-Pro-14 (mac-book)",
+  "env": "env -i HOME USER LOGNAME PATH LANG TERM; capture stub first on PATH",
+  "hook_injection": "-c features.hooks=true -c <render_codex_hook_config_override shape> with agentdesk_exe = capture stub",
+  "global_config_changed": false,
+  "user_layer_hooks": "~/.codex/hooks.json (moshi-hook, herdr) also ran in every trial; they are not part of this fixture"
+ },
+ "activation": {
+  "agentdesk_hook_config": {
+   "endpoint": "http://127.0.0.1:9",
+   "provider": "codex",
+   "session_id": "agentdesk-codex-hook-relay",
+   "agentdesk_exe": "fake-agentdesk"
+  },
+  "trials": [
+   {
+    "name": "session_flag_trust_hashes",
+    "mode": "exec",
+    "bypass_hook_trust": false,
+    "state": "rendered",
+    "agentdesk_hooks_fired": false,
+    "session_id": "01a0e2bf-2324-7140-b6a8-4926adbd2f33",
+    "trusted_hashes": [{"state_key": "/config.toml:session_start:0:0", "trusted_hash": "sha256:7d83b0da611a762a9fefcaa8afe89f93c9623b7e671fb00465853b0e906b6ce1"}, {"state_key": "/config.toml:session_start:1:0", "trusted_hash": "sha256:dc531651f93029b1cf37de16156e734bdbaba3cccdce967062000ba6fa0450a0"}, {"state_key": "/config.toml:session_start:2:0", "trusted_hash": "sha256:d07bda95ebd18ef8ce97b2fd187489416b5db489259f68859ccaf48fc1f78904"}, {"state_key": "/config.toml:user_prompt_submit:0:0", "trusted_hash": "sha256:72e146c2a997ad0b21114e76618b7987f4c2b0d27d17b94ba80cbb99687289e6"}, {"state_key": "/config.toml:stop:0:0", "trusted_hash": "sha256:ebbdcd91dacb1e24fe6709d6c2b72b89e6a3c413eedc662fa969fb289895bf36"}, {"state_key": "/config.toml:pre_tool_use:0:0", "trusted_hash": "sha256:a91c0ba0929358693d87ebd36f29c68d192f3964f12f32cd684b2fbee17febd1"}, {"state_key": "/config.toml:permission_request:0:0", "trusted_hash": "sha256:8c2a2d2b7a5e5e5ebbfe517d84cb3ba7d11bfa03d21edbe5b3fce43a0d79fd41"}, {"state_key": "/config.toml:post_tool_use:0:0", "trusted_hash": "sha256:c24d00d0c8d5b684b5b7c6cc46b37d2a8fa3c454e682dae93f28690c5a8f5de7"}, {"state_key": "/config.toml:pre_compact:0:0", "trusted_hash": "sha256:25148d0642a569f7464ca136b0b907e0b18eaa3705fbecb737a9e536635c1f6b"}, {"state_key": "/config.toml:post_compact:0:0", "trusted_hash": "sha256:08c12f915216a83ddb78d37444d0b1c8ae9f9d075f6ebf95327f52471297d751"}]
+   },
+   {
+    "name": "bypass_hook_trust",
+    "mode": "exec",
+    "bypass_hook_trust": true,
+    "state": "omitted",
+    "agentdesk_hooks_fired": true
+   },
+   {
+    "name": "bypass_hook_trust_tui",
+    "mode": "interactive",
+    "bypass_hook_trust": true,
+    "state": "rendered",
+    "agentdesk_hooks_fired": true
+   }
+  ],
+  "resume_help_advertises_bypass": true,
+  "tui_startup_warnings": [
+   "Running without the shared background server: command-line configuration overrides (-c, --enable, --disable, or --search) requires embedded mode.",
+   "`--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation."
+  ],
+  "tui_trust_prompt": "an untrusted cwd shows 'Trust this folder?' before any hook; the TUI trial ran in /private/tmp, already trusted in ~/.codex/config.toml",
+  "hook_env": "no CODEX_* session/thread variable is exported to hooks"
+ },
+ "rollout_identity": {
+  "session_meta_id_field": "payload.id",
+  "turn_id_records": "task_started, turn_context, item_completed, token_usage_record and task_complete carry payload.turn_id equal to the hook turn_id"
+ },
+ "runs": [
+  {
+   "name": "exec_bypass",
+   "mode": "exec",
+   "events": [
+    {"event": "SessionStart", "command_session_id": "agentdesk-codex-hook-relay", "t_rel_s": 0.0, "transcript_exists_at_hook": true, "transcript_size_at_hook": 84268, "env_codex_keys": ["CODEX_MANAGED_BY_NPM", "CODEX_MANAGED_PACKAGE_ROOT"], "payload": {"cwd": "/private/tmp/claude-501/-Users-itismyfield--adk-release-worktrees-claude-adk-cc-20260924-070310/77038591-d8ff-4b10-b373-9eca5f98e052/scratchpad/cap/codex-proj", "hook_event_name": "SessionStart", "model": "gpt-6-astra", "permission_mode": "bypassPermissions", "session_id": "01a0e2bf-6a37-7810-99c6-90621f7bfb0d", "source": "startup", "transcript_path": "/Users/itismyfield/.codex/sessions/2026/09/27/rollout-2026-09-27T21-03-10-01a0e2bf-6a37-7810-99c6-90621f7bfb0d.jsonl"}},
+    {"event": "UserPromptSubmit", "command_session_id": "agentdesk-codex-hook-relay", "t_rel_s": 0.16, "transcript_exists_at_hook": true, "transcript_size_at_hook": 84268, "env_codex_keys": ["CODEX_MANAGED_BY_NPM", "CODEX_MANAGED_PACKAGE_ROOT"], "payload": {"cwd": "/private/tmp/claude-501/-Users-itismyfield--adk-release-worktrees-claude-adk-cc-20260924-070310/77038591-d8ff-4b10-b373-9eca5f98e052/scratchpad/cap/codex-proj", "hook_event_name": "UserPromptSubmit", "model": "gpt-6-astra", "permission_mode": "bypassPermissions", "prompt": "Reply with exactly the word: ok", "session_id": "01a0e2bf-6a37-7810-99c6-90621f7bfb0d", "transcript_path": "/Users/itismyfield/.codex/sessions/2026/09/27/rollout-2026-09-27T21-03-10-01a0e2bf-6a37-7810-99c6-90621f7bfb0d.jsonl", "turn_id": "01a0e2bf-6ab3-7e13-8651-aa7c90105e09"}},
+    {"event": "Stop", "command_session_id": "agentdesk-codex-hook-relay", "t_rel_s": 2.526, "transcript_exists_at_hook": true, "transcript_size_at_hook": 87750, "env_codex_keys": ["CODEX_MANAGED_BY_NPM", "CODEX_MANAGED_PACKAGE_ROOT"], "payload": {"cwd": "/private/tmp/claude-501/-Users-itismyfield--adk-release-worktrees-claude-adk-cc-20260924-070310/77038591-d8ff-4b10-b373-9eca5f98e052/scratchpad/cap/codex-proj", "hook_event_name": "Stop", "last_assistant_message": "ok", "model": "gpt-6-astra", "permission_mode": "bypassPermissions", "session_id": "01a0e2bf-6a37-7810-99c6-90621f7bfb0d", "stop_hook_active": false, "transcript_path": "/Users/itismyfield/.codex/sessions/2026/09/27/rollout-2026-09-27T21-03-10-01a0e2bf-6a37-7810-99c6-90621f7bfb0d.jsonl", "turn_id": "01a0e2bf-6ab3-7e13-8651-aa7c90105e09"}}
+   ],
+   "rollout_session_meta": [
+    {"timestamp": "2026-09-27T12:03:10.651Z", "ordinal": 0, "type": "session_meta", "payload": {"creator_user_id": "<redacted>", "creator_account_id": "<redacted>", "session_id": "01a0e2bf-6a37-7810-99c6-90621f7bfb0d", "id": "01a0e2bf-6a37-7810-99c6-90621f7bfb0d", "timestamp": "2026-09-27T12:03:10.520Z", "cwd": "/private/tmp/claude-501/-Users-itismyfield--adk-release-worktrees-claude-adk-cc-20260924-070310/77038591-d8ff-4b10-b373-9eca5f98e052/scratchpad/cap/codex-proj", "runtime_workspace_roots": ["/private/tmp/claude-501/-Users-itismyfield--adk-release-worktrees-claude-adk-cc-20260924-070310/77038591-d8ff-4b10-b373-9eca5f98e052/scratchpad/cap/codex-proj"], "originator": "codex_exec", "cli_version": "0.157.1", "source": "exec", "thread_source": "user", "model_provider": "openai", "base_instructions": "<omitted>", "history_mode": "paginated", "multi_agent_version": "v2", "context_window": {"window_id": "01a0e2bf-6a37-7810-99c6-907d302b5848"}}}
+   ]
+  },
+  {
+   "name": "tui_bypass_startup_clear",
+   "mode": "interactive",
+   "steps": [
+    "launch",
+    "prompt",
+    "/clear",
+    "prompt",
+    "/quit"
+   ],
+   "note": "thread created at launch 12:04:25Z; SessionStart fired only with the first prompt at 12:04:56Z, after the rollout header was written; /clear fired SessionStart(clear) only with the next prompt",
+   "events": [
+    {"event": "SessionStart", "command_session_id": "agentdesk-codex-hook-relay", "t_rel_s": 0.0, "transcript_exists_at_hook": true, "transcript_size_at_hook": 84496, "env_codex_keys": ["CODEX_MANAGED_BY_NPM", "CODEX_MANAGED_PACKAGE_ROOT"], "payload": {"cwd": "/private/tmp", "hook_event_name": "SessionStart", "model": "gpt-6-astra", "permission_mode": "bypassPermissions", "session_id": "01a0e2c0-909c-7683-975d-3bcb669aad04", "source": "startup", "transcript_path": "/Users/itismyfield/.codex/sessions/2026/09/27/rollout-2026-09-27T21-04-25-01a0e2c0-909c-7683-975d-3bcb669aad04.jsonl"}},
+    {"event": "UserPromptSubmit", "command_session_id": "agentdesk-codex-hook-relay", "t_rel_s": 0.134, "transcript_exists_at_hook": true, "transcript_size_at_hook": 84496, "env_codex_keys": ["CODEX_MANAGED_BY_NPM", "CODEX_MANAGED_PACKAGE_ROOT"], "payload": {"cwd": "/private/tmp", "hook_event_name": "UserPromptSubmit", "model": "gpt-6-astra", "permission_mode": "bypassPermissions", "prompt": "Reply with exactly the word: ok", "session_id": "01a0e2c0-909c-7683-975d-3bcb669aad04", "transcript_path": "/Users/itismyfield/.codex/sessions/2026/09/27/rollout-2026-09-27T21-04-25-01a0e2c0-909c-7683-975d-3bcb669aad04.jsonl", "turn_id": "01a0e2c1-0530-7011-83b0-f7c053f058d9"}},
+    {"event": "Stop", "command_session_id": "agentdesk-codex-hook-relay", "t_rel_s": 4.436, "transcript_exists_at_hook": true, "transcript_size_at_hook": 88029, "env_codex_keys": ["CODEX_MANAGED_BY_NPM", "CODEX_MANAGED_PACKAGE_ROOT"], "payload": {"cwd": "/private/tmp", "hook_event_name": "Stop", "last_assistant_message": "ok", "model": "gpt-6-astra", "permission_mode": "bypassPermissions", "session_id": "01a0e2c0-909c-7683-975d-3bcb669aad04", "stop_hook_active": false, "transcript_path": "/Users/itismyfield/.codex/sessions/2026/09/27/rollout-2026-09-27T21-04-25-01a0e2c0-909c-7683-975d-3bcb669aad04.jsonl", "turn_id": "01a0e2c1-0530-7011-83b0-f7c053f058d9"}},
+    {"event": "SessionStart", "command_session_id": "agentdesk-codex-hook-relay", "t_rel_s": 26.296, "transcript_exists_at_hook": true, "transcript_size_at_hook": 84496, "env_codex_keys": ["CODEX_MANAGED_BY_NPM", "CODEX_MANAGED_PACKAGE_ROOT"], "payload": {"cwd": "/private/tmp", "hook_event_name": "SessionStart", "model": "gpt-6-astra", "permission_mode": "bypassPermissions", "session_id": "01a0e2c1-4f2d-7593-a28f-38b9519d157a", "source": "clear", "transcript_path": "/Users/itismyfield/.codex/sessions/2026/09/27/rollout-2026-09-27T21-05-14-01a0e2c1-4f2d-7593-a28f-38b9519d157a.jsonl"}},
+    {"event": "UserPromptSubmit", "command_session_id": "agentdesk-codex-hook-relay", "t_rel_s": 26.527, "transcript_exists_at_hook": true, "transcript_size_at_hook": 84496, "env_codex_keys": ["CODEX_MANAGED_BY_NPM", "CODEX_MANAGED_PACKAGE_ROOT"], "payload": {"cwd": "/private/tmp", "hook_event_name": "UserPromptSubmit", "model": "gpt-6-astra", "permission_mode": "bypassPermissions", "prompt": "Reply with exactly the word: two", "session_id": "01a0e2c1-4f2d-7593-a28f-38b9519d157a", "transcript_path": "/Users/itismyfield/.codex/sessions/2026/09/27/rollout-2026-09-27T21-05-14-01a0e2c1-4f2d-7593-a28f-38b9519d157a.jsonl", "turn_id": "01a0e2c1-6bf2-7870-bfa6-10939d5f2ee7"}},
+    {"event": "Stop", "command_session_id": "agentdesk-codex-hook-relay", "t_rel_s": 29.141, "transcript_exists_at_hook": true, "transcript_size_at_hook": 88018, "env_codex_keys": ["CODEX_MANAGED_BY_NPM", "CODEX_MANAGED_PACKAGE_ROOT"], "payload": {"cwd": "/private/tmp", "hook_event_name": "Stop", "last_assistant_message": "two", "model": "gpt-6-astra", "permission_mode": "bypassPermissions", "session_id": "01a0e2c1-4f2d-7593-a28f-38b9519d157a", "stop_hook_active": false, "transcript_path": "/Users/itismyfield/.codex/sessions/2026/09/27/rollout-2026-09-27T21-05-14-01a0e2c1-4f2d-7593-a28f-38b9519d157a.jsonl", "turn_id": "01a0e2c1-6bf2-7870-bfa6-10939d5f2ee7"}}
+   ],
+   "rollout_session_meta": [
+    {"timestamp": "2026-09-27T12:04:55.735Z", "ordinal": 0, "type": "session_meta", "payload": {"creator_user_id": "<redacted>", "creator_account_id": "<redacted>", "session_id": "01a0e2c0-909c-7683-975d-3bcb669aad04", "id": "01a0e2c0-909c-7683-975d-3bcb669aad04", "timestamp": "2026-09-27T12:04:25.884Z", "cwd": "/private/tmp", "runtime_workspace_roots": ["/private/tmp"], "originator": "codex-tui", "cli_version": "0.157.1", "source": "cli", "thread_source": "user", "model_provider": "openai", "base_instructions": "<omitted>", "history_mode": "paginated", "multi_agent_version": "v2", "context_window": {"window_id": "01a0e2c0-909c-7683-975d-3bdce773a782"}}},
+    {"timestamp": "2026-09-27T12:05:22.040Z", "ordinal": 0, "type": "session_meta", "payload": {"creator_user_id": "<redacted>", "creator_account_id": "<redacted>", "session_id": "01a0e2c1-4f2d-7593-a28f-38b9519d157a", "id": "01a0e2c1-4f2d-7593-a28f-38b9519d157a", "timestamp": "2026-09-27T12:05:14.670Z", "cwd": "/private/tmp", "runtime_workspace_roots": ["/private/tmp"], "originator": "codex-tui", "cli_version": "0.157.1", "source": "cli", "thread_source": "user", "model_provider": "openai", "base_instructions": "<omitted>", "history_mode": "paginated", "multi_agent_version": "v2", "context_window": {"window_id": "01a0e2c1-4f2d-7593-a28f-38cf8fa1d84c"}}}
+   ]
+  }
+ ]
+}

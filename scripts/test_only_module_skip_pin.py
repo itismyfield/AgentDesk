@@ -77,6 +77,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/automation_candidate_materializer/allowed_path_tests.rs",
         "src/services/automation_candidate_materializer/iteration_result_tests.rs",
         "src/services/claude_tui/hook_output_guard_tests.rs",
+        "src/services/claude_tui/hook_payload_fixture_tests.rs",
         "src/services/claude_tui/hook_server_memento_tests.rs",
         "src/services/claude_tui/session/auto_compact_launch_tests.rs",
         "src/services/kakao/transport_tests.rs",
