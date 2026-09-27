@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use super::VoiceConfig;
-use super::config::VoiceSttMode;
+use super::config::{VoiceSttMode, VoiceSttProvider};
 use super::metrics::{SttOutcome, record_stt_outcome};
 use super::stt_streaming::{
     StreamingDecodeWindow, StreamingDecodeWindowMeta, StreamingOverlapConfig,
@@ -54,6 +54,8 @@ pub(crate) struct SttConfig {
     /// is below this (and whose peak is below `LOW_VOLUME_MAX_DB`) are skipped.
     pub(crate) speech_start_db: f32,
     pub(crate) stream_overlap: StreamingOverlapConfig,
+    /// Set for `voice.stt.provider: openai-compatible`; replaces whisper-cli.
+    pub(crate) http: Option<super::openai_compat::OpenAiCompatEndpoint>,
 }
 
 impl SttConfig {
@@ -77,6 +79,8 @@ impl SttConfig {
                 keep_ms: config.stt.stream.keep_ms,
             }
             .normalized(),
+            http: (config.stt.provider == VoiceSttProvider::OpenaiCompatible)
+                .then(|| config.stt.openai_compatible.clone()),
         }
     }
 }
@@ -148,16 +152,10 @@ pub(crate) struct SttRuntime {
 }
 
 impl SttRuntime {
-    // reason: voice runtime is wired only when voice config is enabled; no
-    // compile target exercises it. See #3034.
-    #[allow(dead_code)]
     pub(crate) fn from_voice_config(config: &VoiceConfig) -> Self {
         Self::new(SttConfig::from_voice_config(config))
     }
 
-    // reason: voice runtime is wired only when voice config is enabled; no
-    // compile target exercises it. See #3034.
-    #[allow(dead_code)]
     pub(crate) fn new(config: SttConfig) -> Self {
         let runner = subprocess_runner(config.timeout);
         Self { config, runner }
@@ -287,10 +285,15 @@ impl SttRuntime {
             }
             cleanup_temp_file(transcript_path).await;
 
-            let output = self
-                .run_whisper(converted_path, transcript_prefix, transcript_path)
-                .await?;
-            let raw = read_whisper_text(transcript_path, &output).await?;
+            let raw = if let Some(endpoint) = &self.config.http {
+                super::openai_compat::transcribe(endpoint, converted_path, &self.config.language)
+                    .await?
+            } else {
+                let output = self
+                    .run_whisper(converted_path, transcript_prefix, transcript_path)
+                    .await?;
+                read_whisper_text(transcript_path, &output).await?
+            };
             let cleaned = clean_transcript(&raw);
             if !cleaned.is_empty() {
                 record_stt_outcome(SttOutcome::Transcribed);
@@ -397,11 +400,12 @@ impl VoiceSttRuntime {
     ) -> Self {
         let fallback = SttRuntime::with_runner(config.clone(), runner.clone());
         match mode {
-            VoiceSttMode::File => Self::File(fallback),
-            VoiceSttMode::Stream => Self::Stream {
+            // Streaming windows are whisper-cli only; an HTTP provider runs per utterance.
+            VoiceSttMode::Stream if config.http.is_none() => Self::Stream {
                 stream: WhisperStream::with_runner(config, runner),
                 fallback,
             },
+            VoiceSttMode::File | VoiceSttMode::Stream => Self::File(fallback),
         }
     }
 
@@ -1010,6 +1014,7 @@ mod tests {
                 length_ms: 8,
                 keep_ms: 2,
             },
+            http: None,
         }
     }
 
