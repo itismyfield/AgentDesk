@@ -219,6 +219,23 @@ pub struct BindingChange {
     pub at: DateTime<Utc>,
 }
 
+/// A native turn delimited by transcript records; measurement only, never turn authority.
+/// `live` covers attach extent, closer timestamp and inheritance; the report checks the window.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShadowTurn {
+    pub channel_id: u64,
+    pub provider: ShadowProvider,
+    pub native_turn_id: String,
+    pub source_range: SourceRange,
+    pub opened_at: DateTime<Utc>,
+    pub closed_at: DateTime<Utc>,
+    pub unit_keys: Vec<UnitKey>,
+    pub autonomous: bool,
+    pub synthetic_tokens: Vec<String>,
+    pub live: bool,
+    pub excluded_reason: Option<String>,
+}
+
 /// Result of deriving one unit from captured records.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeriveOutput {
@@ -232,6 +249,7 @@ pub enum DeriveOutput {
         source_range: SourceRange,
         reason: String,
     },
+    TurnClosed(ShadowTurn),
 }
 
 /// One persisted line under the shadow root.
