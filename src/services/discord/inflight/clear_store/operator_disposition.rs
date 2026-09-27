@@ -34,3 +34,71 @@ pub(in crate::services::discord) fn operator_disposition_remove_pinned(
         "operator_disposition_remove_pinned",
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row() -> InflightTurnState {
+        InflightTurnState::new(
+            ProviderKind::Claude,
+            6294,
+            None,
+            42,
+            123,
+            0,
+            "operator disposition".into(),
+            None,
+            Some("disposition-fixture".into()),
+            None,
+            None,
+            0,
+        )
+    }
+
+    #[test]
+    fn operator_disposition_pin_mismatch_never_unlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let row = row();
+        let path = inflight_state_path(root.path(), &ProviderKind::Claude, row.channel_id);
+        let guard = lock_inflight_state_path(&path).unwrap();
+        let bytes = serde_json::to_vec(&row).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        let mut successor = row.clone();
+        successor.user_msg_id += 1;
+        let mut other_nonce = row.clone();
+        other_nonce.turn_nonce = Some("other-episode".into());
+        for mismatched in [successor, other_nonce] {
+            let result = operator_disposition_remove_pinned(
+                &guard,
+                &InflightEpisodePin::from_state(&mismatched),
+            );
+            assert_eq!(result.0, GuardedClearOutcome::UserMsgMismatch);
+            assert!(result.1.is_none());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn operator_disposition_rereads_guarded_bytes_and_removes_rebind_row() {
+        let root = tempfile::tempdir().unwrap();
+        let mut row = row();
+        row.rebind_origin = true;
+        let path = inflight_state_path(root.path(), &ProviderKind::Claude, row.channel_id);
+        let guard = lock_inflight_state_path(&path).unwrap();
+        let pin = InflightEpisodePin::from_state(&row);
+        let mut replacement = row.clone();
+        replacement.user_msg_id += 1;
+        fs::write(&path, serde_json::to_vec(&replacement).unwrap()).unwrap();
+        assert_eq!(
+            operator_disposition_remove_pinned(&guard, &pin).0,
+            GuardedClearOutcome::UserMsgMismatch
+        );
+        fs::write(&path, serde_json::to_vec(&row).unwrap()).unwrap();
+        let (outcome, removed) = operator_disposition_remove_pinned(&guard, &pin);
+        assert_eq!(outcome, GuardedClearOutcome::Cleared);
+        assert!(removed.unwrap().rebind_origin);
+        assert!(!path.exists());
+        assert!(super::super::super::super::second_handle_try_lock(&path).is_err());
+    }
+}
