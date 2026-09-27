@@ -307,30 +307,7 @@ pub(crate) fn stamp_spawn_markers(
     })
 }
 
-/// Write a fresh, globally-unique per-spawn nonce to the `.spawn_nonce` marker.
-///
-/// Called once at each provider spawn site (claude/codex/qwen) right after
-/// `tmux::create_session` stamps `.generation`. The nonce is the stability key
-/// the status panel uses to detect a genuine new-session boundary (#3087): it
-/// is guaranteed unique per spawn (a v4 UUID — no reliance on filesystem mtime
-/// resolution or `fsync` ordering), invariant across every status tick and
-/// every TURN of one session (the marker is never rewritten by the live
-/// wrapper), and orthogonal to both the runtime generation number and the
-/// provider-session id.
-///
-/// Errors are propagated to the caller (a missing/short write would degrade the
-/// panel-reset boundary to best-effort, so it is logged rather than silently
-/// swallowed — best-effort writes are exactly what made the earlier mtime key
-/// fragile). The `.generation` marker and its mtime are left untouched.
-///
-/// The write is atomic and stale-safe (#3087 P2): the nonce is written to a
-/// sibling temp file and `rename`d over `.spawn_nonce`, so a reader never sees a
-/// torn/short nonce. If ANY step fails, the destination is removed before the
-/// error returns, so a respawn whose write fails leaves NO readable nonce at all
-/// — the instance key degrades to `None` (panel may redundantly reset) rather
-/// than reading the PRIOR spawn's stale nonce (which would wrongly SUPPRESS the
-/// reset on a genuinely new session). "Absent → None key" is always preferred
-/// over "stale → colliding key".
+/// Create a fresh nonce for legacy callers; production spawns use the combined gate.
 pub(crate) fn write_spawn_nonce(tmux_session_name: &str) -> std::io::Result<String> {
     write_spawn_nonce_value(tmux_session_name, uuid::Uuid::new_v4().simple().to_string())
 }
@@ -1158,6 +1135,23 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn binding_context_t4_t11_prepared_nonce_publishes_under_one_authority() {
+        use crate::services::tmux_common::try_with_tmux_source_authority;
+        use crate::services::tui_prompt_dedupe::binding_context::tests::*;
+        let (_root, _env) = fixture();
+        let p = prepared();
+        let session = p.context.tmux_session.clone();
+        let locked = session.clone();
+        let _hook = set_spawn_after_generation_hook(Arc::new(move || {
+            assert!(try_with_tmux_source_authority(&locked, |_| ()).is_none());
+        }));
+        let nonce = stamp_spawn_markers(&session, Some(&p)).unwrap();
+        assert_eq!(nonce, p.context.execution_nonce);
+        assert_eq!(read_spawn_nonce(&session).as_deref(), Some(nonce.as_str()));
+    }
+
     #[test]
     fn spawn_markers_stamp_generation_before_nonce() {
         let (_root, _env) = isolated_runtime_root();
@@ -1200,9 +1194,10 @@ mod tests {
         assert_eq!(claude.matches(combined).count(), 1);
         assert_eq!(codex.matches(combined).count(), 1);
         for source in [claude, codex] {
+            let compact = source.split_whitespace().collect::<String>();
             assert_eq!(
-                source
-                    .matches("stamp_spawn_markers(tmux_session_name, Some(")
+                compact
+                    .matches("stamp_spawn_markers(tmux_session_name,Some(")
                     .count(),
                 1
             );

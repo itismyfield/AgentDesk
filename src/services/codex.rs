@@ -2792,6 +2792,14 @@ fn handle_codex_json_line(
 
 #[cfg(test)]
 mod tui_hosting_tests {
+    #[cfg(unix)]
+    #[test]
+    fn binding_context_t3b_wrapper_clears_inherited_context() {
+        use crate::services::tui_prompt_dedupe::binding_context::tests::*;
+        let (_root, _env) = fixture();
+        child_context(&super::build_tmux_launch_env_lines(None, None, None), None);
+    }
+
     use super::{
         CodexLaunchOptions, CodexRuntimeKind, append_codex_config_overrides, base_tui_args,
         build_codex_tui_args, build_tmux_launch_env_lines,

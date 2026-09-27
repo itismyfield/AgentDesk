@@ -1,6 +1,7 @@
 //! Tui session launch.
 
 use super::*;
+use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 
 /// Prepare durable launch evidence and the Codex Direct TUI launch script.
 #[cfg(unix)]
@@ -22,21 +23,20 @@ pub(super) fn prepare_codex_tui_launch_script(
     let owner_path = tmux_owner_path(tmux_session_name);
 
     let script_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "sh");
-    let prepared =
-        match crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::prepare(
-            "codex",
-            tmux_session_name,
-            report_channel_id,
-            launch_options.resume_session_id.as_deref(),
-            launch_options.resume_session_id.is_some(),
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                let _ = std::fs::remove_file(&owner_path);
-                let _ = std::fs::remove_file(&script_path);
-                return Err(error);
-            }
-        };
+    let prepared = match PreparedIncarnation::prepare(
+        "codex",
+        tmux_session_name,
+        report_channel_id,
+        launch_options.resume_session_id.as_deref(),
+        launch_options.resume_session_id.is_some(),
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let _ = std::fs::remove_file(&owner_path);
+            let _ = std::fs::remove_file(&script_path);
+            return Err(error);
+        }
+    };
     let resolution = resolve_codex_binary();
     let codex_bin = resolution
         .resolved_path
@@ -102,4 +102,18 @@ pub(super) fn prepare_codex_tui_launch_script(
         owner_path,
         rollout_modified_since,
     })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    #[test]
+    fn binding_context_t7_codex_launch_fails_before_tmux() {
+        use super::prepare_codex_tui_launch_script as launch;
+        let options = CodexLaunchOptions::new("");
+        crate::services::tui_prompt_dedupe::binding_context::tests::launch_failures(
+            |t| launch(t, None, "", &options, None, None, false, "").map(|_| ()),
+            "sh",
+        );
+    }
 }

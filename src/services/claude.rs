@@ -223,6 +223,17 @@ fn build_tmux_launch_env_lines(
 
 #[cfg(test)]
 mod launch_env_tests {
+    #[cfg(unix)]
+    #[test]
+    fn binding_context_t3b_wrapper_clears_inherited_context() {
+        use crate::services::tui_prompt_dedupe::binding_context::tests::*;
+        let (_root, _env) = fixture();
+        child_context(
+            &super::build_tmux_launch_env_lines(None, None, None, None),
+            None,
+        );
+    }
+
     use super::build_tmux_launch_env_lines;
 
     #[test]
