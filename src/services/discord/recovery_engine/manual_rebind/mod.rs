@@ -230,6 +230,16 @@ async fn rebind_inflight_for_channel_inner(
             if expected_episode.is_some_and(|pin| !pin.matches_state(&existing)) {
                 return Err(RebindError::InflightEpisodeChanged);
             }
+            // Boot owns predecessor-marker adoption; a retained marker has not completed that handoff.
+            let predecessor_marker = existing.restart_mode
+                == Some(crate::services::discord::InflightRestartMode::DrainRestart)
+                && existing
+                    .restart_generation
+                    .and_then(|generation| generation.checked_add(1))
+                    == Some(shared.restart.current_generation);
+            if predecessor_marker {
+                return Err(RebindError::InflightAlreadyExists);
+            }
             match recovery_phase_for_existing_inflight_rebind(&existing) {
                 // The durable automatic lane owns one exact live episode.
                 // Preserve that row and adopt it below; clearing it into a
