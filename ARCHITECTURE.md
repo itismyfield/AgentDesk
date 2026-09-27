@@ -33,6 +33,7 @@ src/
 │   │   │   └── observation.rs
 │   │   ├── orchestrator/
 │   │   │   ├── config_dir_checks.rs
+│   │   │   ├── fd_usage.rs
 │   │   │   ├── health_snapshot.rs
 │   │   │   ├── observation_checks.rs
 │   │   │   ├── observation_tests.rs
@@ -205,6 +206,9 @@ src/
 │   └── types.rs
 ├── engine/
 │   ├── ops/
+│   │   ├── exec_ops/
+│   │   │   ├── exec_allowlist_tests.rs
+│   │   │   └── session_liveness_tests.rs
 │   │   ├── agent_ops.rs
 │   │   ├── auto_queue_ops.rs
 │   │   ├── cards_ops.rs
@@ -353,6 +357,7 @@ src/
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
 │   │   ├── agents_setup.rs
+│   │   ├── agents_turn_deliver.rs
 │   │   ├── agents_turn_target.rs
 │   │   ├── analytics.rs
 │   │   ├── auth.rs
@@ -560,6 +565,7 @@ src/
 │   │   ├── mod.rs
 │   │   ├── prompt_readiness.rs
 │   │   ├── session.rs
+│   │   ├── source_verify.rs
 │   │   ├── startup_dialog.rs
 │   │   ├── transcript_tail.rs
 │   │   └── tui_relay.rs
@@ -771,6 +777,7 @@ src/
 │   │   │   ├── stall_liveness.rs
 │   │   │   ├── stall_verdict.rs
 │   │   │   ├── transcript_binding_stall.rs
+│   │   │   ├── turn_deliver.rs
 │   │   │   ├── unpaired_active_token.rs
 │   │   │   └── watcher_respawn.rs
 │   │   ├── idle_recap/
@@ -850,12 +857,16 @@ src/
 │   │   │   │   │   └── whole_proof.rs
 │   │   │   │   ├── codec_tests.rs
 │   │   │   │   ├── fence.rs
+│   │   │   │   ├── load.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── protocol.rs
 │   │   │   │   ├── reader.rs
 │   │   │   │   ├── reader_tests.rs
 │   │   │   │   ├── schema.rs
-│   │   │   │   └── state.rs
+│   │   │   │   ├── state.rs
+│   │   │   │   ├── tests.rs
+│   │   │   │   ├── validation.rs
+│   │   │   │   └── validation_tests.rs
 │   │   │   ├── manual_delivery/
 │   │   │   │   ├── headless_nonce.rs
 │   │   │   │   └── production_nonce_tests.rs
@@ -1401,6 +1412,7 @@ src/
 │   │   │   ├── context_window.rs
 │   │   │   ├── current_message_anchor.rs
 │   │   │   ├── early_tui_completion.rs
+│   │   │   ├── entry_abort_mailbox_tests.rs
 │   │   │   ├── finalize_epilogue.rs
 │   │   │   ├── followup_requeue.rs
 │   │   │   ├── guards.rs
@@ -1739,9 +1751,13 @@ src/
 │   │   ├── binary_resolver/
 │   │   │   ├── grok.rs
 │   │   │   ├── resolution.rs
+│   │   │   ├── runtime_path.rs
 │   │   │   └── windows_codex.rs
 │   │   ├── tmux/
-│   │   │   └── availability.rs
+│   │   │   ├── liveness/
+│   │   │   │   └── tests.rs
+│   │   │   ├── availability.rs
+│   │   │   └── liveness.rs
 │   │   ├── binary_resolver.rs
 │   │   ├── dump_tool.rs
 │   │   ├── mod.rs
@@ -1866,6 +1882,10 @@ src/
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
 │   │   └── tests_pg.rs
+│   ├── tui_o/
+│   │   └── shadow/
+│   │       ├── mod.rs
+│   │       └── root.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── binding_context.rs
 │   │   ├── extract.rs

@@ -246,6 +246,7 @@ jobs:
               - 'src/server/mod.rs'
               - 'src/server/multinode_regression.rs'
               - 'src/server/resource_locks.rs'
+              - 'src/server/routes/agents_turn_deliver.rs'
               - 'src/server/routes/auto_queue_lifecycle_pg_tests.rs'
               - 'src/server/routes/campaigns.rs'
               - 'src/server/routes/dispatched_sessions_tests.rs'
@@ -1782,6 +1783,7 @@ jobs:
       # `relay_state_contract_refs` blocks that `cargo check --all-targets`
       # compiles to prove those symbols exist. The `relay_contract` path filter
       # force-runs that compile for doc-only changes, so both halves stay on.
+      # H2 contract anchors are also checked against imported Python functions.
       - name: Contract symbol-ref sync gate (always, #4268)
         run: |
           python3 scripts/check_contract_symbol_refs.py
@@ -1791,7 +1793,7 @@ jobs:
       - name: H2 tmux boundary measurement (linux, inert)
         run: bash scripts/ci/h2_measure.sh --lane linux --inert
 
-      # H2 R-O module map, Linux lane: the driver canary always runs, the repo map is inert until activation.
+      # H2 R-O module map: module/cfg driver self-tests are required; only the repo map stays inert until activation.
       # sccache cannot wrap the driver, and a cached compile would skip writing the map.
       - name: H2 module map (linux, inert)
         env:

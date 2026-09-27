@@ -15,3 +15,11 @@ pub(in crate::services::discord) mod protocol;
 pub(in crate::services::discord) mod reader;
 #[cfg(test)]
 mod reader_tests;
+
+mod validation;
+#[cfg(test)]
+mod validation_tests;
+
+pub(in crate::services::discord) mod load;
+#[cfg(test)]
+mod tests;

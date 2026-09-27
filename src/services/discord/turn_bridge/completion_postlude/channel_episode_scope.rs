@@ -425,10 +425,8 @@ mod tests {
         }
     }
 
-    /// Source pin for design L-4. This fixes the complete production caller set and
-    /// its token-registration contract. The TUI-direct bridge retains its
-    /// synthetic claim's token, yielding Idle after release or Foreign when a
-    /// successor has claimed the retained mailbox handle.
+    /// Pins production bridge callers and the admission regression fixture.
+    /// Each entry preserves its mailbox token-registration contract.
     #[test]
     fn bridge_entry_sites_pin_mailbox_token_registration_contract() {
         let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -462,8 +460,9 @@ mod tests {
                 "services/discord/router/message_handler/headless_turn.rs",
                 "services/discord/router/message_handler/intake_turn.rs",
                 "services/discord/tui_prompt_relay/claude_idle_bridge.rs",
+                "services/discord/turn_bridge/entry_abort_mailbox_tests.rs",
             ],
-            "every new production bridge caller must declare its mailbox token-registration contract"
+            "every bridge entry file must declare its mailbox token-registration contract"
         );
 
         let intake = include_str!("../../router/message_handler/intake_turn.rs");
