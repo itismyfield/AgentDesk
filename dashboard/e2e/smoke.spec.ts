@@ -1722,10 +1722,10 @@ test.describe("Dashboard smoke tests", () => {
     const topbar = page.getByTestId("topbar");
     await expect(bottomNav).toBeVisible();
     await expect(bottomNav.locator("button")).toHaveCount(5);
+    await expect(page.getByTestId("app-mobile-tab-voice")).toBeVisible();
     await expect(page.getByTestId("app-mobile-tab-home")).toBeVisible();
     await expect(page.getByTestId("app-mobile-tab-office")).toBeVisible();
     await expect(page.getByTestId("app-mobile-tab-kanban")).toBeVisible();
-    await expect(page.getByTestId("app-mobile-tab-stats")).toBeVisible();
 
     const tabMetrics = await bottomNav.locator("button").evaluateAll((buttons) =>
       buttons.map((button) => {
@@ -1875,8 +1875,8 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page).toHaveURL(/\/kanban$/);
     await expectNoHorizontalOverflow(page);
 
-    await page.getByTestId("app-mobile-tab-stats").click();
-    await expect(page).toHaveURL(/\/stats$/);
+    await page.getByTestId("app-mobile-tab-voice").click();
+    await expect(page).toHaveURL(/\/voice$/);
     await expectNoHorizontalOverflow(page);
 
     await page.getByTestId("app-mobile-more-button").click();
