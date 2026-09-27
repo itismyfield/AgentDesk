@@ -1069,6 +1069,7 @@ server::routes::github::tests::create_issue_dry_run_reports_reserved_feature_cap
 server::routes::github::tests::create_issue_non_dry_run_maps_shared_service_github_failure
 server::routes::github::tests::create_issue_non_dry_run_maps_shared_service_success_response
 server::routes::github::tests::create_issue_rejects_reserved_fields_without_gh_side_effects
+server::routes::health_api::session_repair::tests::measured_refusal_precedes_failed_session_lookup
 server::routes::health_api::session_repair::tests::session_observation_gates_actual_repair_calls
 server::routes::health_api::tests::auto_queue_cleanup_backlog_is_served_from_both_health_response_arms
 server::routes::health_api::tests::compute_fully_recovered_preserves_recovery_axis_when_runtime_degrades
