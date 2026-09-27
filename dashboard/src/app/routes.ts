@@ -1,6 +1,7 @@
 export type AppSectionId = "workspace" | "extensions" | "me";
 
 export type AppRouteId =
+  | "voice"
   | "home"
   | "office"
   | "agents"
@@ -40,6 +41,17 @@ export const APP_ROUTE_SECTIONS: AppRouteSection[] = [
 ];
 
 export const APP_ROUTES: AppRouteEntry[] = [
+  {
+    id: "voice",
+    path: "/voice",
+    section: "workspace",
+    labelKo: "음성",
+    labelEn: "Voice",
+    descriptionKo: "말로 여러 에이전트에 일을 맡기고 결과를 들어요.",
+    descriptionEn: "Hand work to agents by voice and hear the results.",
+    paletteIcon: "🎙️",
+    shortcutKey: "v",
+  },
   {
     id: "home",
     path: "/home",
