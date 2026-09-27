@@ -533,11 +533,11 @@ pub(in crate::services::discord) async fn reregister_restart_adopted_turn_from_i
     let Some(provider) = state.provider_kind() else {
         return false;
     };
-    let Ok(mut guard) = inflight::lock_inflight_episode(
-        &provider,
-        state.channel_id,
-        &inflight::InflightEpisodePin::from_state(state),
-    ) else {
+    let lock_provider = provider.clone();
+    let channel_id = state.channel_id;
+    let episode = inflight::InflightEpisodePin::from_state(state);
+    let lock_episode = move || inflight::lock_inflight_episode(&lock_provider, channel_id, &episode);
+    let Ok(Ok(mut guard)) = tokio::task::spawn_blocking(lock_episode).await else {
         return false;
     };
     let state = guard.state().clone();
@@ -1813,6 +1813,29 @@ mod restart_marker_adoption_tests {
             HELD, HELD, HELD, HELD,
         ];
         assert_eq!(actual, want);
+    }
+
+    #[test]
+    fn boot_handoff_lock_wait_keeps_runtime_worker_available() {
+        let row = with(|_| {});
+        booted(&row, |shared| {
+            let held = inflight::lock_inflight_episode(&Claude, CHANNEL, &inflight::InflightEpisodePin::from_state(&row)).unwrap();
+            let (ready, resume) = std::sync::mpsc::channel();
+            let watchdog = std::thread::spawn(move || {
+                let progressed = resume.recv_timeout(std::time::Duration::from_secs(2)).is_ok();
+                drop(held);
+                progressed
+            });
+            let adopted = block_on(async {
+                let (adopted, ()) = tokio::join!(biased;
+                    super::reregister_restart_adopted_turn_from_inflight(shared, &row),
+                    async { tokio::task::yield_now().await; let _ = ready.send(()); }
+                );
+                adopted
+            });
+            assert!(watchdog.join().unwrap(), "canonical flock wait blocked the single runtime worker");
+            assert!(adopted);
+        });
     }
 
     #[test]

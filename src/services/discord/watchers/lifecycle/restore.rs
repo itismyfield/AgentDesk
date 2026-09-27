@@ -534,6 +534,9 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                     0
                 }
             } else {
+                if state.restart_mode.is_some() {
+                    continue;
+                }
                 std::fs::metadata(&output_path)
                     .map(|m| m.len())
                     .unwrap_or(0)
