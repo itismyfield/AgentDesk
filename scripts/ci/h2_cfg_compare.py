@@ -17,7 +17,7 @@ def read_cfg(path: Path) -> set[Cfg]:
     try:
         snapshot = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        raise ValueError(f"{path}:{exc.lineno}: expected structured cfg JSON; raw --print cfg is ambiguous") from exc
+        raise ValueError(f"{path}:{exc.lineno}: expected structured cfg JSON: {exc.msg}") from exc
     if not isinstance(snapshot, list) or not snapshot:
         raise ValueError(f"{path}: expected a nonempty cfg array")
     atoms = set()
@@ -41,7 +41,9 @@ def compare_cfgs(linux: set[Cfg], macos: set[Cfg]) -> dict[str, list[Cfg]]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, epilog="Raw --print cfg is ambiguous; supply structured JSON snapshots.",
+    )
     parser.add_argument("--linux", type=Path, required=True, help="Linux structured cfg JSON snapshot")
     parser.add_argument("--macos", type=Path, required=True, help="macOS structured cfg JSON snapshot")
     args = parser.parse_args(argv)
@@ -49,11 +51,15 @@ def main(argv: list[str] | None = None) -> int:
     for lane in ("linux", "macos"):
         try:
             snapshots[lane] = read_cfg(getattr(args, lane))
-        except (OSError, UnicodeError, ValueError) as exc:
-            print(f"h2-cfg-compare: {lane}: {exc}", file=sys.stderr)
+        except (OSError, UnicodeError, ValueError, RecursionError, MemoryError) as exc:
+            print(f"h2-cfg-compare: {lane}: {type(exc).__name__}: {exc}", file=sys.stderr)
             return 2
-    report = compare_cfgs(snapshots["linux"], snapshots["macos"])
-    print(json.dumps(report, ensure_ascii=True, indent=2))
+    try:
+        report = compare_cfgs(snapshots["linux"], snapshots["macos"])
+        print(json.dumps(report, ensure_ascii=True, indent=2))
+    except MemoryError:
+        print("h2-cfg-compare: cannot report cfg comparison: MemoryError", file=sys.stderr)
+        return 2
     return 1 if report["linux_only"] or report["macos_only"] else 0
 
 

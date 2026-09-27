@@ -608,6 +608,26 @@ class H2ContractCliTest(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0, proc.stdout)
         self.assertIn("H2 contract: imported h2_cfg_compare::compare_cfgs is not documented", proc.stdout)
 
+    def test_main_preserves_import_search_path_on_h2_success_and_error(self):
+        probe = textwrap.dedent("""
+            import runpy
+            import sys
+            checker = runpy.run_path(sys.argv[1])
+            before = sys.path[:]
+            result = checker["main"](["--h2-doc", sys.argv[2]])
+            assert result == int(sys.argv[3]), result
+            assert sys.path == before, (before, sys.path)
+        """)
+        with tempfile.TemporaryDirectory() as tmp:
+            for doc, expected in ((CHECKER.H2_DOC, 0), (Path(tmp, "missing.md"), 1)):
+                with self.subTest(doc=doc):
+                    proc = subprocess.run(
+                        [sys.executable, "-c", probe, str(SCRIPT_PATH), str(doc), str(expected)],
+                        capture_output=True, text=True,
+                    )
+                    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                    self.assertEqual(proc.stderr, "")
+
 
 class IntegrationTest(unittest.TestCase):
     def test_repo_doc_and_code_anchors_in_sync(self) -> None:
