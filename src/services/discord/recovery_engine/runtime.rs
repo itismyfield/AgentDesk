@@ -536,7 +536,8 @@ pub(in crate::services::discord) async fn reregister_restart_adopted_turn_from_i
     let lock_provider = provider.clone();
     let channel_id = state.channel_id;
     let episode = inflight::InflightEpisodePin::from_state(state);
-    let lock_episode = move || inflight::lock_inflight_episode(&lock_provider, channel_id, &episode);
+    let lock_episode =
+        move || inflight::lock_inflight_episode(&lock_provider, channel_id, &episode);
     let Ok(Ok(mut guard)) = tokio::task::spawn_blocking(lock_episode).await else {
         return false;
     };
@@ -1809,8 +1810,8 @@ mod restart_marker_adoption_tests {
             replaced(|r| r.turn_nonce = Some("b".into())),     // nonce-only successor
         ];
         let want = [
-            RELEASED, RELEASED, ADVANCED, HELD, HELD, KEPT, KEPT, HELD, HELD, HELD, HELD,
-            HELD, HELD, HELD, HELD,
+            RELEASED, RELEASED, ADVANCED, HELD, HELD, KEPT, KEPT, HELD, HELD, HELD, HELD, HELD,
+            HELD, HELD, HELD,
         ];
         assert_eq!(actual, want);
     }
@@ -1819,10 +1820,17 @@ mod restart_marker_adoption_tests {
     fn boot_handoff_lock_wait_keeps_runtime_worker_available() {
         let row = with(|_| {});
         booted(&row, |shared| {
-            let held = inflight::lock_inflight_episode(&Claude, CHANNEL, &inflight::InflightEpisodePin::from_state(&row)).unwrap();
+            let held = inflight::lock_inflight_episode(
+                &Claude,
+                CHANNEL,
+                &inflight::InflightEpisodePin::from_state(&row),
+            )
+            .unwrap();
             let (ready, resume) = std::sync::mpsc::channel();
             let watchdog = std::thread::spawn(move || {
-                let progressed = resume.recv_timeout(std::time::Duration::from_secs(2)).is_ok();
+                let progressed = resume
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .is_ok();
                 drop(held);
                 progressed
             });
@@ -1833,7 +1841,10 @@ mod restart_marker_adoption_tests {
                 );
                 adopted
             });
-            assert!(watchdog.join().unwrap(), "canonical flock wait blocked the single runtime worker");
+            assert!(
+                watchdog.join().unwrap(),
+                "canonical flock wait blocked the single runtime worker"
+            );
             assert!(adopted);
         });
     }
@@ -1852,7 +1863,8 @@ mod restart_marker_adoption_tests {
                 let bytes = row_bytes();
                 block_on(async {
                     let adopted =
-                        super::reregister_restart_adopted_turn_from_inflight(shared, &observed).await;
+                        super::reregister_restart_adopted_turn_from_inflight(shared, &observed)
+                            .await;
                     assert!(
                         !adopted,
                         "a successor row must refuse the stale boot decision"
@@ -1891,10 +1903,11 @@ mod restart_marker_adoption_tests {
                 let (adopted, active) = block_on(async {
                     let adopted =
                         super::reregister_restart_adopted_turn_from_inflight(shared, &row).await;
-                    let active = super::super::mailbox_snapshot(shared, super::ChannelId::new(CHANNEL))
-                        .await
-                        .cancel_token
-                        .is_some();
+                    let active =
+                        super::super::mailbox_snapshot(shared, super::ChannelId::new(CHANNEL))
+                            .await
+                            .cancel_token
+                            .is_some();
                     (adopted, active)
                 });
                 std::fs::set_permissions(parent, permissions).unwrap();
