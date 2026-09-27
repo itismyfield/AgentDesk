@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
 use crate::services::discord::SharedData;
+use crate::services::discord::task_supervisor::watcher_mutations::track_mutation;
 use crate::services::dispatches::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
@@ -39,8 +40,7 @@ pub(crate) async fn post_serenity_message_with_nonce(
         );
     }
     crate::services::discord::rate_limit_wait(shared, channel_id).await;
-    channel_id
-        .send_message(http, message)
+    track_mutation(channel_id.send_message(http, message))
         .await
         .map(|message| message.id.get().to_string())
 }

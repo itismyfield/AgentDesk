@@ -8,6 +8,7 @@ use futures::FutureExt;
 
 use super::SharedData;
 pub(in crate::services::discord) mod watcher_completion;
+pub(in crate::services::discord) mod watcher_mutations;
 
 pub(in crate::services::discord) fn spawn_observed<F>(
     task_name: &'static str,
@@ -42,12 +43,21 @@ where
 {
     let completion = watcher_completion::Registration::new(cancel.clone());
     spawn_observed(task_name, async move {
-        let cleanup_guard = TmuxWatcherTaskGuard {
+        let cleanup_guard = completion.needs_cleanup().then(|| TmuxWatcherTaskGuard {
             shared,
             tmux_session_name,
             cancel,
-        };
-        let outcome = AssertUnwindSafe(future).catch_unwind().await;
+        });
+        if !completion.may_poll() {
+            drop(future);
+            drop(cleanup_guard);
+            return;
+        }
+        let (outcome, ambiguous) =
+            watcher_mutations::observe(
+                async move { AssertUnwindSafe(future).catch_unwind().await },
+            )
+            .await;
         drop(cleanup_guard);
         let result = match outcome {
             Ok(()) => watcher_completion::Outcome::Returned,
@@ -56,7 +66,7 @@ where
                 watcher_completion::Outcome::Panicked
             }
         };
-        completion.finish(result);
+        completion.finish(result, ambiguous);
     })
 }
 

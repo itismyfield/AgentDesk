@@ -70,7 +70,7 @@ async fn duplicate_guard_does_not_remove_original_registration() {
     assert!(observe(&cancel).is_some());
     let duplicate = Registration::new(cancel.clone());
     let later_ticket = observe(&cancel).unwrap();
-    original.finish(Outcome::Returned);
+    original.finish(Outcome::Returned, false);
     // The second registration is still live: neither observer may see Returned.
     assert_eq!(ticket.wait().await, Outcome::Unknown);
     assert_eq!(later_ticket.wait().await, Outcome::Unknown);
@@ -84,9 +84,9 @@ async fn old_completion_preserves_other_incarnation() {
     let old_registration = Registration::new(old.clone());
     let new_registration = Registration::new(new.clone());
     let new_ticket = observe(&new).unwrap();
-    old_registration.finish(Outcome::Returned);
+    old_registration.finish(Outcome::Returned, false);
     assert!(observe(&old).is_none());
     assert!(observe(&new).is_some());
-    new_registration.finish(Outcome::Returned);
+    new_registration.finish(Outcome::Returned, false);
     assert_eq!(new_ticket.wait().await, Outcome::Returned);
 }

@@ -1,7 +1,7 @@
 use super::*;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -13,6 +13,38 @@ pub enum Outcome {
 struct Record {
     _cancel: Arc<AtomicBool>,
     sender: Arc<watch::Sender<Outcome>>,
+    ack: Option<oneshot::Sender<QuiesceAck>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuiesceAck {
+    Quiesced,
+    Ambiguous,
+    Busy,
+}
+
+/// Request cooperative cancellation; callers must release registry and sidecar guards first.
+/// Only Quiesced certifies this watcher; timeout never aborts its pending transport.
+#[allow(dead_code)]
+pub async fn quiesce(cancel: &Arc<AtomicBool>, timeout: std::time::Duration) -> QuiesceAck {
+    let receiver = {
+        let mut records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(record) = records.get_mut(&key(cancel)) else {
+            return QuiesceAck::Busy;
+        };
+        if *record.sender.borrow() != Outcome::Pending || record.ack.is_some() {
+            return QuiesceAck::Busy;
+        }
+        let (sender, receiver) = oneshot::channel();
+        record.ack = Some(sender);
+        cancel.store(true, std::sync::atomic::Ordering::Release);
+        receiver
+    };
+    tokio::time::timeout(timeout, receiver)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(QuiesceAck::Busy)
 }
 static RECORDS: LazyLock<Mutex<HashMap<usize, Record>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -38,11 +70,7 @@ impl Ticket {
         }
     }
 }
-/// Clone before cancellation. A task that ended before lookup also returns None:
-/// absence is Unknown, never evidence that the watcher joined.
-/// This observes one registration, not all tasks sharing an Arc. After its record
-/// is removed, a third registration may complete while a duplicate still lives.
-/// Retirement consumers must separately establish unique spawn incarnation.
+/// Clone before cancellation; missing or duplicate registrations never prove completion.
 pub fn observe(cancel: &Arc<AtomicBool>) -> Option<Ticket> {
     let records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
     records.get(&key(cancel)).map(|r| Ticket {
@@ -53,16 +81,26 @@ pub fn observe(cancel: &Arc<AtomicBool>) -> Option<Ticket> {
 pub(super) struct Registration {
     cancel: Arc<AtomicBool>,
     sender: Arc<watch::Sender<Outcome>>,
+    may_poll: bool,
+    needs_cleanup: bool,
 }
 impl Registration {
     pub(super) fn new(cancel: Arc<AtomicBool>) -> Self {
         let sender = Arc::new(watch::channel(Outcome::Pending).0);
         let mut records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut may_poll = false;
+        let mut needs_cleanup = true;
         if let std::collections::hash_map::Entry::Vacant(entry) = records.entry(key(&cancel)) {
-            entry.insert(Record {
-                _cancel: cancel.clone(),
-                sender: sender.clone(),
-            });
+            if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                sender.send_replace(Outcome::Unknown);
+            } else {
+                may_poll = true;
+                entry.insert(Record {
+                    _cancel: cancel.clone(),
+                    sender: sender.clone(),
+                    ack: None,
+                });
+            }
         } else {
             // Preserve the record identity, but invalidate every observer of this
             // ambiguous cancel Arc. finish must not overwrite this sticky Unknown.
@@ -75,28 +113,55 @@ impl Registration {
                 "duplicate watcher completion registration; all observations are Unknown"
             );
             sender.send_replace(Outcome::Unknown);
+            needs_cleanup = false;
         }
-        Self { cancel, sender }
+        Self {
+            cancel,
+            sender,
+            may_poll,
+            needs_cleanup,
+        }
     }
-    fn remove(&self) {
+    pub(super) fn may_poll(&self) -> bool {
+        self.may_poll
+    }
+    pub(super) fn needs_cleanup(&self) -> bool {
+        self.needs_cleanup
+    }
+    fn remove(&self) -> Option<Record> {
         let mut records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
         if records
             .get(&key(&self.cancel))
             .is_some_and(|r| Arc::ptr_eq(&r.sender, &self.sender))
         {
-            records.remove(&key(&self.cancel));
+            records.remove(&key(&self.cancel))
+        } else {
+            None
         }
     }
-    pub(super) fn finish(self, result: Outcome) {
-        self.remove();
-        if *self.sender.borrow() != Outcome::Unknown {
+    pub(super) fn finish(self, result: Outcome, ambiguous: bool) {
+        let record = self.remove();
+        let unambiguous = *self.sender.borrow() != Outcome::Unknown;
+        if unambiguous {
             self.sender.send_replace(result);
+        }
+        if let Some(ack) = record.and_then(|record| record.ack) {
+            let result = if !unambiguous || result != Outcome::Returned {
+                QuiesceAck::Busy
+            } else if ambiguous {
+                QuiesceAck::Ambiguous
+            } else {
+                QuiesceAck::Quiesced
+            };
+            let _ = ack.send(result);
         }
     }
 }
 impl Drop for Registration {
     fn drop(&mut self) {
-        self.remove();
+        if let Some(ack) = self.remove().and_then(|record| record.ack) {
+            let _ = ack.send(QuiesceAck::Busy);
+        }
     }
 }
 

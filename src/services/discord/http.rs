@@ -1,3 +1,4 @@
+use super::task_supervisor::watcher_mutations::track_mutation;
 use poise::serenity_prelude as serenity;
 use serenity::{
     ChannelId, CreateActionRow, CreateAllowedMentions, CreateMessage, EditMessage, Message,
@@ -123,7 +124,7 @@ pub(in crate::services::discord) async fn send_channel_message(
     content: &str,
 ) -> serenity::Result<Message> {
     let message = channel_message_builder(content, None, None)?;
-    channel_id.send_message(http, message).await
+    track_mutation(channel_id.send_message(http, message)).await
 }
 
 /// Send an idempotent create. With `enforce_nonce`, Discord returns the
@@ -136,7 +137,7 @@ pub(in crate::services::discord) async fn send_channel_message_with_nonce(
     nonce: &str,
 ) -> serenity::Result<Message> {
     let message = channel_message_builder(content, None, Some(nonce))?;
-    channel_id.send_message(http, message).await
+    track_mutation(channel_id.send_message(http, message)).await
 }
 
 pub(in crate::services::discord) async fn send_channel_message_with_reference(
@@ -151,7 +152,7 @@ pub(in crate::services::discord) async fn send_channel_message_with_reference(
         Some((reference_channel_id, reference_message_id)),
         None,
     )?;
-    channel_id.send_message(http, message).await
+    track_mutation(channel_id.send_message(http, message)).await
 }
 
 pub(in crate::services::discord) async fn send_channel_message_with_reference_and_nonce(
@@ -167,7 +168,7 @@ pub(in crate::services::discord) async fn send_channel_message_with_reference_an
         Some((reference_channel_id, reference_message_id)),
         Some(nonce),
     )?;
-    channel_id.send_message(http, message).await
+    track_mutation(channel_id.send_message(http, message)).await
 }
 
 pub(in crate::services::discord) async fn send_channel_message_with_required_reference(
@@ -218,15 +219,16 @@ pub(in crate::services::discord) async fn send_channel_message_with_components(
     content: &str,
     components: Vec<CreateActionRow>,
 ) -> serenity::Result<Message> {
-    channel_id
-        .send_message(
+    track_mutation(
+        channel_id.send_message(
             http,
             CreateMessage::new()
                 .content(discord_content_or_zwsp(content)?)
                 .components(components)
                 .allowed_mentions(relay_allowed_mentions()),
-        )
-        .await
+        ),
+    )
+    .await
 }
 
 /// Edit a channel message while replacing its interactive components.
@@ -237,16 +239,17 @@ pub(in crate::services::discord) async fn edit_channel_message_with_components(
     content: &str,
     components: Vec<CreateActionRow>,
 ) -> serenity::Result<Message> {
-    channel_id
-        .edit_message(
+    track_mutation(
+        channel_id.edit_message(
             http,
             message_id,
             EditMessage::new()
                 .content(discord_content_or_zwsp(content)?)
                 .components(components)
                 .allowed_mentions(relay_allowed_mentions()),
-        )
-        .await
+        ),
+    )
+    .await
 }
 
 pub(in crate::services::discord) async fn edit_channel_message(
@@ -255,15 +258,16 @@ pub(in crate::services::discord) async fn edit_channel_message(
     message_id: MessageId,
     content: &str,
 ) -> serenity::Result<Message> {
-    channel_id
-        .edit_message(
+    track_mutation(
+        channel_id.edit_message(
             http,
             message_id,
             EditMessage::new()
                 .content(discord_content_or_zwsp(content)?)
                 .allowed_mentions(relay_allowed_mentions()),
-        )
-        .await
+        ),
+    )
+    .await
 }
 
 /// Delete a single channel message by id. Errors are propagated; callers
@@ -274,7 +278,7 @@ pub(in crate::services::discord) async fn delete_channel_message(
     channel_id: ChannelId,
     message_id: MessageId,
 ) -> serenity::Result<()> {
-    channel_id.delete_message(http, message_id).await
+    track_mutation(channel_id.delete_message(http, message_id)).await
 }
 
 #[cfg(test)]

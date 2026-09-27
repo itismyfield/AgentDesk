@@ -2,6 +2,8 @@ use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
 
 use super::SharedData;
+#[cfg(not(test))]
+use super::task_supervisor::watcher_mutations::track_mutation;
 
 const MIN_REAL_DISCORD_MESSAGE_ID: u64 = 100_000_000_000_000;
 
@@ -145,14 +147,16 @@ async fn apply_reaction_action_detailed(
 ) -> Result<(), ReactionLifecycleError> {
     let reaction = serenity::ReactionType::Unicode(emoji.to_string());
     match action {
-        ReactionAction::Add => channel_id
-            .create_reaction(http, message_id, reaction)
-            .await
-            .map_err(ReactionLifecycleError::from_serenity),
-        ReactionAction::Remove => channel_id
-            .delete_reaction(http, message_id, None, reaction)
-            .await
-            .map_err(ReactionLifecycleError::from_serenity),
+        ReactionAction::Add => {
+            track_mutation(channel_id.create_reaction(http, message_id, reaction))
+                .await
+                .map_err(ReactionLifecycleError::from_serenity)
+        }
+        ReactionAction::Remove => {
+            track_mutation(channel_id.delete_reaction(http, message_id, None, reaction))
+                .await
+                .map_err(ReactionLifecycleError::from_serenity)
+        }
     }
 }
 

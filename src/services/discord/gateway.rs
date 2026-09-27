@@ -17,6 +17,7 @@ use super::outbound::{
     DiscordOutboundClient, post_serenity_message_with_nonce, shared_outbound_deduper,
 };
 use super::router;
+use super::task_supervisor::watcher_mutations::track_mutation;
 use super::turn_bridge::{auto_retry_with_history, release_retry_pending};
 use super::{
     Intervention, QueuedCardDisposition, QueuedCardTeardown, SharedData, formatting, queue_marker,
@@ -299,16 +300,17 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
     {
         let channel_id = parse_channel_id(target_channel)?;
         rate_limit_wait(&self.shared, channel_id).await;
-        channel_id
-            .send_message(
+        track_mutation(
+            channel_id.send_message(
                 &self.http,
                 serenity::CreateMessage::new()
                     .content(content)
                     .allowed_mentions(super::http::relay_allowed_mentions()),
-            )
-            .await
-            .map(|message| message.id.get().to_string())
-            .map_err(dispatch_post_error)
+            ),
+        )
+        .await
+        .map(|message| message.id.get().to_string())
+        .map_err(dispatch_post_error)
     }
 
     async fn post_message_with_reference(
@@ -331,8 +333,8 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
         // Degrade to a normal (non-reply) send when the referenced message no
         // longer exists. This also hardens every reply against a since-deleted
         // target.
-        channel_id
-            .send_message(
+        track_mutation(
+            channel_id.send_message(
                 &self.http,
                 serenity::CreateMessage::new()
                     .reference_message(
@@ -344,10 +346,11 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
                     )
                     .content(content)
                     .allowed_mentions(super::http::relay_allowed_mentions()),
-            )
-            .await
-            .map(|message| message.id.get().to_string())
-            .map_err(dispatch_post_error)
+            ),
+        )
+        .await
+        .map(|message| message.id.get().to_string())
+        .map_err(dispatch_post_error)
     }
 
     async fn post_message_with_nonce(
@@ -418,17 +421,18 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
             )
         })?;
         rate_limit_wait(&self.shared, channel_id).await;
-        channel_id
-            .edit_message(
+        track_mutation(
+            channel_id.edit_message(
                 &self.http,
                 message_id,
                 serenity::EditMessage::new()
                     .content(content)
                     .allowed_mentions(super::http::relay_allowed_mentions()),
-            )
-            .await
-            .map(|message| message.id.get().to_string())
-            .map_err(dispatch_post_error)
+            ),
+        )
+        .await
+        .map(|message| message.id.get().to_string())
+        .map_err(dispatch_post_error)
     }
 }
 
@@ -648,8 +652,7 @@ impl TurnGateway for DiscordGateway {
     ) -> GatewayFuture<'a, Result<(), String>> {
         Box::pin(async move {
             rate_limit_wait(&self.shared, channel_id).await;
-            channel_id
-                .delete_message(&self.http, message_id)
+            track_mutation(channel_id.delete_message(&self.http, message_id))
                 .await
                 .map_err(|e| e.to_string())
         })

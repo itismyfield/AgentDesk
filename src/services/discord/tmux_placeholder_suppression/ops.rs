@@ -19,6 +19,7 @@ use super::{
     PlaceholderSuppressOrigin, guarded_cleanup_target_author,
 };
 use crate::services::discord;
+use crate::services::discord::task_supervisor::watcher_mutations::track_mutation;
 
 pub(super) fn strip_placeholder_indicators_for_preserve(
     text: &str,
@@ -475,7 +476,7 @@ async fn delete_placeholder_with_operation(
     operation: PlaceholderCleanupOperation,
     source: &'static str,
 ) -> PlaceholderCleanupOutcome {
-    let outcome = match channel_id.delete_message(http, message_id).await {
+    let outcome = match track_mutation(channel_id.delete_message(http, message_id)).await {
         Ok(_) => PlaceholderCleanupOutcome::Succeeded,
         Err(error) => classify_delete_error(&error.to_string()),
     };
