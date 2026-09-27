@@ -127,6 +127,9 @@ cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests:
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::unregistered_scripts_are_reported_as_one_warn_item
 cli::doctor::orchestrator::observation_tests::observations_gate_stale_mailbox_posts
 cli::doctor::orchestrator::observation_tests::observations_preserve_unmeasured_diagnostics
+cli::doctor::orchestrator::observation_tests::reason_aggregation_and_human_checks_preserve_safety_restrictions
+cli::doctor::orchestrator::observation_tests::repair_responses_preserve_measured_safety_and_gates
+cli::doctor::orchestrator::observation_tests::repair_responses_preserve_unmeasured_results
 cli::doctor::orchestrator::profile_filter_tests::json_report_exposes_portable_readiness_sections
 cli::doctor::orchestrator::profile_filter_tests::mailbox_consistency_findings_use_provider_runtime_group
 cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_detail_includes_applied_and_resolved_hashes

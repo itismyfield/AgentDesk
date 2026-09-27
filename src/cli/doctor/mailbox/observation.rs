@@ -105,7 +105,9 @@ pub(crate) fn classify_mailbox_findings(body: &Value) -> Vec<MailboxFinding> {
         return Vec::new();
     };
     let Some(mailboxes) = value.as_array() else {
-        let mut finding = unavailable(body, FieldIssue::new("mailboxes", Some(value), "array"));
+        let issue = FieldIssue::new("mailboxes", Some(value), "array");
+        let mut finding = unavailable(&Value::Null, issue.clone());
+        finding.evidence = json!({"measurement_issue": issue});
         finding.id = "mailbox_observation_unavailable";
         return vec![finding];
     };

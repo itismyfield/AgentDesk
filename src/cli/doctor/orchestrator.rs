@@ -814,22 +814,11 @@ fn highest_reason_severity(reasons: &[health::ClassifiedReason]) -> Severity {
 }
 
 fn highest_reason_fix_safety(reasons: &[health::ClassifiedReason]) -> FixSafety {
-    let mut result = FixSafety::ReadOnly;
-    for reason in reasons {
-        result =
-            match (result, reason.fix_safety) {
-                (FixSafety::NotFixable, _) | (_, FixSafety::NotFixable) => FixSafety::NotFixable,
-                (FixSafety::ExplicitDbRepairRequired, _)
-                | (_, FixSafety::ExplicitDbRepairRequired) => FixSafety::ExplicitDbRepairRequired,
-                (FixSafety::ExplicitRestartRequired, _)
-                | (_, FixSafety::ExplicitRestartRequired) => FixSafety::ExplicitRestartRequired,
-                (FixSafety::SafeLocalRepair, _) | (_, FixSafety::SafeLocalRepair) => {
-                    FixSafety::SafeLocalRepair
-                }
-                _ => FixSafety::ReadOnly,
-            };
-    }
-    result
+    reasons
+        .iter()
+        .map(|reason| reason.fix_safety)
+        .max_by_key(|safety| safety.restriction_rank())
+        .unwrap_or(FixSafety::ReadOnly)
 }
 
 fn stale_zero_byte_db_candidates(
@@ -1734,8 +1723,9 @@ fn build_json_report(
     checks: &[Check],
     actions: &[FixAction],
 ) -> DoctorReport {
-    let summary = summarize_checks(checks);
-    let sections = build_doctor_sections(checks);
+    let checks = [checks, &repair_response::verification_checks(actions)].concat();
+    let summary = summarize_checks(&checks);
+    let sections = build_doctor_sections(&checks);
     let checks = checks
         .iter()
         .map(|check| DoctorCheckReport {
@@ -2057,47 +2047,8 @@ fn apply_service_fix(snapshot: &HealthSnapshot, options: &DoctorOptions) -> Vec<
     Vec::new()
 }
 
-fn stale_mailbox_repair_response_status(response: &Value) -> &str {
-    response
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| {
-            if response.get("ok").and_then(Value::as_bool) == Some(true) {
-                "applied"
-            } else if response.get("skipped").and_then(Value::as_bool) == Some(true)
-                || response.get("safety_gate").is_some()
-            {
-                "skipped"
-            } else {
-                "partial_repair"
-            }
-        })
-}
-
-fn stale_mailbox_repair_safety_gate(response: &Value) -> &'static str {
-    match response
-        .get("safety_gate")
-        .and_then(Value::as_str)
-        .unwrap_or("repair_skipped")
-    {
-        "mailbox_not_found" => "mailbox_not_found",
-        "expected_evidence_mismatch" => "expected_evidence_mismatch",
-        "queue_not_empty" => "queue_not_empty",
-        "active_dispatch_present" => "active_dispatch_present",
-        "tmux_present" => "tmux_present",
-        _ => "repair_skipped",
-    }
-}
-
-fn stale_mailbox_repair_fix_safety(response: &Value) -> FixSafety {
-    match response.get("fix_safety").and_then(Value::as_str) {
-        Some("explicit_restart_required") => FixSafety::ExplicitRestartRequired,
-        Some("explicit_db_repair_required") => FixSafety::ExplicitDbRepairRequired,
-        Some("not_fixable") => FixSafety::NotFixable,
-        Some("read_only") => FixSafety::ReadOnly,
-        _ => FixSafety::SafeLocalRepair,
-    }
-}
+mod repair_response;
+mod report_display;
 
 mod observation_checks;
 use observation_checks::check_mailbox_consistency;
@@ -3964,69 +3915,14 @@ pub fn cmd_doctor(options: DoctorOptions) -> Result<(), String> {
             let actions = report
                 .fixes
                 .iter()
-                .map(|action| FixAction {
-                    id: action.id,
-                    name: action.name,
-                    status: action.status,
-                    ok: action.ok,
-                    detail: action.detail.clone(),
-                    skipped: action.skipped,
-                    requires_explicit_consent: action.requires_explicit_consent,
-                    fix_safety: match action.fix_safety {
-                        "read_only" => FixSafety::ReadOnly,
-                        "safe_local_repair" => FixSafety::SafeLocalRepair,
-                        "explicit_restart_required" => FixSafety::ExplicitRestartRequired,
-                        "explicit_db_repair_required" => FixSafety::ExplicitDbRepairRequired,
-                        _ => FixSafety::NotFixable,
-                    },
-                    safety_gate: action.safety_gate,
-                    skipped_reason: action.skipped_reason.clone(),
-                    evidence: action.evidence.clone(),
-                })
+                .map(report_display::fix_action)
                 .collect::<Vec<_>>();
             print_fix_actions(&actions);
         }
         let checks = report
             .checks
             .iter()
-            .map(|check| Check {
-                id: check.id,
-                group: check_group_from_report(check.group),
-                name: check.name,
-                status: match check.status {
-                    "pass" => CheckStatus::Pass,
-                    "warn" => CheckStatus::Warn,
-                    _ => CheckStatus::Fail,
-                },
-                severity: match check.severity {
-                    "info" => Severity::Info,
-                    "warning" => Severity::Warning,
-                    "critical" => Severity::Critical,
-                    _ => Severity::Error,
-                },
-                subsystem: check.subsystem,
-                detail: check.detail.clone(),
-                guidance: check.guidance.clone(),
-                path: check.path.clone(),
-                expected: check.expected.clone(),
-                actual: check.actual.clone(),
-                next_steps: check.next_steps.clone(),
-                evidence: check.evidence.clone(),
-                fix_safety: match check.fix_safety {
-                    "read_only" => FixSafety::ReadOnly,
-                    "safe_local_repair" => FixSafety::SafeLocalRepair,
-                    "explicit_restart_required" => FixSafety::ExplicitRestartRequired,
-                    "explicit_db_repair_required" => FixSafety::ExplicitDbRepairRequired,
-                    _ => FixSafety::NotFixable,
-                },
-                security_exposure: match check.security_exposure {
-                    "local_path" => SecurityExposure::LocalPath,
-                    "operational_metadata" => SecurityExposure::OperationalMetadata,
-                    "credential_metadata" => SecurityExposure::CredentialMetadata,
-                    "public_surface" => SecurityExposure::PublicSurface,
-                    _ => SecurityExposure::None,
-                },
-            })
+            .map(report_display::check)
             .collect::<Vec<_>>();
         for (group, label) in [
             (CheckGroup::Core, "Core"),
