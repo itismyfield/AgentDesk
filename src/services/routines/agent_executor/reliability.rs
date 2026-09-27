@@ -40,6 +40,71 @@ pub(super) fn fresh_provider_session_probe_allowed(
             >= Duration::seconds(FRESH_PROVIDER_SESSION_LIVENESS_GRACE_SECS)
 }
 
+/// Completion evidence for a headless agent turn: its transcript, or a terminal
+/// no-deliverable quality event. Shared by routines and the voice conductor.
+pub(crate) async fn find_headless_turn_completion(
+    pool: &PgPool,
+    turn_id: &str,
+    since: DateTime<Utc>,
+) -> sqlx::Result<Option<AgentTurnCompletion>> {
+    let transcript = sqlx::query_as::<_, AgentTranscriptCompletionRow>(
+        r#"
+        SELECT assistant_message, duration_ms::bigint AS duration_ms, created_at
+        FROM session_transcripts
+        WHERE turn_id = $1
+          AND created_at >= $2
+          AND BTRIM(assistant_message) <> ''
+        ORDER BY created_at ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(turn_id)
+    .bind(since)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(transcript) = transcript {
+        let evidence = if assistant_message_is_no_reply(&transcript.assistant_message) {
+            AgentTurnCompletionEvidence::NoReplyTranscript
+        } else {
+            AgentTurnCompletionEvidence::AssistantTranscript
+        };
+        return Ok(Some(AgentTurnCompletion {
+            assistant_message: Some(transcript.assistant_message),
+            duration_ms: transcript.duration_ms,
+            created_at: transcript.created_at,
+            evidence,
+            terminal_status: None,
+        }));
+    }
+
+    let terminal = sqlx::query_as::<_, AgentQualityCompletionRow>(
+        r#"
+        SELECT event_type::text AS event_type,
+               payload #>> '{details,outcome}' AS outcome,
+               CASE
+                   WHEN payload #>> '{details,duration_ms}' ~ '^-?[0-9]+$'
+                   THEN (payload #>> '{details,duration_ms}')::bigint
+                   ELSE NULL
+               END AS duration_ms,
+               created_at
+        FROM agent_quality_event
+        WHERE correlation_id = $1
+          AND source_event_id = $1
+          AND created_at >= $2
+          AND event_type = 'turn_error'::agent_quality_event_type
+          AND payload #>> '{details,outcome}' = 'empty_response'
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(turn_id)
+    .bind(since)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(terminal.and_then(terminal_completion_from_quality_event))
+}
+
 impl RoutineAgentExecutor {
     pub(super) async fn find_turn_completion(
         &self,
@@ -48,76 +113,15 @@ impl RoutineAgentExecutor {
         let Some(turn_id) = run.turn_id.as_deref() else {
             return Ok(None);
         };
-        let transcript = sqlx::query_as::<_, AgentTranscriptCompletionRow>(
-            r#"
-            SELECT assistant_message, duration_ms::bigint AS duration_ms, created_at
-            FROM session_transcripts
-            WHERE turn_id = $1
-              AND created_at >= $2
-              AND BTRIM(assistant_message) <> ''
-            ORDER BY created_at ASC
-            LIMIT 1
-            "#,
-        )
-        .bind(turn_id)
-        .bind(run.started_at)
-        .fetch_optional(&*self.pool)
-        .await
-        .map_err(|error| {
-            anyhow!(
-                "lookup routine agent transcript {} for run {}: {error}",
-                turn_id,
-                run.run_id
-            )
-        })?;
-        if let Some(transcript) = transcript {
-            let evidence = if assistant_message_is_no_reply(&transcript.assistant_message) {
-                AgentTurnCompletionEvidence::NoReplyTranscript
-            } else {
-                AgentTurnCompletionEvidence::AssistantTranscript
-            };
-            return Ok(Some(AgentTurnCompletion {
-                assistant_message: Some(transcript.assistant_message),
-                duration_ms: transcript.duration_ms,
-                created_at: transcript.created_at,
-                evidence,
-                terminal_status: None,
-            }));
-        }
-
-        let terminal = sqlx::query_as::<_, AgentQualityCompletionRow>(
-            r#"
-            SELECT event_type::text AS event_type,
-                   payload #>> '{details,outcome}' AS outcome,
-                   CASE
-                       WHEN payload #>> '{details,duration_ms}' ~ '^-?[0-9]+$'
-                       THEN (payload #>> '{details,duration_ms}')::bigint
-                       ELSE NULL
-                   END AS duration_ms,
-                   created_at
-            FROM agent_quality_event
-            WHERE correlation_id = $1
-              AND source_event_id = $1
-              AND created_at >= $2
-              AND event_type = 'turn_error'::agent_quality_event_type
-              AND payload #>> '{details,outcome}' = 'empty_response'
-            ORDER BY created_at ASC, id ASC
-            LIMIT 1
-            "#,
-        )
-        .bind(turn_id)
-        .bind(run.started_at)
-        .fetch_optional(&*self.pool)
-        .await
-        .map_err(|error| {
-            anyhow!(
-                "lookup routine agent terminal turn {} for run {}: {error}",
-                turn_id,
-                run.run_id
-            )
-        })?;
-
-        Ok(terminal.and_then(terminal_completion_from_quality_event))
+        find_headless_turn_completion(&self.pool, turn_id, run.started_at)
+            .await
+            .map_err(|error| {
+                anyhow!(
+                    "lookup routine agent turn completion {} for run {}: {error}",
+                    turn_id,
+                    run.run_id
+                )
+            })
     }
     /// A fresh managed-tmux turn that lost its pane cannot produce a
     /// transcript or terminal quality event. Detect that state before the

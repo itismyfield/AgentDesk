@@ -656,6 +656,46 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             }),
         ),
         ep(
+            "POST",
+            "/api/voice/conductor/say",
+            "agents",
+            "Plan a spoken request, start a headless turn on each chosen agent, and return the job. Results are gathered in the background and a spoken summary is added when every turn finishes; each change is broadcast as a voice_conductor_job event.",
+        )
+        .with_params([("text", body_param("string", true, "Transcribed request"))])
+        .with_example(
+            json!({"text": "대시보드한테 모바일 캠페인 탭 점검시키고 스케줄러한테 내일 일정 정리시켜"}),
+            json!({
+                "id": "2f6c1c9e-0d1b-4c43-9a57-5f0d8f1b7c21",
+                "request": "대시보드한테 모바일 캠페인 탭 점검시키고 스케줄러한테 내일 일정 정리시켜",
+                "reply": "대시보드와 스케줄러에 맡겼어요. 끝나면 알려드릴게요.",
+                "created_at": "2026-09-27T09:00:00Z",
+                "dispatches": [{
+                    "agent_id": "adk-dashboard",
+                    "agent_name": "대시보드",
+                    "prompt": "모바일 뷰에서 캠페인 탭을 점검하고 깨지는 곳을 정리해줘.",
+                    "turn_id": "discord:1490141479707086938:1727427600000",
+                    "status": "running",
+                    "result": null,
+                    "error": null
+                }],
+                "summary": null,
+                "finished_at": null
+            }),
+        ),
+        ep(
+            "GET",
+            "/api/voice/conductor/jobs",
+            "agents",
+            "List the most recent voice conductor jobs, newest first. Jobs are kept in memory and reset on restart.",
+        ),
+        ep(
+            "GET",
+            "/api/voice/conductor/jobs/{id}",
+            "agents",
+            "Read one voice conductor job with per-agent status, results and the spoken summary.",
+        )
+        .with_params([("id", path_param("Job id"))]),
+        ep(
             "GET",
             "/api/dispatched-sessions",
             "dispatched-sessions",

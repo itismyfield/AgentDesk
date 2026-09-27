@@ -48,6 +48,7 @@ pub(crate) struct VoiceConfig {
     pub lobby_channel_id: Option<String>,
     pub active_agent_ttl_seconds: u64,
     pub foreground: VoiceForegroundConfig,
+    pub conductor: VoiceConductorConfig,
     pub spoken_result: VoiceSpokenResultConfig,
     pub default_sensitivity_mode: BargeInSensitivity,
     pub auto_join_channel_ids: Vec<String>,
@@ -74,6 +75,7 @@ impl Default for VoiceConfig {
             lobby_channel_id: None,
             active_agent_ttl_seconds: DEFAULT_ACTIVE_AGENT_TTL_SECS,
             foreground: VoiceForegroundConfig::default(),
+            conductor: VoiceConductorConfig::default(),
             spoken_result: VoiceSpokenResultConfig::default(),
             default_sensitivity_mode: BargeInSensitivity::Normal,
             auto_join_channel_ids: Vec::new(),
@@ -189,6 +191,24 @@ impl Default for VoiceForegroundConfig {
             model: DEFAULT_FOREGROUND_MODEL.to_string(),
             max_chars: DEFAULT_FOREGROUND_MAX_CHARS,
             timeout_ms: DEFAULT_FOREGROUND_TIMEOUT_MS,
+        }
+    }
+}
+
+/// The voice conductor fans one request out to agents and speaks a summary
+/// once their turns finish (or `max_wait_secs` passes).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct VoiceConductorConfig {
+    pub provider: String,
+    pub max_wait_secs: u64,
+}
+
+impl Default for VoiceConductorConfig {
+    fn default() -> Self {
+        Self {
+            provider: DEFAULT_FOREGROUND_PROVIDER.to_string(),
+            max_wait_secs: 30 * 60,
         }
     }
 }
