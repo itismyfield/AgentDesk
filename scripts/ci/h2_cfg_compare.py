@@ -12,12 +12,16 @@ from pathlib import Path
 Cfg = tuple[str, ...]
 
 
-def read_cfg(path: Path) -> set[Cfg]:
+def read_cfg(path: Path, *, data: bytes | None = None) -> set[Cfg]:
     """Read JSON atoms [name] or [name, value]; rustc's unescaped text output is not an input format."""
     try:
-        snapshot = json.loads(path.read_text(encoding="utf-8"))
+        snapshot = json.loads((path.read_bytes() if data is None else data).decode("utf-8"))
     except json.JSONDecodeError as exc:
         raise ValueError(f"{path}:{exc.lineno}: expected structured cfg JSON: {exc.msg}") from exc
+    if isinstance(snapshot, dict) and snapshot.get("schema") == 1:
+        if not all(isinstance(snapshot.get(key), str) and len(snapshot[key]) == 32 for key in ("run_id", "nonce")):
+            raise ValueError(f"{path}: invalid cfg run identity")
+        snapshot = snapshot.get("atoms")
     if not isinstance(snapshot, list) or not snapshot:
         raise ValueError(f"{path}: expected a nonempty cfg array")
     atoms = set()
