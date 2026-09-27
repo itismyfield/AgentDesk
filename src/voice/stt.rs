@@ -14,7 +14,6 @@ use tracing::{debug, warn};
 use super::VoiceConfig;
 use super::config::{VoiceSttMode, VoiceSttProvider};
 use super::metrics::{SttOutcome, record_stt_outcome};
-use super::openai_compat::OpenAiCompatEndpoint;
 use super::stt_streaming::{
     StreamingDecodeWindow, StreamingDecodeWindowMeta, StreamingOverlapConfig,
     WHISPER_STREAM_SAMPLE_RATE_HZ, WhisperStreamOverlapSegmenter,
@@ -55,9 +54,8 @@ pub(crate) struct SttConfig {
     /// is below this (and whose peak is below `LOW_VOLUME_MAX_DB`) are skipped.
     pub(crate) speech_start_db: f32,
     pub(crate) stream_overlap: StreamingOverlapConfig,
-    /// Set when `voice.stt.provider` is `openai-compatible`: the converted
-    /// utterance is sent there instead of to whisper-cli.
-    pub(crate) http: Option<OpenAiCompatEndpoint>,
+    /// Set for `voice.stt.provider: openai-compatible`; replaces whisper-cli.
+    pub(crate) http: Option<super::openai_compat::OpenAiCompatEndpoint>,
 }
 
 impl SttConfig {
@@ -193,17 +191,8 @@ impl SttRuntime {
 
         let result = async {
             self.convert_for_whisper(wav_path, &converted_path).await?;
-            match &self.config.http {
-                Some(endpoint) => self.run_http(endpoint, &converted_path).await,
-                None => {
-                    self.run_whisper_with_retry(
-                        &converted_path,
-                        &transcript_prefix,
-                        &transcript_path,
-                    )
-                    .await
-                }
-            }
+            self.run_whisper_with_retry(&converted_path, &transcript_prefix, &transcript_path)
+                .await
         }
         .await;
 
@@ -296,10 +285,15 @@ impl SttRuntime {
             }
             cleanup_temp_file(transcript_path).await;
 
-            let output = self
-                .run_whisper(converted_path, transcript_prefix, transcript_path)
-                .await?;
-            let raw = read_whisper_text(transcript_path, &output).await?;
+            let raw = if let Some(endpoint) = &self.config.http {
+                super::openai_compat::transcribe(endpoint, converted_path, &self.config.language)
+                    .await?
+            } else {
+                let output = self
+                    .run_whisper(converted_path, transcript_prefix, transcript_path)
+                    .await?;
+                read_whisper_text(transcript_path, &output).await?
+            };
             let cleaned = clean_transcript(&raw);
             if !cleaned.is_empty() {
                 record_stt_outcome(SttOutcome::Transcribed);
@@ -312,23 +306,6 @@ impl SttRuntime {
         warn!("voice STT produced an empty transcript after retry (#3914)");
         record_stt_outcome(SttOutcome::EmptyAfterRetry);
         Ok(String::new())
-    }
-
-    async fn run_http(
-        &self,
-        endpoint: &OpenAiCompatEndpoint,
-        converted_path: &Path,
-    ) -> Result<String> {
-        let raw = super::openai_compat::transcribe(endpoint, converted_path, &self.config.language)
-            .await
-            .context("transcribe utterance over the openai-compatible endpoint")?;
-        let cleaned = clean_transcript(&raw);
-        record_stt_outcome(if cleaned.is_empty() {
-            SttOutcome::EmptyAfterRetry
-        } else {
-            SttOutcome::Transcribed
-        });
-        Ok(cleaned)
     }
 
     async fn run_whisper(
@@ -422,18 +399,13 @@ impl VoiceSttRuntime {
         runner: SttCommandRunner,
     ) -> Self {
         let fallback = SttRuntime::with_runner(config.clone(), runner.clone());
-        // Streaming windows are whisper-cli only; an HTTP provider runs per utterance.
-        let mode = if config.http.is_some() {
-            VoiceSttMode::File
-        } else {
-            mode
-        };
         match mode {
-            VoiceSttMode::File => Self::File(fallback),
-            VoiceSttMode::Stream => Self::Stream {
+            // Streaming windows are whisper-cli only; an HTTP provider runs per utterance.
+            VoiceSttMode::Stream if config.http.is_none() => Self::Stream {
                 stream: WhisperStream::with_runner(config, runner),
                 fallback,
             },
+            VoiceSttMode::File | VoiceSttMode::Stream => Self::File(fallback),
         }
     }
 

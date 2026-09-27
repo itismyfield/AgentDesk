@@ -412,6 +412,8 @@ src/
 │   │   ├── termination_events.rs
 │   │   ├── turn_lease.rs
 │   │   ├── v1.rs
+│   │   ├── voice_audio.rs
+│   │   ├── voice_conductor.rs
 │   │   └── voice_config.rs
 │   ├── web_surface/
 │   │   └── tests.rs
@@ -1987,6 +1989,7 @@ src/
 │   ├── turn_cancel_queue_guard.rs
 │   ├── turn_lifecycle.rs
 │   ├── turn_orchestrator.rs
+│   ├── voice_conductor.rs
 │   └── writer_protocol.rs
 ├── supervisor/
 │   └── mod.rs
@@ -2025,6 +2028,7 @@ src/
 │   ├── flight.rs
 │   ├── metrics.rs
 │   ├── mod.rs
+│   ├── openai_compat.rs
 │   ├── progress.rs
 │   ├── prompt.rs
 │   ├── receiver.rs

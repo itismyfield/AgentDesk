@@ -31,7 +31,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs:6` (+1 more) |  |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs:34` (+1 more) | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
 | `ADK_THREAD_LOCK_WAIT_STARTED` | `src/cli/discord_thread_create_lock.rs:549` |  |
-| `ADK_VOICE_KEEP_WAV` | `src/voice/config.rs:135` | `keep_recordings` 또는 환경변수 `ADK_VOICE_KEEP_WAV` 에 따라 utterance wav / segment / transcript sidecar 를 보존할지 결정한다 (#2156). |
+| `ADK_VOICE_KEEP_WAV` | `src/voice/config.rs:138` | `keep_recordings` 또는 환경변수 `ADK_VOICE_KEEP_WAV` 에 따라 utterance wav / segment / transcript sidecar 를 보존할지 결정한다 (#2156). |
 | `ADK_VOICE_SILENCE` | `src/services/discord/voice_barge_in/foreground_decision.rs:3` |  |
 | `AGENTDESK_API_URL` | `src/cli/client.rs:14` (+1 more) | `env_hint` names the environment variable(s) the *caller's* `api_base()` actually honors — client.rs resolves `AGENTDESK_API_URL` only, while monitoring.rs pre… |
 | `AGENTDESK_CATCH_UP_POLL_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs:414` |  |
@@ -133,7 +133,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs:478` (+1 more) |  |
 | `QWEN_CODE_SYSTEM_SETTINGS_PATH` | `src/cli/doctor/orchestrator.rs:484` (+1 more) |  |
 | `QWEN_HOME` | `src/cli/doctor/orchestrator.rs:456` (+2 more) |  |
-| `REQUIRE_WAKE_WORD` | `src/voice/config.rs:103` | A live yaml with `wake_words: []` plus `REQUIRE_WAKE_WORD=1` would otherwise make EVERY utterance fail the (impossible-to-satisfy) gate and be silently dropped. |
+| `REQUIRE_WAKE_WORD` | `src/voice/config.rs:106` | A live yaml with `wake_words: []` plus `REQUIRE_WAKE_WORD=1` would otherwise make EVERY utterance fail the (impossible-to-satisfy) gate and be silently dropped. |
 | `RUST_LOG` | `src/logging.rs:29` | The directive every shipped dcserver process adds on top of `RUST_LOG`. |
 | `SHELL` | `src/services/platform/binary_resolver.rs:1277` |  |
 | `USERPROFILE` | `src/cli/doctor/orchestrator.rs:466` (+6 more) |  |
