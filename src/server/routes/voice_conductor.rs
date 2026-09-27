@@ -48,7 +48,7 @@ pub(crate) async fn say(
                             .unwrap_or("agent turn target unavailable")
                             .to_string()
                     })?;
-            super::agents::start_headless_turn_on_target(
+            super::agents_turn_target::start_headless_turn_on_target(
                 &registry,
                 target,
                 prompt,

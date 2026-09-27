@@ -12,9 +12,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 
 use crate::services::provider::ProviderKind;
-use crate::services::routines::agent_executor::{
-    AgentTurnCompletionEvidence, find_headless_turn_completion,
-};
+use crate::services::routines::agent_executor::AgentTurnCompletionEvidence;
+use crate::services::routines::agent_executor::reliability::find_headless_turn_completion;
 use crate::voice::config::VoiceConfig;
 
 const MAX_KEPT_JOBS: usize = 50;

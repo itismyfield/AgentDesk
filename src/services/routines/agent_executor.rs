@@ -1,8 +1,7 @@
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, Utc};
 
-mod reliability;
-pub(crate) use reliability::find_headless_turn_completion;
+pub(crate) mod reliability;
 use reliability::{current_attempt_started_at, provider_error_from_completion};
 use serde_json::{Map, Value, json};
 use sqlx::PgPool;

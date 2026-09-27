@@ -135,3 +135,28 @@ pub(super) async fn resolve_agent_turn_target(
         channel_id: channel_id_num,
     })
 }
+
+/// Starts a headless turn on an already resolved agent target and returns its
+/// turn id and start status. Shared by the turn-start route and the voice
+/// conductor.
+pub(super) async fn start_headless_turn_on_target(
+    registry: &crate::services::discord::health::HealthRegistry,
+    target: AgentTurnTarget,
+    prompt: String,
+    source: Option<String>,
+    metadata: Option<serde_json::Value>,
+) -> Result<(String, &'static str), crate::services::discord::HeadlessTurnStartError> {
+    let channel_name_hint = (!target.primary_channel.chars().all(|ch| ch.is_ascii_digit()))
+        .then_some(target.primary_channel);
+    crate::services::discord::health::start_headless_agent_turn(
+        registry,
+        poise::serenity_prelude::ChannelId::new(target.channel_id),
+        target.provider,
+        prompt,
+        source,
+        metadata,
+        channel_name_hint,
+    )
+    .await
+    .map(|outcome| (outcome.turn_id, outcome.status.as_str()))
+}
