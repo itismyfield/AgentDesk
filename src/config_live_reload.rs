@@ -306,9 +306,8 @@ pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str>
     if section_changed(&old.data, &new.data) {
         changed.push("data");
     }
-    // Most cluster runtime and wait-queue snapshots are installed at boot. The
-    // owner-authority channel allowlist is a planner telemetry scope read from
-    // `current()` per intake, so exclude only that field from the boot fingerprint.
+    // Exclude decision-time settings from the cluster boot fingerprint:
+    // the intake telemetry allowlist and gateway handback breaker configuration.
     let mut old_cluster = old.cluster.clone();
     let mut new_cluster = new.cluster.clone();
     old_cluster
@@ -319,6 +318,7 @@ pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str>
         .intake_routing
         .owner_authority_channel_ids
         .clear();
+    old_cluster.gateway_handback_breaker = new_cluster.gateway_handback_breaker.clone();
     if old_cluster != new_cluster {
         changed.push("cluster");
     }

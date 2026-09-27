@@ -144,11 +144,16 @@ impl GatewayHandbackBreaker {
             return false;
         };
         let now = (self.clock)();
-        if self.retry.is_some() || state.pending.is_some() || state.suppressed(now) {
+        if self.retry.is_some() || state.suppressed(now) {
             return false;
         }
-        state.pending = Some(now);
-        self.write(&state)
+        // A holder may have missed settlement while disabled; do not count that handback.
+        let replaced_pending = state.pending.replace(now).is_some();
+        let written = self.write(&state);
+        if written && replaced_pending {
+            self.state_error("holder replaced an unsettled handback without counting it");
+        }
+        written
     }
 
     pub(super) fn observe(&mut self, acquired: Result<bool, ()>) {
