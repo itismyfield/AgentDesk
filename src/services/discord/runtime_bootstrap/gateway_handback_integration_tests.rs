@@ -398,19 +398,16 @@ async fn backend_exit_removes_home_waiter_until_live_home_takes_handback_pg() {
         !fixture.publish_waiter().await,
         "cancelled acquisition clears the heartbeat waiter"
     );
-    crate::config::save_to_path(&config_path, &fixture.config).unwrap();
-    let waiter = GatewayWaiterGuard::new("claude");
+    home.unlock().await.unwrap();
     let home_shared =
         super::super::make_shared_data_for_tests_with_storage(Some(fixture.pool.clone()));
-    let mut running = Running::start(
-        home_shared,
-        GatewayLeaseAcquisition {
-            lease: home,
-            waiter: Some(waiter),
-        },
-        None,
-    )
-    .await;
+    let GatewayLeaseOutcome::Proceed(Some(acquired)) =
+        fixture.acquire(&home_shared, &mut fixture.breaker()).await
+    else {
+        panic!("preferred home acquires the released lease")
+    };
+    crate::config::save_to_path(&config_path, &fixture.config).unwrap();
+    let mut running = Running::start(home_shared, acquired, None).await;
     assert!(fixture.publish_waiter().await);
     running.manager.shutdown_all().await;
     running.ended().await;
