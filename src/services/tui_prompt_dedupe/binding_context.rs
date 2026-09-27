@@ -129,7 +129,7 @@ fn durable_directory(path: &Path) -> io::Result<()> {
     }
     #[cfg(test)]
     creation_fault("directory")?;
-    fs::File::open(parent)?.sync_all()
+    crate::services::discord::runtime_store::fsync_parent_dir(path)
 }
 
 impl PreparedIncarnation {
@@ -186,7 +186,7 @@ impl PreparedIncarnation {
             fs::remove_file(&temp)?;
             #[cfg(test)]
             creation_fault("parent")?;
-            fs::File::open(parent)?.sync_all()
+            crate::services::discord::runtime_store::fsync_parent_dir(&path)
         })();
         let _ = fs::remove_file(&temp);
         result?;
