@@ -38,6 +38,7 @@ src/
 │   │   │   ├── observation_tests.rs
 │   │   │   ├── provider_credentials.rs
 │   │   │   ├── repair_response.rs
+│   │   │   ├── report_display.rs
 │   │   │   └── stale_mailbox_repair.rs
 │   │   ├── contract.rs
 │   │   ├── health.rs
