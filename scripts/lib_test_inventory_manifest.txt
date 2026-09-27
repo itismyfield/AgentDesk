@@ -9115,6 +9115,7 @@ services::tui_o::shadow::derive::tests::sealed_units_repeat_silently_and_block_w
 services::tui_o::shadow::derive::tests::split_pieces_follow_legacy_split_in_utf16_units
 services::tui_o::shadow::derive::tests::turns_open_on_native_input_and_close_on_idle_observation
 services::tui_o::shadow::diff::tests::a_post_after_the_unit_window_misses_even_when_the_observer_drains_late
+services::tui_o::shadow::diff::tests::an_edit_that_moves_a_consumed_occurrence_does_not_free_it
 services::tui_o::shadow::diff::tests::an_unposted_tool_unit_is_o_only_while_other_misses_stay_unknown
 services::tui_o::shadow::diff::tests::exact_match_is_tried_before_an_earlier_containing_message
 services::tui_o::shadow::diff::tests::historical_units_are_not_diffed_while_other_o_outcomes_are_immediate
@@ -9124,6 +9125,8 @@ services::tui_o::shadow::diff::tests::normalized_containment_is_format_only_and_
 services::tui_o::shadow::diff::tests::one_legacy_occurrence_is_consumed_by_one_unit_only
 services::tui_o::shadow::metrics::tests::the_derive_reason_for_an_oversized_split_piece_counts_as_split_over_limit
 services::tui_o::shadow::report::tests::a_complete_window_passes_counting_turns_not_units_and_skipping_backlog
+services::tui_o::shadow::report::tests::a_thread_bound_in_the_window_stays_covered_after_a_restart_or_unbind
+services::tui_o::shadow::report::tests::a_timeless_tap_gap_counts_by_its_storage_time_until_the_last_judgement
 services::tui_o::shadow::report::tests::operator_classification_resolves_listed_diffs_and_rejects_bad_input
 services::tui_o::shadow::report::tests::population_gaps_fail_while_unreadable_history_only_warns
 services::tui_o::shadow::report::tests::samples_count_only_units_sealed_inside_the_window_boundary
@@ -9135,7 +9138,7 @@ services::tui_o::shadow::root::tests::shadow_root_refuses_links_and_leaves_outsi
 services::tui_o::shadow::root::tests::store_appends_readable_jsonl_and_stops_at_the_cap
 services::tui_o::shadow::root::tests::store_seals_a_torn_tail_so_new_appends_survive_and_reports_the_damage
 services::tui_o::shadow::tap::tests::a_turn_running_at_attach_is_captured_from_its_opener_and_closes_live
-services::tui_o::shadow::tap::tests::a_window_start_applied_after_a_capture_still_reaches_what_it_captured
+services::tui_o::shadow::tap::tests::a_window_start_applied_ticks_after_a_capture_still_reaches_what_it_captured
 services::tui_o::shadow::tap::tests::observer_attaches_derives_diffs_and_persists_only_through_the_sink
 services::tui_o::shadow::tap::tests::only_window_starts_appended_after_startup_are_polled
 services::tui_o::shadow::tap::tests::tap_counts_a_full_queue_as_dropped_instead_of_waiting
