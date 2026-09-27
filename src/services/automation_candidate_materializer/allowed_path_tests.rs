@@ -109,7 +109,7 @@ fn materialized_metadata_marks_loop_candidate() {
         dedupe_key: Some("pattern:1".to_string()),
         start_ready: false,
         program: CandidateProgramInput {
-            repo_dir: "/repo".to_string(),
+            repo_dir: std::env::temp_dir().join("repo").display().to_string(),
             allowed_write_paths: vec!["src/services".to_string()],
             metric_name: "failure_count".to_string(),
             metric_target: 0.0,
