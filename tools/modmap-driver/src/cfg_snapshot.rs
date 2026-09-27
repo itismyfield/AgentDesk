@@ -25,12 +25,41 @@ impl Snapshot {
             .collect();
         atoms.sort();
         atoms.dedup();
-        publish(&self.out, &serde_json::json!(atoms))?;
+        let run_id = std::env::var("MODMAP_RUN_ID").unwrap_or_default();
+        let bound = !run_id.is_empty();
+        let cfg = if bound {
+            serde_json::json!({"schema": 1, "run_id": run_id, "nonce": self.nonce, "atoms": atoms})
+        } else {
+            serde_json::json!(atoms)
+        };
+        publish(&self.out, &cfg)?;
         let mut invocation = self.out.as_os_str().to_owned();
         invocation.push(".invocation.json");
-        publish(
-            Path::new(&invocation),
-            &serde_json::json!({"nonce": self.nonce, "argv": self.argv, "root": root}),
-        )
+        let mut proof = serde_json::json!({"nonce": self.nonce, "argv": self.argv, "root": root});
+        if bound {
+            let out = std::env::var("MODMAP_OUT").unwrap_or_default();
+            proof["schema"] = serde_json::json!(1);
+            proof["run_id"] = serde_json::json!(run_id);
+            proof["kind"] = serde_json::json!(std::env::var("MODMAP_KIND").unwrap_or_default());
+            proof["tsv"] = serde_json::json!(std::fs::read_to_string(&out)?);
+            proof["out"] = serde_json::json!(out);
+            proof["env"] = serde_json::json!(
+                std::env::vars()
+                    .filter(|(key, _)| {
+                        key.starts_with("CARGO_FEATURE_")
+                            || matches!(
+                                key.as_str(),
+                                "MODMAP_RUN_ID"
+                                    | "RUSTFLAGS"
+                                    | "CARGO_ENCODED_RUSTFLAGS"
+                                    | "CARGO_BUILD_TARGET"
+                                    | "RUSTC_BOOTSTRAP"
+                                    | "OUT_DIR"
+                            )
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            );
+        }
+        publish(Path::new(&invocation), &proof)
     }
 }

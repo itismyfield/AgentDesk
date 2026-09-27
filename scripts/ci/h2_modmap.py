@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import h2_depinfo  # noqa: E402
 import h2_measure as m  # noqa: E402
 import h2_cfg_compare as cfg_compare  # noqa: E402
+import h2_cfg_collect as collect  # noqa: E402
 
 DRIVER = "tools/modmap-driver"
 MIN_MODULES = 1000
@@ -43,7 +44,7 @@ CANARY_CFG = {
 class ModmapError(RuntimeError):
     pass
 
-def cargo(root: Path, *args: str, log: Path | None = None, **env: str) -> list[dict]:
+def cargo(root: Path, *args: str, log: Path | None = None, record: Path | None = None, **env: str) -> list[dict]:
     """No rustc wrapper: sccache cannot wrap the driver, and a cache hit would skip writing the map."""
     full = {k: v for k, v in os.environ.items() if k not in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET")}
     full.pop("RUSTC_BOOTSTRAP", None)
@@ -64,6 +65,8 @@ def cargo(root: Path, *args: str, log: Path | None = None, **env: str) -> list[d
                 events.append(event)
                 if event.get("reason") == "compiler-message":
                     print(event["message"].get("rendered") or event["message"]["message"], end="\n", file=sys.stderr)
+    if record is not None:
+        collect.write_json(record, dict(rc=proc.returncode, argv=["cargo", *args]))
     if proc.returncode:
         raise ModmapError(f"`cargo {' '.join(args)}` failed ({proc.returncode})")
     return events
@@ -88,6 +91,8 @@ def fresh(path: Path, start: int) -> None:
 def check_canary_cfg(path: Path, nonce: str, driver: Path, crate: Path, events: list[dict]) -> None:
     atoms = cfg_compare.read_cfg(path)
     raw = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(raw, dict):
+        raw = raw.get("atoms")
     if raw != [list(atom) for atom in sorted(atoms)]:
         raise ModmapError("cfg canary: snapshot is not sorted and unique")
     probes = {atom for atom in atoms if atom[0].startswith("h2_probe_") or atom[0] == "feature"}
@@ -138,7 +143,7 @@ def map_modules(root: Path, driver: Path, crate: Path, out: Path, min_modules: i
     marker.touch()
     start = marker.stat().st_mtime_ns  # the file clock, which also stamps the map
     nonce = uuid.uuid4().hex
-    events = cargo(root, "check", "--lib", "-q", "--message-format=json", "--manifest-path", str(crate / "Cargo.toml"), *extra,
+    events = cargo(root, "check", "--lib", "--message-format=json", "--manifest-path", str(crate / "Cargo.toml"), *extra,
                    log=out.with_suffix(".cargo.jsonl"), RUSTC_WORKSPACE_WRAPPER=str(driver), MODMAP_OUT=str(out),
                    MODMAP_CFG_OUT=str(cfg_out) if cfg_out else "", MODMAP_CFG_NONCE=nonce)
     for path in outputs:
@@ -150,32 +155,115 @@ def map_modules(root: Path, driver: Path, crate: Path, out: Path, min_modules: i
         check_canary_cfg(cfg_out, nonce, driver, crate, events)
     return rows
 
+def source_state(root: Path) -> dict:
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
+    names = git("ls-files", "-c", "-o", "--exclude-standard", "-z").split("\0")
+    inputs = {name: collect.digest((root / name).read_bytes()) if (root / name).is_file() else None
+              for name in sorted(set(names)) if name}
+    return dict(sha=git("rev-parse", "HEAD"), tree=git("rev-parse", "HEAD^{tree}"),
+                dirty_digest=collect.digest(git("diff", "HEAD", "--binary").encode()),
+                inputs_digest=collect.digest(json.dumps(inputs, sort_keys=True).encode()),
+                config={name: inputs.get(name) for name in
+                        ("Cargo.lock", "Cargo.toml", "clippy.toml", ".cargo/config.toml", "rust-toolchain.toml")})
+
+
+def map_run(root: Path, driver: Path, crate: Path, out: Path, cfg: Path, meta: Path,
+            lane: str, run_id: str, kind: str, context: dict) -> list:
+    run = out.parent
+    run.mkdir(parents=True, exist_ok=True)
+    if any(run.iterdir()):
+        raise ModmapError("metadata: run directory must be empty")
+    marker = run / "start"
+    marker.touch()
+    nonce = uuid.uuid4().hex
+    paths = dict(tsv=str(out), cfg=str(cfg), invocation=str(cfg) + ".invocation.json",
+                 cargo=str(run / "cargo.json"), stdout=str(run / "cargo.jsonl"), stderr=str(run / "cargo.stderr"))
+    request = dict(schema=collect.SCHEMA, run_dir=str(run), kind=kind, run_id=run_id, nonce=nonce,
+                   root=str(crate), lane=lane, driver=str(driver), manifest=str(meta), paths=paths, **context)
+    collect.write_json(run / "request.json", request)
+    extra = ("--locked", "--target-dir", str(root / "target/h2/canary"), "--features", "h2_cfg_probe") if kind == "canary" else ()
+    events = cargo(root, "check", "--lib", "--message-format=json", "--manifest-path", str(crate / "Cargo.toml"), *extra,
+                   log=Path(paths["stdout"]), record=Path(paths["cargo"]), RUSTC_WORKSPACE_WRAPPER=str(driver),
+                   MODMAP_OUT=str(out), MODMAP_CFG_OUT=str(cfg), MODMAP_CFG_NONCE=nonce,
+                   MODMAP_RUN_ID=run_id, MODMAP_KIND=kind)
+    for path in paths.values():
+        fresh(Path(path), marker.stat().st_mtime_ns)
+    if kind == "canary":
+        check_canary_cfg(cfg, nonce, driver, crate, events)
+    elif source_state(root) != context["source"]:
+        raise ModmapError("metadata: source changed during map run")
+    collect.seal(run, meta)
+    return h2_depinfo.load_modmap(out)
+
+
+def collection_context(root: Path, lane: str) -> dict:
+    versions = {tool: subprocess.check_output([tool, "-vV"], cwd=root, text=True).strip()
+                for tool in ("rustc", "clippy-driver")}
+    host = next((line.removeprefix("host: ") for line in versions["rustc"].splitlines() if line.startswith("host: ")), "")
+    target = {"linux": "x86_64-unknown-linux-gnu", "macos": "aarch64-apple-darwin"}[lane]
+    if host != target:
+        raise HostMismatch(f"lane {lane} requires {target} host (got {host})")
+    return dict(host=host, target=target, source=source_state(root), toolchain=versions)
+
+
+class HostMismatch(ModmapError):
+    pass
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo", type=Path, default=m.REPO_ROOT)
-    parser.add_argument("--out", type=Path, help="map path (default <repo>/target/h2/modmap.tsv)")
+    parser.add_argument("--out", type=Path, help="the only root TSV (with --lane: new run directory)")
+    parser.add_argument("--lane", choices=("linux", "macos"), help="collect a bound cfg and metadata manifest")
+    parser.add_argument("--cfg-out", type=Path)
+    parser.add_argument("--meta-out", type=Path)
     parser.add_argument("--inert", action="store_true", help="skip the repo map while no baseline is committed")
     parser.add_argument("--canary", action="store_true", help="self-test the driver even when --inert skips the map")
     args = parser.parse_args(argv)
     root = args.repo.resolve()
+    if (args.cfg_out or args.meta_out) and not args.lane:
+        parser.error("--cfg-out/--meta-out require --lane")
+    run_id = uuid.uuid4().hex
+    run_base = root / "target/h2/runs" / run_id
+    out = (args.out or (run_base / "root/modmap.tsv" if args.lane else root / "target/h2/modmap.tsv")).absolute()
+    cfg = (args.cfg_out or out.with_suffix(".cfg.json")).absolute()
+    meta = (args.meta_out or out.with_suffix(".meta.json")).absolute()
+    if args.lane:
+        outputs = {out, cfg, meta, Path(str(cfg) + ".invocation.json")}
+        if (len(outputs) != 4 or any(p.parent != out.parent or p.resolve() != p for p in outputs)
+                or any(p.name.endswith(".partial") or p.name in ("start", "request.json", "cargo.json", "cargo.jsonl", "cargo.stderr") for p in outputs)):
+            parser.error("outputs must be distinct canonical files in the same new run directory")
+        if out.parent.exists() and any(out.parent.iterdir()):
+            parser.error("root run directory must be new or empty")
     skip_map = args.inert and not any((root / rel).exists() for rel in m.BASELINE_FILES)
     if skip_map and not args.canary:
-        print("h2-modmap: no baseline committed; inert no-op")
+        print("h2-modmap: no baseline committed; inert no-op; root=skipped")
         return 0
-    out = args.out or root / "target/h2/modmap.tsv"
     try:
+        context = collection_context(root, args.lane) if args.lane else None
         driver = build_driver(root)
         canary = root / DRIVER / "canary"
-        got = h2_depinfo.modmap_problems(map_modules(root, driver, canary, root / "target/h2/canary.tsv", 1,
-                                                     "--locked", "--target-dir", str(root / "target/h2/canary"),
-                                                     "--features", "h2_cfg_probe", cfg_out=root / "target/h2/canary.cfg.json"))
+        if args.lane:
+            canary_run = run_base / "canary"
+            rows = map_run(root, driver, canary, canary_run / "modmap.tsv", canary_run / "cfg.json",
+                           canary_run / "metadata.json", args.lane, run_id, "canary", context)
+        else:
+            rows = map_modules(root, driver, canary, root / "target/h2/canary.tsv", 1,
+                               "--locked", "--target-dir", str(root / "target/h2/canary"),
+                               "--features", "h2_cfg_probe", cfg_out=root / "target/h2/canary.cfg.json")
+        got = h2_depinfo.modmap_problems(rows)
         if got != CANARY_PROBLEMS:
             raise ModmapError("driver canary drifted; got:\n  " + "\n  ".join(got or ["(no problems)"]))
         if skip_map:
-            print("h2-modmap: driver canary holds; no baseline committed, repo map skipped")
+            print("h2-modmap: driver canary holds; no baseline committed, repo map skipped; root=skipped")
             return 0
-        rows = map_modules(root, driver, root, out, MIN_MODULES)
-    except (ModmapError, m.MeasureError, OSError, ValueError) as exc:
+        rows = (map_run(root, driver, root, out, cfg, meta, args.lane, run_id, "root", context)
+                if args.lane else map_modules(root, driver, root, out, MIN_MODULES))
+    except HostMismatch as exc:
+        print(f"h2-modmap: {exc}", file=sys.stderr)
+        return 3
+    except (ModmapError, m.MeasureError, OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
         print(f"h2-modmap: {exc}", file=sys.stderr)
         return 1
     print(f"h2-modmap: {sum(row.kind == 'file' for row in rows)} file modules -> {out}")
