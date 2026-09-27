@@ -4,6 +4,7 @@ import type {
   VoiceAgentConfig,
   VoiceConfigResponse,
   VoiceGlobalConfig,
+  VoiceModels,
 } from "../types";
 import * as api from "../api";
 import type { OperatorConnectorsResponse, RuntimeConfigMap, RuntimeConfigValue } from "../api";
@@ -551,6 +552,12 @@ export default function SettingsView({
     [],
   );
 
+  const updateVoiceModels = useCallback((patch: Partial<VoiceModels>) => {
+    setVoiceDraft((current) =>
+      current ? { ...current, models: { ...current.models, ...patch } } : current,
+    );
+  }, []);
+
   const updateVoiceAgent = useCallback(
     (agentId: string, patch: Partial<VoiceAgentConfig>) => {
       setVoiceDraft((current) =>
@@ -721,7 +728,7 @@ export default function SettingsView({
         setActiveRuntimeCategoryId, setPanelQuery, setPendingDangerousConfigSave,
         setSelectedPipelineAgentId, setSelectedPipelineRepo, setShowOnboarding,
         showOnboarding, startingProviderId, removingProviderAccountKey, subtleButtonClass, subtleButtonStyle, tr,
-        updateVoiceAgent, updateVoiceGlobal, voiceAliasConflict, voiceDirty, voiceDraft,
+        updateVoiceAgent, updateVoiceGlobal, updateVoiceModels, voiceAliasConflict, voiceDirty, voiceDraft,
         voiceError, voiceLoaded, voiceSaving,
       }}
     />

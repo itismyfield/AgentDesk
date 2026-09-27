@@ -740,6 +740,7 @@ engine::ops::exec_ops::session_liveness_tests::js_liveness_preserves_owner_live_
 engine::ops::http_ops::tests::build_response_rejects_truncated_content_length
 engine::ops::http_ops::tests::chunked_response_is_rejected_explicitly
 engine::ops::http_ops::tests::connect_first_reachable_falls_through_to_second_address
+engine::ops::http_ops::tests::connect_first_reachable_stops_at_the_deadline
 engine::ops::http_ops::tests::describe_panic_payload_handles_str_string_and_unknown
 engine::ops::http_ops::tests::escape_for_json_escapes_quotes_and_control_chars
 engine::ops::http_ops::tests::invoke_localhost_post_rejects_non_loopback
@@ -1229,6 +1230,7 @@ server::routes::skills_manifest_audit::tests::skill_manifest_paths_takes_directo
 server::routes::skills_manifest_audit::tests::the_four_manifest_read_states_stay_distinguishable
 server::routes::skills_manifest_audit::tests::union_covers_db_only_ids_and_a_failed_source_stops_grading
 server::routes::stats::memento_feedback_stats_pg_tests::load_memento_feedback_counts_returns_persisted_writer_values_pg
+server::routes::voice_config::tests::put_body_models_switch_providers_and_omitted_models_keep_them
 server::routes::voice_config::tests::put_body_rejects_duplicate_dashboard_aliases
 server::routes::voice_config::tests::version_changes_when_voice_alias_changes
 server::startup_preflight::tests::startup_preflight_runs_the_resolved_check_without_propagating_failure
@@ -1502,6 +1504,7 @@ services::claude::claude_tui_session_resolution_tests::stranded_followup_user_dr
 services::claude::claude_tui_session_resolution_tests::unknown_transcript_quiescent_draft_can_recreate_hosted_tui
 services::claude::claude_tui_session_resolution_tests::unknown_transcript_with_prompt_marker_and_draft_reaches_recovery
 services::claude::claude_tui_session_resolution_tests::warm_followup_continues_after_prompt_draft_clear
+services::claude::launch_env_tests::binding_context_t3b_wrapper_clears_inherited_context
 services::claude::launch_env_tests::launch_env_exports_absolute_compact_window_behind_its_isolation_fence
 services::claude::local_tmux_lifecycle_tests::claude_tui_handoff_uses_runtime_ready_without_fifo
 services::claude::local_tmux_lifecycle_tests::claude_tui_runtime_binding_recovers_resume_transcript_when_cwd_lookup_missed
@@ -1526,6 +1529,7 @@ services::claude::local_tmux_lifecycle_tests::routine_binding_clear_starts_fresh
 services::claude::process_session_launch::tests::account_switch_drops_only_the_resume_argument_and_its_token
 services::claude::simple_launch_env_tests::simple_command_clears_an_inherited_absolute_compact_window
 services::claude::simple_timeout_2387_tests::timeout_drain_prefers_late_result_when_child_pid_snapshot_is_none
+services::claude::tui_session_launch::tests::binding_context_t7_claude_launch_fails_before_tmux
 services::claude_command::chokepoint_guard_tests::claude_binaries_are_not_raw_spawned_outside_the_chokepoint
 services::claude_command::chokepoint_guard_tests::raw_spawn_guard_flags_foreign_spawns_and_exempts_the_chokepoint
 services::claude_command::chokepoint_guard_tests::sealed_claude_seam_confined_to_chokepoint
@@ -2183,6 +2187,7 @@ services::codex::relay_separator_tests::codex_second_agent_message_carries_parag
 services::codex::remote_dispatch_gate_tests::remote_direct_is_refused_when_gate_off
 services::codex::remote_dispatch_gate_tests::remote_tmux_is_hard_refused_as_policy_non_goal
 services::codex::simple_timeout_2387_tests::timeout_drain_prefers_late_result_when_child_pid_snapshot_is_none
+services::codex::tui_hosting_tests::binding_context_t3b_wrapper_clears_inherited_context
 services::codex::tui_hosting_tests::codex_direct_tui_declares_all_current_options_supported
 services::codex::tui_hosting_tests::codex_fifo_wrapper_reuse_requires_live_pane_output_fifo_mode_and_fifo_file
 services::codex::tui_hosting_tests::codex_legacy_tmux_script_preserves_wrapper_launch
@@ -2205,6 +2210,7 @@ services::codex::tui_hosting_tests::codex_tui_turn_lock_is_shared_only_by_the_sa
 services::codex::tui_hosting_tests::codex_wrapper_existing_session_audit_reasons_match_cleanup_paths
 services::codex::tui_hosting_tests::codex_wrapper_input_mode_detector_distinguishes_fifo_pipe_and_unknown
 services::codex::tui_hosting_tests::live_reused_provider_session_is_preserved_when_wrapper_io_is_missing
+services::codex::tui_session_launch::tests::binding_context_t7_codex_launch_fails_before_tmux
 services::codex_remote_policy::tests::prerequisites_remain_unsatisfied
 services::codex_tmux_wrapper::accepted_turn_tests::accepted_quiet_process_reaches_terminal_without_retired_limits
 services::codex_tmux_wrapper::child_exit_tests::actual_provider_exit_drains_terminal_without_waiting_for_descendant_fds
@@ -4410,6 +4416,13 @@ services::discord::prompt_builder::section_dedupe::tests::would_be_duplicate_doe
 services::discord::prompt_builder::session_anchors::tests::session_anchors_use_native_claude_system_prompt_on_launch_and_resume
 services::discord::prompt_builder::session_anchors::tests::session_anchors_use_native_codex_developer_instructions
 services::discord::queue_exit_feedback_reconciler_tests::apply_queue_exit_feedback_adds_feedback_reaction_through_reconciler
+services::discord::queue_io::ledger_settlement_tests::a_requeue_after_an_earlier_completed_episode_of_the_same_id_still_dispatches
+services::discord::queue_io::ledger_settlement_tests::absent_or_unreadable_ledger_settles_nothing
+services::discord::queue_io::ledger_settlement_tests::merged_row_drops_only_the_settled_source_and_dispatches_the_rest
+services::discord::queue_io::ledger_settlement_tests::out_of_band_delivery_recorded_under_another_id_does_not_settle_the_queued_row
+services::discord::queue_io::ledger_settlement_tests::released_mailbox_does_not_reinject_a_ledger_settled_row_but_delivers_a_same_body_new_id
+services::discord::queue_io::ledger_settlement_tests::restart_restored_dispatch_marker_of_a_settled_turn_leaves_as_superseded
+services::discord::queue_io::ledger_settlement_tests::settlement_rolls_back_with_the_dequeue_when_queue_persistence_fails
 services::discord::queue_io::presleep_tests::abandoned_presence_auto_reconcile_releases_idle_queue_gate_but_keeps_durable_record
 services::discord::queue_io::presleep_tests::backstop_no_rearm_when_fire_observes_real_foreground_turn
 services::discord::queue_io::presleep_tests::backstop_rearms_after_cleanup_retry_gate_then_next_fire_starts_queue
@@ -5914,6 +5927,7 @@ services::discord::tmux::tmux_output_stream::tests::watcher_status_panel_fallbac
 services::discord::tmux::tmux_session_files::tests::adoption_current_generation_marker_is_a_noop
 services::discord::tmux::tmux_session_files::tests::adoption_never_stamps_a_fresh_incarnation_with_an_old_mtime
 services::discord::tmux::tmux_session_files::tests::adoption_recovers_an_absent_marker_with_nonzero_identity
+services::discord::tmux::tmux_session_files::tests::binding_context_t4_t11_prepared_nonce_publishes_under_one_authority
 services::discord::tmux::tmux_session_files::tests::committed_frontier_gated_on_same_generation
 services::discord::tmux::tmux_session_files::tests::every_spawn_site_uses_the_combined_marker_gate
 services::discord::tmux::tmux_session_files::tests::generation_failure_nonce_success_changes_source_witness
@@ -7829,6 +7843,10 @@ services::discord_config_audit::voice_alias_precheck_tests::precheck_collision_r
 services::discord_config_audit::voice_alias_precheck_tests::precheck_collision_with_voice_enabled_downgrades_to_disabled
 services::discord_config_audit::voice_alias_precheck_tests::precheck_no_collision_keeps_voice_enabled
 services::discord_config_audit::voice_alias_precheck_tests::precheck_no_voice_section_is_noop_even_with_collision
+services::discord_custody::tests::attempt_records_keep_their_observations_across_a_reload
+services::discord_custody::tests::current_reads_only_the_head_and_the_last_preserved_window
+services::discord_custody::tests::ledger_shapes_fold_to_their_obligation_state
+services::discord_custody::tests::the_status_report_separates_current_from_last_attempt_and_writes_nothing
 services::dispatch_gate::auth_profiles::selection_tests::disabling_gate_or_removing_override_releases_the_old_admission_threshold
 services::dispatch_gate::auth_profiles::selection_tests::exhausted_accounts_defer_automation_but_allow_session_launch
 services::dispatch_gate::auth_profiles::selection_tests::persisted_admission_threshold_skips_an_earlier_pressured_backup_at_spawn
@@ -9140,6 +9158,13 @@ services::tool_output_guard::tests::line_heavy_small_error_is_sanitized_once_wit
 services::tool_output_guard::tests::small_output_is_preserved_exactly
 services::tool_output_guard::tests::very_large_non_ascii_error_aligns_context_window_to_utf8
 services::tool_output_guard::tests::very_large_single_line_error_keeps_projection_memory_bounded
+services::tui_o::shadow::binding_reader::tests::binding_reader_reports_source_changes_once_and_keeps_the_last_on_gaps
+services::tui_o::shadow::binding_reader::tests::binding_view_reads_the_native_transcript_of_tui_runtimes_only
+services::tui_o::shadow::capture::tests::capture_emits_complete_lines_only_and_tracks_the_prefix_hash
+services::tui_o::shadow::capture::tests::capture_halts_instead_of_buffering_an_oversized_partial_record
+services::tui_o::shadow::capture::tests::capture_halts_on_shrink_rewrite_and_replacement
+services::tui_o::shadow::capture::tests::capture_keeps_record_boundaries_under_small_budgets_and_mid_line_starts
+services::tui_o::shadow::capture::tests::capture_rereads_a_buffered_partial_line_before_emitting_it
 services::tui_o::shadow::root::tests::shadow_root_is_fixed_under_runtime_root_and_the_flag_defaults_off
 services::tui_o::shadow::root::tests::shadow_root_refuses_links_and_leaves_outside_files_untouched
 services::tui_o::shadow::root::tests::store_appends_readable_jsonl_and_stops_at_the_cap
@@ -9151,10 +9176,17 @@ services::tui_prompt_control::tests::quoted_mid_sentence_and_multiline_slashes_s
 services::tui_prompt_control::tests::recognizes_known_local_controls_without_matching_prefixes_or_mid_body_text
 services::tui_prompt_control::tests::recognizes_raw_and_envelope_without_using_them_as_a_dedup_key
 services::tui_prompt_control::tests::splitting_the_primitive_leaves_the_claude_lowercasing_contract_intact
+services::tui_prompt_dedupe::binding_context::tests::binding_context_t12_permission_failure_is_unknown
+services::tui_prompt_dedupe::binding_context::tests::binding_context_t13_host_uses_only_explicit_sources
+services::tui_prompt_dedupe::binding_context::tests::binding_context_t16_sweep_before_publication_aborts_launch
+services::tui_prompt_dedupe::binding_context::tests::binding_context_t1_create_never_replaces_existing_evidence
+services::tui_prompt_dedupe::binding_context::tests::binding_context_t3_env_is_the_only_launch_source
+services::tui_prompt_dedupe::binding_context::tests::binding_context_t8_gc_requires_retirement_and_rotates
 services::tui_prompt_dedupe::session_rotation::tests::drain_progress_resets_the_stall_counter_and_stall_accumulates
 services::tui_prompt_dedupe::session_rotation::tests::second_hop_preserves_the_original_frozen_transcript
 services::tui_prompt_dedupe::session_rotation::tests::settling_a_rotation_does_not_retire_the_adopted_session_authority
 services::tui_prompt_dedupe::session_rotation::tests::the_adopted_authority_is_writable_without_a_rotation_record
+services::tui_prompt_dedupe::shadow_peek::tests::shadow_lookup_copies_live_bindings_without_purging_relay_state
 services::tui_prompt_dedupe::tests::advance_offset_rejects_mismatched_path_when_relay_override_differs
 services::tui_prompt_dedupe::tests::advances_runtime_binding_offset_for_same_output_path
 services::tui_prompt_dedupe::tests::advances_runtime_binding_relay_offset_separately_from_runtime_path
@@ -9503,6 +9535,10 @@ services::turn_orchestrator::remint_fence::remint_fence_tests::only_a_finish_nam
 services::turn_orchestrator::remint_fence::remint_fence_tests::only_the_episode_started_since_the_last_release_is_recoverable
 services::turn_orchestrator::turn_finished_signal_tests::turn_finished_latch_short_circuits_late_subscribers
 services::turn_orchestrator::turn_finished_signal_tests::turn_finished_reset_unlatches_on_new_turn
+services::voice_conductor::tests::parse_plan_reads_json_inside_prose_and_drops_empty_dispatches
+services::voice_conductor::tests::parse_plan_speaks_non_json_output_and_dispatches_nothing
+services::voice_conductor::tests::planner_prompt_fences_the_request_as_data
+services::voice_conductor::tests::upsert_job_evicts_only_finished_jobs
 services::writer_protocol::authority::tests::canonical_v1_digests_and_request_order_ignore_provider_and_permutation
 services::writer_protocol::authority::tests::exact_parent_does_not_overlap_descendant
 services::writer_protocol::authority::tests::failed_multi_key_acquisition_rolls_back_atomically

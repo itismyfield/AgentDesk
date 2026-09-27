@@ -38,7 +38,7 @@ mod turn_finished_signal;
 use active_source_dedup::{
     active_turn_enqueue_refusal, intervention_has_active_source,
     intervention_sources_all_match_active, purge_active_source_from_queue,
-    strip_source_message_id_from_intervention,
+    strip_source_message_id_from_intervention, take_unsettled,
 };
 use clear_channel::clear_channel_state;
 pub(crate) use dispatch_reservation::{
@@ -2202,10 +2202,7 @@ fn spawn_channel_mailbox(
                         continue;
                     }
                     let previous_queue = state.intervention_queue.clone();
-                    let next_result = dequeue_next_soft_intervention(
-                        &mut state.intervention_queue,
-                        primary_message_id,
-                    );
+                    let next_result = take_unsettled(&mut state, channel_id, primary_message_id);
                     let queue_len_after = state.intervention_queue.len();
                     // #3167 BLOCKER-2 — capture the dispatched head id BEFORE the
                     // intervention is moved into the reply, so we can reserve the
@@ -5131,11 +5128,10 @@ mod no_ttl_evict_tests {
 
     #[test]
     fn very_old_intervention_survives_prune() {
-        let now = Instant::now();
-        // Far past the old 10-minute TTL.
-        let ancient = now
-            .checked_sub(Duration::from_secs(60 * 60))
-            .expect("test clock should subtract an hour");
+        let ancient = Instant::now();
+        // Far past the old 10-minute TTL. Forward from `ancient` because a Windows
+        // `Instant` starts at boot, so a young runner cannot subtract an hour.
+        let now = ancient + Duration::from_secs(60 * 60);
         let mut queue = vec![intervention_at(1, ancient)];
 
         let exits = prune_interventions_at(&mut queue, now);

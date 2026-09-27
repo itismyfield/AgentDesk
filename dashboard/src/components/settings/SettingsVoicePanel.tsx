@@ -4,7 +4,11 @@ import type {
   VoiceAgentConfig,
   VoiceConfigResponse,
   VoiceGlobalConfig,
+  VoiceModels,
+  VoiceOpenAiEndpoint,
   VoiceSensitivityMode,
+  VoiceSttProvider,
+  VoiceTtsBackend,
 } from "../../types";
 import {
   SurfaceCallout as SettingsCallout,
@@ -38,6 +42,7 @@ interface SettingsVoicePanelProps extends Pick<
   tr: SettingsTr;
   updateVoiceAgent: (agentId: string, patch: Partial<VoiceAgentConfig>) => void;
   updateVoiceGlobal: <K extends keyof VoiceGlobalConfig>(key: K, value: VoiceGlobalConfig[K]) => void;
+  updateVoiceModels: (patch: Partial<VoiceModels>) => void;
   voiceAliasConflict: VoiceAliasConflict | null;
   voiceDirty: boolean;
   voiceDraft: VoiceConfigResponse | null;
@@ -60,6 +65,7 @@ export function SettingsVoicePanel({
   tr,
   updateVoiceAgent,
   updateVoiceGlobal,
+  updateVoiceModels,
   voiceAliasConflict,
   voiceDirty,
   voiceDraft,
@@ -194,6 +200,131 @@ export function SettingsVoicePanel({
             </option>
           ))}
         </select>
+      </CompactFieldCard>
+    ) : null,
+  ].filter(Boolean);
+
+  const models = voiceDraft.models;
+  const endpointFields = (
+    endpoint: VoiceOpenAiEndpoint,
+    onChange: (patch: Partial<VoiceOpenAiEndpoint>) => void,
+    modelPlaceholder: string,
+  ) => (
+    <div className="mt-3 grid gap-2">
+      <input
+        value={endpoint.base_url}
+        onChange={(event) => onChange({ base_url: event.target.value })}
+        className="w-full rounded-2xl px-3 py-2.5 text-sm"
+        style={inputStyle}
+        placeholder="http://127.0.0.1:8000/v1"
+        aria-label={tr("서버 주소", "Server URL")}
+      />
+      <div className="grid grid-cols-2 gap-2">
+        <input
+          value={endpoint.model}
+          onChange={(event) => onChange({ model: event.target.value })}
+          className="w-full rounded-2xl px-3 py-2.5 text-sm"
+          style={inputStyle}
+          placeholder={modelPlaceholder}
+          aria-label={tr("모델", "Model")}
+        />
+        <input
+          value={endpoint.api_key_env}
+          onChange={(event) => onChange({ api_key_env: event.target.value })}
+          className="w-full rounded-2xl px-3 py-2.5 text-sm"
+          style={inputStyle}
+          placeholder={tr("API 키 변수", "API key var")}
+          aria-label={tr("API 키 환경변수 이름", "API key environment variable name")}
+        />
+      </div>
+    </div>
+  );
+  const visibleModelCards = [
+    isRowVisible("voice.models.stt") ? (
+      <CompactFieldCard
+        key="stt"
+        label={tr("받아쓰기(STT)", "Speech to text")}
+        description={tr(
+          "로컬 whisper 또는 OpenAI 호환 서버(Whisper API, faster-whisper 서버 등)를 고릅니다.",
+          "Local whisper, or any OpenAI-compatible server (Whisper API, faster-whisper server, etc.).",
+        )}
+      >
+        <div className="grid grid-cols-2 gap-2">
+          <select
+            value={models.stt_provider}
+            onChange={(event) => updateVoiceModels({ stt_provider: event.target.value as VoiceSttProvider })}
+            className="w-full rounded-2xl px-3 py-2.5 text-sm"
+            style={inputStyle}
+            aria-label={tr("STT 제공자", "STT provider")}
+          >
+            <option value="whisper-cli">{tr("로컬 whisper", "Local whisper")}</option>
+            <option value="openai-compatible">{tr("OpenAI 호환 서버", "OpenAI-compatible server")}</option>
+          </select>
+          <input
+            value={models.language}
+            onChange={(event) => updateVoiceModels({ language: event.target.value })}
+            className="w-full rounded-2xl px-3 py-2.5 text-sm"
+            style={inputStyle}
+            placeholder="ko"
+            aria-label={tr("언어", "Language")}
+          />
+        </div>
+        {models.stt_provider === "openai-compatible"
+          ? endpointFields(
+            models.stt,
+            (patch) => updateVoiceModels({ stt: { ...models.stt, ...patch } }),
+            "whisper-1",
+          )
+          : null}
+      </CompactFieldCard>
+    ) : null,
+    isRowVisible("voice.models.tts") ? (
+      <CompactFieldCard
+        key="tts"
+        label={tr("읽어주기(TTS)", "Text to speech")}
+        description={tr(
+          "Edge 음성 또는 OpenAI 호환 서버(OpenAI TTS, Kokoro 등)를 고릅니다.",
+          "Edge voices, or any OpenAI-compatible server (OpenAI TTS, Kokoro, etc.).",
+        )}
+      >
+        <div className="grid grid-cols-2 gap-2">
+          <select
+            value={models.tts_backend}
+            onChange={(event) => updateVoiceModels({ tts_backend: event.target.value as VoiceTtsBackend })}
+            className="w-full rounded-2xl px-3 py-2.5 text-sm"
+            style={inputStyle}
+            aria-label={tr("TTS 제공자", "TTS provider")}
+          >
+            <option value="edge">Edge</option>
+            <option value="openai-compatible">{tr("OpenAI 호환 서버", "OpenAI-compatible server")}</option>
+          </select>
+          {models.tts_backend === "edge" ? (
+            <input
+              value={models.edge_voice}
+              onChange={(event) => updateVoiceModels({ edge_voice: event.target.value })}
+              className="w-full rounded-2xl px-3 py-2.5 text-sm"
+              style={inputStyle}
+              placeholder="ko-KR-SunHiNeural"
+              aria-label={tr("Edge 음성", "Edge voice")}
+            />
+          ) : (
+            <input
+              value={models.tts.voice}
+              onChange={(event) => updateVoiceModels({ tts: { ...models.tts, voice: event.target.value } })}
+              className="w-full rounded-2xl px-3 py-2.5 text-sm"
+              style={inputStyle}
+              placeholder="alloy"
+              aria-label={tr("음성", "Voice")}
+            />
+          )}
+        </div>
+        {models.tts_backend === "openai-compatible"
+          ? endpointFields(
+            models.tts,
+            (patch) => updateVoiceModels({ tts: { ...models.tts, ...patch } }),
+            "tts-1",
+          )
+          : null}
       </CompactFieldCard>
     ) : null,
   ].filter(Boolean);
@@ -358,6 +489,15 @@ export function SettingsVoicePanel({
         descriptionEn: "Defaults shared by every agent.",
         totalCount: 3,
         rows: visibleGlobalCards,
+      })}
+
+      {renderSettingGroupCard({
+        titleKo: "음성 모델",
+        titleEn: "Speech models",
+        descriptionKo: "받아쓰기와 읽어주기에 쓸 모델입니다. 음성 화면은 저장 즉시, Discord 음성 채널은 서버를 다시 시작하면 반영됩니다. API 키는 값이 아니라 환경변수 이름으로 적습니다.",
+        descriptionEn: "Models for transcription and speech. The voice screen uses them as soon as they are saved; Discord voice picks them up after a server restart. Give the API key as an environment variable name, not the key itself.",
+        totalCount: 2,
+        rows: visibleModelCards,
       })}
 
       <SettingsSubsection
