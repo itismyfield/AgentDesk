@@ -1412,6 +1412,7 @@ src/
 │   │   │   ├── context_window.rs
 │   │   │   ├── current_message_anchor.rs
 │   │   │   ├── early_tui_completion.rs
+│   │   │   ├── entry_abort_mailbox_tests.rs
 │   │   │   ├── finalize_epilogue.rs
 │   │   │   ├── followup_requeue.rs
 │   │   │   ├── guards.rs
@@ -1881,6 +1882,10 @@ src/
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
 │   │   └── tests_pg.rs
+│   ├── tui_o/
+│   │   └── shadow/
+│   │       ├── mod.rs
+│   │       └── root.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── extract.rs
 │   │   ├── observation.rs

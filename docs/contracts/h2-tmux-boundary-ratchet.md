@@ -217,7 +217,7 @@ r9의 15개 ID군을 모두 유지한다(H10의 a/b는 같은 행에 구분).
 | H4 | 외부 크레이트 내부 실행으로 우회 | Cargo.lock tmux/pty 이름 거부, 의존성 리뷰; 모든 우회 크레이트 검출은 아님 |
 | H5 | scripts/routines/E2E의 직접 tmux | 범위 밖; deploy-release.sh, session-anchor*.zsh, relay_watchdog.py, _defaults.sh 및 E2E/smoke 스크립트 |
 | H6 | gh/git allowlist도 git -c core.sshCommand·gh alias 등의 셸 우회를 막지 못함 | 인자 검사 미구현, 리뷰 |
-| H7 | Clippy lint 이름 변경·삭제 | 1.94.1 고정, 업그레이드 시 실제 진단·liveness 검증 |
+| H7 | Clippy lint 이름 변경·삭제, compiler 속성 전개 규칙 변경 | 1.94.1 고정, 업그레이드 시 실제 진단·liveness 및 H15 소형 compile fixture 재검증 |
 | H8 | impl의 익명 const/static/closure enclosing_item 이름 충돌 | span 시작 줄 보조 필드, 충돌 admission에 lines 요구 |
 | H9 | Windows 전용 항목은 양 레인 미측정 | src/runtime_layout/windows_links.rs::create_directory_junction 미등록, 해당 파일 tmux 문자열 금지 |
 | H10a / H10b | a: hasLivePane의 서버 재시작 직후 stale socket; b: binary_resolver 캐시의 최초 호출 의존 | a: PR-2 호출측 재시도; b: 격리 HOME/PATH 가짜 tmux 또는 owner 내부 runner 주입의 있음/없음/오류 행동 테스트 필수 |
@@ -225,17 +225,23 @@ r9의 15개 ID군을 모두 유지한다(H10의 a/b는 같은 행에 구분).
 | H12 | DISPATCHERS 밖 make/just/사용자 래퍼 리터럴의 동적 인자 | 상수 목록 변경+regen+admission, 리뷰 |
 | H13 | 설계 어휘 census와 Clippy JSON 사이 오차 | 규모 추정은 실제 양 레인 측정값으로 교체 |
 | H14 | macOS hosted 레이블 변경으로 측정 중단 | 레이블 갱신과 실제 host 단언; 현재 inert no-op은 host를 검사하지 않음 |
-| H15 | 정상 owner doc 속성의 concat!/include_str!도 item macro로 오탐 | [owner_shape_problems:132][shape]; PR-3b 전 수리할 차단 결함, 영구 허용 아님 |
+| H15 | 지원 밖 속성·잘못 닫힌 속성의 macro는 보수적으로 거부 | [owner_shape_problems][shape]는 doc 및 중첩 cfg_attr의 속성 자리에서 doc RHS만 item macro 검사에서 제외; 술어·임의 속성 내부 doc는 제외하지 않음 |
 | H16 | macro fn의 module 귀속·`<module>` R-W 면제, raw identifier·const/static 내부 item 경로의 선재 한계 | [SourceFile:66/measure:309][items], [rw_problem:274][rw]; 파일 map은 R-W 전체 증명이 아님, 실제 baseline 영향 검증 |
 | H17 | 정상 항등 macro 모듈·hand-written item 재배치도 fail-closed 거부 | [modmap_problems:124][modmap]; 출처 보존 규칙의 보수적 오탐, 컴파일 가능한 모든 Rust 문법 지원 약속 없음 |
 | H18 | hardlink·대소문자 alias의 파일 동치가 realpath만으로 증명되지 않음 | [classify:92/walker_problems:174][aliases]; duplicate_mod와 함께 실측 필요, 미측정을 해결로 세지 않음 |
 | H19 | 두 compiler 패스가 같은 source/target/cfg였는지 입증하는 receipt 부재 | [map_modules:57][collector], [root_lib_depinfo:45][depinfo]; PR-3b 증거 연결 필요, cfg 목록 일치만으로 대체 불가 |
 
-H15~H19는 r9 §8-3에 따라 추가한다. 근거는 기준 main 코드와
-`design-pr3b-v1.md`의 「이전 DESIGN_BLOCKED와의 대조」, 「우회 경로 전수표」(P3-E/I/F/J·V5)다.
-후자는 코디네이터 레인 기록이며 위 링크는 같은 기준 SHA의 저장소 근거를 고정한다.
+H15의 RHS 제외는 compiler 수용 조건에 의존한다. 지원하는 key-value 속성의 값은 macro 전개 후 literal이어야 하며,
+정상 doc 값은 문자열이다. item·block·non-literal 전개로 item 선언 권한을 얻을 수 없고, shape helper가 Rust 의미론을 검증하지는 않는다.
+macro 이름으로 승인하지 않으며 macro_rules!·#[path] 검사와 R-E pub inventory는 원문 code view를 유지한다.
+include_str!와 문자열 literal을 읽는 include!의 shape 면제는 데이터 승인이 아니다. 비rs 입력은 기존 R-O 데이터 allowlist,
+.rs 입력은 실제 module 의무를 계속 적용한다. Rust 1.94.1 소형 compile fixture는 로컬 1회 로그로 검증하며 CI 단계로 추가하지 않는다.
 
-[shape]: https://github.com/itismyfield/AgentDesk/blob/cd8fe090acb1c1f5f309a5ca22f7cc7c61a0ec81/scripts/ci/h2_admission.py#L132
+H15~H19는 r9 §8-3에 따라 추가했다. 근거는 기준 main 코드와
+`design-pr3b-v1.md`의 「이전 DESIGN_BLOCKED와의 대조」, 「우회 경로 전수표」(P3-E/I/F/J·V5)다.
+후자는 코디네이터 레인 기록이며 H16~H19 링크는 같은 기준 SHA의 저장소 근거를 고정한다. H15는 현재 수리 구현을 가리킨다.
+
+[shape]: ../../scripts/ci/h2_admission.py
 [items]: https://github.com/itismyfield/AgentDesk/blob/cd8fe090acb1c1f5f309a5ca22f7cc7c61a0ec81/scripts/ci/h2_measure.py#L66
 [rw]: https://github.com/itismyfield/AgentDesk/blob/cd8fe090acb1c1f5f309a5ca22f7cc7c61a0ec81/scripts/ci/h2_admission.py#L274
 [modmap]: https://github.com/itismyfield/AgentDesk/blob/cd8fe090acb1c1f5f309a5ca22f7cc7c61a0ec81/scripts/ci/h2_depinfo.py#L124
