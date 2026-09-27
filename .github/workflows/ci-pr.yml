@@ -246,6 +246,7 @@ jobs:
               - 'src/server/mod.rs'
               - 'src/server/multinode_regression.rs'
               - 'src/server/resource_locks.rs'
+              - 'src/server/routes/agents_turn_deliver.rs'
               - 'src/server/routes/auto_queue_lifecycle_pg_tests.rs'
               - 'src/server/routes/campaigns.rs'
               - 'src/server/routes/dispatched_sessions_tests.rs'
@@ -1782,6 +1783,7 @@ jobs:
       # `relay_state_contract_refs` blocks that `cargo check --all-targets`
       # compiles to prove those symbols exist. The `relay_contract` path filter
       # force-runs that compile for doc-only changes, so both halves stay on.
+      # H2 contract anchors are also checked against imported Python functions.
       - name: Contract symbol-ref sync gate (always, #4268)
         run: |
           python3 scripts/check_contract_symbol_refs.py

@@ -27,12 +27,14 @@ OPTIONAL_FIELDS = frozenset({"base_sha", "lines"})
 # R-O: every file under an owner path; adding one means editing this roster in review.
 OWNER_GLOBS = ("src/services/platform/tmux*", "src/services/session_host*")
 OWNER_ROSTER = frozenset({"src/services/platform/tmux.rs", "src/services/platform/tmux/availability.rs",
+                          "src/services/platform/tmux/liveness.rs", "src/services/platform/tmux/liveness/tests.rs",
                           "src/services/session_host.rs", *(f"src/services/session_host/{name}.rs" for name in (
                               "legacy_collapse", "model", "process_host", "resolve", "tmux_host", "traits"))})
 # R-O: owner files allowed a `path =` attribute, bare or in cfg_attr (none today); a reviewed change.
 PATH_ATTR_ALLOWED: frozenset[str] = frozenset()
 # R-E: low-level tmux owner API inventory; each pub fn is EXEC (clippy.toml) or a non-exec helper.
-INVENTORY_FILES = ("src/services/platform/tmux.rs", "src/services/platform/tmux/availability.rs")
+INVENTORY_FILES = ("src/services/platform/tmux.rs", "src/services/platform/tmux/availability.rs",
+                   "src/services/platform/tmux/liveness.rs")
 NONEXEC = frozenset(f"agentdesk::services::platform::tmux::availability::{name}" for name in (
     "mark_available_from_live_session", "invalidate_cache", "cached_unavailable_due_to_missing"))
 PS = frozenset(f"agentdesk::services::platform::tmux::{name}" for name in ("read_process_args", "process_start_time"))
@@ -59,7 +61,6 @@ R_C_GRANDFATHERED: dict[str, dict[tuple[str, str], int]] = {
         ("check_tmux", ".with_expected_actual(\"tmux available in PATH\", \"tmux available\"),"): 2,
         ("check_tmux", ".with_expected_actual(\"tmux available in PATH\", \"tmux not found\")"): 2, ("check_tmux", ".with_path(\"tmux\")"): 2,
         ("check_tmux", "Ok(ver) => Check::ok(\"tmux\", CheckGroup::Core, \"tmux\", ver)"): 2},
-    "src/engine/ops/exec_ops.rs": {("register_exec_ops", "let allowed = [\"gh\", \"git\", \"tmux\"];"): 1},
     "src/services/claude.rs": {("execute_streaming_local_tmux", "return Err(format!(\"tmux error: {}\", stderr));"): 1,
         ("send_followup_to_tmux", "debug_log(\"tmux session died after streaming partial follow-up output — suppress replay\");"): 1,
         ("send_followup_to_tmux", "debug_log(\"tmux session died during follow-up before new output — requesting recreation\");"): 1},

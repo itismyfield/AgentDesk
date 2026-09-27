@@ -272,7 +272,7 @@ fi
 
 if run_check guards "H2 tmux boundary measurer and admission self-tests"; then
 # The gates are inert in CI until the baseline lands; their unit tests, module map included, run now.
-"$PYTHON" -m unittest tests.test_h2_measure tests.test_h2_admission tests.test_h2_modmap
+"$PYTHON" -m unittest tests.test_h2_measure tests.test_h2_admission tests.test_h2_modmap tests.test_h2_cfg_compare
 fi
 
 if run_check guards "Reachability row-independence + change-surface gate (#5071 T4-B1)"; then
@@ -689,6 +689,7 @@ if run_check cargo "Contract symbol-ref doc<->code sync gate (#4268)"; then
 # game (raw strings / macros / cfg can't fool a real compile), and deriving the
 # anchor set from the compiled code (not `// sym:` comments) is what killed the
 # r3 comment-decoupling bypass.
+# It also matches docs/contracts/h2-tmux-boundary-ratchet.md anchors to imported H2 Python functions.
 "$PYTHON" scripts/check_contract_symbol_refs.py
 "$PYTHON" -m unittest tests.test_contract_symbol_refs
 fi

@@ -6,3 +6,20 @@ pub(in crate::services::discord) const LEDGER_PROTOCOL: u32 = 0;
 pub(in crate::services::discord) const LEDGER_SCHEMA: u32 = 1;
 pub(in crate::services::discord) const REDRIVE_CAPPED_SIGNAL: &str =
     "relay_obligation_redrive_capped";
+
+#[cfg(test)]
+mod codec_tests;
+pub(in crate::services::discord) mod fence;
+pub(in crate::services::discord) mod protocol;
+
+pub(in crate::services::discord) mod reader;
+#[cfg(test)]
+mod reader_tests;
+
+mod validation;
+#[cfg(test)]
+mod validation_tests;
+
+pub(in crate::services::discord) mod load;
+#[cfg(test)]
+mod tests;
