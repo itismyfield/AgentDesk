@@ -21,6 +21,81 @@ type Pause = std::sync::Mutex<Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::
 /// The mailbox slot, the active counter and the turn start clock.
 type Slot = (Option<MessageId>, Option<String>, usize, Option<Instant>);
 
+#[test]
+fn restart_keeps_hook_claim_whose_frontier_contains_the_previous_terminal() {
+    run(|output| async move {
+        use crate::services::discord::recovery_engine::{BootRow, boot_row_decision};
+        use crate::services::tui_prompt_dedupe as dedupe;
+        let terminal = r#"{"type":"system","subtype":"stop_hook_summary"}"#;
+        let prompt = r#"{"type":"user","message":{"role":"user","content":"new turn"}}"#;
+        let tool = r#"{"type":"assistant","message":{"content":[{"type":"tool_use"}]}}"#;
+        std::fs::write(&output, format!("{terminal}\n{prompt}\n{tool}\n")).unwrap();
+        let shared = make_shared_data_for_tests();
+        let channel = ChannelId::new(6_294_801);
+        let anchor = MessageId::new(6_294_802);
+        lease(TMUX, channel, anchor.get(), &output);
+        dedupe::register_provider_session("claude", "restart-hook-session", TMUX);
+        assert_eq!(
+            dedupe::observe_prompt_by_provider_session_at(
+                "claude",
+                "restart-hook-session",
+                "new turn",
+                chrono::Utc::now(),
+            ),
+            dedupe::PromptObservation::PublishedSshDirect,
+        );
+        assert_eq!(
+            dedupe::runtime_binding_for_tmux_session(TMUX)
+                .unwrap()
+                .last_offset,
+            0
+        );
+        let prior = synthetic_start::synthetic_start_prior_turn_view(
+            &shared,
+            &ProviderKind::Claude,
+            channel,
+            TMUX,
+            anchor.get(),
+        )
+        .await;
+        assert!(
+            crate::services::discord::tui_direct_pending_start::prior_turn_finalized(prior.view)
+        );
+        assert!(
+            claim(
+                (shared.clone(), channel, output.clone()),
+                anchor.get(),
+                TMUX
+            )
+            .await
+        );
+        let mut row = inflight::load_inflight_state(&ProviderKind::Claude, channel.get()).unwrap();
+        assert_eq!(row.turn_start_offset, Some(0));
+        assert!(!row.terminal_delivery_committed);
+        row.restart_mode = Some(crate::services::discord::InflightRestartMode::DrainRestart);
+        row.restart_generation = Some(6);
+        inflight::save_inflight_state(&row).unwrap();
+        let path = output.parent().unwrap().join(format!(
+            "runtime/discord_inflight/claude/{}.json",
+            channel.get(),
+        ));
+        let before = std::fs::read(&path).unwrap();
+        let mut boot = make_shared_data_for_tests();
+        Arc::get_mut(&mut boot).unwrap().restart.current_generation = 7;
+        assert_eq!(
+            boot_row_decision(&ProviderKind::Claude, &boot, &row).await,
+            BootRow::Leave
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            mailbox_snapshot(&boot, channel)
+                .await
+                .cancel_token
+                .is_none()
+        );
+    });
+}
+
 fn run<Fut: std::future::Future<Output = ()>>(body: impl FnOnce(PathBuf) -> Fut) {
     let _telemetry = crate::services::observability::lock_env_then_runtime();
     let temp = tempfile::tempdir().unwrap();
