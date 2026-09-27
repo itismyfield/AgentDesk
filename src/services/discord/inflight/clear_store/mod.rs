@@ -12,6 +12,7 @@
 
 mod abandon;
 mod identity;
+pub(in crate::services::discord) use identity::remove_identity_matched_state;
 mod reconcile_gate;
 pub(in crate::services::discord) use identity::clear_inflight_state_for_captured_episode;
 

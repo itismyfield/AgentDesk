@@ -139,6 +139,7 @@ pub(in crate::services::discord) use self::orphan_relay_reclaim::{
 // (incl. the #3016 core hot files) stay byte-identical. Public API is not
 // widened. The shared persist/validate primitives moved to `store.rs`.
 mod clear_store;
+pub(in crate::services::discord) use clear_store::remove_identity_matched_state;
 mod save_store;
 
 // Shared persist/validate primitives (moved to `store.rs`): re-imported at the

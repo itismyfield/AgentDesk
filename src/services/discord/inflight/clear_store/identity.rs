@@ -83,7 +83,7 @@ fn guarded_identity_clear_outcome(
     GuardedClearOutcome::Cleared
 }
 
-fn remove_identity_matched_state(
+pub(in crate::services::discord) fn remove_identity_matched_state(
     path: &std::path::Path,
     provider: &ProviderKind,
     channel_id: u64,
