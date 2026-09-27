@@ -5,7 +5,8 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use super::{ShadowProvider, UnitKind};
-use crate::services::provider::ProviderKind;
+// Variant values only: the write-zero allowlist audits these two, not ProviderKind's methods.
+use crate::services::provider::ProviderKind::{Claude as ClaudeKind, Codex as CodexKind};
 use crate::services::tui_turn_state::envelope_is_turn_end_terminator;
 
 /// What a unit would post; `Excluded` units are recorded but never posted.
@@ -51,7 +52,7 @@ pub fn native_time(record: &Value) -> Option<DateTime<Utc>> {
 
 fn claude(record: &Value) -> Vec<RecordFact> {
     // Strict E wins over any other reading of the row, e.g. an interrupt marker user row.
-    if envelope_is_turn_end_terminator(&ProviderKind::Claude, record) {
+    if envelope_is_turn_end_terminator(&ClaudeKind, record) {
         return vec![RecordFact::Idle(None)];
     }
     match str_at(record, "type") {
@@ -135,7 +136,7 @@ fn claude_tool_result(item: &Value) -> RecordFact {
 }
 
 fn codex(record: &Value) -> Vec<RecordFact> {
-    if envelope_is_turn_end_terminator(&ProviderKind::Codex, record) {
+    if envelope_is_turn_end_terminator(&CodexKind, record) {
         return vec![RecordFact::Idle(None)];
     }
     let payload = record.get("payload").unwrap_or(&Value::Null);

@@ -12,8 +12,13 @@ SHADOW_MODULE = "crate::services::tui_o::shadow"
 # Crate items outside the shadow whose whole call tree was audited as mutation-free.
 CRATE_ALLOW = {
     "crate::services::agent_protocol::RuntimeHandoffKind",
+    "crate::services::discord::DISCORD_MSG_LIMIT",
+    "crate::services::discord::formatting::split_for_shadow",
+    "crate::services::provider::ProviderKind::Claude",
+    "crate::services::provider::ProviderKind::Codex",
     "crate::services::tui_prompt_dedupe::TuiRuntimeBinding",
     "crate::services::tui_prompt_dedupe::peek_tmux_runtime_binding",
+    "crate::services::tui_turn_state::envelope_is_turn_end_terminator",
 }
 EXTERNAL_ROOTS = {"std", "core", "alloc", "chrono", "serde", "serde_json", "sha2", "hex", "tokio", "tracing", "libc"}
 PRIMITIVE = re.compile(r"[iu](8|16|32|64|128|size)|f32|f64|bool|char|str")
