@@ -722,6 +722,22 @@ mod tests {
     }
 
     #[test]
+    fn gateway_handback_breaker_changes_need_no_restart() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.cluster.gateway_handback_breaker.enabled = false;
+        new.cluster.gateway_handback_breaker.window_secs += 1;
+        new.cluster.gateway_handback_breaker.max_empty += 1;
+        new.cluster.gateway_handback_breaker.suppress_secs += 1;
+        assert!(restart_required_changes(&old, &new).is_empty());
+        assert!(restart_required_changes(&new, &old).is_empty());
+
+        new.cluster.lease_ttl_secs += 1;
+        assert_eq!(restart_required_changes(&old, &new), vec!["cluster"]);
+        assert_eq!(restart_required_changes(&new, &old), vec!["cluster"]);
+    }
+
+    #[test]
     fn intake_owner_authority_allowlist_change_needs_no_restart() {
         let old = Config::default();
         let mut new = old.clone();
