@@ -1,3 +1,6 @@
+pub(crate) mod measurement;
+pub(crate) use measurement::degraded_reasons;
+
 use serde_json::{Value, json};
 
 use super::contract::{FixSafety, SecurityExposure, Severity};
@@ -293,16 +296,6 @@ pub(crate) fn classify_degraded_reason(raw: &str) -> ClassifiedReason {
             next_step: "inspect detailed health payload".to_string(),
         },
     }
-}
-
-pub(crate) fn degraded_reasons(body: &Value) -> Vec<ClassifiedReason> {
-    body.get("degraded_reasons")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(classify_degraded_reason)
-        .collect()
 }
 
 pub(crate) fn reasons_evidence(reasons: &[ClassifiedReason]) -> Value {
