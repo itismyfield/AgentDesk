@@ -1,7 +1,7 @@
 //! The shadow's only write target: `<runtime_root>/o_shadow/`.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -12,15 +12,25 @@ use super::{ShadowRecord, ShadowSink};
 pub const SHADOW_DIR_NAME: &str = "o_shadow";
 pub const RECORDS_FILE_NAME: &str = "records.jsonl";
 
-/// Directory fixed to `<runtime_root>/o_shadow` at construction; no other path is writable.
+/// `<runtime_root>/o_shadow`, accepted only while it is a real directory, not a symlink.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShadowRoot(PathBuf);
 
+fn real_dir(dir: &Path) -> io::Result<()> {
+    let is_dir = std::fs::symlink_metadata(dir)?.file_type().is_dir();
+    is_dir
+        .then_some(())
+        .ok_or_else(|| io::Error::other("o_shadow is not a real directory"))
+}
+
 impl ShadowRoot {
+    /// Creates only `o_shadow` itself; a symlink or non-directory there is refused.
     pub fn under(runtime_root: &Path) -> io::Result<Self> {
         let dir = runtime_root.join(SHADOW_DIR_NAME);
-        std::fs::create_dir_all(&dir)?;
-        Ok(Self(dir))
+        match std::fs::DirBuilder::new().create(&dir) {
+            Err(error) if error.kind() != io::ErrorKind::AlreadyExists => Err(error),
+            _ => real_dir(&dir).map(|()| Self(dir)),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -30,6 +40,13 @@ impl ShadowRoot {
     pub fn records_path(&self) -> PathBuf {
         self.0.join(RECORDS_FILE_NAME)
     }
+}
+
+/// Parsed records plus the 1-based numbers of lines that did not parse.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StoredLog {
+    pub records: Vec<StoredRecord>,
+    pub damaged_lines: Vec<usize>,
 }
 
 /// One JSONL line: the record and when the shadow stored it.
@@ -49,17 +66,39 @@ pub struct ShadowStore {
 }
 
 impl ShadowStore {
+    /// Opens the records file without following symlinks and seals a torn last line.
     pub fn open(root: ShadowRoot, cap_bytes: u64) -> io::Result<Self> {
+        real_dir(root.path())?;
         let path = root.records_path();
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
-        let written = file.metadata()?.len();
-        let dropped_over_cap = 0;
+        if std::fs::symlink_metadata(&path).is_ok_and(|meta| !meta.file_type().is_file()) {
+            return Err(io::Error::other("records.jsonl is not a regular file"));
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).append(true).create(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+        let mut file = options.open(path)?;
+        #[cfg(unix)]
+        if std::os::unix::fs::MetadataExt::nlink(&file.metadata()?) != 1 {
+            return Err(io::Error::other("records.jsonl has another hard link"));
+        }
+        let mut written = file.metadata()?.len();
+        let mut last = [b'\n'];
+        if written > 0 {
+            file.seek(SeekFrom::End(-1))?;
+            file.read_exact(&mut last)?;
+        }
+        // A crash can leave a torn last line; a newline keeps later appends parseable.
+        if last[0] != b'\n' {
+            file.write_all(b"\n")?;
+            written += 1;
+        }
         Ok(Self {
             root,
             file,
             written,
             cap_bytes,
-            dropped_over_cap,
+            dropped_over_cap: 0,
         })
     }
 
@@ -71,22 +110,32 @@ impl ShadowStore {
         self.dropped_over_cap
     }
 
+    /// Strict read: any damaged line is an error; `read_stored` reports damage instead.
     pub fn read_records(root: &ShadowRoot) -> io::Result<Vec<ShadowRecord>> {
-        let stored = Self::read_stored(root)?;
-        Ok(stored.into_iter().map(|line| line.record).collect())
+        let log = Self::read_stored(root)?;
+        if let Some(line) = log.damaged_lines.first() {
+            let detail = format!("records line {line} does not parse");
+            return Err(io::Error::new(io::ErrorKind::InvalidData, detail));
+        }
+        Ok(log.records.into_iter().map(|line| line.record).collect())
     }
 
-    /// Reads every stored line; a torn final line from a crash is skipped.
-    pub fn read_stored(root: &ShadowRoot) -> io::Result<Vec<StoredRecord>> {
-        let file = match File::open(root.records_path()) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            opened => opened?,
-        };
-        let mut stored = Vec::new();
-        for line in BufReader::new(file).lines() {
-            stored.extend(serde_json::from_str::<StoredRecord>(&line?).ok());
+    /// Reads every line and lists the ones that do not parse, such as a sealed torn tail.
+    pub fn read_stored(root: &ShadowRoot) -> io::Result<StoredLog> {
+        let mut log = StoredLog::default();
+        if !root.records_path().exists() {
+            return Ok(log);
         }
-        Ok(stored)
+        for (index, line) in BufReader::new(File::open(root.records_path())?)
+            .lines()
+            .enumerate()
+        {
+            match serde_json::from_str::<StoredRecord>(&line?) {
+                Ok(stored) => log.records.push(stored),
+                Err(_) => log.damaged_lines.push(index + 1),
+            }
+        }
+        Ok(log)
     }
 }
 
@@ -151,5 +200,43 @@ mod tests {
         assert!(capped.append(&records[0]).is_err());
         assert_eq!(capped.dropped_over_cap(), 1);
         assert_eq!(ShadowStore::read_records(&root).unwrap(), records);
+    }
+
+    #[test]
+    fn store_seals_a_torn_tail_so_new_appends_survive_and_reports_the_damage() {
+        let runtime = tempfile::tempdir().unwrap();
+        let root = ShadowRoot::under(runtime.path()).unwrap();
+        std::fs::write(root.records_path(), br#"{"at":"#).unwrap();
+        let record = ShadowRecord::TapGap { dropped: 42 };
+        let mut store = ShadowStore::open(root.clone(), 4096).unwrap();
+        store.append(&record).unwrap();
+        let log = ShadowStore::read_stored(&root).unwrap();
+        assert_eq!((log.records.len(), log.damaged_lines), (1, vec![1]));
+        assert_eq!(log.records[0].record, record);
+        assert!(ShadowStore::read_records(&root).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shadow_root_refuses_links_and_leaves_outside_files_untouched() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let (outside, absent) = (dir.path().join("outside"), dir.path().join("absent"));
+        std::fs::write(&outside, b"sentinel\n").unwrap();
+        for (runtime, target) in [("linked", &outside), ("dangling", &absent)] {
+            std::fs::create_dir(dir.path().join(runtime)).unwrap();
+            let root = ShadowRoot::under(&dir.path().join(runtime)).unwrap();
+            symlink(target, root.records_path()).unwrap();
+            assert!(ShadowStore::open(root, 4096).is_err());
+        }
+        std::fs::create_dir(dir.path().join("hard")).unwrap();
+        let root = ShadowRoot::under(&dir.path().join("hard")).unwrap();
+        std::fs::hard_link(&outside, root.records_path()).unwrap();
+        assert!(ShadowStore::open(root, 4096).is_err());
+        std::fs::create_dir(dir.path().join("rooted")).unwrap();
+        symlink(dir.path(), dir.path().join("rooted/o_shadow")).unwrap();
+        assert!(ShadowRoot::under(&dir.path().join("rooted")).is_err());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"sentinel\n");
+        assert!(!absent.exists());
     }
 }
