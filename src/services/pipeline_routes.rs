@@ -5,8 +5,7 @@ use sqlx::{PgPool, Row};
 use crate::db::table_metadata;
 use crate::utils::api::clamp_api_limit;
 
-/// #1082 -- accepted `on_failure` policy values.
-/// Kept in sync with `crate::pipeline::OnFailurePolicy`.
+/// Accepted `on_failure` values for a `pipeline_stages` row.
 pub const STAGE_ON_FAILURE_VALUES: &[&str] =
     &["escalate", "retry-with-backoff", "fallback-stage", "fail"];
 

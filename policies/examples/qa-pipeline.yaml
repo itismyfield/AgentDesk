@@ -101,18 +101,3 @@ clocks:
     set: review_entered_at
   done:
     set: completed_at
-
-timeouts:
-  requested:
-    duration: 45m
-    clock: requested_at
-    max_retries: 10
-    on_exhaust: requested
-  in_progress:
-    duration: 2h
-    clock: started_at
-    on_exhaust: in_progress
-  review:
-    duration: 30m
-    clock: review_entered_at
-    on_exhaust: review

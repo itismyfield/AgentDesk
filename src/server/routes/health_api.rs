@@ -21,6 +21,9 @@ use super::AppState;
 /// because it is a registered `shrink` giant (#4710).
 mod public_projection;
 mod runtime_profile;
+#[cfg(all(test, unix))]
+mod unread_tail_attribution_tests;
+use crate::services::discord::relay_recovery::unmeasured_tail_of;
 use runtime_profile::{attach_runtime_profile, cluster_standby_without_gateway};
 
 const X_AGENTDESK_SOURCE: &str = "x-agentdesk-source";
@@ -1044,7 +1047,7 @@ pub async fn stale_mailbox_repair_handler(
                     "ok": false,
                     "applied": false,
                     "skipped": true,
-                    "fix_safety": "safe_local_repair",
+                    "fix_safety": crate::cli::doctor::contract::FixSafety::SafeLocalRepair,
                     "safety_gate": "mailbox_not_found",
                     "skipped_reason": "provider-scoped mailbox registry unavailable",
                     "post_repair_mailbox": null,
@@ -1063,7 +1066,7 @@ pub async fn stale_mailbox_repair_handler(
                     "ok": false,
                     "applied": false,
                     "skipped": true,
-                    "fix_safety": "safe_local_repair",
+                    "fix_safety": crate::cli::doctor::contract::FixSafety::SafeLocalRepair,
                     "safety_gate": "mailbox_not_found",
                     "skipped_reason": "no provider-scoped mailbox exists for channel",
                     "provider": provider.as_str(),
@@ -1082,7 +1085,7 @@ pub async fn stale_mailbox_repair_handler(
                     "ok": false,
                     "applied": false,
                     "skipped": true,
-                    "fix_safety": "safe_local_repair",
+                    "fix_safety": crate::cli::doctor::contract::FixSafety::SafeLocalRepair,
                     "safety_gate": "mailbox_not_found",
                     "skipped_reason": "no mailbox handle exists for channel",
                     "post_repair_mailbox": null,
@@ -1108,7 +1111,7 @@ pub async fn stale_mailbox_repair_handler(
                 "ok": false,
                 "applied": false,
                 "skipped": true,
-                "fix_safety": "safe_local_repair",
+                "fix_safety": crate::cli::doctor::contract::FixSafety::SafeLocalRepair,
                 "safety_gate": "expected_evidence_mismatch",
                 "skipped_reason": "mailbox evidence changed before repair",
                 "post_repair_mailbox": before,
@@ -1124,7 +1127,7 @@ pub async fn stale_mailbox_repair_handler(
                 "ok": false,
                 "applied": false,
                 "skipped": true,
-                "fix_safety": "safe_local_repair",
+                "fix_safety": crate::cli::doctor::contract::FixSafety::SafeLocalRepair,
                 "safety_gate": "queue_not_empty",
                 "skipped_reason": "live queue evidence exists",
                 "post_repair_mailbox": before,
@@ -1159,7 +1162,7 @@ pub async fn stale_mailbox_repair_handler(
                 "ok": false,
                 "applied": false,
                 "skipped": true,
-                "fix_safety": "explicit_restart_required",
+                "fix_safety": crate::cli::doctor::contract::FixSafety::ExplicitRestartRequired,
                 "safety_gate": "active_dispatch_present",
                 "skipped_reason": "session record still has active dispatch evidence",
                 "pre_repair_session": before_session_state,
@@ -1199,16 +1202,12 @@ pub async fn stale_mailbox_repair_handler(
                             &provider,
                             request.channel_id,
                         );
-                    // Keep the manual stale-mailbox repair's destructive idle
-                    // clear gate aligned with ReattachWatcher: unread capture bytes
-                    // are live relay evidence, so do not retire mailbox/inflight
-                    // bookkeeping while the watcher still has bytes to consume.
-                    // #5071 relay-tail S2: the shared predicate is what keeps the
-                    // two gates aligned, including on `None` — an unmeasured tail
-                    // is not a drained one.
+                    // Shared with ReattachWatcher: see `stale_mailbox_idle_tail_admits`.
                     let no_unread_bytes =
-                        crate::services::discord::relay_recovery::unread_tail_is_proven_drained(
-                            snapshot.unread_bytes,
+                        crate::services::discord::relay_recovery::stale_mailbox_idle_tail_admits(
+                            &provider,
+                            snapshot,
+                            inflight_safe && !unrelayed_tail,
                         );
                     if inflight_safe && no_unread_bytes && !unrelayed_tail {
                         health::clear_idle_tmux_stale_turn(
@@ -1295,7 +1294,7 @@ pub async fn stale_mailbox_repair_handler(
                         || idle_repair.persistent_inflight_cleared
                         || idle_repair.runtime_session_cleared,
                     "skipped": false,
-                    "fix_safety": "safe_idle_tmux_repair",
+                    "fix_safety": crate::cli::doctor::contract::FixSafety::SafeIdleTmuxRepair,
                     "safety_gate": "tmux_ready_for_input_no_unsent_output",
                     "inflight_cleared": idle_repair.persistent_inflight_cleared,
                     "runtime_session_cleared": idle_repair.runtime_session_cleared,
@@ -1313,9 +1312,10 @@ pub async fn stale_mailbox_repair_handler(
                 "ok": false,
                 "applied": false,
                 "skipped": true,
-                "fix_safety": "explicit_restart_required",
+                "fix_safety": crate::cli::doctor::contract::FixSafety::ExplicitRestartRequired,
                 "safety_gate": "tmux_present",
                 "skipped_reason": "live tmux evidence exists",
+                "unread_tail": before_watcher_inflight.as_ref().and_then(unmeasured_tail_of),
                 "post_repair_mailbox": before,
                 "post_repair_watcher_inflight": before_watcher_inflight
             })),
@@ -1457,7 +1457,7 @@ pub async fn stale_mailbox_repair_handler(
                 session_disconnected_count
             ),
             "skipped": false,
-            "fix_safety": "safe_local_repair",
+            "fix_safety": crate::cli::doctor::contract::FixSafety::SafeLocalRepair,
             "safety_gate": "no_live_work_evidence",
             "inflight_cleared": inflight_cleared,
             "session_disconnected_count": session_disconnected_count,
@@ -1907,7 +1907,7 @@ mod tests {
         test_api_router_with_config_and_registry(config, None)
     }
 
-    fn test_api_router_with_config_and_registry(
+    pub(super) fn test_api_router_with_config_and_registry(
         config: crate::config::Config,
         health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
     ) -> axum::Router {

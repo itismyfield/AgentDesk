@@ -34,6 +34,7 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/cli/doctor/orchestrator/observation_tests.rs",
         "src/services/cluster/attachment_transfer/storage_tests.rs",
         "src/services/cluster/intake_router_hook/attachment_tests.rs",
         "src/services/cluster/execution_capacity/tests.rs",
@@ -138,9 +139,12 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tmux_watcher/completion_gate_tests.rs",
         "src/services/discord/tmux_watcher/jsonl_rotation/backstop_tests.rs",
         "src/services/discord/tmux_watcher/loop_poll_prologue/post_terminal_disposal_tests.rs",
+        "src/services/discord/tmux_watcher/owed_range_baseline_tests.rs",
         "src/services/discord/tmux_watcher/panel_decisions_tests.rs",
         "src/services/discord/tmux_watcher/session_bound_ack_tests.rs",
         "src/services/discord/tmux_watcher/single_message_footer_tests.rs",
+        "src/services/discord/tmux_watcher/streaming_baseline_tests.rs",
+        "src/services/discord/tmux_watcher/streaming_harness_tests.rs",
         "src/services/discord/tmux_watcher/streaming_status_tick/committed_progress_tests.rs",
         "src/services/discord/tmux_watcher/streaming_status_tick/native_collector_tests.rs",
         "src/services/discord/tmux_watcher/supervisor_relay_tests.rs",
@@ -158,6 +162,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_direct_pending_start/tests.rs",
         "src/services/discord/tui_prompt_relay/rehydration/idempotency_tests.rs",
         "src/services/discord/tui_prompt_relay/tests.rs",
+        "src/services/discord/tui_prompt_relay/tests/fenced_admission_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/synthetic_terminal_ordering_tests.rs",
         "src/services/discord/turn_bridge/body_mutation_telemetry_tests.rs",
@@ -202,6 +207,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/mailbox_finish/closed_actor_tests.rs",
         "src/services/discord/queue_io/turn_admission_tests.rs",
         "src/services/discord/health/relay_auto_heal/orphan_token_tests.rs",
+        "src/server/routes/health_api/unread_tail_attribution_tests.rs",
     }
 )
 
@@ -227,6 +233,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/relay_recovery/tests/circuit_breaker_apply.rs",
         "src/services/discord/relay_recovery/tests/incarnation_follow_up.rs",
         "src/services/discord/relay_recovery/tests/orphan_token_finish.rs",
+        "src/services/discord/relay_recovery/tests/unread_tail_seed.rs",
         "src/services/discord/session_relay_sink/tests/stream_frame_fixtures.rs",
         "src/services/discord/tui_prompt_relay/local_model_queue_wake_e2e.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/catch_up_pagination_e2e.rs",

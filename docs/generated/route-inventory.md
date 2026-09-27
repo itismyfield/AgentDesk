@@ -93,8 +93,8 @@
 | `POST` | `/api/discord/send` | `health_api::send_handler` | `src/server/routes/health_api.rs:1544` | `src/server/routes/domains/ops.rs:36` |
 | `POST` | `/api/discord/send-dm` | `health_api::senddm_handler` | `src/server/routes/health_api.rs:1741` | `src/server/routes/domains/ops.rs:46` |
 | `POST` | `/api/discord/send-to-agent` | `health_api::send_to_agent_handler` | `src/server/routes/health_api.rs:1699` | `src/server/routes/domains/ops.rs:42` |
-| `GET` | `/api/dispatch-outbox/failed` | `health_api::list_dispatch_outbox_failures_handler` | `src/server/routes/health_api.rs:880` | `src/server/routes/domains/ops.rs:22` |
-| `POST` | `/api/dispatch-outbox/failed` | `health_api::ack_dispatch_outbox_failures_handler` | `src/server/routes/health_api.rs:903` | `src/server/routes/domains/ops.rs:22` |
+| `GET` | `/api/dispatch-outbox/failed` | `health_api::list_dispatch_outbox_failures_handler` | `src/server/routes/health_api.rs:883` | `src/server/routes/domains/ops.rs:22` |
+| `POST` | `/api/dispatch-outbox/failed` | `health_api::ack_dispatch_outbox_failures_handler` | `src/server/routes/health_api.rs:906` | `src/server/routes/domains/ops.rs:22` |
 | `GET` | `/api/dispatched-sessions` | `dispatched_sessions::list_dispatched_sessions` | `src/server/routes/dispatched_sessions.rs:17` | `src/server/routes/domains/runtime.rs:53` |
 | `GET` | `/api/dispatched-sessions/claude-session-id` | `dispatched_sessions::get_claude_session_id` | `src/server/routes/dispatched_sessions.rs:56` | `src/server/routes/domains/runtime.rs:65` |
 | `DELETE` | `/api/dispatched-sessions/cleanup` | `dispatched_sessions::cleanup_sessions` | `src/server/routes/dispatched_sessions.rs:34` | `src/server/routes/domains/ops.rs:140` |
@@ -117,8 +117,8 @@
 | `GET` | `/api/docs` | `docs::api_docs` | `src/server/routes/docs.rs:64` | `src/server/routes/domains/ops.rs:266` |
 | `GET` | `/api/docs/{group}/{category}` | `docs::api_docs_group_category` | `src/server/routes/docs.rs:319` | `src/server/routes/domains/ops.rs:268` |
 | `GET` | `/api/docs/{segment}` | `docs::api_docs_group_or_category` | `src/server/routes/docs.rs:296` | `src/server/routes/domains/ops.rs:267` |
-| `POST` | `/api/doctor/stale-mailbox/repair` | `health_api::stale_mailbox_repair_handler` | `src/server/routes/health_api.rs:992` | `src/server/routes/domains/runtime.rs:40` |
-| `GET` | `/api/doctor/startup/latest` | `health_api::startup_doctor_latest_handler` | `src/server/routes/health_api.rs:975` | `src/server/routes/domains/runtime.rs:22` |
+| `POST` | `/api/doctor/stale-mailbox/repair` | `health_api::stale_mailbox_repair_handler` | `src/server/routes/health_api.rs:995` | `src/server/routes/domains/runtime.rs:40` |
+| `GET` | `/api/doctor/startup/latest` | `health_api::startup_doctor_latest_handler` | `src/server/routes/health_api.rs:978` | `src/server/routes/domains/runtime.rs:22` |
 | `DELETE` | `/api/e2e/discord/channels/{channel_id}/messages/{message_id}` | `e2e_control::delete_discord_message` | `src/server/routes/e2e_control.rs:59` | `src/server/routes/domains/ops.rs:284` |
 | `DELETE` | `/api/e2e/discord/failures` | `e2e_control::clear_discord_failure` | `src/server/routes/e2e_control.rs:139` | `src/server/routes/domains/ops.rs:288` |
 | `POST` | `/api/e2e/discord/failures` | `e2e_control::inject_discord_failure` | `src/server/routes/e2e_control.rs:105` | `src/server/routes/domains/ops.rs:288` |
@@ -132,8 +132,8 @@
 | `GET` | `/api/github/repos` | `github::list_repos` | `src/server/routes/github.rs:787` | `src/server/routes/domains/integrations.rs:75` |
 | `POST` | `/api/github/repos` | `github::register_repo` | `src/server/routes/github.rs:820` | `src/server/routes/domains/integrations.rs:75` |
 | `POST` | `/api/github/repos/{owner}/{repo}/sync` | `github::sync_repo` | `src/server/routes/github.rs:864` | `src/server/routes/domains/integrations.rs:79` |
-| `GET` | `/api/health` | `health_api::health_handler` | `src/server/routes/health_api.rs:861` | `src/server/routes/domains/access.rs:15` |
-| `GET` | `/api/health/detail` | `health_api::health_detail_handler` | `src/server/routes/health_api.rs:866` | `src/server/routes/domains/runtime.rs:21` |
+| `GET` | `/api/health` | `health_api::health_handler` | `src/server/routes/health_api.rs:864` | `src/server/routes/domains/access.rs:15` |
+| `GET` | `/api/health/detail` | `health_api::health_detail_handler` | `src/server/routes/health_api.rs:869` | `src/server/routes/domains/runtime.rs:21` |
 | `GET` | `/api/help` | `docs::api_help` | `src/server/routes/docs.rs:38` | `src/server/routes/domains/ops.rs:265` |
 | `GET` | `/api/home/kpi-trends` | `home_metrics::home_kpi_trends` | `src/server/routes/home_metrics.rs:54` | `src/server/routes/domains/admin.rs:92` |
 | `POST` | `/api/hook/reset-status` | `hooks::reset_status` | `src/server/routes/hooks.rs:36` | `src/server/routes/domains/runtime.rs:142` |

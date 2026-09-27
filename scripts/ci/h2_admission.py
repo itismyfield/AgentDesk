@@ -330,7 +330,7 @@ def base_state(root: Path, rev: str) -> tuple[dict | None, dict, str | None]:
                 (Path(tmp) / rel).write_text(text, encoding="utf-8")
         return m.load_baseline(Path(tmp)), m.load_config(Path(tmp) / "clippy.toml"), git_show(root, rev, ADMISSIONS_FILE)
 
-def evaluate(root: Path, lane: str, base_rev: str, lines: list[str]) -> list[str]:
+def evaluate(root: Path, lane: str, base_rev: str, lines: list[str], modmap: Path) -> list[str]:
     head = m.load_baseline(root)
     base, base_config, base_admissions = base_state(root, base_rev)
     if base is None:
@@ -340,7 +340,7 @@ def evaluate(root: Path, lane: str, base_rev: str, lines: list[str]) -> list[str
     config = m.load_config(root / "clippy.toml")
     result = m.measure(root, lines, config)
     problems = zero_rules(root) + owner_shape_problems(root) + untagged_entries(root / "clippy.toml")
-    problems += h2_depinfo.ro_problems(root, lines)
+    problems += h2_depinfo.ro_problems(root, lines, modmap)
     problems += m.compare(result["rows"], head, lane)
     if result["total"] < m.LIVENESS_FLOOR:
         problems.append(f"only {result['total']} H2 diagnostics (< liveness floor {m.LIVENESS_FLOOR})")
@@ -359,6 +359,7 @@ def main(argv=None) -> int:
     parser.add_argument("--repo", type=Path, default=m.REPO_ROOT)
     parser.add_argument("--base", help="base commit (PR base SHA or merge-base with main)")
     parser.add_argument("--json", type=Path, help="read clippy JSON from a file instead of running cargo")
+    parser.add_argument("--modmap", type=Path, help="module map TSV written by scripts/ci/h2_modmap.py")
     parser.add_argument("--inert", action="store_true", help="no-op without a baseline; report without failing")
     args = parser.parse_args(argv)
     root = args.repo.resolve()
@@ -368,11 +369,11 @@ def main(argv=None) -> int:
             return 0
         print("h2-admission: baseline missing (scripts/ci/h2_baseline_*.toml)", file=sys.stderr)
         return 2
-    if not args.base:
-        parser.error("--base is required once a baseline exists")
+    if not args.base or not args.modmap:
+        parser.error("--base and --modmap are required once a baseline exists")
     try:
         lines = args.json.read_text(encoding="utf-8").splitlines() if args.json else m.run_clippy(root, None)
-        problems = evaluate(root, args.lane, args.base, lines)
+        problems = evaluate(root, args.lane, args.base, lines, args.modmap)
     except (m.MeasureError, AdmissionError) as exc:
         problems = [str(exc)]
     for problem in problems:

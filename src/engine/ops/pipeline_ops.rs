@@ -169,12 +169,6 @@ pub(super) fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
                 return null;
             };
 
-            agentdesk.pipeline.getTimeout = function(state, config) {
-                var cfg = config || agentdesk.pipeline.getConfig();
-                if (!cfg || !cfg.timeouts) return null;
-                return cfg.timeouts[state] || null;
-            };
-
             agentdesk.pipeline.hasState = function(state, config) {
                 var cfg = config || agentdesk.pipeline.getConfig();
                 if (!cfg || !cfg.states) return false;
