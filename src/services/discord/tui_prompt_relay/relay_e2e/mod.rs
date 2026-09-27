@@ -16,6 +16,14 @@ mod catch_up_pagination_e2e;
 mod discord_mock;
 mod stale_resume_retry_e2e;
 
+pub(in crate::services::discord) async fn mock_discord_context() -> (
+    poise::serenity_prelude::Context,
+    tokio::task::JoinHandle<()>,
+) {
+    let (proxy, gateway, server) = discord_mock::start(discord_mock::DiscordMockState::new()).await;
+    (discord_mock::serenity_context(proxy, gateway).await, server)
+}
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
