@@ -130,7 +130,8 @@ pub trait DeriveLink: Send {
     fn capture_start(&mut self, binding: &SourceBinding, extent: u64) -> u64;
     /// Records below `attach_extent` must come out as historical, never live.
     fn attach(&mut self, source: &SourceId, attach_extent: u64, attached_at: DateTime<Utc>);
-    fn window_start(&mut self, t0: DateTime<Utc>, source: &SourceId, window_start_extent: u64);
+    /// Sources attached before `t0` count as live only when `sources` lists them.
+    fn window_start(&mut self, t0: DateTime<Utc>, sources: &[WindowStartSource]);
     fn derive(&mut self, binding: &SourceBinding, batch: &CaptureBatch) -> Vec<DeriveOutput>;
 }
 
@@ -220,12 +221,9 @@ impl Observer {
         }
     }
 
-    /// Moves each listed source's live boundary to its size at `t0`.
+    /// Opens the window at `t0`; listed sources move their live boundary to their size at t0.
     pub fn window_start(&mut self, t0: DateTime<Utc>, sources: &[WindowStartSource]) {
-        for listed in sources {
-            let extent = listed.window_start_extent;
-            self.link.window_start(t0, &listed.source, extent);
-        }
+        self.link.window_start(t0, sources);
     }
 
     /// Binding changes, one capture poll per feed, then tap events and whatever the diff decided.
@@ -297,8 +295,27 @@ impl DeriveLink for TranscriptDerive {
     fn attach(&mut self, source: &SourceId, attach_extent: u64, attached_at: DateTime<Utc>) {
         TranscriptDerive::attach(self, source, attach_extent, attached_at);
     }
-    fn window_start(&mut self, t0: DateTime<Utc>, source: &SourceId, window_start_extent: u64) {
-        TranscriptDerive::window_start(self, t0, source, window_start_extent);
+    fn window_start(&mut self, t0: DateTime<Utc>, sources: &[WindowStartSource]) {
+        // The derive opens a window only through a source; this placeholder matches no file.
+        let placeholder = WindowStartSource {
+            source: SourceId {
+                session_id: String::new(),
+                path: PathBuf::new(),
+                dev: 0,
+                ino: 0,
+            },
+            window_start_extent: 0,
+        };
+        let listed = sources
+            .iter()
+            .chain(sources.is_empty().then_some(&placeholder));
+        for WindowStartSource {
+            source,
+            window_start_extent,
+        } in listed
+        {
+            TranscriptDerive::window_start(self, t0, source, *window_start_extent);
+        }
     }
     fn derive(&mut self, binding: &SourceBinding, batch: &CaptureBatch) -> Vec<DeriveOutput> {
         ShadowDerive::derive(self, binding, batch)
@@ -568,7 +585,7 @@ mod tests {
             extent - 3
         }
         fn attach(&mut self, _source: &SourceId, _extent: u64, _at: DateTime<Utc>) {}
-        fn window_start(&mut self, _t0: DateTime<Utc>, _source: &SourceId, _extent: u64) {}
+        fn window_start(&mut self, _t0: DateTime<Utc>, _sources: &[WindowStartSource]) {}
         fn derive(&mut self, _binding: &SourceBinding, _batch: &CaptureBatch) -> Vec<DeriveOutput> {
             self.0
                 .take()
@@ -707,6 +724,8 @@ mod tests {
         let link = Box::new(TranscriptDerive::with_clock(fixed_clock));
         let mut observer = Observer::new(Box::new(sink.clone()), opener, link);
         let at: DateTime<Utc> = "2026-09-27T12:06:00.500Z".parse().unwrap();
+        // No source was attached at t0, so the window lists none and this source joins it.
+        observer.window_start(at - chrono::Duration::seconds(30), &[]);
         let change = BindingChange {
             channel_id: 7,
             old: None,
