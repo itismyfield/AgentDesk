@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, Utc};
 
-mod reliability;
+pub(crate) mod reliability;
 use reliability::{current_attempt_started_at, provider_error_from_completion};
 use serde_json::{Map, Value, json};
 use sqlx::PgPool;
@@ -47,7 +47,7 @@ struct AgentQualityCompletionRow {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AgentTurnCompletionEvidence {
+pub(crate) enum AgentTurnCompletionEvidence {
     AssistantTranscript,
     NoReplyTranscript,
     TerminalTurn,
@@ -72,12 +72,12 @@ impl AgentTurnCompletionEvidence {
 }
 
 #[derive(Debug, Clone)]
-struct AgentTurnCompletion {
-    assistant_message: Option<String>,
+pub(crate) struct AgentTurnCompletion {
+    pub(crate) assistant_message: Option<String>,
     duration_ms: Option<i64>,
     created_at: DateTime<Utc>,
-    evidence: AgentTurnCompletionEvidence,
-    terminal_status: Option<String>,
+    pub(crate) evidence: AgentTurnCompletionEvidence,
+    pub(crate) terminal_status: Option<String>,
 }
 
 impl RoutineAgentExecutor {

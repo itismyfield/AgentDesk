@@ -9,7 +9,10 @@ use super::AppState;
 use crate::config::{AgentDef, Config};
 use crate::error::AppResult;
 use crate::voice::barge_in::BargeInSensitivity;
-use crate::voice::config::DEFAULT_ACTIVE_AGENT_TTL_SECS;
+use crate::voice::config::{
+    DEFAULT_ACTIVE_AGENT_TTL_SECS, VoiceOpenAiTtsConfig, VoiceSttProvider, VoiceTtsBackendKind,
+};
+use crate::voice::openai_compat::OpenAiCompatEndpoint;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -55,9 +58,48 @@ impl Default for VoiceAgentConfigDto {
     }
 }
 
+/// Speech model choices: which STT and TTS providers run and with what model.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+struct VoiceModelsDto {
+    stt_provider: VoiceSttProvider,
+    stt: OpenAiCompatEndpoint,
+    language: String,
+    tts_backend: VoiceTtsBackendKind,
+    tts: VoiceOpenAiTtsConfig,
+    edge_voice: String,
+}
+
+impl VoiceModelsDto {
+    fn from_config(voice: &crate::voice::VoiceConfig) -> Self {
+        Self {
+            stt_provider: voice.stt.provider,
+            stt: voice.stt.openai_compatible.clone(),
+            language: voice.stt.language.clone(),
+            tts_backend: voice.tts.backend,
+            tts: voice.tts.openai_compatible.clone(),
+            edge_voice: voice.tts.edge.voice.clone(),
+        }
+    }
+
+    fn apply(&self, voice: &mut crate::voice::VoiceConfig) {
+        voice.stt.provider = self.stt_provider;
+        voice.stt.openai_compatible = self.stt.clone();
+        voice.tts.backend = self.tts_backend;
+        voice.tts.openai_compatible = self.tts.clone();
+        if let Some(language) = clean_optional_string(Some(self.language.clone())) {
+            voice.stt.language = language;
+        }
+        if let Some(edge_voice) = clean_optional_string(Some(self.edge_voice.clone())) {
+            voice.tts.edge.voice = edge_voice;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct VoiceConfigResponse {
     global: VoiceGlobalConfigDto,
+    models: VoiceModelsDto,
     agents: Vec<VoiceAgentConfigDto>,
     version: String,
     source_path: Option<String>,
@@ -69,6 +111,8 @@ pub(crate) struct PutVoiceConfigBody {
     version: Option<String>,
     actor: Option<String>,
     global: VoiceGlobalConfigDto,
+    /// Omitted by older clients; the saved model choices are then kept.
+    models: Option<VoiceModelsDto>,
     agents: Vec<VoiceAgentConfigDto>,
 }
 
@@ -78,6 +122,7 @@ impl Default for PutVoiceConfigBody {
             version: None,
             actor: None,
             global: VoiceGlobalConfigDto::default(),
+            models: None,
             agents: Vec::new(),
         }
     }
@@ -162,6 +207,15 @@ async fn put_voice_config_inner(
     Ok(response_from_config(config, Some(path)))
 }
 
+/// Voice config as currently saved in agentdesk.yaml, so dashboard edits apply
+/// to browser voice requests without a restart.
+pub(crate) fn live_voice_config(fallback: &crate::voice::VoiceConfig) -> crate::voice::VoiceConfig {
+    match load_editable_config() {
+        Ok((config, _, true)) => config.voice,
+        _ => fallback.clone(),
+    }
+}
+
 fn load_voice_config_response() -> Result<VoiceConfigResponse, VoiceConfigError> {
     let (config, path, _) = load_editable_config()?;
     Ok(response_from_config(config, Some(path)))
@@ -200,6 +254,9 @@ fn apply_voice_config_body(
     };
     config.voice.default_sensitivity_mode = body.global.default_sensitivity_mode;
     config.voice.barge_in.sensitivity = body.global.default_sensitivity_mode;
+    if let Some(models) = &body.models {
+        models.apply(&mut config.voice);
+    }
 
     for patch in &body.agents {
         let agent = config
@@ -223,6 +280,7 @@ fn response_from_config(config: Config, source_path: Option<PathBuf>) -> VoiceCo
             active_agent_ttl_seconds: config.voice.active_agent_ttl_seconds,
             default_sensitivity_mode: config.voice.default_sensitivity_mode,
         },
+        models: VoiceModelsDto::from_config(&config.voice),
         agents: config.agents.iter().map(agent_to_dto).collect(),
         version: voice_config_version(&config),
         source_path: source_path.map(|path| path.display().to_string()),
@@ -253,6 +311,7 @@ fn voice_config_version(config: &Config) -> String {
             "active_agent_ttl_seconds": config.voice.active_agent_ttl_seconds,
             "default_sensitivity_mode": config.voice.default_sensitivity_mode,
         },
+        "models": VoiceModelsDto::from_config(&config.voice),
         "agents": config.agents.iter().map(agent_to_dto).collect::<Vec<_>>(),
     });
     let bytes = serde_json::to_vec(&snapshot).expect("voice config snapshot serializes");
@@ -462,5 +521,24 @@ mod tests {
         config.agents[0].aliases.push("테크 디렉터".to_string());
         let after = voice_config_version(&config);
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn put_body_models_switch_providers_and_omitted_models_keep_them() {
+        let mut config = Config::default();
+        let mut models = VoiceModelsDto::from_config(&config.voice);
+        models.stt_provider = VoiceSttProvider::OpenaiCompatible;
+        models.stt.base_url = "http://127.0.0.1:8000/v1".to_string();
+        models.tts_backend = VoiceTtsBackendKind::OpenaiCompatible;
+        models.tts.voice = "alloy".to_string();
+        let body = PutVoiceConfigBody {
+            models: Some(models.clone()),
+            ..PutVoiceConfigBody::default()
+        };
+        apply_voice_config_body(&mut config, &body).unwrap();
+        assert_eq!(VoiceModelsDto::from_config(&config.voice), models);
+
+        apply_voice_config_body(&mut config, &PutVoiceConfigBody::default()).unwrap();
+        assert_eq!(VoiceModelsDto::from_config(&config.voice), models);
     }
 }

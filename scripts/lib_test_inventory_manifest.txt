@@ -1229,6 +1229,7 @@ server::routes::skills_manifest_audit::tests::skill_manifest_paths_takes_directo
 server::routes::skills_manifest_audit::tests::the_four_manifest_read_states_stay_distinguishable
 server::routes::skills_manifest_audit::tests::union_covers_db_only_ids_and_a_failed_source_stops_grading
 server::routes::stats::memento_feedback_stats_pg_tests::load_memento_feedback_counts_returns_persisted_writer_values_pg
+server::routes::voice_config::tests::put_body_models_switch_providers_and_omitted_models_keep_them
 server::routes::voice_config::tests::put_body_rejects_duplicate_dashboard_aliases
 server::routes::voice_config::tests::version_changes_when_voice_alias_changes
 server::startup_preflight::tests::startup_preflight_runs_the_resolved_check_without_propagating_failure
@@ -9529,6 +9530,10 @@ services::turn_orchestrator::remint_fence::remint_fence_tests::only_a_finish_nam
 services::turn_orchestrator::remint_fence::remint_fence_tests::only_the_episode_started_since_the_last_release_is_recoverable
 services::turn_orchestrator::turn_finished_signal_tests::turn_finished_latch_short_circuits_late_subscribers
 services::turn_orchestrator::turn_finished_signal_tests::turn_finished_reset_unlatches_on_new_turn
+services::voice_conductor::tests::parse_plan_reads_json_inside_prose_and_drops_empty_dispatches
+services::voice_conductor::tests::parse_plan_speaks_non_json_output_and_dispatches_nothing
+services::voice_conductor::tests::planner_prompt_fences_the_request_as_data
+services::voice_conductor::tests::upsert_job_evicts_only_finished_jobs
 services::writer_protocol::authority::tests::canonical_v1_digests_and_request_order_ignore_provider_and_permutation
 services::writer_protocol::authority::tests::exact_parent_does_not_overlap_descendant
 services::writer_protocol::authority::tests::failed_multi_key_acquisition_rolls_back_atomically
