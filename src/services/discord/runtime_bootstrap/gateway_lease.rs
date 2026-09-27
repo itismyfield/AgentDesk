@@ -533,31 +533,8 @@ async fn self_fence_gateway(
     }
 }
 
-/// Spawn the gateway singleton-lease keepalive loop.
-///
-/// Every tick it keepalives the held advisory lock. A keepalive error means the
-/// underlying Postgres connection died, which releases the advisory lock
-/// server-side (it is session-scoped) — but that is almost always a TRANSIENT
-/// blip (DB restart, brief network drop), not a genuine hand-off to another
-/// instance. Fencing on the very first error previously left the process alive
-/// forever with a dead, never-reacquired gateway (#3620: a startup DB blip took
-/// the Discord relay down for ~2h until a manual restart).
-///
-/// So instead of fencing on the first error, it re-acquires the lock on a fresh
-/// connection — mirroring the cluster-leader lease
-/// (`node_registry::spawn_heartbeat_loop`), which auto-recovered from the same
-/// blip while this loop did not:
-///   * re-acquired (`Ok(Some)`)  → the gateway never went down; keep serving.
-///   * held elsewhere (`Ok(None)`) → another instance owns the singleton now,
-///     so self-fence to avoid a split-brain (two live gateways).
-///   * db unreachable (`Err`)    → nobody can hold the lock while the DB is
-///     down, so keep the gateway up and retry on the next tick.
-///
-/// The self-fence path flips shutdown flags, cancels tmux watchers, drains
-/// pending queues, persists last_message_ids, and shuts down all shards.
-/// Spawned after the client is built (needs `shard_manager`) and before the
-/// gateway backend run. Returns the JoinHandle so run_bot can abort it on
-/// backend exit.
+/// Keep the lease alive while serving, and self-fence when another node holds it.
+/// Voluntary handback suppression never bypasses lease recovery or fencing.
 pub(super) fn run_bot_spawn_gateway_lease_keepalive(
     lease: crate::db::postgres::AdvisoryLockLease,
     shared: &Arc<SharedData>,
