@@ -21,8 +21,10 @@ struct LegacyState {
     exact_for: Option<UnitKey>,
     duplicate_of: Option<UnitKey>,
     contained: bool,
-    /// Normalized-text ranges already matched by containment; one occurrence serves one piece.
-    claimed: Vec<Range<usize>>,
+    /// Containment matches: normalized range and the piece it serves; one occurrence per piece.
+    claimed: Vec<(Range<usize>, PieceDigest)>,
+    /// An edit removed a consumed occurrence, so no text of the message can be shown to be unused.
+    claim_lost: bool,
 }
 
 /// A unit is decided one window after sealing; a Legacy message two windows after its
@@ -112,9 +114,7 @@ impl WindowDiff {
             let exact = self
                 .candidates(channel, since)
                 .find(|(_, l)| {
-                    l.exact_for.is_none()
-                        && l.claimed.is_empty()
-                        && l.msg.content_sha256 == piece.sha256
+                    l.exact_for.is_none() && !l.contained && l.msg.content_sha256 == piece.sha256
                 })
                 .map(|(id, _)| *id);
             if let Some(id) = exact {
@@ -124,13 +124,13 @@ impl WindowDiff {
             }
             exact_all = false;
             let contained = (self.candidates(channel, since))
-                .filter(|(_, l)| l.exact_for.is_none())
+                .filter(|(_, l)| l.exact_for.is_none() && !l.claim_lost)
                 .find_map(|(id, l)| Some((*id, contains_piece(&l.content, piece, &l.claimed)?)));
             match contained.and_then(|(id, range)| self.legacy.get_mut(&id).map(|l| (id, l, range)))
             {
                 Some((id, l, range)) => {
                     l.contained = true;
-                    l.claimed.push(range);
+                    l.claimed.push((range, piece.clone()));
                     ids.push(id);
                 }
                 None => missing = true,
@@ -207,6 +207,7 @@ impl ShadowDiff for WindowDiff {
                     duplicate_of: None,
                     contained: false,
                     claimed: Vec::new(),
+                    claim_lost: false,
                 });
             }
             LegacyTapEvent::Updated {
@@ -227,6 +228,15 @@ impl ShadowDiff for WindowDiff {
                         content_sha256,
                     });
                     l.content = content.clone();
+                    // An edit moves text; each consumed occurrence is found again and stays taken.
+                    let mut moved = std::mem::take(&mut l.claimed);
+                    moved.sort_by_key(|(range, _)| range.start);
+                    for (_, piece) in moved {
+                        match contains_piece(&l.content, &piece, &l.claimed) {
+                            Some(range) => l.claimed.push((range, piece)),
+                            None => l.claim_lost = true,
+                        }
+                    }
                 }
             }
             LegacyTapEvent::Deleted { msg_id, at, .. } => {
@@ -310,7 +320,7 @@ fn normalize_legacy(content: &str) -> String {
 fn contains_piece(
     content: &str,
     piece: &PieceDigest,
-    claimed: &[Range<usize>],
+    claimed: &[(Range<usize>, PieceDigest)],
 ) -> Option<Range<usize>> {
     let text = normalize_legacy(content);
     let target = piece.units as usize;
@@ -332,7 +342,7 @@ fn contains_piece(
         let range = bounds[start].0..bounds[end].0;
         let free = claimed
             .iter()
-            .all(|c| c.end <= range.start || range.end <= c.start);
+            .all(|(c, _)| c.end <= range.start || range.end <= c.start);
         if bounds[end].1 == want && free && sha256_hex(&text[range.clone()]) == piece.sha256 {
             return Some(range);
         }
@@ -495,6 +505,37 @@ mod tests {
         let format_only = |ids| (FormatOnly, ids, DiffCause::Expected);
         let contained = vec![format_only(vec![2]), missing, format_only(vec![2])];
         assert_eq!(rows(&mut diff, 301), contained);
+    }
+
+    #[test]
+    fn an_edit_that_moves_a_consumed_occurrence_does_not_free_it() {
+        let mut diff = WindowDiff::default();
+        seal(&mut diff, "a", 0, &["one"]);
+        post(&mut diff, 1, 0, "one\nfooter");
+        assert_eq!(rows(&mut diff, 300)[0].0, FormatOnly);
+        let edit = |diff: &mut WindowDiff, text: &str| {
+            let (channel_id, msg_id, at) = (7, 1, t(301));
+            let content = Some(text.to_string());
+            diff.observe_legacy(&LegacyTapEvent::Updated {
+                channel_id,
+                msg_id,
+                at,
+                content,
+            });
+        };
+        edit(&mut diff, "prefix\none\nfooter");
+        seal(&mut diff, "b", 301, &["one"]);
+        let missing = (LegacyMissing, vec![], DiffCause::Unknown);
+        assert_eq!(rows(&mut diff, 601), vec![missing.clone()]);
+        // The consumed text is gone after the edit, so none of the message is handed out again.
+        let mut diff = WindowDiff::default();
+        seal(&mut diff, "c", 0, &["one two"]);
+        post(&mut diff, 1, 0, "one two\nfooter");
+        rows(&mut diff, 300);
+        edit(&mut diff, "one\ntwo\nfooter");
+        seal(&mut diff, "d", 301, &["one"]);
+        seal(&mut diff, "e", 301, &["one\ntwo\nfooter"]);
+        assert_eq!(rows(&mut diff, 601), [missing.clone(), missing]);
     }
 
     #[test]

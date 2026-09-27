@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -104,8 +104,9 @@ pub struct Observer {
     feeds: HashMap<u64, Feed>,
     open_capture: CaptureOpener,
     link: Box<dyn DeriveLink>,
-    /// Batches read this tick, derived next tick after the loop applies any WindowStart it read.
-    captured: Vec<(SourceBinding, CaptureBatch)>,
+    /// Batches with their capture time, derived after the loop applies any WindowStart it read.
+    captured: Vec<(DateTime<Utc>, SourceBinding, CaptureBatch)>,
+    window_applied: bool,
 }
 
 impl Observer {
@@ -127,6 +128,7 @@ impl Observer {
             open_capture,
             link,
             captured: Vec::new(),
+            window_applied: false,
         }
     }
 
@@ -180,6 +182,7 @@ impl Observer {
     /// Opens the window at `t0`; listed sources move their live boundary to their size at t0.
     pub fn window_start(&mut self, t0: DateTime<Utc>, sources: &[WindowStartSource]) {
         self.link.window_start(t0, sources);
+        self.window_applied = true;
     }
 
     /// Binding changes, last tick's captures derived, one capture poll per feed, then tap events and diffs.
@@ -197,9 +200,14 @@ impl Observer {
             }
             self.persist(ShadowRecord::Binding { change });
         }
-        let captured = std::mem::take(&mut self.captured);
-        let outputs: Vec<DeriveOutput> = (captured.iter())
-            .flat_map(|(binding, batch)| self.link.derive(binding, batch))
+        // Before the first window, captures wait so a late-appended WindowStart still reaches them.
+        let applied = self.window_applied;
+        let (due, held): (Vec<_>, Vec<_>) = std::mem::take(&mut self.captured)
+            .into_iter()
+            .partition(|(at, _, _)| applied || now - *at >= Duration::seconds(WINDOW_WAIT_SECS));
+        self.captured = held;
+        let outputs: Vec<DeriveOutput> = (due.iter())
+            .flat_map(|(_, binding, batch)| self.link.derive(binding, batch))
             .collect();
         for output in outputs {
             self.diff.observe_derived(&output, now);
@@ -210,7 +218,7 @@ impl Observer {
             match feed.capture.poll(MAX_READ_BYTES) {
                 CaptureOutcome::Batch(batch) if !batch.records.is_empty() => {
                     lags.extend(capture_lag_ms(&feed.binding.source.path, now));
-                    self.captured.push((feed.binding.clone(), batch));
+                    self.captured.push((now, feed.binding.clone(), batch));
                 }
                 CaptureOutcome::Batch(_) => {}
                 CaptureOutcome::Anomaly(anomaly) => {
@@ -244,6 +252,9 @@ fn capture_lag_ms(path: &Path, now: DateTime<Utc>) -> Option<u64> {
     let modified: DateTime<Utc> = std::fs::metadata(path).ok()?.modified().ok()?.into();
     u64::try_from((now - modified).num_milliseconds()).ok()
 }
+
+/// Longest wait for the first window; a capture older than this derives without one.
+const WINDOW_WAIT_SECS: i64 = 5 * 60;
 
 /// How far back attach looks for the opener of a turn that is still running.
 const OPENER_SCAN_BYTES: u64 = 8 * 1024 * 1024;
@@ -585,8 +596,9 @@ mod tests {
                     .to_string()
             })
             .collect();
+        // No window is applied, so the capture derives once it has waited WINDOW_WAIT_SECS.
         let expected = [
-            "header", "attach", "binding", "tap_gap", "diff", "derived", "anomaly", "diff",
+            "header", "attach", "binding", "tap_gap", "diff", "anomaly", "derived", "diff",
             "legacy",
         ];
         assert_eq!(kinds, expected);
@@ -688,11 +700,11 @@ mod tests {
     }
 
     fn race_clock() -> DateTime<Utc> {
-        "2026-09-27T12:06:05.750Z".parse().unwrap()
+        "2026-09-27T12:06:06.750Z".parse().unwrap()
     }
 
     #[test]
-    fn a_window_start_applied_after_a_capture_still_reaches_what_it_captured() {
+    fn a_window_start_applied_ticks_after_a_capture_still_reaches_what_it_captured() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tui_o_shadow");
         let fixture = std::fs::read_to_string(format!("{path}/derive_claude_tui.jsonl")).unwrap();
         let lines: Vec<String> = fixture.lines().map(|line| format!("{line}\n")).collect();
@@ -727,7 +739,9 @@ mod tests {
             .open(&transcript)
             .unwrap();
         std::io::Write::write_all(&mut file, lines[3..10].concat().as_bytes()).unwrap();
-        // The CLI appended WindowStart after this tick's tail read, so the capture comes first.
+        // The CLI appended WindowStart two ticks after the capture that holds the closer.
+        let captured_at = race_clock() - Duration::seconds(1);
+        observer.tick(captured_at, vec![], vec![], 0);
         observer.tick(race_clock(), vec![], vec![], 0);
         let t0: DateTime<Utc> = "2026-09-27T12:06:05Z".parse().unwrap();
         let window_start_extent = extent;
