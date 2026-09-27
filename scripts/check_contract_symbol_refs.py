@@ -644,6 +644,7 @@ def format_report(report: ContractRefReport) -> str:
 
 def check_h2_contract(doc: Path = H2_DOC) -> list[str]:
     """Bind the H2 doc to imported Python functions without parsing Rust definitions."""
+    old_path = sys.path[:]
     sys.path.insert(0, str(REPO_ROOT / "scripts" / "ci"))
     try:
         from h2_admission import evaluate, rw_problem
@@ -657,6 +658,8 @@ def check_h2_contract(doc: Path = H2_DOC) -> list[str]:
         documented = extract_doc_anchors(doc.read_text(encoding="utf-8"))
     except (ImportError, AttributeError, OSError, UnicodeError) as exc:
         return [f"H2 contract reference unavailable: {exc}"]
+    finally:
+        sys.path[:] = old_path
     errors = [f"H2 contract: sym:{a} has no imported reference" for a in sorted(documented - anchors)]
     errors += [f"H2 contract: imported {a} is not documented" for a in sorted(anchors - documented)]
     return errors
@@ -665,6 +668,7 @@ def check_h2_contract(doc: Path = H2_DOC) -> list[str]:
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Contract symbol-ref sync gate (#4268).")
     parser.add_argument("--doc", type=Path, default=DEFAULT_DOC, help="Contract doc path.")
+    parser.add_argument("--h2-doc", type=Path, default=H2_DOC, help="H2 contract doc path.")
     return parser.parse_args(argv)
 
 
@@ -672,7 +676,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     report = build_report(doc=args.doc)
     print(format_report(report))
-    h2_errors = check_h2_contract()
+    h2_errors = check_h2_contract(doc=args.h2_doc)
     print("\n".join(h2_errors) if h2_errors else "H2 contract symbol-ref check passed (Python imports in sync)")
     return 0 if report.is_clean() and not h2_errors else 1
 

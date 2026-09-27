@@ -30,7 +30,7 @@ R-O 방식에는 이후 [사용자 (a) 결정](https://github.com/itismyfield/Ag
 | R-O compiler 대조 | [h2_depinfo.py](../../scripts/ci/h2_depinfo.py), `sym:h2_depinfo::ro_problems` | root lib dep-info와 expanded module map, duplicate_mod 진단 대조 |
 | 잔존 walker 대조 | `sym:h2_depinfo::walker_problems` | compiled file의 realpath→modpath와 R-W 텍스트 walker의 실제 open 경로 대조 |
 | module map 수집 | [h2_modmap.py](../../scripts/ci/h2_modmap.py), `sym:h2_modmap::map_modules` | 이번 실행의 TSV 존재·신선도·형식·file module 하한 검사 |
-| cfg 목록 진단 | [h2_cfg_compare.py](../../scripts/ci/h2_cfg_compare.py), `sym:h2_cfg_compare::compare_cfgs` | 컴파일러가 출력한 cfg 원자 집합의 교집합과 양방향 차이 |
+| cfg 목록 진단 | [h2_cfg_compare.py](../../scripts/ci/h2_cfg_compare.py), `sym:h2_cfg_compare::compare_cfgs` | 구조화된 cfg 원자 집합의 교집합과 양방향 차이 |
 
 [modmap-driver](../../tools/modmap-driver/src/main.rs)는 `RUSTC_WORKSPACE_WRAPPER`로 root lib 컴파일을 식별하고
 `after_expansion`에서 [module map](../../tools/modmap-driver/src/modmap.rs)을 쓴 뒤 `Compilation::Stop`한다.
@@ -50,36 +50,46 @@ R-O는 compiler map을 사용하지만 **item 귀속 전체를 compiler def-path
 ## 3. 레인·재현 조건·cfg 목록 비교
 
 측정 레인은 `linux`(`x86_64-unknown-linux-gnu`)와 `macos`(`aarch64-apple-darwin`)다.
-`rust-toolchain.toml`은 현재 1.94.1이며 Clippy를 설치한다. macOS hosted 레이블은 `macos-15`다.
+`rust-toolchain.toml`은 현재 1.94.1을 지정한다. CI의 `components: clippy`가 Clippy를 설치하고
+`h2_measure.sh`가 가용성을 검사한다. macOS hosted 레이블은 `macos-15`다.
 `h2_measure.sh`는 host triple을 확인하고 `CARGO_BUILD_TARGET`, `RUSTFLAGS`,
 `CARGO_ENCODED_RUSTFLAGS`를 해제하며 incremental을 끈다. root lib/default features가 측정 기준이다.
 env 해제만으로 Cargo config, build-script cfg, 실제 rustc argv의 일치가 증명되지는 않는다.
 재현 조건을 명시하는 것이며 모든 환경에서 같은 결과를 보장하지 않는다.
 
-cfg 비교 입력은 각 레인에서 **실제로 실행한 컴파일러의 `--print cfg` 형식 UTF-8 출력**이다.
-예를 들어 각 호스트에서 `rustc --print cfg > lane.cfg`를 실행하면 그 컴파일러의 기본 cfg를 얻는다.
-root lib 비교에 쓰려면 실제 invocation의 target, feature/custom `--cfg`, codegen 옵션 등도 반영해야 한다.
-일반 `rustc --print cfg` 출력만으로 Cargo feature나 build-script가 넣은 cfg를 수집했다고 주장하지 않는다.
-호출 argv·toolchain·source/config·build-script 결과와의 provenance 연결은 PR-3b에서 검증할 잔여다.
+cfg 비교 입력은 **원자 경계를 보존해 JSON으로 직렬화한 UTF-8 snapshot**이다.
+형식은 비어 있지 않은 배열이며 원자마다 flag는 `["unix"]`, 값이 있으면 `["target_os", "linux"]`다.
+이름은 식별자 문자열, 값은 Unicode 문자열이다. Python의 `str.isidentifier()`로 이름을 검사하며
+Rust cfg 술어나 소스 문법을 평가하지 않는다. 객체·숫자·null·고립 surrogate는 거부한다.
+
+rustc 1.94.1의 `--print cfg`는 값을 escape하지 않는다. 값 `a"`+개행+`b="c`인 `foo` 하나와
+`foo="a"`, `b="c"` 두 원자는 같은 줄 집합을 출력할 수 있어 원문만으로 복구할 수 없다.
+따라서 **원문 출력은 rc 2로 거부**하며 줄별 JSON 감싸기나 원문에서의 자동 변환도 제공하지 않는다.
+수집자는 컴파일러가 가진 이름/값 경계가 사라지기 전에 JSON serializer로 snapshot을 만들어야 한다.
+예: `[["foo", "a\"\nb=\"c"]]`와 `[["foo", "a"], ["b", "c"]]`는 서로 다르다.
+이 PR은 구조화 snapshot의 비교기이며 compiler 수집기를 구현하지 않는다.
+실제 invocation의 target·feature/custom cfg·codegen 옵션·build-script 결과를 수집하고
+argv·toolchain·source/config·증거 provenance에 연결하는 일은 PR-3b에서 검증할 잔여다.
 
 두 호스트의 결과를 모은 뒤 실행한다:
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/ci/h2_cfg_compare.py \
-  --linux linux.cfg --macos macos.cfg
+  --linux linux.cfg.json --macos macos.cfg.json
 ```
 
 stdout은 `common`, `linux_only`, `macos_only` 세 정렬 배열을 가진 JSON이다.
-각 줄은 `unix` 또는 `target_os="linux"` 같은 원자 하나다. 빈 줄·순서·중복은 무시한다.
+출력의 각 원자도 `[이름]` 또는 `[이름, 값]`이다. 배열 순서·중복 원자는 무시한다.
 같은 key의 여러 값(`target_feature`, `target_has_atomic`, `feature` 등)은 각각 보존한다.
-인용 값·escape는 불투명 문자열로 보존하며 동치 평가를 하지 않는다.
-출력 형식을 검사할 뿐 cfg 술어, `cfg_attr`, 소스 파일·모듈 도달성을 해석하지 않는다.
+flag `["key"]`와 빈 값 `["key", ""]`는 다르다. JSON escape만 decode하며 값의 공백·개행·따옴표·
+역슬래시를 정규화하거나 Rust escape로 재평가하지 않는다. 출력은 ASCII JSON escape를 사용한다.
+cfg 술어, `cfg_attr`, 소스 파일·모듈 도달성을 해석하지 않는다.
 
 | rc | 뜻 | 처리 |
 |---|---|---|
-| 0 | 두 유효 목록의 집합이 동일 | 목록 동등성만 확인; 증거의 신선도·완전성·target triple 증명은 아님 |
+| 0 | 두 구조화 원자 집합이 동일 | 이름/값 동등성만 확인; 증거의 신선도·완전성·target triple 증명은 아님 |
 | 1 | 하나 이상의 차이 | 양쪽 전용 원자를 진단; OS/architecture 차이도 숨기지 않음 |
-| 2 | 필수 인자 누락, 파일 읽기/UTF-8/형식 오류, 빈 목록 | stderr에 레인·파일(형식 오류는 줄 번호); 비교 JSON을 내지 않음 |
+| 2 | 필수 인자 누락, 파일 읽기/UTF-8/JSON/schema 오류, 빈 목록 | stderr에 레인·파일(문법 오류는 줄, schema 오류는 원자 번호); 비교 JSON을 내지 않음 |
 
 Linux/macOS의 정상 target cfg는 다르므로 rc 1은 예상 가능한 진단이다.
 이를 곧바로 admission 위반으로 취급하거나 allowlist로 지우지 않는다.
