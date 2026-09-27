@@ -1507,9 +1507,8 @@ function processVerdict(cardId, verdict, result, options) {
       return;
     }
 
-    // Review passed — move to the next pipeline stage, otherwise terminal (#110).
-    // advanceStage picks and assigns it under the repo stage lock that stage saves
-    // take: the stage after the current one, or the first review_pass stage.
+    // Review passed: advanceStage moves the card to the next stage under the repo
+    // stage lock, or reports that none is left and the card goes terminal (#110).
     var cardInfo = agentdesk.cards.get(cardId);
     var stageMove = null;
     var nextStage = null;

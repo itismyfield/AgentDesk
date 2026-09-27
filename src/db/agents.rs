@@ -88,6 +88,34 @@ impl AgentChannelBindings {
         }
     }
 
+    /// Explicit provider columns win over the legacy primary channel.
+    pub(crate) fn provider_for_channel(
+        &self,
+        matches: impl Fn(&str) -> bool,
+    ) -> Option<ProviderKind> {
+        let claude = self
+            .discord_channel_cc
+            .as_deref()
+            .is_some_and(|c| matches(c.trim()));
+        let codex = [
+            self.discord_channel_cdx.as_deref(),
+            self.discord_channel_alt.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|c| matches(c.trim()));
+        match (claude, codex) {
+            (true, false) => Some(ProviderKind::Claude),
+            (false, true) => Some(ProviderKind::Codex),
+            (true, true) => None,
+            (false, false) => self
+                .discord_channel_id
+                .as_deref()
+                .filter(|c| matches(c.trim()))
+                .and_then(|_| self.primary_provider_kind()),
+        }
+    }
+
     pub fn all_channels(&self) -> Vec<String> {
         let mut channels = Vec::new();
         for value in [
@@ -404,4 +432,24 @@ pub async fn resolve_agent_dispatch_channel_pg(
                 bindings.primary_channel()
             }
         }))
+}
+
+/// Seeds a Claude-primary agent row with the given cc/cdx channel bindings.
+#[cfg(test)]
+pub(crate) async fn insert_agent_channels_for_tests(
+    pool: &PgPool,
+    agent_id: &str,
+    cc: Option<&str>,
+    cdx: Option<&str>,
+) {
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, discord_channel_cc, discord_channel_cdx)
+         VALUES ($1, $1, 'claude', $2, $3)",
+    )
+    .bind(agent_id)
+    .bind(cc)
+    .bind(cdx)
+    .execute(pool)
+    .await
+    .expect("seed agent channels"); // agentdesk-audit: allow-unwrap — #[cfg(test)] seed helper; a failed insert must abort the test
 }

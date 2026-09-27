@@ -146,6 +146,8 @@ function createAgentdeskMock(options) {
     queries: [],
     executions: [],
     execCalls: [],
+    sessionLivenessCalls: [],
+    sessionKillCalls: [],
     statusCalls: [],
     reviewStatusCalls: [],
     reviewStateSyncs: [],
@@ -225,6 +227,13 @@ function createAgentdeskMock(options) {
     exec(cmd, args, execOptions) {
       state.execCalls.push({ cmd, args: args || [], options: execOptions || {} });
       return exec(cmd, args || [], execOptions || {}, state);
+    },
+    session: {
+      hasLivePane(name) {
+        state.sessionLivenessCalls.push(name);
+        return settings.sessionHasLivePane ? settings.sessionHasLivePane(name) : "unknown";
+      },
+      kill(name) { state.sessionKillCalls.push(name); }
     },
     config: {
       get(key) {

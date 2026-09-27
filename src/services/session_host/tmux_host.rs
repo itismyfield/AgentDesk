@@ -21,6 +21,16 @@ fn map_output(result: Result<Output, String>) -> Result<HostMutation, HostError>
     }
 }
 
+impl TmuxHost {
+    pub(crate) fn liveness_within(
+        &self,
+        session: HostSessionRef<'_>,
+        budget: std::time::Duration,
+    ) -> HostLiveness {
+        tmux::pane_liveness_within(session.name, budget).into()
+    }
+}
+
 impl InteractiveSessionHost for TmuxHost {
     fn kind(&self) -> HostKind {
         HostKind::Tmux
