@@ -3,7 +3,7 @@
 ## 1. 범위와 현재 상태
 
 이 계약은 `src/**`의 **root lib 타깃 prod 코드 중 owner 밖** tmux 직접 조작 사이트의 증가를 제한한다.
-owner는 `src/services/platform/tmux.rs`, `src/services/platform/tmux/availability.rs`,
+owner는 `src/services/platform/tmux.rs`, `src/services/platform/tmux/**`,
 `src/services/session_host.rs`, `src/services/session_host/**`이며, 별도 owner 명부도 대조한다.
 테스트·bin 전용 코드·build script·proc-macro 실행·외부 크레이트 내부·운영 스크립트는 측정 범위 밖이다.
 
@@ -11,7 +11,8 @@ owner는 `src/services/platform/tmux.rs`, `src/services/platform/tmux/availabili
 기준 main `cd8fe090acb1c1f5f309a5ca22f7cc7c61a0ec81`에는 `clippy.toml`,
 `scripts/ci/h2_admissions.toml`, 두 baseline 파일이 없고 `LIVENESS_FLOOR = 0`이다.
 CI의 측정/map 호출에는 `--inert`가 있고 admission CLI는 CI에서 호출하지 않는다.
-정책 exec allowlist는 아직 `gh/git/tmux`이며 `hasLivePane`와 `gh/git` 제한은 PR-2의 작업이다.
+정책은 `agentdesk.session.hasLivePane(name)`으로 생존 상태를 조회하며, Rust exec 경계는 `gh/git`만 허용한다.
+`tmux_server_pids`와 `check_file_descriptor_headroom`은 비-macOS에서도 빈 결과의 동명 스텁으로 lint 경로를 유지한다.
 이 문서에서 활성 후 계약과 후속 방어선을 현재 구현의 보장으로 읽지 않는다.
 
 정본은 [r9 결정](https://github.com/itismyfield/AgentDesk/issues/5340#issuecomment-5819255658)이다.
