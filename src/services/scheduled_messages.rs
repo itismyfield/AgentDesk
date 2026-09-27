@@ -327,10 +327,16 @@ async fn start_agent_turn(
     let provider = message
         .target_channel_id
         .as_deref()
-        .and_then(|target| {
+        .filter(|target| {
+            bindings
+                .all_channels()
+                .iter()
+                .any(|bound| resolve_channel(bound) == resolve_channel(target))
+        })
+        .map(|target| {
             bindings.provider_for_channel(|bound| resolve_channel(bound) == resolve_channel(target))
         })
-        .or_else(|| bindings.resolved_primary_provider_kind())
+        .unwrap_or_else(|| bindings.resolved_primary_provider_kind())
         .ok_or_else(|| anyhow!("agent {agent_id} primary provider is not configured"))?;
     let primary_channel = bindings
         .channel_for_provider(Some(provider.as_str()))

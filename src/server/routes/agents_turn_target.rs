@@ -80,6 +80,15 @@ fn resolve_bound_target(
             })
         })
         .transpose()?;
+    if requested.is_none()
+        && channel_override.is_none()
+        && bindings.resolved_primary_provider_kind().is_none()
+    {
+        return Err(target_error(
+            StatusCode::CONFLICT,
+            "agent primary provider is not configured",
+        ));
+    }
     let primary_channel = channel_override
         .map(str::to_owned)
         .or_else(|| {
@@ -142,6 +151,7 @@ mod tests {
         for (channel, explicit, expected) in [
             (None, None, ProviderKind::Codex),
             (Some("101"), None, ProviderKind::Claude),
+            (Some("00101"), None, ProviderKind::Claude),
             (Some("102"), None, ProviderKind::Codex),
             (Some("103"), None, ProviderKind::Codex),
             (Some("101"), Some("claude"), ProviderKind::Claude),
@@ -155,7 +165,7 @@ mod tests {
                 "channel={channel:?} explicit={explicit:?}"
             );
             if let Some(channel) = channel {
-                assert_eq!(target.channel_id.to_string(), channel);
+                assert_eq!(target.channel_id, channel.parse::<u64>().unwrap());
             }
         }
         let err = resolve_bound_target(&bindings, "dual", Some("codex"), Some("101"))
@@ -166,6 +176,21 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(err.0, StatusCode::FORBIDDEN);
+        let empty = crate::db::agents::AgentChannelBindings::default();
+        let err = resolve_bound_target(&empty, "unbound", None, None)
+            .err()
+            .unwrap();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert_eq!(err.1.0["error"], "agent primary provider is not configured");
+        let mut ambiguous = bindings.clone();
+        ambiguous.discord_channel_cdx = Some("101".into());
+        assert_eq!(
+            resolve_bound_target(&ambiguous, "dual", None, Some("101"))
+                .err()
+                .unwrap()
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
         for provider in ["claude", "codex", "gemini"] {
             let single = crate::db::agents::AgentChannelBindings {
                 provider: Some(provider.into()),

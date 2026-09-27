@@ -180,6 +180,18 @@ mod tests {
     use super::super::{AppState, domains};
     use crate::services::discord::health::HealthRegistry;
 
+    #[test]
+    fn invalid_turn_target_is_422() {
+        let (status, body) = super::delivery_response(
+            101,
+            Err(super::HumanInputError::InvalidTarget(
+                "provider mismatch".into(),
+            )),
+        );
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body.0["error"], "invalid_target");
+    }
+
     pub(super) fn router(
         pg_pool: Option<sqlx::PgPool>,
         health_registry: Option<Arc<HealthRegistry>>,

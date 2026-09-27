@@ -447,6 +447,97 @@ mod headless_turn_provider_tests {
     use poise::serenity_prelude::{MessageId, UserId};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn headless_turn_setup_failure_releases_only_its_slot_and_active_count() {
+        use crate::services::discord::{health, increment_global_active};
+        let harness = RelayE2eHarness::start().await;
+        harness.register_channel_in_role_map();
+        let shared = make_shared_data_for_tests();
+        let mut other = make_shared_data_for_tests();
+        Arc::get_mut(&mut other).unwrap().provider = ProviderKind::Codex;
+        other.settings.write().await.provider = ProviderKind::Codex;
+        shared
+            .http
+            .cached_serenity_ctx
+            .set(harness.ctx.clone())
+            .ok()
+            .unwrap();
+        shared
+            .http
+            .cached_bot_token
+            .set("test-token".into())
+            .ok()
+            .unwrap();
+        let registry = health::HealthRegistry::new();
+        registry.register("codex".into(), other.clone()).await;
+        registry.register("claude".into(), shared.clone()).await;
+        let unrelated_channel = ChannelId::new(CHANNEL_ID + 1);
+        let unrelated = Arc::new(CancelToken::new());
+        assert!(
+            mailbox_try_start_turn(
+                &shared,
+                unrelated_channel,
+                unrelated.clone(),
+                UserId::new(1),
+                MessageId::new(901)
+            )
+            .await
+        );
+        increment_global_active(&shared, "test_unrelated_turn");
+        let bindings = crate::db::agents::AgentChannelBindings {
+            provider: Some("codex".into()),
+            discord_channel_cc: Some(CHANNEL_ID.to_string()),
+            discord_channel_cdx: Some((CHANNEL_ID + 2).to_string()),
+            ..Default::default()
+        };
+        let provider = bindings
+            .provider_for_channel(|channel| channel == CHANNEL_ID.to_string())
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            health::start_headless_agent_turn(
+                &registry,
+                harness.channel_id,
+                provider,
+                "status".into(),
+                Some("imessage".into()),
+                None,
+                Some("unconfigured-workspace".into()),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, Err(router::HeadlessTurnStartError::Internal(ref reason)) if reason.contains("no workspace resolved")),
+            "{result:?}"
+        );
+        assert!(
+            mailbox_snapshot(&shared, harness.channel_id)
+                .await
+                .cancel_token
+                .is_none(),
+            "setup failure must release its mailbox"
+        );
+        assert_eq!(
+            shared.restart.global_active.load(Ordering::Relaxed),
+            1,
+            "failed setup must preserve another active turn's count"
+        );
+        assert!(Arc::ptr_eq(
+            mailbox_snapshot(&shared, unrelated_channel)
+                .await
+                .cancel_token
+                .as_ref()
+                .unwrap(),
+            &unrelated
+        ));
+        assert!(!unrelated.cancelled.load(Ordering::Relaxed));
+        assert_eq!(other.restart.global_active.load(Ordering::Relaxed), 0);
+        assert!(other.mailbox_peek(harness.channel_id).is_none());
+        assert!(shared.core.lock().await.sessions.is_empty());
+        assert_eq!(harness.placeholder_posts(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn headless_turn_provider_mismatch_refuses_before_mailbox_or_session_mutation() {
         let harness = RelayE2eHarness::start().await;
         let cases = [

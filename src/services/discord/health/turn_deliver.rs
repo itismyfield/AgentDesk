@@ -328,6 +328,8 @@ mod tests {
             (ports(vec![StartAttempt::Busy, started()], Nothing), "started discord:7:1 enqueue=0"),
             (ports(vec![StartAttempt::Busy, StartAttempt::Busy], Nothing), "queued discord:7:900 session_transition enqueue=1"),
             (ports(vec![StartAttempt::Unavailable("no ctx".into())], Turn), "RuntimeUnavailable(\"no ctx\") enqueue=0"),
+            (ports(vec![StartAttempt::InvalidTarget("provider mismatch".into())], Turn), "InvalidTarget(\"provider mismatch\") enqueue=0"),
+            (ports(vec![StartAttempt::Busy, StartAttempt::InvalidTarget("provider mismatch".into())], Nothing), "InvalidTarget(\"provider mismatch\") enqueue=0"),
             (refused, "QueueRefused(\"LastItemDedup\") enqueue=1"),
         ];
         for (fake, expected) in cases {
