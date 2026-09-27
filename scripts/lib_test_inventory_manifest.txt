@@ -125,6 +125,11 @@ cli::doctor::mailbox::tests::queue_depth_alone_no_longer_suppresses_the_busy_mai
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::empty_directory_passes_with_zero_counts
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::fully_registered_scripts_pass
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::unregistered_scripts_are_reported_as_one_warn_item
+cli::doctor::orchestrator::observation_tests::observations_gate_stale_mailbox_posts
+cli::doctor::orchestrator::observation_tests::observations_preserve_unmeasured_diagnostics
+cli::doctor::orchestrator::observation_tests::reason_aggregation_and_human_checks_preserve_safety_restrictions
+cli::doctor::orchestrator::observation_tests::repair_responses_preserve_measured_safety_and_gates
+cli::doctor::orchestrator::observation_tests::repair_responses_preserve_unmeasured_results
 cli::doctor::orchestrator::profile_filter_tests::json_report_exposes_portable_readiness_sections
 cli::doctor::orchestrator::profile_filter_tests::mailbox_consistency_findings_use_provider_runtime_group
 cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_detail_includes_applied_and_resolved_hashes
@@ -842,6 +847,7 @@ logging::rotation_tests::trace_context_extracts_turn_correlation_fields_from_pay
 logging::rotation_tests::trace_context_prefers_numeric_canonical_channel_id_key
 logging::test_capture::tests::a_callsite_first_hit_without_a_subscriber_still_reaches_a_live_capture
 logging::tests::default_agentdesk_filter_keeps_observability_targets_and_drops_policy_target
+logging::tests::trace_context_builder_fields_are_recorded_and_inherited_by_a_nested_child_event
 logging::tests::trace_context_span_records_turn_correlation_fields
 phase_gate::auto_queue_phase_gate_tests::authoritative_context_reconstructs_only_proven_pre_snapshot_legacy_default
 phase_gate::auto_queue_phase_gate_tests::phase_gate_registry_catalog_and_dispatch_mapping_share_declarations
@@ -1063,6 +1069,8 @@ server::routes::github::tests::create_issue_dry_run_reports_reserved_feature_cap
 server::routes::github::tests::create_issue_non_dry_run_maps_shared_service_github_failure
 server::routes::github::tests::create_issue_non_dry_run_maps_shared_service_success_response
 server::routes::github::tests::create_issue_rejects_reserved_fields_without_gh_side_effects
+server::routes::health_api::session_repair::tests::measured_refusal_precedes_failed_session_lookup
+server::routes::health_api::session_repair::tests::session_observation_gates_actual_repair_calls
 server::routes::health_api::tests::auto_queue_cleanup_backlog_is_served_from_both_health_response_arms
 server::routes::health_api::tests::compute_fully_recovered_preserves_recovery_axis_when_runtime_degrades
 server::routes::health_api::tests::discord_bot_token_reload_router_rejects_non_loopback_auth_token_without_bearer
@@ -1543,6 +1551,8 @@ services::claude_compact_trigger::tests::window_switch_invalidates_old_worker_an
 services::claude_e::process::tests::claude_e_command_receives_authoritative_launch_env
 services::claude_tui::composer_lock::claude_tui_composer_lock_tests::compact_composer_lock_proceeds_while_turn_lifetime_lock_is_held
 services::claude_tui::composer_lock::claude_tui_composer_lock_tests::composer_mutation_lock_serializes_two_mutations
+services::claude_tui::composer_lock::claude_tui_composer_lock_tests::try_composer_lock_rejects_held_and_poisoned_lock
+services::claude_tui::composer_lock::claude_tui_composer_lock_tests::try_composer_lock_serializes_existing_writer
 services::claude_tui::composer_lock::claude_tui_composer_lock_tests::turn_lock_serializes_concurrent_callbacks
 services::claude_tui::composer_lock::claude_tui_composer_lock_tests::turn_locks_are_shared_per_session_only
 services::claude_tui::hook_bundle::tests::codex_hook_command_uses_stable_session_id_for_trust_identity
@@ -2278,6 +2288,8 @@ services::codex_tui::input::tests::stale_composer_scrolled_deep_into_history_is_
 services::codex_tui::input::tests::steering_snapshot_requires_composer_and_rejects_modal
 services::codex_tui::input::tests::submit_confirmation_allows_fallback_only_after_two_live_draft_snapshots
 services::codex_tui::input::tests::taking_composer_ready_signal_is_one_shot
+services::codex_tui::input::tests::try_composer_lock_rejects_held_and_poisoned_lock
+services::codex_tui::input::tests::try_composer_lock_serializes_existing_writer
 services::codex_tui::input::tests::wait_reports_cancel_not_session_dead_when_token_is_set_before_first_probe
 services::codex_tui::input::tests::wait_returns_cancelled_immediately_when_token_is_pre_cancelled
 services::codex_tui::input::tests::wait_returns_cancelled_when_token_flips_mid_wait_even_with_no_pane
@@ -3330,6 +3342,8 @@ services::discord::inflight::budget::tests::bump_persists_attempts_on_restart_ma
 services::discord::inflight::budget::tests::bump_persists_attempts_on_tui_direct_row
 services::discord::inflight::budget::tests::bump_refuses_row_owned_by_newer_turn
 services::discord::inflight::budget::tests::bump_refuses_tui_direct_row_without_offset_proof
+services::discord::inflight::clear_store::identity::operator_disposition::tests::operator_disposition_pin_mismatch_never_unlinks
+services::discord::inflight::clear_store::identity::operator_disposition::tests::operator_disposition_rereads_guarded_bytes_and_removes_rebind_row
 services::discord::inflight::clear_store::identity::tests::captured_episode_clears_its_matching_row
 services::discord::inflight::clear_store::identity::tests::captured_episode_preserves_a_foreign_nonce
 services::discord::inflight::clear_store::identity::tests::captured_episode_preserves_every_changed_identity_field
@@ -5455,6 +5469,7 @@ services::discord::session_runtime::worktree_reuse_channel_isolation_tests::reco
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::reconcile_refused_when_tmux_cwd_not_managed_or_unusable
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::restart_restore_cwd_does_not_cross_channels
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::restart_restore_cwd_legacy_null_single_row_is_reused
+services::discord::session_status_hook::tests::post_status_span_carries_channel_and_session_identity
 services::discord::session_transition::tests::inactive_channel_locks_are_pruned_only_on_vacant_insertion
 services::discord::session_transition::tests::transition_acquisition_times_out_after_contract_window
 services::discord::settings::content::role_prompt_cache_tests::role_prompt_cache_invalidates_when_file_changes
@@ -7978,6 +7993,7 @@ services::health_active_session_audit::tests::active_session_audit_settings_clam
 services::health_active_session_audit::tests::active_session_audit_stalled_turn_recommends_stall_watchdog
 services::health_active_session_audit::tests::active_session_audit_truncated_and_single_row_per_session
 services::health_active_session_audit::tests::active_session_audit_turn_active_no_dispatch_maps_to_stale_mailbox
+services::health_diagnostics::session_state::tests::session_lookup_preserves_failures_and_absence_on_health_wire
 services::health_diagnostics::tests::a_pending_health_await_is_visible_as_in_flight
 services::health_diagnostics::tests::active_session_audit_query_filters_foreign_and_background_rows
 services::health_diagnostics::tests::an_injected_backlog_short_circuits_before_any_probe
@@ -9119,6 +9135,9 @@ services::tui_prompt_dedupe::tests::evict_dead_tmux_mirror_drops_runtime_and_cha
 services::tui_prompt_dedupe::tests::expired_pending_prompt_publishes_as_direct_input
 services::tui_prompt_dedupe::tests::external_input_relay_lease_can_be_bound_to_channel_after_observation
 services::tui_prompt_dedupe::tests::external_input_turn_lease_carries_owner_and_trace_fields
+services::tui_prompt_dedupe::tests::external_lease_fence_preserves_failure_and_clears_success
+services::tui_prompt_dedupe::tests::external_lease_fence_rejects_absent_changed_and_other_channel
+services::tui_prompt_dedupe::tests::external_lease_fence_serializes_writer_and_rejects_stale_capture
 services::tui_prompt_dedupe::tests::extract_returns_stable_top_level_uuid
 services::tui_prompt_dedupe::tests::extract_yields_none_entry_id_when_uuid_absent
 services::tui_prompt_dedupe::tests::extracts_claude_transcript_user_message_text
