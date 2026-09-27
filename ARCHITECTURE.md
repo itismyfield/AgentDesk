@@ -1867,6 +1867,7 @@ src/
 │   ├── tmux_turn_liveness/
 │   │   └── tests_pg.rs
 │   ├── tui_prompt_dedupe/
+│   │   ├── binding_context.rs
 │   │   ├── extract.rs
 │   │   ├── observation.rs
 │   │   ├── runtime_binding.rs

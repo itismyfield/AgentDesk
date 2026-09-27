@@ -2,8 +2,7 @@
 
 use super::*;
 
-/// Prepare the Claude TUI launch script and hosted tmux session.
-/// Verbatim prep/create extraction: temp cleanup, owner/runtime markers, launch script, create_session; marker `?` exits precede cleanup, later failures keep original cleanup, success returns owner path.
+/// Prepare durable launch evidence before creating the hosted tmux session.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_and_create_claude_tui_session(
@@ -16,7 +15,14 @@ pub(super) fn prepare_and_create_claude_tui_session(
     hook_endpoint: String,
     resume: bool,
     auth_env_lines: &str,
-) -> Result<String, String> {
+    channel_id: Option<u64>,
+) -> Result<
+    (
+        String,
+        crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation,
+    ),
+    String,
+> {
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
     write_tmux_owner_marker(tmux_session_name)?;
     crate::services::tmux_common::write_tmux_runtime_kind_marker(
@@ -25,7 +31,16 @@ pub(super) fn prepare_and_create_claude_tui_session(
     )?;
     let owner_path = tmux_owner_path(tmux_session_name);
     let mut prepared_session_files = None;
+    let mut incarnation = None;
     let launch_result = (|| -> Result<std::process::Output, String> {
+        let prepared =
+            crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::prepare(
+                "claude",
+                tmux_session_name,
+                channel_id,
+                Some(resolved_session_id),
+                resume,
+            )?;
         let exe =
             std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
         let (claude_bin, _resolution) = resolve_claude_binary()?;
@@ -42,19 +57,18 @@ pub(super) fn prepare_and_create_claude_tui_session(
         };
         let session_files =
             crate::services::claude_tui::session::prepare_claude_tui_launch(&launch_config)?;
-        if !auth_env_lines.is_empty() {
-            let script = std::fs::read_to_string(&session_files.launch_script_path)
-                .map_err(|error| format!("read Claude TUI launch script: {error}"))?;
-            let script = script.replacen(
-                "#!/bin/bash\n",
-                &format!("#!/bin/bash\n{auth_env_lines}"),
-                1,
-            );
-            std::fs::write(&session_files.launch_script_path, script)
-                .map_err(|error| format!("update Claude TUI auth launch script: {error}"))?;
-        }
         let launch_script_path = session_files.launch_script_path.clone();
         prepared_session_files = Some(session_files);
+        let script = std::fs::read_to_string(&launch_script_path)
+            .map_err(|error| format!("read Claude TUI launch script: {error}"))?;
+        let script = script.replacen(
+            "#!/bin/bash\n",
+            &format!("#!/bin/bash\n{auth_env_lines}{}", prepared.env_lines()),
+            1,
+        );
+        std::fs::write(&launch_script_path, script)
+            .map_err(|error| format!("update Claude TUI launch script: {error}"))?;
+        incarnation = Some(prepared);
         crate::services::platform::tmux::create_session(
             tmux_session_name,
             Some(working_dir),
@@ -82,5 +96,8 @@ pub(super) fn prepare_and_create_claude_tui_session(
         let _ = std::fs::remove_file(&owner_path);
         return Err(format!("tmux error: {}", stderr));
     }
-    Ok(owner_path)
+    Ok((
+        owner_path,
+        incarnation.ok_or("missing prepared incarnation")?,
+    ))
 }

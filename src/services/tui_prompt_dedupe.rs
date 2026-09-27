@@ -1,3 +1,4 @@
+pub(crate) mod binding_context;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;

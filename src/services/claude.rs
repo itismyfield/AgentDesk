@@ -185,7 +185,7 @@ fn build_tmux_launch_env_lines(
     report_provider: Option<ProviderKind>,
     auto_compact_window: Option<u64>,
 ) -> String {
-    let mut env_lines = String::from("unset CLAUDECODE\n");
+    let mut env_lines = String::from("unset CLAUDECODE\nunset AGENTDESK_BINDING_CONTEXT\n");
     if let Some(exec_path) = exec_path {
         env_lines.push_str(&format!(
             "export PATH='{}'\n",
@@ -1804,7 +1804,7 @@ fn execute_streaming_local_tui_tmux(
     if let Some(ref token) = cancel_token {
         token.bind_claude_tmux_session(tmux_session_name);
     }
-    let owner_path = prepare_and_create_claude_tui_session(
+    let (owner_path, prepared) = prepare_and_create_claude_tui_session(
         tmux_session_name,
         working_dir,
         working_dir_path,
@@ -1814,6 +1814,7 @@ fn execute_streaming_local_tui_tmux(
         hook_endpoint,
         resume,
         &auth_env_lines,
+        report_channel_id,
     )?;
     crate::services::tmux_common::write_tmux_session_auth_profile(
         tmux_session_name,
@@ -1824,13 +1825,11 @@ fn execute_streaming_local_tui_tmux(
     }
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
-    // #3087: stamp a per-spawn nonce on the Claude-TUI DIRECT spawn path too.
-    // Without it this path produces no `.spawn_nonce`, so the status-panel
-    // instance key is `None` and the new-session boundary cannot be detected.
-    if let Err(e) = crate::services::discord::stamp_spawn_markers(tmux_session_name) {
-        debug_log(&format!(
-            "failed to write spawn nonce for {tmux_session_name} (claude-tui): {e}"
-        ));
+    if let Err(e) =
+        crate::services::discord::stamp_spawn_markers(tmux_session_name, Some(&prepared))
+    {
+        crate::services::platform::tmux::kill_session(tmux_session_name);
+        return Err(format!("publish binding context: {e}"));
     }
 
     let _ = sender.send(StreamMessage::Init {
@@ -2816,7 +2815,7 @@ fn execute_streaming_local_tmux(
     // distinct spawns into one instance key. Write errors are logged (not
     // silently swallowed) since a missing nonce degrades the panel-reset
     // boundary to best-effort.
-    if let Err(e) = crate::services::discord::stamp_spawn_markers(tmux_session_name) {
+    if let Err(e) = crate::services::discord::stamp_spawn_markers(tmux_session_name, None) {
         debug_log(&format!(
             "failed to write spawn nonce for {tmux_session_name}: {e}"
         ));

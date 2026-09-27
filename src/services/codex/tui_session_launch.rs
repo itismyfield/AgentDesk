@@ -2,12 +2,7 @@
 
 use super::*;
 
-/// Resolve the Codex binary, build the launch args + env, render and write the
-/// launch script, and register the Discord-originated prompt for dedupe.
-///
-/// Returns the resolved binary, script path, owner-marker path, and the
-/// rollout "modified since" stamp captured just before the script is written.
-/// Errors propagate exactly as the inline body did (`?`).
+/// Prepare durable launch evidence and the Codex Direct TUI launch script.
 #[cfg(unix)]
 pub(super) fn prepare_codex_tui_launch_script(
     tmux_session_name: &str,
@@ -26,18 +21,34 @@ pub(super) fn prepare_codex_tui_launch_script(
     )?;
     let owner_path = tmux_owner_path(tmux_session_name);
 
+    let script_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "sh");
+    let prepared =
+        match crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::prepare(
+            "codex",
+            tmux_session_name,
+            report_channel_id,
+            launch_options.resume_session_id.as_deref(),
+            launch_options.resume_session_id.is_some(),
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let _ = std::fs::remove_file(&owner_path);
+                let _ = std::fs::remove_file(&script_path);
+                return Err(error);
+            }
+        };
     let resolution = resolve_codex_binary();
     let codex_bin = resolution
         .resolved_path
         .clone()
         .ok_or_else(|| "Codex CLI not found".to_string())?;
-    let script_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "sh");
     let mut env_lines = build_tmux_launch_env_lines(
         resolution.exec_path.as_deref(),
         report_channel_id,
         report_provider,
     );
     env_lines.push_str(auth_env_lines);
+    env_lines.push_str(&prepared.env_lines());
     let mut args = build_codex_tui_args(launch_options);
     let codex_hook_overrides = if codex_direct_tui_hook_overrides_enabled() {
         prepare_codex_tui_hook_overrides(
@@ -86,6 +97,7 @@ pub(super) fn prepare_codex_tui_launch_script(
         prompt,
     );
     Ok(CodexTuiLaunchScript {
+        prepared,
         script_path,
         owner_path,
         rollout_modified_since,

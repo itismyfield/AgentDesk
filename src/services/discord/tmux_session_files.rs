@@ -210,6 +210,7 @@ fn bump_generation_mtime_past_previous(
 /// never carries a colliding generation key even transiently. That bump is
 /// best-effort: see `bump_generation_mtime_past_previous` for what it does and
 /// does not guarantee.
+#[cfg(test)]
 pub(in crate::services::discord) fn stamp_session_generation_marker(
     tmux_session_name: &str,
 ) -> Option<i64> {
@@ -286,16 +287,24 @@ fn run_spawn_markers_after_generation_hook_for_tests() {
     }
 }
 
-/// Stamp the generation identity before the per-spawn nonce.
-///
-/// Generation failures remain best-effort and do not suppress nonce creation.
-/// The returned result is exactly `write_spawn_nonce`'s result, including its
-/// successful nonce value and its `std::io::Error`.
-pub(crate) fn stamp_spawn_markers(tmux_session_name: &str) -> std::io::Result<String> {
-    let _ = stamp_session_generation_marker(tmux_session_name);
-    #[cfg(test)]
-    run_spawn_markers_after_generation_hook_for_tests();
-    write_spawn_nonce(tmux_session_name)
+/// Validate prepared evidence and publish both markers under the source authority.
+/// Generation remains best-effort; nonce failures remove the stale destination.
+pub(crate) fn stamp_spawn_markers(
+    tmux_session_name: &str,
+    prepared: Option<&crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation>,
+) -> std::io::Result<String> {
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |_| {
+        if let Some(prepared) = prepared {
+            prepared.validate(tmux_session_name)?;
+        }
+        let _ = stamp_session_generation_marker_under_source_authority(tmux_session_name);
+        #[cfg(test)]
+        run_spawn_markers_after_generation_hook_for_tests();
+        let nonce = prepared
+            .map(|p| p.context.execution_nonce.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+        write_spawn_nonce_value(tmux_session_name, nonce)
+    })
 }
 
 /// Write a fresh, globally-unique per-spawn nonce to the `.spawn_nonce` marker.
@@ -323,7 +332,10 @@ pub(crate) fn stamp_spawn_markers(tmux_session_name: &str) -> std::io::Result<St
 /// reset on a genuinely new session). "Absent → None key" is always preferred
 /// over "stale → colliding key".
 pub(crate) fn write_spawn_nonce(tmux_session_name: &str) -> std::io::Result<String> {
-    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    write_spawn_nonce_value(tmux_session_name, uuid::Uuid::new_v4().simple().to_string())
+}
+
+fn write_spawn_nonce_value(tmux_session_name: &str, nonce: String) -> std::io::Result<String> {
     let path =
         crate::services::tmux_common::session_temp_path(tmux_session_name, SPAWN_NONCE_SUFFIX);
     // Distinct per-process temp sibling to avoid clobbering across concurrent
@@ -1151,7 +1163,7 @@ mod tests {
         let (_root, _env) = isolated_runtime_root();
         let session = unique_session("stamp-order");
 
-        stamp_spawn_markers(&session).expect("stamp both spawn markers");
+        stamp_spawn_markers(&session, None).expect("stamp both spawn markers");
 
         assert_ne!(
             read_generation_file_mtime_ns(&session),
@@ -1181,12 +1193,20 @@ mod tests {
         let claude = include_str!("../claude.rs");
         let codex = include_str!("../codex.rs");
         let qwen = include_str!("../qwen.rs");
-        let combined = "crate::services::discord::stamp_spawn_markers(tmux_session_name)";
+        let combined = "crate::services::discord::stamp_spawn_markers(tmux_session_name, None)";
         let nonce_only = "crate::services::discord::write_spawn_nonce(tmux_session_name)";
         let inline_generation = "session_temp_path(tmux_session_name, \"generation\")";
 
-        assert_eq!(claude.matches(combined).count(), 2);
-        assert_eq!(codex.matches(combined).count(), 2);
+        assert_eq!(claude.matches(combined).count(), 1);
+        assert_eq!(codex.matches(combined).count(), 1);
+        for source in [claude, codex] {
+            assert_eq!(
+                source
+                    .matches("stamp_spawn_markers(tmux_session_name, Some(")
+                    .count(),
+                1
+            );
+        }
         assert_eq!(qwen.matches(combined).count(), 1);
         for source in [claude, codex, qwen] {
             assert!(!source.contains(nonce_only));
@@ -1407,7 +1427,7 @@ mod tests {
     fn stamp_spawn_markers_returns_nonce_result_verbatim() {
         let (_root, _env) = isolated_runtime_root();
         let success_session = unique_session("nonce-verbatim-success");
-        let nonce = stamp_spawn_markers(&success_session).expect("combined marker success");
+        let nonce = stamp_spawn_markers(&success_session, None).expect("combined marker success");
         assert_eq!(
             std::fs::read_to_string(nonce_path(&success_session)).unwrap(),
             nonce
@@ -1425,7 +1445,9 @@ mod tests {
             std::process::id()
         );
         std::fs::create_dir(&combined_tmp).expect("block combined nonce temp path");
-        let combined_kind = stamp_spawn_markers(&combined_session).unwrap_err().kind();
+        let combined_kind = stamp_spawn_markers(&combined_session, None)
+            .unwrap_err()
+            .kind();
         assert_eq!(combined_kind, direct_kind);
     }
 
@@ -1448,7 +1470,7 @@ mod tests {
         let _hook = set_spawn_after_generation_hook(Arc::new(move || {
             std::fs::set_permissions(&restored, std::fs::Permissions::from_mode(0o700)).unwrap();
         }));
-        stamp_spawn_markers(&session).expect("nonce succeeds after generation failure");
+        stamp_spawn_markers(&session, None).expect("nonce succeeds after generation failure");
         std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         let after = read_source_epoch_witness(&session);
         assert_ne!(after, before);
@@ -1484,7 +1506,7 @@ mod tests {
 
         let mut result = None;
         let logs = capture_warns(|| {
-            result = Some(stamp_spawn_markers(&session));
+            result = Some(stamp_spawn_markers(&session, None));
         });
         std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o700))
             .expect("restore sessions permissions");

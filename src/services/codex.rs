@@ -246,7 +246,7 @@ fn build_tmux_launch_env_lines(
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
 ) -> String {
-    let mut env_lines = String::from("unset CLAUDECODE\n");
+    let mut env_lines = String::from("unset CLAUDECODE\nunset AGENTDESK_BINDING_CONTEXT\n");
     if let Some(exec_path) = exec_path {
         env_lines.push_str(&format!(
             "export PATH='{}'\n",
@@ -1595,6 +1595,7 @@ fn cleanup_existing_codex_tui_session(
 /// Paths and timing produced while preparing a Codex Direct TUI launch script.
 #[cfg(unix)]
 struct CodexTuiLaunchScript {
+    prepared: crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation,
     script_path: String,
     owner_path: String,
     rollout_modified_since: std::time::SystemTime,
@@ -1790,6 +1791,7 @@ fn execute_streaming_local_tui_tmux(
         .cleanup_best_effort();
 
     let CodexTuiLaunchScript {
+        prepared,
         script_path,
         owner_path,
         rollout_modified_since,
@@ -1832,11 +1834,11 @@ fn execute_streaming_local_tui_tmux(
 
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
-    // #3087: stamp a per-spawn nonce on the Codex-TUI DIRECT spawn path too.
-    // Without it this path produces no `.spawn_nonce`, so the status-panel
-    // instance key is `None` and the new-session boundary cannot be detected.
-    if let Err(e) = crate::services::discord::stamp_spawn_markers(tmux_session_name) {
-        tracing::warn!("failed to write spawn nonce for {tmux_session_name} (codex-tui): {e}");
+    if let Err(e) =
+        crate::services::discord::stamp_spawn_markers(tmux_session_name, Some(&prepared))
+    {
+        crate::services::platform::tmux::kill_session(tmux_session_name);
+        return Err(format!("publish binding context: {e}"));
     }
 
     wire_cancel_token_to_tmux_session(cancel_token.as_ref(), tmux_session_name);
@@ -2367,10 +2369,8 @@ fn execute_streaming_local_tmux(
     // Keep tmux session alive after process exits for post-mortem analysis
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
-    // #3087: stamp a per-spawn nonce in a SEPARATE marker (see claude.rs). The
-    // status-panel session-instance key reads this unique nonce instead of the
-    // `.generation` mtime, eliminating mtime missing/duplicate collisions.
-    if let Err(e) = crate::services::discord::stamp_spawn_markers(tmux_session_name) {
+    // Give the wrapper a fresh nonce for the status-panel session boundary.
+    if let Err(e) = crate::services::discord::stamp_spawn_markers(tmux_session_name, None) {
         tracing::warn!("failed to write spawn nonce for {tmux_session_name}: {e}");
     }
 
