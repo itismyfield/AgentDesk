@@ -638,6 +638,8 @@ src/
 │   ├── codex_tmux_wrapper/
 │   │   └── input.rs
 │   ├── codex_tui/
+│   │   ├── input/
+│   │   │   └── composer_lock.rs
 │   │   ├── rollout_tail/
 │   │   │   └── parser.rs
 │   │   ├── session/
