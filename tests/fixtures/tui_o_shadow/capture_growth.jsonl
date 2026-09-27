@@ -1,0 +1,5 @@
+{"type":"user","uuid":"u-01","sessionId":"session","message":{"role":"user","content":"요약해 줘"}}
+{"type":"assistant","uuid":"a-01","sessionId":"session","message":{"id":"msg_01","content":[{"type":"text","text":"네, 요약입니다."}]}}
+{"type":"assistant","uuid":"a-02","sessionId":"session","message":{"id":"msg_01","content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"user","uuid":"u-02","sessionId":"session","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","is_error":false,"content":"a.txt"}]}}
+{"timestamp":"2026-09-27T12:00:00Z","type":"response_item","payload":{"type":"message","id":"msg_codex_01","role":"assistant","content":[{"type":"output_text","text":"완료"}]}}

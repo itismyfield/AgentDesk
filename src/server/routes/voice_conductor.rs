@@ -62,6 +62,7 @@ pub(crate) async fn say(
             })
             .map_err(|error| match error {
                 crate::services::discord::HeadlessTurnStartError::Conflict(error)
+                | crate::services::discord::HeadlessTurnStartError::InvalidTarget(error)
                 | crate::services::discord::HeadlessTurnStartError::Internal(error) => error,
             })
         }

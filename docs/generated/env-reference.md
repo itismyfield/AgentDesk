@@ -10,7 +10,7 @@ comment adjacent to that site (blank when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 89
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 90
 - Platform and third-party variables: 27
 
 ## AgentDesk variables
@@ -34,6 +34,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_VOICE_KEEP_WAV` | `src/voice/config.rs:138` | `keep_recordings` 또는 환경변수 `ADK_VOICE_KEEP_WAV` 에 따라 utterance wav / segment / transcript sidecar 를 보존할지 결정한다 (#2156). |
 | `ADK_VOICE_SILENCE` | `src/services/discord/voice_barge_in/foreground_decision.rs:3` |  |
 | `AGENTDESK_API_URL` | `src/cli/client.rs:14` (+1 more) | `env_hint` names the environment variable(s) the *caller's* `api_base()` actually honors — client.rs resolves `AGENTDESK_API_URL` only, while monitoring.rs pre… |
+| `AGENTDESK_BINDING_CONTEXT` | `src/services/tui_prompt_dedupe/binding_context.rs:113` | Hook capture reads this value without consulting mutable markers. |
 | `AGENTDESK_CATCH_UP_POLL_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs:414` |  |
 | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` | `src/services/discord/catch_up.rs:551` | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` overrides the gap (0 disables — used by tests and by operators who want the old unthrottled behaviour). |
 | `AGENTDESK_CLAUDE_PATH` | `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs:162` | Dispatched turns must not reach a host `claude` or host config: a real CLI rejects the synthetic resume id and triggers a stale-resume re-dispatch. |
@@ -68,7 +69,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_HOOK_RELAY_TEST_ENDPOINT` | `src/services/claude_tui/hook_relay.rs:46` |  |
 | `AGENTDESK_HOOK_RELAY_TEST_MUTATION` | `src/services/claude_tui/hook_relay/ordered_queue.rs:41` (+1 more) |  |
 | `AGENTDESK_HOOK_RELAY_TEST_STDOUT_PATH` | `src/services/claude_tui/hook_relay.rs:50` |  |
-| `AGENTDESK_INSTANCE_ID` | `src/services/cluster/node_registry.rs:672` (+1 more) | Resolve the self instance_id, preferring the value the cluster bootstrap registered (config-driven if present), falling back to the env-var/hostname pair only… |
+| `AGENTDESK_INSTANCE_ID` | `src/services/cluster/node_registry.rs:672` (+2 more) | Resolve the self instance_id, preferring the value the cluster bootstrap registered (config-driven if present), falling back to the env-var/hostname pair only… |
 | `AGENTDESK_KAKAO_ACCOUNTS` | `src/services/kakao.rs:35` (+1 more) |  |
 | `AGENTDESK_KAKAO_CALENDAR_ACCOUNTS` | `src/services/kakao/account.rs:21` | Separate allowlist: enabling calendar never implicitly grants all message accounts. |
 | `AGENTDESK_KAKAO_CALENDAR_ENABLED` | `src/services/kakao/account.rs:10` |  |
@@ -112,29 +113,29 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | Variable | Defined at | Description |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | `src/server/rate_limit_sync.rs:203` (+1 more) | Priority: 1) OAuth token (Claude Code subscription), 2) ANTHROPIC_API_KEY. |
-| `APPDATA` | `src/services/platform/binary_resolver.rs:1170` |  |
+| `APPDATA` | `src/services/platform/binary_resolver.rs:1160` |  |
 | `CARGO_MANIFEST_DIR` | `src/services/maintenance/jobs/target_sweep.rs:55` | Order matters: `CARGO_MANIFEST_DIR` is set by cargo during dev/test runs (resolving the actual checkout) but is UNSET in the deployed release binary, so it cle… |
 | `CLAUDE_CONFIG_DIR` | `src/services/claude_tui/hook_output_guard.rs:57` (+3 more) | The Claude home this host reads rollout transcripts under, honouring the `CLAUDE_CONFIG_DIR` override. |
 | `CODEX_HOME` | `src/services/codex_tui/rollout_tail.rs:173` | The Codex home this host reads rollouts under, honouring the `CODEX_HOME` override. |
-| `COKACDIR_DEBUG` | `src/services/claude.rs:251` | Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var. |
+| `COKACDIR_DEBUG` | `src/services/claude.rs:262` | Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var. |
 | `COMPUTERNAME` | `src/services/tmux_common.rs:1142` |  |
 | `DATABASE_URL` | `src/db/postgres.rs:1009` |  |
 | `GEMINI_CLIENT_ID` | `src/server/mod.rs:1439` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
 | `GEMINI_CLIENT_SECRET` | `src/server/mod.rs:1440` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
 | `GEMINI_CLI_HOME` | `src/services/mcp_config.rs:708` |  |
-| `HOME` | `src/cli/doctor/orchestrator.rs:462` (+9 more) | #2655: handler for the `install-memento-session-hook` CLI surface. |
+| `HOME` | `src/cli/doctor/orchestrator.rs:467` (+9 more) | #2655: handler for the `install-memento-session-hook` CLI surface. |
 | `HOSTNAME` | `src/server/outbox_worker.rs:24` (+2 more) |  |
-| `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs:1098` (+2 more) |  |
+| `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs:1088` (+2 more) |  |
 | `MEMENTO_WORKSPACE` | `src/server/routes/memory_api.rs:200` (+1 more) |  |
 | `OPENAI_API_KEY` | `src/server/rate_limit_sync.rs:115` | --- Codex: ~/.codex/auth.json (CLI subscription), else OPENAI_API_KEY --- |
-| `PATH` | `src/cli/doctor/orchestrator.rs:1534` (+5 more) | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
+| `PATH` | `src/cli/doctor/orchestrator.rs:1539` (+5 more) | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
 | `POSTGRES_TEST_ADMIN_DB` | `src/db/auto_queue/test_support.rs:16` (+4 more) |  |
 | `POSTGRES_TEST_DATABASE_URL_BASE` | `src/db/postgres.rs:1023` | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
-| `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs:478` (+1 more) |  |
-| `QWEN_CODE_SYSTEM_SETTINGS_PATH` | `src/cli/doctor/orchestrator.rs:484` (+1 more) |  |
-| `QWEN_HOME` | `src/cli/doctor/orchestrator.rs:456` (+2 more) |  |
+| `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs:483` (+1 more) |  |
+| `QWEN_CODE_SYSTEM_SETTINGS_PATH` | `src/cli/doctor/orchestrator.rs:489` (+1 more) |  |
+| `QWEN_HOME` | `src/cli/doctor/orchestrator.rs:461` (+2 more) |  |
 | `REQUIRE_WAKE_WORD` | `src/voice/config.rs:106` | A live yaml with `wake_words: []` plus `REQUIRE_WAKE_WORD=1` would otherwise make EVERY utterance fail the (impossible-to-satisfy) gate and be silently dropped. |
 | `RUST_LOG` | `src/logging.rs:29` | The directive every shipped dcserver process adds on top of `RUST_LOG`. |
-| `SHELL` | `src/services/platform/binary_resolver.rs:1277` |  |
-| `USERPROFILE` | `src/cli/doctor/orchestrator.rs:466` (+6 more) |  |
+| `SHELL` | `src/services/platform/binary_resolver.rs:1267` |  |
+| `USERPROFILE` | `src/cli/doctor/orchestrator.rs:471` (+6 more) |  |
 | `VOICE_AUDIO_DEBUG_DIR` | `src/voice/receiver.rs:72` |  |

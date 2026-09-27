@@ -145,6 +145,11 @@ pub mod tmux_wrapper;
 pub mod tool_output_guard;
 #[allow(dead_code)]
 pub(crate) mod writer_protocol;
+// Shadow-only output track; unreferenced until its spawn is wired behind the off-by-default flag.
+#[allow(dead_code)]
+pub(crate) mod tui_o {
+    pub(crate) mod shadow;
+}
 // #3034: 4 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during tui_prompt_dedupe dead-code cleanup.
 pub(crate) mod tui_prompt_control;

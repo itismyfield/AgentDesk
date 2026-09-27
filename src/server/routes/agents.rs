@@ -184,7 +184,7 @@ fn resolve_channel_identifier(value: &str) -> Option<u64> {
     super::dispatches::resolve_channel_alias_pub(value).or_else(|| value.trim().parse::<u64>().ok())
 }
 
-fn channel_identifier_matches(left: &str, right: &str) -> bool {
+pub(super) fn channel_identifier_matches(left: &str, right: &str) -> bool {
     let left_trimmed = left.trim();
     let right_trimmed = right.trim();
     if left_trimmed.eq_ignore_ascii_case(right_trimmed) {
@@ -873,11 +873,11 @@ pub async fn start_agent_turn(
         ),
         Err(crate::services::discord::HeadlessTurnStartError::Conflict(error)) => (
             StatusCode::CONFLICT,
-            Json(json!({
-                "ok": false,
-                "error": error,
-                "status": "conflict",
-            })),
+            Json(json!({"ok": false, "error": error, "status": "conflict"})),
+        ),
+        Err(crate::services::discord::HeadlessTurnStartError::InvalidTarget(error)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"ok": false, "error": error, "status": "invalid_target"})),
         ),
         Err(crate::services::discord::HeadlessTurnStartError::Internal(error)) => (
             StatusCode::SERVICE_UNAVAILABLE,
