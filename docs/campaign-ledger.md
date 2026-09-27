@@ -24,10 +24,17 @@ All routes are under `/api` and use the same protected admin middleware as
 
 | Method | Route | Result |
 | --- | --- | --- |
-| GET | `/campaigns?limit=100&offset=0` | `{campaigns: Campaign[], limit, offset}`; latest updated first, limit 1–500 |
+| GET | `/campaigns?limit=100&offset=0` | `{campaigns: Campaign[], live, limit, offset}`; latest updated first, limit 1–500 |
 | POST | `/campaigns` | HTTP 201 `{campaign}`; optional client ID, otherwise UUID; existing ID returns 409 |
-| GET | `/campaigns/{id}` | `{campaign}`; missing ID returns 404 |
+| GET | `/campaigns/{id}` | `{campaign, live}`; missing ID returns 404 |
 | PUT | `/campaigns/{id}` | `{campaign}`; requires `expected_revision`, replaces complete aggregate |
+
+`live` is the execution projection the ledger itself does not hold. For each node
+whose `issue_url` is a GitHub issue that has a kanban card, it reports `card_id`,
+`card_status`, the card's newest `dispatch_type`/`dispatch_status` and newest
+auto-queue `queue_status` (list: campaign id → node id → status; single read:
+node id → status). It is computed on every read and never written back, so it
+can disagree with a node's saved `status`.
 | GET | `/campaigns/{id}/history` | `{revisions: Campaign[]}`; the retained newest 10 revisions, descending; older ones are deleted, not archived |
 
 Campaign fields: `id`, `title`, `description`, `status`, `round`, `revision`,
@@ -72,7 +79,8 @@ callers must verify their evidence before marking work complete.
 
 ## Dashboard navigation
 
-The first screen leads with running, then blocked, tasks as cards: gist (`summary`,
+The first screen leads with running, then blocked, tasks as cards (a node whose
+card has a pending or dispatched dispatch counts as running): gist (`summary`,
 else the title), a seven-step bar (investigate → design → implement → review → fix →
 merge → deploy check) inferred from the free-text `stage` by the stage keyword
 written first (unmatched stages show their short text), `benefit`, and `blocker`
@@ -91,7 +99,8 @@ task dependency view rather than a miniature rendering of the entire campaign.
 Aggregated group relationships can be cyclic even when the task DAG is acyclic.
 The task view shows direct predecessors and successors across groups and filters,
 with explicit omitted counts and a complete connection list for high fan-in/out.
-The saved `running` status remains a checkpoint, not a live process-health signal.
+The saved `running` status remains a checkpoint, not a live process-health signal;
+the list row and task details show the `live` card, dispatch and queue state beside it.
 
 ## CLI usage
 

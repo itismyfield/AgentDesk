@@ -8,13 +8,13 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/campaigns",
             "campaigns",
-            "List durable campaign DAG checkpoints from canonical PostgreSQL, newest updated first.",
+            "List durable campaign DAG checkpoints from canonical PostgreSQL, newest updated first. `live` maps campaign id -> node id -> what the kanban card behind the node's GitHub issue_url is doing now (card_id, card_status, newest dispatch_type/dispatch_status, newest auto-queue queue_status); it is read per request and never stored in the ledger.",
         )
         .with_params([
             ("limit", query_param("integer", false, "Page size 1..500; default 100.")),
             ("offset", query_param("integer", false, "Zero-based offset; default 0.")),
         ])
-        .with_example(json!({}), json!({"campaigns": [], "limit": 100, "offset": 0}))
+        .with_example(json!({}), json!({"campaigns": [], "live": {}, "limit": 100, "offset": 0}))
         .with_curl("curl -H \"Authorization: Bearer $ADK_AUTH_TOKEN\" \"$ADK_URL/api/campaigns\""),
         ep(
             "POST",
@@ -40,10 +40,10 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/campaigns/{id}",
             "campaigns",
-            "Read the canonical checkpoint before resuming after clear, compaction, quota interruption, or provider/session replacement. Recorded running state is not proof of a live process.",
+            "Read the canonical checkpoint before resuming after clear, compaction, quota interruption, or provider/session replacement. Recorded running state is not proof of a live process; `live` (node id -> card/dispatch/queue status of the node's issue card) is.",
         )
         .with_params([("id", path_param("Campaign ID."))])
-        .with_example(json!({"path": {"id": "release-a"}}), json!({"campaign": {"id": "release-a", "title": "Release A", "description": "", "status": "planned", "round": 1, "revision": 1, "nodes": [], "created_at": "2026-09-20T00:00:00Z", "updated_at": "2026-09-20T00:00:00Z"}}))
+        .with_example(json!({"path": {"id": "release-a"}}), json!({"campaign": {"id": "release-a", "title": "Release A", "description": "", "status": "planned", "round": 1, "revision": 1, "nodes": [], "created_at": "2026-09-20T00:00:00Z", "updated_at": "2026-09-20T00:00:00Z"}, "live": {}}))
         .with_curl("curl -H \"Authorization: Bearer $ADK_AUTH_TOKEN\" \"$ADK_URL/api/campaigns/release-a\""),
         ep(
             "PUT",

@@ -1,4 +1,4 @@
-import type { CampaignNode, CampaignNodeStatus } from "../../api/campaigns";
+import type { CampaignNode, CampaignNodeLive, CampaignNodeStatus } from "../../api/campaigns";
 
 export const NODE_STATUSES: CampaignNodeStatus[] = ["pending", "running", "blocked", "completed", "failed", "skipped"];
 
@@ -10,11 +10,12 @@ export interface CampaignFilters {
 }
 export const EMPTY_FILTERS: CampaignFilters = { query: "", status: "all", group: null, hideCompleted: false };
 export function campaignGroup(node: CampaignNode): string { return node.group || ""; }
-export function campaignIssueLabel(node: CampaignNode): string {
+export function campaignIssueNumber(node: CampaignNode): string | null {
   const safe = safeCampaignLink(node.issue_url);
   const issue = safe ? new URL(safe).pathname.match(/\/issues\/(\d+)\/?$/)?.[1] : null;
-  return issue ? `#${issue}` : node.id;
+  return issue ? `#${issue}` : null;
 }
+export function campaignIssueLabel(node: CampaignNode): string { return campaignIssueNumber(node) ?? node.id; }
 export function filterCampaignNodes(nodes: CampaignNode[], filters: CampaignFilters): CampaignNode[] {
   const query = filters.query.trim().toLocaleLowerCase();
   return nodes.filter((node) => (!filters.hideCompleted || node.status !== "completed")
@@ -91,11 +92,19 @@ export function campaignStageStep(stage: string): { index: number; raw: string }
   return { index: best.index, raw: plain.length > 28 ? `${plain.slice(0, 27)}…` : plain };
 }
 
-/** Running then blocked work leads the first screen; every other status is only counted. */
-export function campaignGlance(nodes: CampaignNode[]) {
-  const active = [...nodes.filter((node) => node.status === "running"), ...nodes.filter((node) => node.status === "blocked")];
+/** The node's issue card has a dispatch waiting or running. */
+export function liveIsWorking(live: CampaignNodeLive | undefined): boolean {
+  return live?.dispatch_status === "pending" || live?.dispatch_status === "dispatched";
+}
+
+/** Running then blocked work leads the first screen; every other status is only counted.
+ * A node whose card has a live dispatch counts as running whatever the ledger says. */
+export function campaignGlance(nodes: CampaignNode[], live: Record<string, CampaignNodeLive> = {}) {
+  const running = nodes.filter((node) => node.status === "running" || liveIsWorking(live[node.id]));
+  const runningIds = new Set(running.map((node) => node.id));
+  const blocked = nodes.filter((node) => node.status === "blocked" && !runningIds.has(node.id));
   const buckets = (["pending", "completed", "skipped", "failed"] as const)
-    .map((status) => ({ status, nodes: nodes.filter((node) => node.status === status) }))
+    .map((status) => ({ status, nodes: nodes.filter((node) => node.status === status && !runningIds.has(node.id)) }))
     .filter((bucket) => bucket.nodes.length > 0);
-  return { active, running: active.filter((node) => node.status === "running").length, buckets };
+  return { active: [...running, ...blocked], running: running.length, blocked: blocked.length, buckets };
 }

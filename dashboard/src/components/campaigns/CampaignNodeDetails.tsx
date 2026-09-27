@@ -1,13 +1,13 @@
 import { useState } from "react";
-import { updateCampaignNode, type Campaign, type CampaignNode } from "../../api/campaigns";
+import { updateCampaignNode, type Campaign, type CampaignNode, type CampaignNodeLive } from "../../api/campaigns";
 import { ApiRequestError } from "../../api/httpClient";
 import { WidgetState } from "../common/WidgetState";
 import { NODE_STATUSES, safeCampaignLink } from "./campaignModel";
-import { Badge, LABELS, type Tr } from "./campaignPresentation";
+import { Badge, LABELS, cardStatusLabel, dispatchLabel, queueLabel, type Tr } from "./campaignPresentation";
 
 export interface CampaignDraft { campaign: Campaign; node: CampaignNode }
-export default function CampaignNodeDetails({ campaign, node, tr, onSaved, editing, onDraftChange }: {
-  campaign: Campaign; node: CampaignNode; tr: Tr; onSaved: (campaign: Campaign) => void;
+export default function CampaignNodeDetails({ campaign, node, live, tr, onSaved, editing, onDraftChange }: {
+  campaign: Campaign; node: CampaignNode; live?: CampaignNodeLive; tr: Tr; onSaved: (campaign: Campaign) => void;
   editing: CampaignDraft | null; onDraftChange: (draft: CampaignDraft | null, expected?: CampaignDraft) => void;
 }) {
   const [saving, setSaving] = useState(false);
@@ -49,6 +49,11 @@ export default function CampaignNodeDetails({ campaign, node, tr, onSaved, editi
     </form> : <>
       {(node.summary || node.benefit) && <p className="campaign-description">{node.summary}{node.summary && node.benefit && "\n"}{node.benefit && `${tr("기대효과", "Benefit")}: ${node.benefit}`}</p>}
       {node.details && <p className="campaign-description">{node.details}</p>}
+      {live && <div className="campaign-live-detail"><h4>{tr("실제 실행 상태", "Live execution")}</h4><dl className="campaign-detail-grid">
+        <div><dt>{tr("보드 칸", "Board column")}</dt><dd>{cardStatusLabel(live.card_status, tr)}</dd></div>
+        <div><dt>{tr("최근 디스패치", "Latest dispatch")}</dt><dd>{dispatchLabel(live, tr) ?? tr("없음", "None")}</dd></div>
+        <div><dt>{tr("자동 큐", "Auto-queue")}</dt><dd>{queueLabel(live, tr) ?? tr("큐에 없음", "Not queued")}</dd></div>
+      </dl></div>}
       <dl className="campaign-detail-grid">
         <div><dt>{tr("단계 · 라운드", "Stage · round")}</dt><dd>{node.stage || "—"} · {node.round}</dd></div>
         <div><dt>{tr("그룹", "Group")}</dt><dd>{node.group || tr("미분류", "Ungrouped")}</dd></div>
@@ -57,14 +62,14 @@ export default function CampaignNodeDetails({ campaign, node, tr, onSaved, editi
         <div><dt>{tr("프로바이더", "Provider")}</dt><dd>{node.provider || "—"}</dd></div>
         <div><dt>{tr("작업 기록 시각", "Task updated")}</dt><dd>{node.updated_at ? new Date(node.updated_at).toLocaleString() : "—"}</dd></div>
         <div><dt>{tr("선행 작업", "Dependencies")}</dt><dd>{node.dependencies.length ? node.dependencies.map((id) => campaign.nodes.find((candidate) => candidate.id === id)?.title || id).join(" · ") : tr("없음", "None")}</dd></div>
-        {node.head_sha && <div><dt>Commit</dt><dd>{node.head_sha}</dd></div>}
+        {node.head_sha && <div><dt>Commit</dt><dd title={node.head_sha}>{node.head_sha.slice(0, 7)}</dd></div>}
       </dl>
       <div className="campaign-next"><h4>{tr("다음 행동", "Next action")}</h4><p>{node.next_action || tr("아직 기록된 다음 행동이 없습니다.", "No next action recorded yet.")}</p></div>
       {node.blocker && <WidgetState kind="stale" title={tr("막힌 이유", "Blocker")} description={node.blocker} compact />}
       {node.evidence.length > 0 && <div><h4>{tr("검증 근거", "Evidence")}</h4><ul>{node.evidence.map((evidence, index) => <li key={index}>{evidence}</li>)}</ul></div>}
       {!!node.acceptance?.length && <div><h4>{tr("완료 조건", "Acceptance criteria")}</h4><ul>{node.acceptance.map((value, index) => <li key={index}>{value}</li>)}</ul></div>}
       {!!node.findings?.length && <div><h4>{tr("발견 사항", "Findings")}</h4><ul>{node.findings.map((value, index) => <li key={index}>{value}</li>)}</ul></div>}
-      {!!node.evidence_records?.length && <div><h4>{tr("검증 기록", "Verification records")}</h4><ul>{node.evidence_records.map((record, index) => <li key={index}><strong>{record.summary}</strong>{record.result && <p>{record.result}</p>}{record.command && <code>{record.command}</code>}{record.head_sha && <p>Commit: {record.head_sha}</p>}{record.recorded_at && <p>{record.recorded_at}</p>}{record.references.map((reference, refIndex) => <p key={refIndex}>{reference}</p>)}</li>)}</ul></div>}
+      {!!node.evidence_records?.length && <div><h4>{tr("검증 기록", "Verification records")}</h4><ul>{node.evidence_records.map((record, index) => <li key={index}><strong>{record.summary}</strong>{record.result && <p>{record.result}</p>}{record.command && <code>{record.command}</code>}{record.head_sha && <p title={record.head_sha}>Commit: {record.head_sha.slice(0, 7)}</p>}{record.recorded_at && <p>{new Date(record.recorded_at).toLocaleString()}</p>}{record.references.map((reference, refIndex) => <p key={refIndex}>{reference}</p>)}</li>)}</ul></div>}
       <div className="campaign-actions">
         {safeCampaignLink(node.issue_url) && <a href={safeCampaignLink(node.issue_url)} target="_blank" rel="noopener noreferrer">{tr("이슈 보기", "View issue")} ↗</a>}
         {safeCampaignLink(node.pr_url) && <a href={safeCampaignLink(node.pr_url)} target="_blank" rel="noopener noreferrer">{tr("PR 보기", "View PR")} ↗</a>}
