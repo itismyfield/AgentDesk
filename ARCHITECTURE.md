@@ -1416,6 +1416,7 @@ src/
 │   │   │   ├── context_window.rs
 │   │   │   ├── current_message_anchor.rs
 │   │   │   ├── early_tui_completion.rs
+│   │   │   ├── entry_abort_mailbox_tests.rs
 │   │   │   ├── finalize_epilogue.rs
 │   │   │   ├── followup_requeue.rs
 │   │   │   ├── guards.rs
