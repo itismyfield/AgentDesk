@@ -3767,6 +3767,8 @@ services::discord::outbound::delivery_obligation::reader_tests::document_rewrite
 services::discord::outbound::delivery_obligation::state::proof_tests::whole_proof_binds_complete_chunks_to_the_durable_attempt
 services::discord::outbound::delivery_obligation::state::proof_tests::whole_proof_rejects_empty_duplicate_partial_and_unproven_cleanup
 services::discord::outbound::delivery_obligation::state::proof_tests::whole_proof_rejects_unbound_epoch_attempt_revision_and_invalid_plans
+services::discord::outbound::delivery_obligation::validation_tests::identity_states_use_one_observed_token_without_binding_legacy
+services::discord::outbound::delivery_obligation::validation_tests::publication_requires_complete_token_and_unchanged_captured_bundle
 services::discord::outbound::delivery_record::relay_state_contract_refs::contract_symbols_exist
 services::discord::outbound::delivery_record::tests::anchor_msg_id_recorded_as_panel_msg_id_3610
 services::discord::outbound::delivery_record::tests::anchor_none_records_null_panel_pair_3610
