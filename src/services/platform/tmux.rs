@@ -918,46 +918,27 @@ pub enum PaneLiveness {
 
 const PANE_LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
+mod liveness;
+
+#[cfg(test)]
+pub(crate) use liveness::tests as liveness_tests;
+
 /// Probe a session's pane liveness as a three-state answer (see [`PaneLiveness`]).
 pub fn pane_liveness(session_name: &str) -> PaneLiveness {
     if is_blank_session_name(session_name) {
         return PaneLiveness::DeadOrAbsent;
     }
-    let mut has_session = tmux_command();
-    has_session.args(["has-session", "-t", &exact_target(session_name)]);
-    match wait_for_tmux_output(has_session, PANE_LIVENESS_PROBE_TIMEOUT, "tmux has-session") {
-        // Spawn/exec failure ⇒ we never reached tmux: unknown, not dead.
-        Err(_) => return PaneLiveness::ProbeError,
-        Ok(output) => match classify_has_session_output(&output) {
-            SessionPresence::Present => {}
-            SessionPresence::Missing => return PaneLiveness::DeadOrAbsent,
-            SessionPresence::ProbeFailed => return PaneLiveness::ProbeError,
-        },
-    }
-    let mut list_panes = tmux_command();
-    list_panes.args([
-        "list-panes",
-        "-t",
-        &exact_target(session_name),
-        "-F",
-        "#{pane_dead}",
-    ]);
-    match wait_for_tmux_output(list_panes, PANE_LIVENESS_PROBE_TIMEOUT, "tmux list-panes") {
-        // list-panes failed on a session we just confirmed present ⇒ unknown.
-        Err(_) => PaneLiveness::ProbeError,
-        Ok(output) if !output.status.success() => PaneLiveness::ProbeError,
-        Ok(output) => {
-            if String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .any(|line| line.trim() == "0")
-            {
-                PaneLiveness::Live
-            } else {
-                // Present but every pane is dead ⇒ the process exited.
-                PaneLiveness::DeadOrAbsent
-            }
-        }
-    }
+    liveness::pane_liveness_using(session_name, tmux_command, wait_for_tmux_output)
+}
+
+/// Observe pane liveness within one shared budget, using only a ready PATH.
+pub(crate) fn pane_liveness_within(session_name: &str, budget: Duration) -> PaneLiveness {
+    liveness::pane_liveness_within_using(
+        session_name,
+        budget,
+        liveness::prepared_tmux_command,
+        wait_for_tmux_output,
+    )
 }
 
 /// Set a tmux session option. Errors are silently ignored (fire-and-forget).

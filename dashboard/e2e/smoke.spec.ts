@@ -14,11 +14,10 @@ const ROUTES = [
 
 // PR #1258: home IA reshuffle (#1245) — drop m_streak/office/roster/activity,
 // move kanban above quality+missions, add m_rate_limit placeholder. Smoke
-// expectations follow the new HOME_DEFAULT_WIDGETS in src/app/AppShell.tsx.
+// expectations follow HOME_DEFAULT_WIDGETS in src/app/HomeOverviewConfig.ts.
 const DEFAULT_HOME_WIDGET_ORDER = [
   "m_tokens",
   "m_cost",
-  "m_progress",
   "m_rate_limit",
   "kanban",
   "routines",
@@ -28,7 +27,6 @@ const DEFAULT_HOME_WIDGET_ORDER = [
 const DEFAULT_HOME_PRIMARY_WIDGET_ORDER = [
   "m_tokens",
   "m_cost",
-  "m_progress",
   "m_rate_limit",
   "kanban",
   "routines",
@@ -39,7 +37,6 @@ const CUSTOM_HOME_WIDGET_ORDER = [
   "routines",
   "kanban",
   "m_rate_limit",
-  "m_progress",
   "m_cost",
   "m_tokens",
 ];
@@ -47,7 +44,6 @@ const CUSTOM_HOME_PRIMARY_WIDGET_ORDER = [
   "routines",
   "kanban",
   "m_rate_limit",
-  "m_progress",
   "m_cost",
   "m_tokens",
 ];
@@ -55,7 +51,6 @@ const DRAGGED_HOME_WIDGET_ORDER = [
   "kanban",
   "m_tokens",
   "m_cost",
-  "m_progress",
   "m_rate_limit",
   "routines",
   "quality",
@@ -906,7 +901,6 @@ const MOCK_SETTINGS_FSM_PIPELINE = {
     on_recover: ["OnRecoverFromFailure"],
   },
   clocks: {},
-  timeouts: {},
   phase_gate: {
     dispatch_to: "project-agentdesk",
     dispatch_type: "review",
@@ -929,6 +923,22 @@ const MOCK_SETTINGS_PIPELINE_STAGES = [
     parallel_with: null,
     applies_to_agent_id: null,
     trigger_after: "ready",
+  },
+];
+
+const MOCK_SETTINGS_CONFIG_ENTRIES = [
+  {
+    key: "max_review_rounds",
+    value: "3",
+    default: "3",
+    baseline: "3",
+    baseline_source: "hardcoded",
+    override_active: false,
+    editable: true,
+    restart_behavior: "persist-live-override",
+    category: "review",
+    label_ko: "최대 리뷰 라운드",
+    label_en: "Max Review Rounds",
   },
 ];
 
@@ -1324,6 +1334,22 @@ async function mockDashboardBootstrap(page: Page) {
     });
   });
 
+  await page.route(/\/api\/routines\/[^/]+\/runs(?:\?.*)?$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ runs: [] }),
+    });
+  });
+
+  await page.route(/\/api\/agents\/quality\/ranking(?:\?.*)?$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ generatedAt: "2026-05-15T01:00:00.000Z", agents: [] }),
+    });
+  });
+
   await page.route(/\/api\/round-table-meetings\/channels$/, async (route) => {
     await route.fulfill({
       status: 200,
@@ -1366,6 +1392,14 @@ async function mockDashboardBootstrap(page: Page) {
 }
 
 async function mockSettingsPipelineEditorApis(page: Page) {
+  await page.route(/\/api\/settings\/config$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ entries: MOCK_SETTINGS_CONFIG_ENTRIES }),
+    });
+  });
+
   await page.route(/\/api\/github-repos$/, async (route) => {
     await route.fulfill({
       status: 200,
@@ -1408,7 +1442,6 @@ async function mockSettingsPipelineEditorApis(page: Page) {
           hooks: MOCK_SETTINGS_FSM_PIPELINE.hooks,
           events: MOCK_SETTINGS_FSM_PIPELINE.events,
           clocks: MOCK_SETTINGS_FSM_PIPELINE.clocks,
-          timeouts: MOCK_SETTINGS_FSM_PIPELINE.timeouts,
           phase_gate: MOCK_SETTINGS_FSM_PIPELINE.phase_gate,
         },
       }),
@@ -1436,6 +1469,14 @@ async function mockSettingsVoiceConfigApi(page: Page) {
           lobby_channel_id: "1503294653313712169",
           active_agent_ttl_seconds: 180,
           default_sensitivity_mode: "normal",
+        },
+        models: {
+          stt_provider: "whisper-cli",
+          stt: { base_url: "", model: "", api_key_env: "" },
+          language: "ko",
+          tts_backend: "edge",
+          tts: { base_url: "", model: "", api_key_env: "", voice: "" },
+          edge_voice: "ko-KR-SunHiNeural",
         },
         agents: [
           {
@@ -1472,6 +1513,14 @@ async function mockSettingsVoiceConfigApi(page: Page) {
 }
 
 async function mockSettingsPipelineEditorApisWithRefreshDelay(page: Page, delayMs = 700) {
+  await page.route(/\/api\/settings\/config$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ entries: MOCK_SETTINGS_CONFIG_ENTRIES }),
+    });
+  });
+
   await page.route(/\/api\/github-repos$/, async (route) => {
     await route.fulfill({
       status: 200,
@@ -1516,7 +1565,6 @@ async function mockSettingsPipelineEditorApisWithRefreshDelay(page: Page, delayM
           hooks: MOCK_SETTINGS_FSM_PIPELINE.hooks,
           events: MOCK_SETTINGS_FSM_PIPELINE.events,
           clocks: MOCK_SETTINGS_FSM_PIPELINE.clocks,
-          timeouts: MOCK_SETTINGS_FSM_PIPELINE.timeouts,
           phase_gate: MOCK_SETTINGS_FSM_PIPELINE.phase_gate,
         },
       }),
@@ -1717,10 +1765,10 @@ test.describe("Dashboard smoke tests", () => {
     const topbar = page.getByTestId("topbar");
     await expect(bottomNav).toBeVisible();
     await expect(bottomNav.locator("button")).toHaveCount(5);
+    await expect(page.getByTestId("app-mobile-tab-voice")).toBeVisible();
     await expect(page.getByTestId("app-mobile-tab-home")).toBeVisible();
     await expect(page.getByTestId("app-mobile-tab-office")).toBeVisible();
     await expect(page.getByTestId("app-mobile-tab-kanban")).toBeVisible();
-    await expect(page.getByTestId("app-mobile-tab-stats")).toBeVisible();
 
     const tabMetrics = await bottomNav.locator("button").evaluateAll((buttons) =>
       buttons.map((button) => {
@@ -1870,8 +1918,8 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page).toHaveURL(/\/kanban$/);
     await expectNoHorizontalOverflow(page);
 
-    await page.getByTestId("app-mobile-tab-stats").click();
-    await expect(page).toHaveURL(/\/stats$/);
+    await page.getByTestId("app-mobile-tab-voice").click();
+    await expect(page).toHaveURL(/\/voice$/);
     await expectNoHorizontalOverflow(page);
 
     await page.getByTestId("app-mobile-more-button").click();
@@ -2424,7 +2472,7 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("ops-signal-outbox_age")).toBeVisible();
     await expect(page.getByTestId("ops-signal-pending_queue")).toBeVisible();
     await expect(page.getByTestId("ops-signal-active_watchers")).toBeVisible();
-    await expect(page.getByTestId("ops-signal-recovery_seconds")).toBeVisible();
+    await expect(page.getByTitle("recovery_seconds: 4m 0s")).toBeVisible();
 
     await expect(page.getByTestId("ops-bottlenecks")).toBeVisible();
     await expect(page.getByTestId("ops-bottleneck-outbox_age")).toBeVisible();
@@ -2705,7 +2753,6 @@ test.describe("Dashboard smoke tests", () => {
                 hooks: MOCK_SETTINGS_FSM_PIPELINE.hooks,
                 events: MOCK_SETTINGS_FSM_PIPELINE.events,
                 clocks: MOCK_SETTINGS_FSM_PIPELINE.clocks,
-                timeouts: MOCK_SETTINGS_FSM_PIPELINE.timeouts,
                 phase_gate: MOCK_SETTINGS_FSM_PIPELINE.phase_gate,
               },
               repoStages: MOCK_SETTINGS_PIPELINE_STAGES,

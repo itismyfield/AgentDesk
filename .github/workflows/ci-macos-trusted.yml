@@ -185,6 +185,11 @@ jobs:
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         run: bash scripts/ci/h2_measure.sh --lane macos --inert
 
+      # H2 R-O module map, macOS lane; a no-op (no rustc-dev install) until the baseline lands.
+      - name: H2 module map (macos, inert)
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
+        run: python3 scripts/ci/h2_modmap.py --inert
+
       - name: cargo test (non-PG, targeted subset)
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         shell: bash
@@ -331,6 +336,12 @@ jobs:
       - name: H2 tmux boundary measurement (macos, inert)
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         run: nice -n 10 bash scripts/ci/h2_measure.sh --lane macos --inert
+
+      # H2 R-O module map, macOS lane; a no-op (no rustc-dev install) until the baseline lands.
+      # The map step clears RUSTC_WRAPPER itself: sccache cannot wrap the driver.
+      - name: H2 module map (macos, inert)
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
+        run: nice -n 10 python3 scripts/ci/h2_modmap.py --inert
 
       - name: cargo test (non-PG, targeted subset)
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'

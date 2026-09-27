@@ -4,7 +4,7 @@ pub(crate) mod chunks;
 pub(crate) mod edge;
 pub(crate) mod playback;
 
-use crate::voice::config::{VoiceConfig, VoiceTtsBackendKind};
+use crate::voice::config::{VoiceConfig, VoiceOpenAiTtsConfig, VoiceTtsBackendKind};
 use crate::voice::utils::expand_tilde;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -128,12 +128,19 @@ pub(crate) trait TtsBackend: Send + Sync {
 #[derive(Clone)]
 pub(crate) enum ConfiguredTtsBackend {
     Edge(EdgeTtsBackend),
+    OpenAiCompatible(OpenAiCompatTtsBackend),
 }
 
 impl ConfiguredTtsBackend {
     pub(crate) fn from_voice_config(config: &VoiceConfig) -> Result<Self> {
         match config.tts.backend {
             VoiceTtsBackendKind::Edge => Ok(Self::Edge(EdgeTtsBackend::from_voice_config(config))),
+            VoiceTtsBackendKind::OpenaiCompatible => {
+                Ok(Self::OpenAiCompatible(OpenAiCompatTtsBackend {
+                    config: config.tts.openai_compatible.clone(),
+                    temp_dir: expand_tilde(&config.audio.temp_dir),
+                }))
+            }
         }
     }
 }
@@ -142,19 +149,57 @@ impl TtsBackend for ConfiguredTtsBackend {
     fn cache_key_parts(&self) -> Vec<String> {
         match self {
             Self::Edge(backend) => backend.cache_key_parts(),
+            Self::OpenAiCompatible(backend) => backend.cache_key_parts(),
         }
     }
 
     fn output_extension(&self) -> &'static str {
         match self {
             Self::Edge(backend) => backend.output_extension(),
+            Self::OpenAiCompatible(backend) => backend.output_extension(),
         }
     }
 
     async fn synthesize(&self, text: &str, kind: TtsSynthesisKind) -> Result<PathBuf> {
         match self {
             Self::Edge(backend) => backend.synthesize(text, kind).await,
+            Self::OpenAiCompatible(backend) => backend.synthesize(text, kind).await,
         }
+    }
+}
+
+/// Any server speaking the OpenAI `/audio/speech` API (OpenAI, or a local
+/// Kokoro/Piper wrapper).
+#[derive(Clone)]
+pub(crate) struct OpenAiCompatTtsBackend {
+    config: VoiceOpenAiTtsConfig,
+    temp_dir: PathBuf,
+}
+
+impl TtsBackend for OpenAiCompatTtsBackend {
+    fn cache_key_parts(&self) -> Vec<String> {
+        vec![
+            "openai-compatible".to_string(),
+            self.config.endpoint.base_url.clone(),
+            self.config.endpoint.model.clone(),
+            self.config.voice.clone(),
+        ]
+    }
+
+    fn output_extension(&self) -> &'static str {
+        "mp3"
+    }
+
+    async fn synthesize(&self, text: &str, _kind: TtsSynthesisKind) -> Result<PathBuf> {
+        // Shares the edge-tts temp prefix so the orphan sweep covers both.
+        crate::voice::openai_compat::synthesize(
+            &self.config.endpoint,
+            &self.config.voice,
+            text,
+            &self.temp_dir,
+            EDGE_TTS_TEMP_PREFIX,
+        )
+        .await
     }
 }
 

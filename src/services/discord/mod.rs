@@ -197,7 +197,8 @@ pub(in crate::services::discord) use catch_up::{
     should_trigger_catch_up_retry, take_catch_up_retry_checkpoint_after_queue_drain,
 };
 pub(in crate::services::discord) use mailbox_finish::{
-    mailbox_finish_cancelled_turn, mailbox_finish_owned_turn, mailbox_finish_turn,
+    mailbox_clear_channel, mailbox_clear_recovery_marker, mailbox_finish_cancelled_turn,
+    mailbox_finish_cancelled_turn_on, mailbox_finish_owned_turn, mailbox_finish_turn,
     mailbox_finish_turn_if_matches, mailbox_finish_turn_if_matches_episode_started_before,
 };
 #[cfg(unix)]
@@ -310,11 +311,11 @@ pub(crate) use runtime_bootstrap::run_bot;
 
 use crate::services::turn_orchestrator::{
     ActiveTurnKind, CancelActiveTurnResult, CancelQueuedMessageResult, ChannelMailboxSnapshot,
-    ClearChannelResult, FinishTurnResult, HydratePendingQueueResult,
-    PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER, QueueExitEvent, QueueExitKind,
-    QueuePersistenceContext, RecoveryKickoffResult, RequeueInterventionResult, TakeNextSoftResult,
-    VALVE_CLEARED_DISPATCH_MARKER_GRACE, load_channel_pending_dispatch_marker,
-    load_pending_dispatch_markers, load_pending_queues, warn_legacy_pending_queue_files,
+    FinishTurnResult, HydratePendingQueueResult, PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER,
+    QueueExitEvent, QueueExitKind, QueuePersistenceContext, RecoveryKickoffResult,
+    RequeueInterventionResult, VALVE_CLEARED_DISPATCH_MARKER_GRACE,
+    load_channel_pending_dispatch_marker, load_pending_dispatch_markers, load_pending_queues,
+    warn_legacy_pending_queue_files,
 };
 pub(super) use crate::services::turn_orchestrator::{
     ChannelMailboxRegistry, Intervention, InterventionMode, MAX_INTERVENTIONS_PER_CHANNEL,
@@ -1640,17 +1641,6 @@ fn ensure_cancel_token_bound_from_inflight(
     ensure_cancel_token_bound_from_inflight_state(provider, &state, cancel_token, reason)
 }
 
-async fn mailbox_clear_recovery_marker(shared: &SharedData, channel_id: ChannelId) {
-    shared.mailbox(channel_id).clear_recovery_marker().await;
-    // #2443 — graduate the 60s `recovery_started_at < 60s` skip via a
-    // deterministic wake-up. Every exit path of the recovery engine
-    // (success / failure / cancel / stale-cleanup) funnels through this
-    // helper, so a single `mark_done()` here covers all of them. Watchers
-    // selecting on `recovery_done.wait()` proceed immediately; the 60s
-    // timeout remains as a hook-miss safety net.
-    shared.mailboxes.recovery_done(channel_id).mark_done();
-}
-
 async fn mailbox_enqueue_intervention(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -2586,23 +2576,6 @@ mod followup_retry_requeue_tests {
     }
 }
 
-async fn mailbox_clear_channel(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-) -> ClearChannelResult {
-    let result = shared
-        .mailbox(channel_id)
-        .clear(queue_persistence_context(shared, provider, channel_id))
-        .await;
-    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
-    // #2443 — `Clear` is the cancel/teardown exit path. Mark recovery_done so
-    // a watcher that subscribed to the recovery latch is freed even when
-    // recovery is aborted rather than completed.
-    shared.mailboxes.recovery_done(channel_id).mark_done();
-    result
-}
-
 /// #3864: in-actor merge of SIGTERM-restored disk queue items into the live
 /// mailbox queue. Replaces the out-of-actor snapshot→build→`replace_queue`
 /// read-modify-write the startup restore path used, which silently lost any
@@ -2615,13 +2588,12 @@ async fn mailbox_merge_restored_queue_items(
     channel_id: ChannelId,
     items: Vec<Intervention>,
 ) -> HydratePendingQueueResult {
-    shared
-        .mailbox(channel_id)
-        .merge_restored_queue_items(
-            items,
-            queue_persistence_context(shared, provider, channel_id),
-        )
-        .await
+    let persistence = queue_persistence_context(shared, provider, channel_id);
+    mailbox_finish::restitution(shared, channel_id, |h| {
+        let (items, p) = (items.clone(), persistence.clone());
+        async move { h.merge_restored_queue_items_or_refused(items, p).await }
+    })
+    .await
 }
 
 async fn mailbox_merge_restored_dispatch_marker(
@@ -2631,14 +2603,15 @@ async fn mailbox_merge_restored_dispatch_marker(
     marker: Intervention,
     restored_override: Option<ChannelId>,
 ) -> HydratePendingQueueResult {
-    shared
-        .mailbox(channel_id)
-        .merge_restored_dispatch_marker(
-            marker,
-            restored_override,
-            queue_persistence_context(shared, provider, channel_id),
-        )
-        .await
+    let persistence = queue_persistence_context(shared, provider, channel_id);
+    mailbox_finish::restitution(shared, channel_id, |h| {
+        let (marker, p) = (marker.clone(), persistence.clone());
+        async move {
+            h.merge_restored_dispatch_marker_or_refused(marker, restored_override, p)
+                .await
+        }
+    })
+    .await
 }
 
 /// #1683: actor-local disk -> in-memory hydration helper. The mailbox
@@ -2650,10 +2623,12 @@ async fn mailbox_hydrate_pending_queue_from_disk(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> HydratePendingQueueResult {
-    shared
-        .mailbox(channel_id)
-        .hydrate_pending_queue_from_disk(queue_persistence_context(shared, provider, channel_id))
-        .await
+    let persistence = queue_persistence_context(shared, provider, channel_id);
+    mailbox_finish::restitution(shared, channel_id, |h| {
+        let p = persistence.clone();
+        async move { h.hydrate_pending_queue_from_disk_or_refused(p).await }
+    })
+    .await
 }
 
 async fn mailbox_restart_drain_all(

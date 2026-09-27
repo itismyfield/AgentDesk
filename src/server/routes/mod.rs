@@ -1,6 +1,8 @@
 pub mod agents;
 mod agents_crud;
 mod agents_setup;
+mod agents_turn_deliver;
+mod agents_turn_target;
 pub mod analytics;
 pub mod auth;
 pub mod auto_queue;
@@ -61,6 +63,8 @@ pub mod stats;
 pub mod termination_events;
 mod turn_lease;
 pub mod v1;
+pub(crate) mod voice_audio;
+pub(crate) mod voice_conductor;
 pub mod voice_config;
 
 #[cfg(test)]

@@ -828,10 +828,11 @@ class FastCheckCiWiringTests(unittest.TestCase):
         postgres = job_block(nightly, "postgres_full")
         self.assertIn("source scripts/ci/non-pg-test-filter.sh", postgres)
         self.assertIn(
-            'cargo test --all-targets -- "${PG_INCLUDE_ARGS[@]}" '
+            'cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" '
             "--nocapture --test-threads=1",
             postgres,
         )
+        self.assertIn("run: cargo test --test e2e -- --test-threads=1", postgres)
 
     def test_relay_authority_contract_job_uses_pinned_recipe(self) -> None:
         job = job_block(
@@ -2156,6 +2157,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 "Install Opus on macOS",
                 "cargo check",
                 "H2 tmux boundary measurement (macos, inert)",
+                "H2 module map (macos, inert)",
                 "cargo test (non-PG, targeted subset)",
                 "Fresh user portable smoke",
                 "sccache stats",
@@ -2202,6 +2204,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 "Cache Cargo dependencies",
                 "cargo check",
                 "H2 tmux boundary measurement (macos, inert)",
+                "H2 module map (macos, inert)",
                 "cargo test (non-PG, targeted subset)",
                 "Fresh user portable smoke",
             },

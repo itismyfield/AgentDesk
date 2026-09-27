@@ -768,14 +768,20 @@ test("timeouts dispatch maintenance module re-enqueues unnotified pending dispat
   ]);
 });
 
-test("timeouts active monitor module checks tmux live panes exactly", () => {
-  const { policy } = loadPolicy("policies/timeouts.js", {
-    exec() {
-      return "1\n0\n";
-    }
-  });
-
-  assert.equal(policy._tmuxHasLivePane("AgentDesk-codex-project-agentdesk"), true);
+test("timeouts active monitor normalizes typed liveness without exec", () => {
+  for (const [value, expected] of [["live", "live"], ["dead", "dead"], ["unknown", "unknown"], [true, "unknown"], [null, "unknown"], ["other", "unknown"], [new Error("probe"), "unknown"]]) {
+    const { policy, state } = loadPolicy("policies/timeouts.js", {
+      sessionHasLivePane(name) {
+        assert.equal(name, "test-pane");
+        if (value instanceof Error) throw value;
+        return value;
+      }
+    });
+    assert.equal(policy._tmuxPaneLiveness("test-pane"), expected);
+    assert.equal(policy._tmuxPaneLiveness("  "), "unknown");
+    assert.deepEqual(state.sessionLivenessCalls, ["test-pane"]);
+    assert.equal(state.execCalls.length, 0);
+  }
 });
 
 test("timeouts active monitor deadlock section uses typed timeout facade", () => {
@@ -827,8 +833,8 @@ test("timeouts active monitor module treats synthetic reattach placeholders as a
         }
       ]
     },
-    exec() {
-      return "0\n";
+    sessionHasLivePane() {
+      return "live";
     }
   });
 
@@ -855,7 +861,7 @@ test("S7 active monitor exempts synthetic turns without force-kill or repeated l
           updated_at: timestampMinutesAgo(mode === "extensions" ? 40 : 1)
         }],
         timeouts: { deadlockCandidates: [{ session_key: sessionKey, agent_id: "agent-1" }] },
-        exec() { return "0\n"; },
+        sessionHasLivePane() { return "live"; },
         httpPost() { return { ok: true, tmux_killed: true }; }
       });
       const key = "deadlock_check:" + sessionKey;
@@ -907,8 +913,8 @@ test("timeouts active monitor preserves quiet accepted review turns", () => {
         "dispatch-review-1": "review"
       }
     },
-    exec() {
-      return "0\n";
+    sessionHasLivePane() {
+      return "live";
     },
     httpPost() {
       return {
@@ -949,8 +955,8 @@ test("timeouts active monitor review fast path leaves non-review sessions on the
         "dispatch-impl-1": "implementation"
       }
     },
-    exec() {
-      throw new Error("non-review session under 30 minutes should not probe tmux");
+    sessionHasLivePane() {
+      throw new Error("probe unavailable");
     }
   });
 
@@ -1401,7 +1407,7 @@ test("S7 ordinary successor clears a legacy synthetic marker without a silence c
       started_at: timestampMinutesAgo(100), updated_at: timestampMinutesAgo(40)
     }]; },
     timeouts: { deadlockCandidates: [{ session_key: sessionKey, agent_id: "agent-1" }] },
-    exec() { return "0\n"; },
+    sessionHasLivePane() { return "live"; },
     httpPost() { return { ok: true, tmux_killed: true }; }
   });
   const key = "deadlock_check:" + sessionKey;
@@ -1453,7 +1459,7 @@ test("active monitor preserves productive turns beyond four and six hours", () =
         started_at: timestampMinutesAgo(ageMinutes), updated_at: timestampMinutesAgo(outputAge)
       }],
       timeouts: { deadlockCandidates: [{ session_key: sessionKey, agent_id: "agent-long", last_heartbeat: timestampMinutesAgo(outputAge) }] },
-      exec() { return "0\n"; },
+      sessionHasLivePane() { return "live"; },
       httpPost() { return { ok: true, tmux_killed: true }; }
     });
     const key = "deadlock_check:" + sessionKey;
@@ -1463,6 +1469,51 @@ test("active monitor preserves productive turns beyond four and six hours", () =
     assert.equal(state.kv.has(key), false);
     assert.equal(state.timeoutTerminationRecords.length, 0);
     assert.equal(state.timeoutMarkSessionIdleCalls.length, 0);
+    }
+  }
+});
+
+
+test("active monitor defers unknown in both loops and refreshes its tick cache", () => {
+  for (const liveness of ["live", "dead", "unknown"]) {
+    for (const hasInflight of [false, true]) {
+      const sessionKey = "provider:__proto__";
+      const row = { session_key: sessionKey, active_dispatch_id: "d1", active_dispatch_status: "pending" };
+      let observation = liveness;
+      const { policy, state } = loadPolicy("policies/timeouts.js", {
+        sessionHasLivePane() { return observation; },
+        inflights: hasInflight ? [{
+          session_key: sessionKey, tmux_session_name: "__proto__", provider: "codex",
+          channel_id: "test-channel", dispatch_id: "d1", request_owner_user_id: 1,
+          started_at: timestampMinutesAgo(45), updated_at: timestampMinutesAgo(35)
+        }] : [],
+        timeouts: { staleWorkingSessions: [row], deadlockCandidates: [row] }
+      });
+      const key = "deadlock_check:" + sessionKey;
+      state.kv.set(key, "preserved");
+      policy._section_I();
+      const defer = liveness === "unknown";
+      const recover = !defer && (liveness === "dead" || !hasInflight);
+      assert.equal(state.dispatchMarkFailedCalls.length, recover ? 1 : 0);
+      assert.deepEqual(toPlain(state.timeoutMarkSessionIdleCalls), recover ? [
+        { sessionKey, options: { clear_active_dispatch_id: true } },
+        { sessionKey, options: { clear_active_dispatch_id: false } }
+      ] : []);
+      assert.equal(state.kv.has(key), defer);
+      assert.equal(state.logs.warn.filter((line) => line.includes("Pane liveness unknown")).length, defer ? 1 : 0);
+      assert.deepEqual(state.sessionLivenessCalls, ["__proto__"]);
+      assert.equal(state.execCalls.length, 0);
+      assert.equal(state.sessionKillCalls.length, 0);
+      assert.equal(state.httpPosts.length, 0);
+      assert.equal(state.timeoutTerminationRecords.length, 0);
+      assert.equal(state.timeoutInactiveCounterCleanups, 1);
+      assert.equal(state.timeoutClearFreshCounterCalls.length, 1);
+      assert.equal(state.timeoutHistoryCleanupCalls.length, 1);
+      observation = "dead";
+      policy._section_I();
+      assert.deepEqual(state.sessionLivenessCalls, ["__proto__", "__proto__"]);
+      assert.equal(state.dispatchMarkFailedCalls.length, (recover ? 1 : 0) + 1);
+      assert.equal(state.kv.has(key), false);
     }
   }
 });
