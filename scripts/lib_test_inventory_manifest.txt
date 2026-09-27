@@ -740,6 +740,7 @@ engine::ops::exec_ops::session_liveness_tests::js_liveness_preserves_owner_live_
 engine::ops::http_ops::tests::build_response_rejects_truncated_content_length
 engine::ops::http_ops::tests::chunked_response_is_rejected_explicitly
 engine::ops::http_ops::tests::connect_first_reachable_falls_through_to_second_address
+engine::ops::http_ops::tests::connect_first_reachable_stops_at_the_deadline
 engine::ops::http_ops::tests::describe_panic_payload_handles_str_string_and_unknown
 engine::ops::http_ops::tests::escape_for_json_escapes_quotes_and_control_chars
 engine::ops::http_ops::tests::invoke_localhost_post_rejects_non_loopback
