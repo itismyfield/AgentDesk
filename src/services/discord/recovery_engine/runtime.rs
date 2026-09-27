@@ -197,36 +197,6 @@ fn predecessor_drain_marker(
     (drain && predecessor && state.turn_nonce.is_some()).then_some(generation)
 }
 
-/// Releases the predecessor generation's `drain_restart` marker under the identity and
-/// episode (nonce) CAS; any other mode, generation or unnamed episode keeps its marker.
-fn release_restart_marker(
-    shared: &SharedData,
-    state: &inflight::InflightTurnState,
-    caller: &'static str,
-) -> Option<inflight::GuardedSaveOutcome> {
-    predecessor_drain_marker(shared, state)?;
-    let mut released = state.clone();
-    released.clear_restart_mode();
-    let identity = inflight::InflightTurnIdentity::from_state(state);
-    let episode = inflight::InflightEpisodePin::from_state(state);
-    let (mode, generation) = (state.restart_mode, state.restart_generation);
-    let outcome = inflight::patch_restart_mode_if_matches_identity(
-        &released,
-        &identity,
-        Some(&episode),
-        mode,
-        generation,
-        caller,
-    );
-    tracing::info!(
-        channel_id = state.channel_id,
-        caller,
-        ?outcome,
-        "restart marker release"
-    );
-    Some(outcome)
-}
-
 /// Closes, instead of adopting, a marked TUI-direct or watcher row whose turn ended before a
 /// later prompt (its placeholder may show that turn); `None` adopts, a failed clear keeps it.
 pub(in crate::services::discord) fn retire_restart_row_past_its_turn(
@@ -345,11 +315,13 @@ fn transcript_turn_ended_before_a_prompt(state: &inflight::InflightTurnState) ->
         })
 }
 
+/// Boot defers ledger registration and retains only the new actor for rollback
+/// until its lock-held marker commit succeeds.
 async fn reregister_active_turn_from_inflight_inner(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
     persist_durable_marker: bool,
-    boot_handoff: bool,
+    minted_actor: Option<&mut Option<Arc<CancelToken>>>,
 ) -> bool {
     let Some(finalizer_msg_id) =
         super::inflight::opt_message_id(state.effective_finalizer_turn_id())
@@ -433,6 +405,9 @@ async fn reregister_active_turn_from_inflight_inner(
             );
         }
         let restored = snapshot.active_user_message_id == Some(finalizer_msg_id);
+        if restored && minted_actor.is_some() {
+            return true;
+        }
         if restored {
             reseed_recovered_finalizer_ledger(
                 shared,
@@ -451,14 +426,15 @@ async fn reregister_active_turn_from_inflight_inner(
                     state,
                     persist_durable_marker,
                 );
-            } else if boot_handoff {
-                release_restart_marker(shared, state, ADOPTED);
             }
         }
         return restored;
     }
 
     if state.request_owner_user_id == 0 {
+        if minted_actor.is_some() {
+            return false;
+        }
         reseed_recovered_finalizer_ledger(
             shared,
             channel_id,
@@ -467,9 +443,6 @@ async fn reregister_active_turn_from_inflight_inner(
             state.effective_relay_owner_kind(),
             state.turn_nonce.as_deref(),
         );
-        if boot_handoff {
-            release_restart_marker(shared, state, ADOPTED);
-        }
         return false;
     }
 
@@ -490,7 +463,7 @@ async fn reregister_active_turn_from_inflight_inner(
     let claim = super::queue_io::mailbox_try_start_turn_unless_released(
         shared,
         channel_id,
-        cancel_token,
+        cancel_token.clone(),
         UserId::new(state.request_owner_user_id),
         finalizer_msg_id,
     )
@@ -504,6 +477,10 @@ async fn reregister_active_turn_from_inflight_inner(
         );
     }
     let started = claim.started;
+    if let Some(actor) = minted_actor {
+        *actor = started.then_some(cancel_token);
+        return started;
+    }
     if started {
         reseed_recovered_finalizer_ledger(
             shared,
@@ -527,8 +504,6 @@ async fn reregister_active_turn_from_inflight_inner(
                 state,
                 persist_durable_marker,
             );
-        } else if boot_handoff {
-            release_restart_marker(shared, state, ADOPTED);
         }
     }
     started
@@ -538,18 +513,74 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
 ) -> bool {
-    reregister_active_turn_from_inflight_inner(shared, state, true, false).await
+    reregister_active_turn_from_inflight_inner(shared, state, true, None).await
 }
 
-const ADOPTED: &str = "recovery_engine::runtime::reregister_restart_adopted_turn_from_inflight";
-
-/// Boot recovery's adoption. It runs once, after this process won the gateway lease, so
-/// a row the predecessor generation marked for this restart is this process's to release.
+/// Keep the exact durable episode fenced across mailbox admission and marker commit.
 pub(in crate::services::discord) async fn reregister_restart_adopted_turn_from_inflight(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
 ) -> bool {
-    reregister_active_turn_from_inflight_inner(shared, state, true, true).await
+    if state.restart_mode.is_none() {
+        return reregister_active_turn_from_inflight(shared, state).await;
+    }
+    let Some(generation) = predecessor_drain_marker(shared, state) else {
+        return false;
+    };
+    let Some(provider) = state.provider_kind() else {
+        return false;
+    };
+    let Ok(mut guard) = inflight::lock_inflight_episode(
+        &provider,
+        state.channel_id,
+        &inflight::InflightEpisodePin::from_state(state),
+    ) else {
+        return false;
+    };
+    let state = guard.state().clone();
+    if predecessor_drain_marker(shared, &state) != Some(generation)
+        || state.turn_nonce.as_deref().is_none_or(str::is_empty)
+        || state.rebind_origin
+        || recovery_terminal_delivery_already_committed(&state)
+    {
+        return false;
+    }
+    let mut minted_actor = None;
+    if !reregister_active_turn_from_inflight_inner(shared, &state, false, Some(&mut minted_actor))
+        .await
+    {
+        return false;
+    }
+    let channel_id = ChannelId::new(state.channel_id);
+    let finalizer_turn_id = state.effective_finalizer_turn_id();
+    let outcome = guard
+        .release_restart_marker_under_guard(generation, readopted_ledger_record_allowed(&state));
+    if outcome != inflight::GuardedSaveOutcome::Saved {
+        tracing::warn!(
+            channel_id = state.channel_id,
+            ?outcome,
+            "restart handoff marker commit failed"
+        );
+        if let Some(actor) = minted_actor {
+            super::super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
+                shared, &provider, channel_id, MessageId::new(finalizer_turn_id),
+                state.turn_nonce.clone(), std::time::Instant::now(), Some(actor),
+            ).await;
+        }
+        return false;
+    }
+    reseed_recovered_finalizer_ledger(
+        shared,
+        channel_id,
+        finalizer_turn_id,
+        &provider,
+        state.effective_relay_owner_kind(),
+        state.turn_nonce.as_deref(),
+    );
+    if readopted_ledger_record_allowed(&state) {
+        mark_readopted_from_inflight(shared, &provider, channel_id, &state, false);
+    }
+    true
 }
 
 /// Automatic reattach holds the canonical episode flock across mailbox and
@@ -561,7 +592,7 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight_u
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
 ) -> bool {
-    reregister_active_turn_from_inflight_inner(shared, state, false, false).await
+    reregister_active_turn_from_inflight_inner(shared, state, false, None).await
 }
 
 #[cfg(test)]
@@ -1744,7 +1775,6 @@ mod restart_marker_adoption_tests {
     fn boot_adoption_releases_only_the_predecessors_drain_marker_on_the_same_episode_6294() {
         const ADVANCED: (bool, bool, u64) = (true, false, 4_096);
         const HELD: (bool, bool, u64) = (false, true, 128);
-        const OWNERLESS: (bool, bool, u64) = (false, false, 128);
         let row = with(|_| {});
         let same = |entry| adopt(entry, &row, &row);
         let marked = |edit: fn(&mut Row)| {
@@ -1771,14 +1801,89 @@ mod restart_marker_adoption_tests {
             marked(|r| r.restart_generation = None),           // unknown generation
             marked(|r| r.restart_mode = Some(HotSwapHandoff)), // hot-swap handoff
             marked(|r| r.turn_nonce = None),                   // episode without nonce
+            marked(|r| r.turn_nonce = Some(String::new())),    // unnamed episode
             replaced(|r| r.turn_start_offset = Some(4_000)),   // identity-only successor
             replaced(|r| r.turn_nonce = Some("b".into())),     // nonce-only successor
         ];
         let want = [
-            RELEASED, RELEASED, ADVANCED, HELD, OWNERLESS, KEPT, KEPT, KEPT, KEPT, KEPT, KEPT,
-            KEPT, KEPT, KEPT,
+            RELEASED, RELEASED, ADVANCED, HELD, HELD, KEPT, KEPT, HELD, HELD, HELD, HELD,
+            HELD, HELD, HELD, HELD,
         ];
         assert_eq!(actual, want);
+    }
+
+    #[test]
+    fn boot_handoff_rejects_replaced_episode_before_mailbox_admission() {
+        for nonce_only in [false, true] {
+            let observed = with(|_| {});
+            let mut successor = observed.clone();
+            if nonce_only {
+                successor.turn_nonce = Some("successor".into());
+            } else {
+                successor.turn_start_offset = Some(4_000);
+            }
+            booted(&successor, |shared| {
+                let bytes = row_bytes();
+                block_on(async {
+                    let adopted =
+                        super::reregister_restart_adopted_turn_from_inflight(shared, &observed).await;
+                    assert!(
+                        !adopted,
+                        "a successor row must refuse the stale boot decision"
+                    );
+                    assert!(
+                        super::super::mailbox_snapshot(shared, super::ChannelId::new(CHANNEL))
+                            .await
+                            .cancel_token
+                            .is_none()
+                    );
+                });
+                assert_eq!(row_bytes(), bytes);
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boot_handoff_rolls_back_on_marker_io_error() {
+        use std::os::unix::fs::PermissionsExt;
+        for real_user in [false, true] {
+            let mut row = with(|_| {});
+            if real_user {
+                row.request_owner_user_id = 8_008;
+            }
+            booted(&row, |shared| {
+                let bytes = row_bytes();
+                let path = inflight::inflight_state_path(
+                    &inflight::inflight_runtime_root().unwrap(),
+                    &Claude,
+                    CHANNEL,
+                );
+                let parent = path.parent().unwrap();
+                let permissions = std::fs::metadata(parent).unwrap().permissions();
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+                let (adopted, active) = block_on(async {
+                    let adopted =
+                        super::reregister_restart_adopted_turn_from_inflight(shared, &row).await;
+                    let active = super::super::mailbox_snapshot(shared, super::ChannelId::new(CHANNEL))
+                        .await
+                        .cancel_token
+                        .is_some();
+                    (adopted, active)
+                });
+                std::fs::set_permissions(parent, permissions).unwrap();
+                assert_eq!(
+                    row_bytes(),
+                    bytes,
+                    "failed marker write must preserve all bytes"
+                );
+                assert!(!adopted, "a failed marker transition is not adoption");
+                assert!(
+                    !active,
+                    "failed handoff must roll back its exact mailbox lease"
+                );
+            });
+        }
     }
 
     const TERMINAL: &str = r#"{"type":"system","subtype":"stop_hook_summary"}"#;

@@ -518,6 +518,9 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                         &shared, &state,
                     )
                     .await;
+                if state.restart_mode.is_some() && !finish_mailbox_on_completion {
+                    continue;
+                }
                 restored_turn = Some(RestoredWatcherTurn {
                     finish_mailbox_on_completion,
                     ..restored_tmux

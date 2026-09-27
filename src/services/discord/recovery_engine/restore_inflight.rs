@@ -674,6 +674,9 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 .await;
                 let finish_mailbox_on_completion =
                     reregister_restart_adopted_turn_from_inflight(shared, &state).await;
+                if state.restart_mode.is_some() && !finish_mailbox_on_completion {
+                    continue;
+                }
 
                 // Spawn the tmux watcher immediately rather than deferring to
                 // restore_tmux_watchers(): the "watcher will adopt" approach raced
@@ -1808,6 +1811,9 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             .await;
             let finish_mailbox_on_completion =
                 reregister_restart_adopted_turn_from_inflight(shared, &state).await;
+            if state.restart_mode.is_some() && !finish_mailbox_on_completion {
+                continue;
+            }
 
             // #4380 backstop: `reregister_active_turn_from_inflight` stamps
             // `readopted_from_inflight`, which the watcher-yield escape hatch honours
