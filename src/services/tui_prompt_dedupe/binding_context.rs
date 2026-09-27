@@ -2,11 +2,12 @@
 
 use crate::services::claude_tui::hook_output_guard::configured_claude_projects_root;
 use crate::services::{platform::tmux::SessionPresence, tmux_common as tc};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
 };
@@ -101,17 +102,100 @@ pub(crate) fn observe_spawn_nonce_marker(tmux: &str) -> SpawnNonceMarker {
     SpawnNonceMarker::Absent
 }
 
-#[allow(dead_code)]
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ContextEnv {
+pub(crate) const BINDING_HEADER: &str = "x-agentdesk-binding-context";
+const CONTEXT_LIMIT: u64 = 16 * 1024;
+const HEADER_LIMIT: usize = 32 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum AbsentReason {
     EnvUnset,
-    Path(PathBuf),
+    Unreadable,
+    Corrupt,
+    NonceMismatch,
+    ProviderMismatch,
+    SchemaUnsupported,
+    LegacyRequest,
 }
-// Hook capture reads this value without consulting mutable markers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum CapturedContext {
+    Captured(BindingContext),
+    Absent(AbsentReason),
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ObservedHookProcess {
+    pub tmux: Option<String>,
+    pub tmux_pane: Option<String>,
+    pub provider_pid: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct HookBindingEnvelope {
+    pub context: CapturedContext,
+    pub observed: ObservedHookProcess,
+}
+impl HookBindingEnvelope {
+    pub(crate) fn capture(provider: &str) -> Self {
+        Self::capture_from_env(provider, |name| std::env::var_os(name))
+    }
+
+    pub(crate) fn capture_from_env(
+        provider: &str,
+        env: impl Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> Self {
+        let capture = || {
+            let path = env("AGENTDESK_BINDING_CONTEXT").ok_or(AbsentReason::EnvUnset)?;
+            let path = Path::new(&path);
+            let ctx = read_context(path).map_err(|error| match error.kind() {
+                io::ErrorKind::InvalidData => AbsentReason::Corrupt,
+                _ => AbsentReason::Unreadable,
+            })?;
+            if path.file_stem().and_then(|s| s.to_str()) != Some(&ctx.execution_nonce) {
+                return Err(AbsentReason::NonceMismatch);
+            }
+            if ctx.provider != provider {
+                return Err(AbsentReason::ProviderMismatch);
+            }
+            if ctx.schema != 1 {
+                return Err(AbsentReason::SchemaUnsupported);
+            }
+            Ok(ctx)
+        };
+        // Overlong observations are unavailable evidence, keeping the encoded header bounded.
+        let observed = |key| {
+            env(key)
+                .and_then(|s| s.into_string().ok())
+                .filter(|s| s.len() <= 256)
+        };
+        Self {
+            context: capture().map_or_else(CapturedContext::Absent, CapturedContext::Captured),
+            observed: ObservedHookProcess {
+                tmux: observed("TMUX"),
+                tmux_pane: observed("TMUX_PANE"),
+                provider_pid: observed("CLAUDE_PID"),
+            },
+        }
+    }
+
+    pub(crate) fn legacy_request() -> Self {
+        Self {
+            context: CapturedContext::Absent(AbsentReason::LegacyRequest),
+            observed: ObservedHookProcess::default(),
+        }
+    }
+
+    pub(crate) fn encode(&self) -> Result<String, String> {
+        serde_json::to_vec(self)
+            .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
+            .map_err(|e| e.to_string())
+    }
+}
+
 #[allow(dead_code)]
-pub(crate) fn context_env() -> ContextEnv {
-    std::env::var_os("AGENTDESK_BINDING_CONTEXT")
-        .map_or(ContextEnv::EnvUnset, |path| ContextEnv::Path(path.into()))
+pub(crate) fn decode_binding_header(header: &str) -> Result<HookBindingEnvelope, String> {
+    if header.len() > HEADER_LIMIT {
+        return Err("binding header exceeds size limit".into());
+    }
+    let bytes = URL_SAFE_NO_PAD.decode(header).map_err(|e| e.to_string())?;
+    serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
 
 fn durable_directory(path: &Path) -> io::Result<()> {
@@ -171,25 +255,27 @@ impl PreparedIncarnation {
             .ok_or_else(|| io::Error::other("context path has no parent"))?;
         durable_directory(parent)?;
         let temp = parent.join(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
-        let result = (|| {
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp)?;
-            file.write_all(&serde_json::to_vec(&context)?)?;
-            #[cfg(test)]
-            creation_fault("file")?;
-            file.sync_all()?;
-            #[cfg(test)]
-            creation_fault("link")?;
-            fs::hard_link(&temp, &path)?;
-            fs::remove_file(&temp)?;
-            #[cfg(test)]
-            creation_fault("parent")?;
-            fs::File::open(parent)?.sync_all()
-        })();
-        let _ = fs::remove_file(&temp);
-        result?;
+        tc::with_tmux_source_authority(&context.tmux_session, |_| {
+            let result = (|| {
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&temp)?;
+                file.write_all(&serde_json::to_vec(&context)?)?;
+                #[cfg(test)]
+                creation_fault("file")?;
+                file.sync_all()?;
+                #[cfg(test)]
+                creation_fault("link")?;
+                fs::hard_link(&temp, &path)?;
+                fs::remove_file(&temp)?;
+                #[cfg(test)]
+                creation_fault("parent")?;
+                fs::File::open(parent)?.sync_all()
+            })();
+            let _ = fs::remove_file(&temp);
+            result
+        })?;
         Ok(Self { context, path })
     }
 
@@ -227,7 +313,27 @@ impl PreparedIncarnation {
 }
 
 fn read_context(path: &Path) -> io::Result<BindingContext> {
-    serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(CONTEXT_LIMIT + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > CONTEXT_LIMIT {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "context exceeds size limit",
+        ));
+    }
+    serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+fn context_temp(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|name| {
+            name.strip_prefix('.')
+                .and_then(|s| s.strip_suffix(".tmp"))
+                .is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        })
 }
 
 fn sweep(
@@ -247,7 +353,7 @@ fn sweep(
     let mut paths: Vec<_> = entries
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .filter(|p| p.extension().is_some_and(|e| e == "json") || context_temp(p))
         .collect();
     paths.sort();
     if paths.is_empty() {
@@ -264,10 +370,11 @@ fn sweep(
             continue;
         };
         if now.signed_duration_since(ctx.created_at) < chrono::Duration::days(7)
-            || context_path(&ctx.provider, &ctx.execution_nonce)
-                .ok()
-                .as_ref()
-                != Some(path)
+            || ctx.provider != provider
+            || ctx.schema != 1
+            || !context_path(&ctx.provider, &ctx.execution_nonce).is_ok_and(|canonical| {
+                canonical == *path || (context_temp(path) && canonical.parent() == path.parent())
+            })
         {
             continue;
         }

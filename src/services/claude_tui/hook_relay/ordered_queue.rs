@@ -1,3 +1,4 @@
+use crate::services::tui_prompt_dedupe::binding_context::HookBindingEnvelope;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -51,6 +52,8 @@ struct OrderedHookRelayRequest {
     event: String,
     session_id: String,
     payload: Value,
+    #[serde(default)]
+    binding: Option<HookBindingEnvelope>,
     marker_dir: PathBuf,
     response: Option<OrderedHookRelayResponseTarget>,
 }
@@ -399,13 +402,14 @@ fn record_completed_high_water(queue_dir: &Path, sequence: u64) -> Result<(), St
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn enqueue_ordered_hook_relay_request(
+pub(super) fn enqueue_ordered_hook_relay_request_with_binding(
     endpoint: &str,
     provider: &str,
     event: &str,
     session_id: &str,
     payload: Value,
     response_timeout: Option<Duration>,
+    binding: Option<HookBindingEnvelope>,
 ) -> Result<(PathBuf, Option<PathBuf>), String> {
     let marker_dir =
         failure_marker_dir(provider).ok_or_else(|| "runtime root is unavailable".to_string())?;
@@ -444,6 +448,7 @@ pub(super) fn enqueue_ordered_hook_relay_request(
         event: event.to_string(),
         session_id: session_id.to_string(),
         payload,
+        binding,
         marker_dir,
         response,
     };
@@ -514,8 +519,16 @@ pub(super) fn handoff_non_wait_hook_event(
     session_id: &str,
     payload: Value,
 ) -> Result<(), String> {
-    let (queue_dir, _) =
-        enqueue_ordered_hook_relay_request(endpoint, provider, event, session_id, payload, None)?;
+    let binding = HookBindingEnvelope::capture(provider);
+    let (queue_dir, _) = enqueue_ordered_hook_relay_request_with_binding(
+        endpoint,
+        provider,
+        event,
+        session_id,
+        payload,
+        None,
+        Some(binding),
+    )?;
     start_ordered_hook_relay_worker(&queue_dir)
 }
 
@@ -528,13 +541,15 @@ pub(super) fn handoff_ordered_hook_event_response_with_timeout(
     timeout: Duration,
 ) -> Result<Value, String> {
     let started = Instant::now();
-    let (queue_dir, response_path) = enqueue_ordered_hook_relay_request(
+    let binding = HookBindingEnvelope::capture(provider);
+    let (queue_dir, response_path) = enqueue_ordered_hook_relay_request_with_binding(
         endpoint,
         provider,
         event,
         session_id,
         payload,
         Some(timeout),
+        Some(binding),
     )?;
     let response_path = response_path
         .ok_or_else(|| "ordered hook relay response path was not allocated".to_string())?;
@@ -718,6 +733,7 @@ fn process_ordered_hook_relay_request(
             &request.request_id,
             request.published_at,
             request.delivery_deadline,
+            request.binding.as_ref(),
             Duration::from_millis(response.timeout_millis),
         );
         let pin_mismatch = result
@@ -735,8 +751,10 @@ fn process_ordered_hook_relay_request(
             .map_err(|err| format!("serialize ordered hook relay response: {err}"))?;
         publish_atomic_file(&response.path, &encoded, "ordered hook relay response")?;
         if pin_mismatch {
+            let error = "receiver rejected relay request id pin with HTTP 409";
+            record_request_failure(&request, error)?;
             return Ok(OrderedHookRelayProcessOutcome::Quarantine(
-                "receiver rejected relay request id pin with HTTP 409".to_string(),
+                error.to_string(),
             ));
         }
         return Ok(OrderedHookRelayProcessOutcome::Completed);
@@ -750,6 +768,7 @@ fn process_ordered_hook_relay_request(
         &request.request_id,
         request.published_at,
         request.delivery_deadline,
+        request.binding.as_ref(),
     ) {
         Ok(()) => Ok(OrderedHookRelayProcessOutcome::Completed),
         Err(error) => {
@@ -944,6 +963,26 @@ fn file_is_older_than(path: &Path, age: Duration) -> bool {
         .ok()
         .and_then(|modified| modified.elapsed().ok())
         .is_some_and(|elapsed| elapsed >= age)
+}
+
+#[cfg(test)]
+pub(super) fn enqueue_ordered_hook_relay_request(
+    endpoint: &str,
+    provider: &str,
+    event: &str,
+    session_id: &str,
+    payload: Value,
+    response_timeout: Option<Duration>,
+) -> Result<(PathBuf, Option<PathBuf>), String> {
+    enqueue_ordered_hook_relay_request_with_binding(
+        endpoint,
+        provider,
+        event,
+        session_id,
+        payload,
+        response_timeout,
+        None,
+    )
 }
 
 #[cfg(test)]
