@@ -1869,6 +1869,7 @@ src/
 │   │       ├── mod.rs
 │   │       ├── root.rs
 │   │       ├── seal.rs
+│   │       ├── tap.rs
 │   │       └── unit_plan.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── extract.rs
