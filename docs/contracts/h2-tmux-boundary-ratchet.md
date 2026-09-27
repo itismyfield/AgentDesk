@@ -33,6 +33,7 @@ R-O 방식에는 이후 [사용자 (a) 결정](https://github.com/itismyfield/Ag
 | R-O compiler 대조 | [h2_depinfo.py](../../scripts/ci/h2_depinfo.py), `sym:h2_depinfo::ro_problems` | root lib dep-info와 expanded module map, duplicate_mod 진단 대조 |
 | 잔존 walker 대조 | `sym:h2_depinfo::walker_problems` | compiled file의 realpath→modpath와 R-W 텍스트 walker의 실제 open 경로 대조 |
 | module map 수집 | [h2_modmap.py](../../scripts/ci/h2_modmap.py), `sym:h2_modmap::map_modules` | 이번 실행의 TSV 존재·신선도·형식·file module 하한 검사 |
+| 레인·공통 env | [h2_env.py](../../scripts/ci/h2_env.py), `sym:h2_env::environment`, `sym:h2_env::check_host` | 공통 정리 목록·host triple; map/driver의 wrapper 해제 및 driver 전용 bootstrap |
 | map metadata 봉인 | [h2_cfg_collect.py](../../scripts/ci/h2_cfg_collect.py), `sym:h2_cfg_collect::seal`, `sym:h2_cfg_collect::read_manifest` | Cargo 성공·동일 run·schema·신선도·하한·digest 검증 후 최종 manifest 게시/재검증 |
 | cfg 목록 진단 | [h2_cfg_compare.py](../../scripts/ci/h2_cfg_compare.py), `sym:h2_cfg_compare::compare_cfgs` | 구조화된 cfg 원자 집합의 교집합과 양방향 차이 |
 
@@ -57,7 +58,7 @@ R-O는 compiler map을 사용하지만 **item 귀속 전체를 compiler def-path
 `rust-toolchain.toml`은 현재 1.94.1을 지정한다. CI의 `components: clippy`가 Clippy를 설치하고
 `h2_measure.sh`가 가용성을 검사한다. macOS hosted 레이블은 `macos-15`다.
 `h2_measure.sh`는 host triple을 확인하고 `CARGO_BUILD_TARGET`, `RUSTFLAGS`,
-`CARGO_ENCODED_RUSTFLAGS`를 해제하며 incremental을 끈다. root lib/default features가 측정 기준이다.
+`CARGO_ENCODED_RUSTFLAGS`, `RUSTC_BOOTSTRAP`를 해제하며 incremental을 끈다. root lib/default features가 측정 기준이다.
 env 해제만으로 Cargo config, build-script cfg, 실제 rustc argv의 일치가 증명되지는 않는다.
 재현 조건을 명시하는 것이며 모든 환경에서 같은 결과를 보장하지 않는다.
 
@@ -89,7 +90,12 @@ Cargo JSONL과 stderr는 map 옆에 보존하고 compiler 진단은 CI stderr에
 `--out`은 유일한 root TSV이며 `--cfg-out`/`--meta-out`은 같은 새 run 디렉터리의 선택적 경로다.
 기본값은 `target/h2/runs/<run_id>/root/modmap.{tsv,cfg.json,meta.json}`이다.
 canary는 `<run_id>/canary/`에 kind=canary로 저장하며 root 증거로 읽을 수 없다.
-옵션 없는 B1 경로는 유지된다. B2a는 CI 호출자가 없는 opt-in 기반이며 공통 env/CI 배선은 B2b에서 활성화한다.
+옵션 없는 B1 경로는 유지된다. B2a는 CI 호출자가 없는 opt-in 기반이다.
+B2b는 공통 env와 기존 Linux/Mac map 단계의 `--lane`을 연결하는 **동작 변경, baseline 전 root는 no-op**이다.
+두 번째 map 단계는 없다. head의 필수 잡 green·소요 시간 전후 확인이 필요하며 원복 순서는 B2b→B2a→B1이다.
+`h2_measure.sh`는 inert 조기 종료 뒤 helper를 사전 검사로 실행하고 고정된 env 명령만 적용한다.
+마지막 `exec "${PYTHON:-python3}" scripts/ci/h2_measure.py ...`를 유지해 launcher가 같은 프로세스에서 직접 계측한다.
+helper는 `h2_measure.py`를 import하거나 exec하지 않는다.
 
 결속 cfg는 `{schema:1, run_id, nonce, atoms}` 객체다. 비교기는 기존 배열과 이 객체의 atoms를 읽는다.
 원자에 가짜 cfg를 추가하지 않는다. cfg bytes 자체에 nonce/run ID를 넣어 옛 cfg의 재게시를 거부한다.

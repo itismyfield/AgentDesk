@@ -1798,7 +1798,7 @@ jobs:
       - name: H2 module map (linux, inert)
         env:
           RUSTC_WRAPPER: ""
-        run: python3 scripts/ci/h2_modmap.py --inert --canary
+        run: python3 scripts/ci/h2_modmap.py --lane linux --inert --canary
 
       - name: Upload maintainability audit artifact
         if: always()
