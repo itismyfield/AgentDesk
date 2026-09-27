@@ -246,8 +246,7 @@ fn pid_liveness(pid: u32) -> Option<bool> {
     Some(reachable || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
 }
 
-/// Windows counterpart of the `kill(pid, 0)` probe: an openable process whose handle is not
-/// yet signaled is alive, `ERROR_ACCESS_DENIED` means it exists under another account, and
+/// Windows `kill(pid, 0)`: an unsignaled handle or `ERROR_ACCESS_DENIED` means alive,
 /// `ERROR_INVALID_PARAMETER` means no such PID.
 #[cfg(windows)]
 #[allow(unsafe_code)]

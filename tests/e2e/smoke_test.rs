@@ -32,9 +32,7 @@ struct SmokeDatabase {
 }
 
 impl SmokeDatabase {
-    /// `None` only when no fixture base is configured. Like the lib fixtures
-    /// (#5218) there is no host fallback, and `AGENTDESK_REQUIRE_PG=1` turns a
-    /// missing base into a failure instead of a skip.
+    /// `None` only without a fixture base; `AGENTDESK_REQUIRE_PG=1` makes that a failure (#5218).
     fn create() -> Option<Self> {
         let base = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE")
             .ok()
@@ -54,7 +52,8 @@ impl SmokeDatabase {
             );
             return None;
         };
-        let base = url::Url::parse(&base).expect("POSTGRES_TEST_DATABASE_URL_BASE is not a URL");
+        let base = explicit_fixture_base(&base)
+            .unwrap_or_else(|error| panic!("POSTGRES_TEST_DATABASE_URL_BASE: {error}"));
         let admin_db =
             std::env::var("POSTGRES_TEST_ADMIN_DB").unwrap_or_else(|_| "postgres".to_string());
         let name = format!("agentdesk_e2e_smoke_{}", uuid::Uuid::new_v4().simple());
@@ -97,10 +96,24 @@ impl SmokeDatabase {
     }
 }
 
-/// `base` pointed at `database`. Like the lib fixtures it replaces the path
-/// rather than appending to it, so a base that names a database or carries a
-/// query still works, and it drops a `dbname` query pair, which sqlx reads
-/// after the path. sqlx's own parser confirms the result.
+/// The base must name its server like the lib fixtures' (`fixture_target.rs`): sqlx
+/// fills a missing host or port from PGHOST/PGPORT, which could be any server.
+fn explicit_fixture_base(base: &str) -> Result<url::Url, String> {
+    let url = url::Url::parse(base).map_err(|error| format!("not a URL: {error}"))?;
+    let host = url.host_str().filter(|host| !host.is_empty());
+    let Some(host) = host else {
+        return Err("the URL must name a host".to_string());
+    };
+    if host.starts_with('/') || host.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("%2f")) {
+        return Err("a Unix socket is not a supported fixture host".to_string());
+    }
+    if url.port().is_none() {
+        return Err("the URL must name a port".to_string());
+    }
+    Ok(url)
+}
+
+/// `base` pointed at `database`: replaces the path and drops `dbname`, which sqlx reads last.
 fn fixture_database_url(base: &url::Url, database: &str) -> String {
     let mut url = base.clone();
     url.set_path(&format!("/{database}"));
@@ -119,6 +132,18 @@ fn fixture_database_url(base: &url::Url, database: &str) -> String {
         .expect("fixture database URL does not parse");
     assert_eq!(options.get_database(), Some(database));
     url.into()
+}
+
+#[test]
+fn explicit_fixture_base_rejects_ambient_server_selection() {
+    for base in [
+        "postgresql:///postgres?sslmode=disable",
+        "postgresql://postgres@127.0.0.1/postgres",
+        "postgresql://postgres@%2Ftmp%2Fpg:5432/postgres",
+    ] {
+        assert!(explicit_fixture_base(base).is_err(), "{base} was accepted");
+    }
+    assert!(explicit_fixture_base("postgresql://postgres@127.0.0.1:5432/postgres").is_ok());
 }
 
 #[test]
