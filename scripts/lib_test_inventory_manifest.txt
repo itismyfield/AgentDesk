@@ -9114,6 +9114,7 @@ services::tui_o::shadow::diff::tests::historical_units_are_not_diffed_while_othe
 services::tui_o::shadow::diff::tests::legacy_posting_a_later_unit_first_is_an_order_diff
 services::tui_o::shadow::diff::tests::legacy_rows_are_judged_two_windows_after_their_last_activity
 services::tui_o::shadow::diff::tests::normalized_containment_is_format_only_and_an_unposted_piece_is_missing
+services::tui_o::shadow::metrics::tests::the_derive_reason_for_an_oversized_split_piece_counts_as_split_over_limit
 services::tui_o::shadow::report::tests::a_complete_window_passes_counting_turns_not_units_and_skipping_backlog
 services::tui_o::shadow::report::tests::population_gaps_fail_while_unreadable_history_only_warns
 services::tui_o::shadow::report::tests::synthetic_entries_count_executed_turns_and_flag_merges_and_profile_mismatch

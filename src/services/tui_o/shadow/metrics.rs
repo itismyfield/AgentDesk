@@ -56,3 +56,35 @@ fn diff_label(diff: &DiffRecord) -> String {
     };
     format!("{}/{}", text(class), text(cause))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::discord::DISCORD_MSG_LIMIT;
+    use crate::services::tui_o::shadow::unit_plan::digest_pieces;
+    use crate::services::tui_o::shadow::{SourceId, SourceRange};
+
+    #[test]
+    fn the_derive_reason_for_an_oversized_split_piece_counts_as_split_over_limit() {
+        let oversized = vec![("x".to_string(), DISCORD_MSG_LIMIT + 1)];
+        let reason = digest_pieces(oversized).unwrap_err();
+        let source = SourceId {
+            session_id: "s".into(),
+            path: "t.jsonl".into(),
+            dev: 1,
+            ino: 1,
+        };
+        let (start, end) = (0, 1);
+        let output = DeriveOutput::SchemaBlocked {
+            channel_id: 7,
+            source_range: SourceRange { source, start, end },
+            reason,
+        };
+        let mut metrics = MetricsSnapshot::default();
+        metrics.record(&ShadowRecord::Derived { output });
+        assert_eq!(
+            (metrics.schema_blocked_total, metrics.split_over_limit_total),
+            (1, 1)
+        );
+    }
+}
