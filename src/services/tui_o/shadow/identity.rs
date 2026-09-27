@@ -162,10 +162,14 @@ fn codex_item(item: &Value, item_type: &str) -> Option<RecordFact> {
             None => return Some(blocked("assistant message with non-text content")),
         },
         ("message", Some("user")) => {
-            return Some(RecordFact::Prompt(
-                false,
-                codex_text(item).unwrap_or_default(),
-            ));
+            // Native input keeps its text items even beside non-text items such as images.
+            let parts = item
+                .get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten();
+            let texts: Vec<&str> = parts.filter_map(|part| str_at(part, "text")).collect();
+            return Some(RecordFact::Prompt(false, texts.join("\n")));
         }
         // Reasoning, other roles and inter-agent traffic are not channel output.
         ("message" | "reasoning" | "agent_message", _) => return None,

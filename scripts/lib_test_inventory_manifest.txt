@@ -9105,7 +9105,8 @@ services::tui_o::shadow::capture::tests::capture_keeps_record_boundaries_under_s
 services::tui_o::shadow::derive::tests::claude_profile_units_follow_identity_rules
 services::tui_o::shadow::derive::tests::codex_profile_units_and_unsealed_announcements
 services::tui_o::shadow::derive::tests::history_below_start_boundary_or_before_window_is_not_live
-services::tui_o::shadow::derive::tests::inherited_edge_and_unattached_turns_are_not_counted
+services::tui_o::shadow::derive::tests::inherited_replayed_edge_and_unattached_turns_are_not_counted
+services::tui_o::shadow::derive::tests::live_requires_attach_and_a_window_boundary_for_the_source
 services::tui_o::shadow::derive::tests::sealed_units_repeat_silently_and_block_when_changed
 services::tui_o::shadow::derive::tests::split_pieces_follow_legacy_split_in_utf16_units
 services::tui_o::shadow::derive::tests::turns_open_on_native_input_and_close_on_idle_observation

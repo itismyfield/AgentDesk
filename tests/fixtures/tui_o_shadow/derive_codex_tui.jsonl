@@ -1,7 +1,7 @@
 {"timestamp":"2026-09-27T12:10:00.000Z","type":"session_meta","payload":{"id":"s-codex","originator":"codex-tui","cwd":"/repo","source":"cli"}}
 {"timestamp":"2026-09-27T12:10:01.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t-1","model_context_window":258400}}
 {"timestamp":"2026-09-27T12:10:01.010Z","type":"turn_context","payload":{"turn_id":"t-1","cwd":"/repo","approval_policy":"never"}}
-{"timestamp":"2026-09-27T12:10:01.020Z","type":"response_item","payload":{"type":"message","role":"user","id":"msg_u1","content":[{"type":"input_text","text":"[o-shadow-synth:e2] 목록 보여 줘"}]}}
+{"timestamp":"2026-09-27T12:10:01.020Z","type":"response_item","payload":{"type":"message","role":"user","id":"msg_u1","content":[{"type":"input_text","text":"[o-shadow-synth:e2] 목록 보여 줘"},{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo="}]}}
 {"timestamp":"2026-09-27T12:10:02.000Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"t-1","item":{"type":"AgentMessage","id":"msg_c1","text":"목록을 봅니다."}}}
 {"timestamp":"2026-09-27T12:10:02.010Z","type":"response_item","payload":{"type":"message","role":"assistant","id":"msg_c1","phase":"commentary","content":[{"type":"output_text","text":"목록을 봅니다."}]}}
 {"timestamp":"2026-09-27T12:10:03.000Z","type":"response_item","payload":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_1","name":"exec","input":"ls","status":"completed"}}
