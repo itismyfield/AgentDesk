@@ -68,6 +68,11 @@ impl TranscriptDerive {
         self.attached.entry(source.clone()).or_insert(first);
     }
 
+    /// Opens the window at `t0` even when it lists no source; the first `t0` holds for the window.
+    pub fn window_open(&mut self, t0: DateTime<Utc>) {
+        self.window.get_or_insert_with(|| (t0, HashMap::new()));
+    }
+
     /// Records one source of the window start at `t0`; the first `t0` holds for the window.
     pub fn window_start(&mut self, t0: DateTime<Utc>, source: &SourceId, window_start_extent: u64) {
         let (_, extents) = self.window.get_or_insert_with(|| (t0, HashMap::new()));
@@ -579,6 +584,20 @@ mod tests {
         partial.attach(&b, 0, at("12:05:30"));
         partial.window_start(at("12:05:40"), &a, 0);
         assert_eq!(reasons(&mut partial, &b), ["window_missing_source"; 3]);
+    }
+
+    /// A window start listing no source still sets t0, so a source attached after it counts;
+    /// a later open keeps the first t0.
+    #[test]
+    fn empty_window_start_then_new_attach_counts_live() {
+        let (records, claude) = (records(CLAUDE), source("claude"));
+        let mut derive = TranscriptDerive::with_clock(clock);
+        derive.window_open(at("12:05:40"));
+        derive.window_open(at("12:30:00"));
+        derive.attach(&claude, 0, at("12:05:50"));
+        let outputs = turns(run(&mut derive, Claude, &claude, &records));
+        let live = outputs.iter().filter(|out| out.ends_with(" live")).count();
+        assert_eq!((outputs.len(), live), (3, 3), "{outputs:?}");
     }
 
     /// Forked-mid-turn, same-source replayed, pre-capture-opener and unattached-source turns
