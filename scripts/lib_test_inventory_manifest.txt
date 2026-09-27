@@ -9097,6 +9097,18 @@ services::tool_output_guard::tests::line_heavy_small_error_is_sanitized_once_wit
 services::tool_output_guard::tests::small_output_is_preserved_exactly
 services::tool_output_guard::tests::very_large_non_ascii_error_aligns_context_window_to_utf8
 services::tool_output_guard::tests::very_large_single_line_error_keeps_projection_memory_bounded
+services::tui_o::shadow::binding_reader::tests::binding_reader_reports_source_changes_once_and_keeps_the_last_on_gaps
+services::tui_o::shadow::binding_reader::tests::binding_view_reads_the_native_transcript_of_tui_runtimes_only
+services::tui_o::shadow::capture::tests::capture_emits_complete_lines_only_and_tracks_the_prefix_hash
+services::tui_o::shadow::capture::tests::capture_halts_on_shrink_rewrite_and_replacement
+services::tui_o::shadow::capture::tests::capture_keeps_record_boundaries_under_small_budgets_and_mid_line_starts
+services::tui_o::shadow::derive::tests::claude_profile_units_follow_identity_rules
+services::tui_o::shadow::derive::tests::codex_profile_units_and_unsealed_announcements
+services::tui_o::shadow::derive::tests::history_below_start_boundary_or_before_window_is_not_live
+services::tui_o::shadow::derive::tests::inherited_edge_and_unattached_turns_are_not_counted
+services::tui_o::shadow::derive::tests::sealed_units_repeat_silently_and_block_when_changed
+services::tui_o::shadow::derive::tests::split_pieces_follow_legacy_split_in_utf16_units
+services::tui_o::shadow::derive::tests::turns_open_on_native_input_and_close_on_idle_observation
 services::tui_o::shadow::diff::tests::exact_match_is_tried_before_an_earlier_containing_message
 services::tui_o::shadow::diff::tests::historical_units_are_not_diffed_while_other_o_outcomes_are_immediate
 services::tui_o::shadow::diff::tests::legacy_posting_a_later_unit_first_is_an_order_diff
@@ -9106,6 +9118,8 @@ services::tui_o::shadow::report::tests::a_complete_window_passes_counting_turns_
 services::tui_o::shadow::report::tests::population_gaps_fail_while_unreadable_history_only_warns
 services::tui_o::shadow::report::tests::synthetic_entries_count_executed_turns_and_flag_merges_and_profile_mismatch
 services::tui_o::shadow::report::tests::window_start_and_version_defects_fail_the_window
+services::tui_o::shadow::root::tests::shadow_root_is_fixed_under_runtime_root_and_the_flag_defaults_off
+services::tui_o::shadow::root::tests::store_appends_readable_jsonl_and_stops_at_the_cap
 services::tui_o::shadow::tap::tests::observer_attaches_derives_diffs_and_persists_only_through_the_sink
 services::tui_o::shadow::tap::tests::tap_copies_own_bot_messages_and_authorless_edits_only
 services::tui_o::shadow::tap::tests::tap_counts_a_full_queue_as_dropped_instead_of_waiting

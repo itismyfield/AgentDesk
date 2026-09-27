@@ -1863,12 +1863,16 @@ src/
 │   │   └── shadow/
 │   │       ├── binding_reader.rs
 │   │       ├── capture.rs
+│   │       ├── derive.rs
 │   │       ├── diff.rs
+│   │       ├── identity.rs
 │   │       ├── metrics.rs
 │   │       ├── mod.rs
 │   │       ├── report.rs
 │   │       ├── root.rs
-│   │       └── tap.rs
+│   │       ├── seal.rs
+│   │       ├── tap.rs
+│   │       └── unit_plan.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── extract.rs
 │   │   ├── observation.rs

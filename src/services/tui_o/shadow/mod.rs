@@ -6,6 +6,10 @@ pub mod capture;
 pub mod root;
 
 // Derive-side modules (identity, seal, derive, unit_plan) are declared below.
+pub mod derive;
+pub mod identity;
+pub mod seal;
+pub mod unit_plan;
 
 // Observe-side modules (tap, diff, report, metrics) are declared below.
 pub mod diff;
