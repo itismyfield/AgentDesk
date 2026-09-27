@@ -1,7 +1,8 @@
 # Dormant delivery obligation schema
 
-The obligation ledger belongs to the existing delivery record. This slice adds
-types only: no production caller, writer, lease, owner, deduper or sender changes.
+The obligation ledger belongs to the existing delivery record. These dormant
+slices add storage/state types, checked proof construction and read-only loading.
+Production callers remain zero; existing writers, leases, owners and senders are unchanged.
 `LEDGER_PROTOCOL` stays at 0 until every required writer and consumer is wired.
 The later serde/read-only loader slices use the same fixture at
 `tests/fixtures/delivery_obligation/ledger.json`.
