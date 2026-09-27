@@ -1,3 +1,21 @@
+// Binaries without enterStage (a rollback before #6355) keep stage saves closed,
+// so the old unlocked pick is safe there.
+function enterPipelineStage(cardId, repoId, triggerAfter) {
+  if (typeof agentdesk.pipeline.enterStage === "function") {
+    return agentdesk.pipeline.enterStage(cardId, triggerAfter);
+  }
+  var stages = agentdesk.db.query(
+    "SELECT id, stage_name, agent_override_id FROM pipeline_stages WHERE repo_id = ? AND trigger_after = ? ORDER BY stage_order ASC LIMIT 1",
+    [repoId, triggerAfter]
+  );
+  if (stages.length === 0) return { status: "unchanged", stage: null };
+  agentdesk.db.execute(
+    "UPDATE kanban_cards SET pipeline_stage_id = ?, updated_at = datetime('now') WHERE id = ?",
+    [stages[0].id, cardId]
+  );
+  return { status: "entered", stage: stages[0] };
+}
+
 var pipeline = {
   name: "pipeline",
   priority: 200,
@@ -42,7 +60,7 @@ var pipeline = {
     if (!card) return;
 
     // Picks and assigns the stage under the repo stage lock that stage saves take.
-    var moved = agentdesk.pipeline.enterStage(payload.card_id, payload.to);
+    var moved = enterPipelineStage(payload.card_id, card.repo_id, payload.to);
     if (!moved.stage) {
       // No stages bound to this state — fast path. Emit a diagnostic only
       // when the state was dispatchable by config but had no stages; that

@@ -43,3 +43,32 @@ test("pipeline onCardTransition uses typed facade agentdesk.cards.get", () => {
   module.onCardTransition({ card_id: "card-1", to: "ready" });
   assert.deepEqual(moves, [{ cardId: "card-1", triggerAfter: "ready" }]);
 });
+
+test("pipeline picks the stage itself on a binary without enterStage", () => {
+  const executions = [];
+  const { module } = loadPolicy("policies/pipeline.js", {
+    pipeline: {
+      resolveForCard: () => ({
+        states: [{ id: "ready", terminal: false }],
+        transitions: [{ from: "ready", type: "gated" }]
+      })
+    },
+    cards: { get: (cardId) => ({ id: cardId, repo_id: "repo-1" }) },
+    db: {
+      query: (sql, params) => {
+        assert.match(sql, /FROM pipeline_stages WHERE repo_id = \? AND trigger_after = \?/);
+        assert.deepEqual(params, ["repo-1", "ready"]);
+        return [{ id: 7, stage_name: "deploy", agent_override_id: null }];
+      },
+      execute: (sql, params) => {
+        executions.push({ sql, params });
+        return { changes: 1 };
+      }
+    }
+  });
+
+  module.onCardTransition({ card_id: "card-1", to: "ready" });
+  assert.equal(executions.length, 1);
+  assert.match(executions[0].sql, /SET pipeline_stage_id = \?/);
+  assert.deepEqual(executions[0].params, [7, "card-1"]);
+});

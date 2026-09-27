@@ -36,6 +36,15 @@ pub async fn startup_reseed(pool: &PgPool, config: &Config) -> Result<(), String
     upsert_kv_meta(pool, "server_port", &config.server.port.to_string()).await?;
     crate::services::settings::seed_runtime_config_defaults_pg(pool, config).await?;
     crate::server::routes::escalation::seed_escalation_defaults_pg(pool, config).await?;
+    let pipeline_path = config.policies.dir.join("default-pipeline.yaml");
+    crate::db::table_metadata::sync_pipeline_stages_from_yaml_pg(pool, &pipeline_path)
+        .await
+        .map_err(|error| {
+            format!(
+                "sync pipeline_stages from {}: {error}",
+                pipeline_path.display()
+            )
+        })?;
 
     for repo_id in normalized_repo_ids(&config.github.repos) {
         register_repo(pool, &repo_id).await?;

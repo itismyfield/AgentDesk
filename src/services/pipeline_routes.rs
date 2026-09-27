@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
+use crate::db::table_metadata;
 use crate::utils::api::clamp_api_limit;
 
 /// Accepted `on_failure` values for a `pipeline_stages` row.
@@ -62,6 +63,7 @@ pub(crate) const STAGE_LOCK_CAPABILITY: [&str; 2] = ["pipeline", "stage_lock_v1"
 pub enum PipelineRouteError {
     BadRequest { stage: String, error: String },
     NotFound(String),
+    Readonly { table: String, source: &'static str },
     Conflict(String),
     Unavailable(String),
     Database(String),
@@ -132,6 +134,7 @@ impl<'a> PipelineRouteService<'a> {
         repo: &str,
         stages: &[PipelineStageInput],
     ) -> Result<Vec<Value>, PipelineRouteError> {
+        self.ensure_table_writable("pipeline_stages").await?;
         validate_pipeline_stages(stages)?;
 
         let mut tx = self
@@ -216,6 +219,7 @@ impl<'a> PipelineRouteService<'a> {
     }
 
     pub async fn delete_stages(&self, repo: &str) -> Result<u64, PipelineRouteError> {
+        self.ensure_table_writable("pipeline_stages").await?;
         let mut tx = self
             .pool
             .begin()
@@ -342,6 +346,19 @@ impl<'a> PipelineRouteService<'a> {
 
         let effective = crate::pipeline::resolve_for_card_pg(self.pool, repo, agent_id).await;
         Ok(effective.to_graph())
+    }
+
+    async fn ensure_table_writable(&self, table: &str) -> Result<(), PipelineRouteError> {
+        let source = table_metadata::source_of_truth_pg(self.pool, table).await;
+        if let Some(source) = source
+            && source.is_readonly()
+        {
+            return Err(PipelineRouteError::Readonly {
+                table: table.to_string(),
+                source: source_label(source),
+            });
+        }
+        Ok(())
     }
 
     async fn ensure_card_exists(&self, card_id: &str) -> Result<(), PipelineRouteError> {
@@ -938,6 +955,14 @@ fn find_current_stage(stages: &[Value], history: &[Value]) -> Value {
         .unwrap_or(Value::Null)
 }
 
+fn source_label(source: table_metadata::Source) -> &'static str {
+    match source {
+        table_metadata::Source::File => "file",
+        table_metadata::Source::FileCanonical => "file-canonical",
+        table_metadata::Source::Db => "db",
+    }
+}
+
 fn database_error(error: sqlx::Error) -> PipelineRouteError {
     PipelineRouteError::Database(error.to_string())
 }
@@ -1074,6 +1099,7 @@ mod tests {
             return; // no local Postgres available — skip.
         };
         let pool = pg_db.connect_and_migrate().await;
+        open_stage_saves(&pool).await;
 
         let service = PipelineRouteService::new(&pool);
 
@@ -1124,6 +1150,18 @@ mod tests {
         pg_db.drop().await;
     }
 
+    /// `pipeline_stages` seeds as `file-canonical` (read-only) in 0019; flip it
+    /// to `db` so the save path runs instead of being rejected.
+    async fn open_stage_saves(pool: &PgPool) {
+        sqlx::query(
+            "UPDATE db_table_metadata SET source_of_truth = 'db' \
+             WHERE table_name = 'pipeline_stages'",
+        )
+        .execute(pool)
+        .await
+        .expect("flip pipeline_stages to db source-of-truth");
+    }
+
     fn dashboard_stage(name: &str) -> PipelineStageInput {
         PipelineStageInput {
             stage_name: name.to_string(),
@@ -1156,6 +1194,11 @@ mod tests {
         };
         let pool = pg_db.connect_and_migrate().await;
         let service = PipelineRouteService::new(&pool);
+        assert!(matches!(
+            service.delete_stages("repo-rt").await,
+            Err(PipelineRouteError::Readonly { .. })
+        ));
+        open_stage_saves(&pool).await;
         let names = |names: &[&str]| {
             names
                 .iter()
@@ -1286,6 +1329,7 @@ mod tests {
             return;
         };
         let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+        open_stage_saves(&pool).await;
         let service = PipelineRouteService::new(&pool);
         let names = |names: &[&str]| {
             names
@@ -1380,6 +1424,7 @@ mod tests {
             return;
         };
         let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+        open_stage_saves(&pool).await;
         let service = PipelineRouteService::new(&pool);
 
         let hold = hold_stage_lock(&pool, "repo-empty").await;

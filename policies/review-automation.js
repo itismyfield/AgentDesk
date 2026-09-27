@@ -1385,6 +1385,44 @@ function loadLatestReviewDispatchContext(cardId, dispatchId) {
   return parseJsonObject(rows[0].context);
 }
 
+// Binaries without advanceStage (a rollback before #6355) keep stage saves closed,
+// so the old unlocked walk is safe there.
+function advanceReviewStage(cardId, cardInfo) {
+  if (typeof agentdesk.pipeline.advanceStage === "function") {
+    return agentdesk.pipeline.advanceStage(cardId, "review_pass");
+  }
+  var stages;
+  if (cardInfo.pipeline_stage_id) {
+    var current = agentdesk.db.query(
+      "SELECT stage_order FROM pipeline_stages WHERE id = ?",
+      [cardInfo.pipeline_stage_id]
+    );
+    if (current.length === 0) return { status: "missing", stage: null };
+    stages = agentdesk.db.query(
+      "SELECT id, stage_name, agent_override_id, provider, skip_condition FROM pipeline_stages WHERE repo_id = ? AND stage_order > ? ORDER BY stage_order ASC LIMIT 1",
+      [cardInfo.repo_id, current[0].stage_order]
+    );
+    if (stages.length === 0) {
+      agentdesk.db.execute(
+        "UPDATE kanban_cards SET pipeline_stage_id = NULL, updated_at = datetime('now') WHERE id = ?",
+        [cardId]
+      );
+      return { status: "completed", stage: null };
+    }
+  } else {
+    stages = agentdesk.db.query(
+      "SELECT id, stage_name, agent_override_id, provider, skip_condition FROM pipeline_stages WHERE repo_id = ? AND trigger_after = 'review_pass' ORDER BY stage_order ASC LIMIT 1",
+      [cardInfo.repo_id]
+    );
+    if (stages.length === 0) return { status: "unchanged", stage: null };
+  }
+  agentdesk.db.execute(
+    "UPDATE kanban_cards SET pipeline_stage_id = ?, updated_at = datetime('now') WHERE id = ?",
+    [stages[0].id, cardId]
+  );
+  return { status: cardInfo.pipeline_stage_id ? "advanced" : "entered", stage: stages[0] };
+}
+
 function processVerdict(cardId, verdict, result, options) {
   var opts = options || {};
   // Guard: skip processing for terminal cards — prevents stale dispatches from
@@ -1513,7 +1551,7 @@ function processVerdict(cardId, verdict, result, options) {
     var stageMove = null;
     var nextStage = null;
     if (cardInfo && cardInfo.repo_id) {
-      stageMove = agentdesk.pipeline.advanceStage(cardId, "review_pass");
+      stageMove = advanceReviewStage(cardId, cardInfo);
       if (stageMove.status === "missing") {
         // The card's stage row is gone, so which stages remain is unknown.
         // Reading that as "no stages left" would skip them and open the PR.

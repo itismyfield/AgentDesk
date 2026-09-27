@@ -42,6 +42,18 @@ fn pipeline_route_error_response(
             })),
         )),
         PipelineRouteError::NotFound(error) => Err(AppError::not_found(error)),
+        PipelineRouteError::Readonly { table, source } => Ok((
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(json!({
+                "error": format!(
+                    "table '{}' is file-canonical; edit policies/default-pipeline.yaml \
+                     and restart the server to apply changes",
+                    table
+                ),
+                "table": table,
+                "source_of_truth": source,
+            })),
+        )),
         PipelineRouteError::Conflict(error) => Err(AppError::conflict(error)),
         PipelineRouteError::Unavailable(error) => Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,

@@ -13,8 +13,8 @@
 #                          and `transitions:` blocks below.
 #
 #   * Pipeline stages    — owned by the `pipeline_stages` table
-#                          (per-repo configuration, managed via
-#                          `/api/pipeline/stages` and the dashboard).
+#                          (repo/agent level configuration, managed via
+#                          `/api/pipeline-stages` and the auto-queue).
 #                          Stages are a *scheduling* abstraction layered
 #                          on top of the FSM: each stage dispatches work
 #                          that drives one or more FSM transitions, but
