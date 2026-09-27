@@ -1857,6 +1857,11 @@ services::claude_tui::session::tests::successful_continuation_persistence_is_cac
 services::claude_tui::session::tests::tui_args_do_not_use_print_mode
 services::claude_tui::session::tests::tui_args_omit_model_when_provider_default_is_requested
 services::claude_tui::session::tests::tui_args_resume_existing_session_by_id
+services::claude_tui::source_verify::tests::a_late_hook_from_a_left_session_never_rebinds_it
+services::claude_tui::source_verify::tests::a_newer_mtime_alone_never_binds_a_transcript
+services::claude_tui::source_verify::tests::a_session_start_before_its_transcript_is_written_waits
+services::claude_tui::source_verify::tests::captured_hooks_bind_only_once_payload_and_opened_file_agree
+services::claude_tui::source_verify::tests::fork_boundary_follows_inherited_row_uuids_not_bodies
 services::claude_tui::startup_dialog::tests::auto_accept_requires_home_dir_resolution
 services::claude_tui::startup_dialog::tests::busy_compacting_pane_is_not_a_startup_dialog
 services::claude_tui::startup_dialog::tests::effort_selector_footer_alone_is_not_a_startup_dialog
