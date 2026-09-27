@@ -1144,6 +1144,7 @@ src/
 │   │   │   ├── terminal_identity.rs
 │   │   │   └── tests.rs
 │   │   ├── task_supervisor/
+│   │   │   ├── quiesce_tests.rs
 │   │   │   ├── watcher_completion.rs
 │   │   │   ├── watcher_completion_tests.rs
 │   │   │   └── watcher_mutations.rs

@@ -168,3 +168,7 @@ impl Drop for Registration {
 #[cfg(test)]
 #[path = "watcher_completion_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "quiesce_tests.rs"]
+mod quiesce_tests;

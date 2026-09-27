@@ -143,6 +143,67 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn precancelled_spawn_cleans_registry_without_polling_reader() {
+        let shared = make_shared_data_for_tests();
+        let tmux = "precancelled-quiesce";
+        let handle = watcher_handle(tmux);
+        let cancel = handle.cancel.clone();
+        cancel.store(true, std::sync::atomic::Ordering::Release);
+        shared.tmux_watchers.insert(ChannelId::new(6294), handle);
+        let polled = Arc::new(AtomicBool::new(false));
+        let flag = polled.clone();
+        spawn_observed_tmux_watcher(
+            "precancelled",
+            shared.clone(),
+            tmux.into(),
+            cancel,
+            async move {
+                flag.store(true, std::sync::atomic::Ordering::Release);
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!polled.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!shared.tmux_watchers.has_live_watcher_handle(tmux));
+    }
+
+    #[tokio::test]
+    async fn rejected_duplicate_does_not_clean_original_registry() {
+        let shared = make_shared_data_for_tests();
+        let tmux = "duplicate-quiesce";
+        let handle = watcher_handle(tmux);
+        let cancel = handle.cancel.clone();
+        shared.tmux_watchers.insert(ChannelId::new(6295), handle);
+        let (finish, resume) = tokio::sync::oneshot::channel();
+        let original = spawn_observed_tmux_watcher(
+            "original",
+            shared.clone(),
+            tmux.into(),
+            cancel.clone(),
+            async {
+                resume.await.unwrap();
+            },
+        );
+        let polled = Arc::new(AtomicBool::new(false));
+        let flag = polled.clone();
+        spawn_observed_tmux_watcher(
+            "duplicate",
+            shared.clone(),
+            tmux.into(),
+            cancel,
+            async move {
+                flag.store(true, std::sync::atomic::Ordering::Release);
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!polled.load(std::sync::atomic::Ordering::Acquire));
+        assert!(shared.tmux_watchers.has_live_watcher_handle(tmux));
+        finish.send(()).unwrap();
+        original.await.unwrap();
+    }
+
     // This runtime check observes cleanup after ACK, but on current_thread it
     // cannot distinguish swapped synchronous statements. The tripwire pins them.
     #[tokio::test]
