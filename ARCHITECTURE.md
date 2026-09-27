@@ -1858,6 +1858,16 @@ src/
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
 │   │   └── tests_pg.rs
+│   ├── tui_o/
+│   │   └── shadow/
+│   │       ├── binding_reader.rs
+│   │       ├── capture.rs
+│   │       ├── derive.rs
+│   │       ├── identity.rs
+│   │       ├── mod.rs
+│   │       ├── root.rs
+│   │       ├── seal.rs
+│   │       └── unit_plan.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── extract.rs
 │   │   ├── observation.rs

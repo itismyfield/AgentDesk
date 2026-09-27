@@ -6,6 +6,10 @@ pub mod capture;
 pub mod root;
 
 // Derive-side modules (identity, seal, derive, unit_plan) are declared below.
+pub mod derive;
+pub mod identity;
+pub mod seal;
+pub mod unit_plan;
 
 // Observe-side modules (tap, diff, report, metrics) are declared below.
 
@@ -20,6 +24,8 @@ pub const MAX_READ_BYTES: u64 = 1024 * 1024;
 pub const TAP_CAPACITY: usize = 1024;
 pub const DISK_CAP_BYTES: u64 = 1024 * 1024 * 1024;
 pub const MATCH_WINDOW: Duration = Duration::from_secs(5 * 60);
+/// Raised when unit identity, turn extraction or historical rules change; old samples do not mix.
+pub const IDENTITY_VERSION: u32 = 2;
 
 /// `tui_o.shadow` settings; disabled unless explicitly enabled.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

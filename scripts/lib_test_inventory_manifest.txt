@@ -9096,6 +9096,10 @@ services::tool_output_guard::tests::line_heavy_small_error_is_sanitized_once_wit
 services::tool_output_guard::tests::small_output_is_preserved_exactly
 services::tool_output_guard::tests::very_large_non_ascii_error_aligns_context_window_to_utf8
 services::tool_output_guard::tests::very_large_single_line_error_keeps_projection_memory_bounded
+services::tui_o::shadow::derive::tests::claude_profile_units_follow_identity_rules
+services::tui_o::shadow::derive::tests::codex_profile_units_and_unsealed_announcements
+services::tui_o::shadow::derive::tests::sealed_units_repeat_silently_and_block_when_changed
+services::tui_o::shadow::derive::tests::split_pieces_follow_legacy_split_in_utf16_units
 services::tui_prompt_control::tests::absolute_path_prompts_are_never_taken_as_codex_commands
 services::tui_prompt_control::tests::codex_local_controls_carry_the_normalized_name_and_the_raw_args
 services::tui_prompt_control::tests::command_shaped_input_outside_the_registry_is_refused_not_forwarded

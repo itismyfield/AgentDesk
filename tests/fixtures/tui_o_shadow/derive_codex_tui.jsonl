@@ -1,0 +1,20 @@
+{"timestamp":"2026-09-27T12:10:00.000Z","type":"session_meta","payload":{"id":"s-codex","originator":"codex-tui","cwd":"/repo","source":"cli"}}
+{"timestamp":"2026-09-27T12:10:01.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t-1","model_context_window":258400}}
+{"timestamp":"2026-09-27T12:10:01.010Z","type":"turn_context","payload":{"turn_id":"t-1","cwd":"/repo","approval_policy":"never"}}
+{"timestamp":"2026-09-27T12:10:01.020Z","type":"response_item","payload":{"type":"message","role":"user","id":"msg_u1","content":[{"type":"input_text","text":"[o-shadow-synth:e2] 목록 보여 줘"}]}}
+{"timestamp":"2026-09-27T12:10:02.000Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"t-1","item":{"type":"AgentMessage","id":"msg_c1","text":"목록을 봅니다."}}}
+{"timestamp":"2026-09-27T12:10:02.010Z","type":"response_item","payload":{"type":"message","role":"assistant","id":"msg_c1","phase":"commentary","content":[{"type":"output_text","text":"목록을 봅니다."}]}}
+{"timestamp":"2026-09-27T12:10:03.000Z","type":"response_item","payload":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_1","name":"exec","input":"ls","status":"completed"}}
+{"timestamp":"2026-09-27T12:10:03.500Z","type":"response_item","payload":{"type":"custom_tool_call_output","id":"ctco_1","call_id":"call_1","output":"a\nb"}}
+{"timestamp":"2026-09-27T12:10:04.000Z","type":"response_item","payload":{"type":"function_call","id":"fc_1","call_id":"call_2","name":"shell","arguments":"{\"cmd\":[\"pwd\"]}"}}
+{"timestamp":"2026-09-27T12:10:04.500Z","type":"response_item","payload":{"type":"function_call_output","id":"fco_1","call_id":"call_2","output":"/repo"}}
+{"timestamp":"2026-09-27T12:10:05.000Z","type":"response_item","payload":{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"opaque"}}
+{"timestamp":"2026-09-27T12:10:06.000Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"t-1","item":{"type":"AgentMessage","id":"msg_f1","text":"a, b 두 개입니다."}}}
+{"timestamp":"2026-09-27T12:10:06.010Z","type":"response_item","payload":{"type":"message","role":"assistant","id":"msg_f1","phase":"final_answer","content":[{"type":"output_text","text":"a, b 두 개입니다."}]}}
+{"timestamp":"2026-09-27T12:10:06.020Z","type":"event_msg","payload":{"type":"token_count","info":null}}
+{"timestamp":"2026-09-27T12:10:06.030Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t-1","last_agent_message":"a, b 두 개입니다."}}
+{"timestamp":"2026-09-27T12:10:07.000Z","type":"response_item","payload":{"type":"agent_message","id":"amsg_1","author":"/root","recipient":"/root/worker","content":[{"type":"text","text":"hi"}]}}
+{"timestamp":"2026-09-27T12:10:08.000Z","type":"compacted","payload":{"message":"","replacement_history":[{"type":"message","role":"assistant","id":"msg_f1","content":[{"type":"output_text","text":"a, b 두 개입니다."}]}]}}
+{"timestamp":"2026-09-27T12:10:09.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t-2"}}
+{"timestamp":"2026-09-27T12:10:10.000Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"t-2","item":{"type":"AgentMessage","id":"msg_p2","text":"진행 중"}}}
+{"timestamp":"2026-09-27T12:10:10.010Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"id 없는 응답"}]}}
