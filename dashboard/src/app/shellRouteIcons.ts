@@ -6,6 +6,7 @@ import {
   FolderKanban,
   Home,
   LayoutDashboard,
+  Mic,
   Settings,
   Trophy,
   Users,
@@ -16,6 +17,8 @@ import type { AppRouteId } from "./routes";
 
 export function iconForRoute(routeId: AppRouteId) {
   switch (routeId) {
+    case "voice":
+      return Mic;
     case "home":
       return Home;
     case "office":

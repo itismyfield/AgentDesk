@@ -274,9 +274,11 @@ mod extract;
 mod observation;
 mod runtime_binding;
 mod session_rotation;
+mod shadow_peek;
 mod state;
 
 pub(crate) use session_rotation::*;
+pub(crate) use shadow_peek::peek_tmux_runtime_binding;
 
 pub use extract::*;
 use extract::{
