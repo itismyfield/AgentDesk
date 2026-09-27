@@ -1,8 +1,9 @@
 //! Gateway tap and the observe loop it feeds: capture -> derive -> diff, persisted only via the sink.
 
 use std::collections::{HashMap, HashSet};
-use std::io;
-use std::path::Path;
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -13,13 +14,17 @@ use tokio::sync::mpsc;
 
 use super::binding_reader::{BindingReader, LiveBindingLookup, ShadowTarget};
 use super::capture::SourceCapture;
+use super::derive::TranscriptDerive;
 use super::diff::WindowDiff;
+use super::identity::{RecordFact, classify, row_key};
 use super::metrics::MetricsSnapshot;
-use super::root::{ShadowRoot, ShadowStore};
+use super::root::{ShadowRoot, ShadowStore, StoredRecord};
+use super::seal::{TurnEvent, TurnTracker};
 use super::{
-    BindingChange, CaptureOutcome, CaptureSource, DISK_CAP_BYTES, IDENTITY_VERSION, LegacyTapEvent,
-    MAX_READ_BYTES, POLL_INTERVAL, SCHEMA_VERSION, ShadowConfig, ShadowDerive, ShadowDiff,
-    ShadowRecord, ShadowSink, SourceBinding, TAP_CAPACITY,
+    BindingChange, CaptureBatch, CaptureOutcome, CaptureSource, DISK_CAP_BYTES, DeriveOutput,
+    IDENTITY_VERSION, LegacyTapEvent, MAX_READ_BYTES, POLL_INTERVAL, SCHEMA_VERSION, ShadowConfig,
+    ShadowDerive, ShadowDiff, ShadowProvider, ShadowRecord, ShadowSink, SourceBinding, SourceId,
+    TAP_CAPACITY, WindowStartSource,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
 
@@ -119,12 +124,14 @@ fn tap_event(bot_id: u64, event: &serenity::FullEvent) -> Option<LegacyTapEvent>
     }
 }
 
-/// Derive-side hooks needed when a source is attached.
+/// Derive-side hooks; one instance serves every source so keys seen on another source stay visible.
 pub trait DeriveLink: Send {
-    /// Offset to capture from: the last turn opener found by the bounded reverse scan, else `extent`.
+    /// Offset to capture from: the running turn's start found by the bounded reverse scan, else `extent`.
     fn capture_start(&mut self, binding: &SourceBinding, extent: u64) -> u64;
     /// Records below `attach_extent` must come out as historical, never live.
-    fn derive_for(&mut self, binding: &SourceBinding, attach_extent: u64) -> Box<dyn ShadowDerive>;
+    fn attach(&mut self, source: &SourceId, attach_extent: u64, attached_at: DateTime<Utc>);
+    fn window_start(&mut self, t0: DateTime<Utc>, source: &SourceId, window_start_extent: u64);
+    fn derive(&mut self, binding: &SourceBinding, batch: &CaptureBatch) -> Vec<DeriveOutput>;
 }
 
 pub type CaptureOpener =
@@ -133,7 +140,6 @@ pub type CaptureOpener =
 struct Feed {
     binding: SourceBinding,
     capture: Box<dyn CaptureSource>,
-    derive: Box<dyn ShadowDerive>,
 }
 
 /// Owns one observe step; every write goes through `sink`.
@@ -197,26 +203,28 @@ impl Observer {
         });
         match opened {
             Ok((attach_extent, capture_start, capture)) => {
-                let derive = self.link.derive_for(&binding, attach_extent);
                 let source = binding.source.clone();
+                self.link.attach(&source, attach_extent, now);
                 self.persist(ShadowRecord::Attach {
                     source,
                     attach_extent,
                     capture_start,
                     attached_at: now,
                 });
-                self.feeds.insert(
-                    binding.channel_id,
-                    Feed {
-                        binding,
-                        capture,
-                        derive,
-                    },
-                );
+                self.feeds
+                    .insert(binding.channel_id, Feed { binding, capture });
             }
             Err(error) => {
                 tracing::warn!(%error, channel_id = binding.channel_id, "o-shadow: attach failed")
             }
+        }
+    }
+
+    /// Moves each listed source's live boundary to its size at `t0`.
+    pub fn window_start(&mut self, t0: DateTime<Utc>, sources: &[WindowStartSource]) {
+        for listed in sources {
+            let extent = listed.window_start_extent;
+            self.link.window_start(t0, &listed.source, extent);
         }
     }
 
@@ -240,7 +248,7 @@ impl Observer {
             match feed.capture.poll(MAX_READ_BYTES) {
                 CaptureOutcome::Batch(batch) if !batch.records.is_empty() => {
                     lags.extend(capture_lag_ms(&feed.binding.source.path, now));
-                    outputs.extend(feed.derive.derive(&feed.binding, &batch));
+                    outputs.extend(self.link.derive(&feed.binding, &batch));
                 }
                 CaptureOutcome::Batch(_) => {}
                 CaptureOutcome::Anomaly(anomaly) => {
@@ -279,9 +287,102 @@ fn capture_lag_ms(path: &Path, now: DateTime<Utc>) -> Option<u64> {
     u64::try_from((now - modified).num_milliseconds()).ok()
 }
 
-/// The derive implementation for attached sources; `None` keeps an enabled shadow from starting half-built.
-fn derive_link() -> Option<Box<dyn DeriveLink>> {
-    None
+/// How far back attach looks for the opener of a turn that is still running.
+const OPENER_SCAN_BYTES: u64 = 8 * 1024 * 1024;
+
+impl DeriveLink for TranscriptDerive {
+    fn capture_start(&mut self, binding: &SourceBinding, extent: u64) -> u64 {
+        running_turn_start(binding.provider, &binding.source.path, extent).unwrap_or(extent)
+    }
+    fn attach(&mut self, source: &SourceId, attach_extent: u64, attached_at: DateTime<Utc>) {
+        TranscriptDerive::attach(self, source, attach_extent, attached_at);
+    }
+    fn window_start(&mut self, t0: DateTime<Utc>, source: &SourceId, window_start_extent: u64) {
+        TranscriptDerive::window_start(self, t0, source, window_start_extent);
+    }
+    fn derive(&mut self, binding: &SourceBinding, batch: &CaptureBatch) -> Vec<DeriveOutput> {
+        ShadowDerive::derive(self, binding, batch)
+    }
+}
+
+/// Start of the turn open at `extent`: its opener row, or the idle row an autonomous turn follows.
+fn running_turn_start(provider: ShadowProvider, path: &Path, extent: u64) -> io::Result<u64> {
+    let from = extent.saturating_sub(OPENER_SCAN_BYTES);
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(from))?;
+    let mut bytes = Vec::new();
+    file.take(extent - from).read_to_end(&mut bytes)?;
+    let mut offset = from;
+    let mut lines: Vec<(u64, &[u8])> = Vec::new();
+    for line in bytes.split_inclusive(|b| *b == b'\n') {
+        // A line cut by the scan window or still being written is not a whole record.
+        if line.ends_with(b"\n") && (offset > from || from == 0) {
+            lines.push((offset, line));
+        }
+        offset += line.len() as u64;
+    }
+    let mut assistant_after = false;
+    for (start, line) in lines.into_iter().rev() {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        let (facts, key) = (classify(provider, &value), row_key(&value));
+        if facts.iter().any(|f| matches!(f, RecordFact::Idle(_))) {
+            return Ok(if assistant_after { start } else { extent });
+        }
+        // A tracker that has not seen the file start opens only on rows that open a turn alone.
+        let mut probe = TurnTracker::starting_at(1);
+        if facts.iter().any(|f| {
+            matches!(
+                probe.observe(f, key.as_ref(), (start, start), Utc::now()),
+                TurnEvent::Opened(_)
+            )
+        }) {
+            return Ok(start);
+        }
+        assistant_after |= facts.contains(&RecordFact::Assistant);
+    }
+    Ok(extent)
+}
+
+/// Follows the store for `WindowStart` lines the CLI appends, from the end seen at startup.
+struct WindowStartTail {
+    path: PathBuf,
+    offset: u64,
+}
+
+impl WindowStartTail {
+    fn at_end(path: PathBuf) -> Self {
+        let offset = std::fs::metadata(&path).map_or(0, |meta| meta.len());
+        Self { path, offset }
+    }
+
+    fn poll(&mut self) -> Vec<(DateTime<Utc>, Vec<WindowStartSource>)> {
+        let mut bytes = Vec::new();
+        let read = File::open(&self.path).and_then(|mut file| {
+            file.seek(SeekFrom::Start(self.offset))?;
+            file.take(MAX_READ_BYTES).read_to_end(&mut bytes)
+        });
+        if read.is_err() {
+            return Vec::new();
+        }
+        let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+        // A line longer than one read can never complete here, so it is skipped.
+        let consumed = if whole == 0 && bytes.len() as u64 == MAX_READ_BYTES {
+            bytes.len()
+        } else {
+            whole
+        };
+        self.offset += consumed as u64;
+        let lines = bytes[..whole].split(|b| *b == b'\n');
+        lines
+            .filter_map(|line| serde_json::from_slice::<StoredRecord>(line).ok())
+            .filter_map(|stored| match stored.record {
+                ShadowRecord::WindowStart { t0, sources } => Some((t0, sources)),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 /// Starts the shadow once per process when `tui_o.shadow.enabled`; it never blocks intake.
@@ -293,9 +394,6 @@ pub fn spawn_if_enabled(config: Option<&TuiOConfig>) {
     if STARTED.set(()).is_err() {
         return;
     }
-    let Some(link) = derive_link() else {
-        return tracing::warn!("o-shadow: enabled but no derive is linked; not started");
-    };
     let store = crate::config::runtime_root()
         .ok_or_else(|| io::Error::other("runtime root unresolved"))
         .and_then(|runtime_root| {
@@ -312,11 +410,13 @@ pub fn spawn_if_enabled(config: Option<&TuiOConfig>) {
     let open_capture: CaptureOpener = Box::new(|binding, start| {
         Ok(Box::new(SourceCapture::open(binding.source.clone(), start)?) as Box<dyn CaptureSource>)
     });
+    let tail = WindowStartTail::at_end(store.root().records_path());
+    let link = Box::new(TranscriptDerive::default());
     let observer = Observer::new(Box::new(store), open_capture, link);
     let allowlist = config.channel_allowlist.clone();
     let spawned = std::thread::Builder::new()
         .name("o-shadow".into())
-        .spawn(move || run(observer, gateway_rx, allowlist));
+        .spawn(move || run(observer, tail, gateway_rx, allowlist));
     if let Err(error) = spawned {
         tracing::warn!(%error, "o-shadow: observe thread did not start");
     }
@@ -324,6 +424,7 @@ pub fn spawn_if_enabled(config: Option<&TuiOConfig>) {
 
 fn run(
     mut observer: Observer,
+    mut tail: WindowStartTail,
     mut gateway_rx: mpsc::Receiver<LegacyTapEvent>,
     allowlist: Vec<u64>,
 ) {
@@ -341,6 +442,9 @@ fn run(
             .values_mut()
             .flat_map(|reader| reader.poll())
             .collect();
+        for (t0, sources) in tail.poll() {
+            observer.window_start(t0, &sources);
+        }
         let legacy = std::iter::from_fn(|| gateway_rx.try_recv().ok()).collect();
         let dropped = TAP.get().map_or(0, GatewayTap::take_dropped);
         observer.tick(Utc::now(), changes, legacy, dropped);
@@ -371,10 +475,11 @@ fn discover_targets(allowlist: &[u64]) -> Vec<ShadowTarget> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::tui_o::shadow::binding_reader::source_id_for;
     use crate::services::tui_o::shadow::diff::sha256_hex;
     use crate::services::tui_o::shadow::{
-        CaptureBatch, CapturedRecord, DeriveOutput, PieceDigest, ShadowProvider, ShadowUnit,
-        SourceAnomaly, SourceAnomalyKind, SourceId, SourceRange, UnitKey, UnitKind,
+        CapturedRecord, PieceDigest, ShadowTurn, ShadowUnit, SourceAnomaly, SourceAnomalyKind,
+        SourceRange, UnitKey, UnitKind,
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -456,29 +561,20 @@ mod tests {
         }
     }
 
-    struct OneUnitDerive(Option<ShadowUnit>);
-
-    impl ShadowDerive for OneUnitDerive {
-        fn derive(&mut self, _binding: &SourceBinding, _batch: &CaptureBatch) -> Vec<DeriveOutput> {
-            self.0
-                .take()
-                .map(DeriveOutput::Sealed)
-                .into_iter()
-                .collect()
-        }
-        fn unsealed(&self) -> Vec<UnitKey> {
-            Vec::new()
-        }
-    }
-
     struct Link(Option<ShadowUnit>);
 
     impl DeriveLink for Link {
         fn capture_start(&mut self, _binding: &SourceBinding, extent: u64) -> u64 {
             extent - 3
         }
-        fn derive_for(&mut self, _binding: &SourceBinding, _extent: u64) -> Box<dyn ShadowDerive> {
-            Box::new(OneUnitDerive(self.0.take()))
+        fn attach(&mut self, _source: &SourceId, _extent: u64, _at: DateTime<Utc>) {}
+        fn window_start(&mut self, _t0: DateTime<Utc>, _source: &SourceId, _extent: u64) {}
+        fn derive(&mut self, _binding: &SourceBinding, _batch: &CaptureBatch) -> Vec<DeriveOutput> {
+            self.0
+                .take()
+                .map(DeriveOutput::Sealed)
+                .into_iter()
+                .collect()
         }
     }
 
@@ -584,5 +680,91 @@ mod tests {
             matches!(&records[7], ShadowRecord::Diff { diff } if diff.class == crate::services::tui_o::shadow::DiffClass::Match && diff.legacy_msg_ids == vec![100])
         );
         assert_eq!(observer.metrics().tap_dropped_total, 2);
+    }
+
+    fn fixed_clock() -> DateTime<Utc> {
+        "2026-09-27T12:06:30Z".parse().unwrap()
+    }
+
+    #[test]
+    fn a_turn_running_at_attach_is_captured_from_its_opener_and_closes_live() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tui_o_shadow");
+        let fixture = std::fs::read_to_string(format!("{path}/derive_claude_tui.jsonl")).unwrap();
+        let lines: Vec<String> = fixture.lines().map(|line| format!("{line}\n")).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("t.jsonl");
+        std::fs::write(&transcript, lines[..3].concat()).unwrap();
+        let binding = SourceBinding {
+            channel_id: 7,
+            provider: ShadowProvider::Claude,
+            source: source_id_for("s-claude", &transcript).unwrap(),
+        };
+        let sink = Records::default();
+        let opener: CaptureOpener = Box::new(|binding, start| {
+            let capture = SourceCapture::open(binding.source.clone(), start)?;
+            Ok(Box::new(capture) as Box<dyn CaptureSource>)
+        });
+        let link = Box::new(TranscriptDerive::with_clock(fixed_clock));
+        let mut observer = Observer::new(Box::new(sink.clone()), opener, link);
+        let at: DateTime<Utc> = "2026-09-27T12:06:00.500Z".parse().unwrap();
+        let change = BindingChange {
+            channel_id: 7,
+            old: None,
+            new: Some(binding),
+            at,
+        };
+        observer.tick(at, vec![change], vec![], 0);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        std::io::Write::write_all(&mut file, lines[3..10].concat().as_bytes()).unwrap();
+        observer.tick(at, vec![], vec![], 0);
+        let records = sink.0.lock().unwrap();
+        let (opener_at, extent) = (lines[0].len() as u64, lines[..3].concat().len() as u64);
+        assert!(records.iter().any(|r| matches!(r,
+            ShadowRecord::Attach { capture_start, attach_extent, .. }
+                if (*capture_start, *attach_extent) == (opener_at, extent))));
+        let turns: Vec<&ShadowTurn> = records
+            .iter()
+            .filter_map(|r| match r {
+                ShadowRecord::Derived {
+                    output: DeriveOutput::TurnClosed(turn),
+                } => Some(turn),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(turns.len(), 1);
+        assert!(
+            turns[0].live && turns[0].native_turn_id == "u-1",
+            "{turns:?}"
+        );
+    }
+
+    #[test]
+    fn only_window_starts_appended_after_startup_are_polled() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = ShadowRoot::under(dir.path()).unwrap();
+        let mut store = ShadowStore::open(root, DISK_CAP_BYTES).unwrap();
+        let source = SourceId {
+            session_id: "s".into(),
+            path: dir.path().join("t.jsonl"),
+            dev: 1,
+            ino: 1,
+        };
+        let window_start = |minute: u32| ShadowRecord::WindowStart {
+            t0: format!("2026-09-27T12:{minute:02}:00Z").parse().unwrap(),
+            sources: vec![WindowStartSource {
+                source: source.clone(),
+                window_start_extent: 10,
+            }],
+        };
+        store.append(&window_start(1)).unwrap();
+        let mut tail = WindowStartTail::at_end(store.root().records_path());
+        store.append(&window_start(2)).unwrap();
+        let polled = tail.poll();
+        assert_eq!(polled.len(), 1);
+        assert_eq!(polled[0].0.to_rfc3339(), "2026-09-27T12:02:00+00:00");
+        assert!(tail.poll().is_empty());
     }
 }

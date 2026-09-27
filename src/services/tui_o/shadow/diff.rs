@@ -11,7 +11,7 @@ use super::{
 };
 
 /// Excluded reason for units below the attach extent; they are not diffed or counted.
-pub const HISTORICAL_REASON: &str = "historical";
+pub(super) const HISTORICAL_REASON: &str = "historical";
 
 struct LegacyState {
     msg: LegacyMsg,
@@ -24,7 +24,7 @@ struct LegacyState {
 
 /// A unit is decided one window after sealing; a Legacy message two windows after its
 /// last activity, by which time every unit that could claim it has been decided.
-pub struct WindowDiff {
+pub(super) struct WindowDiff {
     window: Duration,
     pending: Vec<ShadowUnit>,
     ready: Vec<DiffRecord>,
@@ -249,7 +249,7 @@ impl ShadowDiff for WindowDiff {
 }
 
 /// Initial cause before operator classification; only duplicates are attributable up front.
-pub fn default_cause(class: DiffClass) -> DiffCause {
+pub(super) fn default_cause(class: DiffClass) -> DiffCause {
     match class {
         DiffClass::Match | DiffClass::FormatOnly | DiffClass::OExcluded => DiffCause::Expected,
         DiffClass::LegacyDuplicate => DiffCause::LegacyDefect,

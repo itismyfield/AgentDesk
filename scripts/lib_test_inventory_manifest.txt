@@ -9120,7 +9120,9 @@ services::tui_o::shadow::report::tests::synthetic_entries_count_executed_turns_a
 services::tui_o::shadow::report::tests::window_start_and_version_defects_fail_the_window
 services::tui_o::shadow::root::tests::shadow_root_is_fixed_under_runtime_root_and_the_flag_defaults_off
 services::tui_o::shadow::root::tests::store_appends_readable_jsonl_and_stops_at_the_cap
+services::tui_o::shadow::tap::tests::a_turn_running_at_attach_is_captured_from_its_opener_and_closes_live
 services::tui_o::shadow::tap::tests::observer_attaches_derives_diffs_and_persists_only_through_the_sink
+services::tui_o::shadow::tap::tests::only_window_starts_appended_after_startup_are_polled
 services::tui_o::shadow::tap::tests::tap_copies_own_bot_messages_and_authorless_edits_only
 services::tui_o::shadow::tap::tests::tap_counts_a_full_queue_as_dropped_instead_of_waiting
 services::tui_prompt_control::tests::absolute_path_prompts_are_never_taken_as_codex_commands
