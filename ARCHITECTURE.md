@@ -205,6 +205,8 @@ src/
 │   └── types.rs
 ├── engine/
 │   ├── ops/
+│   │   ├── exec_ops/
+│   │   │   └── session_liveness_tests.rs
 │   │   ├── agent_ops.rs
 │   │   ├── auto_queue_ops.rs
 │   │   ├── cards_ops.rs
@@ -1743,9 +1745,13 @@ src/
 │   │   ├── binary_resolver/
 │   │   │   ├── grok.rs
 │   │   │   ├── resolution.rs
+│   │   │   ├── runtime_path.rs
 │   │   │   └── windows_codex.rs
 │   │   ├── tmux/
-│   │   │   └── availability.rs
+│   │   │   ├── liveness/
+│   │   │   │   └── tests.rs
+│   │   │   ├── availability.rs
+│   │   │   └── liveness.rs
 │   │   ├── binary_resolver.rs
 │   │   ├── dump_tool.rs
 │   │   ├── mod.rs
