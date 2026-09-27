@@ -10,6 +10,8 @@ use super::{SourceAnomalyKind as Kind, SourceId};
 
 /// Bytes re-read behind the cursor each poll to catch in-place rewrites.
 const TAIL_GUARD_BYTES: u64 = 4096;
+/// A record still missing its newline past this size halts the source instead of growing memory.
+pub const MAX_PARTIAL_BYTES: usize = 16 * 1024 * 1024;
 
 #[cfg(unix)]
 pub fn file_identity(meta: &Metadata) -> (u64, u64) {
@@ -112,18 +114,34 @@ impl SourceCapture {
         if self.file.metadata().map_err(io_err)?.len() < cursor + chunk.len() as u64 {
             return Err((Kind::Shrunk, "shrank during read".into()));
         }
+        let last_newline = chunk.iter().rposition(|b| *b == b'\n');
+        let rest = last_newline.map_or(self.partial.len() + chunk.len(), |at| chunk.len() - at - 1);
+        if rest > MAX_PARTIAL_BYTES {
+            return Err((
+                Kind::Oversized,
+                format!("record without newline passed {rest} bytes"),
+            ));
+        }
+        // A line spanning polls is re-read once before emission; the tail guard only covers 4 KiB.
+        if last_newline.is_some() && !self.partial.is_empty() {
+            let disk = read_at(&self.file, self.captured_through, self.partial.len() as u64);
+            if disk.map_err(io_err)? != self.partial {
+                return Err((Kind::PrefixMismatch, "buffered partial line changed".into()));
+            }
+        }
         self.guard.extend_from_slice(&chunk);
         let excess = self.guard.len().saturating_sub(TAIL_GUARD_BYTES as usize);
         self.guard.drain(..excess);
+        let mut search = self.partial.len();
         self.partial.extend_from_slice(&chunk);
         let (mut records, mut consumed) = (Vec::new(), 0);
-        while let Some(pos) = self.partial[consumed..].iter().position(|b| *b == b'\n') {
-            let line = &self.partial[consumed..consumed + pos + 1];
+        while let Some(pos) = self.partial[search..].iter().position(|b| *b == b'\n') {
+            let line = &self.partial[consumed..search + pos + 1];
             let start = self.captured_through + consumed as u64;
             self.prefix.update(line);
-            consumed += line.len();
+            (consumed, search) = (search + pos + 1, search + pos + 1);
             if !std::mem::take(&mut self.skip_torn_line) {
-                let (end, line) = (start + line.len() as u64, line[..pos].to_vec());
+                let (end, line) = (start + line.len() as u64, line[..line.len() - 1].to_vec());
                 records.push(CapturedRecord { start, end, line });
             }
         }
@@ -262,5 +280,35 @@ mod tests {
             std::fs::rename(dir.path().join("new.jsonl"), &path).unwrap();
             assert_eq!(poll(&mut replaced, MAX), Err(Kind::Replaced));
         }
+    }
+
+    #[test]
+    fn capture_rereads_a_buffered_partial_line_before_emitting_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("partial.jsonl");
+        let mut bytes = vec![b'a'; 2 * TAIL_GUARD_BYTES as usize];
+        std::fs::write(&path, &bytes).unwrap();
+        let mut capture = SourceCapture::open(source_id_for("p", &path).unwrap(), 0).unwrap();
+        assert_eq!(poll(&mut capture, MAX), Ok(vec![]));
+        bytes[0] = b'b';
+        bytes.push(b'\n');
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(poll(&mut capture, MAX), Err(Kind::PrefixMismatch));
+    }
+
+    #[test]
+    fn capture_halts_instead_of_buffering_an_oversized_partial_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.jsonl");
+        std::fs::write(&path, vec![b'a'; MAX_PARTIAL_BYTES]).unwrap();
+        let mut capture = SourceCapture::open(source_id_for("h", &path).unwrap(), 0).unwrap();
+        let budget = 2 * MAX_PARTIAL_BYTES as u64;
+        assert_eq!(poll(&mut capture, budget), Ok(vec![]));
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"a").unwrap();
+        assert_eq!(poll(&mut capture, budget), Err(Kind::Oversized));
     }
 }
