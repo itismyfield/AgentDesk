@@ -95,7 +95,7 @@ pub(crate) fn node_awaits_gateway(node: &Value, provider: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub(super) fn capabilities_with_runtime_state(base: &Value) -> Value {
+pub(crate) fn capabilities_with_runtime_state(base: &Value) -> Value {
     let mut capabilities = base.as_object().cloned().unwrap_or_default();
     super::readiness::publish(&mut capabilities);
     super::machine_resources::publish(&mut capabilities);
