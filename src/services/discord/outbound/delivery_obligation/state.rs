@@ -93,3 +93,6 @@ pub(in crate::services::discord) enum BlockedReason {
     SourceUnavailable,
     PublicationMismatch,
 }
+
+mod proof_access;
+pub(in crate::services::discord) mod proof_input;

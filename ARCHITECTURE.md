@@ -842,6 +842,9 @@ src/
 │   │   │   └── claude.rs
 │   │   ├── outbound/
 │   │   │   ├── delivery_obligation/
+│   │   │   │   ├── state/
+│   │   │   │   │   ├── proof_access.rs
+│   │   │   │   │   └── proof_input.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── schema.rs
 │   │   │   │   └── state.rs
