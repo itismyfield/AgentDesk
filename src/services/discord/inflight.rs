@@ -140,7 +140,7 @@ pub(in crate::services::discord) use self::orphan_relay_reclaim::{
 // widened. The shared persist/validate primitives moved to `store.rs`.
 mod clear_store;
 #[allow(unused_imports)]
-pub(in crate::services::discord) use clear_store::remove_identity_matched_state;
+pub(in crate::services::discord) use clear_store::operator_disposition_remove_pinned;
 mod save_store;
 
 // Shared persist/validate primitives (moved to `store.rs`): re-imported at the

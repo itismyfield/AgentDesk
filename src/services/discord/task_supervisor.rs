@@ -40,28 +40,21 @@ pub(in crate::services::discord) fn spawn_observed_tmux_watcher<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let mut completion = watcher_completion::Registration::new(cancel.clone());
+    let completion = watcher_completion::Registration::new(cancel.clone());
     spawn_observed(task_name, async move {
         let cleanup_guard = TmuxWatcherTaskGuard {
             shared,
             tmux_session_name,
             cancel,
         };
-        let mut future = Box::pin(AssertUnwindSafe(future).catch_unwind());
-        let outcome = tokio::select! {
-            biased;
-            () = completion.quiesce_requested() => None,
-            outcome = &mut future => Some(outcome),
-        };
-        drop(future);
+        let outcome = AssertUnwindSafe(future).catch_unwind().await;
         drop(cleanup_guard);
         let result = match outcome {
-            Some(Ok(())) => watcher_completion::Outcome::Returned,
-            Some(Err(payload)) => {
+            Ok(()) => watcher_completion::Outcome::Returned,
+            Err(payload) => {
                 tracing::error!(task_name, panic = %panic_payload_summary(payload.as_ref()), "discord background task panicked");
                 watcher_completion::Outcome::Panicked
             }
-            None => watcher_completion::Outcome::Unknown,
         };
         completion.finish(result);
     })

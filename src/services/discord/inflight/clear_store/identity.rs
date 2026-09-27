@@ -1,5 +1,9 @@
 use super::*;
 
+#[path = "operator_disposition.rs"]
+mod operator_disposition;
+pub(in crate::services::discord) use operator_disposition::operator_disposition_remove_pinned;
+
 pub(in crate::services::discord) fn clear_inflight_state_if_matches_identity_in_root(
     root: &std::path::Path,
     provider: &ProviderKind,
@@ -83,8 +87,7 @@ fn guarded_identity_clear_outcome(
     GuardedClearOutcome::Cleared
 }
 
-/// Remove an already-validated row while the caller retains its canonical sidecar lock.
-pub(in crate::services::discord) fn remove_identity_matched_state(
+fn remove_identity_matched_state(
     path: &std::path::Path,
     provider: &ProviderKind,
     channel_id: u64,
