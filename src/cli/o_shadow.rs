@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::services::provider::ProviderKind;
 use crate::services::provider_hosting::resolve_provider_session_selection_with_channel;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
-use crate::services::tui_o::shadow::report::{self, ReportInput, profile_of};
+use crate::services::tui_o::shadow::report::{self, ClassifyInput, ReportInput, profile_of};
 use crate::services::tui_o::shadow::root::{ShadowRoot, ShadowStore};
 use crate::services::tui_o::shadow::{
     DISK_CAP_BYTES, PopulationChannel, PopulationProvider, PopulationSnapshot, PopulationSource,
@@ -32,6 +32,9 @@ pub(crate) enum OShadowCommand {
         /// Window end t1 (RFC 3339)
         #[arg(long)]
         to: DateTime<Utc>,
+        /// JSON array of {diff_key, cause, note} operator classifications applied before judging
+        #[arg(long)]
+        classify: Option<std::path::PathBuf>,
     },
     /// Synthetic prompt manifest
     #[command(subcommand)]
@@ -62,7 +65,10 @@ pub(crate) fn run(command: OShadowCommand) -> Result<(), String> {
     let root = ShadowRoot::under(&runtime_root).map_err(|e| format!("o_shadow root: {e}"))?;
     match command {
         OShadowCommand::WindowStart => window_start(&root),
-        OShadowCommand::Report { from, to } => super::direct::run_async(report(root, from, to)),
+        OShadowCommand::Report { from, to, classify } => {
+            let classify = read_classify(classify.as_deref());
+            super::direct::run_async(report(root, from, to, classify))
+        }
         OShadowCommand::Manifest(ManifestAction::Add {
             channel_id,
             expected_runtime_kind,
@@ -137,7 +143,12 @@ fn window_start(root: &ShadowRoot) -> Result<(), String> {
     Ok(())
 }
 
-async fn report(root: ShadowRoot, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<(), String> {
+async fn report(
+    root: ShadowRoot,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    classify: ClassifyInput,
+) -> Result<(), String> {
     let path = crate::config::resolved_config_path();
     let bytes = std::fs::read(&path).map_err(|e| format!("read config {}: {e}", path.display()))?;
     let config = crate::config::load_from_path(&path).map_err(|e| format!("load config: {e}"))?;
@@ -189,6 +200,7 @@ async fn report(root: ShadowRoot, from: DateTime<Utc>, to: DateTime<Utc>) -> Res
         from,
         to,
         reported_at: now,
+        classify: &classify,
     });
     let snapshot_record = ShadowRecord::Population {
         snapshot: snapshot.clone(),
@@ -209,6 +221,17 @@ async fn report(root: ShadowRoot, from: DateTime<Utc>, to: DateTime<Utc>) -> Res
             outcome.failures.len()
         ))
     }
+}
+
+/// A missing or malformed file becomes a report failure rather than an unclassified run.
+fn read_classify(path: Option<&std::path::Path>) -> ClassifyInput {
+    let Some(path) = path else {
+        return ClassifyInput::Absent;
+    };
+    let parsed = std::fs::read(path)
+        .map_err(|e| format!("read {}: {e}", path.display()))
+        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| e.to_string()));
+    parsed.map_or_else(ClassifyInput::Unreadable, ClassifyInput::Entries)
 }
 
 fn read_manifest(root: &ShadowRoot) -> Result<Vec<SyntheticEntry>, String> {

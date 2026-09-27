@@ -3,13 +3,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::metrics::MetricsSnapshot;
 use super::{
-    DeriveOutput, DiffClass, IDENTITY_VERSION, MATCH_WINDOW, PopulationSnapshot, PopulationSource,
-    REPORT_VERSION, SCHEMA_VERSION, ShadowProvider, ShadowRecord, ShadowTurn, ShadowUnit, SourceId,
-    SyntheticEntry, UnitKey, UnitKind,
+    DeriveOutput, DiffCause, DiffClass, DiffRecord, IDENTITY_VERSION, MATCH_WINDOW,
+    PopulationSnapshot, PopulationSource, REPORT_VERSION, SCHEMA_VERSION, ShadowProvider,
+    ShadowRecord, ShadowTurn, ShadowUnit, SourceId, SyntheticEntry, UnitKey, UnitKind,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
 
@@ -111,6 +111,31 @@ pub fn attached_sources(records: &[ShadowRecord]) -> Vec<(SourceId, DateTime<Utc
     attached
 }
 
+/// One operator verdict from `report --classify`; only Expected, Legacy_defect and O_defect apply.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Classification {
+    pub diff_key: String,
+    pub cause: DiffCause,
+    pub note: String,
+}
+
+/// The `--classify` file; an unreadable one fails the report instead of being skipped.
+pub enum ClassifyInput {
+    Absent,
+    Entries(Vec<Classification>),
+    Unreadable(String),
+}
+
+/// A non-Match diff in the window: the cause it was recorded with and the one judged.
+#[derive(Debug, Serialize)]
+pub struct DiffEntry {
+    pub diff_key: String,
+    pub class: DiffClass,
+    pub recorded: DiffCause,
+    pub cause: DiffCause,
+}
+
 pub struct ReportInput<'a> {
     pub records: &'a [ShadowRecord],
     pub manifest: &'a [SyntheticEntry],
@@ -119,6 +144,7 @@ pub struct ReportInput<'a> {
     pub from: DateTime<Utc>,
     pub to: DateTime<Utc>,
     pub reported_at: DateTime<Utc>,
+    pub classify: &'a ClassifyInput,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Serialize)]
@@ -144,6 +170,15 @@ pub struct ReportOutcome {
     pub uncounted_turns: BTreeMap<String, usize>,
     pub synthetic: BTreeMap<String, &'static str>,
     pub metrics: MetricsSnapshot,
+    pub diffs: Vec<DiffEntry>,
+    /// Cause totals over every in-window diff, as recorded and after operator classification.
+    pub causes_before: BTreeMap<String, usize>,
+    pub causes_after: BTreeMap<String, usize>,
+    /// Operator changes keyed `recorded->classified`.
+    pub reclassified: BTreeMap<String, usize>,
+    /// Operator entries that replaced an automatic `OOnlyTool` cause.
+    pub auto_overridden: usize,
+    pub o_only_tool: usize,
 }
 
 fn record_time(
@@ -246,6 +281,7 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
     let (mut header, mut clock, mut stale) = (None, None, 0);
     let mut metrics = MetricsSnapshot::default();
     let mut classes: HashMap<&UnitKey, DiffClass> = HashMap::new();
+    let mut window_diffs: Vec<&DiffRecord> = Vec::new();
     for record in input.records {
         if let ShadowRecord::Header {
             schema_version,
@@ -265,6 +301,9 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
         if own.or(clock).is_some_and(|at| t0 <= at && at <= late) {
             stale += usize::from(header != Some((SCHEMA_VERSION, IDENTITY_VERSION)));
             metrics.record(record);
+            if let ShadowRecord::Diff { diff } = record {
+                window_diffs.push(diff);
+            }
         }
     }
     if stale > 0 {
@@ -405,14 +444,11 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
             counted.len()
         ));
     }
-    let unresolved: u64 = metrics
-        .diff_total
-        .iter()
-        .filter(|(label, _)| label.ends_with("/Unknown") || label.ends_with("/O_defect"))
-        .map(|(_, n)| n)
-        .sum();
+    let judged = classify(&window_diffs, input.classify, &mut failures);
+    let after = |cause| judged.causes_after.get(&label(cause)).copied().unwrap_or(0) as u64;
     for (count, what) in [
-        (unresolved, "diffs still Unknown or O_defect"),
+        (after(DiffCause::Unknown), "diffs still Unknown"),
+        (after(DiffCause::ODefect), "diffs classified O_defect"),
         (
             metrics.split_over_limit_total,
             "split pieces over the Discord limit",
@@ -436,7 +472,115 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
         uncounted_turns: uncounted,
         synthetic,
         metrics,
+        diffs: judged.diffs,
+        causes_before: judged.causes_before,
+        causes_after: judged.causes_after,
+        reclassified: judged.reclassified,
+        auto_overridden: judged.auto_overridden,
+        o_only_tool: judged.o_only_tool,
     }
+}
+
+fn label(value: impl Serialize) -> String {
+    let value = serde_json::to_value(value).ok();
+    let text = value.as_ref().and_then(|v| v.as_str());
+    text.unwrap_or_default().to_string()
+}
+
+/// Operator-facing identity of a diff: its unit key, else its Legacy ids, else its class.
+fn diff_key(diff: &DiffRecord) -> String {
+    let (channel, class) = (diff.channel_id, label(diff.class));
+    match (&diff.unit_key, diff.legacy_msg_ids.as_slice()) {
+        (Some(k), _) => {
+            let (provider, kind) = (label(k.provider), label(k.kind));
+            format!("{}/{provider}/{kind}/{}", k.channel_id, k.native_key)
+        }
+        (None, []) => format!("{channel}/{class}"),
+        (None, ids) => {
+            let ids: Vec<String> = ids.iter().map(u64::to_string).collect();
+            format!("{channel}/{class}/{}", ids.join("+"))
+        }
+    }
+}
+
+#[derive(Default)]
+struct Judged {
+    diffs: Vec<DiffEntry>,
+    causes_before: BTreeMap<String, usize>,
+    causes_after: BTreeMap<String, usize>,
+    reclassified: BTreeMap<String, usize>,
+    auto_overridden: usize,
+    o_only_tool: usize,
+}
+
+/// Applies operator causes to the window's non-Match diffs; every input defect is a failure.
+fn classify(diffs: &[&DiffRecord], input: &ClassifyInput, failures: &mut Vec<String>) -> Judged {
+    let mut judged = Judged::default();
+    let mut seen_keys: HashMap<String, usize> = HashMap::new();
+    for diff in diffs {
+        *judged.causes_before.entry(label(diff.cause)).or_default() += 1;
+        judged.o_only_tool += usize::from(diff.cause == DiffCause::OOnlyTool);
+        if diff.class == DiffClass::Match {
+            *judged.causes_after.entry(label(diff.cause)).or_default() += 1;
+            continue;
+        }
+        let base = diff_key(diff);
+        let n = seen_keys.entry(base.clone()).or_default();
+        *n += 1;
+        let diff_key = if *n == 1 { base } else { format!("{base}#{n}") };
+        let (class, recorded, cause) = (diff.class, diff.cause, diff.cause);
+        judged.diffs.push(DiffEntry {
+            diff_key,
+            class,
+            recorded,
+            cause,
+        });
+    }
+    let entries = match input {
+        ClassifyInput::Absent => &[][..],
+        ClassifyInput::Entries(entries) => entries.as_slice(),
+        ClassifyInput::Unreadable(error) => {
+            failures.push(format!("classify: unreadable input: {error}"));
+            &[][..]
+        }
+    };
+    let mut used = HashSet::new();
+    for entry in entries {
+        let key = &entry.diff_key;
+        let operator_cause = matches!(
+            entry.cause,
+            DiffCause::Expected | DiffCause::LegacyDefect | DiffCause::ODefect
+        );
+        let target = judged.diffs.iter_mut().find(|d| &d.diff_key == key);
+        let problem = if entry.note.trim().is_empty() {
+            "has an empty note"
+        } else if !used.insert(key.as_str()) {
+            "is listed twice"
+        } else if !operator_cause {
+            "names a cause operators cannot assign"
+        } else if target.is_none() {
+            "is not a diff of this report"
+        } else {
+            ""
+        };
+        match target {
+            Some(diff) if problem.is_empty() => {
+                if diff.recorded == DiffCause::OOnlyTool {
+                    judged.auto_overridden += 1;
+                }
+                if diff.recorded != entry.cause {
+                    let pair = format!("{}->{}", label(diff.recorded), label(entry.cause));
+                    *judged.reclassified.entry(pair).or_default() += 1;
+                }
+                diff.cause = entry.cause;
+            }
+            _ => failures.push(format!("classify: {key} {problem}")),
+        }
+    }
+    for diff in &judged.diffs {
+        *judged.causes_after.entry(label(diff.cause)).or_default() += 1;
+    }
+    judged
 }
 
 #[cfg(test)]
@@ -583,6 +727,20 @@ mod tests {
         judge_at(records, manifest, population, t(120), t(130))
     }
 
+    fn classified(records: &[ShadowRecord], classify: ClassifyInput) -> ReportOutcome {
+        let (allowlist, from, to, reported_at) = (&[7][..], t(-1), t(120), t(130));
+        evaluate(&ReportInput {
+            records,
+            manifest: &[],
+            population: &claude(),
+            allowlist,
+            from,
+            to,
+            reported_at,
+            classify: &classify,
+        })
+    }
+
     fn judge_at(
         records: &[ShadowRecord],
         manifest: &[SyntheticEntry],
@@ -599,6 +757,7 @@ mod tests {
             from,
             to,
             reported_at,
+            classify: &ClassifyInput::Absent,
         })
     }
 
@@ -652,6 +811,107 @@ mod tests {
         assert!(
             early.iter().any(|f| f.starts_with("reported before")),
             "{early:?}"
+        );
+    }
+
+    #[test]
+    fn operator_classification_resolves_listed_diffs_and_rejects_bad_input() {
+        let diff = |unit_key, class, legacy_msg_ids, cause| ShadowRecord::Diff {
+            diff: DiffRecord {
+                channel_id: 7,
+                unit_key,
+                class,
+                legacy_msg_ids,
+                cause,
+            },
+        };
+        let mut records = passing();
+        records.extend([
+            diff(
+                Some(key(0, UnitKind::Body)),
+                DiffClass::LegacyMissing,
+                vec![],
+                DiffCause::Unknown,
+            ),
+            diff(
+                Some(key(11, UnitKind::Tool)),
+                DiffClass::LegacyMissing,
+                vec![],
+                DiffCause::OOnlyTool,
+            ),
+            diff(None, DiffClass::LegacyExtra, vec![9], DiffCause::Unknown),
+        ]);
+        let open = classified(&records, ClassifyInput::Absent);
+        assert!(
+            open.failures.iter().any(|f| f == "2 diffs still Unknown"),
+            "{:?}",
+            open.failures
+        );
+        assert_eq!((open.o_only_tool, open.diffs.len()), (1, 3));
+        let keys: Vec<String> = open.diffs.iter().map(|d| d.diff_key.clone()).collect();
+        let entry = |key: &String, cause, note: &str| Classification {
+            diff_key: key.clone(),
+            cause,
+            note: note.into(),
+        };
+        let resolved = vec![
+            entry(&keys[0], DiffCause::Expected, "streamed then edited away"),
+            entry(&keys[2], DiffCause::LegacyDefect, "legacy echo"),
+        ];
+        let done = classified(&records, ClassifyInput::Entries(resolved.clone()));
+        assert!(done.pass, "{:?}", done.failures);
+        let count = |pairs: &[(&str, usize)]| {
+            pairs
+                .iter()
+                .map(|(k, n)| (k.to_string(), *n))
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(
+            done.causes_before,
+            count(&[("OOnlyTool", 1), ("Unknown", 2)])
+        );
+        assert_eq!(
+            done.causes_after,
+            count(&[("Expected", 1), ("Legacy_defect", 1), ("OOnlyTool", 1)])
+        );
+        assert_eq!(
+            done.reclassified,
+            count(&[("Unknown->Expected", 1), ("Unknown->Legacy_defect", 1)])
+        );
+        let mut blamed = resolved.clone();
+        blamed.push(entry(
+            &keys[1],
+            DiffCause::ODefect,
+            "tool line should have posted",
+        ));
+        let blamed = classified(&records, ClassifyInput::Entries(blamed));
+        assert!(
+            blamed
+                .failures
+                .iter()
+                .any(|f| f == "1 diffs classified O_defect")
+        );
+        assert_eq!(blamed.auto_overridden, 1);
+        let bad_inputs = [
+            vec![entry(&"7/nope".to_string(), DiffCause::Expected, "x")],
+            vec![resolved[0].clone(), resolved[0].clone()],
+            vec![entry(&keys[0], DiffCause::Expected, " ")],
+            vec![entry(&keys[0], DiffCause::Unknown, "x")],
+        ];
+        for bad in bad_inputs {
+            let mut input = resolved.clone();
+            input.retain(|e| bad.iter().all(|b| b.diff_key != e.diff_key));
+            input.extend(bad);
+            let outcome = classified(&records, ClassifyInput::Entries(input));
+            let flagged = outcome.failures.iter().any(|f| f.starts_with("classify:"));
+            assert!(flagged && !outcome.pass, "{:?}", outcome.failures);
+        }
+        let unreadable = classified(&records, ClassifyInput::Unreadable("eof".into()));
+        assert!(
+            unreadable
+                .failures
+                .iter()
+                .any(|f| f.starts_with("classify:"))
         );
     }
 

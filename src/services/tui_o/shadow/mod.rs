@@ -162,6 +162,8 @@ pub enum DiffCause {
     LegacyDefect,
     Expected,
     Unknown,
+    /// Expected family: a tool unit Legacy never posts, so the A0 comparison cannot judge it.
+    OOnlyTool,
 }
 
 /// `unit_key` is absent for rows with no O unit (Legacy extras, tap gaps).

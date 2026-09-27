@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     DeriveOutput, DiffCause, DiffClass, DiffRecord, LegacyEdit, LegacyMsg, LegacyTapEvent,
-    MATCH_WINDOW, PieceDigest, ShadowDiff, ShadowUnit, UnitKey,
+    MATCH_WINDOW, PieceDigest, ShadowDiff, ShadowUnit, UnitKey, UnitKind,
 };
 
 /// Excluded reason for units below the attach extent; they are not diffed or counted.
@@ -130,7 +130,13 @@ impl WindowDiff {
             (false, true, true) => DiffClass::Match,
             (false, true, false) => DiffClass::FormatOnly,
         };
-        record(channel, Some(key), class, ids)
+        // Legacy never posts tool units, so only their absence is expected; other diffs stay open.
+        let o_only = class == DiffClass::LegacyMissing && key.kind != UnitKind::Body;
+        let mut row = record(channel, Some(key), class, ids);
+        if o_only {
+            row.cause = DiffCause::OOnlyTool;
+        }
+        row
     }
 }
 
@@ -312,7 +318,7 @@ fn contains_piece(content: &str, piece: &PieceDigest) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::tui_o::shadow::{ShadowProvider, SourceId, SourceRange, UnitKind};
+    use crate::services::tui_o::shadow::{ShadowProvider, SourceId, SourceRange};
     use DiffClass::*;
     use chrono::TimeZone;
 
@@ -331,6 +337,10 @@ mod tests {
     }
 
     fn seal(diff: &mut WindowDiff, id: &str, at: i64, pieces: &[&str]) {
+        seal_as(diff, UnitKind::Body, id, at, pieces);
+    }
+
+    fn seal_as(diff: &mut WindowDiff, kind: UnitKind, id: &str, at: i64, pieces: &[&str]) {
         let digest = |(i, p): (usize, &&str)| PieceDigest {
             index: i as u32,
             units: p.encode_utf16().count() as u32,
@@ -343,8 +353,8 @@ mod tests {
             ino: 1,
         };
         let unit = ShadowUnit {
-            unit_key: key(id),
-            kind: UnitKind::Body,
+            unit_key: UnitKey { kind, ..key(id) },
+            kind,
             source_range: SourceRange {
                 source,
                 start: 0,
@@ -420,6 +430,27 @@ mod tests {
         assert_eq!(late[0], (LegacyDuplicate, vec![2], DiffCause::LegacyDefect));
         assert_eq!(late[1], (LegacyExtra, vec![3], DiffCause::Unknown));
         assert_eq!(diff.drain_retired().len(), 5);
+    }
+
+    #[test]
+    fn an_unposted_tool_unit_is_o_only_while_other_misses_stay_unknown() {
+        let mut diff = WindowDiff::default();
+        seal_as(&mut diff, UnitKind::Tool, "t", 0, &["Bash: ls"]);
+        seal_as(&mut diff, UnitKind::ToolResult, "r", 0, &["boom"]);
+        seal(&mut diff, "b", 0, &["never posted"]);
+        seal(&mut diff, "one", 0, &["one"]);
+        seal_as(&mut diff, UnitKind::Tool, "two", 0, &["two"]);
+        post(&mut diff, 1, 0, "two");
+        post(&mut diff, 2, 0, "one");
+        let o_only = (LegacyMissing, vec![], DiffCause::OOnlyTool);
+        let expected = vec![
+            o_only.clone(),
+            o_only,
+            (LegacyMissing, vec![], DiffCause::Unknown),
+            (Match, vec![2], DiffCause::Expected),
+            (OrderDiff, vec![1], DiffCause::Unknown),
+        ];
+        assert_eq!(rows(&mut diff, 300), expected);
     }
 
     #[test]
