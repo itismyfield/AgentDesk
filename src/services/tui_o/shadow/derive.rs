@@ -1,7 +1,7 @@
 //! `ShadowDerive` over captured transcript records: identity, plan and seal for each record,
 //! plus the native turns its Idle observations close.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::Value;
@@ -10,12 +10,15 @@ use super::identity::{RecordFact, classify, native_time, row_key};
 use super::seal::{SealOutcome, SealRegistry, TurnEvent, TurnSpan, TurnTracker};
 use super::unit_plan::{UnitPlan, plan};
 use super::{
-    CaptureBatch, CapturedRecord, DeriveOutput, ShadowDerive, ShadowTurn, ShadowUnit,
-    SourceBinding, SourceId, SourceRange, UnitKey,
+    CaptureBatch, CapturedRecord, DeriveOutput, ShadowDerive, ShadowProvider, ShadowTurn,
+    ShadowUnit, SourceBinding, SourceId, SourceRange, UnitKey,
 };
 
 /// A closer written this long before attach or window start is treated as replayed history.
 const CLOSER_START_SKEW: TimeDelta = TimeDelta::seconds(60);
+
+/// Turn identity across sources: channel, provider and an opener or closer native key.
+type TurnKey = (u64, ShadowProvider, String);
 
 /// Idle observations that closed no countable turn.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -27,11 +30,14 @@ pub struct TurnCounters {
 pub struct TranscriptDerive {
     seals: SealRegistry,
     turns: HashMap<(u64, SourceId), TurnTracker>,
-    /// Per source: start boundary (attach or window-start extent) and attach time.
+    /// Per source: file size and time at first attach.
     attached: HashMap<SourceId, (u64, DateTime<Utc>)>,
-    window_t0: Option<DateTime<Utc>>,
-    /// Source that first showed each opener or closer key; a key from another source is inherited.
-    turn_key_sources: HashMap<(u64, String), SourceId>,
+    /// Window start `t0` and the size at t0 of each source it listed.
+    window: Option<(DateTime<Utc>, HashMap<SourceId, u64>)>,
+    /// Source that first opened each opener key; a turn reopened elsewhere is inherited.
+    opener_sources: HashMap<TurnKey, SourceId>,
+    /// Opener and closer keys of every closed turn; a later turn showing one is inherited.
+    closed_turn_keys: HashSet<TurnKey>,
     counters: TurnCounters,
     clock: fn() -> DateTime<Utc>,
 }
@@ -48,8 +54,9 @@ impl TranscriptDerive {
             seals: SealRegistry::default(),
             turns: HashMap::new(),
             attached: HashMap::new(),
-            window_t0: None,
-            turn_key_sources: HashMap::new(),
+            window: None,
+            opener_sources: HashMap::new(),
+            closed_turn_keys: HashSet::new(),
             counters: TurnCounters::default(),
             clock,
         }
@@ -61,11 +68,22 @@ impl TranscriptDerive {
         self.attached.entry(source.clone()).or_insert(first);
     }
 
-    /// Moves a source's boundary to its size at window start `t0`; records below it are history.
+    /// Records one source of the window start at `t0`; the first `t0` holds for the window.
     pub fn window_start(&mut self, t0: DateTime<Utc>, source: &SourceId, window_start_extent: u64) {
-        self.window_t0 = Some(t0);
-        let boundary = self.attached.entry(source.clone()).or_insert((0, t0));
-        boundary.0 = window_start_extent;
+        let (_, extents) = self.window.get_or_insert_with(|| (t0, HashMap::new()));
+        extents.insert(source.clone(), window_start_extent);
+    }
+
+    /// Where live output of `source` starts and the earliest closer time, or why none can count.
+    fn start_boundary(&self, source: &SourceId) -> Result<(u64, DateTime<Utc>), &'static str> {
+        let &(attach_extent, attached_at) = self.attached.get(source).ok_or("unattached")?;
+        let (t0, extents) = self.window.as_ref().ok_or("no_window")?;
+        if attached_at >= *t0 {
+            return Ok((attach_extent, attached_at));
+        }
+        // A source attached before t0 needs its size at t0; its attach size would admit backlog.
+        let extent = extents.get(source).ok_or("window_missing_source")?;
+        Ok((*extent, *t0))
     }
 
     pub fn turn_counters(&self) -> TurnCounters {
@@ -94,11 +112,13 @@ impl TranscriptDerive {
             start: record.start,
             end: record.end,
         };
-        let floor = |(extent, at): (u64, DateTime<Utc>)| {
-            (extent, self.window_t0.map_or(at, |t0| t0.max(at)))
+        let boundary = self.start_boundary(source);
+        // Backlog below the attach size stays history even before the window evidence is complete.
+        let history_extent = match boundary {
+            Ok((extent, _)) => Some(extent),
+            Err(_) => self.attached.get(source).map(|&(extent, _)| extent),
         };
-        let attached = self.attached.get(source).copied().map(floor);
-        let historical = attached.is_some_and(|(extent, _)| record.start < extent);
+        let historical = history_extent.is_some_and(|extent| record.start < extent);
         let blocked = |reason| DeriveOutput::SchemaBlocked {
             channel_id: binding.channel_id,
             source_range: range.clone(),
@@ -174,31 +194,36 @@ impl TranscriptDerive {
                     TurnEvent::StrayIdle => self.counters.stray_e += 1,
                     TurnEvent::EdgeTurn => self.counters.edge_turn_uncounted += 1,
                     TurnEvent::Opened(id) => {
-                        let first = (binding.channel_id, id);
-                        self.turn_key_sources
-                            .entry(first)
-                            .or_insert_with(|| source.clone());
+                        let opener = (binding.channel_id, binding.provider, id);
+                        let first = self.opener_sources.entry(opener);
+                        first.or_insert_with(|| source.clone());
                     }
                     TurnEvent::Closed(span) => {
                         // Each check only excludes, so a wrong input fails the window instead of passing it.
-                        let keys = [span.native_turn_id.clone(), row.clone()]
-                            .into_iter()
-                            .flatten();
-                        let inherited = keys.fold(false, |inherited, id| {
-                            let entry = self.turn_key_sources.entry((binding.channel_id, id));
-                            inherited | (entry.or_insert_with(|| source.clone()) != source)
+                        let turn_key =
+                            |id: &String| (binding.channel_id, binding.provider, id.clone());
+                        let reopened = span.native_turn_id.as_ref().is_some_and(|id| {
+                            let first = self.opener_sources.get(&turn_key(id));
+                            first.is_some_and(|first| first != source)
                         });
+                        let keys: Vec<TurnKey> = [&span.native_turn_id, &row]
+                            .into_iter()
+                            .flatten()
+                            .map(turn_key)
+                            .collect();
+                        let replayed = keys.iter().any(|key| self.closed_turn_keys.contains(key));
+                        self.closed_turn_keys.extend(keys);
                         let closer_at = native_time(&value);
-                        let excluded_reason = match attached {
-                            None => Some("unattached"),
-                            Some((extent, _)) if record.start < extent => Some("historical"),
-                            Some((_, floor))
+                        let excluded_reason = match boundary {
+                            Err(reason) => Some(reason),
+                            Ok((extent, _)) if record.start < extent => Some("historical"),
+                            Ok((_, floor))
                                 if !closer_at.is_some_and(|at| at >= floor - CLOSER_START_SKEW) =>
                             {
                                 Some("closer_before_start")
                             }
-                            Some(_) if inherited => Some("inherited"),
-                            Some(_) => None,
+                            Ok(_) if reopened || replayed => Some("inherited"),
+                            Ok(_) => None,
                         };
                         out.push(DeriveOutput::TurnClosed(shadow_turn(
                             binding,
@@ -362,10 +387,15 @@ mod tests {
             .collect()
     }
 
-    fn attached(name: &str, extent: u64) -> (TranscriptDerive, SourceId) {
-        let mut derive = TranscriptDerive::with_clock(|| at("12:20:00"));
-        let source = source(name);
-        derive.attach(&source, extent, at("12:05:30"));
+    fn clock() -> DateTime<Utc> {
+        at("12:20:00")
+    }
+
+    /// A source attached before a window that started while the source was still empty.
+    fn live_source(name: &str) -> (TranscriptDerive, SourceId) {
+        let (mut derive, source) = (TranscriptDerive::with_clock(clock), source(name));
+        derive.attach(&source, 0, at("12:05:30"));
+        derive.window_start(at("12:05:40"), &source, 0);
         (derive, source)
     }
 
@@ -373,7 +403,7 @@ mod tests {
     /// only errors posted, and synthetic error rows by uuid; unkeyed shapes block.
     #[test]
     fn claude_profile_units_follow_identity_rules() {
-        let (mut derive, source) = attached("claude", 0);
+        let (mut derive, source) = live_source("claude");
         let outputs = run(&mut derive, Claude, &source, &records(CLAUDE));
         let expected = [
             "sealed Body msg_1:1 pieces=1",
@@ -397,7 +427,7 @@ mod tests {
     /// AgentMessage stays unsealed until its response_item, and replays add no Body.
     #[test]
     fn codex_profile_units_and_unsealed_announcements() {
-        let (mut derive, source) = attached("codex", 0);
+        let (mut derive, source) = live_source("codex");
         let records = records(CODEX);
         assert!(units(run(&mut derive, Codex, &source, &records[..5])).is_empty());
         let unsealed = |derive: &TranscriptDerive| -> Vec<String> {
@@ -462,10 +492,10 @@ mod tests {
     }
 
     /// Strict E closes a turn and never opens one; a native completion closes Codex turns;
-    /// tokens come only from native user input; repeated E is only counted.
+    /// tokens come only from native user text, even beside non-text items; repeated E is counted.
     #[test]
     fn turns_open_on_native_input_and_close_on_idle_observation() {
-        let (mut derive, source) = attached("claude", 0);
+        let (mut derive, source) = live_source("claude");
         let expected = [
             r#"turn u-1 ["msg_1:1", "msg_1:2", "msg_1:3", "msg_1:4", "toolu_a", "toolu_b", "toolu_c"] auto=false tokens=["[o-shadow-synth:e1]"] live"#,
             r#"turn u-2 ["a-err"] auto=false tokens=[] live"#,
@@ -481,7 +511,7 @@ mod tests {
         };
         assert_eq!(derive.turn_counters(), counters);
 
-        let (mut derive, source) = attached("codex", 0);
+        let (mut derive, source) = live_source("codex");
         let expected = [
             r#"turn t-1 ["msg_c1", "ctc_1", "call_1", "fc_1", "call_2", "msg_f1"] auto=false tokens=["[o-shadow-synth:e2]"] live"#,
         ];
@@ -496,9 +526,10 @@ mod tests {
     #[test]
     fn history_below_start_boundary_or_before_window_is_not_live() {
         let records = records(CLAUDE);
-        let (mut derive, source) = attached("claude", 0);
-        derive.window_start(at("12:05:40"), &source, records[10].start);
-        let outputs = run(&mut derive, Claude, &source, &records);
+        let (mut early, claude) = (TranscriptDerive::with_clock(clock), source("claude"));
+        early.attach(&claude, 0, at("12:05:30"));
+        early.window_start(at("12:05:40"), &claude, records[10].start);
+        let outputs = run(&mut early, Claude, &claude, &records);
         assert_eq!(outputs[0], "excluded Body msg_1:1 historical");
         assert!(outputs[7].starts_with("turn u-1 [] ") && outputs[7].ends_with("historical"));
         assert_eq!(
@@ -506,12 +537,15 @@ mod tests {
             r#"turn u-2 ["a-err"] auto=false tokens=[] live"#
         );
 
-        let (mut joined, source) = attached("joined", records[10].start);
-        assert_eq!(run(&mut joined, Claude, &source, &records)[7], outputs[7]);
+        let (mut joined, other) = (TranscriptDerive::with_clock(clock), source("other"));
+        joined.window_start(at("12:05:40"), &other, 0);
+        joined.attach(&claude, records[10].start, at("12:05:50"));
+        assert_eq!(run(&mut joined, Claude, &claude, &records)[7], outputs[7]);
 
-        let (mut late, source) = attached("claude", 0);
-        late.window_start(at("12:30:00"), &source, 0);
-        let outputs = turns(run(&mut late, Claude, &source, &records));
+        let mut late = TranscriptDerive::with_clock(clock);
+        late.attach(&claude, 0, at("12:05:30"));
+        late.window_start(at("12:30:00"), &claude, 0);
+        let outputs = turns(run(&mut late, Claude, &claude, &records));
         assert!(
             outputs
                 .iter()
@@ -519,29 +553,67 @@ mod tests {
         );
     }
 
-    /// A turn whose opener a parent source already showed (a fork taken mid-turn), a turn whose
-    /// opener precedes capture, and turns of unattached sources never count.
+    /// No turn is live without both an attach and a window start, and a source attached before
+    /// t0 but missing from the window start must not fall back to its attach size.
     #[test]
-    fn inherited_edge_and_unattached_turns_are_not_counted() {
+    fn live_requires_attach_and_a_window_boundary_for_the_source() {
         let records = records(CLAUDE);
-        let (mut derive, parent) = attached("parent", 0);
+        let (a, b) = (source("a"), source("b"));
+        let reasons = |derive: &mut TranscriptDerive, source: &SourceId| -> Vec<String> {
+            let outputs = turns(run(derive, Claude, source, &records));
+            outputs
+                .iter()
+                .map(|out| out.rsplit(' ').next().unwrap_or("").to_owned())
+                .collect()
+        };
+        let mut only_attach = TranscriptDerive::with_clock(clock);
+        only_attach.attach(&a, 0, at("12:05:30"));
+        assert_eq!(reasons(&mut only_attach, &a), ["no_window"; 3]);
+
+        let mut only_window = TranscriptDerive::with_clock(clock);
+        only_window.window_start(at("12:05:40"), &a, 0);
+        assert_eq!(reasons(&mut only_window, &a), ["unattached"; 3]);
+
+        let mut partial = TranscriptDerive::with_clock(clock);
+        partial.attach(&a, 0, at("12:05:30"));
+        partial.attach(&b, 0, at("12:05:30"));
+        partial.window_start(at("12:05:40"), &a, 0);
+        assert_eq!(reasons(&mut partial, &b), ["window_missing_source"; 3]);
+    }
+
+    /// Forked-mid-turn, same-source replayed, pre-capture-opener and unattached-source turns
+    /// never count.
+    #[test]
+    fn inherited_replayed_edge_and_unattached_turns_are_not_counted() {
+        let records = records(CLAUDE);
+        let (mut derive, parent) = live_source("parent");
         run(&mut derive, Claude, &parent, &records[..8]);
         let child = source("child");
-        derive.attach(&child, 0, at("12:05:30"));
+        derive.attach(&child, 0, at("12:05:50"));
         let outputs = turns(run(&mut derive, Claude, &child, &records[..10]));
         assert!(outputs.len() == 1 && outputs[0].ends_with("inherited"));
 
-        let mut derive = TranscriptDerive::with_clock(|| at("12:20:00"));
+        let (mut derive, claude) = live_source("claude");
+        let first = turns(run(&mut derive, Claude, &claude, &records[..10]));
+        let eof = records[9].end;
+        let shift = |record: &CapturedRecord| CapturedRecord {
+            start: record.start + eof,
+            end: record.end + eof,
+            line: record.line.clone(),
+        };
+        let replay: Vec<CapturedRecord> = records[1..10].iter().map(shift).collect();
+        let second = turns(run(&mut derive, Claude, &claude, &replay));
+        assert!(first.len() == 1 && first[0].ends_with("live"));
+        assert!(second.len() == 1 && second[0].ends_with("inherited"));
+
+        let mut derive = TranscriptDerive::with_clock(clock);
         let outputs = turns(run(&mut derive, Claude, &source("mid"), &records[3..14]));
         let counters = TurnCounters {
             stray_e: 1,
             edge_turn_uncounted: 1,
         };
         assert_eq!(derive.turn_counters(), counters);
-        assert!(
-            outputs.len() == 1
-                && outputs[0].starts_with("turn u-2")
-                && outputs[0].ends_with("unattached")
-        );
+        let unattached = outputs[0].starts_with("turn u-2") && outputs[0].ends_with("unattached");
+        assert!(outputs.len() == 1 && unattached);
     }
 }
