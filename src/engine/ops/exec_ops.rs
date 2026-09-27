@@ -1,5 +1,6 @@
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::process::{configure_child_process_group, wait_with_output_timeout};
+use crate::services::session_host::{HostLiveness, HostSessionRef, TmuxHost};
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use std::ffi::OsStr;
 use std::process::{Command, Output, Stdio};
@@ -11,6 +12,9 @@ use std::time::Duration;
 // Runs a local command synchronously with a bounded timeout. Limited to safe commands.
 
 const DEFAULT_EXEC_TIMEOUT_MS: u64 = 30_000;
+
+#[cfg(test)]
+mod session_liveness_tests;
 
 fn exec_override_env_var(cmd: &str) -> String {
     format!(
@@ -122,6 +126,29 @@ fn run_exec_command(
         .spawn()
         .map_err(|error| format!("Failed to start {}: {}", label, error))?;
     wait_with_output_timeout(child, Duration::from_millis(timeout_ms), label)
+}
+
+fn register_session_liveness_op<'js>(
+    ctx: &Ctx<'js>,
+    session: &Object<'js>,
+    probe: impl Fn(String, Duration) -> HostLiveness + 'js,
+) -> JsResult<()> {
+    session.set(
+        "hasLivePane",
+        Function::new(ctx.clone(), move |name: String| -> &'static str {
+            let budget = crate::engine::loader::bridge_op_deadline_remaining()
+                .unwrap_or(Duration::from_secs(2))
+                .min(Duration::from_secs(2));
+            if name.trim().is_empty() || budget.is_zero() {
+                return "unknown";
+            }
+            match probe(name, budget) {
+                HostLiveness::Live => "live",
+                HostLiveness::DeadOrAbsent => "dead",
+                HostLiveness::ProbeError => "unknown",
+            }
+        })?,
+    )
 }
 
 pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
@@ -326,6 +353,9 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
 
     // agentdesk.session.sendCommand(sessionKey, command) — inject a slash command into a tmux session
     let session_obj = rquickjs::Object::new(ctx.clone())?;
+    register_session_liveness_op(ctx, &session_obj, |name, budget| {
+        TmuxHost.liveness_within(HostSessionRef::tmux(&name), budget)
+    })?;
     session_obj.set(
         "sendCommand",
         rquickjs::Function::new(

@@ -25,6 +25,7 @@ import rust_lex  # noqa: E402
 CRATE = "agentdesk"
 LANES = ("linux", "macos")
 OWNER_FILES = frozenset({
+    "src/services/platform/tmux/liveness.rs",
     "src/services/platform/tmux.rs",
     "src/services/platform/tmux/availability.rs",
     "src/services/session_host.rs",
