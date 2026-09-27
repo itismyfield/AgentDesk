@@ -12,7 +12,7 @@ use crate::services::provider::ProviderKind;
 use crate::services::provider_hosting::resolve_provider_session_selection_with_channel;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::shadow::report::{self, ClassifyInput, ReportInput, profile_of};
-use crate::services::tui_o::shadow::root::{ShadowRoot, ShadowStore};
+use crate::services::tui_o::shadow::root::{ShadowRoot, ShadowStore, StoredRecord};
 use crate::services::tui_o::shadow::{
     DISK_CAP_BYTES, PopulationChannel, PopulationProvider, PopulationSnapshot, PopulationSource,
     ShadowRecord, ShadowSink, SyntheticEntry, WindowStartSource,
@@ -113,6 +113,15 @@ fn read_records(root: &ShadowRoot) -> Result<Vec<ShadowRecord>, String> {
     ShadowStore::read_records(root).map_err(|e| format!("read o_shadow records: {e}"))
 }
 
+/// Same strictness as `read_records`, keeping each line's storage time for the report.
+fn read_stored(root: &ShadowRoot) -> Result<Vec<StoredRecord>, String> {
+    let log = ShadowStore::read_stored(root).map_err(|e| format!("read o_shadow records: {e}"))?;
+    match log.damaged_lines.first() {
+        Some(line) => Err(format!("read o_shadow records: line {line} does not parse")),
+        None => Ok(log.records),
+    }
+}
+
 /// fstat only; a path that now names another file keeps its next attach extent as the boundary.
 fn window_start(root: &ShadowRoot) -> Result<(), String> {
     let (mut sources, mut skipped) = (Vec::new(), Vec::new());
@@ -162,7 +171,8 @@ async fn report(
         sha256,
         mtime,
     };
-    let records = read_records(&root)?;
+    let stored = read_stored(&root)?;
+    let records = || stored.iter().map(|line| &line.record);
     let manifest = read_manifest(&root)?;
     let now = Utc::now();
     let sessions = recent_sessions(&config, from - Duration::days(7)).await;
@@ -186,19 +196,19 @@ async fn report(
         ok: sessions.is_ok(),
         observed_kinds: observed.into_iter().collect(),
     };
-    let aux = vec![report::bound_kinds(&records, from, to, now), s3];
+    let aux = vec![report::bound_kinds(records(), from, to, now), s3];
     let allowlist = config
         .tui_o
         .as_ref()
         .map(|t| t.shadow.channel_allowlist.clone())
         .unwrap_or_default();
-    let threads: Vec<(u64, String)> = report::bound_channels(&records, to)
+    let threads: Vec<(u64, String)> = report::bound_channels(records(), from, to)
         .into_iter()
         .filter(|(channel_id, _)| allowlist.contains(channel_id))
         .collect();
     let snapshot = population(&config, file, aux, now, &resolve, &threads);
     let outcome = report::evaluate(&ReportInput {
-        records: &records,
+        records: &stored,
         manifest: &manifest,
         population: &snapshot,
         allowlist: &allowlist,
