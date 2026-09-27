@@ -1,5 +1,5 @@
-//! Planned restart mid-turn: a TUI-direct turn marked `drain_restart` is adopted by the
-//! replacement, closes when it finishes, and blocks neither the next turn nor restart.
+//! Restart resumes a provably running TUI-direct turn and closes it when it finishes.
+//! Historical terminal records without an episode commit leave the marked row intact.
 
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
@@ -186,9 +186,12 @@ async fn eventually(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
 
 /// Returns once the mock has taken no request-visible change for two seconds.
 async fn settle(mock: &Mock) {
-    let (mut last, mut quiet) = (Vec::new(), 0);
+    let (mut last, mut quiet) = ((Vec::new(), 0), 0);
     for _ in 0..150 {
-        let now = visible(mock);
+        let now = (
+            visible(mock),
+            mock.writes.lock().expect("mock writes").len(),
+        );
         quiet = if now == last { quiet + 1 } else { 0 };
         if quiet == 10 {
             return;
@@ -209,8 +212,13 @@ type Observed =
     tokio::sync::broadcast::Receiver<crate::services::tui_prompt_dedupe::ObservedTuiPrompt>;
 
 /// Boots a replacement dcserver over `channel` in boot order: the idle relay, then the
-/// watcher restore, which re-adopts any surviving inflight row.
-async fn boot(generation: u64, tmux: &str, channel: Channel) -> (Mock, Observed) {
+/// watcher restore, which adopts only a row with sufficient episode evidence.
+async fn boot(
+    generation: u64,
+    tmux: &str,
+    channel: Channel,
+    expect_watcher: bool,
+) -> (Mock, Observed) {
     let mock = Mock::new();
     mock.placeholder_posts.store(1, Ordering::SeqCst);
     let minted = &mock.next_response_id;
@@ -237,7 +245,10 @@ async fn boot(generation: u64, tmux: &str, channel: Channel) -> (Mock, Observed)
     crate::services::discord::tmux::restore_tmux_watchers(&ctx.http, &shared).await;
     let channel = ChannelId::new(CHANNEL_ID);
     let watched = shared.tmux_watchers.contains_key(&channel);
-    assert!(watched, "the restore attached no watcher to {tmux}");
+    assert_eq!(watched, expect_watcher, "watcher restore for {tmux}");
+    if !expect_watcher {
+        assert_eq!(shared.mailbox(channel).has_active_turn().await, Ok(false));
+    }
     (mock, observed)
 }
 
@@ -300,7 +311,7 @@ async fn a_turn_marked_drain_restart_is_closed_after_it_finishes_6294() {
         end_process(&phase, Ok(()));
     }
     let carried = (phase != "first").then(|| kept(&root, "first"));
-    let (mock, mut observed) = boot(generation, &tmux, carried.unwrap_or_default()).await;
+    let (mock, mut observed) = boot(generation, &tmux, carried.unwrap_or_default(), true).await;
     if phase == "first" {
         // The running turn finishes, then the next injected turn arrives: its prompt
         // lands first and its answer a moment later.
@@ -347,6 +358,66 @@ const LATER_BODIES: [&str; 2] = ["later turn one body 6294", "later turn two bod
 const BUSY_BODY: &str = "turn running at the fix boot body 6294";
 const BUSY_PANE: &str = "✻ Thinking… (12s · ↑ 1.2k tokens · esc to interrupt)\n";
 
+// No message creation or edit is permitted while this boot preserves the marked row.
+const FIX_ALLOWED_MESSAGE_WRITES: &[(Method, u64, String)] = &[];
+
+fn forbidden_fix_writes(mock: &Mock, channel: &Channel) -> Vec<(Method, u64, String)> {
+    let inherited = |id: &u64| channel.iter().any(|(kept, _)| kept == id);
+    let writes = mock.writes.lock().expect("mock writes").clone();
+    writes
+        .into_iter()
+        .filter(|write @ (method, id, _)| {
+            let message_write = *method == Method::POST || *method == Method::PATCH;
+            (message_write && !FIX_ALLOWED_MESSAGE_WRITES.contains(write))
+                || (*method != Method::POST && inherited(id))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn fix_oracle_rejects_an_arbitrary_post_and_patch_even_after_delete() {
+    let mock = Mock::new();
+    let (proxy, _, server) = discord_mock::start(mock.clone()).await;
+    let client = reqwest::Client::new();
+    let url = format!("{proxy}/api/v10/channels/{CHANNEL_ID}/messages");
+    let reply: serde_json::Value = client
+        .post(&url)
+        .json(&json!({"content": "arbitrary fresh message"}))
+        .send()
+        .await
+        .expect("post")
+        .error_for_status()
+        .expect("posted")
+        .json()
+        .await
+        .expect("message");
+    let id = reply["id"].as_str().expect("message id");
+    let url = format!("{url}/{id}");
+    client
+        .patch(&url)
+        .json(&json!({"content": "arbitrary edit"}))
+        .send()
+        .await
+        .expect("patch")
+        .error_for_status()
+        .expect("patched");
+    client
+        .delete(&url)
+        .send()
+        .await
+        .expect("delete")
+        .error_for_status()
+        .expect("deleted");
+    assert!(visible(&mock).is_empty(), "final state hides every write");
+    let forbidden = forbidden_fix_writes(&mock, &Vec::new());
+    let methods: Vec<_> = forbidden
+        .iter()
+        .map(|(method, _, _)| method.clone())
+        .collect();
+    assert_eq!(methods, vec![Method::POST, Method::PATCH]);
+    server.abort();
+}
+
 /// The first boot of the fix over a row an older build kept marked: the row's turn and
 /// later ones finished unrelayed, its placeholder shows the next turn, and the pane is busy.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -362,10 +433,10 @@ async fn first_boot_over_a_marked_row_keeps_delivered_and_foreign_bodies_6294() 
     let pane = PathBuf::from(std::env::var("TMUX_TMPDIR").expect("tmux tmpdir")).join("pane");
     let target = PLACEHOLDER + 1;
     let foreign = format!("{}\n\n⠋ {}", LATER_BODIES[0], LATER_BODIES[0]);
-    // The row a boot holds, by episode; the busy turn has none yet and no ended turn may return.
-    let episode = || {
-        let row = inflight::load_inflight_state(&Claude, CHANNEL_ID);
-        row.map(|row| (row.turn_nonce, row.turn_start_offset, row.restart_mode))
+    let row_bytes = || {
+        let root = inflight::inflight_runtime_root().expect("inflight root");
+        std::fs::read(inflight::inflight_state_path(&root, &Claude, CHANNEL_ID))
+            .expect("marked row")
     };
     if phase == "old" {
         let ids = (ANCHOR, PLACEHOLDER);
@@ -374,10 +445,11 @@ async fn first_boot_over_a_marked_row_keeps_delivered_and_foreign_bodies_6294() 
     }
     if phase == "first" {
         // The running turn is delivered; the next one is streaming at the next restart.
-        let (mock, _) = boot(generation, &tmux, Vec::new()).await;
+        let (mock, _) = boot(generation, &tmux, Vec::new(), true).await;
         append(&transcript, &finish("run", DELIVERED_BODY));
         wait_for_body(&mock, DELIVERED_BODY).await;
         let shown = [visible(&mock), vec![(target, "...".to_string())]].concat();
+        assert_eq!(copies(&shown, DELIVERED_BODY), vec![PLACEHOLDER]);
         keep(&root, &phase, &shown);
         let marked = "turn marked by the restart prompt 6294";
         mark_running_turn(&tmux, &transcript, "marked", marked, (ANCHOR + 1, target));
@@ -398,46 +470,37 @@ async fn first_boot_over_a_marked_row_keeps_delivered_and_foreign_bodies_6294() 
         let mut channel = kept(&root, "first");
         channel.retain(|(id, _)| *id != target);
         channel.push((target, foreign.clone()));
-        let (mock, _) = boot(generation, &tmux, channel.clone()).await;
+        let preserved = row_bytes();
+        let (mock, _) = boot(generation, &tmux, channel.clone(), false).await;
         settle(&mock).await;
         let shown = visible(&mock);
-        // Every write, even one undone later, that re-sends a finished turn's body or edits
-        // or deletes a message this boot inherited.
-        let finished = [[DELIVERED_BODY, MARKED_BODY], LATER_BODIES].concat();
-        let inherited = |id: &u64| channel.iter().any(|(kept, _)| kept == id);
-        let writes = mock.writes.lock().expect("mock writes").clone();
-        let forbidden = writes.into_iter().filter(|(method, id, content)| {
-            let resent = finished.iter().any(|body| content.contains(body));
-            resent || (*method != Method::POST && inherited(id))
-        });
-        let forbidden: Vec<_> = forbidden.collect();
+        // The transcript alone cannot attribute its terminal records to this row.
+        // Preserve its bytes and reject even writes hidden by a later delete.
+        let forbidden = forbidden_fix_writes(&mock, &channel);
         let written = shown.iter().filter(|m| !channel.contains(m)).count();
-        let at_fix = episode();
+        let preserved = row_bytes() == preserved;
         keep(&root, &phase, &shown);
         shut_down_for_restart();
-        // (forbidden writes, new or changed messages, row left)
-        let want = (Vec::new(), 0, None);
-        end_process(&phase, verdict((forbidden, written, at_fix), want, &shown));
+        let remarked = inflight::load_inflight_state(&Claude, CHANNEL_ID).expect("remarked row");
+        assert_eq!(remarked.restart_generation, Some(generation));
+        // (forbidden writes, new or changed messages, bytes preserved before shutdown)
+        let want = (Vec::new(), 0, true);
+        end_process(
+            &phase,
+            verdict((forbidden, written, preserved), want, &shown),
+        );
     }
 
-    // The next restart boots over the fix boot's channel; the busy turn then finishes.
+    // Shutdown refreshes the predecessor generation, without supplying terminal proof.
     let before = kept(&root, "fix");
-    let (mock, _) = boot(generation, &tmux, before.clone()).await;
+    let preserved = row_bytes();
+    let (mock, _) = boot(generation, &tmux, before.clone(), false).await;
     settle(&mock).await;
-    let at_restart = episode();
     std::fs::remove_file(&pane).expect("idle pane");
     append(&transcript, &finish("busy", BUSY_BODY));
-    wait_for_body(&mock, BUSY_BODY).await;
+    settle(&mock).await;
     let shown = visible(&mock);
-    let changed = shown.iter().filter(|entry| !before.contains(entry));
-    let rewritten = changed.filter(|(_, c)| !c.contains(BUSY_BODY)).count();
-    let at_target = shown.iter().find(|(id, _)| *id == target).cloned();
-    let closed = inflight::load_inflight_state(&Claude, CHANNEL_ID).is_none();
-    // (delivered body copies, marked row's placeholder, row at the boot, messages the
-    // next restart rewrote, busy body copies, row closed)
-    let delivered = copies(&shown, DELIVERED_BODY).len();
-    let actual = (delivered, at_target, at_restart);
-    let after = (rewritten, copies(&shown, BUSY_BODY).len(), closed);
-    let want = ((1, Some((target, foreign)), None), (0, 1, true));
-    end_process(&phase, verdict((actual, after), want, &shown));
+    let forbidden = forbidden_fix_writes(&mock, &before);
+    let actual = (forbidden, shown == before, row_bytes() == preserved);
+    end_process(&phase, verdict(actual, (Vec::new(), true, true), &shown));
 }
