@@ -788,8 +788,9 @@ mod tests {
     /// MUTATION GUARD (codex #4391 r3-1). `localhost` can resolve to `::1`
     /// before `127.0.0.1`; the client must try every resolved address, not
     /// just the first. The first address below is a closed port (instant
-    /// ECONNREFUSED); reverting `connect_first_reachable` to first-only makes
-    /// this fail its own assert.
+    /// ECONNREFUSED on unix; Windows retries the refused SYN for about two
+    /// seconds, so the deadline leaves room for that); reverting
+    /// `connect_first_reachable` to first-only makes this fail its own assert.
     #[test]
     fn connect_first_reachable_falls_through_to_second_address() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind reachable server");
@@ -801,7 +802,7 @@ mod tests {
             drop(l);
             a
         };
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(10);
         let stream = connect_first_reachable(&[closed, good], deadline);
         assert!(
             stream.is_ok(),
