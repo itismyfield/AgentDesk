@@ -125,6 +125,8 @@ cli::doctor::mailbox::tests::queue_depth_alone_no_longer_suppresses_the_busy_mai
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::empty_directory_passes_with_zero_counts
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::fully_registered_scripts_pass
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::unregistered_scripts_are_reported_as_one_warn_item
+cli::doctor::orchestrator::observation_tests::observations_gate_stale_mailbox_posts
+cli::doctor::orchestrator::observation_tests::observations_preserve_unmeasured_diagnostics
 cli::doctor::orchestrator::profile_filter_tests::json_report_exposes_portable_readiness_sections
 cli::doctor::orchestrator::profile_filter_tests::mailbox_consistency_findings_use_provider_runtime_group
 cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_detail_includes_applied_and_resolved_hashes
