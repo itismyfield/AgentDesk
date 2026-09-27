@@ -96,3 +96,6 @@ pub(in crate::services::discord) enum BlockedReason {
 
 mod proof_access;
 pub(in crate::services::discord) mod proof_input;
+#[cfg(test)]
+mod proof_tests;
+mod whole_proof;

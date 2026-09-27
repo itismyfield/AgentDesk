@@ -844,7 +844,9 @@ src/
 │   │   │   ├── delivery_obligation/
 │   │   │   │   ├── state/
 │   │   │   │   │   ├── proof_access.rs
-│   │   │   │   │   └── proof_input.rs
+│   │   │   │   │   ├── proof_input.rs
+│   │   │   │   │   ├── proof_tests.rs
+│   │   │   │   │   └── whole_proof.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── schema.rs
 │   │   │   │   └── state.rs
