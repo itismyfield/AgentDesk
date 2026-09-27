@@ -9130,6 +9130,7 @@ services::tui_o::shadow::tap::tests::a_window_start_applied_after_a_capture_stil
 services::tui_o::shadow::tap::tests::observer_attaches_derives_diffs_and_persists_only_through_the_sink
 services::tui_o::shadow::tap::tests::only_window_starts_appended_after_startup_are_polled
 services::tui_o::shadow::tap::tests::tap_counts_a_full_queue_as_dropped_instead_of_waiting
+services::tui_o::shadow_host::tests::tap_copies_own_bot_messages_and_authorless_edits_only
 services::tui_prompt_control::tests::absolute_path_prompts_are_never_taken_as_codex_commands
 services::tui_prompt_control::tests::codex_local_controls_carry_the_normalized_name_and_the_raw_args
 services::tui_prompt_control::tests::command_shaped_input_outside_the_registry_is_refused_not_forwarded
@@ -9137,6 +9138,7 @@ services::tui_prompt_control::tests::quoted_mid_sentence_and_multiline_slashes_s
 services::tui_prompt_control::tests::recognizes_known_local_controls_without_matching_prefixes_or_mid_body_text
 services::tui_prompt_control::tests::recognizes_raw_and_envelope_without_using_them_as_a_dedup_key
 services::tui_prompt_control::tests::splitting_the_primitive_leaves_the_claude_lowercasing_contract_intact
+services::tui_prompt_dedupe::runtime_binding::shadow_session_tests::observer_discovery_lists_live_sessions_without_changing_relay_state
 services::tui_prompt_dedupe::session_rotation::tests::drain_progress_resets_the_stall_counter_and_stall_accumulates
 services::tui_prompt_dedupe::session_rotation::tests::second_hop_preserves_the_original_frozen_transcript
 services::tui_prompt_dedupe::session_rotation::tests::settling_a_rotation_does_not_retire_the_adopted_session_authority
