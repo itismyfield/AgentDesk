@@ -294,6 +294,7 @@ jobs:
               - 'src/services/discord/router/intake_dispatch/tests.rs'
               - 'src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs'
               - 'src/services/discord/router/message_handler/voice_announcement_route.rs'
+              - 'src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs'
               - 'src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_capability.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs'
