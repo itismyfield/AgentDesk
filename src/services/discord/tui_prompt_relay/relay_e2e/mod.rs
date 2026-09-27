@@ -14,6 +14,7 @@
 
 mod catch_up_pagination_e2e;
 mod discord_mock;
+mod restart_marker_e2e;
 mod stale_resume_retry_e2e;
 
 pub(in crate::services::discord) async fn mock_discord_context() -> (

@@ -46,7 +46,12 @@ pub(super) struct DiscordMockState {
     pub(super) history_queries: Arc<Mutex<Vec<HistoryQuery>>>,
     /// Every message the mock minted, in id order, as `(reply_to, latest content)`.
     pub(super) messages: Arc<Mutex<MintedMessages>>,
-    next_response_id: Arc<AtomicU64>,
+    /// Ids a `DELETE` removed; `messages` keeps their last content.
+    pub(super) deleted: Arc<Mutex<std::collections::BTreeSet<u64>>>,
+    /// Every message write in arrival order, as `(method, message id, content)`; a delete
+    /// has no content. Final state hides a write a later one undid; this does not.
+    pub(super) writes: Arc<Mutex<Vec<(Method, u64, String)>>>,
+    pub(super) next_response_id: Arc<AtomicU64>,
 }
 
 impl DiscordMockState {
@@ -60,6 +65,8 @@ impl DiscordMockState {
             history: Arc::new(Mutex::new(Vec::new())),
             history_queries: Arc::new(Mutex::new(Vec::new())),
             messages: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            deleted: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+            writes: Arc::new(Mutex::new(Vec::new())),
             next_response_id: Arc::new(AtomicU64::new(FIRST_RESPONSE_MESSAGE_ID)),
         }
     }
@@ -290,6 +297,8 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
             .and_then(Value::as_str)
             .and_then(|id| id.parse().ok());
         let message = (reply_to, content.clone());
+        let write = (Method::POST, id, content.clone());
+        state.writes.lock().expect("mock writes").push(write);
         state
             .messages
             .lock()
@@ -327,6 +336,8 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
         let id = path.rsplit('/').next().and_then(|tail| tail.parse().ok());
         let id = id.unwrap_or(FIRST_RESPONSE_MESSAGE_ID);
         let edited = content.to_string();
+        let write = (Method::PATCH, id, edited.clone());
+        state.writes.lock().expect("mock writes").push(write);
         state
             .messages
             .lock()
@@ -349,6 +360,11 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
     if method == Method::DELETE
         && path.starts_with(&format!("/api/v10/channels/{CHANNEL_ID}/messages/"))
     {
+        if let Some(id) = path.rsplit('/').next().and_then(|tail| tail.parse().ok()) {
+            state.deleted.lock().expect("mock deletions").insert(id);
+            let write = (Method::DELETE, id, String::new());
+            state.writes.lock().expect("mock writes").push(write);
+        }
         return StatusCode::NO_CONTENT.into_response();
     }
     // `catch_up` resolves the bot identity here and skips every candidate whose
