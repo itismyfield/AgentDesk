@@ -37,6 +37,7 @@ pub enum HumanInputError {
     AuthorNotAllowed,
     RuntimeUnavailable(String),
     QueueRefused(String),
+    InvalidTarget(String),
 }
 
 /// Stricter than Discord intake auth: an explicit owner is required and
@@ -55,6 +56,7 @@ enum StartAttempt {
     Started(String),
     Busy,
     Unavailable(String),
+    InvalidTarget(String),
 }
 
 /// What holds the mailbox slot when a start was refused.
@@ -78,6 +80,7 @@ async fn deliver_with_ports<P: DeliveryPorts>(
     match ports.try_start().await {
         StartAttempt::Started(turn_id) => return Ok(HumanInputDelivery::Started { turn_id }),
         StartAttempt::Unavailable(error) => return Err(HumanInputError::RuntimeUnavailable(error)),
+        StartAttempt::InvalidTarget(error) => return Err(HumanInputError::InvalidTarget(error)),
         StartAttempt::Busy => {}
     }
     let reason = match ports.mailbox_holder().await {
@@ -89,6 +92,9 @@ async fn deliver_with_ports<P: DeliveryPorts>(
             StartAttempt::Started(turn_id) => return Ok(HumanInputDelivery::Started { turn_id }),
             StartAttempt::Unavailable(error) => {
                 return Err(HumanInputError::RuntimeUnavailable(error));
+            }
+            StartAttempt::InvalidTarget(error) => {
+                return Err(HumanInputError::InvalidTarget(error));
             }
             StartAttempt::Busy => "session_transition",
         },
@@ -132,6 +138,9 @@ impl DeliveryPorts for LivePorts {
         match result {
             Ok(outcome) => StartAttempt::Started(outcome.turn_id),
             Err(router::HeadlessTurnStartError::Conflict(_)) => StartAttempt::Busy,
+            Err(router::HeadlessTurnStartError::InvalidTarget(error)) => {
+                StartAttempt::InvalidTarget(error)
+            }
             Err(router::HeadlessTurnStartError::Internal(error)) => {
                 StartAttempt::Unavailable(error)
             }
@@ -319,6 +328,8 @@ mod tests {
             (ports(vec![StartAttempt::Busy, started()], Nothing), "started discord:7:1 enqueue=0"),
             (ports(vec![StartAttempt::Busy, StartAttempt::Busy], Nothing), "queued discord:7:900 session_transition enqueue=1"),
             (ports(vec![StartAttempt::Unavailable("no ctx".into())], Turn), "RuntimeUnavailable(\"no ctx\") enqueue=0"),
+            (ports(vec![StartAttempt::InvalidTarget("provider mismatch".into())], Turn), "InvalidTarget(\"provider mismatch\") enqueue=0"),
+            (ports(vec![StartAttempt::Busy, StartAttempt::InvalidTarget("provider mismatch".into())], Nothing), "InvalidTarget(\"provider mismatch\") enqueue=0"),
             (refused, "QueueRefused(\"LastItemDedup\") enqueue=1"),
         ];
         for (fake, expected) in cases {

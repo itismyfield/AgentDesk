@@ -150,6 +150,10 @@ fn delivery_response(
         Err(HumanInputError::AuthorNotAllowed) => {
             failure(StatusCode::FORBIDDEN, "author_not_allowed")
         }
+        Err(HumanInputError::InvalidTarget(detail)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"ok": false, "error": "invalid_target", "detail": detail})),
+        ),
         Err(HumanInputError::RuntimeUnavailable(detail)) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"ok": false, "error": "runtime_unavailable", "detail": detail})),
@@ -175,6 +179,18 @@ mod tests {
 
     use super::super::{AppState, domains};
     use crate::services::discord::health::HealthRegistry;
+
+    #[test]
+    fn invalid_turn_target_is_422() {
+        let (status, body) = super::delivery_response(
+            101,
+            Err(super::HumanInputError::InvalidTarget(
+                "provider mismatch".into(),
+            )),
+        );
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body.0["error"], "invalid_target");
+    }
 
     pub(super) fn router(
         pg_pool: Option<sqlx::PgPool>,
