@@ -88,6 +88,34 @@ impl AgentChannelBindings {
         }
     }
 
+    /// Explicit provider columns win over the legacy primary channel.
+    pub(crate) fn provider_for_channel(
+        &self,
+        matches: impl Fn(&str) -> bool,
+    ) -> Option<ProviderKind> {
+        let claude = self
+            .discord_channel_cc
+            .as_deref()
+            .is_some_and(|c| matches(c.trim()));
+        let codex = [
+            self.discord_channel_cdx.as_deref(),
+            self.discord_channel_alt.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|c| matches(c.trim()));
+        match (claude, codex) {
+            (true, false) => Some(ProviderKind::Claude),
+            (false, true) => Some(ProviderKind::Codex),
+            (true, true) => None,
+            (false, false) => self
+                .discord_channel_id
+                .as_deref()
+                .filter(|c| matches(c.trim()))
+                .and_then(|_| self.primary_provider_kind()),
+        }
+    }
+
     pub fn all_channels(&self) -> Vec<String> {
         let mut channels = Vec::new();
         for value in [
