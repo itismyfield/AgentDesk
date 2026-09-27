@@ -320,16 +320,21 @@ async fn start_agent_turn(
         .await
         .map_err(|error| anyhow!("load agent bindings for {agent_id}: {error}"))?
         .ok_or_else(|| anyhow!("agent {agent_id} not found"))?;
-    let provider = bindings
-        .resolved_primary_provider_kind()
-        .ok_or_else(|| anyhow!("agent {agent_id} primary provider is not configured"))?;
-    let primary_channel = bindings
-        .primary_channel()
-        .ok_or_else(|| anyhow!("agent {agent_id} primary channel is not configured"))?;
     let resolve_channel = |value: &str| {
         crate::services::dispatches::outbox_route::resolve_channel_alias_pub(value)
             .or_else(|| value.parse::<u64>().ok())
     };
+    let provider = message
+        .target_channel_id
+        .as_deref()
+        .and_then(|target| {
+            bindings.provider_for_channel(|bound| resolve_channel(bound) == resolve_channel(target))
+        })
+        .or_else(|| bindings.resolved_primary_provider_kind())
+        .ok_or_else(|| anyhow!("agent {agent_id} primary provider is not configured"))?;
+    let primary_channel = bindings
+        .channel_for_provider(Some(provider.as_str()))
+        .ok_or_else(|| anyhow!("agent {agent_id} primary channel is not configured"))?;
     let owner_channel_num = resolve_channel(&primary_channel)
         .ok_or_else(|| anyhow!("agent {agent_id} primary channel is invalid: {primary_channel}"))?;
     let turn_channel_num = match message.target_channel_id.as_deref() {

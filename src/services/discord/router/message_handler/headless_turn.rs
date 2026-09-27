@@ -94,7 +94,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
         .and_then(|binding| binding.provider.clone())
         .unwrap_or(settings_provider);
     if provider != shared.provider {
-        return Err(HeadlessTurnStartError::Internal(format!(
+        return Err(HeadlessTurnStartError::InvalidTarget(format!(
             "headless provider mismatch: mailbox={} execution={}",
             shared.provider.as_str(),
             provider.as_str()

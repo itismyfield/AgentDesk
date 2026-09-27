@@ -150,6 +150,10 @@ fn delivery_response(
         Err(HumanInputError::AuthorNotAllowed) => {
             failure(StatusCode::FORBIDDEN, "author_not_allowed")
         }
+        Err(HumanInputError::InvalidTarget(detail)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"ok": false, "error": "invalid_target", "detail": detail})),
+        ),
         Err(HumanInputError::RuntimeUnavailable(detail)) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"ok": false, "error": "runtime_unavailable", "detail": detail})),
