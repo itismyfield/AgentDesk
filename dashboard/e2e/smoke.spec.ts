@@ -14,11 +14,10 @@ const ROUTES = [
 
 // PR #1258: home IA reshuffle (#1245) — drop m_streak/office/roster/activity,
 // move kanban above quality+missions, add m_rate_limit placeholder. Smoke
-// expectations follow the new HOME_DEFAULT_WIDGETS in src/app/AppShell.tsx.
+// expectations follow HOME_DEFAULT_WIDGETS in src/app/HomeOverviewConfig.ts.
 const DEFAULT_HOME_WIDGET_ORDER = [
   "m_tokens",
   "m_cost",
-  "m_progress",
   "m_rate_limit",
   "kanban",
   "routines",
@@ -28,7 +27,6 @@ const DEFAULT_HOME_WIDGET_ORDER = [
 const DEFAULT_HOME_PRIMARY_WIDGET_ORDER = [
   "m_tokens",
   "m_cost",
-  "m_progress",
   "m_rate_limit",
   "kanban",
   "routines",
@@ -39,7 +37,6 @@ const CUSTOM_HOME_WIDGET_ORDER = [
   "routines",
   "kanban",
   "m_rate_limit",
-  "m_progress",
   "m_cost",
   "m_tokens",
 ];
@@ -47,7 +44,6 @@ const CUSTOM_HOME_PRIMARY_WIDGET_ORDER = [
   "routines",
   "kanban",
   "m_rate_limit",
-  "m_progress",
   "m_cost",
   "m_tokens",
 ];
@@ -55,7 +51,6 @@ const DRAGGED_HOME_WIDGET_ORDER = [
   "kanban",
   "m_tokens",
   "m_cost",
-  "m_progress",
   "m_rate_limit",
   "routines",
   "quality",
@@ -931,6 +926,22 @@ const MOCK_SETTINGS_PIPELINE_STAGES = [
   },
 ];
 
+const MOCK_SETTINGS_CONFIG_ENTRIES = [
+  {
+    key: "max_review_rounds",
+    value: "3",
+    default: "3",
+    baseline: "3",
+    baseline_source: "hardcoded",
+    override_active: false,
+    editable: true,
+    restart_behavior: "persist-live-override",
+    category: "review",
+    label_ko: "최대 리뷰 라운드",
+    label_en: "Max Review Rounds",
+  },
+];
+
 async function mockMeetingsHubApis(page: Page) {
   await page.route(/\/api\/round-table-meetings\/channels$/, async (route) => {
     await route.fulfill({
@@ -1323,6 +1334,22 @@ async function mockDashboardBootstrap(page: Page) {
     });
   });
 
+  await page.route(/\/api\/routines\/[^/]+\/runs(?:\?.*)?$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ runs: [] }),
+    });
+  });
+
+  await page.route(/\/api\/agents\/quality\/ranking(?:\?.*)?$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ generatedAt: "2026-05-15T01:00:00.000Z", agents: [] }),
+    });
+  });
+
   await page.route(/\/api\/round-table-meetings\/channels$/, async (route) => {
     await route.fulfill({
       status: 200,
@@ -1365,6 +1392,14 @@ async function mockDashboardBootstrap(page: Page) {
 }
 
 async function mockSettingsPipelineEditorApis(page: Page) {
+  await page.route(/\/api\/settings\/config$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ entries: MOCK_SETTINGS_CONFIG_ENTRIES }),
+    });
+  });
+
   await page.route(/\/api\/github-repos$/, async (route) => {
     await route.fulfill({
       status: 200,
@@ -1470,6 +1505,14 @@ async function mockSettingsVoiceConfigApi(page: Page) {
 }
 
 async function mockSettingsPipelineEditorApisWithRefreshDelay(page: Page, delayMs = 700) {
+  await page.route(/\/api\/settings\/config$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ entries: MOCK_SETTINGS_CONFIG_ENTRIES }),
+    });
+  });
+
   await page.route(/\/api\/github-repos$/, async (route) => {
     await route.fulfill({
       status: 200,
@@ -2421,7 +2464,7 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("ops-signal-outbox_age")).toBeVisible();
     await expect(page.getByTestId("ops-signal-pending_queue")).toBeVisible();
     await expect(page.getByTestId("ops-signal-active_watchers")).toBeVisible();
-    await expect(page.getByTestId("ops-signal-recovery_seconds")).toBeVisible();
+    await expect(page.getByTitle("recovery_seconds: 4m 0s")).toBeVisible();
 
     await expect(page.getByTestId("ops-bottlenecks")).toBeVisible();
     await expect(page.getByTestId("ops-bottleneck-outbox_age")).toBeVisible();
