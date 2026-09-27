@@ -188,6 +188,7 @@ async fn report(root: ShadowRoot, from: DateTime<Utc>, to: DateTime<Utc>) -> Res
         allowlist: &allowlist,
         from,
         to,
+        reported_at: now,
     });
     let snapshot_record = ShadowRecord::Population {
         snapshot: snapshot.clone(),

@@ -17,6 +17,8 @@ pub const MIN_TOTAL_TURNS: usize = 30;
 pub const MIN_PROFILE_TURNS: usize = 10;
 pub const MIN_TOOL_TURNS: usize = 3;
 pub const MIN_SPLIT_TURNS: usize = 1;
+/// The fixed measurement window; a longer one would admit turns the design does not count.
+pub const WINDOW_MINUTES: i64 = 120;
 /// Criteria the records cannot show; the coordinator records them next to the verdict.
 pub const EXTERNAL_CHECKS: [&str; 2] = ["write_zero_audit", "resource_limits"];
 
@@ -116,6 +118,7 @@ pub struct ReportInput<'a> {
     pub allowlist: &'a [u64],
     pub from: DateTime<Utc>,
     pub to: DateTime<Utc>,
+    pub reported_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Serialize)]
@@ -231,6 +234,15 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
 
     // Version mix and in-window totals; timeless rows take the latest earlier timestamp.
     let late = t1 + Duration::seconds(2 * MATCH_WINDOW.as_secs() as i64);
+    if t1 - t0 > Duration::minutes(WINDOW_MINUTES) {
+        failures.push(format!("window is longer than {WINDOW_MINUTES} minutes"));
+    }
+    // Units and Legacy rows near t1 are judged only after two match windows.
+    if input.reported_at < late {
+        failures.push(format!(
+            "reported before {late}, when the last diffs are judged"
+        ));
+    }
     let (mut header, mut clock, mut stale) = (None, None, 0);
     let mut metrics = MetricsSnapshot::default();
     let mut classes: HashMap<&UnitKey, DiffClass> = HashMap::new();
@@ -568,7 +580,17 @@ mod tests {
         manifest: &[SyntheticEntry],
         population: &PopulationSnapshot,
     ) -> ReportOutcome {
-        let (allowlist, from, to) = (&[7][..], t(-1), t(120));
+        judge_at(records, manifest, population, t(120), t(130))
+    }
+
+    fn judge_at(
+        records: &[ShadowRecord],
+        manifest: &[SyntheticEntry],
+        population: &PopulationSnapshot,
+        to: DateTime<Utc>,
+        reported_at: DateTime<Utc>,
+    ) -> ReportOutcome {
+        let (allowlist, from) = (&[7][..], t(-1));
         evaluate(&ReportInput {
             records,
             manifest,
@@ -576,6 +598,7 @@ mod tests {
             allowlist,
             from,
             to,
+            reported_at,
         })
     }
 
@@ -623,6 +646,13 @@ mod tests {
         let mut stale = passing();
         stale.extend([header(IDENTITY_VERSION - 1), turn(80, 900, &[], Vec::new())]);
         assert!(judge(&stale, &[], &claude()).failures[0].starts_with("stale samples"));
+        let long = judge_at(&passing(), &[], &claude(), t(121), t(131)).failures;
+        assert!(long.iter().any(|f| f.contains("longer than")), "{long:?}");
+        let early = judge_at(&passing(), &[], &claude(), t(120), t(129)).failures;
+        assert!(
+            early.iter().any(|f| f.starts_with("reported before")),
+            "{early:?}"
+        );
     }
 
     #[test]
