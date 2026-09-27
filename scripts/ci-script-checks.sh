@@ -608,11 +608,9 @@ fi
 
 if run_check contracts "Build token serialization tests (#5663)"; then
 "$PYTHON" -m unittest tests.test_package_release
-# scripts/build_token.py serializes the two release scripts' cargo sites; the
-# Makefile target and install.sh's source install stay outside it by design.
-# It is Python, so neither shellcheck nor cargo covers it; this unittest run is
-# its ONLY CI gate, and it scans every tracked *.sh and Makefile for release
-# cargo sites, so a dropped wiring or a new unserialized one cannot pass silently.
+# Observe executed Cargo calls; the older scanner remains a repository inventory.
+"$PYTHON" scripts/check_release_token_wiring.py
+"$PYTHON" -m unittest tests.test_release_token_wiring
 "$PYTHON" -m unittest tests.test_build_token_serialization_5663
 fi
 

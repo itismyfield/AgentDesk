@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
+use tracing::Instrument;
 
 use super::session_canonical_identity::HookCanonicalIdentity;
 use super::{RoleBinding, SharedData};
@@ -22,6 +23,7 @@ pub(super) async fn post_status(
     canonical: Option<HookCanonicalIdentity<'_>>,
 ) {
     let status = crate::db::session_status::normalize_incoming_session_status(Some(status));
+    let channel_id_string = channel_id.map(|id| id.get().to_string());
     let body = crate::services::dispatched_sessions::HookSessionBody {
         session_key: session_key.to_string(),
         instance_id: None,
@@ -39,17 +41,30 @@ pub(super) async fn post_status(
         thread_channel_id: thread_channel_id.map(|id| id.to_string()),
         claude_session_id: None,
         session_id: None,
-        channel_id: channel_id.map(|id| id.get().to_string()),
+        channel_id: channel_id_string.clone(),
         identity_kind: canonical.map(|identity| identity.identity_kind.to_string()),
         discord_token_hash: canonical.map(|identity| identity.discord_token_hash.to_string()),
         turn_start_nonce: None,
         dispatched_origin: None,
     };
 
-    if let Err(err) = super::internal_api::hook_session(body).await {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!("  [{ts}] ⚠ ADK session POST failed: {err}");
+    // The whole block (including the failure `warn!`) is instrumented, not just
+    // the request future, so the failure log also carries the span's fields.
+    let span = crate::logging::session_span(
+        "session_status_hook_post",
+        dispatch_id,
+        agent_id,
+        channel_id_string.map(std::borrow::Cow::Owned),
+        Some(session_key),
+    );
+    async {
+        if let Err(err) = super::internal_api::hook_session(body).await {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!("  [{ts}] ⚠ ADK session POST failed: {err}");
+        }
     }
+    .instrument(span)
+    .await;
 }
 
 fn clean_nonempty(value: Option<&str>) -> Option<&str> {
@@ -167,4 +182,104 @@ pub(super) async fn post_legacy(
         None,
     )
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{self, Write};
+    use std::sync::Mutex;
+
+    #[derive(Clone)]
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn post_status_span_carries_channel_and_session_identity() {
+        const CHILD: &str = "ADK_SESSION_STATUS_HOOK_SPAN_CHILD";
+        const TEST: &str = "services::discord::session_status_hook::tests::post_status_span_carries_channel_and_session_identity";
+        if std::env::var_os(CHILD).is_none() {
+            // internal_api's context is process-global; isolate in a fresh process so
+            // this never races a sibling test's context or reaches a live API.
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+            return;
+        }
+
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer = LogWriter(logs.clone());
+        // Same directive dcserver ships with, so this proves the span survives
+        // the production filter, not just a debug-level test filter.
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_env_filter(tracing_subscriber::EnvFilter::new(
+                crate::logging::DEFAULT_TRACING_DIRECTIVE,
+            ))
+            .with_writer(move || writer.clone())
+            .finish();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        crate::logging::test_capture::pin_callsite_interest();
+        tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(post_status(
+                "session-boundary-4221",
+                None,
+                None,
+                "working",
+                &ProviderKind::Claude,
+                None,
+                None,
+                None,
+                Some("dispatch-boundary"),
+                None,
+                Some(serenity::ChannelId::new(4_221_000)),
+                Some("agent-boundary"),
+                None,
+            ));
+        });
+
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        // No context installed in this fresh child process, so `load_context()`
+        // errs and this failure line is reached deterministically, no socket.
+        let line = logs
+            .lines()
+            .find(|line| line.contains("ADK session POST failed"))
+            .expect("failure log line at the production filter level");
+        assert!(line.contains("channel_id=Some(\"4221000\")"), "logs={line}");
+        assert!(
+            line.contains("session_key=Some(\"session-boundary-4221\")"),
+            "logs={line}"
+        );
+        assert!(
+            line.contains("dispatch_id=Some(\"dispatch-boundary\")"),
+            "logs={line}"
+        );
+        assert!(
+            line.contains("agent_id=Some(\"agent-boundary\")"),
+            "logs={line}"
+        );
+    }
 }
