@@ -1,6 +1,5 @@
-//! Voice conductor: one spoken request fans out to agent turns, the results
-//! are gathered, and a short spoken summary is written. Text in, text out, so
-//! any audio front end (browser, Discord voice) can sit in front of it.
+//! Voice conductor: one request fans out to agent turns and returns a short spoken summary.
+//! Text in, text out, so any audio front end (browser, Discord voice) can sit in front.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -305,9 +304,8 @@ fn publish(events: &crate::eventbus::BroadcastTx, job: ConductorJob) {
     crate::eventbus::emit_event(events, JOB_EVENT, payload);
 }
 
-/// Planning and summarizing read untrusted text (the request, agent output), so
-/// they run only on Claude's simple path, which disables every tool
-/// (`--tools ""`). The other providers' simple paths can run tools.
+/// Planning and summarizing read untrusted text, so they run only on Claude's simple path
+/// with every tool disabled (`--tools ""`); other providers' simple paths can run tools.
 async fn run_llm(prompt: String, stage: &str) -> Result<String, String> {
     crate::services::provider_exec::execute_simple_with_timeout(
         ProviderKind::Claude,

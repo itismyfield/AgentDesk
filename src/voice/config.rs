@@ -196,10 +196,8 @@ impl Default for VoiceForegroundConfig {
     }
 }
 
-/// The voice conductor fans one request out to agents and speaks a summary
-/// once their turns finish (or `max_wait_secs` passes). Its own planning and
-/// summary calls always run on the tool-less Claude path, so there is no
-/// provider setting here.
+/// Voice conductor settings: summary after turns finish or `max_wait_secs` passes.
+/// Planning and summary always run on the tool-less Claude path, so there is no provider setting.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub(crate) struct VoiceConductorConfig {

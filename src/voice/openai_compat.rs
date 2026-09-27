@@ -1,7 +1,5 @@
-//! Speech-to-text and text-to-speech over the OpenAI audio API shape
-//! (`/audio/transcriptions`, `/audio/speech`). Works with OpenAI itself and
-//! with local servers that speak the same API, so swapping a model is a config
-//! change.
+//! STT/TTS over the OpenAI audio API shape (`/audio/transcriptions`, `/audio/speech`).
+//! Works with OpenAI and compatible local servers, so swapping a model is a config change.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
