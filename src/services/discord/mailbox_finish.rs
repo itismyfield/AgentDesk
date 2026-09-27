@@ -171,6 +171,46 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches(
     result
 }
 
+/// Releases only the admitted token when setup ends before bridge guards exist.
+/// No durable-row cleanup or terminal completion is authorized by this unwind.
+pub(in crate::services::discord) async fn unwind_unstarted_turn(
+    shared: &std::sync::Arc<SharedData>,
+    channel_id: ChannelId,
+    cancel: &std::sync::Arc<crate::services::provider::CancelToken>,
+) {
+    let snapshot = super::mailbox_snapshot(shared, channel_id).await;
+    let Some(message_id) = snapshot.active_user_message_id else {
+        return;
+    };
+    let finish =
+        mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
+            shared,
+            &shared.provider,
+            channel_id,
+            message_id,
+            cancel.turn_nonce().map(str::to_owned),
+            std::time::Instant::now(),
+            Some(cancel.clone()),
+        )
+        .await;
+    let Some(removed) = finish.removed_token else {
+        return;
+    };
+    removed.mark_completion_cleanup();
+    removed
+        .cancelled
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    super::saturating_decrement_global_active(shared);
+    if finish.has_pending {
+        super::schedule_deferred_idle_queue_kickoff(
+            shared.clone(),
+            shared.provider.clone(),
+            channel_id,
+            "pre_bridge_unwind",
+        );
+    }
+}
+
 async fn mailbox_finish_turn_if_matches_episode_started_before_inner(
     shared: &SharedData,
     provider: &ProviderKind,

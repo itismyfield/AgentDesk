@@ -361,12 +361,8 @@ pub(super) use crate::services::observability::LIVE_TURN_PROVEN_BY_PROGRESS_INVA
 /// eighth, `cancel_token`, is this owner's own token, so it is the strongest
 /// candidate on the whole surface — and it is refused on a stronger ground than
 /// attribution: `cancelled` records that somebody ASKED for a stop, not that a
-/// relay finished, and `is_completion_cleanup()` is set only inside
-/// `do_finalize`'s `removed_token.is_some()` arm — the arm that REMOVES the
-/// active turn. While there is still a mailbox here to reclaim, that bit is
-/// false by construction of the wedge, and the watcher context passes
-/// `allow_completion_cleanup = false` besides. Reading it would be reading a
-/// constant.
+/// relay finished. Completion cleanup follows exact mailbox release, including
+/// a pre-guard abort, so it cannot witness progress for an active mailbox.
 fn empirical_reclaim_witness(
     owner_kind: ReclaimableMailboxOwner,
     reason: StaleSyntheticReclaimReason,

@@ -11,6 +11,7 @@ pub(crate) mod confirmation;
 pub(crate) mod decision;
 pub(crate) mod delivery;
 pub(in crate::services::discord) mod delivery_frontier_probe;
+pub(in crate::services::discord) mod delivery_obligation;
 pub(in crate::services::discord) mod delivery_record; // #3089 B0
 pub(crate) mod manual_delivery;
 pub(crate) mod message;
