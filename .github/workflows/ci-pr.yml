@@ -1687,7 +1687,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
-          components: clippy, rustc-dev  # rustc-dev: tools/modmap-driver for the H2 module map step
+          components: clippy, rustc-dev, llvm-tools  # tools/modmap-driver links rustc_private; Linux needs libLLVM from llvm-tools
 
       - name: Setup sccache for lib inventory
         uses: mozilla-actions/sccache-action@v0.0.10

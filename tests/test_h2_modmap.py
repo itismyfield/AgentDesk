@@ -114,7 +114,9 @@ class CiWiring(unittest.TestCase):
         steps = yaml.safe_load((REPO_ROOT / ".github/workflows/ci-pr.yml").read_text(encoding="utf-8"))["jobs"]["scripts"]["steps"]
         toolchain = next(step for step in steps if step.get("uses", "").startswith("dtolnay/rust-toolchain"))
         step = next(step for step in steps if step.get("name") == "H2 module map (linux, inert)")
-        self.assertIn("rustc-dev", [part.strip() for part in toolchain["with"]["components"].split(",")])
+        components = [part.strip() for part in toolchain["with"]["components"].split(",")]
+        self.assertIn("rustc-dev", components)
+        self.assertIn("llvm-tools", components)
         self.assertEqual((step.get("if"), step.get("env"), step["run"]),
                          (None, {"RUSTC_WRAPPER": ""}, "python3 scripts/ci/h2_modmap.py --inert --canary"))
         self.assertLess(steps.index(toolchain), steps.index(step))
