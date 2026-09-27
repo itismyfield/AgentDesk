@@ -836,12 +836,14 @@ src/
 │   │   │   │   │   └── whole_proof.rs
 │   │   │   │   ├── codec_tests.rs
 │   │   │   │   ├── fence.rs
+│   │   │   │   ├── load.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── protocol.rs
 │   │   │   │   ├── reader.rs
 │   │   │   │   ├── reader_tests.rs
 │   │   │   │   ├── schema.rs
 │   │   │   │   ├── state.rs
+│   │   │   │   ├── tests.rs
 │   │   │   │   ├── validation.rs
 │   │   │   │   └── validation_tests.rs
 │   │   │   ├── manual_delivery/

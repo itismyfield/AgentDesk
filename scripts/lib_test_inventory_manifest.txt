@@ -3748,6 +3748,12 @@ services::discord::outbound::delivery_obligation::reader_tests::document_rewrite
 services::discord::outbound::delivery_obligation::state::proof_tests::whole_proof_binds_complete_chunks_to_the_durable_attempt
 services::discord::outbound::delivery_obligation::state::proof_tests::whole_proof_rejects_empty_duplicate_partial_and_unproven_cleanup
 services::discord::outbound::delivery_obligation::state::proof_tests::whole_proof_rejects_unbound_epoch_attempt_revision_and_invalid_plans
+services::discord::outbound::delivery_obligation::tests::fence_classification_never_repairs_or_uses_revision_as_authority
+services::discord::outbound::delivery_obligation::tests::legacy_loading_preserves_absence_and_refuses_partial_binding
+services::discord::outbound::delivery_obligation::tests::malformed_and_unreadable_records_never_become_empty_ledgers
+services::discord::outbound::delivery_obligation::tests::publication_bundle_rejects_stale_or_incomplete_snapshots
+services::discord::outbound::delivery_obligation::tests::unknown_schema_protocol_and_variants_fail_closed
+services::discord::outbound::delivery_obligation::tests::unknown_top_level_fields_survive_loading_and_document_rewrite
 services::discord::outbound::delivery_obligation::validation_tests::identity_states_use_one_observed_token_without_binding_legacy
 services::discord::outbound::delivery_obligation::validation_tests::publication_requires_complete_token_and_unchanged_captured_bundle
 services::discord::outbound::delivery_record::relay_state_contract_refs::contract_symbols_exist
