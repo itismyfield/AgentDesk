@@ -5,7 +5,7 @@
 //!
 //! ## Pipeline-Driven Transitions (#106 P5)
 //!
-//! All transition rules, gates, hooks, clocks, and timeouts are defined in
+//! All transition rules, gates, hooks, and clocks are defined in
 //! `policies/default-pipeline.yaml`. No hardcoded state names exist in this module.
 //! See the YAML file for the complete state machine specification.
 //!

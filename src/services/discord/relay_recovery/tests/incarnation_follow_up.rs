@@ -11,7 +11,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 #[derive(Clone, Copy, Debug)]
-enum FollowUp {
+pub(in crate::services::discord) enum FollowUp {
     FinishOwned,
     FinishCancelled,
     Finish,
@@ -22,7 +22,7 @@ enum FollowUp {
 }
 
 impl FollowUp {
-    const ALL: [Self; 7] = [
+    pub(in crate::services::discord) const ALL: [Self; 7] = [
         Self::FinishOwned,
         Self::FinishCancelled,
         Self::Finish,
@@ -40,7 +40,7 @@ impl FollowUp {
         )
     }
 
-    fn run<'a>(
+    pub(in crate::services::discord) fn run<'a>(
         self,
         shared: &'a SharedData,
         provider: &'a ProviderKind,
