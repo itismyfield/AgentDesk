@@ -187,6 +187,72 @@ fn hot_kill_switch_bypasses_timed_and_manual_holds_without_touching_state() {
 }
 
 #[test]
+fn holder_resumes_handback_after_disable_skips_pending_settlement() {
+    let _environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    for prior_empty in [false, true] {
+        let fixture = Fixture::new();
+        let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            fixture.root.path(),
+        );
+        let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_CONFIG",
+            &fixture.root.path().join("config.yaml"),
+        );
+        let new_owner = || {
+            let now = fixture.now.clone();
+            GatewayHandbackBreaker::with_sources(
+                "claude",
+                "discord_a",
+                Some(fixture.root.path().into()),
+                move || now.load(SeqCst),
+                || {
+                    crate::config::load_graceful()
+                        .cluster
+                        .gateway_handback_breaker
+                },
+            )
+        };
+        let mut owner = new_owner();
+        if prior_empty {
+            empty(&mut owner);
+        }
+        assert!(owner.record_yield());
+        fixture.configure(false, 2);
+        owner = new_owner();
+        owner.observe(Ok(true));
+        fixture.advance(15);
+        fixture.configure(true, 2);
+        let logs = capture(|| {
+            assert!(!owner.suppressed());
+            assert!(
+                owner.record_yield(),
+                "holder must recover the skipped settlement"
+            );
+            owner.observe(Ok(false));
+            for _ in 0..3 {
+                assert!(!owner.suppressed());
+            }
+        });
+        assert_eq!(
+            logs.matches("gateway_handback_breaker_state_error").count(),
+            1
+        );
+        assert!(!logs.contains("gateway_handback_suppressed"));
+        empty(&mut owner);
+        assert_eq!(
+            owner.suppressed(),
+            prior_empty,
+            "preserve earlier empty handbacks without counting the skipped settlement"
+        );
+        if !prior_empty {
+            empty(&mut owner);
+            assert!(owner.suppressed());
+        }
+    }
+}
+
+#[test]
 fn pending_survives_disable_errors_and_restarts_and_is_settled_only_once() {
     let fixture = Fixture::new();
     let mut owner = fixture.owner("a");
@@ -194,9 +260,7 @@ fn pending_survives_disable_errors_and_restarts_and_is_settled_only_once() {
     fixture.configure(false, 2);
     owner.observe(Ok(true));
     fixture.configure(true, 2);
-    assert!(!owner.record_yield());
     owner.observe(Err(()));
-    assert!(!owner.record_yield());
     owner = fixture.owner("a");
     owner.observe(Ok(true));
     owner = fixture.owner("a");
