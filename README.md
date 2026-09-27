@@ -195,7 +195,6 @@ Business logic lives in JavaScript files under `policies/`, hot-reloaded without
 | `kanban-rules.js` | Core lifecycle: dispatch completion, PM decision gates |
 | `review-automation.js` | Counter-model review dispatch, verdict processing, review state sync |
 | `auto-queue.js` | Batch-phased card queuing, phase gate dispatch, slot management |
-| `phase_gate.js` | Phase gate verification before opening the next batch |
 | `ci-recovery.js` | CI failure detection, auto-rerun, and recovery card creation |
 | `timeouts.js` (+ `timeouts/` modules) | Stale card detection, deadlock recovery, idle session kill, branch guard, dispatch maintenance |
 | `triage-rules.js` | GitHub issue auto-classification and agent assignment |
