@@ -3,7 +3,7 @@
 use super::super::{
     ApiRouter, AppState, agents, agents_crud, cluster, dispatched_sessions, dispatches, dm_reply,
     health_api, hooks, idle_recap, monitoring, protected_api_domain, provider_cli_api, queue_api,
-    termination_events, turn_lease, voice_conductor,
+    termination_events, turn_lease, voice_audio, voice_conductor,
 };
 use axum::{
     Router,
@@ -138,6 +138,8 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/agents/{id}/transcripts", get(agents::agent_transcripts))
             .route("/agents/{id}/timeline", get(agents::agent_timeline))
             .route("/sessions", get(agents_crud::list_sessions))
+            .route("/voice/transcribe", post(voice_audio::transcribe))
+            .route("/voice/speak", post(voice_audio::speak))
             .route("/voice/conductor/say", post(voice_conductor::say))
             .route("/voice/conductor/jobs", get(voice_conductor::list_jobs))
             .route("/voice/conductor/jobs/{id}", get(voice_conductor::get_job))

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::voice::barge_in::BargeInSensitivity;
+use crate::voice::openai_compat::OpenAiCompatEndpoint;
 use crate::voice::stt_streaming::{
     DEFAULT_STREAM_KEEP_MS, DEFAULT_STREAM_LENGTH_MS, DEFAULT_STREAM_STEP_MS,
 };
@@ -230,6 +231,8 @@ impl Default for VoiceSpokenResultConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub(crate) struct VoiceSttConfig {
+    pub provider: VoiceSttProvider,
+    pub openai_compatible: OpenAiCompatEndpoint,
     pub mode: VoiceSttMode,
     pub ffmpeg_command: String,
     pub whisper_command: String,
@@ -241,6 +244,8 @@ pub(crate) struct VoiceSttConfig {
 impl Default for VoiceSttConfig {
     fn default() -> Self {
         Self {
+            provider: VoiceSttProvider::WhisperCli,
+            openai_compatible: OpenAiCompatEndpoint::default(),
             mode: VoiceSttMode::File,
             ffmpeg_command: DEFAULT_STT_FFMPEG_COMMAND.to_string(),
             whisper_command: DEFAULT_STT_WHISPER_COMMAND.to_string(),
@@ -249,6 +254,14 @@ impl Default for VoiceSttConfig {
             stream: VoiceSttStreamConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum VoiceSttProvider {
+    #[default]
+    WhisperCli,
+    OpenaiCompatible,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -283,6 +296,7 @@ pub(crate) struct VoiceTtsConfig {
     pub backend: VoiceTtsBackendKind,
     pub progress_cache_dir: PathBuf,
     pub edge: VoiceEdgeTtsConfig,
+    pub openai_compatible: VoiceOpenAiTtsConfig,
 }
 
 impl Default for VoiceTtsConfig {
@@ -291,6 +305,7 @@ impl Default for VoiceTtsConfig {
             backend: VoiceTtsBackendKind::Edge,
             progress_cache_dir: PathBuf::from(DEFAULT_PROGRESS_TTS_CACHE_DIR),
             edge: VoiceEdgeTtsConfig::default(),
+            openai_compatible: VoiceOpenAiTtsConfig::default(),
         }
     }
 }
@@ -300,6 +315,15 @@ impl Default for VoiceTtsConfig {
 pub(crate) enum VoiceTtsBackendKind {
     #[default]
     Edge,
+    OpenaiCompatible,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct VoiceOpenAiTtsConfig {
+    #[serde(flatten)]
+    pub endpoint: OpenAiCompatEndpoint,
+    pub voice: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

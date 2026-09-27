@@ -64,13 +64,14 @@ pub(crate) async fn say(
         }
     };
 
-    let job = voice_conductor::say(&pool, &state.config.voice, text, start_turn)
+    let config = super::voice_config::live_voice_config(&state.config.voice);
+    let job = voice_conductor::say(&pool, &config, text, start_turn)
         .await
         .map_err(AppError::internal)?;
     if job.finished_at.is_none() {
         tokio::spawn(voice_conductor::gather(
             pool,
-            state.config.voice.clone(),
+            config,
             job.id.clone(),
             state.broadcast_tx.clone(),
         ));

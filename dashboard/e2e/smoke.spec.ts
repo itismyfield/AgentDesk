@@ -1435,6 +1435,14 @@ async function mockSettingsVoiceConfigApi(page: Page) {
           active_agent_ttl_seconds: 180,
           default_sensitivity_mode: "normal",
         },
+        models: {
+          stt_provider: "whisper-cli",
+          stt: { base_url: "", model: "", api_key_env: "" },
+          language: "ko",
+          tts_backend: "edge",
+          tts: { base_url: "", model: "", api_key_env: "", voice: "" },
+          edge_voice: "ko-KR-SunHiNeural",
+        },
         agents: [
           {
             id: "codex",

@@ -657,6 +657,23 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         ),
         ep(
             "POST",
+            "/api/voice/transcribe",
+            "agents",
+            "Transcribe one recorded utterance (base64 audio from the browser) with the STT provider selected in voice config.",
+        )
+        .with_params([
+            ("audio_base64", body_param("string", true, "Base64-encoded audio")),
+            ("mime", body_param("string", false, "Recorder MIME type, e.g. audio/webm")),
+        ]),
+        ep(
+            "POST",
+            "/api/voice/speak",
+            "agents",
+            "Synthesize text with the TTS backend selected in voice config and return base64 mp3.",
+        )
+        .with_params([("text", body_param("string", true, "Text to speak"))]),
+        ep(
+            "POST",
             "/api/voice/conductor/say",
             "agents",
             "Plan a spoken request, start a headless turn on each chosen agent, and return the job. Results are gathered in the background and a spoken summary is added when every turn finishes; each change is broadcast as a voice_conductor_job event.",
