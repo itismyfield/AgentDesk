@@ -6,7 +6,7 @@
 
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
@@ -46,14 +46,21 @@ impl SmokeDatabase {
                 Ok("1"),
                 "PG required but POSTGRES_TEST_DATABASE_URL_BASE unset"
             );
+            // Straight to stderr, which libtest does not capture, so the skip
+            // shows in the log and as a CI annotation rather than as a quiet pass.
+            let _ = writeln!(
+                std::io::stderr(),
+                "\n::warning title=e2e smoke skipped::POSTGRES_TEST_DATABASE_URL_BASE is unset; the smoke tests need PostgreSQL and did not start a server"
+            );
             return None;
         };
+        let base = url::Url::parse(&base).expect("POSTGRES_TEST_DATABASE_URL_BASE is not a URL");
         let admin_db =
             std::env::var("POSTGRES_TEST_ADMIN_DB").unwrap_or_else(|_| "postgres".to_string());
         let name = format!("agentdesk_e2e_smoke_{}", uuid::Uuid::new_v4().simple());
         let database = Self {
-            admin_url: format!("{base}/{admin_db}"),
-            url: format!("{base}/{name}"),
+            admin_url: fixture_database_url(&base, &admin_db),
+            url: fixture_database_url(&base, &name),
             name,
         };
         database
@@ -87,6 +94,43 @@ impl SmokeDatabase {
         })
         .join()
         .expect("admin statement thread panicked")
+    }
+}
+
+/// `base` pointed at `database`. Like the lib fixtures it replaces the path
+/// rather than appending to it, so a base that names a database or carries a
+/// query still works, and it drops a `dbname` query pair, which sqlx reads
+/// after the path. sqlx's own parser confirms the result.
+fn fixture_database_url(base: &url::Url, database: &str) -> String {
+    let mut url = base.clone();
+    url.set_path(&format!("/{database}"));
+    let query: Vec<(String, String)> = base
+        .query_pairs()
+        .filter(|(key, _)| key != "dbname")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.set_query(None);
+    if !query.is_empty() {
+        url.query_pairs_mut().extend_pairs(query);
+    }
+    let options: sqlx::postgres::PgConnectOptions = url
+        .as_str()
+        .parse()
+        .expect("fixture database URL does not parse");
+    assert_eq!(options.get_database(), Some(database));
+    url.into()
+}
+
+#[test]
+fn fixture_database_url_targets_the_named_database() {
+    for base in [
+        "postgresql://postgres:postgres@127.0.0.1:5432",
+        "postgresql://postgres:postgres@127.0.0.1:5432/postgres?application_name=ci",
+        "postgresql://postgres:postgres@127.0.0.1:5432/?dbname=postgres&sslmode=disable",
+    ] {
+        let url = fixture_database_url(&url::Url::parse(base).expect("base parses"), "smoke_db");
+        assert!(url.contains("/smoke_db"), "{base} -> {url}");
+        assert!(!url.contains("dbname"), "{base} -> {url}");
     }
 }
 

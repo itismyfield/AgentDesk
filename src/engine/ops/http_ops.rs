@@ -789,7 +789,7 @@ mod tests {
     /// before `127.0.0.1`; the client must try every resolved address, not
     /// just the first. The first address below is a closed port (instant
     /// ECONNREFUSED on unix; Windows retries the refused SYN for about two
-    /// seconds, so the deadline leaves room for that); reverting
+    /// seconds, inside the production budget used as the deadline); reverting
     /// `connect_first_reachable` to first-only makes this fail its own assert.
     #[test]
     fn connect_first_reachable_falls_through_to_second_address() {
@@ -802,12 +802,29 @@ mod tests {
             drop(l);
             a
         };
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + HTTP_POST_DEFAULT_TIMEOUT;
         let stream = connect_first_reachable(&[closed, good], deadline);
         assert!(
             stream.is_ok(),
             "second resolved address must be attempted, got {:?}",
             stream.err()
+        );
+    }
+
+    /// MUTATION GUARD (total deadline). Once the deadline has passed no
+    /// address is tried, even a reachable one, so the list walk can never
+    /// outlast the caller's budget.
+    #[test]
+    fn connect_first_reachable_stops_at_the_deadline() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind reachable server");
+        let good = listener.local_addr().expect("addr");
+        let deadline = Instant::now();
+        std::thread::sleep(Duration::from_millis(5));
+        let stream = connect_first_reachable(&[good], deadline);
+        assert!(
+            matches!(&stream, Err(message) if message == "connect deadline exceeded"),
+            "a passed deadline must stop the walk, got {:?}",
+            stream.map(|_| ())
         );
     }
 
