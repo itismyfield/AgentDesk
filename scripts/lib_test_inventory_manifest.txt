@@ -9096,6 +9096,11 @@ services::tool_output_guard::tests::line_heavy_small_error_is_sanitized_once_wit
 services::tool_output_guard::tests::small_output_is_preserved_exactly
 services::tool_output_guard::tests::very_large_non_ascii_error_aligns_context_window_to_utf8
 services::tool_output_guard::tests::very_large_single_line_error_keeps_projection_memory_bounded
+services::tui_o::shadow::diff::tests::exact_match_is_tried_before_an_earlier_containing_message
+services::tui_o::shadow::diff::tests::historical_units_are_not_diffed_while_other_o_outcomes_are_immediate
+services::tui_o::shadow::diff::tests::legacy_posting_a_later_unit_first_is_an_order_diff
+services::tui_o::shadow::diff::tests::legacy_rows_are_judged_two_windows_after_their_last_activity
+services::tui_o::shadow::diff::tests::normalized_containment_is_format_only_and_an_unposted_piece_is_missing
 services::tui_prompt_control::tests::absolute_path_prompts_are_never_taken_as_codex_commands
 services::tui_prompt_control::tests::codex_local_controls_carry_the_normalized_name_and_the_raw_args
 services::tui_prompt_control::tests::command_shaped_input_outside_the_registry_is_refused_not_forwarded
