@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use super::AppState;
 use crate::error::{AppError, AppResult};
-use crate::services::voice_conductor::{self, ConductorJob};
+use crate::services::voice_conductor::{self, ConductorJob, StartedTurn};
 
 const LISTED_JOBS: usize = 20;
 
@@ -56,7 +56,10 @@ pub(crate) async fn say(
                 None,
             )
             .await
-            .map(|(turn_id, _)| turn_id)
+            .map(|(turn_id, status)| StartedTurn {
+                turn_id,
+                consumed: status == "consumed",
+            })
             .map_err(|error| match error {
                 crate::services::discord::HeadlessTurnStartError::Conflict(error)
                 | crate::services::discord::HeadlessTurnStartError::Internal(error) => error,
@@ -64,14 +67,13 @@ pub(crate) async fn say(
         }
     };
 
-    let config = super::voice_config::live_voice_config(&state.config.voice);
-    let job = voice_conductor::say(&pool, &config, text, start_turn)
+    let job = voice_conductor::say(&pool, text, start_turn)
         .await
         .map_err(AppError::internal)?;
     if job.finished_at.is_none() {
         tokio::spawn(voice_conductor::gather(
             pool,
-            config,
+            super::voice_config::live_voice_config(&state.config.voice),
             job.id.clone(),
             state.broadcast_tx.clone(),
         ));

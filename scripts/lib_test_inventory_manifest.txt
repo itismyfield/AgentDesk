@@ -9459,6 +9459,7 @@ services::turn_orchestrator::turn_finished_signal_tests::turn_finished_reset_unl
 services::voice_conductor::tests::parse_plan_reads_json_inside_prose_and_drops_empty_dispatches
 services::voice_conductor::tests::parse_plan_speaks_non_json_output_and_dispatches_nothing
 services::voice_conductor::tests::planner_prompt_fences_the_request_as_data
+services::voice_conductor::tests::upsert_job_evicts_only_finished_jobs
 services::writer_protocol::authority::tests::canonical_v1_digests_and_request_order_ignore_provider_and_permutation
 services::writer_protocol::authority::tests::exact_parent_does_not_overlap_descendant
 services::writer_protocol::authority::tests::failed_multi_key_acquisition_rolls_back_atomically

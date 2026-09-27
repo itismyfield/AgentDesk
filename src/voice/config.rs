@@ -197,18 +197,18 @@ impl Default for VoiceForegroundConfig {
 }
 
 /// The voice conductor fans one request out to agents and speaks a summary
-/// once their turns finish (or `max_wait_secs` passes).
+/// once their turns finish (or `max_wait_secs` passes). Its own planning and
+/// summary calls always run on the tool-less Claude path, so there is no
+/// provider setting here.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub(crate) struct VoiceConductorConfig {
-    pub provider: String,
     pub max_wait_secs: u64,
 }
 
 impl Default for VoiceConductorConfig {
     fn default() -> Self {
         Self {
-            provider: DEFAULT_FOREGROUND_PROVIDER.to_string(),
             max_wait_secs: 30 * 60,
         }
     }

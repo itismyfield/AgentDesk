@@ -23,7 +23,7 @@ pub(super) fn current_attempt_started_at(run: &RunningAgentRoutineRun) -> DateTi
         })
         .unwrap_or(run.started_at)
 }
-pub(super) fn provider_error_from_completion(completion: &AgentTurnCompletion) -> Option<String> {
+pub(crate) fn provider_error_from_completion(completion: &AgentTurnCompletion) -> Option<String> {
     if !completion.evidence.confirms_assistant_delivery() {
         return None;
     }
