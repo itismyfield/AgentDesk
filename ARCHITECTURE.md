@@ -851,6 +851,8 @@ src/
 │   │   │   │   ├── fence.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── protocol.rs
+│   │   │   │   ├── reader.rs
+│   │   │   │   ├── reader_tests.rs
 │   │   │   │   ├── schema.rs
 │   │   │   │   └── state.rs
 │   │   │   ├── manual_delivery/
