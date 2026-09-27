@@ -294,9 +294,30 @@ fn verdict<T: Debug + PartialEq>(actual: T, want: T, shown: &Channel) -> Result<
     (actual == want).then_some(()).ok_or(wrong)
 }
 
+fn row_bytes() -> Vec<u8> {
+    let root = inflight::inflight_runtime_root().expect("inflight root");
+    std::fs::read(inflight::inflight_state_path(&root, &Claude, CHANNEL_ID)).expect("marked row")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_turn_marked_drain_restart_is_closed_after_it_finishes_6294() {
-    let test = "a_turn_marked_drain_restart_is_closed_after_it_finishes_6294";
+    running_restart(
+        "a_turn_marked_drain_restart_is_closed_after_it_finishes_6294",
+        PLACEHOLDER,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_running_restart_without_a_message_target_is_left_untouched() {
+    running_restart(
+        "a_running_restart_without_a_message_target_is_left_untouched",
+        0,
+    )
+    .await;
+}
+
+async fn running_restart(test: &str, current_message_id: u64) {
     let tmux = Claude.build_tmux_session_name(&CHANNEL_ID.to_string());
     let Some(phase) = phase(test, &["old", "first", "second"], &tmux) else {
         return;
@@ -306,12 +327,33 @@ async fn a_turn_marked_drain_restart_is_closed_after_it_finishes_6294() {
     let transcript = live_pane(&root, &tmux, phase == "old");
     let report = root.join("first-replacement.json");
     if phase == "old" {
-        let ids = (ANCHOR, PLACEHOLDER);
+        let ids = (ANCHOR, current_message_id);
         mark_running_turn(&tmux, &transcript, "run", RUNNING_PROMPT, ids);
         end_process(&phase, Ok(()));
     }
-    let carried = (phase != "first").then(|| kept(&root, "first"));
-    let (mock, mut observed) = boot(generation, &tmux, carried.unwrap_or_default(), true).await;
+    let carried = (phase != "first")
+        .then(|| kept(&root, "first"))
+        .unwrap_or_default();
+    let preserved = (current_message_id == 0).then(row_bytes);
+    let (mock, mut observed) = boot(generation, &tmux, carried.clone(), preserved.is_none()).await;
+    if let Some(preserved) = preserved {
+        settle(&mock).await;
+        let shown = visible(&mock);
+        let intact = row_bytes() == preserved;
+        let untouched = mock.writes.lock().expect("mock writes").is_empty();
+        if phase == "first" {
+            keep(&root, &phase, &shown);
+            shut_down_for_restart();
+        }
+        end_process(
+            &phase,
+            verdict(
+                (intact, untouched, shown == carried),
+                (true, true, true),
+                &shown,
+            ),
+        );
+    }
     if phase == "first" {
         // The running turn finishes, then the next injected turn arrives: its prompt
         // lands first and its answer a moment later.
@@ -433,11 +475,6 @@ async fn first_boot_over_a_marked_row_keeps_delivered_and_foreign_bodies_6294() 
     let pane = PathBuf::from(std::env::var("TMUX_TMPDIR").expect("tmux tmpdir")).join("pane");
     let target = PLACEHOLDER + 1;
     let foreign = format!("{}\n\n⠋ {}", LATER_BODIES[0], LATER_BODIES[0]);
-    let row_bytes = || {
-        let root = inflight::inflight_runtime_root().expect("inflight root");
-        std::fs::read(inflight::inflight_state_path(&root, &Claude, CHANNEL_ID))
-            .expect("marked row")
-    };
     if phase == "old" {
         let ids = (ANCHOR, PLACEHOLDER);
         mark_running_turn(&tmux, &transcript, "run", DELIVERED_PROMPT, ids);
