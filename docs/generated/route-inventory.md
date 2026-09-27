@@ -335,8 +335,8 @@
 | `PATCH` | `/api/v1/settings/{key}` | `patch_setting` | `src/server/routes/v1.rs:380` | `src/server/routes/v1.rs:129` |
 | `GET` | `/api/v1/stream` | `stream` | `src/server/routes/v1.rs:231` | `src/server/routes/v1.rs:125` |
 | `GET` | `/api/v1/tokens` | `tokens` | `src/server/routes/v1.rs:205` | `src/server/routes/v1.rs:122` |
-| `GET` | `/api/voice/conductor/jobs` | `voice_conductor::list_jobs` | `src/server/routes/voice_conductor.rs:85` | `src/server/routes/domains/runtime.rs:148` |
-| `GET` | `/api/voice/conductor/jobs/{id}` | `voice_conductor::get_job` | `src/server/routes/voice_conductor.rs:90` | `src/server/routes/domains/runtime.rs:149` |
+| `GET` | `/api/voice/conductor/jobs` | `voice_conductor::list_jobs` | `src/server/routes/voice_conductor.rs:86` | `src/server/routes/domains/runtime.rs:148` |
+| `GET` | `/api/voice/conductor/jobs/{id}` | `voice_conductor::get_job` | `src/server/routes/voice_conductor.rs:91` | `src/server/routes/domains/runtime.rs:149` |
 | `POST` | `/api/voice/conductor/say` | `voice_conductor::say` | `src/server/routes/voice_conductor.rs:21` | `src/server/routes/domains/runtime.rs:147` |
 | `GET` | `/api/voice/config` | `voice_config::get_voice_config` | `src/server/routes/voice_config.rs:155` | `src/server/routes/domains/admin.rs:84` |
 | `PUT` | `/api/voice/config` | `voice_config::put_voice_config` | `src/server/routes/voice_config.rs:165` | `src/server/routes/domains/admin.rs:84` |
