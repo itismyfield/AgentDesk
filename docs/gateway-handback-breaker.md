@@ -34,3 +34,4 @@ the default 10-second publication interval does not bound the commit delay.
 Provider-level advertisements can still cause empty handbacks across different
 tokens. Suppression limits those events per token, and may delay a healthy home's
 return for 30 minutes or until manual reset while the current holder keeps serving.
+Observation windows follow the backup wall clock; clock changes alter them.
