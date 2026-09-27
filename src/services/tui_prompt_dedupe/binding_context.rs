@@ -146,7 +146,7 @@ impl HookBindingEnvelope {
         let capture = || {
             let path = env(CONTEXT_ENV).ok_or(AbsentReason::EnvUnset)?;
             let path = Path::new(&path);
-            let ctx = read_context(path).map_err(|error| match error.kind() {
+            let ctx = read_hook_context(path).map_err(|error| match error.kind() {
                 io::ErrorKind::InvalidData => AbsentReason::Corrupt,
                 _ => AbsentReason::Unreadable,
             })?;
@@ -315,6 +315,10 @@ impl PreparedIncarnation {
 }
 
 fn read_context(path: &Path) -> io::Result<BindingContext> {
+    serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)
+}
+
+fn read_hook_context(path: &Path) -> io::Result<BindingContext> {
     let mut bytes = Vec::new();
     fs::File::open(path)?
         .take(CONTEXT_LIMIT + 1)
