@@ -21,6 +21,7 @@ import h2_admission as adm  # noqa: E402
 import h2_depinfo  # noqa: E402
 import h2_measure as h2  # noqa: E402
 from tests.test_h2_measure import diag, locate  # noqa: E402  (shared clippy-JSON fixture helpers)
+from tests.test_h2_modmap import write_modmap  # noqa: E402
 
 TMUX = "agentdesk::services::platform::tmux::has_session"
 CMD, TOKIO = "std::process::Command::new", "tokio::process::Command::new"
@@ -88,6 +89,16 @@ def write_depinfo(root: Path, digest: str, deps) -> Path:
                     + f"\n# env-dep:CARGO_MANIFEST_DIR={root}\n# env-dep:CLIPPY_CONF_DIR\n", encoding="utf-8")
     return path
 
+def mod_row(file: str, modpath: str, parent: str = "src/lib.rs", attrs: str = "-") -> str:
+    """A driver map row for a hand-written `mod x;` in `parent`."""
+    return f"{file}\t{modpath}\t#0\t#0\tmodule\t{parent}\t{parent}:1:1: 1:9 (#0)\t{attrs}\tfile"
+
+TREE_MAP = [mod_row("src/services/mod.rs", "crate::services"),
+            mod_row("src/services/platform/mod.rs", "crate::services::platform", "src/services/mod.rs"),
+            mod_row(OWNER, "crate::services::platform::tmux", "src/services/platform/mod.rs"),
+            mod_row(PROBE, "crate::services::probe", "src/services/mod.rs"),
+            mod_row(RELAY, "crate::services::relay", "src/services/mod.rs", 'path#0["relay_impl.rs"]')]
+
 def dup_mod(file: str, line: int) -> str:
     return json.dumps({"reason": "compiler-message", "target": {"kind": ["lib"]}, "message": {
         "code": {"code": "clippy::duplicate_mod"}, "message": "file is loaded as a module multiple times: `src/a.rs`",
@@ -114,6 +125,7 @@ class Tree(unittest.TestCase):
         (self.root / "clippy.toml").write_text(CLIPPY_TOML, encoding="utf-8")
         self.regen_baseline()
         write_depinfo(self.root, "00aa", [*SOURCES, "Cargo.toml"])
+        self.modmap = write_modmap(self.root / "target/modmap.tsv", TREE_MAP)
         self.git("init", "-q", "-b", "main")
         self.commit("base")
         self.base = self.git("rev-parse", "HEAD").strip()
@@ -151,14 +163,14 @@ class Tree(unittest.TestCase):
         return [*diag_lines(self.sources), artifact(self.root, "00aa"), *self.extra]
 
     def evaluate(self, lane: str = "linux") -> list[str]:
-        return adm.evaluate(self.root, lane, self.base, self.lines())
+        return adm.evaluate(self.root, lane, self.base, self.lines(), self.modmap)
 
     def run_main(self, *args: str) -> tuple[int, str, str]:
         (json_path := self.root.parent / f"{self.root.name}.json").write_text("\n".join(self.lines()))
         self.addCleanup(json_path.unlink, missing_ok=True)
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            code = adm.main(["--repo", str(self.root), "--json", str(json_path), *args])
+            code = adm.main(["--repo", str(self.root), "--json", str(json_path), "--modmap", str(self.modmap), *args])
         return code, out.getvalue(), err.getvalue()
 
 GROW = """\
@@ -299,11 +311,11 @@ class EndToEnd(Tree):
     def test_base_prerequisites_and_inert(self) -> None:
         empty_tree = self.git("hash-object", "-t", "tree", "-w", "/dev/null").strip()
         empty = self.git("commit-tree", "-m", "empty", empty_tree).strip()
-        self.assertIn("has no scripts/ci/h2_baseline_*.toml", adm.evaluate(self.root, "linux", empty, [])[0])
+        self.assertIn("has no scripts/ci/h2_baseline_*.toml", adm.evaluate(self.root, "linux", empty, [], self.modmap)[0])
         (self.root / "clippy.toml").write_text(CLIPPY_TOML.replace("H2 W both", "H2 SUBPROC_W both"))
         self.commit("no W")
         rev = self.git("rev-parse", "HEAD").strip()
-        self.assertIn("clippy.toml has no H2 W entries", adm.evaluate(self.root, "linux", rev, [])[0])
+        self.assertIn("clippy.toml has no H2 W entries", adm.evaluate(self.root, "linux", rev, [], self.modmap)[0])
         for rel in h2.BASELINE_FILES:
             (self.root / rel).unlink()
         self.assertEqual(self.run_main("--lane", "linux", "--inert")[:2], (0, "h2-admission: no baseline committed; inert no-op\n"))
@@ -344,23 +356,32 @@ class EndToEnd(Tree):
                     depinfo.chmod(0o644)
 
 class DepInfo(unittest.TestCase):
-    """R-O over the root lib dep-info of a two-module crate."""
+    """R-O over the root lib dep-info against the driver's module map of a small crate."""
 
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name)
-        lib = 'mod a;\n#[path = "sp ace.rs"]\nmod s;\n#[path = "한글.rs"]\nmod k;\n#[path = "payload.inc"]\nmod payload;\n'
-        files = {"src/lib.rs": lib, "src/a.rs": "", "src/sp ace.rs": "", "src/한글.rs": "", "src/b.rs": "", "src/payload.inc": ""}
-        for rel, text in files.items():
-            (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
-            (self.root / rel).write_text(text, encoding="utf-8")
-        h2._MODULE_TABLES.clear()
         self.addCleanup(h2._MODULE_TABLES.clear)
+        self.root = Path(tmp.name)
+        for rel in ("src/lib.rs", "src/a.rs", "src/sp ace.rs", "src/한글.rs", "src/b.rs", "src/payload.inc"):
+            (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / rel).write_text("", encoding="utf-8")
+        self.modmap = self.root / "modmap.tsv"
+        self.mount(())
 
-    def problems(self, *extra: str, lines: list[str] | None = None) -> list[str]:
+    def mount(self, modules: tuple[str, ...]) -> None:
+        """lib.rs mounts src/a.rs and `modules` as crate::m0.., and the module map says so."""
+        mods = ("src/a.rs", *modules)
+        (self.root / "src/lib.rs").write_text("".join(f'#[path = "{os.path.relpath(rel, "src")}"]\nmod m{n};\n'
+                                                      for n, rel in enumerate(mods)), encoding="utf-8")
+        h2._MODULE_TABLES.clear()
+        write_modmap(self.modmap, [mod_row(rel, f"crate::m{n}") for n, rel in enumerate(mods)])
+
+    def problems(self, *extra: str, modules: tuple[str, ...] = (), lines: list[str] | None = None) -> list[str]:
+        """src/lib.rs, src/a.rs and `extra` compiled; src/a.rs and `modules` mounted."""
+        self.mount(modules)
         write_depinfo(self.root, "c0ffee", ["src/lib.rs", "src/a.rs", *extra])
-        return h2_depinfo.ro_problems(self.root, [artifact(self.root, "c0ffee")] if lines is None else lines)
+        return h2_depinfo.ro_problems(self.root, [artifact(self.root, "c0ffee")] if lines is None else lines, self.modmap)
 
     def test_rust_input_must_be_in_the_module_tree(self) -> None:
         self.assertEqual(self.problems(), [])
@@ -368,6 +389,12 @@ class DepInfo(unittest.TestCase):
         for extra, rel in (("src/b.rs", "src/b.rs"), (str(self.root / out_dir), out_dir)):  # unmounted file, OUT_DIR code
             with self.subTest(extra=extra):
                 self.assertEqual(self.problems(extra), [f"R-O: {rel} is compiled into the lib but is not in the module tree"])
+
+    def test_module_file_must_be_a_rust_input(self) -> None:
+        # a map rustc's own .d does not back (another build, a stale map) cannot vouch for a module
+        self.assertEqual(self.problems(modules=("src/b.rs",)),
+                         ["R-O: module file src/b.rs is not among the lib's .rs compile inputs"])
+        self.assertEqual(self.problems("src/b.rs", modules=("src/b.rs",)), [])
 
     def test_allowlisted_data_inputs_pass(self) -> None:
         self.assertEqual(self.problems(str(self.root / "migrations/postgres/0001_init.sql"), "Cargo.toml", "clippy.toml",
@@ -377,34 +404,44 @@ class DepInfo(unittest.TestCase):
         with tempfile.TemporaryDirectory() as elsewhere:
             (outside := Path(elsewhere) / "g.rs").write_text("")
             self.assertIn("outside the repo", self.problems(str(outside))[0])
-        # src/payload.inc is mounted by `#[path]`, so it is in the module tree yet still not data
-        for extra in ("src/payload.inc", "src/shared.inc", "migrations/postgres/sub/x.sql", "vendor/migrations/postgres/x.sql", "assets/a.html"):
+        data = "R-O: lib compile input {} is not in the data allowlist"
+        for extra in ("src/shared.inc", "migrations/postgres/sub/x.sql", "vendor/migrations/postgres/x.sql", "assets/a.html"):
             with self.subTest(extra=extra):
-                self.assertEqual(self.problems(extra), [f"R-O: lib compile input {extra} is not in the data allowlist"])
+                self.assertEqual(self.problems(extra), [data.format(extra)])
+        # src/payload.inc mounted by `#[path]` is in the module map yet still not data
+        self.assertEqual(self.problems("src/payload.inc", modules=("src/payload.inc",)),
+                         ["R-O: file module crate::m1 (src/payload.inc) is not a .rs file inside the repo",
+                          data.format("src/payload.inc"), "R-O: module file src/payload.inc is not among the lib's .rs compile inputs"])
 
     def test_paths_are_unescaped_and_normalized(self) -> None:
-        # `\ ` escapes, UTF-8, canonical absolute spelling and `..` all name module-tree files
+        # `\ ` escapes, UTF-8, canonical absolute spelling and `..` all name module-map files
         self.assertEqual(self.problems("src/sp ace.rs", "src/한글.rs", os.path.realpath(self.root / "src/a.rs"),
-                                       "src/x/../a.rs"), [])
+                                       "src/x/../a.rs", modules=("src/sp ace.rs", "src/한글.rs")), [])
 
     def test_symlinked_modules_compare_by_target(self) -> None:
+        # the driver names a module by its realpath; every .d spelling of that file must resolve there
         with tempfile.TemporaryDirectory() as elsewhere:
             (outside := Path(os.path.realpath(elsewhere)) / "g.rs").write_text("")
             (self.root / "src/real.rs").write_text("")
             (self.root / "src/sym.rs").symlink_to("real.rs")
             (self.root / "src/out.rs").symlink_to(outside)
-            with (self.root / "src/lib.rs").open("a", encoding="utf-8") as lib:
-                lib.write("mod sym;\nmod out;\n")
-            self.assertEqual(self.problems("src/sym.rs", "src/x/../sym.rs"), [])
-            # `..` right after a directory symlink resolves on disk, for the module and its children
+            self.assertEqual(self.problems("src/sym.rs", "src/x/../sym.rs", modules=("src/real.rs",)), [])
+            # lib.rs mounts the link while the driver names its target: the walker's spelling resolves before comparing
+            (self.root / "src/lib.rs").write_text('#[path = "a.rs"]\nmod m0;\n#[path = "sym.rs"]\nmod m1;\n', encoding="utf-8")
+            h2._MODULE_TABLES.clear()
+            self.assertEqual(h2_depinfo.ro_problems(self.root, [artifact(self.root, "c0ffee")], self.modmap), [])
+            # `..` right after a directory symlink resolves on disk, for the file the walker opens and for its child
             (self.root / "shared/nested").mkdir(parents=True)
             (self.root / "shared/payload.rs").write_text("mod inner;\n")
             (self.root / "shared/inner.rs").write_text("")
             (self.root / "src/jump").symlink_to("../shared/nested")
-            with (self.root / "src/lib.rs").open("a", encoding="utf-8") as lib:
-                lib.write('#[path = "jump/../payload.rs"]\nmod hop;\n')
+            (self.root / "src/lib.rs").write_text('#[path = "a.rs"]\nmod m0;\n#[path = "jump/../payload.rs"]\nmod m1;\n',
+                                                  encoding="utf-8")
             h2._MODULE_TABLES.clear()
-            self.assertEqual(self.problems("src/jump/../payload.rs", "src/jump/../inner.rs"), [])
+            write_depinfo(self.root, "c0ffee", ["src/lib.rs", "src/a.rs", "src/jump/../payload.rs", "src/jump/../inner.rs"])
+            write_modmap(self.modmap, [mod_row("src/a.rs", "crate::m0"), mod_row("shared/payload.rs", "crate::m1"),
+                                       mod_row("shared/inner.rs", "crate::m1::inner", "shared/payload.rs")])
+            self.assertEqual(h2_depinfo.ro_problems(self.root, [artifact(self.root, "c0ffee")], self.modmap), [])
             self.assertEqual(self.problems("src/out.rs"), [f"R-O: lib compile input {outside.as_posix()} is outside the repo"])
 
     def test_aliases_keep_the_rule_of_each_spelling(self) -> None:
@@ -416,16 +453,17 @@ class DepInfo(unittest.TestCase):
         (self.root / "src/alias.rs").symlink_to("../migrations/postgres/1.sql")
         (self.root / "src/data.inc").write_text("")
         (self.root / "src/sym.rs").symlink_to("data.inc")
-        with (self.root / "src/lib.rs").open("a", encoding="utf-8") as lib:
-            lib.write("mod sym;\n")
         data, code = "R-O: lib compile input {} is not in the data allowlist", "R-O: {} is compiled into the lib but is not in the module tree"
-        for extra, expected in (
-                (("src/payload.inc",), data.format("src/payload.inc")),  # non-Rust spelling of a module file
-                (("src/payload.inc", "src/real.rs"), data.format("src/payload.inc")),
-                (("src/alias.rs",), code.format("src/alias.rs")),  # Rust spelling of allowlisted data
-                (("src/sym.rs",), data.format("src/sym.rs"))):  # mounted Rust spelling of non-allowlisted data
-            with self.subTest(extra=extra):
-                self.assertEqual(self.problems(*extra), [expected])
+        not_rs = "R-O: file module crate::m1 ({}) is not a .rs file inside the repo"
+        for extra, modules, expected in (
+                (("src/payload.inc",), ("src/real.rs",), [data.format("src/payload.inc")]),  # non-Rust spelling of a module
+                (("src/payload.inc", "src/real.rs"), ("src/real.rs",), [data.format("src/payload.inc")]),
+                (("src/alias.rs",), (), [code.format("src/alias.rs")]),  # Rust spelling of allowlisted data
+                # mounted Rust spellings of non-allowlisted data, and of allowlisted data (only the module rule sees it)
+                (("src/sym.rs",), ("src/data.inc",), [not_rs.format("src/data.inc"), data.format("src/sym.rs")]),
+                (("src/alias.rs",), ("migrations/postgres/1.sql",), [not_rs.format("migrations/postgres/1.sql")])):
+            with self.subTest(extra=extra, modules=modules):
+                self.assertEqual(self.problems(*extra, modules=modules), expected)
 
     def test_invalid_dep_info_is_a_problem(self) -> None:
         depinfo = write_depinfo(self.root, "c0ffee", ["src/lib.rs", "src/a.rs"])
@@ -434,9 +472,37 @@ class DepInfo(unittest.TestCase):
         for case, text in cases.items():
             with self.subTest(case=case):
                 depinfo.write_text(text, encoding="utf-8")
-                problems = h2_depinfo.ro_problems(self.root, [artifact(self.root, "c0ffee")])
+                problems = h2_depinfo.ro_problems(self.root, [artifact(self.root, "c0ffee")], self.modmap)
                 self.assertEqual([p[:len(f"R-O: root lib dep-info {depinfo}")] for p in problems],
                                  [f"R-O: root lib dep-info {depinfo}"])
+
+    def test_unreadable_or_malformed_map_is_a_problem(self) -> None:
+        self.assertEqual(self.problems(), [])
+        good, row = self.modmap.read_text(encoding="utf-8"), mod_row("src/a.rs", "crate::m0")
+        head = good.replace(row + "\n", "")
+        cases = {"missing": None, "no final newline": good[:-1], "other root": good.replace("src/lib.rs\t", "src/main.rs\t", 1),
+                 "short row": head + row.rsplit("\t", 1)[0] + "\n", "extra cell": head + row + "\t-\n",
+                 "bad ctx": head + row.replace("#0", "#x", 1) + "\n", "dangling attr": head + row.replace("\t-\tfile", "\tdoc#0,\tfile\n"),
+                 "unescaped quote": head + row.replace("\t-\tfile", '\tpath#0["a"b"]\tfile\n'),
+                 "unknown kind": head + row.replace("\tfile", "\tmodule\n")}
+        for case, text in cases.items():
+            with self.subTest(case=case):
+                self.modmap.unlink(missing_ok=True)
+                if text is not None:
+                    self.modmap.write_text(text, encoding="utf-8")
+                problems = h2_depinfo.ro_problems(self.root, [artifact(self.root, "c0ffee")], self.modmap)
+                self.assertEqual(len(problems), 1, problems)
+                self.assertRegex(problems[0], r"^R-O: (cannot read module map|module map .* (lacks|is malformed))")
+        # a broken .d does not hide a broken map, nor the other way round
+        (self.root / "target/debug/deps/agentdesk-c0ffee.d").write_text("", encoding="utf-8")
+        self.assertEqual(len(h2_depinfo.ro_problems(self.root, [artifact(self.root, "c0ffee")], self.modmap)), 2)
+
+    def test_unreadable_walker_source_is_a_problem(self) -> None:
+        # the text walker reads every module file too; a failure is one problem, never an empty table
+        (self.root / "src/a.rs").write_bytes(b"\xff")
+        problems = self.problems()
+        self.assertEqual(len(problems), 1, problems)
+        self.assertRegex(problems[0], r"^R-O: cannot read text walker module table: ")
 
     def test_dep_info_is_matched_by_the_root_lib_hash(self) -> None:
         decoy = write_depinfo(self.root, "deadbeef", ["src/lib.rs", "src/b.rs"])
@@ -449,6 +515,181 @@ class DepInfo(unittest.TestCase):
                               ([artifact(self.root, "0bad")], "agentdesk-0bad.d does not exist")):
             with self.subTest(needle=needle):
                 self.assertIn(needle, self.problems(lines=lines)[0])
+
+# Driver rows of the H2 R-O counterexample crates (owner src/owner.rs, its clean row left out; `/abs/` the crate dir).
+# Verdicts: m macro-made, n inside an item, a macro-made attribute, o owner `#[path]`, i an unmoduled .rs input, w walker.
+PROBE_ROWS = """\
+base\tsrc/shared.rs\tcrate::shared\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:2:1: 2:12 (#0)\t-\tfile
+base\tsrc/plat.rs\tcrate::plat\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:3:14: 3:23 (#0)\t<cfg_trace>#0\tfile
+main\tsrc/plat.rs\tcrate::plat\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:3:14: 3:23 (#0)\t<cfg_trace>#0\tfile
+main\tsrc/shared.rs\tcrate::{fn probe}::injected\t#4\t#4\tfn:probe\tsrc/lib.rs\tsrc/lib.rs:1:53: 1:66 (#4)\tpath#4["shared.rs"]\tfile
+v3\tsrc/shared.rs\tcrate::owner::{fn probe}::injected\t#4\t#4\tfn:probe\tsrc/owner.rs\tsrc/lib.rs:1:53: 1:66 (#4)\tpath#4["shared.rs"]\tfile
+v3_ext\tsrc/shared.rs\tcrate::owner::{fn probe}::injected\t#5\t#5\tfn:probe\tsrc/owner.rs\t/abs/src/lib.rs:2:53: 2:66 (#5)\tpath#5["/abs/src/shared.rs"]\tfile
+f1_rawcfg\tsrc/shared.rs\tcrate::owner::{fn probe}::injected\t#5\t#5\tfn:probe\tsrc/owner.rs\t/abs/src/lib.rs:2:53: 2:66 (#5)\tpath#5["/abs/src/shared.rs"]\tfile
+f1_cfgattr_raw\tsrc/shared.rs\tcrate::owner::{fn probe}::injected\t#5\t#5\tfn:probe\tsrc/owner.rs\t/abs/src/lib.rs:2:53: 2:66 (#5)\tpath#5["/abs/src/shared.rs"]\tfile
+f1_lrm\tsrc/shared.rs\tcrate::owner::{fn probe}::injected\t#5\t#5\tfn:probe\tsrc/owner.rs\t/abs/src/lib.rs:2:53: 2:66 (#5)\tpath#5["/abs/src/shared.rs"]\tfile
+f2_tt\tsrc/shared.rs\tcrate::owner::{fn probe}::injected\t#5\t#5\tfn:probe\tsrc/owner.rs\t/abs/src/lib.rs:2:53: 2:66 (#5)\tpath#5["/abs/src/shared.rs"]\tfile
+f3_constgen\tsrc/shared.rs\tcrate::owner::{fn probe}::injected\t#5\t#5\tfn:probe\tsrc/owner.rs\t/abs/src/lib.rs:2:53: 2:66 (#5)\tpath#5["/abs/src/shared.rs"]\tfile
+p1_1\tsrc/shared.rs\tcrate::owner::{fn existing_owner_operation}::injected\t#5\t#5\tfn:existing_owner_operation\tsrc/owner.rs\t/abs/src/lib.rs:2:53: 2:66 (#5)\tpath#5["/abs/src/shared.rs"]\tfile
+p1_2\tsrc/shared.rs\tcrate::owner::{fn existing_owner_operation}::injected\t#5\t#5\tfn:existing_owner_operation\tsrc/owner.rs\t/abs/src/lib.rs:2:53: 2:66 (#5)\tpath#5["/abs/src/shared.rs"]\tfile
+x1_ident\tsrc/shared.rs\tcrate::owner::injected\t#4\t#0\tmodule\tsrc/owner.rs\tsrc/lib.rs:1:146: 1:153 (#4)\tpath#4["/abs/src/shared.rs"]\tfile
+x1_pass_fn\tsrc/shared.rs\tcrate::owner::{fn probe}::injected\t#0\t#0\tfn:probe\tsrc/owner.rs\tsrc/owner.rs:1:148: 1:161 (#0)\tpath#0["/abs/src/shared.rs"]\tfile
+x1_addpath\tsrc/shared.rs\tcrate::owner::injected\t#0\t#0\tmodule\tsrc/owner.rs\tsrc/owner.rs:1:12: 1:25 (#0)\tpath#4["/abs/src/shared.rs"]\tfile
+x1_pass_mod\tsrc/shared.rs\tcrate::owner::injected\t#0\t#0\tmodule\tsrc/owner.rs\tsrc/owner.rs:1:132: 1:145 (#0)\tpath#0["/abs/src/shared.rs"]\tfile
+x2_include\tsrc/shared.rs\tcrate::shared\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:2:1: 2:12 (#0)\t-\tfile
+inline_in_fn\tsrc/inline/x.rs\tcrate::{fn probe}::inline::x\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:4:9: 4:15 (#0)\tpath#0["x.rs"]\tfile
+"""
+PROBE_VERDICTS = dict(base="w", main="mnaw", **dict.fromkeys(
+    ("v3", "v3_ext", "f1_rawcfg", "f1_cfgattr_raw", "f1_lrm", "f2_tt", "f3_constgen", "p1_1", "p1_2"), "mnao"),
+    x1_ident="maow", x1_pass_fn="no", x1_addpath="aow", x1_pass_mod="ow", x2_include="i", inline_in_fn="n")
+PROBE_KINDS = {"m": "declared by a macro expansion", "n": "is declared inside", "a": "macro-made attribute",
+               "o": "via #[path]", "i": "is compiled into the lib but is not in the module tree", "w": "text walker"}
+# h2_measure._module_walk of each case beyond lib.rs and owner.rs; it reads neither `#[cfg(..)] mod x;` on one line
+# nor a macro's `mod`, so base's plat.rs and the x1 mounts are missing.
+PROBE_WALKER = dict(base={"src/shared.rs": "agentdesk::shared"}, f3_constgen={"src/shared.rs": "agentdesk::shared"},
+                    p1_1={"src/shared.rs": "agentdesk::declared"}, p1_2={"src/shared.rs": "agentdesk::decoy::forged"},
+                    x2_include={"src/shared.rs": "agentdesk::shared"}, inline_in_fn={"src/inline/x.rs": "agentdesk::inline::x"})
+
+class ProbeFixtures(unittest.TestCase):
+    def test_counterexample_crates_keep_their_verdicts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(h2, "OWNER_FILES", frozenset({"src/owner.rs"})), \
+                mock.patch.object(h2, "OWNER_PREFIXES", ()):
+            root = Path(tmp)
+            for case, kinds in PROBE_VERDICTS.items():
+                table = {"src/lib.rs": h2.CRATE, "src/owner.rs": f"{h2.CRATE}::owner", **PROBE_WALKER.get(case, {})}
+                walk = table, [root / rel for rel in table]
+                with self.subTest(case=case), mock.patch.object(h2, "_module_walk", lambda _root, walk=walk: walk):
+                    rows = [line.split("\t", 1)[1] for line in PROBE_ROWS.splitlines() if line.split("\t", 1)[0] == case]
+                    extra = ["src/extra_body.rs"] if case == "x2_include" else []
+                    write_depinfo(root, "c0ffee", ["src/lib.rs", *(row.split("\t")[0] for row in rows), *extra])
+                    problems = h2_depinfo.ro_problems(root, [artifact(root, "c0ffee")], write_modmap(root / "map.tsv", rows))
+                    found = [kind for problem in problems for kind, text in PROBE_KINDS.items() if text in problem]
+                    self.assertEqual((sorted(found), len(problems)), (sorted(kinds), len(kinds)), problems)
+
+# Crates R-O must judge: (sources, the rows the driver writes, the problems). R-W places sites by the text walker,
+# which misreads `rel`, `pathattr` and anything inside a macro-made module; `incmod` and `splice` use include!.
+RELOCATIONS = {
+    "rel": ({"src/lib.rs": '#[path = "."]\nmod w {\n    pub mod z;\n}\n#[path = "q.rs"] // real file for crate::z\n'
+                           "pub mod z;\npub fn g() { w::z::f() }\n", "src/q.rs": "pub fn f() {}\n", "src/z.rs": "pub fn f() {}\n"},
+            ['src/lib.rs\tcrate::w\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:2:1: 4:2 (#0)\tpath#0["."]\tinline',
+             "src/z.rs\tcrate::w::z\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:3:5: 3:15 (#0)\t-\tfile",
+             'src/q.rs\tcrate::z\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:6:1: 6:11 (#0)\tpath#0["q.rs"]\tfile'],
+            ["R-O: rustc compiles src/q.rs as agentdesk::z but the text walker reads it as no module",
+             "R-O: rustc compiles src/z.rs as agentdesk::w::z but the text walker reads it as agentdesk::z"]),
+    "macwrap": ({"src/lib.rs": "macro_rules! wrap {\n    ($i:item) => {\n        pub mod w {\n            $i\n        }\n    };\n}\n"
+                               "wrap! {\n    pub mod z;\n}\npub fn g() { w::z::f() }\n", "src/w/z.rs": "pub fn f() {}\n"},
+                ["src/lib.rs\tcrate::w\t#4\t#4\tmodule\tsrc/lib.rs\tsrc/lib.rs:3:9: 5:10 (#4)\t-\tinline",
+                 "src/lib.rs\tcrate::w\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:9:5: 9:15 (#0)\t-\twrapped",
+                 "src/w/z.rs\tcrate::w::z\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:9:5: 9:15 (#0)\t-\tfile"],
+                ["R-O: inline module crate::w is declared by a macro expansion",
+                 "R-O: macro-made module crate::w wraps hand-written items from src/lib.rs",
+                 "R-O: rustc compiles src/w/z.rs as agentdesk::w::z but the text walker reads it as no module"]),
+    "incmod": ({"src/lib.rs": 'pub mod a;\npub mod b {\n    include!("a.rs");\n}\n', "src/a.rs": "pub fn f() {}\n"},
+               ["src/a.rs\tcrate::a\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:1:1: 1:11 (#0)\t-\tfile",
+                "src/lib.rs\tcrate::b\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:2:1: 4:2 (#0)\t-\tinline",
+                "src/a.rs\tcrate::b\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/a.rs:1:1: 1:14 (#0)\t-\tinclude"],
+               ["R-O: include! splices src/a.rs into crate::b"]),
+    "splice": ({"src/lib.rs": 'pub mod plain;\ninclude!("body.rs");\n', "src/body.rs": "pub fn from_body() {}\n",
+                "src/plain.rs": "pub fn p() {}\n"},
+               ["src/plain.rs\tcrate::plain\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:1:1: 1:15 (#0)\t-\tfile",
+                "src/body.rs\tcrate\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/body.rs:1:1: 1:22 (#0)\t-\tinclude"],
+               ["R-O: include! splices src/body.rs into crate", "R-O: src/body.rs is compiled into the lib but is not in the module tree"]),
+    "itemwrap": ({"src/lib.rs": "pub fn tmux_exec() {}\nmacro_rules! wrap {\n    ($($i:item)*) => {\n        pub mod w {\n"
+                                "            $($i)*\n        }\n    };\n}\nwrap! {\n    pub fn f() {\n        crate::tmux_exec()\n"
+                                "    }\n}\npub fn g() {\n    w::f()\n}\npub mod plain;\n", "src/plain.rs": ""},
+                 ["src/lib.rs\tcrate::w\t#4\t#4\tmodule\tsrc/lib.rs\tsrc/lib.rs:4:9: 6:10 (#4)\t-\tinline",
+                  "src/lib.rs\tcrate::w\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:10:5: 12:6 (#0)\t-\twrapped",
+                  "src/plain.rs\tcrate::plain\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:17:1: 17:15 (#0)\t-\tfile"],
+                 ["R-O: macro-made module crate::w wraps hand-written items from src/lib.rs"]),
+    # the tokio::select! shape: a macro-made module of macro-made items only, which the walker needs no path for
+    "selectlike": ({"src/lib.rs": "// The shape tokio::select! leaves: a macro-made helper module inside a fn body, holding only "
+                                  "macro-made items.\nmacro_rules! select_like {\n    ($e:expr) => {{\n        mod __select_util {\n"
+                                  "            pub(super) enum Out<T> {\n                Val(T),\n                Disabled,\n"
+                                  "            }\n        }\n        match $e {\n            v => __select_util::Out::Val(v),\n"
+                                  "        }\n    }};\n}\npub fn f() -> u32 {\n    match select_like!(1u32) {\n        _ => 0,\n"
+                                  "    }\n}\npub mod plain;\n", "src/plain.rs": "pub fn p() {}\n"},
+                   ["src/lib.rs\tcrate::{fn f}::__select_util\t#4\t#4\tfn:f\tsrc/lib.rs\tsrc/lib.rs:4:9: 9:10 (#4)\t-\tinline",
+                    "src/plain.rs\tcrate::plain\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:20:1: 20:15 (#0)\t-\tfile"],
+                   []),
+    "pathattr": ({"src/lib.rs": 'macro_rules! at_root {\n    ($i:item) => {\n        #[path = "."]\n        $i\n    };\n}\n'
+                                "at_root! {\n    mod w {\n        pub mod z;\n    }\n}\npub fn g() {\n    w::z::f()\n}\n",
+                  "src/z.rs": "pub fn f() {}\n"},
+                 ['src/lib.rs\tcrate::w\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:8:5: 10:6 (#0)\tpath#4["."]\tinline',
+                  "src/lib.rs\tcrate::w\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:9:9: 9:19 (#0)\t-\twrapped",
+                  "src/z.rs\tcrate::w::z\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:9:9: 9:19 (#0)\t-\tfile"],
+                 ["R-O: inline module crate::w carries a macro-made attribute",
+                  "R-O: macro-made module crate::w wraps hand-written items from src/lib.rs",
+                  "R-O: rustc compiles src/z.rs as agentdesk::w::z but the text walker reads it as no module"]),
+    # a module any expansion defined is macro-made, even from call-site tokens only; the nearest module decides
+    "ttbody": ({"src/lib.rs": "pub fn tmux_exec() {}\nmacro_rules! wrap {\n    ($body:tt) => {\n        pub mod w $body\n"
+                              "    };\n}\nwrap!({\n    pub fn f() {\n        crate::tmux_exec()\n    }\n});\n"
+                              "pub fn g() {\n    w::f()\n}\npub mod plain;\n", "src/plain.rs": ""},
+               ["src/lib.rs\tcrate::w\t#4\t#4\tmodule\tsrc/lib.rs\tsrc/lib.rs:4:9: 4:24 (#4)\t-\tinline",
+                "src/lib.rs\tcrate::w\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:8:5: 10:6 (#0)\t-\twrapped",
+                "src/plain.rs\tcrate::plain\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:15:1: 15:15 (#0)\t-\tfile"],
+               ["R-O: macro-made module crate::w wraps hand-written items from src/lib.rs"]),
+    "identonly": ({"src/lib.rs": "pub fn tmux_exec() {}\nmacro_rules! wrap {\n    ($kw:tt $body:tt) => {\n"
+                                 "        $kw w $body\n    };\n}\nwrap!(mod {\n    pub fn f() {\n"
+                                 "        crate::tmux_exec()\n    }\n});\npub fn g() {\n    w::f()\n}\npub mod plain;\n", "src/plain.rs": ""},
+                  ["src/lib.rs\tcrate::w\t#0\t#4\tmodule\tsrc/lib.rs\tsrc/lib.rs:7:7: 11:2 (#0)\t-\tinline",
+                   "src/lib.rs\tcrate::w\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:8:5: 10:6 (#0)\t-\twrapped",
+                   "src/plain.rs\tcrate::plain\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:15:1: 15:15 (#0)\t-\tfile"],
+                  ["R-O: macro-made module crate::w wraps hand-written items from src/lib.rs"]),
+    "itemonly": ({"src/lib.rs": "pub fn tmux_exec() {}\nmacro_rules! wrap {\n    ($name:ident $body:tt) => {\n"
+                                "        pub mod $name $body\n    };\n}\nwrap!(w {\n    pub fn f() {\n"
+                                "        crate::tmux_exec()\n    }\n});\npub fn g() {\n    w::f()\n}\npub mod plain;\n", "src/plain.rs": ""},
+                 ["src/lib.rs\tcrate::w\t#4\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:4:9: 4:28 (#4)\t-\tinline",
+                  "src/lib.rs\tcrate::w\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:8:5: 10:6 (#0)\t-\twrapped",
+                  "src/plain.rs\tcrate::plain\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:15:1: 15:15 (#0)\t-\tfile"],
+                 ["R-O: macro-made module crate::w wraps hand-written items from src/lib.rs"]),
+    "nested2": ({"src/lib.rs": "pub fn tmux_exec() {}\nmacro_rules! inner {\n    ($body:tt) => {\n"
+                               "        pub mod w $body\n    };\n}\nmacro_rules! outer {\n    ($body:tt) => {\n"
+                               "        inner!($body);\n    };\n}\nouter!({\n    pub fn f() {\n"
+                               "        crate::tmux_exec()\n    }\n});\npub fn g() {\n    w::f()\n}\npub mod plain;\n", "src/plain.rs": ""},
+                ["src/lib.rs\tcrate::w\t#5\t#5\tmodule\tsrc/lib.rs\tsrc/lib.rs:4:9: 4:24 (#5)\t-\tinline",
+                 "src/lib.rs\tcrate::w\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:13:5: 15:6 (#0)\t-\twrapped",
+                 "src/plain.rs\tcrate::plain\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:20:1: 20:15 (#0)\t-\tfile"],
+                ["R-O: macro-made module crate::w wraps hand-written items from src/lib.rs"]),
+    "innerof": ({"src/lib.rs": "pub fn tmux_exec() {}\nmacro_rules! wrap {\n    ($body:tt) => {\n        pub mod o {\n"
+                               "            pub mod w $body\n        }\n    };\n}\nwrap!({\n    pub fn f() {\n"
+                               "        crate::tmux_exec()\n    }\n});\npub fn g() {\n    o::w::f()\n}\npub mod plain;\n", "src/plain.rs": ""},
+                ["src/lib.rs\tcrate::o\t#4\t#4\tmodule\tsrc/lib.rs\tsrc/lib.rs:4:9: 6:10 (#4)\t-\tinline",
+                 "src/lib.rs\tcrate::o::w\t#4\t#4\tmodule\tsrc/lib.rs\tsrc/lib.rs:5:13: 5:28 (#4)\t-\tinline",
+                 "src/lib.rs\tcrate::o::w\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:10:5: 12:6 (#0)\t-\twrapped",
+                 "src/plain.rs\tcrate::plain\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:17:1: 17:15 (#0)\t-\tfile"],
+                ["R-O: macro-made module crate::o::w wraps hand-written items from src/lib.rs"]),
+    "handmod": ({"src/lib.rs": "pub fn tmux_exec() {}\nmacro_rules! wrap {\n    ($body:tt) => {\n        pub mod w $body\n"
+                               "    };\n}\nwrap!({\n    pub mod inner {\n        pub fn f() {\n"
+                               "            crate::tmux_exec()\n        }\n    }\n});\npub fn g() {\n    w::inner::f()\n"
+                               "}\npub mod plain;\n", "src/plain.rs": ""},
+                ["src/lib.rs\tcrate::w\t#4\t#4\tmodule\tsrc/lib.rs\tsrc/lib.rs:4:9: 4:24 (#4)\t-\tinline",
+                 "src/lib.rs\tcrate::w\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:8:5: 12:6 (#0)\t-\twrapped",
+                 "src/lib.rs\tcrate::w::inner\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:8:5: 12:6 (#0)\t-\tinline",
+                 "src/lib.rs\tcrate::w::inner\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:9:9: 11:10 (#0)\t-\twrapped",
+                 "src/plain.rs\tcrate::plain\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:17:1: 17:15 (#0)\t-\tfile"],
+                ["R-O: macro-made module crate::w wraps hand-written items from src/lib.rs",
+                 "R-O: macro-made module crate::w::inner wraps hand-written items from src/lib.rs"]),
+}
+
+class Relocations(unittest.TestCase):
+    def test_relocated_file_modules_are_caught(self) -> None:
+        for case, (sources, rows, expected) in RELOCATIONS.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                for rel, text in sources.items():
+                    (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                    (root / rel).write_text(text, encoding="utf-8")
+                h2._MODULE_TABLES.clear()
+                write_depinfo(root, "c0ffee", sorted(sources))
+                problems = h2_depinfo.ro_problems(root, [artifact(root, "c0ffee")], write_modmap(root / "map.tsv", rows))
+                self.assertEqual(problems, expected)
+
+    def test_an_owner_steers_no_file_module_by_path(self) -> None:
+        # `#[path]` on an inline parent moves its file modules as surely as on the file module itself
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(h2, "OWNER_FILES", frozenset({"src/lib.rs"})):
+            rows = h2_depinfo.load_modmap(write_modmap(Path(tmp) / "map.tsv", RELOCATIONS["rel"][1]))
+            self.assertEqual(h2_depinfo.modmap_problems(rows), ["R-O: owner file src/lib.rs mounts inline module crate::w via #[path]",
+                                                                "R-O: owner file src/lib.rs mounts src/q.rs via #[path]"])
 
 class ParseAdmissions(unittest.TestCase):
     def test_schema(self) -> None:
