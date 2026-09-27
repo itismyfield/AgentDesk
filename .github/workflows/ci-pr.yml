@@ -1793,7 +1793,7 @@ jobs:
       - name: H2 tmux boundary measurement (linux, inert)
         run: bash scripts/ci/h2_measure.sh --lane linux --inert
 
-      # H2 R-O module map, Linux lane: the driver canary always runs, the repo map is inert until activation.
+      # H2 R-O module map: module/cfg driver self-tests are required; only the repo map stays inert until activation.
       # sccache cannot wrap the driver, and a cached compile would skip writing the map.
       - name: H2 module map (linux, inert)
         env:

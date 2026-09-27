@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import shutil
 import subprocess
@@ -32,9 +33,8 @@ CANARY_ROWS = ["src/shared.rs\tcrate::shared\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/li
 # The canary as a driver that lost every expansion context would write it.
 DRIFTED_ROWS = [re.sub(r"#[1-9]\d*", "#0", row) for row in CANARY_ROWS]
 # Stub cargo: `build` leaves a driver binary; `check` does what STUB_CANARY / STUB_REPO says with MODMAP_OUT.
-STUB_CARGO = """\
-#!/usr/bin/env python3
-import os, pathlib, shutil, sys
+STUB_CARGO = r"""#!/usr/bin/env python3
+import json, os, pathlib, platform, shutil, sys
 args = sys.argv[1:]
 if args[0] == "build":
     driver = pathlib.Path(args[args.index("--target-dir") + 1], "release/modmap-driver")
@@ -45,11 +45,40 @@ manifest = args[args.index("--manifest-path") + 1]
 action, _, source = os.environ["STUB_CANARY" if "/canary/" in manifest else "STUB_REPO"].partition(":")
 out = pathlib.Path(os.environ["MODMAP_OUT"])
 if action == "fail":
+    print(json.dumps({"reason": "compiler-message", "message": {"rendered": "error: driver rejected the map", "level": "error"}}))
+    print("cargo: check failed", file=sys.stderr)
     sys.exit(101)
 if action in ("copy", "old"):
     shutil.copy(source, out)
 if action == "old":
     os.utime(out, ns=(0, 0))
+if os.environ.get("MODMAP_CFG_OUT"):
+    cfg = pathlib.Path(os.environ["MODMAP_CFG_OUT"])
+    proof = pathlib.Path(str(cfg) + ".invocation.json")
+    mode = os.environ.get("STUB_CFG", "ok")
+    probes = [["feature", "h2_cfg_probe"], ["h2_probe_pair"], ["h2_probe_pair", ""],
+              ["h2_probe_multi", "first"], ["h2_probe_multi", "second"],
+              ["h2_probe_escape", 'quote=" slash=\\ newline=\n한글']]
+    session = [["target_os", "macos" if sys.platform == "darwin" else "linux"],
+               ["target_arch", "aarch64" if platform.machine() in ("arm64", "aarch64") else "x86_64"],
+               ["target_family", "unix"], ["unix"], ["panic", "unwind"], ["debug_assertions"]]
+    atoms = sorted(probes + session)
+    crate = pathlib.Path(manifest).parent
+    argv = [os.environ["RUSTC_WORKSPACE_WRAPPER"], "/rustc", "src/lib.rs"]
+    for atom in probes:
+        argv += ["--cfg", atom[0] + ("=" + json.dumps(atom[1], ensure_ascii=False) if len(atom) == 2 else "")]
+    invocation = dict(nonce=os.environ["MODMAP_CFG_NONCE"], argv=argv, root=str(crate))
+    if mode == "nonce": invocation["nonce"] = "earlier-run"
+    if mode == "argv": invocation["argv"] += ["--test"]
+    if mode == "feature": atoms.remove(["feature", "h2_cfg_probe"])
+    if mode == "unexpected": atoms.append(["h2_probe_extra"])
+    if mode == "target": atoms.remove(session[0])
+    if mode == "none": sys.exit(0)
+    cfg.write_text("{}" if mode == "schema" else json.dumps(sorted(atoms)))
+    if mode != "no-proof": proof.write_text(json.dumps(invocation))
+    if mode == "old": os.utime(cfg, ns=(0, 0))
+    if mode == "old-proof": os.utime(proof, ns=(0, 0))
+    if mode == "fail-after": sys.exit(101)
 """
 
 def write_modmap(path: Path, rows) -> Path:
@@ -107,6 +136,33 @@ class Wrapper(unittest.TestCase):
         self.assertEqual((code, "repo map skipped" in output), (0, True), output)
         code, output = self.run_wrapper("--inert", "--canary", STUB_CANARY=drifted)
         self.assertEqual((code, "driver canary drifted" in output), (1, True), output)
+
+    def test_cfg_requires_fresh_output_and_this_driver_invocation(self) -> None:
+        (self.root / h2.BASELINE_FILES[0]).unlink()
+        cases = (("none", "was not written"), ("old", "predates this run"),
+                 ("no-proof", "was not written"), ("old-proof", "predates this run"),
+                 ("nonce", "nonce mismatch"), ("argv", "argv/root mismatch"),
+                 ("schema", "expected a nonempty cfg array"), ("feature", "probe atoms differ"),
+                 ("unexpected", "probe atoms differ"), ("target", "session target/codegen atoms differ"),
+                 ("fail-after", "failed (101)"))
+        for mode, needle in cases:
+            with self.subTest(mode=mode):
+                code, output = self.run_wrapper("--inert", "--canary", STUB_REPO="fail")
+                self.assertEqual((code, "cfg self-test holds" in output), (0, True), output)
+                code, output = self.run_wrapper("--inert", "--canary", STUB_CFG=mode, STUB_REPO="fail")
+                self.assertEqual((code, needle in output), (1, True), output)
+
+    def test_json_diagnostics_and_stderr_survive_canary_and_root_failure(self) -> None:
+        for which in ("STUB_CANARY", "STUB_REPO"):
+            with self.subTest(which=which):
+                code, output = self.run_wrapper(**{which: "fail"})
+                self.assertEqual(code, 1, output)
+                self.assertIn("error: driver rejected the map", output)
+                self.assertIn("cargo: check failed", output)
+                name = "canary" if which == "STUB_CANARY" else "modmap"
+                log = self.root / f"target/h2/{name}.cargo.jsonl"
+                self.assertEqual(json.loads(log.read_text())["reason"], "compiler-message")
+                self.assertIn("cargo: check failed", log.with_suffix(".stderr").read_text())
 
 class CiWiring(unittest.TestCase):
     def test_linux_script_checks_self_test_the_driver_without_a_wrapper(self) -> None:

@@ -11,6 +11,8 @@ owner는 `src/services/platform/tmux.rs`, `src/services/platform/tmux/**`,
 기준 main `cd8fe090acb1c1f5f309a5ca22f7cc7c61a0ec81`에는 `clippy.toml`,
 `scripts/ci/h2_admissions.toml`, 두 baseline 파일이 없고 `LIVENESS_FLOOR = 0`이다.
 CI의 측정/map 호출에는 `--inert`가 있고 admission CLI는 CI에서 호출하지 않는다.
+cfg snapshot B1은 inert가 아니다. 필수 Linux 잡은 baseline 없이도 driver를 빌드하고
+`--inert --canary`로 실제 cfg self-test를 실행하며 실패를 rc 1로 전파한다.
 정책은 `agentdesk.session.hasLivePane(name)`으로 생존 상태를 조회하며, Rust exec 경계는 `gh/git`만 허용한다.
 `tmux_server_pids`와 `check_file_descriptor_headroom`은 비-macOS에서도 빈 결과의 동명 스텁으로 lint 경로를 유지한다.
 이 문서에서 활성 후 계약과 후속 방어선을 현재 구현의 보장으로 읽지 않는다.
@@ -68,9 +70,20 @@ rustc 1.94.1의 `--print cfg`는 값을 escape하지 않는다. 값 `a"`+개행+
 따라서 **원문 출력은 rc 2로 거부**하며 줄별 JSON 감싸기나 원문에서의 자동 변환도 제공하지 않는다.
 수집자는 컴파일러가 가진 이름/값 경계가 사라지기 전에 JSON serializer로 snapshot을 만들어야 한다.
 예: `[["foo", "a\"\nb=\"c"]]`와 `[["foo", "a"], ["b", "c"]]`는 서로 다르다.
-이 PR은 구조화 snapshot의 비교기이며 compiler 수집기를 구현하지 않는다.
-실제 invocation의 target·feature/custom cfg·codegen 옵션·build-script 결과를 수집하고
-argv·toolchain·source/config·증거 provenance에 연결하는 일은 PR-3b에서 검증할 잔여다.
+driver의 root non-test lib `after_expansion`은 `MODMAP_CFG_OUT` 설정 시
+`tcx.sess.psess.config`를 정렬·중복 제거하여 직렬화한다. flag와 빈 값도 별개 원자다.
+cfg 및 `<cfg>.invocation.json`은 각각 임시 파일→rename으로 게시한다. 후자는
+`MODMAP_CFG_NONCE`, 수신 argv, crate root를 기록한다. 두 파일의 게시를 하나의 원자적 완료로 보지 않는다.
+쓰기가 실패하면 compiler 오류로 Cargo가 실패하며 이미 남은 map/cfg도 성공 증거가 아니다.
+
+canary는 feature, flag/빈 값, 다중 값, escape probe를 실제 compiler에 전달한다.
+Python은 독립 기대값과 정확 비교하고 target/codegen 원자의 존재 및 test/windows의 부재를 검사한다.
+cfg·invocation을 사전 삭제하고 marker 이후 mtime, 이번 nonce, root/argv를 대조한다.
+Cargo event/명시적 cfg argv에 없는 세션 원자를 요구하며 동일/원자 제거 비교도 실행한다.
+Cargo JSONL과 stderr는 map 옆에 보존하고 compiler 진단은 CI stderr에도 출력한다.
+기존 Linux `H2 module map (linux, inert)` 단계의 root-skip만 inert이며 canary는 필수다.
+이 canary는 root 수집물이나 Clippy session 증거를 대신하지 않는다. 단일 수집/metadata·공통 env·
+양 레인 옵션 배선은 B2, toolchain/source/config·Clippy provenance와 receipt 결속은 PR-3b의 잔여다.
 
 두 호스트의 결과를 모은 뒤 실행한다:
 
@@ -95,7 +108,7 @@ cfg 술어, `cfg_attr`, 소스 파일·모듈 도달성을 해석하지 않는�
 Linux/macOS의 정상 target cfg는 다르므로 rc 1은 예상 가능한 진단이다.
 이를 곧바로 admission 위반으로 취급하거나 allowlist로 지우지 않는다.
 비교 도구 자체는 컴파일러를 실행하지 않고 입력 파일·baseline도 수정하지 않는다.
-이번 CI 배선은 이 도구의 행동 테스트뿐이며 실제 목록 비교로 H2를 활성화하지 않는다.
+CI는 비교기 행동 테스트와 실제 driver canary를 실행하며 H2 admission을 활성화하지 않는다.
 
 [r8](https://github.com/itismyfield/AgentDesk/issues/5340#issuecomment-5818836310)의 §6.5/A12′는 hosted 측정이 15분을 넘을 때
 cfg 파일/항목 목록으로 대체하는 방안을 기술했다. 이후 compiler 결정에 맞춰 PR-1c는 실제 cfg 목록의
