@@ -296,25 +296,11 @@ impl DeriveLink for TranscriptDerive {
         TranscriptDerive::attach(self, source, attach_extent, attached_at);
     }
     fn window_start(&mut self, t0: DateTime<Utc>, sources: &[WindowStartSource]) {
-        // The derive opens a window only through a source; this placeholder matches no file.
-        let placeholder = WindowStartSource {
-            source: SourceId {
-                session_id: String::new(),
-                path: PathBuf::new(),
-                dev: 0,
-                ino: 0,
-            },
-            window_start_extent: 0,
-        };
-        let listed = sources
-            .iter()
-            .chain(sources.is_empty().then_some(&placeholder));
-        for WindowStartSource {
-            source,
-            window_start_extent,
-        } in listed
-        {
-            TranscriptDerive::window_start(self, t0, source, *window_start_extent);
+        // Opened first so an empty list still sets t0 for sources attached later.
+        self.window_open(t0);
+        for listed in sources {
+            let extent = listed.window_start_extent;
+            TranscriptDerive::window_start(self, t0, &listed.source, extent);
         }
     }
     fn derive(&mut self, binding: &SourceBinding, batch: &CaptureBatch) -> Vec<DeriveOutput> {
