@@ -151,6 +151,39 @@ impl LockedInflightEpisode {
         )
         .map_or(GuardedSaveOutcome::IoError, |()| GuardedSaveOutcome::Saved)
     }
+
+    /// Commit the predecessor marker transition without dropping exact-episode authority.
+    pub(in crate::services::discord) fn release_restart_marker_under_guard(
+        &mut self,
+        generation: u64,
+        readopted: bool,
+    ) -> GuardedSaveOutcome {
+        if self.state.rebind_origin
+            || self.state.turn_nonce.as_deref().is_none_or(str::is_empty)
+            || self.state.restart_mode != Some(InflightRestartMode::DrainRestart)
+            || self.state.restart_generation != Some(generation)
+        {
+            return GuardedSaveOutcome::AuthorityPinned;
+        }
+        if self.state.user_msg_id == 0 && self.state.turn_start_offset.is_none() {
+            return GuardedSaveOutcome::Unnameable;
+        }
+        let mut updated = self.state.clone();
+        updated.clear_restart_mode();
+        updated.readopted_from_inflight |= readopted;
+        match super::store::persist_under_lock_with_snapshot(
+            &self.root,
+            &self.path,
+            &updated,
+            "restart_marker_handoff",
+        ) {
+            Ok(Some(saved)) => {
+                self.state = saved;
+                GuardedSaveOutcome::Saved
+            }
+            _ => GuardedSaveOutcome::IoError,
+        }
+    }
 }
 
 /// Atomically adopt one exact episode and retain the same canonical advisory lock.
