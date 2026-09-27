@@ -154,6 +154,8 @@ cli::json_output::tests::status_is_tolerant_of_missing_sections
 cli::json_output::tests::status_projects_counts_and_discord
 cli::json_output::tests::terminations_empty_is_empty_array
 cli::json_output::tests::terminations_projects_events_with_bool_alive
+cli::o_shadow::tests::an_allowlisted_thread_bound_to_a_default_tui_provider_covers_its_profile
+cli::o_shadow::tests::population_joins_resolver_defaults_with_numeric_channels_and_warns_on_name_only
 cli::query::tests::apply_filters_drops_non_matching
 cli::query::tests::apply_filters_no_filters_returns_input
 cli::query::tests::filters_match_string_and_number
