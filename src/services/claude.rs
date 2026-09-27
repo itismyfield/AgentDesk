@@ -1825,12 +1825,10 @@ fn execute_streaming_local_tui_tmux(
     }
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
-    if let Err(e) =
-        crate::services::discord::stamp_spawn_markers(tmux_session_name, Some(&prepared))
-    {
-        crate::services::platform::tmux::kill_session(tmux_session_name);
-        return Err(format!("publish binding context: {e}"));
-    }
+    prepared.finish_spawn(crate::services::discord::stamp_spawn_markers(
+        tmux_session_name,
+        Some(&prepared),
+    ))?;
 
     let _ = sender.send(StreamMessage::Init {
         session_id: resolved_session_id.clone(),

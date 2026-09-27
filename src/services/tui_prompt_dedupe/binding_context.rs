@@ -83,7 +83,10 @@ fn context_path(provider: &str, nonce: &str) -> io::Result<PathBuf> {
 }
 
 pub(crate) fn context_presence(provider: &str, nonce: &str) -> ContextPresence {
-    match context_path(provider, nonce).and_then(fs::metadata) {
+    let Ok(path) = context_path(provider, nonce) else {
+        return ContextPresence::Unknown;
+    };
+    match fs::metadata(path) {
         Ok(meta) if meta.is_file() => ContextPresence::Present,
         Err(e) if e.kind() == io::ErrorKind::NotFound => ContextPresence::Absent,
         _ => ContextPresence::Unknown,
@@ -194,6 +197,16 @@ impl PreparedIncarnation {
             "{UNSET_CONTEXT}export AGENTDESK_BINDING_CONTEXT={}\n",
             crate::services::process::shell_escape(&self.path.to_string_lossy())
         )
+    }
+
+    pub(crate) fn finish_spawn(&self, result: io::Result<String>) -> Result<(), String> {
+        result.map(|_| ()).map_err(|error| {
+            crate::services::platform::tmux::kill_session(
+                &self.context.tmux_session,
+                "binding context publication failed",
+            );
+            format!("publish binding context: {error}")
+        })
     }
 
     pub(crate) fn validate(&self, tmux: &str) -> io::Result<()> {
