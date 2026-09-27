@@ -32,7 +32,7 @@ beforeEach(() => {
     removeItem: (key: string) => storage.delete(key), clear: () => storage.clear(),
   } });
   container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
-  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [campaign], live: {} });
+  vi.mocked(getCampaigns).mockResolvedValue([campaign]);
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.clearAllMocks(); });
 async function render() { await act(async () => root.render(<CampaignsPanel language="en" />)); }
@@ -51,7 +51,7 @@ async function typeValue(input: HTMLInputElement | HTMLTextAreaElement, value: s
 it("restores the selected campaign and exposes the durable continuation checkpoint", async () => {
   const other = { ...campaign, id: "other", title: "Other", nodes: [] };
   window.localStorage.setItem(STORAGE_KEYS.dashboardActiveCampaign, JSON.stringify(campaign.id));
-  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [other, campaign], live: {} });
+  vi.mocked(getCampaigns).mockResolvedValue([other, campaign]);
   await render();
   expect(selectFor("Select campaign").value).toBe("ongoing");
   expect(container.querySelector(".campaign-node-detail")).toBeNull();
@@ -71,7 +71,7 @@ it("retains the prior checkpoint and explicitly marks a failed refresh", async (
 });
 
 it("shows an empty state and distinguishes initial fetch failure", async () => {
-  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [], live: {} });
+  vi.mocked(getCampaigns).mockResolvedValue([]);
   await render();
   expect(container.textContent).toContain("No campaigns yet");
   vi.mocked(getCampaigns).mockRejectedValue(new Error("Forbidden"));
@@ -84,7 +84,7 @@ it("preserves the edit revision and the draft when another session changes the c
   await render();
   await selectTask();
   await act(async () => button("Edit task").click());
-  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [{ ...campaign, revision: 6 }], live: {} });
+  vi.mocked(getCampaigns).mockResolvedValue([{ ...campaign, revision: 6 }]);
   await act(async () => button("Refresh").click());
   vi.mocked(updateCampaignNode).mockRejectedValue(new ApiRequestError("conflict", { status: 409 }));
   await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
@@ -94,7 +94,7 @@ it("preserves the edit revision and the draft when another session changes the c
 });
 
 it("browses 120 tasks through group collapse, issue search and combined filters without a full graph", async () => {
-  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [makeLargeCampaign()], live: {} });
+  vi.mocked(getCampaigns).mockResolvedValue([makeLargeCampaign()]);
   await render();
   expect(container.querySelectorAll(".campaign-task-row")).toHaveLength(0);
   expect(container.querySelectorAll(".campaign-group-heading")).toHaveLength(4);
@@ -120,7 +120,7 @@ it("browses 120 tasks through group collapse, issue search and combined filters 
 
 it("preserves selection, filters, collapse and a group edit draft across polls, task changes and campaign switches", async () => {
   const large = makeLargeCampaign();
-  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [large, campaign], live: {} });
+  vi.mocked(getCampaigns).mockResolvedValue([large, campaign]);
   await render();
   await selectTask("task-31");
   await act(async () => button("Edit task").click());
@@ -133,7 +133,7 @@ it("preserves selection, filters, collapse and a group edit draft across polls, 
   expect(Array.from(container.querySelectorAll("form input")).some((input) => (input as HTMLInputElement).value === "Gateway follow-up")).toBe(true);
   await changeSelect(selectFor("Group filter"), JSON.stringify("Gateway"));
   await act(async () => container.querySelector<HTMLButtonElement>(".campaign-group-heading")!.click());
-  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [{ ...large, revision: 6 }, campaign], live: {} });
+  vi.mocked(getCampaigns).mockResolvedValue([{ ...large, revision: 6 }, campaign]);
   await act(async () => button("Refresh").click());
   expect(selectFor("Group filter").value).toBe(JSON.stringify("Gateway"));
   expect(container.querySelector(".campaign-group-heading")?.getAttribute("aria-expanded")).toBe("false");
@@ -149,7 +149,7 @@ it("preserves selection, filters, collapse and a group edit draft across polls, 
 });
 
 it("keeps hidden cross-group dependencies explicit and keyboard navigation skips collapsed rows", async () => {
-  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [makeLargeCampaign()], live: {} });
+  vi.mocked(getCampaigns).mockResolvedValue([makeLargeCampaign()]);
   await render();
   await selectTask("task-30");
   await changeSelect(selectFor("Group filter"), JSON.stringify("Gateway"));
@@ -170,7 +170,7 @@ it("keeps hidden cross-group dependencies explicit and keyboard navigation skips
 });
 
 it("opens a canonical group from the overview and keeps advanced mobile filters opt-in", async () => {
-  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [makeLargeCampaign()], live: {} });
+  vi.mocked(getCampaigns).mockResolvedValue([makeLargeCampaign()]);
   await render();
   expect(button("Filters").getAttribute("aria-expanded")).toBe("false");
   await act(async () => button("Filters").click());
@@ -185,7 +185,7 @@ it("opens a canonical group from the overview and keeps advanced mobile filters 
 
 it("does not discard a newer draft when an older save resolves after switching away and back", async () => {
   const twoTasks = { ...campaign, nodes: [...campaign.nodes, { ...campaign.nodes[0], id: "other", title: "Other task" }] };
-  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [twoTasks], live: {} });
+  vi.mocked(getCampaigns).mockResolvedValue([twoTasks]);
   let resolveSave!: (value: Campaign) => void;
   vi.mocked(updateCampaignNode).mockImplementationOnce(() => new Promise((resolve) => { resolveSave = resolve; }));
   await render();
@@ -213,13 +213,13 @@ it("never regresses a newer polled revision when an older save response arrives"
   await act(async () => button("Edit task").click());
   await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
   const latest = { ...campaign, revision: 9, nodes: [{ ...campaign.nodes[0], next_action: "Newer authoritative checkpoint" }] };
-  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [latest], live: {} });
+  vi.mocked(getCampaigns).mockResolvedValue([latest]);
   await act(async () => button("Refresh").click());
   await act(async () => resolveSave({ ...campaign, revision: 6 }));
   expect(container.querySelector("form")).toBeNull();
   expect(container.querySelector(".campaign-next")?.textContent).toContain("Newer authoritative checkpoint");
   // A stale read response is fenced too, regardless of its request arrival order.
-  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [{ ...campaign, revision: 7 }], live: {} });
+  vi.mocked(getCampaigns).mockResolvedValue([{ ...campaign, revision: 7 }]);
   await act(async () => button("Refresh").click());
   expect(container.querySelector(".campaign-next")?.textContent).toContain("Newer authoritative checkpoint");
   await act(async () => button("Edit task").click());
@@ -234,34 +234,4 @@ it("opens the existing task details from a running card on the first screen", as
   await act(async () => container.querySelector<HTMLButtonElement>('[data-glance-id="review"]')!.click());
   expect(container.querySelector(".campaign-node-detail h3")?.textContent).toBe("Review current head");
   expect(container.textContent).toContain("session-42");
-});
-
-it("shows what the issue card is doing next to the ledger status without sending it back on save", async () => {
-  const linked = { ...campaign, nodes: [{ ...campaign.nodes[0], status: "pending" as const, issue_url: "https://github.com/o/r/issues/7" }] };
-  const live = { card_id: "card-7", card_status: "review", dispatch_type: "review", dispatch_status: "dispatched", session_status: "turn_active", session_seen_at: "2026-09-27T12:00:00Z", running: true, queue_status: "dispatched" };
-  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [linked], live: { ongoing: { review: live } } });
-  await render();
-  expect(container.textContent).toContain("Running now 1");
-  await selectTask();
-  expect(container.querySelector(".campaign-task-row .campaign-live")?.textContent).toBe("Review running");
-  expect(container.querySelector(".campaign-inspector-header")?.textContent).toContain("#7");
-  const detail = container.querySelector(".campaign-live-detail")!;
-  expect(detail.textContent).toContain("Review");
-  expect(detail.textContent).toContain("Working");
-  expect(detail.textContent).toContain("Started by auto-queue");
-  await act(async () => button("Edit task").click());
-  vi.mocked(updateCampaignNode).mockResolvedValue({ ...linked, revision: 6 });
-  await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-  expect(vi.mocked(updateCampaignNode).mock.calls[0][1]).not.toHaveProperty("card_status");
-});
-
-it("does not call a dispatch running when no session is working on it", async () => {
-  const linked = { ...campaign, nodes: [{ ...campaign.nodes[0], status: "pending" as const, issue_url: "https://github.com/o/r/issues/7" }] };
-  const live = { card_id: "card-7", card_status: "review", dispatch_type: "review", dispatch_status: "dispatched", session_status: null, session_seen_at: null, running: false, queue_status: null };
-  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [linked], live: { ongoing: { review: live } } });
-  await render();
-  expect(container.textContent).toContain("Running now 0");
-  await selectTask();
-  expect(container.querySelector(".campaign-task-row .campaign-live")?.textContent).toBe("Review assigned");
-  expect(container.querySelector(".campaign-live-detail")?.textContent).toContain("No session on it");
 });

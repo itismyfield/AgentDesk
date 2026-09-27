@@ -51,37 +51,86 @@ function makePipeline(): PipelineConfigFull {
     phase_gate: {
       dispatch_to: "self",
       dispatch_type: "phase-gate",
+      pass_verdict: "phase_gate_passed",
+      checks: ["merge_verified", "issue_closed"],
     },
   };
 }
 
 describe("pipeline-visual-editor-model", () => {
-  it("keeps stored stage values the editor does not offer", () => {
+  it("normalizes null trigger_after to ready", () => {
     const stage = stageDraftFromApi({
       id: "stage-1",
       repo: "itismyfield/AgentDesk",
       stage_name: "e2e",
       stage_order: 0,
-      provider: "codex",
+      entry_skill: "playwright",
+      provider: "counter",
       agent_override_id: null,
-      skip_condition: "label:hotfix",
+      timeout_minutes: 15,
+      on_failure: "retry",
+      on_failure_target: null,
+      max_retries: 2,
+      skip_condition: null,
+      parallel_with: null,
+      applies_to_agent_id: null,
       trigger_after: null as unknown as PipelineStage["trigger_after"],
+      created_at: 0,
     });
 
     expect(normalizeStageTrigger(undefined)).toBe("ready");
-    expect(stage).toMatchObject({ trigger_after: "ready", provider: "codex", skip_condition: "label:hotfix" });
-    expect(buildStageSavePayload([stage])[0]).toMatchObject({ provider: "codex", skip_condition: "label:hotfix" });
+    expect(stage.trigger_after).toBe("ready");
   });
 
-  it("saves the repo's full stage list with only runtime fields", () => {
-    const payload = buildStageSavePayload([
-      { stage_name: " e2e ", provider: "counter", agent_override_id: "", skip_condition: "no_rs_changes", trigger_after: "review_pass" },
-      { stage_name: "  ", provider: "", agent_override_id: "", skip_condition: "", trigger_after: "ready" },
-    ]);
+  it("preserves other-agent stages when saving filtered stages", () => {
+    const repoStages = [
+      {
+        id: "global",
+        repo: "itismyfield/AgentDesk",
+        stage_name: "global-stage",
+        stage_order: 0,
+        entry_skill: "skill-a",
+        provider: null,
+        agent_override_id: null,
+        timeout_minutes: 30,
+        on_failure: "fail",
+        on_failure_target: null,
+        max_retries: 1,
+        skip_condition: null,
+        parallel_with: null,
+        applies_to_agent_id: null,
+        trigger_after: "ready",
+        created_at: 0,
+      },
+      {
+        id: "agent-b",
+        repo: "itismyfield/AgentDesk",
+        stage_name: "agent-b-only",
+        stage_order: 1,
+        entry_skill: "skill-b",
+        provider: "counter",
+        agent_override_id: null,
+        timeout_minutes: 20,
+        on_failure: "retry",
+        on_failure_target: null,
+        max_retries: 2,
+        skip_condition: null,
+        parallel_with: null,
+        applies_to_agent_id: "agent-b",
+        trigger_after: "review_pass",
+        created_at: 0,
+      },
+    ] satisfies PipelineStage[];
 
-    expect(payload).toEqual([
-      { stage_name: "e2e", provider: "counter", agent_override_id: null, skip_condition: "no_rs_changes", trigger_after: "review_pass" },
-    ]);
+    const payload = buildStageSavePayload(repoStages, [stageDraftFromApi(repoStages[0])], "agent-a");
+
+    expect(payload).toHaveLength(2);
+    expect(payload[0].stage_name).toBe("global-stage");
+    expect(payload[1]).toMatchObject({
+      stage_name: "agent-b-only",
+      applies_to_agent_id: "agent-b",
+      trigger_after: "review_pass",
+    });
   });
 
   // A non-visual key the Rust override schema accepts, so the fixture stays a

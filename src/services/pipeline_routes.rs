@@ -1142,58 +1142,6 @@ mod tests {
         }
     }
 
-    /// Migrations mark `pipeline_stages` file-canonical in `db_table_metadata`,
-    /// and the old write guard turned every save on a real install into a 405.
-    #[tokio::test]
-    async fn replace_stages_writes_on_a_migrated_database_pg() {
-        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
-            "agentdesk_pipeline_stages",
-            "pipeline stage persistence",
-        )
-        .await
-        else {
-            return;
-        };
-        let pool = pg_db.connect_and_migrate().await;
-        let service = PipelineRouteService::new(&pool);
-
-        let first = service
-            .replace_stages(
-                "repo-rt",
-                &[PipelineStageInput {
-                    timeout_minutes: Some(120),
-                    ..dashboard_stage("qa")
-                }],
-            )
-            .await
-            .expect("replace_stages succeeds on a migrated database");
-        assert_eq!(first[0]["timeout_minutes"], json!(120));
-
-        // The dashboard sends only the runtime fields; ids and metadata stay.
-        let second = service
-            .replace_stages(
-                "repo-rt",
-                &[
-                    dashboard_stage("build"),
-                    PipelineStageInput {
-                        provider: Some("counter".to_string()),
-                        ..dashboard_stage("qa")
-                    },
-                ],
-            )
-            .await
-            .expect("second save");
-        assert_eq!(second.len(), 2);
-        assert_eq!(second[1]["stage_name"], json!("qa"));
-        assert_eq!(second[1]["id"], first[0]["id"]);
-        assert_eq!(second[1]["stage_order"], json!(2));
-        assert_eq!(second[1]["provider"], json!("counter"));
-        assert_eq!(second[1]["timeout_minutes"], json!(120));
-
-        assert_eq!(service.delete_stages("repo-rt").await.expect("delete"), 2);
-        pg_db.drop().await;
-    }
-
     /// A card in a stage keeps pointing at that stage's id; a save must not
     /// strand it or reroute it past stages it has not run.
     #[tokio::test]
@@ -1264,6 +1212,7 @@ mod tests {
             .replace_stages("repo-rt", &names(&["qa"]))
             .await
             .expect("closed cards do not hold stages");
+        assert_eq!(service.delete_stages("repo-rt").await.expect("delete"), 1);
 
         pg_db.drop().await;
     }

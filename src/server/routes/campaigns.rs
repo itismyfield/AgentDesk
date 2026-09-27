@@ -84,24 +84,18 @@ pub async fn list(
 ) -> AppResult<Json<Value>> {
     let limit = i64::from(query.limit.unwrap_or(100).clamp(1, 500));
     let offset = i64::from(query.offset.unwrap_or(0));
-    let pool = pool(&state)?;
-    let campaigns = campaigns::list(pool, limit, offset).await.map_err(error)?;
-    let live = campaigns::live_status(pool, &campaigns)
+    let campaigns = campaigns::list(pool(&state)?, limit, offset)
         .await
         .map_err(error)?;
     Ok(Json(
-        json!({ "campaigns": campaigns, "live": live, "limit": limit, "offset": offset }),
+        json!({ "campaigns": campaigns, "limit": limit, "offset": offset }),
     ))
 }
 
 pub async fn get(State(state): State<AppState>, Path(id): Path<String>) -> AppResult<Json<Value>> {
-    let pool = pool(&state)?;
-    let campaign = campaigns::get(pool, &id).await.map_err(error)?;
-    let mut live = campaigns::live_status(pool, std::slice::from_ref(&campaign))
-        .await
-        .map_err(error)?;
-    let live = live.remove(&campaign.id).unwrap_or_default();
-    Ok(Json(json!({ "campaign": campaign, "live": live })))
+    Ok(Json(
+        json!({ "campaign": campaigns::get(pool(&state)?, &id).await.map_err(error)? }),
+    ))
 }
 
 pub async fn history(

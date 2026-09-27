@@ -72,17 +72,10 @@ pub(crate) fn build_github_issue_url(repo_id: &str, issue_number: i64) -> Option
     ))
 }
 
-/// `(owner/repo, issue number)` for a GitHub issue link or path.
-pub(crate) fn github_issue_ref(raw: &str) -> Option<(String, i64)> {
-    let segments = github_path_segments(raw)?;
-    Some((
-        normalize_github_repo_id(raw)?,
-        issue_number_from_segments(&segments)?,
-    ))
-}
-
 pub(crate) fn normalize_github_issue_url(raw: &str) -> Option<String> {
-    let (repo_id, issue_number) = github_issue_ref(raw)?;
+    let segments = github_path_segments(raw)?;
+    let repo_id = normalize_github_repo_id(raw)?;
+    let issue_number = issue_number_from_segments(&segments)?;
     Some(format!(
         "https://github.com/{repo_id}/issues/{issue_number}"
     ))

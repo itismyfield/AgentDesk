@@ -152,12 +152,18 @@ events:
 #
 # Repo/agent overrides may replace this block. Resolution order:
 # agent override → repo override → these system defaults.
-# The pass verdict and required checks belong to the gate kind declared in
-# src/phase_gate.rs, not to this block.
 
 phase_gate:
   dispatch_to: self
   dispatch_type: phase-gate
+  pass_verdict: phase_gate_passed
+  # #1082: `checks` now references names registered via policies/phase_gate.js.
+  # YAML lists the gate names only; their implementations live in the JS
+  # registry (`agentdesk.registerPhaseGate(name, fn)`).
+  checks:
+    - merge_verified
+    - issue_closed
+    - build_passed
 
 # ── Stage failure moves (#1081, #5718) ───────────────────────────
 #
@@ -169,6 +175,10 @@ phase_gate:
 # has no such field, so serde discarded it on every load and no code ever
 # read it; removed in #5718. Unknown top-level keys are now rejected at
 # load time instead of being dropped silently.
+#
+# The `pipeline_stages` columns `on_failure` / `on_failure_target` /
+# `max_retries` / `backoff` remain stored config metadata that no runtime
+# executor reads (see migrations/postgres/0076_pipeline_stages_backoff.sql).
 
 # ── Clocks ────────────────────────────────────────────────────────
 #

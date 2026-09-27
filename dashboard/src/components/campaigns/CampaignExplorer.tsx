@@ -1,15 +1,15 @@
 import { useMemo, useRef, useState, type KeyboardEvent } from "react";
-import type { Campaign, CampaignNodeLive, CampaignNodeStatus } from "../../api/campaigns";
+import type { Campaign, CampaignNodeStatus } from "../../api/campaigns";
 import { WidgetState } from "../common/WidgetState";
 import CampaignNodeDetails, { type CampaignDraft } from "./CampaignNodeDetails";
 import CampaignNeighborhood from "./CampaignNeighborhood";
 import CampaignGroupOverview from "./CampaignGroupOverview";
 import CampaignGlance from "./CampaignGlance";
 import { EMPTY_FILTERS, NODE_STATUSES, campaignIssueLabel, filterCampaignNodes, groupCampaignNodes, type CampaignFilters } from "./campaignModel";
-import { Badge, LABELS, LiveChip, type Tr } from "./campaignPresentation";
+import { Badge, LABELS, type Tr } from "./campaignPresentation";
 
-export default function CampaignExplorer({ campaign, live, tr, onSaved, drafts, onDraftChange }: {
-  campaign: Campaign; live: Record<string, CampaignNodeLive>; tr: Tr; onSaved: (campaign: Campaign) => void;
+export default function CampaignExplorer({ campaign, tr, onSaved, drafts, onDraftChange }: {
+  campaign: Campaign; tr: Tr; onSaved: (campaign: Campaign) => void;
   drafts: Record<string, CampaignDraft>; onDraftChange: (key: string, draft: CampaignDraft | null, expected?: CampaignDraft) => void;
 }) {
   const [filters, setFilters] = useState<CampaignFilters>(EMPTY_FILTERS);
@@ -46,7 +46,7 @@ export default function CampaignExplorer({ campaign, live, tr, onSaved, drafts, 
   };
   const hiddenDependencies = selected?.dependencies.filter((id) => !visibleIds.has(id)) ?? [];
   return <div className="campaign-explorer">
-    <CampaignGlance nodes={campaign.nodes} live={live} tr={tr} onOpen={(id) => selectNode(id, true)} />
+    <CampaignGlance nodes={campaign.nodes} tr={tr} onOpen={(id) => selectNode(id, true)} />
     <div className={`campaign-toolbar ${filtersOpen ? "filters-open" : ""}`}>
       <label className="campaign-search"><span>{tr("작업 검색", "Search tasks")}</span><input type="search" aria-label={tr("작업 검색", "Search tasks")} placeholder={tr("제목, 번호, 담당, 세션…", "Title, ID, assignee, session…")} value={filters.query} onChange={(event) => patchFilters({ query: event.target.value })} /></label>
       <button className="campaign-filter-toggle" aria-expanded={filtersOpen} onClick={() => setFiltersOpen((current) => !current)}>{tr("필터", "Filters")}{(filters.status !== "all" || filters.group !== null || filters.hideCompleted) ? " •" : ""}</button>
@@ -62,10 +62,10 @@ export default function CampaignExplorer({ campaign, live, tr, onSaved, drafts, 
           {filtered.length === 0 && <WidgetState kind="empty" title={tr("조건에 맞는 작업이 없습니다.", "No matching tasks.")} action={<button onClick={() => setFilters(EMPTY_FILTERS)}>{tr("필터 초기화", "Reset filters")}</button>} />}
           <div className="campaign-group-list" aria-label={tr("그룹별 작업", "Tasks by group")}>
             {visibleGroups.map((group, groupIndex) => <section className="campaign-task-group" key={group.key}>
-              <button className="campaign-group-heading" aria-expanded={!collapsed.has(group.key)} aria-controls={`campaign-group-${groupIndex}`} onClick={() => toggleGroup(group.key)}><span aria-hidden>{collapsed.has(group.key) ? "▸" : "▾"}</span><strong>{group.key || tr("미분류", "Ungrouped")}</strong>{group.visible.length < group.nodes.length && <span title={tr("필터에 맞는 작업", "Tasks matching the filters")}>{tr(`${group.visible.length}개 표시`, `${group.visible.length} shown`)}</span>}<span className="campaign-group-progress">{group.progress.counts.completed}/{group.nodes.length} {tr("완료", "done")}</span><span className="campaign-mini-progress" aria-label={`${group.progress.percent}%`}><i style={{ width: `${group.progress.percent}%` }} /></span>{group.progress.counts.running > 0 && <span className="campaign-group-active">{tr(`진행 ${group.progress.counts.running}`, `${group.progress.counts.running} running`)}</span>}{group.progress.counts.blocked > 0 && <span className="campaign-group-blocked">{tr(`막힘 ${group.progress.counts.blocked}`, `${group.progress.counts.blocked} blocked`)}</span>}</button>
+              <button className="campaign-group-heading" aria-expanded={!collapsed.has(group.key)} aria-controls={`campaign-group-${groupIndex}`} onClick={() => toggleGroup(group.key)}><span aria-hidden>{collapsed.has(group.key) ? "▸" : "▾"}</span><strong>{group.key || tr("미분류", "Ungrouped")}</strong><span>{group.visible.length === group.nodes.length ? group.nodes.length : `${group.visible.length}/${group.nodes.length}`}</span><span className="campaign-group-progress">{group.progress.counts.completed}/{group.nodes.length} {tr("완료", "done")}</span><span className="campaign-mini-progress" aria-label={`${group.progress.percent}%`}><i style={{ width: `${group.progress.percent}%` }} /></span><span className="campaign-group-active">{tr(`진행 ${group.progress.counts.running}`, `${group.progress.counts.running} running`)}</span>{group.progress.counts.blocked > 0 && <span className="campaign-group-blocked">{tr(`막힘 ${group.progress.counts.blocked}`, `${group.progress.counts.blocked} blocked`)}</span>}</button>
               {!collapsed.has(group.key) && <div id={`campaign-group-${groupIndex}`}>
                 <div className="campaign-task-columns" aria-hidden><span>{tr("작업", "Task")}</span><span>{tr("상태", "Status")}</span><span>{tr("단계", "Stage")}</span><span>{tr("회차", "Round")}</span><span>{tr("담당", "Assignee")}</span></div>
-                {group.visible.map((node) => { const hidden = node.dependencies.filter((id) => !visibleIds.has(id)).length; return <button key={node.id} ref={(element) => { if (element) rowRefs.current.set(node.id, element); else rowRefs.current.delete(node.id); }} className="campaign-task-row" data-node-id={node.id} aria-pressed={node.id === selectedId} onClick={() => selectNode(node.id)} onKeyDown={(event) => navigateRows(event, node.id)}><span className="campaign-task-title" title={node.title}><span className="campaign-task-id">{campaignIssueLabel(node)}</span><strong>{node.title}</strong>{drafts[`${campaign.id}:${node.id}`] && <small title={tr("수정 중인 초안", "Unsaved draft")}>*</small>}{hidden > 0 && <small title={tr("필터 밖 선행 작업", "Dependencies outside filters")}>↳ {hidden}</small>}</span><span className="campaign-task-status"><Badge status={node.status} tr={tr} /><LiveChip live={live[node.id]} tr={tr} /></span><span className="campaign-task-stage" title={node.stage}>{node.stage}</span><span className="campaign-task-round">R{node.round}</span><span className="campaign-task-owner" title={node.assignee || ""}>{node.assignee || "—"}</span></button>; })}
+                {group.visible.map((node) => { const hidden = node.dependencies.filter((id) => !visibleIds.has(id)).length; return <button key={node.id} ref={(element) => { if (element) rowRefs.current.set(node.id, element); else rowRefs.current.delete(node.id); }} className="campaign-task-row" data-node-id={node.id} aria-pressed={node.id === selectedId} onClick={() => selectNode(node.id)} onKeyDown={(event) => navigateRows(event, node.id)}><span className="campaign-task-title" title={`${node.id} · ${node.title}`}><span className="campaign-task-id">{campaignIssueLabel(node)}</span><strong>{node.title}</strong>{drafts[`${campaign.id}:${node.id}`] && <small title={tr("수정 중인 초안", "Unsaved draft")}>*</small>}{hidden > 0 && <small title={tr("필터 밖 선행 작업", "Dependencies outside filters")}>↳ {hidden}</small>}</span><Badge status={node.status} tr={tr} /><span className="campaign-task-stage" title={node.stage}>{node.stage}</span><span className="campaign-task-round">R{node.round}</span><span className="campaign-task-owner" title={node.assignee || ""}>{node.assignee || "—"}</span></button>; })}
               </div>}
             </section>)}
           </div>
@@ -75,10 +75,10 @@ export default function CampaignExplorer({ campaign, live, tr, onSaved, drafts, 
         </>}
       </div>
       {selected ? <aside ref={inspectorRef} className="campaign-inspector" aria-label={tr("선택 작업", "Selected task")}>
-        <div className="campaign-row campaign-inspector-header"><span>{campaignIssueLabel(selected)}</span><button onClick={() => setSelectedId(null)} aria-label={tr("상세 닫기", "Close details")}>×</button></div>
+        <div className="campaign-row campaign-inspector-header"><span>{selected.id}</span><button onClick={() => setSelectedId(null)} aria-label={tr("상세 닫기", "Close details")}>×</button></div>
         {!visibleIds.has(selected.id) && <p className="campaign-filter-note">{tr("선택 작업은 현재 필터 밖에 있습니다.", "The selected task is outside the current filters.")}</p>}
         {hiddenDependencies.length > 0 && <p className="campaign-filter-note">{tr(`필터 밖 선행 작업 ${hiddenDependencies.length}개. 연결 보기에서 확인할 수 있습니다.`, `${hiddenDependencies.length} dependencies are outside the filters. Open Connections to inspect them.`)}</p>}
-        <CampaignNodeDetails key={selected.id} campaign={campaign} node={selected} live={live[selected.id]} tr={tr} onSaved={onSaved} editing={drafts[`${campaign.id}:${selected.id}`] ?? null} onDraftChange={(draft, expected) => onDraftChange(`${campaign.id}:${selected.id}`, draft, expected)} />
+        <CampaignNodeDetails key={selected.id} campaign={campaign} node={selected} tr={tr} onSaved={onSaved} editing={drafts[`${campaign.id}:${selected.id}`] ?? null} onDraftChange={(draft, expected) => onDraftChange(`${campaign.id}:${selected.id}`, draft, expected)} />
       </aside> : <aside className="campaign-inspector-placeholder"><span>↗</span><p>{tr("작업을 선택해 담당 세션과 다음 행동을 확인하세요.", "Select a task to inspect its session and next action.")}</p></aside>}
     </div>
   </div>;

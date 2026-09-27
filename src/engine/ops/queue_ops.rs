@@ -46,6 +46,9 @@ fn queue_status_raw_pg(pool: &PgPool) -> String {
                     "pending": count_pg(&bridge_pool, "SELECT COUNT(*) FROM task_dispatches WHERE status = 'pending'").await?,
                     "dispatched": count_pg(&bridge_pool, "SELECT COUNT(*) FROM task_dispatches WHERE status = 'dispatched'").await?,
                 },
+                "legacy_dispatch_queue": {
+                    "queued": count_pg(&bridge_pool, "SELECT COUNT(*) FROM dispatch_queue").await?,
+                },
                 "message_outbox": {
                     "pending": count_pg(&bridge_pool, "SELECT COUNT(*) FROM message_outbox WHERE status = 'pending'").await?,
                     "failed": count_pg(&bridge_pool, "SELECT COUNT(*) FROM message_outbox WHERE status = 'failed'").await?,

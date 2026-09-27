@@ -57,10 +57,10 @@ export default function PipelineVisualEditorInspector({ ctx, actions }: Props) {
           {tr(
             ctx.useScrollableMobileFsmCanvas
               ? "모바일은 위 빠른 선택 목록에서 전환이나 상태를 고른 뒤 이 패널에서 event, hook, policy를 편집합니다."
-              : "전환선을 선택하면 이 패널에서 event, hook, policy를 바로 편집할 수 있습니다.",
+              : "전환선을 선택하면 우측 280px 패널에서 event, hook, policy를 바로 편집할 수 있습니다.",
             ctx.useScrollableMobileFsmCanvas
               ? "On mobile, choose a transition or state from the quick selector above, then edit its event, hook, and policy here."
-              : "Select an edge to edit its event, hook, and policy in this panel.",
+              : "Select an edge to edit its event, hook, and policy in the 280px side panel.",
           )}
         </div>
       )}

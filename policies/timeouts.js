@@ -63,7 +63,7 @@ timeouts.onTick1min = function(ev) {
   agentdesk.log.debug("[tick1min] total " + (Date.now() - start) + "ms");
 };
 
-// 5min tier: [R] [B] [G] [M] [O] + TTL cleanup (non-critical reconciliation)
+// 5min tier: [R] [B] [F] [G] [H] [M] [O] + TTL cleanup (non-critical reconciliation)
 // [I] moved to 30s tier for critical-path isolation (#127)
 timeouts.onTick5min = function(ev) {
   var start = Date.now();
@@ -78,8 +78,12 @@ timeouts.onTick5min = function(ev) {
   agentdesk.log.debug("[tick5min][R] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_B(); } catch(e) { agentdesk.log.warn("[tick5min] B error: " + e); }
   agentdesk.log.debug("[tick5min][B] " + (Date.now() - t) + "ms");
+  t = Date.now(); try { timeouts._section_F(); } catch(e) { agentdesk.log.warn("[tick5min] F error: " + e); }
+  agentdesk.log.debug("[tick5min][F] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_G(); } catch(e) { agentdesk.log.warn("[tick5min] G error: " + e); }
   agentdesk.log.debug("[tick5min][G] " + (Date.now() - t) + "ms");
+  t = Date.now(); try { timeouts._section_H(); } catch(e) { agentdesk.log.warn("[tick5min] H error: " + e); }
+  agentdesk.log.debug("[tick5min][H] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_M(); } catch(e) { agentdesk.log.warn("[tick5min] M error: " + e); }
   agentdesk.log.debug("[tick5min][M] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_O(); } catch(e) { agentdesk.log.warn("[tick5min] O error: " + e); }

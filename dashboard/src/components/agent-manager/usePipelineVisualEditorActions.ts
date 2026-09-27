@@ -1,7 +1,7 @@
 import type { Dispatch, SetStateAction } from "react";
 
 import * as api from "../../api";
-import type { PipelineConfigFull } from "../../types";
+import type { PipelineConfigFull, PipelineStage } from "../../types";
 import {
   buildFsmEdgeBindingKey,
   buildOverridePayload,
@@ -30,6 +30,7 @@ interface Params {
   isFsmVariant: boolean;
   level: EditLevel;
   pipelineDraft: PipelineConfigFull | null;
+  allRepoStages: PipelineStage[];
   stageDrafts: StageDraft[];
   overrideExtras: Record<string, unknown>;
   pipelineChanged: boolean;
@@ -58,6 +59,7 @@ export function usePipelineVisualEditorActions(params: Params) {
     isFsmVariant,
     level,
     pipelineDraft,
+    allRepoStages,
     stageDrafts,
     overrideExtras,
     pipelineChanged,
@@ -420,7 +422,7 @@ export function usePipelineVisualEditorActions(params: Params) {
         }
       }
       if (!isFsmVariant && stagesChanged) {
-        await api.savePipelineStages(repo, buildStageSavePayload(stageDrafts));
+        await api.savePipelineStages(repo, buildStageSavePayload(allRepoStages, stageDrafts, selectedAgentId));
       }
       await refreshAfterMutation(level);
       setSuccess(tr("비주얼 파이프라인 편집 내용을 저장했습니다.", "Saved visual pipeline editor changes."));
@@ -471,9 +473,13 @@ export function usePipelineVisualEditorActions(params: Params) {
     setSaving(true);
     setError(null);
     try {
-      await api.deletePipelineStages(repo);
+      if (selectedAgentId) {
+        await api.savePipelineStages(repo, buildStageSavePayload(allRepoStages, [], selectedAgentId));
+      } else {
+        await api.deletePipelineStages(repo);
+      }
       await refreshAfterMutation(level);
-      setSuccess(tr("레포의 파이프라인 스테이지를 모두 지웠습니다.", "Cleared the repository's pipeline stages."));
+      setSuccess(tr("보이는 파이프라인 스테이지를 정리했습니다.", "Cleared visible pipeline stages."));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : tr("스테이지 정리에 실패했습니다.", "Failed to clear stages."));
     } finally {

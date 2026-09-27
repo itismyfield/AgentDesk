@@ -22,11 +22,16 @@ export interface FsmEdgeBinding {
 
 export interface StageDraft {
   stage_name: string;
-  // Only "counter" and "no_rs_changes" change behaviour (review-automation.js). Other stored
-  // values are kept as they are so a save does not rewrite them.
+  entry_skill: string;
   provider: string;
   agent_override_id: string;
+  timeout_minutes: number;
+  on_failure: "fail" | "retry" | "previous" | "goto";
+  on_failure_target: string;
+  max_retries: number;
   skip_condition: string;
+  parallel_with: string;
+  applies_to_agent_id: string;
   trigger_after: StageTrigger;
 }
 
@@ -116,6 +121,8 @@ export function clonePhaseGate(phaseGate: PhaseGateConfig): PhaseGateConfig {
   return {
     dispatch_to: phaseGate.dispatch_to,
     dispatch_type: phaseGate.dispatch_type,
+    pass_verdict: phaseGate.pass_verdict,
+    checks: [...phaseGate.checks],
   };
 }
 
@@ -128,9 +135,16 @@ export function normalizeStageTrigger(
 export function stageDraftFromApi(stage: PipelineStage): StageDraft {
   return {
     stage_name: stage.stage_name,
+    entry_skill: stage.entry_skill ?? "",
     provider: stage.provider ?? "",
     agent_override_id: stage.agent_override_id ?? "",
+    timeout_minutes: stage.timeout_minutes,
+    on_failure: stage.on_failure,
+    on_failure_target: stage.on_failure_target ?? "",
+    max_retries: stage.max_retries,
     skip_condition: stage.skip_condition ?? "",
+    parallel_with: stage.parallel_with ?? "",
+    applies_to_agent_id: stage.applies_to_agent_id ?? "",
     trigger_after: normalizeStageTrigger(stage.trigger_after),
   };
 }
@@ -138,9 +152,16 @@ export function stageDraftFromApi(stage: PipelineStage): StageDraft {
 export function emptyStageDraft(): StageDraft {
   return {
     stage_name: "",
+    entry_skill: "",
     provider: "",
     agent_override_id: "",
+    timeout_minutes: 60,
+    on_failure: "fail",
+    on_failure_target: "",
+    max_retries: 3,
     skip_condition: "",
+    parallel_with: "",
+    applies_to_agent_id: "",
     trigger_after: "ready",
   };
 }
@@ -148,19 +169,60 @@ export function emptyStageDraft(): StageDraft {
 export function stageInputFromDraft(stage: StageDraft) {
   return {
     stage_name: stage.stage_name.trim(),
-    provider: stage.provider || null,
+    entry_skill: stage.entry_skill.trim() || null,
+    provider: stage.provider.trim() || null,
     agent_override_id: stage.agent_override_id || null,
-    skip_condition: stage.skip_condition || null,
+    timeout_minutes: stage.timeout_minutes,
+    on_failure: stage.on_failure,
+    on_failure_target: stage.on_failure_target.trim() || null,
+    max_retries: stage.max_retries,
+    skip_condition: stage.skip_condition.trim() || null,
+    parallel_with: stage.parallel_with.trim() || null,
+    applies_to_agent_id: stage.applies_to_agent_id || null,
     trigger_after: normalizeStageTrigger(stage.trigger_after),
   };
 }
 
-// Stages belong to the repo as a whole; saving replaces the repo's full list. The server keeps
-// each stage's id and its unedited settings (timeouts, retries) as long as the name stays.
-export function buildStageSavePayload(stageDrafts: StageDraft[]) {
-  return stageDrafts
+export function filterVisibleStages(stages: PipelineStage[], selectedAgentId?: string | null) {
+  if (!selectedAgentId) {
+    return stages;
+  }
+  return stages.filter(
+    (stage) => !stage.applies_to_agent_id || stage.applies_to_agent_id === selectedAgentId,
+  );
+}
+
+export function buildStageSavePayload(
+  repoStages: PipelineStage[],
+  stageDrafts: StageDraft[],
+  selectedAgentId?: string | null,
+) {
+  const editedStages = stageDrafts
     .filter((stage) => stage.stage_name.trim())
     .map((stage) => stageInputFromDraft(stage));
+
+  if (!selectedAgentId) {
+    return editedStages;
+  }
+
+  const otherAgentStages = repoStages
+    .filter((stage) => stage.applies_to_agent_id && stage.applies_to_agent_id !== selectedAgentId)
+    .map((stage) => ({
+      stage_name: stage.stage_name,
+      entry_skill: stage.entry_skill ?? null,
+      provider: stage.provider ?? null,
+      agent_override_id: stage.agent_override_id ?? null,
+      timeout_minutes: stage.timeout_minutes,
+      on_failure: stage.on_failure,
+      on_failure_target: stage.on_failure_target ?? null,
+      max_retries: stage.max_retries,
+      skip_condition: stage.skip_condition ?? null,
+      parallel_with: stage.parallel_with ?? null,
+      applies_to_agent_id: stage.applies_to_agent_id ?? null,
+      trigger_after: normalizeStageTrigger(stage.trigger_after),
+    }));
+
+  return [...editedStages, ...otherAgentStages];
 }
 
 export function extractOverrideExtras(rawConfig: unknown): Record<string, unknown> {

@@ -28,10 +28,15 @@ export default function PipelineVisualEditorStagePanel({ ctx, actions }: Props) 
             {tr("파이프라인 스테이지", "Pipeline Stages")}
           </h4>
           <p className="text-xs" style={MUTED_TEXT_STYLE}>
-            {tr(
-              "레포 전체에 적용되는 자동 실행 단계입니다. 카드가 트리거 상태에 들어가거나 리뷰를 통과하면 순서대로 진행합니다.",
-              "Automated stages for the whole repository. They run in order when a card reaches the trigger state or passes review.",
-            )}
+            {ctx.selectedAgentDetail
+              ? tr(
+                  "선택된 에이전트에 보이는 스테이지만 편집합니다. 저장 시 다른 에이전트 전용 스테이지는 유지됩니다.",
+                  "You are editing only stages visible to the selected agent. Saving preserves other-agent stages.",
+                )
+              : tr(
+                  "상태머신과 같은 카드 안에서 스테이지 실행 순서를 함께 관리합니다.",
+                  "Manage stage execution order in the same card as the state machine.",
+                )}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -47,7 +52,7 @@ export default function PipelineVisualEditorStagePanel({ ctx, actions }: Props) 
               opacity: ctx.saving || (ctx.stageDrafts.length === 0 && ctx.allRepoStages.length === 0) ? 0.45 : 1,
             }}
           >
-            {tr("스테이지 모두 지우기", "Clear all stages")}
+            {tr("보이는 스테이지 정리", "Clear visible stages")}
           </button>
         </div>
       </div>
@@ -92,6 +97,8 @@ function StageCard({ ctx, actions, stage, index }: Props & { stage: StageDraft; 
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2">
+        <TextField ctx={ctx} label={tr("스킬", "Skill")} value={stage.entry_skill} onChange={(value) => actions.updateStage(index, { entry_skill: value })} placeholder="claude-code-plan" />
+        <TextField ctx={ctx} label={tr("프로바이더", "Provider")} value={stage.provider} onChange={(value) => actions.updateStage(index, { provider: value })} placeholder="self / counter" />
         <SelectField
           label={tr("트리거", "Trigger")}
           value={stage.trigger_after}
@@ -101,25 +108,31 @@ function StageCard({ ctx, actions, stage, index }: Props & { stage: StageDraft; 
             ["review_pass", tr("리뷰 통과 후", "After review pass")],
           ]}
         />
+        <NumberField ctx={ctx} label={tr("타임아웃(분)", "Timeout (min)")} value={stage.timeout_minutes} min={1} onChange={(value) => actions.updateStage(index, { timeout_minutes: Math.max(1, value || 60) })} />
+        <AgentSelect ctx={ctx} label={tr("담당 에이전트 조정", "Agent adjustment")} value={stage.agent_override_id} emptyLabel={tr("카드 담당자", "Card assignee")} onChange={(value) => actions.updateStage(index, { agent_override_id: value })} />
+        <AgentSelect ctx={ctx} label={tr("적용 대상 에이전트", "Applies to agent")} value={stage.applies_to_agent_id} emptyLabel={tr("전체", "All agents")} onChange={(value) => actions.updateStage(index, { applies_to_agent_id: value })} />
         <SelectField
-          label={tr("실행 방식", "Provider")}
-          value={stage.provider === "counter" ? "counter" : ""}
-          onChange={(value) => actions.updateStage(index, { provider: value })}
+          label={tr("실패 시", "On failure")}
+          value={stage.on_failure}
+          onChange={(value) => actions.updateStage(index, { on_failure: value as StageDraft["on_failure"] })}
           options={[
-            ["", tr("담당 에이전트", "Assigned agent")],
-            ["counter", tr("교차 모델 (e2e 항목이 있을 때만)", "Counter model (only with an e2e item)")],
+            ["fail", tr("실패 처리", "Fail")],
+            ["retry", tr("재시도", "Retry")],
+            ["previous", tr("이전 스테이지", "Previous stage")],
+            ["goto", tr("지정 스테이지", "Go to stage")],
           ]}
         />
-        <AgentSelect ctx={ctx} label={tr("담당 에이전트 지정", "Agent override")} value={stage.agent_override_id} emptyLabel={tr("카드 담당자", "Card assignee")} onChange={(value) => actions.updateStage(index, { agent_override_id: value })} />
-        <SelectField
-          label={tr("건너뛰기", "Skip")}
-          value={stage.skip_condition === "no_rs_changes" ? "no_rs_changes" : ""}
-          onChange={(value) => actions.updateStage(index, { skip_condition: value })}
-          options={[
-            ["", tr("건너뛰지 않음", "Never")],
-            ["no_rs_changes", tr("Rust 변경이 없으면", "When no Rust files changed")],
-          ]}
-        />
+        <NumberField ctx={ctx} label={tr("최대 재시도", "Max retries")} value={stage.max_retries} min={0} onChange={(value) => actions.updateStage(index, { max_retries: Math.max(0, value || 0) })} />
+        {stage.on_failure === "goto" && (
+          <div className="sm:col-span-2">
+            <StageNameSelect ctx={ctx} label={tr("이동 대상", "Goto target")} value={stage.on_failure_target} index={index} onChange={(value) => actions.updateStage(index, { on_failure_target: value })} />
+          </div>
+        )}
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <TextField ctx={ctx} label={tr("스킵 조건", "Skip condition")} value={stage.skip_condition} onChange={(value) => actions.updateStage(index, { skip_condition: value })} placeholder="label:hotfix" />
+        <StageNameSelect ctx={ctx} label={tr("병렬 스테이지", "Parallel with")} value={stage.parallel_with} index={index} emptyLabel={tr("없음", "None")} onChange={(value) => actions.updateStage(index, { parallel_with: value })} />
       </div>
 
       <div className="flex flex-wrap gap-2">
@@ -137,6 +150,28 @@ function StageCard({ ctx, actions, stage, index }: Props & { stage: StageDraft; 
           {tr("삭제", "Delete")}
         </button>
       </div>
+    </div>
+  );
+}
+
+function TextField(props: { ctx: any; label: string; value: string; onChange: (value: string) => void; placeholder?: string }) {
+  return (
+    <div>
+      <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+        {props.label}
+      </label>
+      <input value={props.value} onChange={(event) => props.onChange(event.target.value)} className={INPUT_CLASS} style={INPUT_STYLE} placeholder={props.placeholder} />
+    </div>
+  );
+}
+
+function NumberField(props: { ctx: any; label: string; value: number; min: number; onChange: (value: number) => void }) {
+  return (
+    <div>
+      <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+        {props.label}
+      </label>
+      <input type="number" value={props.value} onChange={(event) => props.onChange(Number(event.target.value))} className={INPUT_CLASS} style={INPUT_STYLE} min={props.min} />
     </div>
   );
 }
@@ -174,3 +209,22 @@ function AgentSelect(props: { ctx: any; label: string; value: string; emptyLabel
   );
 }
 
+function StageNameSelect(props: { ctx: any; label: string; value: string; index: number; onChange: (value: string) => void; emptyLabel?: string }) {
+  return (
+    <div>
+      <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+        {props.label}
+      </label>
+      <select value={props.value} onChange={(event) => props.onChange(event.target.value)} className={INPUT_CLASS} style={INPUT_STYLE}>
+        <option value="">{props.emptyLabel ?? props.ctx.tr("선택", "Select")}</option>
+        {props.ctx.stageDrafts
+          .filter((_: StageDraft, stageIndex: number) => stageIndex !== props.index)
+          .map((candidate: StageDraft) => (
+            <option key={candidate.stage_name} value={candidate.stage_name}>
+              {candidate.stage_name}
+            </option>
+          ))}
+      </select>
+    </div>
+  );
+}

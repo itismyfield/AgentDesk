@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getCampaigns, type Campaign, type CampaignLive, type CampaignNodeLive } from "../../api/campaigns";
+import { getCampaigns, type Campaign } from "../../api/campaigns";
 import { STORAGE_KEYS } from "../../lib/storageKeys";
 import { readLocalStorageValue, writeLocalStorageValue } from "../../lib/useLocalStorage";
 import { WidgetState } from "../common/WidgetState";
@@ -9,12 +9,9 @@ import CampaignExplorer from "./CampaignExplorer";
 import type { CampaignDraft } from "./CampaignNodeDetails";
 import "./campaigns.css";
 
-const NO_LIVE: Record<string, CampaignNodeLive> = {};
-
 export default function CampaignsPanel({ language }: { language: string }) {
   const tr: Tr = useCallback((ko, en) => language === "ko" ? ko : en, [language]);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
-  const [live, setLive] = useState<CampaignLive>({});
   const [drafts, setDrafts] = useState<Record<string, CampaignDraft>>({});
   const onDraftChange = (key: string, draft: CampaignDraft | null, expected?: CampaignDraft) => setDrafts((current) => {
     // A save may finish after this task was reopened and its draft changed.
@@ -33,9 +30,8 @@ export default function CampaignsPanel({ language }: { language: string }) {
     const id = ++requestId.current;
     setLoading(true);
     try {
-      const { campaigns: values, live: nextLive } = await getCampaigns();
+      const values = await getCampaigns();
       if (!mounted.current || id !== requestId.current) return;
-      setLive(nextLive);
       setCampaigns((current) => values.map((value) => {
         const previous = current.find((candidate) => candidate.id === value.id);
         return previous && previous.revision > value.revision ? previous : value;
@@ -68,12 +64,12 @@ export default function CampaignsPanel({ language }: { language: string }) {
         <label className="campaign-selector"><span>{tr("캠페인 선택", "Select campaign")}</span><select aria-label={tr("캠페인 선택", "Select campaign")} value={campaign.id} onChange={(event) => setSelectedId(event.target.value)}>{campaigns.map((value) => <option key={value.id} value={value.id}>{value.title}</option>)}</select></label>
         <Badge status={campaign.status} tr={tr} />
         <span className="campaign-summary-round">{tr("라운드", "Round")} {campaign.round}</span>
-        <strong>{tr(`완료 ${progress.counts.completed}/${progress.total}`, `${progress.counts.completed}/${progress.total} done`)}</strong>
+        <strong>{progress.percent}% <span className="campaign-muted">{progress.counts.completed}/{progress.total}</span></strong>
         {refreshedAt && <span className="campaign-freshness">{tr("확인", "Checked")} {new Date(refreshedAt).toLocaleTimeString(language)}</span>}
       </div>
       {campaign.description && <p className="campaign-description" title={campaign.description}>{campaign.description}</p>}
       <progress className="campaign-progress" max={100} value={progress.percent} aria-label={tr("작업 완료율", "Task completion")} />
-      {campaign.nodes.length ? <CampaignExplorer key={campaign.id} campaign={campaign} live={live[campaign.id] ?? NO_LIVE} tr={tr} onSaved={onSaved} drafts={drafts} onDraftChange={onDraftChange} /> : <WidgetState kind="empty" title={tr("아직 작업이 없습니다.", "No tasks yet.")} />}
+      {campaign.nodes.length ? <CampaignExplorer key={campaign.id} campaign={campaign} tr={tr} onSaved={onSaved} drafts={drafts} onDraftChange={onDraftChange} /> : <WidgetState kind="empty" title={tr("아직 작업이 없습니다.", "No tasks yet.")} />}
     </div>}
   </section>;
 }

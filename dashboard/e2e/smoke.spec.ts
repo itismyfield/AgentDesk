@@ -909,15 +909,24 @@ const MOCK_SETTINGS_FSM_PIPELINE = {
   phase_gate: {
     dispatch_to: "project-agentdesk",
     dispatch_type: "review",
+    pass_verdict: "approved",
+    checks: ["artifact_attached"],
   },
 };
 
 const MOCK_SETTINGS_PIPELINE_STAGES = [
   {
     stage_name: "implementation",
-    provider: null,
+    entry_skill: "adk-dashboard",
+    provider: "codex",
     agent_override_id: null,
+    timeout_minutes: 60,
+    on_failure: "previous",
+    on_failure_target: null,
+    max_retries: 1,
     skip_condition: null,
+    parallel_with: null,
+    applies_to_agent_id: null,
     trigger_after: "ready",
   },
 ];

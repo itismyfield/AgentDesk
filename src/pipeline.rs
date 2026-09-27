@@ -336,6 +336,19 @@ fn build_replace_warnings(
             dropped_items(base.clocks.keys().cloned(), clocks.keys().cloned()),
         );
     }
+    if let Some(phase_gate) = override_cfg.phase_gate.as_ref() {
+        push_replace_warning(
+            &mut warnings,
+            layer,
+            target_id,
+            "phase_gate.checks",
+            dropped_items(
+                base.phase_gate.checks.iter().cloned(),
+                phase_gate.checks.iter().cloned(),
+            ),
+        );
+    }
+
     warnings
 }
 
@@ -701,15 +714,28 @@ fn default_phase_gate_dispatch_type() -> String {
     "phase-gate".to_string()
 }
 
-/// Who runs a phase-gate dispatch. The pass verdict and required checks belong to
-/// the gate kind (`crate::phase_gate::PHASE_GATE_DECLARATIONS`); older manifests
-/// that still carry `pass_verdict`/`checks` here load with those keys ignored.
+fn default_phase_gate_pass_verdict() -> String {
+    "phase_gate_passed".to_string()
+}
+
+fn default_phase_gate_checks() -> Vec<String> {
+    vec![
+        "merge_verified".to_string(),
+        "issue_closed".to_string(),
+        "build_passed".to_string(),
+    ]
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseGateConfig {
     #[serde(default = "default_phase_gate_dispatch_to")]
     pub dispatch_to: String,
     #[serde(default = "default_phase_gate_dispatch_type")]
     pub dispatch_type: String,
+    #[serde(default = "default_phase_gate_pass_verdict")]
+    pub pass_verdict: String,
+    #[serde(default = "default_phase_gate_checks")]
+    pub checks: Vec<String>,
 }
 
 impl Default for PhaseGateConfig {
@@ -717,6 +743,8 @@ impl Default for PhaseGateConfig {
         Self {
             dispatch_to: default_phase_gate_dispatch_to(),
             dispatch_type: default_phase_gate_dispatch_type(),
+            pass_verdict: default_phase_gate_pass_verdict(),
+            checks: default_phase_gate_checks(),
         }
     }
 }
@@ -1091,6 +1119,12 @@ impl PipelineConfig {
         }
         if self.phase_gate.dispatch_type.trim().is_empty() {
             anyhow::bail!("phase_gate.dispatch_type must not be empty");
+        }
+        if self.phase_gate.pass_verdict.trim().is_empty() {
+            anyhow::bail!("phase_gate.pass_verdict must not be empty");
+        }
+        if self.phase_gate.checks.is_empty() {
+            anyhow::bail!("phase_gate.checks must not be empty");
         }
 
         Ok(())

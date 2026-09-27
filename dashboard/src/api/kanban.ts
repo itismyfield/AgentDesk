@@ -382,9 +382,16 @@ export async function getCardGitHubComments(
 
 export interface PipelineStageInput {
   stage_name: string;
+  entry_skill?: string | null;
   provider?: string | null;
   agent_override_id?: string | null;
+  timeout_minutes?: number;
+  on_failure?: "fail" | "retry" | "previous" | "goto";
+  on_failure_target?: string | null;
+  max_retries?: number;
   skip_condition?: string | null;
+  parallel_with?: string | null;
+  applies_to_agent_id?: string | null;
   trigger_after?: "ready" | "review_pass";
 }
 
