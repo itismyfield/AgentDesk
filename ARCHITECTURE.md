@@ -844,7 +844,17 @@ src/
 │   │   │   └── claude.rs
 │   │   ├── outbound/
 │   │   │   ├── delivery_obligation/
+│   │   │   │   ├── state/
+│   │   │   │   │   ├── proof_access.rs
+│   │   │   │   │   ├── proof_input.rs
+│   │   │   │   │   ├── proof_tests.rs
+│   │   │   │   │   └── whole_proof.rs
+│   │   │   │   ├── codec_tests.rs
+│   │   │   │   ├── fence.rs
 │   │   │   │   ├── mod.rs
+│   │   │   │   ├── protocol.rs
+│   │   │   │   ├── reader.rs
+│   │   │   │   ├── reader_tests.rs
 │   │   │   │   ├── schema.rs
 │   │   │   │   └── state.rs
 │   │   │   ├── manual_delivery/

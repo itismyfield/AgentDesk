@@ -62,6 +62,9 @@ fn assert_prompt_pairs(events: &[Value], key: &str) {
 #[test]
 fn claude_hook_payloads_name_the_transcript_agentdesk_derives_for_the_session() {
     let fixture = load("claude-2.1.283.json");
+    // --settings hooks fired without a workspace trust prompt on the capture host.
+    assert_eq!(fixture["activation"]["settings_flag_hooks_fire"], true);
+    assert_eq!(fixture["activation"]["trust_dialog_shown"], false);
     let mut checked = 0;
     for run in runs(&fixture) {
         for event in run["events"].as_array().expect("events") {
@@ -248,10 +251,53 @@ fn codex_session_flag_trust_hashes_alone_did_not_activate_hooks_on_the_captured_
         .map(|entry| (entry.state_key, entry.trusted_hash))
         .collect();
     let trials = activation["trials"].as_array().expect("trials");
-    let hashed = trials
+    let observed: Vec<_> = trials
         .iter()
-        .find(|trial| trial["name"] == "session_flag_trust_hashes")
-        .expect("hash-only trial");
+        .map(|trial| {
+            (
+                text(trial, "name"),
+                text(trial, "mode"),
+                text(trial, "state"),
+                trial["bypass_hook_trust"].as_bool().expect("bypass flag"),
+                trial["agentdesk_hooks_fired"]
+                    .as_bool()
+                    .expect("fired flag"),
+            )
+        })
+        .collect();
+    // (name, mode, trust state, bypass flag, AgentDesk hooks fired) per captured trial.
+    assert_eq!(
+        observed,
+        [
+            (
+                "session_flag_trust_hashes",
+                "exec",
+                "rendered",
+                false,
+                false
+            ),
+            ("bypass_hook_trust", "exec", "omitted", true, true),
+            (
+                "bypass_hook_trust_tui",
+                "interactive",
+                "rendered",
+                true,
+                true
+            ),
+        ]
+    );
+    for (_, mode, _, _, fired) in &observed {
+        let captured_events = runs(&fixture)
+            .iter()
+            .filter(|run| run["mode"] == *mode)
+            .any(|run| {
+                run["events"]
+                    .as_array()
+                    .is_some_and(|events| !events.is_empty())
+            });
+        assert!(!fired || captured_events, "no captured events for {mode}");
+    }
+    let hashed = &trials[0];
     let captured: Vec<(String, String)> = hashed["trusted_hashes"]
         .as_array()
         .expect("hashes")
@@ -265,18 +311,6 @@ fn codex_session_flag_trust_hashes_alone_did_not_activate_hooks_on_the_captured_
         .collect();
     // The negative trial is only evidence if it carried AgentDesk's exact hashes.
     assert_eq!(computed, captured);
-    assert_eq!(hashed["bypass_hook_trust"], false);
-    assert_eq!(hashed["agentdesk_hooks_fired"], false);
-    let bypass: Vec<_> = trials
-        .iter()
-        .filter(|trial| trial["bypass_hook_trust"] == true)
-        .collect();
-    assert!(!bypass.is_empty());
-    assert!(
-        bypass
-            .iter()
-            .all(|trial| trial["agentdesk_hooks_fired"] == true)
-    );
     assert_eq!(activation["resume_help_advertises_bypass"], true);
 }
 

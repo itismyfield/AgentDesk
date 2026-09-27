@@ -3,7 +3,7 @@
  "provider": "claude",
  "cli_version": "2.1.283 (Claude Code)",
  "provenance": "captured",
- "captured_at": "2026-09-27T20:56:00+09:00/2026-09-27T21:07:00+09:00",
+ "captured_at": "2026-09-27T20:55:58+09:00/2026-09-27T21:14:56+09:00",
  "capture": {
   "host": "MacBook-Pro-14 (mac-book)",
   "env": "env -i HOME USER LOGNAME PATH LANG TERM; no inherited CLAUDE*/CODEX* variables",
