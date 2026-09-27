@@ -317,9 +317,10 @@ pub(crate) mod tests {
         PreparedIncarnation::prepare("claude", &tmux, Some(42), Some("native-id"), false).unwrap()
     }
     pub(crate) fn child_context(lines: &str, expected: Option<&Path>) {
+        let inherited = prepared();
         let output = std::process::Command::new("/bin/bash")
             .args(["-c", &format!("{lines}\nexec /usr/bin/env")])
-            .env("AGENTDESK_BINDING_CONTEXT", "/inherited/A.json")
+            .env("AGENTDESK_BINDING_CONTEXT", &inherited.path)
             .output()
             .unwrap();
         assert!(output.status.success());
