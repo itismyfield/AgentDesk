@@ -23,10 +23,11 @@ impl Fixture {
     }
 
     fn configure(&self, enabled: bool, max_empty: usize) {
-        std::fs::write(self.root.path().join("config.yaml"), format!(
-            "data:\n  dir: {:?}\ncluster:\n  gateway_handback_breaker:\n    enabled: {enabled}\n    max_empty: {max_empty}\n",
-            self.root.path().join("data")
-        )).unwrap();
+        let mut config = crate::config::Config::default();
+        config.data.dir = self.root.path().join("data");
+        config.cluster.gateway_handback_breaker.enabled = enabled;
+        config.cluster.gateway_handback_breaker.max_empty = max_empty;
+        crate::config::save_to_path(&self.root.path().join("config.yaml"), &config).unwrap();
     }
 
     fn path(&self, token: &str) -> PathBuf {
