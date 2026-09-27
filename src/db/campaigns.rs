@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, types::Json};
 
+use crate::services::stale_turn_reconciler::STALE_TURN_GRACE;
 use crate::utils::github_links::github_issue_ref;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -278,14 +279,30 @@ pub async fn get(pool: &PgPool, id: &str) -> Result<Campaign, CampaignError> {
 }
 
 /// What the card behind a node's `issue_url` is doing now. Read per request,
-/// never written into the ledger document.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+/// never written into the ledger document. `dispatch_*` describe the card's
+/// newest dispatch row, which can outlive the session that ran it; only
+/// `running` claims that work is happening now.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq, sqlx::FromRow)]
 pub struct NodeLiveStatus {
     pub card_id: String,
     pub card_status: String,
     pub dispatch_type: Option<String>,
     pub dispatch_status: Option<String>,
+    /// The session holding that dispatch, if any, and its last heartbeat.
+    pub session_status: Option<String>,
+    pub session_seen_at: Option<DateTime<Utc>>,
+    /// The dispatch is out and its session is mid-turn, with a heartbeat inside
+    /// the stale-turn grace window.
+    pub running: bool,
     pub queue_status: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct LiveRow {
+    repo_id: String,
+    issue_number: i64,
+    #[sqlx(flatten)]
+    status: NodeLiveStatus,
 }
 
 /// Campaign id -> node id -> live status. Nodes without a GitHub issue link, or
@@ -312,15 +329,26 @@ pub async fn live_status(
     }
     let (repos, numbers): (Vec<String>, Vec<i64>) = nodes_by_issue.keys().cloned().unzip();
     let rows: Vec<LiveRow> = sqlx::query_as(
-        "SELECT k.repo_id, k.issue_number, c.id, COALESCE(c.status, 'backlog'),
-                d.dispatch_type, d.status, q.status
+        "SELECT k.repo_id, k.issue_number, c.id AS card_id,
+                COALESCE(c.status, 'backlog') AS card_status,
+                d.dispatch_type, d.status AS dispatch_status,
+                s.status AS session_status, s.last_heartbeat AS session_seen_at,
+                COALESCE(d.status = 'dispatched'
+                         AND s.status IN ('turn_active', 'awaiting_bg')
+                         AND s.last_heartbeat >= NOW() - ($3::BIGINT * INTERVAL '1 second'),
+                         FALSE) AS running,
+                q.status AS queue_status
          FROM UNNEST($1::TEXT[], $2::BIGINT[]) AS k(repo_id, issue_number)
          JOIN kanban_cards c
            ON LOWER(c.repo_id) = k.repo_id AND c.github_issue_number = k.issue_number
          LEFT JOIN LATERAL (
-             SELECT dispatch_type, status FROM task_dispatches
+             SELECT id, dispatch_type, status FROM task_dispatches
              WHERE kanban_card_id = c.id ORDER BY created_at DESC, id DESC LIMIT 1
          ) d ON TRUE
+         LEFT JOIN LATERAL (
+             SELECT status, last_heartbeat FROM sessions
+             WHERE active_dispatch_id = d.id ORDER BY last_heartbeat DESC NULLS LAST LIMIT 1
+         ) s ON TRUE
          LEFT JOIN LATERAL (
              SELECT status FROM auto_queue_entries
              WHERE kanban_card_id = c.id ORDER BY created_at DESC, id DESC LIMIT 1
@@ -328,34 +356,19 @@ pub async fn live_status(
     )
     .bind(&repos)
     .bind(&numbers)
+    .bind(STALE_TURN_GRACE.as_secs() as i64)
     .fetch_all(pool)
     .await?;
-    for (repo, number, card_id, card_status, dispatch_type, dispatch_status, queue_status) in rows {
-        let status = NodeLiveStatus {
-            card_id,
-            card_status,
-            dispatch_type,
-            dispatch_status,
-            queue_status,
-        };
-        for (campaign_id, node_id) in nodes_by_issue.get(&(repo, number)).into_iter().flatten() {
+    for row in rows {
+        let key = (row.repo_id, row.issue_number);
+        for (campaign_id, node_id) in nodes_by_issue.get(&key).into_iter().flatten() {
             live.entry((*campaign_id).to_owned())
                 .or_default()
-                .insert((*node_id).to_owned(), status.clone());
+                .insert((*node_id).to_owned(), row.status.clone());
         }
     }
     Ok(live)
 }
-
-type LiveRow = (
-    String,
-    i64,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
 
 /// Every revision snapshots the whole DAG, so long campaigns keep only the newest ones.
 pub const REVISION_RETENTION: i64 = 10;

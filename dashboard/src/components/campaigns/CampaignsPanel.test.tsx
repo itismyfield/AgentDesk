@@ -238,7 +238,7 @@ it("opens the existing task details from a running card on the first screen", as
 
 it("shows what the issue card is doing next to the ledger status without sending it back on save", async () => {
   const linked = { ...campaign, nodes: [{ ...campaign.nodes[0], status: "pending" as const, issue_url: "https://github.com/o/r/issues/7" }] };
-  const live = { card_id: "card-7", card_status: "review", dispatch_type: "review", dispatch_status: "dispatched", queue_status: "dispatched" };
+  const live = { card_id: "card-7", card_status: "review", dispatch_type: "review", dispatch_status: "dispatched", session_status: "turn_active", session_seen_at: "2026-09-27T12:00:00Z", running: true, queue_status: "dispatched" };
   vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [linked], live: { ongoing: { review: live } } });
   await render();
   expect(container.textContent).toContain("Running now 1");
@@ -247,9 +247,21 @@ it("shows what the issue card is doing next to the ledger status without sending
   expect(container.querySelector(".campaign-inspector-header")?.textContent).toContain("#7");
   const detail = container.querySelector(".campaign-live-detail")!;
   expect(detail.textContent).toContain("Review");
+  expect(detail.textContent).toContain("Working");
   expect(detail.textContent).toContain("Started by auto-queue");
   await act(async () => button("Edit task").click());
   vi.mocked(updateCampaignNode).mockResolvedValue({ ...linked, revision: 6 });
   await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
   expect(vi.mocked(updateCampaignNode).mock.calls[0][1]).not.toHaveProperty("card_status");
+});
+
+it("does not call a dispatch running when no session is working on it", async () => {
+  const linked = { ...campaign, nodes: [{ ...campaign.nodes[0], status: "pending" as const, issue_url: "https://github.com/o/r/issues/7" }] };
+  const live = { card_id: "card-7", card_status: "review", dispatch_type: "review", dispatch_status: "dispatched", session_status: null, session_seen_at: null, running: false, queue_status: null };
+  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [linked], live: { ongoing: { review: live } } });
+  await render();
+  expect(container.textContent).toContain("Running now 0");
+  await selectTask();
+  expect(container.querySelector(".campaign-task-row .campaign-live")?.textContent).toBe("Review assigned");
+  expect(container.querySelector(".campaign-live-detail")?.textContent).toContain("No session on it");
 });

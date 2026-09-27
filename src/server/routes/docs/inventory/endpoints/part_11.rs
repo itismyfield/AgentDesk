@@ -8,7 +8,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/campaigns",
             "campaigns",
-            "List durable campaign DAG checkpoints from canonical PostgreSQL, newest updated first. `live` maps campaign id -> node id -> what the kanban card behind the node's GitHub issue_url is doing now (card_id, card_status, newest dispatch_type/dispatch_status, newest auto-queue queue_status); it is read per request and never stored in the ledger.",
+            "List durable campaign DAG checkpoints from canonical PostgreSQL, newest updated first. `live` maps campaign id -> node id -> what the kanban card behind the node's GitHub issue_url is doing now (card_id, card_status, newest dispatch_type/dispatch_status, session_status/session_seen_at of the session holding that dispatch, running, newest auto-queue queue_status); `running` is true only while that session is mid-turn with a fresh heartbeat. It is read per request and never stored in the ledger.",
         )
         .with_params([
             ("limit", query_param("integer", false, "Page size 1..500; default 100.")),
@@ -40,7 +40,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/campaigns/{id}",
             "campaigns",
-            "Read the canonical checkpoint before resuming after clear, compaction, quota interruption, or provider/session replacement. Recorded running state is not proof of a live process; `live` (node id -> card/dispatch/queue status of the node's issue card) is.",
+            "Read the canonical checkpoint before resuming after clear, compaction, quota interruption, or provider/session replacement. Recorded running state is not proof of a live process; check `live` (node id -> card, dispatch, session and queue status of the node's issue card), where `running` means a session is mid-turn on it now.",
         )
         .with_params([("id", path_param("Campaign ID."))])
         .with_example(json!({"path": {"id": "release-a"}}), json!({"campaign": {"id": "release-a", "title": "Release A", "description": "", "status": "planned", "round": 1, "revision": 1, "nodes": [], "created_at": "2026-09-20T00:00:00Z", "updated_at": "2026-09-20T00:00:00Z"}, "live": {}}))

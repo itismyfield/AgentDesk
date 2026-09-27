@@ -63,6 +63,9 @@ export const campaignNodeLiveSchema = z.looseObject({
   card_status: z.string(),
   dispatch_type: nullableText,
   dispatch_status: nullableText,
+  session_status: nullableText,
+  session_seen_at: nullableText,
+  running: z.boolean().default(false),
   queue_status: nullableText,
 });
 const nodeLiveMapSchema = z.record(z.string(), campaignNodeLiveSchema);

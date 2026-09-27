@@ -28,14 +28,18 @@ All routes are under `/api` and use the same protected admin middleware as
 | POST | `/campaigns` | HTTP 201 `{campaign}`; optional client ID, otherwise UUID; existing ID returns 409 |
 | GET | `/campaigns/{id}` | `{campaign, live}`; missing ID returns 404 |
 | PUT | `/campaigns/{id}` | `{campaign}`; requires `expected_revision`, replaces complete aggregate |
+| GET | `/campaigns/{id}/history` | `{revisions: Campaign[]}`; the retained newest 10 revisions, descending; older ones are deleted, not archived |
 
 `live` is the execution projection the ledger itself does not hold. For each node
 whose `issue_url` is a GitHub issue that has a kanban card, it reports `card_id`,
-`card_status`, the card's newest `dispatch_type`/`dispatch_status` and newest
-auto-queue `queue_status` (list: campaign id → node id → status; single read:
-node id → status). It is computed on every read and never written back, so it
-can disagree with a node's saved `status`.
-| GET | `/campaigns/{id}/history` | `{revisions: Campaign[]}`; the retained newest 10 revisions, descending; older ones are deleted, not archived |
+`card_status`, the card's newest `dispatch_type`/`dispatch_status`, the
+`session_status` and `session_seen_at` heartbeat of the session holding that
+dispatch, and the newest auto-queue `queue_status` (list: campaign id → node id →
+status; single read: node id → status). A dispatch row can stay `dispatched` after
+its session is gone, so only `running` claims work is happening now: the dispatch
+is out and its session is `turn_active` or `awaiting_bg` with a heartbeat inside
+the stale-turn grace window. `live` is computed on every read and never written
+back, so it can disagree with a node's saved `status`.
 
 Campaign fields: `id`, `title`, `description`, `status`, `round`, `revision`,
 `nodes`, `created_at`, `updated_at`. Status is `planned`, `active`, `paused`,
@@ -100,7 +104,9 @@ Aggregated group relationships can be cyclic even when the task DAG is acyclic.
 The task view shows direct predecessors and successors across groups and filters,
 with explicit omitted counts and a complete connection list for high fan-in/out.
 The saved `running` status remains a checkpoint, not a live process-health signal;
-the list row and task details show the `live` card, dispatch and queue state beside it.
+the list row and task details show the `live` card, dispatch, session and queue state
+beside it. "Running now" counts nodes saved as `running` plus open nodes whose card
+is `running`; a node saved as completed or skipped keeps its place.
 
 ## CLI usage
 

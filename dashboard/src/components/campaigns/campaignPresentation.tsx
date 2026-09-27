@@ -20,13 +20,18 @@ const DISPATCH_TYPES: Record<string, [string, string]> = {
   "scope-assessment": ["범위 판단", "Scope check"], consultation: ["상담", "Consultation"],
 };
 const DISPATCH_STATUSES: Record<string, [string, string]> = {
-  pending: ["대기", "queued"], dispatched: ["진행 중", "running"], completed: ["완료", "done"],
+  pending: ["대기", "queued"], dispatched: ["배정됨", "assigned"], completed: ["완료", "done"],
   failed: ["실패", "failed"], cancelled: ["취소", "cancelled"],
 };
 const QUEUE_STATUSES: Record<string, [string, string]> = {
   pending: ["자동 큐 대기", "Waiting in auto-queue"], dispatched: ["자동 큐에서 실행", "Started by auto-queue"],
   done: ["자동 큐 완료", "Auto-queue done"], skipped: ["자동 큐 건너뜀", "Skipped by auto-queue"],
   failed: ["자동 큐 실패", "Auto-queue failed"], user_cancelled: ["자동 큐 취소", "Removed from auto-queue"],
+};
+const SESSION_STATUSES: Record<string, [string, string]> = {
+  turn_active: ["작업 중", "Working"], awaiting_bg: ["백그라운드 작업 대기", "Waiting on background work"],
+  awaiting_user: ["답장 대기", "Waiting for a reply"], idle: ["유휴", "Idle"],
+  disconnected: ["연결 끊김", "Disconnected"], aborted: ["중단됨", "Aborted"],
 };
 const label = (labels: Record<string, [string, string]>, value: string | null, tr: Tr) =>
   value ? (labels[value] ? tr(...labels[value]) : value) : null;
@@ -36,15 +41,23 @@ export function cardStatusLabel(status: string, tr: Tr) {
 }
 export function dispatchLabel(live: CampaignNodeLive, tr: Tr) {
   const type = label(DISPATCH_TYPES, live.dispatch_type, tr) ?? tr("작업", "Work");
+  if (live.running) return `${type} ${tr("진행 중", "running")}`;
   return live.dispatch_status ? `${type} ${label(DISPATCH_STATUSES, live.dispatch_status, tr)}` : null;
+}
+export function sessionLabel(live: CampaignNodeLive, tr: Tr) {
+  if (!live.session_status) return tr("잡은 세션 없음", "No session on it");
+  const seen = live.session_seen_at ? new Date(live.session_seen_at).toLocaleString() : null;
+  return [label(SESSION_STATUSES, live.session_status, tr), seen && tr(`마지막 신호 ${seen}`, `last seen ${seen}`)].filter(Boolean).join(" · ");
 }
 export function queueLabel(live: CampaignNodeLive, tr: Tr) { return label(QUEUE_STATUSES, live.queue_status, tr); }
 
-/** One phrase for what the issue card is doing now: live dispatch, then queue wait, then board column. */
+/** One phrase for what the issue card is doing now: open dispatch, then queue wait, then board column.
+ * Only a dispatch a session is working on right now reads as running. */
 export function LiveChip({ live, tr }: { live: CampaignNodeLive | undefined; tr: Tr }) {
   if (!live) return null;
   const working = liveIsWorking(live);
-  const text = working ? dispatchLabel(live, tr)
+  const open = live.dispatch_status === "pending" || live.dispatch_status === "dispatched";
+  const text = open ? dispatchLabel(live, tr)
     : live.queue_status === "pending" ? queueLabel(live, tr)
     : `${tr("보드", "Board")}: ${cardStatusLabel(live.card_status, tr)}`;
   return <span className={`campaign-live${working ? " is-working" : ""}`}>{text}</span>;

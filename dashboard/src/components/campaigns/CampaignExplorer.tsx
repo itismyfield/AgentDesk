@@ -5,7 +5,7 @@ import CampaignNodeDetails, { type CampaignDraft } from "./CampaignNodeDetails";
 import CampaignNeighborhood from "./CampaignNeighborhood";
 import CampaignGroupOverview from "./CampaignGroupOverview";
 import CampaignGlance from "./CampaignGlance";
-import { EMPTY_FILTERS, NODE_STATUSES, campaignIssueLabel, campaignIssueNumber, filterCampaignNodes, groupCampaignNodes, type CampaignFilters } from "./campaignModel";
+import { EMPTY_FILTERS, NODE_STATUSES, campaignIssueLabel, filterCampaignNodes, groupCampaignNodes, type CampaignFilters } from "./campaignModel";
 import { Badge, LABELS, LiveChip, type Tr } from "./campaignPresentation";
 
 export default function CampaignExplorer({ campaign, live, tr, onSaved, drafts, onDraftChange }: {
@@ -75,7 +75,7 @@ export default function CampaignExplorer({ campaign, live, tr, onSaved, drafts, 
         </>}
       </div>
       {selected ? <aside ref={inspectorRef} className="campaign-inspector" aria-label={tr("선택 작업", "Selected task")}>
-        <div className="campaign-row campaign-inspector-header"><span>{campaignIssueNumber(selected)}</span><button onClick={() => setSelectedId(null)} aria-label={tr("상세 닫기", "Close details")}>×</button></div>
+        <div className="campaign-row campaign-inspector-header"><span>{campaignIssueLabel(selected)}</span><button onClick={() => setSelectedId(null)} aria-label={tr("상세 닫기", "Close details")}>×</button></div>
         {!visibleIds.has(selected.id) && <p className="campaign-filter-note">{tr("선택 작업은 현재 필터 밖에 있습니다.", "The selected task is outside the current filters.")}</p>}
         {hiddenDependencies.length > 0 && <p className="campaign-filter-note">{tr(`필터 밖 선행 작업 ${hiddenDependencies.length}개. 연결 보기에서 확인할 수 있습니다.`, `${hiddenDependencies.length} dependencies are outside the filters. Open Connections to inspect them.`)}</p>}
         <CampaignNodeDetails key={selected.id} campaign={campaign} node={selected} live={live[selected.id]} tr={tr} onSaved={onSaved} editing={drafts[`${campaign.id}:${selected.id}`] ?? null} onDraftChange={(draft, expected) => onDraftChange(`${campaign.id}:${selected.id}`, draft, expected)} />

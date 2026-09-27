@@ -92,15 +92,16 @@ export function campaignStageStep(stage: string): { index: number; raw: string }
   return { index: best.index, raw: plain.length > 28 ? `${plain.slice(0, 27)}…` : plain };
 }
 
-/** The node's issue card has a dispatch waiting or running. */
+/** A session is mid-turn on the node's issue card right now (the server checks its heartbeat). */
 export function liveIsWorking(live: CampaignNodeLive | undefined): boolean {
-  return live?.dispatch_status === "pending" || live?.dispatch_status === "dispatched";
+  return live?.running === true;
 }
 
 /** Running then blocked work leads the first screen; every other status is only counted.
- * A node whose card has a live dispatch counts as running whatever the ledger says. */
+ * Live work makes an open node count as running; a completed or skipped node stays where the ledger put it. */
 export function campaignGlance(nodes: CampaignNode[], live: Record<string, CampaignNodeLive> = {}) {
-  const running = nodes.filter((node) => node.status === "running" || liveIsWorking(live[node.id]));
+  const running = nodes.filter((node) => node.status === "running"
+    || (node.status !== "completed" && node.status !== "skipped" && liveIsWorking(live[node.id])));
   const runningIds = new Set(running.map((node) => node.id));
   const blocked = nodes.filter((node) => node.status === "blocked" && !runningIds.has(node.id));
   const buckets = (["pending", "completed", "skipped", "failed"] as const)

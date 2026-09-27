@@ -20,7 +20,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 it("includes older campaigns beyond the first page with validated pagination metadata", async () => {
   const first = Array.from({ length: 100 }, (_, id) => ({ ...campaignPayload, id: String(id) }));
-  const live = { card_id: "card-7", card_status: "in_progress", dispatch_type: "review", dispatch_status: "dispatched", queue_status: null };
+  const live = { card_id: "card-7", card_status: "in_progress", dispatch_type: "review", dispatch_status: "dispatched", session_status: "turn_active", session_seen_at: "2026-09-27T12:00:00Z", running: true, queue_status: null };
   fetchMock.mockResolvedValueOnce(response({ campaigns: first, live: { "0": { review: live } }, limit: 100, offset: 0 }))
     .mockResolvedValueOnce(response({ campaigns: [{ ...campaignPayload, id: "older-campaign" }], limit: 100, offset: 100 }));
   const result = await getCampaigns();

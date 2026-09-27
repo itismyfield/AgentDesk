@@ -363,6 +363,8 @@ async fn postgres_live_status_reads_the_issue_card_without_touching_the_ledger_p
          VALUES ('run-1', 'Owner/Repo', 'agent-1', 'active')",
         "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, status)
          VALUES ('entry-1', 'run-1', 'card-7', 'dispatched')",
+        "INSERT INTO sessions (session_key, status, active_dispatch_id, last_heartbeat)
+         VALUES ('session-7', 'turn_active', 'd-new', NOW())",
     ] {
         sqlx::query(statement)
             .execute(&pool)
@@ -381,16 +383,34 @@ async fn postgres_live_status_reads_the_issue_card_without_touching_the_ledger_p
         .expect("live status");
     let nodes = &live["live"];
     assert_eq!(nodes.len(), 1, "issue 8 has no card");
+    let status = &nodes["implement"];
     assert_eq!(
-        nodes["implement"],
+        NodeLiveStatus {
+            session_seen_at: None,
+            ..status.clone()
+        },
         NodeLiveStatus {
             card_id: "card-7".into(),
             card_status: "in_progress".into(),
             dispatch_type: Some("review".into()),
             dispatch_status: Some("dispatched".into()),
+            session_status: Some("turn_active".into()),
+            session_seen_at: None,
+            running: true,
             queue_status: Some("dispatched".into()),
         }
     );
+    assert!(status.session_seen_at.is_some());
+
+    // A dispatched row whose session went quiet is not running work.
+    sqlx::query("UPDATE sessions SET last_heartbeat = NOW() - INTERVAL '1 hour'")
+        .execute(&pool)
+        .await
+        .expect("age heartbeat");
+    let live = live_status(&pool, std::slice::from_ref(&campaign))
+        .await
+        .expect("live status");
+    assert!(!live["live"]["implement"].running);
     assert_eq!(
         get(&pool, "live").await.expect("ledger").revision,
         campaign.revision

@@ -85,11 +85,11 @@ describe("first-screen glance", () => {
     expect(result.running).toBe(1);
     expect(result.buckets.map((bucket) => [bucket.status, bucket.nodes.length])).toEqual([["pending", 2], ["completed", 1], ["skipped", 1]]);
   });
-  it("counts a node whose card has a live dispatch as running and blocked work separately", () => {
-    const live = (dispatch_status: string) => ({ card_id: "card", card_status: "in_progress", dispatch_type: "implementation", dispatch_status, queue_status: null });
-    const result = campaignGlance([node("b", [], "blocked"), node("p-live"), node("p-done")], { "p-live": live("dispatched"), "p-done": live("completed") });
+  it("counts open nodes with work running now as running, and leaves closed and quiet ones alone", () => {
+    const live = (running: boolean) => ({ card_id: "card", card_status: "in_progress", dispatch_type: "implementation", dispatch_status: "dispatched", session_status: running ? "turn_active" : "idle", session_seen_at: null, running, queue_status: null });
+    const result = campaignGlance([node("b", [], "blocked"), node("p-live"), node("p-quiet"), node("c-live", [], "completed")], { "p-live": live(true), "p-quiet": live(false), "c-live": live(true) });
     expect(result.active.map((value) => value.id)).toEqual(["p-live", "b"]);
     expect([result.running, result.blocked]).toEqual([1, 1]);
-    expect(result.buckets.map((bucket) => [bucket.status, bucket.nodes.length])).toEqual([["pending", 1]]);
+    expect(result.buckets.map((bucket) => [bucket.status, bucket.nodes.length])).toEqual([["pending", 1], ["completed", 1]]);
   });
 });

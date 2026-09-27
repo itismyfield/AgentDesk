@@ -3,7 +3,7 @@ import { updateCampaignNode, type Campaign, type CampaignNode, type CampaignNode
 import { ApiRequestError } from "../../api/httpClient";
 import { WidgetState } from "../common/WidgetState";
 import { NODE_STATUSES, safeCampaignLink } from "./campaignModel";
-import { Badge, LABELS, cardStatusLabel, dispatchLabel, queueLabel, type Tr } from "./campaignPresentation";
+import { Badge, LABELS, cardStatusLabel, dispatchLabel, queueLabel, sessionLabel, type Tr } from "./campaignPresentation";
 
 export interface CampaignDraft { campaign: Campaign; node: CampaignNode }
 export default function CampaignNodeDetails({ campaign, node, live, tr, onSaved, editing, onDraftChange }: {
@@ -52,6 +52,7 @@ export default function CampaignNodeDetails({ campaign, node, live, tr, onSaved,
       {live && <div className="campaign-live-detail"><h4>{tr("실제 실행 상태", "Live execution")}</h4><dl className="campaign-detail-grid">
         <div><dt>{tr("보드 칸", "Board column")}</dt><dd>{cardStatusLabel(live.card_status, tr)}</dd></div>
         <div><dt>{tr("최근 디스패치", "Latest dispatch")}</dt><dd>{dispatchLabel(live, tr) ?? tr("없음", "None")}</dd></div>
+        {live.dispatch_status && <div><dt>{tr("세션", "Session")}</dt><dd>{sessionLabel(live, tr)}</dd></div>}
         <div><dt>{tr("자동 큐", "Auto-queue")}</dt><dd>{queueLabel(live, tr) ?? tr("큐에 없음", "Not queued")}</dd></div>
       </dl></div>}
       <dl className="campaign-detail-grid">
