@@ -868,10 +868,19 @@ mod tests {
         judge_at(records, manifest, population, t(120), t(130))
     }
 
+    /// Stores every fixture row inside the window; rows with their own time ignore it.
+    fn stored(records: &[ShadowRecord]) -> Vec<StoredRecord> {
+        let at = |record: &ShadowRecord| StoredRecord {
+            at: t(10),
+            record: record.clone(),
+        };
+        records.iter().map(at).collect()
+    }
+
     fn classified(records: &[ShadowRecord], classify: ClassifyInput) -> ReportOutcome {
         let (allowlist, from, to, reported_at) = (&[7][..], t(-1), t(120), t(130));
         evaluate(&ReportInput {
-            records,
+            records: &stored(records),
             manifest: &[],
             population: &claude(),
             allowlist,
@@ -884,6 +893,16 @@ mod tests {
 
     fn judge_at(
         records: &[ShadowRecord],
+        manifest: &[SyntheticEntry],
+        population: &PopulationSnapshot,
+        to: DateTime<Utc>,
+        reported_at: DateTime<Utc>,
+    ) -> ReportOutcome {
+        judge_stored(&stored(records), manifest, population, to, reported_at)
+    }
+
+    fn judge_stored(
+        records: &[StoredRecord],
         manifest: &[SyntheticEntry],
         population: &PopulationSnapshot,
         to: DateTime<Utc>,
@@ -1235,5 +1254,84 @@ mod tests {
         assert_eq!(outcome.profiles["claude_tui"].synthetic_turns, 2);
         let wrong = [entry("a", "codex_tui")];
         assert!(!judge(&records, &wrong, &claude()).pass);
+    }
+
+    #[test]
+    fn a_timeless_tap_gap_counts_by_its_storage_time_until_the_last_judgement() {
+        let (channel_id, unit_key, class) = (0, None, DiffClass::TapGap);
+        let (legacy_msg_ids, cause) = (Vec::new(), DiffCause::Unknown);
+        let diff = DiffRecord {
+            channel_id,
+            unit_key,
+            class,
+            legacy_msg_ids,
+            cause,
+        };
+        let gap = [
+            ShadowRecord::TapGap { dropped: 1 },
+            ShadowRecord::Diff { diff },
+        ];
+        let judge_gap_at = |minutes| {
+            let mut records = stored(&passing());
+            let at = t(minutes);
+            let late = gap.iter().map(|record| StoredRecord {
+                at,
+                record: record.clone(),
+            });
+            records.extend(late);
+            judge_stored(&records, &[], &claude(), t(120), t(140)).failures
+        };
+        // Stored at t1+11m, after every unit of the window was judged.
+        assert_eq!(judge_gap_at(131), Vec::<String>::new());
+        // From one match window before t0 until `late`, a gap may hide events window units needed.
+        let hidden = ["1 diffs still Unknown", "1 tap events dropped"];
+        assert_eq!(judge_gap_at(123), hidden);
+        assert_eq!(judge_gap_at(-4), hidden);
+        assert_eq!(judge_gap_at(-6), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_thread_bound_in_the_window_stays_covered_after_a_restart_or_unbind() {
+        use crate::services::tui_o::shadow::{BindingChange, SourceBinding};
+        let bind = |channel_id, at, bound: bool| {
+            let (provider, source) = (ShadowProvider::Claude, src(1));
+            let new = bound.then(|| SourceBinding {
+                channel_id,
+                provider,
+                source,
+            });
+            let old = None;
+            let change = BindingChange {
+                channel_id,
+                old,
+                new,
+                at,
+            };
+            ShadowRecord::Binding { change }
+        };
+        let mut records = passing();
+        records.insert(1, bind(7, t(-2), true));
+        let (schema_version, identity_version, build) = (SCHEMA_VERSION, IDENTITY_VERSION, "");
+        records.push(ShadowRecord::Header {
+            schema_version,
+            identity_version,
+            build: build.into(),
+            started_at: t(119),
+        });
+        let threads = bound_channels(&records, t(0), t(120));
+        assert_eq!(threads, [(7, "claude".to_string())]);
+        let channels: Vec<(u64, &str)> = threads.iter().map(|(c, p)| (*c, p.as_str())).collect();
+        let population = snapshot(&["claude_tui"], &channels, Vec::new());
+        let outcome = judge(&records, &[], &population);
+        assert!(outcome.pass, "{:?}", outcome.failures);
+        // Bound only before t0 or only after t1: no evidence for this window.
+        let outside = [
+            bind(8, t(-9), true),
+            bind(8, t(-1), false),
+            bind(9, t(121), true),
+        ];
+        let mut unbound = vec![bind(7, t(-2), true), bind(7, t(60), false)];
+        unbound.extend(outside);
+        assert_eq!(bound_channels(&unbound, t(0), t(120)), threads);
     }
 }
