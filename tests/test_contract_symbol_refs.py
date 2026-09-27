@@ -9,11 +9,14 @@ these tests target: doc-anchor extraction, the code-derived Rust-anchor parser
 gate, the set comparison, and the distinct-anchor floor. Each round-2/round-3
 false-pass has a dedicated reproduction.
 """
+# H2 cases also check Python import bindings and the public script's exit status.
 
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
+import tempfile
 import textwrap
 import unittest
 from pathlib import Path
@@ -578,6 +581,32 @@ class WiringTest(unittest.TestCase):
             self.assertIn(host, workflow)
         # The required-context mirror gates the forced run.
         self.assertIn("Relay-contract fast check mirror (always, #4268)", workflow)
+
+
+class H2ContractCliTest(unittest.TestCase):
+    def run_contract(self, text):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Path(tmp, "h2.md")
+            doc.write_text(text, encoding="utf-8")
+            return subprocess.run([sys.executable, str(SCRIPT_PATH), "--h2-doc", str(doc)],
+                                  capture_output=True, text=True)
+
+    def test_matching_h2_document_passes_the_script(self):
+        proc = self.run_contract(CHECKER.H2_DOC.read_text(encoding="utf-8"))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("H2 contract symbol-ref check passed", proc.stdout)
+
+    def test_document_only_symbol_fails_the_script_with_diagnostic(self):
+        text = CHECKER.H2_DOC.read_text(encoding="utf-8") + "\n`sym:missing::entry`\n"
+        proc = self.run_contract(text)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("H2 contract: sym:missing::entry has no imported reference", proc.stdout)
+
+    def test_import_only_symbol_fails_the_script_with_diagnostic(self):
+        text = CHECKER.H2_DOC.read_text(encoding="utf-8").replace("`sym:h2_cfg_compare::compare_cfgs`", "")
+        proc = self.run_contract(text)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("H2 contract: imported h2_cfg_compare::compare_cfgs is not documented", proc.stdout)
 
 
 class IntegrationTest(unittest.TestCase):

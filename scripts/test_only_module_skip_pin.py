@@ -34,6 +34,8 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/discord/outbound/delivery_obligation/validation_tests.rs",
+        "src/services/discord/outbound/delivery_obligation/reader_tests.rs",
         "src/services/discord/outbound/delivery_obligation/codec_tests.rs",
         "src/services/discord/outbound/delivery_obligation/state/proof_tests.rs",
         "src/cli/doctor/orchestrator/observation_tests.rs",
@@ -76,6 +78,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/automation_candidate_materializer/allowed_path_tests.rs",
         "src/services/automation_candidate_materializer/iteration_result_tests.rs",
         "src/services/claude_tui/hook_output_guard_tests.rs",
+        "src/services/claude_tui/hook_payload_fixture_tests.rs",
         "src/services/claude_tui/hook_server_memento_tests.rs",
         "src/services/claude_tui/session/auto_compact_launch_tests.rs",
         "src/services/kakao/transport_tests.rs",

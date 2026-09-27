@@ -551,6 +551,7 @@ src/
 │   │   ├── hook_bundle.rs
 │   │   ├── hook_output_guard.rs
 │   │   ├── hook_output_guard_tests.rs
+│   │   ├── hook_payload_fixture_tests.rs
 │   │   ├── hook_registry.rs
 │   │   ├── hook_relay.rs
 │   │   ├── hook_server.rs
@@ -853,8 +854,12 @@ src/
 │   │   │   │   ├── fence.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── protocol.rs
+│   │   │   │   ├── reader.rs
+│   │   │   │   ├── reader_tests.rs
 │   │   │   │   ├── schema.rs
-│   │   │   │   └── state.rs
+│   │   │   │   ├── state.rs
+│   │   │   │   ├── validation.rs
+│   │   │   │   └── validation_tests.rs
 │   │   │   ├── manual_delivery/
 │   │   │   │   ├── headless_nonce.rs
 │   │   │   │   └── production_nonce_tests.rs
