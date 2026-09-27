@@ -258,8 +258,8 @@ pub(in crate::services::discord) fn clear_inflight_state_for_captured_episode(
     }
 }
 
-/// Removes a restart-marked episode in one locked step, only while the row still carries
-/// `marker`, `expected`'s identity and `episode`; no markerless row is saved on the way.
+/// Removes a completed restart-marked episode under its exact pin and marker.
+/// The lock-held row must still carry the completion proof; no markerless row is saved.
 pub(in crate::services::discord) fn clear_restart_marked_episode(
     provider: &ProviderKind,
     channel_id: u64,
@@ -281,12 +281,12 @@ pub(in crate::services::discord) fn clear_restart_marked_episode(
         return GuardedClearOutcome::Missing;
     };
     let marked = (state.restart_mode, state.restart_generation) == (Some(marker.0), Some(marker.1));
-    let on_disk = super::super::InflightEpisodePin::from_state(&state);
     if !marked
+        || !state.terminal_delivery_committed
         || state.rebind_origin
         || expected.is_unnameable()
         || !expected.matches_state(&state)
-        || !episode.is_same_episode_as(&on_disk)
+        || !episode.matches_state(&state)
     {
         return GuardedClearOutcome::UserMsgMismatch;
     }
