@@ -300,6 +300,7 @@ pub(in crate::services::discord) async fn handle_event(
     data: &Data,
 ) -> Result<(), Error> {
     maybe_cleanup_sessions(&data.shared).await;
+    crate::services::tui_o::shadow::tap::observe(ctx, event);
     match event {
         serenity::FullEvent::InteractionCreate { interaction } => {
             if let Some(component) = interaction.as_message_component() {
@@ -368,7 +369,6 @@ pub(in crate::services::discord) async fn handle_event(
                 const MSG_DEDUP_TTL: std::time::Duration = std::time::Duration::from_secs(60);
                 let now = std::time::Instant::now();
                 let key = format!("mid:{}", new_message.id);
-
                 // Lazy cleanup of expired mid:* entries to prevent unbounded growth.
                 //
                 // #2044 F10: previously this ran every 50 messages

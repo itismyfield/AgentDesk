@@ -1865,7 +1865,8 @@ src/
 │   │       ├── diff.rs
 │   │       ├── metrics.rs
 │   │       ├── mod.rs
-│   │       └── root.rs
+│   │       ├── root.rs
+│   │       └── tap.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── extract.rs
 │   │   ├── observation.rs
