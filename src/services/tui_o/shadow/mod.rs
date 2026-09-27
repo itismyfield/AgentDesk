@@ -1,6 +1,8 @@
 //! Read-only shadow of TUI output: derives what O would post and diffs it against Legacy.
 //! Its only write target is `root::ShadowRoot`; `scripts/check_o_shadow_write_zero.py` enforces that.
 
+pub mod binding_reader;
+pub mod capture;
 pub mod root;
 
 // Derive-side modules (identity, seal, derive, unit_plan) are declared below.
@@ -164,6 +166,7 @@ pub enum SourceAnomalyKind {
     Shrunk,
     PrefixMismatch,
     Unreadable,
+    Oversized,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,4 +264,10 @@ pub trait ShadowDiff: Send {
 /// diff/report boundary: the single persistence sink, implemented by `root::ShadowStore`.
 pub trait ShadowSink: Send {
     fn append(&mut self, record: &ShadowRecord) -> std::io::Result<()>;
+}
+
+/// Everything the shadow receives; no HTTP client, shared runtime data or tmux handle.
+pub struct ShadowInputs {
+    pub binding_reader: binding_reader::BindingReader,
+    pub gateway_rx: tokio::sync::mpsc::Receiver<LegacyTapEvent>,
 }

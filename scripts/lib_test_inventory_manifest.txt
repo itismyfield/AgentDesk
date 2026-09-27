@@ -9145,6 +9145,13 @@ services::tool_output_guard::tests::line_heavy_small_error_is_sanitized_once_wit
 services::tool_output_guard::tests::small_output_is_preserved_exactly
 services::tool_output_guard::tests::very_large_non_ascii_error_aligns_context_window_to_utf8
 services::tool_output_guard::tests::very_large_single_line_error_keeps_projection_memory_bounded
+services::tui_o::shadow::binding_reader::tests::binding_reader_reports_source_changes_once_and_keeps_the_last_on_gaps
+services::tui_o::shadow::binding_reader::tests::binding_view_reads_the_native_transcript_of_tui_runtimes_only
+services::tui_o::shadow::capture::tests::capture_emits_complete_lines_only_and_tracks_the_prefix_hash
+services::tui_o::shadow::capture::tests::capture_halts_instead_of_buffering_an_oversized_partial_record
+services::tui_o::shadow::capture::tests::capture_halts_on_shrink_rewrite_and_replacement
+services::tui_o::shadow::capture::tests::capture_keeps_record_boundaries_under_small_budgets_and_mid_line_starts
+services::tui_o::shadow::capture::tests::capture_rereads_a_buffered_partial_line_before_emitting_it
 services::tui_o::shadow::root::tests::shadow_root_is_fixed_under_runtime_root_and_the_flag_defaults_off
 services::tui_o::shadow::root::tests::shadow_root_refuses_links_and_leaves_outside_files_untouched
 services::tui_o::shadow::root::tests::store_appends_readable_jsonl_and_stops_at_the_cap
@@ -9166,6 +9173,7 @@ services::tui_prompt_dedupe::session_rotation::tests::drain_progress_resets_the_
 services::tui_prompt_dedupe::session_rotation::tests::second_hop_preserves_the_original_frozen_transcript
 services::tui_prompt_dedupe::session_rotation::tests::settling_a_rotation_does_not_retire_the_adopted_session_authority
 services::tui_prompt_dedupe::session_rotation::tests::the_adopted_authority_is_writable_without_a_rotation_record
+services::tui_prompt_dedupe::shadow_peek::tests::shadow_lookup_copies_live_bindings_without_purging_relay_state
 services::tui_prompt_dedupe::tests::advance_offset_rejects_mismatched_path_when_relay_override_differs
 services::tui_prompt_dedupe::tests::advances_runtime_binding_offset_for_same_output_path
 services::tui_prompt_dedupe::tests::advances_runtime_binding_relay_offset_separately_from_runtime_path

@@ -1884,6 +1884,8 @@ src/
 │   │   └── tests_pg.rs
 │   ├── tui_o/
 │   │   └── shadow/
+│   │       ├── binding_reader.rs
+│   │       ├── capture.rs
 │   │       ├── mod.rs
 │   │       └── root.rs
 │   ├── tui_prompt_dedupe/
@@ -1892,6 +1894,7 @@ src/
 │   │   ├── observation.rs
 │   │   ├── runtime_binding.rs
 │   │   ├── session_rotation.rs
+│   │   ├── shadow_peek.rs
 │   │   ├── state.rs
 │   │   ├── synthetic_prompt.rs
 │   │   └── tests.rs
