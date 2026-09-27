@@ -34,6 +34,8 @@ function useSpeechQueue(onSpeakingChange: (speaking: boolean) => void) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const queueRef = useRef<string[]>([]);
   const playingRef = useRef(false);
+  // Bumped by stop() so audio still being synthesized is dropped, not played.
+  const generationRef = useRef(0);
 
   const playNext = useCallback(async () => {
     if (playingRef.current) return;
@@ -44,8 +46,10 @@ function useSpeechQueue(onSpeakingChange: (speaking: boolean) => void) {
     }
     playingRef.current = true;
     onSpeakingChange(true);
+    const generation = generationRef.current;
     try {
       const { audio_base64, mime } = await speakVoice(text);
+      if (generation !== generationRef.current) return;
       const audio = audioRef.current ?? new Audio();
       audioRef.current = audio;
       audio.src = `data:${mime};base64,${audio_base64}`;
@@ -70,9 +74,12 @@ function useSpeechQueue(onSpeakingChange: (speaking: boolean) => void) {
   }, [playNext]);
 
   const stop = useCallback(() => {
+    generationRef.current += 1;
     queueRef.current = [];
     audioRef.current?.pause();
   }, []);
+
+  useEffect(() => stop, [stop]);
 
   // Mobile browsers only allow playback on an element first played from a tap.
   const unlock = useCallback(() => {
@@ -116,6 +123,12 @@ export default function VoicePage() {
       upsertJob(job);
       addEntry("assistant", job.reply);
       speech.speak(job.reply);
+      // Jobs with nothing to wait for (every start failed) come back finished.
+      if (job.summary) {
+        spokenSummaries.current.add(job.id);
+        addEntry("assistant", job.summary);
+        speech.speak(job.summary);
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {

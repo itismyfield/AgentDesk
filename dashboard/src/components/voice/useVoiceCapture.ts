@@ -30,6 +30,11 @@ export function useVoiceCapture({ handsFree, busy, onSpeechStart, onUtterance }:
   const contextRef = useRef<AudioContext | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // A recording cut off by stop() (mic off, leaving the screen) is discarded.
+  const discardedRef = useRef<MediaRecorder | null>(null);
+  const startingRef = useRef(false);
+  // Bumped by stop() so a start still waiting on mic permission gives up.
+  const sessionRef = useRef(0);
   const optionsRef = useRef({ handsFree, busy, onSpeechStart, onUtterance });
   useEffect(() => {
     optionsRef.current = { handsFree, busy, onSpeechStart, onUtterance };
@@ -48,6 +53,7 @@ export function useVoiceCapture({ handsFree, busy, onSpeechStart, onUtterance }:
     recorder.onstop = () => {
       recorderRef.current = null;
       setRecording(false);
+      if (discardedRef.current === recorder) return;
       if (Date.now() - startedAt >= MIN_UTTERANCE_MS && chunks.length > 0) {
         optionsRef.current.onUtterance(new Blob(chunks, { type: recorder.mimeType || mimeType }));
       }
@@ -63,6 +69,8 @@ export function useVoiceCapture({ handsFree, busy, onSpeechStart, onUtterance }:
   }, []);
 
   const stop = useCallback(() => {
+    sessionRef.current += 1;
+    discardedRef.current = recorderRef.current;
     stopRecording();
     if (timerRef.current) clearInterval(timerRef.current);
     timerRef.current = null;
@@ -75,16 +83,27 @@ export function useVoiceCapture({ handsFree, busy, onSpeechStart, onUtterance }:
   }, [stopRecording]);
 
   const start = useCallback(async () => {
-    if (streamRef.current) return;
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    });
+    if (streamRef.current || startingRef.current) return;
+    startingRef.current = true;
+    const session = sessionRef.current;
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+    } finally {
+      startingRef.current = false;
+    }
+    if (session !== sessionRef.current) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    streamRef.current = stream;
     const context = new AudioContext();
+    contextRef.current = context;
     const analyser = context.createAnalyser();
     analyser.fftSize = 1024;
     context.createMediaStreamSource(stream).connect(analyser);
-    streamRef.current = stream;
-    contextRef.current = context;
     setActive(true);
 
     const samples = new Float32Array(analyser.fftSize);

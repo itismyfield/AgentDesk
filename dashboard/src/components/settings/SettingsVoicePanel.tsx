@@ -461,8 +461,8 @@ export function SettingsVoicePanel({
       >
         <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
           {tr(
-            "음성 채널, 대화 유지 시간, 음성 모델, 에이전트별 호출 이름을 조정합니다. 저장하면 다음 음성 입력부터 반영됩니다.",
-            "Adjust the voice channel, conversation handoff time, speech models, and each agent's spoken names. Saved changes apply to the next voice input.",
+            "음성 채널, 대화 유지 시간, 에이전트별 호출 이름을 조정합니다. 저장하면 다음 음성 입력부터 반영됩니다.",
+            "Adjust the voice channel, conversation handoff time, and each agent's spoken names. Saved changes apply to the next voice input.",
           )}
         </p>
       </SettingsCallout>
@@ -494,8 +494,8 @@ export function SettingsVoicePanel({
       {renderSettingGroupCard({
         titleKo: "음성 모델",
         titleEn: "Speech models",
-        descriptionKo: "받아쓰기와 읽어주기에 쓸 모델입니다. API 키는 값이 아니라 환경변수 이름으로 적습니다.",
-        descriptionEn: "Models for transcription and speech. Give the API key as an environment variable name, not the key itself.",
+        descriptionKo: "받아쓰기와 읽어주기에 쓸 모델입니다. 음성 화면은 저장 즉시, Discord 음성 채널은 서버를 다시 시작하면 반영됩니다. API 키는 값이 아니라 환경변수 이름으로 적습니다.",
+        descriptionEn: "Models for transcription and speech. The voice screen uses them as soon as they are saved; Discord voice picks them up after a server restart. Give the API key as an environment variable name, not the key itself.",
         totalCount: 2,
         rows: visibleModelCards,
       })}
