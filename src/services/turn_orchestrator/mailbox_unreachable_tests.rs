@@ -1,9 +1,11 @@
+use std::sync::Arc;
+
 use tokio::sync::mpsc;
 
 use super::actor_hydrate_regression_tests::make_intervention;
 use super::{
     ChannelMailboxHandle, ChannelMailboxRegistry, EnqueueRefusalReason, GLOBAL_CHANNEL_MAILBOXES,
-    MailboxUnreachable, QueuePersistenceContext, spawn_channel_mailbox,
+    MailboxUnreachable, QueuePersistenceContext, RecoveryDoneSignal, spawn_channel_mailbox,
 };
 use crate::services::provider::ProviderKind;
 use poise::serenity_prelude::ChannelId;
@@ -11,7 +13,10 @@ use poise::serenity_prelude::ChannelId;
 pub(crate) fn closed_handle() -> ChannelMailboxHandle {
     let (sender, receiver) = mpsc::unbounded_channel();
     drop(receiver);
-    ChannelMailboxHandle { sender }
+    ChannelMailboxHandle {
+        sender,
+        recovery_done: Arc::new(RecoveryDoneSignal::new()),
+    }
 }
 
 impl ChannelMailboxRegistry {
@@ -29,7 +34,10 @@ fn reply_dropping_handle() -> ChannelMailboxHandle {
             drop(msg);
         }
     });
-    ChannelMailboxHandle { sender }
+    ChannelMailboxHandle {
+        sender,
+        recovery_done: Arc::new(RecoveryDoneSignal::new()),
+    }
 }
 
 async fn assert_turn_queries_unreachable(handle: &ChannelMailboxHandle) {
@@ -46,7 +54,11 @@ async fn assert_turn_queries_unreachable(handle: &ChannelMailboxHandle) {
 
 #[tokio::test]
 async fn measured_idle_is_distinct_from_unreachable_actor() {
-    let live = spawn_channel_mailbox(ChannelId::new(6046));
+    let live = spawn_channel_mailbox(
+        ChannelId::new(6046),
+        Default::default(),
+        Arc::new(RecoveryDoneSignal::new()),
+    );
     assert_eq!(live.has_active_turn().await, Ok(false));
     assert_eq!(live.has_blocking_active_turn().await, Ok(false));
     assert!(matches!(live.cancel_token().await, Ok(None)));

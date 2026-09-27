@@ -68,6 +68,7 @@ pub(super) async fn reap_inflight_rows_at_boot_with_guard(
     let owned = provider.clone();
     let reap = move || {
         inflight_runtime_root()
+            .inspect(|root| super::boot_custody::preserve_before_boot_reap(root, &owned))
             .map(|root| reap_inflight_rows_at_boot_in_root(&root, &owned))
             .unwrap_or_default()
     };

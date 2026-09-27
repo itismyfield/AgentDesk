@@ -131,15 +131,62 @@ mod tests {
     }
 
     #[test]
+    fn trace_context_builder_fields_are_recorded_and_inherited_by_a_nested_child_event() {
+        let logs = capture_logs_with_default_filter(|| {
+            let span = TraceContext::default()
+                .with_channel_id(Some(Cow::Borrowed("builder-channel")))
+                .with_session_key(Some("builder-session"))
+                .span("builder-consumer");
+            span.in_scope(|| {
+                tracing::info!("parent scope marker");
+                let child = tracing::info_span!("nested_child_operation");
+                child.in_scope(|| tracing::info!("nested child marker"));
+            });
+            tracing::info!("outside any span marker");
+        });
+
+        let parent_line = logs
+            .lines()
+            .find(|line| line.contains("parent scope marker"))
+            .expect("parent-scope event logged");
+        assert!(
+            parent_line.contains("channel_id=Some(\"builder-channel\")"),
+            "{parent_line}"
+        );
+        assert!(
+            parent_line.contains("session_key=Some(\"builder-session\")"),
+            "{parent_line}"
+        );
+
+        let child_line = logs
+            .lines()
+            .find(|line| line.contains("nested child marker"))
+            .expect("nested child event logged");
+        assert!(
+            child_line.contains("channel_id=Some(\"builder-channel\")"),
+            "child event must inherit the ancestor span's field: {child_line}"
+        );
+        assert!(
+            child_line.contains("session_key=Some(\"builder-session\")"),
+            "child event must inherit the ancestor span's field: {child_line}"
+        );
+
+        let outside_line = logs
+            .lines()
+            .find(|line| line.contains("outside any span marker"))
+            .expect("post-span event logged");
+        assert!(
+            !outside_line.contains("channel_id=Some(\"builder-channel\")"),
+            "field must not leak once the span has closed: {outside_line}"
+        );
+    }
+
+    #[test]
     fn default_agentdesk_filter_keeps_observability_targets_and_drops_policy_target() {
         let logs = capture_logs_with_default_filter(|| {
             tracing::info!(
                 target: crate::api_caller_observability::LOG_TARGET,
                 "api caller production filter marker"
-            );
-            tracing::info!(
-                target: crate::engine::ops::TIMEOUT_SHADOW_LOG_TARGET,
-                "timeout shadow production filter marker"
             );
             tracing::info!(
                 target: "policy",
@@ -153,14 +200,6 @@ mod tests {
         );
         assert!(
             logs.contains(crate::api_caller_observability::LOG_TARGET),
-            "logs={logs}"
-        );
-        assert!(
-            logs.contains("timeout shadow production filter marker"),
-            "logs={logs}"
-        );
-        assert!(
-            logs.contains(crate::engine::ops::TIMEOUT_SHADOW_LOG_TARGET),
             "logs={logs}"
         );
         assert!(
@@ -503,6 +542,16 @@ impl<'a> TraceContext<'a> {
         self
     }
 
+    pub(crate) fn with_channel_id(mut self, channel_id: Option<Cow<'a, str>>) -> Self {
+        self.channel_id = channel_id.or(self.channel_id);
+        self
+    }
+
+    pub(crate) fn with_session_key(mut self, session_key: Option<&'a str>) -> Self {
+        self.session_key = session_key.or(self.session_key);
+        self
+    }
+
     pub(crate) fn span(self, name: &'static str) -> tracing::Span {
         tracing::info_span!(
             "trace_context",
@@ -535,6 +584,23 @@ pub(crate) fn hook_span(hook_name: &str, payload: &serde_json::Value) -> tracing
     TraceContext::from_payload(payload)
         .with_hook_name(Some(hook_name))
         .span("policy_hook")
+}
+
+/// Sibling to `dispatch_span` for callers that also carry a channel/session
+/// identity; `dispatch_span`'s signature stays unchanged for existing callers.
+pub(crate) fn session_span(
+    name: &'static str,
+    dispatch_id: Option<&str>,
+    agent_id: Option<&str>,
+    channel_id: Option<Cow<'_, str>>,
+    session_key: Option<&str>,
+) -> tracing::Span {
+    TraceContext::default()
+        .with_dispatch_id(dispatch_id)
+        .with_agent_id(agent_id)
+        .with_channel_id(channel_id)
+        .with_session_key(session_key)
+        .span(name)
 }
 
 fn find_string<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {

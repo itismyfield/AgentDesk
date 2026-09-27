@@ -47,8 +47,8 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_CONFIG` | `src/config.rs:2799` (+6 more) | The on-disk config path the running server loaded from, resolved with the same precedence as [`load`] (`$AGENTDESK_CONFIG` → runtime root → cwd → home). |
 | `AGENTDESK_CSWAP_PATH` | `src/services/cswap.rs:22` (+1 more) |  |
 | `AGENTDESK_DCSERVER_LABEL` | `src/cli/dcserver.rs:18` (+2 more) |  |
-| `AGENTDESK_DCSERVER_LOG_MAX_BYTES` | `src/logging.rs:225` |  |
-| `AGENTDESK_DCSERVER_LOG_MAX_FILES` | `src/logging.rs:233` |  |
+| `AGENTDESK_DCSERVER_LOG_MAX_BYTES` | `src/logging.rs:264` |  |
+| `AGENTDESK_DCSERVER_LOG_MAX_FILES` | `src/logging.rs:272` |  |
 | `AGENTDESK_DELIVERY_RECORD_AUTHORITY` | `src/services/discord/outbound/delivery_record.rs:1282` | #3089 B2b read-authority flag (`AGENTDESK_DELIVERY_RECORD_AUTHORITY`, OnceLock, compiled default ON since #5071 T1 S8-2). |
 | `AGENTDESK_DELIVERY_RECORD_SHADOW` | `src/services/discord/outbound/delivery_record.rs:1211` | #3089 B1 shadow-write flag (`AGENTDESK_DELIVERY_RECORD_SHADOW`, OnceLock, default OFF), with its provenance. |
 | `AGENTDESK_DISCORD_API_BASE_URL` | `src/services/dispatches/discord_delivery/transport.rs:192` |  |
@@ -101,7 +101,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_ROOT_DIR` | `src/cli/dcserver.rs:20` (+21 more) | Canonical runtime root: $AGENTDESK_ROOT_DIR → ~/.adk/release All code that needs the AgentDesk root directory MUST call this function instead of reimplementing… |
 | `AGENTDESK_SINGLE_MESSAGE_PANEL` | `src/services/discord/single_message_panel.rs:33` | The rollout gate previously short-circuited a missing env var to `false`, so any environment without an explicit `AGENTDESK_SINGLE_MESSAGE_PANEL=1` silently fe… |
 | `AGENTDESK_SOURCE_ZPROFILE` | `src/services/routines/migrated.rs:619` |  |
-| `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/mod.rs:508` | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |
+| `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/mod.rs:509` | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |
 | `AGENTDESK_TEST_POSTGRES_ACQUIRE_TIMEOUT_MS` | `src/db/postgres.rs:1045` (+1 more) | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
 | `AGENTDESK_TOKEN` | `src/cli/run.rs:142` |  |
 | `AGENTDESK_VOICE_REQUIRE_ALIASES` | `src/services/discord_config_audit.rs:206` | - On collision when `AGENTDESK_VOICE_REQUIRE_ALIASES=1`: return an `Err` describing the collision so callers can choose to fail fast. |
@@ -127,7 +127,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs:1098` (+2 more) |  |
 | `MEMENTO_WORKSPACE` | `src/server/routes/memory_api.rs:200` (+1 more) |  |
 | `OPENAI_API_KEY` | `src/server/rate_limit_sync.rs:115` | --- Codex: ~/.codex/auth.json (CLI subscription), else OPENAI_API_KEY --- |
-| `PATH` | `src/cli/doctor/orchestrator.rs:1545` (+5 more) | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
+| `PATH` | `src/cli/doctor/orchestrator.rs:1534` (+5 more) | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
 | `POSTGRES_TEST_ADMIN_DB` | `src/db/auto_queue/test_support.rs:16` (+4 more) |  |
 | `POSTGRES_TEST_DATABASE_URL_BASE` | `src/db/postgres.rs:1023` | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
 | `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs:478` (+1 more) |  |

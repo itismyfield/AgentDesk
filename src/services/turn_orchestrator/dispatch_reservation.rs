@@ -8,11 +8,12 @@ use serenity::{ChannelId, MessageId};
 use super::active_source_dedup::strip_source_message_id_from_intervention;
 use super::pending_queue_persistence::{
     load_channel_pending_dispatch_marker, load_channel_pending_queue,
-    remove_channel_pending_dispatch_marker,
+    load_channel_pending_queue_checked, remove_channel_pending_dispatch_marker,
 };
 use super::{
     ChannelMailboxState, DispatchLease, HydratePendingQueueResult, Intervention, InterventionMode,
-    QueuePersistenceContext, TakeNextSoftResult, persist_queue_or_restore,
+    QueuePersistenceContext, RequeueInterventionResult, TakeNextSoftResult,
+    persist_queue_or_restore,
 };
 
 pub(crate) const PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER: Duration = Duration::from_secs(10);
@@ -353,6 +354,57 @@ pub(super) fn merge_pending_dispatch_marker_into_state(
     }
 }
 
+/// Absorbs the disk queue before an arm rewrites the whole file, so a disk-only backlog is kept;
+/// a failed read comes back as `persistence_error` and the caller stops before its write.
+pub(super) fn absorb_disk_queue(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+) -> HydratePendingQueueResult {
+    let loaded = load_channel_pending_queue_checked(
+        &persistence.provider,
+        &persistence.token_hash,
+        channel_id,
+    );
+    let (items, over) = match loaded {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            tracing::error!(channel_id = channel_id.get(), error = %error, "pending queue read failed");
+            return HydratePendingQueueResult {
+                absorbed: 0,
+                queue_len_after: state.intervention_queue.len(),
+                restored_override: None,
+                persistence_error: Some(error),
+            };
+        }
+    };
+    let mut persistence = persistence.clone();
+    persistence.dispatch_role_override =
+        persistence.dispatch_role_override.or(over.map(|c| c.get()));
+    hydrate_pending_queue_into_state(state, channel_id, items, persistence, over)
+}
+
+/// `absorb_disk_queue` for arms that only need its read error to stop before their write.
+pub(super) fn absorb_disk_queue_error(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+) -> Option<String> {
+    absorb_disk_queue(state, channel_id, persistence).persistence_error
+}
+
+impl RequeueInterventionResult {
+    /// The requeue was refused because the disk queue could not be read first.
+    pub(super) fn absorb_failed(error: String) -> Self {
+        Self {
+            enqueued: false,
+            refusal_reason: None,
+            queue_exit_events: Vec::new(),
+            persistence_error: Some(error),
+        }
+    }
+}
+
 pub(super) fn hydrate_pending_queue_from_disk_if_present(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
@@ -420,7 +472,10 @@ pub(super) fn reconcile_pending_dispatch_marker_before_take_next(
     channel_id: ChannelId,
     persistence: &QueuePersistenceContext,
 ) -> Option<TakeNextSoftResult> {
-    if state.pending_user_dispatch.is_some() {
+    let absorb_error = (state.pending_user_dispatch.is_none())
+        .then(|| absorb_disk_queue(state, channel_id, persistence).persistence_error)
+        .flatten();
+    if state.pending_user_dispatch.is_some() || absorb_error.is_some() {
         return Some(TakeNextSoftResult {
             intervention: None,
             dispatch_lease: None,
@@ -430,7 +485,7 @@ pub(super) fn reconcile_pending_dispatch_marker_before_take_next(
                 .any(|item| item.mode == InterventionMode::Soft),
             queue_len_after: state.intervention_queue.len(),
             queue_exit_events: Vec::new(),
-            persistence_error: None,
+            persistence_error: absorb_error,
         });
     }
 

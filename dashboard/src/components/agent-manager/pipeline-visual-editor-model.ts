@@ -46,7 +46,6 @@ export interface GraphNode {
   index: number;
   hookCount: number;
   hasClock: boolean;
-  hasTimeout: boolean;
 }
 
 export interface GraphEdge {
@@ -81,9 +80,11 @@ const VISUAL_OVERRIDE_KEYS = new Set([
   "hooks",
   "events",
   "clocks",
-  "timeouts",
   "phase_gate",
 ]);
+
+// Retired override sections: dropped from saves so stored rows shed them instead of round-tripping.
+const RETIRED_OVERRIDE_KEYS = new Set(["timeouts"]);
 
 export function clonePipelineConfig(pipeline: PipelineConfigFull): PipelineConfigFull {
   return {
@@ -111,9 +112,6 @@ export function clonePipelineConfig(pipeline: PipelineConfigFull): PipelineConfi
     ),
     clocks: Object.fromEntries(
       Object.entries(pipeline.clocks).map(([key, clock]) => [key, { ...clock }]),
-    ),
-    timeouts: Object.fromEntries(
-      Object.entries(pipeline.timeouts).map(([key, timeout]) => [key, { ...timeout }]),
     ),
     phase_gate: clonePhaseGate(pipeline.phase_gate),
   };
@@ -233,7 +231,7 @@ export function extractOverrideExtras(rawConfig: unknown): Record<string, unknow
   }
   const extras: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(rawConfig as Record<string, unknown>)) {
-    if (!VISUAL_OVERRIDE_KEYS.has(key)) {
+    if (!VISUAL_OVERRIDE_KEYS.has(key) && !RETIRED_OVERRIDE_KEYS.has(key)) {
       extras[key] = value;
     }
   }
@@ -274,9 +272,6 @@ export function buildOverridePayload(
     ),
     clocks: Object.fromEntries(
       Object.entries(pipeline.clocks).map(([key, clock]) => [key, { ...clock }]),
-    ),
-    timeouts: Object.fromEntries(
-      Object.entries(pipeline.timeouts).map(([key, timeout]) => [key, { ...timeout }]),
     ),
     phase_gate: clonePhaseGate(pipeline.phase_gate),
   };
@@ -404,7 +399,6 @@ export function buildPipelineGraph(
       index,
       hookCount: (hooks?.on_enter.length ?? 0) + (hooks?.on_exit.length ?? 0),
       hasClock: !!pipeline.clocks[state.id],
-      hasTimeout: !!pipeline.timeouts[state.id],
     };
   });
 
