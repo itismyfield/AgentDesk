@@ -162,6 +162,7 @@ async fn release_catalog_before_diagnostic<F>(
 pub(super) async fn run_bot_run_gateway_backend(
     mut client: serenity::Client,
     provider_for_error: &ProviderKind,
+    gateway_waiter: Option<GatewayWaiterGuard>,
     gateway_lease_task: Option<tokio::task::JoinHandle<()>>,
     model_catalog_refresh_task: Option<tokio::task::JoinHandle<()>>,
     startup_reconcile_remaining_for_client_start: Arc<std::sync::atomic::AtomicUsize>,
@@ -200,6 +201,7 @@ pub(super) async fn run_bot_run_gateway_backend(
             true
         }
     };
+    drop(gateway_waiter);
     release_catalog_before_diagnostic(model_catalog_refresh_task, async {
         if gateway_backend_failed {
             run_startup_diagnostic_after_reconcile_barrier(

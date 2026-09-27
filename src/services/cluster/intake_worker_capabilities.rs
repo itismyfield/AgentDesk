@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{LazyLock, RwLock};
 
 use serde_json::{Value, json};
@@ -12,17 +12,9 @@ static ACTIVE_INTAKE_WORKER_PROVIDERS: LazyLock<RwLock<BTreeSet<String>>> =
 const PRESERVE_ON_CANCEL_V1: &str = "preserve_on_cancel_v1";
 const SCHEDULED_MESSAGE_DISCORD_MENTION_CONSUMER_V1: &str = "discord_mention_consumer_v1";
 
-/// Providers whose `run_bot` on this node is actively trying to take the Discord
-/// gateway lease (#4351). Advertised so a non-preferred holder can tell "the
-/// preferred node is heartbeating" apart from "the preferred node actually wants
-/// and is able to run this gateway".
-///
-/// Without the distinction, a preferred node whose dcserver is up but whose bot
-/// never starts (no token for this provider, startup failure, acquire gave up)
-/// would make the non-preferred holder yield to nobody, self-fence, restart,
-/// re-acquire, and yield again — a gateway outage loop.
-static GATEWAY_WAITER_PROVIDERS: LazyLock<RwLock<BTreeSet<String>>> =
-    LazyLock::new(|| RwLock::new(BTreeSet::new()));
+// Count live gateway owners so one bot stopping does not hide another bot's intent.
+static GATEWAY_WAITER_PROVIDERS: LazyLock<RwLock<BTreeMap<String, usize>>> =
+    LazyLock::new(|| RwLock::new(BTreeMap::new()));
 
 pub(crate) fn register_intake_worker_provider(provider: &str) {
     let provider = provider.trim().to_ascii_lowercase();
@@ -41,32 +33,42 @@ pub(super) fn active_intake_worker_providers() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Called by the preferred node right before it starts waiting for the gateway
-/// lease, and held for as long as it keeps waiting or holds it. The next
-/// heartbeat (≤ `heartbeat_interval_secs`) publishes it.
-pub(crate) fn register_gateway_waiter(provider: &str) {
-    let provider = provider.trim().to_ascii_lowercase();
-    if provider.is_empty() {
-        return;
-    }
-    if let Ok(mut providers) = GATEWAY_WAITER_PROVIDERS.write() {
-        providers.insert(provider);
+/// Keeps gateway intent advertised until acquisition or backend ownership ends.
+pub(crate) struct GatewayWaiterGuard {
+    provider: String,
+}
+
+impl GatewayWaiterGuard {
+    pub(crate) fn new(provider: &str) -> Self {
+        let provider = provider.trim().to_ascii_lowercase();
+        if !provider.is_empty() {
+            let mut providers = GATEWAY_WAITER_PROVIDERS
+                .write()
+                .unwrap_or_else(|error| error.into_inner());
+            *providers.entry(provider.clone()).or_default() += 1;
+        }
+        Self { provider }
     }
 }
 
-/// Called when this node stops wanting the gateway for `provider` (acquire error,
-/// shutdown). Clears the signal so peers stop yielding to us.
-pub(crate) fn deregister_gateway_waiter(provider: &str) {
-    let provider = provider.trim().to_ascii_lowercase();
-    if let Ok(mut providers) = GATEWAY_WAITER_PROVIDERS.write() {
-        providers.remove(&provider);
+impl Drop for GatewayWaiterGuard {
+    fn drop(&mut self) {
+        let mut providers = GATEWAY_WAITER_PROVIDERS
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(count) = providers.get_mut(&self.provider) {
+            *count -= 1;
+            if *count == 0 {
+                providers.remove(&self.provider);
+            }
+        }
     }
 }
 
 fn active_gateway_waiter_providers() -> Vec<String> {
     GATEWAY_WAITER_PROVIDERS
         .read()
-        .map(|providers| providers.iter().cloned().collect())
+        .map(|providers| providers.keys().cloned().collect())
         .unwrap_or_default()
 }
 
