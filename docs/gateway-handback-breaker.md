@@ -12,12 +12,13 @@ State belongs to a token and survives process restarts at
 Delete that one file to reset; the next keepalive decision observes its absence
 (the normal keepalive interval is 15 seconds). Corrupt or unreadable state also
 suppresses handback; it is never silently replaced. A failed pending write prevents
-unlock. Failed settlement is retried without counting the handback twice.
+unlock. Within the same process, failed settlement is retried without counting twice.
 
 Set `enabled: false` for immediate legacy behavior at the next decision, including
 when state is unreadable or manually held. Disabled decisions do not read or write
-state. Turning it back on restores the saved history and suppression. An unsettled
-pending handback is preserved until an acquisition observation or manual reset.
+state. Turning it back on restores the saved history and suppression. If a holder
+missed settlement while disabled, its next handback replaces the unsettled pending
+without counting it and emits one state-error alert after saving the replacement.
 Logs emit `gateway_handback_suppressed` with provider/owner on activation and
 `gateway_handback_breaker_state_error` with owner on state failure.
 

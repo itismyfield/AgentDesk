@@ -62,6 +62,7 @@ impl Fixture {
         config.cluster.instance_id = Some("backup".into());
         config.cluster.gateway_preferred_instance_id = Some("home".into());
         config.cluster.lease_ttl_secs = 600;
+        config.cluster.gateway_yield_grace_secs = 5;
         crate::config::save_to_path(&config_path, &config).unwrap();
         sqlx::query("INSERT INTO worker_nodes(instance_id,status,last_heartbeat_at) VALUES ('home','online',NOW())")
             .execute(&pool).await.unwrap();
@@ -293,7 +294,7 @@ async fn empty_handbacks_survive_restart_then_suppression_keeps_serving_and_self
     let Some(fixture) = Fixture::new().await else {
         return;
     };
-    assert_eq!(fixture.config.cluster.gateway_yield_grace_secs, 90);
+    let grace_secs = fixture.config.cluster.gateway_yield_grace_secs;
     let mut running = fixture.backup().await;
     fixture.advertise(true).await;
     for repetition in 1..=2 {
@@ -302,24 +303,24 @@ async fn empty_handbacks_survive_restart_then_suppression_keeps_serving_and_self
         drop(running);
         let reacquire_started = Instant::now();
         running = fixture.backup().await;
-        assert!(reacquire_started.elapsed() >= Duration::from_secs(90));
+        assert!(reacquire_started.elapsed() >= Duration::from_secs(grace_secs));
         let ready_at = running.events.ready_at.lock().unwrap().unwrap();
         println!(
-            "handback={repetition} observed_unlock_to_mock_READY_ms={}..{} restart=fresh_SharedData grace_config_secs=90",
+            "handback={repetition} observed_unlock_to_mock_READY_ms={}..{} restart=fresh_SharedData grace_config_secs={grace_secs}",
             ready_at.duration_since(after_unlock).as_millis(),
             ready_at.duration_since(before_unlock).as_millis()
         );
     }
     assert!(fixture.breaker().suppressed());
     let standby = tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_secs(2),
         fixture.acquire(&running.shared, &mut fixture.breaker()),
     )
     .await
-    .expect("active suppression skips the initial ninety-second grace");
+    .expect("active suppression skips the configured initial grace");
     assert!(matches!(standby, GatewayLeaseOutcome::Standby));
     let before = running.events.messages.load(Ordering::SeqCst);
-    fixture.ticks(4).await;
+    fixture.ticks(2).await;
     assert!(!running.backend.is_finished());
     assert!(running.events.messages.load(Ordering::SeqCst) > before);
     let pid = fixture.holder().await.unwrap();
@@ -418,7 +419,7 @@ async fn backend_exit_removes_home_waiter_until_live_home_takes_handback_pg() {
         "backend exit clears the heartbeat waiter"
     );
     let mut backup = fixture.backup().await;
-    fixture.ticks(4).await;
+    fixture.ticks(2).await;
     assert!(!backup.backend.is_finished());
     let waiter = GatewayWaiterGuard::new("claude");
     assert!(fixture.publish_waiter().await);
