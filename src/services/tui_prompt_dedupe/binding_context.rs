@@ -102,6 +102,8 @@ pub(crate) fn observe_spawn_nonce_marker(tmux: &str) -> SpawnNonceMarker {
     SpawnNonceMarker::Absent
 }
 
+// Hook capture reads this value without consulting mutable markers.
+const CONTEXT_ENV: &str = "AGENTDESK_BINDING_CONTEXT";
 pub(crate) const BINDING_HEADER: &str = "x-agentdesk-binding-context";
 const CONTEXT_LIMIT: u64 = 16 * 1024;
 const HEADER_LIMIT: usize = 32 * 1024;
@@ -142,7 +144,7 @@ impl HookBindingEnvelope {
         env: impl Fn(&str) -> Option<std::ffi::OsString>,
     ) -> Self {
         let capture = || {
-            let path = env("AGENTDESK_BINDING_CONTEXT").ok_or(AbsentReason::EnvUnset)?;
+            let path = env(CONTEXT_ENV).ok_or(AbsentReason::EnvUnset)?;
             let path = Path::new(&path);
             let ctx = read_context(path).map_err(|error| match error.kind() {
                 io::ErrorKind::InvalidData => AbsentReason::Corrupt,
@@ -436,6 +438,16 @@ pub(crate) mod tests {
             .lines()
             .find_map(|l| l.strip_prefix("AGENTDESK_BINDING_CONTEXT="));
         assert_eq!(value.map(Path::new), expected);
+        if expected.is_none() {
+            assert_eq!(
+                HookBindingEnvelope::capture_from_env("claude", |key| {
+                    env.lines()
+                        .find_map(|line| line.strip_prefix(&format!("{key}=")).map(Into::into))
+                })
+                .context,
+                CapturedContext::Absent(AbsentReason::EnvUnset)
+            );
+        }
     }
     pub(crate) fn fake_tmux(root: &Path) -> Guard {
         let stub = "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$AGENTDESK_ROOT_DIR/tmux.calls\"\n";
@@ -493,7 +505,14 @@ pub(crate) mod tests {
         unsafe { std::env::remove_var("AGENTDESK_BINDING_CONTEXT") };
         let p = prepared();
         crate::services::discord::stamp_spawn_markers(&p.context.tmux_session, None).unwrap();
-        assert_eq!(context_env(), ContextEnv::EnvUnset);
+        assert!(matches!(
+            observe_spawn_nonce_marker(&p.context.tmux_session),
+            SpawnNonceMarker::Known(_)
+        ));
+        assert_eq!(
+            HookBindingEnvelope::capture("claude").context,
+            CapturedContext::Absent(AbsentReason::EnvUnset)
+        );
         child_context(&p.env_lines(), Some(&p.path));
         let p = PreparedIncarnation {
             path: p.path.with_file_name("quote' space.json"),
@@ -545,6 +564,151 @@ pub(crate) mod tests {
         assert!(kept.path.exists());
         assert!(!retired.path.exists());
     }
+    #[test]
+    fn binding_context_capture_errors_and_header_codec_are_bounded() {
+        let (_root, _env) = fixture();
+        let p = prepared();
+        let original = fs::read(&p.path).unwrap();
+        let capture = || {
+            HookBindingEnvelope::capture_from_env("claude", |key| match key {
+                "AGENTDESK_BINDING_CONTEXT" => Some(p.path.clone().into_os_string()),
+                "TMUX" => Some("/tmp/socket,12,3".into()),
+                "TMUX_PANE" => Some("%7".into()),
+                "CLAUDE_PID" => Some("123".into()),
+                _ => None,
+            })
+        };
+        let good = capture();
+        assert_eq!(good.context, CapturedContext::Captured(p.context.clone()));
+        assert_eq!(
+            good.observed,
+            ObservedHookProcess {
+                tmux: Some("/tmp/socket,12,3".into()),
+                tmux_pane: Some("%7".into()),
+                provider_pid: Some("123".into())
+            }
+        );
+        assert_eq!(
+            decode_binding_header(&good.encode().unwrap()).unwrap(),
+            good
+        );
+        for (field, value, reason) in [
+            (
+                "execution_nonce",
+                serde_json::json!("wrong"),
+                AbsentReason::NonceMismatch,
+            ),
+            (
+                "provider",
+                serde_json::json!("codex"),
+                AbsentReason::ProviderMismatch,
+            ),
+            (
+                "schema",
+                serde_json::json!(2),
+                AbsentReason::SchemaUnsupported,
+            ),
+        ] {
+            let mut ctx: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            ctx[field] = value;
+            fs::write(&p.path, serde_json::to_vec(&ctx).unwrap()).unwrap();
+            assert_eq!(capture().context, CapturedContext::Absent(reason));
+        }
+        let mut oversized = original.clone();
+        oversized.resize(CONTEXT_LIMIT as usize + 1, b' ');
+        for bytes in [b"broken".to_vec(), oversized] {
+            fs::write(&p.path, bytes).unwrap();
+            assert_eq!(
+                capture().context,
+                CapturedContext::Absent(AbsentReason::Corrupt)
+            );
+        }
+        let mut boundary = original;
+        boundary.resize(CONTEXT_LIMIT as usize, b' ');
+        fs::write(&p.path, boundary).unwrap();
+        assert_eq!(capture(), good);
+        fs::remove_file(&p.path).unwrap();
+        assert_eq!(
+            capture().context,
+            CapturedContext::Absent(AbsentReason::Unreadable)
+        );
+        for invalid in [
+            "+///".into(),
+            "e30=".into(),
+            "e30\n".into(),
+            "_x".into(),
+            "a".repeat(HEADER_LIMIT + 1),
+        ] {
+            assert!(decode_binding_header(&invalid).is_err());
+        }
+        let mut large = p.context;
+        large.provider_root = Some(PathBuf::from("x".repeat(15_000)));
+        fs::write(&p.path, serde_json::to_vec(&large).unwrap()).unwrap();
+        let worst = HookBindingEnvelope::capture_from_env("claude", |key| {
+            Some(if key == "AGENTDESK_BINDING_CONTEXT" {
+                p.path.clone().into_os_string()
+            } else {
+                "\0".repeat(256).into()
+            })
+        });
+        assert!(matches!(worst.context, CapturedContext::Captured(_)));
+        assert!(worst.encode().unwrap().len() < HEADER_LIMIT);
+        assert_eq!(
+            decode_binding_header(&worst.encode().unwrap()).unwrap(),
+            worst
+        );
+        assert_eq!(
+            HookBindingEnvelope::capture_from_env("claude", |_| Some("x".repeat(257).into()))
+                .observed,
+            ObservedHookProcess::default()
+        );
+    }
+
+    #[test]
+    fn binding_context_tmp_sweep_preserves_live_writers_and_uncertain_evidence() {
+        let (_root, _env) = fixture();
+        let p = prepared();
+        let temp = p
+            .path
+            .with_file_name(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
+        fs::rename(&p.path, &temp).unwrap();
+        let now = Utc::now() + chrono::Duration::days(8);
+        for presence in [Present, ProbeFailed] {
+            sweep("claude", now, 128, |_| presence);
+            assert!(temp.exists());
+        }
+        let marker = tc::session_temp_path(&p.context.tmux_session, "spawn_nonce");
+        fs::write(&marker, &p.context.execution_nonce).unwrap();
+        sweep("claude", now, 128, |_| Missing);
+        assert!(temp.exists());
+        fs::remove_file(&marker).unwrap();
+        sweep("claude", Utc::now(), 128, |_| Missing);
+        assert!(temp.exists());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker = tc::with_tmux_source_authority(&p.context.tmux_session, |_| {
+                let worker = scope.spawn(|| {
+                    sweep("claude", now, 128, |_| {
+                        tx.send(()).unwrap();
+                        Missing
+                    })
+                });
+                rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                assert!(temp.exists(), "writer still owns the temporary context");
+                worker
+            });
+            worker.join().unwrap();
+        });
+        assert!(
+            !temp.exists(),
+            "retired crash residue is swept after writer releases authority"
+        );
+        fs::write(&temp, b"partial JSON").unwrap();
+        sweep("claude", now, 128, |_| Missing);
+        assert!(temp.exists());
+    }
+
     #[test]
     fn binding_context_t12_permission_failure_is_unknown() {
         let (_root, _env) = fixture();

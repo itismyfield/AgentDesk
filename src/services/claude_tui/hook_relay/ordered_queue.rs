@@ -1234,6 +1234,18 @@ mod tests {
         mpsc::Receiver<Value>,
         std::thread::JoinHandle<usize>,
     ) {
+        spawn_observed_receiver(statuses, request_body)
+    }
+
+    #[cfg(unix)]
+    fn spawn_observed_receiver(
+        statuses: Vec<u16>,
+        observe: fn(&[u8]) -> Value,
+    ) -> (
+        String,
+        mpsc::Receiver<Value>,
+        std::thread::JoinHandle<usize>,
+    ) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind status receiver");
         let endpoint = format!(
             "http://{}",
@@ -1259,7 +1271,7 @@ mod tests {
                         break;
                     }
                 }
-                request_tx.send(request_body(&encoded)).unwrap();
+                request_tx.send(observe(&encoded)).unwrap();
                 let reason = if status == 409 {
                     "Conflict"
                 } else {
@@ -1275,6 +1287,193 @@ mod tests {
             observed
         });
         (endpoint, request_rx, receiver)
+    }
+
+    #[cfg(unix)]
+    fn binding_header(request: &[u8]) -> Value {
+        let header = std::str::from_utf8(request)
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case(
+                    crate::services::tui_prompt_dedupe::binding_context::BINDING_HEADER,
+                )
+                .then(|| value.trim())
+            })
+            .expect("every queue request carries a binding header");
+        json!({"header": header, "body": request_body(request)})
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn binding_context_t2_t9_queue_replay_keeps_capture_and_legacy_headers() {
+        use crate::config::TestEnvVarGuard as Guard;
+        use crate::services::tui_prompt_dedupe::binding_context::{tests::*, *};
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct D0Request {
+            request_id: String,
+            published_at: DateTime<Utc>,
+            delivery_deadline: DateTime<Utc>,
+            endpoint: String,
+            provider: String,
+            event: String,
+            session_id: String,
+            payload: Value,
+            marker_dir: PathBuf,
+            response: Option<OrderedHookRelayResponseTarget>,
+        }
+        let (_root, _env) = fixture();
+        for mode in ["replay", "retry", "legacy"] {
+            let p = prepared();
+            let _capture =
+                Guard::set_path_after_shared_test_env_lock("AGENTDESK_BINDING_CONTEXT", &p.path);
+            let statuses = if mode == "retry" {
+                vec![425, 202]
+            } else {
+                vec![202]
+            };
+            let (endpoint, requests, receiver) = spawn_observed_receiver(statuses, binding_header);
+            let queue = relay_queue_dir("claude", mode).unwrap();
+            let lock = lock_relay_queue_file(&queue.join("worker.lock"), false).unwrap();
+            handoff_non_wait_hook_event(
+                &endpoint,
+                "claude",
+                "PostToolUse",
+                mode,
+                json!({"sent": mode}),
+            )
+            .unwrap();
+            let ingress = queue_ingress_paths(&queue).unwrap().remove(0);
+            let bytes = std::fs::read(&ingress).unwrap();
+            let old_worker: D0Request = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(old_worker.payload, json!({"sent": mode}));
+            let captured: OrderedHookRelayRequest = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                captured.binding.as_ref().unwrap().context,
+                CapturedContext::Captured(p.context)
+            );
+            let expected = if mode == "legacy" {
+                let mut old: Value = serde_json::from_slice(&bytes).unwrap();
+                old.as_object_mut().unwrap().remove("binding");
+                let bytes = serde_json::to_vec(&old).unwrap();
+                assert!(
+                    serde_json::from_slice::<OrderedHookRelayRequest>(&bytes)
+                        .unwrap()
+                        .binding
+                        .is_none()
+                );
+                std::fs::write(&ingress, bytes).unwrap();
+                HookBindingEnvelope::legacy_request().encode().unwrap()
+            } else {
+                captured.binding.unwrap().encode().unwrap()
+            };
+            if mode == "retry" {
+                promote_ordered_hook_relay_ingress(&queue).unwrap();
+                let path = queue_request_paths(&queue).unwrap().remove(0);
+                assert!(matches!(
+                    process_ordered_hook_relay_request(&path).unwrap(),
+                    OrderedHookRelayProcessOutcome::Retry
+                ));
+                assert_eq!(
+                    requests.recv_timeout(Duration::from_secs(3)).unwrap()["header"],
+                    expected
+                );
+            }
+            std::fs::remove_file(p.path).unwrap();
+            let next = prepared();
+            let _next =
+                Guard::set_path_after_shared_test_env_lock("AGENTDESK_BINDING_CONTEXT", &next.path);
+            drop(lock);
+            let mut worker = spawn_worker_process(&queue);
+            let observed = requests.recv_timeout(Duration::from_secs(3)).unwrap();
+            assert_eq!(
+                observed["header"], expected,
+                "{mode}: replay must retain the enqueue bytes"
+            );
+            assert_eq!(observed["body"], json!({"sent": mode}));
+            assert!(worker.wait().unwrap().success());
+            assert_eq!(
+                receiver.join().unwrap(),
+                if mode == "retry" { 2 } else { 1 }
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn binding_context_t5_capture_failure_preserves_cli_stdout_and_enqueue() {
+        use crate::config::TestEnvVarGuard as Guard;
+        use crate::services::tui_prompt_dedupe::binding_context::{tests::*, *};
+        let (_root, _env) = fixture();
+        let p = prepared();
+        let _capture =
+            Guard::set_path_after_shared_test_env_lock("AGENTDESK_BINDING_CONTEXT", &p.path);
+        let mut oversized = std::fs::read(&p.path).unwrap();
+        oversized.resize(16 * 1024 + 1, b' ');
+        for bytes in [b"broken".to_vec(), oversized] {
+            std::fs::write(&p.path, bytes).unwrap();
+            for event in ["PostToolUse", "UserPromptSubmit", "Stop"] {
+                let (endpoint, requests, receiver) =
+                    spawn_observed_receiver(vec![202], binding_header);
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                super::super::run_cli_with_io_transport_and_failure_recorder(
+                    &endpoint,
+                    "claude",
+                    event,
+                    event,
+                    "relay",
+                    &mut &b"{}"[..],
+                    &mut stdout,
+                    &mut stderr,
+                    handoff_non_wait_hook_event,
+                    handoff_ordered_hook_event_response_with_timeout,
+                    |_, _, _, _, error| panic!("capture failure escaped as hook failure: {error}"),
+                )
+                .unwrap();
+                assert_eq!(stdout, b"{\"suppressOutput\":true}\n");
+                assert!(stderr.is_empty());
+                let observed = requests.recv_timeout(Duration::from_secs(3)).unwrap();
+                assert_eq!(observed["body"], json!({}));
+                let envelope = decode_binding_header(observed["header"].as_str().unwrap()).unwrap();
+                assert_eq!(
+                    envelope.context,
+                    CapturedContext::Absent(AbsentReason::Corrupt)
+                );
+                assert_eq!(receiver.join().unwrap(), 1);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn binding_context_t15_response_conflict_records_quarantine_and_failure() {
+        use crate::services::tui_prompt_dedupe::binding_context::tests::fixture;
+        let (_root, _env) = fixture();
+        let (endpoint, requests, receiver) = spawn_status_receiver(vec![409]);
+        let error = handoff_ordered_hook_event_response_with_timeout(
+            &endpoint,
+            "claude",
+            "Stop",
+            "response-conflict",
+            json!({}),
+            Duration::from_millis(750),
+        )
+        .unwrap_err();
+        assert!(error.contains("HTTP 409"));
+        requests.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(receiver.join().unwrap(), 1);
+        let queue = relay_queue_dir("claude", "response-conflict").unwrap();
+        wait_until(
+            || recursively_contains(&queue.join("quarantine"), "evidence.json"),
+            "quarantine evidence",
+        );
+        assert!(recursively_contains(&queue.join("quarantine"), "HTTP 409"));
+        let markers = super::super::drain_hook_relay_failure_markers("claude", "response-conflict");
+        assert_eq!(markers.len(), 1);
+        assert!(markers[0].error.contains("HTTP 409"));
     }
 
     #[cfg(unix)]
