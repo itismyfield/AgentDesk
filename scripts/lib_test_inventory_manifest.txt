@@ -9096,6 +9096,8 @@ services::tool_output_guard::tests::line_heavy_small_error_is_sanitized_once_wit
 services::tool_output_guard::tests::small_output_is_preserved_exactly
 services::tool_output_guard::tests::very_large_non_ascii_error_aligns_context_window_to_utf8
 services::tool_output_guard::tests::very_large_single_line_error_keeps_projection_memory_bounded
+services::tui_o::shadow::root::tests::shadow_root_is_fixed_under_runtime_root_and_the_flag_defaults_off
+services::tui_o::shadow::root::tests::store_appends_readable_jsonl_and_stops_at_the_cap
 services::tui_prompt_control::tests::absolute_path_prompts_are_never_taken_as_codex_commands
 services::tui_prompt_control::tests::codex_local_controls_carry_the_normalized_name_and_the_raw_args
 services::tui_prompt_control::tests::command_shaped_input_outside_the_registry_is_refused_not_forwarded
