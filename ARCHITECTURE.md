@@ -1887,6 +1887,7 @@ src/
 │   │       ├── mod.rs
 │   │       └── root.rs
 │   ├── tui_prompt_dedupe/
+│   │   ├── binding_context.rs
 │   │   ├── extract.rs
 │   │   ├── observation.rs
 │   │   ├── runtime_binding.rs
