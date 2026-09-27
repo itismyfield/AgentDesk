@@ -225,7 +225,7 @@ async fn quiesce_success_prevents_same_cancel_reregistration_poll() {
     task.await.unwrap();
     let polled = Arc::new(AtomicBool::new(false));
     let flag = polled.clone();
-    spawn(cancel, async move {
+    spawn(cancel.clone(), async move {
         flag.store(true, std::sync::atomic::Ordering::Release);
     })
     .await
