@@ -239,6 +239,10 @@ if run_check guards "Directory fsync single-path guard"; then
 "$PYTHON" -m unittest tests.test_dir_fsync_single_path
 fi
 
+if run_check guards "TUI output shadow write-zero census"; then
+"$PYTHON" scripts/check_o_shadow_write_zero.py
+fi
+
 if run_check guards "Alert dedupe/authority/routing wiring contract (#4448/#4449)"; then
 "$PYTHON" -m unittest tests.test_alert_dedupe_4448 tests.test_auto_queue_monitor tests.test_actionable_ops_alert_routing
 fi
