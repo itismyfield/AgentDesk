@@ -78,6 +78,10 @@ impl ShadowStore {
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
         let mut file = options.open(path)?;
+        #[cfg(unix)]
+        if std::os::unix::fs::MetadataExt::nlink(&file.metadata()?) != 1 {
+            return Err(io::Error::other("records.jsonl has another hard link"));
+        }
         let mut written = file.metadata()?.len();
         let mut last = [b'\n'];
         if written > 0 {
@@ -89,13 +93,12 @@ impl ShadowStore {
             file.write_all(b"\n")?;
             written += 1;
         }
-        let dropped_over_cap = 0;
         Ok(Self {
             root,
             file,
             written,
             cap_bytes,
-            dropped_over_cap,
+            dropped_over_cap: 0,
         })
     }
 
@@ -215,7 +218,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn shadow_root_refuses_symlinks_and_leaves_outside_files_untouched() {
+    fn shadow_root_refuses_links_and_leaves_outside_files_untouched() {
         use std::os::unix::fs::symlink;
         let dir = tempfile::tempdir().unwrap();
         let (outside, absent) = (dir.path().join("outside"), dir.path().join("absent"));
@@ -226,6 +229,10 @@ mod tests {
             symlink(target, root.records_path()).unwrap();
             assert!(ShadowStore::open(root, 4096).is_err());
         }
+        std::fs::create_dir(dir.path().join("hard")).unwrap();
+        let root = ShadowRoot::under(&dir.path().join("hard")).unwrap();
+        std::fs::hard_link(&outside, root.records_path()).unwrap();
+        assert!(ShadowStore::open(root, 4096).is_err());
         std::fs::create_dir(dir.path().join("rooted")).unwrap();
         symlink(dir.path(), dir.path().join("rooted/o_shadow")).unwrap();
         assert!(ShadowRoot::under(&dir.path().join("rooted")).is_err());

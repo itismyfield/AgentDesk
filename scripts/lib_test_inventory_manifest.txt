@@ -9097,7 +9097,7 @@ services::tool_output_guard::tests::small_output_is_preserved_exactly
 services::tool_output_guard::tests::very_large_non_ascii_error_aligns_context_window_to_utf8
 services::tool_output_guard::tests::very_large_single_line_error_keeps_projection_memory_bounded
 services::tui_o::shadow::root::tests::shadow_root_is_fixed_under_runtime_root_and_the_flag_defaults_off
-services::tui_o::shadow::root::tests::shadow_root_refuses_symlinks_and_leaves_outside_files_untouched
+services::tui_o::shadow::root::tests::shadow_root_refuses_links_and_leaves_outside_files_untouched
 services::tui_o::shadow::root::tests::store_appends_readable_jsonl_and_stops_at_the_cap
 services::tui_o::shadow::root::tests::store_seals_a_torn_tail_so_new_appends_survive_and_reports_the_damage
 services::tui_prompt_control::tests::absolute_path_prompts_are_never_taken_as_codex_commands
