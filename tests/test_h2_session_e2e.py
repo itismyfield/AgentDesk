@@ -42,8 +42,8 @@ class WorkspaceSession(unittest.TestCase):
         run = self.case / tag
         manifest = session.session(ROOT, crate or self.crate, run, self.conf, self.lane, driver=self.driver,
                                    extra=("--locked", "--offline", "--target-dir", str(target or self.case / (tag + "-target")), *extra))
-        self.assertEqual(manifest["kind"], "canary-cfg")
-        self.assertEqual(manifest["proof"]["schema"], "h2-session/1-cfg")
+        self.assertEqual(manifest["kind"], "canary-items")
+        self.assertEqual(manifest["proof"]["schema"], "h2-session/2")
         self.assertEqual(manifest["proof"]["unit"]["lib"], str((crate or self.crate) / "src/lib.rs"))
         self.assertEqual(list(run.glob("*.claim")), [run / "session.json.claim"])
         return manifest, run
@@ -77,10 +77,12 @@ class WorkspaceSession(unittest.TestCase):
                 codes = [json.loads(line)["message"]["code"]["code"] for line in actual]
                 self.assertIn("unused_imports", codes)
                 self.assertIn("clippy::disallowed_methods", codes)
-                # The cfg-only child stops at after_expansion, before early lints; only expansion output reaches it.
-                child = [json.loads(line)["code"]["code"] for line in (run / "session.json.items.stderr").read_bytes().splitlines()]
+                # HIR queries emit early lints; child diagnostics must stay out of Cargo's JSONL.
+                child = [(json.loads(line).get("code") or {}).get("code")
+                         for line in (run / "session.json.items.stderr").read_bytes().splitlines()]
                 marker = ["h2_expansion_marker"] if dependency == "mac" else []
-                self.assertEqual(child, marker)
+                self.assertIn("unused_imports", child)
+                self.assertEqual([code for code in child if code == "h2_expansion_marker"], marker)
                 self.assertEqual([code for code in codes if code == "h2_expansion_marker"], marker)
                 self.assertEqual(manifest["proof"]["unit"]["package"], "requested_root")
                 events = [json.loads(line) for line in (run / "clippy.jsonl").read_text().splitlines()]

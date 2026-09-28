@@ -26,3 +26,6 @@ pub fn probe() {
 
 #[cfg(h2_items_bs_clippy)]
 pub fn build_script_clippy_probe() {}
+
+mod items_probe;
+mod items_crlf;
