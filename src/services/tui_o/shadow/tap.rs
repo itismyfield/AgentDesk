@@ -15,16 +15,16 @@ use tokio::sync::mpsc;
 use super::binding_reader::{BindingReader, LiveBindingLookup, ShadowTarget};
 use super::capture::SourceCapture;
 use super::derive::TranscriptDerive;
-use super::diff::WindowDiff;
+use super::diff::{WindowDiff, sha256_hex};
 use super::identity::{RecordFact, classify, row_key};
 use super::metrics::MetricsSnapshot;
 use super::root::{ShadowRoot, ShadowStore, StoredRecord};
 use super::seal::{TurnEvent, TurnTracker};
 use super::{
-    BindingChange, CaptureBatch, CaptureOutcome, CaptureSource, DISK_CAP_BYTES, DeriveOutput,
-    IDENTITY_VERSION, LegacyTapEvent, MAX_READ_BYTES, POLL_INTERVAL, SCHEMA_VERSION, ShadowConfig,
-    ShadowDerive, ShadowDiff, ShadowProvider, ShadowRecord, ShadowSink, SourceBinding, SourceId,
-    TAP_CAPACITY, WindowStartSource,
+    BindingChange, CaptureBatch, CaptureOutcome, CaptureSource, CapturedRecord, DISK_CAP_BYTES,
+    DeriveOutput, IDENTITY_VERSION, LegacyMsg, LegacyTapEvent, MAX_READ_BYTES, POLL_INTERVAL,
+    SCHEMA_VERSION, ShadowConfig, ShadowDerive, ShadowDiff, ShadowProvider, ShadowRecord,
+    ShadowSink, SourceBinding, SourceId, TAP_CAPACITY, WindowStartSource,
 };
 
 /// The `tui_o:` config section; absent means every output-track feature is off.
@@ -207,8 +207,8 @@ impl Observer {
         let (applied, mut bytes, mut held) =
             (self.window_applied, 0, std::mem::take(&mut self.captured));
         let keep = (held.iter().rev())
-            .take_while(|(_, _, batch)| {
-                bytes += batch.records.iter().map(|r| r.line.len()).sum::<usize>();
+            .take_while(|held| {
+                bytes += held_bytes(held);
                 !applied && bytes <= HOLD_BYTES
             })
             .count();
@@ -245,9 +245,27 @@ impl Observer {
             self.feeds.remove(&channel_id);
             self.persist(ShadowRecord::Anomaly { anomaly });
         }
-        legacy
-            .iter()
-            .for_each(|event| self.diff.observe_legacy(event));
+        for event in &legacy {
+            self.diff.observe_legacy(event);
+            // Also recorded when created, so the report can tell a window message is still open.
+            if let LegacyTapEvent::Created {
+                channel_id,
+                msg_id,
+                at,
+                content,
+            } = event
+            {
+                let msg = LegacyMsg {
+                    msg_id: *msg_id,
+                    channel_id: *channel_id,
+                    created_at: *at,
+                    edits: Vec::new(),
+                    deleted: false,
+                    content_sha256: sha256_hex(content),
+                };
+                self.persist(ShadowRecord::Legacy { msg });
+            }
+        }
         // A loss is dated by the span since the previous TapGap, so collections are checkpointed too.
         let checkpoint = Duration::seconds(CHECKPOINT_SECS);
         if dropped > 0
@@ -273,8 +291,17 @@ fn capture_lag_ms(path: &Path, now: DateTime<Utc>) -> Option<u64> {
     u64::try_from((now - modified).num_milliseconds()).ok()
 }
 
-/// Capture bytes held for the first window; older captures derive without one.
+/// Heap held for the first window, as `held_bytes` counts it; older captures derive without one.
 const HOLD_BYTES: usize = 32 * 1024 * 1024;
+
+/// Heap a held batch keeps: record slots at capacity, each line, and both copies of its source id.
+fn held_bytes((_, binding, batch): &(DateTime<Utc>, SourceBinding, CaptureBatch)) -> usize {
+    let id = |source: &SourceId| source.session_id.capacity() + source.path.capacity();
+    let lines: usize = batch.records.iter().map(|r| r.line.capacity()).sum();
+    let slots = batch.records.capacity() * std::mem::size_of::<CapturedRecord>();
+    let entry = std::mem::size_of::<(DateTime<Utc>, SourceBinding, CaptureBatch)>();
+    entry + id(&binding.source) + id(&batch.source) + slots + lines
+}
 
 /// Most seconds between two TapGap records while the observer runs, drops or not.
 pub const CHECKPOINT_SECS: i64 = 10;
@@ -364,31 +391,36 @@ impl WindowStartTail {
         Self { path, offset }
     }
 
+    /// Reads to the end, so a WindowStart applies on the loop pass after its append.
     fn poll(&mut self) -> Vec<(DateTime<Utc>, Vec<WindowStartSource>)> {
-        let mut bytes = Vec::new();
-        let read = File::open(&self.path).and_then(|mut file| {
-            file.seek(SeekFrom::Start(self.offset))?;
-            file.take(MAX_READ_BYTES).read_to_end(&mut bytes)
-        });
-        if read.is_err() {
-            return Vec::new();
-        }
-        let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
-        // A line longer than one read can never complete here, so it is skipped.
-        let consumed = if whole == 0 && bytes.len() as u64 == MAX_READ_BYTES {
-            bytes.len()
-        } else {
-            whole
-        };
-        self.offset += consumed as u64;
-        let lines = bytes[..whole].split(|b| *b == b'\n');
-        lines
-            .filter_map(|line| serde_json::from_slice::<StoredRecord>(line).ok())
-            .filter_map(|stored| match stored.record {
+        let mut starts = Vec::new();
+        loop {
+            let mut bytes = Vec::new();
+            let read = File::open(&self.path).and_then(|mut file| {
+                file.seek(SeekFrom::Start(self.offset))?;
+                file.take(MAX_READ_BYTES).read_to_end(&mut bytes)
+            });
+            if read.is_err() {
+                return starts;
+            }
+            let full = bytes.len() as u64 == MAX_READ_BYTES;
+            let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+            // A line longer than one read can never complete here, so it is skipped.
+            self.offset += if whole == 0 && full {
+                bytes.len()
+            } else {
+                whole
+            } as u64;
+            let lines = bytes[..whole].split(|b| *b == b'\n');
+            let stored = lines.filter_map(|line| serde_json::from_slice::<StoredRecord>(line).ok());
+            starts.extend(stored.filter_map(|stored| match stored.record {
                 ShadowRecord::WindowStart { t0, sources } => Some((t0, sources)),
                 _ => None,
-            })
-            .collect()
+            }));
+            if !full {
+                return starts;
+            }
+        }
     }
 }
 
