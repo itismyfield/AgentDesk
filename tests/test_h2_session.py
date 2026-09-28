@@ -1,4 +1,4 @@
-"""Cfg-only sessions use fake Cargo events and never execute a compiler."""
+"""Sessions use fake Cargo events and never execute a compiler."""
 from __future__ import annotations
 
 import copy
@@ -72,7 +72,7 @@ class Session(unittest.TestCase):
         req = json.loads((run / "request.json").read_text())
         unit = {k: v for k, v in req["unit"].items() if k != "package_id"}
         unit.update(root=str(self.crate), metadata="abcd", test=False)
-        proof = dict(schema="h2-session/1-cfg", unit=unit, pid=42, nonce=req["nonce"], run_id=req["run_id"],
+        proof = dict(schema="h2-session/2", unit=unit, pid=42, nonce=req["nonce"], run_id=req["run_id"],
             argv=["/rustc", str(self.lib), "--crate-name", "fixture", "--crate-type", "cdylib,rlib"],
             env_sha256="a" * 64, cfg=list(self.cfg), driver_rustc=s.ALLOWED["driver_rustc"])
         proof.update({key: req["toolchain"][key] for key in ("clippy_driver", "clippy", "clippy_rustc")})
@@ -84,6 +84,13 @@ class Session(unittest.TestCase):
             (run / f"session.json.{suffix}").write_text("\n".join(self.cfg) + "\n")
         for suffix in ("items.stdout", "items.stderr", "probe.stdout", "probe.stderr"):
             (run / f"session.json.{suffix}").write_text("")
+        header = dict(schema=1, run_id=req["run_id"], nonce=req["nonce"], kind="canary-items",
+                      root=str(self.crate), crate="fixture", cfg_clippy=True)
+        row = ["rust/library.rs", 0, 18, "fn", "fixture::caller", None, "caller", 1, 1, 0, "Fn", False]
+        body = (json.dumps(header) + "\n" + json.dumps(row) + "\n").encode()
+        (run / "items.jsonl").write_bytes(body)
+        proof.update(items_sha256=s.collect.digest(body), items_records=1)
+        (run / "items.jsonl.sha256").write_text(json.dumps(dict(sha256=proof["items_sha256"], records=1)))
         self.mutate(run, proof, claim, events)
         for name, value in (("session.json", proof), ("session.json.claim", claim)):
             if value is not None and not value.get("omit"):
@@ -121,7 +128,7 @@ class Session(unittest.TestCase):
         self.assertEqual(env["MODMAP_EXPECT_LIB"], str(self.lib))
         self.assertGreater(self.lib.stat().st_mtime_ns, 1)
         self.assertFalse((self.crate / "src/lib.rs").exists())
-        self.assertEqual((result["schema"], result["kind"]), (s.collect.SCHEMA, "canary-cfg"))
+        self.assertEqual((result["schema"], result["kind"]), (s.collect.SCHEMA, "canary-items"))
         self.assertEqual(result, json.loads((self.root / "run/manifest.json").read_text()))
         for name, digest in result["digests"].items():
             self.assertEqual(digest, s.collect.digest((self.root / "run" / name).read_bytes()))
@@ -178,7 +185,7 @@ class Session(unittest.TestCase):
         self.assertEqual(len(self.calls), 0)
         self.assertFalse(any(self.root.glob("links*/manifest.json")))
         config.write_text('[target.aarch64-apple-darwin.fixture]\nrustc-env={REVIEW_BINDING="live"}\n')
-        self.assertEqual(self.run_session("plain-links")["kind"], "canary-cfg")
+        self.assertEqual(self.run_session("plain-links")["kind"], "canary-items")
 
     def test_cargo_env_overrides_are_rejected_before_any_cargo(self):
         roots = (self.crate / ".cargo", self.root / ".cargo", self.root / "cargo-home")
@@ -387,7 +394,7 @@ class Session(unittest.TestCase):
             "proof-missing": (lambda r, p, c, e: p.update(omit=True), "no root compile"),
             "nonce": (lambda r, p, c, e: p.update(nonce="old"), "nonce"),
             "run_id": (lambda r, p, c, e: p.update(run_id="old"), "run_id"),
-            "schema": (lambda r, p, c, e: p.update(schema="h2-session/2"), "schema"),
+            "schema": (lambda r, p, c, e: p.update(schema="h2-session/1-cfg"), "schema"),
             "cfg-empty": (lambda r, p, c, e: p.update(cfg=[]), "cfg"),
             "cfg-mismatch": (lambda r, p, c, e: (r / "session.json.items-cfg.txt").write_text("unix\n"), "cfg"),
             "cfg-no-clippy": (lambda r, p, c, e: p.update(cfg=["debug_assertions"]), "cfg"),
@@ -403,6 +410,64 @@ class Session(unittest.TestCase):
         for name, (mutate, pattern) in cases.items():
             with self.subTest(name=name):
                 self.reject(mutate, pattern, name)
+
+    def test_items_are_bound_at_callback_proof_and_seal(self):
+        result = self.run_session()
+        run = self.root / "run"
+        digest = s.collect.digest((run / "items.jsonl").read_bytes())
+        self.assertEqual(result["proof"]["schema"], "h2-session/2")
+        self.assertEqual(result["proof"]["items_records"], 1)
+        self.assertEqual(result["proof"]["items_sha256"], digest)
+        self.assertEqual(json.loads((run / "items.jsonl.sha256").read_bytes()), dict(sha256=digest, records=1))
+        self.assertEqual(result["digests"]["items.jsonl"], digest)
+        self.assertIn("items.jsonl.sha256", result["digests"])
+
+    def test_items_tampering_missing_fields_and_old_formats_never_seal(self):
+        def alter(run, proof, claim, events, change, refresh=False):
+            path = run / "items.jsonl"
+            lines = [json.loads(line) for line in path.read_bytes().splitlines()]
+            change(lines)
+            body = ("\n".join(json.dumps(line) for line in lines) + "\n").encode()
+            path.write_bytes(body)
+            if refresh:
+                digest = s.collect.digest(body)
+                proof.update(items_sha256=digest, items_records=len(lines) - 1)
+                (run / "items.jsonl.sha256").write_text(json.dumps(dict(sha256=digest, records=len(lines) - 1)))
+        cases = {
+            "file": lambda r, p, c, e: (r / "items.jsonl").unlink(),
+            "sidecar": lambda r, p, c, e: (r / "items.jsonl.sha256").unlink(),
+            "digest-absent": lambda r, p, c, e: p.pop("items_sha256"),
+            "digest-empty": lambda r, p, c, e: p.update(items_sha256=""),
+            "count-absent": lambda r, p, c, e: p.pop("items_records"),
+            "count-wrong": lambda r, p, c, e: p.update(items_records=2),
+            "count-bool": lambda r, p, c, e: p.update(items_records=True),
+            "proof-digest": lambda r, p, c, e: p.update(items_sha256="0" * 64),
+            "callback-digest": lambda r, p, c, e: (r / "items.jsonl.sha256").write_text('{"sha256":"","records":1}'),
+            "callback-count": lambda r, p, c, e: (r / "items.jsonl.sha256").write_text(
+                json.dumps(dict(sha256=p["items_sha256"], records=2))),
+            "body-splice": lambda *a: alter(*a, lambda rows: rows[1].__setitem__(4, "fixture::other")),
+            "truncated": lambda r, p, c, e: (r / "items.jsonl").write_bytes(b'{"schema":'),
+            "partial-items": lambda r, p, c, e: (r / "items.jsonl.partial").touch(),
+            "zero": lambda *a: alter(*a, lambda rows: rows.pop(), True),
+            "old-jsonl": lambda *a: alter(*a, lambda rows: rows.pop(0), True),
+            "old-array": lambda *a: alter(*a, lambda rows: rows.__setitem__(1, ["rust/library.rs", 0, 18, "fn"]), True),
+            "old-object": lambda *a: alter(*a, lambda rows: rows.__setitem__(1, {"file": "rust/library.rs"}), True),
+        }
+        for key, value in (("nonce", "old"), ("run_id", "old"), ("root", "/other"), ("crate", "other"),
+                           ("kind", "canary-cfg"), ("cfg_clippy", False), ("schema", 0)):
+            cases[key] = lambda *a, k=key, v=value: alter(*a, lambda rows: rows[0].update({k: v}), True)
+        for name, mutate in cases.items():
+            with self.subTest(name=name):
+                self.reject(mutate, "items|partial", "items-" + name)
+        for name in ("items.jsonl", "items.jsonl.sha256"):
+            with self.subTest(stale=name):
+                self.reject(lambda r, p, c, e: os.utime(r / name, ns=(0, 0)), "predates", "stale-" + name)
+            def alias(run, proof, claim, events):
+                path = run / name
+                path.rename(run / "alias")
+                path.symlink_to(run / "alias")
+            with self.subTest(alias=name):
+                self.reject(alias, "canonical", "alias-" + name)
 
     def test_all_version_commands_must_succeed_and_host_must_match(self):
         original = self.command
