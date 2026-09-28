@@ -207,7 +207,7 @@ request/proof/items/sidecar/clippy.jsonl은 한 번 읽어 봉인 digest와 대�
 items 구조는 runner와 같은 `validate_items`/`item_records`로 검사한다. 0개 레코드·헤더 없는 옛 JSONL·객체 레코드는 실패다.
 원문은 source state를 계산하는 한 번의 git 목록·읽기에서만 얻는다. 그 digest가 request와 같아야 하고, 같은 bytes만 매핑에 쓴다.
 모든 레코드에 `hi ≤ 길이`와 lo의 원문 행 = compiler 행을 요구한다. 진단 site는 expansion을 끝까지 따라간 호출 위치다.
-lib artifact는 요청 package에서 lib kind이고 src_path가 요청 lib로 resolve되는 artifact다. 경로가 같은 build script·bin artifact는 후보가 아니다.
+lib artifact는 요청 package에서 lib kind이고 src_path가 요청 lib로 resolve되는 artifact다(session 봉인과 매핑이 같은 선택을 쓴다). 경로가 같은 build script·bin artifact는 후보가 아니다.
 진단은 요청 package이고 target(kind·name·crate_types·src_path 문자열)이 유일한 lib artifact의 target과 같은 것만 쓴다.
 경로 resolve는 문자열마다 한 번이고, 진단 귀속은 그 target과의 구조 비교라 파일시스템 재해석에 의존하지 않는다. resolve 실패(symlink loop 포함)는 `unsealed`다.
 envelope가 없거나 lib 컴파일(artifact)이 하나가 아니거나(`--all-targets`의 test 컴파일 등), artifact target이 요청 unit과 다르거나,
