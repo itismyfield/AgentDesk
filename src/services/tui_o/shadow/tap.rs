@@ -490,3 +490,471 @@ fn run(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::tui_o::shadow::binding_reader::source_id_for;
+    use crate::services::tui_o::shadow::diff::sha256_hex;
+    use crate::services::tui_o::shadow::{
+        CapturedRecord, PieceDigest, ShadowTurn, ShadowUnit, SourceAnomaly, SourceAnomalyKind,
+        SourceRange, UnitKey, UnitKind,
+    };
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    fn created(msg_id: u64, at: DateTime<Utc>, content: &str) -> LegacyTapEvent {
+        let content = content.to_string();
+        LegacyTapEvent::Created {
+            channel_id: 7,
+            msg_id,
+            at,
+            content,
+        }
+    }
+
+    #[test]
+    fn tap_counts_a_full_queue_as_dropped_instead_of_waiting() {
+        let (tap, mut rx) = GatewayTap::new(&[7], 1);
+        tap.offer(created(1, Utc::now(), "a"));
+        tap.offer(created(2, Utc::now(), "b"));
+        assert_eq!((tap.take_dropped(), tap.take_dropped()), (1, 0));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(LegacyTapEvent::Created { msg_id: 1, .. })
+        ));
+        assert!(tap.watches(7) && !tap.watches(8));
+    }
+
+    #[derive(Clone, Default)]
+    struct Records(Arc<Mutex<Vec<ShadowRecord>>>);
+
+    impl ShadowSink for Records {
+        fn append(&mut self, record: &ShadowRecord) -> io::Result<()> {
+            self.0.lock().unwrap().push(record.clone());
+            Ok(())
+        }
+    }
+
+    struct ScriptedCapture(SourceId, VecDeque<CaptureOutcome>);
+
+    impl CaptureSource for ScriptedCapture {
+        fn source(&self) -> &SourceId {
+            &self.0
+        }
+        fn poll(&mut self, _max_bytes: u64) -> CaptureOutcome {
+            self.1.pop_front().unwrap_or_else(|| {
+                CaptureOutcome::Batch(CaptureBatch {
+                    source: self.0.clone(),
+                    records: vec![],
+                    captured_through: 0,
+                })
+            })
+        }
+    }
+
+    struct Link(Option<ShadowUnit>);
+
+    impl DeriveLink for Link {
+        fn capture_start(&mut self, _binding: &SourceBinding, extent: u64) -> u64 {
+            extent - 3
+        }
+        fn attach(&mut self, _source: &SourceId, _extent: u64, _at: DateTime<Utc>) {}
+        fn window_start(&mut self, _t0: DateTime<Utc>, _sources: &[WindowStartSource]) {}
+        fn derive(&mut self, _binding: &SourceBinding, _batch: &CaptureBatch) -> Vec<DeriveOutput> {
+            self.0
+                .take()
+                .map(DeriveOutput::Sealed)
+                .into_iter()
+                .collect()
+        }
+    }
+
+    #[test]
+    fn observer_attaches_derives_diffs_and_persists_only_through_the_sink() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"0123456789").unwrap();
+        let source = SourceId {
+            session_id: "s".into(),
+            path: file.path().into(),
+            dev: 1,
+            ino: 1,
+        };
+        let now = Utc::now();
+        let unit = ShadowUnit {
+            unit_key: UnitKey {
+                channel_id: 7,
+                provider: ShadowProvider::Claude,
+                native_key: "m:0".into(),
+                kind: UnitKind::Body,
+            },
+            kind: UnitKind::Body,
+            source_range: SourceRange {
+                source: source.clone(),
+                start: 7,
+                end: 10,
+            },
+            sealed_at: now,
+            pieces: vec![PieceDigest {
+                index: 0,
+                units: 5,
+                sha256: sha256_hex("hello"),
+            }],
+        };
+        let line = CapturedRecord {
+            start: 7,
+            end: 10,
+            line: b"{}".to_vec(),
+        };
+        let batch = CaptureBatch {
+            source: source.clone(),
+            records: vec![line],
+            captured_through: 10,
+        };
+        let anomaly = SourceAnomaly {
+            source: source.clone(),
+            kind: SourceAnomalyKind::Shrunk,
+            captured_through: 10,
+            detail: String::new(),
+        };
+        let script = VecDeque::from([
+            CaptureOutcome::Batch(batch),
+            CaptureOutcome::Anomaly(anomaly),
+        ]);
+        let starts = Arc::new(Mutex::new(Vec::new()));
+        let seen = starts.clone();
+        let opener: CaptureOpener = Box::new(move |binding, start| {
+            seen.lock().unwrap().push(start);
+            Ok(
+                Box::new(ScriptedCapture(binding.source.clone(), script.clone()))
+                    as Box<dyn CaptureSource>,
+            )
+        });
+        let sink = Records::default();
+        let mut observer =
+            Observer::new(Box::new(sink.clone()), opener, Box::new(Link(Some(unit))));
+        let binding = SourceBinding {
+            channel_id: 7,
+            provider: ShadowProvider::Claude,
+            source,
+        };
+        let change = BindingChange {
+            channel_id: 7,
+            old: None,
+            new: Some(binding),
+            at: now,
+        };
+        observer.start(now);
+        observer.window_start(now, &[]);
+        observer.tick(now, vec![change], vec![created(100, now, "hello")], 2);
+        observer.tick(now + chrono::Duration::seconds(1), vec![], vec![], 0);
+        observer.tick(now + chrono::Duration::seconds(300), vec![], vec![], 0);
+        observer.tick(now + chrono::Duration::seconds(601), vec![], vec![], 0);
+        let kinds: Vec<String> = sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                serde_json::to_value(r).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        // A drop is recorded at once; quiet collections only every CHECKPOINT_SECS. A Legacy
+        // message is recorded when created and again when it retires.
+        let expected = [
+            "header", "attach", "binding", "legacy", "tap_gap", "diff", "derived", "anomaly",
+            "tap_gap", "diff", "tap_gap", "legacy",
+        ];
+        assert_eq!(kinds, expected);
+        assert_eq!(*starts.lock().unwrap(), vec![7]);
+        let records = sink.0.lock().unwrap();
+        assert!(
+            matches!(&records[3], ShadowRecord::Legacy { msg } if msg.msg_id == 100 && msg.created_at == now)
+        );
+        assert!(
+            matches!(&records[9], ShadowRecord::Diff { diff } if diff.class == crate::services::tui_o::shadow::DiffClass::Match && diff.legacy_msg_ids == vec![100])
+        );
+        assert_eq!(observer.metrics().tap_dropped_total, 2);
+    }
+
+    fn fixed_clock() -> DateTime<Utc> {
+        "2026-09-27T12:06:30Z".parse().unwrap()
+    }
+
+    #[test]
+    fn a_turn_running_at_attach_is_captured_from_its_opener_and_closes_live() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tui_o_shadow");
+        let fixture = std::fs::read_to_string(format!("{path}/derive_claude_tui.jsonl")).unwrap();
+        let lines: Vec<String> = fixture.lines().map(|line| format!("{line}\n")).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("t.jsonl");
+        std::fs::write(&transcript, lines[..3].concat()).unwrap();
+        let binding = SourceBinding {
+            channel_id: 7,
+            provider: ShadowProvider::Claude,
+            source: source_id_for("s-claude", &transcript).unwrap(),
+        };
+        let sink = Records::default();
+        let opener: CaptureOpener = Box::new(|binding, start| {
+            let capture = SourceCapture::open(binding.source.clone(), start)?;
+            Ok(Box::new(capture) as Box<dyn CaptureSource>)
+        });
+        let link = Box::new(TranscriptDerive::with_clock(fixed_clock));
+        let mut observer = Observer::new(Box::new(sink.clone()), opener, link);
+        let at: DateTime<Utc> = "2026-09-27T12:06:00.500Z".parse().unwrap();
+        // No source was attached at t0, so the window lists none and this source joins it.
+        observer.window_start(at - chrono::Duration::seconds(30), &[]);
+        let change = BindingChange {
+            channel_id: 7,
+            old: None,
+            new: Some(binding),
+            at,
+        };
+        observer.tick(at, vec![change], vec![], 0);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        std::io::Write::write_all(&mut file, lines[3..10].concat().as_bytes()).unwrap();
+        observer.tick(at, vec![], vec![], 0);
+        observer.tick(at, vec![], vec![], 0);
+        let records = sink.0.lock().unwrap();
+        let (opener_at, extent) = (lines[0].len() as u64, lines[..3].concat().len() as u64);
+        assert!(records.iter().any(|r| matches!(r,
+            ShadowRecord::Attach { capture_start, attach_extent, .. }
+                if (*capture_start, *attach_extent) == (opener_at, extent))));
+        let turns: Vec<&ShadowTurn> = records
+            .iter()
+            .filter_map(|r| match r {
+                ShadowRecord::Derived {
+                    output: DeriveOutput::TurnClosed(turn),
+                } => Some(turn),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(turns.len(), 1);
+        assert!(
+            turns[0].live && turns[0].native_turn_id == "u-1",
+            "{turns:?}"
+        );
+    }
+
+    #[test]
+    fn only_window_starts_appended_after_startup_are_polled() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = ShadowRoot::under(dir.path()).unwrap();
+        let mut store = ShadowStore::open(root, DISK_CAP_BYTES).unwrap();
+        let source = SourceId {
+            session_id: "s".into(),
+            path: dir.path().join("t.jsonl"),
+            dev: 1,
+            ino: 1,
+        };
+        let window_start = |minute: u32| ShadowRecord::WindowStart {
+            t0: format!("2026-09-27T12:{minute:02}:00Z").parse().unwrap(),
+            sources: vec![WindowStartSource {
+                source: source.clone(),
+                window_start_extent: 10,
+            }],
+        };
+        store.append(&window_start(1)).unwrap();
+        let mut tail = WindowStartTail::at_end(store.root().records_path());
+        store.append(&window_start(2)).unwrap();
+        let polled = tail.poll();
+        assert_eq!(polled.len(), 1);
+        assert_eq!(polled[0].0.to_rfc3339(), "2026-09-27T12:02:00+00:00");
+        assert!(tail.poll().is_empty());
+    }
+
+    fn race_clock() -> DateTime<Utc> {
+        "2026-09-27T12:06:06.750Z".parse().unwrap()
+    }
+
+    #[test]
+    fn a_window_start_applied_minutes_after_a_capture_still_reaches_it_at_its_capture_time() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tui_o_shadow");
+        let fixture = std::fs::read_to_string(format!("{path}/derive_claude_tui.jsonl")).unwrap();
+        let lines: Vec<String> = fixture.lines().map(|line| format!("{line}\n")).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("race.jsonl");
+        std::fs::write(&transcript, lines[..3].concat()).unwrap();
+        let source = source_id_for("s-claude", &transcript).unwrap();
+        let (channel_id, provider) = (7, ShadowProvider::Claude);
+        let binding = SourceBinding {
+            channel_id,
+            provider,
+            source: source.clone(),
+        };
+        let extent = lines[..3].concat().len() as u64;
+        let sink = Records::default();
+        let opener: CaptureOpener = Box::new(|binding, start| {
+            let capture = SourceCapture::open(binding.source.clone(), start)?;
+            Ok(Box::new(capture) as Box<dyn CaptureSource>)
+        });
+        let link = Box::new(TranscriptDerive::with_clock(observed_at));
+        let mut observer = Observer::new(Box::new(sink.clone()), opener, link);
+        let attached_at: DateTime<Utc> = "2026-09-27T12:05:00Z".parse().unwrap();
+        let change = BindingChange {
+            channel_id,
+            old: None,
+            new: Some(binding),
+            at: attached_at,
+        };
+        observer.tick(attached_at, vec![change], vec![], 0);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        std::io::Write::write_all(&mut file, lines[3..10].concat().as_bytes()).unwrap();
+        // The CLI appended WindowStart more than five minutes after the capture of the closer.
+        let captured_at = race_clock() - Duration::seconds(1);
+        observer.tick(captured_at, vec![], vec![], 0);
+        observer.tick(race_clock(), vec![], vec![], 0);
+        let expired = captured_at + Duration::seconds(301);
+        observer.tick(expired, vec![], vec![], 0);
+        let t0: DateTime<Utc> = "2026-09-27T12:06:05Z".parse().unwrap();
+        let window_start_extent = extent;
+        observer.window_start(
+            t0,
+            &[WindowStartSource {
+                source,
+                window_start_extent,
+            }],
+        );
+        observer.tick(expired + Duration::seconds(1), vec![], vec![], 0);
+        let records = sink.0.lock().unwrap();
+        let turns: Vec<&ShadowTurn> = records
+            .iter()
+            .filter_map(|r| match r {
+                ShadowRecord::Derived {
+                    output: DeriveOutput::TurnClosed(turn),
+                } => Some(turn),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(turns.len(), 1);
+        assert!(
+            turns[0].live && turns[0].closed_at == captured_at,
+            "{turns:?}"
+        );
+    }
+
+    #[test]
+    fn captures_waiting_for_the_first_window_stay_within_the_hold_budget() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"0123456789").unwrap();
+        let (channel_id, provider) = (7, ShadowProvider::Claude);
+        let source = source_id_for("s", file.path()).unwrap();
+        // One complete line of MAX_READ_BYTES per tick, the most a feed reads.
+        let line = CapturedRecord {
+            start: 0,
+            end: MAX_READ_BYTES,
+            line: vec![b'x'; MAX_READ_BYTES as usize - 1],
+        };
+        let batch = |_| {
+            let (source, records) = (source.clone(), vec![line.clone()]);
+            CaptureOutcome::Batch(CaptureBatch {
+                source,
+                records,
+                captured_through: 0,
+            })
+        };
+        let script: VecDeque<CaptureOutcome> = (0..40).map(batch).collect();
+        let opener: CaptureOpener = Box::new(move |binding, _| {
+            let capture = ScriptedCapture(binding.source.clone(), script.clone());
+            Ok(Box::new(capture) as Box<dyn CaptureSource>)
+        });
+        let sink = Box::new(Records::default());
+        let mut observer = Observer::new(sink, opener, Box::new(Link(None)));
+        let now = Utc::now();
+        let binding = SourceBinding {
+            channel_id,
+            provider,
+            source,
+        };
+        let (old, new, at) = (None, Some(binding), now);
+        let change = BindingChange {
+            channel_id,
+            old,
+            new,
+            at,
+        };
+        observer.tick(now, vec![change], vec![], 0);
+        (1..40).for_each(|i| observer.tick(now + Duration::seconds(i), vec![], vec![], 0));
+        let held: usize = (observer.captured.iter())
+            .flat_map(|(_, _, batch)| &batch.records)
+            .map(|record| record.line.len())
+            .sum();
+        // The budget plus the one read taken after this tick's release.
+        assert!(held <= HOLD_BYTES + MAX_READ_BYTES as usize, "{held}");
+        assert!(observer.captured.len() < 40);
+    }
+
+    #[test]
+    fn blank_lines_spend_the_first_window_hold_budget() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let source = source_id_for("blank", file.path()).unwrap();
+        let (channel_id, provider) = (7, ShadowProvider::Claude);
+        let binding = SourceBinding {
+            channel_id,
+            provider,
+            source,
+        };
+        let opener: CaptureOpener = Box::new(|binding, start| {
+            let capture = SourceCapture::open(binding.source.clone(), start)?;
+            Ok(Box::new(capture) as Box<dyn CaptureSource>)
+        });
+        let link = Box::new(TranscriptDerive::with_clock(observed_at));
+        let mut observer = Observer::new(Box::new(Records::default()), opener, link);
+        let now = Utc::now();
+        let (old, new, at) = (None, Some(binding), now);
+        let change = BindingChange {
+            channel_id,
+            old,
+            new,
+            at,
+        };
+        observer.tick(now, vec![change], vec![], 0);
+        let mut writer = std::fs::OpenOptions::new().append(true).open(file.path());
+        let writer = writer.as_mut().unwrap();
+        for i in 1..=6 {
+            io::Write::write_all(writer, &vec![b'\n'; MAX_READ_BYTES as usize]).unwrap();
+            observer.tick(now + Duration::seconds(i), vec![], vec![], 0);
+        }
+        // Newline-only records carry no line bytes, yet each keeps a record slot.
+        let slot = std::mem::size_of::<CapturedRecord>();
+        let kept: usize = (observer.captured.iter())
+            .map(|(_, _, batch)| {
+                let lines: usize = batch.records.iter().map(|r| r.line.capacity()).sum();
+                batch.records.capacity() * slot + lines
+            })
+            .sum();
+        assert!(kept <= 200 * 1024 * 1024, "{kept}");
+        assert_eq!(observer.captured.len(), 1);
+    }
+
+    #[test]
+    fn the_window_start_tail_reads_to_the_end_in_one_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        std::fs::write(&path, b"").unwrap();
+        let mut tail = WindowStartTail::at_end(path.clone());
+        let line = |record| {
+            let stored = StoredRecord {
+                at: Utc::now(),
+                record,
+            };
+            serde_json::to_string(&stored).unwrap() + "\n"
+        };
+        // More than one read of other rows lands ahead of the line the CLI appends.
+        let filler = line(ShadowRecord::TapGap { dropped: 0 });
+        let mut bytes = filler.repeat(2 * MAX_READ_BYTES as usize / filler.len());
+        let (t0, sources) = (Utc::now(), Vec::new());
+        bytes += &line(ShadowRecord::WindowStart { t0, sources });
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(tail.poll(), vec![(t0, Vec::new())]);
+    }
+}
