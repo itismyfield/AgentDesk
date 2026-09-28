@@ -60,7 +60,11 @@ def load(path: Path, *, crate: Path) -> Items:
             raise MeasureError("items: not an h2-session/2 items manifest")
         unit, claimed = request["unit"], proof.get("unit")
         root = Path(unit["manifest"]).parent
-        if (unit["manifest"] != str((crate / "Cargo.toml").resolve(strict=True)) or not isinstance(claimed, dict)
+        try:
+            expected = (crate / "Cargo.toml").resolve(strict=True)
+        except RuntimeError as exc:
+            raise MappingError("unsealed", f"items: cannot resolve the expected crate manifest: {exc}") from exc
+        if (unit["manifest"] != str(expected) or not isinstance(claimed, dict)
                 or any(claimed.get(key) != unit[key] for key in UNIT) or claimed.get("root") != str(root)
                 or claimed.get("test") is not False or value.get("root") != str(root)):
             raise MeasureError("items: session unit differs from its request or the expected crate")
