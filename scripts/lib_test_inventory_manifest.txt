@@ -6584,6 +6584,9 @@ services::discord::tui_direct_pending_start::tests::restart_orphan_requires_froz
 services::discord::tui_direct_pending_start::tests::restart_orphan_requires_generation_boundary
 services::discord::tui_direct_pending_start::tests::restart_orphan_requires_ready_for_input
 services::discord::tui_direct_pending_start::tests::restart_request_window_sidecar_keeps_old_process_epoch
+services::discord::tui_direct_pending_start::tests::retire_tests::retire_during_final_orphan_reclaim_skips_the_abort
+services::discord::tui_direct_pending_start::tests::retire_tests::retired_waiting_worker_exits_without_claim_and_keeps_sibling_gate
+services::discord::tui_direct_pending_start::tests::retire_tests::visibly_completed_anchor_retires_record_and_stops_its_worker
 services::discord::tui_direct_pending_start::tests::stale_foreign_death_gate_clears_rebind_origin_lifecycle_row
 services::discord::tui_direct_pending_start::tests::stale_foreign_demote_cancels_and_removes_current_watcher
 services::discord::tui_direct_pending_start::tests::stale_foreign_demote_excludes_session_bound_relay_for_orphan_reclaim
@@ -6814,6 +6817,7 @@ services::discord::tui_prompt_relay::tests::relay_prompt_decision_skips_model_tw
 services::discord::tui_prompt_relay::tests::relayerless_claim_tests::claim_without_live_watcher_stamps_bridge_adapter_despite_supervisor_producer
 services::discord::tui_prompt_relay::tests::relayerless_claim_tests::watcher_attaching_after_a_bridge_adapter_save_adds_no_session_bound_send
 services::discord::tui_prompt_relay::tests::relayerless_claim_tests::watcher_lost_between_owner_decision_and_save_is_sent_once_after_the_age
+services::discord::tui_prompt_relay::tests::retired_pending_start_claim_tests::retire_during_admission_refuses_row_save_and_releases_mailbox
 services::discord::tui_prompt_relay::tests::s3t1_abort_and_recv_error_preserve_foreign_turn_and_anchor
 services::discord::tui_prompt_relay::tests::s3t2_delivery_failure_never_cancels_successor_or_commits_cursor
 services::discord::tui_prompt_relay::tests::s3t3_abort_deletes_only_owned_unreferenced_placeholder

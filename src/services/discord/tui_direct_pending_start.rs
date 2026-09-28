@@ -51,7 +51,8 @@ pub(super) use state::{
     ReclaimStaleForeignOutcome, STALE_FOREIGN_INFLIGHT_MIN_AGE_SECS, TuiDirectPendingStart, ViewFn,
     backstop_claim_is_safe, delete, load_all, mark_present_on_restore,
     pending_synthetic_start_blocks_idle_kickoff, pending_synthetic_start_present, persist,
-    prior_turn_finalized, record_claim_marker_if_watcher_owned, should_defer_synthetic_turn_start,
+    prior_turn_finalized, record_claim_marker_if_watcher_owned, retire_completed,
+    save_row_unless_retired, should_defer_synthetic_turn_start,
 };
 #[allow(unused_imports)]
 pub(super) use state::{
@@ -69,7 +70,7 @@ use state::{
     active_worker_guard_for_spawn, committed_foreign_complete_finalize_context,
     committed_foreign_inflight_is_finalize_clearable, output_capture_offset,
     restart_orphan_evidence_at, restart_orphan_pane_ready_for_input,
-    stale_foreign_cancel_finalize_context, stale_foreign_inflight_is_reclaimable_at,
+    stale_foreign_cancel_finalize_context, stale_foreign_inflight_is_reclaimable_at, take_retired,
     update_claim_attempt_count,
 };
 
@@ -684,6 +685,9 @@ async fn run_worker_inner(
             }
             tokio::time::sleep(PENDING_START_POLL).await;
         };
+        if take_retired(&record) {
+            return;
+        }
 
         match outcome {
             WaitOutcome::Finalized => {}
@@ -751,6 +755,9 @@ async fn run_worker_inner(
                     // exactly like the exhaustion branch below — the prior
                     // owner's identity-guarded completion can never clear OUR
                     // anchor out of it. Release it here (process-local only).
+                    if take_retired(&record) {
+                        return;
+                    }
                     let anchor_slot_released = release_prompt_anchor_slot(&record);
                     tracing::warn!(
                         provider = %record.provider,
@@ -828,6 +835,9 @@ async fn run_worker_inner(
             return;
         }
 
+        if take_retired(&record) {
+            return;
+        }
         // Transient claim failure: do NOT delete (P1-2). Retry, bounded.
         claim_attempts = claim_attempts.saturating_add(1);
         update_claim_attempt_count(&mut record, claim_attempts);
