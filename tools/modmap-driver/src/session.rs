@@ -3,7 +3,7 @@ use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::{ffi::OsStrExt, process::CommandExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -64,6 +64,9 @@ fn requested_unit(args: &[String]) -> Result<Option<Value>> {
             .any(|v| matches!(v.as_str(), "bin" | "proc-macro"))
     {
         return Ok(None);
+    }
+    if args.iter().any(|arg| arg.starts_with('@')) {
+        return Err("response-file compiler arguments are unsupported for a producer".into());
     }
     types.sort();
     types.dedup();
@@ -156,15 +159,36 @@ fn captured(command: &mut Command, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn prepare(argv: &[String], clippy: &OsStr) -> Result<()> {
+fn clippy_version(clippy: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new(clippy).args(args).output()?;
+    if !output.status.success() {
+        return Err("clippy identity query failed".into());
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+fn prepare(argv: &[String], clippy: &OsStr) -> Result<PathBuf> {
     let Some(unit) = requested_unit(&argv[2..])? else {
-        return Ok(());
+        return Ok(PathBuf::from(clippy));
     };
     let proof = with_suffix("")?;
     let nonce = required("MODMAP_CFG_NONCE")?;
     let run_id = required("MODMAP_RUN_ID")?;
     if proof.exists() {
         return Err("proof already exists: second producer in this session".into());
+    }
+    let request: Value = serde_json::from_slice(&fs::read(
+        proof
+            .parent()
+            .ok_or("session output has no parent")?
+            .join("request.json"),
+    )?)?;
+    let clippy = fs::canonicalize(clippy)?;
+    let expected = request["toolchain"]["clippy_driver"]
+        .as_str()
+        .ok_or("request has no approved clippy path")?;
+    if clippy != Path::new(expected) {
+        return Err("clippy path differs from request".into());
     }
     // A claim is permanent for this run, including failed or interrupted producers.
     let mut claim = OpenOptions::new()
@@ -175,6 +199,13 @@ fn prepare(argv: &[String], clippy: &OsStr) -> Result<()> {
         &json!({"pid": std::process::id(), "unit": unit}),
     )?)?;
     claim.sync_all()?;
+    let version = clippy_version(&clippy, &["--version"])?;
+    let compiler = clippy_version(&clippy, &["--rustc", "-vV"])?;
+    if Some(version.as_str()) != request["toolchain"]["clippy"].as_str()
+        || Some(compiler.as_str()) != request["toolchain"]["clippy_rustc"].as_str()
+    {
+        return Err("clippy identity differs from request".into());
+    }
     captured(
         Command::new(std::env::current_exe()?)
             .arg("__modmap_items_child")
@@ -185,7 +216,7 @@ fn prepare(argv: &[String], clippy: &OsStr) -> Result<()> {
     let flags = std::env::var("CLIPPY_ARGS").unwrap_or_default();
     // Passing --print in argv disables Clippy; only this root probe receives the trailing argument.
     captured(
-        Command::new(clippy).args(&argv[1..]).env(
+        Command::new(&clippy).args(&argv[1..]).env(
             "CLIPPY_ARGS",
             format!("{flags}--print=cfg={}__CLIPPY_HACKERY__", printed.display()),
         ),
@@ -210,14 +241,15 @@ fn prepare(argv: &[String], clippy: &OsStr) -> Result<()> {
         .collect();
     let value = json!({"schema": "h2-session/1-cfg", "unit": unit, "pid": std::process::id(),
         "nonce": nonce, "run_id": run_id, "argv": &argv[1..], "env_sha256": digest,
+        "clippy_driver": clippy, "clippy": version, "clippy_rustc": compiler,
         "cfg": cfg.split_terminator('\n').collect::<Vec<_>>(), "driver_rustc": rustc_interface::util::rustc_version_str()});
     let partial = with_suffix(".partial")?;
     fs::write(&partial, serde_json::to_vec(&value)?)?;
     fs::rename(partial, proof)?;
-    Ok(())
+    Ok(clippy)
 }
 
 pub fn run(argv: &[String], clippy: &OsStr) -> ! {
-    prepare(argv, clippy).unwrap_or_else(|e| fail(e));
+    let clippy = prepare(argv, clippy).unwrap_or_else(|e| fail(e));
     fail(Command::new(clippy).args(&argv[1..]).exec())
 }

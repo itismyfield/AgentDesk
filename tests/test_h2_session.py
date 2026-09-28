@@ -47,13 +47,15 @@ class Session(unittest.TestCase):
             (str(self.clippy), "--version"): "clippy 0.1.94 (e408947bfd 2026-03-25)",
             (str(self.clippy), "--rustc", "-vV"): self.version,
             (str(self.driver), "__modmap_version"): "1.94.1 (e408947bf 2026-03-25)"}
+        self.cfg = ["clippy", "debug_assertions", 'target_arch="aarch64"', 'target_os="macos"',
+                    'target_env=""', 'target_vendor="apple"', 'target_pointer_width="64"']
         self.calls, self.checks, self.metadata = [], [], []
         self.mutate = lambda run, proof, claim, events: None
         self.rc = 0
         self.after = lambda run: None
         for p in (patch.object(s.subprocess, "run", side_effect=self.command),
                   patch.object(s.modmap, "source_state", return_value={"sha": "unchanged"}),
-                  patch.dict(os.environ, RUSTUP_TOOLCHAIN="fixture-toolchain")):
+                  patch.dict(os.environ, RUSTUP_TOOLCHAIN="fixture-toolchain", CARGO_HOME=str(self.root / "cargo-home"))):
             p.start()
             self.addCleanup(p.stop)
 
@@ -72,12 +74,13 @@ class Session(unittest.TestCase):
         unit.update(root=str(self.crate), metadata="abcd", test=False)
         proof = dict(schema="h2-session/1-cfg", unit=unit, pid=42, nonce=req["nonce"], run_id=req["run_id"],
             argv=["/rustc", str(self.lib), "--crate-name", "fixture", "--crate-type", "cdylib,rlib"],
-            env_sha256="a" * 64, cfg=["clippy", "debug_assertions"], driver_rustc=s.ALLOWED["driver_rustc"])
+            env_sha256="a" * 64, cfg=list(self.cfg), driver_rustc=s.ALLOWED["driver_rustc"])
+        proof.update({key: req["toolchain"][key] for key in ("clippy_driver", "clippy", "clippy_rustc")})
         claim = dict(pid=42, unit=copy.deepcopy(unit))
         events = [dict(reason="compiler-artifact", package_id=req["unit"]["package_id"],
                        target={"src_path": str(self.lib)}, profile={"test": False}, fresh=False)]
         for suffix in ("items-cfg.txt", "clippy-cfg.txt"):
-            (run / f"session.json.{suffix}").write_text("clippy\ndebug_assertions\n")
+            (run / f"session.json.{suffix}").write_text("\n".join(self.cfg) + "\n")
         for suffix in ("items.stdout", "items.stderr", "probe.stdout", "probe.stderr"):
             (run / f"session.json.{suffix}").write_text("")
         self.mutate(run, proof, claim, events)
@@ -130,6 +133,7 @@ class Session(unittest.TestCase):
     def test_printed_cfg_preserves_embedded_newlines(self):
         def escaped(run, proof, claim, events):
             text = 'clippy\nh2_probe_escape="quote=" slash=\\ newline=\n한글"\nunix\n'
+            text += "\n".join(self.cfg[2:]) + "\n"
             proof["cfg"] = text.splitlines()
             for suffix in ("items-cfg.txt", "clippy-cfg.txt"):
                 (run / f"session.json.{suffix}").write_text(text)
@@ -142,6 +146,129 @@ class Session(unittest.TestCase):
             proof["argv"][1] = "crate/rust/library.rs"
         self.mutate = relative
         self.assertEqual(self.run_session()["proof"]["unit"]["lib"], str(self.lib))
+
+    def test_cargo_env_overrides_are_rejected_before_any_cargo(self):
+        roots = (self.crate / ".cargo", self.root / ".cargo", self.root / "cargo-home")
+        keys = ("MODMAP_CLIPPY_DRIVER", "MODMAP_SESSION_OUT", "CLIPPY_ARGS", "RUSTC_WORKSPACE_WRAPPER",
+                "RUSTUP_TOOLCHAIN", "CARGO_BUILD_RUSTC", "CARGO_BUILD_TARGET", "CARGO_HOME", "PATH",
+                "CARGO_INCREMENTAL", "CARGO_PKG_NAME", "CARGO_MANIFEST_DIR", "CARGO_ENCODED_RUSTFLAGS",
+                "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS", "RUSTC_BOOTSTRAP")
+        for root in roots:
+            root.mkdir(exist_ok=True)
+            for filename in ("config", "config.toml"):
+                for key in keys:
+                    for forced in (False, True):
+                        path = root / filename
+                        value = '{ value = "/foreign/driver", force = true }' if forced else '"/foreign/driver"'
+                        path.write_text(f"[env]\n{key} = {value}\n")
+                        try:
+                            with self.subTest(root=root, filename=filename, key=key, forced=forced):
+                                with self.assertRaisesRegex(s.MeasureError, "reserved"):
+                                    self.run_session(f"config-{len(self.calls)}")
+                                self.assertEqual(self.calls, [])
+                        finally:
+                            path.unlink()
+        self.assertFalse(any(self.root.glob("config-*/manifest.json")))
+
+    def test_config_discovery_keeps_plain_build_env_and_rejects_compiler_controls(self):
+        config = self.crate / ".cargo/config.toml"
+        config.parent.mkdir()
+        config.write_text('[env]\nREVIEW_BINDING={value="live", force=true}\n[build]\nrustflags=["--cfg", "live"]\n')
+        self.assertIn(str(config), self.run_session()["request"]["cargo_config"])
+        for i, text in enumerate(('include=["other.toml"]', '[build]\nrustc="other"',
+                                  '[build]\nrustc-wrapper="cache"', '[build]\nrustc-workspace-wrapper="other"')):
+            with self.subTest(text=text):
+                config.write_text(text)
+                before = len(self.calls)
+                with self.assertRaisesRegex(s.MeasureError, "config includes|compiler setting"):
+                    self.run_session(f"compiler{i}")
+                self.assertEqual(len(self.calls), before)
+        config.unlink()
+        relative = self.crate / "cargo-home/config"
+        relative.parent.mkdir()
+        relative.write_text('[env]\nMODMAP_CLIPPY_DRIVER="foreign"\n')
+        with patch.dict(os.environ, CARGO_HOME="cargo-home"):
+            with self.assertRaisesRegex(s.MeasureError, "reserved"):
+                self.run_session("relative-home")
+
+    def test_config_change_between_metadata_and_compile_is_rejected(self):
+        original = s.requested_unit
+        def changed(*args):
+            unit = original(*args)
+            config = self.root / "cargo-home/config.toml"
+            config.parent.mkdir()
+            config.write_text('[env]\nREVIEW_BINDING="changed"\n')
+            return unit
+        with patch.object(s, "requested_unit", side_effect=changed):
+            with self.assertRaisesRegex(s.MeasureError, "config changed"):
+                self.run_session()
+        self.assertEqual(len(self.metadata), 1)
+        self.assertEqual(self.checks, [])
+        self.assertFalse((self.root / "run/manifest.json").exists())
+
+    def test_config_and_package_changing_extra_options_are_rejected(self):
+        cases = (("--config", 'env.MODMAP_CLIPPY_DRIVER="foreign"'), ("--config=other.toml",),
+                 ("--conf=other.toml",), ("--features", "--config=other.toml"), ("-Zunstable-options",), ("-C", "other"),
+                 ("--package", "helper"), ("--package=helper",), ("-phelper",), ("-p", "helper"),
+                 ("--workspace",), ("--all",), ("--exclude=fixture",), ("--manifest-path=other.toml",),
+                 ("--", "--config", "other"), ("+nightly",))
+        for i, extra in enumerate(cases):
+            with self.subTest(extra=extra):
+                with self.assertRaisesRegex(s.MeasureError, "extra"):
+                    self.run_session(f"extra{i}", extra=extra)
+                self.assertFalse((self.root / f"extra{i}/manifest.json").exists())
+        self.assertEqual(self.calls, [])
+
+    def test_proof_binds_effective_clippy_after_cargo_overlay(self):
+        for key, wrong in (("clippy_driver", "/foreign/clippy-driver"), ("clippy", "other-version"),
+                           ("clippy_rustc", "commit-hash: other")):
+            with self.subTest(key=key):
+                self.reject(lambda r, p, c, e: p.update({key: wrong}), "clippy", key)
+
+    def test_response_file_and_foreign_cfg_cannot_be_sealed(self):
+        for i, hidden in enumerate(("--target=aarch64-unknown-linux-gnu", "--test")):
+            response = self.crate / f"args{i}"
+            response.write_text(hidden + "\n")
+            with self.subTest(hidden=hidden):
+                self.reject(lambda r, p, c, e: p["argv"].append("@" + str(response)), "response", f"response{i}")
+        def foreign(run, proof, claim, events):
+            proof["cfg"] = [c for c in proof["cfg"] if not c.startswith("target_arch=")]
+            proof["cfg"].append('target_arch="x86_64"')
+            for suffix in ("items-cfg.txt", "clippy-cfg.txt"):
+                (run / f"session.json.{suffix}").write_text("\n".join(proof["cfg"]) + "\n")
+        self.reject(foreign, "cfg target", "foreign-cfg")
+
+    def test_linux_cfg_target_is_bound_as_well(self):
+        version = self.version.replace("aarch64-apple-darwin", "x86_64-unknown-linux-gnu")
+        self.answers[("rustc", "-vV")] = version
+        self.answers[(str(self.clippy), "--rustc", "-vV")] = version
+        self.cfg = ["clippy", 'target_arch="x86_64"', 'target_os="linux"', 'target_env="gnu"',
+                    'target_vendor="unknown"', 'target_pointer_width="64"']
+        result = s.session(self.root, self.crate, self.root / "linux", self.conf, "linux", driver=self.driver)
+        self.assertEqual(result["request"]["target"], "x86_64-unknown-linux-gnu")
+        for atom in self.cfg[1:]:
+            proof = result["proof"]
+            original = list(proof["cfg"])
+            proof["cfg"].remove(atom)
+            run = self.root / "linux"
+            (run / "session.json").write_text(json.dumps(proof))
+            for suffix in ("items-cfg.txt", "clippy-cfg.txt"):
+                (run / f"session.json.{suffix}").write_text("\n".join(proof["cfg"]) + "\n")
+            with self.subTest(atom=atom), self.assertRaisesRegex(s.MeasureError, "cfg target"):
+                s.validate(run, result["request"])
+            proof["cfg"] = original
+
+    def test_workspace_default_members_do_not_select_the_requested_package(self):
+        with (self.crate / "Cargo.toml").open("a") as manifest:
+            manifest.write('[workspace]\nmembers=["helper"]\ndefault-members=["helper"]\n')
+        helper = copy.deepcopy(self.md["packages"][0])
+        helper.update(name="helper", id="helper-id", manifest_path=str(self.crate / "helper/Cargo.toml"))
+        self.md["packages"].insert(0, helper)
+        result = self.run_session()
+        self.assertIn("--package", self.checks[-1])
+        selected = self.checks[-1][self.checks[-1].index("--package") + 1]
+        self.assertEqual(selected, result["request"]["unit"]["package_id"])
+        self.assertNotEqual(selected, helper["id"])
 
     def test_allowed_matches_repo_and_ci(self):
         import tomllib

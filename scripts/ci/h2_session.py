@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import tomllib
 import uuid
 from pathlib import Path
 
@@ -16,9 +17,52 @@ from h2_measure import LINTS, RO_LINTS, MeasureError
 ALLOWED = dict(release="1.94.1", commit="e408947bfd200af42db322daf0fadfe7e26d3bd1", cargo="cargo 1.94.1 ",
                clippy="clippy 0.1.94 (e408947bfd ", driver_rustc="1.94.1 (e408947bf 2026-03-25)")
 SCHEMA = "h2-session/1-cfg"
+TARGET_CFG = {"x86_64-unknown-linux-gnu": ("x86_64", "linux", "gnu", "unknown", "64"),
+              "aarch64-apple-darwin": ("aarch64", "macos", "", "apple", "64")}
+TARGET_KEYS = ("target_arch", "target_os", "target_env", "target_vendor", "target_pointer_width")
 OUTPUTS = ("session.json", "session.json.claim", "session.json.items-cfg.txt", "session.json.clippy-cfg.txt",
            "session.json.items.stdout", "session.json.items.stderr", "session.json.probe.stdout",
            "session.json.probe.stderr", "clippy.jsonl", "cargo.stderr", "cargo.json")
+
+
+def check_extra(extra) -> None:
+    values = {"--features", "-F", "--jobs", "-j", "--target", "--target-dir"}
+    switches = {"--locked", "--offline", "--frozen", "--all-features", "--no-default-features",
+                "--all-targets", "--verbose", "-v", "--quiet", "-q"}
+    args = iter(extra)
+    for arg in args:
+        flag, equals, value = arg.partition("=")
+        if flag in switches and not equals:
+            continue
+        value = value if equals else next(args, "")
+        if flag not in values or not value or value.startswith(("-", "@", "+")):
+            raise MeasureError(f"session extra option is unsupported: {arg}")
+
+
+def cargo_config(crate: Path, env: dict) -> dict:
+    home = Path(env.get("CARGO_HOME") or Path.home() / ".cargo")
+    directories = {p / ".cargo" for p in (crate, *crate.parents)} | {(crate / home).resolve()}
+    reserved = set(h2_env.CLEAR) | {"PATH", "HOME", "CARGO_HOME", "CARGO_INCREMENTAL",
+                                   "CARGO_MANIFEST_DIR", "CARGO_PKG_NAME", "LD_LIBRARY_PATH",
+                                   "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"}
+    files = {}
+    for directory in sorted(directories):
+        for name in ("config", "config.toml"):
+            path = directory / name
+            if not path.exists():
+                continue
+            body = path.read_bytes()
+            config = tomllib.loads(body.decode("utf-8"))
+            if "include" in config:
+                raise MeasureError(f"session Cargo config includes are unsupported: {path}")
+            for key in config.get("env", {}):
+                if (key in reserved or key.startswith(("MODMAP_", "CLIPPY_", "RUSTC", "RUSTUP_"))
+                        or h2_env.CLEAR_RE.fullmatch(key)):
+                    raise MeasureError(f"session reserved Cargo env key {key}: {path}")
+            if any(config.get("build", {}).get(key) for key in ("rustc", "rustc-wrapper", "rustc-workspace-wrapper")):
+                raise MeasureError(f"session reserved Cargo compiler setting: {path}")
+            files[str(path)] = collect.digest(body)
+    return files
 
 
 def output(argv: list[str], cwd: Path, env: dict) -> str:
@@ -119,6 +163,12 @@ def validate(run: Path, request: dict) -> dict:
             or data["session.json.items-cfg.txt"] != data["session.json.clippy-cfg.txt"]
             or data["session.json.items-cfg.txt"] != ("\n".join(cfg) + "\n").encode()):
         raise MeasureError("session cfg mismatch")
+    target_cfg = {f'{key}="{value}"' for key, value in zip(TARGET_KEYS, TARGET_CFG[request["target"]])}
+    if {entry for entry in cfg if entry.partition("=")[0] in TARGET_KEYS} != target_cfg:
+        raise MeasureError("session cfg target mismatch")
+    for key in ("clippy_driver", "clippy", "clippy_rustc"):
+        if proof.get(key) != request["toolchain"][key]:
+            raise MeasureError(f"session clippy identity mismatch: {key}")
     if proof.get("driver_rustc") != request["toolchain"]["driver_rustc"]:
         raise MeasureError("session driver compiler mismatch")
     if not isinstance(proof.get("env_sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", proof["env_sha256"]):
@@ -126,6 +176,8 @@ def validate(run: Path, request: dict) -> dict:
     argv = proof.get("argv")
     if (not isinstance(argv, list) or not all(isinstance(a, str) for a in argv) or len(argv) < 2 or "--test" in argv):
         raise MeasureError("session argv mismatch")
+    if any(arg.startswith("@") for arg in argv):
+        raise MeasureError("session response-file compiler arguments are unsupported")
     for i, arg in enumerate(argv):
         if arg == "--target" or arg.startswith("--target="):
             target = argv[i + 1] if arg == "--target" and i + 1 < len(argv) else arg.removeprefix("--target=")
@@ -150,6 +202,9 @@ def session(root: Path, crate: Path, run_dir: Path, conf_dir: Path, lane: str, *
             raise MeasureError("session run directory must be new or empty and canonical")
         driver = (driver or root / "target/modmap-driver/release/modmap-driver").resolve(strict=True)
         env = {k: v for k, v in h2_env.environment("measure").items() if not k.startswith("MODMAP_")}
+        extra = tuple(extra)
+        check_extra(extra)
+        configs = cargo_config(crate, env)
         toolchain = toolchain_guard(crate, env, driver, clippy)
         host = h2_env.check_host(lane, toolchain["rustc"])
         unit = requested_unit(crate, env)
@@ -158,6 +213,7 @@ def session(root: Path, crate: Path, run_dir: Path, conf_dir: Path, lane: str, *
         nonce, run_id = uuid.uuid4().hex, uuid.uuid4().hex
         request = dict(schema=SCHEMA, kind="canary-cfg", unit=unit, repo=str(root), conf_dir=str(conf_dir),
                        run_id=run_id, nonce=nonce, lane=lane, host=host, target=h2_env.LANES[lane], toolchain=toolchain,
+                       cargo_config=configs,
                        source=source_state(root, Path(unit["lib"]), conf_dir))
         collect.write_json(run / "request.json", request)
         flags = ["--cap-lints", "warn"] + [v for lint in (*LINTS, *RO_LINTS) for v in ("--force-warn", lint)]
@@ -167,13 +223,17 @@ def session(root: Path, crate: Path, run_dir: Path, conf_dir: Path, lane: str, *
                    MODMAP_CFG_NONCE=nonce, MODMAP_RUN_ID=run_id,
                    **{f"MODMAP_EXPECT_{k.upper()}": unit[k] for k in ("manifest", "package", "lib")})
         os.utime(unit["lib"], None)
-        argv = ["cargo", "check", "--lib", "--message-format=json", *extra]
+        if cargo_config(crate, env) != configs:
+            raise MeasureError("session Cargo config changed")
+        argv = ["cargo", "check", "--lib", "--message-format=json", "--package", unit["package_id"], *extra]
         proc = subprocess.run(argv, cwd=crate, env=env, capture_output=True, text=True)
         (run / "clippy.jsonl").write_text(proc.stdout, encoding="utf-8")
         (run / "cargo.stderr").write_text(proc.stderr, encoding="utf-8")
         collect.write_json(run / "cargo.json", dict(rc=proc.returncode, argv=argv))
         if proc.returncode:
             raise MeasureError(f"session Cargo failed ({proc.returncode}); see {run / 'cargo.stderr'}")
+        if cargo_config(crate, env) != configs:
+            raise MeasureError("session Cargo config changed")
         manifest = validate(run, request)
         collect.write_json(run / "manifest.json", manifest)
         return manifest
