@@ -245,21 +245,38 @@ class Baseline(Fixture):
         self.assertEqual(exec_rows[("src/services/probe.rs", "alive", TMUX)], {"linux": 7, "macos": 1})
 
 class ShellEntrypoint(unittest.TestCase):
-    def run_sh(self, *args: str, host: str) -> subprocess.CompletedProcess:
+    def run_sh(self, *args: str, host: str, probe: bool = False) -> subprocess.CompletedProcess:
         with tempfile.TemporaryDirectory() as tmp:
             tree = Path(tmp)
             (tree / "scripts/ci").mkdir(parents=True)
             (tree / "scripts/ci/h2_measure.sh").write_text((REPO_ROOT / "scripts/ci/h2_measure.sh").read_text())
+            (tree / "scripts/ci/h2_env.py").write_text((REPO_ROOT / "scripts/ci/h2_env.py").read_text())
             (bin_dir := tree / "bin").mkdir()
+            (bin_dir / "python3").symlink_to(sys.executable)
             for tool, body in (("rustc", f"echo 'host: {host}'"), ("rustup", "echo clippy-aarch64"),
-                               ("python3", 'echo "py $*"')):
+                               ("launcher", 'echo "py $*"')):
                 (bin_dir / tool).write_text(f"#!/bin/sh\n{body}\n")
                 (bin_dir / tool).chmod(0o755)
             if "--with-baseline" in args:
                 (tree / h2.BASELINE_FILES[1]).write_text("")
                 args = tuple(a for a in args if a != "--with-baseline")
-            env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", RUSTFLAGS="-Cx", PYTHON="python3")
-            return subprocess.run(["bash", str(tree / "scripts/ci/h2_measure.sh"), *args],
+            if probe:
+                (bin_dir / "launcher").write_text(f"#!{sys.executable}\n" + textwrap.dedent("""\
+                    import os, runpy, sys
+                    assert sys.argv[1] == 'scripts/ci/h2_measure.py', sys.argv
+                    assert os.getpid() == int(os.environ['H2_SHELL_PID']), 'launcher lost shell PID'
+                    runpy.run_path(sys.argv[1], run_name='__main__')
+                """))
+                (tree / "scripts/ci/h2_measure.py").write_text(textwrap.dedent("""\
+                    import json, os, sys
+                    print(json.dumps({'argv': sys.argv[1:], 'incremental': os.environ['CARGO_INCREMENTAL'],
+                                      'flags': [key for key in ('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS',
+                                               'CARGO_BUILD_TARGET', 'RUSTC_BOOTSTRAP') if key in os.environ]}))
+                """))
+            env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", RUSTFLAGS="-Cx", PYTHON=str(bin_dir / "launcher"),
+                       CARGO_ENCODED_RUSTFLAGS="bad", CARGO_BUILD_TARGET="wrong", RUSTC_BOOTSTRAP="1", CARGO_INCREMENTAL="1")
+            return subprocess.run(["bash", "-c", 'export H2_SHELL_PID=$$; exec bash "$@"', "h2-test",
+                                   str(tree / "scripts/ci/h2_measure.sh"), *args],
                                   env=env, capture_output=True, text=True)
 
     def test_inert_no_op_host_triple_and_hand_off(self) -> None:
@@ -274,6 +291,12 @@ class ShellEntrypoint(unittest.TestCase):
         result = self.run_sh("--lane", "macos", "--inert", "--with-baseline", host="aarch64-apple-darwin")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "py scripts/ci/h2_measure.py --check --lane macos --inert")
+
+    def test_python_launcher_keeps_process_and_clean_environment(self) -> None:
+        result = self.run_sh("--lane", "macos", "--regen", "--with-baseline", host="aarch64-apple-darwin", probe=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"argv": ["scripts/ci/h2_measure.py", "--lane", "macos", "--regen"],
+                                                   "incremental": "0", "flags": []})
 
 if __name__ == "__main__":
     unittest.main()
