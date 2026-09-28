@@ -382,7 +382,7 @@ def mapping_guard(stats: dict[str, list[int]], *, rounds: int = 10) -> dict:
             uids, regions = found
             if regions is None:
                 if 0 not in uids and (me in uids or loose or uids & owners):
-                    if not user_manager(pid, uids):
+                    if uids != {me} or not user_manager(pid, uids):
                         raise MeasureError(f"session fence: cannot read the mappings of process {pid} (uids {sorted(uids)})")
                     managers.append([pid, "systemd"])
                     continue

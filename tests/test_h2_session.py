@@ -792,14 +792,15 @@ class Fence(Harness):
                     self.assertRaisesRegex(s.MeasureError, "cannot read the mappings", s.mapping_guard, stats)
                 else:
                     self.assertEqual(s.mapping_guard(stats)[verdict], 1)
-        scope = f"0::/user.slice/user-{me}.slice/user@{me}.service/init.scope\n"
-        for n, (name, ppid, cgroup) in enumerate((("systemd", 1, scope), ("systemd", 2, scope), ("python3", 1, scope),
-                                                  ("systemd", 1, scope.replace("init", "app")))):
+        scope, alien = (f"0::/user.slice/user-{u}.slice/user@{u}.service/init.scope\n" for u in (me, other))
+        for n, (name, ppid, cgroup, uid) in enumerate((("systemd", 1, scope, me), ("systemd", 2, scope, me),
+                                                       ("python3", 1, scope, me), ("systemd", 1, alien, other),
+                                                       ("systemd", 1, scope.replace("init", "app"), me))):
             (proc := self.root / f"proc{n}" / "9").mkdir(parents=True)
             (proc / "status").write_text(f"Name:\t{name}\nPPid:\t{ppid}\n"), (proc / "cgroup").write_text(cgroup)
             with self.subTest(name, ppid=ppid, cgroup=cgroup), patch.object(s, "PROC_ROOT", proc.parent), \
                     patch.object(s.sys, "platform", "linux"), patch.object(s, "list_pids", lambda: [9]), \
-                    patch.object(s, "read_maps", return_value=({me}, None)):
+                    patch.object(s, "read_maps", return_value=({uid}, None)):
                 self.assertEqual(s.mapping_guard(stats)["user_managers"], [[9, "systemd"]]) if not n else \
                     self.assertRaisesRegex(s.MeasureError, "cannot read the mappings of process 9", s.mapping_guard, stats)
         pids = iter(range(1, 100))

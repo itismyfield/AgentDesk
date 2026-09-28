@@ -185,8 +185,7 @@ fence는 이 파일 변경형 쓰기를 쓴 주체(편집기·동시 프로세�
   - 전진하지 않거나(예산 5초), 되돌아가거나, 관측 값이 모두 초 배수이거나, 최소 간격이 1초 이상이면 fail-closed다. 관측 간격과 같은 tick 재쓰기 수는 request와 stderr에 남긴다.
 - **fence 시작 조건.** capture한 모든 파일은 probe와 같은 st_dev에 있고 `ctime < P`여야 한다. 그러면 그 뒤의 쓰기, 곧 같은 내용 복원·mtime 복원·hard link 경유 쓰기는 반드시 ctime을 바꾼다. 이는 tick 크기와 무관하다. rename 교체는 inode를 바꾼다.
 - **경로 이름공간.** capture 파일마다 workspace root(포함)부터 부모까지의 각 디렉터리를 lstat로 `(dev, ino, mtime_ns, ctime_ns)` 봉인한다. root 밖 파일(clippy.toml 등)은 부모 디렉터리만 봉인한다.
-  - 디렉터리도 probe와 같은 st_dev·`ctime < P`여야 한다. 그래서 조상 디렉터리를 rename으로 B 트리와 바꿨다 되돌리면 그 부모의 mtime·ctime이 남는다.
-  - leaf나 성분이 심볼릭 링크면 거부한다(링크 객체 봉인 대신 거부: 링크 대상 경로의 디렉터리는 봉인 목록 밖이다). leaf는 capture한 inode와 같은 일반 파일이어야 한다.
+  - 디렉터리도 probe와 같은 st_dev·`ctime < P`여야 한다. 그래서 조상 디렉터리를 rename으로 B 트리와 바꿨다 되돌리면 그 부모의 mtime·ctime이 남는다. leaf나 성분이 심볼릭 링크면 거부한다(링크 객체 봉인 대신 거부: 링크 대상 경로의 디렉터리는 봉인 목록 밖이다). leaf는 capture한 inode와 같은 일반 파일이어야 한다.
   - 정상 세션은 봉인 디렉터리에 항목을 만들지 않는다. run 디렉터리는 probe 전에 만들고, probe 파일·출력은 run 안에 쓴다. Cargo target 디렉터리(`--target-dir`, 없으면 metadata `target_directory`)는 probe 전에 미리 만든다. root 위 조상은 봉인하지 않는다. `/tmp`·runner 작업 디렉터리처럼 다른 작업이 항목을 바꾸는 공유 디렉터리라 정상 CI를 거부하게 된다. 남는 반례: root의 엄격한 조상을 rename으로 바꿨다 되돌리는 교체(root inode 자체는 그대로).
 - **공유 매핑 가드.** 이미 dirty한 쓰기 가능 `MAP_SHARED` 매핑을 통한 저장은 ctime을 바꾸지 않을 수 있다. 그래서 capture·봉인 직후 Cargo 전에, capture `(dev, ino)`나 경로를 매핑한 프로세스를 찾으면 세션을 거부한다.
   - Linux: `/proc/<pid>/maps`의 공유(`s`) 매핑 전부. mprotect로 이미 dirty한 page를 fault 없이 다시 쓰기 가능하게 할 수 있어 현재 쓰기 권한과 무관하게 본다. maps는 `/proc/<pid>/task/<tid>/maps`로 모든 task에서 읽고, task 목록은 새 tid가 없을 때까지 다시 읽는다. `pthread_exit`로 끝난 leader는 maps가 비어도 worker가 주소 공간을 가지기 때문이다. 빈 maps는 커널 스레드(`PF_KTHREAD`)이거나 남은 task가 모두 Z/X일 때만 검사로 센다. task 목록을 읽지 못하거나 비었거나 살아 있는 task의 maps가 비어 있으면(3회 재시도) root가 아닌 프로세스는 거부한다. macOS(task VM을 프로세스가 공유하므로 pid 단위): libproc `PROC_PIDREGIONPATHINFO`에서 최대 보호가 쓰기인 영역(private COW 매핑도 보수적으로 포함).
