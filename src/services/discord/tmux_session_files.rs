@@ -287,8 +287,8 @@ fn run_spawn_markers_after_generation_hook_for_tests() {
     }
 }
 
-/// Validate prepared evidence and publish both markers under the source authority.
-/// Generation remains best-effort; nonce failures remove the stale destination.
+/// Validate prepared evidence and publish both markers under the source authority; generation remains best-effort.
+/// Nonce failures remove the stale destination; the v4 UUID is mtime-independent and never rewritten by live wrappers between turns.
 pub(crate) fn stamp_spawn_markers(
     tmux_session_name: &str,
     prepared: Option<&crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation>,

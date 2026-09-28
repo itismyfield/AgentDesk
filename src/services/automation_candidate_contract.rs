@@ -92,7 +92,7 @@ mod tests {
     fn valid_metadata() -> Value {
         serde_json::json!({
             "program": {
-                "repo_dir": "/repo",
+                "repo_dir": std::env::temp_dir().join("repo"),
                 "allowed_write_paths": ["src/services"],
                 "metric_name": "failure_count",
                 "metric_target": 0

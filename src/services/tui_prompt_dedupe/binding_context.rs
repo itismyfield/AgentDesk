@@ -2,11 +2,12 @@
 
 use crate::services::claude_tui::hook_output_guard::configured_claude_projects_root;
 use crate::services::{platform::tmux::SessionPresence, tmux_common as tc};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
 };
@@ -101,17 +102,102 @@ pub(crate) fn observe_spawn_nonce_marker(tmux: &str) -> SpawnNonceMarker {
     SpawnNonceMarker::Absent
 }
 
-#[allow(dead_code)]
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ContextEnv {
-    EnvUnset,
-    Path(PathBuf),
-}
 // Hook capture reads this value without consulting mutable markers.
+const CONTEXT_ENV: &str = "AGENTDESK_BINDING_CONTEXT";
+pub(crate) const BINDING_HEADER: &str = "x-agentdesk-binding-context";
+const CONTEXT_LIMIT: u64 = 16 * 1024;
+const HEADER_LIMIT: usize = 32 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum AbsentReason {
+    EnvUnset,
+    Unreadable,
+    Corrupt,
+    NonceMismatch,
+    ProviderMismatch,
+    SchemaUnsupported,
+    LegacyRequest,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum CapturedContext {
+    Captured(BindingContext),
+    Absent(AbsentReason),
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ObservedHookProcess {
+    pub tmux: Option<String>,
+    pub tmux_pane: Option<String>,
+    pub provider_pid: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct HookBindingEnvelope {
+    pub context: CapturedContext,
+    pub observed: ObservedHookProcess,
+}
+impl HookBindingEnvelope {
+    pub(crate) fn capture(provider: &str) -> Self {
+        Self::capture_from_env(provider, |name| std::env::var_os(name))
+    }
+
+    pub(crate) fn capture_from_env(
+        provider: &str,
+        env: impl Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> Self {
+        let capture = || {
+            let path = env(CONTEXT_ENV).ok_or(AbsentReason::EnvUnset)?;
+            let path = Path::new(&path);
+            let ctx = read_hook_context(path).map_err(|error| match error.kind() {
+                io::ErrorKind::InvalidData => AbsentReason::Corrupt,
+                _ => AbsentReason::Unreadable,
+            })?;
+            if path.file_stem().and_then(|s| s.to_str()) != Some(&ctx.execution_nonce) {
+                return Err(AbsentReason::NonceMismatch);
+            }
+            if ctx.provider != provider {
+                return Err(AbsentReason::ProviderMismatch);
+            }
+            if ctx.schema != 1 {
+                return Err(AbsentReason::SchemaUnsupported);
+            }
+            Ok(ctx)
+        };
+        // Overlong observations are unavailable evidence, keeping the encoded header bounded.
+        let observed = |key| {
+            env(key)
+                .and_then(|s| s.into_string().ok())
+                .filter(|s| s.len() <= 256)
+        };
+        Self {
+            context: capture().map_or_else(CapturedContext::Absent, CapturedContext::Captured),
+            observed: ObservedHookProcess {
+                tmux: observed("TMUX"),
+                tmux_pane: observed("TMUX_PANE"),
+                provider_pid: observed("CLAUDE_PID"),
+            },
+        }
+    }
+
+    pub(crate) fn legacy_request() -> Self {
+        Self {
+            context: CapturedContext::Absent(AbsentReason::LegacyRequest),
+            observed: ObservedHookProcess::default(),
+        }
+    }
+
+    pub(crate) fn encode(&self) -> Result<String, String> {
+        serde_json::to_vec(self)
+            .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
+            .map_err(|e| e.to_string())
+    }
+}
+
 #[allow(dead_code)]
-pub(crate) fn context_env() -> ContextEnv {
-    std::env::var_os("AGENTDESK_BINDING_CONTEXT")
-        .map_or(ContextEnv::EnvUnset, |path| ContextEnv::Path(path.into()))
+pub(crate) fn decode_binding_header(header: &str) -> Result<HookBindingEnvelope, String> {
+    if header.len() > HEADER_LIMIT {
+        return Err("binding header exceeds size limit".into());
+    }
+    let bytes = URL_SAFE_NO_PAD.decode(header).map_err(|e| e.to_string())?;
+    serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
 
 fn durable_directory(path: &Path) -> io::Result<()> {
@@ -171,25 +257,27 @@ impl PreparedIncarnation {
             .ok_or_else(|| io::Error::other("context path has no parent"))?;
         durable_directory(parent)?;
         let temp = parent.join(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
-        let result = (|| {
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp)?;
-            file.write_all(&serde_json::to_vec(&context)?)?;
-            #[cfg(test)]
-            creation_fault("file")?;
-            file.sync_all()?;
-            #[cfg(test)]
-            creation_fault("link")?;
-            fs::hard_link(&temp, &path)?;
-            fs::remove_file(&temp)?;
-            #[cfg(test)]
-            creation_fault("parent")?;
-            crate::services::discord::runtime_store::fsync_parent_dir(&path)
-        })();
-        let _ = fs::remove_file(&temp);
-        result?;
+        tc::with_tmux_source_authority(&context.tmux_session, |_| {
+            let result = (|| {
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&temp)?;
+                file.write_all(&serde_json::to_vec(&context)?)?;
+                #[cfg(test)]
+                creation_fault("file")?;
+                file.sync_all()?;
+                #[cfg(test)]
+                creation_fault("link")?;
+                fs::hard_link(&temp, &path)?;
+                fs::remove_file(&temp)?;
+                #[cfg(test)]
+                creation_fault("parent")?;
+                crate::services::discord::runtime_store::fsync_parent_dir(&path)
+            })();
+            let _ = fs::remove_file(&temp);
+            result
+        })?;
         Ok(Self { context, path })
     }
 
@@ -230,6 +318,30 @@ fn read_context(path: &Path) -> io::Result<BindingContext> {
     serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)
 }
 
+fn read_hook_context(path: &Path) -> io::Result<BindingContext> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(CONTEXT_LIMIT + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > CONTEXT_LIMIT {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "context exceeds size limit",
+        ));
+    }
+    serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+fn context_temp(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|name| {
+            name.strip_prefix('.')
+                .and_then(|s| s.strip_suffix(".tmp"))
+                .is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        })
+}
+
 fn sweep(
     provider: &str,
     now: DateTime<Utc>,
@@ -247,7 +359,7 @@ fn sweep(
     let mut paths: Vec<_> = entries
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .filter(|p| p.extension().is_some_and(|e| e == "json") || context_temp(p))
         .collect();
     paths.sort();
     if paths.is_empty() {
@@ -264,10 +376,11 @@ fn sweep(
             continue;
         };
         if now.signed_duration_since(ctx.created_at) < chrono::Duration::days(7)
-            || context_path(&ctx.provider, &ctx.execution_nonce)
-                .ok()
-                .as_ref()
-                != Some(path)
+            || ctx.provider != provider
+            || ctx.schema != 1
+            || !context_path(&ctx.provider, &ctx.execution_nonce).is_ok_and(|canonical| {
+                canonical == *path || (context_temp(path) && canonical.parent() == path.parent())
+            })
         {
             continue;
         }
@@ -329,6 +442,16 @@ pub(crate) mod tests {
             .lines()
             .find_map(|l| l.strip_prefix("AGENTDESK_BINDING_CONTEXT="));
         assert_eq!(value.map(Path::new), expected);
+        if expected.is_none() {
+            assert_eq!(
+                HookBindingEnvelope::capture_from_env("claude", |key| {
+                    env.lines()
+                        .find_map(|line| line.strip_prefix(&format!("{key}=")).map(Into::into))
+                })
+                .context,
+                CapturedContext::Absent(AbsentReason::EnvUnset)
+            );
+        }
     }
     pub(crate) fn fake_tmux(root: &Path) -> Guard {
         let stub = "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$AGENTDESK_ROOT_DIR/tmux.calls\"\n";
@@ -386,7 +509,19 @@ pub(crate) mod tests {
         unsafe { std::env::remove_var("AGENTDESK_BINDING_CONTEXT") };
         let p = prepared();
         crate::services::discord::stamp_spawn_markers(&p.context.tmux_session, None).unwrap();
-        assert_eq!(context_env(), ContextEnv::EnvUnset);
+        assert!(matches!(
+            observe_spawn_nonce_marker(&p.context.tmux_session),
+            SpawnNonceMarker::Known(_)
+        ));
+        assert_eq!(
+            HookBindingEnvelope::capture("claude").context,
+            CapturedContext::Absent(AbsentReason::EnvUnset)
+        );
+        crate::services::discord::stamp_spawn_markers(&p.context.tmux_session, Some(&p)).unwrap();
+        assert_eq!(
+            HookBindingEnvelope::capture("claude").context,
+            CapturedContext::Absent(AbsentReason::EnvUnset)
+        );
         child_context(&p.env_lines(), Some(&p.path));
         let p = PreparedIncarnation {
             path: p.path.with_file_name("quote' space.json"),
@@ -438,6 +573,151 @@ pub(crate) mod tests {
         assert!(kept.path.exists());
         assert!(!retired.path.exists());
     }
+    #[test]
+    fn binding_context_capture_errors_and_header_codec_are_bounded() {
+        let (_root, _env) = fixture();
+        let p = prepared();
+        let original = fs::read(&p.path).unwrap();
+        let capture = || {
+            HookBindingEnvelope::capture_from_env("claude", |key| match key {
+                "AGENTDESK_BINDING_CONTEXT" => Some(p.path.clone().into_os_string()),
+                "TMUX" => Some("/tmp/socket,12,3".into()),
+                "TMUX_PANE" => Some("%7".into()),
+                "CLAUDE_PID" => Some("123".into()),
+                _ => None,
+            })
+        };
+        let good = capture();
+        assert_eq!(good.context, CapturedContext::Captured(p.context.clone()));
+        assert_eq!(
+            good.observed,
+            ObservedHookProcess {
+                tmux: Some("/tmp/socket,12,3".into()),
+                tmux_pane: Some("%7".into()),
+                provider_pid: Some("123".into())
+            }
+        );
+        assert_eq!(
+            decode_binding_header(&good.encode().unwrap()).unwrap(),
+            good
+        );
+        for (field, value, reason) in [
+            (
+                "execution_nonce",
+                serde_json::json!("wrong"),
+                AbsentReason::NonceMismatch,
+            ),
+            (
+                "provider",
+                serde_json::json!("codex"),
+                AbsentReason::ProviderMismatch,
+            ),
+            (
+                "schema",
+                serde_json::json!(2),
+                AbsentReason::SchemaUnsupported,
+            ),
+        ] {
+            let mut ctx: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            ctx[field] = value;
+            fs::write(&p.path, serde_json::to_vec(&ctx).unwrap()).unwrap();
+            assert_eq!(capture().context, CapturedContext::Absent(reason));
+        }
+        let mut oversized = original.clone();
+        oversized.resize(CONTEXT_LIMIT as usize + 1, b' ');
+        for bytes in [b"broken".to_vec(), oversized] {
+            fs::write(&p.path, bytes).unwrap();
+            assert_eq!(
+                capture().context,
+                CapturedContext::Absent(AbsentReason::Corrupt)
+            );
+        }
+        let mut boundary = original;
+        boundary.resize(CONTEXT_LIMIT as usize, b' ');
+        fs::write(&p.path, boundary).unwrap();
+        assert_eq!(capture(), good);
+        fs::remove_file(&p.path).unwrap();
+        assert_eq!(
+            capture().context,
+            CapturedContext::Absent(AbsentReason::Unreadable)
+        );
+        for invalid in [
+            "+///".into(),
+            "e30=".into(),
+            "e30\n".into(),
+            "_x".into(),
+            "a".repeat(HEADER_LIMIT + 1),
+        ] {
+            assert!(decode_binding_header(&invalid).is_err());
+        }
+        let mut large = p.context;
+        large.provider_root = Some(PathBuf::from("x".repeat(15_000)));
+        fs::write(&p.path, serde_json::to_vec(&large).unwrap()).unwrap();
+        let worst = HookBindingEnvelope::capture_from_env("claude", |key| {
+            Some(if key == "AGENTDESK_BINDING_CONTEXT" {
+                p.path.clone().into_os_string()
+            } else {
+                "\0".repeat(256).into()
+            })
+        });
+        assert!(matches!(worst.context, CapturedContext::Captured(_)));
+        assert!(worst.encode().unwrap().len() < HEADER_LIMIT);
+        assert_eq!(
+            decode_binding_header(&worst.encode().unwrap()).unwrap(),
+            worst
+        );
+        assert_eq!(
+            HookBindingEnvelope::capture_from_env("claude", |_| Some("x".repeat(257).into()))
+                .observed,
+            ObservedHookProcess::default()
+        );
+    }
+
+    #[test]
+    fn binding_context_tmp_sweep_preserves_live_writers_and_uncertain_evidence() {
+        let (_root, _env) = fixture();
+        let p = prepared();
+        let temp = p
+            .path
+            .with_file_name(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
+        fs::rename(&p.path, &temp).unwrap();
+        let now = Utc::now() + chrono::Duration::days(8);
+        for presence in [Present, ProbeFailed] {
+            sweep("claude", now, 128, |_| presence);
+            assert!(temp.exists());
+        }
+        let marker = tc::session_temp_path(&p.context.tmux_session, "spawn_nonce");
+        fs::write(&marker, &p.context.execution_nonce).unwrap();
+        sweep("claude", now, 128, |_| Missing);
+        assert!(temp.exists());
+        fs::remove_file(&marker).unwrap();
+        sweep("claude", Utc::now(), 128, |_| Missing);
+        assert!(temp.exists());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker = tc::with_tmux_source_authority(&p.context.tmux_session, |_| {
+                let worker = scope.spawn(|| {
+                    sweep("claude", now, 128, |_| {
+                        tx.send(()).unwrap();
+                        Missing
+                    })
+                });
+                rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                assert!(temp.exists(), "writer still owns the temporary context");
+                worker
+            });
+            worker.join().unwrap();
+        });
+        assert!(
+            !temp.exists(),
+            "retired crash residue is swept after writer releases authority"
+        );
+        fs::write(&temp, b"partial JSON").unwrap();
+        sweep("claude", now, 128, |_| Missing);
+        assert!(temp.exists());
+    }
+
     #[test]
     fn binding_context_t12_permission_failure_is_unknown() {
         let (_root, _env) = fixture();

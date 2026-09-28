@@ -36,6 +36,8 @@ DRIFTED_ROWS = [re.sub(r"#[1-9]\d*", "#0", row) for row in CANARY_ROWS]
 STUB_CARGO = r"""#!/usr/bin/env python3
 import json, os, pathlib, platform, shutil, sys
 args = sys.argv[1:]
+if os.environ.get("STUB_CALLS"):
+    with open(os.environ["STUB_CALLS"], "a") as calls: calls.write(json.dumps(args) + "\n")
 if args[0] == "build":
     driver = pathlib.Path(args[args.index("--target-dir") + 1], "release/modmap-driver")
     driver.parent.mkdir(parents=True, exist_ok=True)
@@ -55,7 +57,7 @@ if action == "old":
 if os.environ.get("MODMAP_CFG_OUT"):
     cfg = pathlib.Path(os.environ["MODMAP_CFG_OUT"])
     proof = pathlib.Path(str(cfg) + ".invocation.json")
-    mode = os.environ.get("STUB_CFG", "ok")
+    mode = os.environ.get("STUB_CFG_" + os.environ.get("MODMAP_KIND", "").upper(), os.environ.get("STUB_CFG", "ok"))
     probes = [["feature", "h2_cfg_probe"], ["h2_probe_pair"], ["h2_probe_pair", ""],
               ["h2_probe_multi", "first"], ["h2_probe_multi", "second"],
               ["h2_probe_escape", 'quote=" slash=\\ newline=\n한글']]
@@ -75,6 +77,12 @@ if os.environ.get("MODMAP_CFG_OUT"):
     if mode == "target": atoms.remove(session[0])
     if mode == "none": sys.exit(0)
     cfg.write_text("{}" if mode == "schema" else json.dumps(sorted(atoms)))
+    if os.environ.get("MODMAP_RUN_ID"):
+        bound = dict(schema=1, run_id=os.environ["MODMAP_RUN_ID"], nonce=os.environ["MODMAP_CFG_NONCE"], atoms=sorted(atoms))
+        invocation.update(schema=1, run_id=bound["run_id"], kind=os.environ["MODMAP_KIND"], out=str(out),
+                          tsv=out.read_text() if out.exists() else "", env={"MODMAP_RUN_ID": bound["run_id"]})
+        if mode == "repost": bound["nonce"] = "0" * 32
+        if mode != "schema": cfg.write_text(json.dumps(bound))
     if mode != "no-proof": proof.write_text(json.dumps(invocation))
     if mode == "old": os.utime(cfg, ns=(0, 0))
     if mode == "old-proof": os.utime(proof, ns=(0, 0))
@@ -131,7 +139,7 @@ class Wrapper(unittest.TestCase):
         (self.root / h2.BASELINE_FILES[0]).unlink()
         # inert without a baseline: nothing runs, or only the canary, which still fails hard
         self.assertEqual(self.run_wrapper("--inert", STUB_CANARY="fail", STUB_REPO="fail"),
-                         (0, "h2-modmap: no baseline committed; inert no-op\n"))
+                         (0, "h2-modmap: no baseline committed; inert no-op; root=skipped\n"))
         code, output = self.run_wrapper("--inert", "--canary", STUB_REPO="fail")
         self.assertEqual((code, "repo map skipped" in output), (0, True), output)
         code, output = self.run_wrapper("--inert", "--canary", STUB_CANARY=drifted)
