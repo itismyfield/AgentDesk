@@ -219,12 +219,15 @@ pub(super) async fn drain_on_terminal_commit_with_applier_and_offsets(
 /// whole job — bounding the `⏳` — is done. Abort-kind markers (foreign pin)
 /// are left untouched: this commit proves nothing about the foreign prior
 /// turn, so their #3296 convergence (drain / sweep / hard cap) is preserved.
+/// The anchor's turn is over, so its pending-start record is retired too.
 pub(in crate::services::discord) fn resolve_own_claim_markers_for_visibly_completed_anchor(
     provider: &str,
     tmux_session_name: &str,
     channel_id: u64,
     anchor_message_id: u64,
 ) -> usize {
+    let key = (provider.to_string(), channel_id, anchor_message_id);
+    super::super::tui_direct_pending_start::retire_completed(key, tmux_session_name);
     let mut resolved = 0usize;
     for marker in load_for_channel(provider, channel_id) {
         if marker.tmux_session_name != tmux_session_name

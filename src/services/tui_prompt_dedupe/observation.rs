@@ -380,6 +380,39 @@ pub(crate) fn clear_external_input_relay_lease(
     true
 }
 
+/// Compare the whole session lease and clear only after a successful operation.
+/// The callback holds STATE; it must not reenter dedupe or acquire outer fences.
+pub(crate) fn with_external_input_relay_lease_if_matches<R, E>(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+    expected: Option<&ExternalInputRelayLease>,
+    operation: impl FnOnce() -> Result<R, E>,
+) -> Option<Result<R, E>> {
+    let provider = normalize_provider(provider);
+    let tmux_session_name = tmux_session_name.trim();
+    if provider.is_empty() || tmux_session_name.is_empty() || channel_id == 0 {
+        return None;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    let key = PromptKey::new(&provider, tmux_session_name);
+    let current = state
+        .external_input_relay_lease_by_tmux
+        .get(&key)
+        .map(|entry| &entry.value);
+    if current != expected
+        || current.is_some_and(|lease| lease.channel_id.is_some_and(|id| id != channel_id))
+    {
+        return None;
+    }
+    let result = operation();
+    if result.is_ok() {
+        state.external_input_relay_lease_by_tmux.remove(&key);
+    }
+    Some(result)
+}
+
 pub(crate) fn clear_external_input_relay_lease_if_matches(
     provider: &str,
     tmux_session_name: &str,

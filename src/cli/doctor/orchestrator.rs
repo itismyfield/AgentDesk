@@ -1,3 +1,8 @@
+#[cfg(target_os = "macos")]
+mod fd_usage;
+#[cfg(target_os = "macos")]
+use fd_usage::{fd_usage_near_limit, fd_usage_percent};
+
 mod health_snapshot;
 use health_snapshot::fetch_health_snapshot;
 mod provider_credentials;
@@ -2971,6 +2976,12 @@ fn launchagent_plist_nofile_limit(label: &str) -> Option<u64> {
         .ok()
 }
 
+#[cfg(not(target_os = "macos"))]
+#[allow(dead_code, reason = "Retained for cross-platform lint path resolution")]
+fn tmux_server_pids() -> Vec<u32> {
+    Vec::new()
+}
+
 #[cfg(target_os = "macos")]
 fn tmux_server_pids() -> Vec<u32> {
     let owner_marker = crate::services::tmux_common::current_tmux_owner_marker();
@@ -3043,24 +3054,6 @@ fn fd_limit_evidence(limit: FdLimitValue) -> Value {
 }
 
 #[cfg(target_os = "macos")]
-fn fd_usage_percent(open_files: u64, soft_limit: u64) -> u64 {
-    if soft_limit == 0 {
-        return 0;
-    }
-    open_files.saturating_mul(100) / soft_limit
-}
-
-#[cfg(target_os = "macos")]
-fn fd_usage_near_limit(open_files: u64, soft_limit: u64) -> bool {
-    if soft_limit == 0 {
-        return false;
-    }
-    let remaining = soft_limit.saturating_sub(open_files);
-    fd_usage_percent(open_files, soft_limit) >= FD_HEADROOM_WARN_PERCENT
-        || remaining <= FD_HEADROOM_WARN_REMAINING
-}
-
-#[cfg(target_os = "macos")]
 fn sample_usage_percent(sample: &FdUsageSample) -> Option<u64> {
     match sample.soft_limit {
         FdLimitValue::Finite(limit) => Some(fd_usage_percent(sample.open_files, limit)),
@@ -3125,6 +3118,12 @@ fn file_descriptor_evidence(
         "warn_remaining": FD_HEADROOM_WARN_REMAINING,
         "samples": sample_evidence,
     })
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(dead_code, reason = "Retained for cross-platform lint path resolution")]
+fn check_file_descriptor_headroom() -> Option<Check> {
+    None
 }
 
 #[cfg(target_os = "macos")]
@@ -3966,6 +3965,13 @@ mod profile_filter_tests {
     };
     use crate::cli::doctor::contract::{DoctorProfile, RunContext};
     use serde_json::json;
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn non_macos_fd_probes_are_empty() {
+        assert!(super::tmux_server_pids().is_empty());
+        assert!(super::check_file_descriptor_headroom().is_none());
+    }
 
     #[test]
     fn mailbox_consistency_findings_use_provider_runtime_group() {

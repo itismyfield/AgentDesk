@@ -167,6 +167,23 @@ pub(in crate::services::discord) fn settled_user_msg_ids(
         .unwrap_or_default()
 }
 
+/// Commit time (Unix ms) of each settled inbound `user_msg_id`; empty when the
+/// ledger is absent or malformed, exactly like [`settled_user_msg_ids`].
+pub(crate) fn settled_commit_ms_by_user_msg_id(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> std::collections::HashMap<u64, u64> {
+    read_ledger(provider, channel_id)
+        .map(|ledger| {
+            ledger
+                .entries
+                .into_iter()
+                .map(|entry| (entry.user_msg_id, entry.committed_at_epoch_ms))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn now_epoch_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

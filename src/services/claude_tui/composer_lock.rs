@@ -45,6 +45,30 @@ pub(crate) fn with_composer_mutation_lock<R>(_tmux_session_name: &str, f: impl F
     f()
 }
 
+/// Try the existing composer fence; contention or poison leaves the callback unrun.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub(crate) fn try_with_composer_mutation_lock<R>(
+    tmux_session_name: &str,
+    operation: impl FnOnce() -> R,
+) -> Option<R> {
+    let composer_lock = COMPOSER_MUTATION_LOCKS
+        .try_entry(tmux_session_name.to_string())?
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone();
+    let _composer_guard = composer_lock.try_lock().ok()?;
+    Some(operation())
+}
+
+#[cfg(not(unix))]
+#[allow(dead_code)]
+pub(crate) fn try_with_composer_mutation_lock<R>(
+    _tmux_session_name: &str,
+    _operation: impl FnOnce() -> R,
+) -> Option<R> {
+    None
+}
+
 /// Run a blocking hosted-turn operation under the pane's full turn lock.
 #[cfg(unix)]
 pub(crate) fn with_session_turn_lock<R>(tmux_session_name: &str, f: impl FnOnce() -> R) -> R {
@@ -64,6 +88,48 @@ mod claude_tui_composer_lock_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, mpsc};
     use std::time::Duration;
+
+    #[test]
+    fn try_composer_lock_rejects_held_and_poisoned_lock() {
+        let session = format!("composer-try-{}", uuid::Uuid::new_v4());
+        let (sent, received) = mpsc::channel();
+        let result = with_composer_mutation_lock(&session, || {
+            let session = session.clone();
+            std::thread::spawn(move || {
+                let _ = sent.send(try_with_composer_mutation_lock(&session, || 7));
+            });
+            received.recv_timeout(Duration::from_secs(1))
+        });
+        assert_eq!(result, Ok(None));
+        let _ = std::panic::catch_unwind(|| {
+            with_composer_mutation_lock(&session, || panic!("poison composer"));
+        });
+        assert_eq!(try_with_composer_mutation_lock(&session, || 7), None);
+        assert_eq!(with_composer_mutation_lock(&session, || 7), 7);
+    }
+
+    #[test]
+    fn try_composer_lock_serializes_existing_writer() {
+        let session = format!("composer-try-writer-{}", uuid::Uuid::new_v4());
+        let (started_tx, started_rx) = mpsc::channel();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let mut writer = None;
+        let result = try_with_composer_mutation_lock(&session, || {
+            let session = session.clone();
+            writer = Some(std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                with_composer_mutation_lock(&session, || {
+                    let _ = entered_tx.send(());
+                });
+            }));
+            started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            entered_rx.recv_timeout(Duration::from_millis(100))
+        });
+        assert_eq!(result, Some(Err(mpsc::RecvTimeoutError::Timeout)));
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        writer.unwrap().join().unwrap();
+        assert_eq!(try_with_composer_mutation_lock(&session, || 7), Some(7));
+    }
 
     #[test]
     fn compact_composer_lock_proceeds_while_turn_lifetime_lock_is_held() {
