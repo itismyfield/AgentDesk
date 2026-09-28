@@ -83,9 +83,7 @@ jobs:
 
   full_macos:
     name: Full tests (macos-latest)
-    # Nightly macOS always uses GitHub-hosted runners. Trusted self-hosted
-    # macOS execution is isolated in ci-macos-trusted.yml, which has no
-    # pull_request trigger and requires an org runner group.
+    # Nightly macOS uses GitHub-hosted runners.
     runs-on: macos-latest
     # #6006: ci-main.yml and ci-pr.yml already build their cargo test lanes with
     # debug information off; nightly never received it. Dropping native debug
