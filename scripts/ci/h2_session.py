@@ -21,6 +21,7 @@ PROTECTED_ENV = ("CLIPPY_ARGS", "CLIPPY_CONF_DIR", "CLIPPY_TERMINAL_WIDTH", "MOD
                  "MODMAP_CFG_NONCE", "MODMAP_RUN_ID", "MODMAP_EXPECT_MANIFEST", "MODMAP_EXPECT_PACKAGE", "MODMAP_EXPECT_LIB")
 TARGET_CFG = {"x86_64-unknown-linux-gnu": ("x86_64", "linux", "gnu", "unknown", "64"),
               "aarch64-apple-darwin": ("aarch64", "macos", "", "apple", "64")}
+LIB_KINDS = {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
 TARGET_KEYS = ("target_arch", "target_os", "target_env", "target_vendor", "target_pointer_width")
 OUTPUTS = ("session.json", "session.json.claim", "session.json.items-cfg.txt", "session.json.clippy-cfg.txt",
            "session.json.items.stdout", "session.json.items.stderr", "session.json.probe.stdout",
@@ -156,6 +157,25 @@ def source_capture(root: Path, lib: Path, conf: Path) -> tuple[dict, dict[str, b
     return dict(repo=repo, lib=collect.digest(body), config=collect.digest(collect.regular(conf / "clippy.toml"))), files
 
 
+def resolver(fail=MeasureError):
+    """Path.resolve memoized per spelling, so a link swapped mid-check cannot reclassify a target."""
+    resolved: dict[str, Path] = {}
+    def canon(name: str) -> Path:
+        if name not in resolved:
+            try:
+                resolved[name] = Path(name).resolve()
+            except RuntimeError as exc:
+                raise fail(f"cannot resolve {name}: {exc}") from exc
+        return resolved[name]
+    return canon
+
+
+def lib_artifacts(events: list[dict], package_id: str, lib: str, canon) -> list[dict]:
+    """Artifacts of the package's lib target at lib; a build script or bin sharing that file is not one."""
+    return [e for e in events if e.get("reason") == "compiler-artifact" and e.get("package_id") == package_id
+            and set(e["target"].get("kind") or ()) & LIB_KINDS and canon(e["target"]["src_path"]) == Path(lib)]
+
+
 def validate(run: Path, request: dict) -> dict:
     if list(run.glob("*.partial")):
         raise MeasureError("session has partial outputs")
@@ -188,9 +208,9 @@ def validate(run: Path, request: dict) -> dict:
     events = [json.loads(line) for line in data["clippy.jsonl"].splitlines() if line.strip()]
     if any(not isinstance(e, dict) for e in events):
         raise MeasureError("session artifact: invalid Cargo JSONL")
-    artifacts = [e for e in events if e.get("reason") == "compiler-artifact"
-                 and Path(e["target"]["src_path"]).resolve() == Path(expected["lib"]) and e["profile"]["test"] is False]
-    if len(artifacts) != 1 or artifacts[0]["package_id"] != expected["package_id"] or artifacts[0]["fresh"] is not False:
+    artifacts = [e for e in lib_artifacts(events, expected["package_id"], expected["lib"], resolver())
+                 if e["profile"]["test"] is False]
+    if len(artifacts) != 1 or artifacts[0]["fresh"] is not False:
         raise MeasureError("session artifact: expected one fresh:false artifact for the requested lib")
     cfg = proof.get("cfg")
     if (not isinstance(cfg, list) or not all(isinstance(v, str) for v in cfg) or "clippy" not in cfg

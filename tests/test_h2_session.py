@@ -416,6 +416,19 @@ class Session(unittest.TestCase):
             with self.subTest(name=name):
                 self.reject(mutate, pattern, name)
 
+    def test_non_lib_artifacts_sharing_the_lib_file_do_not_count(self):
+        def share(kind, crate_types):
+            def mutate(run, proof, claim, events):
+                other = copy.deepcopy(events[0])
+                other["target"].update(kind=kind, crate_types=crate_types, name="build-script-build")
+                events.append(other)
+            return mutate
+        self.mutate = share(["custom-build"], ["bin"])
+        self.assertEqual(self.run_session("build")["kind"], "canary-items")
+        self.mutate = share(["bin"], ["bin"])
+        self.assertEqual(self.run_session("bin")["kind"], "canary-items")
+        self.reject(share(["rlib"], ["rlib"]), "artifact", "two-libs")
+
     def test_items_are_bound_at_callback_proof_and_seal(self):
         result = self.run_session()
         run = self.root / "run"

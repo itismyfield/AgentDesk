@@ -17,7 +17,7 @@ from h2_measure import MeasureError
 KIND = "canary-items"
 SEALED = ("request.json", "session.json", "items.jsonl", "items.jsonl.sha256", "clippy.jsonl")
 UNIT = ("manifest", "package", "lib", "crate_name", "crate_types")
-LIB_KINDS = {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
+LIB_KINDS = session.LIB_KINDS
 IDENTITY = ("kind", "name", "crate_types", "src_path")
 EXEC = {"fn", "nested_fn", "trait_method", "trait_impl_method", "inherent_method", "const"}
 # Headers that own no executable code; their executable parts are separate records.
@@ -107,16 +107,8 @@ def load(path: Path, *, crate: Path) -> Items:
 
 def attribute(events: list[dict], unit: dict) -> tuple[list[dict], int]:
     """Messages of the one proved lib compilation, and how many other units' messages were set aside."""
-    resolved: dict[str, Path] = {}
-    def canon(name: str) -> Path:  # each spelling is resolved once, so a swapped link cannot reclassify
-        if name not in resolved:
-            try:
-                resolved[name] = Path(name).resolve()
-            except RuntimeError as exc:
-                raise MappingError("unsealed", f"items: cannot resolve {name}: {exc}") from exc
-        return resolved[name]
-    builds = [e for e in events if e.get("reason") == "compiler-artifact" and e.get("package_id") == unit["package_id"]
-              and set(e["target"].get("kind") or ()) & LIB_KINDS and canon(e["target"]["src_path"]) == Path(unit["lib"])]
+    canon = session.resolver(lambda detail: MappingError("unsealed", f"items: {detail}"))
+    builds = session.lib_artifacts(events, unit["package_id"], unit["lib"], canon)
     if len(builds) != 1:
         raise MappingError("provenance", f"{len(builds)} compilations of the lib; its diagnostics are not attributable")
     sealed = builds[0]["target"]
