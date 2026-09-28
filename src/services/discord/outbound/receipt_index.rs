@@ -130,6 +130,13 @@ pub(in crate::services::discord) struct ReceiptIndex {
     frontier: Option<FrontierPrefix>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum CoverageProvenance {
+    ExactReceipt,
+    FrontierPrefix,
+    Mixed,
+}
+
 impl ReceiptIndex {
     /// Pure union-coverage test for the obligation `[start, end)`.
     ///
@@ -191,6 +198,37 @@ impl ReceiptIndex {
             }
         }
         false
+    }
+
+    /// Label coverage without changing `covers`; exact union evidence takes precedence.
+    pub(in crate::services::discord) fn coverage_provenance(
+        &self,
+        provider: &ProviderKind,
+        tmux_session_name: &str,
+        generation_mtime_ns: i64,
+        obligation: (u64, u64),
+    ) -> Option<CoverageProvenance> {
+        if !self.covers(provider, tmux_session_name, generation_mtime_ns, obligation) {
+            return None;
+        }
+        let key = ReceiptProjectionKey {
+            provider: provider.clone(),
+            tmux_session_name: tmux_session_name.to_owned(),
+            generation_mtime_ns,
+        };
+        if self.receipt_ranges.get(&key).is_some_and(|ranges| {
+            ranges
+                .iter()
+                .any(|&(start, end)| start <= obligation.0 && end >= obligation.1)
+        }) {
+            Some(CoverageProvenance::ExactReceipt)
+        } else if self.frontier.is_some_and(|frontier| {
+            frontier.generation_mtime_ns == generation_mtime_ns && frontier.end >= obligation.1
+        }) {
+            Some(CoverageProvenance::FrontierPrefix)
+        } else {
+            Some(CoverageProvenance::Mixed)
+        }
     }
 
     /// Bound the frontier operand by the transcript's current length, the guard

@@ -55,7 +55,17 @@ pub(crate) struct Intervention {
     pub(crate) voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static SOURCE_CLOCK_SAMPLE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 impl Intervention {
+    #[cfg(test)]
+    pub(crate) fn source_clock_sample_hook_for_tests(hook: impl FnOnce() + 'static) {
+        SOURCE_CLOCK_SAMPLE_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
     pub(crate) fn preserve_on_cancel(&self) -> bool {
         self.source_message_queued_generations
             .iter()
@@ -63,20 +73,26 @@ impl Intervention {
     }
 
     pub(crate) fn source_message_queued_generations(&self) -> Vec<SourceMessageQueuedGeneration> {
+        #[cfg(test)]
+        if let Some(hook) = SOURCE_CLOCK_SAMPLE_HOOK.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
         let source_message_ids = if self.source_message_ids.is_empty() {
             vec![self.message_id]
         } else {
             self.source_message_ids.clone()
         };
-        if self.source_message_queued_generations.is_empty() {
-            return source_message_ids
-                .into_iter()
+        let mut owners = if self.source_message_queued_generations.is_empty() {
+            source_message_ids
+                .iter()
+                .copied()
                 .map(|message_id| {
                     SourceMessageQueuedGeneration::new(message_id, self.queued_generation)
                 })
-                .collect();
-        }
-        let mut owners = self.source_message_queued_generations.clone();
+                .collect()
+        } else {
+            self.source_message_queued_generations.clone()
+        };
         for message_id in source_message_ids {
             if !owners.iter().any(|owner| owner.message_id == message_id) {
                 owners.push(SourceMessageQueuedGeneration::new(

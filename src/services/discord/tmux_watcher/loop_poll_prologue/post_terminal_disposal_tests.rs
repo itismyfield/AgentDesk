@@ -1,6 +1,10 @@
 use super::*;
 use crate::services::discord::make_shared_data_for_tests;
 
+#[cfg(unix)]
+#[path = "post_terminal_disposal_tests/compact_summary_tests.rs"]
+mod compact_summary_tests;
+
 // PATH/root isolation follows continuation_marker_tests; no live tmux or transport.
 #[cfg(unix)]
 #[tokio::test]

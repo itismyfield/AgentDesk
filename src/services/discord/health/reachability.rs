@@ -20,6 +20,7 @@
 //! not a sealed capability.
 
 pub(in crate::services::discord) mod composite;
+pub(in crate::services::discord) mod coverage;
 pub(in crate::services::discord) mod discovery;
 pub(in crate::services::discord) mod divergence;
 pub(in crate::services::discord) mod external_verdict;
