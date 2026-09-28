@@ -33,6 +33,8 @@ R-O 방식에는 이후 [사용자 (a) 결정](https://github.com/itismyfield/Ag
 | R-O compiler 대조 | [h2_depinfo.py](../../scripts/ci/h2_depinfo.py), `sym:h2_depinfo::ro_problems` | root lib dep-info와 expanded module map, duplicate_mod 진단 대조 |
 | 잔존 walker 대조 | `sym:h2_depinfo::walker_problems` | compiled file의 realpath→modpath와 R-W 텍스트 walker의 실제 open 경로 대조 |
 | module map 수집 | [h2_modmap.py](../../scripts/ci/h2_modmap.py), `sym:h2_modmap::map_modules` | 이번 실행의 TSV 존재·신선도·형식·file module 하한 검사 |
+| 레인·공통 env | [h2_env.py](../../scripts/ci/h2_env.py), `sym:h2_env::environment`, `sym:h2_env::check_host` | 공통 정리 목록·host triple; map/driver의 wrapper 해제 및 driver 전용 bootstrap |
+| map metadata 봉인 | [h2_cfg_collect.py](../../scripts/ci/h2_cfg_collect.py), `sym:h2_cfg_collect::seal`, `sym:h2_cfg_collect::read_manifest` | Cargo 성공·동일 run·schema·신선도·하한·digest 검증 후 최종 manifest 게시/재검증 |
 | cfg 목록 진단 | [h2_cfg_compare.py](../../scripts/ci/h2_cfg_compare.py), `sym:h2_cfg_compare::compare_cfgs` | 구조화된 cfg 원자 집합의 교집합과 양방향 차이 |
 
 [modmap-driver](../../tools/modmap-driver/src/main.rs)는 `RUSTC_WORKSPACE_WRAPPER`로 root lib 컴파일을 식별하고
@@ -56,14 +58,14 @@ R-O는 compiler map을 사용하지만 **item 귀속 전체를 compiler def-path
 `rust-toolchain.toml`은 현재 1.94.1을 지정한다. CI의 `components: clippy`가 Clippy를 설치하고
 `h2_measure.sh`가 가용성을 검사한다. macOS hosted 레이블은 `macos-15`다.
 `h2_measure.sh`는 host triple을 확인하고 `CARGO_BUILD_TARGET`, `RUSTFLAGS`,
-`CARGO_ENCODED_RUSTFLAGS`를 해제하며 incremental을 끈다. root lib/default features가 측정 기준이다.
+`CARGO_ENCODED_RUSTFLAGS`, `RUSTC_BOOTSTRAP`를 해제하며 incremental을 끈다. root lib/default features가 측정 기준이다.
 env 해제만으로 Cargo config, build-script cfg, 실제 rustc argv의 일치가 증명되지는 않는다.
 재현 조건을 명시하는 것이며 모든 환경에서 같은 결과를 보장하지 않는다.
 
 cfg 비교 입력은 **원자 경계를 보존해 JSON으로 직렬화한 UTF-8 snapshot**이다.
 형식은 비어 있지 않은 배열이며 원자마다 flag는 `["unix"]`, 값이 있으면 `["target_os", "linux"]`다.
 이름은 식별자 문자열, 값은 Unicode 문자열이다. Python의 `str.isidentifier()`로 이름을 검사하며
-Rust cfg 술어나 소스 문법을 평가하지 않는다. 객체·숫자·null·고립 surrogate는 거부한다.
+Rust cfg 술어나 소스 문법을 평가하지 않는다. 아래 실행 결속 객체 이외의 객체·숫자·null·고립 surrogate는 거부한다.
 
 rustc 1.94.1의 `--print cfg`는 값을 escape하지 않는다. 값 `a"`+개행+`b="c`인 `foo` 하나와
 `foo="a"`, `b="c"` 두 원자는 같은 줄 집합을 출력할 수 있어 원문만으로 복구할 수 없다.
@@ -82,8 +84,36 @@ cfg·invocation을 사전 삭제하고 marker 이후 mtime, 이번 nonce, root/a
 Cargo event/명시적 cfg argv에 없는 세션 원자를 요구하며 동일/원자 제거 비교도 실행한다.
 Cargo JSONL과 stderr는 map 옆에 보존하고 compiler 진단은 CI stderr에도 출력한다.
 기존 Linux `H2 module map (linux, inert)` 단계의 root-skip만 inert이며 canary는 필수다.
-이 canary는 root 수집물이나 Clippy session 증거를 대신하지 않는다. 단일 수집/metadata·공통 env·
-양 레인 옵션 배선은 B2, toolchain/source/config·Clippy provenance와 receipt 결속은 PR-3b의 잔여다.
+이 canary는 root 수집물이나 Clippy session 증거를 대신하지 않는다.
+
+`h2_modmap.py --lane linux|macos`는 driver 준비→canary→root expansion 1회를 소유한다.
+`--out`은 유일한 root TSV이며 `--cfg-out`/`--meta-out`은 같은 새 run 디렉터리의 선택적 경로다.
+기본값은 `target/h2/runs/<run_id>/root/modmap.{tsv,cfg.json,meta.json}`이다.
+canary는 `<run_id>/canary/`에 kind=canary로 저장하며 root 증거로 읽을 수 없다.
+옵션 없는 B1 경로는 유지된다. B2a는 CI 호출자가 없는 opt-in 기반이다.
+B2b는 공통 env와 기존 Linux/Mac map 단계의 `--lane`을 연결하는 **동작 변경, baseline 전 root는 no-op**이다.
+두 번째 map 단계는 없다. head의 필수 잡 green·소요 시간 전후 확인이 필요하며 원복 순서는 B2b→B2a→B1이다.
+`h2_measure.sh`는 inert 조기 종료 뒤 helper를 사전 검사로 실행하고 고정된 env 명령만 적용한다.
+마지막 `exec "${PYTHON:-python3}" scripts/ci/h2_measure.py ...`를 유지해 launcher가 같은 프로세스에서 직접 계측한다.
+helper는 `h2_measure.py`를 import하거나 exec하지 않는다.
+
+결속 cfg는 `{schema:1, run_id, nonce, atoms}` 객체다. 비교기는 기존 배열과 이 객체의 atoms를 읽는다.
+원자에 가짜 cfg를 추가하지 않는다. cfg bytes 자체에 nonce/run ID를 넣어 옛 cfg의 재게시를 거부한다.
+동일 callback의 invocation은 root/argv/env/kind/output과 TSV 원문을 기록해 봉인 전 다른 TSV 접합도 거부한다.
+TSV 원문은 별도 hash 의존성을 늘리지 않는 driver 확인값이며 manifest에는 두 파일의 SHA256을 봉인한다.
+
+metadata schema 1은 kind/run ID/nonce/lane/root/host/target, source SHA/tree/dirty·입력 digest,
+Cargo.lock/config digest, rustc/Clippy 버전, 실제 argv/env/features/default-features와 build-script events·
+생성 입력 digest, 파일 경로/개수·cfg/TSV/driver/Cargo 기록 digest를 포함한다.
+helper는 compile/Cargo 호출 없이 run 기록만 검증한다. Cargo rc≠0이면 잔존 파일도 전체 무효다.
+마지막 manifest만 임시 파일→원자 rename으로 게시한다. 여러 산출물 rename은 하나의 원자 작업이 아니다.
+소비자는 `read_manifest`로 파일 bytes와 기록을 재검증하며 manifest 없는 부분 파일·symlink·다른 run을 거부한다.
+이는 신뢰된 로컬 생산자의 일관성 검사이며 모든 기록을 함께 위조하는 쓰기 주체의 인증은 아니다.
+
+map rc는 0=요청 작업 완료, 1=compile/canary/수집·검증·쓰기 실패, 2=CLI 입력 계약 오류,
+3=lane host 불일치다. baseline 전 inert 종료는 `root=skipped`이며 root manifest를 만들지 않는다.
+B2 소유 산출물은 map run의 metadata manifest다. Clippy JSON/.d와 이를 묶는 receipt 생산·소비는 3b-A 소유다.
+map session cfg와 Clippy effective cfg의 동등성·admission 활성화를 이 manifest로 주장하지 않는다.
 
 두 호스트의 결과를 모은 뒤 실행한다:
 

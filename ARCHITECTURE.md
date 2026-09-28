@@ -801,7 +801,9 @@ src/
 │   │   │   ├── removal/
 │   │   │   │   ├── boot_custody.rs
 │   │   │   │   ├── boot_custody_tests.rs
-│   │   │   │   └── boot_reaper.rs
+│   │   │   │   ├── boot_reaper.rs
+│   │   │   │   ├── custody_notice.rs
+│   │   │   │   └── custody_notice_tests.rs
 │   │   │   ├── save_store/
 │   │   │   │   ├── identity_gate/
 │   │   │   │   │   ├── runtime_stamp/
@@ -1285,6 +1287,9 @@ src/
 │   │   │   ├── tombstone.rs
 │   │   │   └── warning_tests.rs
 │   │   ├── tui_direct_pending_start/
+│   │   │   ├── tests/
+│   │   │   │   └── retire_tests.rs
+│   │   │   ├── restore_gate.rs
 │   │   │   ├── state.rs
 │   │   │   ├── tests.rs
 │   │   │   └── watcher_cancel.rs
@@ -1302,6 +1307,7 @@ src/
 │   │   │   │   └── stale_reclaim.rs
 │   │   │   ├── tests/
 │   │   │   │   ├── fenced_admission_tests.rs
+│   │   │   │   ├── retired_pending_start_claim_tests.rs
 │   │   │   │   ├── scenario_census_e2e.rs
 │   │   │   │   ├── synthetic_bridge_handoff_pg_tests.rs
 │   │   │   │   └── synthetic_terminal_ordering_tests.rs
@@ -1654,6 +1660,8 @@ src/
 │   │   ├── voice_routing.rs
 │   │   ├── voice_sensitivity.rs
 │   │   └── zombie_foreground_release.rs
+│   ├── discord_custody/
+│   │   └── tests.rs
 │   ├── dispatch_gate/
 │   │   ├── auth_profiles/
 │   │   │   └── selection_tests.rs
@@ -1950,6 +1958,7 @@ src/
 │   ├── codex_tmux_wrapper.rs
 │   ├── cswap.rs
 │   ├── discord_config_audit.rs
+│   ├── discord_custody.rs
 │   ├── discord_dm_reply_store.rs
 │   ├── disk_monitor.rs
 │   ├── dispatch_gate.rs

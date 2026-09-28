@@ -288,6 +288,7 @@ jobs:
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/stall_alert.rs'
               - 'src/services/discord/idle_recap_interaction.rs'
+              - 'src/services/discord/inflight/removal/custody_notice_tests.rs'
               - 'src/services/discord/mod.rs'
               - 'src/services/discord/relay_recovery_circuit_alert_producer.rs'
               - 'src/services/discord/relay_recovery_circuit_breaker.rs'
@@ -1798,7 +1799,7 @@ jobs:
       - name: H2 module map (linux, inert)
         env:
           RUSTC_WRAPPER: ""
-        run: python3 scripts/ci/h2_modmap.py --inert --canary
+        run: python3 scripts/ci/h2_modmap.py --lane linux --inert --canary
 
       - name: Upload maintainability audit artifact
         if: always()

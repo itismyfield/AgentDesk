@@ -106,9 +106,9 @@ def classify(root: Path, deps) -> tuple[list[tuple[str, str]], set[str]]:
                              if written.is_relative_to(r)), dep), rel))
     return inside, outside
 
-def load_modmap(path: Path) -> list[ModRow]:
+def load_modmap(path: Path, *, data: bytes | None = None) -> list[ModRow]:
     """The rows after the root; a map in any other shape (truncated, reordered, a cell short or extra) raises."""
-    lines = path.read_text(encoding="utf-8").split("\n")
+    lines = (path.read_bytes() if data is None else data).decode("utf-8").split("\n")
     if lines[:2] != [MODMAP_HEADER, MODMAP_ROOT] or lines[-1] != "":
         raise m.MeasureError(f"module map {path} lacks the header and root lib rows or its final newline")
     rows = []
