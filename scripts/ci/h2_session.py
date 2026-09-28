@@ -5,6 +5,8 @@ import json
 import os
 import re
 import subprocess
+import sys
+import time
 import tomllib
 import uuid
 from pathlib import Path
@@ -145,16 +147,98 @@ def requested_unit(crate: Path, env: dict) -> dict:
 
 
 def source_state(root: Path, lib: Path, conf: Path) -> dict:
-    return dict(repo=modmap.source_state(root), lib=collect.digest(lib.read_bytes()),
-                config=collect.digest(collect.regular(conf / "clippy.toml")))
+    return source_capture(root, lib, conf)[0]
 
 
-def source_capture(root: Path, lib: Path, conf: Path) -> tuple[dict, dict[str, bytes]]:
-    """source_state plus the absolute-path bytes it digests; a listed lib is not reread."""
-    repo, bodies = modmap.source_capture(root)
-    files = {str(root / name): body for name, body in bodies.items()}
-    body = files[str(lib)] if str(lib) in files else lib.read_bytes()
-    return dict(repo=repo, lib=collect.digest(body), config=collect.digest(collect.regular(conf / "clippy.toml"))), files
+def source_capture(root: Path, lib: Path, conf: Path) -> tuple[dict, dict[str, bytes], dict[str, list[int]]]:
+    """source_state, the absolute-path bytes it digests and their stats; a listed lib is not reread."""
+    try:
+        repo, bodies, stats = modmap.source_capture(root)
+        files = {str(root / name): body for name, body in bodies.items()}
+        stats = {str(root / name): stat for name, stat in stats.items()}
+        config = conf / "clippy.toml"
+        if config.absolute() != config.resolve() or not config.is_file():
+            raise MeasureError(f"session config {config} is not a regular canonical file")
+        for path in (lib, config):
+            if str(path) not in files:
+                files[str(path)], stats[str(path)] = modmap.read_stable(path)
+    except modmap.ModmapError as exc:
+        raise MeasureError(f"session source capture: {exc}") from exc
+    return (dict(repo=repo, lib=collect.digest(files[str(lib)]), config=collect.digest(files[str(config)])),
+            files, stats)
+
+
+def probe_ctime(fd: int) -> int:
+    return os.fstat(fd).st_ctime_ns
+
+
+def clock_probe(path: Path, *, advances: int = 2, budget: float = 5.0) -> dict:
+    """Rewrite one unlisted file until its ctime advances; a later write to any fenced file then gets a later ctime."""
+    seen, writes, deadline = [], 0, time.monotonic() + budget
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        while len(seen) <= advances and time.monotonic() < deadline:
+            os.pwrite(fd, b"fence\n", 0)
+            writes, stamp = writes + 1, probe_ctime(fd)
+            if seen and stamp < seen[-1]:
+                raise MeasureError("session fence: ctime went backwards")
+            if not seen or stamp != seen[-1]:
+                seen.append(stamp)
+        dev = os.fstat(fd).st_dev
+    finally:
+        os.close(fd)
+        path.unlink()
+    probe = dict(dev=dev, ctimes=seen, writes=writes, same_tick=writes - len(seen))
+    check_probe(probe)
+    return probe
+
+
+def check_probe(probe) -> int:
+    """The finest ctime step the probe saw; no advance or whole-second stamps cannot separate write and restore."""
+    ctimes = probe.get("ctimes") if isinstance(probe, dict) else None
+    if (not isinstance(ctimes, list) or len(ctimes) < 3 or any(type(c) is not int for c in ctimes)
+            or type(probe.get("dev")) is not int or any(b <= a for a, b in zip(ctimes, ctimes[1:]))):
+        raise MeasureError(f"session fence: ctime did not advance on this filesystem ({probe!r})")
+    step = min(b - a for a, b in zip(ctimes, ctimes[1:]))
+    if all(c % 1_000_000_000 == 0 for c in ctimes) or step >= 1_000_000_000:
+        raise MeasureError(f"session fence: ctime resolution is whole seconds ({ctimes}); refusing the fence")
+    return step
+
+
+def check_fence(fence, files_read: dict[str, bytes]) -> None:
+    """The sealed stats cover exactly the captured files, on the probed filesystem, all older than the probe."""
+    if not isinstance(fence, dict) or not isinstance(fence.get("files"), dict) or not fence["files"]:
+        raise MeasureError("session fence: no stat list")
+    check_probe(fence.get("probe"))
+    files, probe = fence["files"], fence["probe"]
+    if set(files) != set(files_read):
+        raise MeasureError("session fence: stat list differs from the captured files")
+    for name, stat in files.items():
+        if not isinstance(stat, list) or len(stat) != len(modmap.STAT) or any(type(v) is not int for v in stat):
+            raise MeasureError(f"session fence: malformed stat for {name}")
+        if stat[2] != len(files_read[name]):
+            raise MeasureError(f"session fence: {name} stat size differs from its captured bytes")
+        if stat[0] != probe["dev"]:
+            raise MeasureError(f"session fence: {name} is not on the probed filesystem")
+        if stat[4] >= probe["ctimes"][-1]:
+            raise MeasureError(f"session fence: {name} changed after the clock probe")
+
+
+def fence_marker(fence: dict) -> dict:
+    return dict(held=True, files=collect.digest(json.dumps(fence["files"], sort_keys=True).encode()),
+                resolution_ns=check_probe(fence["probe"]))
+
+
+def check_fence_end(fence: dict) -> None:
+    """Any write since capture moved ctime, and a replacement moved the inode, even if the bytes came back."""
+    for name, stat in sorted(fence["files"].items()):
+        try:
+            now = modmap.stat_of(name)
+        except OSError:
+            now = None
+        if now != stat:
+            fields = "removed" if now is None else ",".join(f for f, a, b in zip(modmap.STAT, stat, now) if a != b)
+            raise MeasureError(f"session fence: {name} was written during Cargo ({fields})")
 
 
 def resolver(fail=MeasureError):
@@ -243,12 +327,16 @@ def validate(run: Path, request: dict) -> dict:
                 raise MeasureError("session argv target mismatch")
     if json.loads(data["cargo.json"])["rc"] != 0:
         raise MeasureError("session Cargo failed")
-    if source_state(Path(request["repo"]), Path(expected["lib"]), Path(request["conf_dir"])) != request["source"]:
+    check_fence_end(request["fence"])
+    state, files, _ = source_capture(Path(request["repo"]), Path(expected["lib"]), Path(request["conf_dir"]))
+    if state != request["source"]:
         raise MeasureError("session source changed")
+    check_fence(request["fence"], files)
     data["request.json"] = request_bytes
     return dict(schema=collect.SCHEMA, kind="canary-items", manifest=str(run / "manifest.json"), run_dir=str(run),
                 root=unit["root"], lane=request["lane"], run_id=request["run_id"], nonce=request["nonce"],
-                request=request, proof=proof, digests={name: collect.digest(body) for name, body in data.items()})
+                request=request, proof=proof, fence=fence_marker(request["fence"]),
+                digests={name: collect.digest(body) for name, body in data.items()})
 
 
 def session(root: Path, crate: Path, run_dir: Path, conf_dir: Path, lane: str, *, extra=(),
@@ -269,10 +357,16 @@ def session(root: Path, crate: Path, run_dir: Path, conf_dir: Path, lane: str, *
         run.mkdir(parents=True, exist_ok=True)
         (run / "start").touch()
         nonce, run_id = uuid.uuid4().hex, uuid.uuid4().hex
+        os.utime(unit["lib"], None)
+        probe = clock_probe(run / "fence.probe")
+        print(f"h2-session: ctime fence probe {probe['writes']} writes, step {check_probe(probe)} ns, "
+              f"{probe['same_tick']} same-tick rewrites", file=sys.stderr)
+        state, files, stats = source_capture(root, Path(unit["lib"]), conf_dir)
+        fence = dict(files=stats, probe=probe)
+        check_fence(fence, files)
         request = dict(schema=SCHEMA, kind="canary-items", unit=unit, repo=str(root), conf_dir=str(conf_dir),
                        run_id=run_id, nonce=nonce, lane=lane, host=host, target=h2_env.LANES[lane], toolchain=toolchain,
-                       cargo_config=configs,
-                       source=source_state(root, Path(unit["lib"]), conf_dir))
+                       cargo_config=configs, source=state, fence=fence)
         flags = ["--cap-lints", "warn"] + [v for lint in (*LINTS, *RO_LINTS) for v in ("--force-warn", lint)]
         env.update(RUSTC_WORKSPACE_WRAPPER=str(driver), MODMAP_CLIPPY_DRIVER=toolchain["clippy_driver"],
                    CLIPPY_ARGS="__CLIPPY_HACKERY__".join([*flags, ""]), CLIPPY_TERMINAL_WIDTH="0",
@@ -281,7 +375,6 @@ def session(root: Path, crate: Path, run_dir: Path, conf_dir: Path, lane: str, *
                    **{f"MODMAP_EXPECT_{k.upper()}": unit[k] for k in ("manifest", "package", "lib")})
         request["protected_env"] = {key: env[key] for key in PROTECTED_ENV}
         collect.write_json(run / "request.json", request)
-        os.utime(unit["lib"], None)
         if cargo_config(crate, env) != configs:
             raise MeasureError("session Cargo config changed")
         argv = ["cargo", "check", "--lib", "--message-format=json", "--package", unit["package_id"], *extra]
