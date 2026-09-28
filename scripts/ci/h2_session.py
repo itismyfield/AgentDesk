@@ -351,15 +351,15 @@ def read_maps(pid: int):
     return {short.uid, short.ruid, short.svuid}, regions
 
 
-def describe(pid: int) -> str:
-    """Name and gids of a Linux process whose maps were unreadable, next to this scanner's gids."""
+def user_manager(pid: int, uids: set) -> bool:
+    """The uid's systemd user manager, whose maps stay unreadable: PPid 1 in its user@ unit's init.scope."""
     try:
-        status = (PROC_ROOT / str(pid) / "status").read_text(errors="replace")
+        status, cgroup = ((PROC_ROOT / str(pid) / name).read_text() for name in ("status", "cgroup"))
     except OSError:
-        return ""
-    name, gids = (re.search(rf"^{key}:\s*(.*)$", status, re.M) for key in ("Name", "Gid"))
-    return (f"; name {name.group(1) if name else '?'}, gids {gids.group(1).split() if gids else '?'},"
-            f" scanner gids {sorted({os.getgid(), os.getegid()})}")
+        return False
+    fields, (uid, *rest) = dict(line.split(":\t", 1) for line in status.splitlines() if ":\t" in line), sorted(uids)
+    return sys.platform == "linux" and not rest and fields.get("Name") == "systemd" and fields.get("PPid") == "1" \
+        and f"0::/user.slice/user-{uid}.slice/user@{uid}.service/init.scope" in cgroup.splitlines()
 
 
 def mapping_guard(stats: dict[str, list[int]], *, rounds: int = 10) -> dict:
@@ -369,7 +369,7 @@ def mapping_guard(stats: dict[str, list[int]], *, rounds: int = 10) -> dict:
     ids, me = {tuple(stat[:2]) for stat in stats.values()}, os.getuid()
     modes = [os.stat(name) for name in stats]
     owners, loose = {st.st_uid for st in modes}, any(st.st_mode & 0o022 for st in modes)
-    seen, counts = set(), dict(processes=0, root=0, foreign=0)
+    seen, counts, managers = set(), dict(processes=0, root=0, foreign=0), []
     for _ in range(rounds):
         fresh = set(list_pids()) - seen
         if not fresh:
@@ -382,8 +382,10 @@ def mapping_guard(stats: dict[str, list[int]], *, rounds: int = 10) -> dict:
             uids, regions = found
             if regions is None:
                 if 0 not in uids and (me in uids or loose or uids & owners):
-                    raise MeasureError(f"session fence: cannot read the mappings of process {pid} (uids {sorted(uids)}"
-                                       f"{describe(pid)})")
+                    if not user_manager(pid, uids):
+                        raise MeasureError(f"session fence: cannot read the mappings of process {pid} (uids {sorted(uids)})")
+                    managers.append([pid, "systemd"])
+                    continue
                 counts["root" if 0 in uids else "foreign"] += 1
                 continue
             counts["processes"] += 1
@@ -392,7 +394,7 @@ def mapping_guard(stats: dict[str, list[int]], *, rounds: int = 10) -> dict:
                     raise MeasureError(f"session fence: process {pid} maps {path} shared and writable")
     else:
         raise MeasureError("session fence: processes kept appearing during the mapping scan")
-    return dict(status="checked", platform=sys.platform, **counts)
+    return dict(status="checked", platform=sys.platform, **counts, user_managers=managers)
 
 
 def check_fence(fence, files_read: dict[str, bytes], root: Path) -> None:
