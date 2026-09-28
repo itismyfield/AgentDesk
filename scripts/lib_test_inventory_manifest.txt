@@ -9124,8 +9124,9 @@ services::tui_o::shadow::diff::tests::normalized_containment_is_format_only_and_
 services::tui_o::shadow::diff::tests::one_legacy_occurrence_is_consumed_by_one_unit_only
 services::tui_o::shadow::metrics::tests::the_derive_reason_for_an_oversized_split_piece_counts_as_split_over_limit
 services::tui_o::shadow::report::tests::a_complete_window_passes_counting_turns_not_units_and_skipping_backlog
+services::tui_o::shadow::report::tests::a_tap_loss_is_dated_by_the_span_since_the_previous_collection
 services::tui_o::shadow::report::tests::a_thread_bound_in_the_window_stays_covered_after_a_restart_or_unbind
-services::tui_o::shadow::report::tests::a_timeless_tap_gap_counts_by_its_storage_time_until_the_last_judgement
+services::tui_o::shadow::report::tests::an_observer_restart_before_the_last_judgement_fails_the_window
 services::tui_o::shadow::report::tests::operator_classification_resolves_listed_diffs_and_rejects_bad_input
 services::tui_o::shadow::report::tests::population_gaps_fail_while_unreadable_history_only_warns
 services::tui_o::shadow::report::tests::samples_count_only_units_sealed_inside_the_window_boundary
