@@ -35,14 +35,19 @@ PATH_ATTR_ALLOWED: frozenset[str] = frozenset()
 # R-E: low-level tmux owner API inventory; each pub fn is EXEC (clippy.toml) or a non-exec helper.
 INVENTORY_FILES = ("src/services/platform/tmux.rs", "src/services/platform/tmux/availability.rs",
                    "src/services/platform/tmux/liveness.rs")
+# pub(super) Command preparer for the owner runner; reclassify as EXEC if visibility widens.
 NONEXEC = frozenset(f"agentdesk::services::platform::tmux::availability::{name}" for name in (
-    "mark_available_from_live_session", "invalidate_cache", "cached_unavailable_due_to_missing"))
+    "mark_available_from_live_session", "invalidate_cache", "cached_unavailable_due_to_missing")) | frozenset({
+        "agentdesk::services::platform::tmux::liveness::prepared_tmux_command"})
 PS = frozenset(f"agentdesk::services::platform::tmux::{name}" for name in ("read_process_args", "process_start_time"))
 SUBPROC_PATHS = frozenset({"std::process::Command::new", "tokio::process::Command::new"})
 W_TYPES = frozenset({"agentdesk::services::codex_tui::input::TmuxTuiActionExecutor",
                      "agentdesk::services::claude_tui::tui_relay::TmuxSendBackend"})
 # Hand-kept entries allowed to have no diagnostic in a lane; the data PR pins these.
-KNOWN_UNREFERENCED: dict[str, frozenset[str]] = {lane: frozenset() for lane in m.LANES}
+# Owner EXEC APIs with no production callers.
+KNOWN_UNREFERENCED: dict[str, frozenset[str]] = {lane: frozenset({
+    "agentdesk::services::platform::tmux::kill_session_checked",
+    "agentdesk::services::platform::tmux::get_option"}) for lane in m.LANES}
 # H9: files no measured lane compiles; they must not mention tmux at all.
 WINDOWS_ONLY_FILES = ("src/runtime_layout/windows_links.rs",)
 
@@ -130,6 +135,56 @@ def owner_pub_fns(root: Path, rel: str, modpath: str) -> set[str]:
         found.add("::".join([modpath, *(registrable or names)]))
     return found
 
+def doc_value_ranges(code: str) -> list[tuple[int, int]]:
+    """Locate doc RHS spans in balanced attributes, using the literal/comment-free code view."""
+    ranges, consumed = [], 0
+    for attr in re.finditer(r"#\s*!?\s*\[", code):
+        if attr.start() < consumed:
+            continue
+        stack, pairs = [], {}
+        for pos in range(attr.end() - 1, len(code)):
+            token = code[pos]
+            if token in "([{":
+                stack.append(pos)
+            elif token in ")]}":
+                if not stack or code[stack[-1]] != {")": "(", "]": "[", "}": "{"}[token]:
+                    break
+                pairs[stack.pop()] = pos
+                if not stack:
+                    break
+        if attr.end() - 1 not in pairs:
+            break  # No exemptions in or beyond an attribute with uncertain boundaries.
+        end = pairs[attr.end() - 1]
+        consumed = end + 1
+
+        def parts(start: int, stop: int) -> list[tuple[int, int]]:
+            result, begin, pos = [], start, start
+            while pos < stop:
+                if pos in pairs:
+                    pos = pairs[pos] + 1
+                    continue
+                if code[pos] == ",":
+                    result.append((begin, pos))
+                    begin = pos + 1
+                pos += 1
+            return [*result, (begin, stop)]
+
+        pending = [(attr.end(), end)]
+        while pending:
+            start, stop = pending.pop()
+            meta = code[start:stop]
+            doc = re.match(r"\s*doc\s*=", meta)
+            if doc and len(parts(start, stop)) == 1:
+                ranges.append((start + doc.end(), stop))
+            cfg = re.match(r"\s*cfg_attr\s*\(", meta)
+            if cfg:
+                opening = start + cfg.end() - 1
+                closing = pairs[opening]
+                if not code[closing + 1:stop].strip():
+                    # The first argument is a predicate, never an attribute value.
+                    pending.extend(parts(opening + 1, closing)[1:])
+    return ranges
+
 def owner_shape_problems(root: Path) -> list[str]:
     """R-E/R-O: no macro_rules!/item-level macro in any owner file; no trait default method in the owner API files.
     Review r6: a macro can synthesize `#[path]` (`#[$attr]`) that has_path_attr cannot see, so it is refused, not expanded."""
@@ -139,10 +194,12 @@ def owner_shape_problems(root: Path) -> list[str]:
             continue
         code = production_views(root / rel)[0]
         items = m.SourceFile(code).items
+        doc_values = doc_value_ranges(code)
         problems += [f"{'R-E' if rel in INVENTORY_FILES else 'R-O'}: {rel} uses item-level macro "
                      f"`{call.group(1) or call.group(2)}!`; owner files must be plain items"
                      for call in ITEM_MACRO_RE.finditer(code)
-                     if call.group(1) or not any(s <= call.start() <= e for s, e, _, _ in items)]
+                     if call.group(1) or (not any(s <= call.start() < e for s, e in doc_values)
+                                         and not any(s <= call.start() <= e for s, e, _, _ in items))]
         if rel not in INVENTORY_FILES:
             continue
         # a fn with a body whose parent scope is a trait declared here is a default method
@@ -331,7 +388,8 @@ def base_state(root: Path, rev: str) -> tuple[dict | None, dict, str | None]:
                 (Path(tmp) / rel).write_text(text, encoding="utf-8")
         return m.load_baseline(Path(tmp)), m.load_config(Path(tmp) / "clippy.toml"), git_show(root, rev, ADMISSIONS_FILE)
 
-def evaluate(root: Path, lane: str, base_rev: str, lines: list[str], modmap: Path) -> list[str]:
+def evaluate(root: Path, lane: str, base_rev: str, lines: list[str], modmap: Path,
+             *, clippy_config: Path | None = None) -> list[str]:
     head = m.load_baseline(root)
     base, base_config, base_admissions = base_state(root, base_rev)
     if base is None:
@@ -339,9 +397,9 @@ def evaluate(root: Path, lane: str, base_rev: str, lines: list[str], modmap: Pat
     if not any(s == "W" for s, _ in base_config.values()):
         return [f"base {base_rev} clippy.toml has no H2 W entries; rebase onto a main that has them"]
     config = m.load_config(root / "clippy.toml")
-    result = m.measure(root, lines, config)
+    result = m.measure(root, lines, m.lane_config(config, lane))
     problems = zero_rules(root) + owner_shape_problems(root) + untagged_entries(root / "clippy.toml")
-    problems += h2_depinfo.ro_problems(root, lines, modmap)
+    problems += h2_depinfo.ro_problems(root, lines, modmap, clippy_config=clippy_config)
     problems += m.compare(result["rows"], head, lane)
     if result["total"] < m.LIVENESS_FLOOR:
         problems.append(f"only {result['total']} H2 diagnostics (< liveness floor {m.LIVENESS_FLOOR})")
@@ -373,8 +431,13 @@ def main(argv=None) -> int:
     if not args.base or not args.modmap:
         parser.error("--base and --modmap are required once a baseline exists")
     try:
-        lines = args.json.read_text(encoding="utf-8").splitlines() if args.json else m.run_clippy(root, None)
-        problems = evaluate(root, args.lane, args.base, lines, args.modmap)
+        config = m.load_config(root / "clippy.toml")
+        if args.json:
+            lines = args.json.read_text(encoding="utf-8").splitlines()
+            problems = evaluate(root, args.lane, args.base, lines, args.modmap)
+        else:
+            with m.lane_clippy_run(root, config, args.lane) as (lines, clippy_config):
+                problems = evaluate(root, args.lane, args.base, lines, args.modmap, clippy_config=clippy_config)
     except (m.MeasureError, AdmissionError) as exc:
         problems = [str(exc)]
     for problem in problems:

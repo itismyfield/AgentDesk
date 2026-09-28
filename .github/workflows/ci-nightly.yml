@@ -83,9 +83,7 @@ jobs:
 
   full_macos:
     name: Full tests (macos-latest)
-    # Nightly macOS always uses GitHub-hosted runners. Trusted self-hosted
-    # macOS execution is isolated in ci-macos-trusted.yml, which has no
-    # pull_request trigger and requires an org runner group.
+    # Nightly macOS uses GitHub-hosted runners.
     runs-on: macos-latest
     # #6006: ci-main.yml and ci-pr.yml already build their cargo test lanes with
     # debug information off; nightly never received it. Dropping native debug
@@ -241,6 +239,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # 30 minutes is the old 15 + 15 arithmetic budget, not measured runtime: selected lib tests grow 385 -> 636 and PG-connected tests 276 -> 422 under `--test-threads=1`.
+      # `--lib` like `just test-postgres`: the PG filter selects nothing elsewhere, and building
+      # all targets at once got the runner killed for memory (exit 143, #4245). e2e runs below.
       - name: cargo test (PostgreSQL bootstrap and routes)
         id: pg_cargo_test
         timeout-minutes: 30
@@ -281,7 +281,12 @@ jobs:
             fi
           fi
           source scripts/ci/non-pg-test-filter.sh
-          cargo test --all-targets -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1
+          cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1
+
+      # The server refuses to boot without PostgreSQL, so the e2e smoke suite runs here.
+      - name: cargo test (e2e smoke against PostgreSQL)
+        timeout-minutes: 20
+        run: cargo test --test e2e -- --test-threads=1
 
       - name: Verify PostgreSQL resource diagnostics
         if: always() && github.event_name == 'workflow_dispatch' && inputs.resource_diagnostics == true

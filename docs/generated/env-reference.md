@@ -10,7 +10,7 @@ comment adjacent to that site (blank when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 89
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 90
 - Platform and third-party variables: 27
 
 ## AgentDesk variables
@@ -31,9 +31,10 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs:6` (+1 more) |  |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs:34` (+1 more) | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
 | `ADK_THREAD_LOCK_WAIT_STARTED` | `src/cli/discord_thread_create_lock.rs:549` |  |
-| `ADK_VOICE_KEEP_WAV` | `src/voice/config.rs:135` | `keep_recordings` 또는 환경변수 `ADK_VOICE_KEEP_WAV` 에 따라 utterance wav / segment / transcript sidecar 를 보존할지 결정한다 (#2156). |
+| `ADK_VOICE_KEEP_WAV` | `src/voice/config.rs:138` | `keep_recordings` 또는 환경변수 `ADK_VOICE_KEEP_WAV` 에 따라 utterance wav / segment / transcript sidecar 를 보존할지 결정한다 (#2156). |
 | `ADK_VOICE_SILENCE` | `src/services/discord/voice_barge_in/foreground_decision.rs:3` |  |
 | `AGENTDESK_API_URL` | `src/cli/client.rs:14` (+1 more) | `env_hint` names the environment variable(s) the *caller's* `api_base()` actually honors — client.rs resolves `AGENTDESK_API_URL` only, while monitoring.rs pre… |
+| `AGENTDESK_BINDING_CONTEXT` | `src/services/tui_prompt_dedupe/binding_context.rs:106` | Hook capture reads this value without consulting mutable markers. |
 | `AGENTDESK_CATCH_UP_POLL_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs:414` |  |
 | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` | `src/services/discord/catch_up.rs:551` | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` overrides the gap (0 disables — used by tests and by operators who want the old unthrottled behaviour). |
 | `AGENTDESK_CLAUDE_PATH` | `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs:162` | Dispatched turns must not reach a host `claude` or host config: a real CLI rejects the synthetic resume id and triggers a stale-resume re-dispatch. |
@@ -49,8 +50,8 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_DCSERVER_LABEL` | `src/cli/dcserver.rs:18` (+2 more) |  |
 | `AGENTDESK_DCSERVER_LOG_MAX_BYTES` | `src/logging.rs:264` |  |
 | `AGENTDESK_DCSERVER_LOG_MAX_FILES` | `src/logging.rs:272` |  |
-| `AGENTDESK_DELIVERY_RECORD_AUTHORITY` | `src/services/discord/outbound/delivery_record.rs:1282` | #3089 B2b read-authority flag (`AGENTDESK_DELIVERY_RECORD_AUTHORITY`, OnceLock, compiled default ON since #5071 T1 S8-2). |
-| `AGENTDESK_DELIVERY_RECORD_SHADOW` | `src/services/discord/outbound/delivery_record.rs:1211` | #3089 B1 shadow-write flag (`AGENTDESK_DELIVERY_RECORD_SHADOW`, OnceLock, default OFF), with its provenance. |
+| `AGENTDESK_DELIVERY_RECORD_AUTHORITY` | `src/services/discord/outbound/delivery_record.rs:1277` | #3089 B2b read-authority flag (`AGENTDESK_DELIVERY_RECORD_AUTHORITY`, OnceLock, compiled default ON since #5071 T1 S8-2). |
+| `AGENTDESK_DELIVERY_RECORD_SHADOW` | `src/services/discord/outbound/delivery_record.rs:1206` | #3089 B1 shadow-write flag (`AGENTDESK_DELIVERY_RECORD_SHADOW`, OnceLock, default OFF), with its provenance. |
 | `AGENTDESK_DISCORD_API_BASE_URL` | `src/services/dispatches/discord_delivery/transport.rs:192` |  |
 | `AGENTDESK_DISCORD_HIGH_RISK_ENABLED` | `src/services/discord/commands/command_policy.rs:272` | - `high_risk_enabled_via_env` — explicit opt-in via `AGENTDESK_DISCORD_HIGH_RISK_ENABLED=1`. |
 | `AGENTDESK_E2E_CHANNEL_IDS` | `src/services/discord/e2e_control.rs:22` (+1 more) | The HTTP route subtree is mounted only when `AGENTDESK_E2E_CONTROL=1` was present when dcserver started, and every operation is restricted to channel IDs captu… |
@@ -58,17 +59,17 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_GH_PATH` | `src/github/mod.rs:20` (+1 more) |  |
 | `AGENTDESK_HEADLESS_DISCORD_NONCE` | `src/services/discord/outbound/manual_delivery/headless_nonce.rs:8` (+1 more) |  |
 | `AGENTDESK_HEADLESS_DURABLE_OUTBOX` | `src/services/discord/turn_bridge/headless_delivery/durable_outbox.rs:8` (+1 more) |  |
-| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_PARENT_TEST` | `src/services/claude_tui/hook_relay.rs:36` |  |
-| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_TEST_ELAPSED_PATH` | `src/services/claude_tui/hook_relay.rs:38` |  |
-| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_TEST_RELEASE_PATH` | `src/services/claude_tui/hook_relay.rs:41` |  |
-| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_WORKER` | `src/services/claude_tui/hook_relay.rs:32` (+1 more) |  |
-| `AGENTDESK_HOOK_RELAY_NON_WAIT_PARENT_TEST` | `src/services/claude_tui/hook_relay.rs:44` |  |
-| `AGENTDESK_HOOK_RELAY_NON_WAIT_WORKER` | `src/services/claude_tui/hook_relay.rs:33` (+1 more) |  |
-| `AGENTDESK_HOOK_RELAY_TEST_ELAPSED_PATH` | `src/services/claude_tui/hook_relay.rs:48` |  |
-| `AGENTDESK_HOOK_RELAY_TEST_ENDPOINT` | `src/services/claude_tui/hook_relay.rs:46` |  |
-| `AGENTDESK_HOOK_RELAY_TEST_MUTATION` | `src/services/claude_tui/hook_relay/ordered_queue.rs:41` (+1 more) |  |
-| `AGENTDESK_HOOK_RELAY_TEST_STDOUT_PATH` | `src/services/claude_tui/hook_relay.rs:50` |  |
-| `AGENTDESK_INSTANCE_ID` | `src/services/cluster/node_registry.rs:672` (+1 more) | Resolve the self instance_id, preferring the value the cluster bootstrap registered (config-driven if present), falling back to the env-var/hostname pair only… |
+| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_PARENT_TEST` | `src/services/claude_tui/hook_relay.rs:37` |  |
+| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_TEST_ELAPSED_PATH` | `src/services/claude_tui/hook_relay.rs:39` |  |
+| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_TEST_RELEASE_PATH` | `src/services/claude_tui/hook_relay.rs:42` |  |
+| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_WORKER` | `src/services/claude_tui/hook_relay.rs:33` (+1 more) |  |
+| `AGENTDESK_HOOK_RELAY_NON_WAIT_PARENT_TEST` | `src/services/claude_tui/hook_relay.rs:45` |  |
+| `AGENTDESK_HOOK_RELAY_NON_WAIT_WORKER` | `src/services/claude_tui/hook_relay.rs:34` (+1 more) |  |
+| `AGENTDESK_HOOK_RELAY_TEST_ELAPSED_PATH` | `src/services/claude_tui/hook_relay.rs:49` |  |
+| `AGENTDESK_HOOK_RELAY_TEST_ENDPOINT` | `src/services/claude_tui/hook_relay.rs:47` |  |
+| `AGENTDESK_HOOK_RELAY_TEST_MUTATION` | `src/services/claude_tui/hook_relay/ordered_queue.rs:42` (+1 more) |  |
+| `AGENTDESK_HOOK_RELAY_TEST_STDOUT_PATH` | `src/services/claude_tui/hook_relay.rs:51` |  |
+| `AGENTDESK_INSTANCE_ID` | `src/services/cluster/node_registry.rs:672` (+2 more) | Resolve the self instance_id, preferring the value the cluster bootstrap registered (config-driven if present), falling back to the env-var/hostname pair only… |
 | `AGENTDESK_KAKAO_ACCOUNTS` | `src/services/kakao.rs:35` (+1 more) |  |
 | `AGENTDESK_KAKAO_CALENDAR_ACCOUNTS` | `src/services/kakao/account.rs:21` | Separate allowlist: enabling calendar never implicitly grants all message accounts. |
 | `AGENTDESK_KAKAO_CALENDAR_ENABLED` | `src/services/kakao/account.rs:10` |  |
@@ -85,11 +86,11 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_POLICY_HARDENING` | `src/engine/loader.rs:67` (+1 more) |  |
 | `AGENTDESK_POLICY_TRUST_ENFORCE` | `src/engine/loader.rs:61` |  |
 | `AGENTDESK_POLICY_TRUST_OVERRIDE` | `src/engine/loader.rs:55` |  |
-| `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES` | `src/config.rs:620` | `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES` accepts `5` or `60`; anything else (including the variable being unset) returns `None`. |
+| `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES` | `src/config.rs:622` | `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES` accepts `5` or `60`; anything else (including the variable being unset) returns `None`. |
 | `AGENTDESK_PRUNE_GLOBAL_SLASH_COMMANDS` | `src/services/discord/runtime_bootstrap/framework_setup.rs:284` |  |
 | `AGENTDESK_PYTHON3_PATH` | `src/engine/ops/runtime_ops.rs:18` |  |
 | `AGENTDESK_QUEUE_EXIT_CLEAR_RETRY_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs:492` |  |
-| `AGENTDESK_REBIND_ORIGIN_DEADLINE_SECS` | `src/services/discord/inflight/rebind_reap.rs:166` | #3581: resolve the rebind-origin reap deadline from `AGENTDESK_REBIND_ORIGIN_DEADLINE_SECS` (clamped to [`REBIND_ORIGIN_DEADLINE_SECS_MIN`]), falling back to [… |
+| `AGENTDESK_REBIND_ORIGIN_DEADLINE_SECS` | `src/services/discord/inflight/rebind_reap.rs:169` | #3581: resolve the rebind-origin reap deadline from `AGENTDESK_REBIND_ORIGIN_DEADLINE_SECS` (clamped to [`REBIND_ORIGIN_DEADLINE_SECS_MIN`]), falling back to [… |
 | `AGENTDESK_RECOVERY_ANCHOR_REPOST` | `src/services/discord/recovery_paths/shared.rs:243` | #3610 PR-2: gate for the recovery anchor-repost fallback (`AGENTDESK_RECOVERY_ANCHOR_REPOST`). |
 | `AGENTDESK_RELAY_CIRCUIT_STAMP` | `src/services/discord/relay_recovery_circuit_alert_producer.rs:19` (+1 more) |  |
 | `AGENTDESK_RELEASE_TMUX_SESSION` | `src/cli/dcserver.rs:19` (+1 more) |  |
@@ -103,7 +104,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_SOURCE_ZPROFILE` | `src/services/routines/migrated.rs:619` |  |
 | `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/mod.rs:509` | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |
 | `AGENTDESK_TEST_POSTGRES_ACQUIRE_TIMEOUT_MS` | `src/db/postgres.rs:1045` (+1 more) | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
-| `AGENTDESK_TOKEN` | `src/cli/run.rs:142` |  |
+| `AGENTDESK_TOKEN` | `src/cli/run.rs:143` |  |
 | `AGENTDESK_VOICE_REQUIRE_ALIASES` | `src/services/discord_config_audit.rs:206` | - On collision when `AGENTDESK_VOICE_REQUIRE_ALIASES=1`: return an `Err` describing the collision so callers can choose to fail fast. |
 | `AGENTDESK_WORKSPACE_ROOT` | `src/services/routines/migrated.rs:309` (+1 more) |  |
 
@@ -116,7 +117,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `CARGO_MANIFEST_DIR` | `src/services/maintenance/jobs/target_sweep.rs:55` | Order matters: `CARGO_MANIFEST_DIR` is set by cargo during dev/test runs (resolving the actual checkout) but is UNSET in the deployed release binary, so it cle… |
 | `CLAUDE_CONFIG_DIR` | `src/services/claude_tui/hook_output_guard.rs:57` (+3 more) | The Claude home this host reads rollout transcripts under, honouring the `CLAUDE_CONFIG_DIR` override. |
 | `CODEX_HOME` | `src/services/codex_tui/rollout_tail.rs:173` | The Codex home this host reads rollouts under, honouring the `CODEX_HOME` override. |
-| `COKACDIR_DEBUG` | `src/services/claude.rs:251` | Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var. |
+| `COKACDIR_DEBUG` | `src/services/claude.rs:262` | Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var. |
 | `COMPUTERNAME` | `src/services/tmux_common.rs:1142` |  |
 | `DATABASE_URL` | `src/db/postgres.rs:1009` |  |
 | `GEMINI_CLIENT_ID` | `src/server/mod.rs:1439` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
@@ -133,7 +134,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs:483` (+1 more) |  |
 | `QWEN_CODE_SYSTEM_SETTINGS_PATH` | `src/cli/doctor/orchestrator.rs:489` (+1 more) |  |
 | `QWEN_HOME` | `src/cli/doctor/orchestrator.rs:461` (+2 more) |  |
-| `REQUIRE_WAKE_WORD` | `src/voice/config.rs:103` | A live yaml with `wake_words: []` plus `REQUIRE_WAKE_WORD=1` would otherwise make EVERY utterance fail the (impossible-to-satisfy) gate and be silently dropped. |
+| `REQUIRE_WAKE_WORD` | `src/voice/config.rs:106` | A live yaml with `wake_words: []` plus `REQUIRE_WAKE_WORD=1` would otherwise make EVERY utterance fail the (impossible-to-satisfy) gate and be silently dropped. |
 | `RUST_LOG` | `src/logging.rs:29` | The directive every shipped dcserver process adds on top of `RUST_LOG`. |
 | `SHELL` | `src/services/platform/binary_resolver.rs:1267` |  |
 | `USERPROFILE` | `src/cli/doctor/orchestrator.rs:471` (+6 more) |  |

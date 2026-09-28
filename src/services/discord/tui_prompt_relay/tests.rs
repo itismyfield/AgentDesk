@@ -3,6 +3,8 @@ use super::observed_prompt_decision::is_local_only_slash_command_prompt;
 use super::*;
 use crate::services::discord::gateway::TurnGateway;
 
+mod compact_summary_tests;
+
 fn compact_command_name_first_stub() -> &'static str {
     "<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>"
 }
@@ -6326,6 +6328,9 @@ mod synthetic_bridge_handoff_pg_tests;
 
 #[cfg(unix)]
 mod synthetic_terminal_ordering_tests;
+
+#[cfg(unix)]
+mod retired_pending_start_claim_tests;
 
 #[cfg(unix)]
 mod relayerless_claim_tests {

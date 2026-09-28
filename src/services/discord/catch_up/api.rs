@@ -7,11 +7,11 @@ use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId};
 
 use crate::services::provider::ProviderKind;
-use crate::services::turn_orchestrator::Intervention;
+use crate::services::turn_orchestrator::{ClaimObservation, Intervention};
 
 use super::super::{
-    MailboxEnqueueOutcome, RuntimeChannelBindingStatus, SharedData, bot_role, health,
-    mailbox_enqueue_intervention, reaction_cleanup, resolve_runtime_channel_binding_status,
+    MailboxEnqueueOutcome, RuntimeChannelBindingStatus, SharedData, bot_role, health, queue_io,
+    reaction_cleanup, resolve_runtime_channel_binding_status,
 };
 use super::too_old_notice::{self, CatchUpTooOldOutboxRequest};
 
@@ -90,8 +90,17 @@ pub(super) trait CatchUpDiscordApi: Sync {
         provider: &ProviderKind,
         channel_id: ChannelId,
         intervention: Intervention,
+        observed: ClaimObservation,
     ) -> MailboxEnqueueOutcome {
-        mailbox_enqueue_intervention(shared, provider, channel_id, intervention).await
+        let observed = Some(observed);
+        queue_io::mailbox_enqueue_observed_intervention(
+            shared,
+            provider,
+            channel_id,
+            intervention,
+            observed,
+        )
+        .await
     }
 
     fn enqueue_too_old_notice(

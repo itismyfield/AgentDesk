@@ -217,6 +217,16 @@ pub(super) use self::delivery::{
     build_long_message_attachment, needs_multiple_messages, send_long_message_ctx,
     send_long_message_raw, split_message,
 };
+
+/// Legacy split pieces and their UTF-16 unit counts, reused unchanged by the output shadow.
+pub(in crate::services) fn split_for_shadow(text: &str) -> Vec<(String, usize)> {
+    let with_units = |piece: String| {
+        let units = discord_message_units(&piece);
+        (piece, units)
+    };
+    split_message(text).into_iter().map(with_units).collect()
+}
+
 #[allow(unused_imports)]
 pub(in crate::services::discord) use self::delivery::{
     long_message_reply_builders, send_long_message_raw_with_reference,
