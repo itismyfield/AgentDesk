@@ -151,7 +151,7 @@ request는 승인한 CLIPPY_ARGS/conf/width와 MODMAP 출력·nonce·run ID·기
 build.rs가 준 값도 예외가 없다. target links 설정의 예약 rustc-env는 Cargo 전에 거부하는 보조 가드다.
 생산자는 자식 실행 전에 `create_new` claim을 쓰고 sync한다. 실패해도 claim은 지우지 않으며 새 run 디렉터리로 재시도한다.
 동일 요청 lib을 한 Cargo 호출에서 두 번 컴파일하는 구성은 정상 코드여도 fail-closed로 거부한다.
-자식은 Cargo의 argv/env를 상속하고 `--cfg clippy`만 더한다. after_expansion에서 items와 cfg를 쓰고 중단한다.
+자식은 Cargo의 argv/env를 상속하고 `--cfg clippy`와 승인된 측정 정책 `--cap-lints warn`을 더한다. after_expansion에서 items와 cfg를 쓰고 중단한다.
 자식 stdout/stderr는 별도 파일로 격리한다. root 전용 Clippy cfg 질의와 byte 일치 후 실제 Clippy로 exec한다.
 proof `h2-session/2`는 unit/pid/nonce/run_id/argv/env_sha256/cfg/driver_rustc, 실제 Clippy 경로·버전·연결 compiler,
 items_sha256/items_records를 필수 기록한다. `1-cfg`, items 없는 proof와 헤더 없는 옛 JSONL은 거부한다.
@@ -172,6 +172,8 @@ nested_fn의 fold는 첫 JSONL 메타데이터 행만 제외한 0-based 번호(h
 콜백은 헤더 포함 정확한 bytes와 레코드 수를 계산해 items.jsonl.sha256의 `{sha256, records}`에 기록한다.
 각 파일은 partial→rename으로 게시한다. 부모는 자식 종료 후 파일을 재계산하여 sidecar와 비교한 뒤 proof를 게시한다.
 runner도 파일=sidecar=proof의 digest/양수 레코드 수, 헤더·mtime·partial을 검사하고 두 items 파일을 manifest에 봉인한다.
+봉인 전에 레코드 필드 타입(bool은 정수에서 제외), kind·path/reason 택일, 고유 def ID, 연관 item/container 및 fold 범위·대상·순환을 검사한다.
+parent는 정수(root=0)이며 모듈·closure 등 미출력 부모는 허용한다. 출력된 중간 부모만 따라가며 display/이름으로 관계를 복원하지 않는다.
 봉인 전 body 접합, 0개 레코드와 빈 digest는 실패한다. 모든 증거를 함께 다시 쓰는 주체의 인증은 보장하지 않는다.
 map 모드의 TSV/cfg와 argv는 그대로이며 items 생산은 세션 자식만 수행한다.
 도구 버전 갱신은 rust-toolchain.toml·CI·ALLOWED를 함께 바꾸고 cargo-clippy spy, cfg 자체 점검,
@@ -191,6 +193,7 @@ fixture proc-macro가 확장 중 stderr에 쓰는 rustc 형식 진단 1줄은 �
 `cdylib+rlib --all-targets`, 선점 claim의 쓰기 0, 같은 unit 동시 진입을 검사한다.
 e2e는 먼저 빌드한 release driver를 사용한다. 실패, 기대보다 적은 시험 수, skip은 canary 실패다. 증거는 `target/h2/session-e2e`에 남긴다.
 CANARY_ITEMS는 (kind, path|reason, file, anchor)이며 원문 regex로 기대 [lo,hi)를 독립 계산한다.
+canary는 봉인 후 items를 한 번 읽고 manifest/proof digest를 대조한 동일 bytes를 파싱한다. 해시 후 경로를 다시 열지 않는다.
 모든 canary 레코드의 원문 좌표·선언/매크로 호출 범위와 fold·매크로 impl parent를 확인한다.
 BOM/CRLF fixture는 -text이며 원문 byte 보존부터 검사한다. 누락·중복·0개·좌표 드리프트는 canary 실패다.
 필수 Linux canary 동작이 바뀌므로 해당 head의 Linux green이 머지 조건이다. 매핑/도출 전환은 후속 단계다.

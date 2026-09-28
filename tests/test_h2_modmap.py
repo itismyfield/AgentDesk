@@ -266,7 +266,7 @@ class SessionCanary(unittest.TestCase):
                                  str(run / "session-target"), "--features", "h2_cfg_probe")))
                 self.assertFalse((run / "session-target").exists())
                 self.assertEqual((run / "session-config/clippy.toml").read_text(), "")
-                items.assert_called_with(crate, run / "session/items.jsonl")
+                items.assert_called_with(crate, run / "session/items.jsonl", session.return_value)
             self.assertEqual([c.args[0] for c in suite.call_args_list],
                              [[sys.executable, "-m", "unittest", module] for module in suites] * 2)
             self.assertTrue(all(c.kwargs["env"]["H2_SESSION_DRIVER"] == str(driver) for c in suite.call_args_list))
@@ -342,7 +342,7 @@ class ItemsCanary(unittest.TestCase):
             self.assertEqual(len(matches), 1, anchor)
             lo, hi = matches[0].span()
             path = "modmap_canary::" + value if value.startswith("items_") else None
-            rows.append(dict(kind=kind, path=path, unregistrable=None if path else value,
+            rows.append(dict(kind=kind, path=path, unregistrable=None if path else value, display=value,
                              file="src/" + name, lo=lo, hi=hi, line=raw.count(b"\n", 0, lo) + 1,
                              macro=b"!" in raw[lo:hi], def_kind="Fn", parent=0, **{"def": i + 1}))
             if value == "anon-const":
@@ -351,17 +351,47 @@ class ItemsCanary(unittest.TestCase):
                 owner = next(j for j, row in enumerate(rows) if row["kind"] == "fn" and
                              row["lo"] < lo < hi < row["hi"] and row["file"] == "src/" + name)
                 rows[-1].update(fold=owner, parent=rows[owner]["def"], escape=value == "fold-escape")
-        method = next(r for r in rows if r["macro"] and r["kind"] == "trait_impl_method")
-        header = dict(method, kind="header", def_kind="Impl { of_trait: true }", **{"def": 100})
-        method["parent"] = 100
-        rows.append(header)
+        for method in list(rows):
+            if method["kind"] not in ("trait_method", "trait_impl_method", "inherent_method"):
+                continue
+            kind = {"trait_method": "Trait", "trait_impl_method": "Impl { of_trait: true }", "inherent_method": "Impl { of_trait: false }"}
+            header = dict(method, kind="header", def_kind=kind[method["kind"]], **{"def": 100 + len(rows)})
+            method.update(parent=header["def"], def_kind="AssocFn")
+            rows.append(header)
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "items.jsonl"
             def check(records):
                 arrays = [[r.get(key) for key in modmap.ITEM_FIELDS[:14 if r["kind"] == "nested_fn" else 12]] for r in records]
                 output.write_text("{}\n" + "".join(json.dumps(r) + "\n" for r in arrays))
-                modmap.check_canary_items(crate, output)
-            check(rows)
+                digest = modmap.collect.digest(output.read_bytes())
+                manifest = dict(digests={"items.jsonl": digest}, proof={"items_sha256": digest})
+                modmap.check_canary_items(crate, output, manifest)
+                return manifest
+            manifest = check(rows)
+            for section, key in (("digests", "items.jsonl"), ("proof", "items_sha256")):
+                stale = copy.deepcopy(manifest)
+                stale[section][key] = "0" * 64
+                with self.assertRaisesRegex(modmap.ModmapError, "after sealing"):
+                    modmap.check_canary_items(crate, output, stale)
+            with patch.object(modmap.collect, "digest", side_effect=lambda body: (output.write_bytes(b"changed"), manifest["digests"]["items.jsonl"])[1]):
+                modmap.check_canary_items(crate, output, manifest)
+            for field in ("nonce", "display"):
+                manifest = check(rows)
+                body = output.read_bytes()
+                def sealed(*args, **kwargs):
+                    path = args[2] / "items.jsonl"
+                    path.parent.mkdir(parents=True)
+                    records = [json.loads(line) for line in body.splitlines()]
+                    records[0].update(nonce="other") if field == "nonce" else records[1].__setitem__(6, "other")
+                    path.write_text("".join(json.dumps(r) + "\n" for r in records))
+                    manifest["proof"]["cfg"] = ["clippy", "h2_items_bs_clippy"]
+                    return manifest
+                with patch.object(h2_session, "session", side_effect=sealed), patch.object(modmap, "run_suite") as suite, \
+                        patch("sys.stdout", new=io.StringIO()) as stdout, self.subTest(field=field):
+                    with self.assertRaisesRegex(modmap.ModmapError, "after sealing"):
+                        modmap.check_session_canary(REPO_ROOT, Path("unused"), crate, Path(tmp) / field, "macos", [])
+                    suite.assert_not_called()
+                    self.assertEqual(stdout.getvalue(), "")
             for key, value in (("lo", 0), ("hi", 0), ("line", 999), ("path", "wrong")):
                 bad = copy.deepcopy(rows)
                 bad[0][key] = value
@@ -387,8 +417,9 @@ class ItemsCanary(unittest.TestCase):
             shutil.copytree(crate / "src", fixture / "src")
             crlf = fixture / "src/items_crlf.rs"
             crlf.write_bytes(crlf.read_bytes().replace(b"\r\n", b"\n"))
+            manifest = check(rows)
             with self.assertRaisesRegex(modmap.ModmapError, "BOM/CRLF"):
-                modmap.check_canary_items(fixture, output)
+                modmap.check_canary_items(fixture, output, manifest)
 
 
 class CiWiring(unittest.TestCase):

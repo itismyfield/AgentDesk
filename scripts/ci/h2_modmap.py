@@ -53,7 +53,59 @@ def item_record(row) -> dict:
     if (not isinstance(row, list) or len(row) not in (12, 14)
             or len(row) != (14 if row[3] == "nested_fn" else 12)):
         raise ValueError("items record schema mismatch")
-    return dict(zip(ITEM_FIELDS, row))
+    item = dict(zip(ITEM_FIELDS, row))
+    integers = ("lo", "hi", "line", "def", "parent") + (("fold",) if len(row) == 14 else ())
+    if (any(type(item[k]) is not int or item[k] < 0 for k in integers)
+            or item["lo"] >= item["hi"] or item["line"] == 0 or item["def"] == 0 or item["def"] == item["parent"]
+            or any(not isinstance(item[k], str) or not item[k] for k in ("file", "kind", "display", "def_kind"))
+            or item["kind"] not in {"fn", "nested_fn", "trait_method", "trait_impl_method", "inherent_method", "const", "header"}
+            or type(item["macro"]) is not bool or (len(row) == 14 and type(item["escape"]) is not bool)
+            or any(item[k] is not None and (not isinstance(item[k], str) or not item[k]) for k in ("path", "unregistrable"))
+            or (item["path"] is None) == (item["unregistrable"] is None)):
+        raise ValueError("items record fields invalid")
+    return item
+
+
+def item_records(arrays) -> list[dict]:
+    rows = [item_record(row) for row in arrays]
+    by_def = {row["def"]: row for row in rows}
+    functions = {"fn", "nested_fn", "trait_method", "trait_impl_method", "inherent_method"}
+    containers = {"trait_method": "Trait", "trait_impl_method": "Impl { of_trait: true }",
+                  "inherent_method": "Impl { of_trait: false }"}
+    if not rows or len(by_def) != len(rows):
+        raise ValueError("items empty or duplicate def IDs")
+    for row in rows:
+        parent = by_def.get(row["parent"])
+        if row["kind"] in functions and row["def_kind"] != ("Fn" if row["kind"] in {"fn", "nested_fn"} else "AssocFn"):
+            raise ValueError("items function kind mismatch")
+        if row["kind"] in containers and (parent is None
+                or parent["kind"] != "header" or parent["def_kind"] != containers[row["kind"]]):
+            raise ValueError("items associated container mismatch")
+        if row["def_kind"] == "AssocConst" and (parent is None or parent["kind"] != "header" or parent["def_kind"] not in containers.values()):
+            raise ValueError("items associated const container mismatch")
+        if row["kind"] == "nested_fn":
+            if row["fold"] >= len(rows):
+                raise ValueError("items fold outside records")
+            owner = rows[row["fold"]]
+            seen = {row["def"]}
+            while parent is not None and parent["kind"] not in functions:
+                if parent["def"] in seen:
+                    raise ValueError("items parent cycle")
+                seen.add(parent["def"])
+                parent = by_def.get(parent["parent"])
+            if (owner["kind"] not in functions or owner is row or row["def_kind"] != "Fn"
+                    or (parent is not None and parent is not owner)
+                    or row["escape"] != (row["unregistrable"] == "fold-escape")
+                    or (not row["escape"] and (row["path"], row["unregistrable"]) != (owner["path"], owner["unregistrable"]))):
+                raise ValueError("items fold owner mismatch")
+    for row in rows:
+        seen = set()
+        while row["kind"] == "nested_fn":
+            if row["def"] in seen:
+                raise ValueError("items fold cycle")
+            seen.add(row["def"])
+            row = rows[row["fold"]]
+    return rows
 
 
 # Anchors describe source text, never coordinates copied from compiler output.
@@ -92,8 +144,15 @@ CANARY_ITEMS = [
 ]
 
 
-def check_canary_items(crate: Path, path: Path) -> None:
-    rows = [item_record(json.loads(line)) for line in path.read_bytes().splitlines()[1:]]
+def check_canary_items(crate: Path, path: Path, manifest: dict) -> None:
+    body = collect.regular(path)
+    digest = collect.digest(body)
+    if digest != manifest["digests"]["items.jsonl"] or digest != manifest["proof"]["items_sha256"]:
+        raise ModmapError("items changed after sealing")
+    try:
+        rows = item_records([json.loads(line) for line in body.splitlines()[1:]])
+    except ValueError as exc:
+        raise ModmapError(str(exc)) from exc
     crlf = (crate / "src/items_crlf.rs").read_bytes()
     if not crlf.startswith(b"\xef\xbb\xbf") or b"\r\n" not in crlf or b"\n" in crlf.replace(b"\r\n", b""):
         raise ModmapError("items canary: BOM/CRLF fixture normalized")
@@ -336,7 +395,7 @@ def check_session_canary(root: Path, driver: Path, crate: Path, run: Path, lane:
                                  extra=("--locked", "--target-dir", str(target), "--features", "h2_cfg_probe"))
     if not {"clippy", "h2_items_bs_clippy"} <= set(manifest["proof"]["cfg"]):
         raise ModmapError("session canary: missing Clippy/build-script cfg")
-    check_canary_items(crate, run / "session/items.jsonl")
+    check_canary_items(crate, run / "session/items.jsonl", manifest)
     for module in suites:
         run_suite(root, driver, module)
     if sorted(suites) == sorted(SESSION_SUITES):

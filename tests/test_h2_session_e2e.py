@@ -64,15 +64,19 @@ class WorkspaceSession(unittest.TestCase):
         return [line for line in body.splitlines(keepends=True) if json.loads(line).get("reason") == "compiler-message"]
 
     def test_workspace_dependencies_match_clippy_cold_and_warm(self):
-        for feature, dependency in (("workspace_lib", "helper"), ("workspace_proc", "mac")):
+        lib = self.crate / "src/lib.rs"
+        source = lib.read_text()
+        for feature, dependency, policy in (("workspace_lib", "helper", "warn"), ("workspace_proc", "mac", "warn"),
+                                             ("workspace_lib", "helper", "deny"), ("workspace_proc", "mac", "forbid")):
+            lib.write_text(f"#![{policy}(unused_imports)]\n" + source)
             args = ("--no-default-features", "--features", feature)
             for temperature in ("cold", "warm"):
-                tag = feature + "-" + temperature
-                target = self.case / (feature + "-target")
+                tag = feature + "-" + policy + "-" + temperature
+                target = self.case / (feature + "-" + policy + "-target")
                 self.assertEqual(target.exists(), temperature == "warm")
                 manifest, run = self.collect(tag, *args, target=target)
                 actual = self.messages((run / "clippy.jsonl").read_bytes())
-                expected = self.messages(self.clippy(tag + "-control", *args, target=self.case / (feature + "-control-target")))
+                expected = self.messages(self.clippy(tag + "-control", *args, target=self.case / (feature + "-" + policy + "-control-target")))
                 self.assertEqual(actual, expected)
                 codes = [json.loads(line)["message"]["code"]["code"] for line in actual]
                 self.assertIn("unused_imports", codes)

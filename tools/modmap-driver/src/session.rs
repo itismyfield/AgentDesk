@@ -145,6 +145,7 @@ pub fn child(argv: &[String]) -> ! {
         let args: Vec<String> = std::iter::once(argv[0].clone())
             .chain(rest.iter().cloned())
             .chain(["--cfg".into(), "clippy".into()])
+            .chain(["--cap-lints".into(), "warn".into()])
             .collect();
         Ok((
             args,
