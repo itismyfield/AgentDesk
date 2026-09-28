@@ -3,6 +3,8 @@ use crate::services::cluster::node_registry::GatewayWaiterGuard;
 
 mod deferred_restart;
 mod framework_setup;
+#[allow(dead_code)]
+mod gateway_handback_breaker;
 mod gateway_lease;
 mod gateway_lease_recovery;
 #[cfg(test)]

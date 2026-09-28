@@ -134,6 +134,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/router/message_handler/intake_turn/race_loss/mailbox_reaction_tests.rs",
         "src/services/discord/router/message_handler/intake_turn/race_loss/requeue_tests.rs",
         "src/services/discord/router/message_handler/session_strategy_lifecycle_tests.rs",
+        "src/services/discord/runtime_bootstrap/gateway_handback_breaker_tests.rs",
         "src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs",
         "src/services/discord/runtime_bootstrap/gateway_lease_tests.rs",
         "src/services/discord/runtime_bootstrap/intake_delivery_capability/tests.rs",
