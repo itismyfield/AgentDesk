@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::voice::barge_in::BargeInSensitivity;
+use crate::voice::openai_compat::OpenAiCompatEndpoint;
 use crate::voice::stt_streaming::{
     DEFAULT_STREAM_KEEP_MS, DEFAULT_STREAM_LENGTH_MS, DEFAULT_STREAM_STEP_MS,
 };
@@ -48,6 +49,7 @@ pub(crate) struct VoiceConfig {
     pub lobby_channel_id: Option<String>,
     pub active_agent_ttl_seconds: u64,
     pub foreground: VoiceForegroundConfig,
+    pub conductor: VoiceConductorConfig,
     pub spoken_result: VoiceSpokenResultConfig,
     pub default_sensitivity_mode: BargeInSensitivity,
     pub auto_join_channel_ids: Vec<String>,
@@ -74,6 +76,7 @@ impl Default for VoiceConfig {
             lobby_channel_id: None,
             active_agent_ttl_seconds: DEFAULT_ACTIVE_AGENT_TTL_SECS,
             foreground: VoiceForegroundConfig::default(),
+            conductor: VoiceConductorConfig::default(),
             spoken_result: VoiceSpokenResultConfig::default(),
             default_sensitivity_mode: BargeInSensitivity::Normal,
             auto_join_channel_ids: Vec::new(),
@@ -193,6 +196,22 @@ impl Default for VoiceForegroundConfig {
     }
 }
 
+/// Voice conductor settings: summary after turns finish or `max_wait_secs` passes.
+/// Planning and summary always run on the tool-less Claude path, so there is no provider setting.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct VoiceConductorConfig {
+    pub max_wait_secs: u64,
+}
+
+impl Default for VoiceConductorConfig {
+    fn default() -> Self {
+        Self {
+            max_wait_secs: 30 * 60,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub(crate) struct VoiceSpokenResultConfig {
@@ -210,6 +229,8 @@ impl Default for VoiceSpokenResultConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub(crate) struct VoiceSttConfig {
+    pub provider: VoiceSttProvider,
+    pub openai_compatible: OpenAiCompatEndpoint,
     pub mode: VoiceSttMode,
     pub ffmpeg_command: String,
     pub whisper_command: String,
@@ -221,6 +242,8 @@ pub(crate) struct VoiceSttConfig {
 impl Default for VoiceSttConfig {
     fn default() -> Self {
         Self {
+            provider: VoiceSttProvider::WhisperCli,
+            openai_compatible: OpenAiCompatEndpoint::default(),
             mode: VoiceSttMode::File,
             ffmpeg_command: DEFAULT_STT_FFMPEG_COMMAND.to_string(),
             whisper_command: DEFAULT_STT_WHISPER_COMMAND.to_string(),
@@ -229,6 +252,14 @@ impl Default for VoiceSttConfig {
             stream: VoiceSttStreamConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum VoiceSttProvider {
+    #[default]
+    WhisperCli,
+    OpenaiCompatible,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -263,6 +294,7 @@ pub(crate) struct VoiceTtsConfig {
     pub backend: VoiceTtsBackendKind,
     pub progress_cache_dir: PathBuf,
     pub edge: VoiceEdgeTtsConfig,
+    pub openai_compatible: VoiceOpenAiTtsConfig,
 }
 
 impl Default for VoiceTtsConfig {
@@ -271,6 +303,7 @@ impl Default for VoiceTtsConfig {
             backend: VoiceTtsBackendKind::Edge,
             progress_cache_dir: PathBuf::from(DEFAULT_PROGRESS_TTS_CACHE_DIR),
             edge: VoiceEdgeTtsConfig::default(),
+            openai_compatible: VoiceOpenAiTtsConfig::default(),
         }
     }
 }
@@ -280,6 +313,15 @@ impl Default for VoiceTtsConfig {
 pub(crate) enum VoiceTtsBackendKind {
     #[default]
     Edge,
+    OpenaiCompatible,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct VoiceOpenAiTtsConfig {
+    #[serde(flatten)]
+    pub endpoint: OpenAiCompatEndpoint,
+    pub voice: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

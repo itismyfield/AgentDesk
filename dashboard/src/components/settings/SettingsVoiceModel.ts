@@ -26,6 +26,11 @@ export function cloneVoiceConfig(config: VoiceConfigResponse): VoiceConfigRespon
   return {
     ...config,
     global: { ...config.global },
+    models: {
+      ...config.models,
+      stt: { ...config.models.stt },
+      tts: { ...config.models.tts },
+    },
     agents: config.agents.map((agent) => ({
       ...agent,
       aliases: [...agent.aliases],
@@ -89,6 +94,7 @@ export function voiceConfigComparable(config: VoiceConfigResponse | null): unkno
   if (!config) return null;
   return {
     global: config.global,
+    models: config.models,
     agents: config.agents.map((agent) => ({
       id: agent.id,
       voice_enabled: agent.voice_enabled,
@@ -108,6 +114,7 @@ export function voiceSaveBody(config: VoiceConfigResponse): VoiceConfigPutBody {
       active_agent_ttl_seconds: Math.max(1, Math.round(config.global.active_agent_ttl_seconds || 180)),
       default_sensitivity_mode: config.global.default_sensitivity_mode,
     },
+    models: config.models,
     agents: config.agents.map((agent) => ({
       ...agent,
       wake_word: agent.wake_word.trim(),
