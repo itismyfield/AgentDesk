@@ -17,6 +17,8 @@ from h2_measure import LINTS, RO_LINTS, MeasureError
 ALLOWED = dict(release="1.94.1", commit="e408947bfd200af42db322daf0fadfe7e26d3bd1", cargo="cargo 1.94.1 ",
                clippy="clippy 0.1.94 (e408947bfd ", driver_rustc="1.94.1 (e408947bf 2026-03-25)")
 SCHEMA = "h2-session/1-cfg"
+PROTECTED_ENV = ("CLIPPY_ARGS", "CLIPPY_CONF_DIR", "CLIPPY_TERMINAL_WIDTH", "MODMAP_SESSION_OUT",
+                 "MODMAP_CFG_NONCE", "MODMAP_RUN_ID", "MODMAP_EXPECT_MANIFEST", "MODMAP_EXPECT_PACKAGE", "MODMAP_EXPECT_LIB")
 TARGET_CFG = {"x86_64-unknown-linux-gnu": ("x86_64", "linux", "gnu", "unknown", "64"),
               "aarch64-apple-darwin": ("aarch64", "macos", "", "apple", "64")}
 TARGET_KEYS = ("target_arch", "target_os", "target_env", "target_vendor", "target_pointer_width")
@@ -55,7 +57,10 @@ def cargo_config(crate: Path, env: dict) -> dict:
             config = tomllib.loads(body.decode("utf-8"))
             if "include" in config:
                 raise MeasureError(f"session Cargo config includes are unsupported: {path}")
-            for key in config.get("env", {}):
+            overlays = [config.get("env", {})]
+            for target in config.get("target", {}).values():
+                overlays.extend(value.get("rustc-env", {}) for value in target.values() if isinstance(value, dict))
+            for key in {key for overlay in overlays for key in overlay}:
                 if (key in reserved or key.startswith(("MODMAP_", "CLIPPY_", "RUSTC", "RUSTUP_"))
                         or h2_env.CLEAR_RE.fullmatch(key)):
                     raise MeasureError(f"session reserved Cargo env key {key}: {path}")
@@ -171,6 +176,10 @@ def validate(run: Path, request: dict) -> dict:
             raise MeasureError(f"session clippy identity mismatch: {key}")
     if proof.get("driver_rustc") != request["toolchain"]["driver_rustc"]:
         raise MeasureError("session driver compiler mismatch")
+    protected = request.get("protected_env")
+    if (not isinstance(protected, dict) or set(protected) != set(PROTECTED_ENV)
+            or not all(isinstance(value, str) for value in protected.values()) or proof.get("protected_env") != protected):
+        raise MeasureError("session protected env mismatch")
     if not isinstance(proof.get("env_sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", proof["env_sha256"]):
         raise MeasureError("session env digest missing/invalid")
     argv = proof.get("argv")
@@ -215,13 +224,14 @@ def session(root: Path, crate: Path, run_dir: Path, conf_dir: Path, lane: str, *
                        run_id=run_id, nonce=nonce, lane=lane, host=host, target=h2_env.LANES[lane], toolchain=toolchain,
                        cargo_config=configs,
                        source=source_state(root, Path(unit["lib"]), conf_dir))
-        collect.write_json(run / "request.json", request)
         flags = ["--cap-lints", "warn"] + [v for lint in (*LINTS, *RO_LINTS) for v in ("--force-warn", lint)]
         env.update(RUSTC_WORKSPACE_WRAPPER=str(driver), MODMAP_CLIPPY_DRIVER=toolchain["clippy_driver"],
                    CLIPPY_ARGS="__CLIPPY_HACKERY__".join([*flags, ""]), CLIPPY_TERMINAL_WIDTH="0",
                    CLIPPY_CONF_DIR=str(conf_dir), MODMAP_SESSION_OUT=str(run / "session.json"),
                    MODMAP_CFG_NONCE=nonce, MODMAP_RUN_ID=run_id,
                    **{f"MODMAP_EXPECT_{k.upper()}": unit[k] for k in ("manifest", "package", "lib")})
+        request["protected_env"] = {key: env[key] for key in PROTECTED_ENV}
+        collect.write_json(run / "request.json", request)
         os.utime(unit["lib"], None)
         if cargo_config(crate, env) != configs:
             raise MeasureError("session Cargo config changed")

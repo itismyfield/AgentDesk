@@ -146,6 +146,9 @@ config include와 --config·package/manifest 선택 변경도 거부하며, Carg
 생산자는 기대 manifest/package/lib가 맞는 non-test lib 호출뿐이다. 정보 질의·bin·proc-macro와 다른 member는 위임한다.
 생산자 후보의 @응답 파일 인수는 해석하지 않고 claim 전에 거부하며, 봉인에서도 같은 인수를 거부한다.
 실제 Clippy canonical 경로는 환경변수가 아닌 request의 승인 경로와 claim 전에 대조한다.
+request는 승인한 CLIPPY_ARGS/conf/width와 MODMAP 출력·nonce·run ID·기대 unit 환경값을 protected_env로 고정한다.
+생산자는 claim·자식 전에 그 값들을 byte 대조하고 proof에 기록하며, 봉인에서도 request와 일치해야 한다.
+build.rs가 준 값도 예외가 없다. target links 설정의 예약 rustc-env는 Cargo 전에 거부하는 보조 가드다.
 생산자는 자식 실행 전에 `create_new` claim을 쓰고 sync한다. 실패해도 claim은 지우지 않으며 새 run 디렉터리로 재시도한다.
 동일 요청 lib을 한 Cargo 호출에서 두 번 컴파일하는 구성은 정상 코드여도 fail-closed로 거부한다.
 자식은 Cargo의 argv/env를 상속하고 `--cfg clippy`만 더한다. after_expansion에서 cfg를 쓰고 중단한다.
