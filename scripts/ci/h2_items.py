@@ -47,7 +47,7 @@ class Items:
 
 
 def load(path: Path, *, crate: Path) -> Items:
-    """Accept only a sealed h2-session/2 manifest of the expected crate, parsing the digest-checked bytes."""
+    """Accept only a sealed, fenced h2-session/2 manifest of the expected crate, parsing the digest-checked bytes."""
     try:
         value = collect.read_json(path)
         run = path.parent
@@ -86,9 +86,12 @@ def load(path: Path, *, crate: Path) -> Items:
             raise MeasureError("items: invalid Cargo JSONL")
         messages, foreign = attribute(events, unit)
         repo = Path(request["repo"])
-        state, files = session.source_capture(repo, Path(unit["lib"]), Path(request["conf_dir"]))
+        state, files, _ = session.source_capture(repo, Path(unit["lib"]), Path(request["conf_dir"]))
         if state != request["source"]:
             raise MeasureError("items: source changed after the session")
+        session.check_fence(request.get("fence"), files)
+        if value.get("fence") != session.fence_marker(request["fence"]):
+            raise MeasureError("items: session has no passed source fence")
         rows: dict[str, list[dict]] = {}
         for record in records:
             rows.setdefault(str(root / record["file"]), []).append(record)

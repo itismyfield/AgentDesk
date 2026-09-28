@@ -309,18 +309,40 @@ def source_state(root: Path) -> dict:
     return source_capture(root)[0]
 
 
-def source_capture(root: Path) -> tuple[dict, dict[str, bytes]]:
-    """The state and the listed file bytes it digests; one listing, each file read once."""
+STAT = ("dev", "ino", "size", "mtime_ns", "ctime_ns")
+
+
+def stat_of(path: Path | str | int) -> list[int]:
+    """The identity a write, rename or hard-link write changes, even when it restores the bytes."""
+    st = os.stat(path)
+    return [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+
+
+def read_stable(path: Path) -> tuple[bytes, list[int]]:
+    """Bytes adopted only when stat, the open file and a second stat agree; no retry."""
+    before = stat_of(path)
+    with open(path, "rb") as handle:
+        held = stat_of(handle.fileno())
+        body = handle.read()
+        if before != held or stat_of(handle.fileno()) != held or stat_of(path) != held or len(body) != held[2]:
+            raise ModmapError(f"source {path} changed while it was captured")
+    return body, before
+
+
+def source_capture(root: Path) -> tuple[dict, dict[str, bytes], dict[str, list[int]]]:
+    """The state, the listed file bytes it digests and each file's stat; one listing, each file read once."""
     def git(*args: str) -> str:
         return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
     names = sorted({name for name in git("ls-files", "-c", "-o", "--exclude-standard", "-z").split("\0") if name})
-    bodies = {name: (root / name).read_bytes() for name in names if (root / name).is_file()}
+    reads = {name: read_stable(root / name) for name in names if (root / name).is_file()}
+    bodies = {name: body for name, (body, _) in reads.items()}
     inputs = {name: collect.digest(bodies[name]) if name in bodies else None for name in names}
     return dict(sha=git("rev-parse", "HEAD"), tree=git("rev-parse", "HEAD^{tree}"),
                 dirty_digest=collect.digest(git("diff", "HEAD", "--binary").encode()),
                 inputs_digest=collect.digest(json.dumps(inputs, sort_keys=True).encode()),
                 config={name: inputs.get(name) for name in
-                        ("Cargo.lock", "Cargo.toml", "clippy.toml", ".cargo/config.toml", "rust-toolchain.toml")}), bodies
+                        ("Cargo.lock", "Cargo.toml", "clippy.toml", ".cargo/config.toml", "rust-toolchain.toml")}), bodies, \
+        {name: stat for name, (_, stat) in reads.items()}
 
 
 def map_run(root: Path, driver: Path, crate: Path, out: Path, cfg: Path, meta: Path,
@@ -361,7 +383,7 @@ def collection_context(root: Path, lane: str) -> dict:
 
 
 # Driver-backed suites --canary runs with the driver it built, and the fewest tests each must run.
-SESSION_SUITES = {"tests.test_h2_session_driver": 8, "tests.test_h2_session_e2e": 6}
+SESSION_SUITES = {"tests.test_h2_session_driver": 8, "tests.test_h2_session_e2e": 8}
 
 
 def run_suite(root: Path, driver: Path, module: str, *, timeout: float = 1200) -> None:

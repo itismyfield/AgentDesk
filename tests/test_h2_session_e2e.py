@@ -15,7 +15,36 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/ci"))
 import h2_env
+import h2_items
 import h2_session as session
+
+A = b"pub fn evil() { crate::sink(); }\n"
+B = A.replace(b"evil", b"safe")
+# Macro call n signals at-n and waits on go-n (FIFOs, outside the capture) or itself writes B then restores A.
+MACRO = """extern crate proc_macro;
+use std::io::{Read, Write};
+#[proc_macro]
+pub fn item(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let (sync, module, own) = (r#"SYNC"#, r#"MODULE"#, OWN);
+    let n = std::fs::read(format!("{sync}/count")).map_or(0, |c| c.len()) + 1;
+    std::fs::write(format!("{sync}/count"), vec![b'x'; n]).unwrap();
+    if own && n <= 2 {
+        std::fs::write(module, if n == 1 { r#"B"# } else { r#"A"# }).unwrap();
+    } else if n <= 2 {
+        std::fs::OpenOptions::new().write(true).open(format!("{sync}/at-{n}")).unwrap().write_all(b"x").unwrap();
+        std::fs::File::open(format!("{sync}/go-{n}")).unwrap().read_to_end(&mut Vec::new()).unwrap();
+    }
+    "mod m;".parse().unwrap()
+}
+"""
+MUTATOR = """import sys
+sync, module, a, b = sys.argv[1:]
+for n, body in ((1, b), (2, a)):
+    open(f"{sync}/at-{n}", "rb").read()
+    open(module, "wb").write(bytes.fromhex(body))
+    open(f"{sync}/go-{n}", "wb").write(b"go")
+"""
+GIT = ("git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false")
 
 
 class WorkspaceSession(unittest.TestCase):
@@ -191,6 +220,57 @@ class WorkspaceSession(unittest.TestCase):
             proof, claim = (json.loads((run / name).read_text()) for name in ("session.json", "session.json.claim"))
             self.assertEqual(claim, {"pid": proof["pid"], "unit": proof["unit"]})
 
+
+    def swap(self, own: bool):
+        """Items compile reads B, Clippy reads A, and the listed file ends as A: the F2 phase order, no sleeps."""
+        sync, module = self.case / "sync", self.crate / "src/m.rs"
+        sync.mkdir()
+        for n in (1, 2):
+            os.mkfifo(sync / f"at-{n}")
+            os.mkfifo(sync / f"go-{n}")
+        macro = MACRO.replace("SYNC", str(sync)).replace("MODULE", str(module)).replace("OWN", str(own).lower())
+        macro = macro.replace('r#"B"#', f'r#"{B.decode()}"#').replace('r#"A"#', f'r#"{A.decode()}"#')
+        (self.crate / "mac/src/lib.rs").write_text(macro)
+        (self.crate / "src/lib.rs").write_text("pub fn sink() {}\nmac::item!();\n")
+        module.write_bytes(A)
+        for args in (("init", "-q"), ("add", "-A"), ("commit", "-q", "-m", "fixture")):
+            subprocess.run([*GIT, *args], cwd=self.crate, check=True, capture_output=True)
+        mutator = None if own else subprocess.Popen([sys.executable, "-c", MUTATOR, str(sync), str(module), A.hex(), B.hex()])
+        run = self.case / "aba"
+        try:
+            manifest = session.session(self.crate, self.crate, run, self.conf, self.lane, driver=self.driver,
+                                       extra=("--locked", "--offline", "--target-dir", str(self.case / "aba-target")))
+        except session.MeasureError as exc:
+            rejected = str(exc)
+        else:
+            loaded = h2_items.load(Path(manifest["manifest"]), crate=self.crate)
+            mapped = [h2_items.resolve(loaded, h2_items.primary(m)) for m in loaded.messages
+                      if (m.get("code") or {}).get("code") == "clippy::disallowed_methods"]
+            self.fail(f"A->B->A session was accepted; the A diagnostic mapped to {mapped}")
+        finally:
+            if mutator is not None:
+                try:
+                    self.assertEqual(mutator.wait(timeout=120), 0)
+                finally:
+                    mutator.kill()
+        self.assertRegex(rejected, r"session fence: .*/src/m\.rs was written during Cargo")
+        self.assertFalse((run / "manifest.json").exists())
+        self.assertEqual((module.read_bytes(), (sync / "count").read_bytes()[:2]), (A, b"xx"))
+        request = json.loads((run / "request.json").read_text())
+        self.assertEqual(session.source_state(self.crate, self.crate / "src/lib.rs", self.conf), request["source"])
+        items = (run / "items.jsonl").read_bytes()
+        self.assertIn(b'::m::safe"', items)
+        self.assertNotIn(b'::m::evil"', items)
+        spans = [span for line in (run / "clippy.jsonl").read_text().splitlines()
+                 for span in (json.loads(line).get("message") or {}).get("spans", []) if span.get("is_primary")]
+        texts = [t["text"] for span in spans if span["file_name"].endswith("m.rs") for t in span["text"]]
+        self.assertIn(A.decode().rstrip("\n"), texts)
+
+    def test_external_writer_between_items_and_clippy_is_fenced(self):
+        self.swap(own=False)
+
+    def test_proc_macro_writer_between_items_and_clippy_is_fenced(self):
+        self.swap(own=True)
 
 if __name__ == "__main__":
     unittest.main()
