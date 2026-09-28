@@ -4563,6 +4563,8 @@ mod stall_watchdog_auto_heal_tests {
         };
         use std::os::unix::fs::MetadataExt;
 
+        // `run_stall_watchdog_pass` GCs the process-wide watcher-absence map.
+        let _absence = super::watcher_respawn::lock_watcher_absence_for_test().await;
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
         let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -5061,8 +5063,9 @@ mod stall_watchdog_auto_heal_tests {
     /// history by the stall-liveness first-threshold regression.
     #[tokio::test(flavor = "current_thread")]
     async fn pre_backstop_capture_advance_has_defense_in_depth_suppression_pg() {
-        // Lock hierarchy `E -> P`: the env lock precedes the postgres
-        // lifecycle lock that `try_create` parks in `pg_db`.
+        // Lock hierarchy `W -> E -> P`: the watcher-absence test lock, then the env
+        // lock, then the postgres lifecycle lock that `try_create` parks in `pg_db`.
+        let _absence = super::watcher_respawn::lock_watcher_absence_for_test().await;
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
         let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -5184,8 +5187,9 @@ mod stall_watchdog_auto_heal_tests {
     /// Productive long turns keep their authority without age-triggered paging.
     #[tokio::test(flavor = "current_thread")]
     async fn long_active_turn_preserves_authority_without_paging_pg() {
-        // Lock hierarchy `E -> P`: the env lock precedes the postgres
-        // lifecycle lock that `try_create` parks in `pg_db`.
+        // Lock hierarchy `W -> E -> P`: the watcher-absence test lock, then the env
+        // lock, then the postgres lifecycle lock that `try_create` parks in `pg_db`.
+        let _absence = super::watcher_respawn::lock_watcher_absence_for_test().await;
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
         let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -5316,8 +5320,9 @@ mod stall_watchdog_auto_heal_tests {
     /// fail because the page is incorrectly suppressed.
     #[tokio::test(flavor = "current_thread")]
     async fn pre_backstop_flat_capture_pages_genuine_stall_pg() {
-        // Lock hierarchy `E -> P`: the env lock precedes the postgres
-        // lifecycle lock that `try_create` parks in `pg_db`.
+        // Lock hierarchy `W -> E -> P`: the watcher-absence test lock, then the env
+        // lock, then the postgres lifecycle lock that `try_create` parks in `pg_db`.
+        let _absence = super::watcher_respawn::lock_watcher_absence_for_test().await;
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
         let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -5516,6 +5521,8 @@ mod stall_watchdog_auto_heal_tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reuse_no_op_reattach_tick_still_skips_the_destructive_branches_5396() {
+        // `run_stall_watchdog_pass` GCs the process-wide watcher-absence map.
+        let _absence = super::watcher_respawn::lock_watcher_absence_for_test().await;
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
         let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(

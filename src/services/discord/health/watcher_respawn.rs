@@ -126,6 +126,23 @@ fn respawn_backoff_secs(failed_attempts: u32) -> u64 {
 static WATCHER_ABSENCE: LazyLock<dashmap::DashMap<WatcherAbsenceKey, WatcherAbsenceState>> =
     LazyLock::new(dashmap::DashMap::new);
 
+/// Held by every test that reads, writes or GCs [`WATCHER_ABSENCE`]: the GC retains over the
+/// whole map, so a sibling test on another clock would expire this test's entries mid-run.
+#[cfg(test)]
+static WATCHER_ABSENCE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Take it before any other test lock, the shared env lock included, so lock order stays acyclic.
+#[cfg(test)]
+pub(super) async fn lock_watcher_absence_for_test() -> tokio::sync::MutexGuard<'static, ()> {
+    WATCHER_ABSENCE_TEST_LOCK.lock().await
+}
+
+/// Sync-test form of [`lock_watcher_absence_for_test`].
+#[cfg(test)]
+pub(super) fn blocking_lock_watcher_absence_for_test() -> tokio::sync::MutexGuard<'static, ()> {
+    WATCHER_ABSENCE_TEST_LOCK.blocking_lock()
+}
+
 /// #3410 finalizer-reason tag used when the force-clean follow-through cancels
 /// the stale mailbox token.
 const FORCE_CLEAN_FINALIZER_REASON: &str = "3410_stall_watchdog_force_clean_respawn";
@@ -1067,6 +1084,7 @@ mod tests {
     #[cfg(unix)] // exercises the unix-only `discord::tmux` generation fence
     #[test]
     fn force_clean_respawn_offset_floor_ignores_stale_prior_generation_frontier() {
+        let _absence = blocking_lock_watcher_absence_for_test();
         let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
         let _env = EnvRootGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let tmp = tempfile::tempdir().expect("temp runtime root");
@@ -1131,6 +1149,7 @@ mod tests {
 
     #[test]
     fn remembered_absence_offset_floor_survives_snapshotless_retry() {
+        let _absence = blocking_lock_watcher_absence_for_test();
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(4_140_001);
         clear_watcher_absence(&provider, channel);
@@ -1398,6 +1417,7 @@ mod tests {
     /// the owning runtime's live watcher.
     #[tokio::test]
     async fn retry_does_not_reinsert_false_absence_when_an_owning_runtime_has_the_watcher() {
+        let _absence = lock_watcher_absence_for_test().await;
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(3_410_208);
         clear_watcher_absence(&provider, channel);
@@ -1501,6 +1521,7 @@ mod tests {
     /// re-attempted on the next tick.
     #[tokio::test]
     async fn retry_keeps_absence_alive_when_no_owner_and_snapshot_is_none() {
+        let _absence = lock_watcher_absence_for_test().await;
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(3_410_210);
         clear_watcher_absence(&provider, channel);
@@ -1558,6 +1579,7 @@ mod tests {
     #[tokio::test]
     async fn stall_watchdog_pass_drives_retry_with_zero_watcher_candidates() {
         use super::super::recovery::run_stall_watchdog_pass;
+        let _absence = lock_watcher_absence_for_test().await;
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(3_410_209);
         clear_watcher_absence(&provider, channel);
@@ -1784,6 +1806,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn sweep_arms_nothing_for_a_channel_whose_tmux_is_dead() {
+        let _absence = lock_watcher_absence_for_test().await;
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(5_957_003);
         clear_watcher_absence(&provider, channel);
@@ -1817,6 +1840,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn absence_sweep_arms_then_drives_one_respawn_attempt_and_backs_off() {
+        let _absence = lock_watcher_absence_for_test().await;
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(5_957_010);
         clear_watcher_absence(&provider, channel);
@@ -1896,6 +1920,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn absence_retry_parks_the_channel_after_the_attempt_cap() {
+        let _absence = lock_watcher_absence_for_test().await;
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(5_957_011);
         clear_watcher_absence(&provider, channel);
@@ -2017,6 +2042,7 @@ mod tests {
     #[tokio::test]
     async fn stall_watchdog_pass_arms_absence_for_an_unwatched_mailbox_channel() {
         use super::super::recovery::run_stall_watchdog_pass;
+        let _absence = lock_watcher_absence_for_test().await;
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(5_957_012);
         clear_watcher_absence(&provider, channel);
@@ -2049,13 +2075,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn watcher_absence_feeds_the_retry_queue_for_the_whole_5h_gap() {
+        let _absence = blocking_lock_watcher_absence_for_test();
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(5_957_004);
         clear_watcher_absence(&provider, channel);
-        // Held for the shared env mutex alone: the watchdog-pass tests GC the
-        // absence map against the wall clock, which retires this fixture's
-        // incident-anchored entry mid-loop if they run alongside it.
-        let _serialized = FakeTmux::answering_alive(true);
         let live = snapshot(
             channel.get(),
             Some("AgentDesk-codex-5957-gap"),
@@ -2115,6 +2138,7 @@ mod tests {
 
     #[test]
     fn deadman_switch_escalates_after_threshold_then_clears_on_watcher_return() {
+        let _absence = blocking_lock_watcher_absence_for_test();
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(3_410_204);
         clear_watcher_absence(&provider, channel);
@@ -2176,6 +2200,7 @@ mod tests {
 
     #[test]
     fn deadman_switch_ignores_idle_channel_without_relay_work() {
+        let _absence = blocking_lock_watcher_absence_for_test();
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(3_410_205);
         clear_watcher_absence(&provider, channel);
@@ -2227,6 +2252,7 @@ mod tests {
     /// `STALL_WATCHDOG_INTERVAL_SECS` tick.
     #[test]
     fn a_routable_unwatched_session_reaches_the_respawn_queue_within_one_minute() {
+        let _absence = blocking_lock_watcher_absence_for_test();
         let provider = ProviderKind::Claude;
         let channel = ChannelId::new(5_957_301);
         clear_watcher_absence(&provider, channel);
@@ -2264,6 +2290,7 @@ mod tests {
     /// has to become loud at a bounded threshold instead of passing silently.
     #[test]
     fn an_unrecovered_routable_absence_warns_once_past_the_threshold() {
+        let _absence = blocking_lock_watcher_absence_for_test();
         let provider = ProviderKind::Claude;
         let channel = ChannelId::new(5_957_302);
         clear_watcher_absence(&provider, channel);
@@ -2305,6 +2332,7 @@ mod tests {
     /// must fire, and exactly once, not on every one of the ~568 ticks.
     #[test]
     fn the_five_hour_incident_gap_warns_exactly_once() {
+        let _absence = blocking_lock_watcher_absence_for_test();
         let provider = ProviderKind::Claude;
         let channel = ChannelId::new(5_957_303);
         clear_watcher_absence(&provider, channel);
@@ -2336,6 +2364,7 @@ mod tests {
     /// dead-man ERROR ladder.
     #[test]
     fn a_channel_observed_on_this_tick_is_left_to_the_relay_work_sweep() {
+        let _absence = blocking_lock_watcher_absence_for_test();
         let provider = ProviderKind::Claude;
         let channel = ChannelId::new(5_957_304);
         clear_watcher_absence(&provider, channel);
@@ -2369,6 +2398,7 @@ mod tests {
     /// a LATER gap must be able to announce itself again.
     #[test]
     fn a_recovered_channel_can_announce_a_later_gap_again() {
+        let _absence = blocking_lock_watcher_absence_for_test();
         let provider = ProviderKind::Claude;
         let channel = ChannelId::new(5_957_305);
         clear_watcher_absence(&provider, channel);
