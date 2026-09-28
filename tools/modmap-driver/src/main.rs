@@ -3,6 +3,7 @@
 #![feature(rustc_private)]
 extern crate rustc_ast;
 extern crate rustc_driver;
+extern crate rustc_feature;
 extern crate rustc_interface;
 extern crate rustc_middle;
 extern crate rustc_session;
@@ -10,6 +11,7 @@ extern crate rustc_span;
 
 mod cfg_snapshot;
 mod modmap;
+mod session;
 
 use rustc_span::ExpnId;
 use std::os::unix::process::CommandExt;
@@ -79,6 +81,19 @@ fn main() {
     if argv.len() < 2 {
         eprintln!("usage: modmap-driver <rustc> <args...> (as RUSTC_WORKSPACE_WRAPPER)");
         std::process::exit(2);
+    }
+    if argv[1] == "__modmap_version" {
+        println!(
+            "{}",
+            rustc_interface::util::rustc_version_str().unwrap_or("unknown")
+        );
+        return;
+    }
+    if argv[1] == "__modmap_items_child" {
+        session::child(&argv);
+    }
+    if let Some(clippy) = std::env::var_os("MODMAP_CLIPPY_DRIVER").filter(|v| !v.is_empty()) {
+        session::run(&argv, &clippy);
     }
     let rest = &argv[2..];
     let Some(root) = root_lib(rest) else {
