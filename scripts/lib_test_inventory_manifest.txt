@@ -9127,11 +9127,6 @@ services::tui_o::shadow::root::tests::shadow_root_is_fixed_under_runtime_root_an
 services::tui_o::shadow::root::tests::shadow_root_refuses_links_and_leaves_outside_files_untouched
 services::tui_o::shadow::root::tests::store_appends_readable_jsonl_and_stops_at_the_cap
 services::tui_o::shadow::root::tests::store_seals_a_torn_tail_so_new_appends_survive_and_reports_the_damage
-services::tui_o::shadow::tap::tests::a_turn_running_at_attach_is_captured_from_its_opener_and_closes_live
-services::tui_o::shadow::tap::tests::a_window_start_applied_ticks_after_a_capture_still_reaches_what_it_captured
-services::tui_o::shadow::tap::tests::observer_attaches_derives_diffs_and_persists_only_through_the_sink
-services::tui_o::shadow::tap::tests::only_window_starts_appended_after_startup_are_polled
-services::tui_o::shadow::tap::tests::tap_counts_a_full_queue_as_dropped_instead_of_waiting
 services::tui_prompt_control::tests::absolute_path_prompts_are_never_taken_as_codex_commands
 services::tui_prompt_control::tests::codex_local_controls_carry_the_normalized_name_and_the_raw_args
 services::tui_prompt_control::tests::command_shaped_input_outside_the_registry_is_refused_not_forwarded

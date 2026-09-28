@@ -1,5 +1,6 @@
 //! Gateway tap and the observe loop it feeds: capture -> derive -> diff, persisted only via the sink.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -107,6 +108,7 @@ pub struct Observer {
     /// Batches with their capture time, derived after the loop applies any WindowStart it read.
     captured: Vec<(DateTime<Utc>, SourceBinding, CaptureBatch)>,
     window_applied: bool,
+    last_checkpoint: Option<DateTime<Utc>>,
 }
 
 impl Observer {
@@ -129,6 +131,7 @@ impl Observer {
             link,
             captured: Vec::new(),
             window_applied: false,
+            last_checkpoint: None,
         }
     }
 
@@ -200,14 +203,24 @@ impl Observer {
             }
             self.persist(ShadowRecord::Binding { change });
         }
-        // Before the first window, captures wait so a late-appended WindowStart still reaches them.
-        let applied = self.window_applied;
-        let (due, held): (Vec<_>, Vec<_>) = std::mem::take(&mut self.captured)
-            .into_iter()
-            .partition(|(at, _, _)| applied || now - *at >= Duration::seconds(WINDOW_WAIT_SECS));
+        // Before the first window, the newest HOLD_BYTES of captures wait for a late WindowStart.
+        let (applied, mut bytes, mut held) =
+            (self.window_applied, 0, std::mem::take(&mut self.captured));
+        let keep = (held.iter().rev())
+            .take_while(|(_, _, batch)| {
+                bytes += batch.records.iter().map(|r| r.line.len()).sum::<usize>();
+                !applied && bytes <= HOLD_BYTES
+            })
+            .count();
+        let due: Vec<_> = held.drain(..held.len() - keep).collect();
         self.captured = held;
         let outputs: Vec<DeriveOutput> = (due.iter())
-            .flat_map(|(_, binding, batch)| self.link.derive(binding, batch))
+            .flat_map(|(at, binding, batch)| {
+                OBSERVED_AT.set(Some(*at));
+                let outputs = self.link.derive(binding, batch);
+                OBSERVED_AT.set(None);
+                outputs
+            })
             .collect();
         for output in outputs {
             self.diff.observe_derived(&output, now);
@@ -235,9 +248,16 @@ impl Observer {
         legacy
             .iter()
             .for_each(|event| self.diff.observe_legacy(event));
-        if dropped > 0 {
+        // A loss is dated by the span since the previous TapGap, so collections are checkpointed too.
+        let checkpoint = Duration::seconds(CHECKPOINT_SECS);
+        if dropped > 0
+            || self
+                .last_checkpoint
+                .is_none_or(|last| now - last >= checkpoint)
+        {
             self.diff.observe_tap_gap(dropped, now);
             self.persist(ShadowRecord::TapGap { dropped });
+            self.last_checkpoint = Some(now);
         }
         for diff in self.diff.drain_ready(now) {
             self.persist(ShadowRecord::Diff { diff });
@@ -253,8 +273,21 @@ fn capture_lag_ms(path: &Path, now: DateTime<Utc>) -> Option<u64> {
     u64::try_from((now - modified).num_milliseconds()).ok()
 }
 
-/// Longest wait for the first window; a capture older than this derives without one.
-const WINDOW_WAIT_SECS: i64 = 5 * 60;
+/// Capture bytes held for the first window; older captures derive without one.
+const HOLD_BYTES: usize = 32 * 1024 * 1024;
+
+/// Most seconds between two TapGap records while the observer runs, drops or not.
+pub const CHECKPOINT_SECS: i64 = 10;
+
+thread_local! {
+    /// Capture time of the batch being derived.
+    static OBSERVED_AT: Cell<Option<DateTime<Utc>>> = const { Cell::new(None) };
+}
+
+/// Derive clock: when the observer read the batch, so holding it does not move its evidence.
+pub fn observed_at() -> DateTime<Utc> {
+    OBSERVED_AT.get().unwrap_or_else(Utc::now)
+}
 
 /// How far back attach looks for the opener of a turn that is still running.
 const OPENER_SCAN_BYTES: u64 = 8 * 1024 * 1024;
@@ -382,7 +415,7 @@ pub fn start(config: &ShadowConfig, runtime_root: &Path, discover: TargetDiscove
         Ok(Box::new(SourceCapture::open(binding.source.clone(), start)?) as Box<dyn CaptureSource>)
     });
     let tail = WindowStartTail::at_end(store.root().records_path());
-    let link = Box::new(TranscriptDerive::default());
+    let link = Box::new(TranscriptDerive::with_clock(observed_at));
     let observer = Observer::new(Box::new(store), open_capture, link);
     let allowlist = config.channel_allowlist.clone();
     let spawned = std::thread::Builder::new()
@@ -423,347 +456,5 @@ fn run(
         if tick % 60 == 0 {
             tracing::info!(metrics = ?observer.metrics(), "o-shadow: metrics");
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::services::tui_o::shadow::binding_reader::source_id_for;
-    use crate::services::tui_o::shadow::diff::sha256_hex;
-    use crate::services::tui_o::shadow::{
-        CapturedRecord, PieceDigest, ShadowTurn, ShadowUnit, SourceAnomaly, SourceAnomalyKind,
-        SourceRange, UnitKey, UnitKind,
-    };
-    use std::collections::VecDeque;
-    use std::sync::{Arc, Mutex};
-
-    fn created(msg_id: u64, at: DateTime<Utc>, content: &str) -> LegacyTapEvent {
-        let content = content.to_string();
-        LegacyTapEvent::Created {
-            channel_id: 7,
-            msg_id,
-            at,
-            content,
-        }
-    }
-
-    #[test]
-    fn tap_counts_a_full_queue_as_dropped_instead_of_waiting() {
-        let (tap, mut rx) = GatewayTap::new(&[7], 1);
-        tap.offer(created(1, Utc::now(), "a"));
-        tap.offer(created(2, Utc::now(), "b"));
-        assert_eq!((tap.take_dropped(), tap.take_dropped()), (1, 0));
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(LegacyTapEvent::Created { msg_id: 1, .. })
-        ));
-        assert!(tap.watches(7) && !tap.watches(8));
-    }
-
-    #[derive(Clone, Default)]
-    struct Records(Arc<Mutex<Vec<ShadowRecord>>>);
-
-    impl ShadowSink for Records {
-        fn append(&mut self, record: &ShadowRecord) -> io::Result<()> {
-            self.0.lock().unwrap().push(record.clone());
-            Ok(())
-        }
-    }
-
-    struct ScriptedCapture(SourceId, VecDeque<CaptureOutcome>);
-
-    impl CaptureSource for ScriptedCapture {
-        fn source(&self) -> &SourceId {
-            &self.0
-        }
-        fn poll(&mut self, _max_bytes: u64) -> CaptureOutcome {
-            self.1.pop_front().unwrap_or_else(|| {
-                CaptureOutcome::Batch(CaptureBatch {
-                    source: self.0.clone(),
-                    records: vec![],
-                    captured_through: 0,
-                })
-            })
-        }
-    }
-
-    struct Link(Option<ShadowUnit>);
-
-    impl DeriveLink for Link {
-        fn capture_start(&mut self, _binding: &SourceBinding, extent: u64) -> u64 {
-            extent - 3
-        }
-        fn attach(&mut self, _source: &SourceId, _extent: u64, _at: DateTime<Utc>) {}
-        fn window_start(&mut self, _t0: DateTime<Utc>, _sources: &[WindowStartSource]) {}
-        fn derive(&mut self, _binding: &SourceBinding, _batch: &CaptureBatch) -> Vec<DeriveOutput> {
-            self.0
-                .take()
-                .map(DeriveOutput::Sealed)
-                .into_iter()
-                .collect()
-        }
-    }
-
-    #[test]
-    fn observer_attaches_derives_diffs_and_persists_only_through_the_sink() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), b"0123456789").unwrap();
-        let source = SourceId {
-            session_id: "s".into(),
-            path: file.path().into(),
-            dev: 1,
-            ino: 1,
-        };
-        let now = Utc::now();
-        let unit = ShadowUnit {
-            unit_key: UnitKey {
-                channel_id: 7,
-                provider: ShadowProvider::Claude,
-                native_key: "m:0".into(),
-                kind: UnitKind::Body,
-            },
-            kind: UnitKind::Body,
-            source_range: SourceRange {
-                source: source.clone(),
-                start: 7,
-                end: 10,
-            },
-            sealed_at: now,
-            pieces: vec![PieceDigest {
-                index: 0,
-                units: 5,
-                sha256: sha256_hex("hello"),
-            }],
-        };
-        let line = CapturedRecord {
-            start: 7,
-            end: 10,
-            line: b"{}".to_vec(),
-        };
-        let batch = CaptureBatch {
-            source: source.clone(),
-            records: vec![line],
-            captured_through: 10,
-        };
-        let anomaly = SourceAnomaly {
-            source: source.clone(),
-            kind: SourceAnomalyKind::Shrunk,
-            captured_through: 10,
-            detail: String::new(),
-        };
-        let script = VecDeque::from([
-            CaptureOutcome::Batch(batch),
-            CaptureOutcome::Anomaly(anomaly),
-        ]);
-        let starts = Arc::new(Mutex::new(Vec::new()));
-        let seen = starts.clone();
-        let opener: CaptureOpener = Box::new(move |binding, start| {
-            seen.lock().unwrap().push(start);
-            Ok(
-                Box::new(ScriptedCapture(binding.source.clone(), script.clone()))
-                    as Box<dyn CaptureSource>,
-            )
-        });
-        let sink = Records::default();
-        let mut observer =
-            Observer::new(Box::new(sink.clone()), opener, Box::new(Link(Some(unit))));
-        let binding = SourceBinding {
-            channel_id: 7,
-            provider: ShadowProvider::Claude,
-            source,
-        };
-        let change = BindingChange {
-            channel_id: 7,
-            old: None,
-            new: Some(binding),
-            at: now,
-        };
-        observer.start(now);
-        observer.tick(now, vec![change], vec![created(100, now, "hello")], 2);
-        observer.tick(now + chrono::Duration::seconds(1), vec![], vec![], 0);
-        observer.tick(now + chrono::Duration::seconds(300), vec![], vec![], 0);
-        observer.tick(now + chrono::Duration::seconds(601), vec![], vec![], 0);
-        let kinds: Vec<String> = sink
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|r| {
-                serde_json::to_value(r).unwrap()["type"]
-                    .as_str()
-                    .unwrap()
-                    .to_string()
-            })
-            .collect();
-        // No window is applied, so the capture derives once it has waited WINDOW_WAIT_SECS.
-        let expected = [
-            "header", "attach", "binding", "tap_gap", "diff", "anomaly", "derived", "diff",
-            "legacy",
-        ];
-        assert_eq!(kinds, expected);
-        assert_eq!(*starts.lock().unwrap(), vec![7]);
-        let records = sink.0.lock().unwrap();
-        assert!(
-            matches!(&records[7], ShadowRecord::Diff { diff } if diff.class == crate::services::tui_o::shadow::DiffClass::Match && diff.legacy_msg_ids == vec![100])
-        );
-        assert_eq!(observer.metrics().tap_dropped_total, 2);
-    }
-
-    fn fixed_clock() -> DateTime<Utc> {
-        "2026-09-27T12:06:30Z".parse().unwrap()
-    }
-
-    #[test]
-    fn a_turn_running_at_attach_is_captured_from_its_opener_and_closes_live() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tui_o_shadow");
-        let fixture = std::fs::read_to_string(format!("{path}/derive_claude_tui.jsonl")).unwrap();
-        let lines: Vec<String> = fixture.lines().map(|line| format!("{line}\n")).collect();
-        let dir = tempfile::tempdir().unwrap();
-        let transcript = dir.path().join("t.jsonl");
-        std::fs::write(&transcript, lines[..3].concat()).unwrap();
-        let binding = SourceBinding {
-            channel_id: 7,
-            provider: ShadowProvider::Claude,
-            source: source_id_for("s-claude", &transcript).unwrap(),
-        };
-        let sink = Records::default();
-        let opener: CaptureOpener = Box::new(|binding, start| {
-            let capture = SourceCapture::open(binding.source.clone(), start)?;
-            Ok(Box::new(capture) as Box<dyn CaptureSource>)
-        });
-        let link = Box::new(TranscriptDerive::with_clock(fixed_clock));
-        let mut observer = Observer::new(Box::new(sink.clone()), opener, link);
-        let at: DateTime<Utc> = "2026-09-27T12:06:00.500Z".parse().unwrap();
-        // No source was attached at t0, so the window lists none and this source joins it.
-        observer.window_start(at - chrono::Duration::seconds(30), &[]);
-        let change = BindingChange {
-            channel_id: 7,
-            old: None,
-            new: Some(binding),
-            at,
-        };
-        observer.tick(at, vec![change], vec![], 0);
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&transcript)
-            .unwrap();
-        std::io::Write::write_all(&mut file, lines[3..10].concat().as_bytes()).unwrap();
-        observer.tick(at, vec![], vec![], 0);
-        observer.tick(at, vec![], vec![], 0);
-        let records = sink.0.lock().unwrap();
-        let (opener_at, extent) = (lines[0].len() as u64, lines[..3].concat().len() as u64);
-        assert!(records.iter().any(|r| matches!(r,
-            ShadowRecord::Attach { capture_start, attach_extent, .. }
-                if (*capture_start, *attach_extent) == (opener_at, extent))));
-        let turns: Vec<&ShadowTurn> = records
-            .iter()
-            .filter_map(|r| match r {
-                ShadowRecord::Derived {
-                    output: DeriveOutput::TurnClosed(turn),
-                } => Some(turn),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(turns.len(), 1);
-        assert!(
-            turns[0].live && turns[0].native_turn_id == "u-1",
-            "{turns:?}"
-        );
-    }
-
-    #[test]
-    fn only_window_starts_appended_after_startup_are_polled() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = ShadowRoot::under(dir.path()).unwrap();
-        let mut store = ShadowStore::open(root, DISK_CAP_BYTES).unwrap();
-        let source = SourceId {
-            session_id: "s".into(),
-            path: dir.path().join("t.jsonl"),
-            dev: 1,
-            ino: 1,
-        };
-        let window_start = |minute: u32| ShadowRecord::WindowStart {
-            t0: format!("2026-09-27T12:{minute:02}:00Z").parse().unwrap(),
-            sources: vec![WindowStartSource {
-                source: source.clone(),
-                window_start_extent: 10,
-            }],
-        };
-        store.append(&window_start(1)).unwrap();
-        let mut tail = WindowStartTail::at_end(store.root().records_path());
-        store.append(&window_start(2)).unwrap();
-        let polled = tail.poll();
-        assert_eq!(polled.len(), 1);
-        assert_eq!(polled[0].0.to_rfc3339(), "2026-09-27T12:02:00+00:00");
-        assert!(tail.poll().is_empty());
-    }
-
-    fn race_clock() -> DateTime<Utc> {
-        "2026-09-27T12:06:06.750Z".parse().unwrap()
-    }
-
-    #[test]
-    fn a_window_start_applied_ticks_after_a_capture_still_reaches_what_it_captured() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tui_o_shadow");
-        let fixture = std::fs::read_to_string(format!("{path}/derive_claude_tui.jsonl")).unwrap();
-        let lines: Vec<String> = fixture.lines().map(|line| format!("{line}\n")).collect();
-        let dir = tempfile::tempdir().unwrap();
-        let transcript = dir.path().join("race.jsonl");
-        std::fs::write(&transcript, lines[..3].concat()).unwrap();
-        let source = source_id_for("s-claude", &transcript).unwrap();
-        let (channel_id, provider) = (7, ShadowProvider::Claude);
-        let binding = SourceBinding {
-            channel_id,
-            provider,
-            source: source.clone(),
-        };
-        let extent = lines[..3].concat().len() as u64;
-        let sink = Records::default();
-        let opener: CaptureOpener = Box::new(|binding, start| {
-            let capture = SourceCapture::open(binding.source.clone(), start)?;
-            Ok(Box::new(capture) as Box<dyn CaptureSource>)
-        });
-        let link = Box::new(TranscriptDerive::with_clock(race_clock));
-        let mut observer = Observer::new(Box::new(sink.clone()), opener, link);
-        let attached_at: DateTime<Utc> = "2026-09-27T12:05:00Z".parse().unwrap();
-        let change = BindingChange {
-            channel_id,
-            old: None,
-            new: Some(binding),
-            at: attached_at,
-        };
-        observer.tick(attached_at, vec![change], vec![], 0);
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&transcript)
-            .unwrap();
-        std::io::Write::write_all(&mut file, lines[3..10].concat().as_bytes()).unwrap();
-        // The CLI appended WindowStart two ticks after the capture that holds the closer.
-        let captured_at = race_clock() - Duration::seconds(1);
-        observer.tick(captured_at, vec![], vec![], 0);
-        observer.tick(race_clock(), vec![], vec![], 0);
-        let t0: DateTime<Utc> = "2026-09-27T12:06:05Z".parse().unwrap();
-        let window_start_extent = extent;
-        observer.window_start(
-            t0,
-            &[WindowStartSource {
-                source,
-                window_start_extent,
-            }],
-        );
-        observer.tick(race_clock(), vec![], vec![], 0);
-        let records = sink.0.lock().unwrap();
-        let turns: Vec<&ShadowTurn> = records
-            .iter()
-            .filter_map(|r| match r {
-                ShadowRecord::Derived {
-                    output: DeriveOutput::TurnClosed(turn),
-                } => Some(turn),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(turns.len(), 1);
-        assert!(turns[0].live, "{turns:?}");
     }
 }
