@@ -1,5 +1,6 @@
 //! Gateway tap and the observe loop it feeds: capture -> derive -> diff, persisted only via the sink.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -107,6 +108,7 @@ pub struct Observer {
     /// Batches with their capture time, derived after the loop applies any WindowStart it read.
     captured: Vec<(DateTime<Utc>, SourceBinding, CaptureBatch)>,
     window_applied: bool,
+    last_checkpoint: Option<DateTime<Utc>>,
 }
 
 impl Observer {
@@ -129,6 +131,7 @@ impl Observer {
             link,
             captured: Vec::new(),
             window_applied: false,
+            last_checkpoint: None,
         }
     }
 
@@ -200,14 +203,24 @@ impl Observer {
             }
             self.persist(ShadowRecord::Binding { change });
         }
-        // Before the first window, captures wait so a late-appended WindowStart still reaches them.
-        let applied = self.window_applied;
-        let (due, held): (Vec<_>, Vec<_>) = std::mem::take(&mut self.captured)
-            .into_iter()
-            .partition(|(at, _, _)| applied || now - *at >= Duration::seconds(WINDOW_WAIT_SECS));
+        // Before the first window, the newest HOLD_BYTES of captures wait for a late WindowStart.
+        let (applied, mut bytes, mut held) =
+            (self.window_applied, 0, std::mem::take(&mut self.captured));
+        let keep = (held.iter().rev())
+            .take_while(|(_, _, batch)| {
+                bytes += batch.records.iter().map(|r| r.line.len()).sum::<usize>();
+                !applied && bytes <= HOLD_BYTES
+            })
+            .count();
+        let due: Vec<_> = held.drain(..held.len() - keep).collect();
         self.captured = held;
         let outputs: Vec<DeriveOutput> = (due.iter())
-            .flat_map(|(_, binding, batch)| self.link.derive(binding, batch))
+            .flat_map(|(at, binding, batch)| {
+                OBSERVED_AT.set(Some(*at));
+                let outputs = self.link.derive(binding, batch);
+                OBSERVED_AT.set(None);
+                outputs
+            })
             .collect();
         for output in outputs {
             self.diff.observe_derived(&output, now);
@@ -235,9 +248,16 @@ impl Observer {
         legacy
             .iter()
             .for_each(|event| self.diff.observe_legacy(event));
-        if dropped > 0 {
+        // A loss is dated by the span since the previous TapGap, so collections are checkpointed too.
+        let checkpoint = Duration::seconds(CHECKPOINT_SECS);
+        if dropped > 0
+            || self
+                .last_checkpoint
+                .is_none_or(|last| now - last >= checkpoint)
+        {
             self.diff.observe_tap_gap(dropped, now);
             self.persist(ShadowRecord::TapGap { dropped });
+            self.last_checkpoint = Some(now);
         }
         for diff in self.diff.drain_ready(now) {
             self.persist(ShadowRecord::Diff { diff });
@@ -253,8 +273,21 @@ fn capture_lag_ms(path: &Path, now: DateTime<Utc>) -> Option<u64> {
     u64::try_from((now - modified).num_milliseconds()).ok()
 }
 
-/// Longest wait for the first window; a capture older than this derives without one.
-const WINDOW_WAIT_SECS: i64 = 5 * 60;
+/// Capture bytes held for the first window; older captures derive without one.
+const HOLD_BYTES: usize = 32 * 1024 * 1024;
+
+/// Most seconds between two TapGap records while the observer runs, drops or not.
+pub const CHECKPOINT_SECS: i64 = 10;
+
+thread_local! {
+    /// Capture time of the batch being derived.
+    static OBSERVED_AT: Cell<Option<DateTime<Utc>>> = const { Cell::new(None) };
+}
+
+/// Derive clock: when the observer read the batch, so holding it does not move its evidence.
+pub fn observed_at() -> DateTime<Utc> {
+    OBSERVED_AT.get().unwrap_or_else(Utc::now)
+}
 
 /// How far back attach looks for the opener of a turn that is still running.
 const OPENER_SCAN_BYTES: u64 = 8 * 1024 * 1024;
@@ -382,7 +415,7 @@ pub fn start(config: &ShadowConfig, runtime_root: &Path, discover: TargetDiscove
         Ok(Box::new(SourceCapture::open(binding.source.clone(), start)?) as Box<dyn CaptureSource>)
     });
     let tail = WindowStartTail::at_end(store.root().records_path());
-    let link = Box::new(TranscriptDerive::default());
+    let link = Box::new(TranscriptDerive::with_clock(observed_at));
     let observer = Observer::new(Box::new(store), open_capture, link);
     let allowlist = config.channel_allowlist.clone();
     let spawned = std::thread::Builder::new()
@@ -580,6 +613,7 @@ mod tests {
             at: now,
         };
         observer.start(now);
+        observer.window_start(now, &[]);
         observer.tick(now, vec![change], vec![created(100, now, "hello")], 2);
         observer.tick(now + chrono::Duration::seconds(1), vec![], vec![], 0);
         observer.tick(now + chrono::Duration::seconds(300), vec![], vec![], 0);
@@ -596,16 +630,16 @@ mod tests {
                     .to_string()
             })
             .collect();
-        // No window is applied, so the capture derives once it has waited WINDOW_WAIT_SECS.
+        // A drop is recorded at once; quiet collections only every CHECKPOINT_SECS.
         let expected = [
-            "header", "attach", "binding", "tap_gap", "diff", "anomaly", "derived", "diff",
-            "legacy",
+            "header", "attach", "binding", "tap_gap", "diff", "derived", "anomaly", "tap_gap",
+            "diff", "tap_gap", "legacy",
         ];
         assert_eq!(kinds, expected);
         assert_eq!(*starts.lock().unwrap(), vec![7]);
         let records = sink.0.lock().unwrap();
         assert!(
-            matches!(&records[7], ShadowRecord::Diff { diff } if diff.class == crate::services::tui_o::shadow::DiffClass::Match && diff.legacy_msg_ids == vec![100])
+            matches!(&records[8], ShadowRecord::Diff { diff } if diff.class == crate::services::tui_o::shadow::DiffClass::Match && diff.legacy_msg_ids == vec![100])
         );
         assert_eq!(observer.metrics().tap_dropped_total, 2);
     }
@@ -704,7 +738,7 @@ mod tests {
     }
 
     #[test]
-    fn a_window_start_applied_ticks_after_a_capture_still_reaches_what_it_captured() {
+    fn a_window_start_applied_minutes_after_a_capture_still_reaches_it_at_its_capture_time() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tui_o_shadow");
         let fixture = std::fs::read_to_string(format!("{path}/derive_claude_tui.jsonl")).unwrap();
         let lines: Vec<String> = fixture.lines().map(|line| format!("{line}\n")).collect();
@@ -724,7 +758,7 @@ mod tests {
             let capture = SourceCapture::open(binding.source.clone(), start)?;
             Ok(Box::new(capture) as Box<dyn CaptureSource>)
         });
-        let link = Box::new(TranscriptDerive::with_clock(race_clock));
+        let link = Box::new(TranscriptDerive::with_clock(observed_at));
         let mut observer = Observer::new(Box::new(sink.clone()), opener, link);
         let attached_at: DateTime<Utc> = "2026-09-27T12:05:00Z".parse().unwrap();
         let change = BindingChange {
@@ -739,10 +773,12 @@ mod tests {
             .open(&transcript)
             .unwrap();
         std::io::Write::write_all(&mut file, lines[3..10].concat().as_bytes()).unwrap();
-        // The CLI appended WindowStart two ticks after the capture that holds the closer.
+        // The CLI appended WindowStart more than five minutes after the capture of the closer.
         let captured_at = race_clock() - Duration::seconds(1);
         observer.tick(captured_at, vec![], vec![], 0);
         observer.tick(race_clock(), vec![], vec![], 0);
+        let expired = captured_at + Duration::seconds(301);
+        observer.tick(expired, vec![], vec![], 0);
         let t0: DateTime<Utc> = "2026-09-27T12:06:05Z".parse().unwrap();
         let window_start_extent = extent;
         observer.window_start(
@@ -752,7 +788,7 @@ mod tests {
                 window_start_extent,
             }],
         );
-        observer.tick(race_clock(), vec![], vec![], 0);
+        observer.tick(expired + Duration::seconds(1), vec![], vec![], 0);
         let records = sink.0.lock().unwrap();
         let turns: Vec<&ShadowTurn> = records
             .iter()
@@ -764,6 +800,60 @@ mod tests {
             })
             .collect();
         assert_eq!(turns.len(), 1);
-        assert!(turns[0].live, "{turns:?}");
+        assert!(
+            turns[0].live && turns[0].closed_at == captured_at,
+            "{turns:?}"
+        );
+    }
+
+    #[test]
+    fn captures_waiting_for_the_first_window_stay_within_the_hold_budget() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"0123456789").unwrap();
+        let (channel_id, provider) = (7, ShadowProvider::Claude);
+        let source = source_id_for("s", file.path()).unwrap();
+        // One complete line of MAX_READ_BYTES per tick, the most a feed reads.
+        let line = CapturedRecord {
+            start: 0,
+            end: MAX_READ_BYTES,
+            line: vec![b'x'; MAX_READ_BYTES as usize - 1],
+        };
+        let batch = |_| {
+            let (source, records) = (source.clone(), vec![line.clone()]);
+            CaptureOutcome::Batch(CaptureBatch {
+                source,
+                records,
+                captured_through: 0,
+            })
+        };
+        let script: VecDeque<CaptureOutcome> = (0..40).map(batch).collect();
+        let opener: CaptureOpener = Box::new(move |binding, _| {
+            let capture = ScriptedCapture(binding.source.clone(), script.clone());
+            Ok(Box::new(capture) as Box<dyn CaptureSource>)
+        });
+        let sink = Box::new(Records::default());
+        let mut observer = Observer::new(sink, opener, Box::new(Link(None)));
+        let now = Utc::now();
+        let binding = SourceBinding {
+            channel_id,
+            provider,
+            source,
+        };
+        let (old, new, at) = (None, Some(binding), now);
+        let change = BindingChange {
+            channel_id,
+            old,
+            new,
+            at,
+        };
+        observer.tick(now, vec![change], vec![], 0);
+        (1..40).for_each(|i| observer.tick(now + Duration::seconds(i), vec![], vec![], 0));
+        let held: usize = (observer.captured.iter())
+            .flat_map(|(_, _, batch)| &batch.records)
+            .map(|record| record.line.len())
+            .sum();
+        // The budget plus the one read taken after this tick's release.
+        assert!(held <= HOLD_BYTES + MAX_READ_BYTES as usize, "{held}");
+        assert!(observer.captured.len() < 40);
     }
 }

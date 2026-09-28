@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::metrics::MetricsSnapshot;
 use super::root::StoredRecord;
+use super::tap::CHECKPOINT_SECS;
 use super::{
     DeriveOutput, DiffCause, DiffClass, DiffRecord, IDENTITY_VERSION, MATCH_WINDOW,
     PopulationSnapshot, PopulationSource, REPORT_VERSION, SCHEMA_VERSION, ShadowProvider,
@@ -353,7 +354,37 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
             "reported before {late}, when the last diffs are judged"
         ));
     }
-    let (mut header, mut stale) = (None, 0);
+    // Evidence is dated when read, so the run that read WindowStart must keep reading until `late`.
+    let opened = starts.first().map_or(records.len(), |(line, ..)| *line);
+    let header_at = |i: &usize| matches!(records[*i], ShadowRecord::Header { .. });
+    let run = (0..opened).rev().find(header_at).unwrap_or(0);
+    let end = (opened..records.len())
+        .find(header_at)
+        .unwrap_or(records.len());
+    if records[end..]
+        .iter()
+        .any(|r| matches!(r, ShadowRecord::Header { started_at, .. } if *started_at <= late))
+    {
+        failures.push(format!(
+            "observer restarted before {late}; work in flight was lost"
+        ));
+    }
+    let checkpoints: Vec<DateTime<Utc>> = (input.records[run..end].iter())
+        .filter(|s| matches!(s.record, ShadowRecord::TapGap { .. }))
+        .map(|s| s.at)
+        .collect();
+    let stall = Duration::seconds(3 * CHECKPOINT_SECS);
+    let continuous = checkpoints
+        .first()
+        .is_some_and(|first| *first <= t0 + stall)
+        && checkpoints.last().is_some_and(|last| *last >= late)
+        && (checkpoints.windows(2)).all(|w| w[1] <= t0 || w[0] >= late || w[1] - w[0] <= stall);
+    if !continuous {
+        failures.push(format!(
+            "tap collection not recorded every {stall} from t0 to {late}"
+        ));
+    }
+    let (mut header, mut stale, mut collected, mut lost) = (None, 0, None, false);
     let mut metrics = MetricsSnapshot::default();
     let mut classes: HashMap<&UnitKey, DiffClass> = HashMap::new();
     let mut window_diffs: Vec<&DiffRecord> = Vec::new();
@@ -373,14 +404,18 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
                 classes.insert(key, diff.class);
             }
         }
-        // A gap may hide events window units are judged on, from W before t0 until `late`.
-        let gap = match record {
-            ShadowRecord::TapGap { .. } => true,
-            ShadowRecord::Diff { diff } => diff.class == DiffClass::TapGap,
-            _ => false,
+        // A loss happened after the previous collection; it may hide events window units are
+        // judged on when that span meets `[t0 - W, late]`.
+        let in_window = match record {
+            ShadowRecord::TapGap { .. } => {
+                lost = collected.is_none_or(|previous| previous < late) && line.at >= t0 - window;
+                collected = Some(line.at);
+                lost
+            }
+            ShadowRecord::Diff { diff } if diff.class == DiffClass::TapGap => lost,
+            _ => t0 <= at && at <= t1,
         };
-        let (start, end) = if gap { (t0 - window, late) } else { (t0, t1) };
-        if start <= at && at <= end {
+        if in_window {
             stale += usize::from(header != Some((SCHEMA_VERSION, IDENTITY_VERSION)));
             metrics.record(record);
             if let ShadowRecord::Diff { diff } = record {
@@ -458,13 +493,11 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
 
     let mut synthetic = BTreeMap::new();
     for entry in input.manifest.iter().filter(|e| e.created_at <= t1) {
-        let channel = population
-            .channels
-            .iter()
-            .find(|c| c.channel_id == entry.channel_id);
-        if channel.map(|c| profile_of(&c.provider)).as_deref()
-            != Some(entry.expected_runtime_kind.as_str())
-        {
+        // A thread can carry one entry per provider it was bound to in the window.
+        let mut kinds = (population.channels.iter())
+            .filter(|c| c.channel_id == entry.channel_id)
+            .map(|c| profile_of(&c.provider));
+        if !kinds.any(|kind| kind == entry.expected_runtime_kind) {
             failures.push(format!(
                 "synthetic {}: channel is not effective {}",
                 entry.entry_id, entry.expected_runtime_kind
@@ -874,7 +907,29 @@ mod tests {
             at: t(10),
             record: record.clone(),
         };
-        records.iter().map(at).collect()
+        // The run then records a tap collection every 20 s from before t0 until after `late`.
+        let collected = (0..400).map(|i| StoredRecord {
+            at: t(-1) + Duration::seconds(20 * i),
+            record: ShadowRecord::TapGap { dropped: 0 },
+        });
+        records.iter().map(at).chain(collected).collect()
+    }
+
+    /// Stores `extra` at `at`, before the first collection recorded after it.
+    fn inserted(
+        mut records: Vec<StoredRecord>,
+        at: DateTime<Utc>,
+        extra: &[ShadowRecord],
+    ) -> Vec<StoredRecord> {
+        let checkpoint = |s: &StoredRecord| matches!(s.record, ShadowRecord::TapGap { dropped: 0 });
+        let index =
+            (records.iter().position(|s| checkpoint(s) && s.at > at)).unwrap_or(records.len());
+        let extra = extra.iter().map(|record| StoredRecord {
+            at,
+            record: record.clone(),
+        });
+        records.splice(index..index, extra);
+        records
     }
 
     fn classified(records: &[ShadowRecord], classify: ClassifyInput) -> ReportOutcome {
@@ -965,7 +1020,11 @@ mod tests {
         assert!(judge(&missed, &[], &claude()).failures[0].contains("missed 1 source"));
         let mut stale = passing();
         stale.extend([header(IDENTITY_VERSION - 1), turn(80, 900, &[], Vec::new())]);
-        assert!(judge(&stale, &[], &claude()).failures[0].starts_with("stale samples"));
+        let failures = judge(&stale, &[], &claude()).failures;
+        assert!(
+            failures.iter().any(|f| f.starts_with("stale samples")),
+            "{failures:?}"
+        );
         for to in [t(10), t(121)] {
             let failures = judge_at(&passing(), &[], &claude(), to, to + Duration::minutes(10));
             let failures = failures.failures;
@@ -1254,10 +1313,17 @@ mod tests {
         assert_eq!(outcome.profiles["claude_tui"].synthetic_turns, 2);
         let wrong = [entry("a", "codex_tui")];
         assert!(!judge(&records, &wrong, &claude()).pass);
+        // Thread 7 was bound to codex, then claude: either provider's profile is effective there.
+        let both = snapshot(&["claude_tui"], &[(7, "codex"), (7, "claude")], Vec::new());
+        let failures = judge(&records, &manifest, &both).failures;
+        assert!(
+            !failures.iter().any(|f| f.contains("not effective")),
+            "{failures:?}"
+        );
     }
 
     #[test]
-    fn a_timeless_tap_gap_counts_by_its_storage_time_until_the_last_judgement() {
+    fn a_tap_loss_is_dated_by_the_span_since_the_previous_collection() {
         let (channel_id, unit_key, class) = (0, None, DiffClass::TapGap);
         let (legacy_msg_ids, cause) = (Vec::new(), DiffCause::Unknown);
         let diff = DiffRecord {
@@ -1271,23 +1337,53 @@ mod tests {
             ShadowRecord::TapGap { dropped: 1 },
             ShadowRecord::Diff { diff },
         ];
-        let judge_gap_at = |minutes| {
+        // `stalled` drops the collections after t119 that a stalled observer never made.
+        let judge_gap_at = |minutes, stalled: bool| {
             let mut records = stored(&passing());
-            let at = t(minutes);
-            let late = gap.iter().map(|record| StoredRecord {
-                at,
-                record: record.clone(),
-            });
-            records.extend(late);
+            records.retain(|s| !stalled || s.at <= t(119) || s.at > t(minutes));
+            let records = inserted(records, t(minutes), &gap);
             judge_stored(&records, &[], &claude(), t(120), t(140)).failures
         };
-        // Stored at t1+11m, after every unit of the window was judged.
-        assert_eq!(judge_gap_at(131), Vec::<String>::new());
-        // From one match window before t0 until `late`, a gap may hide events window units needed.
+        // Lost and collected at t1+11m, after every unit of the window was judged.
+        assert_eq!(judge_gap_at(131, false), Vec::<String>::new());
+        // From one match window before t0 until `late`, a loss may hide events window units needed.
         let hidden = ["1 diffs still Unknown", "1 tap events dropped"];
-        assert_eq!(judge_gap_at(123), hidden);
-        assert_eq!(judge_gap_at(-4), hidden);
-        assert_eq!(judge_gap_at(-6), Vec::<String>::new());
+        assert_eq!(judge_gap_at(123, false), hidden);
+        assert_eq!(judge_gap_at(-4, false), hidden);
+        assert_eq!(judge_gap_at(-6, false), Vec::<String>::new());
+        // Lost at t119 but collected only at t131: the span since t119 meets the window.
+        let failures = judge_gap_at(131, true);
+        assert!(
+            failures[0].starts_with("tap collection not recorded"),
+            "{failures:?}"
+        );
+        assert_eq!(failures[1..], hidden);
+    }
+
+    #[test]
+    fn an_observer_restart_before_the_last_judgement_fails_the_window() {
+        let restart = |minutes| ShadowRecord::Header {
+            schema_version: SCHEMA_VERSION,
+            identity_version: IDENTITY_VERSION,
+            build: String::new(),
+            started_at: t(minutes),
+        };
+        let judge_restart_at = |minutes| {
+            let records = inserted(stored(&passing()), t(minutes), &[restart(minutes)]);
+            judge_stored(&records, &[], &claude(), t(120), t(140)).failures
+        };
+        // A restart at t119 drops held captures, pending units and unretired Legacy rows.
+        let failures = judge_restart_at(119);
+        assert!(
+            failures[0].starts_with("observer restarted before"),
+            "{failures:?}"
+        );
+        assert!(
+            failures[1].starts_with("tap collection not recorded"),
+            "{failures:?}"
+        );
+        assert_eq!(failures.len(), 2);
+        assert_eq!(judge_restart_at(131), Vec::<String>::new());
     }
 
     #[test]
@@ -1311,18 +1407,20 @@ mod tests {
         };
         let mut records = passing();
         records.insert(1, bind(7, t(-2), true));
+        // The session ended and the observer restarted after the window's last judgement.
         let (schema_version, identity_version, build) = (SCHEMA_VERSION, IDENTITY_VERSION, "");
-        records.push(ShadowRecord::Header {
+        let restart = ShadowRecord::Header {
             schema_version,
             identity_version,
             build: build.into(),
-            started_at: t(119),
-        });
-        let threads = bound_channels(&records, t(0), t(120));
+            started_at: t(131),
+        };
+        let records = inserted(stored(&records), t(131), &[restart]);
+        let threads = bound_channels(records.iter().map(|s| &s.record), t(0), t(120));
         assert_eq!(threads, [(7, "claude".to_string())]);
         let channels: Vec<(u64, &str)> = threads.iter().map(|(c, p)| (*c, p.as_str())).collect();
         let population = snapshot(&["claude_tui"], &channels, Vec::new());
-        let outcome = judge(&records, &[], &population);
+        let outcome = judge_stored(&records, &[], &population, t(120), t(140));
         assert!(outcome.pass, "{:?}", outcome.failures);
         // Bound only before t0 or only after t1: no evidence for this window.
         let outside = [
