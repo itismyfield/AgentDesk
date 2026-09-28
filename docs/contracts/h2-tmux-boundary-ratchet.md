@@ -130,8 +130,98 @@ helper는 compile/Cargo 호출 없이 run 기록만 검증한다. Cargo rc≠0�
 
 map rc는 0=요청 작업 완료, 1=compile/canary/수집·검증·쓰기 실패, 2=CLI 입력 계약 오류,
 3=lane host 불일치다. baseline 전 inert 종료는 `root=skipped`이며 root manifest를 만들지 않는다.
-B2 소유 산출물은 map run의 metadata manifest다. Clippy JSON/.d와 이를 묶는 receipt 생산·소비는 3b-A 소유다.
+B2 소유 산출물은 map run의 metadata manifest다. Clippy JSON과 items의 결속은 같은 호출 세션 manifest가 맡는다.
+`.d`·admission 활성과 map 세션/Clippy 세션의 R-O 동등성은 3b-A 소유다.
 map session cfg와 Clippy effective cfg의 동등성·admission 활성화를 이 manifest로 주장하지 않는다.
+
+### Canary Clippy 세션 계약
+
+`h2_session.session`은 items/cfg 세션이며 `h2_modmap.py`의 canary 검증에서 실행한다.
+`h2_env.environment("measure")`로 정리한 환경에서 Cargo와 버전 질의를 같은 crate cwd로 실행한다.
+`ALLOWED`는 rustc release/commit, Cargo, sysroot의 Clippy 경로/버전/연결 compiler, driver compiler를 검사한다.
+허용 조합과 host가 맞아야 metadata를 읽고 request를 만든다. metadata의 canonical manifest로 package를 고르고,
+non-proc-macro lib 하나의 canonical 경로·package ID·crate 이름·종류를 고정하며 그 lib만 touch한다.
+Cargo는 그 package ID를 명시적으로 선택한다. extra는 features/jobs/target/target-dir과 실행 제어 옵션만 받는다.
+crate·상위·CARGO_HOME의 config/config.toml에서 예약된 session/toolchain [env] 키와 compiler 교체를 거부한다.
+config include와 --config·package/manifest 선택 변경도 거부하며, Cargo 설정 bytes는 실행 전후 같아야 한다.
+생산자는 기대 manifest/package/lib가 맞는 non-test lib 호출뿐이다. 정보 질의·bin·proc-macro와 다른 member는 위임한다.
+생산자 후보의 @응답 파일 인수는 해석하지 않고 claim 전에 거부하며, 봉인에서도 같은 인수를 거부한다.
+실제 Clippy canonical 경로는 환경변수가 아닌 request의 승인 경로와 claim 전에 대조한다.
+request는 승인한 CLIPPY_ARGS/conf/width와 MODMAP 출력·nonce·run ID·기대 unit 환경값을 protected_env로 고정한다.
+생산자는 claim·자식 전에 그 값들을 byte 대조하고 proof에 기록하며, 봉인에서도 request와 일치해야 한다.
+build.rs가 준 값도 예외가 없다. target links 설정의 예약 rustc-env는 Cargo 전에 거부하는 보조 가드다.
+생산자는 자식 실행 전에 `create_new` claim을 쓰고 sync한다. 실패해도 claim은 지우지 않으며 새 run 디렉터리로 재시도한다.
+동일 요청 lib을 한 Cargo 호출에서 두 번 컴파일하는 구성은 정상 코드여도 fail-closed로 거부한다.
+자식은 Cargo의 argv/env를 상속하고 `--cfg clippy`와 승인된 측정 정책 `--cap-lints warn`을 더한다. after_expansion에서 items와 cfg를 쓰고 중단한다.
+자식 stdout/stderr는 별도 파일로 격리한다. root 전용 Clippy cfg 질의와 byte 일치 후 실제 Clippy로 exec한다.
+proof `h2-session/2`는 unit/pid/nonce/run_id/argv/env_sha256/cfg/driver_rustc, 실제 Clippy 경로·버전·연결 compiler,
+items_sha256/items_records를 필수 기록한다. `1-cfg`, items 없는 proof와 헤더 없는 옛 JSONL은 거부한다.
+Clippy identity는 승인 경로에서 직접 질의하고 request와 대조한다. 봉인에서도 재대조하며 cfg target은 요청 lane과 같아야 한다.
+봉인 전 claim의 pid/unit, request의 공통 unit 필드, 요청 lib의 non-test artifact 1개와 package ID/fresh:false를 대조한다.
+proof·cfg의 결속, 파일 시각·partial·source/config 불변도 검사하며 SHA-256을 기존 JSON 원자 게시 helper로 봉인한다.
+manifest/request/items 헤더 kind는 `canary-items`다. root map 소비자는 이를 거부한다. 매핑 라이브러리 `h2_items`는 이 kind만 받으며 호출자는 아직 없다.
+items 경로는 session.json과 같은 run의 items.jsonl로 고정하며 추가 환경 경로를 받지 않는다.
+첫 줄은 `{schema:1, run_id, nonce, kind, root, crate, cfg_clippy:true}`이며 나머지는 JSON 배열 레코드다.
+순서는 `[file, lo, hi, kind, path|null, reason|null, display, line, def, parent, def_kind, macro]`다.
+nested_fn만 끝에 `[fold, escape]` 두 필드를 추가한다. 옛 객체 레코드와 길이가 다른 배열은 받지 않는다.
+display는 진단용 DefPath 문자열이고 등록은 지역 정의의 module/trait/Self DefId에서만 계산한다.
+좌표는 `source_callsite`의 `original_relative_byte_pos`로 원문 BOM/CRLF를 보존한다.
+fn 밖 AnonConst/InlineConst도 const 소유자로 기록한다. 합성 헤더만 생략하고 실행 소유자의 파일/좌표 오류는 실패한다.
+header 중복은 (file, lo, hi, def_kind)로 줄이되 impl/trait은 def/parent 결속을 위해 개별로 유지한다.
+nested_fn의 fold는 첫 JSONL 메타데이터 행만 제외한 0-based 번호(header kind 포함)다. escape는 접는 fn 조상의 DefId 자손 impl 존재 여부다.
+탈출은 fold-escape, 외부 trait은 external:<crate>, fn 안 정의는 in-function, 비 ADT Self는 self-not-adt로 기록한다.
+콜백은 헤더 포함 정확한 bytes와 레코드 수를 계산해 items.jsonl.sha256의 `{sha256, records}`에 기록한다.
+각 파일은 partial→rename으로 게시한다. 부모는 자식 종료 후 파일을 재계산하여 sidecar와 비교한 뒤 proof를 게시한다.
+runner도 파일=sidecar=proof의 digest/양수 레코드 수, 헤더·mtime·partial을 검사하고 두 items 파일을 manifest에 봉인한다.
+봉인 전에 레코드 필드 타입(bool은 정수에서 제외), kind·path/reason 택일, 고유 def ID, 연관 item/container 및 fold 범위·대상·순환을 검사한다.
+parent는 정수(root=0)이며 모듈·closure 등 미출력 부모는 허용한다. 출력된 중간 부모만 따라가며 display/이름으로 관계를 복원하지 않는다.
+봉인 전 body 접합, 0개 레코드와 빈 digest는 실패한다. 모든 증거를 함께 다시 쓰는 주체의 인증은 보장하지 않는다.
+map 모드의 TSV/cfg와 argv는 그대로이며 items 생산은 세션 자식만 수행한다.
+도구 버전 갱신은 rust-toolchain.toml·CI·ALLOWED를 함께 바꾸고 cargo-clippy spy, cfg 자체 점검,
+cold/warm 진단 byte 일치, items 동일성, workspace 생산자/claim 시험 증거를 다시 제시한다.
+
+baseline이 없어도 `--inert --canary`는 map canary 뒤에 Clippy 세션을 실행하고, 이어서 빌드한 driver로
+`tests.test_h2_session_driver`와 실제 workspace e2e `tests.test_h2_session_e2e`를 실행한다.
+CI 단계는 두 모듈을 `--suite`로 명시하며 `--canary`는 둘 중 하나라도 빠지거나 겹치면 rc 2로 거부한다.
+각 모듈은 최소 시험 수 이상 실행되고 skip 없이 `OK`여야 한다.
+세션 target은 매 실행 UUID run 아래 새 `session-target`이며 기존 디렉터리가 있으면 거부한다.
+공유 target 삭제 없이 cold build.rs 실행을 보장하고 proof cfg에 `clippy`와 `h2_items_bs_clippy`를 요구한다.
+workspace fixture는 helper lib·proc-macro·독립 member를 포함하며 root와 다른 member의 소스 앞부분을 공유한다.
+두 의존성 대조군은 cold/warm `compiler-message` JSONL을 실제 `cargo clippy`와 byte 비교한다.
+items 자식의 HIR 질의는 early lint(`unused_imports` 등)를 발생시키며 자식 로그로 격리한다.
+fixture proc-macro가 확장 중 stderr에 쓰는 rustc 형식 진단 1줄은 자식 로그에만 있고 JSONL에는 한 번만 나와야 한다.
+`--package` 고정 아래 `-j 2` member 의존성 위임, `--workspace` 거부, 다른 member 직접 진입의 위임·쓰기 0,
+`cdylib+rlib --all-targets`, 선점 claim의 쓰기 0, 같은 unit 동시 진입을 검사한다.
+e2e는 먼저 빌드한 release driver를 사용한다. 실패, 기대보다 적은 시험 수, skip은 canary 실패다. 증거는 `target/h2/session-e2e`에 남긴다.
+CANARY_ITEMS는 (kind, path|reason, file, anchor)이며 원문 regex로 기대 [lo,hi)를 독립 계산한다.
+canary는 봉인 후 items를 한 번 읽고 manifest/proof digest를 대조한 동일 bytes를 파싱한다. 해시 후 경로를 다시 열지 않는다.
+모든 canary 레코드의 원문 좌표·선언/매크로 호출 범위와 fold·매크로 impl parent를 확인한다.
+BOM/CRLF fixture는 -text이며 원문 byte 보존부터 검사한다. 누락·중복·0개·좌표 드리프트는 canary 실패다.
+필수 Linux canary 동작이 바뀌므로 해당 head의 Linux green이 머지 조건이다. 매핑/도출 전환은 후속 단계다.
+
+### Items 매핑 라이브러리 (비활성)
+`scripts/ci/h2_items.py`는 CI·measure 경로에 연결하지 않은 라이브러리다. 도출 전환과 R-W 소비는 후속 단계가 맡는다.
+load는 봉인 manifest(schema 1, kind `canary-items`)와 request/proof `h2-session/2`만 받는다.
+기대 crate manifest와 request unit, proof unit의 공통 필드·root·`test:false`, nonce·run ID를 대조한다.
+request/proof/items/sidecar/clippy.jsonl은 한 번 읽어 봉인 digest와 대조한 같은 bytes만 파싱하고 다시 열지 않는다.
+items 구조는 runner와 같은 `validate_items`/`item_records`로 검사한다. 0개 레코드·헤더 없는 옛 JSONL·객체 레코드는 실패다.
+원문은 source state를 계산하는 한 번의 git 목록·읽기에서만 얻는다. 그 digest가 request와 같아야 하고, 같은 bytes만 매핑에 쓴다.
+모든 레코드에 `hi ≤ 길이`와 lo의 원문 행 = compiler 행을 요구한다. 진단 site는 expansion을 끝까지 따라간 호출 위치다.
+lib artifact는 요청 package에서 lib kind이고 src_path가 요청 lib로 resolve되는 artifact다(session 봉인과 매핑이 같은 선택을 쓴다). 경로가 같은 build script·bin artifact는 후보가 아니다.
+진단은 요청 package이고 target(kind·name·crate_types·src_path 문자열)이 유일한 lib artifact의 target과 같은 것만 쓴다.
+경로 resolve는 문자열마다 한 번이고, 진단 귀속은 그 target과의 구조 비교라 파일시스템 재해석에 의존하지 않는다. resolve 실패(symlink loop 포함)는 `unsealed`다.
+envelope가 없거나 lib 컴파일(artifact)이 하나가 아니거나(`--all-targets`의 test 컴파일 등), artifact target이 요청 unit과 다르거나,
+같은 package의 lib kind target이 그 target과 다르면 `provenance`다. 다른 package와 lib kind가 아닌 build script·bin 진단은 경로가 같아도 `foreign` 수로만 노출한다.
+레코드 file은 package root 기준이다. 진단 file_name은 절대 경로이거나 request에 기록한 Cargo workspace root 기준이다.
+workspace root 기준은 proof argv의 lib 입력이 그 root 기준 상대 경로일 때만 인정하며, 아니면 상대 file_name은 `no-item`이다.
+site는 byte_start 행 = line_start, byte_end ≤ 길이여야 한다. 정규화 오프셋은 CRLF/BOM에서 `coord`로 실패한다.
+site를 포함하는 가장 좁은 레코드를 고르며 같은 폭 다른 범위는 `ambiguous:overlap`이다.
+동률은 모든 실행 소유자(fn류·const·anon-const)를 남긴다. header는 소유자의 DefId parent로 증명된 container이거나
+비실행 def_kind일 때만 버리고, 그 밖의 header는 `ambiguous:unproven-header`다.
+실행 소유자가 둘 이상이면 `ambiguous`, 하나면 그 path 또는 등록 불가 사유, 없으면 module-level이다.
+모든 실패는 reason을 가진 `MappingError`다. 봉인·source 불일치·git capture 실패와 옛 request는 `unsealed`, 잘못된 span·spans 목록은 `coord`다.
+빈 spans·primary span 없음과 목록 안 레코드 없음은 `no-item`, 목록 밖 파일은 `unsealed`다. 통과나 0건이 되지 않는다.
+`canary-items`는 현재 세션의 유일한 kind이므로 root 결속은 kind가 아닌 기대 crate unit 대조로 한다.
 
 두 호스트의 결과를 모은 뒤 실행한다:
 
@@ -247,7 +337,7 @@ r9의 15개 ID군을 모두 유지한다(H10의 a/b는 같은 행에 구분).
 | H16 | macro fn의 module 귀속·`<module>` R-W 면제, raw identifier·const/static 내부 item 경로의 선재 한계 | [SourceFile:66/measure:309][items], [rw_problem:274][rw]; 파일 map은 R-W 전체 증명이 아님, 실제 baseline 영향 검증 |
 | H17 | 정상 항등 macro 모듈·hand-written item 재배치도 fail-closed 거부 | [modmap_problems:124][modmap]; 출처 보존 규칙의 보수적 오탐, 컴파일 가능한 모든 Rust 문법 지원 약속 없음 |
 | H18 | hardlink·대소문자 alias의 파일 동치가 realpath만으로 증명되지 않음 | [classify:92/walker_problems:174][aliases]; duplicate_mod와 함께 실측 필요, 미측정을 해결로 세지 않음 |
-| H19 | 두 compiler 패스가 같은 source/target/cfg였는지 입증하는 receipt 부재 | [map_modules:57][collector], [root_lib_depinfo:45][depinfo]; PR-3b 증거 연결 필요, cfg 목록 일치만으로 대체 불가 |
+| H19 | R-O map 패스와 Clippy 패스가 같은 source/target/cfg였는지 입증하는 결속 부재 | [map_modules:57][collector], [root_lib_depinfo:45][depinfo]; items와 Clippy JSON은 같은 호출 세션 manifest로 결속(매핑 비활성), map TSV·`.d` 결속은 3b-A 증거 필요, cfg 목록 일치만으로 대체 불가 |
 
 H15의 RHS 제외는 compiler 수용 조건에 의존한다. 지원하는 key-value 속성의 값은 macro 전개 후 literal이어야 하며,
 정상 doc 값은 문자열이다. item·block·non-literal 전개로 item 선언 권한을 얻을 수 없고, shape helper가 Rust 의미론을 검증하지는 않는다.

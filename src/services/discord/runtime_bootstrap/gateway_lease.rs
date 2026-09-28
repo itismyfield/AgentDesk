@@ -87,18 +87,8 @@ async fn gateway_preference() -> Option<GatewayPreference> {
     resolve_gateway_preference(&config.cluster, self_instance_id)
 }
 
-/// May we hand the gateway over to the preferred node?
-///
-/// Being `online` in `worker_nodes` is **not** sufficient. A node whose dcserver
-/// is up and heartbeating may have no token for this provider, may have failed
-/// before gateway startup, or may simply not be contending for the lease. Yielding
-/// to such a node hands the gateway to nobody: we release, self-fence, restart,
-/// re-acquire, and yield again — a gateway outage loop.
-///
-/// So the preferred node must also *advertise* that it wants this gateway, via the
-/// `discord_gateway.waiting_providers` capability that `register_gateway_waiter`
-/// publishes on every heartbeat. That signal only exists while a `run_bot` on that
-/// node is actually waiting for, or holding, the lease for this provider.
+/// Only yield to an online node advertising a live gateway waiter; a heartbeat
+/// alone does not mean the node can take over the gateway.
 fn should_yield_to_preferred(
     nodes: &[serde_json::Value],
     preferred_instance_id: &str,
@@ -187,24 +177,15 @@ async fn yield_to_preferred_gateway(
     );
 }
 
-/// The preferred node is an **unbounded** waiter.
-///
-/// It must not give up: a non-preferred holder only learns it has to yield on its
-/// next keepalive tick, and it yields *because* this node advertises that it is
-/// waiting. If this loop bailed after a grace period and stopped advertising, the
-/// holder would keep the gateway (correct) — but if it bailed while still
-/// advertising, the holder would yield to a node that is no longer acquiring, and
-/// the gateway would be lost. Waiting forever keeps the two sides consistent.
-///
-/// The waiter signal is registered before the first attempt and cleared only on a
-/// DB error or shutdown, so a peer never yields to a node that is not acquiring.
+/// Wait indefinitely while advertising intent, then pass the guard to the backend.
+/// Cancellation, acquisition failure, and backend exit all clear the same intent.
 async fn acquire_as_preferred_gateway(
     pool: &sqlx::PgPool,
     token_hash: &str,
     provider: &ProviderKind,
     shared: &Arc<SharedData>,
-) -> Result<Option<crate::db::postgres::AdvisoryLockLease>, String> {
-    crate::services::cluster::node_registry::register_gateway_waiter(provider.as_str());
+) -> Result<Option<GatewayLeaseAcquisition>, String> {
+    let waiter = GatewayWaiterGuard::new(provider.as_str());
     // Publish the intent immediately rather than waiting for the next heartbeat,
     // so a peer holding the lease can start yielding right away.
     if let Err(error) =
@@ -227,16 +208,18 @@ async fn acquire_as_preferred_gateway(
         match acquired {
             // Keep the waiter signal registered: we now hold the gateway, and a
             // peer that sees it will not try to take it from us anyway.
-            Ok(Some(lease)) => return Ok(Some(lease)),
+            Ok(Some(lease)) => {
+                return Ok(Some(GatewayLeaseAcquisition {
+                    lease,
+                    waiter: Some(waiter),
+                }));
+            }
             Ok(None) => {
                 if shared
                     .restart
                     .shutting_down
                     .load(std::sync::atomic::Ordering::SeqCst)
                 {
-                    crate::services::cluster::node_registry::deregister_gateway_waiter(
-                        provider.as_str(),
-                    );
                     return Ok(None);
                 }
                 // ~1 log/minute at a 5s poll: enough to see a stuck hand-off,
@@ -251,13 +234,7 @@ async fn acquire_as_preferred_gateway(
                 attempts += 1;
                 tokio::time::sleep(GATEWAY_PREFERENCE_POLL_INTERVAL).await;
             }
-            Err(error) => {
-                // We cannot acquire and must not keep peers yielding to us.
-                crate::services::cluster::node_registry::deregister_gateway_waiter(
-                    provider.as_str(),
-                );
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         }
     }
 }
@@ -308,11 +285,16 @@ async fn try_acquire_with_startup_orphan_reap(
     }
 }
 
+pub(super) struct GatewayLeaseAcquisition {
+    pub(super) lease: crate::db::postgres::AdvisoryLockLease,
+    pub(super) waiter: Option<GatewayWaiterGuard>,
+}
+
 /// Outcome of the gateway singleton-lease acquisition phase.
 pub(super) enum GatewayLeaseOutcome {
     /// Either the lease was acquired (`Some`) or there is no PG pool (`None`,
     /// the standalone/no-DB path). Either way, startup proceeds.
-    Proceed(Option<crate::db::postgres::AdvisoryLockLease>),
+    Proceed(Option<GatewayLeaseAcquisition>),
     /// Another node owns the lease, so this provider is a confirmed standby.
     /// The startup diagnostic has already run; run_bot must expose the standby
     /// runtime and leave its shutdown-barrier slot for the marker poller.
@@ -355,9 +337,23 @@ pub(super) async fn run_bot_acquire_gateway_lease(
                 }
                 Some(pref) => {
                     yield_to_preferred_gateway(pool, pref, provider, shared).await;
-                    try_acquire_with_startup_orphan_reap(pool, token_hash, provider).await
+                    try_acquire_with_startup_orphan_reap(pool, token_hash, provider)
+                        .await
+                        .map(|lease| {
+                            lease.map(|lease| GatewayLeaseAcquisition {
+                                lease,
+                                waiter: None,
+                            })
+                        })
                 }
-                None => try_acquire_with_startup_orphan_reap(pool, token_hash, provider).await,
+                None => try_acquire_with_startup_orphan_reap(pool, token_hash, provider)
+                    .await
+                    .map(|lease| {
+                        lease.map(|lease| GatewayLeaseAcquisition {
+                            lease,
+                            waiter: None,
+                        })
+                    }),
             };
             match acquired {
                 Ok(Some(lease)) => {
