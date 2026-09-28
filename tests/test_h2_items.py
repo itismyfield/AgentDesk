@@ -372,6 +372,18 @@ class Items(unittest.TestCase):
         self.assertEqual((len(loaded.messages), len(seen)), (len(DIAGNOSTICS), 2))
         self.assert_reason("unsealed", run, lambda path: path == self.h.lib)
 
+    def test_a_looping_crate_manifest_is_unsealed(self):
+        manifest, resolve, cargo = self.seal(name="loop"), Path.resolve, self.h.crate / "Cargo.toml"
+        cargo.unlink()
+        cargo.symlink_to("Cargo.toml")
+        def py311(path, *args, **kwargs):
+            if path == cargo:
+                raise RuntimeError(f"Symlink loop from {str(path)!r}")
+            return resolve(path, *args, **kwargs)
+        self.assert_reason("unsealed", self.load, manifest)
+        with patch.object(Path, "resolve", py311):
+            self.assert_reason("unsealed", self.load, manifest)
+
 
 if __name__ == "__main__":
     unittest.main()
