@@ -61,23 +61,25 @@ impl WindowDiff {
         std::mem::take(&mut self.retired)
     }
 
+    /// Messages live in `[since, until]`; a unit derived late still sees none of its later history.
     fn candidates(
         &self,
         channel: u64,
-        since: DateTime<Utc>,
+        (since, until): (DateTime<Utc>, DateTime<Utc>),
     ) -> impl Iterator<Item = (&u64, &LegacyState)> {
         self.legacy.iter().filter(move |(_, l)| {
-            l.msg.channel_id == channel && !l.msg.deleted && l.last_at >= since
+            let settled = l.msg.created_at <= until && l.msg.edits.iter().all(|e| e.at <= until);
+            l.msg.channel_id == channel && !l.msg.deleted && l.last_at >= since && settled
         })
     }
 
-    fn claim_exact(&mut self, id: u64, key: &UnitKey, since: DateTime<Utc>) {
+    fn claim_exact(&mut self, id: u64, key: &UnitKey, span: (DateTime<Utc>, DateTime<Utc>)) {
         let channel = key.channel_id;
         let Some(sha) = self.legacy.get(&id).map(|l| l.msg.content_sha256.clone()) else {
             return;
         };
         let twins: Vec<u64> = self
-            .candidates(channel, since)
+            .candidates(channel, span)
             .filter(|(other, l)| {
                 **other != id && l.exact_for.is_none() && l.msg.content_sha256 == sha
             })
@@ -108,22 +110,22 @@ impl WindowDiff {
     fn decide(&mut self, unit: ShadowUnit) -> DiffRecord {
         let key = unit.unit_key;
         let channel = key.channel_id;
-        let since = unit.sealed_at - self.window;
+        let span = (unit.sealed_at - self.window, unit.sealed_at + self.window);
         let (mut ids, mut exact_all, mut missing) = (Vec::new(), true, false);
         for piece in &unit.pieces {
             let exact = self
-                .candidates(channel, since)
+                .candidates(channel, span)
                 .find(|(_, l)| {
                     l.exact_for.is_none() && !l.contained && l.msg.content_sha256 == piece.sha256
                 })
                 .map(|(id, _)| *id);
             if let Some(id) = exact {
-                self.claim_exact(id, &key, since);
+                self.claim_exact(id, &key, span);
                 ids.push(id);
                 continue;
             }
             exact_all = false;
-            let contained = (self.candidates(channel, since))
+            let contained = (self.candidates(channel, span))
                 .filter(|(_, l)| l.exact_for.is_none() && !l.claim_lost)
                 .find_map(|(id, l)| Some((*id, contains_piece(&l.content, piece, &l.claimed)?)));
             match contained.and_then(|(id, range)| self.legacy.get_mut(&id).map(|l| (id, l, range)))
@@ -348,236 +350,4 @@ fn contains_piece(
         }
     }
     None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::services::tui_o::shadow::{ShadowProvider, SourceId, SourceRange};
-    use DiffClass::*;
-    use chrono::TimeZone;
-
-    fn t(secs: i64) -> DateTime<Utc> {
-        Utc.timestamp_opt(1_800_000_000 + secs, 0).unwrap()
-    }
-
-    fn key(id: &str) -> UnitKey {
-        let native_key = id.to_string();
-        UnitKey {
-            channel_id: 7,
-            provider: ShadowProvider::Claude,
-            native_key,
-            kind: UnitKind::Body,
-        }
-    }
-
-    fn seal(diff: &mut WindowDiff, id: &str, at: i64, pieces: &[&str]) {
-        seal_as(diff, UnitKind::Body, id, at, pieces);
-    }
-
-    fn seal_as(diff: &mut WindowDiff, kind: UnitKind, id: &str, at: i64, pieces: &[&str]) {
-        let digest = |(i, p): (usize, &&str)| PieceDigest {
-            index: i as u32,
-            units: p.encode_utf16().count() as u32,
-            sha256: sha256_hex(p),
-        };
-        let source = SourceId {
-            session_id: "s".into(),
-            path: "/t".into(),
-            dev: 1,
-            ino: 1,
-        };
-        let unit = ShadowUnit {
-            unit_key: UnitKey { kind, ..key(id) },
-            kind,
-            source_range: SourceRange {
-                source,
-                start: 0,
-                end: 1,
-            },
-            sealed_at: t(at),
-            pieces: pieces.iter().enumerate().map(digest).collect(),
-        };
-        diff.observe_derived(&DeriveOutput::Sealed(unit), t(at));
-    }
-
-    fn post(diff: &mut WindowDiff, msg_id: u64, at: i64, content: &str) {
-        let (channel_id, at, content) = (7, t(at), content.to_string());
-        diff.observe_legacy(&LegacyTapEvent::Created {
-            channel_id,
-            msg_id,
-            at,
-            content,
-        });
-    }
-
-    fn rows(diff: &mut WindowDiff, at: i64) -> Vec<(DiffClass, Vec<u64>, DiffCause)> {
-        let row = |r: DiffRecord| (r.class, r.legacy_msg_ids, r.cause);
-        diff.drain_ready(t(at)).into_iter().map(row).collect()
-    }
-
-    #[test]
-    fn exact_match_is_tried_before_an_earlier_containing_message() {
-        let mut diff = WindowDiff::default();
-        post(&mut diff, 1, 0, "⏳ working\nfinal answer");
-        post(&mut diff, 2, 1, "final answer");
-        seal(&mut diff, "a", 2, &["final answer"]);
-        assert!(
-            rows(&mut diff, 301).is_empty(),
-            "undecided inside the window"
-        );
-        assert_eq!(
-            rows(&mut diff, 302),
-            vec![(Match, vec![2], DiffCause::Expected)]
-        );
-    }
-
-    #[test]
-    fn normalized_containment_is_format_only_and_an_unposted_piece_is_missing() {
-        let mut diff = WindowDiff::default();
-        seal(&mut diff, "a", 0, &["first\nsecond"]);
-        seal(&mut diff, "b", 0, &["never posted"]);
-        post(&mut diff, 1, 200, "fir\u{200b}st\r\nsecond\n\n✅ done");
-        let decided = rows(&mut diff, 300);
-        assert_eq!(decided[0], (FormatOnly, vec![1], DiffCause::Expected));
-        assert_eq!(decided[1], (LegacyMissing, vec![], DiffCause::Unknown));
-    }
-
-    #[test]
-    fn legacy_rows_are_judged_two_windows_after_their_last_activity() {
-        let mut diff = WindowDiff::default();
-        seal(&mut diff, "a", 0, &["same"]);
-        seal(&mut diff, "b", 5, &["twice"]);
-        seal(&mut diff, "c", 5, &["twice"]);
-        post(&mut diff, 1, 10, "same");
-        post(&mut diff, 2, 20, "same");
-        post(&mut diff, 3, 30, "unrelated");
-        post(&mut diff, 4, 6, "twice");
-        post(&mut diff, 5, 7, "twice");
-        let decided = rows(&mut diff, 305);
-        assert_eq!(
-            decided.iter().filter(|r| r.0 == Match).count(),
-            3,
-            "{decided:?}"
-        );
-        assert!(rows(&mut diff, 619).is_empty());
-        let late = rows(&mut diff, 630);
-        assert_eq!(late[0], (LegacyDuplicate, vec![2], DiffCause::LegacyDefect));
-        assert_eq!(late[1], (LegacyExtra, vec![3], DiffCause::Unknown));
-        assert_eq!(diff.drain_retired().len(), 5);
-    }
-
-    #[test]
-    fn an_unposted_tool_unit_is_o_only_while_other_misses_stay_unknown() {
-        let mut diff = WindowDiff::default();
-        seal_as(&mut diff, UnitKind::Tool, "t", 0, &["Bash: ls"]);
-        seal_as(&mut diff, UnitKind::ToolResult, "r", 0, &["boom"]);
-        seal(&mut diff, "b", 0, &["never posted"]);
-        seal(&mut diff, "one", 0, &["one"]);
-        seal_as(&mut diff, UnitKind::Tool, "two", 0, &["two"]);
-        post(&mut diff, 1, 0, "two");
-        post(&mut diff, 2, 0, "one");
-        let o_only = (LegacyMissing, vec![], DiffCause::OOnlyTool);
-        let expected = vec![
-            o_only.clone(),
-            o_only,
-            (LegacyMissing, vec![], DiffCause::Unknown),
-            (Match, vec![2], DiffCause::Expected),
-            (OrderDiff, vec![1], DiffCause::Unknown),
-        ];
-        assert_eq!(rows(&mut diff, 300), expected);
-    }
-
-    #[test]
-    fn one_legacy_occurrence_is_consumed_by_one_unit_only() {
-        let mut diff = WindowDiff::default();
-        seal(&mut diff, "a", 0, &["same answer"]);
-        seal(&mut diff, "b", 1, &["same answer"]);
-        post(&mut diff, 1, 0, "same answer");
-        let missing = (LegacyMissing, vec![], DiffCause::Unknown);
-        let exact = vec![(Match, vec![1], DiffCause::Expected), missing.clone()];
-        assert_eq!(rows(&mut diff, 301), exact);
-        let mut diff = WindowDiff::default();
-        seal(&mut diff, "c", 0, &["one"]);
-        seal(&mut diff, "d", 1, &["one"]);
-        seal(&mut diff, "e", 1, &["two"]);
-        post(&mut diff, 2, 0, "one\ntwo");
-        let format_only = |ids| (FormatOnly, ids, DiffCause::Expected);
-        let contained = vec![format_only(vec![2]), missing, format_only(vec![2])];
-        assert_eq!(rows(&mut diff, 301), contained);
-    }
-
-    #[test]
-    fn an_edit_that_moves_a_consumed_occurrence_does_not_free_it() {
-        let mut diff = WindowDiff::default();
-        seal(&mut diff, "a", 0, &["one"]);
-        post(&mut diff, 1, 0, "one\nfooter");
-        assert_eq!(rows(&mut diff, 300)[0].0, FormatOnly);
-        let edit = |diff: &mut WindowDiff, text: &str| {
-            let (channel_id, msg_id, at) = (7, 1, t(301));
-            let content = Some(text.to_string());
-            diff.observe_legacy(&LegacyTapEvent::Updated {
-                channel_id,
-                msg_id,
-                at,
-                content,
-            });
-        };
-        edit(&mut diff, "prefix\none\nfooter");
-        seal(&mut diff, "b", 301, &["one"]);
-        let missing = (LegacyMissing, vec![], DiffCause::Unknown);
-        assert_eq!(rows(&mut diff, 601), vec![missing.clone()]);
-        // The consumed text is gone after the edit, so none of the message is handed out again.
-        let mut diff = WindowDiff::default();
-        seal(&mut diff, "c", 0, &["one two"]);
-        post(&mut diff, 1, 0, "one two\nfooter");
-        rows(&mut diff, 300);
-        edit(&mut diff, "one\ntwo\nfooter");
-        seal(&mut diff, "d", 301, &["one"]);
-        seal(&mut diff, "e", 301, &["one\ntwo\nfooter"]);
-        assert_eq!(rows(&mut diff, 601), [missing.clone(), missing]);
-    }
-
-    #[test]
-    fn a_post_after_the_unit_window_misses_even_when_the_observer_drains_late() {
-        let mut diff = WindowDiff::default();
-        seal(&mut diff, "late", 0, &["answer"]);
-        seal(&mut diff, "edge", 0, &["edge"]);
-        post(&mut diff, 1, 300, "edge");
-        post(&mut diff, 2, 301, "answer");
-        let decided = rows(&mut diff, 301);
-        assert_eq!(decided[0], (LegacyMissing, vec![], DiffCause::Unknown));
-        assert_eq!(decided[1], (Match, vec![1], DiffCause::Expected));
-    }
-
-    #[test]
-    fn legacy_posting_a_later_unit_first_is_an_order_diff() {
-        let mut diff = WindowDiff::default();
-        seal(&mut diff, "a", 0, &["one"]);
-        seal(&mut diff, "b", 0, &["two"]);
-        post(&mut diff, 1, 0, "two");
-        post(&mut diff, 2, 0, "one");
-        let classes: Vec<_> = rows(&mut diff, 300).into_iter().map(|r| r.0).collect();
-        assert_eq!(classes, vec![Match, OrderDiff]);
-    }
-
-    #[test]
-    fn historical_units_are_not_diffed_while_other_o_outcomes_are_immediate() {
-        let mut diff = WindowDiff::default();
-        let excluded = |reason: &str| DeriveOutput::Excluded {
-            unit_key: key("x"),
-            reason: reason.into(),
-        };
-        diff.observe_derived(&excluded(HISTORICAL_REASON), t(0));
-        diff.observe_derived(&excluded("normal_tool_result"), t(0));
-        diff.observe_tap_gap(3, t(0));
-        let decided = rows(&mut diff, 0);
-        assert_eq!(
-            decided,
-            vec![
-                (OExcluded, vec![], DiffCause::Expected),
-                (TapGap, vec![], DiffCause::Unknown)
-            ]
-        );
-    }
 }

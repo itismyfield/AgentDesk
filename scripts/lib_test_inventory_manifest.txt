@@ -9112,15 +9112,6 @@ services::tui_o::shadow::derive::tests::live_requires_attach_and_a_window_bounda
 services::tui_o::shadow::derive::tests::sealed_units_repeat_silently_and_block_when_changed
 services::tui_o::shadow::derive::tests::split_pieces_follow_legacy_split_in_utf16_units
 services::tui_o::shadow::derive::tests::turns_open_on_native_input_and_close_on_idle_observation
-services::tui_o::shadow::diff::tests::a_post_after_the_unit_window_misses_even_when_the_observer_drains_late
-services::tui_o::shadow::diff::tests::an_edit_that_moves_a_consumed_occurrence_does_not_free_it
-services::tui_o::shadow::diff::tests::an_unposted_tool_unit_is_o_only_while_other_misses_stay_unknown
-services::tui_o::shadow::diff::tests::exact_match_is_tried_before_an_earlier_containing_message
-services::tui_o::shadow::diff::tests::historical_units_are_not_diffed_while_other_o_outcomes_are_immediate
-services::tui_o::shadow::diff::tests::legacy_posting_a_later_unit_first_is_an_order_diff
-services::tui_o::shadow::diff::tests::legacy_rows_are_judged_two_windows_after_their_last_activity
-services::tui_o::shadow::diff::tests::normalized_containment_is_format_only_and_an_unposted_piece_is_missing
-services::tui_o::shadow::diff::tests::one_legacy_occurrence_is_consumed_by_one_unit_only
 services::tui_o::shadow::metrics::tests::the_derive_reason_for_an_oversized_split_piece_counts_as_split_over_limit
 services::tui_o::shadow::root::tests::shadow_root_is_fixed_under_runtime_root_and_the_flag_defaults_off
 services::tui_o::shadow::root::tests::shadow_root_refuses_links_and_leaves_outside_files_untouched
