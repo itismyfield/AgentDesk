@@ -733,7 +733,8 @@ if run_check cargo "Agent maintenance freshness tests"; then
 fi
 
 if run_check cargo "Maintainability audit tests"; then
-"$PYTHON" -m unittest tests.test_audit_maintainability.FooterViewWritesCheck
+"$PYTHON" -m unittest tests.test_audit_maintainability.FooterViewWritesCheck \
+  tests.test_audit_maintainability.GiantFileRatchetCheck
 fi
 
 if run_check cargo "Maintainability audit"; then
