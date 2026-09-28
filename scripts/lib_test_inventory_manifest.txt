@@ -9113,6 +9113,7 @@ services::tui_o::shadow::derive::tests::sealed_units_repeat_silently_and_block_w
 services::tui_o::shadow::derive::tests::split_pieces_follow_legacy_split_in_utf16_units
 services::tui_o::shadow::derive::tests::turns_open_on_native_input_and_close_on_idle_observation
 services::tui_o::shadow::diff::tests::a_post_after_the_unit_window_misses_even_when_the_observer_drains_late
+services::tui_o::shadow::diff::tests::a_unit_derived_after_its_window_is_judged_on_the_legacy_state_of_that_window
 services::tui_o::shadow::diff::tests::an_edit_that_moves_a_consumed_occurrence_does_not_free_it
 services::tui_o::shadow::diff::tests::an_unposted_tool_unit_is_o_only_while_other_misses_stay_unknown
 services::tui_o::shadow::diff::tests::exact_match_is_tried_before_an_earlier_containing_message

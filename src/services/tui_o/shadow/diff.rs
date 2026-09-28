@@ -61,23 +61,25 @@ impl WindowDiff {
         std::mem::take(&mut self.retired)
     }
 
+    /// Messages live in `[since, until]`; a unit derived late still sees none of its later history.
     fn candidates(
         &self,
         channel: u64,
-        since: DateTime<Utc>,
+        (since, until): (DateTime<Utc>, DateTime<Utc>),
     ) -> impl Iterator<Item = (&u64, &LegacyState)> {
         self.legacy.iter().filter(move |(_, l)| {
-            l.msg.channel_id == channel && !l.msg.deleted && l.last_at >= since
+            let settled = l.msg.created_at <= until && l.msg.edits.iter().all(|e| e.at <= until);
+            l.msg.channel_id == channel && !l.msg.deleted && l.last_at >= since && settled
         })
     }
 
-    fn claim_exact(&mut self, id: u64, key: &UnitKey, since: DateTime<Utc>) {
+    fn claim_exact(&mut self, id: u64, key: &UnitKey, span: (DateTime<Utc>, DateTime<Utc>)) {
         let channel = key.channel_id;
         let Some(sha) = self.legacy.get(&id).map(|l| l.msg.content_sha256.clone()) else {
             return;
         };
         let twins: Vec<u64> = self
-            .candidates(channel, since)
+            .candidates(channel, span)
             .filter(|(other, l)| {
                 **other != id && l.exact_for.is_none() && l.msg.content_sha256 == sha
             })
@@ -108,22 +110,22 @@ impl WindowDiff {
     fn decide(&mut self, unit: ShadowUnit) -> DiffRecord {
         let key = unit.unit_key;
         let channel = key.channel_id;
-        let since = unit.sealed_at - self.window;
+        let span = (unit.sealed_at - self.window, unit.sealed_at + self.window);
         let (mut ids, mut exact_all, mut missing) = (Vec::new(), true, false);
         for piece in &unit.pieces {
             let exact = self
-                .candidates(channel, since)
+                .candidates(channel, span)
                 .find(|(_, l)| {
                     l.exact_for.is_none() && !l.contained && l.msg.content_sha256 == piece.sha256
                 })
                 .map(|(id, _)| *id);
             if let Some(id) = exact {
-                self.claim_exact(id, &key, since);
+                self.claim_exact(id, &key, span);
                 ids.push(id);
                 continue;
             }
             exact_all = false;
-            let contained = (self.candidates(channel, since))
+            let contained = (self.candidates(channel, span))
                 .filter(|(_, l)| l.exact_for.is_none() && !l.claim_lost)
                 .find_map(|(id, l)| Some((*id, contains_piece(&l.content, piece, &l.claimed)?)));
             match contained.and_then(|(id, range)| self.legacy.get_mut(&id).map(|l| (id, l, range)))
@@ -548,6 +550,29 @@ mod tests {
         let decided = rows(&mut diff, 301);
         assert_eq!(decided[0], (LegacyMissing, vec![], DiffCause::Unknown));
         assert_eq!(decided[1], (Match, vec![1], DiffCause::Expected));
+    }
+
+    #[test]
+    fn a_unit_derived_after_its_window_is_judged_on_the_legacy_state_of_that_window() {
+        let mut diff = WindowDiff::default();
+        post(&mut diff, 1, 10, "kept");
+        post(&mut diff, 2, 20, "draft");
+        post(&mut diff, 3, 350, "late");
+        let (channel_id, msg_id, at, content) = (7, 2, t(350), Some("changed".to_string()));
+        let edit = LegacyTapEvent::Updated {
+            channel_id,
+            msg_id,
+            at,
+            content,
+        };
+        diff.observe_legacy(&edit);
+        // Read at 0 but derived only at 400, after a held capture reached the matcher.
+        for (id, text) in [("k", "kept"), ("l", "late"), ("c", "changed")] {
+            seal(&mut diff, id, 0, &[text]);
+        }
+        let missing = (LegacyMissing, vec![], DiffCause::Unknown);
+        let matched = (Match, vec![1], DiffCause::Expected);
+        assert_eq!(rows(&mut diff, 400), [matched, missing.clone(), missing]);
     }
 
     #[test]
