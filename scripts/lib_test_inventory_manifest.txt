@@ -1169,6 +1169,12 @@ server::routes::queue_api::cancel_queue_preserve_pg_tests::a_recorded_removal_wi
 server::routes::queue_api::cancel_queue_preserve_pg_tests::force_cancel_dead_letters_the_queued_message_it_purges_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::preserve_cancel_keeps_the_queued_message_and_records_nothing_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::preserve_cancel_on_a_dead_mailbox_reports_no_loss_verdict_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_cancel_observation_rows_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_cancel_serializes_unknown_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_hydration_closed_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_hydration_unreachable_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_force_purge_without_global_mirror_is_unknown_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_recorded_preserve_removal_is_still_unknown_pg
 server::routes::receipt::tests::concurrent_token_analytics_misses_are_single_flighted
 server::routes::receipt::tests::concurrent_token_analytics_refreshes_are_coalesced
 server::routes::receipt::tests::token_analytics_cache_state_header_values_are_stable
@@ -3046,6 +3052,9 @@ services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_
 services::discord::health::recovery::live_agent_recovery::tests::recovery_metadata_is_a_role_bound_persistent_routine_when_requested
 services::discord::health::recovery::owning_runtime_http_tests::owning_runtime_http_uses_channel_matched_runtime
 services::discord::health::recovery::post_cancel_drain_tests::drain_restores_disk_queue_and_role_override
+services::discord::health::recovery::post_cancel_drain_tests::queue_truth_drain_distinguishes_unreachable_from_empty
+services::discord::health::recovery::post_cancel_drain_tests::queue_truth_hydration_closed
+services::discord::health::recovery::post_cancel_drain_tests::queue_truth_hydration_unreachable
 services::discord::health::recovery::rebind_error_status_tests::runtime_binding_unavailable_maps_to_conflict
 services::discord::health::recovery::rebind_error_status_tests::zero_channel_id_maps_to_bad_request
 services::discord::health::recovery::stall_alert::tests::owner_zero_and_tui_sentinel_never_render_mentions
@@ -8852,6 +8861,8 @@ services::routines::session_control::tests::fresh_teardown_fallback_tmux_name_ma
 services::routines::session_control::tests::fresh_teardown_prefers_routine_thread_and_never_primary_channel
 services::routines::session_control::tests::fresh_teardown_rejects_persistent_routine
 services::routines::session_control::tests::provider_clear_behavior_documents_supported_reset_paths
+services::routines::session_control::tests::queue_truth_routine_remote_teardown_reports_unknown_pg
+services::routines::session_control::tests::queue_truth_routine_reset_reports_unknown_pg
 services::routines::session_control::tests::session_key_remote_owned_gates_local_tmux_kill
 services::routines::session_control::tests::target_channel_prefers_session_thread_then_routine_thread_then_primary
 services::routines::session_control::tests::tmux_name_from_session_key_uses_suffix_after_host
@@ -9470,6 +9481,9 @@ services::turn_cancel_queue_guard::tests::a_mailbox_that_dies_after_capture_keep
 services::turn_cancel_queue_guard::tests::an_intact_queue_is_left_alone
 services::turn_cancel_queue_guard::tests::an_unreadable_queue_reports_no_verdict
 services::turn_cancel_queue_guard::tests::kept_ids_cover_the_queue_the_dispatch_window_and_the_running_turn
+services::turn_cancel_queue_guard::tests::queue_truth_disk_loss_needs_both_readings
+services::turn_cancel_queue_guard::tests::queue_truth_preserved_capture_requires_measured_disk
+services::turn_cancel_queue_guard::tests::queue_truth_purge_requires_a_complete_no_removal_witness
 services::turn_cancel_queue_guard::tests::records_the_queued_message_a_cancel_removed
 services::turn_cancel_queue_guard::tests::the_guard_never_writes_to_the_mailbox
 services::turn_cancel_queue_guard::tests::the_promoted_message_is_not_recorded_as_lost
@@ -9477,6 +9491,8 @@ services::turn_lifecycle::policy_observability_tests::cancel_observability_emits
 services::turn_lifecycle::policy_observability_tests::cleanup_policy_observability_surface_matches_cancel_contract
 services::turn_lifecycle::policy_observability_tests::compute_queue_preserved_detects_disk_and_memory_loss
 services::turn_lifecycle::policy_observability_tests::dropped_queue_message_ids_names_the_lost_user_instructions
+services::turn_lifecycle::policy_observability_tests::queue_truth_disk_stat_error_is_unmeasured
+services::turn_lifecycle::policy_observability_tests::queue_truth_lost_actor_is_not_a_measured_empty_queue
 services::turn_orchestrator::active_turn_kind_tests::background_start_yields_to_queued_backlog
 services::turn_orchestrator::active_turn_kind_tests::background_turn_is_active_but_not_blocking
 services::turn_orchestrator::active_turn_kind_tests::background_yields_during_dequeue_to_claim_window

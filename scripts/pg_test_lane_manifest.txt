@@ -120,6 +120,7 @@ src/services/observability/recovery_audit.rs
 src/services/observability/turn_lifecycle.rs
 src/services/pipeline_override.rs
 src/services/pipeline_routes.rs
+src/services/routines/session_control.rs
 src/services/scheduled_messages/context_snapshot.rs
 src/services/scheduled_messages/postgres_tests.rs
 src/services/session_forwarding.rs
@@ -259,6 +260,7 @@ services::observability::recovery_audit::tests::recovery_audit_pg_tests
 services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests
 services::pipeline_override::pipeline_override_pg_tests
 services::pipeline_routes::tests
+services::routines::session_control::tests
 services::scheduled_messages::context_snapshot::postgres_tests
 services::scheduled_messages::postgres_tests
 services::session_forwarding::tests
@@ -649,6 +651,12 @@ server::routes::queue_api::cancel_queue_preserve_pg_tests::a_recorded_removal_wi
 server::routes::queue_api::cancel_queue_preserve_pg_tests::force_cancel_dead_letters_the_queued_message_it_purges_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::preserve_cancel_keeps_the_queued_message_and_records_nothing_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::preserve_cancel_on_a_dead_mailbox_reports_no_loss_verdict_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_cancel_observation_rows_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_cancel_serializes_unknown_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_hydration_closed_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_hydration_unreachable_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_force_purge_without_global_mirror_is_unknown_pg
+server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_recorded_preserve_removal_is_still_unknown_pg
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_create_persists_trimmed_explicit_bot
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_explicit_target_still_requires_agent_primary_channel
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_rejects_invalid_agent_primary_channel
@@ -1075,6 +1083,8 @@ services::pipeline_routes::tests::card_stage_moves_take_turns_with_stage_saves_p
 services::pipeline_routes::tests::replace_stages_persists_backoff_round_trip_pg
 services::pipeline_routes::tests::stage_saves_refuse_to_strand_open_cards_pg
 services::pipeline_routes::tests::stage_saves_take_turns_pg
+services::routines::session_control::tests::queue_truth_routine_remote_teardown_reports_unknown_pg
+services::routines::session_control::tests::queue_truth_routine_reset_reports_unknown_pg
 services::scheduled_messages::context_snapshot::postgres_tests::capture_refuses_empty_channel_pg
 services::scheduled_messages::context_snapshot::postgres_tests::capture_respects_clear_boundary_pg
 services::scheduled_messages::context_snapshot::postgres_tests::capture_then_validate_roundtrip_pg
