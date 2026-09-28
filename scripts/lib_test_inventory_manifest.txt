@@ -9206,6 +9206,7 @@ services::tui_o::shadow::capture::tests::capture_halts_instead_of_buffering_an_o
 services::tui_o::shadow::capture::tests::capture_halts_on_shrink_rewrite_and_replacement
 services::tui_o::shadow::capture::tests::capture_keeps_record_boundaries_under_small_budgets_and_mid_line_starts
 services::tui_o::shadow::capture::tests::capture_rereads_a_buffered_partial_line_before_emitting_it
+services::tui_o::shadow::derive::tests::split_pieces_follow_legacy_split_in_utf16_units
 services::tui_o::shadow::root::tests::shadow_root_is_fixed_under_runtime_root_and_the_flag_defaults_off
 services::tui_o::shadow::root::tests::shadow_root_refuses_links_and_leaves_outside_files_untouched
 services::tui_o::shadow::root::tests::store_appends_readable_jsonl_and_stops_at_the_cap

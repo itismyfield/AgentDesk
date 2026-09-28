@@ -155,7 +155,7 @@ fn provider_envelope_turn_state(provider: &ProviderKind, json: &Value) -> Option
 /// ONLY `turn.completed` (excludes a mid-turn `agent_message`); Claude ONLY
 /// `result` and `system{turn_duration | stop_hook_summary}`. `false` means
 /// "Idle-class but not a boundary → keep scanning back".
-pub(super) fn envelope_is_turn_end_terminator(provider: &ProviderKind, json: &Value) -> bool {
+pub(crate) fn envelope_is_turn_end_terminator(provider: &ProviderKind, json: &Value) -> bool {
     let Some(type_str) = json.get("type").and_then(Value::as_str) else {
         return false;
     };

@@ -1899,8 +1899,12 @@ src/
 │   │   └── shadow/
 │   │       ├── binding_reader.rs
 │   │       ├── capture.rs
+│   │       ├── derive.rs
+│   │       ├── identity.rs
 │   │       ├── mod.rs
-│   │       └── root.rs
+│   │       ├── root.rs
+│   │       ├── seal.rs
+│   │       └── unit_plan.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── binding_context.rs
 │   │   ├── extract.rs
