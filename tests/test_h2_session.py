@@ -53,9 +53,12 @@ class Session(unittest.TestCase):
         self.mutate = lambda run, proof, claim, events: None
         self.rc = 0
         self.after = lambda run: None
+        # Tests that clear CARGO_HOME must not fall back to the host ~/.cargo.
         for p in (patch.object(s.subprocess, "run", side_effect=self.command),
                   patch.object(s.modmap, "source_state", return_value={"sha": "unchanged"}),
-                  patch.dict(os.environ, RUSTUP_TOOLCHAIN="fixture-toolchain", CARGO_HOME=str(self.root / "cargo-home"))):
+                  patch.object(s.Path, "home", return_value=self.root / "home"),
+                  patch.dict(os.environ, RUSTUP_TOOLCHAIN="fixture-toolchain", CARGO_HOME=str(self.root / "cargo-home"),
+                             HOME=str(self.root / "home"))):
             p.start()
             self.addCleanup(p.stop)
 
