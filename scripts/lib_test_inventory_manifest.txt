@@ -9140,8 +9140,13 @@ services::tui_o::shadow::report::tests::a_window_legacy_message_needs_a_terminal
 services::tui_o::shadow::report::tests::a_window_line_stored_out_of_reach_or_a_second_window_in_the_run_fails
 services::tui_o::shadow::report::tests::an_excluded_unit_keeps_its_window_census_when_the_window_line_is_late
 services::tui_o::shadow::report::tests::an_observer_restart_even_after_the_last_judgement_fails_with_later_run_present
+services::tui_o::shadow::report::tests::concurrent_report_attempts_allow_exactly_one_verdict
 services::tui_o::shadow::report::tests::operator_classification_resolves_listed_diffs_and_rejects_bad_input
 services::tui_o::shadow::report::tests::population_gaps_fail_while_unreadable_history_only_warns
+services::tui_o::shadow::report::tests::post_late_deleted_or_terminal_evidence_cannot_settle_a_legacy_message
+services::tui_o::shadow::report::tests::post_late_terminal_evidence_cannot_decide_a_window_unit
+services::tui_o::shadow::report::tests::repeated_report_fails_even_after_deleted_terminal_or_classification_improves
+services::tui_o::shadow::report::tests::report_time_is_limited_to_late_through_sixty_seconds_after_late
 services::tui_o::shadow::report::tests::samples_count_only_units_sealed_inside_the_window_boundary
 services::tui_o::shadow::report::tests::synthetic_entries_count_executed_turns_and_flag_merges_and_profile_mismatch
 services::tui_o::shadow::report::tests::undecided_unsealed_or_windowless_samples_fail_the_window
