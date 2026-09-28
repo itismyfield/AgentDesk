@@ -20,20 +20,21 @@ use serde::Serialize;
 use crate::config::RelayVerdictSource;
 use crate::services::discord::outbound::delivery_record::delivery_record_path;
 use crate::services::discord::outbound::receipt_index::{
-    ReceiptIndex, ReceiptIndexRead, read_receipt_index_at,
+    CoverageProvenance, ReceiptIndex, ReceiptIndexRead, read_receipt_index_at,
 };
 use crate::services::discord::relay_health::RelayHealthSnapshot;
 use crate::services::provider::ProviderKind;
 
 use super::super::session_enrichment::ExecutorWitness;
+use super::coverage::{CoverageProvenanceCounts, CoverageReport};
 use super::divergence::{CoordinateObservation, RowCoordinateDivergence, divergence};
 use super::external_verdict::{
     ExternalRelayVerdict, classify_external_verdict_at, external_verdict_path,
 };
-use super::ledger::{
-    LedgerObligation, ReachabilityLedger, ledger_file_exists, ledger_path, read_ledger_at,
-};
-use super::ledger_ttl::{EXPIRED_REASON, expired_without_a_producer, ledger_committed_at_epoch_ms};
+use super::ledger::{LedgerObligation, ReachabilityLedger, ledger_path, read_ledger_snapshot_at};
+#[cfg(test)]
+use super::ledger_ttl::ledger_committed_at_epoch_ms;
+use super::ledger_ttl::{EXPIRED_REASON, expired_without_a_producer};
 use super::observation::REACHABILITY_OBSERVATION_INTERVAL_SECS;
 use super::verdict::{
     NotAliveObligationState, ReachabilityUnknownReason, ReachabilityVerdict,
@@ -82,6 +83,7 @@ pub(in crate::services::discord) struct RelayVerdict {
     in_band: ReachabilityVerdict,
     external: ExternalRelayVerdict,
     decided_by: RelayVerdictTier,
+    coverage: CoverageReport,
 }
 
 /// The shared ladder both tiers project onto. Spelled out per variant instead
@@ -129,6 +131,7 @@ pub(in crate::services::discord) fn compose_relay_verdict(
         in_band,
         external,
         decided_by,
+        coverage: CoverageReport::new(None, None),
     }
 }
 
@@ -208,6 +211,7 @@ impl RelayVerdict {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(in crate::services::discord) struct RelayVerdictReport {
     pub verdict: &'static str,
+    pub coverage: CoverageReport,
     pub decided_by: RelayVerdictTier,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oldest_unsatisfied_age_secs: Option<u64>,
@@ -313,6 +317,7 @@ impl RelayVerdictReport {
         };
         Self {
             verdict: verdict.label(),
+            coverage: verdict.coverage.clone(),
             decided_by: verdict.decided_by(),
             oldest_unsatisfied_age_secs,
             uncovered_ranges,
@@ -434,6 +439,7 @@ pub(in crate::services::discord) struct ReachabilityInputs<'a> {
 
 /// What the coverage sweep could and could not retire.
 struct CoverageSweep {
+    provenance: CoverageProvenanceCounts,
     /// Ages of obligations no receipt and no frontier covers.
     uncovered_ages_secs: Vec<u64>,
     /// Ages of obligations that ARE covered, but under a generation key with no
@@ -464,19 +470,29 @@ fn sweep_coverage(
     now_epoch_ms: u64,
 ) -> CoverageSweep {
     let mut sweep = CoverageSweep {
+        provenance: CoverageProvenanceCounts::default(),
         uncovered_ages_secs: Vec::new(),
         unproven_ages_secs: Vec::new(),
         oldest_first_observed_at_epoch_ms: None,
     };
     for obligation in obligations {
-        let covered = index.as_ref().is_some_and(|index| {
-            index.covers(
+        let provenance = index.as_ref().and_then(|index| {
+            index.coverage_provenance(
                 provider,
                 tmux_session_name,
                 generation_mtime_ns,
                 (obligation.start, obligation.end),
             )
         });
+        match provenance {
+            Some(CoverageProvenance::ExactReceipt) => sweep.provenance.exact_receipt_ranges += 1,
+            Some(CoverageProvenance::FrontierPrefix) => {
+                sweep.provenance.frontier_prefix_ranges += 1
+            }
+            Some(CoverageProvenance::Mixed) => sweep.provenance.mixed_ranges += 1,
+            None => {}
+        }
+        let covered = provenance.is_some();
         if covered && generation_proven {
             continue;
         }
@@ -497,6 +513,19 @@ fn sweep_coverage(
     sweep
 }
 
+#[cfg(test)]
+pub(in crate::services::discord) fn classify_reachability(
+    inputs: ReachabilityInputs<'_>,
+) -> ReachabilityVerdict {
+    evaluate_reachability(inputs).0
+}
+
+fn evaluate_reachability(inputs: ReachabilityInputs<'_>) -> (ReachabilityVerdict, CoverageReport) {
+    let mut coverage = CoverageReport::new(inputs.ledger, inputs.ledger_observed_at_epoch_ms);
+    let verdict = classify_with_coverage(inputs, &mut coverage);
+    (verdict, coverage)
+}
+
 /// Produce the Tier A verdict — 4987 §4.1 / §-1.3b / §-1.4. The `Unknown` arms
 /// run before the obligation ladder, since grading an incomplete obligation
 /// set answers nothing. Actual order: coordinate divergence, store
@@ -506,8 +535,9 @@ fn sweep_coverage(
 /// against the ladder's own verdict and yields to a strictly stronger one.
 /// #5071 relay-tail S1 (I-5): the `Unknown` arms name what they observed;
 /// `Unknown` permits no health regardless.
-pub(in crate::services::discord) fn classify_reachability(
+fn classify_with_coverage(
     inputs: ReachabilityInputs<'_>,
+    coverage: &mut CoverageReport,
 ) -> ReachabilityVerdict {
     if let Some(reason) = inputs.divergence.unknown_reason() {
         return ReachabilityVerdict::unknown(reason, 0);
@@ -515,11 +545,13 @@ pub(in crate::services::discord) fn classify_reachability(
     if matches!(inputs.receipts, ReceiptIndexRead::Unknown(_))
         || (inputs.ledger.is_none() && inputs.ledger_present)
     {
+        coverage.observation_state = "unreadable";
         // 4987 §-1.4 counterexample 7: a store that exists and won't parse is
         // `Unknown`, never `Unreachable` — coverage is unknown, not absent.
         return ReachabilityVerdict::unknown(ReachabilityUnknownReason::ReceiptStoreUnreadable, 0);
     }
     let Some(ledger) = inputs.ledger else {
+        coverage.observation_state = "never_observed";
         // Never observed. 4987 §-1.4: not `Reachable`; #5071 relay-tail S1
         // (I-5): not an unresolved transcript either — no coordinate was framed.
         return ReachabilityVerdict::unknown(ReachabilityUnknownReason::NeverObserved, 0);
@@ -528,12 +560,14 @@ pub(in crate::services::discord) fn classify_reachability(
     // must not be retired by a clock. `read_truncated` is hardcoded `false` at
     // the production call site today, so this pins an ordering only.
     if inputs.read_truncated {
+        coverage.observation_state = "lagging";
         return ReachabilityVerdict::unknown(ReachabilityUnknownReason::ReadTruncated, 0);
     }
     // Checked before the transcript arm (a producerless ledger can never pass
     // it), but must not preempt a `Reachable` verdict — `expired_without_a_producer`
     // refuses to expire over §-1.4's positive alive evidence.
     if let Some(unobserved_for_secs) = expired_without_a_producer(&inputs, ledger) {
+        coverage.observation_state = "expired";
         return ReachabilityVerdict::Expired {
             unobserved_for_secs,
         };
@@ -563,6 +597,23 @@ pub(in crate::services::discord) fn classify_reachability(
         ledger.incarnation.generation_mtime_ns,
         ledger.incarnation.spawn_nonce.is_some(),
         inputs.now_epoch_ms,
+    );
+
+    coverage.observation_state = if ledger.cursor_offset > eof || ledger.last_observed_len > eof {
+        "unresolved"
+    } else if ledger.counters.incomplete_observations > 0 {
+        // Cumulative gaps have no resolution witness; reaching EOF cannot
+        // prove that skipped records were observed.
+        "incomplete"
+    } else if ledger.cursor_offset < ledger.last_observed_len || ledger.cursor_offset < eof {
+        "lagging"
+    } else {
+        "current"
+    };
+    coverage.record(
+        &sweep.uncovered_ages_secs,
+        &sweep.unproven_ages_secs,
+        sweep.provenance.clone(),
     );
 
     let oldest_uncovered = sweep.uncovered_ages_secs.iter().copied().max();
@@ -729,11 +780,9 @@ pub(in crate::services::discord) fn observe_relay_verdict(
     };
 
     let ledger_path = ledger_path(provider, probe.channel_id);
-    let ledger = ledger_path.as_deref().and_then(read_ledger_at);
-    let ledger_present = ledger_path.as_deref().is_some_and(ledger_file_exists);
-    let ledger_observed_at_epoch_ms = ledger_path
+    let (ledger, ledger_present, ledger_observed_at_epoch_ms) = ledger_path
         .as_deref()
-        .and_then(ledger_committed_at_epoch_ms);
+        .map_or((None, false, None), read_ledger_snapshot_at);
 
     let receipts = delivery_record_path(provider, probe.channel_id)
         .as_deref()
@@ -749,7 +798,7 @@ pub(in crate::services::discord) fn observe_relay_verdict(
             )
         });
 
-    let in_band = classify_reachability(ReachabilityInputs {
+    let (in_band, coverage) = evaluate_reachability(ReachabilityInputs {
         provider,
         divergence: divergence_outcome,
         ledger: ledger.as_ref(),
@@ -777,7 +826,9 @@ pub(in crate::services::discord) fn observe_relay_verdict(
                 })
         });
 
-    compose_relay_verdict(in_band, external)
+    let mut verdict = compose_relay_verdict(in_band, external);
+    verdict.coverage = coverage;
+    verdict
 }
 
 /// Resolve the registry's transcript and decide 4987 §-1.4's alive question.

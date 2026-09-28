@@ -197,7 +197,7 @@ async fn force_purge_finish_never_reaches_a_successor_actor() {
     let successor_turn = start_test_turn(&shared, channel, MessageId::new(5_951_822)).await;
     successor_turn.cancelled.store(true, Ordering::Relaxed);
 
-    assert_eq!(purge.await, Some(0));
+    assert_eq!(purge.await.map(|counts| counts.drained), Some(0));
     let live = shared.mailbox(channel).snapshot().await.cancel_token;
     assert!(
         live.is_some_and(|token| Arc::ptr_eq(&token, &successor_turn)),
