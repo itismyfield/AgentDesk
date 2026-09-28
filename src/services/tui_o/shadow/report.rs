@@ -953,10 +953,14 @@ mod tests {
         judge_at(records, manifest, population, t(120), t(130))
     }
 
-    /// Stores every fixture row inside the window; rows with their own time ignore it.
+    /// Stores fixture rows inside the window; a run starts and a window opens when they say.
     fn stored(records: &[ShadowRecord]) -> Vec<StoredRecord> {
         let at = |record: &ShadowRecord| StoredRecord {
-            at: t(10),
+            at: match record {
+                ShadowRecord::Header { started_at, .. } => *started_at,
+                ShadowRecord::WindowStart { t0, .. } => *t0,
+                _ => t(10),
+            },
             record: record.clone(),
         };
         // The run then records a tap collection every 20 s from before t0 until after `late`.
