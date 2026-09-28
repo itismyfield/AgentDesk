@@ -7,12 +7,15 @@ use serde::Serialize;
 use serenity::{ChannelId, MessageId};
 
 use crate::services::discord::inflight::opt_message_id;
+use crate::services::discord::mailbox_finish::legacy_restitution_refusal;
 use crate::services::discord::mailbox_probe::wait_for_turn_end;
 use crate::services::discord::relay_recovery::AxisBSite;
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::discord::turn_view_reconciler::note_intake_turn_cleared_via_shared as tv_clear;
 use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::{CancelToken, ProviderKind};
+use crate::services::turn_orchestrator::HydratePendingQueueResult;
+use crate::services::turn_orchestrator::registry_purge::MailboxRefusal;
 
 use super::HealthRegistry;
 use super::rebind_request::{ParsedRebindRequest, parse_rebind_body};
@@ -616,7 +619,9 @@ pub async fn schedule_pending_queue_drain_after_cancel(
     // dedupes by `message_id` and prepends disk items so neither the
     // surviving disk payload nor the live racer is dropped.
     let post_depth = if snapshot.disk_present {
-        let hydrate_result = hydrate_pending_queue_from_disk(&shared, &provider, channel_id).await;
+        let hydrate_result = hydrate_pending_queue_from_disk(&shared, &provider, channel_id)
+            .await
+            .unwrap_or_else(legacy_restitution_refusal);
         let _absorbed = hydrate_result.absorbed;
         hydrate_result.queue_len_after
     } else {
@@ -656,37 +661,21 @@ impl PostCancelDrainOutcome {
     }
 }
 
-/// codex review round-3 P2 (#1672): load the disk-backed pending queue
-/// for `channel_id` and merge it into the in-memory mailbox. Restores
-/// the matching `dispatch_role_override` alongside the queue so
-/// requeued items target the same destination channel as the original
-/// `mailbox_enqueue_intervention` call.
-///
-/// codex review round-4 P2-1 (#1672): the merge runs through the
-/// mailbox actor, so a concurrent `mailbox_enqueue_intervention`
-/// racing with this hydrate is preserved rather than clobbered. Disk
-/// items are inserted at the head of the queue and any `message_id`
-/// already present is skipped to keep the merge idempotent on retry.
-///
-/// #1683: the disk read also runs inside the actor message. A pending
-/// dequeue can no longer remove the queue file after an out-of-actor
-/// stale read and then have that stale payload reinserted by hydrate.
-///
-/// Returns the post-hydrate queue depth plus any restored role override.
+/// Merge the disk queue inside the actor and restore its role override after an actual response.
 async fn hydrate_pending_queue_from_disk(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
-) -> crate::services::turn_orchestrator::HydratePendingQueueResult {
+) -> Result<HydratePendingQueueResult, MailboxRefusal> {
     let result =
-        discord::mailbox_hydrate_pending_queue_from_disk(shared, provider, channel_id).await;
+        discord::mailbox_hydrate_pending_queue_from_disk(shared, provider, channel_id).await?;
     if let Some(alt_channel_id) = result.restored_override {
         shared
             .dispatch
             .role_overrides
             .insert(channel_id, alt_channel_id);
     }
-    result
+    Ok(result)
 }
 
 /// #1672: Resolve a usable tmux session name for cancel observability.
@@ -1845,7 +1834,9 @@ pub(crate) async fn run_stall_watchdog_pass(
             )
             .await;
             if !has_pending {
-                let hydrate = hydrate_pending_queue_from_disk(&shared, provider, channel_id).await;
+                let hydrate = hydrate_pending_queue_from_disk(&shared, provider, channel_id)
+                    .await
+                    .unwrap_or_else(legacy_restitution_refusal);
                 if hydrate.queue_len_after > 0 && hydrate.persistence_error.is_none() {
                     discord::schedule_deferred_idle_queue_kickoff(
                         shared.clone(),
@@ -6521,6 +6512,55 @@ mod owning_runtime_http_tests {
                 .await
                 .is_none(),
             "a first-runtime/name-only lookup would mask this missing owner HTTP"
+        );
+    }
+}
+
+#[cfg(test)]
+mod post_cancel_drain_tests {
+    use super::*;
+    use crate::services::discord::relay_recovery::tests::isolated_agentdesk_root;
+    use crate::services::discord::relay_recovery::tests::orphan_token_finish::queued;
+    use crate::services::turn_orchestrator::save_channel_queue;
+
+    #[tokio::test]
+    async fn drain_restores_disk_queue_and_role_override() {
+        let _root = isolated_agentdesk_root();
+        let shared = discord::make_shared_data_for_tests();
+        let registry = HealthRegistry::new();
+        let (channel, alternate) = (ChannelId::new(6_038_701), ChannelId::new(6_038_702));
+        let provider = ProviderKind::Claude;
+        registry
+            .register(provider.as_str().to_string(), shared.clone())
+            .await;
+        assert!(
+            shared
+                .mailbox(channel)
+                .snapshot()
+                .await
+                .intervention_queue
+                .is_empty()
+        );
+        save_channel_queue(
+            &provider,
+            &shared.token_hash,
+            channel,
+            &[queued(6_038_703)],
+            Some(alternate.get()),
+        )
+        .unwrap();
+        let result = schedule_pending_queue_drain_after_cancel(
+            &registry,
+            provider.as_str(),
+            channel,
+            "test_drain",
+        )
+        .await;
+        assert!(result.scheduled);
+        assert_eq!(result.queue_depth_after, 1);
+        assert_eq!(
+            shared.dispatch.role_overrides.get(&channel).map(|v| *v),
+            Some(alternate)
         );
     }
 }

@@ -3016,6 +3016,7 @@ services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_
 services::discord::health::recovery::leak_recovery_inflight_finalize_tests::oob_leak_recovery_preserves_a_newer_turns_inflight
 services::discord::health::recovery::live_agent_recovery::tests::recovery_metadata_is_a_role_bound_persistent_routine_when_requested
 services::discord::health::recovery::owning_runtime_http_tests::owning_runtime_http_uses_channel_matched_runtime
+services::discord::health::recovery::post_cancel_drain_tests::drain_restores_disk_queue_and_role_override
 services::discord::health::recovery::rebind_error_status_tests::runtime_binding_unavailable_maps_to_conflict
 services::discord::health::recovery::rebind_error_status_tests::zero_channel_id_maps_to_bad_request
 services::discord::health::recovery::stall_alert::tests::owner_zero_and_tui_sentinel_never_render_mentions
@@ -3738,9 +3739,11 @@ services::discord::jsonl_watcher::tests::notify_fires_when_file_modified
 services::discord::jsonl_watcher::tests::notify_is_inert_when_parent_missing_but_does_not_panic
 services::discord::last_message_checkpoint_tests::advance_last_message_checkpoint_interleaved_advances_keep_max
 services::discord::mailbox_finish::closed_actor_tests::exhausted_restitution_is_not_an_empty_success
+services::discord::mailbox_finish::closed_actor_tests::hydration_exhaustion_returns_closed_and_keeps_disk_queue
 services::discord::mailbox_finish::closed_actor_tests::refused_restitution_lands_on_the_successor
 services::discord::mailbox_finish::closed_actor_tests::refused_take_keeps_the_pending_catch_up_retry
 services::discord::mailbox_finish::closed_actor_tests::refused_wrapper_request_runs_no_follow_up
+services::discord::mailbox_finish::closed_actor_tests::restitution_preserves_typed_refusals_and_legacy_results
 services::discord::mailbox_finish::closed_actor_tests::unreadable_disk_queue_stops_whole_queue_writes
 services::discord::mailbox_finish::closed_actor_tests::whole_queue_writes_keep_a_disk_only_queue
 services::discord::mailbox_finish::relay_state_contract_refs::contract_symbols_exist

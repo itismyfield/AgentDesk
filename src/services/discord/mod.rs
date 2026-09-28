@@ -2614,17 +2614,17 @@ async fn mailbox_merge_restored_dispatch_marker(
     .await
 }
 
-/// #1683: actor-local disk -> in-memory hydration helper. The mailbox
-/// actor reads the queue file and merges it in one serialized message,
-/// preventing stale out-of-actor disk snapshots from reintroducing an
-/// item that another actor message already dequeued and removed from disk.
+/// Read and merge disk items inside the actor so stale snapshots cannot reintroduce dequeued work.
 async fn mailbox_hydrate_pending_queue_from_disk(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
-) -> HydratePendingQueueResult {
+) -> Result<
+    HydratePendingQueueResult,
+    crate::services::turn_orchestrator::registry_purge::MailboxRefusal,
+> {
     let persistence = queue_persistence_context(shared, provider, channel_id);
-    mailbox_finish::restitution(shared, channel_id, |h| {
+    mailbox_finish::try_restitution(shared, channel_id, |h| {
         let p = persistence.clone();
         async move { h.hydrate_pending_queue_from_disk_or_refused(p).await }
     })
