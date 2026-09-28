@@ -513,17 +513,7 @@ pub async fn force_kill_provider_channel_runtime(
     .await
 }
 
-/// #1672: Snapshot the per-channel pending-queue state from both the
-/// in-memory mailbox and the disk-backed `discord_pending_queue` file.
-///
-/// Used by the cancel API + text-stop helpers to verify their
-/// "pending_queue must be preserved across cancel" invariant *after*
-/// the cancel completes, instead of asserting it via a hardcoded
-/// `queue_preserved=true`.
-///
-/// Returns `None` only when the registered shared runtime cannot be
-/// resolved for `provider_name`. A missing channel mailbox or absent
-/// disk file are reported as `(0, false)` rather than `None`.
+/// Observe the mailbox and its disk queue; an unanswered mailbox has no snapshot.
 pub async fn snapshot_pending_queue_state(
     registry: &HealthRegistry,
     provider_name: &str,
@@ -531,13 +521,13 @@ pub async fn snapshot_pending_queue_state(
 ) -> Option<PendingQueueSnapshot> {
     let provider = ProviderKind::from_str(provider_name)?;
     let shared = shared_for_provider(registry, &provider, channel_id).await?;
-    Some(snapshot_pending_queue_state_for_shared(&shared, &provider, channel_id).await)
+    snapshot_pending_queue_state_for_shared(&shared, &provider, channel_id).await
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct PendingQueueSnapshot {
     pub queue_depth: usize,
-    pub disk_present: bool,
+    pub disk_present: Option<bool>,
     // #3034: populated for diagnostics/observability; not read by the queue
     // preservation check (which only compares depth + presence).
     #[allow(dead_code)]
@@ -554,11 +544,12 @@ async fn snapshot_pending_queue_state_for_shared(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
-) -> PendingQueueSnapshot {
+) -> Option<PendingQueueSnapshot> {
     let queued = shared
         .mailbox(channel_id)
-        .snapshot()
+        .try_snapshot()
         .await
+        .ok()?
         .intervention_queue;
     let queue_depth = queued.len();
     let message_ids = queued
@@ -570,34 +561,17 @@ async fn snapshot_pending_queue_state_for_shared(
             .join(&shared.token_hash)
             .join(format!("{}.json", channel_id.get()))
     });
-    let disk_present = disk_path
-        .as_ref()
-        .map(|path| path.exists())
-        .unwrap_or(false);
-    PendingQueueSnapshot {
+    let disk_present = disk_path.as_ref().and_then(|path| path.try_exists().ok());
+    Some(PendingQueueSnapshot {
         queue_depth,
         disk_present,
         disk_path,
         message_ids,
-    }
+    })
 }
 
-/// #1672: After a cancel that left the channel idle, kick the deferred
-/// idle-queue drain so any survived `pending_queue` items are picked up
-/// without requiring the next user message to arrive first.
-///
-/// Returns `true` when the drain was scheduled (registered shared runtime
-/// found and at least one item is queued in memory or on disk), `false`
-/// otherwise.
-///
-/// codex review round-3 P2: when the in-memory mailbox is empty but the
-/// disk-backed `discord_pending_queue/<provider>/<token>/<channel>.json`
-/// file is still present, hydrate the mailbox from disk before
-/// scheduling the drain. Without this, the cancel response correctly
-/// reports `queue_disk_present_after=true` but the queued items remain
-/// stranded — the drain helper sees an empty mailbox and bails out, and
-/// the next `mailbox_enqueue_intervention` may overwrite the disk file
-/// before the items are ever absorbed.
+/// Hydrate the disk queue when needed, then schedule the surviving work for an idle channel.
+/// No queue depth is published without an actor observation after the attempted hydration.
 pub async fn schedule_pending_queue_drain_after_cancel(
     registry: &HealthRegistry,
     provider_name: &str,
@@ -610,7 +584,11 @@ pub async fn schedule_pending_queue_drain_after_cancel(
     let Some(shared) = shared_for_provider(registry, &provider, channel_id).await else {
         return PostCancelDrainOutcome::skipped();
     };
-    let snapshot = snapshot_pending_queue_state_for_shared(&shared, &provider, channel_id).await;
+    let Some(snapshot) =
+        snapshot_pending_queue_state_for_shared(&shared, &provider, channel_id).await
+    else {
+        return PostCancelDrainOutcome::skipped();
+    };
     // codex review round-4 P2-1 (#1672): hydrate from disk *whenever*
     // the disk file is present, not just when the in-memory queue is
     // empty. If a concurrent `mailbox_enqueue_intervention` slipped a
@@ -618,41 +596,44 @@ pub async fn schedule_pending_queue_drain_after_cancel(
     // still need to merge whatever the disk holds. Actor-local hydrate
     // dedupes by `message_id` and prepends disk items so neither the
     // surviving disk payload nor the live racer is dropped.
-    let post_depth = if snapshot.disk_present {
-        let hydrate_result = hydrate_pending_queue_from_disk(&shared, &provider, channel_id)
-            .await
-            .unwrap_or_else(legacy_restitution_refusal);
-        let _absorbed = hydrate_result.absorbed;
-        hydrate_result.queue_len_after
+    let post_depth = if snapshot.disk_present != Some(false) {
+        match hydrate_pending_queue_from_disk(&shared, &provider, channel_id).await {
+            Ok(result) => result.queue_len_after,
+            Err(refusal) => {
+                let diagnostic = legacy_restitution_refusal(refusal).persistence_error;
+                tracing::warn!(
+                    channel_id = channel_id.get(),
+                    ?refusal,
+                    ?diagnostic,
+                    "pending queue hydration refused"
+                );
+                return PostCancelDrainOutcome::skipped();
+            }
+        }
     } else {
         snapshot.queue_depth
     };
     if post_depth == 0 {
         return PostCancelDrainOutcome {
             scheduled: false,
-            queue_depth_after: 0,
+            queue_depth_after: Some(0),
         };
     }
     discord::schedule_deferred_idle_queue_kickoff(shared.clone(), provider, channel_id, reason);
     PostCancelDrainOutcome {
         scheduled: true,
-        queue_depth_after: post_depth,
+        queue_depth_after: Some(post_depth),
     }
 }
 
-/// codex review round-4 P2-2 (#1672): return value of
-/// `schedule_pending_queue_drain_after_cancel`. The cancel response
-/// builders use `queue_depth_after` as the source of truth for
-/// `queued_remaining` so the API contract reflects the post-hydrate
-/// state, not the (typically zero) snapshot taken before disk
-/// hydration ran.
+/// Drain scheduling and measured depth; unresolved runtimes and refused hydration have no depth.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PostCancelDrainOutcome {
     // #3034: outcome flag retained for diagnostics; callers consume
     // `queue_depth_after` as the API source of truth (see doc above).
     #[allow(dead_code)]
     pub scheduled: bool,
-    pub queue_depth_after: usize,
+    pub queue_depth_after: Option<usize>,
 }
 
 impl PostCancelDrainOutcome {
@@ -6523,6 +6504,82 @@ mod post_cancel_drain_tests {
     use crate::services::discord::relay_recovery::tests::orphan_token_finish::queued;
     use crate::services::turn_orchestrator::save_channel_queue;
 
+    async fn refused_hydration(refusal: MailboxRefusal) {
+        let _root = isolated_agentdesk_root();
+        let shared = discord::make_shared_data_for_tests();
+        let registry = HealthRegistry::new();
+        let channel = ChannelId::new(6038731);
+        let provider = ProviderKind::Claude;
+        registry.register("claude".into(), shared.clone()).await;
+        save_channel_queue(
+            &provider,
+            &shared.token_hash,
+            channel,
+            &[queued(42)],
+            Some(43),
+        )
+        .unwrap();
+        let attempts =
+            shared
+                .mailboxes
+                .insert_snapshot_only_for_test(channel, Default::default(), refusal);
+        let result =
+            schedule_pending_queue_drain_after_cancel(&registry, "claude", channel, "test_refusal")
+                .await;
+        shared.mailboxes.remove_fixture_for_test(channel);
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            if refusal == MailboxRefusal::Closed {
+                3
+            } else {
+                1
+            }
+        );
+        assert_eq!(result.queue_depth_after, None);
+        assert!(!result.scheduled);
+        let disk = crate::services::turn_orchestrator::load_channel_pending_queue_for_tests(
+            &provider,
+            &shared.token_hash,
+            channel,
+        )
+        .0;
+        assert_eq!(
+            disk.iter().map(|i| i.message_id.get()).collect::<Vec<_>>(),
+            [42]
+        );
+        assert!(!shared.dispatch.role_overrides.contains_key(&channel));
+    }
+
+    #[tokio::test]
+    async fn queue_truth_hydration_unreachable() {
+        refused_hydration(MailboxRefusal::Unreachable).await;
+    }
+
+    #[tokio::test]
+    async fn queue_truth_hydration_closed() {
+        refused_hydration(MailboxRefusal::Closed).await;
+    }
+
+    #[tokio::test]
+    async fn queue_truth_drain_distinguishes_unreachable_from_empty() {
+        let _root = isolated_agentdesk_root();
+        let shared = discord::make_shared_data_for_tests();
+        let registry = HealthRegistry::new();
+        registry.register("claude".into(), shared.clone()).await;
+        let channel = ChannelId::new(6038732);
+        let empty =
+            schedule_pending_queue_drain_after_cancel(&registry, "claude", channel, "test_empty")
+                .await;
+        assert_eq!(empty.queue_depth_after, Some(0));
+        shared.mailboxes.insert_unreachable_for_test(channel);
+        let lost =
+            schedule_pending_queue_drain_after_cancel(&registry, "claude", channel, "test_lost")
+                .await;
+        shared.mailboxes.remove_fixture_for_test(channel);
+        assert_eq!(lost.queue_depth_after, None);
+        assert!(!lost.scheduled);
+    }
+
     #[tokio::test]
     async fn drain_restores_disk_queue_and_role_override() {
         let _root = isolated_agentdesk_root();
@@ -6557,7 +6614,7 @@ mod post_cancel_drain_tests {
         )
         .await;
         assert!(result.scheduled);
-        assert_eq!(result.queue_depth_after, 1);
+        assert_eq!(result.queue_depth_after, Some(1));
         assert_eq!(
             shared.dispatch.role_overrides.get(&channel).map(|v| *v),
             Some(alternate)

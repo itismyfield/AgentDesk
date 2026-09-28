@@ -1208,7 +1208,7 @@ impl SharedData {
 }
 
 #[cfg(test)]
-pub(super) fn make_shared_data_for_tests() -> Arc<SharedData> {
+pub(crate) fn make_shared_data_for_tests() -> Arc<SharedData> {
     make_shared_data_for_tests_with_storage(None)
 }
 
@@ -1685,6 +1685,12 @@ fn queue_exit_card_body(kind: QueueExitKind) -> &'static str {
 #[cfg(test)]
 mod queue_exit_feedback_reconciler_tests {
     use super::*;
+
+    impl SharedData {
+        pub(crate) fn queue_fixture_parts(&self) -> (&ChannelMailboxRegistry, &str) {
+            (&self.mailboxes, &self.token_hash)
+        }
+    }
 
     struct ScopedRuntimeRoot {
         _lock: std::sync::MutexGuard<'static, ()>,
