@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::metrics::MetricsSnapshot;
 use super::root::StoredRecord;
+use super::tap::CHECKPOINT_SECS;
 use super::{
     DeriveOutput, DiffCause, DiffClass, DiffRecord, IDENTITY_VERSION, MATCH_WINDOW,
     PopulationSnapshot, PopulationSource, REPORT_VERSION, SCHEMA_VERSION, ShadowProvider,
@@ -353,7 +354,37 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
             "reported before {late}, when the last diffs are judged"
         ));
     }
-    let (mut header, mut stale) = (None, 0);
+    // Evidence is dated when read, so the run that read WindowStart must keep reading until `late`.
+    let opened = starts.first().map_or(records.len(), |(line, ..)| *line);
+    let header_at = |i: &usize| matches!(records[*i], ShadowRecord::Header { .. });
+    let run = (0..opened).rev().find(header_at).unwrap_or(0);
+    let end = (opened..records.len())
+        .find(header_at)
+        .unwrap_or(records.len());
+    if records[end..]
+        .iter()
+        .any(|r| matches!(r, ShadowRecord::Header { started_at, .. } if *started_at <= late))
+    {
+        failures.push(format!(
+            "observer restarted before {late}; work in flight was lost"
+        ));
+    }
+    let checkpoints: Vec<DateTime<Utc>> = (input.records[run..end].iter())
+        .filter(|s| matches!(s.record, ShadowRecord::TapGap { .. }))
+        .map(|s| s.at)
+        .collect();
+    let stall = Duration::seconds(3 * CHECKPOINT_SECS);
+    let continuous = checkpoints
+        .first()
+        .is_some_and(|first| *first <= t0 + stall)
+        && checkpoints.last().is_some_and(|last| *last >= late)
+        && (checkpoints.windows(2)).all(|w| w[1] <= t0 || w[0] >= late || w[1] - w[0] <= stall);
+    if !continuous {
+        failures.push(format!(
+            "tap collection not recorded every {stall} from t0 to {late}"
+        ));
+    }
+    let (mut header, mut stale, mut collected, mut lost) = (None, 0, None, false);
     let mut metrics = MetricsSnapshot::default();
     let mut classes: HashMap<&UnitKey, DiffClass> = HashMap::new();
     let mut window_diffs: Vec<&DiffRecord> = Vec::new();
@@ -373,14 +404,18 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
                 classes.insert(key, diff.class);
             }
         }
-        // A gap may hide events window units are judged on, from W before t0 until `late`.
-        let gap = match record {
-            ShadowRecord::TapGap { .. } => true,
-            ShadowRecord::Diff { diff } => diff.class == DiffClass::TapGap,
-            _ => false,
+        // A loss happened after the previous collection; it may hide events window units are
+        // judged on when that span meets `[t0 - W, late]`.
+        let in_window = match record {
+            ShadowRecord::TapGap { .. } => {
+                lost = collected.is_none_or(|previous| previous < late) && line.at >= t0 - window;
+                collected = Some(line.at);
+                lost
+            }
+            ShadowRecord::Diff { diff } if diff.class == DiffClass::TapGap => lost,
+            _ => t0 <= at && at <= t1,
         };
-        let (start, end) = if gap { (t0 - window, late) } else { (t0, t1) };
-        if start <= at && at <= end {
+        if in_window {
             stale += usize::from(header != Some((SCHEMA_VERSION, IDENTITY_VERSION)));
             metrics.record(record);
             if let ShadowRecord::Diff { diff } = record {
@@ -458,13 +493,11 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
 
     let mut synthetic = BTreeMap::new();
     for entry in input.manifest.iter().filter(|e| e.created_at <= t1) {
-        let channel = population
-            .channels
-            .iter()
-            .find(|c| c.channel_id == entry.channel_id);
-        if channel.map(|c| profile_of(&c.provider)).as_deref()
-            != Some(entry.expected_runtime_kind.as_str())
-        {
+        // A thread can carry one entry per provider it was bound to in the window.
+        let mut kinds = (population.channels.iter())
+            .filter(|c| c.channel_id == entry.channel_id)
+            .map(|c| profile_of(&c.provider));
+        if !kinds.any(|kind| kind == entry.expected_runtime_kind) {
             failures.push(format!(
                 "synthetic {}: channel is not effective {}",
                 entry.entry_id, entry.expected_runtime_kind
