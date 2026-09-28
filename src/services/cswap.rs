@@ -232,76 +232,82 @@ impl CswapAdapter for CswapCliAdapter {
         timeout: Duration,
         operation: &'static str,
     ) -> CswapFuture<'a, Result<String, CswapError>> {
-        Box::pin(async move {
-            let path = resolve_cswap_path().await.ok_or(CswapError::NotInstalled)?;
-            let mut command = tokio::process::Command::new(&path);
-            command.kill_on_drop(true);
-            command.args(args);
-            if let Some(path) = merged_runtime_path() {
-                command.env("PATH", path);
-            }
-            command.stdout(Stdio::piped());
-            command.stderr(Stdio::piped());
-            configure_cswap_process_group(&mut command);
-
-            let mut child = command
-                .spawn()
-                .map_err(|err| CswapError::Exec(err.to_string()))?;
-            let child_pid = child.id();
-            let stdout = child
-                .stdout
-                .take()
-                .ok_or_else(|| CswapError::Exec("failed to capture cswap stdout".to_string()))?;
-            let stderr = child
-                .stderr
-                .take()
-                .ok_or_else(|| CswapError::Exec("failed to capture cswap stderr".to_string()))?;
-            let stdout_task = tokio::spawn(read_child_pipe(stdout));
-            let stderr_task = tokio::spawn(read_child_pipe(stderr));
-
-            let status = tokio::select! {
-                status = child.wait() => status.map_err(|err| CswapError::Exec(err.to_string()))?,
-                _ = tokio::time::sleep(timeout) => {
-                    kill_cswap_process_group(child_pid);
-                    let _ = child.start_kill();
-                    let _ = child.wait().await;
-                    let _ = stdout_task.await;
-                    let _ = stderr_task.await;
-                    return Err(CswapError::Timeout {
-                        operation,
-                        timeout_secs: timeout.as_secs(),
-                    });
-                }
-            };
-
-            let stdout = stdout_task
-                .await
-                .map_err(|err| CswapError::Exec(err.to_string()))?
-                .map_err(|err| CswapError::Exec(err.to_string()))?;
-            let stderr = stderr_task
-                .await
-                .map_err(|err| CswapError::Exec(err.to_string()))?
-                .map_err(|err| CswapError::Exec(err.to_string()))?;
-            let stdout = String::from_utf8(stdout)
-                .map_err(|err| CswapError::InvalidUtf8(err.to_string()))?;
-            let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
-
-            if !status.success() {
-                let error_message = if stderr.is_empty() {
-                    stdout.trim().to_string()
-                } else {
-                    stderr
-                };
-                return Err(CswapError::CommandFailed {
-                    status: status.to_string(),
-                    stderr: error_message,
-                    stdout,
-                });
-            }
-
-            Ok(stdout)
-        })
+        Box::pin(run_cswap_cli(args, timeout, operation))
     }
+}
+
+async fn run_cswap_cli(
+    args: Vec<String>,
+    timeout: Duration,
+    operation: &'static str,
+) -> Result<String, CswapError> {
+    let path = resolve_cswap_path().await.ok_or(CswapError::NotInstalled)?;
+    let mut command = tokio::process::Command::new(&path);
+    command.kill_on_drop(true);
+    command.args(args);
+    if let Some(path) = merged_runtime_path() {
+        command.env("PATH", path);
+    }
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    configure_cswap_process_group(&mut command);
+
+    let mut child = command
+        .spawn()
+        .map_err(|err| CswapError::Exec(err.to_string()))?;
+    let child_pid = child.id();
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| CswapError::Exec("failed to capture cswap stdout".to_string()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| CswapError::Exec("failed to capture cswap stderr".to_string()))?;
+    let stdout_task = tokio::spawn(read_child_pipe(stdout));
+    let stderr_task = tokio::spawn(read_child_pipe(stderr));
+
+    let status = tokio::select! {
+        status = child.wait() => status.map_err(|err| CswapError::Exec(err.to_string()))?,
+        _ = tokio::time::sleep(timeout) => {
+            kill_cswap_process_group(child_pid);
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            return Err(CswapError::Timeout {
+                operation,
+                timeout_secs: timeout.as_secs(),
+            });
+        }
+    };
+
+    let stdout = stdout_task
+        .await
+        .map_err(|err| CswapError::Exec(err.to_string()))?
+        .map_err(|err| CswapError::Exec(err.to_string()))?;
+    let stderr = stderr_task
+        .await
+        .map_err(|err| CswapError::Exec(err.to_string()))?
+        .map_err(|err| CswapError::Exec(err.to_string()))?;
+    let stdout =
+        String::from_utf8(stdout).map_err(|err| CswapError::InvalidUtf8(err.to_string()))?;
+    let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
+
+    if !status.success() {
+        let error_message = if stderr.is_empty() {
+            stdout.trim().to_string()
+        } else {
+            stderr
+        };
+        return Err(CswapError::CommandFailed {
+            status: status.to_string(),
+            stderr: error_message,
+            stdout,
+        });
+    }
+
+    Ok(stdout)
 }
 
 pub struct CswapService {
