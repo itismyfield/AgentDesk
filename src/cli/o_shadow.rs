@@ -25,6 +25,9 @@ pub(crate) enum OShadowCommand {
     /// Record t0 as the current size of every attached transcript; run once when the window opens
     WindowStart,
     /// Judge one window against the E1 bar; exits nonzero unless every recorded criterion passes
+    #[command(
+        after_help = "Do not restart the observer during measurement; report once immediately after late (t1 + 10 minutes).\nFor later_run_present, duplicate_seal_in_run or capture_anomaly_in_run, remeasure in a new observer run."
+    )]
     Report {
         /// Earliest time of the window_start record that defines t0 (RFC 3339)
         #[arg(long)]

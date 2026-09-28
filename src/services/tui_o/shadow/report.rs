@@ -416,6 +416,26 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
             "tap collection not recorded every {stall} from t0 to {late}"
         ));
     }
+    // Later runs can overwrite unit evidence; measure again in a single uninterrupted run.
+    if end < records.len() {
+        failures.push("later_run_present".into());
+    }
+    let mut sealed_in_run = HashSet::new();
+    if records[run..end].iter().any(|record| match record {
+        ShadowRecord::Derived {
+            output: DeriveOutput::Sealed(unit),
+        } => !sealed_in_run.insert(&unit.unit_key),
+        _ => false,
+    }) {
+        failures.push("duplicate_seal_in_run".into());
+    }
+    // A pre-window anomaly can leave its feed halted throughout the measurement.
+    if input.records[run..end]
+        .iter()
+        .any(|line| line.at <= late && matches!(line.record, ShadowRecord::Anomaly { .. }))
+    {
+        failures.push("capture_anomaly_in_run".into());
+    }
     let (mut header, mut stale, mut collected, mut lost) = (None, 0, None, false);
     let mut halted = 0;
     let mut metrics = MetricsSnapshot::default();
@@ -1418,7 +1438,7 @@ mod tests {
     }
 
     #[test]
-    fn an_observer_restart_before_the_last_judgement_fails_the_window() {
+    fn an_observer_restart_even_after_the_last_judgement_fails_with_later_run_present() {
         let restart = |minutes| ShadowRecord::Header {
             schema_version: SCHEMA_VERSION,
             identity_version: IDENTITY_VERSION,
@@ -1439,12 +1459,12 @@ mod tests {
             failures[1].starts_with("tap collection not recorded"),
             "{failures:?}"
         );
-        assert_eq!(failures.len(), 2);
-        assert_eq!(judge_restart_at(131), Vec::<String>::new());
+        assert_eq!(failures[2..], ["later_run_present"]);
+        assert_eq!(judge_restart_at(131), ["later_run_present"]);
     }
 
     #[test]
-    fn a_thread_bound_in_the_window_stays_covered_after_a_restart_or_unbind() {
+    fn a_thread_stays_covered_after_restart_but_the_report_fails_with_later_run_present() {
         use crate::services::tui_o::shadow::{BindingChange, SourceBinding};
         let bind = |channel_id, at, bound: bool| {
             let (provider, source) = (ShadowProvider::Claude, src(1));
@@ -1478,7 +1498,8 @@ mod tests {
         let channels: Vec<(u64, &str)> = threads.iter().map(|(c, p)| (*c, p.as_str())).collect();
         let population = snapshot(&["claude_tui"], &channels, Vec::new());
         let outcome = judge_stored(&records, &[], &population, t(120), t(140));
-        assert!(outcome.pass, "{:?}", outcome.failures);
+        assert_eq!(outcome.failures, ["later_run_present"]);
+        assert!(!outcome.pass);
         // Bound only before t0 or only after t1: no evidence for this window.
         let outside = [
             bind(8, t(-9), true),
@@ -1706,7 +1727,108 @@ mod tests {
     }
 
     #[test]
-    fn a_capture_anomaly_near_the_window_fails_it() {
+    fn a_later_run_resealing_an_unknown_unit_fails_with_later_run_present() {
+        let mut records = stored(&passing());
+        let k = key(90, UnitKind::Body);
+        let mut unknown = matched(k.clone());
+        if let ShadowRecord::Diff { diff } = &mut unknown {
+            diff.class = DiffClass::LegacyMissing;
+            diff.cause = DiffCause::Unknown;
+        }
+        records = inserted(records, t(10), &[sealed(k.clone(), 1)]);
+        records = inserted(records, t(15), &[unknown]);
+        let before = judge_stored(&records, &[], &claude(), t(120), t(130));
+        assert!(!before.pass);
+        assert_eq!(before.failures, ["1 diffs still Unknown"]);
+        let mut restart = header(IDENTITY_VERSION);
+        if let ShadowRecord::Header { started_at, .. } = &mut restart {
+            *started_at = t(131);
+        }
+        records = inserted(records, t(131), &[restart]);
+        let next = ShadowRecord::WindowStart {
+            t0: t(132),
+            sources: Vec::new(),
+        };
+        let attach = ShadowRecord::Attach {
+            source: src(2),
+            attach_extent: 100,
+            capture_start: 100,
+            attached_at: t(132),
+        };
+        records = inserted(records, t(132), &[next, attach]);
+        let mut resealed = sealed(k, 1);
+        if let ShadowRecord::Derived {
+            output: DeriveOutput::Sealed(unit),
+        } = &mut resealed
+        {
+            unit.sealed_at = t(133);
+            unit.source_range.source = src(2);
+        }
+        records = inserted(records, t(133), &[resealed]);
+        let after = judge_stored(&records, &[], &claude(), t(120), t(134));
+        assert_eq!(after.failures, ["later_run_present"]);
+        assert!(!after.pass);
+    }
+
+    #[test]
+    fn a_duplicate_seal_in_the_run_fails_even_outside_the_window() {
+        for at in [t(5), t(133)] {
+            let mut duplicate = sealed(key(0, UnitKind::Body), 1);
+            if let ShadowRecord::Derived {
+                output: DeriveOutput::Sealed(unit),
+            } = &mut duplicate
+            {
+                unit.sealed_at = at;
+            }
+            let records = inserted(stored(&passing()), at, &[duplicate]);
+            let outcome = judge_stored(&records, &[], &claude(), t(120), t(134));
+            assert_eq!(outcome.failures, ["duplicate_seal_in_run"], "{at}");
+            assert!(!outcome.pass);
+        }
+    }
+
+    #[test]
+    fn a_feed_lost_six_minutes_before_the_window_fails_despite_other_feed_samples() {
+        let mut records = passing();
+        if let ShadowRecord::Header { started_at, .. } = &mut records[0] {
+            *started_at = t(-10);
+        }
+        let attach = ShadowRecord::Attach {
+            source: src(2),
+            attach_extent: 100,
+            capture_start: 100,
+            attached_at: t(-8),
+        };
+        let anomaly = ShadowRecord::Anomaly {
+            anomaly: SourceAnomaly {
+                source: src(2),
+                kind: SourceAnomalyKind::Shrunk,
+                captured_through: 500,
+                detail: String::new(),
+            },
+        };
+        records.splice(1..1, [attach, anomaly]);
+        assert!(attached_sources(records[..3].iter()).is_empty());
+        let mut records = stored(&records);
+        records[1].at = t(-8);
+        records[2].at = t(-6);
+        let outcome = evaluate(&ReportInput {
+            records: &records,
+            manifest: &[],
+            population: &snapshot(&["claude_tui"], &[(7, "claude"), (8, "claude")], Vec::new()),
+            allowlist: &[7, 8],
+            from: t(-1),
+            to: t(120),
+            reported_at: t(130),
+            classify: &ClassifyInput::Absent,
+        });
+        assert_eq!(outcome.total_turns, 30);
+        assert_eq!(outcome.failures, ["capture_anomaly_in_run"]);
+        assert!(!outcome.pass);
+    }
+
+    #[test]
+    fn a_capture_anomaly_even_six_minutes_before_the_window_fails_with_capture_anomaly_in_run() {
         let anomaly = SourceAnomaly {
             source: src(1),
             kind: SourceAnomalyKind::Shrunk,
@@ -1720,10 +1842,14 @@ mod tests {
             let records = inserted(stored(&passing()), at, &halted);
             judge_stored(&records, &[], &claude(), t(120), t(140)).failures
         };
-        let halted = ["1 capture anomalies that halted a source"];
+        let halted = [
+            "capture_anomaly_in_run",
+            "1 capture anomalies that halted a source",
+        ];
         assert_eq!(judge_anomaly_at(t(60)), halted);
         assert_eq!(judge_anomaly_at(t(-4)), halted);
-        assert_eq!(judge_anomaly_at(t(-6)), Vec::<String>::new());
+        assert_eq!(judge_anomaly_at(t(-6)), ["capture_anomaly_in_run"]);
+        assert_eq!(judge_anomaly_at(t(130)), halted);
         assert_eq!(judge_anomaly_at(t(131)), Vec::<String>::new());
     }
 
