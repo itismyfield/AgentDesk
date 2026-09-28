@@ -154,14 +154,55 @@ async fn release_catalog_before_diagnostic<F>(
     diagnostic.await;
 }
 
-/// Run the Discord gateway backend (`client.start()`) to completion, classify
-/// the exit, release gateway-owned background work, then run the post-reconcile
-/// startup diagnostic on failure. This is the final event-loop entry of run_bot.
-/// Consumes `client`.
+async fn finish_gateway_backend<E, F>(
+    gateway_backend_task: tokio::task::JoinHandle<Result<(), E>>,
+    provider_for_error: &ProviderKind,
+    gateway_waiter: Option<GatewayWaiterGuard>,
+    gateway_lease_task: Option<tokio::task::JoinHandle<()>>,
+    model_catalog_refresh_task: Option<tokio::task::JoinHandle<()>>,
+    diagnostic: F,
+) where
+    E: std::fmt::Display,
+    F: std::future::Future<Output = ()>,
+{
+    match gateway_backend_task.await {
+        Ok(Ok(())) => {
+            tracing::warn!(
+                "  ✗ {} gateway backend exited without error",
+                provider_for_error.display_name()
+            );
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                "  ✗ {} bot error: {error}",
+                provider_for_error.display_name()
+            );
+        }
+        Err(join_error) if join_error.is_panic() => {
+            tracing::error!(
+                "  ✗ {} gateway backend task panicked: {join_error}",
+                provider_for_error.display_name()
+            );
+        }
+        Err(join_error) => {
+            tracing::warn!(
+                "  ✗ {} gateway backend task ended unexpectedly: {join_error}",
+                provider_for_error.display_name()
+            );
+        }
+    }
+    drop(gateway_waiter);
+    release_catalog_before_diagnostic(model_catalog_refresh_task, diagnostic).await;
+    abort_and_join_task(gateway_lease_task).await;
+}
+
+/// Run the gateway backend and clear its waiter intent before diagnostics or
+/// lease release so peers stop handing back to a stopped backend.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_bot_run_gateway_backend(
     mut client: serenity::Client,
     provider_for_error: &ProviderKind,
+    gateway_waiter: Option<GatewayWaiterGuard>,
     gateway_lease_task: Option<tokio::task::JoinHandle<()>>,
     model_catalog_refresh_task: Option<tokio::task::JoinHandle<()>>,
     startup_reconcile_remaining_for_client_start: Arc<std::sync::atomic::AtomicUsize>,
@@ -170,50 +211,20 @@ pub(super) async fn run_bot_run_gateway_backend(
     api_port: u16,
 ) {
     let gateway_backend_task = tokio::spawn(async move { client.start().await });
-    let gateway_backend_failed = match gateway_backend_task.await {
-        Ok(Ok(())) => {
-            tracing::warn!(
-                "  ✗ {} gateway backend exited without error",
-                provider_for_error.display_name()
-            );
-            true
-        }
-        Ok(Err(error)) => {
-            tracing::warn!(
-                "  ✗ {} bot error: {error}",
-                provider_for_error.display_name()
-            );
-            true
-        }
-        Err(join_error) if join_error.is_panic() => {
-            tracing::error!(
-                "  ✗ {} gateway backend task panicked: {join_error}",
-                provider_for_error.display_name()
-            );
-            true
-        }
-        Err(join_error) => {
-            tracing::warn!(
-                "  ✗ {} gateway backend task ended unexpectedly: {join_error}",
-                provider_for_error.display_name()
-            );
-            true
-        }
-    };
-    release_catalog_before_diagnostic(model_catalog_refresh_task, async {
-        if gateway_backend_failed {
-            run_startup_diagnostic_after_reconcile_barrier(
-                startup_reconcile_remaining_for_client_start,
-                startup_doctor_started_for_client_start,
-                health_registry_for_client_start,
-                api_port,
-            )
-            .await;
-        }
-    })
+    finish_gateway_backend(
+        gateway_backend_task,
+        provider_for_error,
+        gateway_waiter,
+        gateway_lease_task,
+        model_catalog_refresh_task,
+        run_startup_diagnostic_after_reconcile_barrier(
+            startup_reconcile_remaining_for_client_start,
+            startup_doctor_started_for_client_start,
+            health_registry_for_client_start,
+            api_port,
+        ),
+    )
     .await;
-
-    abort_and_join_task(gateway_lease_task).await;
 }
 
 #[cfg(test)]
@@ -288,5 +299,121 @@ mod lifecycle_tests {
                 });
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod gateway_waiter_tests {
+    use super::*;
+    use crate::services::cluster::intake_worker_capabilities::capabilities_with_runtime_state;
+    use crate::services::cluster::node_registry::node_awaits_gateway;
+
+    fn advertised(provider: &str) -> bool {
+        node_awaits_gateway(
+            &serde_json::json!({
+                "capabilities": capabilities_with_runtime_state(&serde_json::json!({}))
+            }),
+            provider,
+        )
+    }
+
+    #[tokio::test]
+    async fn gateway_waiter_exit_arms_withdraw_before_diagnostic_and_lease_abort() {
+        for exit in 0..4 {
+            let provider = format!("gateway-waiter-exit-{exit}");
+            let waiter = GatewayWaiterGuard::new(&provider);
+            let backend = tokio::spawn(async move {
+                match exit {
+                    0 => Ok(()),
+                    1 => Err("backend error"),
+                    2 => panic!("backend panic"),
+                    _ => std::future::pending::<Result<(), &str>>().await,
+                }
+            });
+            if exit == 3 {
+                backend.abort();
+            }
+            let lease = tokio::spawn(std::future::pending());
+            let lease_watch = lease.abort_handle();
+            let mut diagnosed = false;
+            assert!(advertised(&provider));
+            finish_gateway_backend(
+                backend,
+                &ProviderKind::Codex,
+                Some(waiter),
+                Some(lease),
+                None,
+                async {
+                    assert!(
+                        !advertised(&provider),
+                        "waiter survived backend exit {exit}"
+                    );
+                    assert!(
+                        !lease_watch.is_finished(),
+                        "lease released before diagnostic"
+                    );
+                    diagnosed = true;
+                },
+            )
+            .await;
+            assert!(diagnosed);
+            assert!(lease_watch.is_finished());
+            assert!(!advertised(&provider));
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_waiter_cancel_and_prebackend_panic_withdraw_intent() {
+        for panic_before_backend in [false, true] {
+            let provider = format!("gateway-waiter-unwind-{panic_before_backend}");
+            let task_provider = provider.clone();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let _waiter = GatewayWaiterGuard::new(&task_provider);
+                started_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+                if panic_before_backend {
+                    panic!("failure before backend creation");
+                }
+                std::future::pending::<()>().await;
+            });
+            started_rx.await.unwrap();
+            assert!(advertised(&provider));
+            if panic_before_backend {
+                release_tx.send(()).unwrap();
+            } else {
+                task.abort();
+            }
+            let error = task.await.unwrap_err();
+            assert_eq!(error.is_panic(), panic_before_backend);
+            assert_eq!(error.is_cancelled(), !panic_before_backend);
+            assert!(!advertised(&provider));
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_waiter_last_same_provider_owner_controls_advertisement() {
+        for cancel_first in [false, true] {
+            let provider = format!("gateway-waiter-count-{cancel_first}");
+            let first = GatewayWaiterGuard::new(&format!(" {} ", provider.to_uppercase()));
+            let survivor = GatewayWaiterGuard::new(&provider);
+            if cancel_first {
+                let task = tokio::spawn(async move {
+                    let _first = first;
+                    std::future::pending::<()>().await;
+                });
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else {
+                drop(first);
+            }
+            assert!(
+                advertised(&provider),
+                "surviving bot lost its waiter advertisement"
+            );
+            drop(survivor);
+            assert!(!advertised(&provider));
+        }
     }
 }

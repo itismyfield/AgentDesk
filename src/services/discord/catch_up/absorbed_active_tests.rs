@@ -7,7 +7,28 @@ use crate::services::discord::recovery_known_ids::{
 };
 
 /// A real merge (`absorbed` first, newer `primary` folds it in), then its claim.
+/// Returns the claimed episode's turn nonce.
 pub(super) async fn absorb_and_claim(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    absorbed: &[MessageId],
+    primary: MessageId,
+) -> String {
+    merge_and_take(shared, provider, channel_id, absorbed, primary).await;
+    let token = Arc::new(crate::services::provider::CancelToken::new());
+    let turn_nonce = token
+        .turn_nonce()
+        .expect("a live claim has a nonce")
+        .to_owned();
+    let owner = serenity::UserId::new(HUMAN_ID);
+    let started = discord::mailbox_try_start_turn(shared, channel_id, token, owner, primary);
+    assert!(started.await, "the merged head claims the turn");
+    turn_nonce
+}
+
+/// The merge alone: the head carrying `absorbed` is taken, not yet claimed.
+pub(super) async fn merge_and_take(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -31,10 +52,6 @@ pub(super) async fn absorb_and_claim(
         (head.message_id, head.source_message_ids),
         (primary, sources)
     );
-    let token = Arc::new(crate::services::provider::CancelToken::new());
-    let owner = serenity::UserId::new(HUMAN_ID);
-    let started = discord::mailbox_try_start_turn(shared, channel_id, token, owner, primary);
-    assert!(started.await, "the merged head claims the turn");
 }
 
 async fn enqueue(
@@ -276,9 +293,8 @@ fn phase2_only(fx: &Fixture, channel_id: ChannelId, ids: &[MessageId]) -> Strict
         .fold(api, |api, id| api.arriving_at(1, human(channel_id, *id)))
 }
 
-/// r10 F1: H is Open on the phase-2 page and a newer X is accepted with no
-/// defer; X must not carry the checkpoint past H, and once the absorbing turn
-/// ends undelivered the barrier retry re-offers H.
+/// An accepted X must not carry the checkpoint past an Open H; once the
+/// absorbing turn ends undelivered, the retry re-offers H.
 async fn assert_phase2_open_h_is_held_then_reoffered(
     fx: &Fixture,
     channel_id: ChannelId,
@@ -343,8 +359,8 @@ async fn phase2_absorbed_membership_then_accepted_x_does_not_leap_h() {
     assert_phase2_open_h_is_held_then_reoffered(&fx, channel_id, (checkpoint, h), &[h, x, p]).await;
 }
 
-/// The same leap on main's queue-membership arm (#5996): a queued M seen only
-/// on the phase-2 page holds the checkpoint and keeps a retry before it.
+/// The queue-membership arm: a queued M seen only on the phase-2 page holds
+/// the checkpoint and keeps a retry before it.
 #[tokio::test(flavor = "current_thread")]
 async fn phase2_queued_membership_then_accepted_x_does_not_leap_m() {
     let fx = Fixture::new().await;
