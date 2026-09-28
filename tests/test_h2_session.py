@@ -38,7 +38,7 @@ class Session(unittest.TestCase):
         self.clippy = self.sysroot / "bin/clippy-driver"
         self.clippy.parent.mkdir(parents=True)
         self.clippy.touch()
-        self.md = {"packages": [{"manifest_path": str(self.crate / "Cargo.toml"), "name": "fixture",
+        self.md = {"workspace_root": str(self.root), "packages": [{"manifest_path": str(self.crate / "Cargo.toml"), "name": "fixture",
             "id": "path+file:///fixture#0.0.0", "targets": [{"name": "fixture", "kind": ["cdylib", "rlib"],
             "crate_types": ["rlib", "cdylib"], "src_path": str(self.lib)}]}]}
         self.version = f"release: 1.94.1\ncommit-hash: {s.ALLOWED['commit']}\nhost: aarch64-apple-darwin\n"
@@ -73,7 +73,7 @@ class Session(unittest.TestCase):
         self.checks.append(argv)
         run = Path(env["MODMAP_SESSION_OUT"]).parent
         req = json.loads((run / "request.json").read_text())
-        unit = {k: v for k, v in req["unit"].items() if k != "package_id"}
+        unit = {k: v for k, v in req["unit"].items() if k not in ("package_id", "workspace_root")}
         unit.update(root=str(self.crate), metadata="abcd", test=False)
         proof = dict(schema="h2-session/2", unit=unit, pid=42, nonce=req["nonce"], run_id=req["run_id"],
             argv=["/rustc", str(self.lib), "--crate-name", "fixture", "--crate-type", "cdylib,rlib"],
@@ -82,7 +82,7 @@ class Session(unittest.TestCase):
         proof["protected_env"] = {key: env[key] for key in s.PROTECTED_ENV}
         claim = dict(pid=42, unit=copy.deepcopy(unit))
         events = [dict(reason="compiler-artifact", package_id=req["unit"]["package_id"],
-                       target={"src_path": str(self.lib)}, profile={"test": False}, fresh=False)]
+                       target=copy.deepcopy(self.md["packages"][0]["targets"][0]), profile={"test": False}, fresh=False)]
         for suffix in ("items-cfg.txt", "clippy-cfg.txt"):
             (run / f"session.json.{suffix}").write_text("\n".join(self.cfg) + "\n")
         for suffix in ("items.stdout", "items.stderr", "probe.stdout", "probe.stderr"):
@@ -156,7 +156,9 @@ class Session(unittest.TestCase):
         def relative(run, proof, claim, events):
             proof["argv"][1] = "crate/rust/library.rs"
         self.mutate = relative
-        self.assertEqual(self.run_session()["proof"]["unit"]["lib"], str(self.lib))
+        result = self.run_session()
+        self.assertEqual(result["proof"]["unit"]["lib"], str(self.lib))
+        self.assertEqual(result["request"]["unit"]["workspace_root"], str(self.root))
 
     def test_request_records_exact_protected_environment(self):
         result = self.run_session()
@@ -413,6 +415,19 @@ class Session(unittest.TestCase):
         for name, (mutate, pattern) in cases.items():
             with self.subTest(name=name):
                 self.reject(mutate, pattern, name)
+
+    def test_non_lib_artifacts_sharing_the_lib_file_do_not_count(self):
+        def share(kind, crate_types):
+            def mutate(run, proof, claim, events):
+                other = copy.deepcopy(events[0])
+                other["target"].update(kind=kind, crate_types=crate_types, name="build-script-build")
+                events.append(other)
+            return mutate
+        self.mutate = share(["custom-build"], ["bin"])
+        self.assertEqual(self.run_session("build")["kind"], "canary-items")
+        self.mutate = share(["bin"], ["bin"])
+        self.assertEqual(self.run_session("bin")["kind"], "canary-items")
+        self.reject(share(["rlib"], ["rlib"]), "artifact", "two-libs")
 
     def test_items_are_bound_at_callback_proof_and_seal(self):
         result = self.run_session()

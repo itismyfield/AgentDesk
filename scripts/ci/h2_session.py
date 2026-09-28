@@ -21,6 +21,7 @@ PROTECTED_ENV = ("CLIPPY_ARGS", "CLIPPY_CONF_DIR", "CLIPPY_TERMINAL_WIDTH", "MOD
                  "MODMAP_CFG_NONCE", "MODMAP_RUN_ID", "MODMAP_EXPECT_MANIFEST", "MODMAP_EXPECT_PACKAGE", "MODMAP_EXPECT_LIB")
 TARGET_CFG = {"x86_64-unknown-linux-gnu": ("x86_64", "linux", "gnu", "unknown", "64"),
               "aarch64-apple-darwin": ("aarch64", "macos", "", "apple", "64")}
+LIB_KINDS = {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
 TARGET_KEYS = ("target_arch", "target_os", "target_env", "target_vendor", "target_pointer_width")
 OUTPUTS = ("session.json", "session.json.claim", "session.json.items-cfg.txt", "session.json.clippy-cfg.txt",
            "session.json.items.stdout", "session.json.items.stderr", "session.json.probe.stdout",
@@ -139,12 +140,40 @@ def requested_unit(crate: Path, env: dict) -> dict:
     if not types or set(types) & {"bin", "proc-macro"}:
         raise MeasureError("session request: unsupported crate types")
     return dict(manifest=str(manifest), package=package["name"], package_id=package["id"],
-                lib=str(Path(lib["src_path"]).resolve(strict=True)), crate_name=lib["name"].replace("-", "_"), crate_types=types)
+                lib=str(Path(lib["src_path"]).resolve(strict=True)), crate_name=lib["name"].replace("-", "_"), crate_types=types,
+                workspace_root=metadata["workspace_root"])
 
 
 def source_state(root: Path, lib: Path, conf: Path) -> dict:
     return dict(repo=modmap.source_state(root), lib=collect.digest(lib.read_bytes()),
                 config=collect.digest(collect.regular(conf / "clippy.toml")))
+
+
+def source_capture(root: Path, lib: Path, conf: Path) -> tuple[dict, dict[str, bytes]]:
+    """source_state plus the absolute-path bytes it digests; a listed lib is not reread."""
+    repo, bodies = modmap.source_capture(root)
+    files = {str(root / name): body for name, body in bodies.items()}
+    body = files[str(lib)] if str(lib) in files else lib.read_bytes()
+    return dict(repo=repo, lib=collect.digest(body), config=collect.digest(collect.regular(conf / "clippy.toml"))), files
+
+
+def resolver(fail=MeasureError):
+    """Path.resolve memoized per spelling, so a link swapped mid-check cannot reclassify a target."""
+    resolved: dict[str, Path] = {}
+    def canon(name: str) -> Path:
+        if name not in resolved:
+            try:
+                resolved[name] = Path(name).resolve()
+            except RuntimeError as exc:
+                raise fail(f"cannot resolve {name}: {exc}") from exc
+        return resolved[name]
+    return canon
+
+
+def lib_artifacts(events: list[dict], package_id: str, lib: str, canon) -> list[dict]:
+    """Artifacts of the package's lib target at lib; a build script or bin sharing that file is not one."""
+    return [e for e in events if e.get("reason") == "compiler-artifact" and e.get("package_id") == package_id
+            and set(e["target"].get("kind") or ()) & LIB_KINDS and canon(e["target"]["src_path"]) == Path(lib)]
 
 
 def validate(run: Path, request: dict) -> dict:
@@ -179,9 +208,9 @@ def validate(run: Path, request: dict) -> dict:
     events = [json.loads(line) for line in data["clippy.jsonl"].splitlines() if line.strip()]
     if any(not isinstance(e, dict) for e in events):
         raise MeasureError("session artifact: invalid Cargo JSONL")
-    artifacts = [e for e in events if e.get("reason") == "compiler-artifact"
-                 and Path(e["target"]["src_path"]).resolve() == Path(expected["lib"]) and e["profile"]["test"] is False]
-    if len(artifacts) != 1 or artifacts[0]["package_id"] != expected["package_id"] or artifacts[0]["fresh"] is not False:
+    artifacts = [e for e in lib_artifacts(events, expected["package_id"], expected["lib"], resolver())
+                 if e["profile"]["test"] is False]
+    if len(artifacts) != 1 or artifacts[0]["fresh"] is not False:
         raise MeasureError("session artifact: expected one fresh:false artifact for the requested lib")
     cfg = proof.get("cfg")
     if (not isinstance(cfg, list) or not all(isinstance(v, str) for v in cfg) or "clippy" not in cfg
