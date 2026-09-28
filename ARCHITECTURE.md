@@ -665,6 +665,7 @@ src/
 │   │   ├── catch_up/
 │   │   │   ├── absorbed_active_tests.rs
 │   │   │   ├── api.rs
+│   │   │   ├── claim_cas_tests.rs
 │   │   │   ├── classification.rs
 │   │   │   ├── classification_order_tests.rs
 │   │   │   ├── frontier_evidence.rs
@@ -1923,6 +1924,7 @@ src/
 │   │   ├── registry_purge/
 │   │   │   └── closed_gate_tests.rs
 │   │   ├── active_source_dedup.rs
+│   │   ├── claim_observation.rs
 │   │   ├── clear_channel.rs
 │   │   ├── closed_verdict.rs
 │   │   ├── dispatch_cleanup.rs

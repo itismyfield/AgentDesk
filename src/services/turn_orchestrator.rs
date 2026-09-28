@@ -12,6 +12,7 @@ use crate::services::provider::{CancelToken, ProviderKind};
 
 // #3293: non-creating registry lookup + operator-gated idle-entry purge.
 mod active_source_dedup;
+mod claim_observation;
 mod clear_channel;
 mod closed_verdict;
 mod dispatch_cleanup;
@@ -37,10 +38,12 @@ mod reply_results;
 mod source_generation;
 mod turn_finished_signal;
 use active_source_dedup::{
-    active_turn_enqueue_refusal, intervention_has_active_source,
-    intervention_sources_all_match_active, purge_active_source_from_queue,
-    strip_source_message_id_from_intervention, take_unsettled,
+    intervention_has_active_source, intervention_sources_all_match_active,
+    purge_active_source_from_queue, strip_source_message_id_from_intervention, take_unsettled,
 };
+pub(crate) use claim_observation::ClaimObservation;
+#[cfg(test)]
+pub(crate) use claim_observation::RECENT_CLAIMS_CAP;
 use clear_channel::clear_channel_state;
 pub(crate) use dispatch_reservation::{
     PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER, VALVE_CLEARED_DISPATCH_MARKER_GRACE,
@@ -401,6 +404,7 @@ pub(crate) struct ChannelMailboxSnapshot {
     pub(crate) pending_user_dispatch_source_ids: Vec<MessageId>,
     /// #6035 — see the same-named field on `ChannelMailboxState`.
     pub(crate) active_absorbed_source_ids: Vec<MessageId>,
+    pub(crate) claim_observation: ClaimObservation,
     pub(crate) pending_user_dispatch_since: Option<Instant>,
     pub(crate) pending_user_dispatch_lease_held_by_caller: bool,
     pub(crate) recently_valve_cleared_dispatch: Option<(MessageId, Instant)>,
@@ -455,6 +459,8 @@ pub(crate) enum EnqueueRefusalReason {
     AlreadyActiveTurn,
     /// #6035 — the active turn's merged head absorbed every source; not dispatch evidence.
     AbsorbedByActiveTurn,
+    /// A claim since the classifying snapshot may speak for a source.
+    ClaimedSinceObservation,
     /// The incoming `message_id` is already present in some queued entry's
     /// `source_message_ids` — duplicate insert from a re-entry or rehydrated
     /// queue.
@@ -479,6 +485,7 @@ impl EnqueueRefusalReason {
         match self {
             EnqueueRefusalReason::AlreadyActiveTurn => "already_active_turn",
             EnqueueRefusalReason::AbsorbedByActiveTurn => "absorbed_by_active_turn",
+            EnqueueRefusalReason::ClaimedSinceObservation => "claimed_since_observation",
             EnqueueRefusalReason::SourceIdAlreadyQueued => "source_id_already_queued",
             EnqueueRefusalReason::SourceIdPendingOrActive => "source_id_pending_or_active",
             EnqueueRefusalReason::LastItemDedup => "last_item_dedup",
@@ -869,26 +876,6 @@ impl ChannelMailboxHandle {
     #[cfg(test)]
     pub(crate) async fn clear_recovery_marker(&self) {
         let _ = self.clear_recovery_marker_or_refused().await;
-    }
-
-    pub(crate) async fn enqueue(
-        &self,
-        intervention: Intervention,
-        persistence: QueuePersistenceContext,
-    ) -> EnqueueInterventionResult {
-        self.request(|reply| ChannelMailboxMsg::Enqueue {
-            intervention,
-            persistence,
-            reply,
-        })
-        .await
-        .unwrap_or(EnqueueInterventionResult {
-            enqueued: false,
-            merged: false,
-            refusal_reason: Some(EnqueueRefusalReason::ActorUnreachable),
-            queue_exit_events: Vec::new(),
-            persistence_error: None,
-        })
     }
 
     pub(crate) async fn has_pending_soft_queue(
@@ -1416,6 +1403,7 @@ enum ChannelMailboxMsg {
     Enqueue {
         intervention: Intervention,
         persistence: QueuePersistenceContext,
+        observed: Option<ClaimObservation>,
         reply: oneshot::Sender<EnqueueInterventionResult>,
     },
     HasPendingSoftQueue {
@@ -1624,6 +1612,7 @@ struct ChannelMailboxState {
     pending_user_dispatch_source_ids: Vec<MessageId>,
     /// #6035 — ids the active turn's merged head absorbed (set on claim, cleared on release).
     active_absorbed_source_ids: Vec<MessageId>,
+    claim_log: claim_observation::ClaimLog,
     pending_user_dispatch_lease: Option<Arc<DispatchLease>>,
     /// #3167 BLOCKER-2 SAFETY VALVE — consecutive `Background` starts refused
     /// SOLELY because of `pending_user_dispatch` (the queue is already empty).
@@ -1794,6 +1783,7 @@ fn spawn_channel_mailbox(
     let own_recovery_done = recovery_done.clone();
     tokio::spawn(async move {
         let mut state = ChannelMailboxState {
+            claim_log: claim_observation::ClaimLog::spawned(channel_id),
             remint_fence: fence,
             ..Default::default()
         };
@@ -2018,6 +2008,7 @@ fn spawn_channel_mailbox(
                                     user_message_id,
                                 );
                             }
+                            state.record_claim();
                             state.recovery_started_at = None;
                             state.turn_started_at = Some(Utc::now());
                             state.turn_started_instant = Some(Instant::now());
@@ -2046,6 +2037,7 @@ fn spawn_channel_mailbox(
                     state.active_user_message_id = Some(user_message_id);
                     // #3167 — preserve the priority class across the re-bind.
                     state.active_turn_kind = turn_kind;
+                    state.record_claim();
                     if was_idle || state.turn_started_at.is_none() {
                         state.turn_started_at = Some(Utc::now());
                     }
@@ -2078,6 +2070,7 @@ fn spawn_channel_mailbox(
                     state.active_user_message_id = user_message_id;
                     // #3167 — a recovery turn is a real (non-background) turn.
                     state.active_turn_kind = ActiveTurnKind::default();
+                    state.record_claim();
                     let recovery_started_at = Instant::now();
                     state.recovery_started_at = Some(recovery_started_at);
                     state.turn_started_at = Some(Utc::now());
@@ -2091,6 +2084,7 @@ fn spawn_channel_mailbox(
                 ChannelMailboxMsg::Enqueue {
                     mut intervention,
                     persistence,
+                    observed,
                     reply,
                 } => {
                     state.last_persistence = Some(persistence.clone());
@@ -2098,7 +2092,7 @@ fn spawn_channel_mailbox(
                     // Intentional pre-hydrate guard: a pure self-requeue of the
                     // active message is never durable work, so it must not prune,
                     // hydrate, or otherwise mutate queue state before refusal.
-                    if let Some(reason) = active_turn_enqueue_refusal(&state, &intervention) {
+                    if let Some(reason) = state.enqueue_refusal(&intervention, observed) {
                         let _ = reply.send(EnqueueInterventionResult::refused(reason, Vec::new()));
                         continue;
                     }
@@ -3432,6 +3426,11 @@ mod actor_hydrate_regression_tests {
             assert!(
                 cleared.removed_token.is_some(),
                 "the anchor is released anyway"
+            );
+            assert_eq!(
+                cleared.discarded_message_ids,
+                [holder],
+                "only the released turn is discarded; the restored queue is not"
             );
             assert_eq!(
                 f.queue_len().await,
