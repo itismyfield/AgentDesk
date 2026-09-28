@@ -11,8 +11,8 @@ subcommand starts the server.
 
 Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this file drifts.
 
-- Top-level commands: 54
-- Commands including nested subcommands: 96
+- Top-level commands: 55
+- Commands including nested subcommands: 97
 
 ## Global options
 
@@ -122,6 +122,7 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk health`](#agentdesk-health) | Show consolidated health snapshot of the current node (server status, dcserver pid, last deploy time, queue lag, Discord/disk/outbox). |  |
 | [`agentdesk machine-compare`](#agentdesk-machine-compare) | Compare release/main/dev state across every registered worker node (`mac-mini`, `mac-book`, …). Renders a side-by-side table with dcserver pid, last deploy, queue lag, and a `diff` column. |  |
 | [`agentdesk activity`](#agentdesk-activity) | Time-windowed activity report: commits / closed issues / merged PRs / deploys / incidents in a single table. Uses gh + git + AgentDesk API. |  |
+| [`agentdesk o-shadow`](#agentdesk-o-shadow) | Read-only TUI output shadow: window start, report, synthetic manifest |  |
 
 ## Commands
 
@@ -1237,3 +1238,9 @@ Usage: `agentdesk activity [OPTIONS]`
 | `--until <UNTIL>` | `String` |  | Optional window end (RFC3339). Defaults to `now` when omitted. |
 | `--repo <REPO>` | `String` |  | Repository in owner/repo form. Defaults to the current repo's `origin` remote when omitted. |
 | `--no-agentdesk` | flag |  | Skip the AgentDesk-side deploy / incident lookup (useful when the local API is offline). Pure git + gh report. |
+
+## `agentdesk o-shadow`
+
+Read-only TUI output shadow: window start, report, synthetic manifest
+
+Usage: `agentdesk o-shadow`
