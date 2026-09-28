@@ -456,9 +456,28 @@ class Session(unittest.TestCase):
         for key, value in (("nonce", "old"), ("run_id", "old"), ("root", "/other"), ("crate", "other"),
                            ("kind", "canary-cfg"), ("cfg_clippy", False), ("schema", 0)):
             cases[key] = lambda *a, k=key, v=value: alter(*a, lambda rows: rows[0].update({k: v}), True)
+        invalid = [(i, v) for i in (1, 2, 7, 8, 9) for v in (None, True, -1)]
+        invalid += [(i, v) for i in (0, 3, 6, 10) for v in (None, "")]
+        invalid += [(3, "unknown"), (4, ""), (4, None), (5, "both"), (9, 1), (11, 1)]
+        for i, (field, value) in enumerate(invalid):
+            cases[f"field{i}"] = lambda *a, k=field, v=value: alter(*a, lambda rows: rows[1].__setitem__(k, v), True)
+        cases["all-null"] = lambda *a: alter(*a, lambda rows: rows.__setitem__(1, [None] * 12), True)
+        cases["duplicate-id"] = lambda *a: alter(*a, lambda rows: rows.append(rows[1].copy()), True)
+        for fold in (-1, True, 2, 1):
+            nested = ["rust/library.rs", 1, 17, "nested_fn", "fixture::caller", None, "nested", 1, 2, 1, "Fn", False, fold, False]
+            cases[f"fold-{fold}"] = lambda *a, row=nested: alter(*a, lambda rows: rows.append(row), True)
+        cases["missing-container"] = lambda *a: alter(*a, lambda rows: (rows[1].__setitem__(3, "trait_method"), rows[1].__setitem__(10, "AssocFn")), True)
+        cycle = [["rust/library.rs", 1, 17, "nested_fn", "fixture::caller", None, "nested", 1, d, 99, "Fn", False, f, False]
+                 for d, f in ((2, 2), (3, 1))]
+        cases["fold-cycle"] = lambda *a: alter(*a, lambda rows: rows.extend(cycle), True)
         for name, mutate in cases.items():
             with self.subTest(name=name):
                 self.reject(mutate, "items|partial", "items-" + name)
+        for parent in (1, 99, 3):
+            nested = ["rust/library.rs", 1, 17, "nested_fn", "fixture::caller", None, "nested", 1, 2, parent, "Fn", False, 0, False]
+            middle = ["rust/library.rs", 0, 18, "const", None, "const-item", "constant", 1, 3, 1, "Const", False]
+            self.mutate = lambda *a: alter(*a, lambda rows: rows.extend([nested, middle]), True)
+            self.assertEqual(self.run_session(f"partial-graph-{parent}")["proof"]["items_records"], 3)
         for name in ("items.jsonl", "items.jsonl.sha256"):
             with self.subTest(stale=name):
                 self.reject(lambda r, p, c, e: os.utime(r / name, ns=(0, 0)), "predates", "stale-" + name)

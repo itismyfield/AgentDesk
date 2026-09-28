@@ -41,8 +41,7 @@ def validate_items(data: dict, proof: dict, request: dict) -> None:
                     crate=request["unit"]["crate_name"], nonce=request["nonce"], run_id=request["run_id"], cfg_clippy=True)
         if rows[0] != want or type(rows[0].get("schema")) is not int or rows[0].get("cfg_clippy") is not True:
             raise ValueError("header mismatch")
-        for row in rows[1:]:
-            modmap.item_record(row)
+        modmap.item_records(rows[1:])
     except (ValueError, TypeError, AttributeError) as exc:
         raise MeasureError(f"session items: {exc}") from exc
 
