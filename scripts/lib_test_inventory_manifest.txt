@@ -3484,6 +3484,9 @@ services::discord::inflight::rebind_origin_reap_tests::preserves_fresh_rebind_wi
 services::discord::inflight::rebind_origin_reap_tests::proven_dead_window_is_conservative
 services::discord::inflight::rebind_origin_reap_tests::reaps_abandoned_rebind_past_deadline
 services::discord::inflight::rebind_origin_reap_tests::reaps_on_generation_mismatch_within_deadline
+services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_delegates_signals
+services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_preserves_probe_error
+services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_skips_probes_without_session
 services::discord::inflight::recovery_relay_attempts_tests::budget_is_three_restarts
 services::discord::inflight::recovery_relay_attempts_tests::counter_round_trips_through_serde
 services::discord::inflight::recovery_relay_attempts_tests::counter_survives_disk_round_trip_in_isolated_root

@@ -1,9 +1,6 @@
 use super::*;
 use crate::services::platform::tmux::PaneLiveness;
 
-#[cfg(test)]
-mod tests;
-
 /// #3635: runtime-liveness oracle for the dead-watcher rebind-origin reap path.
 ///
 /// A Watcher-owned orphan can never satisfy
@@ -508,3 +505,6 @@ pub(in crate::services::discord) fn ownerless_external_input_inflight_is_stale(
 ) -> bool {
     ownerless_external_input_inflight_is_stale_at(state, now_unix())
 }
+
+#[cfg(test)]
+mod tests;
