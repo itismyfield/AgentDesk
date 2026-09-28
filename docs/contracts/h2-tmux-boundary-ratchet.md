@@ -207,8 +207,10 @@ request/proof/items/sidecar/clippy.jsonl은 한 번 읽어 봉인 digest와 대�
 items 구조는 runner와 같은 `validate_items`/`item_records`로 검사한다. 0개 레코드·헤더 없는 옛 JSONL·객체 레코드는 실패다.
 원문은 source state를 계산하는 한 번의 git 목록·읽기에서만 얻는다. 그 digest가 request와 같아야 하고, 같은 bytes만 매핑에 쓴다.
 모든 레코드에 `hi ≤ 길이`와 lo의 원문 행 = compiler 행을 요구한다. 진단 site는 expansion을 끝까지 따라간 호출 위치다.
-진단은 Cargo envelope의 package_id·manifest_path·target이 요청 lib인 것만 쓰고, 다른 unit 진단 수는 `foreign`으로 노출한다.
-envelope가 없거나 lib 컴파일(artifact)이 하나가 아니면(`--all-targets`의 test 컴파일 등) `provenance`로 실패한다.
+진단은 요청 package이고 target(kind·name·crate_types·src_path 문자열)이 유일한 lib artifact의 target과 같은 것만 쓴다.
+경로 resolve는 문자열마다 한 번이고, 진단 귀속은 그 target과의 구조 비교라 파일시스템 재해석에 의존하지 않는다.
+envelope가 없거나 lib 컴파일(artifact)이 하나가 아니거나(`--all-targets`의 test 컴파일 등), artifact target이 요청 unit과 다르거나,
+같은 package에서 lib kind 또는 lib 경로를 주장하면서 그 target과 다르면 `provenance`다. 다른 package·build script·bin 진단만 `foreign` 수로 노출한다.
 레코드 file은 package root 기준이다. 진단 file_name은 절대 경로이거나 request에 기록한 Cargo workspace root 기준이다.
 workspace root 기준은 proof argv의 lib 입력이 그 root 기준 상대 경로일 때만 인정하며, 아니면 상대 file_name은 `no-item`이다.
 site는 byte_start 행 = line_start, byte_end ≤ 길이여야 한다. 정규화 오프셋은 CRLF/BOM에서 `coord`로 실패한다.
@@ -216,8 +218,8 @@ site를 포함하는 가장 좁은 레코드를 고르며 같은 폭 다른 범�
 동률은 모든 실행 소유자(fn류·const·anon-const)를 남긴다. header는 소유자의 DefId parent로 증명된 container이거나
 비실행 def_kind일 때만 버리고, 그 밖의 header는 `ambiguous:unproven-header`다.
 실행 소유자가 둘 이상이면 `ambiguous`, 하나면 그 path 또는 등록 불가 사유, 없으면 module-level이다.
-모든 실패는 reason을 가진 `MappingError`다. 봉인·source 불일치와 옛 request는 `unsealed`, 잘못된 span은 `coord`다.
-primary span 없음과 목록 안 레코드 없음은 `no-item`, 목록 밖 파일은 `unsealed`다. 통과나 0건이 되지 않는다.
+모든 실패는 reason을 가진 `MappingError`다. 봉인·source 불일치·git capture 실패와 옛 request는 `unsealed`, 잘못된 span·spans 목록은 `coord`다.
+빈 spans·primary span 없음과 목록 안 레코드 없음은 `no-item`, 목록 밖 파일은 `unsealed`다. 통과나 0건이 되지 않는다.
 `canary-items`는 현재 세션의 유일한 kind이므로 root 결속은 kind가 아닌 기대 crate unit 대조로 한다.
 
 두 호스트의 결과를 모은 뒤 실행한다:
