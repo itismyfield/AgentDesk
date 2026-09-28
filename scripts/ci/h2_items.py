@@ -89,7 +89,7 @@ def load(path: Path, *, crate: Path) -> Items:
         state, files, _ = session.source_capture(repo, Path(unit["lib"]), Path(request["conf_dir"]))
         if state != request["source"]:
             raise MeasureError("items: source changed after the session")
-        session.check_fence(request.get("fence"), files)
+        session.check_fence(request.get("fence"), files, repo)
         if value.get("fence") != session.fence_marker(request["fence"]):
             raise MeasureError("items: session has no passed source fence")
         rows: dict[str, list[dict]] = {}

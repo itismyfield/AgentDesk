@@ -258,6 +258,9 @@ class Items(unittest.TestCase):
             "other device": (lambda f: files(f, lambda n, st: [st[0] + 1] + st[1:] if n == lib else st), None),
             "whole seconds": (lambda f: dict(f, probe=dict(f["probe"], ctimes=[10 ** 9 * k for k in (1, 2, 3)])), None),
             "no probe": (lambda f: dict(f, probe=None), None),
+            "no lookup dirs": (lambda f: {k: v for k, v in f.items() if k != "dirs"}, None),
+            "guard unavailable": (lambda f: dict(f, mappings=dict(status="unavailable", platform="sunos")), None),
+            "no guard": (lambda f: {k: v for k, v in f.items() if k != "mappings"}, None),
         }
         for label, (forge, marker) in cases.items():
             with self.subTest(label):
@@ -371,8 +374,9 @@ class Items(unittest.TestCase):
 
 
     def test_attribution_resolves_the_sealed_lib_path_once(self):
-        alias, lib = self.h.lib.parent / "alias.rs", self.h.lib.name
+        alias, lib = self.h.crate / "gen/alias.rs", "../rust/" + self.h.lib.name
         (self.h.lib.parent / "other.rs").write_text(SOURCE)
+        alias.parent.mkdir()
         alias.symlink_to(lib)
         manifest = self.seal(cases=DIAGNOSTICS[:1], target=dict(src_path=str(alias)), name="alias")
         resolve, calls = Path.resolve, []
@@ -380,7 +384,7 @@ class Items(unittest.TestCase):
             if path != alias or not calls.append(path) and len(calls) == 1:
                 return resolve(path, *args, **kwargs)
             alias.unlink()
-            alias.symlink_to("other.rs")
+            alias.symlink_to("../rust/other.rs")
             try:
                 return resolve(path, *args, **kwargs)
             finally:
