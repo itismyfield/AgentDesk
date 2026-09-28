@@ -13,10 +13,9 @@
 #     matching [[admission]] with decompose_issue to
 #     scripts/ratchet_admission_history.toml. Prefer splitting instead.
 #
-# Scope (this batch): the M2.x turn-lifecycle decomposition surface
-# (src/services/discord/** and src/services/turn_*), where re-inflation was
-# reported. Other production giants remain covered by the `giant_files`
-# documentation gate; extend this table to ratchet them too.
+# Scope: every registered production giant (scripts/giant_file_registry.toml)
+# plus the decomposed turn-lifecycle files kept below their landed size. Pin a
+# new giant here at its measured production LoC when it is registered.
 
 [giant_file_ratchet]
 # #3038 execute_streaming S3: lowered claude.rs 3989 -> 2950 by moving the
@@ -780,3 +779,72 @@
 "src/services/review_decision/review_state_repo.rs" = 35
 "src/services/review_decision/tuning_aggregate.rs" = 469
 "src/services/review_decision/worktree_stale.rs" = 553
+
+# Registered giants pinned at their measured production LoC so the shared
+# wiring slack is bounded by a frozen cap instead of the previous PR.
+"src/cli/client.rs" = 2417
+"src/cli/dcserver.rs" = 1405
+"src/cli/direct.rs" = 1838
+"src/cli/doctor/orchestrator.rs" = 3958
+"src/cli/init.rs" = 1439
+"src/cli/migrate/apply.rs" = 3238
+"src/cli/migrate/plan.rs" = 1513
+"src/cli/migrate/source.rs" = 1612
+"src/cli/provider_cli/mod.rs" = 1039
+"src/config.rs" = 2721
+"src/db/auto_queue/entries.rs" = 1689
+"src/db/auto_queue/phase_gates.rs" = 1556
+"src/db/dispatched_sessions.rs" = 2152
+"src/db/dispatches/mod.rs" = 1029
+"src/db/postgres.rs" = 1773
+"src/dispatch/dispatch_context.rs" = 2816
+"src/dispatch/dispatch_create.rs" = 1337
+"src/dispatch/dispatch_status.rs" = 1573
+"src/engine/loader.rs" = 1332
+"src/engine/mod.rs" = 1277
+"src/engine/ops/db_ops.rs" = 1413
+"src/github/sync.rs" = 1499
+"src/pipeline.rs" = 1173
+"src/receipt.rs" = 1842
+"src/reconcile.rs" = 1616
+"src/server/mod.rs" = 2496
+"src/server/routes/agents.rs" = 1141
+"src/server/routes/agents_crud.rs" = 1044
+"src/server/routes/agents_setup.rs" = 1357
+"src/server/routes/escalation.rs" = 1361
+"src/server/routes/health_api.rs" = 1738
+"src/server/routes/kanban.rs" = 2420
+"src/server/routes/meetings.rs" = 1245
+"src/server/routes/resume.rs" = 1227
+"src/server/routes/v1.rs" = 1737
+"src/services/auto_queue.rs" = 1545
+"src/services/auto_queue/activate_command.rs" = 1532
+"src/services/auto_queue/cleanup_tasks.rs" = 1464
+"src/services/claude_tui/input.rs" = 2262
+"src/services/codex.rs" = 2775
+"src/services/codex_tmux_wrapper.rs" = 1115
+"src/services/codex_tui/input.rs" = 1898
+"src/services/codex_tui/rollout_tail.rs" = 1480
+"src/services/discord/catch_up.rs" = 1656
+"src/services/discord/health/snapshot.rs" = 1183
+"src/services/discord/outbound/delivery_record.rs" = 2580
+"src/services/discord/standby_relay.rs" = 1012
+"src/services/discord/tmux_watcher/turn_stream_collector.rs" = 1100
+"src/services/discord/tui_prompt_relay/synthetic_start.rs" = 1000
+"src/services/discord/turn_bridge/stream_tick.rs" = 1109
+"src/services/discord_config_audit.rs" = 1280
+"src/services/dispatched_sessions.rs" = 1377
+"src/services/dispatches/discord_delivery/orchestration.rs" = 1502
+"src/services/dispatches/outbox_route.rs" = 1178
+"src/services/gemini.rs" = 1351
+"src/services/memory/memento.rs" = 1402
+"src/services/onboarding/mod.rs" = 2858
+"src/services/opencode.rs" = 2732
+"src/services/platform/binary_resolver.rs" = 1456
+"src/services/provider.rs" = 1372
+"src/services/qwen.rs" = 1535
+"src/services/routines/agent_executor.rs" = 2134
+"src/services/routines/discord_log.rs" = 1575
+"src/services/routines/store.rs" = 3573
+"src/services/settings.rs" = 1078
+"src/services/tmux_common.rs" = 2083
