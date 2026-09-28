@@ -15,8 +15,8 @@ use std::time::{Duration, SystemTime};
 /// staging/grave path and lock owner token unique so concurrent refreshes never collide.
 static REFRESH_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Backstop age after which a lock whose holder liveness is *indeterminate* (non-unix, or an
-/// empty/unreadable/malformed owner token) is treated as abandoned. A live, readable PID is
+/// Backstop age after which a lock whose holder liveness is *indeterminate* (no liveness probe
+/// on this platform, or an empty/unreadable/malformed owner token) is treated as abandoned. A live, readable PID is
 /// never aged out. Generous because it must never race a genuinely slow-but-live refresh.
 const STALE_LOCK_TTL: Duration = Duration::from_secs(300);
 
@@ -104,8 +104,8 @@ pub(super) fn refresh_managed_skill_dir(
     };
 
     // Residual-risk bound: the rename-based release (see SkillRefreshLock::drop) has a
-    // sub-instant where lock_path is absent, so on the INDETERMINATE path only (non-unix, or
-    // a malformed/empty token -- NEVER on unix with a well-formed token, where liveness is
+    // sub-instant where lock_path is absent, so on the INDETERMINATE path only (no liveness
+    // probe, or a malformed/empty token -- NEVER with a well-formed token, where liveness is
     // authoritative and a live holder is never stolen) two refreshers can transiently
     // overlap in the copy/swap below. This is NOT corrupting: each refresher's staging dir is
     // unique and a COMPLETE copy of the same source, the swap is an atomic full-dir rename,
@@ -183,10 +183,10 @@ fn try_take_lock(lock_path: &Path) -> Result<Option<SkillRefreshLock>, String> {
 }
 
 /// A lock is stale (safe to steal) only when its holder is provably gone:
-///   * the recorded PID is readable and confirmed NOT alive (unix `kill(pid, 0)` -> `ESRCH`),
-///     or
-///   * liveness is indeterminate (non-unix, or an empty/unreadable/malformed token) AND the
-///     lock is older than [`STALE_LOCK_TTL`].
+///   * the recorded PID is readable and confirmed NOT alive (unix `kill(pid, 0)` -> `ESRCH`,
+///     Windows `OpenProcess` -> `ERROR_INVALID_PARAMETER` or a signaled handle), or
+///   * liveness is indeterminate (no probe on this platform, or an empty/unreadable/malformed
+///     token) AND the lock is older than [`STALE_LOCK_TTL`].
 ///
 /// Liveness is authoritative: a readable, live PID is NEVER stolen regardless of age, so a
 /// slow-but-active holder cannot be stolen out from under its own copy/swap.
@@ -246,7 +246,35 @@ fn pid_liveness(pid: u32) -> Option<bool> {
     Some(reachable || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
 }
 
-#[cfg(not(unix))]
+/// Windows `kill(pid, 0)`: an unsignaled handle or `ERROR_ACCESS_DENIED` means alive,
+/// `ERROR_INVALID_PARAMETER` means no such PID.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn pid_liveness(pid: u32) -> Option<bool> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, WAIT_TIMEOUT,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
+
+    // SAFETY: OpenProcess takes no pointers; a null return is handled before any use.
+    let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if raw.is_null() {
+        return match std::io::Error::last_os_error().raw_os_error() {
+            Some(code) if code == ERROR_ACCESS_DENIED as i32 => Some(true),
+            Some(code) if code == ERROR_INVALID_PARAMETER as i32 => Some(false),
+            _ => None,
+        };
+    }
+    // SAFETY: OpenProcess returned a new handle that nothing else owns; OwnedHandle closes it.
+    let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+    // SAFETY: the handle stays open for this zero-timeout wait.
+    Some(unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } == WAIT_TIMEOUT)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn pid_liveness(_pid: u32) -> Option<bool> {
     None // no cheap liveness probe here; fall back to the TTL backstop
 }
