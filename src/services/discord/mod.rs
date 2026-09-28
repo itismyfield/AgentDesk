@@ -1042,11 +1042,6 @@ pub(crate) struct SharedData {
 pub(crate) use session_transition::{SESSION_TRANSITION_LOCK_WAIT_TIMEOUT, SessionTransitionBusy};
 
 impl SharedData {
-    #[cfg(test)]
-    pub(crate) fn queue_fixture_parts(&self) -> (&ChannelMailboxRegistry, &str) {
-        (&self.mailboxes, &self.token_hash)
-    }
-
     pub(super) fn has_runtime_storage(&self) -> bool {
         self.pg_pool.is_some()
     }
@@ -1714,6 +1709,12 @@ fn queue_exit_card_body(kind: QueueExitKind) -> &'static str {
 #[cfg(test)]
 mod queue_exit_feedback_reconciler_tests {
     use super::*;
+
+    impl SharedData {
+        pub(crate) fn queue_fixture_parts(&self) -> (&ChannelMailboxRegistry, &str) {
+            (&self.mailboxes, &self.token_hash)
+        }
+    }
 
     struct ScopedRuntimeRoot {
         _lock: std::sync::MutexGuard<'static, ()>,

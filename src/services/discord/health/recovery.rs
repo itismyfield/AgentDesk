@@ -602,7 +602,7 @@ pub async fn schedule_pending_queue_drain_after_cancel(
             Err(refusal) => {
                 let diagnostic = legacy_restitution_refusal(refusal).persistence_error;
                 tracing::warn!(
-                    channel = channel_id.get(),
+                    channel_id = channel_id.get(),
                     ?refusal,
                     ?diagnostic,
                     "pending queue hydration refused"
