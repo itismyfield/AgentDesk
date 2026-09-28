@@ -359,12 +359,12 @@ def read_proc(path: Path) -> str:
 
 
 def manager_scope(pid: int, uid: int) -> tuple[str | None, str]:
-    """Name of a process in the uid's user@ init.scope (systemd keeps only the manager and sd-pam there), and what it is."""
+    """Name of a process in the uid's exact user@ init.scope, and its pid details for a refusal."""
     status, cgroup = (read_proc(PROC_ROOT / str(pid) / name) for name in ("status", "cgroup"))
     fields = dict(line.split(":\t", 1) for line in status.splitlines() if ":\t" in line)
     inside = sys.platform == "linux" and f"0::/user.slice/user-{uid}.slice/user@{uid}.service/init.scope" in cgroup.splitlines()
     return fields.get("Name") if inside else None, \
-        f"name {fields.get('Name')}, ppid {fields.get('PPid')}, cgroup {cgroup.strip().splitlines()}"
+        f"name {fields.get('Name')}, ppid {fields.get('PPid')}, cgroup {cgroup.splitlines()}"
 
 
 def mapping_guard(stats: dict[str, list[int]], *, rounds: int = 10) -> dict:

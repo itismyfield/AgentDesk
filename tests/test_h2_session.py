@@ -805,7 +805,8 @@ class Fence(Harness):
                     patch.object(s.sys, "platform", "linux"), patch.object(s, "list_pids", lambda: [9]), \
                     patch.object(s, "read_maps", return_value=(set(uid if isinstance(uid, tuple) else (uid,)), None)):
                 self.assertEqual(s.mapping_guard(stats)["user_managers"], [[9, name]]) if n < 2 else \
-                    self.assertRaisesRegex(s.MeasureError, r"process 9 .*name systemd, ppid 1, cgroup \S", s.mapping_guard, stats)
+                    self.assertRaisesRegex(s.MeasureError, "process 9 .*name systemd, ppid 1, cgroup " + re.escape(
+                        str(cgroup.splitlines()) if cgroup else "['<unreadable"), s.mapping_guard, stats)
         pids = iter(range(1, 100))
         with patch.object(s, "list_pids", lambda: [next(pids)]), patch.object(s, "read_maps", return_value=None):
             self.assertRaisesRegex(s.MeasureError, "kept appearing", s.mapping_guard, stats)
