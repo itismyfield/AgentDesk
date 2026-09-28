@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -32,11 +33,16 @@ class DriverControls(unittest.TestCase):
             self.spy(executable)
         request = dict(toolchain=dict(clippy_driver=str(self.approved), clippy="approved-version",
                                       clippy_rustc="commit-hash: approved"))
-        (self.run / "request.json").write_text(json.dumps(request))
         self.env = dict(h2_env.environment("measure"), CARGO_MANIFEST_DIR=str(self.root), CARGO_PKG_NAME="fixture",
                         MODMAP_EXPECT_MANIFEST=str(self.manifest), MODMAP_EXPECT_PACKAGE="fixture",
                         MODMAP_EXPECT_LIB=str(self.lib), MODMAP_SESSION_OUT=str(self.run / "session.json"),
-                        MODMAP_CLIPPY_DRIVER=str(self.approved), MODMAP_CFG_NONCE="n" * 32, MODMAP_RUN_ID="r" * 32)
+                        MODMAP_CLIPPY_DRIVER=str(self.approved), MODMAP_CFG_NONCE="n" * 32, MODMAP_RUN_ID="r" * 32,
+                        CLIPPY_ARGS="--cap-lints__CLIPPY_HACKERY__warn__CLIPPY_HACKERY__",
+                        CLIPPY_CONF_DIR=str(self.root), CLIPPY_TERMINAL_WIDTH="0")
+        keys = ("CLIPPY_ARGS", "CLIPPY_CONF_DIR", "CLIPPY_TERMINAL_WIDTH", "MODMAP_SESSION_OUT",
+                "MODMAP_CFG_NONCE", "MODMAP_RUN_ID", "MODMAP_EXPECT_MANIFEST", "MODMAP_EXPECT_PACKAGE", "MODMAP_EXPECT_LIB")
+        request["protected_env"] = {key: self.env[key] for key in keys}
+        (self.run / "request.json").write_text(json.dumps(request))
         self.args = ["/rustc", str(self.lib), "--crate-name", "fixture", "--crate-type", "lib"]
 
     def spy(self, path, version="approved-version"):
@@ -71,6 +77,45 @@ else: print("delegated")
         self.assertEqual(self.snapshot(), before)
         self.assert_no_child()
 
+    def assert_overlay_rejected(self, args, key, value, **env):
+        before = self.snapshot()
+        result = self.invoke(args, **{key: value, **env})
+        self.assertEqual(result.returncode, 101, result.stderr)
+        self.assertIn(f"protected env {key}", result.stderr)
+        self.assertEqual(self.snapshot(), before)
+        self.assert_no_child()
+
+    def test_build_script_clippy_args_with_matching_cfg_fails_before_claim(self):
+        out = self.root / "out"
+        out.mkdir()
+        response = out / "hidden.rsp"
+        response.write_text("--test\n")
+        # Model Cargo's compiler argv/env after build.rs writes its OUT_DIR response file.
+        for value in (f"@{response}__CLIPPY_HACKERY__", "--test__CLIPPY_HACKERY__",
+                      self.env["CLIPPY_ARGS"] + " ", ""):
+            with self.subTest(value=value):
+                self.assert_overlay_rejected([*self.args, "--cfg", "test"], "CLIPPY_ARGS", value, OUT_DIR=str(out))
+
+    def test_links_override_clippy_args_fails_before_claim(self):
+        response = self.root / "hidden.rsp"
+        response.write_text("--test\n")
+        config = tomllib.loads('[target.aarch64-apple-darwin.fixture]\nrustc-cfg=["test"]\n'
+                              f'rustc-env={{CLIPPY_ARGS="@{response}__CLIPPY_HACKERY__"}}\n')
+        override = config["target"]["aarch64-apple-darwin"]["fixture"]
+        args = self.args + [arg for cfg in override["rustc-cfg"] for arg in ("--cfg", cfg)]
+        self.assert_overlay_rejected(args, "CLIPPY_ARGS", override["rustc-env"]["CLIPPY_ARGS"])
+
+    def test_other_protected_env_and_missing_approval_fail_before_claim(self):
+        for key, value in (("CLIPPY_CONF_DIR", str(self.root / "other")), ("CLIPPY_TERMINAL_WIDTH", "80"),
+                           ("MODMAP_SESSION_OUT", str(self.run / "other.json")), ("MODMAP_RUN_ID", "other")):
+            with self.subTest(key=key):
+                self.assert_overlay_rejected(self.args, key, value)
+        path = self.run / "request.json"
+        request = json.loads(path.read_text())
+        del request["protected_env"]["CLIPPY_ARGS"]
+        path.write_text(json.dumps(request))
+        self.assert_overlay_rejected(self.args, "CLIPPY_ARGS", self.env["CLIPPY_ARGS"])
+
     def test_response_files_hiding_target_or_test_fail_before_outputs(self):
         for hidden in ("--target=aarch64-unknown-linux-gnu", "--test"):
             with self.subTest(hidden=hidden):
@@ -91,7 +136,7 @@ else: print("delegated")
         for args, overlay in cases:
             with self.subTest(args=args, overlay=overlay):
                 before = self.snapshot()
-                result = self.invoke([*args, "@missing.rsp"], **overlay)
+                result = self.invoke([*args, "@missing.rsp"], CLIPPY_ARGS="--test__CLIPPY_HACKERY__", **overlay)
                 self.assertEqual((result.returncode, result.stdout.strip()), (0, "delegated"), result.stderr)
                 self.assertEqual(self.snapshot(), before)
                 calls = self.approved.with_suffix(".calls")
@@ -117,6 +162,8 @@ else: print("delegated")
         self.assertEqual(result.returncode, 101, result.stderr)
         self.assertIn("clippy identity", result.stderr)
         self.assertEqual(set(self.snapshot()), {"request.json", "session.json.claim"})
+        calls = self.approved.with_suffix(".calls").read_text().splitlines()
+        self.assertEqual([json.loads(line) for line in calls], [["--version"], ["--rustc", "-vV"]])
         self.assertFalse(self.foreign.with_suffix(".calls").exists())
 
 

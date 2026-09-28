@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -167,6 +168,32 @@ fn clippy_version(clippy: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
+fn protected_env(request: &Value) -> Result<BTreeMap<String, String>> {
+    let mut actual = BTreeMap::new();
+    for key in [
+        "CLIPPY_ARGS",
+        "CLIPPY_CONF_DIR",
+        "CLIPPY_TERMINAL_WIDTH",
+        "MODMAP_SESSION_OUT",
+        "MODMAP_CFG_NONCE",
+        "MODMAP_RUN_ID",
+        "MODMAP_EXPECT_MANIFEST",
+        "MODMAP_EXPECT_PACKAGE",
+        "MODMAP_EXPECT_LIB",
+    ] {
+        let expected = request["protected_env"][key]
+            .as_str()
+            .ok_or_else(|| format!("request has no protected env {key}"))?;
+        let value =
+            std::env::var(key).map_err(|_| format!("protected env {key} is missing or invalid"))?;
+        if value.as_bytes() != expected.as_bytes() {
+            return Err(format!("protected env {key} differs from request").into());
+        }
+        actual.insert(key.to_owned(), value);
+    }
+    Ok(actual)
+}
+
 fn prepare(argv: &[String], clippy: &OsStr) -> Result<PathBuf> {
     let Some(unit) = requested_unit(&argv[2..])? else {
         return Ok(PathBuf::from(clippy));
@@ -190,6 +217,7 @@ fn prepare(argv: &[String], clippy: &OsStr) -> Result<PathBuf> {
     if clippy != Path::new(expected) {
         return Err("clippy path differs from request".into());
     }
+    let protected_env = protected_env(&request)?;
     // A claim is permanent for this run, including failed or interrupted producers.
     let mut claim = OpenOptions::new()
         .write(true)
@@ -213,7 +241,7 @@ fn prepare(argv: &[String], clippy: &OsStr) -> Result<PathBuf> {
         "items",
     )?;
     let printed = with_suffix(".clippy-cfg.txt")?;
-    let flags = std::env::var("CLIPPY_ARGS").unwrap_or_default();
+    let flags = &protected_env["CLIPPY_ARGS"];
     // Passing --print in argv disables Clippy; only this root probe receives the trailing argument.
     captured(
         Command::new(&clippy).args(&argv[1..]).env(
@@ -226,7 +254,7 @@ fn prepare(argv: &[String], clippy: &OsStr) -> Result<PathBuf> {
     if cfg.is_empty() || cfg != fs::read_to_string(printed)? {
         return Err("items cfg != clippy-driver cfg".into());
     }
-    let env: std::collections::BTreeMap<_, _> = std::env::vars_os()
+    let env: BTreeMap<_, _> = std::env::vars_os()
         .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
         .collect();
     let bytes = serde_json::to_vec(&env.into_iter().collect::<Vec<_>>())?;
@@ -240,7 +268,7 @@ fn prepare(argv: &[String], clippy: &OsStr) -> Result<PathBuf> {
         .map(|b| format!("{b:02x}"))
         .collect();
     let value = json!({"schema": "h2-session/1-cfg", "unit": unit, "pid": std::process::id(),
-        "nonce": nonce, "run_id": run_id, "argv": &argv[1..], "env_sha256": digest,
+        "nonce": nonce, "run_id": run_id, "argv": &argv[1..], "env_sha256": digest, "protected_env": protected_env,
         "clippy_driver": clippy, "clippy": version, "clippy_rustc": compiler,
         "cfg": cfg.split_terminator('\n').collect::<Vec<_>>(), "driver_rustc": rustc_interface::util::rustc_version_str()});
     let partial = with_suffix(".partial")?;
