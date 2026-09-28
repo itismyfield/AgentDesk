@@ -76,6 +76,7 @@ class Session(unittest.TestCase):
             argv=["/rustc", str(self.lib), "--crate-name", "fixture", "--crate-type", "cdylib,rlib"],
             env_sha256="a" * 64, cfg=list(self.cfg), driver_rustc=s.ALLOWED["driver_rustc"])
         proof.update({key: req["toolchain"][key] for key in ("clippy_driver", "clippy", "clippy_rustc")})
+        proof["protected_env"] = {key: env[key] for key in s.PROTECTED_ENV}
         claim = dict(pid=42, unit=copy.deepcopy(unit))
         events = [dict(reason="compiler-artifact", package_id=req["unit"]["package_id"],
                        target={"src_path": str(self.lib)}, profile={"test": False}, fresh=False)]
@@ -147,6 +148,38 @@ class Session(unittest.TestCase):
         self.mutate = relative
         self.assertEqual(self.run_session()["proof"]["unit"]["lib"], str(self.lib))
 
+    def test_request_records_exact_protected_environment(self):
+        result = self.run_session()
+        env = self.calls[-1][2]
+        keys = ("CLIPPY_ARGS", "CLIPPY_CONF_DIR", "CLIPPY_TERMINAL_WIDTH", "MODMAP_SESSION_OUT",
+                "MODMAP_CFG_NONCE", "MODMAP_RUN_ID", "MODMAP_EXPECT_MANIFEST", "MODMAP_EXPECT_PACKAGE", "MODMAP_EXPECT_LIB")
+        expected = {key: env[key] for key in keys}
+        self.assertEqual(result["request"].get("protected_env"), expected)
+        self.assertEqual(result["proof"].get("protected_env"), expected)
+
+    def test_protected_environment_mismatch_or_omission_prevents_seal(self):
+        for i, (key, value) in enumerate((("CLIPPY_ARGS", "@hidden.rsp__CLIPPY_HACKERY__"),
+                                         ("CLIPPY_ARGS", "--test__CLIPPY_HACKERY__"), ("CLIPPY_ARGS", ""),
+                                         ("CLIPPY_CONF_DIR", "/other"), ("CLIPPY_TERMINAL_WIDTH", "80"),
+                                         ("MODMAP_CFG_NONCE", "other"))):
+            with self.subTest(key=key, value=value):
+                self.reject(lambda r, p, c, e: p.setdefault("protected_env", {}).update({key: value}),
+                            "protected env", f"protected{i}")
+        self.reject(lambda r, p, c, e: p.pop("protected_env", None), "protected env", "missing-protected")
+
+    def test_links_rustc_env_cannot_override_protected_keys(self):
+        config = self.crate / ".cargo/config.toml"
+        config.parent.mkdir()
+        for i, key in enumerate(("CLIPPY_ARGS", "CLIPPY_CONF_DIR", "MODMAP_RUN_ID")):
+            config.write_text('[target.aarch64-apple-darwin.fixture]\nrustc-cfg=["test"]\n'
+                              f'rustc-env={{ {key}="@hidden.rsp__CLIPPY_HACKERY__" }}\n')
+            with self.subTest(key=key), self.assertRaisesRegex(s.MeasureError, "reserved"):
+                self.run_session(f"links{i}")
+        self.assertEqual(len(self.calls), 0)
+        self.assertFalse(any(self.root.glob("links*/manifest.json")))
+        config.write_text('[target.aarch64-apple-darwin.fixture]\nrustc-env={REVIEW_BINDING="live"}\n')
+        self.assertEqual(self.run_session("plain-links")["kind"], "canary-cfg")
+
     def test_cargo_env_overrides_are_rejected_before_any_cargo(self):
         roots = (self.crate / ".cargo", self.root / ".cargo", self.root / "cargo-home")
         keys = ("MODMAP_CLIPPY_DRIVER", "MODMAP_SESSION_OUT", "CLIPPY_ARGS", "RUSTC_WORKSPACE_WRAPPER",
@@ -165,7 +198,7 @@ class Session(unittest.TestCase):
                             with self.subTest(root=root, filename=filename, key=key, forced=forced):
                                 with self.assertRaisesRegex(s.MeasureError, "reserved"):
                                     self.run_session(f"config-{len(self.calls)}")
-                                self.assertEqual(self.calls, [])
+                                self.assertEqual(len(self.calls), 0)
                         finally:
                             path.unlink()
         self.assertFalse(any(self.root.glob("config-*/manifest.json")))
@@ -217,7 +250,7 @@ class Session(unittest.TestCase):
                 with self.assertRaisesRegex(s.MeasureError, "extra"):
                     self.run_session(f"extra{i}", extra=extra)
                 self.assertFalse((self.root / f"extra{i}/manifest.json").exists())
-        self.assertEqual(self.calls, [])
+        self.assertEqual(len(self.calls), 0)
 
     def test_proof_binds_effective_clippy_after_cargo_overlay(self):
         for key, wrong in (("clippy_driver", "/foreign/clippy-driver"), ("clippy", "other-version"),
