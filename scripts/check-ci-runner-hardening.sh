@@ -1269,6 +1269,8 @@ def static_matrix_value?(value)
   end
 end
 
+# Repository policy requires explicit static runner values, including in every include row.
+# Exclude cannot approve forbidden candidates; matrix merge semantics are not evaluated.
 def matrix_runner_labels(job, axis)
   strategy = job["strategy"]
   matrix = strategy.is_a?(Hash) ? strategy["matrix"] : nil
@@ -1282,7 +1284,6 @@ def matrix_runner_labels(job, axis)
   excluded = matrix.fetch("exclude", [])
   return [] unless included.is_a?(Array) && excluded.is_a?(Array)
   return [] unless excluded.all? { |row| row.is_a?(Hash) }
-  # Each include row must specify the runner; a new combination cannot inherit it.
   return [] unless included.all? { |row| row.is_a?(Hash) && row.key?(axis) }
 
   dimensions.fetch(axis, []) + included.map { |row| row[axis] }
@@ -1297,9 +1298,10 @@ def hosted_runner?(runner, job)
     return false unless reference
 
     labels = matrix_runner_labels(job, reference[1])
-    !labels.empty? && labels.all? { |label| HOSTED_RUNNER_LABELS.include?(label) }
+    !labels.empty? && labels.all? { |label| label.is_a?(String) && HOSTED_RUNNER_LABELS.include?(label) }
   when Array
-    !runner.empty? && runner.all? { |label| label.is_a?(String) && hosted_runner?(label, job) }
+    # Multiple labels require one runner to match all of them, so allow only one selector.
+    runner.length == 1 && runner.all? { |label| label.is_a?(String) && hosted_runner?(label, job) }
   when Hash
     labels = runner["labels"]
     runner.keys == ["labels"] && (labels.is_a?(String) || labels.is_a?(Array)) && hosted_runner?(labels, job)
@@ -1321,7 +1323,7 @@ if retired_runner_reference?(document) || implicit_retired_reference
 end
 jobs.each do |job_id, job|
   unless job.is_a?(Hash) && hosted_runner?(job["runs-on"], job)
-    warn "#{path}: jobs.#{job_id}.runs-on violates hosted runner policy: use an approved label or a static matrix axis (#{HOSTED_RUNNER_LABELS.join(', ')})"
+    warn "#{path}: jobs.#{job_id}.runs-on violates repository hosted runner policy: use one approved label (scalar or singleton array), optionally under labels, or an explicitly enumerated static matrix runner axis; every include row must specify that axis and exclude cannot approve forbidden candidates; each matrix runner value must be an approved scalar label (#{HOSTED_RUNNER_LABELS.join(', ')})"
     exit 1
   end
 end

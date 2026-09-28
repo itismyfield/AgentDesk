@@ -19,7 +19,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "2bab728830c680ccea8b31897885a8958d2b45d73a3a7cf50f8e360e8a859a12"
+    "3734874adee95f0edf070e41c3c975f6ca7fcb451c11927c067f81e234cb1057"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Path-filtered required contexts: (mirror job, required name, runner job,
@@ -2393,7 +2393,7 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
                 check=False,
             )
 
-    def test_hardening_rejects_self_hosted_routing_in_any_workflow(self) -> None:
+    def test_hardening_rejects_routing_outside_repository_hosted_runner_policy(self) -> None:
         pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         trusted = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
         variants = {
@@ -2415,6 +2415,10 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             "custom-label": "    runs-on: agentdesk-macos\n",
             "custom-list": "    runs-on: [macOS, ARM64]\n",
             "mixed-hosted-custom-list": "    runs-on: [ubuntu-latest, agentdesk-macos]\n",
+            "multiple-hosted-labels": "    runs-on: [ubuntu-latest, macos-15]\n",
+            "multiple-hosted-labels-mapping": "    runs-on: {labels: [ubuntu-latest, macos-15]}\n",
+            "duplicate-hosted-labels": "    runs-on: [ubuntu-latest, ubuntu-latest]\n",
+            "duplicate-hosted-labels-mapping": "    runs-on: {labels: [ubuntu-latest, ubuntu-latest]}\n",
             "nested-label-mapping": "    runs-on: {labels: {labels: macos-15}}\n",
             "unknown-variable": "    runs-on: ${{ vars.CI_RUNNER }}\n",
             "group-hosted-label": "    runs-on: {group: macs, labels: macos-15}\n",
@@ -2437,6 +2441,22 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
                 "    runs-on: ${{ matrix.os }}\n"
                 "    strategy:\n      matrix:\n        os: ['${{ vars.CI_RUNNER }}']\n"
             ),
+            "matrix-list-candidate": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [[ubuntu-latest]]\n"
+            ),
+            "matrix-mapping-candidate": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [{labels: ubuntu-latest}]\n"
+            ),
+            "matrix-include-list-candidate": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        include: [{os: [ubuntu-latest]}]\n"
+            ),
+            "matrix-include-mapping-candidate": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        include: [{os: {labels: ubuntu-latest}}]\n"
+            ),
             "matrix-include-custom": (
                 "    runs-on: ${{ matrix.os }}\n"
                 "    strategy:\n      matrix:\n        os: [ubuntu-latest]\n"
@@ -2447,7 +2467,7 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
                 "    strategy:\n      matrix:\n        os: [ubuntu-latest]\n"
                 "        include: ${{ fromJSON(vars.EXTRA) }}\n"
             ),
-            "matrix-include-missing-runner": (
+            "matrix-policy-include-missing-runner": (
                 "    runs-on: ${{ matrix.runner }}\n"
                 "    strategy:\n      matrix:\n"
                 "        include: [{runner: macos-15}, {target: custom}]\n"
@@ -2457,7 +2477,12 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
                 "    strategy:\n      matrix:\n        target: [linux]\n"
                 "        include: [{runner: macos-15}]\n"
             ),
-            "matrix-excluded-custom": (
+            "matrix-policy-include-inherited-runner": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [ubuntu-latest]\n"
+                "        include: [{feature: extra}]\n"
+            ),
+            "matrix-policy-excluded-custom": (
                 "    runs-on: ${{ matrix.os }}\n"
                 "    strategy:\n      matrix:\n        os: [ubuntu-latest, agentdesk-macos]\n"
                 "        exclude: [{os: agentdesk-macos}]\n"
@@ -2474,8 +2499,12 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
                     )
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("hosted runner policy", result.stderr)
+                    if name.startswith("matrix-policy-"):
+                        self.assertIn("explicitly enumerated static matrix runner axis", result.stderr)
+                        self.assertIn("every include row must specify that axis", result.stderr)
+                        self.assertIn("exclude cannot approve forbidden candidates", result.stderr)
 
-    def test_hardening_accepts_hosted_labels_and_static_matrices(self) -> None:
+    def test_hardening_accepts_hosted_labels_and_repository_policy_static_matrices(self) -> None:
         variants = {
             label: f"    runs-on: {label}\n"
             for label in ("ubuntu-latest", "ubuntu-22.04", "macos-15", "macos-latest", "windows-latest")
@@ -2483,6 +2512,7 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
         variants.update({
             "label-list": "    runs-on: [ubuntu-latest]\n",
             "label-mapping": "    runs-on: {labels: macos-15}\n",
+            "label-mapping-singleton-list": "    runs-on: {labels: [ubuntu-latest]}\n",
             "matrix-axis": (
                 "    runs-on: ${{ matrix.os }}\n"
                 "    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n"
