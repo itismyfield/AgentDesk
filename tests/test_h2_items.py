@@ -16,6 +16,7 @@ RECORDS = json.loads((FIXTURE / "items.json").read_text(encoding="utf-8"))
 DIAGNOSTICS = json.loads((FIXTURE / "clippy.json").read_text(encoding="utf-8"))
 FILE = "rust/library.rs"
 RUN, STATE = subprocess.run, harness.s.modmap.source_state
+TARGET = dict(name="fixture", kind=["cdylib", "rlib"], crate_types=["rlib", "cdylib"])
 GIT = ("git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false")
 
 
@@ -53,7 +54,7 @@ def diagnostic(case: dict, raw: bytes, name: str = "crate/" + FILE, lib: str = "
                     is_primary=True, expansion=dict(span=span, macro_decl_name=inner.split("!")[0] + "!"))
     message = dict(message="disallowed", code=dict(code="clippy::disallowed_methods"), level="warning", spans=[span])
     return dict(reason="compiler-message", package_id="path+file:///fixture#0.0.0", message=message,
-                manifest_path=str(Path(lib).parents[1] / "Cargo.toml"), target=dict(kind=["lib"], src_path=lib))
+                manifest_path=str(Path(lib).parents[1] / "Cargo.toml"), target=dict(TARGET, src_path=lib))
 
 
 class Items(unittest.TestCase):
@@ -82,7 +83,7 @@ class Items(unittest.TestCase):
         RUN([*GIT, *args], cwd=self.h.root, check=True)
 
     def seal(self, *, crlf=False, normalized=False, rows=None, cases=DIAGNOSTICS, name="run", spelling="crate/" + FILE,
-             extra=()) -> Path:
+             extra=(), target=None) -> Path:
         raw = encode(crlf)
         self.h.lib.write_bytes(raw)
         coords = SOURCE.encode() if normalized else raw
@@ -97,7 +98,8 @@ class Items(unittest.TestCase):
             proof.update(items_sha256=harness.s.collect.digest(body), items_records=len(body_rows))
             (run / "items.jsonl.sha256").write_text(json.dumps(dict(sha256=proof["items_sha256"], records=len(body_rows))))
             proof["argv"][1] = spelling
-            events.extend(diagnostic(case, raw, lib=str(self.h.lib)) for case in cases)
+            events[0]["target"].update(target or {})
+            events.extend(diagnostic(case, raw, lib=events[0]["target"]["src_path"]) for case in cases)
             events.extend(extra)
         self.h.mutate = mutate
         return Path(self.h.run_session(name)["manifest"])
@@ -176,6 +178,8 @@ class Items(unittest.TestCase):
         self.assert_reason("unsealed", items.resolve, loaded, {**span, "file_name": "crate/gen/out.rs"})
         for message in (dict(spans=[]), dict(spans=[{**span, "is_primary": False}]), dict()):
             self.assert_reason("no-item", items.primary, message)
+        for message in (dict(spans=1), dict(spans=[1]), dict(spans={"is_primary": True})):
+            self.assert_reason("coord", items.primary, message)
 
     def test_ties_are_order_independent_and_overlap_is_ambiguous(self):
         by_def = {r["def"]: dict(zip(harness.s.modmap.ITEM_FIELDS, row(r, SOURCE.encode()))) for r in RECORDS}
@@ -229,6 +233,12 @@ class Items(unittest.TestCase):
                     self.load(manifest)
                 self.assertEqual(caught.exception.reason, "unsealed")
         self.assert_reason("unsealed", items.load, self.seal(name="foreign"), crate=other)
+        manifest = self.seal(name="gitless")
+        (self.h.root / ".git").rename(self.h.root / "git.moved")
+        try:
+            self.assert_reason("unsealed", self.load, manifest)
+        finally:
+            (self.h.root / "git.moved").rename(self.h.root / ".git")
 
     def test_source_bytes_and_membership_come_from_the_sealed_capture(self):
         manifest = self.seal(name="bytes")
@@ -295,8 +305,17 @@ class Items(unittest.TestCase):
         own = diagnostic(DIAGNOSTICS[0], encode(False), lib=lib)
         foreign = [{**own, "package_id": "path+file:///other#0.0.0", "manifest_path": str(self.h.root / "other/Cargo.toml")},
                    {**own, "target": dict(kind=["custom-build"], src_path=str(self.h.crate / "build.rs"))}]
-        loaded = self.load(self.seal(cases=DIAGNOSTICS[:1], extra=foreign, name="foreign"))
-        self.assertEqual((len(loaded.messages), loaded.foreign), (1, 2))
+        bin_ = {**own, "target": dict(name="fixture", kind=["bin"], crate_types=["bin"], src_path=str(self.h.crate / "main.rs"))}
+        loaded = self.load(self.seal(cases=DIAGNOSTICS[:1], extra=[*foreign, bin_], name="foreign"))
+        self.assertEqual((len(loaded.messages), loaded.foreign), (1, 3))
+        self.assertEqual((self.load(self.seal(cases=(), name="quiet")).messages), [])
+        other = str(self.h.lib.parent / "other.rs")
+        for label, target in (("path", {**own["target"], "src_path": other}), ("kind", {**own["target"], "kind": ["bin"]}),
+                              ("types", {**own["target"], "crate_types": ["rlib"]}), ("bare", dict(kind=["lib"], src_path=other))):
+            with self.subTest(label):
+                event = {**own, "target": target}
+                self.assert_reason("provenance", self.load, self.seal(cases=(), extra=[event], name="claims-" + label))
+        self.assert_reason("provenance", self.load, self.seal(cases=(), target=dict(name="other"), name="artifact-name"))
         twice = dict(reason="compiler-artifact", package_id=own["package_id"], target={"src_path": lib},
                      profile={"test": True}, fresh=False)
         for label, event in (("target", {k: v for k, v in own.items() if k != "target"}),
@@ -305,6 +324,27 @@ class Items(unittest.TestCase):
                              ("test-compile", twice)):
             with self.subTest(label):
                 self.assert_reason("provenance", self.load, self.seal(cases=(), extra=[event], name=label))
+
+
+    def test_attribution_resolves_the_sealed_lib_path_once(self):
+        alias, lib = self.h.lib.parent / "alias.rs", self.h.lib.name
+        (self.h.lib.parent / "other.rs").write_text(SOURCE)
+        alias.symlink_to(lib)
+        manifest = self.seal(cases=DIAGNOSTICS[:1], target=dict(src_path=str(alias)), name="alias")
+        resolve, calls = Path.resolve, []
+        def aba(path, *args, **kwargs):
+            if path != alias or not calls.append(path) and len(calls) == 1:
+                return resolve(path, *args, **kwargs)
+            alias.unlink()
+            alias.symlink_to("other.rs")
+            try:
+                return resolve(path, *args, **kwargs)
+            finally:
+                alias.unlink()
+                alias.symlink_to(lib)
+        with patch.object(Path, "resolve", aba):
+            loaded = self.load(manifest)
+        self.assertEqual((len(loaded.messages), loaded.foreign), (1, 0))
 
 
 if __name__ == "__main__":

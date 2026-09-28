@@ -82,7 +82,7 @@ class Session(unittest.TestCase):
         proof["protected_env"] = {key: env[key] for key in s.PROTECTED_ENV}
         claim = dict(pid=42, unit=copy.deepcopy(unit))
         events = [dict(reason="compiler-artifact", package_id=req["unit"]["package_id"],
-                       target={"src_path": str(self.lib)}, profile={"test": False}, fresh=False)]
+                       target=copy.deepcopy(self.md["packages"][0]["targets"][0]), profile={"test": False}, fresh=False)]
         for suffix in ("items-cfg.txt", "clippy-cfg.txt"):
             (run / f"session.json.{suffix}").write_text("\n".join(self.cfg) + "\n")
         for suffix in ("items.stdout", "items.stderr", "probe.stdout", "probe.stderr"):

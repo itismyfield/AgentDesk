@@ -5,6 +5,7 @@ import bisect
 import json
 import os
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from h2_measure import MeasureError
 KIND = "canary-items"
 SEALED = ("request.json", "session.json", "items.jsonl", "items.jsonl.sha256", "clippy.jsonl")
 UNIT = ("manifest", "package", "lib", "crate_name", "crate_types")
+LIB_KINDS = {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
+IDENTITY = ("kind", "name", "crate_types", "src_path")
 EXEC = {"fn", "nested_fn", "trait_method", "trait_impl_method", "inherent_method", "const"}
 # Headers that own no executable code; their executable parts are separate records.
 NON_EXEC = {"Struct", "Union", "Enum", "Use", "TyAlias", "TraitAlias", "Macro", "ExternCrate",
@@ -98,31 +101,39 @@ def load(path: Path, *, crate: Path) -> Items:
         return items
     except MappingError:
         raise
-    except (MeasureError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+    except (MeasureError, OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as exc:
         raise MappingError("unsealed", str(exc) if isinstance(exc, MeasureError) else f"items: {exc}") from exc
 
 
 def attribute(events: list[dict], unit: dict) -> tuple[list[dict], int]:
     """Messages of the one proved lib compilation, and how many other units' messages were set aside."""
-    def lib(event) -> bool:
-        return Path(event["target"]["src_path"]).resolve() == Path(unit["lib"])
-    builds = [e for e in events
-              if e.get("reason") == "compiler-artifact" and e.get("package_id") == unit["package_id"] and lib(e)]
+    resolved: dict[str, Path] = {}
+    def canon(name: str) -> Path:  # each spelling is resolved once, so a swapped link cannot reclassify
+        return resolved.setdefault(name, Path(name).resolve())
+    builds = [e for e in events if e.get("reason") == "compiler-artifact" and e.get("package_id") == unit["package_id"]
+              and canon(e["target"]["src_path"]) == Path(unit["lib"])]
     if len(builds) != 1:
         raise MappingError("provenance", f"{len(builds)} compilations of the lib; its diagnostics are not attributable")
+    sealed = builds[0]["target"]
+    if (not set(sealed.get("kind") or ()) & LIB_KINDS or sealed.get("name", "").replace("-", "_") != unit["crate_name"]
+            or sorted(sealed.get("crate_types") or ()) != unit["crate_types"]):
+        raise MappingError("provenance", f"lib artifact target {sealed!r} is not the requested lib")
     own, foreign = [], 0
     for event in events:
         if event.get("reason") != "compiler-message":
             continue
+        target = event.get("target")
         if (not all(isinstance(event.get(key), str) for key in ("package_id", "manifest_path"))
-                or not isinstance((event.get("target") or {}).get("src_path"), str)
-                or not isinstance(event.get("message"), dict)):
+                or not isinstance(target, dict) or not isinstance(target.get("src_path"), str)
+                or not isinstance(target.get("kind"), list) or not isinstance(event.get("message"), dict)):
             raise MappingError("provenance", "compiler message without its Cargo package/target")
         mine = event["package_id"] == unit["package_id"]
-        if mine != (Path(event["manifest_path"]).resolve() == Path(unit["manifest"])):
+        if mine != (canon(event["manifest_path"]) == Path(unit["manifest"])):
             raise MappingError("provenance", f"package {event['package_id']} at {event['manifest_path']}")
-        if mine and lib(event):
+        if mine and all(target.get(key) == sealed.get(key) for key in IDENTITY):
             own.append(event["message"])
+        elif mine and (set(target["kind"]) & LIB_KINDS or canon(target["src_path"]) == Path(unit["lib"])):
+            raise MappingError("provenance", f"message target {target!r} contradicts the lib artifact")
         else:
             foreign += 1
     return own, foreign
@@ -139,7 +150,10 @@ def compiler_base(unit: dict, proof: dict) -> str | None:
 
 
 def primary(message: dict) -> dict:
-    spans = [span for span in message.get("spans") or () if isinstance(span, dict) and span.get("is_primary") is True]
+    spans = message.get("spans", [])
+    if not isinstance(spans, list) or not all(isinstance(span, dict) for span in spans):
+        raise MappingError("coord", f"malformed diagnostic spans: {spans!r}")
+    spans = [span for span in spans if span.get("is_primary") is True]
     if not spans:
         raise MappingError("no-item", f"diagnostic has no primary span: {message.get('message')!r}")
     return spans[0]
