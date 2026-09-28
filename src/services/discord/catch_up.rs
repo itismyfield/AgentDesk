@@ -961,11 +961,11 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         // Get bot's own user ID to filter out self-messages
         // Collect existing message IDs in queue for dedup
         let known_snapshot = mailbox_snapshot(shared, channel_id).await;
-        let (known_arms, existing_ids) = recovery_known_arms_and_ids(&known_snapshot);
-        // #4564: the durable completed-turn ledger for this channel, read once per
-        // scan (mirrors `existing_ids`). Suppresses the false restart-gap TooOld
-        // notice for inbound messages that already reached terminal delivery.
-        let settled_ids = settled_ledger_consult::settled_ids(provider, channel_id);
+        let (mut known_arms, mut existing_ids) = recovery_known_arms_and_ids(&known_snapshot);
+        // One completed-turn ledger read per scan suppresses the false TooOld
+        // notice for delivered ids and restores the active episode's durable absorbed arms.
+        let ledger = settled_ledger_consult::read(provider, channel_id);
+        let settled_ids = ledger.settle(&known_snapshot, &mut known_arms, &mut existing_ids);
 
         let allowed_bot_ids: Vec<u64> = {
             let settings = shared.settings.read().await;
@@ -1053,12 +1053,8 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 }
             };
             let mid = msg.id.get();
-            // Codex P2 round 2 on #1301: check the cap BEFORE recording the
-            // recover, otherwise `stats.recovered` would tally a message we
-            // refused to enqueue and the log would lie about the queue
-            // contents. Stopping iteration keeps the checkpoint pinned at
-            // the last actually-queued message — newer entries that we
-            // declined are still > `after_msg` for the next pass.
+            // Check the cap before counting a recover so refused work is not tallied.
+            // Keep the checkpoint at the last queued message so newer ids stay retryable.
             if outcome == CatchUpClassification::Recover && stats.recovered >= remaining_capacity {
                 frontier.seal(mid);
                 let retry_after = frontier.retry_after(scan_checkpoint, mid);
@@ -1147,6 +1143,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     pending_uploads: Vec::new(),
                     voice_announcement: None,
                 },
+                known_snapshot.claim_observation,
             )
             .await;
             match classify_phase2_enqueue_commit(&enqueue) {
@@ -1378,11 +1375,11 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             catch_up_remaining_queue_capacity(mailbox.intervention_queue.len());
         // #5996: keep the arm that answered for each id — only the arm can say
         // whether a membership carries the evidence an advance must earn.
-        let (known_arms, mut existing_ids) = recovery_known_arms_and_ids(&mailbox);
-        // #4564: same durable completed-turn ledger consult as phase 1, read once
-        // per channel. A Settled outcome in phase 2 simply skips (no enqueue, no
-        // notice) — an already-answered message must not be re-surfaced.
-        let settled_ids = settled_ledger_consult::settled_ids(provider, channel_id);
+        let (mut known_arms, mut existing_ids) = recovery_known_arms_and_ids(&mailbox);
+        // Phase 1's ledger consult, re-read per channel. A Settled outcome
+        // skips (no enqueue, no notice): an answered message is never re-surfaced.
+        let ledger = settled_ledger_consult::read(provider, channel_id);
+        let settled_ids = ledger.settle(&mailbox, &mut known_arms, &mut existing_ids);
         let barrier = open_barriers.get(&channel_id).map(|r| r.barrier);
         let mut frontier = Phase2Frontier::new(barrier, last_bot_response_id);
         let live_checkpoint = shared.last_message_ids.get(&channel_id).map(|v| *v);
@@ -1538,6 +1535,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                     pending_uploads: Vec::new(),
                     voice_announcement: None,
                 },
+                mailbox.claim_observation,
             )
             .await;
             match classify_phase2_enqueue_commit(&enqueue) {

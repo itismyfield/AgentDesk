@@ -8,6 +8,9 @@
 
 use tempfile::tempdir;
 
+#[path = "coverage_tests.rs"]
+mod coverage_tests;
+
 use super::*;
 use crate::services::discord::health::STALL_WATCHDOG_INTERVAL_SECS;
 use crate::services::discord::health::liveness_authority::CaptureCoordinateObservation;

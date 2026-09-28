@@ -19,7 +19,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "503881cce0ed2fe2482efe338b3355f4c8260677db1a86e0e41d12f3fcf94e15"
+    "3734874adee95f0edf070e41c3c975f6ca7fcb451c11927c067f81e234cb1057"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Path-filtered required contexts: (mirror job, required name, runner job,
@@ -783,21 +783,21 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 )["cross_os_rust"]
                 self.assertFalse(selects(survivors, sample))
 
-    def test_macos_pr_lane_runs_single_message_panel_tests(self) -> None:
+    def test_trusted_macos_hosted_lane_runs_single_message_panel_tests(self) -> None:
         workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
         command = (
             "env -u AGENTDESK_ROOT_DIR cargo test --lib "
             "single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres"
         )
-        self.assertEqual(workflow.count(command), 2)
+        self.assertEqual(job_block(workflow, "macos_hosted").count(command), 1)
 
-    def test_macos_pr_lane_runs_placeholder_live_events_tests(self) -> None:
+    def test_trusted_macos_hosted_lane_runs_placeholder_live_events_tests(self) -> None:
         workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
         command = (
             "env -u AGENTDESK_ROOT_DIR cargo test --lib "
             "placeholder_live_events -- --skip _pg --skip pg_ --skip postgres"
         )
-        self.assertEqual(workflow.count(command), 2)
+        self.assertEqual(job_block(workflow, "macos_hosted").count(command), 1)
 
     def test_main_and_nightly_retain_non_pg_test_coverage(self) -> None:
         justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
@@ -2125,44 +2125,22 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must retain exact needs: changes", result.stderr)
 
-    def test_trusted_macos_runs_busy_retry_regressions_on_both_runner_paths(self) -> None:
+    def test_trusted_macos_runs_busy_retry_regressions_on_hosted_runner(self) -> None:
         workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
         hosted = job_block(workflow, "macos_hosted")
-        self_hosted = job_block(workflow, "macos_self_hosted")
-
         self.assertEqual(hosted.count(BUSY_RETRY_4888_TEST_COMMAND), 1)
-        self.assertEqual(
-            self_hosted.count(f"nice -n 10 {BUSY_RETRY_4888_TEST_COMMAND}"), 1
-        )
 
-    def test_trusted_macos_path_filter_skips_steps_not_the_required_job(self) -> None:
-        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
-        # Hosted slots are the scarce resource; the filter must not add a job.
-        self.assertNotIn("macos-trusted-rust-filter.py", job_block(workflow, "resolve_macos_runner"))
-        self_hosted = job_block(workflow, "macos_self_hosted")
-        header, steps = self_hosted.split("    steps:\n", 1)
-        # The job name is the required context, so the filter may only gate steps.
-        self.assertNotIn("rust_filter", header)
-        checkout = steps.index("      - uses: actions/checkout@v4\n")
-        filter_step = step_block(self_hosted, "Decide whether heavy steps are needed")
-        self.assertLess(checkout, steps.index(filter_step))
-        self.assertIn("fetch-depth: 0", steps[checkout : steps.index(filter_step)])
-        # A failed filter must not fail the job; the gated steps run instead.
-        self.assertIn("continue-on-error: true", filter_step)
-        self.assert_filter_gates_exactly(
-            "macos_self_hosted",
-            {
-                "Install Rust toolchain",
-                "Configure local sccache",
-                "Install Opus on macOS",
-                "cargo check",
-                "H2 tmux boundary measurement (macos, inert)",
-                "H2 module map (macos, inert)",
-                "cargo test (non-PG, targeted subset)",
-                "Fresh user portable smoke",
-                "sccache stats",
-            },
-        )
+    def test_trusted_macos_has_only_an_unconditional_hosted_job(self) -> None:
+        workflow = yaml.safe_load(MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8"))
+        jobs = workflow["jobs"]
+        self.assertNotIn("macos_self_hosted", jobs)
+        self.assertNotIn("resolve_macos_runner", jobs)
+        self.assertEqual(set(jobs), {"macos_hosted"})
+        hosted = jobs["macos_hosted"]
+        self.assertEqual(hosted["name"], "Trusted macOS check (hosted)")
+        self.assertEqual(hosted["runs-on"], "macos-15")
+        self.assertNotIn("needs", hosted)
+        self.assertNotIn("if", hosted)
 
     def assert_filter_gates_exactly(self, job_name: str, gated: set[str]) -> None:
         """`gated` skips only on a successful run=false; other steps never skip."""
@@ -2182,7 +2160,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                         eval_step_if(condition, context), gated_runs or name not in gated
                     )
 
-    def test_trusted_macos_hosted_job_gates_the_same_heavy_steps(self) -> None:
+    def test_trusted_macos_hosted_job_gates_only_heavy_steps(self) -> None:
         workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
         hosted = job_block(workflow, "macos_hosted")
         header, steps = hosted.split("    steps:\n", 1)
@@ -2191,11 +2169,17 @@ class FastCheckCiWiringTests(unittest.TestCase):
         filter_step = step_block(hosted, "Decide whether heavy steps are needed")
         self.assertLess(checkout, steps.index(filter_step))
         self.assertIn("fetch-depth: 0", steps[checkout : steps.index(filter_step)])
+        parsed = yaml.safe_load(workflow)["jobs"]["macos_hosted"]
+        filter_config = next(step for step in parsed["steps"] if step.get("id") == "rust_filter")
+        self.assertEqual(filter_config["continue-on-error"], True)
+        self.assertEqual(filter_config["shell"], "bash")
+        self.assertEqual(filter_config["env"], {"EVENT_NAME": "${{ github.event_name }}"})
         self.assertEqual(
-            filter_step,
-            step_block(job_block(workflow, "macos_self_hosted"), "Decide whether heavy steps are needed"),
+            filter_config["run"],
+            'python3 scripts/ci/macos-trusted-rust-filter.py --event "$EVENT_NAME" '
+            '--base-ref origin/main >> "$GITHUB_OUTPUT"',
         )
-        # Hosted keeps its own ungated sccache opt-out, not the self-hosted local cache.
+        # Hosted cache opt-out remains unconditional, including docs-only pushes.
         self.assert_filter_gates_exactly(
             "macos_hosted",
             {
@@ -2211,6 +2195,44 @@ class FastCheckCiWiringTests(unittest.TestCase):
         )
         self.assertIn("Disable sccache on hosted macOS", hosted)
         self.assertNotIn("Configure local sccache", hosted)
+
+    def assert_hosted_sccache_reset(self, run: str) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            github_env = Path(temp) / "github-env"
+            github_env.touch()
+            result = subprocess.run(
+                ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", run],
+                cwd=temp,
+                env={
+                    "PATH": os.environ["PATH"],
+                    "GITHUB_ENV": str(github_env),
+                    "RUSTC_WRAPPER": "sccache",
+                    "SCCACHE_GHA_ENABLED": "true",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            entries = dict(line.split("=", 1) for line in github_env.read_text().splitlines())
+        self.assertEqual(entries.get("RUSTC_WRAPPER"), "")
+        self.assertEqual(entries.get("SCCACHE_GHA_ENABLED"), "")
+
+    def test_trusted_macos_hosted_sccache_reset_writes_both_empty_values(self) -> None:
+        workflow = yaml.safe_load(MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8"))
+        disable = next(
+            step for step in workflow["jobs"]["macos_hosted"]["steps"]
+            if step.get("name") == "Disable sccache on hosted macOS"
+        )
+        self.assertEqual(disable["shell"], "bash")
+        self.assertNotIn("if", disable)
+        self.assert_hosted_sccache_reset(disable["run"])
+        for variable in ("RUSTC_WRAPPER", "SCCACHE_GHA_ENABLED"):
+            with self.subTest(deleted=variable):
+                line = f'  echo "{variable}="\n'
+                self.assertIn(line, disable["run"])
+                with self.assertRaises(AssertionError):
+                    self.assert_hosted_sccache_reset(disable["run"].replace(line, "", 1))
 
     def test_test_lane_baseline_uses_candidate_snapshot_refs(self) -> None:
         pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
@@ -2370,6 +2392,187 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
                 capture_output=True,
                 check=False,
             )
+
+    def test_hardening_rejects_routing_outside_repository_hosted_runner_policy(self) -> None:
+        pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        trusted = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
+        variants = {
+            "scalar": "    runs-on: self-hosted\n",
+            "list": "    runs-on: [self-hosted, macOS]\n",
+            "block-list": "    runs-on:\n      - self-hosted\n      - macOS\n",
+            "group-labels": "    runs-on: {group: macs, labels: self-hosted}\n",
+            "escaped": '    "runs-on": "self-\\u0068osted"\n',
+            "case": "    runs-on: SELF-HOSTED\n",
+            "matrix": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [self-hosted]\n"
+            ),
+            "variable": "    runs-on: ${{ vars.MACOS_RUNNER }}\n",
+            "group-variable": (
+                "    runs-on: {group: '${{ vars.MACOS_RUNNER_GROUP }}', labels: macOS}\n"
+            ),
+            "format": "    runs-on: ${{ format('self-{0}', 'hosted') }}\n",
+            "custom-label": "    runs-on: agentdesk-macos\n",
+            "custom-list": "    runs-on: [macOS, ARM64]\n",
+            "mixed-hosted-custom-list": "    runs-on: [ubuntu-latest, agentdesk-macos]\n",
+            "multiple-hosted-labels": "    runs-on: [ubuntu-latest, macos-15]\n",
+            "multiple-hosted-labels-mapping": "    runs-on: {labels: [ubuntu-latest, macos-15]}\n",
+            "duplicate-hosted-labels": "    runs-on: [ubuntu-latest, ubuntu-latest]\n",
+            "duplicate-hosted-labels-mapping": "    runs-on: {labels: [ubuntu-latest, ubuntu-latest]}\n",
+            "nested-label-mapping": "    runs-on: {labels: {labels: macos-15}}\n",
+            "unknown-variable": "    runs-on: ${{ vars.CI_RUNNER }}\n",
+            "group-hosted-label": "    runs-on: {group: macs, labels: macos-15}\n",
+            "literal-expression": "    runs-on: ${{ 'ubuntu-latest' }}\n",
+            "matrix-expression": "    runs-on: ${{ matrix.os || 'ubuntu-latest' }}\n",
+            "missing-matrix": "    runs-on: ${{ matrix.os }}\n",
+            "dynamic-matrix": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix: ${{ fromJSON(vars.MATRIX) }}\n"
+            ),
+            "dynamic-axis": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: ${{ fromJSON(vars.RUNNERS) }}\n"
+            ),
+            "matrix-custom-candidate": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [ubuntu-latest, agentdesk-macos]\n"
+            ),
+            "matrix-variable-candidate": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: ['${{ vars.CI_RUNNER }}']\n"
+            ),
+            "matrix-list-candidate": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [[ubuntu-latest]]\n"
+            ),
+            "matrix-mapping-candidate": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [{labels: ubuntu-latest}]\n"
+            ),
+            "matrix-include-list-candidate": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        include: [{os: [ubuntu-latest]}]\n"
+            ),
+            "matrix-include-mapping-candidate": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        include: [{os: {labels: ubuntu-latest}}]\n"
+            ),
+            "matrix-include-custom": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [ubuntu-latest]\n"
+                "        include: [{os: agentdesk-macos}]\n"
+            ),
+            "matrix-dynamic-include": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [ubuntu-latest]\n"
+                "        include: ${{ fromJSON(vars.EXTRA) }}\n"
+            ),
+            "matrix-policy-include-missing-runner": (
+                "    runs-on: ${{ matrix.runner }}\n"
+                "    strategy:\n      matrix:\n"
+                "        include: [{runner: macos-15}, {target: custom}]\n"
+            ),
+            "matrix-base-missing-runner": (
+                "    runs-on: ${{ matrix.runner }}\n"
+                "    strategy:\n      matrix:\n        target: [linux]\n"
+                "        include: [{runner: macos-15}]\n"
+            ),
+            "matrix-policy-include-inherited-runner": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [ubuntu-latest]\n"
+                "        include: [{feature: extra}]\n"
+            ),
+            "matrix-policy-excluded-custom": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [ubuntu-latest, agentdesk-macos]\n"
+                "        exclude: [{os: agentdesk-macos}]\n"
+            ),
+            "empty-runner-list": "    runs-on: []\n",
+        }
+        for name, runner in variants.items():
+            for path in ("ci-macos-trusted.yml", "extra.yaml"):
+                with self.subTest(runner=name, workflow=path):
+                    mutated = trusted.replace("    runs-on: macos-15\n", runner, 1)
+                    self.assertNotEqual(mutated, trusted)
+                    result = self.run_hardening_fixture(
+                        pr_workflow, extra_workflows={path: mutated}
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("hosted runner policy", result.stderr)
+                    if name.startswith("matrix-policy-"):
+                        self.assertIn("explicitly enumerated static matrix runner axis", result.stderr)
+                        self.assertIn("every include row must specify that axis", result.stderr)
+                        self.assertIn("exclude cannot approve forbidden candidates", result.stderr)
+
+    def test_hardening_accepts_hosted_labels_and_repository_policy_static_matrices(self) -> None:
+        variants = {
+            label: f"    runs-on: {label}\n"
+            for label in ("ubuntu-latest", "ubuntu-22.04", "macos-15", "macos-latest", "windows-latest")
+        }
+        variants.update({
+            "label-list": "    runs-on: [ubuntu-latest]\n",
+            "label-mapping": "    runs-on: {labels: macos-15}\n",
+            "label-mapping-singleton-list": "    runs-on: {labels: [ubuntu-latest]}\n",
+            "matrix-axis": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n"
+            ),
+            "matrix-include-only": (
+                "    runs-on: ${{ matrix.runner }}\n"
+                "    strategy:\n      matrix:\n"
+                "        include: [{runner: macos-15}, {runner: ubuntu-22.04}]\n"
+            ),
+            "matrix-axis-include-exclude": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [ubuntu-latest, macos-latest]\n"
+                "        include: [{os: windows-latest}]\n"
+                "        exclude: [{os: macos-latest}]\n"
+            ),
+        })
+        for name, runner in variants.items():
+            with self.subTest(runner=name):
+                workflow = "name: Runner probe\non: push\njobs:\n  probe:\n" + runner
+                workflow += "    steps:\n      - run: echo ok\n"
+                result = self.run_hardening_fixture(
+                    PR_WORKFLOW.read_text(encoding="utf-8"), {"runner-probe.yaml": workflow}
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_hardening_distinguishes_retired_variable_reads_from_prose(self) -> None:
+        variants = {
+            "step-name": ("name", "Verify self-hosted routing is absent", True),
+            "defensive-if": ("if", "runner.environment != 'self-hosted'", True),
+            "defensive-expression": ("if", "${{ runner.environment != 'self-hosted' }}", True),
+            "variable-prose": ("name", "Explain vars.MACOS_RUNNER retirement", True),
+            "quoted-literal": ("name", "${{ 'vars.MACOS_RUNNER' }}", True),
+            "quoted-if-literal": ("if", "contains('vars.MACOS_RUNNER', 'MACOS_RUNNER')", True),
+            "env-if-prose": ("env", {"if": "vars.MACOS_RUNNER"}, True),
+            "different-variable": ("env", {"RUNNER": "${{ vars.MACOS_RUNNER_GROUP }}"}, True),
+            "actual-dot-read": ("env", {"RUNNER": "${{ vars.MACOS_RUNNER }}"}, False),
+            "actual-bracket-read": ("env", {"RUNNER": "${{ vars['MACOS_RUNNER'] }}"}, False),
+            "actual-case-read": ("env", {"RUNNER": "${{ VARS.macos_runner }}"}, False),
+            "actual-implicit-if": ("if", "vars.MACOS_RUNNER != ''", False),
+            "quoted-delimiter": ("name", "${{ format('}}', vars.MACOS_RUNNER) }}", False),
+        }
+        for name, (key, value, accepted) in variants.items():
+            with self.subTest(case=name):
+                workflow = {"name": "Runner probe", "on": "push", "jobs": {"probe": {
+                    "runs-on": "ubuntu-latest", "steps": [{"run": "echo ok", key: value}],
+                }}}
+                result = self.run_hardening_fixture(
+                    PR_WORKFLOW.read_text(encoding="utf-8"),
+                    {"runner-probe.yaml": yaml.safe_dump(workflow)},
+                )
+                self.assertEqual(result.returncode, 0 if accepted else 1, result.stderr)
+                if not accepted:
+                    self.assertIn("forbids vars.MACOS_RUNNER references", result.stderr)
+
+    def test_hardening_accepts_every_repository_workflow(self) -> None:
+        result = self.run_hardening_fixture(
+            PR_WORKFLOW.read_text(encoding="utf-8"),
+            {path.name: path.read_text(encoding="utf-8") for path in workflow_paths()},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_hardening_rejects_flow_sequence_manual_trigger(self) -> None:
         source = PR_WORKFLOW.read_text(encoding="utf-8")
