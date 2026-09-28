@@ -178,7 +178,10 @@ class WorkspaceSession(unittest.TestCase):
                 (self.case / f"race-{n}-{i}.stderr").write_bytes(proc.stderr)
             self.assertEqual(sorted(p.returncode for p in results), [0, 101], [p.stderr.decode() for p in results])
             loser = next(p for p in results if p.returncode)
-            self.assertIn(b"File exists", loser.stderr)
+            self.assertIn(loser.stderr.strip(), (
+                b"modmap-driver (clippy session): File exists (os error 17)",
+                b"modmap-driver (clippy session): proof already exists: second producer in this session",
+            ))
             proof, claim = (json.loads((run / name).read_text()) for name in ("session.json", "session.json.claim"))
             self.assertEqual(claim, {"pid": proof["pid"], "unit": proof["unit"]})
 
