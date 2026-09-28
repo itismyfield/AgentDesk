@@ -252,6 +252,12 @@ fn mutate_at(
     mutate(&mut ledger);
     prune_ledger(&mut ledger, now_ms);
     let data = serde_json::to_string_pretty(&ledger).map_err(|e| e.to_string())?;
+    #[cfg(test)]
+    BEFORE_PUBLISH.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
     runtime_store::atomic_write(path, &data)
 }
 
@@ -375,6 +381,24 @@ pub(in crate::services::discord) fn record_merged_alias(
             "#6035 merged-head alias record failed (absorbed ids stay unsettled)"
         );
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_PUBLISH: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn append_before_publish_for_tests(
+    channel_id: u64,
+    user_msg_id: u64,
+    nonce: &str,
+    committed_ms: u64,
+    hook: impl FnOnce() + 'static,
+) -> Result<(), String> {
+    BEFORE_PUBLISH.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    let path = ledger_path(&ProviderKind::Claude, channel_id).ok_or("test ledger path missing")?;
+    append_at(&path, user_msg_id, Some(nonce), committed_ms)
 }
 
 #[cfg(test)]

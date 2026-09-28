@@ -4,8 +4,8 @@
 use super::*;
 use crate::services::discord::outbound::completed_turn_ledger;
 use crate::services::turn_orchestrator::{
-    QueueExitKind, TakeNextSoftResult, load_channel_pending_dispatch_marker,
-    load_channel_pending_queue_for_tests,
+    QueueExitKind, SourceMessageQueuedGeneration, TakeNextSoftResult,
+    load_channel_pending_dispatch_marker, load_channel_pending_queue_for_tests,
 };
 
 const HANDOFF_BODY: &str = "[family-counsel → project-agentdesk 핸드오프] 제안 수용";
@@ -48,7 +48,10 @@ fn queued(id: u64, text: &str) -> Intervention {
         message_id: MessageId::new(id),
         queued_generation: crate::services::discord::runtime_store::process_generation(),
         source_message_ids: vec![MessageId::new(id)],
-        source_message_queued_generations: Vec::new(),
+        source_message_queued_generations: vec![SourceMessageQueuedGeneration::new(
+            MessageId::new(id),
+            crate::services::discord::runtime_store::process_generation(),
+        )],
         source_text_segments: Vec::new(),
         text: text.to_string(),
         mode: InterventionMode::Soft,
@@ -418,6 +421,180 @@ async fn an_absorbed_copy_requeued_before_the_claim_is_settled_by_the_merged_del
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn a_delivered_absorbed_copy_is_settled_before_a_new_input_merges() {
+    absorbed_copy_merge(false, "memory").await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_late_published_completion_settles_each_sources_original_enqueue() {
+    absorbed_copy_merge(true, "memory").await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn late_completion_retains_source_times_through_queue_and_dispatch_restore() {
+    for restore in ["queue", "dispatch"] {
+        absorbed_copy_merge(true, restore).await;
+    }
+}
+
+async fn absorbed_copy_merge(delayed: bool, restore: &str) {
+    let _root = scoped_runtime_root();
+    let shared = make_shared_data_for_tests();
+    let channel_id = ChannelId::new(6_289_400);
+    let (h, p) = (6_289_401, 6_289_402);
+    let occupant = MessageId::new(6_289_403);
+    assert!(
+        mailbox_try_start_turn(
+            &shared,
+            channel_id,
+            Arc::new(CancelToken::new()),
+            UserId::new(7),
+            occupant
+        )
+        .await
+    );
+    enqueue_merged_pair(&shared, channel_id, h, p).await;
+    mailbox_finish_turn(&shared, &ProviderKind::Claude, channel_id).await;
+    let taken = actor_take(&shared, channel_id).await;
+    assert_eq!(
+        taken
+            .intervention
+            .as_ref()
+            .map(|item| item.source_message_ids.clone()),
+        Some(vec![MessageId::new(h), MessageId::new(p)])
+    );
+    // A catch-up copy of H lands in the dequeue -> claim window.
+    let mut copy = queued(h, "absorbed request");
+    copy.merge_consecutive = true;
+    copy.created_at -= std::time::Duration::from_secs(2);
+    if let Some(us) = &mut copy.source_message_queued_generations[0].enqueued_at_epoch_us {
+        *us -= 2_000_000;
+    }
+    enqueue(&shared, channel_id, copy).await;
+    let token = Arc::new(CancelToken::new());
+    let nonce = token.turn_nonce().expect("turn nonce").to_owned();
+    assert!(
+        mailbox_try_start_turn(
+            &shared,
+            channel_id,
+            token,
+            UserId::new(7),
+            MessageId::new(p)
+        )
+        .await
+    );
+    assert_eq!(
+        mailbox_snapshot(&shared, channel_id)
+            .await
+            .intervention_queue
+            .len(),
+        1,
+        "the claim purges only P"
+    );
+    let committed_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        - 1000;
+    let k = MessageId::new(6_289_404);
+    completed_turn_ledger::append_before_publish_for_tests(
+        channel_id.get(),
+        k.get(),
+        "earlier-k",
+        committed_ms,
+        || {},
+    )
+    .unwrap();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        completed_turn_ledger::append_before_publish_for_tests(
+            channel_id.get(),
+            p,
+            &nonce,
+            committed_ms,
+            move || {
+                ready_tx.send(()).unwrap();
+                resume_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+            },
+        )
+        .unwrap();
+    });
+    ready_rx.await.unwrap();
+    assert!(
+        !completed_turn_ledger::settled_user_msg_ids(&ProviderKind::Claude, channel_id.get())
+            .contains(&h)
+    );
+    let mut writer = Some(writer);
+    if !delayed {
+        resume_tx.send(()).unwrap();
+        writer.take().unwrap().join().unwrap();
+    }
+    let mut fresh = queued(k.get(), "new request");
+    fresh.merge_consecutive = true;
+    let enqueued = shared
+        .mailbox(channel_id)
+        .enqueue(
+            fresh,
+            queue_persistence_context(&shared, &ProviderKind::Claude, channel_id),
+        )
+        .await;
+    assert!(enqueued.enqueued, "{:?}", enqueued.refusal_reason);
+    assert!(enqueued.persistence_error.is_none());
+    drop(taken);
+    if restore == "dispatch" {
+        mailbox_finish_turn(&shared, &ProviderKind::Claude, channel_id).await;
+        let pending = actor_take(&shared, channel_id).await;
+        assert_eq!(
+            pending.intervention.as_ref().unwrap().source_message_ids,
+            vec![MessageId::new(h), k]
+        );
+        assert!(pending.queue_exit_events.is_empty());
+    }
+    if delayed {
+        assert!(enqueued.merged);
+        assert!(enqueued.queue_exit_events.is_empty());
+        resume_tx.send(()).unwrap();
+        writer.take().unwrap().join().unwrap();
+    }
+    if restore != "dispatch" {
+        mailbox_finish_turn(&shared, &ProviderKind::Claude, channel_id).await;
+    }
+    let shared = if restore == "memory" {
+        shared
+    } else {
+        drop(shared);
+        make_shared_data_for_tests()
+    };
+    let result = actor_take(&shared, channel_id).await;
+    assert!(result.persistence_error.is_none());
+    let dispatched = result.intervention.expect("the new request must dispatch");
+    assert_eq!(
+        dispatched.source_message_ids,
+        vec![k],
+        "dispatch must contain K alone; H was already answered by P/n"
+    );
+    assert_eq!(dispatched.text, "new request");
+    assert_eq!(dispatched.message_id, k);
+    let all_exits: Vec<_> = enqueued
+        .queue_exit_events
+        .iter()
+        .chain(&result.queue_exit_events)
+        .collect();
+    assert_eq!(all_exits.len(), 1);
+    let settled = all_exits[0];
+    assert_eq!(settled.kind, QueueExitKind::Superseded);
+    assert_eq!(
+        settled.intervention.source_message_ids,
+        vec![MessageId::new(h)]
+    );
+    assert_eq!(settled.intervention.text, "absorbed request");
+    assert!(disk_queue_ids(&shared, channel_id).is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn a_restored_merged_marker_of_a_delivered_episode_settles_every_source() {
     let _root = scoped_runtime_root();
     let channel_id = ChannelId::new(6_288_900);
@@ -514,4 +691,327 @@ async fn an_absorbed_source_takes_its_backing_episode_time_not_a_later_episode_o
         Some(h),
         "only the old backing episode dates H, and it predates this copy"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pre_merge_settlement_preserves_a_requeued_episode_and_unsettled_sources() {
+    let _root = scoped_runtime_root();
+    let shared = make_shared_data_for_tests();
+    let channel_id = ChannelId::new(6_289_500);
+    let (h, reused, k) = (6_289_501, 6_289_502, 6_289_503);
+    deliver_after_enqueue(channel_id, reused);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    for (id, text) in [(h, "answered source"), (reused, "new episode")] {
+        let mut item = queued(id, text);
+        item.merge_consecutive = true;
+        enqueue(&shared, channel_id, item).await;
+    }
+    deliver_after_enqueue(channel_id, h);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let mut fresh = queued(k, "new request");
+    fresh.merge_consecutive = true;
+    let result = shared
+        .mailbox(channel_id)
+        .enqueue(
+            fresh,
+            queue_persistence_context(&shared, &ProviderKind::Claude, channel_id),
+        )
+        .await;
+    assert!(
+        result.enqueued && result.merged,
+        "{:?}",
+        result.refusal_reason
+    );
+    assert!(result.persistence_error.is_none());
+    assert_eq!(result.queue_exit_events.len(), 1);
+    let exit = &result.queue_exit_events[0];
+    assert_eq!(exit.kind, QueueExitKind::Superseded);
+    assert_eq!(
+        exit.intervention.source_message_ids,
+        vec![MessageId::new(h)]
+    );
+    assert_eq!(exit.intervention.text, "answered source");
+    let persisted =
+        load_channel_pending_queue_for_tests(&ProviderKind::Claude, &shared.token_hash, channel_id)
+            .0;
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(
+        persisted[0].source_message_ids,
+        vec![MessageId::new(reused), MessageId::new(k)]
+    );
+    assert_eq!(persisted[0].text, "new episode\nnew request");
+
+    drop(shared);
+    let restored = make_shared_data_for_tests();
+    let drained = actor_take(&restored, channel_id).await;
+    assert!(drained.queue_exit_events.is_empty());
+    let dispatched = drained
+        .intervention
+        .expect("both new inputs must survive restart");
+    assert_eq!(
+        dispatched.source_message_ids,
+        persisted[0].source_message_ids
+    );
+    assert_eq!(dispatched.text, persisted[0].text);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pre_merge_settlement_rolls_back_when_queue_persistence_fails() {
+    let root = scoped_runtime_root();
+    let shared = make_shared_data_for_tests();
+    let channel_id = ChannelId::new(6_289_600);
+    let (h, k) = (6_289_601, 6_289_602);
+    let mut old = queued(h, "answered source");
+    old.merge_consecutive = true;
+    enqueue(&shared, channel_id, old).await;
+    deliver_after_enqueue(channel_id, h);
+    let queue_path = root
+        .temp
+        .path()
+        .join("runtime/discord_pending_queue/claude")
+        .join(&shared.token_hash)
+        .join(format!("{}.json", channel_id.get()));
+    std::fs::remove_file(&queue_path).unwrap();
+    std::fs::create_dir(&queue_path).unwrap();
+    let mut fresh = queued(k, "new request");
+    fresh.merge_consecutive = true;
+    let persistence = queue_persistence_context(&shared, &ProviderKind::Claude, channel_id);
+    let result = shared
+        .mailbox(channel_id)
+        .enqueue(fresh.clone(), persistence.clone())
+        .await;
+    assert!(!result.enqueued);
+    assert!(result.persistence_error.is_some());
+    assert!(result.queue_exit_events.is_empty());
+    let live = mailbox_snapshot(&shared, channel_id)
+        .await
+        .intervention_queue;
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].source_message_ids, vec![MessageId::new(h)]);
+    assert_eq!(live[0].text, "answered source");
+
+    std::fs::remove_dir(&queue_path).unwrap();
+    let retry = shared.mailbox(channel_id).enqueue(fresh, persistence).await;
+    assert!(retry.enqueued);
+    assert!(retry.persistence_error.is_none());
+    assert_eq!(retry.queue_exit_events.len(), 1);
+    assert_eq!(retry.queue_exit_events[0].kind, QueueExitKind::Superseded);
+    assert_eq!(
+        retry.queue_exit_events[0].intervention.message_id,
+        MessageId::new(h)
+    );
+    let drained = actor_take(&shared, channel_id).await;
+    assert_eq!(
+        drained.intervention.unwrap().source_message_ids,
+        vec![MessageId::new(k)]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn restart_first_enqueue_settles_unfinished_disk_copy() {
+    for marker in [false, true] {
+        for observed in [false, true] {
+            let _root = scoped_runtime_root();
+            let channel = ChannelId::new(6_289_700);
+            let (h, k) = (6_289_701, 6_289_702);
+            let shared = make_shared_data_for_tests();
+            let mut copy = queued(h, "answered copy");
+            copy.created_at -= std::time::Duration::from_secs(2);
+            if let Some(us) = &mut copy.source_message_queued_generations[0].enqueued_at_epoch_us {
+                *us -= 2_000_000;
+            }
+            copy.merge_consecutive = true;
+            enqueue(&shared, channel, copy).await;
+            if marker {
+                assert!(actor_take(&shared, channel).await.intervention.is_some());
+            }
+            completed_turn_ledger::append_completed_turn(&ProviderKind::Claude, channel.get(), h);
+            drop(shared);
+            let shared = make_shared_data_for_tests();
+            let observation = observed.then(|| {
+                crate::services::turn_orchestrator::ChannelMailboxSnapshot::no_actor(channel)
+                    .claim_observation
+            });
+            let mut fresh = queued(k, "new request");
+            fresh.merge_consecutive = true;
+            let result = shared
+                .mailbox(channel)
+                .enqueue_observed(
+                    fresh,
+                    queue_persistence_context(&shared, &ProviderKind::Claude, channel),
+                    observation,
+                )
+                .await;
+            assert!(result.enqueued && result.persistence_error.is_none());
+            assert_eq!(result.queue_exit_events.len(), 1);
+            assert_eq!(result.queue_exit_events[0].kind, QueueExitKind::Superseded);
+            assert_eq!(
+                result.queue_exit_events[0].intervention.source_message_ids,
+                vec![MessageId::new(h)]
+            );
+            let memory = mailbox_snapshot(&shared, channel).await.intervention_queue;
+            assert_eq!(memory.len(), 1);
+            assert_eq!(memory[0].source_message_ids, vec![MessageId::new(k)]);
+            assert_eq!(disk_queue_ids(&shared, channel), vec![k]);
+            let next = actor_take(&shared, channel).await;
+            assert!(next.queue_exit_events.is_empty());
+            assert_eq!(
+                next.intervention.unwrap().source_message_ids,
+                vec![MessageId::new(k)]
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_source_times_fall_back_to_the_row_episode_boundary() {
+    for marker in [false, true] {
+        for format in ["source", "legacy", "ownerless"] {
+            for offset_us in [-2_000_000_i64, -1000, -1, 0, 1, 1000, 1_000_000] {
+                if format != "source" && offset_us % 1000 != 0 {
+                    continue;
+                }
+                let root = scoped_runtime_root();
+                let shared = make_shared_data_for_tests();
+                let provider = &ProviderKind::Claude;
+                let hash = &shared.token_hash;
+                let (owners, epoch) = ("source_message_queued_generations", "enqueued_at_epoch_us");
+                let channel = ChannelId::new(6_289_800);
+                let h = 6_289_801;
+                let committed_ms = 1_700_000_000_000_u64;
+                let enqueued_us = (committed_ms * 1000).checked_add_signed(offset_us).unwrap();
+                enqueue(&shared, channel, queued(h, "legacy row")).await;
+                if marker {
+                    assert!(actor_take(&shared, channel).await.intervention.is_some());
+                }
+                let path = root
+                    .temp
+                    .path()
+                    .join("runtime/discord_pending_queue/claude")
+                    .join(&shared.token_hash)
+                    .join(format!(
+                        "{}.{}",
+                        channel.get(),
+                        if marker { "dispatch" } else { "json" }
+                    ));
+                let mut payload: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                let row = if marker {
+                    &mut payload
+                } else {
+                    &mut payload[0]
+                };
+                row["created_at_wall_time_ms"] = serde_json::json!(if format == "source" {
+                    committed_ms - 5000
+                } else {
+                    enqueued_us / 1000
+                });
+                if format == "ownerless" {
+                    row.as_object_mut().unwrap().remove(owners);
+                } else {
+                    let owner = &mut row[owners][0];
+                    if format == "source" {
+                        owner[epoch] = serde_json::json!(enqueued_us);
+                    } else {
+                        owner.as_object_mut().unwrap().remove(epoch);
+                    }
+                }
+                std::fs::write(&path, serde_json::to_vec(&payload).unwrap()).unwrap();
+                completed_turn_ledger::append_before_publish_for_tests(
+                    channel.get(),
+                    h,
+                    "old",
+                    committed_ms,
+                    || {},
+                )
+                .unwrap();
+                let loaded = if marker {
+                    load_channel_pending_dispatch_marker(provider, hash, channel)
+                        .unwrap()
+                        .0
+                } else {
+                    load_channel_pending_queue_for_tests(provider, hash, channel)
+                        .0
+                        .remove(0)
+                };
+                assert_eq!(
+                    loaded.source_message_queued_generations[0].enqueued_at_epoch_us,
+                    Some(enqueued_us),
+                    "{format} marker={marker} offset={offset_us}"
+                );
+                drop(shared);
+                let result = actor_take(&make_shared_data_for_tests(), channel).await;
+                assert_eq!(result.intervention.is_none(), offset_us < 0);
+                assert_eq!(
+                    exits(&result),
+                    if offset_us < 0 {
+                        vec![(h, QueueExitKind::Superseded)]
+                    } else {
+                        vec![]
+                    }
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn clock_sample_delay_cannot_backdate_a_new_episode() {
+    for human in [false, true] {
+        let _root = scoped_runtime_root();
+        let shared = make_shared_data_for_tests();
+        let channel = ChannelId::new(6_289_900);
+        let h = 6_289_901;
+        let committed_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            - 1;
+        completed_turn_ledger::append_before_publish_for_tests(
+            channel.get(),
+            h,
+            "old",
+            committed_ms,
+            || {},
+        )
+        .unwrap();
+        let mut item = queued(h, "new episode after completion");
+        item.source_message_queued_generations = vec![if human {
+            SourceMessageQueuedGeneration::user_instruction(
+                MessageId::new(h),
+                item.queued_generation,
+            )
+        } else {
+            SourceMessageQueuedGeneration::new(MessageId::new(h), item.queued_generation)
+        }];
+        let created_us = item.source_message_queued_generations[0].enqueued_at_epoch_us;
+        let called = std::rc::Rc::new(std::cell::Cell::new(false));
+        let hook_called = called.clone();
+        Intervention::source_clock_sample_hook_for_tests(move || {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            std::thread::sleep(std::time::Duration::from_millis(now_ms - committed_ms + 5));
+            hook_called.set(true);
+        });
+        enqueue(&shared, channel, item).await;
+        assert!(
+            called.get(),
+            "the actual Enqueue must cross the injected clock delay"
+        );
+        let result = actor_take(&shared, channel).await;
+        assert!(
+            result.queue_exit_events.is_empty(),
+            "a previous completion must not supersede the new episode: {:?}",
+            exits(&result)
+        );
+        let dispatched = result.intervention.unwrap();
+        assert_eq!(dispatched.message_id.get(), h);
+        assert!(created_us.is_some_and(|us| us > committed_ms * 1000));
+        assert_eq!(
+            dispatched.source_message_queued_generations[0].enqueued_at_epoch_us,
+            created_us
+        );
+    }
 }
