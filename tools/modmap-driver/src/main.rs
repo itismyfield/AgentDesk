@@ -4,12 +4,14 @@
 extern crate rustc_ast;
 extern crate rustc_driver;
 extern crate rustc_feature;
+extern crate rustc_hir;
 extern crate rustc_interface;
 extern crate rustc_middle;
 extern crate rustc_session;
 extern crate rustc_span;
 
 mod cfg_snapshot;
+mod items;
 mod modmap;
 mod session;
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import copy
 import os
 import json
 import re
@@ -213,9 +214,10 @@ class SessionCanary(unittest.TestCase):
                 patch.object(modmap, "collection_context"), patch.object(modmap, "map_run", return_value=[]), \
                 patch.object(modmap.h2_depinfo, "modmap_problems", return_value=modmap.CANARY_PROBLEMS), \
                 patch.object(h2_session, "session", return_value={"proof": {"cfg": ["clippy", "h2_items_bs_clippy"]}}), \
-                patch.object(modmap, "run_suite") as suite, patch("sys.stdout", new=io.StringIO()) as output:
+                patch.object(modmap, "check_canary_items"), patch.object(modmap, "run_suite") as suite, \
+                patch("sys.stdout", new=io.StringIO()) as output:
             self.assertEqual(modmap.main(["--repo", tmp, "--lane", "linux"]), 0)
-            self.assertIn("cold Clippy session holds (cfg-only); suites not run", output.getvalue())
+            self.assertIn("cold Clippy session and items anchors hold; suites not run", output.getvalue())
             self.assertNotIn("driver controls and workspace e2e hold", output.getvalue())
             suite.assert_not_called()
 
@@ -247,7 +249,8 @@ class SessionCanary(unittest.TestCase):
     def test_cold_session_cfg_and_required_suites(self):
         suites = list(modmap.SESSION_SUITES)
         with tempfile.TemporaryDirectory() as tmp, patch.object(h2_session, "session") as session, \
-                patch.object(modmap.subprocess, "Popen") as suite, patch("sys.stdout", new=io.StringIO()) as output:
+                patch.object(modmap.subprocess, "Popen") as suite, patch("sys.stdout", new=io.StringIO()) as output, \
+                patch.object(modmap, "check_canary_items") as items:
             root = Path(tmp).resolve()
             driver, crate = root / "driver", root / modmap.DRIVER / "canary"
             process = suite.return_value.__enter__.return_value
@@ -263,6 +266,7 @@ class SessionCanary(unittest.TestCase):
                                  str(run / "session-target"), "--features", "h2_cfg_probe")))
                 self.assertFalse((run / "session-target").exists())
                 self.assertEqual((run / "session-config/clippy.toml").read_text(), "")
+                items.assert_called_with(crate, run / "session/items.jsonl")
             self.assertEqual([c.args[0] for c in suite.call_args_list],
                              [[sys.executable, "-m", "unittest", module] for module in suites] * 2)
             self.assertTrue(all(c.kwargs["env"]["H2_SESSION_DRIVER"] == str(driver) for c in suite.call_args_list))
@@ -273,6 +277,11 @@ class SessionCanary(unittest.TestCase):
                 session.return_value = {"proof": {"cfg": cfg}}
                 with self.assertRaisesRegex(modmap.ModmapError, "build-script cfg"):
                     modmap.check_session_canary(root, driver, crate, root / str(cfg), "linux", suites)
+            self.assertEqual(suite.call_count, 4)
+            with patch.object(modmap, "check_canary_items", side_effect=modmap.ModmapError("items failed")):
+                session.return_value = {"proof": {"cfg": ["clippy", "h2_items_bs_clippy"]}}
+                with self.assertRaisesRegex(modmap.ModmapError, "items failed"):
+                    modmap.check_session_canary(root, driver, crate, root / "items-failed", "linux", suites)
             self.assertEqual(suite.call_count, 4)
             session.return_value = {"proof": {"cfg": ["clippy", "h2_items_bs_clippy"]}}
             for module, n in modmap.SESSION_SUITES.items():
@@ -322,6 +331,65 @@ class SessionCanary(unittest.TestCase):
             self.assertEqual(modmap.main(["--repo", tmp, "--inert"]), 0)
             session.assert_not_called()
             build.assert_not_called()
+
+class ItemsCanary(unittest.TestCase):
+    def test_source_oracle_rejects_spans_paths_owners_and_empty_output(self):
+        crate = REPO_ROOT / modmap.DRIVER / "canary"
+        rows = []
+        for i, (kind, value, name, anchor) in enumerate(modmap.CANARY_ITEMS):
+            raw = (crate / "src" / name).read_bytes()
+            matches = list(re.finditer(anchor, raw, re.S))
+            self.assertEqual(len(matches), 1, anchor)
+            lo, hi = matches[0].span()
+            path = "modmap_canary::" + value if value.startswith("items_") else None
+            rows.append(dict(kind=kind, path=path, unregistrable=None if path else value,
+                             file="src/" + name, lo=lo, hi=hi, line=raw.count(b"\n", 0, lo) + 1,
+                             macro=b"!" in raw[lo:hi], def_kind="Fn", parent=0, **{"def": i + 1}))
+            if value == "anon-const":
+                rows[-1]["def_kind"] = "AnonConst" if b"mixed!" in raw[lo:hi] else "InlineConst"
+            if kind == "nested_fn":
+                owner = next(j for j, row in enumerate(rows) if row["kind"] == "fn" and
+                             row["lo"] < lo < hi < row["hi"] and row["file"] == "src/" + name)
+                rows[-1].update(fold=owner, parent=rows[owner]["def"], escape=value == "fold-escape")
+        method = next(r for r in rows if r["macro"] and r["kind"] == "trait_impl_method")
+        header = dict(method, kind="header", def_kind="Impl { of_trait: true }", **{"def": 100})
+        method["parent"] = 100
+        rows.append(header)
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "items.jsonl"
+            def check(records):
+                arrays = [[r.get(key) for key in modmap.ITEM_FIELDS[:14 if r["kind"] == "nested_fn" else 12]] for r in records]
+                output.write_text("{}\n" + "".join(json.dumps(r) + "\n" for r in arrays))
+                modmap.check_canary_items(crate, output)
+            check(rows)
+            for key, value in (("lo", 0), ("hi", 0), ("line", 999), ("path", "wrong")):
+                bad = copy.deepcopy(rows)
+                bad[0][key] = value
+                with self.subTest(key=key), self.assertRaises(modmap.ModmapError):
+                    check(bad)
+            for bad in ([], rows[1:], rows + [rows[0]], [r for r in rows if r is not header]):
+                with self.assertRaises(modmap.ModmapError):
+                    check(bad)
+            for mutation in ("normalized", "definition"):
+                bad = copy.deepcopy(rows)
+                row = next(r for r in bad if r["file"].endswith("items_crlf.rs")) if mutation == "normalized" else next(
+                    r for r in bad if r["path"] == "modmap_canary::items_probe::made_a")
+                raw = (crate / row["file"]).read_bytes()
+                if mutation == "normalized":
+                    for bound in ("lo", "hi"):
+                        row[bound] -= 3 + raw[:row[bound]].count(b"\r\n")
+                else:
+                    row["lo"] = raw.index(b"pub fn made_a() {}")
+                    row["hi"] = row["lo"] + len(b"pub fn made_a() {}")
+                with self.subTest(mutation=mutation), self.assertRaisesRegex(modmap.ModmapError, "anchor"):
+                    check(bad)
+            fixture = Path(tmp) / "canary"
+            shutil.copytree(crate / "src", fixture / "src")
+            crlf = fixture / "src/items_crlf.rs"
+            crlf.write_bytes(crlf.read_bytes().replace(b"\r\n", b"\n"))
+            with self.assertRaisesRegex(modmap.ModmapError, "BOM/CRLF"):
+                modmap.check_canary_items(fixture, output)
+
 
 class CiWiring(unittest.TestCase):
     def test_linux_script_checks_self_test_the_driver_without_a_wrapper(self) -> None:

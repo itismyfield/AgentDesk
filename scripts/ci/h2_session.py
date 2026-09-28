@@ -1,4 +1,4 @@
-"""Collect and seal an opt-in, cfg-only Clippy wrapper session."""
+"""Collect and seal compiler items from a Clippy wrapper session."""
 from __future__ import annotations
 
 import json
@@ -16,7 +16,7 @@ from h2_measure import LINTS, RO_LINTS, MeasureError
 
 ALLOWED = dict(release="1.94.1", commit="e408947bfd200af42db322daf0fadfe7e26d3bd1", cargo="cargo 1.94.1 ",
                clippy="clippy 0.1.94 (e408947bfd ", driver_rustc="1.94.1 (e408947bf 2026-03-25)")
-SCHEMA = "h2-session/1-cfg"
+SCHEMA = "h2-session/2"
 PROTECTED_ENV = ("CLIPPY_ARGS", "CLIPPY_CONF_DIR", "CLIPPY_TERMINAL_WIDTH", "MODMAP_SESSION_OUT",
                  "MODMAP_CFG_NONCE", "MODMAP_RUN_ID", "MODMAP_EXPECT_MANIFEST", "MODMAP_EXPECT_PACKAGE", "MODMAP_EXPECT_LIB")
 TARGET_CFG = {"x86_64-unknown-linux-gnu": ("x86_64", "linux", "gnu", "unknown", "64"),
@@ -24,7 +24,27 @@ TARGET_CFG = {"x86_64-unknown-linux-gnu": ("x86_64", "linux", "gnu", "unknown", 
 TARGET_KEYS = ("target_arch", "target_os", "target_env", "target_vendor", "target_pointer_width")
 OUTPUTS = ("session.json", "session.json.claim", "session.json.items-cfg.txt", "session.json.clippy-cfg.txt",
            "session.json.items.stdout", "session.json.items.stderr", "session.json.probe.stdout",
-           "session.json.probe.stderr", "clippy.jsonl", "cargo.stderr", "cargo.json")
+           "session.json.probe.stderr", "clippy.jsonl", "cargo.stderr", "cargo.json", "items.jsonl", "items.jsonl.sha256")
+
+
+def validate_items(data: dict, proof: dict, request: dict) -> None:
+    try:
+        body = data["items.jsonl"]
+        rows = [json.loads(line) for line in body.splitlines()]
+        receipt = json.loads(data["items.jsonl.sha256"])
+        count, digest = proof.get("items_records"), proof.get("items_sha256")
+        if (type(count) is not int or count <= 0 or count != len(rows) - 1 or not body.endswith(b"\n")
+                or digest != collect.digest(body) or receipt != dict(sha256=digest, records=count)
+                or type(receipt.get("records")) is not int):
+            raise ValueError("callback/file/proof digest or record count mismatch")
+        want = dict(schema=1, kind=request["kind"], root=str(Path(request["unit"]["manifest"]).parent),
+                    crate=request["unit"]["crate_name"], nonce=request["nonce"], run_id=request["run_id"], cfg_clippy=True)
+        if rows[0] != want or type(rows[0].get("schema")) is not int or rows[0].get("cfg_clippy") is not True:
+            raise ValueError("header mismatch")
+        for row in rows[1:]:
+            modmap.item_record(row)
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise MeasureError(f"session items: {exc}") from exc
 
 
 def check_extra(extra) -> None:
@@ -148,6 +168,7 @@ def validate(run: Path, request: dict) -> dict:
         raise MeasureError(f"session claim: {exc}") from exc
     if proof.get("schema") != SCHEMA:
         raise MeasureError("session proof schema mismatch")
+    validate_items(data, proof, request)
     for key in ("nonce", "run_id"):
         if proof.get(key) != request[key]:
             raise MeasureError(f"session {key} mismatch")
@@ -197,7 +218,7 @@ def validate(run: Path, request: dict) -> dict:
     if source_state(Path(request["repo"]), Path(expected["lib"]), Path(request["conf_dir"])) != request["source"]:
         raise MeasureError("session source changed")
     data["request.json"] = request_bytes
-    return dict(schema=collect.SCHEMA, kind="canary-cfg", manifest=str(run / "manifest.json"), run_dir=str(run),
+    return dict(schema=collect.SCHEMA, kind="canary-items", manifest=str(run / "manifest.json"), run_dir=str(run),
                 root=unit["root"], lane=request["lane"], run_id=request["run_id"], nonce=request["nonce"],
                 request=request, proof=proof, digests={name: collect.digest(body) for name, body in data.items()})
 
@@ -220,7 +241,7 @@ def session(root: Path, crate: Path, run_dir: Path, conf_dir: Path, lane: str, *
         run.mkdir(parents=True, exist_ok=True)
         (run / "start").touch()
         nonce, run_id = uuid.uuid4().hex, uuid.uuid4().hex
-        request = dict(schema=SCHEMA, kind="canary-cfg", unit=unit, repo=str(root), conf_dir=str(conf_dir),
+        request = dict(schema=SCHEMA, kind="canary-items", unit=unit, repo=str(root), conf_dir=str(conf_dir),
                        run_id=run_id, nonce=nonce, lane=lane, host=host, target=h2_env.LANES[lane], toolchain=toolchain,
                        cargo_config=configs,
                        source=source_state(root, Path(unit["lib"]), conf_dir))
