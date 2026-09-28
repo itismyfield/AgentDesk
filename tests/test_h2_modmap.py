@@ -36,6 +36,13 @@ DRIFTED_ROWS = [re.sub(r"#[1-9]\d*", "#0", row) for row in CANARY_ROWS]
 STUB_CARGO = r"""#!/usr/bin/env python3
 import json, os, pathlib, platform, shutil, sys
 args = sys.argv[1:]
+if os.environ.get("STUB_CALLS"):
+    with open(os.environ["STUB_CALLS"], "a") as calls: calls.write(json.dumps(args) + "\n")
+if os.environ.get("STUB_ENV_LOG"):
+    keys = ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET", "RUSTC_BOOTSTRAP", "CARGO_INCREMENTAL",
+            "RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER")
+    with open(os.environ["STUB_ENV_LOG"], "a") as log:
+        log.write(json.dumps({key: os.environ.get(key) for key in keys}) + "\n")
 if args[0] == "build":
     driver = pathlib.Path(args[args.index("--target-dir") + 1], "release/modmap-driver")
     driver.parent.mkdir(parents=True, exist_ok=True)
@@ -55,7 +62,7 @@ if action == "old":
 if os.environ.get("MODMAP_CFG_OUT"):
     cfg = pathlib.Path(os.environ["MODMAP_CFG_OUT"])
     proof = pathlib.Path(str(cfg) + ".invocation.json")
-    mode = os.environ.get("STUB_CFG", "ok")
+    mode = os.environ.get("STUB_CFG_" + os.environ.get("MODMAP_KIND", "").upper(), os.environ.get("STUB_CFG", "ok"))
     probes = [["feature", "h2_cfg_probe"], ["h2_probe_pair"], ["h2_probe_pair", ""],
               ["h2_probe_multi", "first"], ["h2_probe_multi", "second"],
               ["h2_probe_escape", 'quote=" slash=\\ newline=\n한글']]
@@ -75,6 +82,12 @@ if os.environ.get("MODMAP_CFG_OUT"):
     if mode == "target": atoms.remove(session[0])
     if mode == "none": sys.exit(0)
     cfg.write_text("{}" if mode == "schema" else json.dumps(sorted(atoms)))
+    if os.environ.get("MODMAP_RUN_ID"):
+        bound = dict(schema=1, run_id=os.environ["MODMAP_RUN_ID"], nonce=os.environ["MODMAP_CFG_NONCE"], atoms=sorted(atoms))
+        invocation.update(schema=1, run_id=bound["run_id"], kind=os.environ["MODMAP_KIND"], out=str(out),
+                          tsv=out.read_text() if out.exists() else "", env={"MODMAP_RUN_ID": bound["run_id"]})
+        if mode == "repost": bound["nonce"] = "0" * 32
+        if mode != "schema": cfg.write_text(json.dumps(bound))
     if mode != "no-proof": proof.write_text(json.dumps(invocation))
     if mode == "old": os.utime(cfg, ns=(0, 0))
     if mode == "old-proof": os.utime(proof, ns=(0, 0))
@@ -131,7 +144,7 @@ class Wrapper(unittest.TestCase):
         (self.root / h2.BASELINE_FILES[0]).unlink()
         # inert without a baseline: nothing runs, or only the canary, which still fails hard
         self.assertEqual(self.run_wrapper("--inert", STUB_CANARY="fail", STUB_REPO="fail"),
-                         (0, "h2-modmap: no baseline committed; inert no-op\n"))
+                         (0, "h2-modmap: no baseline committed; inert no-op; root=skipped\n"))
         code, output = self.run_wrapper("--inert", "--canary", STUB_REPO="fail")
         self.assertEqual((code, "repo map skipped" in output), (0, True), output)
         code, output = self.run_wrapper("--inert", "--canary", STUB_CANARY=drifted)
@@ -164,6 +177,24 @@ class Wrapper(unittest.TestCase):
                 self.assertEqual(json.loads(log.read_text())["reason"], "compiler-message")
                 self.assertIn("cargo: check failed", log.with_suffix(".stderr").read_text())
 
+    def test_shared_env_is_clean_and_bootstrap_is_driver_only(self) -> None:
+        log = self.maps / "env.jsonl"
+        code, output = self.run_wrapper(STUB_ENV_LOG=str(log), RUSTFLAGS="bad", CARGO_ENCODED_RUSTFLAGS="bad",
+                                        CARGO_BUILD_TARGET="foreign", RUSTC_BOOTSTRAP="bad", RUSTC_WRAPPER="cache",
+                                        CARGO_BUILD_RUSTC_WRAPPER="cache", CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="cache")
+        self.assertEqual(code, 0, output)
+        build, canary, root = [json.loads(line) for line in log.read_text().splitlines()]
+        for env in (build, canary, root):
+            for key in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET"):
+                self.assertIsNone(env[key], key)
+            self.assertEqual(env["CARGO_INCREMENTAL"], "0")
+            for key in ("RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"):
+                self.assertEqual(env[key], "", key)
+        self.assertEqual([env["RUSTC_BOOTSTRAP"] for env in (build, canary, root)], ["1", None, None])
+        self.assertEqual(build["RUSTC_WORKSPACE_WRAPPER"], "")
+        self.assertEqual(canary["RUSTC_WORKSPACE_WRAPPER"], root["RUSTC_WORKSPACE_WRAPPER"])
+        self.assertTrue(root["RUSTC_WORKSPACE_WRAPPER"].endswith("/release/modmap-driver"))
+
 class CiWiring(unittest.TestCase):
     def test_linux_script_checks_self_test_the_driver_without_a_wrapper(self) -> None:
         import yaml  # installed on the script-check runners
@@ -174,7 +205,7 @@ class CiWiring(unittest.TestCase):
         self.assertIn("rustc-dev", components)
         self.assertIn("llvm-tools", components)
         self.assertEqual((step.get("if"), step.get("env"), step["run"]),
-                         (None, {"RUSTC_WRAPPER": ""}, "python3 scripts/ci/h2_modmap.py --inert --canary"))
+                         (None, {"RUSTC_WRAPPER": ""}, "python3 scripts/ci/h2_modmap.py --lane linux --inert --canary"))
         self.assertLess(steps.index(toolchain), steps.index(step))
 
 if __name__ == "__main__":

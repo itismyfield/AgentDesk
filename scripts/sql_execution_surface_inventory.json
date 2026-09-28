@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "8f90ecb6a436cdce1c10841d390b3e09c3b9ba45",
+  "measured_at_sha": "2d7090106abe4aae70a6d5626ab02365d160641e",
   "records": [
     {
       "root": "migrations/postgres",
@@ -25372,6 +25372,33 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:c0550546632fe248665a3955cb9688e8a382878c2ff54d0a48b216b8d5683774"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/inflight/removal/custody_notice.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:5d5708edc0c7e682a9f211090ebdebf380489397537c11b3369d87d6394e17a7"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/inflight/removal/custody_notice_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b7daad8519a057f2f1727fbb373fab307006b9264d44d54d2423c41f3a8ead9e"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/inflight/removal/custody_notice_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:2a70852c94d3ca0a05e317ab2e870a069f396aaa805f8ac9d7818cfa9176086f"
     },
     {
       "root": "src",
