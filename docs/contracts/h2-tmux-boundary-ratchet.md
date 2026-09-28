@@ -133,9 +133,9 @@ map rc는 0=요청 작업 완료, 1=compile/canary/수집·검증·쓰기 실패
 B2 소유 산출물은 map run의 metadata manifest다. Clippy JSON/.d와 이를 묶는 receipt 생산·소비는 3b-A 소유다.
 map session cfg와 Clippy effective cfg의 동등성·admission 활성화를 이 manifest로 주장하지 않는다.
 
-### 비활성 Clippy 세션 계약
+### Canary Clippy 세션 계약
 
-`h2_session.session`은 호출자가 명시적으로 시작하는 cfg-only 기반이다. CI 진입점은 없다.
+`h2_session.session`은 cfg-only 기반이며 `h2_modmap.py`의 canary 검증에서 실행한다.
 `h2_env.environment("measure")`로 정리한 환경에서 Cargo와 버전 질의를 같은 crate cwd로 실행한다.
 `ALLOWED`는 rustc release/commit, Cargo, sysroot의 Clippy 경로/버전/연결 compiler, driver compiler를 검사한다.
 허용 조합과 host가 맞아야 metadata를 읽고 request를 만든다. metadata의 canonical manifest로 package를 고르고,
@@ -161,6 +161,21 @@ manifest kind는 `canary-cfg`다. root map 소비자는 이를 거부하고 매�
 items 생산을 추가할 때 proof를 `h2-session/2`로 승격하고 items digest/records를 필수화하며 cfg-only proof를 거부한다.
 도구 버전 갱신은 rust-toolchain.toml·CI·ALLOWED를 함께 바꾸고 cargo-clippy spy, cfg 자체 점검,
 cold/warm 진단 byte 일치, items 동일성, workspace 생산자/claim 시험 증거를 다시 제시한다.
+
+baseline이 없어도 `--inert --canary`는 map canary 뒤에 Clippy 세션을 실행하고, 이어서 빌드한 driver로
+`tests.test_h2_session_driver`와 실제 workspace e2e `tests.test_h2_session_e2e`를 실행한다.
+CI 단계는 두 모듈을 `--suite`로 명시하며 `--canary`는 둘 중 하나라도 빠지거나 겹치면 rc 2로 거부한다.
+각 모듈은 최소 시험 수 이상 실행되고 skip 없이 `OK`여야 한다.
+세션 target은 매 실행 UUID run 아래 새 `session-target`이며 기존 디렉터리가 있으면 거부한다.
+공유 target 삭제 없이 cold build.rs 실행을 보장하고 proof cfg에 `clippy`와 `h2_items_bs_clippy`를 요구한다.
+workspace fixture는 helper lib·proc-macro·독립 member를 포함하며 root와 다른 member의 소스 앞부분을 공유한다.
+두 의존성 대조군은 cold/warm `compiler-message` JSONL을 실제 `cargo clippy`와 byte 비교한다.
+cfg-only items 자식은 `after_expansion`에서 멈추므로 early lint(`unused_imports` 등)를 내지 않는다.
+fixture proc-macro가 확장 중 stderr에 쓰는 rustc 형식 진단 1줄은 자식 로그에만 있고 JSONL에는 한 번만 나와야 한다.
+`--package` 고정 아래 `-j 2` member 의존성 위임, `--workspace` 거부, 다른 member 직접 진입의 위임·쓰기 0,
+`cdylib+rlib --all-targets`, 선점 claim의 쓰기 0, 같은 unit 동시 진입을 검사한다.
+e2e는 먼저 빌드한 release driver를 사용한다. 실패, 기대보다 적은 시험 수, skip은 canary 실패다. 증거는 `target/h2/session-e2e`에 남긴다.
+필수 Linux canary 동작이 바뀌므로 해당 head의 Linux green이 머지 조건이다. cfg-only 봉인은 items 매핑에 쓰지 않는다.
 
 두 호스트의 결과를 모은 뒤 실행한다:
 

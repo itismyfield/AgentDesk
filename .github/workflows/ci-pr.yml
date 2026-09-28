@@ -1797,10 +1797,11 @@ jobs:
 
       # H2 R-O module map: module/cfg driver self-tests are required; only the repo map stays inert until activation.
       # sccache cannot wrap the driver, and a cached compile would skip writing the map.
+      # --canary then runs each --suite against the driver it built; skips or a short run fail the step.
       - name: H2 module map (linux, inert)
         env:
           RUSTC_WRAPPER: ""
-        run: python3 scripts/ci/h2_modmap.py --lane linux --inert --canary
+        run: python3 scripts/ci/h2_modmap.py --lane linux --inert --canary --suite tests.test_h2_session_driver --suite tests.test_h2_session_e2e
 
       - name: Upload maintainability audit artifact
         if: always()
