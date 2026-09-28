@@ -7,7 +7,8 @@ use crate::services::platform::tmux::PaneLiveness;
 /// [`should_reap_abandoned_rebind_origin`]'s `== None` owner conjunct, and is
 /// shape-identical to a live-but-idle row (#3154/#3540 require live Watcher
 /// rebinds to survive restarts). Only a *runtime* probe can tell them apart,
-/// hence this trait, stubbable in tests.
+/// tests inject the runtime verdict through this trait.
+#[cfg(test)]
 pub(super) trait WatcherLiveness {
     /// True only when the watcher owning `state` is *provably* dead **or
     /// idle-stuck**: no runtime activity has advanced within
@@ -16,27 +17,23 @@ pub(super) trait WatcherLiveness {
     fn is_proven_dead(&self, state: &InflightTurnState) -> bool;
 }
 
-/// #3635: production [`WatcherLiveness`] using the same signals the
+/// The production probe uses the same signals the
 /// stall-watchdog (#3169/#3629) trusts: tmux pane liveness + runtime activity.
-pub(super) struct RuntimeWatcherLiveness;
-
-impl WatcherLiveness for RuntimeWatcherLiveness {
-    fn is_proven_dead(&self, state: &InflightTurnState) -> bool {
-        // No session name to probe => cannot prove death => never reap.
-        let Some(session) = state.tmux_session_name.as_deref() else {
-            return false;
-        };
-        let session = session.trim();
-        if session.is_empty() {
-            return false;
-        }
-        // A transient probe failure is "unknown", not "dead" — preserve.
-        let pane = crate::services::tmux_diagnostics::tmux_session_pane_liveness(session);
-        if pane == PaneLiveness::ProbeError {
-            return false;
-        }
-        proven_dead_from_signals(pane, watcher_runtime_activity_recent(session))
+pub(super) fn runtime_watcher_is_proven_dead(state: &InflightTurnState) -> bool {
+    // No session name to probe => cannot prove death => never reap.
+    let Some(session) = state.tmux_session_name.as_deref() else {
+        return false;
+    };
+    let session = session.trim();
+    if session.is_empty() {
+        return false;
     }
+    // A transient probe failure is "unknown", not "dead" — preserve.
+    let pane = crate::services::tmux_diagnostics::tmux_session_pane_liveness(session);
+    if pane == PaneLiveness::ProbeError {
+        return false;
+    }
+    proven_dead_from_signals(pane, watcher_runtime_activity_recent(session))
 }
 
 /// Pure proven-dead/idle-stuck decision from the two probed signals,
@@ -399,7 +396,7 @@ pub(in crate::services::discord) fn reap_dead_watcher_rebind_origin_locked(
 
 /// The placeholder sweeper's entry point for the dead-watcher rebind-origin
 /// reap. Cheapest-first: fs-only structural gate, then the
-/// [`RuntimeWatcherLiveness`] probe (`spawn_blocking`, outside any lock),
+/// [`runtime_watcher_is_proven_dead`] probe (`spawn_blocking`, outside any lock),
 /// then the locked re-validate. Returns `true` only when genuinely unlinked.
 ///
 /// Not called from the boot path: a just-restarted watcher's session reads
@@ -416,7 +413,7 @@ pub(in crate::services::discord) async fn sweep_reap_dead_watcher_rebind_origin(
     let probe_state = state.clone();
     // A spawn_blocking join failure (panic/shutdown) is treated as unknown ⇒ preserve.
     let proven_dead =
-        tokio::task::spawn_blocking(move || RuntimeWatcherLiveness.is_proven_dead(&probe_state))
+        tokio::task::spawn_blocking(move || runtime_watcher_is_proven_dead(&probe_state))
             .await
             .unwrap_or(false);
     if !proven_dead {

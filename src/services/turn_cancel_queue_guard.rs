@@ -44,21 +44,20 @@ pub(crate) struct CancelQueueLoss {
     /// Removed with no durable record anywhere. Non-empty is the contract
     /// violation itself.
     pub(crate) unpreserved_message_ids: Vec<u64>,
-    /// Depth of the channel queue after the cancel, when the mailbox answered.
-    /// A mailbox that never answered is indistinguishable from an empty one
-    /// here (#6046), so this is a report, never a basis for a claim.
+    /// Depth of the channel queue after the cancel; `None` when the mailbox never answered.
     pub(crate) queue_depth_after: Option<usize>,
     /// Whether every queue this cancel could have taken from was readable.
     pub(crate) observed: bool,
 }
 
 impl CancelQueueLoss {
-    /// `None` when a queue this cancel could have emptied was never read. Two
-    /// blind witnesses do not compose into a proof, so an unread queue means
-    /// this cancel does not get to answer the question at all.
+    /// `Some(false)` once any removal went unrecorded, whatever else was unread.
+    /// Otherwise `None` when a queue this cancel could have emptied was never read.
     pub(crate) fn loss_recorded(&self) -> Option<bool> {
-        self.observed
-            .then(|| self.unpreserved_message_ids.is_empty())
+        if !self.unpreserved_message_ids.is_empty() {
+            return Some(false);
+        }
+        self.observed.then_some(true)
     }
 }
 
@@ -76,9 +75,12 @@ pub(crate) async fn capture_queue_before_cancel(
     let Some(handle) = ChannelMailboxRegistry::global_handle(channel_id) else {
         return CancelQueueCapture::default();
     };
-    CancelQueueCapture {
-        items: handle.snapshot().await.intervention_queue,
-        observed: true,
+    match handle.try_snapshot().await {
+        Ok(snapshot) => CancelQueueCapture {
+            items: snapshot.intervention_queue,
+            observed: true,
+        },
+        Err(_) => CancelQueueCapture::default(),
     }
 }
 
@@ -109,9 +111,11 @@ pub(crate) async fn record_queue_loss_after_cancel(
     };
 
     let snapshot = match ChannelMailboxRegistry::global_handle(channel_id) {
-        Some(handle) => Some(handle.snapshot().await),
+        Some(handle) => handle.try_snapshot().await.ok(),
         None => None,
     };
+    // An unread post-cancel queue proves nothing kept, so the cancel gets no verdict.
+    outcome.observed &= snapshot.is_some();
     outcome.queue_depth_after = snapshot
         .as_ref()
         .map(|snapshot| snapshot.intervention_queue.len());
@@ -453,5 +457,72 @@ mod tests {
             None,
             "a disk queue that vanished unseen must not be reported as fully recorded"
         );
+    }
+
+    type BreakMailbox = fn(&ChannelMailboxRegistry, ChannelId);
+    const DEAD_MAILBOXES: [(&str, BreakMailbox); 2] = [
+        (
+            "closed",
+            ChannelMailboxRegistry::insert_unreachable_for_test,
+        ),
+        (
+            "reply-dropping",
+            ChannelMailboxRegistry::insert_reply_dropping_for_test,
+        ),
+    ];
+
+    /// A mailbox that exists but never answers is unread, not an empty queue.
+    #[tokio::test]
+    async fn a_dead_mailbox_capture_reports_no_verdict() {
+        for (offset, (kind, kill)) in DEAD_MAILBOXES.into_iter().enumerate() {
+            let channel_id = ChannelId::new(6_038_301 + offset as u64);
+            kill(&ChannelMailboxRegistry::default(), channel_id);
+            let capture = capture_queue_before_cancel(&target(channel_id)).await;
+            assert!(
+                !capture.observed,
+                "{kind}: a dead mailbox was read as empty"
+            );
+            assert_eq!(
+                record(&target(channel_id), &capture, false)
+                    .await
+                    .loss_recorded(),
+                None,
+                "{kind}: an unread queue must not be reported as a kept promise"
+            );
+        }
+    }
+
+    /// The mailbox dies between capture and record: nothing is provably kept, and an
+    /// unrecorded removal still reports `false` rather than hiding behind the unread queue.
+    #[tokio::test]
+    async fn a_mailbox_that_dies_after_capture_keeps_nothing_and_still_reports_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        for (offset, (kind, kill)) in DEAD_MAILBOXES.into_iter().enumerate() {
+            let channel_id = ChannelId::new(6_038_311 + offset as u64);
+            let registry = ChannelMailboxRegistry::default();
+            registry
+                .handle(channel_id)
+                .replace_queue(
+                    vec![queued(9_311, "captured, then unreadable")],
+                    QueuePersistenceContext::new(&ProviderKind::Claude, "", None),
+                )
+                .await;
+            let capture = capture_queue_before_cancel(&target(channel_id)).await;
+            assert_eq!(
+                ids(&capture),
+                vec![9_311],
+                "{kind}: fixture must capture one item"
+            );
+            kill(&registry, channel_id);
+
+            let outcome = record(&target(channel_id), &capture, false).await;
+            assert_eq!(
+                outcome.queue_depth_after, None,
+                "{kind}: no reading, no depth"
+            );
+            assert_eq!(outcome.unpreserved_message_ids, vec![9_311], "{kind}");
+            assert_eq!(outcome.loss_recorded(), Some(false), "{kind}");
+        }
     }
 }
