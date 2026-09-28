@@ -1287,6 +1287,7 @@ src/
 │   │   ├── tui_direct_pending_start/
 │   │   │   ├── tests/
 │   │   │   │   └── retire_tests.rs
+│   │   │   ├── restore_gate.rs
 │   │   │   ├── state.rs
 │   │   │   ├── tests.rs
 │   │   │   └── watcher_cancel.rs
