@@ -6,7 +6,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::metrics::MetricsSnapshot;
-use super::root::StoredRecord;
+use super::root::{ShadowRoot, StoredRecord};
 use super::tap::CHECKPOINT_SECS;
 use super::{
     DeriveOutput, DiffCause, DiffClass, DiffRecord, IDENTITY_VERSION, MATCH_WINDOW,
@@ -21,6 +21,8 @@ pub const MIN_TOOL_TURNS: usize = 3;
 pub const MIN_SPLIT_TURNS: usize = 1;
 /// The fixed measurement window; a longer one would admit turns the design does not count.
 pub const WINDOW_MINUTES: i64 = 120;
+/// One minute allows CLI scheduling jitter (six checkpoints), without extending evidence collection.
+pub const REPORT_GRACE_SECS: i64 = 60;
 /// Criteria the records cannot show; the coordinator records them next to the verdict.
 pub const EXTERNAL_CHECKS: [&str; 2] = ["write_zero_audit", "resource_limits"];
 
@@ -258,7 +260,32 @@ fn record_time(
     }
 }
 
-pub fn evaluate(input: &ReportInput) -> ReportOutcome {
+/// A durable, exclusive receipt consumes the attempt even when evaluation fails or the process exits.
+pub fn evaluate_once(root: &ShadowRoot, input: &ReportInput) -> std::io::Result<ReportOutcome> {
+    let opened = input.records.iter().position(|line| {
+        matches!(&line.record, ShadowRecord::WindowStart { t0, .. } if (input.from..=input.to).contains(t0))
+    });
+    let mut repeated = false;
+    if let Some(opened) = opened
+        && let ShadowRecord::WindowStart { t0, .. } = &input.records[opened].record
+        && let Some(run) = (0..opened)
+            .rev()
+            .find(|i| matches!(input.records[*i].record, ShadowRecord::Header { .. }))
+    {
+        repeated =
+            !root.claim_report_attempt(run + 1, &input.records[run], *t0, input.reported_at)?;
+    }
+    let mut outcome = evaluate(input);
+    if repeated {
+        outcome
+            .failures
+            .push("report_attempt_already_recorded".into());
+        outcome.pass = false;
+    }
+    Ok(outcome)
+}
+
+fn evaluate(input: &ReportInput) -> ReportOutcome {
     let (mut failures, mut warnings) = (Vec::new(), Vec::new());
     let records: Vec<&ShadowRecord> = input.records.iter().map(|s| &s.record).collect();
     let starts: Vec<_> = (records.iter().enumerate())
@@ -354,6 +381,9 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
             "reported before {late}, when the last diffs are judged"
         ));
     }
+    if input.reported_at > late + Duration::seconds(REPORT_GRACE_SECS) {
+        failures.push("report_grace_exceeded".into());
+    }
     // Evidence is dated when read, so one run must read from t0 until `late` without restarting.
     let opened = starts.first().map_or(records.len(), |(line, ..)| *line);
     let header_at = |i: &usize| matches!(records[*i], ShadowRecord::Header { .. });
@@ -415,6 +445,26 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
         failures.push(format!(
             "tap collection not recorded every {stall} from t0 to {late}"
         ));
+    }
+    // Later runs can overwrite unit evidence; measure again in a single uninterrupted run.
+    if end < records.len() {
+        failures.push("later_run_present".into());
+    }
+    let mut sealed_in_run = HashSet::new();
+    if records[run..end].iter().any(|record| match record {
+        ShadowRecord::Derived {
+            output: DeriveOutput::Sealed(unit),
+        } => !sealed_in_run.insert(&unit.unit_key),
+        _ => false,
+    }) {
+        failures.push("duplicate_seal_in_run".into());
+    }
+    // A pre-window anomaly can leave its feed halted throughout the measurement.
+    if input.records[run..end]
+        .iter()
+        .any(|line| line.at <= late && matches!(line.record, ShadowRecord::Anomaly { .. }))
+    {
+        failures.push("capture_anomaly_in_run".into());
     }
     let (mut header, mut stale, mut collected, mut lost) = (None, 0, None, false);
     let mut halted = 0;
@@ -604,8 +654,15 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
             counted.len()
         ));
     }
-    // Completion is proven per unit by a terminal diff, never inferred from elapsed time.
-    let decided: HashSet<&UnitKey> = (records.iter())
+    // Only evidence stored by `late` can prove completion; later rows must not repair this window.
+    let completion_records = || {
+        input
+            .records
+            .iter()
+            .filter(|line| line.at <= late)
+            .map(|line| &line.record)
+    };
+    let decided: HashSet<&UnitKey> = completion_records()
         .filter_map(|r| match r {
             ShadowRecord::Diff { diff } => diff.unit_key.as_ref(),
             _ => None,
@@ -620,7 +677,7 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
         .len();
     let windowless = uncounted.get("no_window").copied().unwrap_or(0) as u64;
     // A window Legacy message is settled once a diff names it or it retired deleted.
-    let settled: HashSet<u64> = (records.iter())
+    let settled: HashSet<u64> = completion_records()
         .flat_map(|r| match r {
             ShadowRecord::Diff { diff } => diff.legacy_msg_ids.clone(),
             ShadowRecord::Legacy { msg } if msg.deleted => vec![msg.msg_id],
@@ -1399,7 +1456,7 @@ mod tests {
             let mut records = stored(&passing());
             records.retain(|s| !stalled || s.at <= t(119) || s.at > t(minutes));
             let records = inserted(records, t(minutes), &gap);
-            judge_stored(&records, &[], &claude(), t(120), t(140)).failures
+            judge_stored(&records, &[], &claude(), t(120), t(131)).failures
         };
         // Lost and collected at t1+11m, after every unit of the window was judged.
         assert_eq!(judge_gap_at(131, false), Vec::<String>::new());
@@ -1418,7 +1475,7 @@ mod tests {
     }
 
     #[test]
-    fn an_observer_restart_before_the_last_judgement_fails_the_window() {
+    fn an_observer_restart_even_after_the_last_judgement_fails_with_later_run_present() {
         let restart = |minutes| ShadowRecord::Header {
             schema_version: SCHEMA_VERSION,
             identity_version: IDENTITY_VERSION,
@@ -1427,7 +1484,7 @@ mod tests {
         };
         let judge_restart_at = |minutes| {
             let records = inserted(stored(&passing()), t(minutes), &[restart(minutes)]);
-            judge_stored(&records, &[], &claude(), t(120), t(140)).failures
+            judge_stored(&records, &[], &claude(), t(120), t(131)).failures
         };
         // A restart at t119 drops held captures, pending units and unretired Legacy rows.
         let failures = judge_restart_at(119);
@@ -1439,12 +1496,12 @@ mod tests {
             failures[1].starts_with("tap collection not recorded"),
             "{failures:?}"
         );
-        assert_eq!(failures.len(), 2);
-        assert_eq!(judge_restart_at(131), Vec::<String>::new());
+        assert_eq!(failures[2..], ["later_run_present"]);
+        assert_eq!(judge_restart_at(131), ["later_run_present"]);
     }
 
     #[test]
-    fn a_thread_bound_in_the_window_stays_covered_after_a_restart_or_unbind() {
+    fn a_thread_stays_covered_after_restart_but_the_report_fails_with_later_run_present() {
         use crate::services::tui_o::shadow::{BindingChange, SourceBinding};
         let bind = |channel_id, at, bound: bool| {
             let (provider, source) = (ShadowProvider::Claude, src(1));
@@ -1477,8 +1534,9 @@ mod tests {
         assert_eq!(threads, [(7, "claude".to_string())]);
         let channels: Vec<(u64, &str)> = threads.iter().map(|(c, p)| (*c, p.as_str())).collect();
         let population = snapshot(&["claude_tui"], &channels, Vec::new());
-        let outcome = judge_stored(&records, &[], &population, t(120), t(140));
-        assert!(outcome.pass, "{:?}", outcome.failures);
+        let outcome = judge_stored(&records, &[], &population, t(120), t(131));
+        assert_eq!(outcome.failures, ["later_run_present"]);
+        assert!(!outcome.pass);
         // Bound only before t0 or only after t1: no evidence for this window.
         let outside = [
             bind(8, t(-9), true),
@@ -1515,7 +1573,7 @@ mod tests {
                 record: ShadowRecord::TapGap { dropped: 0 },
             }));
             records.sort_by_key(|line| line.at);
-            judge_stored(&records, &[], &claude(), t(120), t(140)).failures
+            judge_stored(&records, &[], &claude(), t(120), t(131)).failures
         };
         assert_eq!(judge_restart(-1, 0), Vec::<String>::new());
         // Stored after t0, whether or not its own clock claims a start before t0.
@@ -1556,7 +1614,7 @@ mod tests {
         ];
         let judge_blocked_at = |at| {
             let records = inserted(stored(&passing()), at, &blocked);
-            judge_stored(&records, &[], &claude(), t(120), t(140))
+            judge_stored(&records, &[], &claude(), t(120), t(131))
         };
         // Read in the window but stored later: held for a late window line, or the next pass.
         let near = [
@@ -1641,9 +1699,9 @@ mod tests {
         let sample = passing()
             .into_iter()
             .skip(2)
-            .map(|record| StoredRecord { at: t(131), record });
+            .map(|record| StoredRecord { at: t(130), record });
         records.extend(sample);
-        judge_stored(&records, &[], &claude(), t(120), t(140))
+        judge_stored(&records, &[], &claude(), t(120), t(131))
     }
 
     #[test]
@@ -1673,7 +1731,7 @@ mod tests {
     #[test]
     fn a_window_line_stored_out_of_reach_or_a_second_window_in_the_run_fails() {
         let judge_rows = |records: &[StoredRecord]| {
-            judge_stored(records, &[], &claude(), t(120), t(140)).failures
+            judge_stored(records, &[], &claude(), t(120), t(131)).failures
         };
         let recorded = |at| {
             let mut records = stored(&passing());
@@ -1706,7 +1764,108 @@ mod tests {
     }
 
     #[test]
-    fn a_capture_anomaly_near_the_window_fails_it() {
+    fn a_later_run_resealing_an_unknown_unit_fails_with_later_run_present() {
+        let mut records = stored(&passing());
+        let k = key(90, UnitKind::Body);
+        let mut unknown = matched(k.clone());
+        if let ShadowRecord::Diff { diff } = &mut unknown {
+            diff.class = DiffClass::LegacyMissing;
+            diff.cause = DiffCause::Unknown;
+        }
+        records = inserted(records, t(10), &[sealed(k.clone(), 1)]);
+        records = inserted(records, t(15), &[unknown]);
+        let before = judge_stored(&records, &[], &claude(), t(120), t(130));
+        assert!(!before.pass);
+        assert_eq!(before.failures, ["1 diffs still Unknown"]);
+        let mut restart = header(IDENTITY_VERSION);
+        if let ShadowRecord::Header { started_at, .. } = &mut restart {
+            *started_at = t(131);
+        }
+        records = inserted(records, t(131), &[restart]);
+        let next = ShadowRecord::WindowStart {
+            t0: t(132),
+            sources: Vec::new(),
+        };
+        let attach = ShadowRecord::Attach {
+            source: src(2),
+            attach_extent: 100,
+            capture_start: 100,
+            attached_at: t(132),
+        };
+        records = inserted(records, t(132), &[next, attach]);
+        let mut resealed = sealed(k, 1);
+        if let ShadowRecord::Derived {
+            output: DeriveOutput::Sealed(unit),
+        } = &mut resealed
+        {
+            unit.sealed_at = t(133);
+            unit.source_range.source = src(2);
+        }
+        records = inserted(records, t(133), &[resealed]);
+        let after = judge_stored(&records, &[], &claude(), t(120), t(131));
+        assert_eq!(after.failures, ["later_run_present"]);
+        assert!(!after.pass);
+    }
+
+    #[test]
+    fn a_duplicate_seal_in_the_run_fails_even_outside_the_window() {
+        for at in [t(5), t(133)] {
+            let mut duplicate = sealed(key(0, UnitKind::Body), 1);
+            if let ShadowRecord::Derived {
+                output: DeriveOutput::Sealed(unit),
+            } = &mut duplicate
+            {
+                unit.sealed_at = at;
+            }
+            let records = inserted(stored(&passing()), at, &[duplicate]);
+            let outcome = judge_stored(&records, &[], &claude(), t(120), t(131));
+            assert_eq!(outcome.failures, ["duplicate_seal_in_run"], "{at}");
+            assert!(!outcome.pass);
+        }
+    }
+
+    #[test]
+    fn a_feed_lost_six_minutes_before_the_window_fails_despite_other_feed_samples() {
+        let mut records = passing();
+        if let ShadowRecord::Header { started_at, .. } = &mut records[0] {
+            *started_at = t(-10);
+        }
+        let attach = ShadowRecord::Attach {
+            source: src(2),
+            attach_extent: 100,
+            capture_start: 100,
+            attached_at: t(-8),
+        };
+        let anomaly = ShadowRecord::Anomaly {
+            anomaly: SourceAnomaly {
+                source: src(2),
+                kind: SourceAnomalyKind::Shrunk,
+                captured_through: 500,
+                detail: String::new(),
+            },
+        };
+        records.splice(1..1, [attach, anomaly]);
+        assert!(attached_sources(records[..3].iter()).is_empty());
+        let mut records = stored(&records);
+        records[1].at = t(-8);
+        records[2].at = t(-6);
+        let outcome = evaluate(&ReportInput {
+            records: &records,
+            manifest: &[],
+            population: &snapshot(&["claude_tui"], &[(7, "claude"), (8, "claude")], Vec::new()),
+            allowlist: &[7, 8],
+            from: t(-1),
+            to: t(120),
+            reported_at: t(130),
+            classify: &ClassifyInput::Absent,
+        });
+        assert_eq!(outcome.total_turns, 30);
+        assert_eq!(outcome.failures, ["capture_anomaly_in_run"]);
+        assert!(!outcome.pass);
+    }
+
+    #[test]
+    fn a_capture_anomaly_even_six_minutes_before_the_window_fails_with_capture_anomaly_in_run() {
         let anomaly = SourceAnomaly {
             source: src(1),
             kind: SourceAnomalyKind::Shrunk,
@@ -1718,12 +1877,16 @@ mod tests {
                 anomaly: anomaly.clone(),
             }];
             let records = inserted(stored(&passing()), at, &halted);
-            judge_stored(&records, &[], &claude(), t(120), t(140)).failures
+            judge_stored(&records, &[], &claude(), t(120), t(131)).failures
         };
-        let halted = ["1 capture anomalies that halted a source"];
+        let halted = [
+            "capture_anomaly_in_run",
+            "1 capture anomalies that halted a source",
+        ];
         assert_eq!(judge_anomaly_at(t(60)), halted);
         assert_eq!(judge_anomaly_at(t(-4)), halted);
-        assert_eq!(judge_anomaly_at(t(-6)), Vec::<String>::new());
+        assert_eq!(judge_anomaly_at(t(-6)), ["capture_anomaly_in_run"]);
+        assert_eq!(judge_anomaly_at(t(130)), halted);
         assert_eq!(judge_anomaly_at(t(131)), Vec::<String>::new());
     }
 
@@ -1741,7 +1904,7 @@ mod tests {
         };
         let judge_legacy = |rows: &[ShadowRecord]| {
             let records = inserted(stored(&passing()), t(119), rows);
-            judge_stored(&records, &[], &claude(), t(120), t(140)).failures
+            judge_stored(&records, &[], &claude(), t(120), t(131)).failures
         };
         // Seen when created but still open at the report: its extra or duplicate row may follow.
         let open = ["1 window Legacy messages without a terminal diff"];
@@ -1751,5 +1914,202 @@ mod tests {
         let deleted = [msg(5, 119, false), msg(5, 119, true)];
         assert_eq!(judge_legacy(&deleted), Vec::<String>::new());
         assert_eq!(judge_legacy(&[msg(5, 121, false)]), Vec::<String>::new());
+    }
+
+    fn open_legacy() -> ShadowRecord {
+        ShadowRecord::Legacy {
+            msg: LegacyMsg {
+                msg_id: 5,
+                channel_id: 7,
+                created_at: t(119),
+                edits: Vec::new(),
+                deleted: false,
+                content_sha256: String::new(),
+            },
+        }
+    }
+
+    fn legacy_settlement(deleted: bool) -> ShadowRecord {
+        let mut record = open_legacy();
+        if deleted {
+            if let ShadowRecord::Legacy { msg } = &mut record {
+                msg.deleted = true;
+            }
+            record
+        } else {
+            ShadowRecord::Diff {
+                diff: DiffRecord {
+                    channel_id: 7,
+                    unit_key: None,
+                    class: DiffClass::Match,
+                    legacy_msg_ids: vec![5],
+                    cause: DiffCause::Expected,
+                },
+            }
+        }
+    }
+
+    fn attempt(
+        root: &ShadowRoot,
+        records: &[StoredRecord],
+        classify: &ClassifyInput,
+    ) -> ReportOutcome {
+        evaluate_once(
+            root,
+            &ReportInput {
+                records,
+                manifest: &[],
+                population: &claude(),
+                allowlist: &[7],
+                from: t(-1),
+                to: t(120),
+                reported_at: t(131),
+                classify,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn report_time_is_limited_to_late_through_sixty_seconds_after_late() {
+        for (offset, pass) in [(-1, false), (0, true), (60, true), (61, false)] {
+            let outcome = judge_at(
+                &passing(),
+                &[],
+                &claude(),
+                t(120),
+                t(130) + Duration::seconds(offset),
+            );
+            assert_eq!(outcome.pass, pass, "{offset}: {:?}", outcome.failures);
+            if offset == 61 {
+                assert_eq!(outcome.failures, ["report_grace_exceeded"]);
+            }
+        }
+    }
+
+    #[test]
+    fn post_late_deleted_or_terminal_evidence_cannot_settle_a_legacy_message() {
+        for deleted in [true, false] {
+            for seconds in [0, 1, 60] {
+                let records = inserted(stored(&passing()), t(119), &[open_legacy()]);
+                let records = inserted(
+                    records,
+                    t(130) + Duration::seconds(seconds),
+                    &[legacy_settlement(deleted)],
+                );
+                let outcome = judge_stored(&records, &[], &claude(), t(120), t(131));
+                let expected = if seconds == 0 {
+                    vec![]
+                } else {
+                    vec!["1 window Legacy messages without a terminal diff"]
+                };
+                assert_eq!(
+                    outcome.failures, expected,
+                    "deleted={deleted}, seconds={seconds}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn post_late_terminal_evidence_cannot_decide_a_window_unit() {
+        let unit = key(99, UnitKind::Body);
+        for seconds in [0, 1, 60] {
+            let records = inserted(stored(&passing()), t(119), &[sealed(unit.clone(), 1)]);
+            let records = inserted(
+                records,
+                t(130) + Duration::seconds(seconds),
+                &[matched(unit.clone())],
+            );
+            let outcome = judge_stored(&records, &[], &claude(), t(120), t(131));
+            let expected = if seconds == 0 {
+                vec![]
+            } else {
+                vec!["1 window units without a terminal diff"]
+            };
+            assert_eq!(outcome.failures, expected, "seconds={seconds}");
+        }
+    }
+
+    #[test]
+    fn repeated_report_fails_even_after_deleted_terminal_or_classification_improves() {
+        for deleted in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = ShadowRoot::under(dir.path()).unwrap();
+            let records = inserted(stored(&passing()), t(119), &[open_legacy()]);
+            let first = evaluate_once(
+                &root,
+                &ReportInput {
+                    records: &records,
+                    manifest: &[],
+                    population: &claude(),
+                    allowlist: &[7],
+                    from: t(-1),
+                    to: t(120),
+                    reported_at: t(130),
+                    classify: &ClassifyInput::Absent,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                first.failures,
+                ["1 window Legacy messages without a terminal diff"]
+            );
+            let improved = inserted(records, t(131), &[legacy_settlement(deleted)]);
+            let reopened = ShadowRoot::under(dir.path()).unwrap();
+            let second = attempt(&reopened, &improved, &ClassifyInput::Absent);
+            assert!(!second.pass);
+            assert!(
+                second
+                    .failures
+                    .iter()
+                    .any(|f| f == "report_attempt_already_recorded"),
+                "{:?}",
+                second.failures
+            );
+            let json = serde_json::json!({"report": second});
+            assert_eq!(
+                json["report"]["failures"],
+                serde_json::json!(second.failures)
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = ShadowRoot::under(dir.path()).unwrap();
+        let records = stored(&passing());
+        assert!(
+            !attempt(
+                &root,
+                &records,
+                &ClassifyInput::Unreadable("missing".into())
+            )
+            .pass
+        );
+        assert!(judge_stored(&records, &[], &claude(), t(120), t(131)).pass);
+        let improved = attempt(&root, &records, &ClassifyInput::Absent);
+        assert_eq!(improved.failures, ["report_attempt_already_recorded"]);
+        assert!(!improved.pass);
+    }
+
+    #[test]
+    fn concurrent_report_attempts_allow_exactly_one_verdict() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = ShadowRoot::under(dir.path()).unwrap();
+        let records = stored(&passing());
+        let barrier = std::sync::Barrier::new(8);
+        let passed = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        attempt(&root, &records, &ClassifyInput::Absent).pass
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| usize::from(h.join().unwrap()))
+                .sum::<usize>()
+        });
+        assert_eq!(passed, 1);
     }
 }

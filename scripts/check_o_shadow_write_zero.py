@@ -26,7 +26,7 @@ READ_ONLY = {"std::fs::File", "std::fs::File::open", "std::fs::Metadata", "std::
              "std::os::unix::fs::MetadataExt", "std::os::unix::fs::MetadataExt::nlink"}
 # Writer items allowed only in root.rs; their constructors must sit inside ROOT_WRITERS functions.
 ROOT_ONLY = ("std::fs::OpenOptions", "std::fs::DirBuilder", "std::os::unix::fs::OpenOptionsExt", "libc::O_NOFOLLOW", "std::io::Write")
-ROOT_WRITERS = {"under", "open"}
+ROOT_WRITERS = {"under", "open", "claim_report_attempt"}
 DENIED = ("std::net", "std::process", "std::env::set_var", "std::env::remove_var", "std::io::Write", "std::fs", "std::os", "libc",
           "tokio::fs", "tokio::net", "tokio::process", "tokio::io")
 TOKENS = [
@@ -70,6 +70,9 @@ def resolve(path: str, module: str, aliases: dict[str, str]) -> str:
     return "::".join(base + (segments[1:] if segments[:1] == ["self"] else segments))
 
 def verdict(path: str, in_root: bool) -> str | None:
+    # Only the root owner may flush its receipt directory entries through the canonical helper.
+    if in_root and path == "crate::services::discord::runtime_store::fsync_parent_dir":
+        return None
     if path == SHADOW_MODULE or path.startswith(SHADOW_MODULE + "::"):
         return None
     root = path.split("::")[0]
@@ -126,6 +129,7 @@ def scan_cli(name: str, text: str) -> list[str]:
             for number, line in enumerate(code.split("\n"), 1) if CLI_DENIED.search(line)]
 
 BAD = [
+    ("fn f() { crate::services::discord::runtime_store::fsync_parent_dir(p); }", False),
     ("fn f(ctx: &Ctx) { ctx.http.say(1); }", False),
     ("fn f() { use std::fs::{write}; let _ = write(p, b); }", False),
     ("fn f() { let _ = crate::services::platform::tmux::send_literal(a, b); }", False),
@@ -145,6 +149,7 @@ BAD = [
     ("#[cfg(test)]\nmod tests {\n}\nfn f() { std::fs::write(p, b); }\n", False),
 ]
 GOOD = [
+    ("fn claim_report_attempt() { let _ = std::fs::OpenOptions::new(); crate::services::discord::runtime_store::fsync_parent_dir(p); }", True),
     ("use std::fs::OpenOptions;\nfn open() { let _ = OpenOptions::new(); }", True),
     ("use crate::services::tui_prompt_dedupe::{TuiRuntimeBinding, peek_tmux_runtime_binding as peek};\n"
      "use super::root::file_identity;\nuse std::io;\nfn f() { let _ = std::fs::File::open(p); let _ = io::Error::other(e); }", False),

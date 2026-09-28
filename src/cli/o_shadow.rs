@@ -25,6 +25,9 @@ pub(crate) enum OShadowCommand {
     /// Record t0 as the current size of every attached transcript; run once when the window opens
     WindowStart,
     /// Judge one window against the E1 bar; exits nonzero unless every recorded criterion passes
+    #[command(
+        after_help = "Do not restart the observer during measurement; report once within 60 seconds after late (t1 + 10 minutes).\nEvery evaluated attempt is consumed, including failures; remeasure in a new observer run after any failure."
+    )]
     Report {
         /// Earliest time of the window_start record that defines t0 (RFC 3339)
         #[arg(long)]
@@ -162,11 +165,11 @@ async fn report(
     let stored = read_stored(&root)?;
     let records = || stored.iter().map(|line| &line.record);
     let manifest = read_manifest(&root)?;
-    let now = Utc::now();
     let sessions = recent_sessions(&config, from - Duration::days(7)).await;
     if let Err(error) = &sessions {
         tracing::warn!(%error, "o-shadow report: sessions history unavailable");
     }
+    let now = Utc::now();
     crate::services::provider_hosting::install_provider_hosting_config(&config);
     let resolve = |provider: &str, channel_id: Option<u64>| {
         ProviderKind::from_str(provider).is_some_and(|kind| {
@@ -195,16 +198,20 @@ async fn report(
         .filter(|(channel_id, _)| allowlist.contains(channel_id))
         .collect();
     let snapshot = population(&config, file, aux, now, &resolve, &threads);
-    let outcome = report::evaluate(&ReportInput {
-        records: &stored,
-        manifest: &manifest,
-        population: &snapshot,
-        allowlist: &allowlist,
-        from,
-        to,
-        reported_at: now,
-        classify: &classify,
-    });
+    let outcome = report::evaluate_once(
+        &root,
+        &ReportInput {
+            records: &stored,
+            manifest: &manifest,
+            population: &snapshot,
+            allowlist: &allowlist,
+            from,
+            to,
+            reported_at: now,
+            classify: &classify,
+        },
+    )
+    .map_err(|e| format!("record report attempt: {e}"))?;
     let snapshot_record = ShadowRecord::Population {
         snapshot: snapshot.clone(),
     };
