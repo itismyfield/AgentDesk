@@ -96,6 +96,7 @@
 - `pr_giant_deletion` (checked first): deleting registered files must remove
   exactly their registry entries and baseline/transition lines; pins and the
   surviving registrations and overdue stay unchanged; no new or growing giant.
+  No strict-progress size/moved-code checks; mixed shrinks see only overdue set.
 - "giant-file" = `>= 1000` **production** lines per
   `scripts/generate_inventory_docs.py` (lines inside `#[cfg(test)] mod` blocks
   are excluded; see the `Prod` column in `module-inventory.md`). Frozen giant

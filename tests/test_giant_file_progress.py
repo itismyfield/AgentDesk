@@ -1438,10 +1438,17 @@ class GiantFileDeletionTest(unittest.TestCase):
         for options, reasons in cases:
             with self.subTest(reasons=reasons):
                 rc, evidence = self.run_pr(**options)
-                self.assertEqual((rc, evidence["selector"]), (2, "pr_giant_deletion"), evidence)
+                self.assertEqual((rc, evidence["selector"], evidence.get("deleted")),
+                                 (2, "pr_giant_deletion", [GONE]), evidence)
                 self.assertEqual(evidence["reason"], "; ".join(reasons))
 
     def test_entry_removal_needs_an_actual_file_deletion(self):
+        # The kept file is edited in place: Git reports "M", not "D", and the PR is not ledger-only.
+        rc, evidence = self.run_pr(delete=(), files={GONE: "pub fn edited() {}\n" * 1200})
+        self.assertEqual((rc, evidence["selector"], "deleted" in evidence),
+                         (2, "pr_ordinary_no_regression", False), evidence)
+        self.assertEqual(evidence["reason"],
+                         "frozen authority blob changed; registry changed in ordinary no-regression PR")
         base = {"overdue": [], "modules": {GONE: 1200, KEPT: 1200},
                 "registrations": {GONE: META_ROOT, KEPT: META_ROOT}}
         candidate = copy.deepcopy(base)

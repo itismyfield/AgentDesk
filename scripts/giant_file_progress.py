@@ -702,6 +702,7 @@ def main() -> int:
                 facts["registry_exact"] = expected == (candidate_root / REGISTRY).read_text(encoding="utf-8")
                 deleted = registered_deletions(base, facts)
                 if deleted:
+                    selector, payload["deleted"] = "pr_giant_deletion", sorted(deleted)
                     facts["deletion_ledgers"] = {name: tuple(
                         (root / name).read_text(encoding="utf-8") for root in (base_root, candidate_root))
                         for name in (REGISTRY, TRANSITION)}
@@ -714,7 +715,6 @@ def main() -> int:
                     retired = set()  # Deadline movement does not retire a source entry.
                 elif selector == "pr_giant_deletion":
                     retired = set()  # A deleted path has no candidate LoC to record.
-                    payload["deleted"] = sorted(deleted)
                 payload.update({"event_base_sha": event_base_sha,
                     "merge_first_parent": parents[1], "head_sha": head_sha, "merge_sha": candidate_sha,
                     "base_tree": oid(base_sha, "tree"), "base_overdue": base["overdue"],
