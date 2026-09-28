@@ -133,6 +133,35 @@ map rc는 0=요청 작업 완료, 1=compile/canary/수집·검증·쓰기 실패
 B2 소유 산출물은 map run의 metadata manifest다. Clippy JSON/.d와 이를 묶는 receipt 생산·소비는 3b-A 소유다.
 map session cfg와 Clippy effective cfg의 동등성·admission 활성화를 이 manifest로 주장하지 않는다.
 
+### 비활성 Clippy 세션 계약
+
+`h2_session.session`은 호출자가 명시적으로 시작하는 cfg-only 기반이다. CI 진입점은 없다.
+`h2_env.environment("measure")`로 정리한 환경에서 Cargo와 버전 질의를 같은 crate cwd로 실행한다.
+`ALLOWED`는 rustc release/commit, Cargo, sysroot의 Clippy 경로/버전/연결 compiler, driver compiler를 검사한다.
+허용 조합과 host가 맞아야 metadata를 읽고 request를 만든다. metadata의 canonical manifest로 package를 고르고,
+non-proc-macro lib 하나의 canonical 경로·package ID·crate 이름·종류를 고정하며 그 lib만 touch한다.
+Cargo는 그 package ID를 명시적으로 선택한다. extra는 features/jobs/target/target-dir과 실행 제어 옵션만 받는다.
+crate·상위·CARGO_HOME의 config/config.toml에서 예약된 session/toolchain [env] 키와 compiler 교체를 거부한다.
+config include와 --config·package/manifest 선택 변경도 거부하며, Cargo 설정 bytes는 실행 전후 같아야 한다.
+생산자는 기대 manifest/package/lib가 맞는 non-test lib 호출뿐이다. 정보 질의·bin·proc-macro와 다른 member는 위임한다.
+생산자 후보의 @응답 파일 인수는 해석하지 않고 claim 전에 거부하며, 봉인에서도 같은 인수를 거부한다.
+실제 Clippy canonical 경로는 환경변수가 아닌 request의 승인 경로와 claim 전에 대조한다.
+request는 승인한 CLIPPY_ARGS/conf/width와 MODMAP 출력·nonce·run ID·기대 unit 환경값을 protected_env로 고정한다.
+생산자는 claim·자식 전에 그 값들을 byte 대조하고 proof에 기록하며, 봉인에서도 request와 일치해야 한다.
+build.rs가 준 값도 예외가 없다. target links 설정의 예약 rustc-env는 Cargo 전에 거부하는 보조 가드다.
+생산자는 자식 실행 전에 `create_new` claim을 쓰고 sync한다. 실패해도 claim은 지우지 않으며 새 run 디렉터리로 재시도한다.
+동일 요청 lib을 한 Cargo 호출에서 두 번 컴파일하는 구성은 정상 코드여도 fail-closed로 거부한다.
+자식은 Cargo의 argv/env를 상속하고 `--cfg clippy`만 더한다. after_expansion에서 cfg를 쓰고 중단한다.
+자식 stdout/stderr는 별도 파일로 격리한다. root 전용 Clippy cfg 질의와 byte 일치 후 실제 Clippy로 exec한다.
+proof `h2-session/1-cfg`는 unit/pid/nonce/run_id/argv/env_sha256/cfg/driver_rustc와 실제 Clippy 경로·버전·연결 compiler를 기록하며 items는 없다.
+Clippy identity는 승인 경로에서 직접 질의하고 request와 대조한다. 봉인에서도 재대조하며 cfg target은 요청 lane과 같아야 한다.
+봉인 전 claim의 pid/unit, request의 공통 unit 필드, 요청 lib의 non-test artifact 1개와 package ID/fresh:false를 대조한다.
+proof·cfg의 결속, 파일 시각·partial·source/config 불변도 검사하며 SHA-256을 기존 JSON 원자 게시 helper로 봉인한다.
+manifest kind는 `canary-cfg`다. root map 소비자는 이를 거부하고 매핑 소비자는 연결하지 않는다.
+items 생산을 추가할 때 proof를 `h2-session/2`로 승격하고 items digest/records를 필수화하며 cfg-only proof를 거부한다.
+도구 버전 갱신은 rust-toolchain.toml·CI·ALLOWED를 함께 바꾸고 cargo-clippy spy, cfg 자체 점검,
+cold/warm 진단 byte 일치, items 동일성, workspace 생산자/claim 시험 증거를 다시 제시한다.
+
 두 호스트의 결과를 모은 뒤 실행한다:
 
 ```sh
