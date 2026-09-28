@@ -1,4 +1,4 @@
-"""Map Clippy diagnostic sites to compiler item records of one sealed session; nothing calls this yet."""
+"""Map Clippy diagnostic sites to compiler item records of one sealed session."""
 from __future__ import annotations
 
 import bisect
@@ -41,6 +41,7 @@ class Items:
     messages: list[dict]
     foreign: int
     manifest: dict
+    lines: list[str]
 
     def line(self, name: str, offset: int) -> int:
         return bisect.bisect_left(self.breaks[name], offset) + 1
@@ -98,7 +99,7 @@ def load(path: Path, *, crate: Path) -> Items:
         raw = {name: files[name] for name in rows if name in files}
         items = Items(root, compiler_base(unit, proof), rows, raw,
                       {name: [m.start() for m in re.finditer(b"\n", body)] for name, body in raw.items()},
-                      messages, foreign, value)
+                      messages, foreign, value, data["clippy.jsonl"].decode("utf-8").splitlines())
         for name, body in raw.items():
             for record in rows[name]:
                 if record["hi"] > len(body) or items.line(name, record["lo"]) != record["line"]:
