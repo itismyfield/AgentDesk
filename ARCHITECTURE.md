@@ -737,6 +737,8 @@ src/
 │   │   │   ├── reachability/
 │   │   │   │   ├── composite.rs
 │   │   │   │   ├── composite_tests.rs
+│   │   │   │   ├── coverage.rs
+│   │   │   │   ├── coverage_tests.rs
 │   │   │   │   ├── discovery.rs
 │   │   │   │   ├── divergence.rs
 │   │   │   │   ├── external_verdict.rs
