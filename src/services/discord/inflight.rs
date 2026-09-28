@@ -86,6 +86,8 @@ use self::rebind_reap::{
     should_reap_dead_watcher_rebind_origin,
 };
 mod removal;
+#[cfg(test)]
+pub(in crate::services::discord) use self::removal::custody_notice_text;
 pub(crate) use self::removal::invalidate_stale_generation;
 pub(in crate::services::discord) use self::removal::load_inflight_states_for_probe_from_root;
 use self::removal::load_inflight_states_from_root;
@@ -139,6 +141,8 @@ pub(in crate::services::discord) use self::orphan_relay_reclaim::{
 // (incl. the #3016 core hot files) stay byte-identical. Public API is not
 // widened. The shared persist/validate primitives moved to `store.rs`.
 mod clear_store;
+#[allow(unused_imports)]
+pub(in crate::services::discord) use clear_store::operator_disposition_remove_pinned;
 mod save_store;
 
 // Shared persist/validate primitives (moved to `store.rs`): re-imported at the

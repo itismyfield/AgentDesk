@@ -2911,3 +2911,182 @@ fn reconcile_holds_source_authority_across_read_decision_and_replacement() {
         "the fence must be released once the funnel returns"
     );
 }
+
+#[test]
+fn external_lease_fence_rejects_absent_changed_and_other_channel() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_state();
+    let lease = record_external_input_turn_lease(
+        "claude",
+        "fence-cas",
+        ExternalInputRelayLease::unassigned(Some(42)),
+    );
+    assert!(clear_external_input_relay_lease_if_matches(
+        "claude",
+        "fence-cas",
+        42,
+        &lease
+    ));
+    let rejected = || -> Result<(), ()> { panic!("mismatch must not run callback") };
+    assert_eq!(
+        with_external_input_relay_lease_if_matches(
+            "claude",
+            "fence-cas",
+            42,
+            Some(&lease),
+            rejected
+        ),
+        None
+    );
+    let successor = record_external_input_turn_lease("claude", "fence-cas", lease.clone());
+    assert_eq!(
+        with_external_input_relay_lease_if_matches(
+            "claude",
+            "fence-cas",
+            42,
+            Some(&lease),
+            rejected
+        ),
+        None
+    );
+    assert_eq!(
+        with_external_input_relay_lease_if_matches("claude", "fence-cas", 42, None, rejected),
+        None
+    );
+    assert_eq!(
+        external_input_relay_lease("claude", "fence-cas", 42),
+        Some(successor)
+    );
+    let other = record_external_input_turn_lease(
+        "claude",
+        "fence-cas",
+        ExternalInputRelayLease::unassigned(Some(43)),
+    );
+    assert_eq!(
+        with_external_input_relay_lease_if_matches("claude", "fence-cas", 42, None, rejected),
+        None
+    );
+    assert_eq!(
+        with_external_input_relay_lease_if_matches(
+            "claude",
+            "fence-cas",
+            42,
+            Some(&other),
+            rejected
+        ),
+        None
+    );
+    assert_eq!(
+        external_input_relay_lease("claude", "fence-cas", 43),
+        Some(other)
+    );
+}
+
+#[test]
+fn external_lease_fence_preserves_failure_and_clears_success() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_state();
+    let lease = record_external_input_turn_lease(
+        "codex",
+        "fence-result",
+        ExternalInputRelayLease::unassigned(None),
+    );
+    assert_eq!(
+        with_external_input_relay_lease_if_matches(
+            "codex",
+            "fence-result",
+            42,
+            Some(&lease),
+            || Err::<(), _>("unlink failed")
+        ),
+        Some(Err("unlink failed"))
+    );
+    assert_eq!(
+        external_input_relay_lease("codex", "fence-result", 42),
+        Some(lease.clone())
+    );
+    assert_eq!(
+        with_external_input_relay_lease_if_matches(
+            "codex",
+            "fence-result",
+            42,
+            Some(&lease),
+            || Ok::<_, ()>(7)
+        ),
+        Some(Ok(7))
+    );
+    assert_eq!(
+        external_input_relay_lease("codex", "fence-result", 42),
+        None
+    );
+    assert_eq!(
+        with_external_input_relay_lease_if_matches(
+            "codex",
+            "fence-result",
+            42,
+            None,
+            || Ok::<_, ()>(8)
+        ),
+        Some(Ok(8))
+    );
+}
+
+#[test]
+fn external_lease_fence_serializes_writer_and_rejects_stale_capture() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_state();
+    let lease = record_external_input_turn_lease(
+        "claude",
+        "fence-writer",
+        ExternalInputRelayLease::unassigned(Some(42)),
+    );
+    let (start, ready) = std::sync::mpsc::channel();
+    let (attempt, attempting) = std::sync::mpsc::channel();
+    let (done, completed) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        ready.recv().unwrap();
+        attempt.send(()).unwrap();
+        let successor = record_external_input_turn_lease(
+            "claude",
+            "fence-writer",
+            ExternalInputRelayLease::unassigned(Some(43)),
+        );
+        done.send(successor).unwrap();
+    });
+    let mut escaped = None;
+    let result = with_external_input_relay_lease_if_matches(
+        "claude",
+        "fence-writer",
+        42,
+        Some(&lease),
+        || {
+            start.send(()).unwrap();
+            attempting.recv_timeout(Duration::from_secs(2)).unwrap();
+            escaped = completed.recv_timeout(Duration::from_millis(100)).ok();
+            Ok::<_, ()>(())
+        },
+    );
+    let successor = escaped
+        .clone()
+        .unwrap_or_else(|| completed.recv_timeout(Duration::from_secs(2)).unwrap());
+    writer.join().unwrap();
+    assert!(
+        escaped.is_none(),
+        "writer must wait through callback and clear"
+    );
+    assert_eq!(result, Some(Ok(())));
+    assert_eq!(
+        with_external_input_relay_lease_if_matches(
+            "claude",
+            "fence-writer",
+            42,
+            Some(&lease),
+            || -> Result<(), ()> { panic!("successor must refuse stale callback") }
+        ),
+        None
+    );
+    assert_eq!(
+        external_input_relay_lease("claude", "fence-writer", 43),
+        Some(successor)
+    );
+}
