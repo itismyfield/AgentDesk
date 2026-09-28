@@ -1900,7 +1900,9 @@ src/
 │   │       ├── binding_reader.rs
 │   │       ├── capture.rs
 │   │       ├── derive.rs
+│   │       ├── diff.rs
 │   │       ├── identity.rs
+│   │       ├── metrics.rs
 │   │       ├── mod.rs
 │   │       ├── root.rs
 │   │       ├── seal.rs
