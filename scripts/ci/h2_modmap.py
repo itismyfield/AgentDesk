@@ -11,6 +11,8 @@ import argparse
 import json
 import os
 import platform
+import re
+import signal
 import subprocess
 import sys
 import uuid
@@ -205,6 +207,54 @@ def collection_context(root: Path, lane: str) -> dict:
     return dict(host=host, target=target, source=source_state(root), toolchain=versions)
 
 
+# Driver-backed suites --canary runs with the driver it built, and the fewest tests each must run.
+SESSION_SUITES = {"tests.test_h2_session_driver": 8, "tests.test_h2_session_e2e": 6}
+
+
+def run_suite(root: Path, driver: Path, module: str, *, timeout: float = 1200) -> None:
+    env = dict(os.environ, H2_SESSION_DRIVER=str(driver), PYTHONDONTWRITEBYTECODE="1")
+    with subprocess.Popen([sys.executable, "-m", "unittest", module], cwd=root, env=env,
+                          stderr=subprocess.PIPE, text=True, start_new_session=True) as result:
+        try:
+            _, stderr = result.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(result.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            _, stderr = result.communicate()
+            sys.stderr.write(stderr)
+            raise ModmapError(f"session canary: TIMEOUT {module} after {timeout}s") from None
+    sys.stderr.write(stderr)
+    if result.returncode:
+        raise ModmapError(f"session canary: {module} failed")
+    # An empty or skipped suite exits 0 on older Pythons; only a full, unskipped run counts.
+    ran = re.search(r"^Ran (\d+) tests? in ", stderr, re.M)
+    if not ran or int(ran.group(1)) < SESSION_SUITES[module] or not re.search(r"^OK$", stderr, re.M):
+        raise ModmapError(f"session canary: {module} ran incompletely or skipped tests")
+
+
+def check_session_canary(root: Path, driver: Path, crate: Path, run: Path, lane: str, suites: list[str]) -> None:
+    import h2_session
+
+    target = run / "session-target"
+    if target.exists():
+        raise ModmapError("session canary requires a cold target")
+    conf = run / "session-config"
+    conf.mkdir(parents=True)
+    (conf / "clippy.toml").write_text("", encoding="utf-8")
+    manifest = h2_session.session(root, crate, run / "session", conf, lane, driver=driver,
+                                 extra=("--locked", "--target-dir", str(target), "--features", "h2_cfg_probe"))
+    if not {"clippy", "h2_items_bs_clippy"} <= set(manifest["proof"]["cfg"]):
+        raise ModmapError("session canary: missing Clippy/build-script cfg")
+    for module in suites:
+        run_suite(root, driver, module)
+    if sorted(suites) == sorted(SESSION_SUITES):
+        print("h2-modmap: cold Clippy session, driver controls and workspace e2e hold (cfg-only)")
+    else:
+        print("h2-modmap: cold Clippy session holds (cfg-only); suites not run")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo", type=Path, default=m.REPO_ROOT)
@@ -214,10 +264,17 @@ def main(argv=None) -> int:
     parser.add_argument("--meta-out", type=Path)
     parser.add_argument("--inert", action="store_true", help="skip the repo map while no baseline is committed")
     parser.add_argument("--canary", action="store_true", help="self-test the driver even when --inert skips the map")
+    parser.add_argument("--suite", action="append", default=[], choices=SESSION_SUITES,
+                        help="driver-backed unittest module --canary runs; --canary must name every one")
     args = parser.parse_args(argv)
     root = args.repo.resolve()
     if not root.is_dir():
         parser.error("--repo must be an existing directory")
+    # The CI step names each suite so wiring checks see it; a dropped or repeated one must not pass as skipped.
+    if args.suite and not args.canary:
+        parser.error("--suite requires --canary")
+    if args.canary and sorted(args.suite) != sorted(SESSION_SUITES):
+        parser.error("--canary must name each of --suite " + " --suite ".join(SESSION_SUITES) + " once")
     if (args.cfg_out or args.meta_out) and not args.lane:
         parser.error("--cfg-out/--meta-out require --lane")
     run_id = uuid.uuid4().hex
@@ -251,6 +308,8 @@ def main(argv=None) -> int:
         got = h2_depinfo.modmap_problems(rows)
         if got != CANARY_PROBLEMS:
             raise ModmapError("driver canary drifted; got:\n  " + "\n  ".join(got or ["(no problems)"]))
+        check_session_canary(root, driver, canary, run_base, args.lane or ("macos" if sys.platform == "darwin" else "linux"),
+                             args.suite)
         if skip_map:
             print("h2-modmap: driver canary holds; no baseline committed, repo map skipped; root=skipped")
             return 0

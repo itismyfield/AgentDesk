@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
+import io
 import os
 import json
 import re
+import signal
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
 import h2_depinfo  # noqa: E402
 import h2_measure as h2  # noqa: E402
+import h2_modmap as modmap  # noqa: E402
+import h2_session  # noqa: E402
+
+SUITE_ARGS = tuple(x for module in modmap.SESSION_SUITES for x in ("--suite", module))
 
 # The canary rows the real driver writes: `shared`, `spliced` and `wrapped::passed` are clean, the rest is not.
 CANARY_ROWS = ["src/shared.rs\tcrate::shared\t#0\t#0\tmodule\tsrc/lib.rs\tsrc/lib.rs:13:1: 13:12 (#0)\t-\tfile",
@@ -117,7 +124,12 @@ class Wrapper(unittest.TestCase):
                         STUB_CANARY=f"copy:{write_modmap(self.maps / 'canary.tsv', CANARY_ROWS)}")
 
     def run_wrapper(self, *args: str, **env: str) -> tuple[int, str]:
-        proc = subprocess.run([sys.executable, str(REPO_ROOT / "scripts/ci/h2_modmap.py"), "--repo", str(self.root), *args],
+        args = tuple(x for arg in args for x in ((arg, *SUITE_ARGS) if arg == "--canary" else (arg,)))
+        entry = (f"import sys; sys.path.insert(0, {str(REPO_ROOT / 'scripts/ci')!r}); "
+                 "import h2_modmap; from unittest.mock import patch; "
+                 "p = patch.object(h2_modmap, 'check_session_canary'); p.start(); "
+                 "sys.exit(h2_modmap.main(sys.argv[1:]))")
+        proc = subprocess.run([sys.executable, "-c", entry, "--repo", str(self.root), *args],
                               env={**self.env, **env}, capture_output=True, text=True)
         return proc.returncode, proc.stdout + proc.stderr
 
@@ -195,6 +207,122 @@ class Wrapper(unittest.TestCase):
         self.assertEqual(canary["RUSTC_WORKSPACE_WRAPPER"], root["RUSTC_WORKSPACE_WRAPPER"])
         self.assertTrue(root["RUSTC_WORKSPACE_WRAPPER"].endswith("/release/modmap-driver"))
 
+class SessionCanary(unittest.TestCase):
+    def test_non_canary_reports_suites_not_run(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(modmap, "build_driver"), \
+                patch.object(modmap, "collection_context"), patch.object(modmap, "map_run", return_value=[]), \
+                patch.object(modmap.h2_depinfo, "modmap_problems", return_value=modmap.CANARY_PROBLEMS), \
+                patch.object(h2_session, "session", return_value={"proof": {"cfg": ["clippy", "h2_items_bs_clippy"]}}), \
+                patch.object(modmap, "run_suite") as suite, patch("sys.stdout", new=io.StringIO()) as output:
+            self.assertEqual(modmap.main(["--repo", tmp, "--lane", "linux"]), 0)
+            self.assertIn("cold Clippy session holds (cfg-only); suites not run", output.getvalue())
+            self.assertNotIn("driver controls and workspace e2e hold", output.getvalue())
+            suite.assert_not_called()
+
+    def test_slow_suite_times_out_and_kills_its_process_group(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(modmap.os, "killpg", wraps=os.killpg) as killpg:
+            root = Path(tmp).resolve()
+            (root / "tests").mkdir()
+            (root / "tests/__init__.py").touch()
+            (root / "tests/test_h2_session_driver.py").write_text(
+                "import os, subprocess, sys, time\n"
+                "from pathlib import Path\n"
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                "Path('group').write_text(str(os.getpgrp()) + ':' + str(os.getpgid(child.pid)))\n"
+                "sys.stderr.write('Ran 8 tests in 0.0s\\n\\nOK\\n'); sys.stderr.flush()\n"
+                "time.sleep(60)\n")
+            with self.assertRaisesRegex(modmap.ModmapError, "TIMEOUT.*tests.test_h2_session_driver"):
+                modmap.run_suite(root, root / "driver", "tests.test_h2_session_driver", timeout=1)
+            parent_group, child_group = map(int, (root / "group").read_text().split(":"))
+            self.assertEqual(parent_group, child_group)
+            killpg.assert_called_once_with(parent_group, signal.SIGKILL)
+            with patch.object(modmap.subprocess, "Popen") as ended, \
+                    patch.object(modmap.os, "killpg", side_effect=ProcessLookupError):
+                process = ended.return_value.__enter__.return_value
+                process.returncode = 0
+                process.communicate.side_effect = [subprocess.TimeoutExpired("suite", 1), (None, "Ran 8 tests in 1s\nOK\n")]
+                with self.assertRaisesRegex(modmap.ModmapError, "TIMEOUT"):
+                    modmap.run_suite(root, root / "driver", "tests.test_h2_session_driver", timeout=1)
+
+    def test_cold_session_cfg_and_required_suites(self):
+        suites = list(modmap.SESSION_SUITES)
+        with tempfile.TemporaryDirectory() as tmp, patch.object(h2_session, "session") as session, \
+                patch.object(modmap.subprocess, "Popen") as suite, patch("sys.stdout", new=io.StringIO()) as output:
+            root = Path(tmp).resolve()
+            driver, crate = root / "driver", root / modmap.DRIVER / "canary"
+            process = suite.return_value.__enter__.return_value
+            process.returncode = 0
+            process.communicate.return_value = (None, f"......\nRan {max(modmap.SESSION_SUITES.values())} tests in 9.1s\n\nOK\n")
+            session.return_value = {"proof": {"cfg": ["clippy", "h2_items_bs_clippy"]}}
+            for n in range(2):
+                run = root / "target/h2/runs" / str(n)
+                modmap.check_session_canary(root, driver, crate, run, "linux", suites)
+                args, kwargs = session.call_args
+                self.assertEqual(args, (root, crate, run / "session", run / "session-config", "linux"))
+                self.assertEqual(kwargs, dict(driver=driver, extra=("--locked", "--target-dir",
+                                 str(run / "session-target"), "--features", "h2_cfg_probe")))
+                self.assertFalse((run / "session-target").exists())
+                self.assertEqual((run / "session-config/clippy.toml").read_text(), "")
+            self.assertEqual([c.args[0] for c in suite.call_args_list],
+                             [[sys.executable, "-m", "unittest", module] for module in suites] * 2)
+            self.assertTrue(all(c.kwargs["env"]["H2_SESSION_DRIVER"] == str(driver) for c in suite.call_args_list))
+            self.assertTrue(all(c.kwargs["start_new_session"] for c in suite.call_args_list))
+            self.assertTrue(all(c.kwargs["timeout"] == 1200 for c in process.communicate.call_args_list))
+            self.assertEqual(output.getvalue().count("driver controls and workspace e2e hold"), 2)
+            for cfg in (["clippy"], ["h2_items_bs_clippy"], []):
+                session.return_value = {"proof": {"cfg": cfg}}
+                with self.assertRaisesRegex(modmap.ModmapError, "build-script cfg"):
+                    modmap.check_session_canary(root, driver, crate, root / str(cfg), "linux", suites)
+            self.assertEqual(suite.call_count, 4)
+            session.return_value = {"proof": {"cfg": ["clippy", "h2_items_bs_clippy"]}}
+            for module, n in modmap.SESSION_SUITES.items():
+                process.returncode = 1
+                with self.assertRaisesRegex(modmap.ModmapError, f"{module} failed"):
+                    modmap.run_suite(root, driver, module)
+                process.returncode = 0
+                for i, stderr in enumerate(("", "\nRan 0 tests in 0.0s\n\nOK\n", f"Ran {n - 1} tests in 1s\n\nOK\n",
+                                            f"Ran {n} tests in 1s\n\nOK (skipped={n})\n", f"Ran {n} tests in 1s\n")):
+                    process.communicate.return_value = (None, stderr)
+                    with self.assertRaisesRegex(modmap.ModmapError, f"{module} ran incompletely or skipped"):
+                        modmap.run_suite(root, driver, module)
+            # the first failing suite stops the canary before the next one runs
+            suite.reset_mock()
+            with self.assertRaisesRegex(modmap.ModmapError, suites[0]):
+                modmap.check_session_canary(root, driver, crate, root / "stop", "linux", suites)
+            self.assertEqual(suite.call_count, 1)
+            occupied = root / "occupied"
+            (occupied / "session-target").mkdir(parents=True)
+            with self.assertRaisesRegex(modmap.ModmapError, "cold target"):
+                modmap.check_session_canary(root, driver, crate, occupied, "linux", suites)
+            self.assertEqual(output.getvalue().count("driver controls and workspace e2e hold"), 2)
+
+    def test_canary_must_name_every_suite_once(self):
+        first, second = modmap.SESSION_SUITES
+        for argv in (["--canary"], ["--canary", "--suite", first], ["--canary", "--suite", second],
+                     ["--canary", "--suite", first, "--suite", first, "--suite", second],
+                     ["--suite", first, "--suite", second], ["--canary", "--suite", "tests.test_h2_session"]):
+            with self.subTest(argv=argv), patch.object(modmap, "build_driver") as build, \
+                    patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit) as exit_:
+                modmap.main(["--inert", *argv])
+            self.assertEqual(exit_.exception.code, 2)
+            build.assert_not_called()
+
+    def test_inert_canary_runs_session_and_propagates_failure(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(modmap, "build_driver") as build, \
+                patch.object(modmap, "collection_context"), patch.object(modmap, "map_run"), \
+                patch.object(modmap, "map_modules"), \
+                patch.object(modmap.h2_depinfo, "modmap_problems", return_value=modmap.CANARY_PROBLEMS), \
+                patch.object(modmap, "check_session_canary", side_effect=h2.MeasureError("session failed")) as session:
+            for flags, lane in ((["--lane", "linux"], "linux"), ([], "macos" if sys.platform == "darwin" else "linux")):
+                self.assertEqual(modmap.main(["--repo", tmp, "--inert", "--canary", *SUITE_ARGS, *flags]), 1)
+                self.assertEqual(session.call_args.args[-2:], (lane, list(modmap.SESSION_SUITES)))
+            self.assertEqual(session.call_count, 2)
+            session.reset_mock()
+            build.reset_mock()
+            self.assertEqual(modmap.main(["--repo", tmp, "--inert"]), 0)
+            session.assert_not_called()
+            build.assert_not_called()
+
 class CiWiring(unittest.TestCase):
     def test_linux_script_checks_self_test_the_driver_without_a_wrapper(self) -> None:
         import yaml  # installed on the script-check runners
@@ -204,8 +332,10 @@ class CiWiring(unittest.TestCase):
         components = [part.strip() for part in toolchain["with"]["components"].split(",")]
         self.assertIn("rustc-dev", components)
         self.assertIn("llvm-tools", components)
+        self.assertEqual(step.get("timeout-minutes"), 30)
         self.assertEqual((step.get("if"), step.get("env"), step["run"]),
-                         (None, {"RUSTC_WRAPPER": ""}, "python3 scripts/ci/h2_modmap.py --lane linux --inert --canary"))
+                         (None, {"RUSTC_WRAPPER": ""}, "python3 scripts/ci/h2_modmap.py --lane linux --inert --canary "
+                          + " ".join(SUITE_ARGS)))
         self.assertLess(steps.index(toolchain), steps.index(step))
 
 if __name__ == "__main__":
