@@ -793,16 +793,19 @@ class Fence(Harness):
                 else:
                     self.assertEqual(s.mapping_guard(stats)[verdict], 1)
         scope = f"0::/user.slice/user-{me}.slice/user@{me}.service/init.scope\n"
-        for n, (name, ppid, cgroup, uid) in enumerate((("systemd", 1, scope, me), ("(sd-pam)", 900, scope, me),
-                                                       ("systemd", 1, scope, other),
-                                                       ("systemd", 1, scope.replace("init", "app"), me))):
+        v1, child = "12:pids:/user.slice\n", scope.replace("init.scope", "init.scope/child")
+        for n, (name, ppid, cgroup, uid) in enumerate((("systemd", 1, scope, me), ("(sd-pam)", 900, v1 + scope, me),
+                                                       ("systemd", 1, scope, other), ("systemd", 1, scope, (me, other)),
+                                                       ("systemd", 1, scope.replace("init", "app"), me),
+                                                       ("systemd", 1, child, me), ("systemd", 1, scope[:-1] + " \n", me),
+                                                       ("systemd", 1, v1, me), ("systemd", 1, None, me))):
             (proc := self.root / f"proc{n}" / "9").mkdir(parents=True)
-            (proc / "status").write_text(f"Name:\t{name}\nPPid:\t{ppid}\n"), (proc / "cgroup").write_text(cgroup)
+            (proc / "status").write_text(f"Name:\t{name}\nPPid:\t{ppid}\n"), cgroup and (proc / "cgroup").write_text(cgroup)
             with self.subTest(name, ppid=ppid, cgroup=cgroup), patch.object(s, "PROC_ROOT", proc.parent), \
                     patch.object(s.sys, "platform", "linux"), patch.object(s, "list_pids", lambda: [9]), \
-                    patch.object(s, "read_maps", return_value=({uid}, None)):
+                    patch.object(s, "read_maps", return_value=(set(uid if isinstance(uid, tuple) else (uid,)), None)):
                 self.assertEqual(s.mapping_guard(stats)["user_managers"], [[9, name]]) if n < 2 else \
-                    self.assertRaisesRegex(s.MeasureError, r"process 9 .*name systemd, ppid 1, cgroup", s.mapping_guard, stats)
+                    self.assertRaisesRegex(s.MeasureError, r"process 9 .*name systemd, ppid 1, cgroup \S", s.mapping_guard, stats)
         pids = iter(range(1, 100))
         with patch.object(s, "list_pids", lambda: [next(pids)]), patch.object(s, "read_maps", return_value=None):
             self.assertRaisesRegex(s.MeasureError, "kept appearing", s.mapping_guard, stats)

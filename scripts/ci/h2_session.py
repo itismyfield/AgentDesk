@@ -351,12 +351,16 @@ def read_maps(pid: int):
     return {short.uid, short.ruid, short.svuid}, regions
 
 
+def read_proc(path: Path) -> str:
+    try:
+        return path.read_text()
+    except OSError as err:
+        return f"<unreadable: {err.strerror}>"
+
+
 def manager_scope(pid: int, uid: int) -> tuple[str | None, str]:
     """Name of a process in the uid's user@ init.scope (systemd keeps only the manager and sd-pam there), and what it is."""
-    try:
-        status, cgroup = ((PROC_ROOT / str(pid) / name).read_text() for name in ("status", "cgroup"))
-    except OSError as err:
-        return None, f"status/cgroup unreadable: {err.strerror}"
+    status, cgroup = (read_proc(PROC_ROOT / str(pid) / name) for name in ("status", "cgroup"))
     fields = dict(line.split(":\t", 1) for line in status.splitlines() if ":\t" in line)
     inside = sys.platform == "linux" and f"0::/user.slice/user-{uid}.slice/user@{uid}.service/init.scope" in cgroup.splitlines()
     return fields.get("Name") if inside else None, \
