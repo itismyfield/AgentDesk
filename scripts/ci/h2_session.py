@@ -259,9 +259,12 @@ def libproc():
     return ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
 
 
+PROC_ROOT, PF_KTHREAD = Path("/proc"), 0x00200000
+
+
 def list_pids() -> list[int]:
     if sys.platform == "linux":
-        return [int(entry.name) for entry in os.scandir("/proc") if entry.name.isdigit()]
+        return [int(entry.name) for entry in os.scandir(PROC_ROOT) if entry.name.isdigit()]
     lib = libproc()
     size = lib.proc_listpids(1, 0, None, 0)
     buf = (ctypes.c_int * (size // 4 + 1024))()
@@ -271,22 +274,69 @@ def list_pids() -> list[int]:
     return [pid for pid in buf[:size // 4] if pid > 0]
 
 
-def read_maps(pid: int):
-    """(uids, [(dev, ino, path, may write)] or None if unreadable), or None for a process that is gone."""
-    if sys.platform == "linux":
-        try:
-            status = Path(f"/proc/{pid}/status").read_bytes()
-            uids = {int(v) for v in re.search(rb"^Uid:(.*)$", status, re.M).group(1).split()}
+def task_view(task: Path):
+    """(uids, state, maps bytes or None if unreadable) of one Linux task."""
+    status = (task / "status").read_bytes()
+    uids = {int(v) for v in re.search(rb"^Uid:(.*)$", status, re.M).group(1).split()}
+    state = re.search(rb"^State:\s*(\S)", status, re.M).group(1)
+    try:
+        return uids, state, (task / "maps").read_bytes()
+    except PermissionError:
+        return uids, state, None
+
+
+def linux_tasks(base: Path) -> dict:
+    """Every task of the thread group, listed again until no new tid appears; a task gone meanwhile is None."""
+    tasks = {}
+    for _ in range(10):
+        fresh = {entry.name for entry in os.scandir(base / "task") if entry.name.isdigit()} - set(tasks)
+        if not fresh:
+            return tasks
+        for tid in fresh:
             try:
-                body = Path(f"/proc/{pid}/maps").read_bytes()
-            except PermissionError:
-                return uids, None
-        except (FileNotFoundError, ProcessLookupError):
-            return None
+                tasks[tid] = task_view(base / "task" / tid)
+            except (FileNotFoundError, ProcessLookupError):
+                tasks[tid] = None
+    raise MeasureError(f"session fence: threads kept appearing in process {base.name}")
+
+
+def linux_maps(pid: int):
+    """read_maps from every task: a leader that exited through pthread_exit has empty maps while its workers run."""
+    base, uids = PROC_ROOT / str(pid), set()
+    try:
+        uids = task_view(base)[0]
+        if int((base / "stat").read_bytes().rsplit(b")", 1)[1].split()[6]) & PF_KTHREAD:
+            return uids, []
+        tasks = linux_tasks(base)
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    except OSError:
+        tasks = {}
+    live = [task for task in tasks.values() if task]
+    uids = uids.union(*(task[0] for task in live))
+    if bodies := [task[2] for task in live if task[2]]:
         # Any shared mapping counts: mprotect can make an already dirty page writable again without a new fault.
         return uids, [(os.makedev(*(int(v, 16) for v in f[3].split(b":"))), int(f[4]),
                        os.fsdecode(f[5].removesuffix(b" (deleted)")) if len(f) > 5 else "", f[1][3:4] == b"s")
-                      for f in (line.split(maxsplit=5) for line in body.splitlines())]
+                      for body in bodies for f in (line.split(maxsplit=5) for line in body.splitlines())]
+    if any(task[2] is None for task in live):
+        return uids, None
+    if tasks and not live:
+        return None
+    return (uids, []) if live and all(task[1] in b"ZX" for task in live) else (uids, "undetermined")
+
+
+def read_maps(pid: int):
+    """(uids, [(dev, ino, path, may write)] or None if unreadable), or None for a process that is gone."""
+    if sys.platform == "linux":
+        for _ in range(3):
+            found = linux_maps(pid)
+            if found is None or found[1] != "undetermined":
+                return found
+            time.sleep(0.05)
+        if 0 not in found[0]:
+            raise MeasureError(f"session fence: cannot tell whether process {pid} still has an address space")
+        return found[0], None
     lib, short, region, regions = libproc(), ShortInfo(), Region(), []
     if lib.proc_pidinfo(pid, 13, ctypes.c_uint64(0), ctypes.byref(short), ctypes.sizeof(short)) <= 0:
         if ctypes.get_errno() == errno.ESRCH:

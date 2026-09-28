@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -558,6 +559,10 @@ class Session(Harness):
         self.assertEqual(claim.read_text(), '{"pid":42}')
 
 
+THREADED = ("import ctypes, mmap, sys, threading\nlib, main = ctypes.CDLL(None), threading.main_thread().ident\n"
+            "f = open(sys.argv[1], 'r+b')\nm = mmap.mmap(f.fileno(), 0)\nm[:1] = m[:1]\n"
+            "def worker():\n    lib.pthread_join(ctypes.c_void_p(main), None)\n    print('held', flush=True)\n    sys.stdin.read()\n"
+            "threading.Thread(target=worker).start()\nlib.pthread_exit(None)\n")
 HOLDER = "import mmap, sys\nf = open(sys.argv[1], 'r+b')\nm = mmap.mmap(f.fileno(), 0)\nm[:1] = m[:1]\nprint('held', flush=True)\nsys.stdin.read()\n"
 
 
@@ -734,9 +739,51 @@ class Fence(Harness):
         self.assertEqual(guard["status"], "checked")
         self.assertGreater(guard["processes"], 1)
 
-    def test_unreadable_or_unending_process_scans_fail_closed(self):
+    def test_mapping_left_to_a_worker_after_the_main_thread_exits_is_refused(self):
+        holder = subprocess.Popen([sys.executable, "-c", THREADED, str(self.lib)], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self.addCleanup(holder.communicate)
+        self.addCleanup(holder.kill)
+        self.assertEqual(holder.stdout.readline(), b"held\n")
+        for _ in range(500 if sys.platform == "linux" else 0):
+            if not Path(f"/proc/{holder.pid}/maps").read_bytes():
+                break
+            time.sleep(0.01)
+        else:
+            self.assertNotEqual(sys.platform, "linux", "the leader kept its address space")
+        with patch.object(s, "list_pids", LIST_PIDS):
+            self.assertRaisesRegex(s.MeasureError, rf"process {holder.pid} maps \S+ shared and writable", s.mapping_guard,
+                                   {str(self.lib): s.modmap.stat_of(self.lib)})
+
+    def test_linux_scan_reads_every_task_and_refuses_an_undecidable_process(self):
+        st, stats = self.lib.stat(), {str(self.lib): s.modmap.stat_of(self.lib)}
+        line = f"7f00-7f01 rw-s 0 {os.major(st.st_dev):x}:{os.minor(st.st_dev):x} {st.st_ino} {self.lib}\n".encode()
+        def task(where, state, maps=b"", flags=0):
+            where.mkdir(parents=True)
+            (where / "status").write_text(f"State:\t{state} (x)\nUid:\t{os.getuid()}\t{os.getuid()}\n")
+            (where / "stat").write_text(f"7 (a) b) {state} 1 1 1 0 -1 {flags} 0")
+            (where / "maps").write_bytes(maps)
+        for name, leader, flags, tasks, refusal in (
+                ("worker", "Z", 0, [("Z", b""), ("S", line)], "shared and writable"), ("unlisted", "S", 0, [], "address space"),
+                ("live and empty", "S", 0, [("S", b"")], "address space"), ("unlistable", "S", 0, None, "address space"),
+                ("exited", "Z", 0, [("Z", b""), ("Z", b"")], None), ("kernel", "I", s.PF_KTHREAD, [("I", b"")], None)):
+            proc = self.root / "proc" / name.replace(" ", "-")
+            task(proc / "7", leader, flags=flags)
+            (proc / "7/task").mkdir()
+            for tid, (state, maps) in enumerate(tasks or [], 7):
+                task(proc / f"7/task/{tid}", state, maps)
+            os.chmod(proc / "7/task", 0o700 if tasks is not None else 0)
+            self.addCleanup(os.chmod, proc / "7/task", 0o700)
+            with self.subTest(name), patch.object(s, "PROC_ROOT", proc), patch.object(s.sys, "platform", "linux"), \
+                    patch.object(s, "list_pids", LIST_PIDS):
+                if refusal:
+                    self.assertRaisesRegex(s.MeasureError, refusal, s.mapping_guard, stats)
+                else:
+                    self.assertEqual(s.mapping_guard(stats)["processes"], 1)
+
+    def test_unreadable_scans_fail_closed_except_the_foreign_residual_boundary(self):
         stats = {str(self.lib): s.modmap.stat_of(self.lib)}
         me, other = os.getuid(), os.getuid() + 1
+        # A foreign 0644 pass is the residual boundary: a writable mapping made while the file was looser is not seen.
         for uids, mode, verdict in (({0}, 0o644, "root"), ({other}, 0o644, "foreign"), ({me}, 0o644, None),
                                     ({other}, 0o664, None), ({me, 0}, 0o666, "root")):
             os.chmod(self.lib, mode)
