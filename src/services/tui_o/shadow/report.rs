@@ -1,0 +1,787 @@
+//! `o-shadow report`: judges one window against the E1 sample, population and classification bar.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
+
+use super::metrics::MetricsSnapshot;
+use super::root::StoredRecord;
+use super::tap::CHECKPOINT_SECS;
+use super::{
+    DeriveOutput, DiffCause, DiffClass, DiffRecord, IDENTITY_VERSION, MATCH_WINDOW,
+    PopulationSnapshot, PopulationSource, REPORT_VERSION, SCHEMA_VERSION, ShadowProvider,
+    ShadowRecord, ShadowTurn, ShadowUnit, SourceId, SyntheticEntry, UnitKey, UnitKind,
+};
+use crate::services::agent_protocol::RuntimeHandoffKind;
+
+pub const MIN_TOTAL_TURNS: usize = 30;
+pub const MIN_PROFILE_TURNS: usize = 10;
+pub const MIN_TOOL_TURNS: usize = 3;
+pub const MIN_SPLIT_TURNS: usize = 1;
+/// The fixed measurement window; a longer one would admit turns the design does not count.
+pub const WINDOW_MINUTES: i64 = 120;
+/// Criteria the records cannot show; the coordinator records them next to the verdict.
+pub const EXTERNAL_CHECKS: [&str; 2] = ["write_zero_audit", "resource_limits"];
+
+/// Provider behind a TUI runtime kind; exhaustive so a new kind fails to compile here.
+fn tui_provider(kind: RuntimeHandoffKind) -> Option<&'static str> {
+    match kind {
+        RuntimeHandoffKind::ClaudeTui => Some("claude"),
+        RuntimeHandoffKind::CodexTui => Some("codex"),
+        RuntimeHandoffKind::LegacyTmuxWrapper
+        | RuntimeHandoffKind::ProcessBackend
+        | RuntimeHandoffKind::ClaudeEAdapter => None,
+    }
+}
+
+/// TUI profile of a provider id, or `unknown:<id>` when no TUI runtime kind serves it.
+pub fn profile_of(provider: &str) -> String {
+    use RuntimeHandoffKind::*;
+    [
+        LegacyTmuxWrapper,
+        ClaudeTui,
+        CodexTui,
+        ProcessBackend,
+        ClaudeEAdapter,
+    ]
+    .into_iter()
+    .find(|kind| tui_provider(*kind) == Some(provider))
+    .map_or_else(
+        || format!("unknown:{provider}"),
+        |kind| kind.as_str().to_string(),
+    )
+}
+
+fn provider_id(provider: ShadowProvider) -> &'static str {
+    match provider {
+        ShadowProvider::Claude => "claude",
+        ShadowProvider::Codex => "codex",
+    }
+}
+
+/// S2: TUI kinds the shadow bound in the run live at `from` and any later run up to `to`.
+pub fn bound_kinds<'r>(
+    records: impl IntoIterator<Item = &'r ShadowRecord>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    read_at: DateTime<Utc>,
+) -> PopulationSource {
+    let mut kinds = BTreeSet::new();
+    for record in records {
+        match record {
+            ShadowRecord::Header { started_at, .. } if *started_at <= from => kinds.clear(),
+            ShadowRecord::Binding { change } if change.at <= to => {
+                kinds.extend(
+                    change
+                        .new
+                        .iter()
+                        .map(|b| profile_of(provider_id(b.provider))),
+                );
+            }
+            _ => {}
+        }
+    }
+    let observed_kinds = kinds.into_iter().collect();
+    PopulationSource {
+        name: "s2_bindings".into(),
+        read_at,
+        ok: true,
+        observed_kinds,
+    }
+}
+
+/// Channels bound to a provider at any moment of `[from, to]`, kept after an unbind or restart.
+pub fn bound_channels<'r>(
+    records: impl IntoIterator<Item = &'r ShadowRecord>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Vec<(u64, String)> {
+    let mut live: BTreeMap<u64, (&'static str, DateTime<Utc>)> = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    // A binding lasts until its channel changes or the run ends at the next header.
+    let mut close = |channel, (provider, start): (&'static str, _), end| {
+        if start <= to && from <= end {
+            seen.insert((channel, provider));
+        }
+    };
+    for record in records {
+        match record {
+            ShadowRecord::Header { started_at, .. } => (std::mem::take(&mut live).into_iter())
+                .for_each(|(channel, bound)| close(channel, bound, *started_at)),
+            ShadowRecord::Binding { change } => {
+                if let Some(bound) = live.remove(&change.channel_id) {
+                    close(change.channel_id, bound, change.at);
+                }
+                if let Some(b) = &change.new {
+                    live.insert(change.channel_id, (provider_id(b.provider), change.at));
+                }
+            }
+            _ => {}
+        }
+    }
+    live.into_iter()
+        .for_each(|(channel, bound)| close(channel, bound, to));
+    (seen.into_iter())
+        .map(|(channel, provider)| (channel, provider.to_string()))
+        .collect()
+}
+
+/// Sources the latest observer run still has attached, with their attach time: cleared by a new
+/// header, dropped when rebound away or broken by an anomaly.
+pub fn attached_sources<'r>(
+    records: impl IntoIterator<Item = &'r ShadowRecord>,
+) -> Vec<(SourceId, DateTime<Utc>)> {
+    let mut attached: Vec<(SourceId, DateTime<Utc>)> = Vec::new();
+    for record in records {
+        match record {
+            ShadowRecord::Header { .. } => attached.clear(),
+            ShadowRecord::Attach {
+                source,
+                attached_at,
+                ..
+            } => attached.push((source.clone(), *attached_at)),
+            ShadowRecord::Binding { change } => {
+                attached.retain(|(s, _)| change.old.as_ref().is_none_or(|old| old.source != *s))
+            }
+            ShadowRecord::Anomaly { anomaly } => attached.retain(|(s, _)| *s != anomaly.source),
+            _ => {}
+        }
+    }
+    attached
+}
+
+/// One operator verdict from `report --classify`; only Expected, Legacy_defect and O_defect apply.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Classification {
+    pub diff_key: String,
+    pub cause: DiffCause,
+    pub note: String,
+}
+
+/// The `--classify` file; an unreadable one fails the report instead of being skipped.
+pub enum ClassifyInput {
+    Absent,
+    Entries(Vec<Classification>),
+    Unreadable(String),
+}
+
+/// A non-Match diff in the window: the cause it was recorded with and the one judged.
+#[derive(Debug, Serialize)]
+pub struct DiffEntry {
+    pub diff_key: String,
+    pub class: DiffClass,
+    pub recorded: DiffCause,
+    pub cause: DiffCause,
+}
+
+pub struct ReportInput<'a> {
+    /// Records with their storage time, which dates the rows that carry no time of their own.
+    pub records: &'a [StoredRecord],
+    pub manifest: &'a [SyntheticEntry],
+    pub population: &'a PopulationSnapshot,
+    pub allowlist: &'a [u64],
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    pub reported_at: DateTime<Utc>,
+    pub classify: &'a ClassifyInput,
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ProfileCounts {
+    pub turns: usize,
+    pub tool_turns: usize,
+    pub split_turns: usize,
+    pub synthetic_turns: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReportOutcome {
+    pub pass: bool,
+    pub failures: Vec<String>,
+    pub warnings: Vec<String>,
+    pub external_checks: [&'static str; 2],
+    /// `[schema, identity, report]` versions this verdict was computed under.
+    pub versions: [u32; 3],
+    pub t0: DateTime<Utc>,
+    pub t1: DateTime<Utc>,
+    pub total_turns: usize,
+    pub profiles: BTreeMap<String, ProfileCounts>,
+    pub uncounted_turns: BTreeMap<String, usize>,
+    pub synthetic: BTreeMap<String, &'static str>,
+    pub metrics: MetricsSnapshot,
+    pub diffs: Vec<DiffEntry>,
+    /// Cause totals over every in-window diff, as recorded and after operator classification.
+    pub causes_before: BTreeMap<String, usize>,
+    pub causes_after: BTreeMap<String, usize>,
+    /// Operator changes keyed `recorded->classified`.
+    pub reclassified: BTreeMap<String, usize>,
+    /// Operator entries that replaced an automatic `OOnlyTool` cause.
+    pub auto_overridden: usize,
+    pub o_only_tool: usize,
+}
+
+fn record_time(
+    record: &ShadowRecord,
+    units: &HashMap<&UnitKey, &ShadowUnit>,
+    legacy: &HashMap<u64, DateTime<Utc>>,
+) -> Option<DateTime<Utc>> {
+    match record {
+        ShadowRecord::Header { started_at: at, .. }
+        | ShadowRecord::Attach {
+            attached_at: at, ..
+        }
+        | ShadowRecord::WindowStart { t0: at, .. }
+        | ShadowRecord::Binding {
+            change: super::BindingChange { at, .. },
+        } => Some(*at),
+        ShadowRecord::Population { snapshot } => Some(snapshot.taken_at),
+        ShadowRecord::Legacy { msg } => Some(msg.created_at),
+        ShadowRecord::Derived {
+            output: DeriveOutput::Sealed(unit),
+        } => Some(unit.sealed_at),
+        ShadowRecord::Derived {
+            output: DeriveOutput::TurnClosed(turn),
+        } => Some(turn.closed_at),
+        // A diff belongs to the sample it judges: its unit's sealing, else its Legacy post.
+        ShadowRecord::Diff { diff } => match &diff.unit_key {
+            Some(key) => units.get(key).map(|u| u.sealed_at),
+            None => diff
+                .legacy_msg_ids
+                .iter()
+                .filter_map(|id| legacy.get(id))
+                .min()
+                .copied(),
+        },
+        _ => None,
+    }
+}
+
+pub fn evaluate(input: &ReportInput) -> ReportOutcome {
+    let (mut failures, mut warnings) = (Vec::new(), Vec::new());
+    let records: Vec<&ShadowRecord> = input.records.iter().map(|s| &s.record).collect();
+    let starts: Vec<_> = (records.iter().enumerate())
+        .filter_map(|(at, r)| match r {
+            ShadowRecord::WindowStart { t0, sources } if (input.from..=input.to).contains(t0) => {
+                Some((at, *t0, sources))
+            }
+            _ => None,
+        })
+        .collect();
+    if starts.len() != 1 {
+        let found = starts.len();
+        failures.push(format!(
+            "window needs exactly one window_start record, found {found}"
+        ));
+    }
+    let t0 = starts.first().map_or(input.from, |(_, t0, _)| *t0);
+    // The window is fixed at two hours from the recorded t0; `--to` must name that instant.
+    let t1 = t0 + Duration::minutes(WINDOW_MINUTES);
+    if (input.to - t1).abs() >= Duration::seconds(1) {
+        failures.push(format!(
+            "window end {} is not t0 + {WINDOW_MINUTES} minutes ({t1})",
+            input.to
+        ));
+    }
+    // Closers at or below this extent were on disk before t0 (or before a mid-window attach).
+    let mut boundary: HashMap<&SourceId, u64> = HashMap::new();
+    if let Some((at, t0, sources)) = starts.first() {
+        boundary.extend(sources.iter().map(|s| (&s.source, s.window_start_extent)));
+        // Attach rows from before t0 may land after the WindowStart line; the run's later rows count too.
+        let later = records[at + 1..].iter();
+        let later = later.take_while(|r| !matches!(r, ShadowRecord::Header { .. }));
+        let later = later.filter_map(|r| match r {
+            ShadowRecord::Attach {
+                source,
+                attached_at,
+                ..
+            } => Some((source.clone(), *attached_at)),
+            _ => None,
+        });
+        let missed = attached_sources(records[..*at].iter().copied())
+            .into_iter()
+            .chain(later)
+            .filter(|(source, attached_at)| attached_at < t0 && !boundary.contains_key(source))
+            .map(|(source, _)| source)
+            .collect::<HashSet<_>>()
+            .len();
+        if missed > 0 {
+            failures.push(format!(
+                "window_start missed {missed} source(s) attached before t0"
+            ));
+        }
+    }
+    let mut units: HashMap<&UnitKey, &ShadowUnit> = HashMap::new();
+    let (mut excluded, mut legacy) = (HashSet::new(), HashMap::new());
+    let mut turns: Vec<&ShadowTurn> = Vec::new();
+    for record in records.iter().copied() {
+        match record {
+            ShadowRecord::Attach {
+                source,
+                attach_extent,
+                attached_at,
+                ..
+            } if (t0..=t1).contains(attached_at) => {
+                boundary.entry(source).or_insert(*attach_extent);
+            }
+            ShadowRecord::Derived {
+                output: DeriveOutput::Sealed(unit),
+            } => {
+                units.insert(&unit.unit_key, unit);
+            }
+            ShadowRecord::Derived {
+                output: DeriveOutput::TurnClosed(turn),
+            } => turns.push(turn),
+            ShadowRecord::Derived {
+                output: DeriveOutput::Excluded { unit_key, .. },
+            } => {
+                excluded.insert(unit_key);
+            }
+            ShadowRecord::Legacy { msg } => {
+                legacy.insert(msg.msg_id, msg.created_at);
+            }
+            _ => {}
+        }
+    }
+
+    // Version mix and in-window totals.
+    let window = Duration::seconds(MATCH_WINDOW.as_secs() as i64);
+    let late = t1 + window * 2;
+    // Units and Legacy rows near t1 are judged only after two match windows.
+    if input.reported_at < late {
+        failures.push(format!(
+            "reported before {late}, when the last diffs are judged"
+        ));
+    }
+    // Evidence is dated when read, so one run must read from t0 until `late` without restarting.
+    let opened = starts.first().map_or(records.len(), |(line, ..)| *line);
+    let header_at = |i: &usize| matches!(records[*i], ShadowRecord::Header { .. });
+    let run = (0..opened).rev().find(header_at);
+    let end = (opened..records.len())
+        .find(header_at)
+        .unwrap_or(records.len());
+    // A start is timed by its own clock and its line's, so neither order nor skew hides it.
+    let began = |i: usize| match &input.records[i] {
+        StoredRecord {
+            at,
+            record: ShadowRecord::Header { started_at, .. },
+        } => Some(((*at).min(*started_at), (*at).max(*started_at))),
+        _ => None,
+    };
+    if run.and_then(began).is_none_or(|(_, last)| last > t0) {
+        failures.push("observer run that read window_start began after t0".into());
+    }
+    let restarted = (0..records.len())
+        .filter(|i| Some(*i) != run)
+        .filter_map(|i| Some((i, began(i)?)))
+        .any(|(i, (first, last))| first <= late && (last >= t0 || i > opened));
+    if restarted {
+        failures.push(format!(
+            "observer restarted before {late}; work in flight was lost"
+        ));
+    }
+    let run = run.unwrap_or(0);
+    let stall = Duration::seconds(3 * CHECKPOINT_SECS);
+    // Captures held for the window derive on the pass after its line, so untimed ones land by `late`.
+    let reach = late - stall * 2;
+    if let Some(recorded) = starts.first().map(|(line, ..)| input.records[*line].at)
+        && !(t0..=reach).contains(&recorded)
+    {
+        failures.push(format!(
+            "window_start recorded at {recorded}, outside [t0, {reach}]"
+        ));
+    }
+    // The derive keeps the first window it applies and takes extents from later ones.
+    let others = (run..end)
+        .filter(|i| *i != opened && input.records[*i].at <= late)
+        .filter(|i| matches!(records[*i], ShadowRecord::WindowStart { .. }))
+        .count();
+    if others > 0 {
+        failures.push(format!(
+            "observer run applied {others} other window_start before {late}"
+        ));
+    }
+    let checkpoints: Vec<DateTime<Utc>> = (input.records[run..end].iter())
+        .filter(|s| matches!(s.record, ShadowRecord::TapGap { .. }))
+        .map(|s| s.at)
+        .collect();
+    let continuous = checkpoints
+        .first()
+        .is_some_and(|first| *first <= t0 + stall)
+        && checkpoints.last().is_some_and(|last| *last >= late)
+        && (checkpoints.windows(2)).all(|w| w[1] <= t0 || w[0] >= late || w[1] - w[0] <= stall);
+    if !continuous {
+        failures.push(format!(
+            "tap collection not recorded every {stall} from t0 to {late}"
+        ));
+    }
+    let (mut header, mut stale, mut collected, mut lost) = (None, 0, None, false);
+    let mut halted = 0;
+    let mut metrics = MetricsSnapshot::default();
+    let mut classes: HashMap<&UnitKey, DiffClass> = HashMap::new();
+    let mut window_diffs: Vec<&DiffRecord> = Vec::new();
+    for line in input.records {
+        let record = &line.record;
+        if let ShadowRecord::Header {
+            schema_version,
+            identity_version,
+            ..
+        } = record
+        {
+            header = Some((*schema_version, *identity_version));
+        }
+        let at = record_time(record, &units, &legacy);
+        if let ShadowRecord::Diff { diff } = record {
+            if let Some(key) = &diff.unit_key {
+                classes.insert(key, diff.class);
+            }
+        }
+        // A loss happened after the previous collection; it may hide events window units are
+        // judged on when that span meets `[t0 - W, late]`.
+        let in_window = match (record, at) {
+            (ShadowRecord::TapGap { .. }, _) => {
+                lost = collected.is_none_or(|previous| previous < late) && line.at >= t0 - window;
+                collected = Some(line.at);
+                lost
+            }
+            (ShadowRecord::Diff { diff }, _) if diff.class == DiffClass::TapGap => lost,
+            (_, Some(at)) => t0 <= at && at <= t1,
+            // Untimed evidence counts wherever a read from the window could have been stored.
+            (_, None) => t0 - window <= line.at && line.at <= late,
+        };
+        if in_window {
+            stale += usize::from(header != Some((SCHEMA_VERSION, IDENTITY_VERSION)));
+            halted += usize::from(matches!(record, ShadowRecord::Anomaly { .. }));
+            metrics.record(record);
+            if let ShadowRecord::Diff { diff } = record {
+                window_diffs.push(diff);
+            }
+        }
+    }
+    if stale > 0 {
+        failures.push(format!(
+            "stale samples: {stale} in-window records under another version"
+        ));
+    }
+
+    let (mut seen, mut counted, mut uncounted) = (HashSet::new(), Vec::new(), BTreeMap::new());
+    for turn in turns
+        .into_iter()
+        .filter(|t| (t0..=t1).contains(&t.closed_at))
+    {
+        let key = (turn.channel_id, turn.provider, turn.native_turn_id.as_str());
+        let reason = if !turn.live {
+            turn.excluded_reason
+                .clone()
+                .unwrap_or_else(|| "not_live".into())
+        } else if boundary
+            .get(&turn.source_range.source)
+            .is_none_or(|b| turn.source_range.end <= *b)
+        {
+            "before_window_boundary".into()
+        } else if !seen.insert(key) {
+            "duplicate_turn_key".into()
+        } else {
+            counted.push(turn);
+            continue;
+        };
+        *uncounted.entry(reason).or_insert(0) += 1;
+    }
+
+    // A turn open across t0 can carry warm-up units; only units sealed past the boundary are samples.
+    let sampled = |key: &UnitKey| {
+        units.get(key).is_some_and(|u| {
+            let bound = boundary.get(&u.source_range.source);
+            (t0..=t1).contains(&u.sealed_at) && bound.is_some_and(|b| u.source_range.start >= *b)
+        })
+    };
+    let is_split = |key: &UnitKey| {
+        key.kind == UnitKind::Body
+            && sampled(key)
+            && units.get(key).is_some_and(|u| u.pieces.len() >= 2)
+            && !matches!(
+                classes.get(key),
+                Some(DiffClass::OSchemaBlocked | DiffClass::OUnsealed)
+            )
+    };
+    let population = input.population;
+    let tokens: HashSet<&str> = input.manifest.iter().map(|e| e.token.as_str()).collect();
+    let mut profiles: BTreeMap<String, ProfileCounts> = population
+        .profiles
+        .iter()
+        .map(|p| (p.clone(), ProfileCounts::default()))
+        .collect();
+    for turn in &counted {
+        let counts = profiles
+            .entry(profile_of(provider_id(turn.provider)))
+            .or_default();
+        counts.turns += 1;
+        let tool = |k: &UnitKey| k.kind == UnitKind::Tool && sampled(k);
+        counts.tool_turns += usize::from(turn.unit_keys.iter().any(tool));
+        counts.split_turns += usize::from(turn.unit_keys.iter().any(is_split));
+        counts.synthetic_turns += usize::from(
+            turn.synthetic_tokens
+                .iter()
+                .any(|t| tokens.contains(t.as_str())),
+        );
+    }
+
+    let mut synthetic = BTreeMap::new();
+    for entry in input.manifest.iter().filter(|e| e.created_at <= t1) {
+        // A thread can carry one entry per provider it was bound to in the window.
+        let mut kinds = (population.channels.iter())
+            .filter(|c| c.channel_id == entry.channel_id)
+            .map(|c| profile_of(&c.provider));
+        if !kinds.any(|kind| kind == entry.expected_runtime_kind) {
+            failures.push(format!(
+                "synthetic {}: channel is not effective {}",
+                entry.entry_id, entry.expected_runtime_kind
+            ));
+        }
+        let hit = counted
+            .iter()
+            .find(|t| t.synthetic_tokens.contains(&entry.token));
+        if hit.is_some_and(|t| profile_of(provider_id(t.provider)) != entry.expected_runtime_kind) {
+            failures.push(format!(
+                "synthetic {}: ran under another profile",
+                entry.entry_id
+            ));
+        }
+        let status = match hit {
+            None => "not_executed",
+            Some(turn) if turn.synthetic_tokens.len() >= 2 => "merged",
+            Some(_) => "live",
+        };
+        synthetic.insert(entry.entry_id.clone(), status);
+    }
+
+    let in_population: BTreeSet<&String> = population.profiles.iter().collect();
+    if in_population.is_empty() {
+        failures.push("population is empty".into());
+    }
+    for profile in &population.profiles {
+        let allowlisted = population.channels.iter().any(|c| {
+            profile_of(&c.provider) == *profile && input.allowlist.contains(&c.channel_id)
+        });
+        if profile.starts_with("unknown:") {
+            failures.push(format!(
+                "{profile}: effective TUI without a TUI runtime kind"
+            ));
+        } else if !allowlisted {
+            failures.push(format!("{profile}: no allowlisted effective-TUI channel"));
+        }
+    }
+    for aux in &population.aux {
+        if !aux.ok {
+            warnings.push(format!("coverage_unverified: {}", aux.name));
+        }
+        for kind in aux
+            .observed_kinds
+            .iter()
+            .filter(|k| !in_population.contains(k))
+        {
+            failures.push(format!(
+                "{}: observed {kind} outside the population",
+                aux.name
+            ));
+        }
+    }
+    for (profile, counts) in &profiles {
+        let bar = (MIN_PROFILE_TURNS, MIN_TOOL_TURNS, MIN_SPLIT_TURNS);
+        if !in_population.contains(profile) {
+            failures.push(format!(
+                "{profile}: {} turns outside the population",
+                counts.turns
+            ));
+        } else if counts.turns < bar.0 || counts.tool_turns < bar.1 || counts.split_turns < bar.2 {
+            failures.push(format!("{profile}: below sample bar {counts:?}"));
+        }
+    }
+    if counted.len() < MIN_TOTAL_TURNS {
+        failures.push(format!(
+            "total live turns {} < {MIN_TOTAL_TURNS}",
+            counted.len()
+        ));
+    }
+    // Completion is proven per unit by a terminal diff, never inferred from elapsed time.
+    let decided: HashSet<&UnitKey> = (records.iter())
+        .filter_map(|r| match r {
+            ShadowRecord::Diff { diff } => diff.unit_key.as_ref(),
+            _ => None,
+        })
+        .collect();
+    let undecided = (units.values())
+        .filter(|u| (t0..=t1).contains(&u.sealed_at) && !decided.contains(&u.unit_key))
+        .count();
+    let unsealed = (counted.iter().flat_map(|t| &t.unit_keys))
+        .filter(|k| !units.contains_key(k) && !excluded.contains(k))
+        .collect::<HashSet<_>>()
+        .len();
+    let windowless = uncounted.get("no_window").copied().unwrap_or(0) as u64;
+    // A window Legacy message is settled once a diff names it or it retired deleted.
+    let settled: HashSet<u64> = (records.iter())
+        .flat_map(|r| match r {
+            ShadowRecord::Diff { diff } => diff.legacy_msg_ids.clone(),
+            ShadowRecord::Legacy { msg } if msg.deleted => vec![msg.msg_id],
+            _ => Vec::new(),
+        })
+        .collect();
+    let open = (legacy.iter())
+        .filter(|(id, at)| (t0..=t1).contains(*at) && !settled.contains(*id))
+        .count();
+    for (count, what) in [
+        (undecided as u64, "window units without a terminal diff"),
+        (
+            open as u64,
+            "window Legacy messages without a terminal diff",
+        ),
+        (halted as u64, "capture anomalies that halted a source"),
+        (unsealed as u64, "units of counted turns never sealed"),
+        (
+            windowless,
+            "turns closed before the observer applied the window",
+        ),
+    ] {
+        if count > 0 {
+            failures.push(format!("{count} {what}"));
+        }
+    }
+    let judged = classify(&window_diffs, input.classify, &mut failures);
+    let after = |cause| judged.causes_after.get(&label(cause)).copied().unwrap_or(0) as u64;
+    for (count, what) in [
+        (after(DiffCause::Unknown), "diffs still Unknown"),
+        (after(DiffCause::ODefect), "diffs classified O_defect"),
+        (
+            metrics.split_over_limit_total,
+            "split pieces over the Discord limit",
+        ),
+        (metrics.tap_dropped_total, "tap events dropped"),
+    ] {
+        if count > 0 {
+            failures.push(format!("{count} {what}"));
+        }
+    }
+    ReportOutcome {
+        pass: failures.is_empty(),
+        failures,
+        warnings,
+        external_checks: EXTERNAL_CHECKS,
+        versions: [SCHEMA_VERSION, IDENTITY_VERSION, REPORT_VERSION],
+        t0,
+        t1,
+        total_turns: counted.len(),
+        profiles,
+        uncounted_turns: uncounted,
+        synthetic,
+        metrics,
+        diffs: judged.diffs,
+        causes_before: judged.causes_before,
+        causes_after: judged.causes_after,
+        reclassified: judged.reclassified,
+        auto_overridden: judged.auto_overridden,
+        o_only_tool: judged.o_only_tool,
+    }
+}
+
+fn label(value: impl Serialize) -> String {
+    let value = serde_json::to_value(value).ok();
+    let text = value.as_ref().and_then(|v| v.as_str());
+    text.unwrap_or_default().to_string()
+}
+
+/// Operator-facing identity of a diff: its unit key, else its Legacy ids, else its class.
+fn diff_key(diff: &DiffRecord) -> String {
+    let (channel, class) = (diff.channel_id, label(diff.class));
+    match (&diff.unit_key, diff.legacy_msg_ids.as_slice()) {
+        (Some(k), _) => {
+            let (provider, kind) = (label(k.provider), label(k.kind));
+            format!("{}/{provider}/{kind}/{}", k.channel_id, k.native_key)
+        }
+        (None, []) => format!("{channel}/{class}"),
+        (None, ids) => {
+            let ids: Vec<String> = ids.iter().map(u64::to_string).collect();
+            format!("{channel}/{class}/{}", ids.join("+"))
+        }
+    }
+}
+
+#[derive(Default)]
+struct Judged {
+    diffs: Vec<DiffEntry>,
+    causes_before: BTreeMap<String, usize>,
+    causes_after: BTreeMap<String, usize>,
+    reclassified: BTreeMap<String, usize>,
+    auto_overridden: usize,
+    o_only_tool: usize,
+}
+
+/// Applies operator causes to the window's non-Match diffs; every input defect is a failure.
+fn classify(diffs: &[&DiffRecord], input: &ClassifyInput, failures: &mut Vec<String>) -> Judged {
+    let mut judged = Judged::default();
+    let mut seen_keys: HashMap<String, usize> = HashMap::new();
+    for diff in diffs {
+        *judged.causes_before.entry(label(diff.cause)).or_default() += 1;
+        judged.o_only_tool += usize::from(diff.cause == DiffCause::OOnlyTool);
+        if diff.class == DiffClass::Match {
+            *judged.causes_after.entry(label(diff.cause)).or_default() += 1;
+            continue;
+        }
+        let base = diff_key(diff);
+        let n = seen_keys.entry(base.clone()).or_default();
+        *n += 1;
+        let diff_key = if *n == 1 { base } else { format!("{base}#{n}") };
+        let (class, recorded, cause) = (diff.class, diff.cause, diff.cause);
+        judged.diffs.push(DiffEntry {
+            diff_key,
+            class,
+            recorded,
+            cause,
+        });
+    }
+    let entries = match input {
+        ClassifyInput::Absent => &[][..],
+        ClassifyInput::Entries(entries) => entries.as_slice(),
+        ClassifyInput::Unreadable(error) => {
+            failures.push(format!("classify: unreadable input: {error}"));
+            &[][..]
+        }
+    };
+    let mut used = HashSet::new();
+    for entry in entries {
+        let key = &entry.diff_key;
+        let operator_cause = matches!(
+            entry.cause,
+            DiffCause::Expected | DiffCause::LegacyDefect | DiffCause::ODefect
+        );
+        let target = judged.diffs.iter_mut().find(|d| &d.diff_key == key);
+        let problem = if entry.note.trim().is_empty() {
+            "has an empty note"
+        } else if !used.insert(key.as_str()) {
+            "is listed twice"
+        } else if !operator_cause {
+            "names a cause operators cannot assign"
+        } else if target.is_none() {
+            "is not a diff of this report"
+        } else {
+            ""
+        };
+        match target {
+            Some(diff) if problem.is_empty() => {
+                if diff.recorded == DiffCause::OOnlyTool {
+                    judged.auto_overridden += 1;
+                }
+                if diff.recorded != entry.cause {
+                    let pair = format!("{}->{}", label(diff.recorded), label(entry.cause));
+                    *judged.reclassified.entry(pair).or_default() += 1;
+                }
+                diff.cause = entry.cause;
+            }
+            _ => failures.push(format!("classify: {key} {problem}")),
+        }
+    }
+    for diff in &judged.diffs {
+        *judged.causes_after.entry(label(diff.cause)).or_default() += 1;
+    }
+    judged
+}

@@ -1913,6 +1913,7 @@ src/
 │   │   │   ├── identity.rs
 │   │   │   ├── metrics.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── report.rs
 │   │   │   ├── root.rs
 │   │   │   ├── seal.rs
 │   │   │   ├── tap.rs
