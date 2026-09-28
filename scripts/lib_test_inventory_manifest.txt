@@ -9299,6 +9299,16 @@ services::tui_o::shadow::diff::tests::legacy_rows_are_judged_two_windows_after_t
 services::tui_o::shadow::diff::tests::normalized_containment_is_format_only_and_an_unposted_piece_is_missing
 services::tui_o::shadow::diff::tests::one_legacy_occurrence_is_consumed_by_one_unit_only
 services::tui_o::shadow::metrics::tests::the_derive_reason_for_an_oversized_split_piece_counts_as_split_over_limit
+services::tui_o::shadow::report::tests::a_complete_window_passes_counting_turns_not_units_and_skipping_backlog
+services::tui_o::shadow::report::tests::a_tap_loss_is_dated_by_the_span_since_the_previous_collection
+services::tui_o::shadow::report::tests::a_thread_bound_in_the_window_stays_covered_after_a_restart_or_unbind
+services::tui_o::shadow::report::tests::an_observer_restart_before_the_last_judgement_fails_the_window
+services::tui_o::shadow::report::tests::operator_classification_resolves_listed_diffs_and_rejects_bad_input
+services::tui_o::shadow::report::tests::population_gaps_fail_while_unreadable_history_only_warns
+services::tui_o::shadow::report::tests::samples_count_only_units_sealed_inside_the_window_boundary
+services::tui_o::shadow::report::tests::synthetic_entries_count_executed_turns_and_flag_merges_and_profile_mismatch
+services::tui_o::shadow::report::tests::undecided_unsealed_or_windowless_samples_fail_the_window
+services::tui_o::shadow::report::tests::window_start_and_version_defects_fail_the_window
 services::tui_o::shadow::root::tests::shadow_root_is_fixed_under_runtime_root_and_the_flag_defaults_off
 services::tui_o::shadow::root::tests::shadow_root_refuses_links_and_leaves_outside_files_untouched
 services::tui_o::shadow::root::tests::store_appends_readable_jsonl_and_stops_at_the_cap
