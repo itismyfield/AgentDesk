@@ -4,6 +4,8 @@ use crate::services::agent_recovery::{
 };
 use crate::services::discord::health::{self, HealthRegistry};
 use crate::services::provider::ProviderKind;
+use crate::services::session_host::legacy_collapse::dead_only_if_dead_or_absent;
+use crate::services::session_host::{HostKind, HostSessionRef, host_for};
 use poise::serenity_prelude::ChannelId;
 use serde_json::json;
 
@@ -195,9 +197,8 @@ async fn fence_runtime(
     }
     // Keep the pre-cleanup identity; registry removal alone is not proof of death.
     tokio::task::spawn_blocking(move || {
-        matches!(
-            crate::services::platform::tmux::pane_liveness(&session),
-            crate::services::platform::tmux::PaneLiveness::DeadOrAbsent
+        dead_only_if_dead_or_absent(
+            host_for(HostKind::Tmux).liveness(HostSessionRef::tmux(&session)),
         )
     })
     .await

@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::session_host::legacy_collapse::{tmux_live_pane_bool, tmux_present_bool};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -108,7 +109,7 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
             let channel_id_inflight = channel_id;
             let watcher_identity_for_inflight = watcher_turn_identity.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                let pane_alive = tmux_session_has_live_pane(&sess_for_inflight);
+                let pane_alive = tmux_live_pane_bool(&sess_for_inflight);
                 if pane_alive {
                     // Pane resurrected (e.g. start_claude respawn race) —
                     // do not touch its inflight.
@@ -130,7 +131,7 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
         {
             let sess = tmux_session_name.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                if tmux_session_exists(&sess) && !tmux_session_has_live_pane(&sess) {
+                if tmux_present_bool(&sess) && !tmux_live_pane_bool(&sess) {
                     // Check if this is a unified-thread session before killing
                     if let Some((_, ch_name)) =
                         crate::services::provider::parse_provider_and_channel_from_tmux_name(&sess)
@@ -185,7 +186,7 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
                     // session here. Revalidate the dead-pane condition right
                     // before the kill so we only tear down the same
                     // dead-paned session we capture-paned.
-                    if tmux_session_exists(&sess) && !tmux_session_has_live_pane(&sess) {
+                    if tmux_present_bool(&sess) && !tmux_live_pane_bool(&sess) {
                         crate::services::platform::tmux::kill_session(
                             &sess,
                             "watcher cleanup: dead session after turn",
