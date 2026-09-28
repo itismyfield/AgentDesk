@@ -124,6 +124,16 @@ pub(super) fn capabilities_with_runtime_state(base: &Value) -> Value {
             Value::Bool(true),
         );
     }
+    let [group, flag] = crate::services::pipeline_routes::STAGE_LOCK_CAPABILITY;
+    let pipeline = capabilities
+        .entry(group.to_string())
+        .or_insert_with(|| json!({}));
+    if !pipeline.is_object() {
+        *pipeline = json!({});
+    }
+    if let Some(features) = pipeline.as_object_mut() {
+        features.insert(flag.to_string(), Value::Bool(true));
+    }
     Value::Object(capabilities)
 }
 
@@ -230,6 +240,10 @@ mod tests {
         );
         assert_eq!(
             capabilities.pointer("/scheduled_messages/discord_mention_consumer_v1"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            capabilities.pointer("/pipeline/stage_lock_v1"),
             Some(&Value::Bool(true))
         );
     }
