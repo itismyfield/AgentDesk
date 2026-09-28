@@ -34,7 +34,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_VOICE_KEEP_WAV` | `src/voice/config.rs:138` | `keep_recordings` 또는 환경변수 `ADK_VOICE_KEEP_WAV` 에 따라 utterance wav / segment / transcript sidecar 를 보존할지 결정한다 (#2156). |
 | `ADK_VOICE_SILENCE` | `src/services/discord/voice_barge_in/foreground_decision.rs:3` |  |
 | `AGENTDESK_API_URL` | `src/cli/client.rs:14` (+1 more) | `env_hint` names the environment variable(s) the *caller's* `api_base()` actually honors — client.rs resolves `AGENTDESK_API_URL` only, while monitoring.rs pre… |
-| `AGENTDESK_BINDING_CONTEXT` | `src/services/tui_prompt_dedupe/binding_context.rs:113` | Hook capture reads this value without consulting mutable markers. |
+| `AGENTDESK_BINDING_CONTEXT` | `src/services/tui_prompt_dedupe/binding_context.rs:106` | Hook capture reads this value without consulting mutable markers. |
 | `AGENTDESK_CATCH_UP_POLL_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs:414` |  |
 | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` | `src/services/discord/catch_up.rs:551` | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` overrides the gap (0 disables — used by tests and by operators who want the old unthrottled behaviour). |
 | `AGENTDESK_CLAUDE_PATH` | `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs:162` | Dispatched turns must not reach a host `claude` or host config: a real CLI rejects the synthetic resume id and triggers a stale-resume re-dispatch. |
@@ -59,16 +59,16 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_GH_PATH` | `src/github/mod.rs:20` (+1 more) |  |
 | `AGENTDESK_HEADLESS_DISCORD_NONCE` | `src/services/discord/outbound/manual_delivery/headless_nonce.rs:8` (+1 more) |  |
 | `AGENTDESK_HEADLESS_DURABLE_OUTBOX` | `src/services/discord/turn_bridge/headless_delivery/durable_outbox.rs:8` (+1 more) |  |
-| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_PARENT_TEST` | `src/services/claude_tui/hook_relay.rs:36` |  |
-| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_TEST_ELAPSED_PATH` | `src/services/claude_tui/hook_relay.rs:38` |  |
-| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_TEST_RELEASE_PATH` | `src/services/claude_tui/hook_relay.rs:41` |  |
-| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_WORKER` | `src/services/claude_tui/hook_relay.rs:32` (+1 more) |  |
-| `AGENTDESK_HOOK_RELAY_NON_WAIT_PARENT_TEST` | `src/services/claude_tui/hook_relay.rs:44` |  |
-| `AGENTDESK_HOOK_RELAY_NON_WAIT_WORKER` | `src/services/claude_tui/hook_relay.rs:33` (+1 more) |  |
-| `AGENTDESK_HOOK_RELAY_TEST_ELAPSED_PATH` | `src/services/claude_tui/hook_relay.rs:48` |  |
-| `AGENTDESK_HOOK_RELAY_TEST_ENDPOINT` | `src/services/claude_tui/hook_relay.rs:46` |  |
-| `AGENTDESK_HOOK_RELAY_TEST_MUTATION` | `src/services/claude_tui/hook_relay/ordered_queue.rs:41` (+1 more) |  |
-| `AGENTDESK_HOOK_RELAY_TEST_STDOUT_PATH` | `src/services/claude_tui/hook_relay.rs:50` |  |
+| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_PARENT_TEST` | `src/services/claude_tui/hook_relay.rs:37` |  |
+| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_TEST_ELAPSED_PATH` | `src/services/claude_tui/hook_relay.rs:39` |  |
+| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_TEST_RELEASE_PATH` | `src/services/claude_tui/hook_relay.rs:42` |  |
+| `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_WORKER` | `src/services/claude_tui/hook_relay.rs:33` (+1 more) |  |
+| `AGENTDESK_HOOK_RELAY_NON_WAIT_PARENT_TEST` | `src/services/claude_tui/hook_relay.rs:45` |  |
+| `AGENTDESK_HOOK_RELAY_NON_WAIT_WORKER` | `src/services/claude_tui/hook_relay.rs:34` (+1 more) |  |
+| `AGENTDESK_HOOK_RELAY_TEST_ELAPSED_PATH` | `src/services/claude_tui/hook_relay.rs:49` |  |
+| `AGENTDESK_HOOK_RELAY_TEST_ENDPOINT` | `src/services/claude_tui/hook_relay.rs:47` |  |
+| `AGENTDESK_HOOK_RELAY_TEST_MUTATION` | `src/services/claude_tui/hook_relay/ordered_queue.rs:42` (+1 more) |  |
+| `AGENTDESK_HOOK_RELAY_TEST_STDOUT_PATH` | `src/services/claude_tui/hook_relay.rs:51` |  |
 | `AGENTDESK_INSTANCE_ID` | `src/services/cluster/node_registry.rs:672` (+2 more) | Resolve the self instance_id, preferring the value the cluster bootstrap registered (config-driven if present), falling back to the env-var/hostname pair only… |
 | `AGENTDESK_KAKAO_ACCOUNTS` | `src/services/kakao.rs:35` (+1 more) |  |
 | `AGENTDESK_KAKAO_CALENDAR_ACCOUNTS` | `src/services/kakao/account.rs:21` | Separate allowlist: enabling calendar never implicitly grants all message accounts. |

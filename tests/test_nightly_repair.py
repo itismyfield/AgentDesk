@@ -17,7 +17,7 @@ DEBUG_KEYS = ("CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG")
 PG_STEP = "cargo test (PostgreSQL bootstrap and routes)"
 WINDOWS_STEP = "Discord thread-create cross-process lock"
 WINDOWS_COMMAND = "cargo test --lib discord_thread_create -- --test-threads=1"
-PG_CARGO = ('cargo test --all-targets -- "${PG_INCLUDE_ARGS[@]}" '
+PG_CARGO = ('cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" '
             "--nocapture --test-threads=1")
 NON_PG_CARGO = 'cargo test --all-targets -- "${NON_PG_SKIP_ARGS[@]}"'
 FILTER_SOURCE = "source scripts/ci/non-pg-test-filter.sh"
@@ -150,8 +150,8 @@ STRUCTURAL_MUTANTS = (
                          '          CARGO_PROFILE_TEST_DEBUG: "0"\n'
                          "        run: cargo test --lib discord_thread_create",
                          "        run: cargo test --lib discord_thread_create")),
-    ("narrows the PostgreSQL target selection",
-     lambda t: t.replace(PG_CARGO, PG_CARGO.replace("--all-targets", "--lib"))),
+    ("builds every target beside the PostgreSQL lib test",
+     lambda t: t.replace(PG_CARGO, PG_CARGO.replace("--lib", "--all-targets"))),
     ("shortens the PostgreSQL step budget",
      lambda t: t.replace("        timeout-minutes: 30", "        timeout-minutes: 20")),
     ("drops the non-PG replay",
@@ -182,16 +182,16 @@ class NightlyRepairWiringTests(unittest.TestCase):
                 self.assertNotEqual(nightly_contract_problems(mutated), [])
 
     def test_both_extractors_still_see_the_direct_cargo_command(self) -> None:
-        rendered = "cargo test --all-targets -- ${PG_INCLUDE_ARGS[@]} --nocapture --test-threads=1"
+        rendered = "cargo test --lib -- ${PG_INCLUDE_ARGS[@]} --nocapture --test-threads=1"
         self.assertIn(rendered, integrity_commands(self.text))
         includes = MEMBERSHIP.load_non_pg_skip_args(ROOT)[1::2]
         self.assertIn(
-            " ".join(("cargo test --all-targets --", *includes,
+            " ".join(("cargo test --lib --", *includes,
                       "--nocapture --test-threads=1")),
             membership_commands(self.text))
 
     def test_wrapping_cargo_silently_loses_target_integrity_coverage(self) -> None:
-        rendered = "cargo test --all-targets -- ${PG_INCLUDE_ARGS[@]} --nocapture --test-threads=1"
+        rendered = "cargo test --lib -- ${PG_INCLUDE_ARGS[@]} --nocapture --test-threads=1"
         for name, mutate in WRAPPER_MUTANTS:
             with self.subTest(mutant=name):
                 mutated = mutate(self.text)
