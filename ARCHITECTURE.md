@@ -1919,6 +1919,10 @@ src/
 │   │   │   ├── seal.rs
 │   │   │   ├── tap.rs
 │   │   │   └── unit_plan.rs
+│   │   ├── store/
+│   │   │   ├── durable.rs
+│   │   │   ├── ledger.rs
+│   │   │   └── mod.rs
 │   │   └── shadow_host.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── binding_context.rs

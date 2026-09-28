@@ -9340,6 +9340,12 @@ services::tui_o::shadow::tap::tests::only_window_starts_appended_after_startup_a
 services::tui_o::shadow::tap::tests::tap_counts_a_full_queue_as_dropped_instead_of_waiting
 services::tui_o::shadow::tap::tests::the_window_start_tail_reads_to_the_end_in_one_pass
 services::tui_o::shadow_host::tests::tap_copies_own_bot_messages_and_authorless_edits_only
+services::tui_o::store::ledger::tests::replay_flags_the_ownership_invariant_breaks_that_pause_a_channel
+services::tui_o::store::tests::a_crash_before_the_era_initializes_only_channels_without_init
+services::tui_o::store::tests::a_torn_ledger_append_is_cut_so_the_channel_reopens_and_keeps_appending
+services::tui_o::store::tests::init_and_ledger_round_trip_the_anchor_serials_and_outcomes
+services::tui_o::store::tests::missing_or_damaged_state_of_an_era_channel_halts_instead_of_reinitializing
+services::tui_o::store::tests::the_store_is_dormant_unless_its_flag_is_set
 services::tui_prompt_control::tests::absolute_path_prompts_are_never_taken_as_codex_commands
 services::tui_prompt_control::tests::codex_local_controls_carry_the_normalized_name_and_the_raw_args
 services::tui_prompt_control::tests::command_shaped_input_outside_the_registry_is_refused_not_forwarded
