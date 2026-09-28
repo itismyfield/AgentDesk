@@ -23,7 +23,9 @@ pub async fn probe_tmux_session_exists(tmux_session_name: &str) -> bool {
     let name = tmux_session_name.to_string();
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        tokio::task::spawn_blocking(move || tmux_session_exists(&name)),
+        tokio::task::spawn_blocking(move || {
+            crate::services::session_host::legacy_collapse::tmux_present_bool(&name)
+        }),
     )
     .await
     .unwrap_or(Ok(true))
@@ -377,5 +379,34 @@ mod tests {
         assert!(should_recreate_session_after_stdin_error(
             "Process session AgentDesk-claude-123 was stopped"
         ));
+    }
+
+    #[test]
+    fn probe_tmux_session_exists_truth_table() {
+        use crate::services::platform::tmux::SessionPresence;
+        use crate::services::session_host::HostPresence;
+        use crate::services::session_host::legacy_collapse::probe_failed_to_missing;
+        for (presence, exists) in [
+            (SessionPresence::Present, true),
+            (SessionPresence::Missing, false),
+            (SessionPresence::ProbeFailed, false),
+        ] {
+            assert_eq!(
+                probe_failed_to_missing(HostPresence::from(presence)),
+                exists
+            );
+            assert_eq!(presence == SessionPresence::Present, exists);
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        for blank in ["", "  "] {
+            assert!(!runtime.block_on(super::probe_tmux_session_exists(blank)));
+            assert_eq!(
+                runtime.block_on(super::probe_tmux_session_exists(blank)),
+                super::tmux_session_exists(blank)
+            );
+        }
     }
 }
