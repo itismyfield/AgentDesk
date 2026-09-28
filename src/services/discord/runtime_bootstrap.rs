@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::cluster::node_registry::GatewayWaiterGuard;
 
 mod deferred_restart;
 mod framework_setup;
@@ -338,8 +339,9 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // wall clock. The files remain owned by the external persistence barrier
     // and are never deleted by the respawned binary.
 
-    let gateway_lease = match gateway_outcome {
-        GatewayLeaseOutcome::Proceed(lease) => lease,
+    let (gateway_lease, gateway_waiter) = match gateway_outcome {
+        GatewayLeaseOutcome::Proceed(Some(acquired)) => (Some(acquired.lease), acquired.waiter),
+        GatewayLeaseOutcome::Proceed(None) => (None, None),
         GatewayLeaseOutcome::Standby => {
             // Standby can execute full turns through the intake worker. Always
             // register its SharedData so detailed health proves either the real
@@ -391,6 +393,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         voice_config,
         voice_receiver,
         gateway_lease,
+        gateway_waiter,
         &restored_model_overrides,
         &restored_fast_mode_channels,
     )

@@ -21,6 +21,50 @@ pub(crate) fn closed_handle() -> ChannelMailboxHandle {
 }
 
 impl ChannelMailboxRegistry {
+    pub(crate) fn queued_for_test(message_id: u64) -> super::Intervention {
+        make_intervention(message_id, "queued", std::time::Instant::now())
+    }
+
+    pub(crate) fn insert_snapshot_only_for_test(
+        &self,
+        channel: ChannelId,
+        snapshot: super::ChannelMailboxSnapshot,
+        refusal: super::registry_purge::MailboxRefusal,
+    ) -> Arc<std::sync::atomic::AtomicUsize> {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = attempts.clone();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(msg) = receiver.recv().await {
+                match msg {
+                    super::ChannelMailboxMsg::Snapshot { reply } => {
+                        let _ = reply.send(snapshot.clone());
+                    }
+                    super::ChannelMailboxMsg::HydratePendingQueueFromDisk { reply, .. } => {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if refusal == super::registry_purge::MailboxRefusal::Closed {
+                            reply.refuse("hydrate");
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let handle = ChannelMailboxHandle {
+            sender,
+            recovery_done: Arc::new(RecoveryDoneSignal::new()),
+        };
+        self.handles.insert(channel, handle.clone());
+        GLOBAL_CHANNEL_MAILBOXES.insert(channel, handle);
+        attempts
+    }
+
+    pub(crate) fn remove_fixture_for_test(&self, channel: ChannelId) {
+        if let Some((_, handle)) = self.handles.remove(&channel) {
+            GLOBAL_CHANNEL_MAILBOXES.remove_if(&channel, |_, h| h.same_actor(&handle));
+        }
+    }
+
     pub(crate) fn insert_unreachable_for_test(&self, channel_id: ChannelId) {
         let handle = closed_handle();
         self.handles.insert(channel_id, handle.clone());
