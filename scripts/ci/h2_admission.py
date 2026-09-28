@@ -35,14 +35,19 @@ PATH_ATTR_ALLOWED: frozenset[str] = frozenset()
 # R-E: low-level tmux owner API inventory; each pub fn is EXEC (clippy.toml) or a non-exec helper.
 INVENTORY_FILES = ("src/services/platform/tmux.rs", "src/services/platform/tmux/availability.rs",
                    "src/services/platform/tmux/liveness.rs")
+# pub(super) Command preparer for the owner runner; reclassify as EXEC if visibility widens.
 NONEXEC = frozenset(f"agentdesk::services::platform::tmux::availability::{name}" for name in (
-    "mark_available_from_live_session", "invalidate_cache", "cached_unavailable_due_to_missing"))
+    "mark_available_from_live_session", "invalidate_cache", "cached_unavailable_due_to_missing")) | frozenset({
+        "agentdesk::services::platform::tmux::liveness::prepared_tmux_command"})
 PS = frozenset(f"agentdesk::services::platform::tmux::{name}" for name in ("read_process_args", "process_start_time"))
 SUBPROC_PATHS = frozenset({"std::process::Command::new", "tokio::process::Command::new"})
 W_TYPES = frozenset({"agentdesk::services::codex_tui::input::TmuxTuiActionExecutor",
                      "agentdesk::services::claude_tui::tui_relay::TmuxSendBackend"})
 # Hand-kept entries allowed to have no diagnostic in a lane; the data PR pins these.
-KNOWN_UNREFERENCED: dict[str, frozenset[str]] = {lane: frozenset() for lane in m.LANES}
+# Owner EXEC APIs with no production callers.
+KNOWN_UNREFERENCED: dict[str, frozenset[str]] = {lane: frozenset({
+    "agentdesk::services::platform::tmux::kill_session_checked",
+    "agentdesk::services::platform::tmux::get_option"}) for lane in m.LANES}
 # H9: files no measured lane compiles; they must not mention tmux at all.
 WINDOWS_ONLY_FILES = ("src/runtime_layout/windows_links.rs",)
 

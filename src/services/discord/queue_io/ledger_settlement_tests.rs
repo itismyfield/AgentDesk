@@ -331,3 +331,187 @@ async fn a_requeue_after_an_earlier_completed_episode_of_the_same_id_still_dispa
         "a delivery committed before this copy was queued settles an earlier episode, not this one"
     );
 }
+
+/// A delivered episode commits after the rows it answers were queued.
+fn deliver_episode(channel_id: ChannelId, primary: u64, turn_nonce: Option<&str>) {
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    completed_turn_ledger::append_completed_episode(
+        &ProviderKind::Claude,
+        channel_id.get(),
+        primary,
+        turn_nonce,
+    );
+}
+
+async fn enqueue_merged_pair(shared: &Arc<SharedData>, channel_id: ChannelId, h: u64, p: u64) {
+    for (id, text) in [(h, "absorbed request"), (p, "primary request")] {
+        let mut item = queued(id, text);
+        item.merge_consecutive = true;
+        enqueue(shared, channel_id, item).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_absorbed_copy_requeued_before_the_claim_is_settled_by_the_merged_delivery() {
+    let _root = scoped_runtime_root();
+    let shared = make_shared_data_for_tests();
+    let channel_id = ChannelId::new(6_288_800);
+    let (h, p) = (6_288_801, 6_288_802);
+    let occupant = MessageId::new(6_288_803);
+    assert!(
+        mailbox_try_start_turn(
+            &shared,
+            channel_id,
+            Arc::new(CancelToken::new()),
+            UserId::new(7),
+            occupant
+        )
+        .await
+    );
+    enqueue_merged_pair(&shared, channel_id, h, p).await;
+    mailbox_finish_turn(&shared, &ProviderKind::Claude, channel_id).await;
+    let taken = actor_take(&shared, channel_id).await;
+    assert_eq!(
+        taken
+            .intervention
+            .as_ref()
+            .map(|item| item.source_message_ids.clone()),
+        Some(vec![MessageId::new(h), MessageId::new(p)])
+    );
+    // A catch-up copy of H lands in the dequeue -> claim window.
+    enqueue(&shared, channel_id, queued(h, "absorbed request")).await;
+    let token = Arc::new(CancelToken::new());
+    let nonce = token.turn_nonce().expect("turn nonce").to_owned();
+    assert!(
+        mailbox_try_start_turn(
+            &shared,
+            channel_id,
+            token,
+            UserId::new(7),
+            MessageId::new(p)
+        )
+        .await
+    );
+    assert_eq!(
+        mailbox_snapshot(&shared, channel_id)
+            .await
+            .intervention_queue
+            .len(),
+        1,
+        "the claim purges only P"
+    );
+    deliver_episode(channel_id, p, Some(&nonce));
+    mailbox_finish_turn(&shared, &ProviderKind::Claude, channel_id).await;
+    drop(taken);
+
+    let result = actor_take(&shared, channel_id).await;
+    assert!(result.persistence_error.is_none());
+    assert_eq!(
+        result
+            .intervention
+            .as_ref()
+            .map(|item| item.message_id.get()),
+        None,
+        "H was answered by P's merged episode"
+    );
+    assert_eq!(exits(&result), vec![(h, QueueExitKind::Superseded)]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_restored_merged_marker_of_a_delivered_episode_settles_every_source() {
+    let _root = scoped_runtime_root();
+    let channel_id = ChannelId::new(6_288_900);
+    let (h, p) = (6_288_901, 6_288_902);
+    let before_restart = make_shared_data_for_tests();
+    enqueue_merged_pair(&before_restart, channel_id, h, p).await;
+    let taken = actor_take(&before_restart, channel_id).await;
+    assert_eq!(
+        taken.intervention.map(|item| item.message_id.get()),
+        Some(p)
+    );
+    completed_turn_ledger::record_merged_alias(
+        &ProviderKind::Claude,
+        channel_id.get(),
+        p,
+        "restored-episode",
+        &[h],
+    );
+    deliver_episode(channel_id, p, Some("restored-episode"));
+    let token_hash = before_restart.token_hash.clone();
+    assert!(
+        load_channel_pending_dispatch_marker(&ProviderKind::Claude, &token_hash, channel_id)
+            .is_some()
+    );
+    drop(before_restart);
+
+    let after_restart = make_shared_data_for_tests();
+    let result = actor_take(&after_restart, channel_id).await;
+    assert!(result.persistence_error.is_none());
+    assert_eq!(exits(&result), vec![(p, QueueExitKind::Superseded)]);
+    assert_eq!(
+        result.intervention.map(|item| item.message_id.get()),
+        None,
+        "the restored H was answered by the same episode"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_newest_alias_at_the_rowless_cap_settles_its_source_after_delivery() {
+    let _root = scoped_runtime_root();
+    let shared = make_shared_data_for_tests();
+    let channel_id = ChannelId::new(6_289_000);
+    let (h, p) = (6_289_100, 6_289_200);
+    enqueue(&shared, channel_id, queued(h + 64, "newest alias source")).await;
+    for offset in 0..65 {
+        completed_turn_ledger::record_merged_alias(
+            &ProviderKind::Claude,
+            channel_id.get(),
+            p + offset,
+            "n",
+            &[h + offset],
+        );
+    }
+    deliver_episode(channel_id, p + 64, Some("n"));
+
+    let result = actor_take(&shared, channel_id).await;
+    assert_eq!(
+        result
+            .intervention
+            .as_ref()
+            .map(|item| item.message_id.get()),
+        None
+    );
+    assert_eq!(exits(&result), vec![(h + 64, QueueExitKind::Superseded)]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_absorbed_source_takes_its_backing_episode_time_not_a_later_episode_of_the_head() {
+    let _root = scoped_runtime_root();
+    let shared = make_shared_data_for_tests();
+    let channel_id = ChannelId::new(6_289_300);
+    let (h, p) = (6_289_301, 6_289_302);
+    completed_turn_ledger::record_merged_alias(
+        &ProviderKind::Claude,
+        channel_id.get(),
+        p,
+        "old",
+        &[h],
+    );
+    deliver_episode(channel_id, p, Some("old"));
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    enqueue(
+        &shared,
+        channel_id,
+        queued(h, "new copy after the old episode"),
+    )
+    .await;
+    deliver_episode(channel_id, p, Some("unrelated-new"));
+
+    let result = actor_take(&shared, channel_id).await;
+    assert!(exits(&result).is_empty());
+    assert_eq!(
+        result.intervention.map(|item| item.message_id.get()),
+        Some(h),
+        "only the old backing episode dates H, and it predates this copy"
+    );
+}
