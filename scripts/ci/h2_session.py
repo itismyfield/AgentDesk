@@ -351,15 +351,16 @@ def read_maps(pid: int):
     return {short.uid, short.ruid, short.svuid}, regions
 
 
-def user_manager(pid: int, uids: set) -> bool:
-    """The uid's systemd user manager, whose maps stay unreadable: PPid 1 in its user@ unit's init.scope."""
+def manager_scope(pid: int, uid: int) -> tuple[str | None, str]:
+    """Name of a process in the uid's user@ init.scope (systemd keeps only the manager and sd-pam there), and what it is."""
     try:
         status, cgroup = ((PROC_ROOT / str(pid) / name).read_text() for name in ("status", "cgroup"))
-    except OSError:
-        return False
-    fields, (uid, *rest) = dict(line.split(":\t", 1) for line in status.splitlines() if ":\t" in line), sorted(uids)
-    return sys.platform == "linux" and not rest and fields.get("Name") == "systemd" and fields.get("PPid") == "1" \
-        and f"0::/user.slice/user-{uid}.slice/user@{uid}.service/init.scope" in cgroup.splitlines()
+    except OSError as err:
+        return None, f"status/cgroup unreadable: {err.strerror}"
+    fields = dict(line.split(":\t", 1) for line in status.splitlines() if ":\t" in line)
+    inside = sys.platform == "linux" and f"0::/user.slice/user-{uid}.slice/user@{uid}.service/init.scope" in cgroup.splitlines()
+    return fields.get("Name") if inside else None, \
+        f"name {fields.get('Name')}, ppid {fields.get('PPid')}, cgroup {cgroup.strip().splitlines()}"
 
 
 def mapping_guard(stats: dict[str, list[int]], *, rounds: int = 10) -> dict:
@@ -382,9 +383,10 @@ def mapping_guard(stats: dict[str, list[int]], *, rounds: int = 10) -> dict:
             uids, regions = found
             if regions is None:
                 if 0 not in uids and (me in uids or loose or uids & owners):
-                    if uids != {me} or not user_manager(pid, uids):
-                        raise MeasureError(f"session fence: cannot read the mappings of process {pid} (uids {sorted(uids)})")
-                    managers.append([pid, "systemd"])
+                    name, detail = manager_scope(pid, me)
+                    if uids != {me} or name is None:
+                        raise MeasureError(f"session fence: cannot read the mappings of process {pid} (uids {sorted(uids)}; {detail})")
+                    managers.append([pid, name])
                     continue
                 counts["root" if 0 in uids else "foreign"] += 1
                 continue
