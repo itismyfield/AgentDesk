@@ -15,7 +15,7 @@ SOURCE = (FIXTURE / "lib.rs").read_text(encoding="utf-8")
 RECORDS = json.loads((FIXTURE / "items.json").read_text(encoding="utf-8"))
 DIAGNOSTICS = json.loads((FIXTURE / "clippy.json").read_text(encoding="utf-8"))
 FILE = "rust/library.rs"
-RUN, STATE = subprocess.run, harness.s.modmap.source_state
+RUN, CAPTURE = subprocess.run, harness.s.modmap.source_capture
 TARGET = dict(name="fixture", kind=["cdylib", "rlib"], crate_types=["rlib", "cdylib"])
 GIT = ("git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false")
 
@@ -75,7 +75,7 @@ class Items(unittest.TestCase):
         self.git("init", "-q")
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "fixture")
-        state = patch.object(harness.s.modmap, "source_state", STATE)
+        state = patch.object(harness.s.modmap, "source_capture", CAPTURE)
         state.start()
         self.addCleanup(state.stop)
 
@@ -240,6 +240,45 @@ class Items(unittest.TestCase):
         finally:
             (self.h.root / "git.moved").rename(self.h.root / ".git")
 
+    def test_load_requires_the_passed_source_fence(self):
+        lib, conf = str(self.h.lib), str(self.h.conf / "clippy.toml")
+        def files(fence, change):
+            changed = {name: change(name, stat) for name, stat in fence["files"].items()}
+            return dict(fence, files={name: stat for name, stat in changed.items() if stat is not None})
+        cases = {
+            "old /2 request": (lambda f: None, None),
+            "no marker": (lambda f: f, "none"),
+            "stale marker": (lambda f: f, "stale"),
+            "lib unlisted": (lambda f: files(f, lambda n, st: None if n == lib else st), None),
+            "extra file": (lambda f: dict(f, files={**f["files"], lib + ".x": f["files"][lib]}), None),
+            "empty list": (lambda f: dict(f, files={}), None),
+            "changed after probe": (lambda f: files(f, lambda n, st: st[:4] + [f["probe"]["ctimes"][-1]] if n == conf else st),
+                                    None),
+            "size": (lambda f: files(f, lambda n, st: st[:2] + [st[2] + 1] + st[3:] if n == lib else st), None),
+            "other device": (lambda f: files(f, lambda n, st: [st[0] + 1] + st[1:] if n == lib else st), None),
+            "whole seconds": (lambda f: dict(f, probe=dict(f["probe"], ctimes=[10 ** 9 * k for k in (1, 2, 3)])), None),
+            "no probe": (lambda f: dict(f, probe=None), None),
+            "no lookup dirs": (lambda f: {k: v for k, v in f.items() if k != "dirs"}, None),
+            "guard unavailable": (lambda f: dict(f, mappings=dict(status="unavailable", platform="sunos")), None),
+            "no guard": (lambda f: {k: v for k, v in f.items() if k != "mappings"}, None),
+        }
+        for label, (forge, marker) in cases.items():
+            with self.subTest(label):
+                manifest = self.seal(name=label.replace(" ", "-").replace("/", ""))
+                self.load(manifest)
+                request = json.loads((manifest.parent / "request.json").read_text())
+                fence = forge(request.pop("fence"))
+                if fence is not None:
+                    request["fence"] = fence
+                value = json.loads(manifest.read_text())
+                try:
+                    mark = {"none": None, "stale": dict(value["fence"], resolution_ns=1)}.get(marker) if marker else \
+                        harness.s.fence_marker(fence)
+                except (harness.s.MeasureError, TypeError, KeyError):
+                    mark = value["fence"]
+                self.rewrite(manifest, {"request.json": json.dumps(request).encode()}, fence=mark)
+                self.assert_reason("unsealed", self.load, manifest)
+
     def test_source_bytes_and_membership_come_from_the_sealed_capture(self):
         manifest = self.seal(name="bytes")
         sealed = self.h.lib.read_bytes()
@@ -335,8 +374,9 @@ class Items(unittest.TestCase):
 
 
     def test_attribution_resolves_the_sealed_lib_path_once(self):
-        alias, lib = self.h.lib.parent / "alias.rs", self.h.lib.name
+        alias, lib = self.h.crate / "gen/alias.rs", "../rust/" + self.h.lib.name
         (self.h.lib.parent / "other.rs").write_text(SOURCE)
+        alias.parent.mkdir()
         alias.symlink_to(lib)
         manifest = self.seal(cases=DIAGNOSTICS[:1], target=dict(src_path=str(alias)), name="alias")
         resolve, calls = Path.resolve, []
@@ -344,7 +384,7 @@ class Items(unittest.TestCase):
             if path != alias or not calls.append(path) and len(calls) == 1:
                 return resolve(path, *args, **kwargs)
             alias.unlink()
-            alias.symlink_to("other.rs")
+            alias.symlink_to("../rust/other.rs")
             try:
                 return resolve(path, *args, **kwargs)
             finally:

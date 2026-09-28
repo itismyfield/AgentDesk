@@ -177,6 +177,29 @@ runner도 파일=sidecar=proof의 digest/양수 레코드 수, 헤더·mtime·pa
 parent는 정수(root=0)이며 모듈·closure 등 미출력 부모는 허용한다. 출력된 중간 부모만 따라가며 display/이름으로 관계를 복원하지 않는다.
 봉인 전 body 접합, 0개 레코드와 빈 digest는 실패한다. 모든 증거를 함께 다시 쓰는 주체의 인증은 보장하지 않는다.
 map 모드의 TSV/cfg와 argv는 그대로이며 items 생산은 세션 자식만 수행한다.
+
+**입력 source fence.** items 자식과 실제 Clippy는 별도 compile이다. 그래서 compile 사이에 원문을 A→B→A로 바꿨다 되돌리는 쓰기는 전후 bytes 비교만으로는 보이지 않는다.
+fence는 이 파일 변경형 쓰기를 쓴 주체(편집기·동시 프로세스·요청 lib 전개 중 proc-macro)와 무관하게 거부한다.
+- **capture 결속.** capture는 목록·lib·clippy.toml 파일마다 stat→open→fstat→read→fstat→stat을 한다. 여섯 번 모두 `(dev, ino, size, mtime_ns, ctime_ns)`가 같고 읽은 길이도 같을 때만 bytes를 채택한다. 다르면 재시도 없이 실패한다.
+- **clock probe.** runner는 lib touch 뒤, capture 전에 run 디렉터리의 목록 밖 임시 파일을 되풀이해 쓴다. ctime이 두 번 전진해야 하며 마지막 값을 P로 둔다.
+  - 전진하지 않거나(예산 5초), 되돌아가거나, 관측 값이 모두 초 배수이거나, 최소 간격이 1초 이상이면 fail-closed다. 관측 간격과 같은 tick 재쓰기 수는 request와 stderr에 남긴다.
+- **fence 시작 조건.** capture한 모든 파일은 probe와 같은 st_dev에 있고 `ctime < P`여야 한다. 그러면 그 뒤의 쓰기, 곧 같은 내용 복원·mtime 복원·hard link 경유 쓰기는 반드시 ctime을 바꾼다. 이는 tick 크기와 무관하다. rename 교체는 inode를 바꾼다.
+- **경로 이름공간.** capture 파일마다 workspace root(포함)부터 부모까지의 각 디렉터리를 lstat로 `(dev, ino, mtime_ns, ctime_ns)` 봉인한다. root 밖 파일(clippy.toml 등)은 부모 디렉터리만 봉인한다.
+  - 디렉터리도 probe와 같은 st_dev·`ctime < P`여야 한다. 그래서 조상 디렉터리를 rename으로 B 트리와 바꿨다 되돌리면 그 부모의 mtime·ctime이 남는다. leaf나 성분이 심볼릭 링크면 거부한다(링크 객체 봉인 대신 거부: 링크 대상 경로의 디렉터리는 봉인 목록 밖이다). leaf는 capture한 inode와 같은 일반 파일이어야 한다.
+  - 정상 세션은 봉인 디렉터리에 항목을 만들지 않는다. run 디렉터리는 probe 전에 만들고, probe 파일·출력은 run 안에 쓴다. Cargo target 디렉터리(`--target-dir`, 없으면 metadata `target_directory`)는 probe 전에 미리 만든다. root 위 조상은 봉인하지 않는다. `/tmp`·runner 작업 디렉터리처럼 다른 작업이 항목을 바꾸는 공유 디렉터리라 정상 CI를 거부하게 된다. 남는 반례: root의 엄격한 조상을 rename으로 바꿨다 되돌리는 교체(root inode 자체는 그대로).
+- **공유 매핑 가드.** 이미 dirty한 쓰기 가능 `MAP_SHARED` 매핑을 통한 저장은 ctime을 바꾸지 않을 수 있다. 그래서 capture·봉인 직후 Cargo 전에, capture `(dev, ino)`나 경로를 매핑한 프로세스를 찾으면 세션을 거부한다.
+  - Linux: `/proc/<pid>/maps`의 공유(`s`) 매핑 전부. mprotect로 이미 dirty한 page를 fault 없이 다시 쓰기 가능하게 할 수 있어 현재 쓰기 권한과 무관하게 본다. maps는 `/proc/<pid>/task/<tid>/maps`로 모든 task에서 읽고, task 목록은 새 tid가 없을 때까지 다시 읽는다. `pthread_exit`로 끝난 leader는 maps가 비어도 worker가 주소 공간을 가지기 때문이다. 빈 maps는 커널 스레드(`PF_KTHREAD`)이거나 남은 task가 모두 Z/X일 때만 검사로 센다. task 목록을 읽지 못하거나 비었거나 살아 있는 task의 maps가 비어 있으면(3회 재시도) root가 아닌 프로세스는 거부한다. macOS(task VM을 프로세스가 공유하므로 pid 단위): libproc `PROC_PIDREGIONPATHINFO`에서 최대 보호가 쓰기인 영역(private COW 매핑도 보수적으로 포함).
+  - maps를 읽지 못한 프로세스: uid(실제·유효·저장·파일시스템)에 0이 있으면 root 등가로 신뢰 경계 밖이라 센다. 아니면 같은 uid이거나, capture 파일의 소유자이거나, 파일에 group/other 쓰기 비트가 있으면 거부한다. 그 외 타 UID는 파일을 쓰기로 열 수 없으므로 센다. 남는 반례: 판정은 현재 소유자·mode 기준이라, 파일이 예전에 쓰기 가능했을 때 타 UID가 만든 기존 쓰기 매핑은 탐지하지 않는다. root가 아닌 타 UID 시스템 데몬도 root처럼 신뢰 경계 밖이다(협조적 CI 입력 전제). uid 네 값이 모두 스캐너 uid이고 cgroup이 `0::/user.slice/user-<uid>.slice/user@<uid>.service/init.scope`인 프로세스(정상 systemd·GitHub runner 구성에서 그 uid의 user manager와 `(sd-pam)`이 놓이는 scope이며, 위임 때문에 보안상 독점은 아니다)는 maps를 읽을 수 없어도 러너 인프라로 세고 pid·Name을 `fence.mappings.user_managers`와 stderr에 남긴다. 다른 미판독 프로세스의 거부 메시지에는 pid·Name·PPid·cgroup을 남긴다. 같은 uid가 위임된 cgroup으로 그 scope에 들어가 위장하는 경우는 협조적 CI 전제의 잔여다.
+  - 목록을 다시 읽어 새 pid가 없을 때까지(최대 10회) 검사하고, 끝나지 않으면 거부한다. pid 재열거와 한 번의 task 열거 pass 안에서는 새 pid·tid만 읽고 이미 읽은 maps를 다시 읽지 않는다. 판정 불가 재시도는 그 pid의 task 전체를 처음부터 다시 읽는다. 어느 쪽도 원자적 목록이 아니다. 결과(`status=checked`, 검사·root·타 UID 수)는 request `fence.mappings`와 stderr에 남는다. 그 밖의 플랫폼은 `unavailable`이고 생산자·소비자 모두 거부한다.
+  - 남는 반례: 가드 뒤 매핑(Linux는 그 pid의 마지막 성공 pass에서 쓴 `/proc/<pid>/task/<tid>/maps` 스냅샷 이후, macOS는 그 pid의 영역 조회 이후 생겨 다시 관측되지 않은 매핑, 가드 실행 중 포함)은 첫 쓰기 fault에서 ctime이 갱신된다는 전제에 기댄다. write-notify가 없는 tmpfs(shmem)와, msync 전까지 시각 갱신을 미룰 수 있는 macOS는 이 전제가 보장되지 않는다. 또 `hidepid`·다른 PID namespace처럼 보이지 않는 프로세스, ACL·capability로 쓰기 권한을 얻은 타 UID, maps 경로·장치가 실제 inode와 다른 overlay 매핑은 가드가 보지 못한다.
+- **fence 종료.** request에 봉인한 stat 목록을 Cargo 종료 뒤 다시 stat한다. 봉인 디렉터리도 다시 lstat한다. 한 필드라도 다르거나 파일이 사라지면 manifest 없이 거부한다. 목록 추가·삭제는 기존 source state 비교가 거부한다.
+- **봉인과 schema.** 통과한 manifest만 `fence` 표지(목록 digest·관측 간격)를 가진다. schema 이름은 `h2-session/2`로 유지한다(proof 생산자 불변). 대신 fence가 없는 옛 request는 소비자가 거부한다.
+
+신뢰 경계 밖인 것:
+- ctime·시계를 조작하는 root 또는 시계 권한 주체, 시계를 뒤로 되돌리는 step
+- 목록 밖 파일 읽기. 목록 밖 파일에 매핑되는 site는 매핑하지 않는다. 그러나 proc-macro의 목록 밖 읽기(OUT_DIR·include 대상 등)를 모두 탐지하지는 않는다. 그 읽기가 목록 파일 site의 token을 바꾸면 fence는 보지 못한다.
+- 파일시스템 일관성. 같은 st_dev와 probe 통과는 일관성 증명이 아니다. overlay는 층을 하나의 장치로 보일 수 있고, NFS는 속성 캐시로 변경을 늦게 보일 수 있으며, FUSE는 구현에 달렸다. 지원 범위는 로컬 일관 파일시스템(ext4·xfs·btrfs·APFS)이다. 파일시스템 종류를 확인하는 가드는 없다.
+- 원문을 쓰지 않고 invocation마다 다른 token을 내는 proc-macro. 이것은 H20 잔여다.
 도구 버전 갱신은 rust-toolchain.toml·CI·ALLOWED를 함께 바꾸고 cargo-clippy spy, cfg 자체 점검,
 cold/warm 진단 byte 일치, items 동일성, workspace 생산자/claim 시험 증거를 다시 제시한다.
 
@@ -205,6 +228,7 @@ load는 봉인 manifest(schema 1, kind `canary-items`)와 request/proof `h2-sess
 기대 crate manifest와 request unit, proof unit의 공통 필드·root·`test:false`, nonce·run ID를 대조한다.
 request/proof/items/sidecar/clippy.jsonl은 한 번 읽어 봉인 digest와 대조한 같은 bytes만 파싱하고 다시 열지 않는다.
 items 구조는 runner와 같은 `validate_items`/`item_records`로 검사한다. 0개 레코드·헤더 없는 옛 JSONL·객체 레코드는 실패다.
+request의 fence stat 목록은 소비자 capture의 파일 집합과 정확히 같아야 한다. 각 size는 capture bytes 길이와 같아야 한다. 봉인 디렉터리 목록은 그 파일들의 조회 경로와 정확히 같아야 하고, `fence.mappings.status`는 `checked`여야 한다. 또한 probe 증거·같은 st_dev·`ctime < P`를 다시 검사한다. manifest의 `fence` 표지도 필요하다. 없거나 다르면 `unsealed`다.
 원문은 source state를 계산하는 한 번의 git 목록·읽기에서만 얻는다. 그 digest가 request와 같아야 하고, 같은 bytes만 매핑에 쓴다.
 모든 레코드에 `hi ≤ 길이`와 lo의 원문 행 = compiler 행을 요구한다. 진단 site는 expansion을 끝까지 따라간 호출 위치다.
 lib artifact는 요청 package에서 lib kind이고 src_path가 요청 lib로 resolve되는 artifact다(session 봉인과 매핑이 같은 선택을 쓴다). 경로가 같은 build script·bin artifact는 후보가 아니다.
@@ -338,6 +362,7 @@ r9의 15개 ID군을 모두 유지한다(H10의 a/b는 같은 행에 구분).
 | H17 | 정상 항등 macro 모듈·hand-written item 재배치도 fail-closed 거부 | [modmap_problems:124][modmap]; 출처 보존 규칙의 보수적 오탐, 컴파일 가능한 모든 Rust 문법 지원 약속 없음 |
 | H18 | hardlink·대소문자 alias의 파일 동치가 realpath만으로 증명되지 않음 | [classify:92/walker_problems:174][aliases]; duplicate_mod와 함께 실측 필요, 미측정을 해결로 세지 않음 |
 | H19 | R-O map 패스와 Clippy 패스가 같은 source/target/cfg였는지 입증하는 결속 부재 | [map_modules:57][collector], [root_lib_depinfo:45][depinfo]; items와 Clippy JSON은 같은 호출 세션 manifest로 결속(매핑 비활성), map TSV·`.d` 결속은 3b-A 증거 필요, cfg 목록 일치만으로 대체 불가 |
+| H20 | items 자식과 Clippy가 두 compile이라 원문 불변·전개 차이(비결정 proc-macro)는 items와 진단이 다른 token에서 나올 수 있음 | 파일 변경형 A→B→A는 입력 source fence로 거부; H2는 적대 방어가 아닌 코드 건강 래칫이며 보안 요구로 올리면 계측 Clippy 단일 compile(설계 후보 ③) |
 
 H15의 RHS 제외는 compiler 수용 조건에 의존한다. 지원하는 key-value 속성의 값은 macro 전개 후 literal이어야 하며,
 정상 doc 값은 문자열이다. item·block·non-literal 전개로 item 선언 권한을 얻을 수 없고, shape helper가 Rust 의미론을 검증하지는 않는다.

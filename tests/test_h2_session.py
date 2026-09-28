@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -16,8 +17,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/ci"))
 import h2_session as s
 
+LIST_PIDS = s.list_pids
 
-class Session(unittest.TestCase):
+
+class Harness(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -55,8 +58,9 @@ class Session(unittest.TestCase):
         self.after = lambda run: None
         # Tests that clear CARGO_HOME must not fall back to the host ~/.cargo.
         for p in (patch.object(s.subprocess, "run", side_effect=self.command),
-                  patch.object(s.modmap, "source_state", return_value={"sha": "unchanged"}),
+                  patch.object(s.modmap, "source_capture", return_value=({"sha": "unchanged"}, {}, {})),
                   patch.object(s.Path, "home", return_value=self.root / "home"),
+                  patch.object(s, "list_pids", return_value=[os.getpid()]),
                   patch.dict(os.environ, RUSTUP_TOOLCHAIN="fixture-toolchain", CARGO_HOME=str(self.root / "cargo-home"),
                              HOME=str(self.root / "home"))):
             p.start()
@@ -110,6 +114,8 @@ class Session(unittest.TestCase):
             self.run_session(name)
         self.assertFalse((self.root / name / "manifest.json").exists())
 
+
+class Session(Harness):
     def test_contract_env_touch_and_seal(self):
         helper = copy.deepcopy(self.md["packages"][0])
         helper.update(name="helper", manifest_path=str(self.crate / "helper/Cargo.toml"))
@@ -408,8 +414,8 @@ class Session(unittest.TestCase):
             "argv": (lambda r, p, c, e: p.update(argv=[]), "argv"),
             "partial": (lambda r, p, c, e: (r / "session.json.partial").touch(), "partial"),
             "mtime": (lambda r, p, c, e: os.utime(r / "session.json.items-cfg.txt", ns=(0, 0)), "predates"),
-            "source": (lambda r, p, c, e: self.lib.write_text("changed"), "source"),
-            "config": (lambda r, p, c, e: (self.conf / "clippy.toml").write_text("changed"), "source"),
+            "source": (lambda r, p, c, e: self.lib.write_text("changed"), "written during Cargo"),
+            "config": (lambda r, p, c, e: (self.conf / "clippy.toml").write_text("changed"), "written during Cargo"),
             "request": (lambda r, p, c, e: (r / "request.json").write_text("{}"), "request"),
         }
         for name, (mutate, pattern) in cases.items():
@@ -551,6 +557,272 @@ class Session(unittest.TestCase):
         with self.assertRaisesRegex(s.MeasureError, "new|empty"):
             self.run_session("used")
         self.assertEqual(claim.read_text(), '{"pid":42}')
+
+
+THREADED = ("import ctypes, mmap, sys, threading\nlib, main = ctypes.CDLL(None), threading.main_thread().ident\n"
+            "f = open(sys.argv[1], 'r+b')\nm = mmap.mmap(f.fileno(), 0)\nm[:1] = m[:1]\n"
+            "def worker():\n    lib.pthread_join(ctypes.c_void_p(main), None)\n    print('held', flush=True)\n    sys.stdin.read()\n"
+            "threading.Thread(target=worker).start()\nlib.pthread_exit(None)\n")
+HOLDER = "import mmap, sys\nf = open(sys.argv[1], 'r+b')\nm = mmap.mmap(f.fileno(), 0)\nm[:1] = m[:1]\nprint('held', flush=True)\nsys.stdin.read()\n"
+
+
+def restore(path: Path, body: bytes) -> None:
+    """Write body over path and put its mtime back, as an A->B->A writer that covers its tracks would."""
+    st = path.stat()
+    path.write_bytes(body)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+
+class Fence(Harness):
+    def test_restored_bytes_and_mtime_still_break_the_fence(self):
+        for name, path in (("lib", lambda: self.lib), ("config", lambda: self.conf / "clippy.toml")):
+            with self.subTest(name):
+                def aba(run, proof, claim, events, path=path()):
+                    body = path.read_bytes()
+                    restore(path, body.replace(b"(", b"["))
+                    restore(path, body)
+                self.reject(aba, r"written during Cargo \(ctime_ns\)", "aba-" + name)
+
+    def test_each_stat_field_is_compared(self):
+        stat = s.modmap.stat_of(self.lib)
+        fence = dict(files={str(self.lib): stat}, dirs={})
+        s.check_fence_end(fence)
+        for i, field in enumerate(s.modmap.STAT):
+            with self.subTest(field), patch.object(s.modmap, "stat_of", return_value=stat[:i] + [stat[i] + 1] + stat[i + 1:]):
+                with self.assertRaisesRegex(s.MeasureError, rf"written during Cargo \({field}\)"):
+                    s.check_fence_end(fence)
+        self.lib.rename(self.root / "moved.rs")
+        with self.assertRaisesRegex(s.MeasureError, "removed"):
+            s.check_fence_end(fence)
+
+    def test_replacement_by_rename_or_a_hard_link_write_is_seen(self):
+        body = self.lib.read_bytes()
+        fence = dict(files={str(self.lib): s.modmap.stat_of(self.lib)}, dirs={})
+        twin = self.root / "twin.rs"
+        twin.write_bytes(body)
+        os.utime(twin, ns=(self.lib.stat().st_atime_ns, self.lib.stat().st_mtime_ns))
+        os.replace(twin, self.lib)
+        with self.assertRaisesRegex(s.MeasureError, "ino"):
+            s.check_fence_end(fence)
+        os.link(self.lib, twin)
+        probe = s.clock_probe(self.root / "probe")
+        fence = dict(files={str(self.lib): s.modmap.stat_of(self.lib)}, dirs={})
+        self.assertLess(fence["files"][str(self.lib)][4], probe["ctimes"][-1])
+        restore(twin, body)
+        with self.assertRaisesRegex(s.MeasureError, "ctime_ns"):
+            s.check_fence_end(fence)
+
+    def test_capture_rejects_a_file_written_while_it_is_read(self):
+        real_open = open
+        def writer(path, mode="r", *args, **kwargs):
+            handle = real_open(path, mode, *args, **kwargs)
+            if Path(path) == self.lib:
+                read = handle.read
+                def read_then_restore(*a):
+                    body = read(*a)
+                    s.clock_probe(self.root / "probe")
+                    restore(self.lib, body)
+                    return body
+                handle.read = read_then_restore
+            return handle
+        self.assertEqual(s.modmap.read_stable(self.lib)[0], self.lib.read_bytes())
+        with patch("builtins.open", writer), self.assertRaisesRegex(s.modmap.ModmapError, "changed while it was captured"):
+            s.modmap.read_stable(self.lib)
+        with patch("builtins.open", writer), self.assertRaisesRegex(s.MeasureError, "source capture"):
+            s.source_capture(self.root, self.lib, self.conf)
+        self.assertFalse(list(self.root.glob("*/request.json")))
+
+    def test_real_probe_measures_this_filesystem(self):
+        probe = s.clock_probe(self.root / "probe")
+        step = s.check_probe(probe)
+        print(f"\nh2 fence probe ({sys.platform}): step {step} ns, {probe['writes']} writes, "
+              f"{probe['same_tick']} same-tick rewrites", file=sys.stderr)
+        self.assertEqual((len(probe["ctimes"]), probe["dev"]), (3, self.root.stat().st_dev))
+        self.assertFalse((self.root / "probe").exists())
+        manifest = self.run_session("probed")
+        self.assertEqual(manifest["fence"], s.fence_marker(manifest["request"]["fence"]))
+        self.assertEqual(set(manifest["request"]["fence"]["files"]), {str(self.lib), str(self.conf / "clippy.toml")})
+
+    def test_coarse_or_stalled_ctime_is_refused(self):
+        ticks = iter(range(10 ** 6))
+        cases = {"whole-seconds": (lambda fd: next(ticks) * 10 ** 9, "whole seconds"),
+                 "two-second": (lambda fd: next(ticks) // 7 * 2 * 10 ** 9 + 1, "whole seconds"),
+                 "stalled": (lambda fd: 5 * 10 ** 17, "did not advance"),
+                 "backwards": (lambda fd: 10 ** 18 - next(ticks), "backwards")}
+        for name, (stamp, pattern) in cases.items():
+            clock = patch.object(s.time, "monotonic", side_effect=(i / 1000 for i in range(10 ** 7)))
+            with self.subTest(name), patch.object(s, "probe_ctime", stamp), clock:
+                self.reject(lambda *args: None, pattern, name)
+                self.assertFalse((self.root / name / "request.json").exists())
+                self.assertFalse((self.root / name / "fence.probe").exists())
+        for probe in (None, {}, dict(dev=1, ctimes=[1, 2]), dict(dev=1, ctimes=[1, 2, 2]), dict(dev="1", ctimes=[1, 2, 3]),
+                      dict(dev=1, ctimes=[1, 2, 3.0]), dict(dev=1, ctimes=[0, 10 ** 9, 2 * 10 ** 9])):
+            with self.subTest(probe=probe), self.assertRaises(s.MeasureError):
+                s.check_probe(probe)
+
+    def test_a_file_changed_after_the_probe_is_refused(self):
+        probe = s.clock_probe
+        def then_write(path):
+            result = probe(path)
+            restore(self.conf / "clippy.toml", (self.conf / "clippy.toml").read_bytes())
+            return result
+        with patch.object(s, "clock_probe", then_write):
+            self.reject(lambda *args: None, "changed after the clock probe", "late")
+        self.assertFalse((self.root / "late/request.json").exists())
+
+    def test_fence_must_cover_exactly_the_captured_bytes(self):
+        files, stats = {str(self.lib): self.lib.read_bytes()}, {str(self.lib): s.modmap.stat_of(self.lib)}
+        fence = dict(files=stats, dirs=s.seal_dirs(self.root, stats), probe=s.clock_probe(self.root / "probe"),
+                     mappings=s.mapping_guard(stats))
+        s.check_fence(fence, files, self.root)
+        self.assertEqual(list(fence["dirs"]), [str(self.lib.parent), str(self.crate), str(self.root)])
+        guard, late = fence["mappings"], fence["dirs"][str(self.crate)][:3] + [fence["probe"]["ctimes"][-1]]
+        bad = {"empty": dict(fence, files={}), "missing": dict(fence, probe=None), "none": None,
+               "no dirs": {k: v for k, v in fence.items() if k != "dirs"}, "no guard": dict(fence, mappings=None),
+               "dir unlisted": dict(fence, dirs={k: v for k, v in fence["dirs"].items() if k != str(self.crate)}),
+               "dir late": dict(fence, dirs={**fence["dirs"], str(self.crate): late}),
+               "unavailable": dict(fence, mappings=dict(status="unavailable", platform="sunos")),
+               "unscanned": dict(fence, mappings=dict(guard, processes=0)),
+               "extra": dict(fence, files={**fence["files"], "/other": fence["files"][str(self.lib)]}),
+               "short": dict(fence, files={str(self.lib): fence["files"][str(self.lib)][:4]}),
+               "bool": dict(fence, files={str(self.lib): [True] + fence["files"][str(self.lib)][1:]}),
+               "device": dict(fence, probe=dict(fence["probe"], dev=fence["probe"]["dev"] + 1))}
+        for name, forged in bad.items():
+            with self.subTest(name), self.assertRaises(s.MeasureError):
+                s.check_fence(forged, files, self.root)
+        with self.assertRaisesRegex(s.MeasureError, "size"):
+            s.check_fence(fence, {str(self.lib): self.lib.read_bytes() + b"x"}, self.root)
+        with self.assertRaisesRegex(s.MeasureError, "differs from the captured files"):
+            s.check_fence(fence, {**files, "/other": b""}, self.root)
+        with patch.object(s.sys, "platform", "sunos"):
+            self.reject(lambda *args: None, "shared-mapping guard not checked .*unavailable", "unguarded")
+
+    def test_directory_swap_and_restore_is_refused(self):
+        staged = Path(tempfile.mkdtemp(dir=self.root.parent))
+        self.addCleanup(lambda: __import__("shutil").rmtree(staged))
+        (staged / "B").mkdir()
+        (staged / "B" / self.lib.name).write_bytes(self.lib.read_bytes().replace(b"caller", b"callee"))
+        seen = []
+        def swap(run, proof, claim, events):
+            here = self.lib.parent
+            seen.append(s.modmap.stat_of(self.lib))
+            here.rename(staged / "A")
+            (staged / "B").rename(here)
+            self.assertIn(b"callee", self.lib.read_bytes())
+            here.rename(staged / "B")
+            (staged / "A").rename(here)
+        self.reject(swap, r"directory \S+/crate changed during Cargo \(mtime_ns,ctime_ns\)", "swapped")
+        self.assertEqual(seen, [s.modmap.stat_of(self.lib)])
+
+    def test_cargo_creating_its_target_dir_is_not_a_namespace_change(self):
+        for name, extra, target in (("default", (), self.root / "target"), ("flag", ("--target-dir=out",), self.crate / "out")):
+            with self.subTest(name):
+                self.after = lambda run: (target / "debug").mkdir(parents=True, exist_ok=True)
+                self.assertIn(str(self.crate), self.run_session(name, extra=extra)["request"]["fence"]["dirs"])
+
+    def test_symlink_leaf_or_component_is_refused(self):
+        (self.crate / "alias.rs").symlink_to(self.lib)
+        (self.root / "via").symlink_to(self.lib.parent)
+        for path in (self.crate / "alias.rs", self.root / "via" / self.lib.name):
+            with self.subTest(path.name), self.assertRaisesRegex(s.MeasureError, "symlink"):
+                s.seal_dirs(self.root, {str(path): s.modmap.stat_of(path)})
+
+    def test_shared_writable_mapping_refuses_the_session(self):
+        holder = subprocess.Popen([sys.executable, "-c", HOLDER, str(self.lib)], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self.addCleanup(holder.kill)
+        self.assertEqual(holder.stdout.readline(), b"held\n")
+        with patch.object(s, "list_pids", LIST_PIDS):
+            self.reject(lambda *args: None, rf"process {holder.pid} maps {re.escape(str(self.lib))} shared and writable", "mapped")
+            self.assertFalse((self.root / "mapped/request.json").exists())
+            holder.communicate(b"")
+            guard = self.run_session("unmapped")["request"]["fence"]["mappings"]
+        self.assertEqual(guard["status"], "checked")
+        self.assertGreater(guard["processes"], 1)
+
+    def test_mapping_left_to_a_worker_after_the_main_thread_exits_is_refused(self):
+        holder = subprocess.Popen([sys.executable, "-c", THREADED, str(self.lib)], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self.addCleanup(holder.communicate)
+        self.addCleanup(holder.kill)
+        self.assertEqual(holder.stdout.readline(), b"held\n")
+        for _ in range(500 if sys.platform == "linux" else 0):
+            if not Path(f"/proc/{holder.pid}/maps").read_bytes():
+                break
+            time.sleep(0.01)
+        else:
+            self.assertNotEqual(sys.platform, "linux", "the leader kept its address space")
+        with patch.object(s, "list_pids", LIST_PIDS):
+            self.assertRaisesRegex(s.MeasureError, rf"process {holder.pid} maps \S+ shared and writable", s.mapping_guard,
+                                   {str(self.lib): s.modmap.stat_of(self.lib)})
+
+    def test_linux_scan_reads_every_task_and_refuses_an_undecidable_process(self):
+        st, stats = self.lib.stat(), {str(self.lib): s.modmap.stat_of(self.lib)}
+        line = f"7f00-7f01 rw-s 0 {os.major(st.st_dev):x}:{os.minor(st.st_dev):x} {st.st_ino} {self.lib}\n".encode()
+        def task(where, state, maps=b"", flags=0):
+            where.mkdir(parents=True)
+            (where / "status").write_text(f"State:\t{state} (x)\nUid:\t{os.getuid()}\t{os.getuid()}\n")
+            (where / "stat").write_text(f"7 (a) b) {state} 1 1 1 0 -1 {flags} 0")
+            (where / "maps").write_bytes(maps)
+        for name, leader, flags, tasks, refusal in (
+                ("worker", "Z", 0, [("Z", b""), ("S", line)], "shared and writable"), ("unlisted", "S", 0, [], "address space"),
+                ("live and empty", "S", 0, [("S", b"")], "address space"), ("unlistable", "S", 0, None, "address space"),
+                ("exited", "Z", 0, [("Z", b""), ("Z", b"")], None), ("kernel", "I", s.PF_KTHREAD, [("I", b"")], None)):
+            proc = self.root / "proc" / name.replace(" ", "-")
+            task(proc / "7", leader, flags=flags)
+            (proc / "7/task").mkdir()
+            for tid, (state, maps) in enumerate(tasks or [], 7):
+                task(proc / f"7/task/{tid}", state, maps)
+            os.chmod(proc / "7/task", 0o700 if tasks is not None else 0)
+            self.addCleanup(os.chmod, proc / "7/task", 0o700)
+            with self.subTest(name), patch.object(s, "PROC_ROOT", proc), patch.object(s.sys, "platform", "linux"), \
+                    patch.object(s, "list_pids", LIST_PIDS):
+                if refusal:
+                    self.assertRaisesRegex(s.MeasureError, refusal, s.mapping_guard, stats)
+                else:
+                    self.assertEqual(s.mapping_guard(stats)["processes"], 1)
+
+    def test_unreadable_scans_fail_closed_except_the_foreign_residual_boundary(self):
+        stats = {str(self.lib): s.modmap.stat_of(self.lib)}
+        me, other = os.getuid(), os.getuid() + 1
+        # A foreign 0644 pass is the residual boundary: a writable mapping made while the file was looser is not seen.
+        for uids, mode, verdict in (({0}, 0o644, "root"), ({other}, 0o644, "foreign"), ({me}, 0o644, None),
+                                    ({other}, 0o664, None), ({me, 0}, 0o666, "root")):
+            os.chmod(self.lib, mode)
+            with self.subTest(uids=uids, mode=mode), patch.object(s, "read_maps", return_value=(uids, None)):
+                if verdict is None:
+                    self.assertRaisesRegex(s.MeasureError, "cannot read the mappings", s.mapping_guard, stats)
+                else:
+                    self.assertEqual(s.mapping_guard(stats)[verdict], 1)
+        scope = f"0::/user.slice/user-{me}.slice/user@{me}.service/init.scope\n"
+        v1, child = "12:pids:/user.slice\n", scope.replace("init.scope", "init.scope/child")
+        for n, (name, ppid, cgroup, uid) in enumerate((("systemd", 1, scope, me), ("(sd-pam)", 900, v1 + scope, me),
+                                                       ("systemd", 1, scope, other), ("systemd", 1, scope, (me, other)),
+                                                       ("systemd", 1, scope.replace("init", "app"), me),
+                                                       ("systemd", 1, child, me), ("systemd", 1, scope[:-1] + " \n", me),
+                                                       ("systemd", 1, v1, me), ("systemd", 1, None, me))):
+            (proc := self.root / f"proc{n}" / "9").mkdir(parents=True)
+            (proc / "status").write_text(f"Name:\t{name}\nPPid:\t{ppid}\n"), cgroup and (proc / "cgroup").write_text(cgroup)
+            with self.subTest(name, ppid=ppid, cgroup=cgroup), patch.object(s, "PROC_ROOT", proc.parent), \
+                    patch.object(s.sys, "platform", "linux"), patch.object(s, "list_pids", lambda: [9]), \
+                    patch.object(s, "read_maps", return_value=(set(uid if isinstance(uid, tuple) else (uid,)), None)):
+                self.assertEqual(s.mapping_guard(stats)["user_managers"], [[9, name]]) if n < 2 else \
+                    self.assertRaisesRegex(s.MeasureError, "process 9 .*name systemd, ppid 1, cgroup " + re.escape(
+                        str(cgroup.splitlines()) if cgroup else "['<unreadable"), s.mapping_guard, stats)
+        pids = iter(range(1, 100))
+        with patch.object(s, "list_pids", lambda: [next(pids)]), patch.object(s, "read_maps", return_value=None):
+            self.assertRaisesRegex(s.MeasureError, "kept appearing", s.mapping_guard, stats)
+
+    def test_unresolvable_paths_are_measure_errors(self):
+        (self.root / "loop").symlink_to(self.root / "loop")
+        with self.assertRaisesRegex(s.MeasureError, "cannot resolve"):
+            s.session(self.root, self.root / "loop", self.root / "looped", self.conf, "macos", driver=self.driver)
+        with patch.object(s.Path, "resolve", side_effect=RuntimeError("Symlink loop")):
+            for name in ("crate", "config"):
+                with self.subTest(name), self.assertRaisesRegex(s.MeasureError, "cannot resolve .*Symlink loop"):
+                    if name == "crate":
+                        self.run_session("looped")
+                    else:
+                        s.source_capture(self.root, self.lib, self.conf)
+        self.assertFalse((self.root / "looped").exists())
 
 
 if __name__ == "__main__":
