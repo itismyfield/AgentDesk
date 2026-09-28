@@ -38,7 +38,7 @@ class Session(unittest.TestCase):
         self.clippy = self.sysroot / "bin/clippy-driver"
         self.clippy.parent.mkdir(parents=True)
         self.clippy.touch()
-        self.md = {"packages": [{"manifest_path": str(self.crate / "Cargo.toml"), "name": "fixture",
+        self.md = {"workspace_root": str(self.root), "packages": [{"manifest_path": str(self.crate / "Cargo.toml"), "name": "fixture",
             "id": "path+file:///fixture#0.0.0", "targets": [{"name": "fixture", "kind": ["cdylib", "rlib"],
             "crate_types": ["rlib", "cdylib"], "src_path": str(self.lib)}]}]}
         self.version = f"release: 1.94.1\ncommit-hash: {s.ALLOWED['commit']}\nhost: aarch64-apple-darwin\n"
@@ -73,7 +73,7 @@ class Session(unittest.TestCase):
         self.checks.append(argv)
         run = Path(env["MODMAP_SESSION_OUT"]).parent
         req = json.loads((run / "request.json").read_text())
-        unit = {k: v for k, v in req["unit"].items() if k != "package_id"}
+        unit = {k: v for k, v in req["unit"].items() if k not in ("package_id", "workspace_root")}
         unit.update(root=str(self.crate), metadata="abcd", test=False)
         proof = dict(schema="h2-session/2", unit=unit, pid=42, nonce=req["nonce"], run_id=req["run_id"],
             argv=["/rustc", str(self.lib), "--crate-name", "fixture", "--crate-type", "cdylib,rlib"],
@@ -156,7 +156,9 @@ class Session(unittest.TestCase):
         def relative(run, proof, claim, events):
             proof["argv"][1] = "crate/rust/library.rs"
         self.mutate = relative
-        self.assertEqual(self.run_session()["proof"]["unit"]["lib"], str(self.lib))
+        result = self.run_session()
+        self.assertEqual(result["proof"]["unit"]["lib"], str(self.lib))
+        self.assertEqual(result["request"]["unit"]["workspace_root"], str(self.root))
 
     def test_request_records_exact_protected_environment(self):
         result = self.run_session()

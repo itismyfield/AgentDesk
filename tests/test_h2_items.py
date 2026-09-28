@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tests import test_h2_session as harness
 import h2_items as items
@@ -12,8 +14,9 @@ FIXTURE = harness.ROOT / "tests/fixtures/h2_items"
 SOURCE = (FIXTURE / "lib.rs").read_text(encoding="utf-8")
 RECORDS = json.loads((FIXTURE / "items.json").read_text(encoding="utf-8"))
 DIAGNOSTICS = json.loads((FIXTURE / "clippy.json").read_text(encoding="utf-8"))
-LISTING = ("git", "ls-files", "-c", "-o", "--exclude-standard", "-z")
 FILE = "rust/library.rs"
+RUN, STATE = subprocess.run, harness.s.modmap.source_state
+GIT = ("git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false")
 
 
 def encode(crlf: bool) -> bytes:
@@ -38,18 +41,19 @@ def row(record: dict, raw: bytes) -> list:
             record["display"], line(raw, lo), record["def"], record.get("parent", 0), def_kind, "!" in record["anchor"]]
 
 
-def diagnostic(case: dict, raw: bytes) -> dict:
+def diagnostic(case: dict, raw: bytes, name: str = "crate/" + FILE, lib: str = "") -> dict:
     prefix, rest = case["anchor"].split("«")
     inner = rest.split("»")[0]
     lo = locate(case["anchor"].replace("«", "").replace("»", ""), raw) + len(prefix.encode())
-    span = dict(file_name=FILE, byte_start=lo, byte_end=lo + len(inner.encode()), line_start=line(raw, lo),
+    span = dict(file_name=name, byte_start=lo, byte_end=lo + len(inner.encode()), line_start=line(raw, lo),
                 is_primary=True, expansion=None)
     if "!" in inner:  # the expanded span points at sink(); only its outermost call site is the site
         sink = locate("pub fn sink", raw)
-        span = dict(file_name=FILE, byte_start=sink, byte_end=sink + 6, line_start=line(raw, sink),
+        span = dict(file_name=name, byte_start=sink, byte_end=sink + 6, line_start=line(raw, sink),
                     is_primary=True, expansion=dict(span=span, macro_decl_name=inner.split("!")[0] + "!"))
     message = dict(message="disallowed", code=dict(code="clippy::disallowed_methods"), level="warning", spans=[span])
-    return dict(reason="compiler-message", package_id="path+file:///fixture#0.0.0", message=message)
+    return dict(reason="compiler-message", package_id="path+file:///fixture#0.0.0", message=message,
+                manifest_path=str(Path(lib).parents[1] / "Cargo.toml"), target=dict(kind=["lib"], src_path=lib))
 
 
 class Items(unittest.TestCase):
@@ -57,9 +61,28 @@ class Items(unittest.TestCase):
         self.h = harness.Session("run_session")
         self.h.setUp()
         self.addCleanup(self.h.doCleanups)
-        self.h.answers[LISTING] = "crate/Cargo.toml\0crate/rust/library.rs\0conf/clippy.toml\0"
+        (self.h.root / ".gitignore").write_text("/*\n!/crate/\n!/conf/\n/crate/gen/\n")
+        self.hooks = []
+        compile_ = harness.s.subprocess.run.side_effect
+        def run(argv, **kw):
+            if argv[0] != "git":
+                return compile_(argv, **kw)
+            if argv[1] == "ls-files" and self.hooks:
+                self.hooks.pop(0)()
+            return RUN(argv, **kw)
+        harness.s.subprocess.run.side_effect = run
+        self.git("init", "-q")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "fixture")
+        state = patch.object(harness.s.modmap, "source_state", STATE)
+        state.start()
+        self.addCleanup(state.stop)
 
-    def seal(self, *, crlf=False, normalized=False, rows=None, cases=DIAGNOSTICS, name="run") -> Path:
+    def git(self, *args):
+        RUN([*GIT, *args], cwd=self.h.root, check=True)
+
+    def seal(self, *, crlf=False, normalized=False, rows=None, cases=DIAGNOSTICS, name="run", spelling="crate/" + FILE,
+             extra=()) -> Path:
         raw = encode(crlf)
         self.h.lib.write_bytes(raw)
         coords = SOURCE.encode() if normalized else raw
@@ -73,7 +96,9 @@ class Items(unittest.TestCase):
             (run / "items.jsonl").write_bytes(body)
             proof.update(items_sha256=harness.s.collect.digest(body), items_records=len(body_rows))
             (run / "items.jsonl.sha256").write_text(json.dumps(dict(sha256=proof["items_sha256"], records=len(body_rows))))
-            events.extend(diagnostic(case, raw) for case in cases)
+            proof["argv"][1] = spelling
+            events.extend(diagnostic(case, raw, lib=str(self.h.lib)) for case in cases)
+            events.extend(extra)
         self.h.mutate = mutate
         return Path(self.h.run_session(name)["manifest"])
 
@@ -96,9 +121,9 @@ class Items(unittest.TestCase):
         self.rewrite(manifest, {"items.jsonl": body, "session.json": json.dumps(proof).encode(),
                                 "items.jsonl.sha256": json.dumps(dict(sha256=proof["items_sha256"], records=records)).encode()})
 
-    def assert_reason(self, reason, call, *args):
+    def assert_reason(self, reason, call, *args, **kwargs):
         with self.assertRaises(items.MappingError) as caught:
-            call(*args)
+            call(*args, **kwargs)
         self.assertEqual(caught.exception.reason, reason)
 
     def test_fixture_sites_map_in_lf_and_bom_crlf(self):
@@ -132,8 +157,7 @@ class Items(unittest.TestCase):
             self.assert_reason("coord", items.resolve, loaded, {**span, **change})
         for bad in ({**span, "byte_start": True}, {**span, "byte_start": span["byte_end"] + 1}, {**span, "file_name": None},
                     {**span, "expansion": {"span": "x"}}):
-            with self.assertRaises(items.MeasureError):
-                items.resolve(loaded, bad)
+            self.assert_reason("coord", items.resolve, loaded, bad)
         raw = encode(False)
         long = row(RECORDS[0], raw)
         long[2] = len(raw) + 1
@@ -148,11 +172,10 @@ class Items(unittest.TestCase):
         span = items.primary(loaded.messages[0])
         gap = self.h.lib.read_bytes().index("/* 한글".encode())
         self.assert_reason("no-item", items.resolve, loaded, {**span, "byte_start": gap, "byte_end": gap + 2, "line_start": 3})
-        self.assert_reason("no-item", items.resolve, loaded, {**span, "file_name": "rust/other.rs"})
-        self.assert_reason("unsealed", items.resolve, loaded, {**span, "file_name": "gen/out.rs"})
+        self.assert_reason("no-item", items.resolve, loaded, {**span, "file_name": "crate/rust/other.rs"})
+        self.assert_reason("unsealed", items.resolve, loaded, {**span, "file_name": "crate/gen/out.rs"})
         for message in (dict(spans=[]), dict(spans=[{**span, "is_primary": False}]), dict()):
-            with self.assertRaises(items.MeasureError):
-                items.primary(message)
+            self.assert_reason("no-item", items.primary, message)
 
     def test_ties_are_order_independent_and_overlap_is_ambiguous(self):
         by_def = {r["def"]: dict(zip(harness.s.modmap.ITEM_FIELDS, row(r, SOURCE.encode()))) for r in RECORDS}
@@ -162,6 +185,8 @@ class Items(unittest.TestCase):
         self.assertEqual(items.resolve_tie([by_def[11], by_def[10]])["def"], 11)
         a, b = dict(by_def[1], lo=10, hi=30), dict(by_def[2], lo=12, hi=32)
         self.assert_reason("ambiguous:overlap", items.map_site, [a, b], 15, 20)
+        odd = dict(by_def[21], kind="header", def_kind="!!!")
+        self.assert_reason("ambiguous:unproven-header:C", items.resolve_tie, [by_def[20], odd])
 
     def test_load_rejects_forged_or_foreign_sessions(self):
         other = self.h.root / "other"
@@ -200,10 +225,86 @@ class Items(unittest.TestCase):
                     moved = run / "copy.json"
                     moved.write_bytes(manifest.read_bytes())
                     manifest = moved
-                with self.assertRaisesRegex(items.MeasureError, pattern):
+                with self.assertRaisesRegex(items.MappingError, pattern) as caught:
                     self.load(manifest)
-        with self.assertRaisesRegex(items.MeasureError, "unit"):
-            items.load(self.seal(name="foreign"), crate=other)
+                self.assertEqual(caught.exception.reason, "unsealed")
+        self.assert_reason("unsealed", items.load, self.seal(name="foreign"), crate=other)
+
+    def test_source_bytes_and_membership_come_from_the_sealed_capture(self):
+        manifest = self.seal(name="bytes")
+        sealed = self.h.lib.read_bytes()
+        swapped = sealed.replace(b"decoy", b"decoz")
+        self.hooks = [lambda: self.h.lib.write_bytes(swapped), lambda: self.h.lib.write_bytes(sealed)]
+        self.assert_reason("unsealed", self.load, manifest)
+        self.h.lib.write_bytes(sealed)
+        self.hooks.clear()
+        capture = harness.s.modmap.source_capture
+        def swap_after(root):
+            result = capture(root)
+            self.h.lib.write_bytes(swapped)
+            return result
+        with patch.object(harness.s.modmap, "source_capture", swap_after):
+            self.assertEqual(self.load(manifest).raw[str(self.h.lib)], sealed)
+        self.h.lib.write_bytes(sealed)
+        outside = row(RECORDS[0], SOURCE.encode())
+        outside[0] = "gen/out.rs"
+        (self.h.crate / "gen").mkdir()
+        (self.h.crate / "gen/out.rs").write_text(SOURCE)
+        outside[8] = 99
+        manifest = self.seal(rows=[row(r, SOURCE.encode()) for r in RECORDS] + [outside], name="member")
+        loaded = self.load(manifest)
+        lo = locate("pub fn sink", SOURCE.encode())
+        span = {**items.primary(loaded.messages[0]), "file_name": "crate/gen/out.rs", "byte_start": lo, "byte_end": lo + 6,
+                "line_start": line(SOURCE.encode(), lo)}
+        self.assert_reason("unsealed", items.resolve, loaded, span)
+        add = lambda: self.git("add", "-f", "crate/gen/out.rs")
+        drop = lambda: self.git("rm", "-q", "--cached", "crate/gen/out.rs")
+        for hooks in ([add, drop], [lambda: None, add]):
+            self.hooks = hooks
+            try:
+                loaded = self.load(manifest)
+            except items.MappingError as exc:
+                self.assertEqual(exc.reason, "unsealed")
+            else:
+                self.assert_reason("unsealed", items.resolve, loaded, span)
+            self.git("rm", "-q", "--cached", "--ignore-unmatch", "crate/gen/out.rs")
+
+    def test_relative_names_use_the_sealed_compiler_base(self):
+        expect = ("fixture::inside", None)
+        for ws, spelling, other in ((self.h.root, "crate/" + FILE, FILE), (self.h.crate, FILE, "crate/" + FILE)):
+            self.h.md["workspace_root"] = str(ws)
+            loaded = self.load(self.seal(name=f"ws-{ws.name}", spelling=spelling))
+            span = items.primary(loaded.messages[0])
+            self.assertEqual(items.resolve(loaded, {**span, "file_name": spelling}), expect)
+            self.assertEqual(items.resolve(loaded, {**span, "file_name": str(self.h.lib)}), expect)
+            self.assert_reason("no-item", items.resolve, loaded, {**span, "file_name": other})
+        self.h.md["workspace_root"] = str(self.h.root)
+        for spelling in (str(self.h.lib), FILE):
+            loaded = self.load(self.seal(name=f"unproven-{len(spelling)}", spelling=spelling))
+            span = items.primary(loaded.messages[0])
+            self.assertEqual(items.resolve(loaded, {**span, "file_name": str(self.h.lib)}), expect)
+            self.assert_reason("no-item", items.resolve, loaded, {**span, "file_name": "crate/" + FILE})
+        manifest = self.seal(name="old")
+        request = json.loads((manifest.parent / "request.json").read_text())
+        del request["unit"]["workspace_root"]
+        self.rewrite(manifest, {"request.json": json.dumps(request).encode()})
+        self.assert_reason("unsealed", self.load, manifest)
+
+    def test_only_the_proved_lib_compilation_owns_diagnostics(self):
+        lib = str(self.h.lib)
+        own = diagnostic(DIAGNOSTICS[0], encode(False), lib=lib)
+        foreign = [{**own, "package_id": "path+file:///other#0.0.0", "manifest_path": str(self.h.root / "other/Cargo.toml")},
+                   {**own, "target": dict(kind=["custom-build"], src_path=str(self.h.crate / "build.rs"))}]
+        loaded = self.load(self.seal(cases=DIAGNOSTICS[:1], extra=foreign, name="foreign"))
+        self.assertEqual((len(loaded.messages), loaded.foreign), (1, 2))
+        twice = dict(reason="compiler-artifact", package_id=own["package_id"], target={"src_path": lib},
+                     profile={"test": True}, fresh=False)
+        for label, event in (("target", {k: v for k, v in own.items() if k != "target"}),
+                             ("package", {k: v for k, v in own.items() if k != "package_id"}),
+                             ("manifest", {**own, "manifest_path": foreign[0]["manifest_path"]}),
+                             ("test-compile", twice)):
+            with self.subTest(label):
+                self.assert_reason("provenance", self.load, self.seal(cases=(), extra=[event], name=label))
 
 
 if __name__ == "__main__":
