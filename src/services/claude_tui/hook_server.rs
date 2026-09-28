@@ -275,9 +275,15 @@ async fn receive_hook(
         )
         && command_session_id != payload_session_id
     {
+        let hook_event = HookEventKind::from_path(&event);
+        let hook = crate::services::tui_prompt_dedupe::binding_events::HookSignal::from_payload(
+            hook_event.as_str(),
+            &payload,
+        );
         match crate::services::tui_prompt_dedupe::adopt_claude_continuation_session(
             command_session_id,
             payload_session_id,
+            &hook,
         ) {
             Some((tmux_session_name, transcript_path)) => {
                 match crate::services::claude_tui::session::persist_claude_continuation_session(
