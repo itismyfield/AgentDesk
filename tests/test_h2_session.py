@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT / "scripts/ci"))
 import h2_session as s
 
 
-class Session(unittest.TestCase):
+class Harness(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -54,7 +54,7 @@ class Session(unittest.TestCase):
         self.rc = 0
         self.after = lambda run: None
         for p in (patch.object(s.subprocess, "run", side_effect=self.command),
-                  patch.object(s.modmap, "source_state", return_value={"sha": "unchanged"}),
+                  patch.object(s.modmap, "source_capture", return_value=({"sha": "unchanged"}, {}, {})),
                   patch.dict(os.environ, RUSTUP_TOOLCHAIN="fixture-toolchain", CARGO_HOME=str(self.root / "cargo-home"))):
             p.start()
             self.addCleanup(p.stop)
@@ -107,6 +107,8 @@ class Session(unittest.TestCase):
             self.run_session(name)
         self.assertFalse((self.root / name / "manifest.json").exists())
 
+
+class Session(Harness):
     def test_contract_env_touch_and_seal(self):
         helper = copy.deepcopy(self.md["packages"][0])
         helper.update(name="helper", manifest_path=str(self.crate / "helper/Cargo.toml"))
@@ -405,8 +407,8 @@ class Session(unittest.TestCase):
             "argv": (lambda r, p, c, e: p.update(argv=[]), "argv"),
             "partial": (lambda r, p, c, e: (r / "session.json.partial").touch(), "partial"),
             "mtime": (lambda r, p, c, e: os.utime(r / "session.json.items-cfg.txt", ns=(0, 0)), "predates"),
-            "source": (lambda r, p, c, e: self.lib.write_text("changed"), "source"),
-            "config": (lambda r, p, c, e: (self.conf / "clippy.toml").write_text("changed"), "source"),
+            "source": (lambda r, p, c, e: self.lib.write_text("changed"), "written during Cargo"),
+            "config": (lambda r, p, c, e: (self.conf / "clippy.toml").write_text("changed"), "written during Cargo"),
             "request": (lambda r, p, c, e: (r / "request.json").write_text("{}"), "request"),
         }
         for name, (mutate, pattern) in cases.items():
@@ -548,6 +550,124 @@ class Session(unittest.TestCase):
         with self.assertRaisesRegex(s.MeasureError, "new|empty"):
             self.run_session("used")
         self.assertEqual(claim.read_text(), '{"pid":42}')
+
+
+def restore(path: Path, body: bytes) -> None:
+    """Write body over path and put its mtime back, as an A->B->A writer that covers its tracks would."""
+    st = path.stat()
+    path.write_bytes(body)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+
+class Fence(Harness):
+    def test_restored_bytes_and_mtime_still_break_the_fence(self):
+        for name, path in (("lib", lambda: self.lib), ("config", lambda: self.conf / "clippy.toml")):
+            with self.subTest(name):
+                def aba(run, proof, claim, events, path=path()):
+                    body = path.read_bytes()
+                    restore(path, body.replace(b"(", b"["))
+                    restore(path, body)
+                self.reject(aba, r"written during Cargo \(ctime_ns\)", "aba-" + name)
+
+    def test_each_stat_field_is_compared(self):
+        stat = s.modmap.stat_of(self.lib)
+        fence = dict(files={str(self.lib): stat})
+        s.check_fence_end(fence)
+        for i, field in enumerate(s.modmap.STAT):
+            with self.subTest(field), patch.object(s.modmap, "stat_of", return_value=stat[:i] + [stat[i] + 1] + stat[i + 1:]):
+                with self.assertRaisesRegex(s.MeasureError, rf"written during Cargo \({field}\)"):
+                    s.check_fence_end(fence)
+        self.lib.rename(self.root / "moved.rs")
+        with self.assertRaisesRegex(s.MeasureError, "removed"):
+            s.check_fence_end(fence)
+
+    def test_replacement_by_rename_or_a_hard_link_write_is_seen(self):
+        body = self.lib.read_bytes()
+        fence = dict(files={str(self.lib): s.modmap.stat_of(self.lib)})
+        twin = self.root / "twin.rs"
+        twin.write_bytes(body)
+        os.utime(twin, ns=(self.lib.stat().st_atime_ns, self.lib.stat().st_mtime_ns))
+        os.replace(twin, self.lib)
+        with self.assertRaisesRegex(s.MeasureError, "ino"):
+            s.check_fence_end(fence)
+        fence = dict(files={str(self.lib): s.modmap.stat_of(self.lib)})
+        os.link(self.lib, twin)
+        with self.assertRaisesRegex(s.MeasureError, "ctime_ns"):
+            s.check_fence_end(fence)
+
+    def test_capture_rejects_a_file_written_while_it_is_read(self):
+        real_open = open
+        def writer(path, mode="r", *args, **kwargs):
+            handle = real_open(path, mode, *args, **kwargs)
+            if Path(path) == self.lib:
+                read = handle.read
+                def read_then_restore(*a):
+                    body = read(*a)
+                    restore(self.lib, body)
+                    return body
+                handle.read = read_then_restore
+            return handle
+        self.assertEqual(s.modmap.read_stable(self.lib)[0], self.lib.read_bytes())
+        with patch("builtins.open", writer), self.assertRaisesRegex(s.modmap.ModmapError, "changed while it was captured"):
+            s.modmap.read_stable(self.lib)
+        with patch("builtins.open", writer), self.assertRaisesRegex(s.MeasureError, "source capture"):
+            s.source_capture(self.root, self.lib, self.conf)
+        self.assertFalse(list(self.root.glob("*/request.json")))
+
+    def test_real_probe_measures_this_filesystem(self):
+        probe = s.clock_probe(self.root / "probe")
+        step = s.check_probe(probe)
+        print(f"\nh2 fence probe ({sys.platform}): step {step} ns, {probe['writes']} writes, "
+              f"{probe['same_tick']} same-tick rewrites", file=sys.stderr)
+        self.assertEqual((len(probe["ctimes"]), probe["dev"]), (3, self.root.stat().st_dev))
+        self.assertFalse((self.root / "probe").exists())
+        manifest = self.run_session("probed")
+        self.assertEqual(manifest["fence"], s.fence_marker(manifest["request"]["fence"]))
+        self.assertEqual(set(manifest["request"]["fence"]["files"]), {str(self.lib), str(self.conf / "clippy.toml")})
+
+    def test_coarse_or_stalled_ctime_is_refused(self):
+        ticks = iter(range(10 ** 6))
+        cases = {"whole-seconds": (lambda fd: next(ticks) * 10 ** 9, "whole seconds"),
+                 "two-second": (lambda fd: next(ticks) // 7 * 2 * 10 ** 9 + 1, "whole seconds"),
+                 "stalled": (lambda fd: 5 * 10 ** 17, "did not advance"),
+                 "backwards": (lambda fd: 10 ** 18 - next(ticks), "backwards")}
+        for name, (stamp, pattern) in cases.items():
+            clock = patch.object(s.time, "monotonic", side_effect=(i / 1000 for i in range(10 ** 7)))
+            with self.subTest(name), patch.object(s, "probe_ctime", stamp), clock:
+                self.reject(lambda *args: None, pattern, name)
+                self.assertFalse((self.root / name / "request.json").exists())
+                self.assertFalse((self.root / name / "fence.probe").exists())
+        for probe in (None, {}, dict(dev=1, ctimes=[1, 2]), dict(dev=1, ctimes=[1, 2, 2]), dict(dev="1", ctimes=[1, 2, 3]),
+                      dict(dev=1, ctimes=[1, 2, 3.0]), dict(dev=1, ctimes=[0, 10 ** 9, 2 * 10 ** 9])):
+            with self.subTest(probe=probe), self.assertRaises(s.MeasureError):
+                s.check_probe(probe)
+
+    def test_a_file_changed_after_the_probe_is_refused(self):
+        probe = s.clock_probe
+        def then_write(path):
+            result = probe(path)
+            restore(self.conf / "clippy.toml", (self.conf / "clippy.toml").read_bytes())
+            return result
+        with patch.object(s, "clock_probe", then_write):
+            self.reject(lambda *args: None, "changed after the clock probe", "late")
+        self.assertFalse((self.root / "late/request.json").exists())
+
+    def test_fence_must_cover_exactly_the_captured_bytes(self):
+        files = {str(self.lib): self.lib.read_bytes()}
+        fence = dict(files={str(self.lib): s.modmap.stat_of(self.lib)}, probe=s.clock_probe(self.root / "probe"))
+        s.check_fence(fence, files)
+        bad = {"empty": dict(fence, files={}), "missing": dict(fence, probe=None), "none": None,
+               "extra": dict(fence, files={**fence["files"], "/other": fence["files"][str(self.lib)]}),
+               "short": dict(fence, files={str(self.lib): fence["files"][str(self.lib)][:4]}),
+               "bool": dict(fence, files={str(self.lib): [True] + fence["files"][str(self.lib)][1:]}),
+               "device": dict(fence, probe=dict(fence["probe"], dev=fence["probe"]["dev"] + 1))}
+        for name, forged in bad.items():
+            with self.subTest(name), self.assertRaises(s.MeasureError):
+                s.check_fence(forged, files)
+        with self.assertRaisesRegex(s.MeasureError, "size"):
+            s.check_fence(fence, {str(self.lib): self.lib.read_bytes() + b"x"})
+        with self.assertRaisesRegex(s.MeasureError, "differs from the captured files"):
+            s.check_fence(fence, {**files, "/other": b""})
 
 
 if __name__ == "__main__":

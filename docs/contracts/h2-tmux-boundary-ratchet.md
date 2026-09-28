@@ -177,6 +177,22 @@ runner도 파일=sidecar=proof의 digest/양수 레코드 수, 헤더·mtime·pa
 parent는 정수(root=0)이며 모듈·closure 등 미출력 부모는 허용한다. 출력된 중간 부모만 따라가며 display/이름으로 관계를 복원하지 않는다.
 봉인 전 body 접합, 0개 레코드와 빈 digest는 실패한다. 모든 증거를 함께 다시 쓰는 주체의 인증은 보장하지 않는다.
 map 모드의 TSV/cfg와 argv는 그대로이며 items 생산은 세션 자식만 수행한다.
+
+**입력 source fence.** items 자식과 실제 Clippy는 별도 compile이다. 그래서 compile 사이에 원문을 A→B→A로 바꿨다 되돌리는 쓰기는 전후 bytes 비교만으로는 보이지 않는다.
+fence는 이 파일 변경형 쓰기를 쓴 주체(편집기·동시 프로세스·요청 lib 전개 중 proc-macro)와 무관하게 거부한다.
+- **capture 결속.** capture는 목록·lib·clippy.toml 파일마다 stat→open→fstat→read→fstat→stat을 한다. 여섯 번 모두 `(dev, ino, size, mtime_ns, ctime_ns)`가 같고 읽은 길이도 같을 때만 bytes를 채택한다. 다르면 재시도 없이 실패한다.
+- **clock probe.** runner는 lib touch 뒤, capture 전에 run 디렉터리의 목록 밖 임시 파일을 되풀이해 쓴다. ctime이 두 번 전진해야 하며 마지막 값을 P로 둔다.
+  - 전진하지 않거나(예산 5초), 되돌아가거나, 관측 값이 모두 초 배수이거나, 최소 간격이 1초 이상이면 fail-closed다.
+  - 관측 간격과 같은 tick 재쓰기 수는 request와 stderr에 남긴다.
+- **fence 시작 조건.** capture한 모든 파일은 probe와 같은 st_dev에 있고 `ctime < P`여야 한다. 그러면 그 뒤의 쓰기, 곧 같은 내용 복원·mtime 복원·hard link 경유 쓰기는 반드시 ctime을 바꾼다. 이는 tick 크기와 무관하다. rename 교체는 inode를 바꾼다.
+- **fence 종료.** request에 봉인한 stat 목록을 Cargo 종료 뒤 다시 stat한다. 한 필드라도 다르거나 파일이 사라지면 manifest 없이 거부한다. 목록 추가·삭제는 기존 source state 비교가 거부한다.
+- **봉인과 schema.** 통과한 manifest만 `fence` 표지(목록 digest·관측 간격)를 가진다. schema 이름은 `h2-session/2`로 유지한다(proof 생산자 불변). 대신 fence가 없는 옛 request는 소비자가 거부한다.
+
+신뢰 경계 밖인 것:
+- ctime·시계를 조작하는 root 또는 시계 권한 주체
+- 시계를 뒤로 되돌리는 step
+- 목록 밖 파일 읽기. 기존대로 해당 레코드·진단이 `unsealed`다.
+- 원문을 쓰지 않고 invocation마다 다른 token을 내는 proc-macro. 이것은 H20 잔여다.
 도구 버전 갱신은 rust-toolchain.toml·CI·ALLOWED를 함께 바꾸고 cargo-clippy spy, cfg 자체 점검,
 cold/warm 진단 byte 일치, items 동일성, workspace 생산자/claim 시험 증거를 다시 제시한다.
 
@@ -205,6 +221,8 @@ load는 봉인 manifest(schema 1, kind `canary-items`)와 request/proof `h2-sess
 기대 crate manifest와 request unit, proof unit의 공통 필드·root·`test:false`, nonce·run ID를 대조한다.
 request/proof/items/sidecar/clippy.jsonl은 한 번 읽어 봉인 digest와 대조한 같은 bytes만 파싱하고 다시 열지 않는다.
 items 구조는 runner와 같은 `validate_items`/`item_records`로 검사한다. 0개 레코드·헤더 없는 옛 JSONL·객체 레코드는 실패다.
+request의 fence stat 목록은 소비자 capture의 파일 집합과 정확히 같아야 한다. 각 size는 capture bytes 길이와 같아야 한다.
+또한 probe 증거·같은 st_dev·`ctime < P`를 다시 검사한다. manifest의 `fence` 표지도 필요하다. 없거나 다르면 `unsealed`다.
 원문은 source state를 계산하는 한 번의 git 목록·읽기에서만 얻는다. 그 digest가 request와 같아야 하고, 같은 bytes만 매핑에 쓴다.
 모든 레코드에 `hi ≤ 길이`와 lo의 원문 행 = compiler 행을 요구한다. 진단 site는 expansion을 끝까지 따라간 호출 위치다.
 lib artifact는 요청 package에서 lib kind이고 src_path가 요청 lib로 resolve되는 artifact다(session 봉인과 매핑이 같은 선택을 쓴다). 경로가 같은 build script·bin artifact는 후보가 아니다.
@@ -338,6 +356,7 @@ r9의 15개 ID군을 모두 유지한다(H10의 a/b는 같은 행에 구분).
 | H17 | 정상 항등 macro 모듈·hand-written item 재배치도 fail-closed 거부 | [modmap_problems:124][modmap]; 출처 보존 규칙의 보수적 오탐, 컴파일 가능한 모든 Rust 문법 지원 약속 없음 |
 | H18 | hardlink·대소문자 alias의 파일 동치가 realpath만으로 증명되지 않음 | [classify:92/walker_problems:174][aliases]; duplicate_mod와 함께 실측 필요, 미측정을 해결로 세지 않음 |
 | H19 | R-O map 패스와 Clippy 패스가 같은 source/target/cfg였는지 입증하는 결속 부재 | [map_modules:57][collector], [root_lib_depinfo:45][depinfo]; items와 Clippy JSON은 같은 호출 세션 manifest로 결속(매핑 비활성), map TSV·`.d` 결속은 3b-A 증거 필요, cfg 목록 일치만으로 대체 불가 |
+| H20 | items 자식과 Clippy가 두 compile이라 원문 불변·전개 차이(비결정 proc-macro)는 items와 진단이 다른 token에서 나올 수 있음 | 파일 변경형 A→B→A는 입력 source fence로 거부; H2는 적대 방어가 아닌 코드 건강 래칫이며 보안 요구로 올리면 계측 Clippy 단일 compile(설계 후보 ③) |
 
 H15의 RHS 제외는 compiler 수용 조건에 의존한다. 지원하는 key-value 속성의 값은 macro 전개 후 literal이어야 하며,
 정상 doc 값은 문자열이다. item·block·non-literal 전개로 item 선언 권한을 얻을 수 없고, shape helper가 Rust 의미론을 검증하지는 않는다.
