@@ -11,11 +11,13 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/ci"))
 import h2_env
 import h2_items
+import h2_measure
 import h2_session as session
 
 A = b"pub fn evil() { crate::sink(); }\n"
@@ -278,6 +280,26 @@ class WorkspaceSession(unittest.TestCase):
                  for span in (json.loads(line).get("message") or {}).get("spans", []) if span.get("is_primary")]
         texts = [t["text"] for span in spans if span["file_name"].endswith("m.rs") for t in span["text"]]
         self.assertIn(A.decode().rstrip("\n"), texts)
+
+    def test_regen_sessions_converge_on_the_requested_lib_paths(self):
+        """Each pass maps its own session; the other member's same-named fns (a wrong root) never enter."""
+        h2 = h2_measure
+        (self.crate / ".gitignore").write_text("/target\n")
+        (self.crate / "scripts/ci").mkdir(parents=True)
+        (self.crate / "clippy.toml").write_text(h2.render_clippy_toml({"requested_root::sink": ("EXEC", frozenset(h2.LANES))}))
+        for args in (("init", "-q"), ("add", "-A"), ("commit", "-q", "-m", "fixture")):
+            subprocess.run([*GIT, *args], cwd=self.crate, check=True, capture_output=True)
+        with mock.patch.object(h2, "H2_CRATES", h2.H2_CRATES | {"requested_root"}):
+            h2.regen(self.crate, self.lane, runner=h2.session_runner(self.crate, self.lane, driver=self.driver))
+            config = h2.load_config(self.crate / "clippy.toml")
+        self.assertEqual(config, {"requested_root::sink": ("EXEC", frozenset(h2.LANES)),
+                                  **{f"requested_root::{f}": ("W", frozenset({self.lane})) for f in ("caller", "outside")}})
+        passes = sorted((self.crate / h2.SESSIONS).glob("*/pass-*"))
+        self.assertEqual([run.name for run in passes], ["pass-1", "pass-2", "pass-3"])
+        for run in passes:
+            manifest = json.loads((run / "manifest.json").read_text())
+            self.assertEqual((manifest["run_dir"], manifest["proof"]["unit"]["package"]), (str(run), "requested_root"))
+            self.assertFalse((run / "items.jsonl").exists())
 
     def test_external_writer_between_items_and_clippy_is_fenced(self):
         self.swap("writer")

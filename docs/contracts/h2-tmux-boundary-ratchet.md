@@ -26,10 +26,10 @@ R-O 방식에는 이후 [사용자 (a) 결정](https://github.com/itismyfield/Ag
 
 | 책임 | 구현·참조 | 입력과 결과 |
 |---|---|---|
-| Clippy 측정 | [h2_measure.py](../../scripts/ci/h2_measure.py), `sym:h2_measure::measure` | lib JSON의 disallowed_methods/types 진단 → 레인별 행과 W/SUBPROC_W 도출 |
-| 고정점 재생성 | `sym:h2_measure::regen` | EXEC seed에서 반복 측정, 최대 20패스; clippy 설정과 baseline 갱신 |
-| admission 종합 | [h2_admission.py](../../scripts/ci/h2_admission.py), `sym:h2_admission::evaluate` | base/head, JSON, 명시적 TSV → zero-rule·R-O·R-E·증가 승인 오류 |
-| R-W 증가 검사 | `sym:h2_admission::rw_problem` | EXEC/W/TYPES 증가 item이 등록된 W에 속하는지 확인 |
+| Clippy 측정 | [h2_measure.py](../../scripts/ci/h2_measure.py), `sym:h2_measure::measure` | 봉인 세션의 lib 진단 → 레인별 행, 같은 세션 items의 compiler 경로로 W/SUBPROC_W 도출 |
+| 고정점 재생성 | `sym:h2_measure::regen` | EXEC seed에서 패스마다 세션 1회, 최대 20패스; clippy 설정과 baseline 갱신 |
+| admission 종합 | [h2_admission.py](../../scripts/ci/h2_admission.py), `sym:h2_admission::evaluate` | base/head, 봉인 세션, 명시적 TSV → zero-rule·R-O·R-E·증가 승인 오류 |
+| R-W 증가 검사 | `sym:h2_admission::rw_problem` | 이번 lane에서 커진 EXEC/W/TYPES key의 측정 site 경로가 모두 이번 lane W에 등록됐는지 확인 |
 | R-O compiler 대조 | [h2_depinfo.py](../../scripts/ci/h2_depinfo.py), `sym:h2_depinfo::ro_problems` | root lib dep-info와 expanded module map, duplicate_mod 진단 대조 |
 | 잔존 walker 대조 | `sym:h2_depinfo::walker_problems` | compiled file의 realpath→modpath와 R-W 텍스트 walker의 실제 open 경로 대조 |
 | module map 수집 | [h2_modmap.py](../../scripts/ci/h2_modmap.py), `sym:h2_modmap::map_modules` | 이번 실행의 TSV 존재·신선도·형식·file module 하한 검사 |
@@ -45,19 +45,20 @@ map 실행은 wrapper를 비우고, 기존 TSV를 지운 뒤 marker 시각과 �
 canary의 오류 목록이 일치해야 하며 실제 저장소 map은 file module이 1000개 이상이어야 한다.
 
 저장소 루트의 `clippy.toml`은 양 lane 합본이며, 측정·check·admission은 해당 lane과 `both` 항목만
-임시 `CLIPPY_CONF_DIR`에 렌더해 실행한다. callee 필터에도 같은 lane 설정을 쓴다.
-admission은 평가가 끝날 때까지 임시 설정을 유지하고, runner가 만든 정확한 `clippy.toml` 경로 하나만
-이번 실행의 R-O 설정 입력으로 인정한다. 다른 외부 파일·동명 파일·별칭·디렉터리 전체는 면제하지 않는다.
-외부 `--json`에는 이 실행 경로의 예외를 부여하지 않는다.
+`target/h2/sessions/<run>/conf`에 렌더해 `h2_session` 세션(Cargo target `target/h2/target`)을 실행한다. callee 필터에도 같은 lane 설정을 쓴다.
+check·admission은 세션 1회(`<run>/check`), regen은 패스마다 세션 1회(`<run>/pass-N`)이며 그 패스 JSONL은 그 패스 items로만 매핑한다.
+소비자는 manifest의 run 디렉터리·repo·lane과 세션이 봉인한 설정 digest가 이번 run·lane 설정과 같을 때만 쓴다. 매핑이 끝난 패스의 items는 지운다.
+외부 JSONL(`--json`)은 없어졌다. `--session <dir>`은 봉인·fence manifest와 같은 결속을 요구하며, 없으면 측정하지 않는다.
+admission은 세션이 봉인한 정확한 `clippy.toml` 경로 하나만 R-O 설정 입력으로 인정한다. 다른 파일·동명 파일·별칭·디렉터리 전체는 면제하지 않는다.
 regen은 EXEC/SUBPROC/TYPES와 반대 lane 도출을 보존하고, 이번 lane의 W/SUBPROC_W를 비운 seed에서 시작한다.
 수렴 뒤 합본과 해당 lane baseline을 갱신하므로 삭제된 경로나 seed와 무관한 도출 순환은 남지 않는다.
 H2 경로는 `[A-Za-z_]\w*(::[A-Za-z_]\w*)+` 형식이며 첫 segment는 `agentdesk/std/core/alloc/tokio` 중 하나다.
 lint·target 필터 전에 코드 유무와 무관하게 compiler-message의 어느 span이든 `clippy.toml`이면 실패한다.
-문구나 반대 lane 여부로 경고를 무시하지 않는다. 외부 `--json`도 lane 설정에서 생산해야 하며 같은 가드를 받는다.
+문구나 반대 lane 여부로 경고를 무시하지 않는다. `--session` 입력도 lane 설정 digest로 결속되며 같은 가드를 받는다.
 등록 불가 오류는 호출부 구조 변경을 요구한다. TYPES 추가를 해결책으로 안내하지 않는다.
 
-R-O는 compiler map을 사용하지만 **item 귀속 전체를 compiler def-path로 바꾼 것은 아니다**.
-`h2_measure._module_walk/_module_table`은 W 도출, R-E owner pub fn 명부, R-W 증가 검사에 남아 있다.
+등록 경로(W/SUBPROC_W 도출·R-W)는 compiler items에서만 온다. 텍스트 walker는 행 key(item 이름)·H8·SUBPROC seed 범위만 정한다.
+`h2_measure._module_walk/_module_table`은 R-E owner pub fn 명부에 남아 있다.
 따라서 compiler map과 walker 대조를 제거하면 이 소비자의 경로가 무검증 상태가 된다.
 `SourceFile`의 함수·const/static 귀속 및 바깥 macro call-site 사용 한계는 §7에 남긴다.
 
@@ -222,8 +223,9 @@ canary는 봉인 후 items를 한 번 읽고 manifest/proof digest를 대조한 
 BOM/CRLF fixture는 -text이며 원문 byte 보존부터 검사한다. 누락·중복·0개·좌표 드리프트는 canary 실패다.
 필수 Linux canary 동작이 바뀌므로 해당 head의 Linux green이 머지 조건이다. 매핑/도출 전환은 후속 단계다.
 
-### Items 매핑 라이브러리 (비활성)
-`scripts/ci/h2_items.py`는 CI·measure 경로에 연결하지 않은 라이브러리다. 도출 전환과 R-W 소비는 후속 단계가 맡는다.
+### Items 매핑 (활성)
+`scripts/ci/h2_items.py`는 measure·regen·check·admission이 모든 세션에서 load하는 매핑이다. baseline 전에는 `h2_measure.sh` 조기 종료와
+`h2_measure.py`/`h2_admission.py`의 baseline 검사가 세션보다 먼저라 CI 동작은 바뀌지 않는다.
 load는 봉인 manifest(schema 1, kind `canary-items`)와 request/proof `h2-session/2`만 받는다.
 기대 crate manifest와 request unit, proof unit의 공통 필드·root·`test:false`, nonce·run ID를 대조한다.
 request/proof/items/sidecar/clippy.jsonl은 한 번 읽어 봉인 digest와 대조한 같은 bytes만 파싱하고 다시 열지 않는다.
@@ -246,6 +248,12 @@ site를 포함하는 가장 좁은 레코드를 고르며 같은 폭 다른 범�
 모든 실패는 reason을 가진 `MappingError`다. 봉인·source 불일치·git capture 실패와 옛 request는 `unsealed`, 잘못된 span·spans 목록은 `coord`다.
 빈 spans·primary span 없음과 목록 안 레코드 없음은 `no-item`, 목록 밖 파일은 `unsealed`다. 통과나 0건이 되지 않는다.
 `canary-items`는 현재 세션의 유일한 kind이므로 root 결속은 kind가 아닌 기대 crate unit 대조로 한다.
+측정은 진단 중 증명된 lib 컴파일의 메시지만 센다. clippy.toml span 검사는 JSONL 전체에 한다.
+도출: path는 W/SUBPROC_W, 등록 불가 사유는 `file::item (reason)`으로 regen 실패·R-E가 된다. 모든 `MappingError`는 측정 실패다.
+header(module-level)는 `disallowed_types`면 등록할 것이 없는 site(R-W 통과 표지)이고, `disallowed_methods`면 `module-call` 등록 불가다.
+TYPES Self trait impl 면제는 없다. trait impl은 지역 trait 메서드 경로, 외부 trait은 `external:<crate>`다.
+R-W는 `measure`가 site마다 모은 경로(`reg`)를 읽는다. 이번 lane에서 커진 key만 보며, site가 없거나 등록 불가이거나 이번 lane W에 없으면 실패다.
+F2(A→B→A 원문 교체)는 입력 source fence로 닫혔고 소비자도 fence 표지를 요구한다. T3(H20)는 잔여로 남는다.
 
 두 호스트의 결과를 모은 뒤 실행한다:
 
@@ -358,10 +366,10 @@ r9의 15개 ID군을 모두 유지한다(H10의 a/b는 같은 행에 구분).
 | H13 | 설계 어휘 census와 Clippy JSON 사이 오차 | 규모 추정은 실제 양 레인 측정값으로 교체 |
 | H14 | macOS hosted 레이블 변경으로 측정 중단 | 레이블 갱신과 실제 host 단언; 현재 inert no-op은 host를 검사하지 않음 |
 | H15 | 지원 밖 속성·잘못 닫힌 속성의 macro는 보수적으로 거부 | [owner_shape_problems][shape]는 doc 및 중첩 cfg_attr의 속성 자리에서 doc RHS만 item macro 검사에서 제외; 술어·임의 속성 내부 doc는 제외하지 않음 |
-| H16 | macro fn의 module 귀속·`<module>` R-W 면제, raw identifier·const/static 내부 item 경로의 선재 한계 | [SourceFile:66/measure:309][items], [rw_problem:274][rw]; 파일 map은 R-W 전체 증명이 아님, 실제 baseline 영향 검증 |
+| H16 | 행 key는 텍스트 walker 이름이라 macro fn의 module 귀속·raw identifier·const/static 이름 한계가 남음(등록·R-W는 compiler 경로) | [SourceFile:66/measure:309][items], [rw_problem:274][rw]; 파일 map은 R-W 전체 증명이 아님, 실제 baseline 영향 검증 |
 | H17 | 정상 항등 macro 모듈·hand-written item 재배치도 fail-closed 거부 | [modmap_problems:124][modmap]; 출처 보존 규칙의 보수적 오탐, 컴파일 가능한 모든 Rust 문법 지원 약속 없음 |
 | H18 | hardlink·대소문자 alias의 파일 동치가 realpath만으로 증명되지 않음 | [classify:92/walker_problems:174][aliases]; duplicate_mod와 함께 실측 필요, 미측정을 해결로 세지 않음 |
-| H19 | R-O map 패스와 Clippy 패스가 같은 source/target/cfg였는지 입증하는 결속 부재 | [map_modules:57][collector], [root_lib_depinfo:45][depinfo]; items와 Clippy JSON은 같은 호출 세션 manifest로 결속(매핑 비활성), map TSV·`.d` 결속은 3b-A 증거 필요, cfg 목록 일치만으로 대체 불가 |
+| H19 | R-O map 패스와 Clippy 패스가 같은 source/target/cfg였는지 입증하는 결속 부재 | [map_modules:57][collector], [root_lib_depinfo:45][depinfo]; items와 Clippy JSON은 같은 호출 세션 manifest로 결속(측정·admission에 활성), map TSV·`.d` 결속은 3b-A 증거 필요, cfg 목록 일치만으로 대체 불가 |
 | H20 | items 자식과 Clippy가 두 compile이라 원문 불변·전개 차이(비결정 proc-macro)는 items와 진단이 다른 token에서 나올 수 있음 | 파일 변경형 A→B→A는 입력 source fence로 거부; H2는 적대 방어가 아닌 코드 건강 래칫이며 보안 요구로 올리면 계측 Clippy 단일 compile(설계 후보 ③) |
 
 H15의 RHS 제외는 compiler 수용 조건에 의존한다. 지원하는 key-value 속성의 값은 macro 전개 후 literal이어야 하며,
