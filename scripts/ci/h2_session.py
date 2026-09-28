@@ -351,6 +351,17 @@ def read_maps(pid: int):
     return {short.uid, short.ruid, short.svuid}, regions
 
 
+def describe(pid: int) -> str:
+    """Name and gids of a Linux process whose maps were unreadable, next to this scanner's gids."""
+    try:
+        status = (PROC_ROOT / str(pid) / "status").read_text(errors="replace")
+    except OSError:
+        return ""
+    name, gids = (re.search(rf"^{key}:\s*(.*)$", status, re.M) for key in ("Name", "Gid"))
+    return (f"; name {name.group(1) if name else '?'}, gids {gids.group(1).split() if gids else '?'},"
+            f" scanner gids {sorted({os.getgid(), os.getegid()})}")
+
+
 def mapping_guard(stats: dict[str, list[int]], *, rounds: int = 10) -> dict:
     """Refuse a capture that a live process could still store into through a mapping; a store there may leave ctime."""
     if sys.platform not in ("linux", "darwin"):
@@ -371,7 +382,8 @@ def mapping_guard(stats: dict[str, list[int]], *, rounds: int = 10) -> dict:
             uids, regions = found
             if regions is None:
                 if 0 not in uids and (me in uids or loose or uids & owners):
-                    raise MeasureError(f"session fence: cannot read the mappings of process {pid} (uids {sorted(uids)})")
+                    raise MeasureError(f"session fence: cannot read the mappings of process {pid} (uids {sorted(uids)}"
+                                       f"{describe(pid)})")
                 counts["root" if 0 in uids else "foreign"] += 1
                 continue
             counts["processes"] += 1
