@@ -1187,6 +1187,8 @@ src/
 │   │   │   ├── monitor_auto_turn_inflight_tests.rs
 │   │   │   └── task_notification_kind_restart_roundtrip_tests.rs
 │   │   ├── tmux_output_stream/
+│   │   │   ├── tests/
+│   │   │   │   └── compact_summary_tests.rs
 │   │   │   ├── native_codex.rs
 │   │   │   └── provider_output_guard_tests.rs
 │   │   ├── tmux_placeholder_suppression/
@@ -1203,6 +1205,8 @@ src/
 │   │   │   │   ├── backstop_tests.rs
 │   │   │   │   └── idle_gate.rs
 │   │   │   ├── loop_poll_prologue/
+│   │   │   │   ├── post_terminal_disposal_tests/
+│   │   │   │   │   └── compact_summary_tests.rs
 │   │   │   │   ├── post_terminal_disposal_tests.rs
 │   │   │   │   └── watcher_resume.rs
 │   │   │   ├── streaming_status_tick/
@@ -1308,6 +1312,7 @@ src/
 │   │   │   │   ├── claim.rs
 │   │   │   │   └── stale_reclaim.rs
 │   │   │   ├── tests/
+│   │   │   │   ├── compact_summary_tests.rs
 │   │   │   │   ├── fenced_admission_tests.rs
 │   │   │   │   ├── retired_pending_start_claim_tests.rs
 │   │   │   │   ├── scenario_census_e2e.rs
