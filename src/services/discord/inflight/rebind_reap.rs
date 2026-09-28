@@ -1,6 +1,9 @@
 use super::*;
 use crate::services::platform::tmux::PaneLiveness;
 
+#[cfg(test)]
+mod tests;
+
 /// #3635: runtime-liveness oracle for the dead-watcher rebind-origin reap path.
 ///
 /// A Watcher-owned orphan can never satisfy
@@ -20,6 +23,9 @@ pub(super) trait WatcherLiveness {
 /// The production probe uses the same signals the
 /// stall-watchdog (#3169/#3629) trusts: tmux pane liveness + runtime activity.
 pub(super) fn runtime_watcher_is_proven_dead(state: &InflightTurnState) -> bool {
+    #[cfg(test)]
+    use tests::watcher_runtime_activity_recent;
+
     // No session name to probe => cannot prove death => never reap.
     let Some(session) = state.tmux_session_name.as_deref() else {
         return false;
@@ -29,7 +35,10 @@ pub(super) fn runtime_watcher_is_proven_dead(state: &InflightTurnState) -> bool 
         return false;
     }
     // A transient probe failure is "unknown", not "dead" — preserve.
+    #[cfg(not(test))]
     let pane = crate::services::tmux_diagnostics::tmux_session_pane_liveness(session);
+    #[cfg(test)]
+    let pane = tests::tmux_session_pane_liveness(session);
     if pane == PaneLiveness::ProbeError {
         return false;
     }
