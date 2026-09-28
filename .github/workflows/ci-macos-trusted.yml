@@ -1,8 +1,9 @@
 name: CI macOS Trusted
 
 on:
+  # Main pushes only: branch pushes used to queue a hosted macOS run each; run a branch manually when needed.
   push:
-    branches-ignore:
+    branches:
       - main
   workflow_dispatch:
   merge_group:
