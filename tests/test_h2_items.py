@@ -306,17 +306,25 @@ class Items(unittest.TestCase):
         foreign = [{**own, "package_id": "path+file:///other#0.0.0", "manifest_path": str(self.h.root / "other/Cargo.toml")},
                    {**own, "target": dict(kind=["custom-build"], src_path=str(self.h.crate / "build.rs"))}]
         bin_ = {**own, "target": dict(name="fixture", kind=["bin"], crate_types=["bin"], src_path=str(self.h.crate / "main.rs"))}
-        loaded = self.load(self.seal(cases=DIAGNOSTICS[:1], extra=[*foreign, bin_], name="foreign"))
-        self.assertEqual((len(loaded.messages), loaded.foreign), (1, 3))
+        shared = [{**own, "target": dict(name="build-script-build", kind=["custom-build"], crate_types=["bin"], src_path=lib)},
+                  {**bin_, "target": {**bin_["target"], "src_path": lib}}]
+        script = dict(reason="compiler-artifact", package_id=own["package_id"], target=shared[0]["target"],
+                      profile={"test": False}, fresh=False)
+        calls, attribute = [], items.attribute
+        with patch.object(items, "attribute", lambda *args: calls.append(args) or attribute(*args)):
+            loaded = self.load(self.seal(cases=DIAGNOSTICS[:1], extra=[*foreign, bin_, *shared], name="foreign"))
+        self.assertEqual((len(loaded.messages), loaded.foreign), (1, 5))
+        events, unit = calls[0]
+        self.assertEqual([len(part) if isinstance(part, list) else part for part in items.attribute([*events, script], unit)], [1, 5])
         self.assertEqual((self.load(self.seal(cases=(), name="quiet")).messages), [])
         other = str(self.h.lib.parent / "other.rs")
-        for label, target in (("path", {**own["target"], "src_path": other}), ("kind", {**own["target"], "kind": ["bin"]}),
+        for label, target in (("path", {**own["target"], "src_path": other}), ("kind", {**own["target"], "kind": ["lib"]}),
                               ("types", {**own["target"], "crate_types": ["rlib"]}), ("bare", dict(kind=["lib"], src_path=other))):
             with self.subTest(label):
                 event = {**own, "target": target}
                 self.assert_reason("provenance", self.load, self.seal(cases=(), extra=[event], name="claims-" + label))
         self.assert_reason("provenance", self.load, self.seal(cases=(), target=dict(name="other"), name="artifact-name"))
-        twice = dict(reason="compiler-artifact", package_id=own["package_id"], target={"src_path": lib},
+        twice = dict(reason="compiler-artifact", package_id=own["package_id"], target=own["target"],
                      profile={"test": True}, fresh=False)
         for label, event in (("target", {k: v for k, v in own.items() if k != "target"}),
                              ("package", {k: v for k, v in own.items() if k != "package_id"}),
@@ -345,6 +353,24 @@ class Items(unittest.TestCase):
         with patch.object(Path, "resolve", aba):
             loaded = self.load(manifest)
         self.assertEqual((len(loaded.messages), loaded.foreign), (1, 0))
+
+    def test_each_spelling_is_resolved_once_and_a_loop_is_a_mapping_error(self):
+        manifest, attribute, resolve = self.seal(name="once"), items.attribute, Path.resolve
+        def run(fail):
+            seen = []
+            def once(path, *args, **kwargs):
+                if str(path) in seen or fail(path):
+                    raise RuntimeError(f"Symlink loop from {path!r}")
+                seen.append(str(path))
+                return resolve(path, *args, **kwargs)
+            def counted(*args):
+                with patch.object(Path, "resolve", once):
+                    return attribute(*args)
+            with patch.object(items, "attribute", counted):
+                return self.load(manifest), seen
+        loaded, seen = run(lambda path: False)
+        self.assertEqual((len(loaded.messages), len(seen)), (len(DIAGNOSTICS), 2))
+        self.assert_reason("unsealed", run, lambda path: path == self.h.lib)
 
 
 if __name__ == "__main__":

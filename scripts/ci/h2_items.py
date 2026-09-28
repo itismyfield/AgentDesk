@@ -109,9 +109,14 @@ def attribute(events: list[dict], unit: dict) -> tuple[list[dict], int]:
     """Messages of the one proved lib compilation, and how many other units' messages were set aside."""
     resolved: dict[str, Path] = {}
     def canon(name: str) -> Path:  # each spelling is resolved once, so a swapped link cannot reclassify
-        return resolved.setdefault(name, Path(name).resolve())
+        if name not in resolved:
+            try:
+                resolved[name] = Path(name).resolve()
+            except RuntimeError as exc:
+                raise MappingError("unsealed", f"items: cannot resolve {name}: {exc}") from exc
+        return resolved[name]
     builds = [e for e in events if e.get("reason") == "compiler-artifact" and e.get("package_id") == unit["package_id"]
-              and canon(e["target"]["src_path"]) == Path(unit["lib"])]
+              and set(e["target"].get("kind") or ()) & LIB_KINDS and canon(e["target"]["src_path"]) == Path(unit["lib"])]
     if len(builds) != 1:
         raise MappingError("provenance", f"{len(builds)} compilations of the lib; its diagnostics are not attributable")
     sealed = builds[0]["target"]
@@ -132,7 +137,7 @@ def attribute(events: list[dict], unit: dict) -> tuple[list[dict], int]:
             raise MappingError("provenance", f"package {event['package_id']} at {event['manifest_path']}")
         if mine and all(target.get(key) == sealed.get(key) for key in IDENTITY):
             own.append(event["message"])
-        elif mine and (set(target["kind"]) & LIB_KINDS or canon(target["src_path"]) == Path(unit["lib"])):
+        elif mine and set(target["kind"]) & LIB_KINDS:
             raise MappingError("provenance", f"message target {target!r} contradicts the lib artifact")
         else:
             foreign += 1
