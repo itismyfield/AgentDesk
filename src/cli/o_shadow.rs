@@ -356,10 +356,10 @@ fn population(
             None => {}
         }
     }
-    // An allowlisted channel with no config entry (a thread) takes the provider it was bound to.
+    // An allowlisted channel with no config entry (a thread) takes each provider it was bound to.
+    let configured: BTreeSet<u64> = channels.iter().map(|c| c.channel_id).collect();
     for (channel_id, provider) in threads {
-        let configured = channels.iter().any(|c| c.channel_id == *channel_id);
-        if !configured && resolve(provider, Some(*channel_id)) {
+        if !configured.contains(channel_id) && resolve(provider, Some(*channel_id)) {
             let (channel_id, provider) = (*channel_id, provider.clone());
             let (effective_tui, basis) = (true, "resolver".to_string());
             channels.push(PopulationChannel {
@@ -456,5 +456,16 @@ mod tests {
         let codex = [(9, "codex".to_string())];
         let snapshot = population(&config, file(), Vec::new(), Utc::now(), &resolve, &codex);
         assert!(snapshot.channels.is_empty());
+        // Thread 8 moved from claude to codex inside the window; both profiles stay covered.
+        let both = |provider: &str, channel: Option<u64>| {
+            matches!(provider, "claude" | "codex") && (channel != Some(7) || provider == "claude")
+        };
+        let moved = [(8, "claude".to_string()), (8, "codex".to_string())];
+        let snapshot = population(&config, file(), Vec::new(), Utc::now(), &both, &moved);
+        let covered: Vec<(u64, &str)> = (snapshot.channels.iter())
+            .map(|c| (c.channel_id, c.provider.as_str()))
+            .collect();
+        assert_eq!(covered, [(7, "claude"), (8, "claude"), (8, "codex")]);
+        assert_eq!(snapshot.profiles, ["claude_tui", "codex_tui"]);
     }
 }
