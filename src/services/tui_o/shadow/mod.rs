@@ -14,6 +14,7 @@ pub mod unit_plan;
 // Observe-side modules (tap, diff, report, metrics) are declared below.
 pub mod diff;
 pub mod metrics;
+pub mod tap;
 
 use std::path::PathBuf;
 use std::time::Duration;
