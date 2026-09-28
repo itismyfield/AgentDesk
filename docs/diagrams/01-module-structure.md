@@ -251,7 +251,6 @@ package "GitHub  (src/github/)" as GithubPkg #Honeydew {
 ' ============================================================
 package "Dashboard  (dashboard/)" as DashPkg #Bisque {
     [React 19 + Vite + Tailwind] as DashApp
-    [Pixi.js\n(office visualization)] as DashPixi
 }
 
 ' ============================================================

@@ -39,7 +39,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 get(execution_requirements::get_node).put(execution_requirements::put_node),
             )
             .route("/agents/{id}/duplicate", post(agents_crud::duplicate_agent))
-            .route("/agents/{id}/offices", get(agents::agent_offices))
             .route("/agents/{id}/signal", post(agents::agent_signal))
             .route("/agents/{id}/message", post(agents::agent_message))
             .route("/agents/{id}/handoff", post(agents::agent_handoff))
