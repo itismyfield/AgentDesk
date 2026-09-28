@@ -33,7 +33,7 @@ R-O 방식에는 이후 [사용자 (a) 결정](https://github.com/itismyfield/Ag
 | R-O compiler 대조 | [h2_depinfo.py](../../scripts/ci/h2_depinfo.py), `sym:h2_depinfo::ro_problems` | root lib dep-info와 expanded module map, duplicate_mod 진단 대조 |
 | 잔존 walker 대조 | `sym:h2_depinfo::walker_problems` | compiled file의 realpath→modpath와 R-W 텍스트 walker의 실제 open 경로 대조 |
 | module map 수집 | [h2_modmap.py](../../scripts/ci/h2_modmap.py), `sym:h2_modmap::map_modules` | 이번 실행의 TSV 존재·신선도·형식·file module 하한 검사 |
-| 레인·공통 env | [h2_env.py](../../scripts/ci/h2_env.py), `sym:h2_env::environment`, `sym:h2_env::check_host` | 공통 정리 목록·host triple; map/driver의 wrapper 해제 및 driver 전용 bootstrap |
+| 레인·공통 env | [h2_env.py](../../scripts/ci/h2_env.py), `sym:h2_env::environment`, `sym:h2_env::check_host` | 모든 모드의 공통 env·wrapper 정리·host triple 및 driver 전용 bootstrap |
 | map metadata 봉인 | [h2_cfg_collect.py](../../scripts/ci/h2_cfg_collect.py), `sym:h2_cfg_collect::seal`, `sym:h2_cfg_collect::read_manifest` | Cargo 성공·동일 run·schema·신선도·하한·digest 검증 후 최종 manifest 게시/재검증 |
 | cfg 목록 진단 | [h2_cfg_compare.py](../../scripts/ci/h2_cfg_compare.py), `sym:h2_cfg_compare::compare_cfgs` | 구조화된 cfg 원자 집합의 교집합과 양방향 차이 |
 
@@ -43,6 +43,18 @@ file/inline/include/wrapped 행은 선언·식별자 context, 부모 파일, 중
 드라이버에는 `rustc-dev`가 필요하다. `RUSTC_BOOTSTRAP=1`은 드라이버 빌드에만 사용한다.
 map 실행은 wrapper를 비우고, 기존 TSV를 지운 뒤 marker 시각과 비교한다.
 canary의 오류 목록이 일치해야 하며 실제 저장소 map은 file module이 1000개 이상이어야 한다.
+
+저장소 루트의 `clippy.toml`은 양 lane 합본이며, 측정·check·admission은 해당 lane과 `both` 항목만
+임시 `CLIPPY_CONF_DIR`에 렌더해 실행한다. callee 필터에도 같은 lane 설정을 쓴다.
+admission은 평가가 끝날 때까지 임시 설정을 유지하고, runner가 만든 정확한 `clippy.toml` 경로 하나만
+이번 실행의 R-O 설정 입력으로 인정한다. 다른 외부 파일·동명 파일·별칭·디렉터리 전체는 면제하지 않는다.
+외부 `--json`에는 이 실행 경로의 예외를 부여하지 않는다.
+regen은 EXEC/SUBPROC/TYPES와 반대 lane 도출을 보존하고, 이번 lane의 W/SUBPROC_W를 비운 seed에서 시작한다.
+수렴 뒤 합본과 해당 lane baseline을 갱신하므로 삭제된 경로나 seed와 무관한 도출 순환은 남지 않는다.
+H2 경로는 `[A-Za-z_]\w*(::[A-Za-z_]\w*)+` 형식이며 첫 segment는 `agentdesk/std/core/alloc/tokio` 중 하나다.
+lint·target 필터 전에 코드 유무와 무관하게 compiler-message의 어느 span이든 `clippy.toml`이면 실패한다.
+문구나 반대 lane 여부로 경고를 무시하지 않는다. 외부 `--json`도 lane 설정에서 생산해야 하며 같은 가드를 받는다.
+등록 불가 오류는 호출부 구조 변경을 요구한다. TYPES 추가를 해결책으로 안내하지 않는다.
 
 R-O는 compiler map을 사용하지만 **item 귀속 전체를 compiler def-path로 바꾼 것은 아니다**.
 `h2_measure._module_walk/_module_table`은 W 도출, R-E owner pub fn 명부, R-W 증가 검사에 남아 있다.
@@ -57,8 +69,14 @@ R-O는 compiler map을 사용하지만 **item 귀속 전체를 compiler def-path
 측정 레인은 `linux`(`x86_64-unknown-linux-gnu`)와 `macos`(`aarch64-apple-darwin`)다.
 `rust-toolchain.toml`은 현재 1.94.1을 지정한다. CI의 `components: clippy`가 Clippy를 설치하고
 `h2_measure.sh`가 가용성을 검사한다. macOS hosted 레이블은 `macos-15`다.
-`h2_measure.sh`는 host triple을 확인하고 `CARGO_BUILD_TARGET`, `RUSTFLAGS`,
-`CARGO_ENCODED_RUSTFLAGS`, `RUSTC_BOOTSTRAP`를 해제하며 incremental을 끈다. root lib/default features가 측정 기준이다.
+`h2_measure.sh`는 host triple을 확인한다. shell과 직접 Python 실행은 같은 공용 환경 정리를 적용한다.
+모든 모드에서 `CARGO`, `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS`, `CARGO_BUILD_TARGET`,
+`RUSTC`, `CARGO_BUILD_RUSTC`, `RUSTC_BOOTSTRAP`, `CLIPPY_ARGS`와 `CARGO_TARGET_*_{RUSTFLAGS,RUNNER,LINKER}`,
+`CARGO_PROFILE_*`, `CARGO_UNSTABLE_*`, `CARGO_FEATURE_*`, `CARGO_CFG_*`, `__CARGO*`를 제거한다.
+`RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER` 및 두 `CARGO_BUILD_` wrapper는 Cargo config보다 우선하도록 빈 문자열로 둔다.
+`CARGO_INCREMENTAL=0`이며 driver 빌드만 `RUSTC_BOOTSTRAP=1`, map 실행만 정리 후 driver wrapper를 주입한다.
+shell은 해당 키를 unset하고 wrapper를 빈 문자열로 export한다. baseline 전 inert 종료는 환경 수집보다 먼저다.
+root lib/default features가 측정 기준이다. target 디렉터리·Cargo 홈·toolchain 선택은 유지한다.
 env 해제만으로 Cargo config, build-script cfg, 실제 rustc argv의 일치가 증명되지는 않는다.
 재현 조건을 명시하는 것이며 모든 환경에서 같은 결과를 보장하지 않는다.
 
