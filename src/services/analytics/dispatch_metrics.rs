@@ -97,13 +97,13 @@ pub async fn achievements_pg(
     pool: &PgPool,
     agent_id: Option<&str>,
 ) -> Result<AchievementsResponse, sqlx::Error> {
-    let milestones: &[(i64, &str, &str)] = &[
-        (10, "first_task", "첫 번째 작업 완료"),
-        (50, "getting_started", "본격적인 시작"),
-        (100, "centurion", "100 XP 달성"),
-        (250, "veteran", "베테랑"),
-        (500, "expert", "전문가"),
-        (1000, "master", "마스터"),
+    let milestones: &[(i64, &str, &str, &str)] = &[
+        (10, "first_task", "첫 번째 작업 완료", "common"),
+        (50, "getting_started", "본격적인 시작", "uncommon"),
+        (100, "centurion", "100 XP 달성", "rare"),
+        (250, "veteran", "베테랑", "epic"),
+        (500, "expert", "전문가", "legendary"),
+        (1000, "master", "마스터", "mythic"),
     ];
 
     let mut query = QueryBuilder::new(
@@ -149,8 +149,14 @@ pub async fn achievements_pg(
     let mut achievements = Vec::new();
     for (agent_id, name, name_ko, xp, avatar_emoji) in &agents {
         let completion_times = agent_completed_times.get(agent_id.as_str());
-        for (threshold, achievement_type, description) in milestones {
+        for (index, (threshold, achievement_type, description, rarity)) in
+            milestones.iter().enumerate()
+        {
             if xp >= threshold {
+                let next_threshold = milestones.get(index + 1).map(|milestone| milestone.0);
+                let percent = next_threshold
+                    .map(|next| ((*xp as f64 / next as f64) * 100.0).round() as i64)
+                    .unwrap_or(100);
                 let approx_index = (*threshold as usize / 10).saturating_sub(1);
                 let earned_at = completion_times
                     .and_then(|times| times.get(approx_index.min(times.len().saturating_sub(1))))
@@ -167,12 +173,59 @@ pub async fn achievements_pg(
                     "agent_name": name,
                     "agent_name_ko": name_ko,
                     "avatar_emoji": avatar_emoji.as_str(),
+                    "rarity": rarity,
+                    "progress": {
+                        "current_xp": xp,
+                        "threshold": threshold,
+                        "next_threshold": next_threshold,
+                        "percent": percent,
+                    },
                 }));
             }
         }
     }
 
-    Ok(AchievementsResponse { achievements })
+    Ok(AchievementsResponse {
+        achievements,
+        daily_missions: daily_missions_pg(pool).await?,
+    })
+}
+
+async fn daily_missions_pg(pool: &PgPool) -> Result<Vec<Value>, sqlx::Error> {
+    let (completed_today, active_agents_today, review_queue): (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT COUNT(*) FROM task_dispatches
+             WHERE status = 'completed' AND updated_at >= date_trunc('day', NOW())),
+            (SELECT COUNT(DISTINCT to_agent_id) FROM task_dispatches
+             WHERE status = 'completed' AND updated_at >= date_trunc('day', NOW())
+               AND to_agent_id IS NOT NULL),
+            (SELECT COUNT(*) FROM kanban_cards WHERE status = 'review')",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(vec![
+        json!({
+            "id": "dispatches_today",
+            "label": "Complete 5 dispatches today",
+            "current": completed_today,
+            "target": 5,
+            "completed": completed_today >= 5,
+        }),
+        json!({
+            "id": "active_agents_today",
+            "label": "Get 3 agents shipping today",
+            "current": active_agents_today,
+            "target": 3,
+            "completed": active_agents_today >= 3,
+        }),
+        json!({
+            "id": "review_queue_zero",
+            "label": "Drain the review queue",
+            "current": i64::from(review_queue == 0),
+            "target": 1,
+            "completed": review_queue == 0,
+        }),
+    ])
 }
 
 pub async fn activity_heatmap_pg(
