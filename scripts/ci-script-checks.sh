@@ -512,10 +512,6 @@ if run_check contracts "Scheduled-message PG path-filter wiring contract"; then
 "$PYTHON" -m unittest tests.test_scheduled_messages_ci_wiring
 fi
 
-if run_check contracts "macOS hosted-overflow routing contract"; then
-"$PYTHON" -m unittest tests.test_macos_runner_overflow_ci_wiring
-fi
-
 if run_check contracts "High-risk recovery path-filter selection contract (#5232)"; then
 "$PYTHON" -m unittest tests.test_high_risk_recovery_path_filter
 fi

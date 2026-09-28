@@ -1232,6 +1232,11 @@ unless jobs.is_a?(Hash)
   warn "#{path}: jobs must be a YAML mapping"
   exit 1
 end
+# Decode YAML scalars so escaped labels and matrix entries cannot bypass the ban.
+if document.to_s.match?(/MACOS_RUNNER|self-hosted/i)
+  warn "#{path}: workflows must not reference self-hosted runners or MACOS_RUNNER"
+  exit 1
+end
 non_string_job_ids = jobs.keys.reject { |job_id| job_id.is_a?(String) }
 unless non_string_job_ids.empty?
   rendered_ids = non_string_job_ids.map(&:inspect).join(", ")
@@ -1557,16 +1562,6 @@ verify_required_check_mirror_hash
 validate_workflow_entries
 
 while IFS= read -r -d '' workflow; do
-  if grep -Eq '^[[:space:]]+pull_request(_target)?:' "$workflow"; then
-    if grep -Eq 'MACOS_RUNNER|self-hosted' "$workflow"; then
-      error "$workflow is pull_request-triggered and must not reference self-hosted macOS routing"
-    fi
-  fi
-
-  if [ "$workflow" != "$trusted_workflow" ] && grep -q 'MACOS_RUNNER' "$workflow"; then
-    error "$workflow references MACOS_RUNNER outside $trusted_workflow"
-  fi
-
   if grep -q 'RUSTC_WRAPPER=' "$workflow" && ! grep -q 'SCCACHE_GHA_ENABLED=' "$workflow"; then
     error "$workflow clears RUSTC_WRAPPER but not SCCACHE_GHA_ENABLED"
   fi
@@ -1585,8 +1580,6 @@ if [ -f "$trusted_workflow" ]; then
     || error "$trusted_workflow must have a workflow_dispatch trigger"
   grep -Eq '^[[:space:]]+merge_group:' "$trusted_workflow" \
     || error "$trusted_workflow must have a merge_group trigger"
-  grep -q 'MACOS_RUNNER_GROUP' "$trusted_workflow" \
-    || error "$trusted_workflow must require MACOS_RUNNER_GROUP for self-hosted routing"
 fi
 
 # Superseded PR heads must release hosted runners immediately. Required

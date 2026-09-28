@@ -19,7 +19,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "503881cce0ed2fe2482efe338b3355f4c8260677db1a86e0e41d12f3fcf94e15"
+    "21ef31d89718b4e2bf7d636ab07a08f735ca5be038de1957a6885665329d4320"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Path-filtered required contexts: (mirror job, required name, runner job,
@@ -783,21 +783,21 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 )["cross_os_rust"]
                 self.assertFalse(selects(survivors, sample))
 
-    def test_macos_pr_lane_runs_single_message_panel_tests(self) -> None:
+    def test_trusted_macos_hosted_lane_runs_single_message_panel_tests(self) -> None:
         workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
         command = (
             "env -u AGENTDESK_ROOT_DIR cargo test --lib "
             "single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres"
         )
-        self.assertEqual(workflow.count(command), 2)
+        self.assertEqual(job_block(workflow, "macos_hosted").count(command), 1)
 
-    def test_macos_pr_lane_runs_placeholder_live_events_tests(self) -> None:
+    def test_trusted_macos_hosted_lane_runs_placeholder_live_events_tests(self) -> None:
         workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
         command = (
             "env -u AGENTDESK_ROOT_DIR cargo test --lib "
             "placeholder_live_events -- --skip _pg --skip pg_ --skip postgres"
         )
-        self.assertEqual(workflow.count(command), 2)
+        self.assertEqual(job_block(workflow, "macos_hosted").count(command), 1)
 
     def test_main_and_nightly_retain_non_pg_test_coverage(self) -> None:
         justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
@@ -2125,44 +2125,22 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must retain exact needs: changes", result.stderr)
 
-    def test_trusted_macos_runs_busy_retry_regressions_on_both_runner_paths(self) -> None:
+    def test_trusted_macos_runs_busy_retry_regressions_on_hosted_runner(self) -> None:
         workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
         hosted = job_block(workflow, "macos_hosted")
-        self_hosted = job_block(workflow, "macos_self_hosted")
-
         self.assertEqual(hosted.count(BUSY_RETRY_4888_TEST_COMMAND), 1)
-        self.assertEqual(
-            self_hosted.count(f"nice -n 10 {BUSY_RETRY_4888_TEST_COMMAND}"), 1
-        )
 
-    def test_trusted_macos_path_filter_skips_steps_not_the_required_job(self) -> None:
-        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
-        # Hosted slots are the scarce resource; the filter must not add a job.
-        self.assertNotIn("macos-trusted-rust-filter.py", job_block(workflow, "resolve_macos_runner"))
-        self_hosted = job_block(workflow, "macos_self_hosted")
-        header, steps = self_hosted.split("    steps:\n", 1)
-        # The job name is the required context, so the filter may only gate steps.
-        self.assertNotIn("rust_filter", header)
-        checkout = steps.index("      - uses: actions/checkout@v4\n")
-        filter_step = step_block(self_hosted, "Decide whether heavy steps are needed")
-        self.assertLess(checkout, steps.index(filter_step))
-        self.assertIn("fetch-depth: 0", steps[checkout : steps.index(filter_step)])
-        # A failed filter must not fail the job; the gated steps run instead.
-        self.assertIn("continue-on-error: true", filter_step)
-        self.assert_filter_gates_exactly(
-            "macos_self_hosted",
-            {
-                "Install Rust toolchain",
-                "Configure local sccache",
-                "Install Opus on macOS",
-                "cargo check",
-                "H2 tmux boundary measurement (macos, inert)",
-                "H2 module map (macos, inert)",
-                "cargo test (non-PG, targeted subset)",
-                "Fresh user portable smoke",
-                "sccache stats",
-            },
-        )
+    def test_trusted_macos_has_only_an_unconditional_hosted_job(self) -> None:
+        workflow = yaml.safe_load(MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8"))
+        jobs = workflow["jobs"]
+        self.assertNotIn("macos_self_hosted", jobs)
+        self.assertNotIn("resolve_macos_runner", jobs)
+        self.assertEqual(set(jobs), {"macos_hosted"})
+        hosted = jobs["macos_hosted"]
+        self.assertEqual(hosted["name"], "Trusted macOS check (hosted)")
+        self.assertEqual(hosted["runs-on"], "macos-15")
+        self.assertNotIn("needs", hosted)
+        self.assertNotIn("if", hosted)
 
     def assert_filter_gates_exactly(self, job_name: str, gated: set[str]) -> None:
         """`gated` skips only on a successful run=false; other steps never skip."""
@@ -2182,7 +2160,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                         eval_step_if(condition, context), gated_runs or name not in gated
                     )
 
-    def test_trusted_macos_hosted_job_gates_the_same_heavy_steps(self) -> None:
+    def test_trusted_macos_hosted_job_gates_only_heavy_steps(self) -> None:
         workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
         hosted = job_block(workflow, "macos_hosted")
         header, steps = hosted.split("    steps:\n", 1)
@@ -2191,11 +2169,17 @@ class FastCheckCiWiringTests(unittest.TestCase):
         filter_step = step_block(hosted, "Decide whether heavy steps are needed")
         self.assertLess(checkout, steps.index(filter_step))
         self.assertIn("fetch-depth: 0", steps[checkout : steps.index(filter_step)])
+        parsed = yaml.safe_load(workflow)["jobs"]["macos_hosted"]
+        filter_config = next(step for step in parsed["steps"] if step.get("id") == "rust_filter")
+        self.assertEqual(filter_config["continue-on-error"], True)
+        self.assertEqual(filter_config["shell"], "bash")
+        self.assertEqual(filter_config["env"], {"EVENT_NAME": "${{ github.event_name }}"})
         self.assertEqual(
-            filter_step,
-            step_block(job_block(workflow, "macos_self_hosted"), "Decide whether heavy steps are needed"),
+            filter_config["run"],
+            'python3 scripts/ci/macos-trusted-rust-filter.py --event "$EVENT_NAME" '
+            '--base-ref origin/main >> "$GITHUB_OUTPUT"',
         )
-        # Hosted keeps its own ungated sccache opt-out, not the self-hosted local cache.
+        # Hosted cache opt-out remains unconditional, including docs-only pushes.
         self.assert_filter_gates_exactly(
             "macos_hosted",
             {
@@ -2370,6 +2354,36 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
                 capture_output=True,
                 check=False,
             )
+
+    def test_hardening_rejects_self_hosted_routing_in_any_workflow(self) -> None:
+        pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        trusted = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
+        variants = {
+            "scalar": "    runs-on: self-hosted\n",
+            "list": "    runs-on: [self-hosted, macOS]\n",
+            "block-list": "    runs-on:\n      - self-hosted\n      - macOS\n",
+            "group-labels": "    runs-on: {group: macs, labels: self-hosted}\n",
+            "escaped": '    "runs-on": "self-\\u0068osted"\n',
+            "case": "    runs-on: SELF-HOSTED\n",
+            "matrix": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [self-hosted]\n"
+            ),
+            "variable": "    runs-on: ${{ vars.MACOS_RUNNER }}\n",
+            "group-variable": (
+                "    runs-on: {group: '${{ vars.MACOS_RUNNER_GROUP }}', labels: macOS}\n"
+            ),
+        }
+        for name, runner in variants.items():
+            for path in ("ci-macos-trusted.yml", "extra.yaml"):
+                with self.subTest(runner=name, workflow=path):
+                    mutated = trusted.replace("    runs-on: macos-15\n", runner, 1)
+                    self.assertNotEqual(mutated, trusted)
+                    result = self.run_hardening_fixture(
+                        pr_workflow, extra_workflows={path: mutated}
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("must not reference self-hosted runners or MACOS_RUNNER", result.stderr)
 
     def test_hardening_rejects_flow_sequence_manual_trigger(self) -> None:
         source = PR_WORKFLOW.read_text(encoding="utf-8")
