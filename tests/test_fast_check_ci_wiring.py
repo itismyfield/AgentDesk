@@ -19,7 +19,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "21ef31d89718b4e2bf7d636ab07a08f735ca5be038de1957a6885665329d4320"
+    "2bab728830c680ccea8b31897885a8958d2b45d73a3a7cf50f8e360e8a859a12"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Path-filtered required contexts: (mirror job, required name, runner job,
@@ -2196,6 +2196,44 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertIn("Disable sccache on hosted macOS", hosted)
         self.assertNotIn("Configure local sccache", hosted)
 
+    def assert_hosted_sccache_reset(self, run: str) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            github_env = Path(temp) / "github-env"
+            github_env.touch()
+            result = subprocess.run(
+                ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", run],
+                cwd=temp,
+                env={
+                    "PATH": os.environ["PATH"],
+                    "GITHUB_ENV": str(github_env),
+                    "RUSTC_WRAPPER": "sccache",
+                    "SCCACHE_GHA_ENABLED": "true",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            entries = dict(line.split("=", 1) for line in github_env.read_text().splitlines())
+        self.assertEqual(entries.get("RUSTC_WRAPPER"), "")
+        self.assertEqual(entries.get("SCCACHE_GHA_ENABLED"), "")
+
+    def test_trusted_macos_hosted_sccache_reset_writes_both_empty_values(self) -> None:
+        workflow = yaml.safe_load(MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8"))
+        disable = next(
+            step for step in workflow["jobs"]["macos_hosted"]["steps"]
+            if step.get("name") == "Disable sccache on hosted macOS"
+        )
+        self.assertEqual(disable["shell"], "bash")
+        self.assertNotIn("if", disable)
+        self.assert_hosted_sccache_reset(disable["run"])
+        for variable in ("RUSTC_WRAPPER", "SCCACHE_GHA_ENABLED"):
+            with self.subTest(deleted=variable):
+                line = f'  echo "{variable}="\n'
+                self.assertIn(line, disable["run"])
+                with self.assertRaises(AssertionError):
+                    self.assert_hosted_sccache_reset(disable["run"].replace(line, "", 1))
+
     def test_test_lane_baseline_uses_candidate_snapshot_refs(self) -> None:
         pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         main_workflow = MAIN_WORKFLOW.read_text(encoding="utf-8")
@@ -2373,6 +2411,58 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             "group-variable": (
                 "    runs-on: {group: '${{ vars.MACOS_RUNNER_GROUP }}', labels: macOS}\n"
             ),
+            "format": "    runs-on: ${{ format('self-{0}', 'hosted') }}\n",
+            "custom-label": "    runs-on: agentdesk-macos\n",
+            "custom-list": "    runs-on: [macOS, ARM64]\n",
+            "mixed-hosted-custom-list": "    runs-on: [ubuntu-latest, agentdesk-macos]\n",
+            "nested-label-mapping": "    runs-on: {labels: {labels: macos-15}}\n",
+            "unknown-variable": "    runs-on: ${{ vars.CI_RUNNER }}\n",
+            "group-hosted-label": "    runs-on: {group: macs, labels: macos-15}\n",
+            "literal-expression": "    runs-on: ${{ 'ubuntu-latest' }}\n",
+            "matrix-expression": "    runs-on: ${{ matrix.os || 'ubuntu-latest' }}\n",
+            "missing-matrix": "    runs-on: ${{ matrix.os }}\n",
+            "dynamic-matrix": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix: ${{ fromJSON(vars.MATRIX) }}\n"
+            ),
+            "dynamic-axis": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: ${{ fromJSON(vars.RUNNERS) }}\n"
+            ),
+            "matrix-custom-candidate": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [ubuntu-latest, agentdesk-macos]\n"
+            ),
+            "matrix-variable-candidate": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: ['${{ vars.CI_RUNNER }}']\n"
+            ),
+            "matrix-include-custom": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [ubuntu-latest]\n"
+                "        include: [{os: agentdesk-macos}]\n"
+            ),
+            "matrix-dynamic-include": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [ubuntu-latest]\n"
+                "        include: ${{ fromJSON(vars.EXTRA) }}\n"
+            ),
+            "matrix-include-missing-runner": (
+                "    runs-on: ${{ matrix.runner }}\n"
+                "    strategy:\n      matrix:\n"
+                "        include: [{runner: macos-15}, {target: custom}]\n"
+            ),
+            "matrix-base-missing-runner": (
+                "    runs-on: ${{ matrix.runner }}\n"
+                "    strategy:\n      matrix:\n        target: [linux]\n"
+                "        include: [{runner: macos-15}]\n"
+            ),
+            "matrix-excluded-custom": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [ubuntu-latest, agentdesk-macos]\n"
+                "        exclude: [{os: agentdesk-macos}]\n"
+            ),
+            "empty-runner-list": "    runs-on: []\n",
         }
         for name, runner in variants.items():
             for path in ("ci-macos-trusted.yml", "extra.yaml"):
@@ -2383,7 +2473,76 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
                         pr_workflow, extra_workflows={path: mutated}
                     )
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("must not reference self-hosted runners or MACOS_RUNNER", result.stderr)
+                    self.assertIn("hosted runner policy", result.stderr)
+
+    def test_hardening_accepts_hosted_labels_and_static_matrices(self) -> None:
+        variants = {
+            label: f"    runs-on: {label}\n"
+            for label in ("ubuntu-latest", "ubuntu-22.04", "macos-15", "macos-latest", "windows-latest")
+        }
+        variants.update({
+            "label-list": "    runs-on: [ubuntu-latest]\n",
+            "label-mapping": "    runs-on: {labels: macos-15}\n",
+            "matrix-axis": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [ubuntu-latest, windows-latest]\n"
+            ),
+            "matrix-include-only": (
+                "    runs-on: ${{ matrix.runner }}\n"
+                "    strategy:\n      matrix:\n"
+                "        include: [{runner: macos-15}, {runner: ubuntu-22.04}]\n"
+            ),
+            "matrix-axis-include-exclude": (
+                "    runs-on: ${{ matrix.os }}\n"
+                "    strategy:\n      matrix:\n        os: [ubuntu-latest, macos-latest]\n"
+                "        include: [{os: windows-latest}]\n"
+                "        exclude: [{os: macos-latest}]\n"
+            ),
+        })
+        for name, runner in variants.items():
+            with self.subTest(runner=name):
+                workflow = "name: Runner probe\non: push\njobs:\n  probe:\n" + runner
+                workflow += "    steps:\n      - run: echo ok\n"
+                result = self.run_hardening_fixture(
+                    PR_WORKFLOW.read_text(encoding="utf-8"), {"runner-probe.yaml": workflow}
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_hardening_distinguishes_retired_variable_reads_from_prose(self) -> None:
+        variants = {
+            "step-name": ("name", "Verify self-hosted routing is absent", True),
+            "defensive-if": ("if", "runner.environment != 'self-hosted'", True),
+            "defensive-expression": ("if", "${{ runner.environment != 'self-hosted' }}", True),
+            "variable-prose": ("name", "Explain vars.MACOS_RUNNER retirement", True),
+            "quoted-literal": ("name", "${{ 'vars.MACOS_RUNNER' }}", True),
+            "quoted-if-literal": ("if", "contains('vars.MACOS_RUNNER', 'MACOS_RUNNER')", True),
+            "env-if-prose": ("env", {"if": "vars.MACOS_RUNNER"}, True),
+            "different-variable": ("env", {"RUNNER": "${{ vars.MACOS_RUNNER_GROUP }}"}, True),
+            "actual-dot-read": ("env", {"RUNNER": "${{ vars.MACOS_RUNNER }}"}, False),
+            "actual-bracket-read": ("env", {"RUNNER": "${{ vars['MACOS_RUNNER'] }}"}, False),
+            "actual-case-read": ("env", {"RUNNER": "${{ VARS.macos_runner }}"}, False),
+            "actual-implicit-if": ("if", "vars.MACOS_RUNNER != ''", False),
+            "quoted-delimiter": ("name", "${{ format('}}', vars.MACOS_RUNNER) }}", False),
+        }
+        for name, (key, value, accepted) in variants.items():
+            with self.subTest(case=name):
+                workflow = {"name": "Runner probe", "on": "push", "jobs": {"probe": {
+                    "runs-on": "ubuntu-latest", "steps": [{"run": "echo ok", key: value}],
+                }}}
+                result = self.run_hardening_fixture(
+                    PR_WORKFLOW.read_text(encoding="utf-8"),
+                    {"runner-probe.yaml": yaml.safe_dump(workflow)},
+                )
+                self.assertEqual(result.returncode, 0 if accepted else 1, result.stderr)
+                if not accepted:
+                    self.assertIn("forbids vars.MACOS_RUNNER references", result.stderr)
+
+    def test_hardening_accepts_every_repository_workflow(self) -> None:
+        result = self.run_hardening_fixture(
+            PR_WORKFLOW.read_text(encoding="utf-8"),
+            {path.name: path.read_text(encoding="utf-8") for path in workflow_paths()},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_hardening_rejects_flow_sequence_manual_trigger(self) -> None:
         source = PR_WORKFLOW.read_text(encoding="utf-8")
