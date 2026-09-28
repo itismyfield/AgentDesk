@@ -90,6 +90,9 @@ fn requested_unit(args: &[String]) -> Result<Option<Value>> {
 
 struct ItemsCallbacks {
     cfg: PathBuf,
+    root: PathBuf,
+    nonce: String,
+    run_id: String,
 }
 
 impl rustc_driver::Callbacks for ItemsCallbacks {
@@ -112,9 +115,17 @@ impl rustc_driver::Callbacks for ItemsCallbacks {
             })
             .collect();
         cfg.sort();
-        if let Err(err) = fs::write(&self.cfg, cfg.join("\n") + "\n") {
+        let written = crate::items::write(
+            tcx,
+            &self.root,
+            self.cfg.parent().unwrap(),
+            &self.nonce,
+            &self.run_id,
+        )
+        .and_then(|()| fs::write(&self.cfg, cfg.join("\n") + "\n"));
+        if let Err(err) = written {
             tcx.dcx()
-                .err(format!("modmap: cannot write session cfg: {err}"));
+                .err(format!("modmap: cannot write session items/cfg: {err}"));
         }
         rustc_driver::Compilation::Stop
     }
@@ -134,11 +145,15 @@ pub fn child(argv: &[String]) -> ! {
         let args: Vec<String> = std::iter::once(argv[0].clone())
             .chain(rest.iter().cloned())
             .chain(["--cfg".into(), "clippy".into()])
+            .chain(["--cap-lints".into(), "warn".into()])
             .collect();
         Ok((
             args,
             ItemsCallbacks {
                 cfg: with_suffix(".items-cfg.txt")?,
+                root: fs::canonicalize(required("CARGO_MANIFEST_DIR")?)?,
+                nonce: required("MODMAP_CFG_NONCE")?,
+                run_id: required("MODMAP_RUN_ID")?,
             },
         ))
     };
@@ -267,7 +282,20 @@ fn prepare(argv: &[String], clippy: &OsStr) -> Result<PathBuf> {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    let value = json!({"schema": "h2-session/1-cfg", "unit": unit, "pid": std::process::id(),
+    let run = proof.parent().ok_or("session output has no parent")?;
+    let items = fs::read(run.join("items.jsonl"))?;
+    let items_sha256 = crate::items::digest(&items);
+    let records = items
+        .split(|&b| b == b'\n')
+        .filter(|line| !line.is_empty())
+        .count()
+        .saturating_sub(1);
+    let receipt: Value = serde_json::from_slice(&fs::read(run.join("items.jsonl.sha256"))?)?;
+    if records == 0 || receipt != json!({"sha256": items_sha256, "records": records}) {
+        return Err("items changed since callback".into());
+    }
+    let value = json!({"schema": "h2-session/2", "unit": unit, "pid": std::process::id(),
+        "items_sha256": items_sha256, "items_records": records,
         "nonce": nonce, "run_id": run_id, "argv": &argv[1..], "env_sha256": digest, "protected_env": protected_env,
         "clippy_driver": clippy, "clippy": version, "clippy_rustc": compiler,
         "cfg": cfg.split_terminator('\n').collect::<Vec<_>>(), "driver_rustc": rustc_interface::util::rustc_version_str()});
