@@ -586,7 +586,7 @@ agentdesk.http.post(
   { retry: false, reason: "idle 30분 초과 — 자동 정리" }
 )
 
-// External commands (allow-list: gh, git, tmux, etc.)
+// External commands (allow-list: gh, git)
 agentdesk.exec("gh", ["issue", "close", "42", "--repo", "owner/repo"])
 agentdesk.exec("git", ["-C", repoDir, "log", "--oneline", "-5"])
 

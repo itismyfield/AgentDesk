@@ -426,8 +426,20 @@ mod cancel_queue_preserve_pg_tests {
         let bytes = to_bytes(response.into_body(), 1 << 20)
             .await
             .expect("read cancel body");
-        let body = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
+        let body = serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|error| {
+            let raw = String::from_utf8_lossy(&bytes);
+            panic!("cancel body is not JSON ({status}): {error}: {raw}")
+        });
         (status, body)
+    }
+
+    /// A missing key must not pass as `null`: absent and unmeasured are different answers.
+    fn assert_explicit_null(body: &Value, key: &str) {
+        assert_eq!(
+            body.get(key),
+            Some(&Value::Null),
+            "`{key}` must be present and null: {body}"
+        );
     }
 
     /// An agent that owns the channel plus an active session, so the handler
@@ -589,5 +601,59 @@ mod cancel_queue_preserve_pg_tests {
             dead_letter_row(&pool, channel_id).await.is_none(),
             "a preserved queue must not be reported as lost"
         );
+    }
+
+    /// A mailbox that exists but never answers is an unread queue, not a kept one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn preserve_cancel_on_a_dead_mailbox_reports_no_loss_verdict_pg() {
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let channel_id = 6_038_401_u64;
+        seed_cancel_target(&pool, channel_id).await;
+        ChannelMailboxRegistry::default().insert_unreachable_for_test(ChannelId::new(channel_id));
+
+        let app = test_router(pool.clone());
+        let (status, body) = post_cancel(&app, channel_id, false).await;
+        assert_eq!(status, StatusCode::OK, "cancel response: {body}");
+        assert_explicit_null(&body, "queue_loss_recorded");
+    }
+
+    /// Recording every captured item proves nothing when the post-cancel queue was never read.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_recorded_removal_with_an_unread_post_cancel_queue_reports_no_verdict_pg() {
+        use crate::services::turn_cancel_queue_guard::{
+            capture_queue_before_cancel, record_queue_loss_after_cancel,
+        };
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let channel_id = 6_038_402_u64;
+        let registry = ChannelMailboxRegistry::default();
+        registry
+            .handle(ChannelId::new(channel_id))
+            .replace_queue(
+                vec![queued_user_message(9_402)],
+                QueuePersistenceContext::new(&ProviderKind::Claude, "", None),
+            )
+            .await;
+        let target = crate::services::turn_lifecycle::TurnLifecycleTarget {
+            provider: Some(ProviderKind::Claude),
+            channel_id: Some(ChannelId::new(channel_id)),
+            tmux_name: String::new(),
+        };
+        let capture = capture_queue_before_cancel(&target).await;
+        registry.insert_unreachable_for_test(ChannelId::new(channel_id));
+
+        let loss =
+            record_queue_loss_after_cancel(&target, &capture, Some(&pool), false, "test_cancel")
+                .await;
+        assert_eq!(loss.dead_lettered_message_ids, vec![9_402]);
+        assert!(dead_letter_row(&pool, channel_id).await.is_some());
+        assert_eq!(loss.loss_recorded(), None, "{loss:?}");
     }
 }

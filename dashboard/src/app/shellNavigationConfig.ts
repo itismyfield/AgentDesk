@@ -1,10 +1,10 @@
 import type { AppRouteId } from "./routes";
 
 export const MOBILE_PRIMARY_ROUTE_IDS: AppRouteId[] = [
+  "voice",
   "home",
   "office",
   "kanban",
-  "stats",
 ];
 
 export const SIDEBAR_SECTION_ORDER: Array<{
