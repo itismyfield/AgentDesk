@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "8cf47a9c558625bdd8462efb99864ae50a1eb9ac",
+  "measured_at_sha": "93bf63271c70ee9fc6ff482fb3e8050c416c6db3",
   "records": [
     {
       "root": "migrations/postgres",
@@ -2638,6 +2638,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:26e41040740cf7b1555364a82c9e3373b48bcbf726f4ec2038b13045d7843c70"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/agents.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:bd53ecef499a1b5d0dbf5e1252511e133159f1e0e875967a8924b1bd90456512"
     },
     {
       "root": "src",
@@ -31896,7 +31905,7 @@
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
-      "fingerprint": "sha256:8e3b79a312c266f5f7bde2b0715e534d2d1400921ac2926d78ba61958c78cdc4"
+      "fingerprint": "sha256:b7c073e69c7be1b360f6568cc8991024d780fc971952779d0f2d9ea5cfe8ebad"
     },
     {
       "root": "src",
@@ -31905,7 +31914,7 @@
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
-      "fingerprint": "sha256:afa103bfcac483f126c3cd5f293299c4088afaaf68741dcf9d7d4b72700d25d7"
+      "fingerprint": "sha256:d854bcf79a4e5bb8fcce6352909e0bffc6490caadf53f2a8b9e664c402fc67ac"
     },
     {
       "root": "src",
@@ -32733,6 +32742,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:747e661c7448ede4ce61a2cf91bc1b0dd3cc2ea0669a0fd1d308124ee6f655c5"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/scheduled_messages/postgres_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:94664f99e45da65814e5e7596ad4a9f1354afc6321f6db7e08c4df3e66566432"
     },
     {
@@ -33526,6 +33544,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:803169d7934477002a9678d177a3b1714c57e5b82026b72069658597d8cecb5e"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/voice_conductor.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f12442b18ada607be937f7d54475b19b14a97c5972e39d4e875827fd7a3673b9"
     },
     {
       "root": "src",

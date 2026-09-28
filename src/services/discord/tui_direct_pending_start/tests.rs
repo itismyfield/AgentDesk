@@ -176,15 +176,20 @@ fn presence_index_marks_and_clears() {
     let provider = "claude";
     let channel = 777u64;
     assert!(!pending_synthetic_start_present(provider, channel));
-    mark_present(provider, channel);
+    mark_present((provider.to_string(), channel, 1));
     assert!(pending_synthetic_start_present(provider, channel));
-    mark_present(provider, channel);
-    mark_absent(provider, channel);
+    mark_present((provider.to_string(), channel, 2));
+    mark_absent(&(provider.to_string(), channel, 1));
     assert!(
         pending_synthetic_start_present(provider, channel),
         "two pending starts on a channel: still present after one clears"
     );
-    mark_absent(provider, channel);
+    mark_absent(&(provider.to_string(), channel, 1));
+    assert!(
+        pending_synthetic_start_present(provider, channel),
+        "removing the same anchor again must not drop its sibling's gate"
+    );
+    mark_absent(&(provider.to_string(), channel, 2));
     assert!(!pending_synthetic_start_present(provider, channel));
     reset_present_for_tests();
 }

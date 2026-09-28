@@ -80,11 +80,13 @@ in-repo attacker even in principle. Do not grow this checker to chase such
 constructs; see PR #4388's seven review rounds for why every added parser layer
 became new attack surface.
 """
+# The H2 boundary contract binds its anchors to imported Python functions instead (check_h2_contract).
 
 from __future__ import annotations
 
 import argparse
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -92,6 +94,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DISCORD_ROOT = REPO_ROOT / "src" / "services" / "discord"
 
 DEFAULT_DOC = REPO_ROOT / "docs" / "relay-state-contract.md"
+H2_DOC = REPO_ROOT / "docs" / "contracts" / "h2-tmux-boundary-ratchet.md"
 
 # Rust files hosting a `#[cfg(test)] mod relay_state_contract_refs` block, mapped
 # to the module path (from `src/services/discord/`) of the FILE that hosts the
@@ -639,9 +642,34 @@ def format_report(report: ContractRefReport) -> str:
     return "\n".join(lines)
 
 
+def check_h2_contract(doc: Path = H2_DOC) -> list[str]:
+    """Bind the H2 doc to imported Python functions without parsing Rust definitions."""
+    old_path = sys.path[:]
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "ci"))
+    try:
+        from h2_admission import evaluate, rw_problem
+        from h2_cfg_compare import compare_cfgs
+        from h2_cfg_collect import seal, read_manifest
+        from h2_depinfo import ro_problems, walker_problems
+        from h2_measure import measure, regen
+        from h2_modmap import map_modules
+
+        refs = (evaluate, rw_problem, compare_cfgs, ro_problems, walker_problems, measure, regen, map_modules, seal, read_manifest)
+        anchors = {f"{ref.__module__}::{ref.__name__}" for ref in refs}
+        documented = extract_doc_anchors(doc.read_text(encoding="utf-8"))
+    except (ImportError, AttributeError, OSError, UnicodeError) as exc:
+        return [f"H2 contract reference unavailable: {exc}"]
+    finally:
+        sys.path[:] = old_path
+    errors = [f"H2 contract: sym:{a} has no imported reference" for a in sorted(documented - anchors)]
+    errors += [f"H2 contract: imported {a} is not documented" for a in sorted(anchors - documented)]
+    return errors
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Contract symbol-ref sync gate (#4268).")
     parser.add_argument("--doc", type=Path, default=DEFAULT_DOC, help="Contract doc path.")
+    parser.add_argument("--h2-doc", type=Path, default=H2_DOC, help="H2 contract doc path.")
     return parser.parse_args(argv)
 
 
@@ -649,7 +677,9 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     report = build_report(doc=args.doc)
     print(format_report(report))
-    return 0 if report.is_clean() else 1
+    h2_errors = check_h2_contract(doc=args.h2_doc)
+    print("\n".join(h2_errors) if h2_errors else "H2 contract symbol-ref check passed (Python imports in sync)")
+    return 0 if report.is_clean() and not h2_errors else 1
 
 
 if __name__ == "__main__":

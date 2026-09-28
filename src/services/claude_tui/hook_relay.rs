@@ -1,3 +1,4 @@
+use crate::services::tui_prompt_dedupe::binding_context::{BINDING_HEADER, HookBindingEnvelope};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -467,6 +468,7 @@ fn relay_hook_event_with_request(
     request_id: &str,
     published_at: DateTime<Utc>,
     delivery_deadline: DateTime<Utc>,
+    binding: Option<&HookBindingEnvelope>,
 ) -> Result<(), String> {
     post_hook_event_with_request_timeout(
         endpoint,
@@ -475,7 +477,7 @@ fn relay_hook_event_with_request(
         session_id,
         payload,
         RELAY_TIMEOUT,
-        Some((request_id, published_at, delivery_deadline)),
+        Some((request_id, published_at, delivery_deadline, binding)),
     )
     .map(|_| ())
 }
@@ -506,6 +508,7 @@ fn relay_hook_event_response_with_request_timeout(
     request_id: &str,
     published_at: DateTime<Utc>,
     delivery_deadline: DateTime<Utc>,
+    binding: Option<&HookBindingEnvelope>,
     timeout: Duration,
 ) -> Result<Value, String> {
     let response = post_hook_event_with_request_timeout(
@@ -515,7 +518,7 @@ fn relay_hook_event_response_with_request_timeout(
         session_id,
         payload,
         timeout,
-        Some((request_id, published_at, delivery_deadline)),
+        Some((request_id, published_at, delivery_deadline, binding)),
     )?;
     response
         .into_json()
@@ -544,15 +547,24 @@ fn post_hook_event_with_request_timeout(
     session_id: &str,
     payload: Value,
     timeout: Duration,
-    request: Option<(&str, DateTime<Utc>, DateTime<Utc>)>,
+    request: Option<(
+        &str,
+        DateTime<Utc>,
+        DateTime<Utc>,
+        Option<&HookBindingEnvelope>,
+    )>,
 ) -> Result<ureq::Response, String> {
     let url = hook_url(endpoint, provider, event, session_id)?;
     let agent = ureq::AgentBuilder::new().timeout(timeout).build();
     let mut request_builder = agent
         .post(url.as_str())
         .set("Content-Type", "application/json");
-    if let Some((request_id, published_at, delivery_deadline)) = request {
+    if let Some((request_id, published_at, delivery_deadline, binding)) = request {
+        let header = binding
+            .unwrap_or(&HookBindingEnvelope::legacy_request())
+            .encode()?;
         request_builder = request_builder
+            .set(BINDING_HEADER, &header)
             .set(RELAY_REQUEST_ID_HEADER, request_id)
             .set(RELAY_PUBLISHED_AT_HEADER, &published_at.to_rfc3339())
             .set(RELAY_DEADLINE_HEADER, &delivery_deadline.to_rfc3339());

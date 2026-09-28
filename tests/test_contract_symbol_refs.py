@@ -9,11 +9,14 @@ these tests target: doc-anchor extraction, the code-derived Rust-anchor parser
 gate, the set comparison, and the distinct-anchor floor. Each round-2/round-3
 false-pass has a dedicated reproduction.
 """
+# H2 cases also check Python import bindings and the public script's exit status.
 
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
+import tempfile
 import textwrap
 import unittest
 from pathlib import Path
@@ -578,6 +581,54 @@ class WiringTest(unittest.TestCase):
             self.assertIn(host, workflow)
         # The required-context mirror gates the forced run.
         self.assertIn("Relay-contract fast check mirror (always, #4268)", workflow)
+
+
+class H2ContractCliTest(unittest.TestCase):
+    def run_contract(self, text):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Path(tmp, "h2.md")
+            doc.write_text(text, encoding="utf-8")
+            return subprocess.run([sys.executable, str(SCRIPT_PATH), "--h2-doc", str(doc)],
+                                  capture_output=True, text=True)
+
+    def test_matching_h2_document_passes_the_script(self):
+        proc = self.run_contract(CHECKER.H2_DOC.read_text(encoding="utf-8"))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("H2 contract symbol-ref check passed", proc.stdout)
+
+    def test_document_only_symbol_fails_the_script_with_diagnostic(self):
+        text = CHECKER.H2_DOC.read_text(encoding="utf-8") + "\n`sym:missing::entry`\n"
+        proc = self.run_contract(text)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("H2 contract: sym:missing::entry has no imported reference", proc.stdout)
+
+    def test_import_only_symbol_fails_the_script_with_diagnostic(self):
+        for symbol in ("h2_cfg_compare::compare_cfgs", "h2_cfg_collect::seal", "h2_cfg_collect::read_manifest"):
+            with self.subTest(symbol=symbol):
+                text = CHECKER.H2_DOC.read_text(encoding="utf-8").replace(f"`sym:{symbol}`", "")
+                proc = self.run_contract(text)
+                self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                self.assertIn(f"H2 contract: imported {symbol} is not documented", proc.stdout)
+
+    def test_main_preserves_import_search_path_on_h2_success_and_error(self):
+        probe = textwrap.dedent("""
+            import runpy
+            import sys
+            checker = runpy.run_path(sys.argv[1])
+            before = sys.path[:]
+            result = checker["main"](["--h2-doc", sys.argv[2]])
+            assert result == int(sys.argv[3]), result
+            assert sys.path == before, (before, sys.path)
+        """)
+        with tempfile.TemporaryDirectory() as tmp:
+            for doc, expected in ((CHECKER.H2_DOC, 0), (Path(tmp, "missing.md"), 1)):
+                with self.subTest(doc=doc):
+                    proc = subprocess.run(
+                        [sys.executable, "-c", probe, str(SCRIPT_PATH), str(doc), str(expected)],
+                        capture_output=True, text=True,
+                    )
+                    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                    self.assertEqual(proc.stderr, "")
 
 
 class IntegrationTest(unittest.TestCase):

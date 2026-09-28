@@ -58,6 +58,7 @@ NON_PG_SKIP_ARGS=(
   --skip server::message_outbox_retry_tests
   --skip server::multinode_regression::multinode_regression_pg_tests
   --skip server::resource_locks::resource_locks_pg_tests
+  --skip server::routes::agents_turn_deliver::pg_tests
   --skip server::routes::auto_queue_lifecycle_pg_tests::tests
   --skip server::routes::auto_queue_preflight_harness_tests
   --skip server::routes::campaigns::tests
