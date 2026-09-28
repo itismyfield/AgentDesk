@@ -1,3 +1,6 @@
+# Lexical tests read sources and Cargo.toml byte-for-byte via include_str!, so a
+# CRLF checkout (Windows core.autocrlf) breaks them. Check out LF everywhere.
+* text=auto eol=lf
 scripts/** text eol=lf
 .githooks/** text eol=lf
 .github/workflows/*.yml text eol=lf

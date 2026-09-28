@@ -22,6 +22,9 @@ pub mod codex_tui;
 pub mod cswap;
 pub mod discord;
 pub mod discord_config_audit;
+// Read only by its tests until the `adk custody status` wiring lands on top of it.
+#[allow(dead_code)]
+pub(crate) mod discord_custody;
 // #1693: `discord_delivery` moved to `dispatches::discord_delivery`. The
 // flat path is preserved as a re-export so existing import sites and
 // tests keep working without churn.
@@ -165,6 +168,7 @@ pub mod turn_cancel_finalizer;
 pub mod turn_cancel_queue_guard;
 pub mod turn_lifecycle;
 pub mod turn_orchestrator;
+pub(crate) mod voice_conductor;
 
 // Compatibility alias only: code referencing `services::remote::*` still
 // compiles, but the target module is disabled per #1606/#2175/#2193. A real

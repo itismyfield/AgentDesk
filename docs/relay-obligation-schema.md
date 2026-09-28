@@ -1,7 +1,8 @@
 # Dormant delivery obligation schema
 
-The obligation ledger belongs to the existing delivery record. This slice adds
-types only: no production caller, writer, lease, owner, deduper or sender changes.
+The obligation ledger belongs to the existing delivery record. These dormant
+slices add storage/state types, checked proof construction and read-only loading.
+Production callers remain zero; existing writers, leases, owners and senders are unchanged.
 `LEDGER_PROTOCOL` stays at 0 until every required writer and consumer is wired.
 The later serde/read-only loader slices use the same fixture at
 `tests/fixtures/delivery_obligation/ledger.json`.
@@ -33,7 +34,7 @@ its revision is diagnostic and need not equal the ledger revision. Missing fence
 for an active ledger requires repair; empty ledger with a fence is IncompleteClear.
 The read-only loader reports those states without repairing either file.
 Unknown top-level fields and sections must survive document roundtrips and any
-later rewrite. Unknown fields inside the understood ledger fail closed.
+later rewrite. Unknown fields in understood publication, obligation and attempt sections fail closed.
 All source evidence is valid only for its recorded publication (epoch, E, digest,
 rev); a revision advanced by an unaware writer invalidates that evidence and the
 reader must refuse restoration. Empty-ledger evidence fields and semantics remain
