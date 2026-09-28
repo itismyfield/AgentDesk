@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail when non-test shadow code can reach an effect outside o_shadow; see CRATE_ALLOW, ROOT_ONLY, DENIED."""
+"""Fail when non-test shadow code can reach an effect outside o_shadow; see CRATE_ALLOW, ROOT_ONLY, DENIED, CLI_DENIED."""
 
 import re
 import sys
@@ -40,6 +40,10 @@ TEST_MOD = re.compile(r"#\[cfg\(test\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\)
 USE = re.compile(r"\buse\s+([^;]+);")
 USE_GROUP = re.compile(r"((?:\w+::)*)\{([^{}]*)\}")
 PATH = re.compile(r"(?<![\w:])(?:::)?(?:[A-Za-z_]\w*::)+[A-Za-z_*]\w*")
+
+# The report CLI reads the server config; server loaders tighten a secret-bearing file's mode.
+CLI_FILE = Path("src/cli/o_shadow.rs")
+CLI_DENIED = re.compile(r"\b(load_from_path|load_graceful|save_to_path|audit_or_harden\w*|set_permissions|config::load)\b")
 
 blank = lambda text: re.sub(r"[^\n]", " ", text)  # noqa: E731
 def brace_end(text: str, open_at: int) -> int:
@@ -113,6 +117,14 @@ def scan_text(name: str, text: str, module: str, in_root: bool) -> list[str]:
                  if not any(start < m.start() < end for start, end in writers)]
     return hits
 
+def scan_cli(name: str, text: str) -> list[str]:
+    code = TOKEN.sub(lambda m: blank(m.group(0)), text)
+    for match in TEST_MOD.finditer(code):
+        end = brace_end(code, match.end() - 1) + 1
+        code = code[:match.start()] + blank(code[match.start():end]) + code[end:]
+    return [f"{name}:{number}: config mode change: {line.strip()}"
+            for number, line in enumerate(code.split("\n"), 1) if CLI_DENIED.search(line)]
+
 BAD = [
     ("fn f(ctx: &Ctx) { ctx.http.say(1); }", False),
     ("fn f() { use std::fs::{write}; let _ = write(p, b); }", False),
@@ -140,10 +152,17 @@ GOOD = [
     ('#[cfg(test)]\nmod tests {\n    fn t() { std::fs::write(p, "}"); }\n}\n', False),
 ]
 
+CLI_BAD = ["fn f() { let _ = crate::config::load_from_path(p); }", "fn f() { let _ = config::load(); }",
+           "fn f() { std::fs::set_permissions(p, m).ok(); }"]
+CLI_GOOD = ["fn f() { let c: Config = serde_yaml::from_slice(&b)?; }\n"
+            "#[cfg(test)]\nmod tests {\n    fn t() { std::fs::set_permissions(p, m).ok(); }\n}\n"]
+
 def self_test() -> list[str]:
     run = lambda text, in_root: scan_text("case.rs", text, f"{SHADOW_MODULE}::case", in_root)  # noqa: E731
     return ([f"self-test missed: {text!r}" for text, in_root in BAD if not run(text, in_root)]
-            + [f"self-test flagged: {hits}" for text, in_root in GOOD if (hits := run(text, in_root))])
+            + [f"self-test flagged: {hits}" for text, in_root in GOOD if (hits := run(text, in_root))]
+            + [f"self-test missed: {text!r}" for text in CLI_BAD if not scan_cli("case.rs", text)]
+            + [f"self-test flagged: {hits}" for text in CLI_GOOD if (hits := scan_cli("case.rs", text))])
 
 def main() -> int:
     failures = self_test()
@@ -152,6 +171,7 @@ def main() -> int:
         parts = list(relative.relative_to(SHADOW_DIR).with_suffix("").parts)
         module = "::".join([SHADOW_MODULE] + (parts[:-1] if parts[-1] == "mod" else parts))
         failures += scan_text(str(relative), path.read_text("utf-8"), module, relative == SHADOW_DIR / "root.rs")
+    failures += scan_cli(str(CLI_FILE), (REPO_ROOT / CLI_FILE).read_text("utf-8"))
     print("\n".join(failures + [f"o-shadow write-zero: {len(failures)} failure(s)"]))
     return 1 if failures else 0
 

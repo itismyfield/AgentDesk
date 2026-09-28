@@ -158,19 +158,7 @@ async fn report(
     to: DateTime<Utc>,
     classify: ClassifyInput,
 ) -> Result<(), String> {
-    let path = crate::config::resolved_config_path();
-    let bytes = std::fs::read(&path).map_err(|e| format!("read config {}: {e}", path.display()))?;
-    let config = crate::config::load_from_path(&path).map_err(|e| format!("load config: {e}"))?;
-    let mtime = std::fs::metadata(&path)
-        .and_then(|m| m.modified())
-        .ok()
-        .map(DateTime::from);
-    let sha256 = hex::encode(Sha256::digest(&bytes));
-    let file = ConfigFile {
-        path: path.display().to_string(),
-        sha256,
-        mtime,
-    };
+    let (config, file) = read_config(&crate::config::resolved_config_path())?;
     let stored = read_stored(&root)?;
     let records = || stored.iter().map(|line| &line.record);
     let manifest = read_manifest(&root)?;
@@ -236,6 +224,31 @@ async fn report(
             outcome.failures.len()
         ))
     }
+}
+
+/// Parses the config itself: the server loader tightens a secret-bearing file's mode.
+fn read_config(path: &std::path::Path) -> Result<(Config, ConfigFile), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read config {}: {e}", path.display()))?;
+    let config: Config =
+        serde_yaml::from_slice(&bytes).map_err(|e| format!("parse config: {e}"))?;
+    crate::config::validate_config(&config).map_err(|e| format!("invalid config: {e:#}"))?;
+    if let Some(password) = config.database.password.as_deref() {
+        crate::utils::redact::register_known_secret(password);
+    }
+    let mtime = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .map(DateTime::from);
+    let sha256 = hex::encode(Sha256::digest(&bytes));
+    let path = path.display().to_string();
+    Ok((
+        config,
+        ConfigFile {
+            path,
+            sha256,
+            mtime,
+        },
+    ))
 }
 
 /// A missing or malformed file becomes a report failure rather than an unclassified run.
@@ -467,5 +480,26 @@ mod tests {
             .collect();
         assert_eq!(covered, [(7, "claude"), (8, "claude"), (8, "codex")]);
         assert_eq!(snapshot.profiles, ["claude_tui", "codex_tui"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_report_reads_a_secret_bearing_config_without_changing_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentdesk.yaml");
+        let mut config = Config::default();
+        config.database.password = Some("database-secret".to_string());
+        crate::config::save_to_path(&path, &config).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        let (read, file) = read_config(&path).unwrap();
+        let after = std::fs::metadata(&path).unwrap();
+        // The server loader would tighten a secret-bearing file to 0600; a report must not.
+        assert_eq!(after.permissions().mode() & 0o777, 0o644);
+        assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+        assert_eq!(read.database.password.as_deref(), Some("database-secret"));
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(file.sha256, hex::encode(Sha256::digest(bytes)));
     }
 }

@@ -605,4 +605,37 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn a_unit_derived_after_its_legacy_state_moved_on_fails_rather_than_matches() {
+        let (channel_id, msg_id, at) = (7, 1, t(350));
+        let content = Some("changed".to_string());
+        let edit = LegacyTapEvent::Updated {
+            channel_id,
+            msg_id,
+            at,
+            content,
+        };
+        let mut timely = WindowDiff::default();
+        post(&mut timely, 1, 10, "draft");
+        seal(&mut timely, "held", 0, &["draft"]);
+        timely.observe_legacy(&edit);
+        let matched = (Match, vec![1], DiffCause::Expected);
+        assert_eq!(rows(&mut timely, 400), [matched]);
+        // Held past a later edit, or past the message's retirement: never a Match, always Unknown.
+        let mut edited = WindowDiff::default();
+        post(&mut edited, 1, 10, "draft");
+        edited.observe_legacy(&edit);
+        seal(&mut edited, "held", 0, &["draft"]);
+        let mut retired = WindowDiff::default();
+        post(&mut retired, 1, 10, "reply");
+        let mut late = rows(&mut retired, 611);
+        seal(&mut retired, "held", 0, &["reply"]);
+        late.extend(rows(&mut retired, 612));
+        for rows in [rows(&mut edited, 400), late] {
+            assert!(rows.iter().all(|(class, ..)| *class != Match), "{rows:?}");
+            let unknown = rows.iter().any(|(.., cause)| *cause == DiffCause::Unknown);
+            assert!(unknown, "{rows:?}");
+        }
+    }
 }
