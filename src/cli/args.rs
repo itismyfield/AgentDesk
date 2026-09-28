@@ -1142,6 +1142,7 @@ mod tests {
             "health",
             "machine-compare",
             "activity",
+            "o-shadow",
             "help",
         ];
 
