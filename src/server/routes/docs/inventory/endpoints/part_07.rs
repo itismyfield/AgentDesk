@@ -699,7 +699,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/dispatches/{id}/cancel",
             "dispatches",
-            "Cancel a pending or dispatched dispatch, reset linked auto-queue bookkeeping, cancel any matching active turn through the shared turn cancel finalizer, and remove the dispatch notify guard. Terminal dispatches return 409 Conflict.",
+            "Cancel a pending or dispatched dispatch, reset linked auto-queue bookkeeping, cancel any matching active turn through the shared turn cancel finalizer, and remove the dispatch notify guard. Terminal dispatches return 409 Conflict. `turn_queue_preserved` is true/false only when measured, otherwise explicit null. `turn_queued_remaining` is the post-drain measurement or explicit null; unreachable or exhausted-closed hydration never reuses an earlier depth.",
         )
         .with_params([("id", path_param("Dispatch ID"))])
         .with_example(

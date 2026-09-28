@@ -665,10 +665,12 @@ src/
 │   │   ├── catch_up/
 │   │   │   ├── absorbed_active_tests.rs
 │   │   │   ├── api.rs
+│   │   │   ├── claim_cas_tests.rs
 │   │   │   ├── classification.rs
 │   │   │   ├── classification_order_tests.rs
 │   │   │   ├── frontier_evidence.rs
 │   │   │   ├── frontier_sweep_tests.rs
+│   │   │   ├── merged_alias_tests.rs
 │   │   │   ├── phase2.rs
 │   │   │   ├── retry_state.rs
 │   │   │   ├── settled_frontier.rs
@@ -735,6 +737,8 @@ src/
 │   │   │   ├── reachability/
 │   │   │   │   ├── composite.rs
 │   │   │   │   ├── composite_tests.rs
+│   │   │   │   ├── coverage.rs
+│   │   │   │   ├── coverage_tests.rs
 │   │   │   │   ├── discovery.rs
 │   │   │   │   ├── divergence.rs
 │   │   │   │   ├── external_verdict.rs
@@ -1187,6 +1191,8 @@ src/
 │   │   │   ├── monitor_auto_turn_inflight_tests.rs
 │   │   │   └── task_notification_kind_restart_roundtrip_tests.rs
 │   │   ├── tmux_output_stream/
+│   │   │   ├── tests/
+│   │   │   │   └── compact_summary_tests.rs
 │   │   │   ├── native_codex.rs
 │   │   │   └── provider_output_guard_tests.rs
 │   │   ├── tmux_placeholder_suppression/
@@ -1203,6 +1209,8 @@ src/
 │   │   │   │   ├── backstop_tests.rs
 │   │   │   │   └── idle_gate.rs
 │   │   │   ├── loop_poll_prologue/
+│   │   │   │   ├── post_terminal_disposal_tests/
+│   │   │   │   │   └── compact_summary_tests.rs
 │   │   │   │   ├── post_terminal_disposal_tests.rs
 │   │   │   │   └── watcher_resume.rs
 │   │   │   ├── streaming_status_tick/
@@ -1308,6 +1316,7 @@ src/
 │   │   │   │   ├── claim.rs
 │   │   │   │   └── stale_reclaim.rs
 │   │   │   ├── tests/
+│   │   │   │   ├── compact_summary_tests.rs
 │   │   │   │   ├── fenced_admission_tests.rs
 │   │   │   │   ├── retired_pending_start_claim_tests.rs
 │   │   │   │   ├── scenario_census_e2e.rs
@@ -1923,6 +1932,7 @@ src/
 │   │   ├── registry_purge/
 │   │   │   └── closed_gate_tests.rs
 │   │   ├── active_source_dedup.rs
+│   │   ├── claim_observation.rs
 │   │   ├── clear_channel.rs
 │   │   ├── closed_verdict.rs
 │   │   ├── dispatch_cleanup.rs
@@ -1937,6 +1947,7 @@ src/
 │   │   ├── overflow.rs
 │   │   ├── pending_queue_persistence.rs
 │   │   ├── queue_cancellation.rs
+│   │   ├── queue_enqueue.rs
 │   │   ├── recovery_kickoff.rs
 │   │   ├── recovery_kickoff_tests.rs
 │   │   ├── registry_purge.rs

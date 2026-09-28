@@ -99,7 +99,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/health/detail",
             "health",
-            "Local/protected detailed health with provider diagnostics and latest startup doctor detail.",
+            "Local/protected detailed health with provider diagnostics and latest startup doctor detail. mailboxes[].reachability.coverage (schema_version 1) reports first-observed uncovered/unproven/pending counts, observation state, cursor/observed EOF/commit time and exact-receipt/frontier-prefix/mixed provenance, including reachable grace; unavailable counts are null. Cumulative incomplete-observation history keeps coverage incomplete even at EOF, preserving known counts; it does not distinguish temporary cap lag from skipped records or change the verdict. Legacy reachability.uncovered_ranges presence and value follow the in-band variant: Degraded/Unreachable publish held counts, Reachable omits the field. An external tier worsening the final verdict neither creates nor recalculates this legacy field (rowless_active_turn retains its existing uncovered-only exception).",
         )
         .with_example(
             json!({}),
@@ -141,6 +141,32 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "warning_count": 0,
                     "configuration_warnings": []
                 },
+                "mailboxes": [{
+                    "provider": "claude",
+                    "channel_id": 42,
+                    "reachability": {
+                        "verdict": "reachable",
+                        "decided_by": "in_band",
+                        "governs_health_polarity": false,
+                        "health_polarity_abstained": false,
+                        "manual_redelivery_banned": false,
+                        "coverage": {
+                            "schema_version": 1,
+                            "observation_state": "current",
+                            "uncovered_ranges": 1,
+                            "unproven_ranges": 2,
+                            "pending_ranges": 3,
+                            "oldest_uncovered_age_secs": 119,
+                            "oldest_unproven_age_secs": 80,
+                            "oldest_pending_age_secs": 119,
+                            "age_basis": "first_observed",
+                            "cursor_offset": 1456,
+                            "observed_eof": 1456,
+                            "observation_committed_at_epoch_ms": 10000000,
+                            "provenance": {"exact_receipt_ranges": 2, "frontier_prefix_ranges": 0, "mixed_ranges": 0}
+                        }
+                    }
+                }],
                 "latest_startup_doctor": {
                     "available": true,
                     "status": "failed",
