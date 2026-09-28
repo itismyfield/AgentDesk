@@ -93,6 +93,9 @@
   Two resets permit at most 184 additional deadline days for the
   same surviving registration. They do not permit `keep` reclassification or
   guarantee decomposition: after the final deadline, overdue blocking remains.
+- `pr_giant_deletion` (checked first): deleting registered files must remove
+  exactly their registry entries and baseline/transition lines; pins and the
+  surviving registrations and overdue stay unchanged; no new or growing giant.
 - "giant-file" = `>= 1000` **production** lines per
   `scripts/generate_inventory_docs.py` (lines inside `#[cfg(test)] mod` blocks
   are excluded; see the `Prod` column in `module-inventory.md`). Frozen giant
