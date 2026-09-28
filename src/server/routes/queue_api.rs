@@ -949,4 +949,44 @@ mod cancel_queue_preserve_pg_tests {
         assert!(dead_letter_row(&pool, channel_id).await.is_some());
         assert_eq!(loss.loss_recorded(), None, "{loss:?}");
     }
+
+    /// An empty global mirror slot is not an absent actor: another registry can still hold the queue.
+    #[tokio::test(flavor = "current_thread")]
+    async fn queue_truth_force_purge_without_global_mirror_is_unknown_pg() {
+        use crate::services::turn_orchestrator::registry_purge;
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let channel_id = 6_038_403_u64;
+        let channel = ChannelId::new(channel_id);
+        seed_cancel_target(&pool, channel_id).await;
+        let registry_a = ChannelMailboxRegistry::default();
+        let registry_b = ChannelMailboxRegistry::default();
+        let handle_a = registry_a.handle(channel);
+        let persistence = QueuePersistenceContext::new(&ProviderKind::Claude, "", None);
+        handle_a
+            .replace_queue(vec![queued_user_message(9_403)], persistence)
+            .await;
+        registry_b.handle(channel);
+        let removed = registry_b.remove_idle_entry(channel).await;
+        assert_eq!(removed, registry_purge::MailboxPurgeOutcome::Removed);
+        assert!(ChannelMailboxRegistry::global_handle(channel).is_none());
+        let depth_a = handle_a
+            .try_snapshot()
+            .await
+            .map(|s| s.intervention_queue.len());
+        assert_eq!(depth_a.ok(), Some(1), "A still holds the queue");
+
+        let (status, body) = post_cancel(&test_router(pool.clone()), channel_id, true).await;
+        assert_eq!(status, StatusCode::OK, "cancel response: {body}");
+        assert_explicit_null(&body, "queued_remaining");
+        let depth_a = handle_a
+            .try_snapshot()
+            .await
+            .map(|s| s.intervention_queue.len());
+        assert_eq!(depth_a.ok(), Some(1), "the purge never reached A: {body}");
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }

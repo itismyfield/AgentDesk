@@ -77,7 +77,7 @@ async fn schedule_post_cancel_queue_drain(
 }
 
 /// Purge through the actor and retain its measured removal counts and post-rollback depth.
-/// Without a live handle, only sweep persisted channel files across token namespaces.
+/// Without a global mirror, sweep files only; another registry's actor may still hold a queue.
 pub(super) async fn force_purge_channel_mailbox(
     health_registry: Option<&Arc<HealthRegistry>>,
     target: &TurnLifecycleTarget,
@@ -102,7 +102,7 @@ pub(super) async fn force_purge_channel_mailbox(
             drained: 0,
             disk_files_removed,
             own_files_removed: Some(0),
-            queue_len_after: 0,
+            queue_len_after: None,
         });
     };
     let token_hash = session_key
@@ -703,7 +703,7 @@ impl QueueService {
         // Publish only measurements after the final queue mutation attempt.
         let queued_remaining = if force {
             loss.queue_depth_after
-                .or(queue_purge.as_ref().map(|c| c.queue_len_after))
+                .or(queue_purge.as_ref().and_then(|c| c.queue_len_after))
         } else {
             drain_depth.or(loss.queue_depth_after)
         };

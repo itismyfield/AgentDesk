@@ -33,7 +33,7 @@ pub(crate) struct PurgeCounts {
     pub(crate) drained: usize,
     pub(crate) disk_files_removed: usize,
     pub(crate) own_files_removed: Option<usize>,
-    pub(crate) queue_len_after: usize,
+    pub(crate) queue_len_after: Option<usize>,
 }
 
 impl From<crate::services::turn_orchestrator::PurgeQueueResult> for PurgeCounts {
@@ -42,7 +42,7 @@ impl From<crate::services::turn_orchestrator::PurgeQueueResult> for PurgeCounts 
             drained: result.drained,
             disk_files_removed: result.disk_files_removed,
             own_files_removed: result.own_files_removed,
-            queue_len_after: result.queue_len_after,
+            queue_len_after: Some(result.queue_len_after),
         }
     }
 }
