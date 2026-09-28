@@ -209,8 +209,13 @@ class EndToEnd(Tree):
         config = h2.load_config(self.root / "clippy.toml")
         config["agentdesk::linux_only"] = ("W", frozenset({"linux"}))
         (self.root / "clippy.toml").write_text(h2.render_clippy_toml(config))
+        run, generated = subprocess.run, []
         def cargo(command, **kwargs):
+            if command[0] != "cargo":
+                return run(command, **kwargs)
             env = kwargs["env"]
+            conf = Path(env["CLIPPY_CONF_DIR"]) / "clippy.toml"
+            generated.append(conf)
             self.assertEqual(command[:3], ["cargo", "clippy", "--lib"])
             self.assertEqual(kwargs["cwd"], self.root.resolve())
             self.assertEqual(h2.load_config(Path(env["CLIPPY_CONF_DIR"]) / "clippy.toml"),
@@ -218,12 +223,33 @@ class EndToEnd(Tree):
             for key in CLEARED:
                 self.assertNotIn(key, env, key)
             self.assertEqual({key: env.get(key) for key in WRAPPERS}, dict.fromkeys(WRAPPERS, ""))
+            write_depinfo(self.root, "00aa", [*SOURCES, "Cargo.toml", conf])
             return subprocess.CompletedProcess(command, 0, "\n".join(self.lines()), "")
         with mock.patch.dict(os.environ, POISON), mock.patch.object(h2.subprocess, "run", side_effect=cargo), \
-                mock.patch.object(adm, "evaluate", return_value=[]) as evaluate, redirect_stdout(io.StringIO()):
+                redirect_stdout(io.StringIO()), redirect_stderr(err := io.StringIO()):
             self.assertEqual(adm.main(["--repo", str(self.root), "--lane", "macos", "--base", self.base,
-                                      "--modmap", str(self.modmap)]), 0)
-        self.assertEqual(evaluate.call_args.args[3], self.lines())
+                                      "--modmap", str(self.modmap)]), 0, err.getvalue())
+        self.assertEqual(len(generated), 1)
+        self.assertFalse(generated[0].exists())
+        self.assertEqual(self.evaluate("macos"), [f"R-O: lib compile input {generated[0]} is outside the repo"])
+
+    def test_generated_config_does_not_exempt_other_external_inputs(self) -> None:
+        for extra in ("other.json", "nested/clippy.toml", "alias.rs"):
+            def runner(root, conf):
+                path = conf / extra
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if extra == "alias.rs":
+                    path.symlink_to(conf / "clippy.toml")
+                else:
+                    path.write_text("unrelated")
+                write_depinfo(self.root, "00aa", [*SOURCES, "Cargo.toml", conf / "clippy.toml", path])
+                return self.lines()
+            with self.subTest(extra=extra), mock.patch.object(h2, "run_clippy", side_effect=runner), \
+                    redirect_stderr(err := io.StringIO()):
+                rc = adm.main(["--repo", str(self.root), "--lane", "macos", "--base", self.base,
+                               "--modmap", str(self.modmap)])
+                self.assertEqual(rc, 1)
+                self.assertIn("outside the repo", err.getvalue())
 
     def test_evaluate_filters_external_json_by_lane(self) -> None:
         config = h2.load_config(self.root / "clippy.toml")
@@ -232,17 +258,19 @@ class EndToEnd(Tree):
         lines = [*self.lines(), diag(PROBE, 1, 1, "agentdesk::linux_only")]
         self.assertEqual(adm.evaluate(self.root, "macos", self.base, lines, self.modmap), [])
 
-    def test_codeless_config_warning_rejects_external_json(self) -> None:
-        warning = json.loads(diag("clippy.toml", 2, 1, "agentdesk::missing"))
-        warning["message"]["code"] = None
-        path = self.root / "invalid.jsonl"
-        path.write_text("\n".join([*self.lines(), json.dumps(warning)]))
-        with mock.patch.object(h2, "run_clippy") as cargo, redirect_stderr(err := io.StringIO()):
-            rc = adm.main(["--repo", str(self.root), "--lane", "macos", "--base", self.base,
-                           "--modmap", str(self.modmap), "--json", str(path)])
-        self.assertEqual(rc, 1)
-        self.assertIn("clippy could not use an H2 path", err.getvalue())
-        cargo.assert_not_called()
+    def test_config_warning_rejects_external_json_with_or_without_code(self) -> None:
+        for code in (None, "clippy::disallowed_methods", "unused_imports"):
+            warning = json.loads(diag("clippy.toml", 2, 1, "agentdesk::missing"))
+            warning["message"]["code"] = {"code": code} if code else None
+            path = self.root / "invalid.jsonl"
+            path.write_text("\n".join([*self.lines(), json.dumps(warning)]))
+            with self.subTest(code=code), mock.patch.object(h2, "run_clippy") as cargo, \
+                    redirect_stderr(err := io.StringIO()), redirect_stdout(io.StringIO()):
+                rc = adm.main(["--repo", str(self.root), "--lane", "macos", "--base", self.base,
+                               "--modmap", str(self.modmap), "--json", str(path)])
+                self.assertEqual(rc, 1)
+                self.assertIn("clippy could not use an H2 path", err.getvalue())
+                cargo.assert_not_called()
 
     def test_growth_needs_exactly_one_suffix_admission(self) -> None:
         self.edit(PROBE, 'alive("x")', 'alive("x") && crate::services::platform::tmux::has_session("y")')

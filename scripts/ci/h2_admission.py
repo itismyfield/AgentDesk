@@ -388,7 +388,8 @@ def base_state(root: Path, rev: str) -> tuple[dict | None, dict, str | None]:
                 (Path(tmp) / rel).write_text(text, encoding="utf-8")
         return m.load_baseline(Path(tmp)), m.load_config(Path(tmp) / "clippy.toml"), git_show(root, rev, ADMISSIONS_FILE)
 
-def evaluate(root: Path, lane: str, base_rev: str, lines: list[str], modmap: Path) -> list[str]:
+def evaluate(root: Path, lane: str, base_rev: str, lines: list[str], modmap: Path,
+             *, clippy_config: Path | None = None) -> list[str]:
     head = m.load_baseline(root)
     base, base_config, base_admissions = base_state(root, base_rev)
     if base is None:
@@ -398,7 +399,7 @@ def evaluate(root: Path, lane: str, base_rev: str, lines: list[str], modmap: Pat
     config = m.load_config(root / "clippy.toml")
     result = m.measure(root, lines, m.lane_config(config, lane))
     problems = zero_rules(root) + owner_shape_problems(root) + untagged_entries(root / "clippy.toml")
-    problems += h2_depinfo.ro_problems(root, lines, modmap)
+    problems += h2_depinfo.ro_problems(root, lines, modmap, clippy_config=clippy_config)
     problems += m.compare(result["rows"], head, lane)
     if result["total"] < m.LIVENESS_FLOOR:
         problems.append(f"only {result['total']} H2 diagnostics (< liveness floor {m.LIVENESS_FLOOR})")
@@ -431,8 +432,12 @@ def main(argv=None) -> int:
         parser.error("--base and --modmap are required once a baseline exists")
     try:
         config = m.load_config(root / "clippy.toml")
-        lines = args.json.read_text(encoding="utf-8").splitlines() if args.json else m.run_lane_clippy(root, config, args.lane)
-        problems = evaluate(root, args.lane, args.base, lines, args.modmap)
+        if args.json:
+            lines = args.json.read_text(encoding="utf-8").splitlines()
+            problems = evaluate(root, args.lane, args.base, lines, args.modmap)
+        else:
+            with m.lane_clippy_run(root, config, args.lane) as (lines, clippy_config):
+                problems = evaluate(root, args.lane, args.base, lines, args.modmap, clippy_config=clippy_config)
     except (m.MeasureError, AdmissionError) as exc:
         problems = [str(exc)]
     for problem in problems:

@@ -21,7 +21,7 @@ import h2_env  # noqa: E402
 
 WRAPPERS = ("RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER",
             "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER")
-CLEARED = ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS", "CARGO_BUILD_TARGET",
+CLEARED = ("CARGO", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS", "CARGO_BUILD_TARGET",
            "RUSTC", "CARGO_BUILD_RUSTC", "RUSTC_BOOTSTRAP", "CLIPPY_ARGS",
            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS", "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER",
            "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER", "CARGO_PROFILE_DEV_OPT_LEVEL", "CARGO_PROFILE_RELEASE_DEBUG",
@@ -280,6 +280,18 @@ class LaneGuards(Fixture):
         self.assertFalse(configs[0].exists())
         self.assertEqual((self.root / "clippy.toml").read_bytes(), stored)
 
+    def test_lane_run_keeps_exact_config_alive_until_consumer_finishes(self) -> None:
+        generated = []
+        def runner(root, conf):
+            generated.append(conf / "clippy.toml")
+            return ["output"]
+        with h2.lane_clippy_run(self.root, self.config, "macos", runner) as (lines, conf):
+            self.assertEqual(lines, ["output"])
+            self.assertEqual(generated, [conf])
+            self.assertTrue(conf.is_file())
+            self.assertTrue(conf.is_absolute())
+        self.assertFalse(conf.exists())
+
     def test_codeless_config_messages_fail_before_lint_and_target_filters(self) -> None:
         for file in ("clippy.toml", "./clippy.toml", "/tmp/conf/clippy.toml"):
             for message in ("does not refer to a reachable function", "expected a function, found a module",
@@ -293,6 +305,18 @@ class LaneGuards(Fixture):
         self.assertEqual(h2.diagnostics([json.dumps(event)]), [])
         self.assertEqual(h2.diagnostics([diag("src/lib.rs", 1, 1, TMUX)]),
                          [("src/lib.rs", 1, 1, "clippy::disallowed_methods", TMUX)])
+
+    def test_coded_config_spans_fail_but_source_diagnostics_pass(self) -> None:
+        for code in (*h2.LINTS, "unused_imports"):
+            for primary in (False, True):
+                event = json.loads(diag("clippy.toml" if primary else "src/lib.rs", 1, 1, TMUX, lint=code))
+                if not primary:
+                    event["message"]["spans"].append({"file_name": "/tmp/conf/clippy.toml", "is_primary": False})
+                    event["target"]["kind"] = ["bin"]
+                with self.subTest(code=code, primary=primary), self.assertRaisesRegex(h2.MeasureError, "clippy.*H2 path"):
+                    h2.diagnostics([json.dumps(event)])
+            expected = [("src/lib.rs", 1, 1, code, TMUX)] if code in h2.LINTS else []
+            self.assertEqual(h2.diagnostics([diag("src/lib.rs", 1, 1, TMUX, lint=code)]), expected)
 
     def test_config_path_format_rejects_silently_ignored_spellings(self) -> None:
         for path in ("<A as B>::m", "crate::f", "unknown::f", "services::f", "agentdesk", "agentdesk::",
@@ -403,6 +427,48 @@ class LaneGuards(Fixture):
         cargo.assert_not_called()
 
 class CleanEnvironment(unittest.TestCase):
+    def test_inherited_cargo_cannot_replace_nested_check_with_successful_noop(self) -> None:
+        scripts = {
+            "cargo": """\
+                import os, sys
+                from pathlib import Path
+                here = Path(__file__).resolve()
+                if sys.argv[1] == 'clippy':
+                    env = dict(os.environ)
+                    env.setdefault('CARGO', str(here))
+                    clippy = str(here.with_name('cargo-clippy'))
+                    os.execve(clippy, [clippy, *sys.argv[1:]], env)
+                assert sys.argv[1] == 'check', sys.argv
+                here.with_name('nested-ran').touch()
+                print('nested cargo check')
+                """,
+            "cargo-clippy": """\
+                import os, sys
+                cargo = os.environ['CARGO']
+                os.execv(cargo, [cargo, 'check', *sys.argv[2:]])
+                """,
+            "success-noop": """\
+                from pathlib import Path
+                Path(__file__).with_name('noop-ran').touch()
+                """,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            for name, body in scripts.items():
+                path = root / name
+                path.write_text(f"#!{sys.executable}\n" + textwrap.dedent(body))
+                path.chmod(0o755)
+            with mock.patch.dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", CARGO=str(root / "success-noop")):
+                control = subprocess.run(["cargo", "clippy"], capture_output=True, text=True)
+                self.assertEqual((control.returncode, control.stdout), (0, ""))
+                self.assertTrue((root / "noop-ran").exists())
+                self.assertFalse((root / "nested-ran").exists())
+                (root / "noop-ran").unlink()
+                self.assertEqual(h2.run_clippy(root, root), ["nested cargo check"])
+                self.assertTrue((root / "nested-ran").exists())
+                self.assertFalse((root / "noop-ran").exists())
+
     def test_python_modes_clear_each_key_and_preserve_execution_inputs(self) -> None:
         kept = {"PATH": "/bin", "CARGO_HOME": "/tmp/cargo", "CARGO_TARGET_DIR": "/tmp/target",
                 "RUSTUP_TOOLCHAIN": "1.94.1", "CLIPPY_CONF_DIR": "/tmp/conf", "CARGO_TARGET_KEEP": "keep",

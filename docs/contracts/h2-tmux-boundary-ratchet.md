@@ -46,10 +46,13 @@ canary의 오류 목록이 일치해야 하며 실제 저장소 map은 file modu
 
 저장소 루트의 `clippy.toml`은 양 lane 합본이며, 측정·check·admission은 해당 lane과 `both` 항목만
 임시 `CLIPPY_CONF_DIR`에 렌더해 실행한다. callee 필터에도 같은 lane 설정을 쓴다.
+admission은 평가가 끝날 때까지 임시 설정을 유지하고, runner가 만든 정확한 `clippy.toml` 경로 하나만
+이번 실행의 R-O 설정 입력으로 인정한다. 다른 외부 파일·동명 파일·별칭·디렉터리 전체는 면제하지 않는다.
+외부 `--json`에는 이 실행 경로의 예외를 부여하지 않는다.
 regen은 EXEC/SUBPROC/TYPES와 반대 lane 도출을 보존하고, 이번 lane의 W/SUBPROC_W를 비운 seed에서 시작한다.
 수렴 뒤 합본과 해당 lane baseline을 갱신하므로 삭제된 경로나 seed와 무관한 도출 순환은 남지 않는다.
 H2 경로는 `[A-Za-z_]\w*(::[A-Za-z_]\w*)+` 형식이며 첫 segment는 `agentdesk/std/core/alloc/tokio` 중 하나다.
-lint·target 필터 전에 `code: null`인 compiler-message의 어느 span이든 `clippy.toml`이면 실패한다.
+lint·target 필터 전에 코드 유무와 무관하게 compiler-message의 어느 span이든 `clippy.toml`이면 실패한다.
 문구나 반대 lane 여부로 경고를 무시하지 않는다. 외부 `--json`도 lane 설정에서 생산해야 하며 같은 가드를 받는다.
 등록 불가 오류는 호출부 구조 변경을 요구한다. TYPES 추가를 해결책으로 안내하지 않는다.
 
@@ -67,7 +70,7 @@ R-O는 compiler map을 사용하지만 **item 귀속 전체를 compiler def-path
 `rust-toolchain.toml`은 현재 1.94.1을 지정한다. CI의 `components: clippy`가 Clippy를 설치하고
 `h2_measure.sh`가 가용성을 검사한다. macOS hosted 레이블은 `macos-15`다.
 `h2_measure.sh`는 host triple을 확인한다. shell과 직접 Python 실행은 같은 공용 환경 정리를 적용한다.
-모든 모드에서 `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS`, `CARGO_BUILD_TARGET`,
+모든 모드에서 `CARGO`, `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS`, `CARGO_BUILD_TARGET`,
 `RUSTC`, `CARGO_BUILD_RUSTC`, `RUSTC_BOOTSTRAP`, `CLIPPY_ARGS`와 `CARGO_TARGET_*_{RUSTFLAGS,RUNNER,LINKER}`,
 `CARGO_PROFILE_*`, `CARGO_UNSTABLE_*`, `CARGO_FEATURE_*`, `CARGO_CFG_*`, `__CARGO*`를 제거한다.
 `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER` 및 두 `CARGO_BUILD_` wrapper는 Cargo config보다 우선하도록 빈 문자열로 둔다.

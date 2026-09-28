@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -259,7 +260,7 @@ def diagnostics(lines) -> list[tuple[str, int, int, str, str]]:
         event = json.loads(raw)
         message = event.get("message") or {}
         code = (message.get("code") or {}).get("code")
-        if event.get("reason") == "compiler-message" and code is None and any(
+        if event.get("reason") == "compiler-message" and any(
                 Path(span.get("file_name", "")).name == "clippy.toml" for span in message.get("spans", [])):
             raise MeasureError(f"clippy could not use an H2 path: {message.get('message', '')}; "
                                "run --regen for stale derived paths")
@@ -292,10 +293,16 @@ def run_clippy(root: Path, conf_dir: Path | None) -> list[str]:
 
 def run_lane_clippy(root: Path, config: dict, lane: str, runner=None) -> list[str]:
     """Run with a temporary lane configuration, leaving the stored union untouched."""
+    with lane_clippy_run(root, config, lane, runner) as (lines, _conf):
+        return lines
+
+@contextmanager
+def lane_clippy_run(root: Path, config: dict, lane: str, runner=None):
+    """Keep this run's exact configuration input alive until its consumer finishes."""
     with tempfile.TemporaryDirectory() as conf_dir:
-        conf = Path(conf_dir)
+        conf = Path(conf_dir).resolve()
         (conf / "clippy.toml").write_text(render_clippy_toml(lane_config(config, lane)), encoding="utf-8")
-        return (runner or run_clippy)(root, conf)
+        yield (runner or run_clippy)(root, conf), conf / "clippy.toml"
 
 def _arg_text(src: SourceFile, open_paren: int) -> str:
     depth = 0
