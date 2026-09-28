@@ -25,7 +25,7 @@ pub(crate) struct FinalizeTurnCancelRequest {
     pub tmux_killed: bool,
     pub inflight_cleared: bool,
     pub queue_depth: Option<usize>,
-    pub queue_preserved: bool,
+    pub queue_preserved: Option<bool>,
     pub termination_recorded: bool,
     pub completed_at: DateTime<Utc>,
 }
@@ -71,7 +71,7 @@ impl FinalizeTurnCancelRequest {
             tmux_killed: false,
             inflight_cleared: false,
             queue_depth: None,
-            queue_preserved: true,
+            queue_preserved: None,
             termination_recorded,
             completed_at: Utc::now(),
         }
@@ -172,13 +172,13 @@ mod tests {
             tmux_killed: false,
             inflight_cleared: true,
             queue_depth: Some(3),
-            queue_preserved: true,
+            queue_preserved: Some(true),
             termination_recorded: true,
             tmux_session_observed: None,
             queue_depth_before: Some(3),
             queue_depth_after: Some(3),
-            queue_disk_present_before: false,
-            queue_disk_present_after: false,
+            queue_disk_present_before: Some(false),
+            queue_disk_present_after: Some(false),
             mailbox_foreground_free: Some(true),
             queue_dropped_message_ids: Vec::new(),
         };
@@ -278,13 +278,13 @@ mod tests {
             tmux_killed: false,
             inflight_cleared: false,
             queue_depth: None,
-            queue_preserved: true,
+            queue_preserved: Some(true),
             termination_recorded: false,
             tmux_session_observed: Some("malformed-session-key".to_string()),
             queue_depth_before: None,
             queue_depth_after: None,
-            queue_disk_present_before: false,
-            queue_disk_present_after: false,
+            queue_disk_present_before: Some(false),
+            queue_disk_present_after: Some(false),
             mailbox_foreground_free: Some(true),
             queue_dropped_message_ids: Vec::new(),
         };
@@ -336,13 +336,13 @@ mod tests {
             tmux_killed: false,
             inflight_cleared: false,
             queue_depth: Some(1),
-            queue_preserved: true,
+            queue_preserved: Some(true),
             termination_recorded: true,
             tmux_session_observed: None,
             queue_depth_before: Some(1),
             queue_depth_after: Some(1),
-            queue_disk_present_before: false,
-            queue_disk_present_after: false,
+            queue_disk_present_before: Some(false),
+            queue_disk_present_after: Some(false),
             mailbox_foreground_free: Some(true),
             queue_dropped_message_ids: Vec::new(),
         };
@@ -441,7 +441,11 @@ mod tests {
                 finalized.details.queue_depth, expected_queue_depth,
                 "{reason}"
             );
-            assert!(finalized.details.queue_preserved, "{reason}");
+            assert_eq!(
+                finalized.details.queue_preserved,
+                expected_queue_depth.map(|_| true),
+                "{reason}"
+            );
             assert_eq!(
                 finalized.details.termination_recorded, expected_termination_recorded,
                 "{reason}"
@@ -482,7 +486,10 @@ mod tests {
             .find(|event| event.payload["reason"] == "!cc stop")
             .expect("!cc stop event should be recorded");
         assert_eq!(cc_stop_event.payload["terminationRecorded"], false);
-        assert_eq!(cc_stop_event.payload["queuePreserved"], true);
+        assert_eq!(
+            cc_stop_event.payload.get("queuePreserved"),
+            Some(&serde_json::Value::Null)
+        );
 
         for expected_reason in [
             "queue-api cancel_turn (preserve)",

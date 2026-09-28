@@ -486,7 +486,7 @@ pub(super) async fn apply_relay_recovery_decision(
             .await;
             let after = mailbox_snapshot(shared, channel).await;
             RelayRecoveryApplyResult {
-                status: if outcome.queue_depth_after > 0 {
+                status: if outcome.queue_depth_after.is_some_and(|depth| depth > 0) {
                     "scheduled_pending_queue_drain"
                 } else {
                     "pending_queue_empty"

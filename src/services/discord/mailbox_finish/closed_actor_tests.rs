@@ -190,7 +190,7 @@ async fn exhausted_restitution_is_not_an_empty_success() {
             let ids: Vec<u64> = queue.iter().map(|item| item.message_id.get()).collect();
             assert_eq!(ids, [QUEUED, OFFERED], "{place} after {step}");
         }
-        discord::mailbox_hydrate_pending_queue_from_disk(&shared, &provider, channel).await;
+        let _ = discord::mailbox_hydrate_pending_queue_from_disk(&shared, &provider, channel).await;
     }
 }
 
@@ -329,5 +329,98 @@ async fn refused_take_keeps_the_pending_catch_up_retry() {
     assert!(
         shared.catch_up_retry_pending.contains_key(&channel),
         "the refused take consumed the channel's pending catch-up retry"
+    );
+}
+
+#[tokio::test]
+async fn restitution_preserves_typed_refusals_and_legacy_results() {
+    use crate::services::turn_orchestrator::HydratePendingQueueResult;
+    use crate::services::turn_orchestrator::registry_purge::MailboxRefusal::{Closed, Unreachable};
+    let _root = isolated_agentdesk_root();
+    let shared = discord::make_shared_data_for_tests();
+    let channel = ChannelId::new(6_038_711);
+    let payload = HydratePendingQueueResult {
+        absorbed: 2,
+        queue_len_after: 3,
+        restored_override: Some(ChannelId::new(6_038_712)),
+        persistence_error: Some("actual persistence error".into()),
+    };
+    let fields = |r: HydratePendingQueueResult| {
+        (
+            r.absorbed,
+            r.queue_len_after,
+            r.restored_override,
+            r.persistence_error,
+        )
+    };
+    for (refusal, failures, expected_attempts) in
+        [(Closed, 3, 3), (Unreachable, 1, 1), (Closed, 2, 3)]
+    {
+        let mut attempts = 0;
+        let result = super::try_restitution(&shared, channel, |_| {
+            attempts += 1;
+            std::future::ready(if attempts <= failures {
+                Err(refusal)
+            } else {
+                Ok(payload.clone())
+            })
+        })
+        .await;
+        assert_eq!(attempts, expected_attempts);
+        if failures == expected_attempts {
+            assert_eq!(result.unwrap_err(), refusal);
+        } else {
+            assert_eq!(fields(result.unwrap()), fields(payload.clone()));
+        }
+    }
+    let success = super::restitution(&shared, channel, |_| {
+        std::future::ready(Ok(payload.clone()))
+    })
+    .await;
+    assert_eq!(fields(success), fields(payload));
+    for (refusal, error) in [
+        (
+            Closed,
+            Some("mailbox still purge-closed after retries".to_string()),
+        ),
+        (Unreachable, None),
+    ] {
+        let legacy = super::legacy_restitution_refusal(refusal);
+        assert_eq!(fields(legacy), (0, 0, None, error.clone()));
+        let legacy =
+            super::restitution(&shared, channel, |_| std::future::ready(Err(refusal))).await;
+        assert_eq!(fields(legacy), (0, 0, None, error));
+    }
+}
+
+#[tokio::test]
+async fn hydration_exhaustion_returns_closed_and_keeps_disk_queue() {
+    use crate::services::turn_orchestrator::registry_purge::MailboxRefusal;
+    let _root = isolated_agentdesk_root();
+    let shared = discord::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel = ChannelId::new(6_038_721);
+    save_channel_queue(
+        &provider,
+        &shared.token_hash,
+        channel,
+        &[queued(OFFERED)],
+        None,
+    )
+    .unwrap();
+    let _old = shared.mailbox(channel);
+    let purge = shared.mailboxes.remove_idle_entry(channel);
+    tokio::pin!(purge);
+    assert!(futures::poll!(purge.as_mut()).is_pending());
+    let result =
+        discord::mailbox_hydrate_pending_queue_from_disk(&shared, &provider, channel).await;
+    assert_eq!(result.unwrap_err(), MailboxRefusal::Closed);
+    assert_eq!(purge.await, MailboxPurgeOutcome::Removed);
+    let disk = load_channel_pending_queue_for_tests(&provider, &shared.token_hash, channel).0;
+    assert_eq!(
+        disk.iter()
+            .map(|item| item.message_id.get())
+            .collect::<Vec<_>>(),
+        [OFFERED]
     );
 }
