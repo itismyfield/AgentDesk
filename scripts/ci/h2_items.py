@@ -31,10 +31,12 @@ class MappingError(MeasureError):
 @dataclass
 class Items:
     root: Path
+    base: str | None
     rows: dict[str, list[dict]]
     raw: dict[str, bytes]
     breaks: dict[str, list[int]]
     messages: list[dict]
+    foreign: int
     manifest: dict
 
     def line(self, name: str, offset: int) -> int:
@@ -75,36 +77,71 @@ def load(path: Path, *, crate: Path) -> Items:
         events = [json.loads(line) for line in data["clippy.jsonl"].splitlines() if line.strip()]
         if not all(isinstance(event, dict) for event in events):
             raise MeasureError("items: invalid Cargo JSONL")
-        messages = [event["message"] for event in events if event.get("reason") == "compiler-message"]
-        if not all(isinstance(message, dict) for message in messages):
-            raise MeasureError("items: invalid compiler message")
+        messages, foreign = attribute(events, unit)
         repo = Path(request["repo"])
-        listing = session.output(["git", "ls-files", "-c", "-o", "--exclude-standard", "-z"], repo, dict(os.environ))
-        listed = {str(repo / name) for name in listing.split("\0") if name}
+        state, files = session.source_capture(repo, Path(unit["lib"]), Path(request["conf_dir"]))
+        if state != request["source"]:
+            raise MeasureError("items: source changed after the session")
         rows: dict[str, list[dict]] = {}
         for record in records:
             rows.setdefault(str(root / record["file"]), []).append(record)
-        # Only files covered by the session source state are read; the recheck below follows every read.
-        raw = {name: Path(name).read_bytes() for name in rows if name in listed}
-        items = Items(root, rows, raw, {name: [m.start() for m in re.finditer(b"\n", body)] for name, body in raw.items()},
-                      messages, value)
+        raw = {name: files[name] for name in rows if name in files}
+        items = Items(root, compiler_base(unit, proof), rows, raw,
+                      {name: [m.start() for m in re.finditer(b"\n", body)] for name, body in raw.items()},
+                      messages, foreign, value)
         for name, body in raw.items():
             for record in rows[name]:
                 if record["hi"] > len(body) or items.line(name, record["lo"]) != record["line"]:
                     raise MappingError("coord", f"item {record['display']}: byte {record['lo']} is line "
                                        f"{items.line(name, record['lo'])} of {len(body)} original bytes, "
                                        f"compiler says {record['line']} (normalized offsets?)")
-        if session.source_state(repo, Path(unit["lib"]), Path(request["conf_dir"])) != request["source"]:
-            raise MeasureError("items: source changed after the session")
         return items
-    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-        raise MeasureError(f"items: {exc}") from exc
+    except MappingError:
+        raise
+    except (MeasureError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise MappingError("unsealed", str(exc) if isinstance(exc, MeasureError) else f"items: {exc}") from exc
+
+
+def attribute(events: list[dict], unit: dict) -> tuple[list[dict], int]:
+    """Messages of the one proved lib compilation, and how many other units' messages were set aside."""
+    def lib(event) -> bool:
+        return Path(event["target"]["src_path"]).resolve() == Path(unit["lib"])
+    builds = [e for e in events
+              if e.get("reason") == "compiler-artifact" and e.get("package_id") == unit["package_id"] and lib(e)]
+    if len(builds) != 1:
+        raise MappingError("provenance", f"{len(builds)} compilations of the lib; its diagnostics are not attributable")
+    own, foreign = [], 0
+    for event in events:
+        if event.get("reason") != "compiler-message":
+            continue
+        if (not all(isinstance(event.get(key), str) for key in ("package_id", "manifest_path"))
+                or not isinstance((event.get("target") or {}).get("src_path"), str)
+                or not isinstance(event.get("message"), dict)):
+            raise MappingError("provenance", "compiler message without its Cargo package/target")
+        mine = event["package_id"] == unit["package_id"]
+        if mine != (Path(event["manifest_path"]).resolve() == Path(unit["manifest"])):
+            raise MappingError("provenance", f"package {event['package_id']} at {event['manifest_path']}")
+        if mine and lib(event):
+            own.append(event["message"])
+        else:
+            foreign += 1
+    return own, foreign
+
+
+def compiler_base(unit: dict, proof: dict) -> str | None:
+    """Cargo runs rustc in the workspace root; only a relative lib argument proves that base for file names."""
+    root = unit["workspace_root"]
+    if not isinstance(root, str) or not os.path.isabs(root):
+        raise ValueError("request has no workspace root")
+    spelled = [a for a in proof["argv"][1:]
+               if not a.startswith("-") and os.path.normpath(os.path.join(root, a)) == unit["lib"]]
+    return root if len(spelled) == 1 and not os.path.isabs(spelled[0]) else None
 
 
 def primary(message: dict) -> dict:
     spans = [span for span in message.get("spans") or () if isinstance(span, dict) and span.get("is_primary") is True]
     if not spans:
-        raise MeasureError(f"items: diagnostic has no primary span: {message.get('message')!r}")
+        raise MappingError("no-item", f"diagnostic has no primary span: {message.get('message')!r}")
     return spans[0]
 
 
@@ -116,7 +153,7 @@ def site(span) -> dict:
     if (not isinstance(span, dict) or not isinstance(span.get("file_name"), str)
             or any(type(span.get(key)) is not int or span[key] < 0 for key in ("byte_start", "byte_end", "line_start"))
             or span["byte_start"] > span["byte_end"]):
-        raise MeasureError(f"items: malformed diagnostic span: {span!r}")
+        raise MappingError("coord", f"malformed diagnostic span: {span!r}")
     return span
 
 
@@ -127,7 +164,7 @@ def resolve_tie(same: list[dict]) -> dict:
     execs = [r for r in same if r["kind"] in EXEC]
     parents = {r["parent"] for r in execs}
     unproven = [r for r in same if r["kind"] not in EXEC and r["def"] not in parents
-                and re.match(r"\w+", r["def_kind"]).group() not in NON_EXEC]
+                and re.match(r"\w*", r["def_kind"]).group() not in NON_EXEC]
     if unproven:
         raise MappingError("ambiguous:unproven-header:" + ",".join(sorted(r["display"] for r in unproven)))
     if len(execs) == 1:
@@ -151,7 +188,9 @@ def map_site(rows: list[dict], lo: int, hi: int) -> dict:
 def resolve(items: Items, span) -> tuple[str | None, str | None]:
     """(registration path, None) or (None, unregistrable reason); mapping failures raise MappingError."""
     where = site(span)
-    name = os.path.normpath(items.root / where["file_name"])
+    if not os.path.isabs(where["file_name"]) and items.base is None:
+        raise MappingError("no-item", f"{where['file_name']}: relative name without a proven compiler directory")
+    name = os.path.normpath(os.path.join(items.base or "", where["file_name"]))
     lo, hi = where["byte_start"], where["byte_end"]
     if name in items.rows and name not in items.raw:
         raise MappingError("unsealed", f"{name} is outside the session source state")

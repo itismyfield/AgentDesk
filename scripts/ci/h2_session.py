@@ -139,12 +139,21 @@ def requested_unit(crate: Path, env: dict) -> dict:
     if not types or set(types) & {"bin", "proc-macro"}:
         raise MeasureError("session request: unsupported crate types")
     return dict(manifest=str(manifest), package=package["name"], package_id=package["id"],
-                lib=str(Path(lib["src_path"]).resolve(strict=True)), crate_name=lib["name"].replace("-", "_"), crate_types=types)
+                lib=str(Path(lib["src_path"]).resolve(strict=True)), crate_name=lib["name"].replace("-", "_"), crate_types=types,
+                workspace_root=metadata["workspace_root"])
 
 
 def source_state(root: Path, lib: Path, conf: Path) -> dict:
     return dict(repo=modmap.source_state(root), lib=collect.digest(lib.read_bytes()),
                 config=collect.digest(collect.regular(conf / "clippy.toml")))
+
+
+def source_capture(root: Path, lib: Path, conf: Path) -> tuple[dict, dict[str, bytes]]:
+    """source_state plus the absolute-path bytes it digests; a listed lib is not reread."""
+    repo, bodies = modmap.source_capture(root)
+    files = {str(root / name): body for name, body in bodies.items()}
+    body = files[str(lib)] if str(lib) in files else lib.read_bytes()
+    return dict(repo=repo, lib=collect.digest(body), config=collect.digest(collect.regular(conf / "clippy.toml"))), files
 
 
 def validate(run: Path, request: dict) -> dict:
