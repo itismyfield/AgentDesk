@@ -55,7 +55,17 @@ pub(crate) struct Intervention {
     pub(crate) voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static SOURCE_CLOCK_SAMPLE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 impl Intervention {
+    #[cfg(test)]
+    pub(crate) fn source_clock_sample_hook_for_tests(hook: impl FnOnce() + 'static) {
+        SOURCE_CLOCK_SAMPLE_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
     pub(crate) fn preserve_on_cancel(&self) -> bool {
         self.source_message_queued_generations
             .iter()
@@ -63,6 +73,10 @@ impl Intervention {
     }
 
     pub(crate) fn source_message_queued_generations(&self) -> Vec<SourceMessageQueuedGeneration> {
+        #[cfg(test)]
+        if let Some(hook) = SOURCE_CLOCK_SAMPLE_HOOK.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
         let source_message_ids = if self.source_message_ids.is_empty() {
             vec![self.message_id]
         } else {
@@ -86,15 +100,6 @@ impl Intervention {
                     self.queued_generation,
                 ));
             }
-        }
-        // Legacy sources inherit the row boundary before merging can replace it.
-        let row_enqueued_us = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| since.as_micros())
-            .saturating_sub(self.created_at.elapsed().as_micros())
-            as u64;
-        for owner in &mut owners {
-            owner.enqueued_at_epoch_us.get_or_insert(row_enqueued_us);
         }
         owners
     }

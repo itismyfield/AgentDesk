@@ -15,17 +15,18 @@ impl SourceMessageQueuedGeneration {
         Self {
             message_id,
             queued_generation,
-            enqueued_at_epoch_us: None,
+            enqueued_at_epoch_us: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|since| u64::try_from(since.as_micros()).ok()),
             preserve_on_cancel: false,
         }
     }
 
     pub(crate) fn user_instruction(message_id: MessageId, queued_generation: u64) -> Self {
         Self {
-            message_id,
-            queued_generation,
-            enqueued_at_epoch_us: None,
             preserve_on_cancel: true,
+            ..Self::new(message_id, queued_generation)
         }
     }
 }
