@@ -7,7 +7,28 @@ use crate::services::discord::recovery_known_ids::{
 };
 
 /// A real merge (`absorbed` first, newer `primary` folds it in), then its claim.
+/// Returns the claimed episode's turn nonce.
 pub(super) async fn absorb_and_claim(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    absorbed: &[MessageId],
+    primary: MessageId,
+) -> String {
+    merge_and_take(shared, provider, channel_id, absorbed, primary).await;
+    let token = Arc::new(crate::services::provider::CancelToken::new());
+    let turn_nonce = token
+        .turn_nonce()
+        .expect("a live claim has a nonce")
+        .to_owned();
+    let owner = serenity::UserId::new(HUMAN_ID);
+    let started = discord::mailbox_try_start_turn(shared, channel_id, token, owner, primary);
+    assert!(started.await, "the merged head claims the turn");
+    turn_nonce
+}
+
+/// The merge alone: the head carrying `absorbed` is taken, not yet claimed.
+pub(super) async fn merge_and_take(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -31,10 +52,6 @@ pub(super) async fn absorb_and_claim(
         (head.message_id, head.source_message_ids),
         (primary, sources)
     );
-    let token = Arc::new(crate::services::provider::CancelToken::new());
-    let owner = serenity::UserId::new(HUMAN_ID);
-    let started = discord::mailbox_try_start_turn(shared, channel_id, token, owner, primary);
-    assert!(started.await, "the merged head claims the turn");
 }
 
 async fn enqueue(
