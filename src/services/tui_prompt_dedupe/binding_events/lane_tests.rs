@@ -203,7 +203,15 @@ fn fork_fixture_is_pending_until_its_transcript_exists_then_resolved_with_parent
     register_tmux_runtime_binding(tmux, claude(&parent_path, parent));
 
     let mut adopted = Vec::new();
-    for step in steps {
+    for (index, step) in steps.iter().enumerate() {
+        if index == 2 {
+            // A restart between the Pending record and the transcript must not break the chain.
+            forget_channel_for_tests(channel);
+            reset_state_for_tests();
+            register_provider_session("claude", parent, tmux);
+            let binding = claude(&parent_path, parent);
+            register_rehydrated_tmux_runtime_binding("claude", tmux, channel, binding);
+        }
         if step["transcript_exists_at_hook"] == true && !fork_path.exists() {
             fs::write(&fork_path, b"{}\n").unwrap();
         }
@@ -294,6 +302,14 @@ fn crash_leaves_log_and_memory_on_the_same_source() {
     APPEND_FAULT.with(|fault| fault.set(None));
     assert_eq!(bound(tmux).0, b_path.display().to_string(), "fail-closed");
     assert_eq!(fs::metadata(lane.log(channel)).unwrap().len(), size);
+    APPEND_FAULT.with(|fault| fault.set(Some("write")));
+    register_tmux_runtime_binding(tmux, claude(&a_path, &a));
+    APPEND_FAULT.with(|fault| fault.set(None));
+    assert_eq!(
+        bound(tmux).0,
+        b_path.display().to_string(),
+        "registration too"
+    );
     assert!(!rx.has_changed().unwrap());
     assert!(adopt_claude_continuation_session(&a, &c, &hook("stop", None)).is_some());
     assert_eq!(
