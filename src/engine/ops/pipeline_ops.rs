@@ -40,6 +40,22 @@ pub(super) fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
         })?,
     )?;
 
+    // __moveCardStageRaw(cardId, mode, trigger): moves a card's stage under the repo stage lock
+    let pg_move = pg_pool.clone();
+    pipeline_obj.set(
+        "__moveCardStageRaw",
+        Function::new(
+            ctx.clone(),
+            move |card_id: String, mode: String, trigger: String| -> String {
+                let Some(pool) = pg_move.as_ref() else {
+                    return r#"{"error":"postgres backend is required for pipeline stage moves"}"#
+                        .to_string();
+                };
+                move_card_stage_raw_pg(pool, card_id, mode, trigger)
+            },
+        )?,
+    )?;
+
     // __resolveForCardRaw(cardId): returns the effective pipeline for a card
     let pg_resolve = pg_pool;
     pipeline_obj.set(
@@ -68,6 +84,22 @@ pub(super) fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
 
             agentdesk.pipeline.resolveForCard = function(cardId) {
                 return JSON.parse(agentdesk.pipeline.__resolveForCardRaw(cardId));
+            };
+
+            function moveCardStage(cardId, mode, trigger) {
+                var result = JSON.parse(
+                    agentdesk.pipeline.__moveCardStageRaw(cardId, mode, trigger || "")
+                );
+                if (result.error) throw new Error(result.error);
+                return result;
+            }
+            // Puts the card in the first stage `triggerAfter` starts.
+            agentdesk.pipeline.enterStage = function(cardId, triggerAfter) {
+                return moveCardStage(cardId, "enter", triggerAfter);
+            };
+            // Moves the card past its stage, or into the first `entryTrigger` stage when it has none.
+            agentdesk.pipeline.advanceStage = function(cardId, entryTrigger) {
+                return moveCardStage(cardId, "advance", entryTrigger);
             };
 
             agentdesk.pipeline.resolvePhaseGateDeclaration = function(kind) {
@@ -257,6 +289,26 @@ mod auto_queue_phase_gate_js_contract_tests {
             assert_eq!(unknown, "null");
             assert!(crate::phase_gate::resolve_declaration_value("unknown-gate").is_none());
         });
+    }
+}
+
+fn move_card_stage_raw_pg(pool: &PgPool, card_id: String, mode: String, trigger: String) -> String {
+    use crate::services::pipeline_routes::{StageStep, move_card_stage};
+    let moved = crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            let step = match mode.as_str() {
+                "enter" => StageStep::Enter(&trigger),
+                "advance" => StageStep::Advance(&trigger),
+                other => return Err(format!("unknown stage move '{other}'")),
+            };
+            move_card_stage(&bridge_pool, &card_id, step).await
+        },
+        |error| error,
+    );
+    match moved {
+        Ok(value) => value.to_string(),
+        Err(error) => serde_json::json!({ "error": error }).to_string(),
     }
 }
 
