@@ -870,10 +870,18 @@ trait TuiActionExecutor {
     fn send_keys(&mut self, session_name: &str, keys: &[&str]) -> Result<Output, String>;
 }
 
-#[derive(Default)]
 struct TmuxTuiActionExecutor {
     composer_mutated: bool,
     enter_attempted: bool,
+}
+
+impl TmuxTuiActionExecutor {
+    fn new() -> Self {
+        Self {
+            composer_mutated: false,
+            enter_attempted: false,
+        }
+    }
 }
 
 impl TuiActionExecutor for TmuxTuiActionExecutor {
@@ -1253,7 +1261,7 @@ fn submit_codex_followup_prompt_under_lock(
             error: "Codex TUI warm follow-up final pane snapshot rejected submit".to_string(),
         };
     }
-    let mut executor = TmuxTuiActionExecutor::default();
+    let mut executor = TmuxTuiActionExecutor::new();
     let action_result =
         run_actions_with_executor(session_name, &actions, cancel_token, &mut executor);
     if action_result
