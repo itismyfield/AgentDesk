@@ -74,6 +74,8 @@ pub(crate) struct PendingQueueItem {
 pub(crate) struct PendingQueueSourceGeneration {
     pub(crate) message_id: u64,
     pub(crate) queued_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) enqueued_at_epoch_us: Option<u64>,
     #[serde(default)]
     #[serde(skip_serializing_if = "is_false")]
     pub(crate) preserve_on_cancel: bool,
@@ -120,6 +122,26 @@ fn pending_dispatch_marker_file_path(
             .join(token_hash)
             .join(format!("{}.dispatch", channel_id.get())),
     )
+}
+
+/// Counts this channel's own queue/marker entries by `lstat`, as `remove_file` sees them,
+/// so a dangling symlink still counts. `None` when the root is unset or `lstat` fails otherwise.
+pub(super) fn channel_queue_files_present(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: ChannelId,
+) -> Option<usize> {
+    let queue = pending_queue_file_path(provider, token_hash, channel_id)?;
+    let marker = pending_dispatch_marker_file_path(provider, token_hash, channel_id)?;
+    let mut present = 0;
+    for path in [queue, marker] {
+        match fs::symlink_metadata(&path) {
+            Ok(_) => present += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+    }
+    Some(present)
 }
 
 fn pending_dispatch_marker_channel_id(path: &Path) -> Option<u64> {
@@ -350,6 +372,7 @@ fn pending_queue_item_from_intervention(
         .map(|owner| PendingQueueSourceGeneration {
             message_id: owner.message_id.get(),
             queued_generation: owner.queued_generation,
+            enqueued_at_epoch_us: owner.enqueued_at_epoch_us,
             preserve_on_cancel: owner.preserve_on_cancel,
         })
         .collect();
@@ -609,43 +632,36 @@ fn pending_queue_item_to_intervention(
     } else {
         item.queued_generation
     };
+    // Preserve the stored boundary exactly; an Instant round trip can break millisecond ties.
+    let legacy_enqueued_us = item
+        .created_at_wall_time_ms
+        .and_then(|ms| ms.checked_mul(1000));
     let mut source_message_queued_generations: Vec<SourceMessageQueuedGeneration> = item
         .source_message_queued_generations
         .into_iter()
         .filter(|owner| owner.message_id != 0)
-        .map(|owner| {
-            let generation = if owner.queued_generation == 0 {
+        .map(|owner| SourceMessageQueuedGeneration {
+            message_id: MessageId::new(owner.message_id),
+            queued_generation: if owner.queued_generation == 0 {
                 queued_generation
             } else {
                 owner.queued_generation
-            };
-            if owner.preserve_on_cancel {
-                SourceMessageQueuedGeneration::user_instruction(
-                    MessageId::new(owner.message_id),
-                    generation,
-                )
-            } else {
-                SourceMessageQueuedGeneration::new(MessageId::new(owner.message_id), generation)
-            }
+            },
+            enqueued_at_epoch_us: owner.enqueued_at_epoch_us.or(legacy_enqueued_us),
+            preserve_on_cancel: owner.preserve_on_cancel,
         })
         .collect();
-    if source_message_queued_generations.is_empty() {
-        source_message_queued_generations = source_message_ids
+    for message_id in &source_message_ids {
+        if !source_message_queued_generations
             .iter()
-            .copied()
-            .map(|message_id| SourceMessageQueuedGeneration::new(message_id, queued_generation))
-            .collect();
-    } else {
-        for message_id in &source_message_ids {
-            if !source_message_queued_generations
-                .iter()
-                .any(|owner| owner.message_id == *message_id)
-            {
-                source_message_queued_generations.push(SourceMessageQueuedGeneration::new(
-                    *message_id,
-                    queued_generation,
-                ));
-            }
+            .any(|owner| owner.message_id == *message_id)
+        {
+            source_message_queued_generations.push(SourceMessageQueuedGeneration {
+                message_id: *message_id,
+                queued_generation,
+                enqueued_at_epoch_us: legacy_enqueued_us,
+                preserve_on_cancel: false,
+            });
         }
     }
     let source_text_segments: Vec<SourceMessageTextSegment> = item
@@ -993,6 +1009,10 @@ mod tests {
             pending_queue_item_to_intervention(item, reference_wall_time, reference_instant);
 
         assert_eq!(restored.created_at, reference_instant);
+        assert_eq!(
+            restored.source_message_queued_generations()[0].enqueued_at_epoch_us,
+            None
+        );
     }
 
     #[test]
@@ -1023,6 +1043,69 @@ mod tests {
             reference_instant.duration_since(restored.created_at)
                 > crate::services::turn_orchestrator::INTERVENTION_DEDUP_WINDOW,
             "a backward-clock restore must not look fresh enough to suppress a re-send"
+        );
+        assert_eq!(
+            restored.source_message_queued_generations[0].enqueued_at_epoch_us,
+            Some((RELOAD_WALL_TIME_MS + 30_000) * 1000)
+        );
+    }
+
+    /// The empty save and marker delete unlink a dangling link, so the purge's own-file count must see it.
+    #[cfg(unix)]
+    #[test]
+    fn own_file_count_includes_dangling_links_the_purge_would_unlink() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+        let (provider, channel_id) = (ProviderKind::Claude, ChannelId::new(6_038_101));
+        let queue = pending_queue_file_path(&provider, "", channel_id).unwrap();
+        let marker = pending_dispatch_marker_file_path(&provider, "", channel_id).unwrap();
+        fs::create_dir_all(queue.parent().unwrap()).unwrap();
+        assert_eq!(
+            channel_queue_files_present(&provider, "", channel_id),
+            Some(0)
+        );
+
+        for (linked, path) in [&queue, &marker].into_iter().enumerate() {
+            std::os::unix::fs::symlink(tmp.path().join("missing"), path).unwrap();
+            assert_eq!(
+                channel_queue_files_present(&provider, "", channel_id),
+                Some(linked + 1),
+                "a dangling {} is an entry the purge unlinks",
+                path.display()
+            );
+        }
+
+        save_channel_queue(&provider, "", channel_id, &[], None).unwrap();
+        remove_channel_pending_dispatch_marker(&provider, "", channel_id).unwrap();
+        assert!(
+            fs::symlink_metadata(&queue).is_err() && fs::symlink_metadata(&marker).is_err(),
+            "premise: the purge's empty save and marker delete really unlink both links"
+        );
+    }
+
+    /// Only `NotFound` is absence; any other `lstat` failure leaves the count unknown.
+    #[cfg(unix)]
+    #[test]
+    fn own_file_count_is_unknown_when_lstat_fails_for_another_reason() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+        let (provider, channel_id) = (ProviderKind::Claude, ChannelId::new(6_038_102));
+        let token_dir = pending_queue_file_path(&provider, "tok", channel_id)
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(token_dir.parent().unwrap()).unwrap();
+        fs::write(&token_dir, b"a file where the token directory belongs").unwrap();
+
+        assert_eq!(
+            channel_queue_files_present(&provider, "tok", channel_id),
+            None,
+            "ENOTDIR is not evidence that the entries are absent"
         );
     }
 }

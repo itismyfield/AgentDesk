@@ -3,12 +3,17 @@
 #![feature(rustc_private)]
 extern crate rustc_ast;
 extern crate rustc_driver;
+extern crate rustc_feature;
+extern crate rustc_hir;
 extern crate rustc_interface;
 extern crate rustc_middle;
 extern crate rustc_session;
 extern crate rustc_span;
 
+mod cfg_snapshot;
+mod items;
 mod modmap;
+mod session;
 
 use rustc_span::ExpnId;
 use std::os::unix::process::CommandExt;
@@ -17,6 +22,7 @@ use std::path::PathBuf;
 struct MapCallbacks {
     root: PathBuf,
     out: PathBuf,
+    cfg: Option<cfg_snapshot::Snapshot>,
 }
 
 impl rustc_driver::Callbacks for MapCallbacks {
@@ -33,9 +39,20 @@ impl rustc_driver::Callbacks for MapCallbacks {
         };
         match walked {
             Ok(rows) => {
-                if let Err(err) = modmap::write(&self.out, &rows) {
+                let written = modmap::write(&self.out, &rows).and_then(|()| {
+                    if let Some(cfg) = &self.cfg {
+                        cfg.write(
+                            &self.root,
+                            tcx.sess.psess.config.iter().map(|&(name, value)| {
+                                (name.to_string(), value.map(|value| value.to_string()))
+                            }),
+                        )?;
+                    }
+                    Ok(())
+                });
+                if let Err(err) = written {
                     tcx.dcx().err(format!(
-                        "modmap: cannot write {}: {err}",
+                        "modmap: cannot write map/cfg outputs for {}: {err}",
                         self.out.display()
                     ));
                 }
@@ -67,6 +84,19 @@ fn main() {
         eprintln!("usage: modmap-driver <rustc> <args...> (as RUSTC_WORKSPACE_WRAPPER)");
         std::process::exit(2);
     }
+    if argv[1] == "__modmap_version" {
+        println!(
+            "{}",
+            rustc_interface::util::rustc_version_str().unwrap_or("unknown")
+        );
+        return;
+    }
+    if argv[1] == "__modmap_items_child" {
+        session::child(&argv);
+    }
+    if let Some(clippy) = std::env::var_os("MODMAP_CLIPPY_DRIVER").filter(|v| !v.is_empty()) {
+        session::run(&argv, &clippy);
+    }
     let rest = &argv[2..];
     let Some(root) = root_lib(rest) else {
         let err = std::process::Command::new(&argv[1]).args(rest).exec();
@@ -86,6 +116,13 @@ fn main() {
     let mut callbacks = MapCallbacks {
         root,
         out: PathBuf::from(out),
+        cfg: std::env::var_os("MODMAP_CFG_OUT")
+            .filter(|out| !out.is_empty())
+            .map(|out| cfg_snapshot::Snapshot {
+                out: PathBuf::from(out),
+                nonce: std::env::var("MODMAP_CFG_NONCE").unwrap_or_default(),
+                argv,
+            }),
     };
     rustc_driver::install_ice_hook("modmap-driver", |_| ());
     std::process::exit(rustc_driver::catch_with_exit_code(|| {

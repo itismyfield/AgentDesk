@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -93,6 +93,14 @@ pub(in crate::services::discord) struct TuiDirectPendingStart {
 impl TuiDirectPendingStart {
     /// Stable filename key for the record (one record per anchor; a channel may
     /// briefly hold several queued anchors which all drain FIFO under the lock).
+    pub(in crate::services::discord) fn key(&self) -> AnchorKey {
+        (
+            self.provider.clone(),
+            self.channel_id,
+            self.anchor_message_id,
+        )
+    }
+
     fn file_stem(&self) -> String {
         format!(
             "{}_{}_{}",
@@ -105,34 +113,38 @@ impl TuiDirectPendingStart {
 // hot watcher / idle-queue paths)
 // ---------------------------------------------------------------------------
 
-static PRESENT: LazyLock<Mutex<HashMap<(String, u64), u32>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+pub(in crate::services::discord) type AnchorKey = (String, u64, u64);
+
+static PRESENT: LazyLock<Mutex<HashSet<AnchorKey>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+/// Records whose turn already finished; their live worker must stand down.
+static RETIRED: LazyLock<Mutex<HashSet<AnchorKey>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 static ACTIVE_WORKERS: LazyLock<Mutex<HashMap<(String, u64), u32>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static PRECLAIMED_ACTIVE_WORKERS: LazyLock<Mutex<HashMap<(String, u64), u32>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static PRESENCE_RECONCILE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-pub(super) fn mark_present(provider: &str, channel_id: u64) {
-    let mut map = PRESENT.lock().unwrap_or_else(|e| e.into_inner());
-    *map.entry((provider.to_string(), channel_id)).or_insert(0) += 1;
+fn present() -> std::sync::MutexGuard<'static, HashSet<AnchorKey>> {
+    PRESENT.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-pub(super) fn mark_absent(provider: &str, channel_id: u64) {
-    let mut map = PRESENT.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(count) = map.get_mut(&(provider.to_string(), channel_id)) {
-        *count = count.saturating_sub(1);
-        if *count == 0 {
-            map.remove(&(provider.to_string(), channel_id));
-        }
-    }
+fn retired() -> std::sync::MutexGuard<'static, HashSet<AnchorKey>> {
+    RETIRED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+pub(super) fn mark_present(key: AnchorKey) {
+    present().insert(key);
+}
+
+pub(super) fn mark_absent(key: &AnchorKey) {
+    present().remove(key);
 }
 
 fn clear_present(provider: &str, channel_id: u64) {
     PRESENT
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .remove(&(provider.to_string(), channel_id));
+        .retain(|(p, c, _)| p != provider || *c != channel_id);
 }
 
 pub(super) struct ActiveWorkerGuard {
@@ -226,11 +238,9 @@ pub(in crate::services::discord) fn pending_synthetic_start_present(
     provider: &str,
     channel_id: u64,
 ) -> bool {
-    let map = PRESENT.lock().unwrap_or_else(|e| e.into_inner());
-    map.get(&(provider.to_string(), channel_id))
-        .copied()
-        .unwrap_or(0)
-        > 0
+    present()
+        .iter()
+        .any(|(p, c, _)| p == provider && *c == channel_id)
 }
 
 pub(in crate::services::discord) fn pending_synthetic_start_blocks_idle_kickoff(
@@ -262,13 +272,16 @@ pub(in crate::services::discord) fn mark_present_on_restore(provider: &str, chan
     let _guard = PRESENCE_RECONCILE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    mark_present(provider, channel_id);
+    for record in records_for_channel(provider, channel_id) {
+        mark_present(record.key());
+    }
     preclaim_active_worker(provider, channel_id);
 }
 
 #[cfg(test)]
 pub(in crate::services::discord) fn reset_present_for_tests() {
     PRESENT.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    retired().clear();
     ACTIVE_WORKERS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -309,7 +322,7 @@ pub(in crate::services::discord) fn persist(record: &TuiDirectPendingStart) -> R
     let _guard = PRESENCE_RECONCILE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    mark_present(&record.provider, record.channel_id);
+    mark_present(record.key());
     write_record(record)?;
     Ok(())
 }
@@ -320,11 +333,66 @@ pub(in crate::services::discord) fn delete(record: &TuiDirectPendingStart) {
     let _guard = PRESENCE_RECONCILE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    mark_absent(&record.provider, record.channel_id);
+    delete_locked(record);
+}
+
+fn delete_locked(record: &TuiDirectPendingStart) {
+    mark_absent(&record.key());
     if let Some(root) = root() {
         let path = root.join(format!("{}.json", record.file_stem()));
         let _ = std::fs::remove_file(path);
     }
+}
+
+/// Delete the record of a turn whose output is already committed so neither its
+/// live worker nor a restart restore can construct an episode for it.
+pub(in crate::services::discord) fn retire_completed(
+    key: AnchorKey,
+    tmux_session_name: &str,
+) -> bool {
+    let Some(record) = records_for_channel(&key.0, key.1)
+        .into_iter()
+        .find(|record| {
+            record.key() == key
+                && record.tmux_session_name == tmux_session_name
+                && record.captured_source.is_none()
+        })
+    else {
+        return false;
+    };
+    let _guard = PRESENCE_RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    delete_locked(&record);
+    retired().insert(key);
+    true
+}
+
+/// The record's turn already finished; its worker exits without claiming or retrying.
+pub(super) fn take_retired(record: &TuiDirectPendingStart) -> bool {
+    let key = record.key();
+    let was_retired = retired().remove(&key);
+    if was_retired {
+        tracing::info!(
+            ?key,
+            "tui_direct_pending_start: retired record's worker exits"
+        );
+    }
+    was_retired
+}
+
+/// Save a claim's row only while its pending start is not retired (`Ok(false)` otherwise).
+pub(in crate::services::discord) fn save_row_unless_retired(
+    state: &inflight::InflightTurnState,
+) -> Result<bool, String> {
+    let _guard = PRESENCE_RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let key = (state.provider.clone(), state.channel_id, state.user_msg_id);
+    if retired().contains(&key) {
+        return Ok(false);
+    }
+    inflight::save_inflight_state_if_absent(state)
 }
 
 pub(super) fn update_claim_attempt_count(record: &mut TuiDirectPendingStart, claim_attempts: u32) {
@@ -332,6 +400,9 @@ pub(super) fn update_claim_attempt_count(record: &mut TuiDirectPendingStart, cla
     let _guard = PRESENCE_RECONCILE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    if retired().contains(&record.key()) {
+        return;
+    }
     if let Err(error) = write_record(record) {
         tracing::warn!(
             provider = %record.provider,

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "f0d2eebe4eda35b367067cb24ac87da2e21c58d9",
+  "measured_at_sha": "74e4596f15be1a4a06470731a36c99857113a25a",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {
@@ -36,6 +36,7 @@
         "src/services/qwen/session_lifecycle.rs": 3,
         "src/services/session_resume.rs": 1,
         "src/services/tmux_turn_liveness.rs": 1,
+        "src/services/tui_prompt_dedupe/binding_context.rs": 1,
         "src/services/turn_lifecycle.rs": 1
       }
     },

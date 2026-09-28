@@ -711,8 +711,25 @@ mod tests {
         )
         .unwrap();
 
+        use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
+        let _runtime = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            dir.path(),
+        );
+        let p =
+            PreparedIncarnation::prepare("claude", "cutover", None, Some(&old_session_id), false)
+                .unwrap();
+        let bytes = fs::read(&p.path).unwrap();
+        let original = fs::read_to_string(&files.launch_script_path).unwrap();
+        fs::write(
+            &files.launch_script_path,
+            format!("{}{}", p.env_lines(), original),
+        )
+        .unwrap();
         assert!(persist_claude_continuation_session_files(&files, &new_session_id).unwrap());
         let launch = fs::read_to_string(&files.launch_script_path).unwrap();
+        assert!(launch.contains(&p.env_lines()));
+        assert_eq!(fs::read(&p.path).unwrap(), bytes);
         let settings = fs::read_to_string(&files.hook_settings_path).unwrap();
         assert!(!launch.contains(&old_session_id));
         assert!(launch.contains(&new_session_id));

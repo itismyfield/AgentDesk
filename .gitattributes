@@ -1,3 +1,6 @@
+# Lexical tests read sources and Cargo.toml byte-for-byte via include_str!, so a
+# CRLF checkout (Windows core.autocrlf) breaks them. Check out LF everywhere.
+* text=auto eol=lf
 scripts/** text eol=lf
 .githooks/** text eol=lf
 .github/workflows/*.yml text eol=lf
@@ -28,3 +31,6 @@ docs/generated/worker-inventory.md merge=regen-inventory
 # and crash on them. `-text` additionally keeps EOL conversion away from files
 # whose exact bytes are the assertion.
 tests/fixtures/relay_obligation/*.jsonl -diff -text
+
+# Preserve the original-byte coordinate canary's BOM and CRLF.
+tools/modmap-driver/canary/src/items_crlf.rs -text
