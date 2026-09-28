@@ -130,6 +130,23 @@ async fn t_f2a_delivered_race_is_refused_and_p_settles_on_its_row() {
     assert_refused_then_reclassified(&fx, &api, (channel_id, h, p), &[h], &[&[h]]).await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn delivered_nonce_race_is_refused_then_both_sources_settle() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(4_603_570);
+    let ids @ (checkpoint, h, p) = (id(1, 600), id(2, 200), id(3, 120));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    let api = StrictApi::new(&fx.shared)
+        .with_history(channel_id, race_history(channel_id, ids))
+        .with_hooks(h, &[Hook::AbsorbAndDeliverEpisode(p)]);
+
+    fx.sweep(&api).await;
+
+    assert_refused_then_reclassified(&fx, &api, (channel_id, h, p), &[], &[]).await;
+    assert_eq!(fx.surfaces(channel_id), (Some(p.get()), Some(p.get())));
+    assert_eq!(fx.pending(channel_id), None);
+}
+
 /// The same race, but P ends undelivered; the fresh snapshot recovers
 /// both ids instead of refusing them again.
 #[tokio::test(flavor = "current_thread")]

@@ -418,6 +418,96 @@ async fn an_absorbed_copy_requeued_before_the_claim_is_settled_by_the_merged_del
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn a_delivered_absorbed_copy_is_settled_before_a_new_input_merges() {
+    let _root = scoped_runtime_root();
+    let shared = make_shared_data_for_tests();
+    let channel_id = ChannelId::new(6_289_400);
+    let (h, p) = (6_289_401, 6_289_402);
+    let occupant = MessageId::new(6_289_403);
+    assert!(
+        mailbox_try_start_turn(
+            &shared,
+            channel_id,
+            Arc::new(CancelToken::new()),
+            UserId::new(7),
+            occupant
+        )
+        .await
+    );
+    enqueue_merged_pair(&shared, channel_id, h, p).await;
+    mailbox_finish_turn(&shared, &ProviderKind::Claude, channel_id).await;
+    let taken = actor_take(&shared, channel_id).await;
+    assert_eq!(
+        taken
+            .intervention
+            .as_ref()
+            .map(|item| item.source_message_ids.clone()),
+        Some(vec![MessageId::new(h), MessageId::new(p)])
+    );
+    // A catch-up copy of H lands in the dequeue -> claim window.
+    let mut copy = queued(h, "absorbed request");
+    copy.merge_consecutive = true;
+    enqueue(&shared, channel_id, copy).await;
+    let token = Arc::new(CancelToken::new());
+    let nonce = token.turn_nonce().expect("turn nonce").to_owned();
+    assert!(
+        mailbox_try_start_turn(
+            &shared,
+            channel_id,
+            token,
+            UserId::new(7),
+            MessageId::new(p)
+        )
+        .await
+    );
+    assert_eq!(
+        mailbox_snapshot(&shared, channel_id)
+            .await
+            .intervention_queue
+            .len(),
+        1,
+        "the claim purges only P"
+    );
+    deliver_episode(channel_id, p, Some(&nonce));
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let k = MessageId::new(6_289_404);
+    let mut fresh = queued(k.get(), "new request");
+    fresh.merge_consecutive = true;
+    let enqueued = shared
+        .mailbox(channel_id)
+        .enqueue(
+            fresh,
+            queue_persistence_context(&shared, &ProviderKind::Claude, channel_id),
+        )
+        .await;
+    assert!(enqueued.enqueued, "{:?}", enqueued.refusal_reason);
+    assert!(enqueued.persistence_error.is_none());
+    mailbox_finish_turn(&shared, &ProviderKind::Claude, channel_id).await;
+    drop(taken);
+
+    let result = actor_take(&shared, channel_id).await;
+    assert!(result.persistence_error.is_none());
+    let dispatched = result.intervention.expect("the new request must dispatch");
+    assert_eq!(
+        dispatched.source_message_ids,
+        vec![k],
+        "dispatch must contain K alone; H was already answered by P/n"
+    );
+    assert_eq!(dispatched.text, "new request");
+    assert_eq!(dispatched.message_id, k);
+    assert!(result.queue_exit_events.is_empty());
+    assert_eq!(enqueued.queue_exit_events.len(), 1);
+    let settled = &enqueued.queue_exit_events[0];
+    assert_eq!(settled.kind, QueueExitKind::Superseded);
+    assert_eq!(
+        settled.intervention.source_message_ids,
+        vec![MessageId::new(h)]
+    );
+    assert_eq!(settled.intervention.text, "absorbed request");
+    assert!(disk_queue_ids(&shared, channel_id).is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn a_restored_merged_marker_of_a_delivered_episode_settles_every_source() {
     let _root = scoped_runtime_root();
     let channel_id = ChannelId::new(6_288_900);
@@ -513,5 +603,119 @@ async fn an_absorbed_source_takes_its_backing_episode_time_not_a_later_episode_o
         result.intervention.map(|item| item.message_id.get()),
         Some(h),
         "only the old backing episode dates H, and it predates this copy"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pre_merge_settlement_preserves_a_requeued_episode_and_unsettled_sources() {
+    let _root = scoped_runtime_root();
+    let shared = make_shared_data_for_tests();
+    let channel_id = ChannelId::new(6_289_500);
+    let (h, reused, k) = (6_289_501, 6_289_502, 6_289_503);
+    deliver_after_enqueue(channel_id, reused);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    for (id, text) in [(h, "answered source"), (reused, "new episode")] {
+        let mut item = queued(id, text);
+        item.merge_consecutive = true;
+        enqueue(&shared, channel_id, item).await;
+    }
+    deliver_after_enqueue(channel_id, h);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let mut fresh = queued(k, "new request");
+    fresh.merge_consecutive = true;
+    let result = shared
+        .mailbox(channel_id)
+        .enqueue(
+            fresh,
+            queue_persistence_context(&shared, &ProviderKind::Claude, channel_id),
+        )
+        .await;
+    assert!(
+        result.enqueued && result.merged,
+        "{:?}",
+        result.refusal_reason
+    );
+    assert!(result.persistence_error.is_none());
+    assert_eq!(result.queue_exit_events.len(), 1);
+    let exit = &result.queue_exit_events[0];
+    assert_eq!(exit.kind, QueueExitKind::Superseded);
+    assert_eq!(
+        exit.intervention.source_message_ids,
+        vec![MessageId::new(h)]
+    );
+    assert_eq!(exit.intervention.text, "answered source");
+    let persisted =
+        load_channel_pending_queue_for_tests(&ProviderKind::Claude, &shared.token_hash, channel_id)
+            .0;
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(
+        persisted[0].source_message_ids,
+        vec![MessageId::new(reused), MessageId::new(k)]
+    );
+    assert_eq!(persisted[0].text, "new episode\nnew request");
+
+    drop(shared);
+    let restored = make_shared_data_for_tests();
+    let drained = actor_take(&restored, channel_id).await;
+    assert!(drained.queue_exit_events.is_empty());
+    let dispatched = drained
+        .intervention
+        .expect("both new inputs must survive restart");
+    assert_eq!(
+        dispatched.source_message_ids,
+        persisted[0].source_message_ids
+    );
+    assert_eq!(dispatched.text, persisted[0].text);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pre_merge_settlement_rolls_back_when_queue_persistence_fails() {
+    let root = scoped_runtime_root();
+    let shared = make_shared_data_for_tests();
+    let channel_id = ChannelId::new(6_289_600);
+    let (h, k) = (6_289_601, 6_289_602);
+    let mut old = queued(h, "answered source");
+    old.merge_consecutive = true;
+    enqueue(&shared, channel_id, old).await;
+    deliver_after_enqueue(channel_id, h);
+    let queue_path = root
+        .temp
+        .path()
+        .join("runtime/discord_pending_queue/claude")
+        .join(&shared.token_hash)
+        .join(format!("{}.json", channel_id.get()));
+    std::fs::remove_file(&queue_path).unwrap();
+    std::fs::create_dir(&queue_path).unwrap();
+    let mut fresh = queued(k, "new request");
+    fresh.merge_consecutive = true;
+    let persistence = queue_persistence_context(&shared, &ProviderKind::Claude, channel_id);
+    let result = shared
+        .mailbox(channel_id)
+        .enqueue(fresh.clone(), persistence.clone())
+        .await;
+    assert!(!result.enqueued);
+    assert!(result.persistence_error.is_some());
+    assert!(result.queue_exit_events.is_empty());
+    let live = mailbox_snapshot(&shared, channel_id)
+        .await
+        .intervention_queue;
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].source_message_ids, vec![MessageId::new(h)]);
+    assert_eq!(live[0].text, "answered source");
+
+    std::fs::remove_dir(&queue_path).unwrap();
+    let retry = shared.mailbox(channel_id).enqueue(fresh, persistence).await;
+    assert!(retry.enqueued);
+    assert!(retry.persistence_error.is_none());
+    assert_eq!(retry.queue_exit_events.len(), 1);
+    assert_eq!(retry.queue_exit_events[0].kind, QueueExitKind::Superseded);
+    assert_eq!(
+        retry.queue_exit_events[0].intervention.message_id,
+        MessageId::new(h)
+    );
+    let drained = actor_take(&shared, channel_id).await;
+    assert_eq!(
+        drained.intervention.unwrap().source_message_ids,
+        vec![MessageId::new(k)]
     );
 }

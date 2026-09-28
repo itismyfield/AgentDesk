@@ -28,6 +28,7 @@ enum Hook {
     /// The channel's actor is purged first, so a fresh actor runs
     /// the undelivered `AbsorbAndEnd`.
     PurgeAbsorbAndEnd(MessageId),
+    AbsorbAndDeliverEpisode(MessageId),
 }
 
 #[derive(Debug)]
@@ -192,6 +193,24 @@ impl CatchUpDiscordApi for StrictApi {
             Some(Hook::AbsorbAndEnd { primary, delivered }) => {
                 let end = claim_cas_tests::absorb_and_end;
                 end(shared, provider, channel_id, message_id, primary, delivered).await;
+                enqueue(intervention).await
+            }
+            Some(Hook::AbsorbAndDeliverEpisode(primary)) => {
+                let nonce = absorbed_active_tests::absorb_and_claim(
+                    shared,
+                    provider,
+                    channel_id,
+                    &[message_id],
+                    primary,
+                )
+                .await;
+                completed_turn_ledger::append_completed_episode(
+                    provider,
+                    channel_id.get(),
+                    primary.get(),
+                    Some(&nonce),
+                );
+                discord::mailbox_finish_turn(shared, provider, channel_id).await;
                 enqueue(intervention).await
             }
             Some(Hook::PurgeAbsorbAndEnd(primary)) => {

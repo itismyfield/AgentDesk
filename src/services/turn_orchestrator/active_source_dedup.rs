@@ -142,7 +142,20 @@ pub(super) fn take_unsettled(
     primary_message_id: Option<MessageId>,
 ) -> super::TakeNextSoftResult {
     let provider = state.last_persistence.as_ref().map(|p| p.provider.clone());
-    let committed = provider.as_ref().map_or_else(Default::default, |provider| {
+    let settled_exits =
+        settle_completed_sources(&mut state.intervention_queue, provider.as_ref(), channel_id);
+    let mut result =
+        super::dequeue_next_soft_intervention(&mut state.intervention_queue, primary_message_id);
+    result.queue_exit_events.splice(0..0, settled_exits);
+    result
+}
+
+pub(super) fn settle_completed_sources(
+    queue: &mut Vec<Intervention>,
+    provider: Option<&crate::services::provider::ProviderKind>,
+    channel_id: poise::serenity_prelude::ChannelId,
+) -> Vec<QueueExitEvent> {
+    let committed = provider.map_or_else(Default::default, |provider| {
         crate::services::discord::outbound::completed_turn_ledger::settled_commit_ms_by_user_msg_id(
             provider,
             channel_id.get(),
@@ -151,7 +164,6 @@ pub(super) fn take_unsettled(
     let now_us = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_micros());
-    let queue = &mut state.intervention_queue;
     let settled_exits = purge_sources_from_queue(queue, |row, id| {
         let enqueued_us = now_us.saturating_sub(row.created_at.elapsed().as_micros());
         committed
@@ -168,7 +180,7 @@ pub(super) fn take_unsettled(
                 session_key: None,
                 turn_id: None,
                 invariant: QUEUE_ROW_SETTLED_BY_COMPLETED_TURN_LEDGER,
-                code_location: "src/services/turn_orchestrator/active_source_dedup.rs:take_unsettled",
+                code_location: "src/services/turn_orchestrator/active_source_dedup.rs:settle_completed_sources",
                 message: "queued source already has a confirmed terminal delivery; removed instead of re-dispatching",
                 details: serde_json::json!({
                     "message_id": event.intervention.message_id.get(),
@@ -179,9 +191,7 @@ pub(super) fn take_unsettled(
             crate::services::observability::InvariantSeverity::Warn,
         );
     }
-    let mut result = super::dequeue_next_soft_intervention(queue, primary_message_id);
-    result.queue_exit_events.splice(0..0, settled_exits);
-    result
+    settled_exits
 }
 
 const QUEUE_ROW_SETTLED_BY_COMPLETED_TURN_LEDGER: &str =
