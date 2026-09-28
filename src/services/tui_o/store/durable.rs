@@ -1,4 +1,4 @@
-//! Crash-ordered file primitives: create-once, synced append and tail truncation.
+//! Crash-ordered file primitives: create-once, atomic replace, synced append and tail truncation.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -44,6 +44,14 @@ pub(super) fn create_once(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::hard_link(&tmp, path)?;
     fsync_parent_dir(path)?;
     fs::remove_file(&tmp)
+}
+
+/// Replaces `path` atomically: temp write, fsync, rename, then the directory entry.
+pub(super) fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let tmp = tmp_path(path);
+    write_synced(&tmp, bytes)?;
+    fs::rename(&tmp, path)?;
+    fsync_parent_dir(path)
 }
 
 pub(super) fn append_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {

@@ -1,9 +1,11 @@
 //! Persistent state of the O writer under `<runtime_root>/o_store`: once-written `init` and
-//! `o_era` and the delivery ledger. Damage halts; it never re-inits.
+//! `o_era`, the delivery ledger, and the raw spool with cursors. Damage halts; it never re-inits.
 
 mod durable;
 pub mod ledger;
+pub mod spool;
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -54,6 +56,8 @@ pub struct OEra {
 #[serde(rename_all = "snake_case")]
 pub enum HaltReason {
     StoreDamage,
+    SpoolGap,
+    SpoolTailMismatch,
 }
 
 /// The channel's O output stops and alarms from the first occurrence.
@@ -67,6 +71,8 @@ pub struct Halt {
 pub enum StoreError {
     Io(io::Error),
     Halt(Halt),
+    /// The channel spool is at its cap; the caller pauses the source and alarms.
+    SpoolFull,
     /// An API precondition failed; nothing was written.
     Rejected(String),
 }
@@ -195,10 +201,15 @@ impl OStore {
         };
         let dir = self.channel_dir(channel);
         let ledger = ledger::recover(&dir.join(LEDGER_FILE), init.initial_anchor)?;
+        let sources = spool::recover_sources(&dir, &init, &ledger)?;
+        let (segment_max, spool_cap) = (spool::SEGMENT_MAX_BYTES, spool::SPOOL_CAP_BYTES);
         Ok(Some(ChannelStore {
             dir,
             init,
             ledger,
+            sources,
+            segment_max,
+            spool_cap,
             failed: false,
         }))
     }
@@ -209,6 +220,9 @@ pub struct ChannelStore {
     dir: PathBuf,
     init: Initialized,
     ledger: LedgerState,
+    sources: BTreeMap<String, spool::SourceSpool>,
+    segment_max: u64,
+    spool_cap: u64,
     failed: bool,
 }
 
