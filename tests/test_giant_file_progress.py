@@ -204,6 +204,52 @@ class GiantFileProgressTest(unittest.TestCase):
         self.reject(lambda b, c, f: c["modules"].update(
             {SURVIVOR: 1201}), "new or growing giant")
 
+    def test_pinned_base_giant_gets_wiring_slack_but_new_and_unpinned_do_not(self):
+        slack = PROGRESS.WIRING_SLACK_LINES
+        self.assertEqual(slack, 30)
+        errors = lambda b, c, f: "; ".join(PROGRESS.pr_evaluation(b, c, f)[1])
+        base, candidate, facts = self.ordinary_fixture()
+        base["pins"] = {SURVIVOR: 1200}
+        candidate["modules"][SURVIVOR] = 1200 + slack
+        self.assertEqual(PROGRESS.pr_evaluation(base, candidate, facts),
+                         ("pr_ordinary_no_regression", []))
+        candidate["modules"][SURVIVOR] = 1201 + slack
+        self.assertIn(f"new or growing giant: {SURVIVOR} grew to {1201 + slack} > base 1200 "
+                      f"+ slack {slack}", errors(base, candidate, facts))
+        # An unpinned giant has no frozen cap, so any growth still fails.
+        base["pins"] = {}
+        candidate["modules"][SURVIVOR] = 1201
+        self.assertIn(f"new or growing giant: {SURVIVOR}", errors(base, candidate, facts))
+        # Crossing the threshold is a new giant even for a pinned path.
+        candidate["modules"][SURVIVOR] = 1200
+        base["modules"]["src/future.rs"] = 990
+        base["pins"] = {SURVIVOR: 1200, "src/future.rs": 990}
+        candidate["modules"]["src/future.rs"] = 1000
+        self.assertIn("new or growing giant: src/future.rs", errors(base, candidate, facts))
+        del base["modules"]["src/future.rs"]
+        self.assertIn("new or growing giant: src/future.rs", errors(base, candidate, facts))
+        # The strict-progress path shares the same growth rule.
+        base, candidate, facts = copy.deepcopy(self.fixture())
+        base["pins"] = {SURVIVOR: 1200}
+        candidate["modules"][SURVIVOR] = 1200 + slack
+        self.assertEqual(PROGRESS.progress_errors(base, candidate, facts), [])
+        self.reject(lambda b, c, f: (b.update(pins={SURVIVOR: 1200}),
+                                     c["modules"].update({SURVIVOR: 1201 + slack})),
+                    "new or growing giant")
+
+    def test_base_pins_read_the_frozen_table_and_grant_no_slack_when_unreadable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.assertEqual(PROGRESS.base_pins(root), {})
+            pin = root / PROGRESS.GIANT_PIN
+            pin.parent.mkdir(parents=True)
+            pin.write_text('[giant_file_ratchet]\n"src/a.rs" = 1200\n', encoding="utf-8")
+            self.assertEqual(PROGRESS.base_pins(root), {"src/a.rs": 1200})
+            for broken in ("[giant_file_ratchet\n", '[giant_file_ratchet]\n"src/a.rs" = 0\n'):
+                with self.subTest(broken=broken):
+                    pin.write_text(broken, encoding="utf-8")
+                    self.assertEqual(PROGRESS.base_pins(root), {})
+
     def test_same_path_child_and_movement_are_required(self):
         self.reject(lambda b, c, f: c["modules"].pop(ROOT_FILE), "same-path progress")
         self.reject(lambda b, c, f: c["modules"].update(
@@ -1349,6 +1395,28 @@ class GiantFileCandidateBaseTest(unittest.TestCase):
                 self.assertIn(reason, evidence["reason"])
                 self.assertEqual(evidence["event_base_sha"], self.event_base)
                 self.assertEqual(evidence["comparison_base_sha"], self.comparison_base)
+
+    def test_giant_pinned_at_base_grows_only_within_wiring_slack(self):
+        self.git("checkout", "-q", "main")
+        self.put(P.GIANT_PIN, '[giant_file_ratchet]\n"src/fixture.rs" = 1100\n')
+        pinned_base = self.commit("pin the fixture giant")
+        slack = P.WIRING_SLACK_LINES
+        for lines, expected_rc in ((1100 + slack, 0), (1101 + slack, 2)):
+            with self.subTest(lines=lines):
+                self.git("read-tree", "--reset", "-u", pinned_base)
+                self.put("docs/pr.txt", "PR-only change\n")
+                self.put("src/fixture.rs", "pub fn fixture() {}\n" * lines)
+                self.git("add", "-A")
+                changed = self.git("commit-tree", self.git("write-tree"), "-p", pinned_base,
+                                   "-p", self.head, "-m", "pinned integration candidate")
+                self.git("checkout", "-qf", "--detach", changed)
+                rc, evidence, _, _, _ = self.run_candidate(candidate=changed)
+                self.assertEqual(rc, expected_rc, evidence)
+                self.assertEqual(evidence["comparison_base_sha"], pinned_base)
+                if expected_rc:
+                    self.assertIn(f"grew to {lines} > base 1100 + slack {slack}", evidence["reason"])
+                else:
+                    self.assertEqual(evidence["selector"], "pr_ordinary_no_regression")
 
 
 if __name__ == "__main__":
