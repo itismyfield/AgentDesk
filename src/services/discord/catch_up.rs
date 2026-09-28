@@ -962,7 +962,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         // Collect existing message IDs in queue for dedup
         let known_snapshot = mailbox_snapshot(shared, channel_id).await;
         let (mut known_arms, mut existing_ids) = recovery_known_arms_and_ids(&known_snapshot);
-        // #4564: one completed-turn ledger read per scan suppresses the false TooOld
+        // One completed-turn ledger read per scan suppresses the false TooOld
         // notice for delivered ids and restores the active episode's durable absorbed arms.
         let ledger = settled_ledger_consult::read(provider, channel_id);
         let settled_ids = ledger.settle(&known_snapshot, &mut known_arms, &mut existing_ids);
@@ -1379,7 +1379,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
         // #5996: keep the arm that answered for each id — only the arm can say
         // whether a membership carries the evidence an advance must earn.
         let (mut known_arms, mut existing_ids) = recovery_known_arms_and_ids(&mailbox);
-        // #4564: phase 1's ledger consult, re-read per channel. A Settled outcome
+        // Phase 1's ledger consult, re-read per channel. A Settled outcome
         // skips (no enqueue, no notice): an answered message is never re-surfaced.
         let ledger = settled_ledger_consult::read(provider, channel_id);
         let settled_ids = ledger.settle(&mailbox, &mut known_arms, &mut existing_ids);

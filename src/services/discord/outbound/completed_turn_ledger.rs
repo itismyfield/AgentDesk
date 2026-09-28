@@ -29,7 +29,6 @@
 //! (`lock_record_path`) and [`runtime_store::atomic_write`] — no new lock
 //! mechanism. Like the delivery-record sidecar, its dedicated subtree keeps it
 //! outside the old-binary inflight reaper's scan set.
-//!
 //! Merged-head aliases: `H`, absorbed by episode `n` of head `P`, is settled only when one read
 //! holds both `alias(P, n, H)` and `entry(P, Some(n))`; a missing link duplicates, never loses.
 
@@ -244,10 +243,8 @@ fn mutate_at(
     runtime_store::atomic_write(path, &data)
 }
 
-/// flock-guarded read-modify-write append. Dedups by `(user_msg_id, turn_nonce)`
-/// (keeps the latest commit time), prunes lazily, and atomically rewrites. A
-/// `user_msg_id` of `0` (synthetic/no-inbound-message turn) is a no-op sentinel
-/// — there is no catch-up message to suppress, so nothing is recorded.
+/// flock-guarded append deduped by `(user_msg_id, turn_nonce)`, keeping the latest commit time.
+/// `user_msg_id == 0` (no inbound message) records nothing: there is nothing to suppress.
 fn append_at(
     path: &Path,
     user_msg_id: u64,

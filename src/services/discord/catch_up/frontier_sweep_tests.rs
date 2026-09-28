@@ -642,7 +642,7 @@ enum Resolution {
     LeftQueueUnprocessed,
     BecameActiveTurn,
     /// M is the newest primary of a merged head that also carries older H. H is
-    /// held while M's turn runs (#6205), then settled by M's delivered episode.
+    /// held while M's turn runs, then settled by M's delivered episode.
     MergedHeadClaimed,
     /// `/clear`: the user discarded M, so neither sweep may run it again.
     IntentionallyCleared,
