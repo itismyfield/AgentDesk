@@ -306,16 +306,21 @@ def map_modules(root: Path, driver: Path, crate: Path, out: Path, min_modules: i
     return rows
 
 def source_state(root: Path) -> dict:
+    return source_capture(root)[0]
+
+
+def source_capture(root: Path) -> tuple[dict, dict[str, bytes]]:
+    """The state and the listed file bytes it digests; one listing, each file read once."""
     def git(*args: str) -> str:
         return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
-    names = git("ls-files", "-c", "-o", "--exclude-standard", "-z").split("\0")
-    inputs = {name: collect.digest((root / name).read_bytes()) if (root / name).is_file() else None
-              for name in sorted(set(names)) if name}
+    names = sorted({name for name in git("ls-files", "-c", "-o", "--exclude-standard", "-z").split("\0") if name})
+    bodies = {name: (root / name).read_bytes() for name in names if (root / name).is_file()}
+    inputs = {name: collect.digest(bodies[name]) if name in bodies else None for name in names}
     return dict(sha=git("rev-parse", "HEAD"), tree=git("rev-parse", "HEAD^{tree}"),
                 dirty_digest=collect.digest(git("diff", "HEAD", "--binary").encode()),
                 inputs_digest=collect.digest(json.dumps(inputs, sort_keys=True).encode()),
                 config={name: inputs.get(name) for name in
-                        ("Cargo.lock", "Cargo.toml", "clippy.toml", ".cargo/config.toml", "rust-toolchain.toml")})
+                        ("Cargo.lock", "Cargo.toml", "clippy.toml", ".cargo/config.toml", "rust-toolchain.toml")}), bodies
 
 
 def map_run(root: Path, driver: Path, crate: Path, out: Path, cfg: Path, meta: Path,
