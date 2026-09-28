@@ -662,16 +662,20 @@ mod tests {
                     .to_string()
             })
             .collect();
-        // A drop is recorded at once; quiet collections only every CHECKPOINT_SECS.
+        // A drop is recorded at once; quiet collections only every CHECKPOINT_SECS. A Legacy
+        // message is recorded when created and again when it retires.
         let expected = [
-            "header", "attach", "binding", "tap_gap", "diff", "derived", "anomaly", "tap_gap",
-            "diff", "tap_gap", "legacy",
+            "header", "attach", "binding", "legacy", "tap_gap", "diff", "derived", "anomaly",
+            "tap_gap", "diff", "tap_gap", "legacy",
         ];
         assert_eq!(kinds, expected);
         assert_eq!(*starts.lock().unwrap(), vec![7]);
         let records = sink.0.lock().unwrap();
         assert!(
-            matches!(&records[8], ShadowRecord::Diff { diff } if diff.class == crate::services::tui_o::shadow::DiffClass::Match && diff.legacy_msg_ids == vec![100])
+            matches!(&records[3], ShadowRecord::Legacy { msg } if msg.msg_id == 100 && msg.created_at == now)
+        );
+        assert!(
+            matches!(&records[9], ShadowRecord::Diff { diff } if diff.class == crate::services::tui_o::shadow::DiffClass::Match && diff.legacy_msg_ids == vec![100])
         );
         assert_eq!(observer.metrics().tap_dropped_total, 2);
     }
@@ -887,5 +891,70 @@ mod tests {
         // The budget plus the one read taken after this tick's release.
         assert!(held <= HOLD_BYTES + MAX_READ_BYTES as usize, "{held}");
         assert!(observer.captured.len() < 40);
+    }
+
+    #[test]
+    fn blank_lines_spend_the_first_window_hold_budget() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let source = source_id_for("blank", file.path()).unwrap();
+        let (channel_id, provider) = (7, ShadowProvider::Claude);
+        let binding = SourceBinding {
+            channel_id,
+            provider,
+            source,
+        };
+        let opener: CaptureOpener = Box::new(|binding, start| {
+            let capture = SourceCapture::open(binding.source.clone(), start)?;
+            Ok(Box::new(capture) as Box<dyn CaptureSource>)
+        });
+        let link = Box::new(TranscriptDerive::with_clock(observed_at));
+        let mut observer = Observer::new(Box::new(Records::default()), opener, link);
+        let now = Utc::now();
+        let (old, new, at) = (None, Some(binding), now);
+        let change = BindingChange {
+            channel_id,
+            old,
+            new,
+            at,
+        };
+        observer.tick(now, vec![change], vec![], 0);
+        let mut writer = std::fs::OpenOptions::new().append(true).open(file.path());
+        let writer = writer.as_mut().unwrap();
+        for i in 1..=6 {
+            io::Write::write_all(writer, &vec![b'\n'; MAX_READ_BYTES as usize]).unwrap();
+            observer.tick(now + Duration::seconds(i), vec![], vec![], 0);
+        }
+        // Newline-only records carry no line bytes, yet each keeps a record slot.
+        let slot = std::mem::size_of::<CapturedRecord>();
+        let kept: usize = (observer.captured.iter())
+            .map(|(_, _, batch)| {
+                let lines: usize = batch.records.iter().map(|r| r.line.capacity()).sum();
+                batch.records.capacity() * slot + lines
+            })
+            .sum();
+        assert!(kept <= 200 * 1024 * 1024, "{kept}");
+        assert_eq!(observer.captured.len(), 1);
+    }
+
+    #[test]
+    fn the_window_start_tail_reads_to_the_end_in_one_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        std::fs::write(&path, b"").unwrap();
+        let mut tail = WindowStartTail::at_end(path.clone());
+        let line = |record| {
+            let stored = StoredRecord {
+                at: Utc::now(),
+                record,
+            };
+            serde_json::to_string(&stored).unwrap() + "\n"
+        };
+        // More than one read of other rows lands ahead of the line the CLI appends.
+        let filler = line(ShadowRecord::TapGap { dropped: 0 });
+        let mut bytes = filler.repeat(2 * MAX_READ_BYTES as usize / filler.len());
+        let (t0, sources) = (Utc::now(), Vec::new());
+        bytes += &line(ShadowRecord::WindowStart { t0, sources });
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(tail.poll(), vec![(t0, Vec::new())]);
     }
 }

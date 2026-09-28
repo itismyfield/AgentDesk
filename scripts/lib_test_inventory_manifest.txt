@@ -9130,10 +9130,12 @@ services::tui_o::shadow::root::tests::store_appends_readable_jsonl_and_stops_at_
 services::tui_o::shadow::root::tests::store_seals_a_torn_tail_so_new_appends_survive_and_reports_the_damage
 services::tui_o::shadow::tap::tests::a_turn_running_at_attach_is_captured_from_its_opener_and_closes_live
 services::tui_o::shadow::tap::tests::a_window_start_applied_minutes_after_a_capture_still_reaches_it_at_its_capture_time
+services::tui_o::shadow::tap::tests::blank_lines_spend_the_first_window_hold_budget
 services::tui_o::shadow::tap::tests::captures_waiting_for_the_first_window_stay_within_the_hold_budget
 services::tui_o::shadow::tap::tests::observer_attaches_derives_diffs_and_persists_only_through_the_sink
 services::tui_o::shadow::tap::tests::only_window_starts_appended_after_startup_are_polled
 services::tui_o::shadow::tap::tests::tap_counts_a_full_queue_as_dropped_instead_of_waiting
+services::tui_o::shadow::tap::tests::the_window_start_tail_reads_to_the_end_in_one_pass
 services::tui_prompt_control::tests::absolute_path_prompts_are_never_taken_as_codex_commands
 services::tui_prompt_control::tests::codex_local_controls_carry_the_normalized_name_and_the_raw_args
 services::tui_prompt_control::tests::command_shaped_input_outside_the_registry_is_refused_not_forwarded
