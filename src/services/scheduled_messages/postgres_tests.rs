@@ -3,6 +3,43 @@ use chrono::Duration;
 use serde_json::json;
 use sqlx::Row;
 
+tokio::task_local! {
+    pub(super) static START_TARGET: std::cell::RefCell<Option<(crate::services::provider::ProviderKind, u64, u64)>>;
+}
+
+#[tokio::test]
+async fn postgres_bound_cc_target_uses_claude_and_cc_owner_channel() {
+    let (pg_db, pool) = create_test_pool("agentdesk_smsg_cc", "scheduled cc target routing").await;
+    insert_one_shot_agent_message(&pool, "dual-provider", "fail").await;
+    sqlx::query("UPDATE agents SET provider = 'codex', discord_channel_cc = '123456789', discord_channel_alt = '987654321' WHERE id = 'dual-provider'")
+        .execute(&pool).await.expect("seed dual-provider fixture");
+    let fire = claim_one(&pool, "cc-target-worker").await;
+    let registry = HealthRegistry::new();
+    let (result, target) = START_TARGET
+        .scope(std::cell::RefCell::new(None), async {
+            let result = start_agent_turn(&pool, &registry, &fire).await;
+            (result, START_TARGET.with(|target| target.borrow().clone()))
+        })
+        .await;
+    pool.close().await;
+    pg_db.drop().await;
+    assert!(
+        result
+            .err()
+            .expect("no runtime registered")
+            .to_string()
+            .contains("provider runtime not registered")
+    );
+    assert_eq!(
+        target,
+        Some((
+            crate::services::provider::ProviderKind::Claude,
+            123456789,
+            123456789
+        ))
+    );
+}
+
 fn at_postgres_precision(value: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
     chrono::DateTime::from_timestamp_micros(value.timestamp_micros())
         .expect("PostgreSQL-compatible timestamp should be representable")

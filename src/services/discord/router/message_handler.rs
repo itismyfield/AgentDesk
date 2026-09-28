@@ -256,7 +256,8 @@ pub(super) use self::attachments::{
 pub(super) use self::control::{handle_shell_command_raw, handle_text_command};
 #[allow(unused_imports)]
 pub(in crate::services::discord) use self::headless_turn::{
-    start_headless_turn, start_reserved_headless_turn, start_voice_headless_turn,
+    start_headless_turn, start_reserved_headless_turn, start_reserved_headless_turn_with_owner,
+    start_voice_headless_turn,
 };
 pub(in crate::services::discord) use self::intake_turn::IntakeDeps;
 pub(crate) use self::intake_turn::{IntakeRequest, execute_intake_turn_core};

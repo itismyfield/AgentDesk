@@ -282,6 +282,93 @@ test("review-automation clears a completed pipeline stage after cards.get migrat
   );
 });
 
+test("review-automation holds a card whose pipeline stage row is gone", () => {
+  const { module, state } = loadPolicy("policies/review-automation.js", {
+    cards: {
+      "card-missing-stage": {
+        id: "card-missing-stage",
+        status: "review",
+        pipeline_stage_id: "101",
+        repo_id: "itismyfield/AgentDesk"
+      }
+    },
+    dbQuery: createSqlRouter([
+      {
+        match: "WHERE id = ? AND kanban_card_id = ? AND dispatch_type = 'review' LIMIT 1",
+        result: [{ context: JSON.stringify({ review_mode: "normal" }) }]
+      },
+      {
+        match: "AND dispatch_type IN ('implementation', 'rework')",
+        result: []
+      }
+    ]),
+    stageMove: () => ({ status: "missing", stage: null })
+  });
+
+  module.__test.processVerdict(
+    "card-missing-stage",
+    "pass",
+    { verdict: "pass" },
+    { review_dispatch_id: "review-missing-stage" }
+  );
+
+  assert.equal(state.manualInterventions.length, 1);
+  assert.match(state.manualInterventions[0].reason, /Pipeline stage 101 no longer exists/);
+  assert.deepEqual(state.statusCalls, []);
+  assert.equal(state.dispatchCreates.length, 0);
+  assert.equal(state.executions.some(({ sql }) => sql.includes("SET pipeline_stage_id = NULL")), false);
+});
+
+test("review-automation walks stages itself on a binary without advanceStage", () => {
+  const stageOrders = { "101": [{ stage_order: 1 }], "404": [] };
+  const { module, state, agentdesk } = loadPolicy("policies/review-automation.js", {
+    cards: {
+      "card-last-stage": {
+        id: "card-last-stage",
+        status: "review",
+        pipeline_stage_id: "101",
+        repo_id: "itismyfield/AgentDesk"
+      },
+      "card-gone-stage": {
+        id: "card-gone-stage",
+        status: "review",
+        pipeline_stage_id: "404",
+        repo_id: "itismyfield/AgentDesk"
+      }
+    },
+    dbQuery: createSqlRouter([
+      {
+        match: "SELECT stage_order FROM pipeline_stages WHERE id = ?",
+        result: (_sql, params) => stageOrders[params[0]]
+      },
+      { match: "AND stage_order > ?", result: [] },
+      { match: "SELECT status FROM kanban_cards WHERE id = ?", result: [{ status: "review" }] },
+      {
+        match: "WHERE id = ? AND kanban_card_id = ? AND dispatch_type = 'review' LIMIT 1",
+        result: [{ context: JSON.stringify({ review_mode: "normal" }) }]
+      },
+      {
+        match: "AND dispatch_type IN ('implementation', 'rework')",
+        result: []
+      }
+    ])
+  });
+  delete agentdesk.pipeline.advanceStage;
+
+  module.__test.processVerdict("card-last-stage", "pass", { verdict: "pass" }, { review_dispatch_id: "review-last" });
+  module.__test.processVerdict("card-gone-stage", "pass", { verdict: "pass" }, { review_dispatch_id: "review-gone" });
+
+  assert.deepEqual(state.stageMoves, []);
+  assert.equal(
+    state.executions.some(
+      ({ sql, params }) => sql.includes("SET pipeline_stage_id = NULL") && params[0] === "card-last-stage"
+    ),
+    true
+  );
+  assert.equal(state.manualInterventions.length, 1);
+  assert.equal(state.manualInterventions[0].cardId, "card-gone-stage");
+});
+
 test("review-automation skips create-pr when reviewed work is already on origin mainline", () => {
   const { module, state } = loadPolicy("policies/review-automation.js", {
     cards: {

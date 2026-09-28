@@ -20,7 +20,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
 import h2_admission as adm  # noqa: E402
 import h2_depinfo  # noqa: E402
 import h2_measure as h2  # noqa: E402
-from tests.test_h2_measure import diag, locate  # noqa: E402  (shared clippy-JSON fixture helpers)
+from tests.test_h2_measure import CLEARED, POISON, WRAPPERS, diag, locate  # noqa: E402
 from tests.test_h2_modmap import write_modmap  # noqa: E402
 
 TMUX = "agentdesk::services::platform::tmux::has_session"
@@ -204,6 +204,73 @@ class EndToEnd(Tree):
         self.assertEqual(self.evaluate("linux"), [])
         self.assertEqual(self.evaluate("macos"), [])
         self.assertEqual(self.run_main("--lane", "macos", "--base", self.base)[0], 0)
+
+    def test_cargo_enforces_only_lane_paths_with_clean_environment(self) -> None:
+        config = h2.load_config(self.root / "clippy.toml")
+        config["agentdesk::linux_only"] = ("W", frozenset({"linux"}))
+        (self.root / "clippy.toml").write_text(h2.render_clippy_toml(config))
+        run, generated = subprocess.run, []
+        def cargo(command, **kwargs):
+            if command[0] != "cargo":
+                return run(command, **kwargs)
+            env = kwargs["env"]
+            conf = Path(env["CLIPPY_CONF_DIR"]) / "clippy.toml"
+            generated.append(conf)
+            self.assertEqual(command[:3], ["cargo", "clippy", "--lib"])
+            self.assertEqual(kwargs["cwd"], self.root.resolve())
+            self.assertEqual(h2.load_config(Path(env["CLIPPY_CONF_DIR"]) / "clippy.toml"),
+                             {p: e for p, e in config.items() if "macos" in e[1]})
+            for key in CLEARED:
+                self.assertNotIn(key, env, key)
+            self.assertEqual({key: env.get(key) for key in WRAPPERS}, dict.fromkeys(WRAPPERS, ""))
+            write_depinfo(self.root, "00aa", [*SOURCES, "Cargo.toml", conf])
+            return subprocess.CompletedProcess(command, 0, "\n".join(self.lines()), "")
+        with mock.patch.dict(os.environ, POISON), mock.patch.object(h2.subprocess, "run", side_effect=cargo), \
+                redirect_stdout(io.StringIO()), redirect_stderr(err := io.StringIO()):
+            self.assertEqual(adm.main(["--repo", str(self.root), "--lane", "macos", "--base", self.base,
+                                      "--modmap", str(self.modmap)]), 0, err.getvalue())
+        self.assertEqual(len(generated), 1)
+        self.assertFalse(generated[0].exists())
+        self.assertEqual(self.evaluate("macos"), [f"R-O: lib compile input {generated[0]} is outside the repo"])
+
+    def test_generated_config_does_not_exempt_other_external_inputs(self) -> None:
+        for extra in ("other.json", "nested/clippy.toml", "alias.rs"):
+            def runner(root, conf):
+                path = conf / extra
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if extra == "alias.rs":
+                    path.symlink_to(conf / "clippy.toml")
+                else:
+                    path.write_text("unrelated")
+                write_depinfo(self.root, "00aa", [*SOURCES, "Cargo.toml", conf / "clippy.toml", path])
+                return self.lines()
+            with self.subTest(extra=extra), mock.patch.object(h2, "run_clippy", side_effect=runner), \
+                    redirect_stderr(err := io.StringIO()):
+                rc = adm.main(["--repo", str(self.root), "--lane", "macos", "--base", self.base,
+                               "--modmap", str(self.modmap)])
+                self.assertEqual(rc, 1)
+                self.assertIn("outside the repo", err.getvalue())
+
+    def test_evaluate_filters_external_json_by_lane(self) -> None:
+        config = h2.load_config(self.root / "clippy.toml")
+        config["agentdesk::linux_only"] = ("W", frozenset({"linux"}))
+        (self.root / "clippy.toml").write_text(h2.render_clippy_toml(config))
+        lines = [*self.lines(), diag(PROBE, 1, 1, "agentdesk::linux_only")]
+        self.assertEqual(adm.evaluate(self.root, "macos", self.base, lines, self.modmap), [])
+
+    def test_config_warning_rejects_external_json_with_or_without_code(self) -> None:
+        for code in (None, "clippy::disallowed_methods", "unused_imports"):
+            warning = json.loads(diag("clippy.toml", 2, 1, "agentdesk::missing"))
+            warning["message"]["code"] = {"code": code} if code else None
+            path = self.root / "invalid.jsonl"
+            path.write_text("\n".join([*self.lines(), json.dumps(warning)]))
+            with self.subTest(code=code), mock.patch.object(h2, "run_clippy") as cargo, \
+                    redirect_stderr(err := io.StringIO()), redirect_stdout(io.StringIO()):
+                rc = adm.main(["--repo", str(self.root), "--lane", "macos", "--base", self.base,
+                               "--modmap", str(self.modmap), "--json", str(path)])
+                self.assertEqual(rc, 1)
+                self.assertIn("clippy could not use an H2 path", err.getvalue())
+                cargo.assert_not_called()
 
     def test_growth_needs_exactly_one_suffix_admission(self) -> None:
         self.edit(PROBE, 'alive("x")', 'alive("x") && crate::services::platform::tmux::has_session("y")')
@@ -808,6 +875,92 @@ class ZeroRules(unittest.TestCase):
         host = {"src/services/session_host.rs": 'macro_rules! mount { ($attr:meta) => { #[$attr] mod escape; }; }\n'
                                                 'mount!(path = "../outside_owner.rs");\n'}
         self.assertEqual(self.rules(host, roster=frozenset(host)), ["R-O", "R-O"])
+
+class OwnerDocAttributes(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.owner = self.root / OWNER
+        self.owner.parent.mkdir(parents=True)
+
+    def test_doc_values_preserve_plain_owner_inventory(self) -> None:
+        attrs = (
+            '#[doc = "plain"]',
+            '#[doc = concat!("a", "b")]',
+            '#[doc = include_str!("note.md")]',
+            '#[doc = concat!(r#"]/*"#,\n include_str!("note.md"))]',
+            '#[cfg_attr(unix, doc = concat!("a", "b"))]',
+            '#![doc = include_str!("note.md")]',
+            r'#[doc = concat!("]\"// /*", r#"]"/* //"#, include_str!("note.md"))]',
+            '#[doc /* ] */ = gen!([[(\']\')]], { /* [ /* ) */ ] */ })]',
+            '#[cfg_attr(all(unix, not(test)), doc = gen!(), allow(unused), doc = other!())]',
+            '#[cfg_attr(unix, cfg_attr(any(unix, windows), doc = gen!()),)]',
+            '#[doc = some::r#gen!()]\n#[allow(unused)]',
+            '#[' + 'cfg_attr(unix, ' * 24 + 'doc = gen!()' + ')' * 24 + ']',
+        )
+        for attr in attrs:
+            for prefix, suffix, item in (("", "", "sample"), ("struct Api;\nimpl Api {\n", "}\n", "Api::sample")):
+                with self.subTest(attr=attr, item=item):
+                    self.owner.write_text(prefix + attr + '\npub fn sample() { body!(); }\n' + suffix, encoding="utf-8")
+                    self.assertEqual(adm.owner_shape_problems(self.root), [])
+                    self.assertEqual(adm.owner_pub_fns(self.root, OWNER, "crate::tmux"), {f"crate::tmux::{item}"})
+
+    def test_only_supported_balanced_doc_values_exempt_macros(self) -> None:
+        attrs = (
+            '#[my_attr(doc = gen!())]',
+            '#[my_attr(nested(doc = gen!()))]',
+            '#[my_attr(#[doc = gen!()])]',
+            '#[my_attr(\n#[doc = gen!()]',
+            '#[cfg_attr(unix, my_attr(doc = gen!()))]',
+            '#[cfg_attr(unix, my_attr(cfg_attr(unix, doc = gen!())))]',
+            '#[cfg_attr(doc = gen!(), doc = accepted!())]',
+            '#[cfg_attr(any(unix, doc = gen!()), doc = accepted!())]',
+            '#[cfg_attr(unix, cfg_attr(doc = gen!(), doc = accepted!()))]',
+            '#[cfg_attr(unix, other = gen!())]',
+            '#[cfg_attr(unix, doc = gen!()) trailing]',
+            '#[r#doc = gen!()]',
+            '#[r#cfg_attr(unix, doc = gen!())]',
+            '#[other::doc = gen!()]',
+            '#[doc = "ok", gen!()]',
+            '#[doc = gen!()',
+            '#[doc = gen!())]',
+            '#[doc = gen!([)]]',
+            '#[cfg_attr(unix, doc = gen!()]',
+        )
+        for attr in attrs:
+            with self.subTest(attr=attr):
+                self.owner.write_text(attr + '\npub fn sample() {}\n', encoding="utf-8")
+                self.assertEqual(adm.owner_shape_problems(self.root), [
+                    f"R-E: {OWNER} uses item-level macro `gen!`; owner files must be plain items"])
+
+    def test_doc_values_do_not_hide_item_macros_or_path(self) -> None:
+        doc = '#[cfg_attr(x, doc = include_str!("note.md"))]\n'
+        cases = (
+            (doc + 'external!();', ('`external!`',), False),
+            (doc + 'concat!();', ('`concat!`',), False),
+            (doc + 'some::r#external!();', ('`external!`',), False),
+            ('#[cfg_attr(x, doc = include_str!("note.md"), external!())]', ('`external!`',), False),
+            ('#![doc = gen!(r#"]" // /*"#)]\nexternal!();', ('`external!`',), False),
+            ('#[doc = gen!([[1], [2]])]\nexternal!();', ('`external!`',), False),
+            ('#[doc = { macro_rules! hidden { () => { "x" } } hidden!() }]', ('`macro_rules!`',), False),
+            (doc + 'macro_rules! hidden { () => {} }', ('`macro_rules!`',), False),
+            ('#[cfg_attr(x, doc = include_str!("note.md"), path = "outside.rs")]', (), True),
+            ('#[cfg_attr(x, doc = gen!(r#"]"#), cfg_attr(y, path = "outside.rs"))]', (), True),
+            (doc + '#[path = "outside.rs"]\nmod child;', (), True),
+            ('#[doc = gen!(path = "outside.rs")]', (), True),
+            (doc + 'trait Api { fn default_method() {} }', ('trait default method Api::default_method',), False),
+        )
+        with mock.patch.object(adm, "OWNER_ROSTER", frozenset({OWNER})), mock.patch.object(adm, "R_C_GRANDFATHERED", {}):
+            for source, needles, path in cases:
+                with self.subTest(source=source):
+                    self.owner.write_text(source + '\npub fn sample() {}\n', encoding="utf-8")
+                    problems = adm.owner_shape_problems(self.root)
+                    self.assertEqual(len(problems), len(needles), problems)
+                    for problem, needle in zip(problems, needles):
+                        self.assertIn(needle, problem)
+                    self.assertEqual(adm.zero_rules(self.root),
+                                     [f"R-O: {OWNER} uses #[path]; owner modules must live under the owner paths"] if path else [])
 
 ESCAPE = {"src/services/platform/tmux.rs": '#[path = "pty_escape.rs"]\npub(crate) mod escape;\npub fn has_session() {}\n'}
 
