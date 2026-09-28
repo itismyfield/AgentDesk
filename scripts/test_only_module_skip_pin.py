@@ -34,6 +34,9 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/discord/tmux_output_stream/tests/compact_summary_tests.rs",
+        "src/services/discord/tmux_watcher/loop_poll_prologue/post_terminal_disposal_tests/compact_summary_tests.rs",
+        "src/services/discord/tui_prompt_relay/tests/compact_summary_tests.rs",
         "src/services/discord/turn_bridge/entry_abort_mailbox_tests.rs",
         "src/services/discord/outbound/delivery_obligation/tests.rs",
         "src/services/discord/outbound/delivery_obligation/validation_tests.rs",
@@ -107,6 +110,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/health/reachability/obligation_tests.rs",
         "src/services/discord/inflight/removal/boot_custody_tests.rs",
         "src/services/discord/inflight/removal/custody_notice_tests.rs",
+        "src/services/discord/inflight/rebind_reap/tests.rs",
         "src/services/discord_custody/tests.rs",
         "src/services/discord/inflight/save_store/bridge_entry_guard_tests.rs",
         "src/services/discord/inflight/save_store/identity_gate/runtime_stamp/claude_terminal_tests.rs",

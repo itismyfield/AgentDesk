@@ -16,11 +16,13 @@ import re
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import rust_lex  # noqa: E402
+import h2_env  # noqa: E402
 
 CRATE = "agentdesk"
 LANES = ("linux", "macos")
@@ -53,6 +55,8 @@ DISPATCHERS = (
 )
 
 CALLEE_RE = re.compile(r"`([^`]+)`")
+H2_PATH_RE = re.compile(r"[A-Za-z_]\w*(::[A-Za-z_]\w*)+")
+H2_CRATES = frozenset({"agentdesk", "std", "core", "alloc", "tokio"})
 ITEM_TOKEN_RE = re.compile(
     r"\bfn\s+([A-Za-z_]\w*)|\bimpl\b|\bmod\s+([A-Za-z_]\w*)|\btrait\s+([A-Za-z_]\w*)"
     r"|(?m:^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?(const|static)[ \t]+(?:mut[ \t]+)?(?!fn\b)([A-Za-z_]\w*))"
@@ -230,10 +234,22 @@ def load_config(clippy_toml: Path) -> dict[str, tuple[str, frozenset[str]]]:
         for entry in data.get(key, []):
             if (tag := h2_tag(entry, key)) is None:
                 continue
+            if not H2_PATH_RE.fullmatch(entry["path"]) or entry["path"].split("::", 1)[0] not in H2_CRATES:
+                raise MeasureError(f"invalid H2 path in {clippy_toml}: {entry['path']!r}")
             if entry["path"] in config:  # a later duplicate would silently override the first
                 raise MeasureError(f"duplicate H2 path in {clippy_toml}: {entry['path']}")
             config[entry["path"]] = tag
     return config
+
+def lane_config(config: dict, lane: str) -> dict:
+    """Only paths registered for this lane are passed to Clippy and measured."""
+    return {path: entry for path, entry in config.items() if lane in entry[1]}
+
+def seed_config(config: dict, lane: str) -> dict:
+    """Start from hand-kept seeds while preserving the other lane's derived registrations."""
+    seeded = {path: (set_name, lanes - {lane} if set_name in DERIVED_SETS else lanes)
+              for path, (set_name, lanes) in config.items()}
+    return {path: entry for path, entry in seeded.items() if entry[1]}
 
 def diagnostics(lines) -> list[tuple[str, int, int, str, str]]:
     """Deduped (file, line, col, lint, callee) from cargo `--message-format=json` lines."""
@@ -244,6 +260,10 @@ def diagnostics(lines) -> list[tuple[str, int, int, str, str]]:
         event = json.loads(raw)
         message = event.get("message") or {}
         code = (message.get("code") or {}).get("code")
+        if event.get("reason") == "compiler-message" and any(
+                Path(span.get("file_name", "")).name == "clippy.toml" for span in message.get("spans", [])):
+            raise MeasureError(f"clippy could not use an H2 path: {message.get('message', '')}; "
+                               "run --regen for stale derived paths")
         if code not in LINTS or "lib" not in (event.get("target") or {}).get("kind", []):
             continue
         callee = CALLEE_RE.search(message.get("message", ""))
@@ -261,13 +281,28 @@ def run_clippy(root: Path, conf_dir: Path | None) -> list[str]:
     """Lint only the lib target. Touching lib.rs forces a re-lint (and a fresh dep-info) instead of a
     cache replay; `--cap-lints warn` stops unrelated deny lints from aborting it (force-warn is uncapped)."""
     (root / "src/lib.rs").touch()
-    env = dict(os.environ, CARGO_INCREMENTAL="0", **({"CLIPPY_CONF_DIR": str(conf_dir)} if conf_dir else {}))
+    env = h2_env.environment("measure")
+    if conf_dir is not None:
+        env["CLIPPY_CONF_DIR"] = str(conf_dir)
     command = ["cargo", "clippy", "--lib", "--message-format=json", "--", "--cap-lints", "warn",
                *itertools.chain.from_iterable(("--force-warn", lint) for lint in LINTS + RO_LINTS)]
     proc = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True)
     if proc.returncode != 0:
         raise MeasureError(f"cargo clippy failed ({proc.returncode}):\n{proc.stderr[-4000:]}")
     return proc.stdout.splitlines()
+
+def run_lane_clippy(root: Path, config: dict, lane: str, runner=None) -> list[str]:
+    """Run with a temporary lane configuration, leaving the stored union untouched."""
+    with lane_clippy_run(root, config, lane, runner) as (lines, _conf):
+        return lines
+
+@contextmanager
+def lane_clippy_run(root: Path, config: dict, lane: str, runner=None):
+    """Keep this run's exact configuration input alive until its consumer finishes."""
+    with tempfile.TemporaryDirectory() as conf_dir:
+        conf = Path(conf_dir).resolve()
+        (conf / "clippy.toml").write_text(render_clippy_toml(lane_config(config, lane)), encoding="utf-8")
+        yield (runner or run_clippy)(root, conf), conf / "clippy.toml"
 
 def _arg_text(src: SourceFile, open_paren: int) -> str:
     depth = 0
@@ -397,35 +432,32 @@ def render_clippy_toml(config: dict[str, tuple[str, frozenset[str]]]) -> str:
         "disallowed-types = [", *entries(True), "]", "",
     ])
 
-def regen(root: Path, lane: str, runner=run_clippy) -> dict:
+def regen(root: Path, lane: str, runner=None) -> dict:
     """Iterate W* / SUBPROC_W for `lane` to a fixpoint, then rewrite clippy.toml and the baseline."""
     clippy_toml = root / "clippy.toml"
     if clippy_toml.exists() and re.search(
             r"^(?!disallowed-(?:methods|types)\b)[A-Za-z]", clippy_toml.read_text(encoding="utf-8"), re.M):
         raise MeasureError("clippy.toml has keys --regen cannot preserve; extend render_clippy_toml")
-    config = load_config(clippy_toml)
+    config = seed_config(load_config(clippy_toml), lane)
     if not any(set_name == "EXEC" for set_name, _ in config.values()):
         raise MeasureError("clippy.toml has no H2 EXEC entries; nothing to regenerate from")
-    with tempfile.TemporaryDirectory() as conf_dir:
-        for _ in range(MAX_REGEN_ITERATIONS):
-            Path(conf_dir, "clippy.toml").write_text(render_clippy_toml(config), encoding="utf-8")
-            result = measure(root, runner(root, Path(conf_dir)), config)
-            if result["derived"]["unregistrable"]:
-                raise MeasureError("items need a disallowed-types entry: " + ", ".join(sorted(result["derived"]["unregistrable"])))
-            updated = {path: (set_name, lanes - {lane} if set_name in DERIVED_SETS else lanes)
-                       for path, (set_name, lanes) in config.items()}
-            updated = {path: entry for path, entry in updated.items() if entry[1]}
-            for set_name in DERIVED_SETS:  # W first: a fn in both sets is tracked as W
-                for path in result["derived"][set_name]:
-                    prev_set, lanes = updated.get(path, (set_name, frozenset()))
-                    if prev_set not in DERIVED_SETS or (prev_set == "W" and set_name != "W"):
-                        continue
-                    updated[path] = (set_name, lanes | {lane})
-            if updated == config:
-                break
-            config = updated
-        else:
-            raise MeasureError(f"W*/SUBPROC_W did not converge in {MAX_REGEN_ITERATIONS} clippy passes")
+    for _ in range(MAX_REGEN_ITERATIONS):
+        result = measure(root, run_lane_clippy(root, config, lane, runner), lane_config(config, lane))
+        if result["derived"]["unregistrable"]:
+            raise MeasureError("cannot register items: " + ", ".join(sorted(result["derived"]["unregistrable"]))
+                               + "; restructure the call site")
+        updated = seed_config(config, lane)
+        for set_name in DERIVED_SETS:  # W first: a fn in both sets is tracked as W
+            for path in result["derived"][set_name]:
+                prev_set, lanes = updated.get(path, (set_name, frozenset()))
+                if prev_set not in DERIVED_SETS or (prev_set == "W" and set_name != "W"):
+                    continue
+                updated[path] = (set_name, lanes | {lane})
+        if updated == config:
+            break
+        config = updated
+    else:
+        raise MeasureError(f"W*/SUBPROC_W did not converge in {MAX_REGEN_ITERATIONS} clippy passes")
     clippy_toml.write_text(render_clippy_toml(config), encoding="utf-8")
     baseline = load_baseline(root) or {section: {} for section in SECTIONS}
     for section in SECTIONS:
@@ -458,10 +490,9 @@ def main(argv=None) -> int:
                 return 0
             print("h2: baseline missing (scripts/ci/h2_baseline_*.toml); rebase onto a main that has it", file=sys.stderr)
             return 2
-        # Same lookup as clippy itself: CLIPPY_CONF_DIR, else the repo root.
-        config = load_config(Path(os.environ.get("CLIPPY_CONF_DIR", root)) / "clippy.toml")
-        lines = args.json.read_text(encoding="utf-8").splitlines() if args.json else run_clippy(root, None)
-        result = measure(root, lines, config)
+        config = load_config(root / "clippy.toml")
+        lines = args.json.read_text(encoding="utf-8").splitlines() if args.json else run_lane_clippy(root, config, args.lane)
+        result = measure(root, lines, lane_config(config, args.lane))
         if not args.check:
             rows = {s: [dict(zip(("file", "item", "callee"), k), count=v,
                              **({"lines": result["sites"][s][k]} if k in result["sites"][s] else {}))
