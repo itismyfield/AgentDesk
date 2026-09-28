@@ -12,6 +12,7 @@ import json
 import os
 import platform
 import re
+import signal
 import subprocess
 import sys
 import uuid
@@ -210,16 +211,26 @@ def collection_context(root: Path, lane: str) -> dict:
 SESSION_SUITES = {"tests.test_h2_session_driver": 8, "tests.test_h2_session_e2e": 6}
 
 
-def run_suite(root: Path, driver: Path, module: str) -> None:
+def run_suite(root: Path, driver: Path, module: str, *, timeout: float = 1200) -> None:
     env = dict(os.environ, H2_SESSION_DRIVER=str(driver), PYTHONDONTWRITEBYTECODE="1")
-    result = subprocess.run([sys.executable, "-m", "unittest", module], cwd=root, env=env,
-                            stderr=subprocess.PIPE, text=True)
-    sys.stderr.write(result.stderr)
+    with subprocess.Popen([sys.executable, "-m", "unittest", module], cwd=root, env=env,
+                          stderr=subprocess.PIPE, text=True, start_new_session=True) as result:
+        try:
+            _, stderr = result.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(result.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            _, stderr = result.communicate()
+            sys.stderr.write(stderr)
+            raise ModmapError(f"session canary: TIMEOUT {module} after {timeout}s") from None
+    sys.stderr.write(stderr)
     if result.returncode:
         raise ModmapError(f"session canary: {module} failed")
     # An empty or skipped suite exits 0 on older Pythons; only a full, unskipped run counts.
-    ran = re.search(r"^Ran (\d+) tests? in ", result.stderr, re.M)
-    if not ran or int(ran.group(1)) < SESSION_SUITES[module] or not re.search(r"^OK$", result.stderr, re.M):
+    ran = re.search(r"^Ran (\d+) tests? in ", stderr, re.M)
+    if not ran or int(ran.group(1)) < SESSION_SUITES[module] or not re.search(r"^OK$", stderr, re.M):
         raise ModmapError(f"session canary: {module} ran incompletely or skipped tests")
 
 
@@ -238,7 +249,10 @@ def check_session_canary(root: Path, driver: Path, crate: Path, run: Path, lane:
         raise ModmapError("session canary: missing Clippy/build-script cfg")
     for module in suites:
         run_suite(root, driver, module)
-    print("h2-modmap: cold Clippy session, driver controls and workspace e2e hold (cfg-only)")
+    if sorted(suites) == sorted(SESSION_SUITES):
+        print("h2-modmap: cold Clippy session, driver controls and workspace e2e hold (cfg-only)")
+    else:
+        print("h2-modmap: cold Clippy session holds (cfg-only); suites not run")
 
 
 def main(argv=None) -> int:
