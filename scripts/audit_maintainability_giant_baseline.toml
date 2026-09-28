@@ -3,12 +3,14 @@
 # Each entry freezes a production giant at its current production LoC (test code
 # excluded, consistent with the `giant_files` check / #3036). The
 # `giant_file_ratchet` audit check fails `--check` when a file's production LoC
-# exceeds its frozen value, so a decomposed module cannot silently re-inflate
+# exceeds its frozen value plus the 30-line wiring slack
+# (`WIRING_SLACK_LINES`), so a decomposed module cannot silently re-inflate
 # (tmux_watcher.rs had regrown 7160 -> 9608 with no upper bound).
 #
 # Workflow:
 #   * As a file shrinks, LOWER its number here to lock in the win.
-#   * Growing a giant requires RAISING its number — a deliberate, reviewable
+#   * Growth up to the frozen value + 30 needs no change here.
+#   * Growing a giant beyond that requires RAISING its number — a deliberate, reviewable
 #     admission in the diff that the giant got bigger. Every raise must append a
 #     matching [[admission]] with decompose_issue to
 #     scripts/ratchet_admission_history.toml. Prefer splitting instead.
