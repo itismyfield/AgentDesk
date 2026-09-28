@@ -271,7 +271,7 @@ if run_check guards "Destructive call-site per-file ratchet (#5071 T3-A4)"; then
 fi
 
 if run_check guards "H2 tmux boundary measurer and admission self-tests"; then
-# The gates are inert in CI until the baseline lands; their unit tests, module map included, run now.
+# Baseline gates skip until activation; driver/cfg canary and these unit tests already run in CI.
 "$PYTHON" -m unittest tests.test_h2_measure tests.test_h2_admission tests.test_h2_modmap tests.test_h2_cfg_compare tests.test_h2_cfg_collect
 fi
 

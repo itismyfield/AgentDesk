@@ -603,7 +603,8 @@ class H2ContractCliTest(unittest.TestCase):
         self.assertIn("H2 contract: sym:missing::entry has no imported reference", proc.stdout)
 
     def test_import_only_symbol_fails_the_script_with_diagnostic(self):
-        for symbol in ("h2_cfg_compare::compare_cfgs", "h2_cfg_collect::seal", "h2_cfg_collect::read_manifest"):
+        for symbol in ("h2_cfg_compare::compare_cfgs", "h2_cfg_collect::seal", "h2_cfg_collect::read_manifest",
+                       "h2_env::environment", "h2_env::check_host"):
             with self.subTest(symbol=symbol):
                 text = CHECKER.H2_DOC.read_text(encoding="utf-8").replace(f"`sym:{symbol}`", "")
                 proc = self.run_contract(text)

@@ -21,6 +21,7 @@ import h2_depinfo  # noqa: E402
 import h2_measure as m  # noqa: E402
 import h2_cfg_compare as cfg_compare  # noqa: E402
 import h2_cfg_collect as collect  # noqa: E402
+import h2_env  # noqa: E402
 
 DRIVER = "tools/modmap-driver"
 MIN_MODULES = 1000
@@ -44,11 +45,10 @@ CANARY_CFG = {
 class ModmapError(RuntimeError):
     pass
 
-def cargo(root: Path, *args: str, log: Path | None = None, record: Path | None = None, **env: str) -> list[dict]:
+def cargo(root: Path, *args: str, log: Path | None = None, record: Path | None = None, mode: str = "map", **env: str) -> list[dict]:
     """No rustc wrapper: sccache cannot wrap the driver, and a cache hit would skip writing the map."""
-    full = {k: v for k, v in os.environ.items() if k not in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET")}
-    full.pop("RUSTC_BOOTSTRAP", None)
-    full.update(RUSTC_WRAPPER="", CARGO_BUILD_RUSTC_WRAPPER="", CARGO_INCREMENTAL="0", **env)
+    full = h2_env.environment(mode)
+    full.update(env)
     proc = subprocess.run(["cargo", *args], cwd=root, env=full, capture_output=log is not None, text=True)
     events = []
     if log is not None:
@@ -79,7 +79,7 @@ def build_driver(root: Path) -> Path:
     target = root / "target/modmap-driver"
     # rustc_private is nightly-gated; the bootstrap flag stays on this build, never on a crate the driver checks
     cargo(root, "build", "--release", "--locked", "--manifest-path", f"{DRIVER}/Cargo.toml",
-          "--target-dir", str(target), RUSTC_BOOTSTRAP="1")
+          "--target-dir", str(target), mode="driver")
     return target / "release/modmap-driver"
 
 def fresh(path: Path, start: int) -> None:
@@ -200,28 +200,24 @@ def map_run(root: Path, driver: Path, crate: Path, out: Path, cfg: Path, meta: P
 def collection_context(root: Path, lane: str) -> dict:
     versions = {tool: subprocess.check_output([tool, "-vV"], cwd=root, text=True).strip()
                 for tool in ("rustc", "clippy-driver")}
-    host = next((line.removeprefix("host: ") for line in versions["rustc"].splitlines() if line.startswith("host: ")), "")
-    target = {"linux": "x86_64-unknown-linux-gnu", "macos": "aarch64-apple-darwin"}[lane]
-    if host != target:
-        raise HostMismatch(f"lane {lane} requires {target} host (got {host})")
+    host = h2_env.check_host(lane, versions["rustc"])
+    target = h2_env.LANES[lane]
     return dict(host=host, target=target, source=source_state(root), toolchain=versions)
-
-
-class HostMismatch(ModmapError):
-    pass
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo", type=Path, default=m.REPO_ROOT)
     parser.add_argument("--out", type=Path, help="the only root TSV (with --lane: new run directory)")
-    parser.add_argument("--lane", choices=("linux", "macos"), help="collect a bound cfg and metadata manifest")
+    parser.add_argument("--lane", choices=h2_env.LANES, help="collect a bound cfg and metadata manifest")
     parser.add_argument("--cfg-out", type=Path)
     parser.add_argument("--meta-out", type=Path)
     parser.add_argument("--inert", action="store_true", help="skip the repo map while no baseline is committed")
     parser.add_argument("--canary", action="store_true", help="self-test the driver even when --inert skips the map")
     args = parser.parse_args(argv)
     root = args.repo.resolve()
+    if not root.is_dir():
+        parser.error("--repo must be an existing directory")
     if (args.cfg_out or args.meta_out) and not args.lane:
         parser.error("--cfg-out/--meta-out require --lane")
     run_id = uuid.uuid4().hex
@@ -234,7 +230,7 @@ def main(argv=None) -> int:
         if (len(outputs) != 4 or any(p.parent != out.parent or p.resolve() != p for p in outputs)
                 or any(p.name.endswith(".partial") or p.name in ("start", "request.json", "cargo.json", "cargo.jsonl", "cargo.stderr") for p in outputs)):
             parser.error("outputs must be distinct canonical files in the same new run directory")
-        if out.parent.exists() and any(out.parent.iterdir()):
+        if out.parent.exists() and (not out.parent.is_dir() or any(out.parent.iterdir())):
             parser.error("root run directory must be new or empty")
     skip_map = args.inert and not any((root / rel).exists() for rel in m.BASELINE_FILES)
     if skip_map and not args.canary:
@@ -260,7 +256,7 @@ def main(argv=None) -> int:
             return 0
         rows = (map_run(root, driver, root, out, cfg, meta, args.lane, run_id, "root", context)
                 if args.lane else map_modules(root, driver, root, out, MIN_MODULES))
-    except HostMismatch as exc:
+    except h2_env.HostMismatch as exc:
         print(f"h2-modmap: {exc}", file=sys.stderr)
         return 3
     except (ModmapError, m.MeasureError, OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import h2_cfg_compare
 import h2_depinfo
+import h2_env
 
 SCHEMA = 1
 MIN_MODULES = 1000
@@ -92,10 +93,10 @@ def validate(run: Path) -> dict:
         actual = argv[index + 1] if arg == "--target" and index + 1 < len(argv) else arg.removeprefix("--target=")
         if (arg == "--target" or arg.startswith("--target=")) and actual != target:
             raise ValueError("metadata: driver target mismatch")
-    if (request.get("lane") not in ("linux", "macos")
+    if (request.get("lane") not in h2_env.LANES
             or not isinstance(request.get("source"), dict) or not isinstance(request.get("toolchain"), dict)):
         raise ValueError("metadata: invalid source/toolchain/lane schema")
-    if request.get("host") != target or f"host: {target}" not in request["toolchain"].get("rustc", "").splitlines():
+    if target != h2_env.LANES[request["lane"]] or request.get("host") != target or f"host: {target}" not in request["toolchain"].get("rustc", "").splitlines():
         raise ValueError("metadata: host/target mismatch")
     atoms = h2_cfg_compare.read_cfg(Path(paths["cfg"]), data=artifacts["cfg"])
     if cfg.get("atoms") != [list(atom) for atom in sorted(atoms)]:

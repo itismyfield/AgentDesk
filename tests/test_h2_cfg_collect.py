@@ -59,6 +59,8 @@ class Collection(unittest.TestCase):
 
     def test_cli_input_host_and_inert_contract(self):
         self.assertEqual(self.run_wrapper("--meta-out", str(self.maps / "wrong/meta.json"))[0], 2)
+        self.assertEqual(self.run_wrapper("--repo", str(self.maps / "absent"))[0], 2)
+        self.assertEqual(self.run_wrapper("--out", str(self.full / "map.tsv"))[0], 2)
         rustc = self.maps / "bin/rustc"
         rustc.write_text("#!/bin/sh\necho 'host: unknown-host'\n")
         code, output = self.run_wrapper()
