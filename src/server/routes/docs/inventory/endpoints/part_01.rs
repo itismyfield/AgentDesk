@@ -99,7 +99,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/health/detail",
             "health",
-            "Local/protected detailed health with provider diagnostics and latest startup doctor detail. mailboxes[].reachability.coverage (schema_version 1) reports first-observed uncovered/unproven/pending counts, observation state, cursor/observed EOF/commit time and exact-receipt/frontier-prefix/mixed provenance, including reachable grace; unavailable counts are null. Legacy reachability.uncovered_ranges keeps its verdict held-count semantics (rowless_active_turn retains its existing uncovered-only exception).",
+            "Local/protected detailed health with provider diagnostics and latest startup doctor detail. mailboxes[].reachability.coverage (schema_version 1) reports first-observed uncovered/unproven/pending counts, observation state, cursor/observed EOF/commit time and exact-receipt/frontier-prefix/mixed provenance, including reachable grace; unavailable counts are null. Cumulative incomplete-observation history keeps coverage incomplete even at EOF, preserving known counts; it does not distinguish temporary cap lag from skipped records or change the verdict. Legacy reachability.uncovered_ranges presence and value follow the in-band variant: Degraded/Unreachable publish held counts, Reachable omits the field. An external tier worsening the final verdict neither creates nor recalculates this legacy field (rowless_active_turn retains its existing uncovered-only exception).",
         )
         .with_example(
             json!({}),

@@ -601,6 +601,10 @@ fn classify_with_coverage(
 
     coverage.observation_state = if ledger.cursor_offset > eof || ledger.last_observed_len > eof {
         "unresolved"
+    } else if ledger.counters.incomplete_observations > 0 {
+        // Cumulative gaps have no resolution witness; reaching EOF cannot
+        // prove that skipped records were observed.
+        "incomplete"
     } else if ledger.cursor_offset < ledger.last_observed_len || ledger.cursor_offset < eof {
         "lagging"
     } else {

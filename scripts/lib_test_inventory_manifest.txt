@@ -2900,6 +2900,7 @@ services::discord::health::reachability::composite::composite_tests::coverage_te
 services::discord::health::reachability::composite::composite_tests::coverage_tests::grace_boundary_changes_only_the_existing_ladder
 services::discord::health::reachability::composite::composite_tests::coverage_tests::ledger_snapshot_keeps_commit_time_with_bytes_across_atomic_replacement
 services::discord::health::reachability::composite::composite_tests::coverage_tests::never_observed_and_unresolved_do_not_claim_empty_coverage
+services::discord::health::reachability::composite::composite_tests::coverage_tests::oversized_observation_stays_incomplete_after_reaching_eof
 services::discord::health::reachability::composite::composite_tests::coverage_tests::provenance_distinguishes_exact_prefix_and_combined_coverage_without_a_witness
 services::discord::health::reachability::composite::composite_tests::coverage_tests::reachable_grace_keeps_pending_on_the_wire
 services::discord::health::reachability::composite::composite_tests::coverage_tests::structural_and_composite_switches_keep_coverage_when_external_wins

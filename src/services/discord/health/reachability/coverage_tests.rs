@@ -1,6 +1,110 @@
 use super::*;
 
 #[test]
+fn oversized_observation_stays_incomplete_after_reaching_eof() {
+    use super::super::super::ledger::read_ledger_at;
+    use super::super::super::observation::{
+        ReachabilityObservationState, capture_watcher_incarnation, observe_channel_at,
+    };
+    use super::super::super::tail::TAIL_READ_CAP_BYTES;
+    use std::io::Write;
+
+    let root = tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+    let provider = provider();
+    let ledger_file = ledger_path(&provider, 6372).unwrap();
+    let transcript = root.path().join("transcript.jsonl");
+    std::fs::write(&transcript, b"").unwrap();
+    let observe = || {
+        let snapshot = capture_watcher_incarnation(
+            &transcript,
+            SESSION,
+            GENERATION,
+            Some("coverage-nonce".into()),
+        )
+        .unwrap();
+        observe_channel_at(&ledger_file, snapshot.clone(), NOW_MS, || Some(snapshot))
+    };
+    let wire = || {
+        let verdict = observe_relay_verdict(RelayVerdictProbe {
+            provider: Some(&provider),
+            channel_id: 6372,
+            row_output_path: None,
+            registry_output_path: Some(transcript.to_str().unwrap()),
+            pane_idle_confirmed: true,
+            rowless_turn: RowlessTurn::None,
+            placeholder_present: false,
+            executor: ExecutorWitness::Present,
+            now_epoch_ms: NOW_MS,
+            process_started_at_epoch_ms: PROCESS_STARTED_MS,
+        });
+        serde_json::to_value(RelayVerdictReport::of(&verdict, true)).unwrap()
+    };
+    assert_eq!(observe(), ReachabilityObservationState::Bootstrapped);
+    let baseline = wire();
+    assert_eq!(baseline["verdict"], "reachable");
+    assert_eq!(baseline["coverage"]["observation_state"], "current");
+    assert_eq!(baseline["coverage"]["pending_ranges"], 0);
+
+    let assistant_line = |text: &str| {
+        format!(
+            "{}\n",
+            serde_json::json!({"type": "assistant", "timestamp": "2020-01-01T00:00:00Z",
+                "message": {"model": "claude", "content": [{"type": "text", "text": text}]
+            }})
+        )
+    };
+    let raw = assistant_line(&"x".repeat(TAIL_READ_CAP_BYTES as usize + 64));
+    assert!(raw.len() as u64 > TAIL_READ_CAP_BYTES);
+    std::fs::write(&transcript, &raw).unwrap();
+    assert!(matches!(
+        observe(),
+        ReachabilityObservationState::Recorded { .. }
+    ));
+    let capped = read_ledger_at(&ledger_file).unwrap();
+    assert_eq!(capped.cursor_offset, TAIL_READ_CAP_BYTES);
+    assert_eq!(capped.counters.incomplete_observations, 1);
+    assert!(capped.live_obligations().is_empty());
+
+    for _ in 0..2 {
+        assert!(matches!(
+            observe(),
+            ReachabilityObservationState::Recorded { .. }
+        ));
+        let ledger = read_ledger_at(&ledger_file).unwrap();
+        assert_eq!(ledger.cursor_offset, raw.len() as u64);
+        assert_eq!(ledger.last_observed_len, ledger.cursor_offset);
+        assert_eq!(ledger.counters.incomplete_observations, 1);
+        let observed = wire();
+        println!("oversized EOF wire: {observed}");
+        assert_eq!(observed["verdict"], baseline["verdict"]);
+        assert!(observed.get("uncovered_ranges").is_none());
+        for field in ["uncovered_ranges", "unproven_ranges", "pending_ranges"] {
+            assert_eq!(observed["coverage"][field], 0);
+        }
+        assert_eq!(observed["coverage"]["observation_state"], "incomplete");
+    }
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap()
+        .write_all(assistant_line("known obligation").as_bytes())
+        .unwrap();
+    assert!(matches!(
+        observe(),
+        ReachabilityObservationState::Recorded { .. }
+    ));
+    let observed = wire();
+    println!("incomplete with known obligation wire: {observed}");
+    assert_eq!(observed["verdict"], baseline["verdict"]);
+    assert_eq!(observed["coverage"]["observation_state"], "incomplete");
+    assert_eq!(observed["coverage"]["uncovered_ranges"], 1);
+    assert_eq!(observed["coverage"]["unproven_ranges"], 0);
+    assert_eq!(observed["coverage"]["pending_ranges"], 1);
+}
+
+#[test]
 fn reachable_grace_keeps_pending_on_the_wire() {
     let verdict = observe_rowless_channel(
         6300,
@@ -297,6 +401,7 @@ fn structural_and_composite_switches_keep_coverage_when_external_wins() {
         let wire = serde_json::to_value(RelayVerdictReport::of(&verdict, governs)).unwrap();
         assert_eq!(wire["verdict"], "unreachable");
         assert_eq!(wire["decided_by"], "external");
+        assert!(wire.get("uncovered_ranges").is_none());
         assert_eq!(wire["governs_health_polarity"], governs);
         assert_eq!(wire["coverage"]["pending_ranges"], 1);
         let mut status = HealthStatus::Healthy;

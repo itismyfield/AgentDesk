@@ -109,8 +109,8 @@ pub(in crate::services::discord) enum ClassifiedDropReason {
     LedgerCapacity,
 }
 
-/// Monotone observation counters — the 30-day record 4987 §3.4 asks for;
-/// nothing branches on them in this slice.
+/// Cumulative observation history informs coverage completeness without
+/// changing the reachability verdict.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::services::discord) struct LedgerCounters {
     /// Ticks that reached the ledger for this channel.
