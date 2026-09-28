@@ -130,7 +130,8 @@ helper는 compile/Cargo 호출 없이 run 기록만 검증한다. Cargo rc≠0�
 
 map rc는 0=요청 작업 완료, 1=compile/canary/수집·검증·쓰기 실패, 2=CLI 입력 계약 오류,
 3=lane host 불일치다. baseline 전 inert 종료는 `root=skipped`이며 root manifest를 만들지 않는다.
-B2 소유 산출물은 map run의 metadata manifest다. Clippy JSON/.d와 이를 묶는 receipt 생산·소비는 3b-A 소유다.
+B2 소유 산출물은 map run의 metadata manifest다. Clippy JSON과 items의 결속은 같은 호출 세션 manifest가 맡는다.
+`.d`·admission 활성과 map 세션/Clippy 세션의 R-O 동등성은 3b-A 소유다.
 map session cfg와 Clippy effective cfg의 동등성·admission 활성화를 이 manifest로 주장하지 않는다.
 
 ### Canary Clippy 세션 계약
@@ -158,7 +159,7 @@ items_sha256/items_records를 필수 기록한다. `1-cfg`, items 없는 proof�
 Clippy identity는 승인 경로에서 직접 질의하고 request와 대조한다. 봉인에서도 재대조하며 cfg target은 요청 lane과 같아야 한다.
 봉인 전 claim의 pid/unit, request의 공통 unit 필드, 요청 lib의 non-test artifact 1개와 package ID/fresh:false를 대조한다.
 proof·cfg의 결속, 파일 시각·partial·source/config 불변도 검사하며 SHA-256을 기존 JSON 원자 게시 helper로 봉인한다.
-manifest/request/items 헤더 kind는 `canary-items`다. root map 소비자는 이를 거부하고 매핑 소비자는 아직 연결하지 않는다.
+manifest/request/items 헤더 kind는 `canary-items`다. root map 소비자는 이를 거부한다. 매핑 라이브러리 `h2_items`는 이 kind만 받으며 호출자는 아직 없다.
 items 경로는 session.json과 같은 run의 items.jsonl로 고정하며 추가 환경 경로를 받지 않는다.
 첫 줄은 `{schema:1, run_id, nonce, kind, root, crate, cfg_clippy:true}`이며 나머지는 JSON 배열 레코드다.
 순서는 `[file, lo, hi, kind, path|null, reason|null, display, line, def, parent, def_kind, macro]`다.
@@ -197,6 +198,22 @@ canary는 봉인 후 items를 한 번 읽고 manifest/proof digest를 대조한 
 모든 canary 레코드의 원문 좌표·선언/매크로 호출 범위와 fold·매크로 impl parent를 확인한다.
 BOM/CRLF fixture는 -text이며 원문 byte 보존부터 검사한다. 누락·중복·0개·좌표 드리프트는 canary 실패다.
 필수 Linux canary 동작이 바뀌므로 해당 head의 Linux green이 머지 조건이다. 매핑/도출 전환은 후속 단계다.
+
+### Items 매핑 라이브러리 (비활성)
+`scripts/ci/h2_items.py`는 CI·measure 경로에 연결하지 않은 라이브러리다. 도출 전환과 R-W 소비는 후속 단계가 맡는다.
+load는 봉인 manifest(schema 1, kind `canary-items`)와 request/proof `h2-session/2`만 받는다.
+기대 crate manifest와 request unit, proof unit의 공통 필드·root·`test:false`, nonce·run ID를 대조한다.
+request/proof/items/sidecar/clippy.jsonl은 한 번 읽어 봉인 digest와 대조한 같은 bytes만 파싱하고 다시 열지 않는다.
+items 구조는 runner와 같은 `validate_items`/`item_records`로 검사한다. 0개 레코드·헤더 없는 옛 JSONL·객체 레코드는 실패다.
+원문은 session source state의 git 목록 파일만 읽는다. 모든 레코드에 `hi ≤ 길이`와 lo의 원문 행 = compiler 행을 요구한다.
+읽은 뒤 source state를 재계산해 request와 같아야 한다. 진단 site는 expansion을 끝까지 따라간 호출 위치다.
+site는 unit root 기준 file_name이며 byte_start 행 = line_start, byte_end ≤ 길이여야 한다. 정규화 오프셋은 CRLF/BOM에서 `coord`로 실패한다.
+site를 포함하는 가장 좁은 레코드를 고르며 같은 폭 다른 범위는 `ambiguous:overlap`이다.
+동률은 모든 실행 소유자(fn류·const·anon-const)를 남긴다. header는 소유자의 DefId parent로 증명된 container이거나
+비실행 def_kind일 때만 버리고, 그 밖의 header는 `ambiguous:unproven-header`다.
+실행 소유자가 둘 이상이면 `ambiguous`, 하나면 그 path 또는 등록 불가 사유, 없으면 module-level이다.
+no-item·coord·ambiguous·목록 밖 파일(`unsealed`)·primary span 없음은 예외이며 통과나 0건이 되지 않는다.
+`canary-items`는 현재 세션의 유일한 kind이므로 root 결속은 kind가 아닌 기대 crate unit 대조로 한다.
 
 두 호스트의 결과를 모은 뒤 실행한다:
 
@@ -312,7 +329,7 @@ r9의 15개 ID군을 모두 유지한다(H10의 a/b는 같은 행에 구분).
 | H16 | macro fn의 module 귀속·`<module>` R-W 면제, raw identifier·const/static 내부 item 경로의 선재 한계 | [SourceFile:66/measure:309][items], [rw_problem:274][rw]; 파일 map은 R-W 전체 증명이 아님, 실제 baseline 영향 검증 |
 | H17 | 정상 항등 macro 모듈·hand-written item 재배치도 fail-closed 거부 | [modmap_problems:124][modmap]; 출처 보존 규칙의 보수적 오탐, 컴파일 가능한 모든 Rust 문법 지원 약속 없음 |
 | H18 | hardlink·대소문자 alias의 파일 동치가 realpath만으로 증명되지 않음 | [classify:92/walker_problems:174][aliases]; duplicate_mod와 함께 실측 필요, 미측정을 해결로 세지 않음 |
-| H19 | 두 compiler 패스가 같은 source/target/cfg였는지 입증하는 receipt 부재 | [map_modules:57][collector], [root_lib_depinfo:45][depinfo]; PR-3b 증거 연결 필요, cfg 목록 일치만으로 대체 불가 |
+| H19 | R-O map 패스와 Clippy 패스가 같은 source/target/cfg였는지 입증하는 결속 부재 | [map_modules:57][collector], [root_lib_depinfo:45][depinfo]; items와 Clippy JSON은 같은 호출 세션 manifest로 결속(매핑 비활성), map TSV·`.d` 결속은 3b-A 증거 필요, cfg 목록 일치만으로 대체 불가 |
 
 H15의 RHS 제외는 compiler 수용 조건에 의존한다. 지원하는 key-value 속성의 값은 macro 전개 후 literal이어야 하며,
 정상 doc 값은 문자열이다. item·block·non-literal 전개로 item 선언 권한을 얻을 수 없고, shape helper가 Rust 의미론을 검증하지는 않는다.
