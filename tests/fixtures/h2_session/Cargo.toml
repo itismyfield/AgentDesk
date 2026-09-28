@@ -1,0 +1,18 @@
+[package]
+name = "requested_root"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+members = ["helper", "mac", "other"]
+resolver = "3"
+
+[features]
+default = ["workspace_lib", "workspace_proc"]
+workspace_lib = ["dep:helper"]
+workspace_proc = ["dep:mac"]
+
+[dependencies]
+helper = { path = "helper", optional = true }
+mac = { path = "mac", optional = true }

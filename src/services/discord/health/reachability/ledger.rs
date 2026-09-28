@@ -109,8 +109,8 @@ pub(in crate::services::discord) enum ClassifiedDropReason {
     LedgerCapacity,
 }
 
-/// Monotone observation counters — the 30-day record 4987 §3.4 asks for;
-/// nothing branches on them in this slice.
+/// Cumulative observation history informs coverage completeness without
+/// changing the reachability verdict.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::services::discord) struct LedgerCounters {
     /// Ticks that reached the ledger for this channel.
@@ -255,6 +255,35 @@ pub(in crate::services::discord) fn read_ledger_at(path: &Path) -> Option<Reacha
     serde_json::from_str::<ReachabilityLedger>(&content)
         .ok()
         .filter(|ledger| ledger.schema_version == LEDGER_SCHEMA_VERSION)
+}
+
+/// Read bytes and commit time from one open file so atomic replacement cannot mix observations.
+pub(super) fn read_ledger_snapshot_at(
+    path: &Path,
+) -> (Option<ReachabilityLedger>, bool, Option<u64>) {
+    match fs::File::open(path) {
+        Ok(file) => read_ledger_snapshot_file(file),
+        Err(error) => (None, error.kind() != std::io::ErrorKind::NotFound, None),
+    }
+}
+
+pub(super) fn read_ledger_snapshot_file(
+    mut file: fs::File,
+) -> (Option<ReachabilityLedger>, bool, Option<u64>) {
+    use std::io::Read;
+    let committed_at = file
+        .metadata()
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok());
+    let mut content = String::new();
+    let ledger = file
+        .read_to_string(&mut content)
+        .ok()
+        .and_then(|_| serde_json::from_str::<ReachabilityLedger>(&content).ok())
+        .filter(|ledger| ledger.schema_version == LEDGER_SCHEMA_VERSION);
+    (ledger, true, committed_at)
 }
 
 /// Whether the file exists at all — distinguishes "no ledger yet" from "a

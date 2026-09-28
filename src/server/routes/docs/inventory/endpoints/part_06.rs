@@ -712,7 +712,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/routines/{id}/session/reset",
             "routines",
-            "Reset the provider session for a persistent agent-backed routine. Claude sends /clear; managed tmux providers reset the process session; providers without managed tmux clear runtime mailbox state only.",
+            "Reset the provider session for a persistent agent-backed routine. `session.queue_preserved` is nullable: null means unmeasured, including Reset and remote-owned teardown; it does not assert preservation. Claude sends /clear; managed tmux providers reset the process session; providers without managed tmux clear runtime mailbox state only.",
         )
         .with_params([("id", path_param("Routine id"))])
         .with_example(
@@ -723,7 +723,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/routines/{id}/session/kill",
             "routines",
-            "Force-kill the provider session for a persistent agent-backed routine, disconnect matching session rows, and interrupt the routine's in-flight run when the session actually changes.",
+            "Force-kill the provider session for a persistent agent-backed routine (`session.queue_preserved` is true/false only when measured, otherwise null), disconnect matching session rows, and interrupt the routine's in-flight run when the session actually changes.",
         )
         .with_params([("id", path_param("Routine id"))])
         .with_example(
