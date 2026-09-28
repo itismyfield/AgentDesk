@@ -68,15 +68,17 @@ impl Intervention {
         } else {
             self.source_message_ids.clone()
         };
-        if self.source_message_queued_generations.is_empty() {
-            return source_message_ids
-                .into_iter()
+        let mut owners = if self.source_message_queued_generations.is_empty() {
+            source_message_ids
+                .iter()
+                .copied()
                 .map(|message_id| {
                     SourceMessageQueuedGeneration::new(message_id, self.queued_generation)
                 })
-                .collect();
-        }
-        let mut owners = self.source_message_queued_generations.clone();
+                .collect()
+        } else {
+            self.source_message_queued_generations.clone()
+        };
         for message_id in source_message_ids {
             if !owners.iter().any(|owner| owner.message_id == message_id) {
                 owners.push(SourceMessageQueuedGeneration::new(
@@ -84,6 +86,15 @@ impl Intervention {
                     self.queued_generation,
                 ));
             }
+        }
+        // Legacy sources inherit the row boundary before merging can replace it.
+        let row_enqueued_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_micros())
+            .saturating_sub(self.created_at.elapsed().as_micros())
+            as u64;
+        for owner in &mut owners {
+            owner.enqueued_at_epoch_us.get_or_insert(row_enqueued_us);
         }
         owners
     }

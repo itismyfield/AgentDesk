@@ -50,7 +50,7 @@ pub(super) fn enqueue_with_settlement(
         && should_merge_intervention(&queue[index], &intervention)
         && let Some((provider, channel_id)) = settlement
     {
-        // Settle against the existing enqueue time before a merge replaces it.
+        // Retire already visible completions before appending the new input.
         let mut candidate = queue.split_off(index);
         queue_exit_events.extend(settle_completed_sources(
             &mut candidate,

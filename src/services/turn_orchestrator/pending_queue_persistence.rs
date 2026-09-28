@@ -74,6 +74,8 @@ pub(crate) struct PendingQueueItem {
 pub(crate) struct PendingQueueSourceGeneration {
     pub(crate) message_id: u64,
     pub(crate) queued_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) enqueued_at_epoch_us: Option<u64>,
     #[serde(default)]
     #[serde(skip_serializing_if = "is_false")]
     pub(crate) preserve_on_cancel: bool,
@@ -370,6 +372,7 @@ fn pending_queue_item_from_intervention(
         .map(|owner| PendingQueueSourceGeneration {
             message_id: owner.message_id.get(),
             queued_generation: owner.queued_generation,
+            enqueued_at_epoch_us: owner.enqueued_at_epoch_us,
             preserve_on_cancel: owner.preserve_on_cancel,
         })
         .collect();
@@ -639,14 +642,16 @@ fn pending_queue_item_to_intervention(
             } else {
                 owner.queued_generation
             };
-            if owner.preserve_on_cancel {
+            let mut source = if owner.preserve_on_cancel {
                 SourceMessageQueuedGeneration::user_instruction(
                     MessageId::new(owner.message_id),
                     generation,
                 )
             } else {
                 SourceMessageQueuedGeneration::new(MessageId::new(owner.message_id), generation)
-            }
+            };
+            source.enqueued_at_epoch_us = owner.enqueued_at_epoch_us;
+            source
         })
         .collect();
     if source_message_queued_generations.is_empty() {

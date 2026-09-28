@@ -135,7 +135,7 @@ pub(super) fn purge_active_source_from_queue(
 }
 
 /// Takes the next soft head after dropping sources whose completed-turn ledger commit
-/// is later than the row's enqueue; an earlier commit belongs to a previous episode.
+/// is later than that source's enqueue; an earlier commit belongs to a previous episode.
 pub(super) fn take_unsettled(
     state: &mut super::ChannelMailboxState,
     channel_id: poise::serenity_prelude::ChannelId,
@@ -161,14 +161,18 @@ pub(super) fn settle_completed_sources(
             channel_id.get(),
         )
     });
-    let now_us = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_micros());
     let settled_exits = purge_sources_from_queue(queue, |row, id| {
-        let enqueued_us = now_us.saturating_sub(row.created_at.elapsed().as_micros());
+        let enqueued_us = row
+            .source_message_queued_generations
+            .iter()
+            .find(|source| source.message_id == id)
+            .and_then(|source| source.enqueued_at_epoch_us);
         committed
             .get(&id.get())
-            .is_some_and(|commit_ms| u128::from(*commit_ms) * 1000 > enqueued_us)
+            .zip(enqueued_us)
+            .is_some_and(|(commit_ms, enqueued_us)| {
+                u128::from(*commit_ms) * 1000 > u128::from(enqueued_us)
+            })
     });
     for event in &settled_exits {
         crate::services::observability::record_invariant_check_with_severity(

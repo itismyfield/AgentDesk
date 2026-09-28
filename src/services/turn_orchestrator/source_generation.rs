@@ -4,6 +4,7 @@ use poise::serenity_prelude::MessageId;
 pub(crate) struct SourceMessageQueuedGeneration {
     pub(crate) message_id: MessageId,
     pub(crate) queued_generation: u64,
+    pub(crate) enqueued_at_epoch_us: Option<u64>,
     /// Positive, per-source proof that this queued payload came from a
     /// genuine user instruction. Unmarked sources retain drop-on-exit.
     pub(crate) preserve_on_cancel: bool,
@@ -14,6 +15,7 @@ impl SourceMessageQueuedGeneration {
         Self {
             message_id,
             queued_generation,
+            enqueued_at_epoch_us: None,
             preserve_on_cancel: false,
         }
     }
@@ -22,6 +24,7 @@ impl SourceMessageQueuedGeneration {
         Self {
             message_id,
             queued_generation,
+            enqueued_at_epoch_us: None,
             preserve_on_cancel: true,
         }
     }

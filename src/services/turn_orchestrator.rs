@@ -182,28 +182,8 @@ fn ensure_source_message_ids(intervention: &mut Intervention) {
             .source_message_ids
             .push(intervention.message_id);
     }
-    if intervention.source_message_queued_generations.is_empty() {
-        intervention.source_message_queued_generations = intervention
-            .source_message_ids
-            .iter()
-            .copied()
-            .map(|message_id| {
-                SourceMessageQueuedGeneration::new(message_id, intervention.queued_generation)
-            })
-            .collect();
-    } else {
-        for message_id in &intervention.source_message_ids {
-            if !intervention
-                .source_message_queued_generations
-                .iter()
-                .any(|owner| owner.message_id == *message_id)
-            {
-                intervention.source_message_queued_generations.push(
-                    SourceMessageQueuedGeneration::new(*message_id, intervention.queued_generation),
-                );
-            }
-        }
-    }
+    intervention.source_message_queued_generations =
+        intervention.source_message_queued_generations();
     ensure_source_text_segments(intervention);
 }
 

@@ -419,6 +419,22 @@ async fn an_absorbed_copy_requeued_before_the_claim_is_settled_by_the_merged_del
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_delivered_absorbed_copy_is_settled_before_a_new_input_merges() {
+    absorbed_copy_merge(false, "memory").await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_late_published_completion_settles_each_sources_original_enqueue() {
+    absorbed_copy_merge(true, "memory").await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn late_completion_retains_source_times_through_queue_and_dispatch_restore() {
+    for restore in ["queue", "dispatch"] {
+        absorbed_copy_merge(true, restore).await;
+    }
+}
+
+async fn absorbed_copy_merge(delayed: bool, restore: &str) {
     let _root = scoped_runtime_root();
     let shared = make_shared_data_for_tests();
     let channel_id = ChannelId::new(6_289_400);
@@ -447,6 +463,7 @@ async fn a_delivered_absorbed_copy_is_settled_before_a_new_input_merges() {
     // A catch-up copy of H lands in the dequeue -> claim window.
     let mut copy = queued(h, "absorbed request");
     copy.merge_consecutive = true;
+    copy.created_at -= std::time::Duration::from_secs(2);
     enqueue(&shared, channel_id, copy).await;
     let token = Arc::new(CancelToken::new());
     let nonce = token.turn_nonce().expect("turn nonce").to_owned();
@@ -468,9 +485,47 @@ async fn a_delivered_absorbed_copy_is_settled_before_a_new_input_merges() {
         1,
         "the claim purges only P"
     );
-    deliver_episode(channel_id, p, Some(&nonce));
-    std::thread::sleep(std::time::Duration::from_millis(5));
+    let committed_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        - 1000;
     let k = MessageId::new(6_289_404);
+    completed_turn_ledger::append_before_publish_for_tests(
+        channel_id.get(),
+        k.get(),
+        "earlier-k",
+        committed_ms,
+        || {},
+    )
+    .unwrap();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        completed_turn_ledger::append_before_publish_for_tests(
+            channel_id.get(),
+            p,
+            &nonce,
+            committed_ms,
+            move || {
+                ready_tx.send(()).unwrap();
+                resume_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+            },
+        )
+        .unwrap();
+    });
+    ready_rx.await.unwrap();
+    assert!(
+        !completed_turn_ledger::settled_user_msg_ids(&ProviderKind::Claude, channel_id.get())
+            .contains(&h)
+    );
+    let mut writer = Some(writer);
+    if !delayed {
+        resume_tx.send(()).unwrap();
+        writer.take().unwrap().join().unwrap();
+    }
     let mut fresh = queued(k.get(), "new request");
     fresh.merge_consecutive = true;
     let enqueued = shared
@@ -482,9 +537,31 @@ async fn a_delivered_absorbed_copy_is_settled_before_a_new_input_merges() {
         .await;
     assert!(enqueued.enqueued, "{:?}", enqueued.refusal_reason);
     assert!(enqueued.persistence_error.is_none());
-    mailbox_finish_turn(&shared, &ProviderKind::Claude, channel_id).await;
     drop(taken);
-
+    if restore == "dispatch" {
+        mailbox_finish_turn(&shared, &ProviderKind::Claude, channel_id).await;
+        let pending = actor_take(&shared, channel_id).await;
+        assert_eq!(
+            pending.intervention.as_ref().unwrap().source_message_ids,
+            vec![MessageId::new(h), k]
+        );
+        assert!(pending.queue_exit_events.is_empty());
+    }
+    if delayed {
+        assert!(enqueued.merged);
+        assert!(enqueued.queue_exit_events.is_empty());
+        resume_tx.send(()).unwrap();
+        writer.take().unwrap().join().unwrap();
+    }
+    if restore != "dispatch" {
+        mailbox_finish_turn(&shared, &ProviderKind::Claude, channel_id).await;
+    }
+    let shared = if restore == "memory" {
+        shared
+    } else {
+        drop(shared);
+        make_shared_data_for_tests()
+    };
     let result = actor_take(&shared, channel_id).await;
     assert!(result.persistence_error.is_none());
     let dispatched = result.intervention.expect("the new request must dispatch");
@@ -495,9 +572,13 @@ async fn a_delivered_absorbed_copy_is_settled_before_a_new_input_merges() {
     );
     assert_eq!(dispatched.text, "new request");
     assert_eq!(dispatched.message_id, k);
-    assert!(result.queue_exit_events.is_empty());
-    assert_eq!(enqueued.queue_exit_events.len(), 1);
-    let settled = &enqueued.queue_exit_events[0];
+    let all_exits: Vec<_> = enqueued
+        .queue_exit_events
+        .iter()
+        .chain(&result.queue_exit_events)
+        .collect();
+    assert_eq!(all_exits.len(), 1);
+    let settled = all_exits[0];
     assert_eq!(settled.kind, QueueExitKind::Superseded);
     assert_eq!(
         settled.intervention.source_message_ids,
@@ -718,4 +799,122 @@ async fn pre_merge_settlement_rolls_back_when_queue_persistence_fails() {
         drained.intervention.unwrap().source_message_ids,
         vec![MessageId::new(k)]
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn restart_first_enqueue_settles_unfinished_disk_copy() {
+    for marker in [false, true] {
+        for observed in [false, true] {
+            let _root = scoped_runtime_root();
+            let channel = ChannelId::new(6_289_700);
+            let (h, k) = (6_289_701, 6_289_702);
+            let shared = make_shared_data_for_tests();
+            let mut copy = queued(h, "answered copy");
+            copy.created_at -= std::time::Duration::from_secs(2);
+            copy.merge_consecutive = true;
+            enqueue(&shared, channel, copy).await;
+            if marker {
+                assert!(actor_take(&shared, channel).await.intervention.is_some());
+            }
+            completed_turn_ledger::append_completed_turn(&ProviderKind::Claude, channel.get(), h);
+            drop(shared);
+            let shared = make_shared_data_for_tests();
+            let observation = observed.then(|| {
+                crate::services::turn_orchestrator::ChannelMailboxSnapshot::no_actor(channel)
+                    .claim_observation
+            });
+            let mut fresh = queued(k, "new request");
+            fresh.merge_consecutive = true;
+            let result = shared
+                .mailbox(channel)
+                .enqueue_observed(
+                    fresh,
+                    queue_persistence_context(&shared, &ProviderKind::Claude, channel),
+                    observation,
+                )
+                .await;
+            assert!(result.enqueued && result.persistence_error.is_none());
+            assert_eq!(result.queue_exit_events.len(), 1);
+            assert_eq!(result.queue_exit_events[0].kind, QueueExitKind::Superseded);
+            assert_eq!(
+                result.queue_exit_events[0].intervention.source_message_ids,
+                vec![MessageId::new(h)]
+            );
+            let memory = mailbox_snapshot(&shared, channel).await.intervention_queue;
+            assert_eq!(memory.len(), 1);
+            assert_eq!(memory[0].source_message_ids, vec![MessageId::new(k)]);
+            assert_eq!(disk_queue_ids(&shared, channel), vec![k]);
+            let next = actor_take(&shared, channel).await;
+            assert!(next.queue_exit_events.is_empty());
+            assert_eq!(
+                next.intervention.unwrap().source_message_ids,
+                vec![MessageId::new(k)]
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_source_times_fall_back_to_the_row_episode_boundary() {
+    for settled in [false, true] {
+        for missing_owners in [false, true] {
+            let root = scoped_runtime_root();
+            let shared = make_shared_data_for_tests();
+            let channel = ChannelId::new(6_289_800);
+            let h = 6_289_801;
+            let committed_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+                - 2000;
+            let mut old = queued(h, "legacy row");
+            old.created_at -= std::time::Duration::from_secs(if settled { 4 } else { 1 });
+            enqueue(&shared, channel, old).await;
+            let path = root
+                .temp
+                .path()
+                .join("runtime/discord_pending_queue/claude")
+                .join(&shared.token_hash)
+                .join(format!("{}.json", channel.get()));
+            let mut rows: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            if missing_owners {
+                rows[0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("source_message_queued_generations");
+            } else {
+                for owner in rows[0]["source_message_queued_generations"]
+                    .as_array_mut()
+                    .unwrap()
+                {
+                    owner
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("enqueued_at_epoch_us");
+                }
+            }
+            std::fs::write(&path, serde_json::to_vec(&rows).unwrap()).unwrap();
+            completed_turn_ledger::append_before_publish_for_tests(
+                channel.get(),
+                h,
+                "old",
+                committed_ms,
+                || {},
+            )
+            .unwrap();
+            drop(shared);
+            let restored = make_shared_data_for_tests();
+            let result = actor_take(&restored, channel).await;
+            assert_eq!(result.intervention.is_none(), settled);
+            assert_eq!(
+                exits(&result),
+                if settled {
+                    vec![(h, QueueExitKind::Superseded)]
+                } else {
+                    vec![]
+                }
+            );
+        }
+    }
 }
