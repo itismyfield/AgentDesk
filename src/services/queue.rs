@@ -1,3 +1,46 @@
+#[cfg(test)]
+use crate::services::turn_orchestrator::{
+    ChannelMailboxHandle, Intervention, QueuePersistenceContext,
+};
+#[cfg(test)]
+use std::{
+    collections::HashMap,
+    sync::{LazyLock, Mutex},
+};
+
+#[cfg(test)]
+static PRE_PURGE_HOOK_FOR_TESTS: LazyLock<Mutex<HashMap<ChannelId, (Vec<Intervention>, String)>>> =
+    LazyLock::new(Default::default);
+
+#[cfg(test)]
+pub(crate) fn set_pre_purge_hook_for_test(
+    channel: ChannelId,
+    items: Vec<Intervention>,
+    token: &str,
+) {
+    PRE_PURGE_HOOK_FOR_TESTS
+        .lock()
+        .unwrap()
+        .insert(channel, (items, token.into()));
+}
+
+#[cfg(test)]
+async fn run_pre_purge_hook_for_test(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    handle: &ChannelMailboxHandle,
+) {
+    let entry = PRE_PURGE_HOOK_FOR_TESTS.lock().unwrap().remove(&channel);
+    if let Some((items, token)) = entry {
+        handle
+            .replace_queue(items, QueuePersistenceContext::new(provider, &token, None))
+            .await;
+    }
+}
+
+use crate::services::turn_cancel_queue_guard::{
+    CancelRemovalWitness, PurgeCounts, disk_queue_lost,
+};
 use std::sync::Arc;
 
 use axum::{Json, http::HeaderMap};
@@ -14,25 +57,7 @@ use crate::services::turn_lifecycle::{
 };
 use poise::serenity_prelude::ChannelId;
 
-/// #1672 P2: shared post-cancel drain helper used by both the
-/// `/turns/{channel_id}/cancel` and `/dispatches/{id}/cancel` queue-api
-/// surfaces. Whenever a cancel goes through the *preserve* path (queue
-/// stays put, watcher stays alive) the channel becomes idle while
-/// `pending_queue` items are still on disk — without an explicit drain
-/// kick the next intervention only runs after a fresh user message
-/// arrives. This helper centralises the call so the two cancel
-/// entry-points cannot drift apart.
-///
-/// codex review round-4 P2-2 (#1672): returns the post-hydrate queue
-/// depth so the cancel response builders can publish a
-/// `queued_remaining` value that reflects the post-drain state. The
-/// `cancel_turn` flow runs the lifecycle finalizer *before* this
-/// helper, so the lifecycle's `queue_depth_after` is taken at a
-/// moment when the in-memory mailbox is intentionally empty
-/// (queue lives only on disk while the cancel preserves it). Without
-/// this re-measurement the API surface reports `queued_remaining: 0`
-/// even though the mailbox is repopulated within a tick of the
-/// response being built.
+/// Schedule preserved work and return only the depth observed after the drain attempt.
 async fn schedule_post_cancel_queue_drain(
     health_registry: Option<&Arc<HealthRegistry>>,
     target: &TurnLifecycleTarget,
@@ -48,29 +73,16 @@ async fn schedule_post_cancel_queue_drain(
         reason,
     )
     .await;
-    Some(outcome.queue_depth_after)
+    outcome.queue_depth_after
 }
 
-/// #2706: force-path queue purge. Empties the in-memory channel mailbox
-/// atomically via `ChannelMailboxHandle::purge_queue`, persisting an empty
-/// queue to disk in the same actor step. Returns the number of intervention
-/// entries that were dropped.
-///
-/// The default preserve path uses `schedule_post_cancel_queue_drain` which
-/// *hydrates* the disk-backed queue back into the mailbox. That is the
-/// opposite of what `force=true` callers want — they reach for force
-/// specifically to clear stale drafts so the next dispatch is not blocked
-/// by a 45s `wait_for_prompt_ready` timeout.
-///
-/// A force cancel must still work when the live session row is already gone.
-/// With a live mailbox actor, disk cleanup is serialized inside
-/// `PurgeQueue`; without one, remove the persisted queue file for this
-/// channel directly across the provider's token namespaces.
+/// Purge through the actor and retain its measured removal counts and post-rollback depth.
+/// Without a live handle, only sweep persisted channel files across token namespaces.
 pub(super) async fn force_purge_channel_mailbox(
     health_registry: Option<&Arc<HealthRegistry>>,
     target: &TurnLifecycleTarget,
     session_key: Option<&str>,
-) -> Option<usize> {
+) -> Option<PurgeCounts> {
     let provider = target.provider.as_ref()?;
     let channel_id = target.channel_id?;
     let Some(handle) =
@@ -86,7 +98,12 @@ pub(super) async fn force_purge_channel_mailbox(
             disk_files_removed,
             "force purge found no live mailbox handle"
         );
-        return Some(0);
+        return Some(PurgeCounts {
+            drained: 0,
+            disk_files_removed,
+            own_files_removed: Some(0),
+            queue_len_after: 0,
+        });
     };
     let token_hash = session_key
         .and_then(SessionIdentity::parse)
@@ -102,7 +119,9 @@ pub(super) async fn force_purge_channel_mailbox(
     // `active_user_message_id`. The handler only clears an anchor whose token
     // is already `cancelled` (the force-kill above flipped it), so a fresh
     // turn that raced in after the kill keeps its anchor (#2706).
-    let purge = handle.purge_queue(persistence, true).await;
+    #[cfg(test)]
+    run_pre_purge_hook_for_test(provider, channel_id, &handle).await;
+    let purge = handle.try_purge_queue(persistence, true).await.ok()?;
     let purged = purge.drained;
     tracing::info!(
         provider = provider.as_str(),
@@ -130,7 +149,7 @@ pub(super) async fn force_purge_channel_mailbox(
             "force purge finalized cancelled active mailbox turn"
         );
     }
-    Some(purged)
+    Some(purge.into())
 }
 
 #[derive(Clone)]
@@ -295,9 +314,9 @@ impl QueueService {
                     turn_completed_at = Some(finalizer.completed_at.to_rfc3339());
                     turn_lifecycle_path = Some(lifecycle.lifecycle_path);
                     turn_tmux_killed = Some(lifecycle.tmux_killed);
-                    turn_queue_preserved = Some(lifecycle.queue_preserved);
+                    turn_queue_preserved = lifecycle.queue_preserved;
                     turn_inflight_cleared = Some(lifecycle.inflight_cleared);
-                    turn_queued_remaining = lifecycle.queue_depth;
+                    turn_queued_remaining = lifecycle.queue_depth_if_observed();
                     drain_target = Some(target);
                 }
 
@@ -327,27 +346,14 @@ impl QueueService {
                         .with_context("dispatch_id", dispatch_id)
                     })?;
 
-                // #1672 P2: with the active turn cancelled and the
-                // dispatch row finalized, kick the deferred idle-queue
-                // drain so any preserved pending_queue items resume
-                // without waiting for the next user message — mirrors
-                // the `/turns/{channel_id}/cancel` (preserve) surface.
-                //
-                // codex review round-4 P2-2 (#1672): also fold the
-                // post-hydrate depth back into `turn_queued_remaining`
-                // so the response advertises the mailbox state that
-                // the channel is actually in once the deferred drain
-                // is queued.
+                // A refused drain invalidates an earlier depth observation too.
                 if let Some(target) = drain_target.as_ref() {
-                    if let Some(post_depth) = schedule_post_cancel_queue_drain(
+                    turn_queued_remaining = schedule_post_cancel_queue_drain(
                         health_registry,
                         target,
                         "queue_api_cancel_dispatch",
                     )
-                    .await
-                    {
-                        turn_queued_remaining = Some(post_depth);
-                    }
+                    .await;
                 }
 
                 tracing::info!("[queue-api] Cancelled dispatch {dispatch_id}");
@@ -662,49 +668,31 @@ impl QueueService {
             .clone()
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| tmux_name.clone());
-        let lifecycle_queued_remaining = lifecycle.queue_depth_after.or(lifecycle.queue_depth);
-
-        // #1672: with the cancel completed and the channel idle, kick
-        // any survived pending_queue items so the next intervention is
-        // picked up without needing a fresh user message to drive the
-        // mailbox poll.
-        //
-        // codex review round-4 P2-2 (#1672): the lifecycle's
-        // `queue_depth_after` is captured *before* the disk-backed
-        // queue gets re-hydrated into the in-memory mailbox, so for
-        // the preserve path it is typically `0` even when the cancel
-        // response is about to deliver a non-empty queue back to the
-        // channel. Use the post-hydrate depth from the drain helper
-        // instead so `queued_remaining` matches what the next
-        // intervention sees.
-        // #2706: force=true must also purge the in-memory channel mailbox so
-        // the next dispatch is not stuck behind stale queued drafts. The
-        // default preserve branch re-hydrates the disk queue back into the
-        // mailbox; force is the opposite operation.
-        let queue_purged_count = if force {
+        let queue_purge = if force {
             force_purge_channel_mailbox(health_registry, &target, session_key.as_deref()).await
         } else {
             None
         };
-        let queued_remaining = if !force {
+        let drain_depth = if !force {
             schedule_post_cancel_queue_drain(health_registry, &target, "queue_api_cancel_turn")
                 .await
-                .or(lifecycle_queued_remaining)
-        } else if queue_purged_count.is_some() {
-            Some(0)
         } else {
-            lifecycle_queued_remaining
+            None
         };
-
-        // #5176 R3: name what this cancel took, with the message text, so the
-        // removal is recoverable by hand instead of vanishing. The `reason`
-        // separates an operator's deliberate purge from a preserve cancel that
-        // lost something anyway, so the rows can be told apart later.
         let loss = crate::services::turn_cancel_queue_guard::record_queue_loss_after_cancel(
             &target,
             &queue_capture,
             self.pg_pool.as_ref(),
-            lifecycle.queue_disk_present_before && !lifecycle.queue_disk_present_after,
+            if force {
+                CancelRemovalWitness::Purge(queue_purge)
+            } else {
+                CancelRemovalWitness::Preserve {
+                    disk_lost: disk_queue_lost(
+                        lifecycle.queue_disk_present_before,
+                        lifecycle.queue_disk_present_after,
+                    ),
+                }
+            },
             if force {
                 "queue_api_cancel_turn_force"
             } else {
@@ -712,14 +700,17 @@ impl QueueService {
             },
         )
         .await;
-        // The drain is the documented source of truth, so it keeps precedence.
-        // The guard's depth only fills a gap the drain left empty: it comes from
-        // a mailbox that cannot distinguish "never answered" from "empty"
-        // (#6046), which is fine as a fallback and wrong as an override.
-        let queued_remaining = queued_remaining.or(loss.queue_depth_after);
+        // Publish only measurements after the final queue mutation attempt.
+        let queued_remaining = if force {
+            loss.queue_depth_after
+                .or(queue_purge.as_ref().map(|c| c.queue_len_after))
+        } else {
+            drain_depth.or(loss.queue_depth_after)
+        };
+        let queue_purged_count = queue_purge.as_ref().map(|c| c.drained);
 
         tracing::info!(
-            "[queue-api] Cancelled turn: channel={}, session={:?}, tmux={}, killed={}, dispatch={:?}, lifecycle={}, agent={:?}, requested_provider={:?}, exact_match={}, queue_preserved={}, queued_before={:?}, queued_after={:?}, queue_disk_before={}, queue_disk_after={}, queue_purged={:?}, mailbox_foreground_free={:?}, queue_dropped_message_ids={:?}",
+            "[queue-api] Cancelled turn: channel={}, session={:?}, tmux={}, killed={}, dispatch={:?}, lifecycle={}, agent={:?}, requested_provider={:?}, exact_match={}, queue_preserved={:?}, queued_before={:?}, queued_after={:?}, queue_disk_before={:?}, queue_disk_after={:?}, queue_purged={:?}, mailbox_foreground_free={:?}, queue_dropped_message_ids={:?}",
             channel_id,
             session_key,
             reported_tmux_session,
@@ -765,9 +756,7 @@ impl QueueService {
             // Discord message id. Empty is the contract; non-empty is a bug
             // report the operator can act on.
             "queue_dropped_message_ids": lifecycle.queue_dropped_message_ids,
-            // #5176 R3: whether every message this cancel removed got a durable
-            // record. `false` is the contract violation itself. `null` means a
-            // queue it could have emptied was never read, so it cannot answer.
+            // True proves no removal; recorded removals remain unknown, and any unrecorded loss is false.
             "queue_dead_lettered_message_ids": loss.dead_lettered_message_ids,
             "queue_unpreserved_message_ids": loss.unpreserved_message_ids,
             "queue_loss_recorded": loss.loss_recorded(),
@@ -943,7 +932,7 @@ mod tests {
 
             let purged = force_purge_channel_mailbox(None, &target, None).await;
 
-            assert_eq!(purged, Some(1));
+            assert_eq!(purged.map(|c| c.drained), Some(1));
             assert!(handle.snapshot().await.intervention_queue.is_empty());
         });
     }
@@ -1000,7 +989,7 @@ mod tests {
             };
             let purged = force_purge_channel_mailbox(None, &target, None).await;
 
-            assert_eq!(purged, Some(1));
+            assert_eq!(purged.map(|c| c.drained), Some(1));
             assert!(handle.snapshot().await.intervention_queue.is_empty());
             let later_dispatch = handle.take_next_soft(persistence).await;
             assert!(

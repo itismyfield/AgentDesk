@@ -1042,6 +1042,11 @@ pub(crate) struct SharedData {
 pub(crate) use session_transition::{SESSION_TRANSITION_LOCK_WAIT_TIMEOUT, SessionTransitionBusy};
 
 impl SharedData {
+    #[cfg(test)]
+    pub(crate) fn queue_fixture_parts(&self) -> (&ChannelMailboxRegistry, &str) {
+        (&self.mailboxes, &self.token_hash)
+    }
+
     pub(super) fn has_runtime_storage(&self) -> bool {
         self.pg_pool.is_some()
     }
@@ -1208,7 +1213,7 @@ impl SharedData {
 }
 
 #[cfg(test)]
-pub(super) fn make_shared_data_for_tests() -> Arc<SharedData> {
+pub(crate) fn make_shared_data_for_tests() -> Arc<SharedData> {
     make_shared_data_for_tests_with_storage(None)
 }
 
