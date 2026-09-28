@@ -345,7 +345,7 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
         }
     }
 
-    // Version mix and in-window totals; timeless rows take their storage time.
+    // Version mix and in-window totals.
     let window = Duration::seconds(MATCH_WINDOW.as_secs() as i64);
     let late = t1 + window * 2;
     // Units and Legacy rows near t1 are judged only after two match windows.
@@ -354,26 +354,58 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
             "reported before {late}, when the last diffs are judged"
         ));
     }
-    // Evidence is dated when read, so the run that read WindowStart must keep reading until `late`.
+    // Evidence is dated when read, so one run must read from t0 until `late` without restarting.
     let opened = starts.first().map_or(records.len(), |(line, ..)| *line);
     let header_at = |i: &usize| matches!(records[*i], ShadowRecord::Header { .. });
-    let run = (0..opened).rev().find(header_at).unwrap_or(0);
+    let run = (0..opened).rev().find(header_at);
     let end = (opened..records.len())
         .find(header_at)
         .unwrap_or(records.len());
-    if records[end..]
-        .iter()
-        .any(|r| matches!(r, ShadowRecord::Header { started_at, .. } if *started_at <= late))
-    {
+    // A start is timed by its own clock and its line's, so neither order nor skew hides it.
+    let began = |i: usize| match &input.records[i] {
+        StoredRecord {
+            at,
+            record: ShadowRecord::Header { started_at, .. },
+        } => Some(((*at).min(*started_at), (*at).max(*started_at))),
+        _ => None,
+    };
+    if run.and_then(began).is_none_or(|(_, last)| last > t0) {
+        failures.push("observer run that read window_start began after t0".into());
+    }
+    let restarted = (0..records.len())
+        .filter(|i| Some(*i) != run)
+        .filter_map(|i| Some((i, began(i)?)))
+        .any(|(i, (first, last))| first <= late && (last >= t0 || i > opened));
+    if restarted {
         failures.push(format!(
             "observer restarted before {late}; work in flight was lost"
+        ));
+    }
+    let run = run.unwrap_or(0);
+    let stall = Duration::seconds(3 * CHECKPOINT_SECS);
+    // Captures held for the window derive on the pass after its line, so untimed ones land by `late`.
+    let reach = late - stall * 2;
+    if let Some(recorded) = starts.first().map(|(line, ..)| input.records[*line].at)
+        && !(t0..=reach).contains(&recorded)
+    {
+        failures.push(format!(
+            "window_start recorded at {recorded}, outside [t0, {reach}]"
+        ));
+    }
+    // The derive keeps the first window it applies and takes extents from later ones.
+    let others = (run..end)
+        .filter(|i| *i != opened && input.records[*i].at <= late)
+        .filter(|i| matches!(records[*i], ShadowRecord::WindowStart { .. }))
+        .count();
+    if others > 0 {
+        failures.push(format!(
+            "observer run applied {others} other window_start before {late}"
         ));
     }
     let checkpoints: Vec<DateTime<Utc>> = (input.records[run..end].iter())
         .filter(|s| matches!(s.record, ShadowRecord::TapGap { .. }))
         .map(|s| s.at)
         .collect();
-    let stall = Duration::seconds(3 * CHECKPOINT_SECS);
     let continuous = checkpoints
         .first()
         .is_some_and(|first| *first <= t0 + stall)
@@ -385,6 +417,7 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
         ));
     }
     let (mut header, mut stale, mut collected, mut lost) = (None, 0, None, false);
+    let mut halted = 0;
     let mut metrics = MetricsSnapshot::default();
     let mut classes: HashMap<&UnitKey, DiffClass> = HashMap::new();
     let mut window_diffs: Vec<&DiffRecord> = Vec::new();
@@ -398,7 +431,7 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
         {
             header = Some((*schema_version, *identity_version));
         }
-        let at = record_time(record, &units, &legacy).unwrap_or(line.at);
+        let at = record_time(record, &units, &legacy);
         if let ShadowRecord::Diff { diff } = record {
             if let Some(key) = &diff.unit_key {
                 classes.insert(key, diff.class);
@@ -406,17 +439,20 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
         }
         // A loss happened after the previous collection; it may hide events window units are
         // judged on when that span meets `[t0 - W, late]`.
-        let in_window = match record {
-            ShadowRecord::TapGap { .. } => {
+        let in_window = match (record, at) {
+            (ShadowRecord::TapGap { .. }, _) => {
                 lost = collected.is_none_or(|previous| previous < late) && line.at >= t0 - window;
                 collected = Some(line.at);
                 lost
             }
-            ShadowRecord::Diff { diff } if diff.class == DiffClass::TapGap => lost,
-            _ => t0 <= at && at <= t1,
+            (ShadowRecord::Diff { diff }, _) if diff.class == DiffClass::TapGap => lost,
+            (_, Some(at)) => t0 <= at && at <= t1,
+            // Untimed evidence counts wherever a read from the window could have been stored.
+            (_, None) => t0 - window <= line.at && line.at <= late,
         };
         if in_window {
             stale += usize::from(header != Some((SCHEMA_VERSION, IDENTITY_VERSION)));
+            halted += usize::from(matches!(record, ShadowRecord::Anomaly { .. }));
             metrics.record(record);
             if let ShadowRecord::Diff { diff } = record {
                 window_diffs.push(diff);
@@ -583,8 +619,24 @@ pub fn evaluate(input: &ReportInput) -> ReportOutcome {
         .collect::<HashSet<_>>()
         .len();
     let windowless = uncounted.get("no_window").copied().unwrap_or(0) as u64;
+    // A window Legacy message is settled once a diff names it or it retired deleted.
+    let settled: HashSet<u64> = (records.iter())
+        .flat_map(|r| match r {
+            ShadowRecord::Diff { diff } => diff.legacy_msg_ids.clone(),
+            ShadowRecord::Legacy { msg } if msg.deleted => vec![msg.msg_id],
+            _ => Vec::new(),
+        })
+        .collect();
+    let open = (legacy.iter())
+        .filter(|(id, at)| (t0..=t1).contains(*at) && !settled.contains(*id))
+        .count();
     for (count, what) in [
         (undecided as u64, "window units without a terminal diff"),
+        (
+            open as u64,
+            "window Legacy messages without a terminal diff",
+        ),
+        (halted as u64, "capture anomalies that halted a source"),
         (unsealed as u64, "units of counted turns never sealed"),
         (
             windowless,
