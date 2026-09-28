@@ -57,6 +57,10 @@ pub fn extract_claude_transcript_user_prompt(json: &Value) -> Option<String> {
     extract_claude_transcript_user_prompt_with_entry_id(json).map(|(prompt, _)| prompt)
 }
 
+pub(crate) fn is_claude_compact_summary(json: &Value) -> bool {
+    json.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
+}
+
 /// #3540: same extraction as [`extract_claude_transcript_user_prompt`], but also
 /// returns the JSONL entry's STABLE identity (`uuid`) when present.
 ///
@@ -88,6 +92,7 @@ pub fn extract_claude_transcript_user_prompt_with_entry_id(
         .get("isMeta")
         .and_then(Value::as_bool)
         .is_some_and(|is_meta| is_meta)
+        || is_claude_compact_summary(json)
     {
         return None;
     }

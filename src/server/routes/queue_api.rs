@@ -388,6 +388,290 @@ mod cancel_queue_preserve_pg_tests {
     const AUTH_TOKEN: &str = "cancel-queue-preserve-test-token";
     const QUEUED_TEXT: &str = "the instruction #5176 threw away";
 
+    #[tokio::test]
+    async fn queue_truth_recorded_preserve_removal_is_still_unknown_pg() {
+        let temp = tempfile::tempdir().unwrap();
+        let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let channel = ChannelId::new(6038769);
+        let handle = seed_queued_message(channel, 42).await;
+        let target = crate::services::turn_lifecycle::TurnLifecycleTarget {
+            provider: Some(ProviderKind::Claude),
+            channel_id: Some(channel),
+            tmux_name: String::new(),
+        };
+        let capture =
+            crate::services::turn_cancel_queue_guard::capture_queue_before_cancel(&target).await;
+        handle
+            .try_purge_queue(
+                QueuePersistenceContext::new(&ProviderKind::Claude, "", None),
+                true,
+            )
+            .await
+            .unwrap();
+        let outcome = crate::services::turn_cancel_queue_guard::record_queue_loss_after_cancel(
+            &target,
+            &capture,
+            Some(&pool),
+            crate::services::turn_cancel_queue_guard::CancelRemovalWitness::Preserve {
+                disk_lost: Some(false),
+            },
+            "queue_truth_removed",
+        )
+        .await;
+        assert_eq!(outcome.dead_lettered_message_ids, [42]);
+        assert_eq!(outcome.loss_recorded(), None);
+        assert!(dead_letter_row(&pool, channel.get()).await.is_some());
+        pool.close().await;
+        db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn queue_truth_dispatch_cancel_serializes_unknown_pg() {
+        dispatch_cancel_observation(None).await;
+    }
+
+    #[tokio::test]
+    async fn queue_truth_dispatch_hydration_unreachable_pg() {
+        dispatch_cancel_observation(Some(
+            crate::services::turn_orchestrator::registry_purge::MailboxRefusal::Unreachable,
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn queue_truth_dispatch_hydration_closed_pg() {
+        dispatch_cancel_observation(Some(
+            crate::services::turn_orchestrator::registry_purge::MailboxRefusal::Closed,
+        ))
+        .await;
+    }
+
+    async fn dispatch_cancel_observation(
+        refusal: Option<crate::services::turn_orchestrator::registry_purge::MailboxRefusal>,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        seed_cancel_target(&pool, 6038770).await;
+        sqlx::query("INSERT INTO task_dispatches (id, title, dispatch_type, status) VALUES ('queue-truth', 'cancel', 'implementation', 'dispatched')").execute(&pool).await.unwrap();
+        sqlx::query(
+            "UPDATE sessions SET active_dispatch_id = 'queue-truth' WHERE channel_id = '6038770'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut state = test_state(pool.clone());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let (mailboxes, token) = shared.queue_fixture_parts();
+        let channel = ChannelId::new(6038770);
+        let attempts = if let Some(refusal) = refusal {
+            crate::services::turn_orchestrator::save_channel_queue(
+                &ProviderKind::Claude,
+                token,
+                channel,
+                &[queued_user_message(42)],
+                None,
+            )
+            .unwrap();
+            let attempts =
+                mailboxes.insert_snapshot_only_for_test(channel, Default::default(), refusal);
+            let registry = crate::services::discord::health::HealthRegistry::new();
+            registry.register("claude".into(), shared.clone()).await;
+            state.health_registry = Some(Arc::new(registry));
+            Some(attempts)
+        } else {
+            None
+        };
+        let app = domains::ops::router(state.clone()).with_state(state);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/dispatches/queue-truth/cancel")
+            .header(header::AUTHORIZATION, format!("Bearer {AUTH_TOKEN}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap())
+                .unwrap();
+        assert_eq!(body["active_turn_cancelled"], true);
+        mailboxes.remove_fixture_for_test(channel);
+        if let Some(attempts) = attempts {
+            let closed = refusal
+                == Some(crate::services::turn_orchestrator::registry_purge::MailboxRefusal::Closed);
+            assert_eq!(
+                attempts.load(std::sync::atomic::Ordering::SeqCst),
+                if closed { 3 } else { 1 }
+            );
+            assert_eq!(body["turn_queue_preserved"], true);
+            let disk = crate::services::turn_orchestrator::load_channel_pending_queue_for_tests(
+                &ProviderKind::Claude,
+                token,
+                channel,
+            )
+            .0;
+            assert_eq!(
+                disk.iter().map(|x| x.message_id.get()).collect::<Vec<_>>(),
+                [42]
+            );
+        } else {
+            assert_explicit_null(&body, "turn_queue_preserved");
+        }
+        assert_explicit_null(&body, "turn_queued_remaining");
+        pool.close().await;
+        db.drop().await;
+    }
+
+    async fn registered_app(
+        pool: &sqlx::PgPool,
+        shared: &Arc<crate::services::discord::SharedData>,
+    ) -> Router {
+        let registry = crate::services::discord::health::HealthRegistry::new();
+        registry.register("claude".into(), shared.clone()).await;
+        let mut state = test_state(pool.clone());
+        state.health_registry = Some(Arc::new(registry));
+        domains::runtime::router(state.clone()).with_state(state)
+    }
+
+    #[tokio::test]
+    async fn queue_truth_cancel_observation_rows_pg() {
+        use crate::services::discord::{make_shared_data_for_tests, runtime_store};
+        use crate::services::turn_orchestrator::{
+            load_channel_pending_queue_for_tests, registry_purge::MailboxRefusal,
+            save_channel_queue,
+        };
+        for (i, row) in [
+            "dead",
+            "drop",
+            "hydrate-drop",
+            "hydrate-closed",
+            "purge-empty",
+            "purge-queued",
+            "rollback",
+            "stat",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let temp = tempfile::tempdir().unwrap();
+            let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+            let db = TestPostgresDb::create().await;
+            let pool = db.connect_and_migrate().await;
+            let shared = make_shared_data_for_tests();
+            let channel = ChannelId::new(6038750 + i as u64);
+            seed_cancel_target(&pool, channel.get()).await;
+            let (mailboxes, token) = shared.queue_fixture_parts();
+            let handle = mailboxes.handle(channel);
+            let provider = ProviderKind::Claude;
+            let persistence = QueuePersistenceContext::new(&provider, "other", None);
+            if row == "purge-queued" || row == "stat" {
+                handle
+                    .replace_queue(vec![queued_user_message(42)], persistence)
+                    .await;
+            }
+            let snapshot = handle.snapshot().await;
+            let refusal = if row == "hydrate-closed" {
+                MailboxRefusal::Closed
+            } else {
+                MailboxRefusal::Unreachable
+            };
+            let attempts = if row.starts_with("hydrate") || row.starts_with("purge") {
+                Some(mailboxes.insert_snapshot_only_for_test(channel, snapshot, refusal))
+            } else {
+                None
+            };
+            if row == "dead" {
+                mailboxes.insert_unreachable_for_test(channel);
+            }
+            if row == "drop" {
+                mailboxes.insert_reply_dropping_for_test(channel);
+            }
+            if row.starts_with("hydrate") {
+                save_channel_queue(&provider, token, channel, &[queued_user_message(42)], None)
+                    .unwrap();
+            }
+            let parent = runtime_store::discord_pending_queue_root()
+                .unwrap()
+                .join("claude");
+            if row == "stat" {
+                std::fs::create_dir_all(&parent).unwrap();
+                std::fs::write(parent.join(token), b"not a directory").unwrap();
+            }
+            if row == "rollback" {
+                std::fs::create_dir_all(parent.join(format!("{}.json", channel.get()))).unwrap();
+                crate::services::queue::set_pre_purge_hook_for_test(
+                    channel,
+                    vec![queued_user_message(42)],
+                    "tokB",
+                );
+            }
+            let app = if row == "purge-queued" {
+                test_router(pool.clone())
+            } else {
+                registered_app(&pool, &shared).await
+            };
+            let force = row.starts_with("purge") || row == "rollback";
+            let (status, body) = post_cancel(&app, channel.get(), force).await;
+            mailboxes.remove_fixture_for_test(channel);
+            assert_eq!(status, StatusCode::OK, "{row}: {body}");
+            if row == "dead" || row == "drop" {
+                for key in [
+                    "queued_remaining",
+                    "queued_before",
+                    "queue_preserved",
+                    "queue_disk_present_before",
+                    "queue_disk_present_after",
+                    "queue_loss_recorded",
+                ] {
+                    assert_explicit_null(&body, key);
+                }
+            } else if row.starts_with("hydrate") {
+                let expected_attempts = if refusal == MailboxRefusal::Closed {
+                    3
+                } else {
+                    1
+                };
+                assert_eq!(
+                    attempts.unwrap().load(std::sync::atomic::Ordering::SeqCst),
+                    expected_attempts,
+                    "{row}"
+                );
+                assert_explicit_null(&body, "queued_remaining");
+                assert_eq!(body["queue_disk_present_after"], true, "{row}");
+                assert_eq!(body["queue_loss_recorded"], true, "{row}");
+                let disk = load_channel_pending_queue_for_tests(&provider, token, channel).0;
+                assert_eq!(
+                    disk.iter().map(|x| x.message_id.get()).collect::<Vec<_>>(),
+                    [42]
+                );
+            } else {
+                assert_explicit_null(&body, "queue_loss_recorded");
+                if row == "stat" {
+                    assert_explicit_null(&body, "queue_disk_present_before");
+                } else {
+                    if row == "rollback" {
+                        assert_eq!(body["queue_purged"], 0);
+                    } else {
+                        assert_explicit_null(&body, "queue_purged");
+                    }
+                    if row == "purge-empty" {
+                        assert_explicit_null(&body, "queued_remaining");
+                    } else {
+                        assert_eq!(
+                            body["queued_remaining"], 1,
+                            "{row}: depth must be 1, never inferred 0: {body}"
+                        );
+                    }
+                }
+            }
+            pool.close().await;
+            db.drop().await;
+        }
+    }
+
     fn test_state(pool: sqlx::PgPool) -> AppState {
         let mut config = crate::config::Config::default();
         config.server.auth_token = Some(AUTH_TOKEN.to_string());
@@ -543,8 +827,9 @@ mod cancel_queue_preserve_pg_tests {
             "force cancel must name the purged instruction: {body}"
         );
         assert_eq!(
-            body["queue_loss_recorded"], true,
-            "a purge with a durable record is not a silent loss: {body}"
+            body.get("queue_loss_recorded"),
+            Some(&Value::Null),
+            "recorded captured losses do not prove complete removal coverage: {body}"
         );
         assert!(
             handle.snapshot().await.intervention_queue.is_empty(),
@@ -576,8 +861,9 @@ mod cancel_queue_preserve_pg_tests {
         assert_eq!(status, StatusCode::OK, "cancel response: {body}");
 
         assert_eq!(
-            body["queue_loss_recorded"], true,
-            "nothing was removed, so nothing was lost: {body}"
+            body.get("queue_loss_recorded"),
+            Some(&Value::Null),
+            "unmeasured disk cannot prove no removal: {body}"
         );
         assert_eq!(
             body["queue_dead_lettered_message_ids"],
@@ -649,11 +935,58 @@ mod cancel_queue_preserve_pg_tests {
         let capture = capture_queue_before_cancel(&target).await;
         registry.insert_unreachable_for_test(ChannelId::new(channel_id));
 
-        let loss =
-            record_queue_loss_after_cancel(&target, &capture, Some(&pool), false, "test_cancel")
-                .await;
+        let loss = record_queue_loss_after_cancel(
+            &target,
+            &capture,
+            Some(&pool),
+            crate::services::turn_cancel_queue_guard::CancelRemovalWitness::Preserve {
+                disk_lost: Some(false),
+            },
+            "test_cancel",
+        )
+        .await;
         assert_eq!(loss.dead_lettered_message_ids, vec![9_402]);
         assert!(dead_letter_row(&pool, channel_id).await.is_some());
         assert_eq!(loss.loss_recorded(), None, "{loss:?}");
+    }
+
+    /// An empty global mirror slot is not an absent actor: another registry can still hold the queue.
+    #[tokio::test(flavor = "current_thread")]
+    async fn queue_truth_force_purge_without_global_mirror_is_unknown_pg() {
+        use crate::services::turn_orchestrator::registry_purge;
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let channel_id = 6_038_403_u64;
+        let channel = ChannelId::new(channel_id);
+        seed_cancel_target(&pool, channel_id).await;
+        let registry_a = ChannelMailboxRegistry::default();
+        let registry_b = ChannelMailboxRegistry::default();
+        let handle_a = registry_a.handle(channel);
+        let persistence = QueuePersistenceContext::new(&ProviderKind::Claude, "", None);
+        handle_a
+            .replace_queue(vec![queued_user_message(9_403)], persistence)
+            .await;
+        registry_b.handle(channel);
+        let removed = registry_b.remove_idle_entry(channel).await;
+        assert_eq!(removed, registry_purge::MailboxPurgeOutcome::Removed);
+        assert!(ChannelMailboxRegistry::global_handle(channel).is_none());
+        let depth_a = handle_a
+            .try_snapshot()
+            .await
+            .map(|s| s.intervention_queue.len());
+        assert_eq!(depth_a.ok(), Some(1), "A still holds the queue");
+
+        let (status, body) = post_cancel(&test_router(pool.clone()), channel_id, true).await;
+        assert_eq!(status, StatusCode::OK, "cancel response: {body}");
+        assert_explicit_null(&body, "queued_remaining");
+        let depth_a = handle_a
+            .try_snapshot()
+            .await
+            .map(|s| s.intervention_queue.len());
+        assert_eq!(depth_a.ok(), Some(1), "the purge never reached A: {body}");
+        pool.close().await;
+        pg_db.drop().await;
     }
 }

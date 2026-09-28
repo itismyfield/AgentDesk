@@ -1186,6 +1186,7 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   repair is free. I20 routes the UNMEASURED case to (b)-safe; it says nothing about
   trading a measured (b) for an (a), and a lane proposing that trade owns showing it
   pays.
+- Health detail also publishes `mailboxes[].reachability.coverage` (schema version 1) from the same verdict sweep, including within-grace reachable results. Its uncovered/unproven/pending sets and provenance are incarnation-scoped telemetry, not turn retirement or delivery authority. See [the health coverage wire contract](design/4987-relay-reachability.md#44-소비-지점-변경) for field semantics and the legacy held-count exception.
 - Honest gap; L1 must not paper over it. For the EXACT #5996 shape the
   discriminator does not resolve today. `classify_reachability` no longer
   short-circuits ahead of the evidence: the `Unknown(RowlessActiveTurn)` arm now runs
