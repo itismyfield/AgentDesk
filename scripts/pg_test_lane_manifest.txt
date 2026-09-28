@@ -40,6 +40,7 @@ src/server/issue_specs.rs
 src/server/mod.rs
 src/server/multinode_regression.rs
 src/server/resource_locks.rs
+src/server/routes/agents_turn_deliver.rs
 src/server/routes/auto_queue_lifecycle_pg_tests.rs
 src/server/routes/campaigns.rs
 src/server/routes/dispatched_sessions_tests.rs
@@ -81,6 +82,7 @@ src/services/discord/catch_up/too_old_notice.rs
 src/services/discord/health/recovery.rs
 src/services/discord/health/recovery/stall_alert.rs
 src/services/discord/idle_recap_interaction.rs
+src/services/discord/inflight/removal/custody_notice_tests.rs
 src/services/discord/mod.rs
 src/services/discord/relay_recovery_circuit_alert_producer.rs
 src/services/discord/relay_recovery_circuit_breaker.rs
@@ -170,6 +172,7 @@ server::issue_specs::issue_specs_pg_tests
 server::message_outbox_retry_tests
 server::multinode_regression::multinode_regression_pg_tests
 server::resource_locks::resource_locks_pg_tests
+server::routes::agents_turn_deliver::pg_tests
 server::routes::auto_queue_lifecycle_pg_tests::tests
 server::routes::auto_queue_preflight_harness_tests
 server::routes::campaigns::tests
@@ -215,6 +218,7 @@ services::discord::health::recovery::stall_alert::tests
 services::discord::health::recovery::stall_watchdog_auto_heal_tests
 services::discord::idle_cleanup_selector_tests
 services::discord::idle_recap_interaction::tests
+services::discord::inflight::removal::custody_notice_tests
 services::discord::relay_recovery::circuit_breaker::tests
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
 services::discord::router::intake_dispatch::tests
@@ -614,6 +618,7 @@ server::multinode_regression::multinode_regression_pg_tests::multinode_single_le
 server::multinode_regression::multinode_regression_pg_tests::multinode_unreal_resource_lock_is_exclusive
 server::resource_locks::resource_locks_pg_tests::resource_lock_allows_only_one_active_holder
 server::resource_locks::resource_locks_pg_tests::resource_lock_reclaims_expired_holder
+server::routes::agents_turn_deliver::pg_tests::target_and_author_gates_run_at_the_route_boundary_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::manual_rebind_accepts_every_canonical_live_status_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_completed_is_rejected_and_performs_no_lifecycle_side_effects_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_pending_start_and_metadata_updates_remain_supported_pg
@@ -823,6 +828,18 @@ services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backsto
 services::discord::idle_cleanup_selector_tests::idle_cleanup_preserves_provider_selector_columns_pg
 services::discord::idle_recap_interaction::tests::concurrent_recap_compact_claim_pg_consumes_exactly_once
 services::discord::idle_recap_interaction::tests::recap_compact_claim_pg_rejects_owner_handoff_without_consuming_pointer
+services::discord::inflight::removal::custody_notice_tests::a_dm_turn_held_only_as_a_pending_start_is_sent_by_the_provider_bot_pg
+services::discord::inflight::removal::custody_notice_tests::a_failed_notice_row_is_enqueued_again_by_the_next_boot_pg
+services::discord::inflight::removal::custody_notice_tests::a_root_reading_the_dm_session_readdresses_an_unclaimed_notice_pg
+services::discord::inflight::removal::custody_notice_tests::a_row_without_persisted_turn_ids_is_one_row_across_boots_and_backfill_pg
+services::discord::inflight::removal::custody_notice_tests::a_tui_direct_turn_is_one_outbox_row_across_boots_pg
+services::discord::inflight::removal::custody_notice_tests::an_earlier_builds_episode_of_a_turn_shares_its_row_pg
+services::discord::inflight::removal::custody_notice_tests::an_episode_is_one_row_whatever_copies_its_root_holds_pg
+services::discord::inflight::removal::custody_notice_tests::anchorless_turns_started_in_the_same_second_are_two_rows_pg
+services::discord::inflight::removal::custody_notice_tests::custody_without_a_tui_direct_turn_enqueues_nothing_pg
+services::discord::inflight::removal::custody_notice_tests::earlier_build_turns_sharing_a_start_time_are_two_rows_pg
+services::discord::inflight::removal::custody_notice_tests::the_boot_reaper_starts_the_notice_pass_pg
+services::discord::inflight::removal::custody_notice_tests::without_postgres_the_notice_waits_for_the_next_boot_pg
 services::discord::relay_recovery::circuit_breaker::tests::pg_alert_is_actionable_and_durably_one_shot_per_episode
 services::discord::relay_recovery::circuit_breaker::tests::progress_during_pg_stage_cancels_stale_alert_and_reopen_is_distinct
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::activate_unknown_status_fails_safe_without_reopen_pg
@@ -1050,7 +1067,10 @@ services::pipeline_override::pipeline_override_pg_tests::agent_write_rejects_sta
 services::pipeline_override::pipeline_override_pg_tests::repo_write_accepts_unassigned_repo_card_without_default_agent_fallback
 services::pipeline_override::pipeline_override_pg_tests::repo_write_rejects_state_id_that_would_fail_kanban_status_check
 services::pipeline_override::pipeline_override_pg_tests::repo_write_repairs_the_pair_when_the_existing_agent_override_is_unreadable
+services::pipeline_routes::tests::card_stage_moves_take_turns_with_stage_saves_pg
 services::pipeline_routes::tests::replace_stages_persists_backoff_round_trip_pg
+services::pipeline_routes::tests::stage_saves_refuse_to_strand_open_cards_pg
+services::pipeline_routes::tests::stage_saves_take_turns_pg
 services::scheduled_messages::context_snapshot::postgres_tests::capture_refuses_empty_channel_pg
 services::scheduled_messages::context_snapshot::postgres_tests::capture_respects_clear_boundary_pg
 services::scheduled_messages::context_snapshot::postgres_tests::capture_then_validate_roundtrip_pg
@@ -1061,6 +1081,7 @@ services::scheduled_messages::context_snapshot::postgres_tests::validate_transie
 services::scheduled_messages::postgres_tests::postgres_agent_evidence_before_runtime_ack_is_not_missed
 services::scheduled_messages::postgres_tests::postgres_agent_timeout_with_push_raw_fails_closed_without_outbox
 services::scheduled_messages::postgres_tests::postgres_agent_trigger_now_retry_preserves_recurring_anchor_through_poller
+services::scheduled_messages::postgres_tests::postgres_bound_cc_target_uses_claude_and_cc_owner_channel
 services::scheduled_messages::postgres_tests::postgres_cancel_before_push_handoff_enqueues_nothing
 services::scheduled_messages::postgres_tests::postgres_definitive_agent_failure_atomically_enqueues_one_fallback
 services::scheduled_messages::postgres_tests::postgres_expired_running_agent_never_enqueues_raw_fallback

@@ -65,8 +65,27 @@ export interface VoiceAgentConfig {
   sensitivity_mode: VoiceSensitivityMode;
 }
 
+export type VoiceSttProvider = "whisper-cli" | "openai-compatible";
+export type VoiceTtsBackend = "edge" | "openai-compatible";
+
+export interface VoiceOpenAiEndpoint {
+  base_url: string;
+  model: string;
+  api_key_env: string;
+}
+
+export interface VoiceModels {
+  stt_provider: VoiceSttProvider;
+  stt: VoiceOpenAiEndpoint;
+  language: string;
+  tts_backend: VoiceTtsBackend;
+  tts: VoiceOpenAiEndpoint & { voice: string };
+  edge_voice: string;
+}
+
 export interface VoiceConfigResponse {
   global: VoiceGlobalConfig;
+  models: VoiceModels;
   agents: VoiceAgentConfig[];
   version: string;
   source_path?: string | null;
@@ -76,6 +95,7 @@ export interface VoiceConfigPutBody {
   version?: string;
   actor?: string;
   global: VoiceGlobalConfig;
+  models?: VoiceModels;
   agents: VoiceAgentConfig[];
 }
 

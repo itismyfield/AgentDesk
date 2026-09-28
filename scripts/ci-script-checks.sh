@@ -239,6 +239,10 @@ if run_check guards "Directory fsync single-path guard"; then
 "$PYTHON" -m unittest tests.test_dir_fsync_single_path
 fi
 
+if run_check guards "TUI output shadow write-zero census"; then
+"$PYTHON" scripts/check_o_shadow_write_zero.py
+fi
+
 if run_check guards "Alert dedupe/authority/routing wiring contract (#4448/#4449)"; then
 "$PYTHON" -m unittest tests.test_alert_dedupe_4448 tests.test_auto_queue_monitor tests.test_actionable_ops_alert_routing
 fi
@@ -267,8 +271,8 @@ if run_check guards "Destructive call-site per-file ratchet (#5071 T3-A4)"; then
 fi
 
 if run_check guards "H2 tmux boundary measurer and admission self-tests"; then
-# The gates are inert in CI until the baseline lands; their unit tests, module map included, run now.
-"$PYTHON" -m unittest tests.test_h2_measure tests.test_h2_admission tests.test_h2_modmap
+# Baseline gates skip until activation; driver/cfg canary and these unit tests already run in CI.
+"$PYTHON" -m unittest tests.test_h2_measure tests.test_h2_admission tests.test_h2_modmap tests.test_h2_cfg_compare tests.test_h2_cfg_collect
 fi
 
 if run_check guards "Reachability row-independence + change-surface gate (#5071 T4-B1)"; then
@@ -685,6 +689,7 @@ if run_check cargo "Contract symbol-ref doc<->code sync gate (#4268)"; then
 # game (raw strings / macros / cfg can't fool a real compile), and deriving the
 # anchor set from the compiled code (not `// sym:` comments) is what killed the
 # r3 comment-decoupling bypass.
+# It also matches docs/contracts/h2-tmux-boundary-ratchet.md anchors to imported H2 Python functions.
 "$PYTHON" scripts/check_contract_symbol_refs.py
 "$PYTHON" -m unittest tests.test_contract_symbol_refs
 fi
