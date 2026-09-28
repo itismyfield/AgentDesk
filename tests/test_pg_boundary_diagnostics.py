@@ -25,7 +25,7 @@ HELPER = ROOT / "scripts/ci/pg-resource-diagnostics.py"
 M = load_module("pg_boundary_diagnostics", HELPER)
 GATE = "github.event_name == 'workflow_dispatch' && inputs.resource_diagnostics == true"
 VERIFY = "Verify PostgreSQL resource diagnostics"
-ARGV = " ".join(("test --all-targets --", *MEMBERSHIP.load_non_pg_skip_args(ROOT)[1::2],
+ARGV = " ".join(("test --lib --", *MEMBERSHIP.load_non_pg_skip_args(ROOT)[1::2],
                  "--nocapture --test-threads=1"))
 MEM = dict(zip(M.MEMORY_KEYS, (16000, 9000, 4000, 3900)))
 META = {"run_id": "9001", "run_attempt": "1", "commit_sha": "c" * 40, "container": "agentdesk-postgres"}
@@ -243,7 +243,7 @@ class BoundaryRuntimeTests(unittest.TestCase):
                    (FILTER_SOURCE, 'exit 0\n' + FILTER_SOURCE, "ok", 0, True),
                    (PG_CARGO, "true", "ok", 0, True), (PG_CARGO, PG_CARGO + '\n' + PG_CARGO, "ok", 0, True),
                    (PG_CARGO, 'if false; then\n' + PG_CARGO + '\nfi', "ok", 0, True),
-                   ("--all-targets", "--lib", "ok", 0, True),
+                   ("--lib", "--all-targets", "ok", 0, True),
                    ('if [ "${PG_DIAG_ENABLED:-false}" = "true" ]; then', 'if true; then', "ok", 0, False))
         for old, new, mode, status, enabled in changes:
             with self.subTest(mutant=old), launch(base.replace(old, new), mode=mode, enabled=enabled) as (p, d):

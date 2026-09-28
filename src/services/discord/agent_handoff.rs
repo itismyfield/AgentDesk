@@ -508,7 +508,9 @@ fn map_turn_start_result(
             turn_id: outcome.turn_id,
             status: outcome.status.as_str(),
         }),
-        Err(HeadlessTurnStartError::Conflict(error)) => Err(AgentHandoffError::conflict(error)),
+        Err(
+            HeadlessTurnStartError::Conflict(error) | HeadlessTurnStartError::InvalidTarget(error),
+        ) => Err(AgentHandoffError::conflict(error)),
         Err(HeadlessTurnStartError::Internal(error)) => {
             Err(AgentHandoffError::turn_unavailable(error))
         }

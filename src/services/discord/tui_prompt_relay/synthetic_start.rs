@@ -297,14 +297,14 @@ async fn claim_tui_direct_synthetic_turn_prepared(
     // keep it relay-ownership-only so watcher completion Path B skips it.
     inflight_state.relay_ownership_only =
         classify_injected_prompt(prompt_text).suppresses_user_turn_lifecycle();
-    match super::super::inflight::save_inflight_state_if_absent(&inflight_state) {
+    match super::super::tui_direct_pending_start::save_row_unless_retired(&inflight_state) {
         Ok(true) => {}
         Ok(false) => {
             tracing::warn!(
                 provider = %provider.as_str(),
                 channel_id = channel_id.get(),
                 tmux_session_name = %tmux_session_name,
-                "skipped TUI-direct synthetic inflight because a durable row already exists"
+                "skipped TUI-direct synthetic inflight: a durable row exists or the pending start retired"
             );
             if mailbox_activation_occurred {
                 bridge_handoff::release_unrecorded_actor(
