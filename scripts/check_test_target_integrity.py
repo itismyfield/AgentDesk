@@ -196,6 +196,12 @@ def discover_targets(repo_root: Path) -> dict[str, Path]:
     return targets
 
 
+def integration_test_root(repo_root: Path, name: str) -> Path:
+    """Crate root of `--test <name>`: cargo discovers tests/<name>.rs or tests/<name>/main.rs."""
+    flat = repo_root / "tests" / f"{name}.rs"
+    return flat if flat.is_file() else repo_root / "tests" / name / "main.rs"
+
+
 @dataclass(frozen=True)
 class RustToken:
     value: str
@@ -1045,10 +1051,11 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
     for target in selected_targets:
         if target.startswith("test:"):
             name = target.partition(":")[2]
-            path = repo_root / "tests" / f"{name}.rs"
+            path = integration_test_root(repo_root, name)
             if not path.is_file():
-                findings.append(("unknown-target",
-                                 f"--test {name}: tests/{name}.rs not found"))
+                findings.append(("unknown-target", (
+                    f"--test {name}: neither tests/{name}.rs nor "
+                    f"tests/{name}/main.rs exists")))
                 continue
             # setdefault evaluates its argument even on a hit, so it
             # re-walked an integration root already inventoried here.
@@ -1077,7 +1084,7 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
         try:
             roots = discover_targets(repo_root)
             for target in selected_targets:
-                root = (repo_root / "tests" / f"{target.partition(':')[2]}.rs"
+                root = (integration_test_root(repo_root, target.partition(":")[2])
                         if target.startswith("test:") else roots.get(target))
                 if root is None or not root.is_file():
                     raise ValueError(f"missing source for {target}")

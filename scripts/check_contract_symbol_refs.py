@@ -649,11 +649,12 @@ def check_h2_contract(doc: Path = H2_DOC) -> list[str]:
     try:
         from h2_admission import evaluate, rw_problem
         from h2_cfg_compare import compare_cfgs
+        from h2_cfg_collect import seal, read_manifest
         from h2_depinfo import ro_problems, walker_problems
         from h2_measure import measure, regen
         from h2_modmap import map_modules
 
-        refs = (evaluate, rw_problem, compare_cfgs, ro_problems, walker_problems, measure, regen, map_modules)
+        refs = (evaluate, rw_problem, compare_cfgs, ro_problems, walker_problems, measure, regen, map_modules, seal, read_manifest)
         anchors = {f"{ref.__module__}::{ref.__name__}" for ref in refs}
         documented = extract_doc_anchors(doc.read_text(encoding="utf-8"))
     except (ImportError, AttributeError, OSError, UnicodeError) as exc:

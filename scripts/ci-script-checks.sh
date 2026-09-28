@@ -272,7 +272,7 @@ fi
 
 if run_check guards "H2 tmux boundary measurer and admission self-tests"; then
 # The gates are inert in CI until the baseline lands; their unit tests, module map included, run now.
-"$PYTHON" -m unittest tests.test_h2_measure tests.test_h2_admission tests.test_h2_modmap tests.test_h2_cfg_compare
+"$PYTHON" -m unittest tests.test_h2_measure tests.test_h2_admission tests.test_h2_modmap tests.test_h2_cfg_compare tests.test_h2_cfg_collect
 fi
 
 if run_check guards "Reachability row-independence + change-surface gate (#5071 T4-B1)"; then
