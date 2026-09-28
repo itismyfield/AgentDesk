@@ -52,6 +52,10 @@ pub(in crate::services::discord) async fn handle_idle_queue_guard_skip(
         .turn_finalizer
         .guarded_finish_residues()
         .contains_key(&channel_id);
+    let head = snapshot
+        .intervention_queue
+        .first()
+        .map(|item| item.message_id);
     tracing::warn!(
         channel_id = channel_id.get(),
         provider = provider.as_str(),
@@ -60,6 +64,8 @@ pub(in crate::services::discord) async fn handle_idle_queue_guard_skip(
             .map(|id| id.get())
             .unwrap_or(0),
         queue_depth = snapshot.intervention_queue.len(),
+        head_message_id = head.map_or(0, |id| id.get()),
+        head_created_at = %head.map(|id| id.created_at().to_string()).unwrap_or_default(),
         residue_recorded,
         slow_backstop_armed,
         recovery_owner = if residue_recorded {

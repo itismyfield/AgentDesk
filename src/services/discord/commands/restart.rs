@@ -160,7 +160,10 @@ async fn start_restart_seed_turn(ctx: &Context<'_>) -> RestartSeedStatus {
             Err(super::super::router::HeadlessTurnStartError::Conflict(_)) => {
                 return RestartSeedStatus::Busy;
             }
-            Err(super::super::router::HeadlessTurnStartError::Internal(error)) => {
+            Err(
+                super::super::router::HeadlessTurnStartError::Internal(error)
+                | super::super::router::HeadlessTurnStartError::InvalidTarget(error),
+            ) => {
                 return RestartSeedStatus::Failed(error);
             }
         }

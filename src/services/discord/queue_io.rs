@@ -800,6 +800,10 @@ fn schedule_deferred_idle_queue_kickoff_inner(
 }
 
 #[cfg(test)]
+#[path = "queue_io/ledger_settlement_tests.rs"]
+mod ledger_settlement_tests;
+
+#[cfg(test)]
 mod presleep_tests {
     use super::*;
 
