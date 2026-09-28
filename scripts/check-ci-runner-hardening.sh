@@ -1232,6 +1232,101 @@ unless jobs.is_a?(Hash)
   warn "#{path}: jobs must be a YAML mapping"
   exit 1
 end
+# Keep this explicit: deriving approval from workflow values would admit custom runners.
+HOSTED_RUNNER_LABELS = %w[ubuntu-latest ubuntu-22.04 macos-15 macos-latest windows-latest].freeze
+
+def retired_runner_reference?(value, implicit_expression = false)
+  case value
+  when Hash
+    value.values.any? { |item| retired_runner_reference?(item) }
+  when Array
+    value.any? { |item| retired_runner_reference?(item) }
+  when String
+    expressions = value.scan(/\$\{\{((?:'(?:[^']|'')*'|(?!\}\}).)*)\}\}/m).flatten
+    expressions << value if implicit_expression && !value.include?("${{")
+    expressions.any? do |expression|
+      # Quoted expression literals are one token, so documentation is not a variable read.
+      tokens = expression.scan(/'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_-]*|[^\s]/)
+      tokens.each_index.any? do |index|
+        next false unless tokens[index].casecmp("vars").zero? && tokens[index - 1] != "."
+
+        property = tokens[index + 1, 2].map(&:downcase)
+        property == [".", "macos_runner"] ||
+          (property == ["[", "'macos_runner'"] && tokens[index + 3] == "]")
+      end
+    end
+  else
+    false
+  end
+end
+
+def static_matrix_value?(value)
+  case value
+  when Hash then value.all? { |key, item| static_matrix_value?(key) && static_matrix_value?(item) }
+  when Array then value.all? { |item| static_matrix_value?(item) }
+  when String then !value.include?("${{")
+  else true
+  end
+end
+
+# Repository policy requires explicit static runner values, including in every include row.
+# Exclude cannot approve forbidden candidates; matrix merge semantics are not evaluated.
+def matrix_runner_labels(job, axis)
+  strategy = job["strategy"]
+  matrix = strategy.is_a?(Hash) ? strategy["matrix"] : nil
+  return [] unless matrix.is_a?(Hash) && static_matrix_value?(matrix)
+
+  dimensions = matrix.reject { |key, _value| %w[include exclude].include?(key) }
+  return [] unless dimensions.all? { |key, values| key.is_a?(String) && values.is_a?(Array) && !values.empty? }
+  return [] unless dimensions.key?(axis) || dimensions.empty?
+
+  included = matrix.fetch("include", [])
+  excluded = matrix.fetch("exclude", [])
+  return [] unless included.is_a?(Array) && excluded.is_a?(Array)
+  return [] unless excluded.all? { |row| row.is_a?(Hash) }
+  return [] unless included.all? { |row| row.is_a?(Hash) && row.key?(axis) }
+
+  dimensions.fetch(axis, []) + included.map { |row| row[axis] }
+end
+
+def hosted_runner?(runner, job)
+  case runner
+  when String
+    return true if HOSTED_RUNNER_LABELS.include?(runner)
+
+    reference = /\A\$\{\{\s*matrix\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}\z/.match(runner)
+    return false unless reference
+
+    labels = matrix_runner_labels(job, reference[1])
+    !labels.empty? && labels.all? { |label| label.is_a?(String) && HOSTED_RUNNER_LABELS.include?(label) }
+  when Array
+    # Multiple labels require one runner to match all of them, so allow only one selector.
+    runner.length == 1 && runner.all? { |label| label.is_a?(String) && hosted_runner?(label, job) }
+  when Hash
+    labels = runner["labels"]
+    runner.keys == ["labels"] && (labels.is_a?(String) || labels.is_a?(Array)) && hosted_runner?(labels, job)
+  else
+    false
+  end
+end
+
+implicit_retired_reference = jobs.values.any? do |job|
+  next false unless job.is_a?(Hash)
+
+  [job, *job.fetch("steps", [])].any? do |entry|
+    entry.is_a?(Hash) && retired_runner_reference?(entry["if"], true)
+  end
+end
+if retired_runner_reference?(document) || implicit_retired_reference
+  warn "#{path}: hosted runner policy forbids vars.MACOS_RUNNER references"
+  exit 1
+end
+jobs.each do |job_id, job|
+  unless job.is_a?(Hash) && hosted_runner?(job["runs-on"], job)
+    warn "#{path}: jobs.#{job_id}.runs-on violates repository hosted runner policy: use one approved label (scalar or singleton array), optionally under labels, or an explicitly enumerated static matrix runner axis; every include row must specify that axis and exclude cannot approve forbidden candidates; each matrix runner value must be an approved scalar label (#{HOSTED_RUNNER_LABELS.join(', ')})"
+    exit 1
+  end
+end
 non_string_job_ids = jobs.keys.reject { |job_id| job_id.is_a?(String) }
 unless non_string_job_ids.empty?
   rendered_ids = non_string_job_ids.map(&:inspect).join(", ")
@@ -1557,16 +1652,6 @@ verify_required_check_mirror_hash
 validate_workflow_entries
 
 while IFS= read -r -d '' workflow; do
-  if grep -Eq '^[[:space:]]+pull_request(_target)?:' "$workflow"; then
-    if grep -Eq 'MACOS_RUNNER|self-hosted' "$workflow"; then
-      error "$workflow is pull_request-triggered and must not reference self-hosted macOS routing"
-    fi
-  fi
-
-  if [ "$workflow" != "$trusted_workflow" ] && grep -q 'MACOS_RUNNER' "$workflow"; then
-    error "$workflow references MACOS_RUNNER outside $trusted_workflow"
-  fi
-
   if grep -q 'RUSTC_WRAPPER=' "$workflow" && ! grep -q 'SCCACHE_GHA_ENABLED=' "$workflow"; then
     error "$workflow clears RUSTC_WRAPPER but not SCCACHE_GHA_ENABLED"
   fi
@@ -1585,8 +1670,6 @@ if [ -f "$trusted_workflow" ]; then
     || error "$trusted_workflow must have a workflow_dispatch trigger"
   grep -Eq '^[[:space:]]+merge_group:' "$trusted_workflow" \
     || error "$trusted_workflow must have a merge_group trigger"
-  grep -q 'MACOS_RUNNER_GROUP' "$trusted_workflow" \
-    || error "$trusted_workflow must require MACOS_RUNNER_GROUP for self-hosted routing"
 fi
 
 # Superseded PR heads must release hosted runners immediately. Required

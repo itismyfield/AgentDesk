@@ -29,7 +29,7 @@ class RelayRecoveryCiWiringTest(unittest.TestCase):
         expected_counts = {
             "justfile": 1,
             ".github/workflows/ci-pr.yml": 0,
-            ".github/workflows/ci-macos-trusted.yml": 2,
+            ".github/workflows/ci-macos-trusted.yml": 1,
         }
         for relative_path, expected_count in expected_counts.items():
             with self.subTest(path=relative_path):

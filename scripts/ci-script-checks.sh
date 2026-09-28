@@ -272,7 +272,7 @@ fi
 
 if run_check guards "H2 tmux boundary measurer and admission self-tests"; then
 # Baseline gates skip until activation; driver/cfg canary and these unit tests already run in CI.
-"$PYTHON" -m unittest tests.test_h2_measure tests.test_h2_admission tests.test_h2_modmap tests.test_h2_cfg_compare tests.test_h2_cfg_collect
+"$PYTHON" -m unittest tests.test_h2_measure tests.test_h2_admission tests.test_h2_modmap tests.test_h2_cfg_compare tests.test_h2_cfg_collect tests.test_h2_session_driver tests.test_h2_session
 fi
 
 if run_check guards "Reachability row-independence + change-surface gate (#5071 T4-B1)"; then
@@ -510,10 +510,6 @@ fi
 
 if run_check contracts "Scheduled-message PG path-filter wiring contract"; then
 "$PYTHON" -m unittest tests.test_scheduled_messages_ci_wiring
-fi
-
-if run_check contracts "macOS hosted-overflow routing contract"; then
-"$PYTHON" -m unittest tests.test_macos_runner_overflow_ci_wiring
 fi
 
 if run_check contracts "High-risk recovery path-filter selection contract (#5232)"; then
