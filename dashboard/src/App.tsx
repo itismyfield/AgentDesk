@@ -78,7 +78,6 @@ export default function App() {
 
   return (
     <OfficeProvider
-      initialOffices={data.offices}
       initialAgents={data.agents}
       initialAllAgents={data.allAgents}
       initialDepartments={data.departments}
@@ -86,7 +85,6 @@ export default function App() {
       initialSessions={data.sessions}
       initialRoundTableMeetings={data.roundTableMeetings}
       initialAuditLogs={data.auditLogs}
-      initialSelectedOfficeId={data.selectedOfficeId}
       pushNotification={pushNotification}
     >
       <SettingsProvider

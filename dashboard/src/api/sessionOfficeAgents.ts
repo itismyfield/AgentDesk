@@ -1,4 +1,4 @@
-import type { Agent, AuditLogEntry, Department, Office } from "../types";
+import type { Agent, AuditLogEntry, Department } from "../types";
 import { resolveAvatarSeed } from "../lib/pixel-avatar";
 import { getDashboardSession } from "./dashboardAuth";
 import { readCachedSnapshot, request, type CachedApiSnapshot, type RequestOptions } from "./httpClient";
@@ -22,83 +22,10 @@ export async function getSession(): Promise<{
   return getDashboardSession();
 }
 
-// ── Offices ──
-
-export async function getOffices(): Promise<Office[]> {
-  const data = await request<{ offices: Office[] }>("/api/offices");
-  return data.offices;
-}
-
-export async function createOffice(office: Partial<Office>): Promise<Office> {
-  return request("/api/offices", {
-    method: "POST",
-    body: JSON.stringify(office),
-  });
-}
-
-export async function updateOffice(
-  id: string,
-  patch: Partial<Office>,
-): Promise<Office> {
-  return request(`/api/offices/${id}`, {
-    method: "PATCH",
-    body: JSON.stringify(patch),
-  });
-}
-
-export async function deleteOffice(id: string): Promise<void> {
-  await request(`/api/offices/${id}`, { method: "DELETE" });
-}
-
-export async function addAgentToOffice(
-  officeId: string,
-  agentId: string,
-  departmentId?: string | null,
-): Promise<void> {
-  await request(`/api/offices/${officeId}/agents`, {
-    method: "POST",
-    body: JSON.stringify({
-      agent_id: agentId,
-      department_id: departmentId ?? null,
-    }),
-  });
-}
-
-export async function removeAgentFromOffice(
-  officeId: string,
-  agentId: string,
-): Promise<void> {
-  await request(`/api/offices/${officeId}/agents/${agentId}`, {
-    method: "DELETE",
-  });
-}
-
-export async function updateOfficeAgent(
-  officeId: string,
-  agentId: string,
-  patch: { department_id?: string | null },
-): Promise<void> {
-  await request(`/api/offices/${officeId}/agents/${agentId}`, {
-    method: "PATCH",
-    body: JSON.stringify(patch),
-  });
-}
-
-export async function batchAddAgentsToOffice(
-  officeId: string,
-  agentIds: string[],
-): Promise<void> {
-  await request(`/api/offices/${officeId}/agents/batch`, {
-    method: "POST",
-    body: JSON.stringify({ agent_ids: agentIds }),
-  });
-}
-
 // ── Agents ──
 
-export function getCachedAgents(officeId?: string): CachedApiSnapshot<Agent[]> | null {
-  const q = officeId ? `?officeId=${officeId}` : "";
-  const cached = readCachedSnapshot<{ agents: Agent[] }>(`/api/agents${q}`);
+export function getCachedAgents(): CachedApiSnapshot<Agent[]> | null {
+  const cached = readCachedSnapshot<{ agents: Agent[] }>("/api/agents");
   if (!cached) return null;
   return {
     data: cached.data.agents.map(normalizeAgent),
@@ -106,12 +33,8 @@ export function getCachedAgents(officeId?: string): CachedApiSnapshot<Agent[]> |
   };
 }
 
-export async function getAgents(
-  officeId?: string,
-  opts?: RequestOptions,
-): Promise<Agent[]> {
-  const q = officeId ? `?officeId=${officeId}` : "";
-  const data = await request<{ agents: Agent[] }>(`/api/agents${q}`, opts);
+export async function getAgents(opts?: RequestOptions): Promise<Agent[]> {
+  const data = await request<{ agents: Agent[] }>("/api/agents", opts);
   return data.agents.map(normalizeAgent);
 }
 
@@ -120,9 +43,7 @@ export async function getAgent(id: string): Promise<Agent> {
   return normalizeAgent(data.agent);
 }
 
-export async function createAgent(
-  agent: Partial<Agent> & { office_id?: string },
-): Promise<Agent> {
+export async function createAgent(agent: Partial<Agent>): Promise<Agent> {
   return request("/api/agents", {
     method: "POST",
     body: JSON.stringify(agent),
@@ -210,21 +131,6 @@ export async function duplicateAgent(
   return data;
 }
 
-export interface AgentOfficeMembership extends Office {
-  assigned: boolean;
-  office_department_id?: string | null;
-  joined_at?: number | null;
-}
-
-export async function getAgentOffices(
-  agentId: string,
-): Promise<AgentOfficeMembership[]> {
-  const data = await request<{ offices: AgentOfficeMembership[] }>(
-    `/api/agents/${agentId}/offices`,
-  );
-  return data.offices;
-}
-
 // ── Audit Logs ──
 
 export async function getAuditLogs(
@@ -244,11 +150,8 @@ export async function getAuditLogs(
 
 // ── Departments ──
 
-export async function getDepartments(officeId?: string): Promise<Department[]> {
-  const q = officeId ? `?officeId=${officeId}` : "";
-  const data = await request<{ departments: Department[] }>(
-    `/api/departments${q}`,
-  );
+export async function getDepartments(): Promise<Department[]> {
+  const data = await request<{ departments: Department[] }>("/api/departments");
   return data.departments;
 }
 

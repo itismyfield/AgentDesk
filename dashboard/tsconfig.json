@@ -15,8 +15,6 @@
   },
   "include": ["src", "vite.config.ts"],
   "exclude": [
-    "src/app/office-workflow-pack.ts",
-    "src/app/office-pack-display.ts",
     "**/*.test.ts"
   ]
 }

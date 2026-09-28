@@ -86,7 +86,7 @@ export function useSettingsPipelineSelector({
         })
       : Promise.resolve(null);
     const agentPromise = shouldRefreshAgents
-      ? api.getAgents(undefined, {
+      ? api.getAgents({
           timeoutMs: PIPELINE_SELECTOR_REFRESH_TIMEOUT_MS,
           maxRetries: 0,
         })

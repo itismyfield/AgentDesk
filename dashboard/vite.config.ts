@@ -37,26 +37,6 @@ function manualChunks(id: string) {
     return "icons";
   }
 
-  if (id.includes("/gifuct-js/")) {
-    return "pixi-gif";
-  }
-
-  if (id.includes("/earcut/")) {
-    return "pixi-geom";
-  }
-
-  if (id.includes("/@xmldom/") || id.includes("/parse-svg-path/")) {
-    return "pixi-svg";
-  }
-
-  if (id.includes("/eventemitter3/") || id.includes("/ismobilejs/") || id.includes("/tiny-lru/")) {
-    return "pixi-utils";
-  }
-
-  if (id.includes("/pixi.js/") || id.includes("/@pixi/")) {
-    return "pixi";
-  }
-
   return undefined;
 }
 

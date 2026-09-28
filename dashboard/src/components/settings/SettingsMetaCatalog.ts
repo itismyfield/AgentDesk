@@ -108,8 +108,8 @@ export function useSettingsMetaCatalog({
         flags: [],
         labelKo: "CEO 이름",
         labelEn: "CEO name",
-        hintKo: "오피스와 일부 운영 UI에서 대표 인물 이름으로 사용됩니다.",
-        hintEn: "Used as the representative persona name in office and ops surfaces.",
+        hintKo: "대표 인물(CEO)의 이름입니다.",
+        hintEn: "Name of the representative persona (CEO).",
         inputKind: "text",
       },
       {
@@ -144,8 +144,8 @@ export function useSettingsMetaCatalog({
         flags: [],
         labelKo: "테마",
         labelEn: "Theme",
-        hintKo: "대시보드와 오피스 화면의 기본 분위기를 정합니다.",
-        hintEn: "Sets the base look and feel for dashboard and office views.",
+        hintKo: "대시보드의 기본 분위기를 정합니다.",
+        hintEn: "Sets the base look and feel for the dashboard.",
         inputKind: "select",
         selectOptions: [
           { value: "dark", labelKo: "다크", labelEn: "Dark" },

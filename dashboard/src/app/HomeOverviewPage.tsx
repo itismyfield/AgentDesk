@@ -24,7 +24,6 @@ export default function HomeOverviewPage({
   isKo,
   wsConnected,
   wsLastEventTs,
-  currentOfficeLabel,
   stats,
   agents,
   meetings,
@@ -36,7 +35,6 @@ export default function HomeOverviewPage({
   wsConnected: boolean;
   /** Required — null only until the first WS event arrives. */
   wsLastEventTs: number | null;
-  currentOfficeLabel: string;
   stats: DashboardStats | null;
   agents: Agent[];
   meetings: RoundTableMeeting[];
@@ -356,7 +354,6 @@ export default function HomeOverviewPage({
     agents,
     analytics,
     costTrend,
-    currentOfficeLabel,
     dailyMissions,
     fallbackActivity,
     formatCompact,
