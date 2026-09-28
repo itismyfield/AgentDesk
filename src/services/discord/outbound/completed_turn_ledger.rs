@@ -32,7 +32,7 @@
 //! Merged-head aliases: `H`, absorbed by episode `n` of head `P`, is settled only when one read
 //! holds both `alias(P, n, H)` and `entry(P, Some(n))`; a missing link duplicates, never loses.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -86,24 +86,42 @@ pub(in crate::services::discord) struct CompletedTurnLedger {
     pub merged_aliases: Vec<MergedAlias>,
 }
 
+/// The one alias join: `entry` is episode `alias.turn_nonce` of `alias.primary`; `None` never joins.
+fn entry_backs(entry: &CompletedTurnEntry, alias: &MergedAlias) -> bool {
+    entry.user_msg_id == alias.primary
+        && entry.turn_nonce.as_deref() == Some(alias.turn_nonce.as_str())
+}
+
 impl CompletedTurnLedger {
     fn backs(&self, alias: &MergedAlias) -> bool {
-        self.entries.iter().any(|entry| {
-            entry.user_msg_id == alias.primary
-                && entry.turn_nonce.as_deref() == Some(alias.turn_nonce.as_str())
-        })
+        self.entries.iter().any(|entry| entry_backs(entry, alias))
     }
 
     /// `entries.ids ∪ { a ∈ alias.absorbed | entry(alias.primary, Some(alias.turn_nonce)) }`,
     /// from this one read.
     pub(in crate::services::discord) fn settled_ids(&self) -> HashSet<u64> {
-        let mut ids: HashSet<u64> = self.entries.iter().map(|e| e.user_msg_id).collect();
-        for alias in &self.merged_aliases {
-            if self.backs(alias) {
-                ids.extend(alias.absorbed.iter().copied());
+        self.settled_commit_ms().into_keys().collect()
+    }
+
+    /// Commit time of each [`Self::settled_ids`] id: a direct id keeps its last-appended entry's
+    /// time; an absorbed id takes its backing entry's, or the later of that and its own entry's.
+    fn settled_commit_ms(&self) -> HashMap<u64, u64> {
+        let mut commits: HashMap<u64, u64> = self
+            .entries
+            .iter()
+            .map(|entry| (entry.user_msg_id, entry.committed_at_epoch_ms))
+            .collect();
+        for entry in &self.entries {
+            let backed = self
+                .merged_aliases
+                .iter()
+                .filter(|alias| entry_backs(entry, alias));
+            for id in backed.flat_map(|alias| alias.absorbed.iter().copied()) {
+                let commit = commits.entry(id).or_insert(entry.committed_at_epoch_ms);
+                *commit = (*commit).max(entry.committed_at_epoch_ms);
             }
         }
-        ids
+        commits
     }
 
     /// The ids episode `turn_nonce` of `primary` absorbed, per its durable alias.
@@ -166,20 +184,14 @@ pub(in crate::services::discord) fn settled_user_msg_ids(
         .unwrap_or_default()
 }
 
-/// Commit time (Unix ms) of each settled inbound `user_msg_id`; empty when the
-/// ledger is absent or malformed, exactly like [`settled_user_msg_ids`].
+/// Commit time (Unix ms) of each settled inbound `user_msg_id`, merged-head aliases
+/// included; empty when the ledger is absent or malformed, exactly like [`settled_user_msg_ids`].
 pub(crate) fn settled_commit_ms_by_user_msg_id(
     provider: &ProviderKind,
     channel_id: u64,
-) -> std::collections::HashMap<u64, u64> {
+) -> HashMap<u64, u64> {
     read_ledger(provider, channel_id)
-        .map(|ledger| {
-            ledger
-                .entries
-                .into_iter()
-                .map(|entry| (entry.user_msg_id, entry.committed_at_epoch_ms))
-                .collect()
-        })
+        .map(|ledger| ledger.settled_commit_ms())
         .unwrap_or_default()
 }
 
@@ -581,6 +593,25 @@ mod tests {
         let primaries: Vec<u64> = ledger.merged_aliases.iter().map(|a| a.primary).collect();
         let expected: Vec<u64> = (101..100 + ROWLESS_ALIAS_CAP as u64).chain([P]).collect();
         assert_eq!(primaries, expected, "first-inserted evicted, active kept");
+    }
+
+    #[test]
+    fn an_absorbed_id_is_dated_only_by_its_exact_backing_episode() {
+        let mut ledger = CompletedTurnLedger {
+            entries: vec![episode(P, "n", 2_000), episode(P, "later", 9_000)],
+            merged_aliases: vec![alias(P, "n", H, 1_000), alias(P, "undelivered", 7, 1_000)],
+        };
+        let commits = ledger.settled_commit_ms();
+        assert_eq!(commits, HashMap::from([(P, 9_000), (H, 2_000)]));
+        assert_eq!(ledger.settled_ids(), commits.into_keys().collect());
+        ledger.entries.insert(0, entry(H, 3_000));
+        assert_eq!(
+            ledger.settled_commit_ms()[&H],
+            3_000,
+            "the later of the two proofs"
+        );
+        ledger.entries[0].committed_at_epoch_ms = 1_500;
+        assert_eq!(ledger.settled_commit_ms()[&H], 2_000);
     }
 
     #[test]
