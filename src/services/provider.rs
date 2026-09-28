@@ -497,9 +497,6 @@ pub fn should_omit_repeated_system_prompt(
 /// 1. Empty system prompts (always omitted — nothing to send).
 /// 2. The legacy Codex+resumed-session rule
 ///    ([`should_omit_repeated_system_prompt`]).
-///
-/// Issue #3744 retired the unused generalized envelope/dev-role dedup
-/// infrastructure rather than wiring it unsafely across provider resets.
 pub fn system_prompt_for_provider_turn<'a>(
     provider: &ProviderKind,
     session_id: Option<&str>,

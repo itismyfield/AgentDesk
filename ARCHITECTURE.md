@@ -194,6 +194,7 @@ src/
 ├── dispatch/
 │   ├── dispatch_status/
 │   │   └── terminal_timestamp_tests.rs
+│   ├── completion_hooks.rs
 │   ├── dispatch_cancel.rs
 │   ├── dispatch_channel.rs
 │   ├── dispatch_context.rs

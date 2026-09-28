@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "b0bcb5fb2e72a28c1d95193578d0e12c52c039be",
+  "measured_at_sha": "7a93bfeab2c4d4ee6bfe6b42ef488ef15cb21055",
   "records": [
     {
       "root": "migrations/postgres",
@@ -12650,6 +12650,24 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/dispatch/completion_hooks.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:bd1f3c9928941eca561653ebde9317b8f82ab6f89e790c8d09199081022a6924"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/dispatch/completion_hooks.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:3001286b7b2780487dbcbed584650e3e7c8642531e74d869121ab2e463f95501"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/dispatch/dispatch_cancel.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -13122,15 +13140,6 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:3812671b4ff3e5aeea46f06a59618b9e04a1e3736fab887066c22d3bd411041e"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/dispatch/dispatch_status.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
       "fingerprint": "sha256:3de4fcc7f980d8a91c9046558c9f9fc1857bf69c86bba8d326d7ac5e5348e8c6"
     },
     {
@@ -13285,15 +13294,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:f826c13ac7a4ef44571492b708fa8bb612f541420bdc709e7f9e8f2d9ea56442"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/dispatch/dispatch_status.rs",
-      "api": "sqlx::query_as",
-      "symbol": "query_as",
-      "classification": "STATIC",
-      "fingerprint": "sha256:01c0727209c67f549f7f2db5b3357799ffb3c4ba82b9e5019d87a4c76777fe51"
     },
     {
       "root": "src",
