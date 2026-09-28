@@ -3,11 +3,17 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
+import shlex
 import subprocess
 import sys
 
 LANES = {"linux": "x86_64-unknown-linux-gnu", "macos": "aarch64-apple-darwin"}
-CLEAR = ("CARGO_BUILD_TARGET", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTC_BOOTSTRAP")
+WRAPPERS = ("RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER",
+            "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER")
+CLEAR = (*WRAPPERS, "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS", "CARGO_BUILD_TARGET",
+         "RUSTC", "CARGO_BUILD_RUSTC", "RUSTC_BOOTSTRAP", "CLIPPY_ARGS")
+CLEAR_RE = re.compile(r"CARGO_TARGET_.*_(?:RUSTFLAGS|RUNNER|LINKER)|CARGO_(?:PROFILE|UNSTABLE|FEATURE|CFG)_.*|__CARGO.*")
 
 
 class HostMismatch(RuntimeError):
@@ -23,14 +29,17 @@ def check_host(lane: str, version: str | None = None) -> str:
     return host
 
 
+def cleared_keys() -> set[str]:
+    return set(CLEAR) | {key for key in os.environ if CLEAR_RE.fullmatch(key)}
+
+
 def environment(mode: str = "measure") -> dict[str, str]:
     if mode not in ("measure", "map", "driver"):
         raise ValueError(f"unknown H2 environment mode: {mode}")
-    full = {key: value for key, value in os.environ.items() if key not in CLEAR}
+    cleared = cleared_keys()
+    full = {key: value for key, value in os.environ.items() if key not in cleared}
     full["CARGO_INCREMENTAL"] = "0"
-    if mode in ("map", "driver"):
-        full.update(RUSTC_WRAPPER="", CARGO_BUILD_RUSTC_WRAPPER="",
-                    RUSTC_WORKSPACE_WRAPPER="", CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="")
+    full.update(dict.fromkeys(WRAPPERS, ""))
     if mode == "driver":
         full["RUSTC_BOOTSTRAP"] = "1"
     return full
@@ -47,7 +56,8 @@ def main(argv=None) -> int:
         if not any(line.startswith("clippy") for line in installed.splitlines()):
             raise HostMismatch("h2: clippy component is not installed for the active toolchain")
         if args.shell:
-            print("unset " + " ".join(CLEAR))
+            print("unset " + " ".join(shlex.quote(key) for key in sorted(cleared_keys())))
+            print("export " + " ".join(key + "=" for key in WRAPPERS))
             print("export CARGO_INCREMENTAL=" + environment()["CARGO_INCREMENTAL"])
     except HostMismatch as exc:
         print(exc, file=sys.stderr)

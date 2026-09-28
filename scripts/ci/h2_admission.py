@@ -396,7 +396,7 @@ def evaluate(root: Path, lane: str, base_rev: str, lines: list[str], modmap: Pat
     if not any(s == "W" for s, _ in base_config.values()):
         return [f"base {base_rev} clippy.toml has no H2 W entries; rebase onto a main that has them"]
     config = m.load_config(root / "clippy.toml")
-    result = m.measure(root, lines, config)
+    result = m.measure(root, lines, m.lane_config(config, lane))
     problems = zero_rules(root) + owner_shape_problems(root) + untagged_entries(root / "clippy.toml")
     problems += h2_depinfo.ro_problems(root, lines, modmap)
     problems += m.compare(result["rows"], head, lane)
@@ -430,7 +430,8 @@ def main(argv=None) -> int:
     if not args.base or not args.modmap:
         parser.error("--base and --modmap are required once a baseline exists")
     try:
-        lines = args.json.read_text(encoding="utf-8").splitlines() if args.json else m.run_clippy(root, None)
+        config = m.load_config(root / "clippy.toml")
+        lines = args.json.read_text(encoding="utf-8").splitlines() if args.json else m.run_lane_clippy(root, config, args.lane)
         problems = evaluate(root, args.lane, args.base, lines, args.modmap)
     except (m.MeasureError, AdmissionError) as exc:
         problems = [str(exc)]
