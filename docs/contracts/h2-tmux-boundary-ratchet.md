@@ -185,13 +185,24 @@ fence는 이 파일 변경형 쓰기를 쓴 주체(편집기·동시 프로세�
   - 전진하지 않거나(예산 5초), 되돌아가거나, 관측 값이 모두 초 배수이거나, 최소 간격이 1초 이상이면 fail-closed다.
   - 관측 간격과 같은 tick 재쓰기 수는 request와 stderr에 남긴다.
 - **fence 시작 조건.** capture한 모든 파일은 probe와 같은 st_dev에 있고 `ctime < P`여야 한다. 그러면 그 뒤의 쓰기, 곧 같은 내용 복원·mtime 복원·hard link 경유 쓰기는 반드시 ctime을 바꾼다. 이는 tick 크기와 무관하다. rename 교체는 inode를 바꾼다.
-- **fence 종료.** request에 봉인한 stat 목록을 Cargo 종료 뒤 다시 stat한다. 한 필드라도 다르거나 파일이 사라지면 manifest 없이 거부한다. 목록 추가·삭제는 기존 source state 비교가 거부한다.
+- **경로 이름공간.** capture 파일마다 workspace root(포함)부터 부모까지의 각 디렉터리를 lstat로 `(dev, ino, mtime_ns, ctime_ns)` 봉인한다. root 밖 파일(clippy.toml 등)은 부모 디렉터리만 봉인한다.
+  - 디렉터리도 probe와 같은 st_dev·`ctime < P`여야 한다. 그래서 조상 디렉터리를 rename으로 B 트리와 바꿨다 되돌리면 그 부모의 mtime·ctime이 남는다.
+  - leaf나 성분이 심볼릭 링크면 거부한다(링크 객체 봉인 대신 거부: 링크 대상 경로의 디렉터리는 봉인 목록 밖이다). leaf는 capture한 inode와 같은 일반 파일이어야 한다.
+  - 정상 세션은 봉인 디렉터리에 항목을 만들지 않는다. run 디렉터리는 probe 전에 만들고, probe 파일·출력은 run 안에 쓴다. Cargo target 디렉터리(`--target-dir`, 없으면 metadata `target_directory`)는 probe 전에 미리 만든다.
+  - root 위 조상은 봉인하지 않는다. `/tmp`·runner 작업 디렉터리처럼 다른 작업이 항목을 바꾸는 공유 디렉터리라 정상 CI를 거부하게 된다. 남는 반례: root의 엄격한 조상을 rename으로 바꿨다 되돌리는 교체(root inode 자체는 그대로).
+- **공유 매핑 가드.** 이미 dirty한 쓰기 가능 `MAP_SHARED` 매핑을 통한 저장은 ctime을 바꾸지 않을 수 있다. 그래서 capture·봉인 직후 Cargo 전에, capture `(dev, ino)`나 경로를 매핑한 프로세스를 찾으면 세션을 거부한다.
+  - Linux: `/proc/<pid>/maps`의 공유(`s`) 매핑 전부. mprotect로 이미 dirty한 page를 fault 없이 다시 쓰기 가능하게 할 수 있어 현재 쓰기 권한과 무관하게 본다. macOS: libproc `PROC_PIDREGIONPATHINFO`에서 최대 보호가 쓰기인 영역(private COW 매핑도 보수적으로 포함).
+  - maps를 읽지 못한 프로세스: uid(실제·유효·저장)에 0이 있으면 root 등가로 신뢰 경계 밖이라 센다. 아니면 같은 uid이거나, capture 파일의 소유자이거나, 파일에 group/other 쓰기 비트가 있으면 거부한다. 그 외 타 UID는 파일을 쓰기로 열 수 없으므로 센다.
+  - 목록을 다시 읽어 새 pid가 없을 때까지(최대 10회) 검사하고, 끝나지 않으면 거부한다. 결과(`status=checked`, 검사·root·타 UID 수)는 request `fence.mappings`와 stderr에 남는다. 그 밖의 플랫폼은 `unavailable`이고 생산자·소비자 모두 거부한다.
+  - 남는 반례: 가드 뒤에 새로 만든 매핑은 첫 쓰기 fault에서 ctime이 갱신된다는 전제에 기댄다. write-notify가 없는 tmpfs(shmem)와, msync 전까지 시각 갱신을 미룰 수 있는 macOS는 이 전제가 보장되지 않는다. 또 `hidepid`·다른 PID namespace처럼 보이지 않는 프로세스, ACL·capability로 쓰기 권한을 얻은 타 UID, maps 경로·장치가 실제 inode와 다른 overlay 매핑은 가드가 보지 못한다.
+- **fence 종료.** request에 봉인한 stat 목록을 Cargo 종료 뒤 다시 stat한다. 봉인 디렉터리도 다시 lstat한다. 한 필드라도 다르거나 파일이 사라지면 manifest 없이 거부한다. 목록 추가·삭제는 기존 source state 비교가 거부한다.
 - **봉인과 schema.** 통과한 manifest만 `fence` 표지(목록 digest·관측 간격)를 가진다. schema 이름은 `h2-session/2`로 유지한다(proof 생산자 불변). 대신 fence가 없는 옛 request는 소비자가 거부한다.
 
 신뢰 경계 밖인 것:
 - ctime·시계를 조작하는 root 또는 시계 권한 주체
 - 시계를 뒤로 되돌리는 step
-- 목록 밖 파일 읽기. 기존대로 해당 레코드·진단이 `unsealed`다.
+- 목록 밖 파일 읽기. 목록 밖 파일에 매핑되는 site는 매핑하지 않는다. 그러나 proc-macro의 목록 밖 읽기(OUT_DIR·include 대상 등)를 모두 탐지하지는 않는다. 그 읽기가 목록 파일 site의 token을 바꾸면 fence는 보지 못한다.
+- 파일시스템 일관성. 같은 st_dev와 probe 통과는 일관성 증명이 아니다. overlay는 층을 하나의 장치로 보일 수 있고, NFS는 속성 캐시로 변경을 늦게 보일 수 있으며, FUSE는 구현에 달렸다. 지원 범위는 로컬 일관 파일시스템(ext4·xfs·btrfs·APFS)이다. 파일시스템 종류를 확인하는 가드는 없다.
 - 원문을 쓰지 않고 invocation마다 다른 token을 내는 proc-macro. 이것은 H20 잔여다.
 도구 버전 갱신은 rust-toolchain.toml·CI·ALLOWED를 함께 바꾸고 cargo-clippy spy, cfg 자체 점검,
 cold/warm 진단 byte 일치, items 동일성, workspace 생산자/claim 시험 증거를 다시 제시한다.
@@ -222,6 +233,7 @@ load는 봉인 manifest(schema 1, kind `canary-items`)와 request/proof `h2-sess
 request/proof/items/sidecar/clippy.jsonl은 한 번 읽어 봉인 digest와 대조한 같은 bytes만 파싱하고 다시 열지 않는다.
 items 구조는 runner와 같은 `validate_items`/`item_records`로 검사한다. 0개 레코드·헤더 없는 옛 JSONL·객체 레코드는 실패다.
 request의 fence stat 목록은 소비자 capture의 파일 집합과 정확히 같아야 한다. 각 size는 capture bytes 길이와 같아야 한다.
+봉인 디렉터리 목록은 그 파일들의 조회 경로와 정확히 같아야 하고, `fence.mappings.status`는 `checked`여야 한다.
 또한 probe 증거·같은 st_dev·`ctime < P`를 다시 검사한다. manifest의 `fence` 표지도 필요하다. 없거나 다르면 `unsealed`다.
 원문은 source state를 계산하는 한 번의 git 목록·읽기에서만 얻는다. 그 digest가 request와 같아야 하고, 같은 bytes만 매핑에 쓴다.
 모든 레코드에 `hi ≤ 길이`와 lo의 원문 행 = compiler 행을 요구한다. 진단 site는 expansion을 끝까지 따라간 호출 위치다.

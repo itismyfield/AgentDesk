@@ -44,6 +44,14 @@ for n, body in ((1, b), (2, a)):
     open(module, "wb").write(bytes.fromhex(body))
     open(f"{sync}/go-{n}", "wb").write(b"go")
 """
+RENAME = """import os, sys
+sync, src, saved, staged = sys.argv[1:]
+for n, moves in ((1, ((src, saved), (staged, src))), (2, ((src, staged), (saved, src)))):
+    open(f"{sync}/at-{n}", "rb").read()
+    for old, new in moves:
+        os.rename(old, new)
+    open(f"{sync}/go-{n}", "wb").write(b"go")
+"""
 GIT = ("git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false")
 
 
@@ -221,21 +229,26 @@ class WorkspaceSession(unittest.TestCase):
             self.assertEqual(claim, {"pid": proof["pid"], "unit": proof["unit"]})
 
 
-    def swap(self, own: bool):
+    def swap(self, mode: str, fenced=r"session fence: .*/src/m\.rs was written during Cargo"):
         """Items compile reads B, Clippy reads A, and the listed file ends as A: the F2 phase order, no sleeps."""
         sync, module = self.case / "sync", self.crate / "src/m.rs"
         sync.mkdir()
         for n in (1, 2):
             os.mkfifo(sync / f"at-{n}")
             os.mkfifo(sync / f"go-{n}")
-        macro = MACRO.replace("SYNC", str(sync)).replace("MODULE", str(module)).replace("OWN", str(own).lower())
+        macro = MACRO.replace("SYNC", str(sync)).replace("MODULE", str(module)).replace("OWN", str(mode == "own").lower())
         macro = macro.replace('r#"B"#', f'r#"{B.decode()}"#').replace('r#"A"#', f'r#"{A.decode()}"#')
         (self.crate / "mac/src/lib.rs").write_text(macro)
         (self.crate / "src/lib.rs").write_text("pub fn sink() {}\nmac::item!();\n")
         module.write_bytes(A)
         for args in (("init", "-q"), ("add", "-A"), ("commit", "-q", "-m", "fixture")):
             subprocess.run([*GIT, *args], cwd=self.crate, check=True, capture_output=True)
-        mutator = None if own else subprocess.Popen([sys.executable, "-c", MUTATOR, str(sync), str(module), A.hex(), B.hex()])
+        staged = self.case / "src-b"
+        shutil.copytree(self.crate / "src", staged)
+        (staged / "m.rs").write_bytes(B)
+        args = {"writer": (MUTATOR, str(module), A.hex(), B.hex()),
+                "rename": (RENAME, str(self.crate / "src"), str(self.case / "src-a"), str(staged))}.get(mode)
+        mutator = args and subprocess.Popen([sys.executable, "-c", args[0], str(sync), *args[1:]])
         run = self.case / "aba"
         try:
             manifest = session.session(self.crate, self.crate, run, self.conf, self.lane, driver=self.driver,
@@ -253,7 +266,7 @@ class WorkspaceSession(unittest.TestCase):
                     self.assertEqual(mutator.wait(timeout=120), 0)
                 finally:
                     mutator.kill()
-        self.assertRegex(rejected, r"session fence: .*/src/m\.rs was written during Cargo")
+        self.assertRegex(rejected, fenced)
         self.assertFalse((run / "manifest.json").exists())
         self.assertEqual((module.read_bytes(), (sync / "count").read_bytes()[:2]), (A, b"xx"))
         request = json.loads((run / "request.json").read_text())
@@ -267,10 +280,13 @@ class WorkspaceSession(unittest.TestCase):
         self.assertIn(A.decode().rstrip("\n"), texts)
 
     def test_external_writer_between_items_and_clippy_is_fenced(self):
-        self.swap(own=False)
+        self.swap("writer")
 
     def test_proc_macro_writer_between_items_and_clippy_is_fenced(self):
-        self.swap(own=True)
+        self.swap("own")
+
+    def test_source_directory_swap_between_items_and_clippy_is_fenced(self):
+        self.swap("rename", r"session fence: directory .*/workspace changed during Cargo")
 
 if __name__ == "__main__":
     unittest.main()
