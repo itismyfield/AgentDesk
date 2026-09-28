@@ -1905,15 +1905,19 @@ src/
 │   ├── tmux_turn_liveness/
 │   │   └── tests_pg.rs
 │   ├── tui_o/
-│   │   └── shadow/
-│   │       ├── binding_reader.rs
-│   │       ├── capture.rs
-│   │       ├── derive.rs
-│   │       ├── identity.rs
-│   │       ├── mod.rs
-│   │       ├── root.rs
-│   │       ├── seal.rs
-│   │       └── unit_plan.rs
+│   │   ├── shadow/
+│   │   │   ├── binding_reader.rs
+│   │   │   ├── capture.rs
+│   │   │   ├── derive.rs
+│   │   │   ├── diff.rs
+│   │   │   ├── identity.rs
+│   │   │   ├── metrics.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── root.rs
+│   │   │   ├── seal.rs
+│   │   │   ├── tap.rs
+│   │   │   └── unit_plan.rs
+│   │   └── shadow_host.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── binding_context.rs
 │   │   ├── extract.rs
