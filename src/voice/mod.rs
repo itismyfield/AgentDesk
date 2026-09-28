@@ -5,6 +5,7 @@ pub(crate) mod commands;
 pub(crate) mod config;
 pub(crate) mod flight;
 pub(crate) mod metrics;
+pub(crate) mod openai_compat;
 pub(crate) mod progress;
 pub(crate) mod prompt;
 pub(crate) mod receiver;

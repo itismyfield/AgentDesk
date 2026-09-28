@@ -54,6 +54,12 @@ fn pipeline_route_error_response(
                 "source_of_truth": source,
             })),
         )),
+        PipelineRouteError::Conflict(error) => Err(AppError::conflict(error)),
+        PipelineRouteError::Unavailable(error) => Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Conflict,
+            error,
+        )),
         PipelineRouteError::Database(error) => {
             Err(AppError::internal(error).with_code(ErrorCode::Database))
         }

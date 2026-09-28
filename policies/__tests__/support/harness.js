@@ -146,6 +146,8 @@ function createAgentdeskMock(options) {
     queries: [],
     executions: [],
     execCalls: [],
+    sessionLivenessCalls: [],
+    sessionKillCalls: [],
     statusCalls: [],
     reviewStatusCalls: [],
     reviewStateSyncs: [],
@@ -177,11 +179,20 @@ function createAgentdeskMock(options) {
     deadlockAlerts: [],
     escalations: [],
     manualInterventions: [],
+    stageMoves: [],
     flushedEscalations: 0,
     kv: new Map(),
     kvDeleteManyCalls: []
   };
 
+  // Mirrors agentdesk.pipeline.enterStage/advanceStage; tests script the result.
+  const moveStage = (mode) => (cardId, trigger) => {
+    state.stageMoves.push({ cardId, mode, trigger });
+    const moved = settings.stageMove ? settings.stageMove(cardId, mode, trigger, state) : null;
+    return clone(moved || { status: "unchanged", stage: null });
+  };
+  pipeline.enterStage = pipeline.enterStage || moveStage("enter");
+  pipeline.advanceStage = pipeline.advanceStage || moveStage("advance");
   const dbQuery = settings.dbQuery || (() => []);
   const dbExecute = settings.dbExecute || (() => ({ changes: 1 }));
   const exec = settings.exec || (() => "");
@@ -216,6 +227,13 @@ function createAgentdeskMock(options) {
     exec(cmd, args, execOptions) {
       state.execCalls.push({ cmd, args: args || [], options: execOptions || {} });
       return exec(cmd, args || [], execOptions || {}, state);
+    },
+    session: {
+      hasLivePane(name) {
+        state.sessionLivenessCalls.push(name);
+        return settings.sessionHasLivePane ? settings.sessionHasLivePane(name) : "unknown";
+      },
+      kill(name) { state.sessionKillCalls.push(name); }
     },
     config: {
       get(key) {
