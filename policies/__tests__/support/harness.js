@@ -179,11 +179,20 @@ function createAgentdeskMock(options) {
     deadlockAlerts: [],
     escalations: [],
     manualInterventions: [],
+    stageMoves: [],
     flushedEscalations: 0,
     kv: new Map(),
     kvDeleteManyCalls: []
   };
 
+  // Mirrors agentdesk.pipeline.enterStage/advanceStage; tests script the result.
+  const moveStage = (mode) => (cardId, trigger) => {
+    state.stageMoves.push({ cardId, mode, trigger });
+    const moved = settings.stageMove ? settings.stageMove(cardId, mode, trigger, state) : null;
+    return clone(moved || { status: "unchanged", stage: null });
+  };
+  pipeline.enterStage = pipeline.enterStage || moveStage("enter");
+  pipeline.advanceStage = pipeline.advanceStage || moveStage("advance");
   const dbQuery = settings.dbQuery || (() => []);
   const dbExecute = settings.dbExecute || (() => ({ changes: 1 }));
   const exec = settings.exec || (() => "");

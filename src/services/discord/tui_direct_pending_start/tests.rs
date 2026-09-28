@@ -3589,3 +3589,5 @@ fn anchor_slot_rig_teardown_preserves_absent_root() {
         false,
     );
 }
+
+mod retire_tests;

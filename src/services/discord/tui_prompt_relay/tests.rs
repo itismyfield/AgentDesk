@@ -6328,6 +6328,9 @@ mod synthetic_bridge_handoff_pg_tests;
 mod synthetic_terminal_ordering_tests;
 
 #[cfg(unix)]
+mod retired_pending_start_claim_tests;
+
+#[cfg(unix)]
 mod relayerless_claim_tests {
     // #6210: a TUI-direct claim must leave a deliverer when the supervisor producer
     // outlives the tmux watcher.

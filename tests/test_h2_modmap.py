@@ -38,6 +38,11 @@ import json, os, pathlib, platform, shutil, sys
 args = sys.argv[1:]
 if os.environ.get("STUB_CALLS"):
     with open(os.environ["STUB_CALLS"], "a") as calls: calls.write(json.dumps(args) + "\n")
+if os.environ.get("STUB_ENV_LOG"):
+    keys = ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET", "RUSTC_BOOTSTRAP", "CARGO_INCREMENTAL",
+            "RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER")
+    with open(os.environ["STUB_ENV_LOG"], "a") as log:
+        log.write(json.dumps({key: os.environ.get(key) for key in keys}) + "\n")
 if args[0] == "build":
     driver = pathlib.Path(args[args.index("--target-dir") + 1], "release/modmap-driver")
     driver.parent.mkdir(parents=True, exist_ok=True)
@@ -172,6 +177,24 @@ class Wrapper(unittest.TestCase):
                 self.assertEqual(json.loads(log.read_text())["reason"], "compiler-message")
                 self.assertIn("cargo: check failed", log.with_suffix(".stderr").read_text())
 
+    def test_shared_env_is_clean_and_bootstrap_is_driver_only(self) -> None:
+        log = self.maps / "env.jsonl"
+        code, output = self.run_wrapper(STUB_ENV_LOG=str(log), RUSTFLAGS="bad", CARGO_ENCODED_RUSTFLAGS="bad",
+                                        CARGO_BUILD_TARGET="foreign", RUSTC_BOOTSTRAP="bad", RUSTC_WRAPPER="cache",
+                                        CARGO_BUILD_RUSTC_WRAPPER="cache", CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="cache")
+        self.assertEqual(code, 0, output)
+        build, canary, root = [json.loads(line) for line in log.read_text().splitlines()]
+        for env in (build, canary, root):
+            for key in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET"):
+                self.assertIsNone(env[key], key)
+            self.assertEqual(env["CARGO_INCREMENTAL"], "0")
+            for key in ("RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"):
+                self.assertEqual(env[key], "", key)
+        self.assertEqual([env["RUSTC_BOOTSTRAP"] for env in (build, canary, root)], ["1", None, None])
+        self.assertEqual(build["RUSTC_WORKSPACE_WRAPPER"], "")
+        self.assertEqual(canary["RUSTC_WORKSPACE_WRAPPER"], root["RUSTC_WORKSPACE_WRAPPER"])
+        self.assertTrue(root["RUSTC_WORKSPACE_WRAPPER"].endswith("/release/modmap-driver"))
+
 class CiWiring(unittest.TestCase):
     def test_linux_script_checks_self_test_the_driver_without_a_wrapper(self) -> None:
         import yaml  # installed on the script-check runners
@@ -182,7 +205,7 @@ class CiWiring(unittest.TestCase):
         self.assertIn("rustc-dev", components)
         self.assertIn("llvm-tools", components)
         self.assertEqual((step.get("if"), step.get("env"), step["run"]),
-                         (None, {"RUSTC_WRAPPER": ""}, "python3 scripts/ci/h2_modmap.py --inert --canary"))
+                         (None, {"RUSTC_WRAPPER": ""}, "python3 scripts/ci/h2_modmap.py --lane linux --inert --canary"))
         self.assertLess(steps.index(toolchain), steps.index(step))
 
 if __name__ == "__main__":
