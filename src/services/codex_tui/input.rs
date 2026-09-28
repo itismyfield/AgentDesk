@@ -1702,22 +1702,6 @@ fn pane_has_codex_prompt_draft(pane: &str) -> bool {
             .is_some()
 }
 
-#[allow(dead_code)] // #3034: test-only (draft-clear path retired).
-fn codex_visible_prompt_draft_backspace_budget(
-    snapshot: &PromptReadinessSnapshot,
-) -> Option<usize> {
-    if !snapshot.prompt_draft_detected || !snapshot.tmux_pane_alive {
-        return None;
-    }
-    let visible_chars = snapshot
-        .pane_tail
-        .lines()
-        .filter_map(codex_visible_prompt_draft_text)
-        .map(|text| text.chars().count())
-        .sum::<usize>();
-    (visible_chars > 0).then_some(visible_chars.saturating_add(16).min(512))
-}
-
 fn codex_visible_prompt_draft_text(line: &str) -> Option<&str> {
     let trimmed = line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
     if let Some(rest) = trimmed.strip_prefix('›') {
@@ -1921,6 +1905,22 @@ mod tests {
     use std::os::windows::process::ExitStatusExt;
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
+
+    // Only tests use this budget now that the draft-clear path is retired.
+    fn codex_visible_prompt_draft_backspace_budget(
+        snapshot: &PromptReadinessSnapshot,
+    ) -> Option<usize> {
+        if !snapshot.prompt_draft_detected || !snapshot.tmux_pane_alive {
+            return None;
+        }
+        let visible_chars = snapshot
+            .pane_tail
+            .lines()
+            .filter_map(codex_visible_prompt_draft_text)
+            .map(|text| text.chars().count())
+            .sum::<usize>();
+        (visible_chars > 0).then_some(visible_chars.saturating_add(16).min(512))
+    }
 
     #[test]
     fn try_composer_lock_rejects_held_and_poisoned_lock() {
