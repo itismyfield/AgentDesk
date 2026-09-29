@@ -45,14 +45,8 @@ pub(crate) fn adopt_from_hook(
                 &tmux_session_name,
                 payload_session_id,
             ) {
-                // #5188: the old wording ("adopted Claude continuation
-                // session") read as if the whole delivery path had followed
-                // the rotation. It had not — only the in-memory runtime
-                // binding was rebound, and the launch-script rehydration pass
-                // could then revert even that. The message now states exactly
-                // what this call site changes and defers the rest to the
-                // rotation ledger, so a reader cannot mistake it for
-                // end-to-end success.
+                // Only the in-memory binding moved here; the rotation ledger carries the rest,
+                // so the message must not read as end-to-end delivery.
                 Ok(changed) => tracing::warn!(
                     provider,
                     command_session_id,
