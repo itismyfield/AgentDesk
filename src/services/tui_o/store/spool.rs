@@ -590,12 +590,18 @@ impl ChannelStore {
             if segment.end > spool.cursor.captured_through {
                 return Err(rejected("cursor has not passed the segment"));
             }
+            // A segment without frames covers no bytes, so it leaves the GC chain as it is.
             let (source, segment_start, through) = (source.clone(), segment.start, segment.end);
-            store.write_ledger(LedgerEntry::SpoolGc {
-                source,
-                segment_start,
-                through,
-            })?;
+            if segment_start < through {
+                store.write_ledger(LedgerEntry::SpoolGc {
+                    source,
+                    segment_start,
+                    through,
+                })?;
+            }
+            if let Some(detail) = store.ledger.violation() {
+                return Err(rejected(&format!("GC entry broke the ledger: {detail}")));
+            }
             fs::remove_file(&segment.path)?;
             fsync_parent_dir(&segment.path)?;
             if let Some(spool) = store.sources.get_mut(&key) {
@@ -814,6 +820,39 @@ mod tests {
         let mut reopened = fixture.open().unwrap();
         assert!(!oldest.exists());
         assert_eq!(lines(&mut reopened, &fixture.source), ["L2"]);
+    }
+
+    #[test]
+    fn a_header_only_segment_is_collected_without_a_gc_entry() {
+        let fixture = Fixture::new(b"L1\n", None);
+        let mut channel = fixture.open().unwrap();
+        channel.segment_max = 1;
+        let mut capture = two_batches(&fixture, &mut channel);
+        // A crash between a segment header and its first frame leaves a segment with no frames.
+        let header = SegmentHeader {
+            source_id: fixture.source.clone(),
+            start_offset: 6,
+            identity_version: IDENTITY_VERSION,
+        };
+        let name = format!("{}-{:020}.seg", source_key(&fixture.source), 6);
+        let mut line = serde_json::to_vec(&header).unwrap();
+        line.push(b'\n');
+        fs::write(fixture.channel_dir().join(SPOOL_DIR).join(name), line).unwrap();
+        let mut channel = fixture.open().unwrap();
+        assert_eq!(channel.retained_segments(&fixture.source), 3);
+        for _ in 0..3 {
+            channel.gc_oldest_segment(&fixture.source).unwrap();
+        }
+        assert_eq!(
+            channel.ledger().gc_segments(&fixture.source),
+            [(0, 3), (3, 6)]
+        );
+        assert_eq!(channel.ledger().violation(), None);
+        assert!(fixture.segments().is_empty());
+        fixture.grow(b"L3\n");
+        let (batch, hash) = poll(&mut capture);
+        channel.append_spool(&batch, &hash).unwrap();
+        assert_eq!(lines(&mut fixture.open().unwrap(), &fixture.source), ["L3"]);
     }
 
     #[test]
