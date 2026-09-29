@@ -2,14 +2,18 @@
 //! is Owned and the channel's delivery lease is held, and settles unclear results from history.
 
 pub mod actor;
+pub mod binding;
 pub mod confirm;
 pub mod deliver;
 pub mod pieces;
+pub mod rotation;
 pub mod round_trip;
 
 use std::future::Future;
 
 use serde::{Deserialize, Serialize};
+
+use crate::services::tui_o::shadow::SourceId;
 
 /// `tui_o.writer` settings; nothing is posted unless explicitly enabled.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,7 +42,8 @@ pub enum PostOutcome {
 /// Discord as the writer uses it: one POST per piece and forward history reads.
 pub trait DiscordPort: Send + Sync + 'static {
     fn bot_id(&self) -> u64;
-    /// The future is spawned under the ownership gate, so it owns everything it needs.
+    /// The first poll runs under the ownership gate and starts the request; the future owns
+    /// everything it needs.
     fn post(
         &self,
         channel: u64,
@@ -54,9 +59,10 @@ pub trait DiscordPort: Send + Sync + 'static {
     fn history_readable(&self, channel: u64) -> bool;
 }
 
-/// The channel's shared delivery lease, held from before admission until the result is recorded.
+/// The channel's shared delivery lease, held from before admission until the result is recorded
+/// and the POST task has ended.
 pub trait DeliveryLease: Send + Sync {
-    type Held: Send;
+    type Held: Send + 'static;
     /// `None` when another holder has it; the piece waits and is never posted without it.
     fn try_acquire(&self, channel: u64, serial: u64) -> Option<Self::Held>;
 }
@@ -92,6 +98,30 @@ pub enum WriterAlarm {
     },
     /// Capture waits until delivered segments are collected; nothing is dropped.
     SpoolFull,
+    /// The binding log skipped a seq; the channel stops before applying anything past it.
+    BindingGap {
+        expected: u64,
+        found: u64,
+    },
+    /// A bind whose transcript file is still unnamed; later binds wait behind it.
+    BindingPending {
+        seq: u64,
+    },
+    /// The source spools but posts nothing until its start is resolved.
+    BoundaryPending {
+        source: SourceId,
+    },
+    /// An old source kept growing well after its successor was bound; both stay read.
+    SourceStillGrowing {
+        source: SourceId,
+    },
+    TooManyReaders {
+        count: usize,
+    },
+    /// A retired source grew; it is read again.
+    RetiredSourceGrew {
+        source: SourceId,
+    },
 }
 
 pub trait AlarmSink: Send + Sync {

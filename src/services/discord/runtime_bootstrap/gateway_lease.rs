@@ -649,7 +649,7 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                         "  [{ts}] 🔐 GATEWAY-LEASE: {} re-acquired singleton lease after transient loss",
                         provider_for_lease.display_name()
                     );
-                    gate.acquired();
+                    gate.reacquired();
                     current_lease = Some(new_lease);
                 }
                 Err(error) => {

@@ -5408,6 +5408,7 @@ services::discord::runtime_bootstrap::relay_dlq_redelivery::tests::plan_trims_mu
 services::discord::runtime_bootstrap::relay_dlq_redelivery::tests::watcher_reason_format_still_carries_every_key_this_module_parses
 services::discord::runtime_bootstrap::restart_lifecycle_characterization_tests::check_deferred_restart_is_noop_without_restart_pending
 services::discord::runtime_bootstrap::restart_lifecycle_characterization_tests::deferred_restart_poller_consumes_marker_token_and_decrements_exactly_once
+services::discord::runtime_bootstrap::shutdown::gateway_waiter_tests::a_lease_reacquired_during_the_exit_diagnostic_keeps_o_admission_closed
 services::discord::runtime_bootstrap::shutdown::gateway_waiter_tests::backend_exit_closes_o_admission_before_the_lease_task_drops_the_lease
 services::discord::runtime_bootstrap::shutdown::gateway_waiter_tests::gateway_waiter_cancel_and_prebackend_panic_withdraw_intent
 services::discord::runtime_bootstrap::shutdown::gateway_waiter_tests::gateway_waiter_exit_arms_withdraw_before_diagnostic_and_lease_abort
@@ -9385,6 +9386,7 @@ services::tui_o::shadow::tap::tests::the_window_start_tail_reads_to_the_end_in_o
 services::tui_o::shadow_host::tests::tap_copies_own_bot_messages_and_authorless_edits_only
 services::tui_o::store::durable::tests::a_create_once_retry_leaves_the_published_file_and_its_crash_alias_untouched
 services::tui_o::store::ledger::tests::replay_flags_the_ownership_invariant_breaks_that_pause_a_channel
+services::tui_o::store::rotation::tests::a_decided_boundary_is_never_rewritten_and_an_unowed_source_keeps_its_spool
 services::tui_o::store::spool::tests::a_crash_between_spool_fsync_and_cursor_move_is_recovered_by_recomputation
 services::tui_o::store::spool::tests::a_first_batch_may_skip_only_the_torn_first_line
 services::tui_o::store::spool::tests::a_gc_entry_outside_the_logged_chain_deletes_nothing_and_halts
@@ -9408,9 +9410,19 @@ services::tui_o::writer::tests::a_created_reply_by_another_author_is_settled_fro
 services::tui_o::writer::tests::a_piece_is_prepared_under_ownership_then_posted_once
 services::tui_o::writer::tests::a_prepared_left_by_a_crash_is_settled_before_the_next_post
 services::tui_o::writer::tests::a_refused_post_blocks_the_channel_even_after_reopening
+services::tui_o::writer::tests::a_violation_recorded_while_running_stops_the_writer_before_the_next_post
 services::tui_o::writer::tests::actor::a_full_spool_pauses_capture_until_delivered_segments_are_collected
 services::tui_o::writer::tests::actor::a_source_rewritten_behind_the_cursor_halts_the_channel_before_any_post
 services::tui_o::writer::tests::actor::an_announced_unit_keeps_its_segment_until_it_is_sealed_and_posted
+services::tui_o::writer::tests::actor::rotation::a_bind_waiting_for_its_file_alarms_once_late_and_its_resolution_attaches_it
+services::tui_o::writer::tests::actor::rotation::a_compact_that_keeps_the_same_source_reposts_nothing
+services::tui_o::writer::tests::actor::rotation::a_fork_posts_only_what_follows_the_eight_rows_it_inherited
+services::tui_o::writer::tests::actor::rotation::a_gap_in_the_binding_log_stops_the_channel_at_the_last_applied_seq
+services::tui_o::writer::tests::actor::rotation::a_long_growing_old_source_and_a_fourth_reader_alarm_while_every_row_still_posts
+services::tui_o::writer::tests::actor::rotation::a_resume_whose_first_new_record_predates_the_bind_posts_nothing_until_resolved
+services::tui_o::writer::tests::actor::rotation::an_old_tail_is_posted_before_the_new_source_and_the_old_source_retires_once_quiet
+services::tui_o::writer::tests::actor::rotation::an_unknown_bind_holds_back_even_a_fresh_source
+services::tui_o::writer::tests::actor::rotation::each_old_source_retires_only_after_its_own_successor_records_something
 services::tui_o::writer::tests::actor::the_actor_posts_each_unit_after_the_switch_once_even_across_a_restart
 services::tui_o::writer::tests::actor::the_round_trip_reads_back_every_case_and_reports_any_difference
 services::tui_o::writer::tests::actor::the_writer_stays_dormant_unless_enabled
@@ -9418,8 +9430,10 @@ services::tui_o::writer::tests::actor::without_ownership_the_actor_keeps_spoolin
 services::tui_o::writer::tests::an_unclear_post_is_settled_from_history_and_never_posted_again
 services::tui_o::writer::tests::an_unclear_post_sharing_an_earlier_unsettled_payload_stays_ambiguous
 services::tui_o::writer::tests::derivation_splits_each_unit_once_and_excludes_or_blocks_the_rest
+services::tui_o::writer::tests::no_post_starts_its_request_after_ownership_closes
 services::tui_o::writer::tests::nothing_is_prepared_or_posted_without_ownership_and_the_delivery_lease
 services::tui_o::writer::tests::settlement_stays_ambiguous_or_unresolved_when_history_cannot_single_out_the_post
+services::tui_o::writer::tests::the_delivery_lease_is_held_until_the_post_task_ends
 services::tui_prompt_control::tests::absolute_path_prompts_are_never_taken_as_codex_commands
 services::tui_prompt_control::tests::codex_local_controls_carry_the_normalized_name_and_the_raw_args
 services::tui_prompt_control::tests::command_shaped_input_outside_the_registry_is_refused_not_forwarded
