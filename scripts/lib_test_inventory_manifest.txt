@@ -9376,6 +9376,7 @@ services::tui_o::shadow::tap::tests::the_window_start_tail_reads_to_the_end_in_o
 services::tui_o::shadow_host::tests::tap_copies_own_bot_messages_and_authorless_edits_only
 services::tui_o::store::durable::tests::a_create_once_retry_leaves_the_published_file_and_its_crash_alias_untouched
 services::tui_o::store::ledger::tests::replay_flags_the_ownership_invariant_breaks_that_pause_a_channel
+services::tui_o::store::rotation::tests::a_decided_boundary_is_never_rewritten_and_an_unowed_source_keeps_its_spool
 services::tui_o::store::spool::tests::a_crash_between_spool_fsync_and_cursor_move_is_recovered_by_recomputation
 services::tui_o::store::spool::tests::a_first_batch_may_skip_only_the_torn_first_line
 services::tui_o::store::spool::tests::a_gc_entry_outside_the_logged_chain_deletes_nothing_and_halts
