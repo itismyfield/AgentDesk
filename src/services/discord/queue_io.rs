@@ -3,7 +3,8 @@ mod transport;
 mod turn_admission;
 use transport::QueueTransport;
 pub(super) use turn_admission::{
-    mailbox_recovery_kickoff, mailbox_try_start_turn_adopting, mailbox_try_start_turn_behind_queue,
+    mailbox_enqueue_observed_intervention, mailbox_recovery_kickoff,
+    mailbox_try_start_turn_adopting, mailbox_try_start_turn_behind_queue,
     mailbox_try_start_turn_kinded_with_feedback, mailbox_try_start_turn_unless_released,
 };
 
@@ -798,6 +799,10 @@ fn schedule_deferred_idle_queue_kickoff_inner(
         }
     });
 }
+
+#[cfg(test)]
+#[path = "queue_io/ledger_settlement_tests.rs"]
+mod ledger_settlement_tests;
 
 #[cfg(test)]
 mod presleep_tests {

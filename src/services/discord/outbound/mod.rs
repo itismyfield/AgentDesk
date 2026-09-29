@@ -6,7 +6,7 @@
 
 use std::sync::OnceLock;
 
-pub(in crate::services::discord) mod completed_turn_ledger; // #4564
+pub(crate) mod completed_turn_ledger; // #4564
 pub(crate) mod confirmation;
 pub(crate) mod decision;
 pub(crate) mod delivery;
@@ -15,6 +15,7 @@ pub(in crate::services::discord) mod delivery_obligation;
 pub(in crate::services::discord) mod delivery_record; // #3089 B0
 pub(crate) mod manual_delivery;
 pub(crate) mod message;
+pub(crate) mod o_writer_io;
 pub(crate) mod policy;
 pub(in crate::services::discord) mod reaction_control;
 // #5071 T4-B3: read-only projection over `delivery_record`'s durable evidence.

@@ -59,6 +59,7 @@ pub struct StreaksResponse {
 #[derive(Debug, Serialize)]
 pub struct AchievementsResponse {
     pub achievements: Vec<Value>,
+    pub daily_missions: Vec<Value>,
 }
 
 #[derive(Debug, Serialize)]

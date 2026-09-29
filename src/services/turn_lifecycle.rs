@@ -45,14 +45,8 @@ pub(crate) struct TurnLifecycleStopResult {
     pub tmux_killed: bool,
     pub inflight_cleared: bool,
     pub queue_depth: Option<usize>,
-    /// `true` when `queue_depth_after >= queue_depth_before` AND the
-    /// disk-backed `discord_pending_queue/<provider>/<token>/<channel>.json`
-    /// did not disappear during the cancel. Computed by the lifecycle
-    /// helper itself from observed before/after state instead of being
-    /// asserted by the caller (#1672 fix — was previously hardcoded
-    /// `true`, masking queue-loss incidents like the 2026-05-04 ch-dd
-    /// recovery).
-    pub queue_preserved: bool,
+    /// Measured queue preservation; absent if either memory or disk could not be observed.
+    pub queue_preserved: Option<bool>,
     pub termination_recorded: bool,
     /// #1672: best-effort tmux session name resolved at cancel time.
     /// Populated even when the caller passed an empty `tmux_name`, by
@@ -68,13 +62,10 @@ pub(crate) struct TurnLifecycleStopResult {
     /// #1672: same as `queue_depth_before` but captured after the cancel
     /// completed. Drives the post-fact `queue_preserved` invariant.
     pub queue_depth_after: Option<usize>,
-    /// #1672: whether the on-disk pending-queue file was present
-    /// immediately before the cancel ran.
-    pub queue_disk_present_before: bool,
-    /// #1672: whether the on-disk pending-queue file is still present
-    /// after the cancel ran. A `true → false` transition is the canonical
-    /// signature of #1672 — pending_queue silently dropped during cancel.
-    pub queue_disk_present_after: bool,
+    /// File presence immediately before cancel; absent when unmeasured.
+    pub queue_disk_present_before: Option<bool>,
+    /// File presence after cancel; only measured true-to-false proves disk loss.
+    pub queue_disk_present_after: Option<bool>,
     /// #5176: whether the channel mailbox actually gave up its foreground
     /// turn anchor. THIS is what "the turn was cancelled" has to mean — a
     /// `turn_status: cancelled` stamp on a mailbox that still owns the
@@ -88,6 +79,13 @@ pub(crate) struct TurnLifecycleStopResult {
     /// the user-message-lossless contract can be traced to a specific
     /// instruction instead of a decremented counter.
     pub queue_dropped_message_ids: Vec<u64>,
+}
+
+impl TurnLifecycleStopResult {
+    pub(crate) fn queue_depth_if_observed(&self) -> Option<usize> {
+        self.queue_depth
+            .filter(|_| self.queue_depth_after.is_some())
+    }
 }
 
 pub(crate) async fn stop_turn_preserving_queue(
@@ -352,6 +350,9 @@ async fn stop_turn_with_policy(
     let queue_dropped_message_ids =
         dropped_queue_message_ids(pre_snapshot.as_ref(), post_snapshot.as_ref());
 
+    if health_registry.is_some() && (pre_snapshot.is_none() || post_snapshot.is_none()) {
+        tracing::warn!(channel = ?target.channel_id, "pending queue unobservable across cancel");
+    }
     let result = TurnLifecycleStopResult {
         lifecycle_path,
         tmux_killed,
@@ -362,8 +363,8 @@ async fn stop_turn_with_policy(
         tmux_session_observed,
         queue_depth_before: pre_snapshot.as_ref().map(|s| s.queue_depth),
         queue_depth_after: post_snapshot.as_ref().map(|s| s.queue_depth),
-        queue_disk_present_before: pre_snapshot.as_ref().is_some_and(|s| s.disk_present),
-        queue_disk_present_after: post_snapshot.as_ref().is_some_and(|s| s.disk_present),
+        queue_disk_present_before: pre_snapshot.as_ref().and_then(|s| s.disk_present),
+        queue_disk_present_after: post_snapshot.as_ref().and_then(|s| s.disk_present),
         mailbox_foreground_free,
         queue_dropped_message_ids,
     };
@@ -518,66 +519,131 @@ pub(crate) mod policy_observability_tests {
         assert!(event.payload["turn_id"].is_null());
     }
 
-    /// #1672: the queue-preservation invariant must be derived from
-    /// observed pre/post snapshots, not hardcoded `true`. Verify the
-    /// helper detects the disk-loss + memory-loss signatures.
+    #[tokio::test]
+    async fn queue_truth_lost_actor_is_not_a_measured_empty_queue() {
+        use super::*;
+        use crate::services::turn_orchestrator::{ChannelMailboxRegistry, QueuePersistenceContext};
+        let temp = tempfile::tempdir().unwrap();
+        let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let registry = HealthRegistry::new();
+        registry.register("claude".into(), shared.clone()).await;
+        let (mailboxes, token) = shared.queue_fixture_parts();
+        for (i, drop_reply) in [false, true].into_iter().enumerate() {
+            let channel = ChannelId::new(6038740 + i as u64);
+            let target = super::TurnLifecycleTarget {
+                provider: Some(ProviderKind::Claude),
+                channel_id: Some(channel),
+                tmux_name: String::new(),
+            };
+            let handle = mailboxes.handle(channel);
+            let item = ChannelMailboxRegistry::queued_for_test(42);
+            handle
+                .replace_queue(
+                    vec![item],
+                    QueuePersistenceContext::new(&ProviderKind::Claude, token, None),
+                )
+                .await;
+            let pre = super::pending_queue_pre_snapshot(Some(&registry), &target)
+                .await
+                .unwrap();
+            assert_eq!(pre.queue_depth, 1);
+            if drop_reply {
+                mailboxes.insert_reply_dropping_for_test(channel);
+            } else {
+                mailboxes.insert_unreachable_for_test(channel);
+            }
+            let post = super::pending_queue_post_snapshot(Some(&registry), &target).await;
+            mailboxes.remove_fixture_for_test(channel);
+            assert!(post.is_none());
+            assert_eq!(
+                super::compute_queue_preserved(
+                    TmuxCleanupPolicy::PreserveSession,
+                    Some(&pre),
+                    post.as_ref()
+                ),
+                None
+            );
+            assert!(super::dropped_queue_message_ids(Some(&pre), post.as_ref()).is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn queue_truth_disk_stat_error_is_unmeasured() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let registry = HealthRegistry::new();
+        registry.register("claude".into(), shared.clone()).await;
+        let (mailboxes, token) = shared.queue_fixture_parts();
+        let channel = ChannelId::new(6038742);
+        let parent = crate::services::discord::runtime_store::discord_pending_queue_root()
+            .unwrap()
+            .join("claude");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::write(parent.join(token), b"not a directory").unwrap();
+        let observed = crate::services::discord::health::snapshot_pending_queue_state(
+            &registry, "claude", channel,
+        )
+        .await
+        .unwrap();
+        mailboxes.remove_fixture_for_test(channel);
+        assert_eq!(observed.disk_present, None);
+    }
+
     #[test]
     fn compute_queue_preserved_detects_disk_and_memory_loss() {
         use crate::services::discord::health::PendingQueueSnapshot;
 
         let pre = PendingQueueSnapshot {
             queue_depth: 1,
-            disk_present: true,
+            disk_present: Some(true),
             disk_path: None,
             message_ids: vec![9_001],
         };
         let post_loss = PendingQueueSnapshot {
             queue_depth: 0,
-            disk_present: false,
+            disk_present: Some(false),
             disk_path: None,
             message_ids: Vec::new(),
         };
-        assert!(
-            !super::compute_queue_preserved(
-                TmuxCleanupPolicy::PreserveSessionAndInflight {
-                    restart_mode: InflightRestartMode::HotSwapHandoff,
-                },
-                Some(&pre),
-                Some(&post_loss),
-            ),
-            "disk file disappearing + queue depth shrinking must report queue_preserved=false"
-        );
-
-        let post_kept = PendingQueueSnapshot {
-            queue_depth: 1,
-            disk_present: true,
-            disk_path: None,
-            message_ids: vec![9_001],
+        let lost_memory = PendingQueueSnapshot {
+            queue_depth: 0,
+            ..pre.clone()
         };
-        assert!(super::compute_queue_preserved(
-            TmuxCleanupPolicy::PreserveSessionAndInflight {
-                restart_mode: InflightRestartMode::HotSwapHandoff,
-            },
-            Some(&pre),
-            Some(&post_kept),
-        ));
-
-        // Empty-before / empty-after is a trivial preservation case.
-        let empty = PendingQueueSnapshot::default();
-        assert!(super::compute_queue_preserved(
-            TmuxCleanupPolicy::PreserveSession,
-            Some(&empty),
-            Some(&empty),
-        ));
-
-        // Missing registry context falls back to the legacy contract:
-        // assume preservation, since the lifecycle helper itself never
-        // deletes the file.
-        assert!(super::compute_queue_preserved(
-            TmuxCleanupPolicy::PreserveSession,
-            None,
-            None,
-        ));
+        let policy = TmuxCleanupPolicy::PreserveSession;
+        assert_eq!(
+            super::compute_queue_preserved(policy, Some(&pre), Some(&post_loss)),
+            Some(false)
+        );
+        assert_eq!(
+            super::compute_queue_preserved(policy, Some(&pre), Some(&pre)),
+            Some(true)
+        );
+        assert_eq!(
+            super::compute_queue_preserved(policy, Some(&pre), Some(&lost_memory)),
+            Some(false)
+        );
+        let lost_disk = PendingQueueSnapshot {
+            queue_depth: 1,
+            ..post_loss.clone()
+        };
+        assert_eq!(
+            super::compute_queue_preserved(policy, Some(&pre), Some(&lost_disk)),
+            Some(false)
+        );
+        let empty = PendingQueueSnapshot {
+            disk_present: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::compute_queue_preserved(policy, Some(&empty), Some(&empty)),
+            Some(true)
+        );
+        for (pre, post) in [(None, None), (Some(&pre), None), (None, Some(&pre))] {
+            assert_eq!(super::compute_queue_preserved(policy, pre, post), None);
+        }
     }
 
     /// #5176: the cancel response must name the user instructions it destroyed.
@@ -589,7 +655,7 @@ pub(crate) mod policy_observability_tests {
         fn snapshot(message_ids: Vec<u64>) -> PendingQueueSnapshot {
             PendingQueueSnapshot {
                 queue_depth: message_ids.len(),
-                disk_present: !message_ids.is_empty(),
+                disk_present: Some(!message_ids.is_empty()),
                 disk_path: None,
                 message_ids,
             }
@@ -715,27 +781,14 @@ fn dropped_queue_message_ids(
         .collect()
 }
 
-/// #1672 invariant: `queue_preserved=true` requires that no in-memory
-/// items were lost AND the disk-backed file did not silently disappear.
-/// For `CleanupSession` (force-kill) we honor the historical contract
-/// of "queue stays on disk for the next runtime" — the lifecycle path
-/// itself never deletes the file, so the same invariant applies.
+/// Preservation requires measured memory and disk state on both sides of the cancel.
 fn compute_queue_preserved(
     cleanup_policy: crate::services::discord::TmuxCleanupPolicy,
     pre: Option<&crate::services::discord::health::PendingQueueSnapshot>,
     post: Option<&crate::services::discord::health::PendingQueueSnapshot>,
-) -> bool {
+) -> Option<bool> {
     let _ = cleanup_policy;
-    match (pre, post) {
-        (Some(pre), Some(post)) => {
-            let disk_preserved = !pre.disk_present || post.disk_present;
-            let memory_preserved = post.queue_depth >= pre.queue_depth;
-            disk_preserved && memory_preserved
-        }
-        // No registry context — fall back to the legacy contract: the
-        // lifecycle path itself does not delete pending_queue files, so
-        // assume preservation. (Same behavior as before #1672 for the
-        // direct-fallback / test-only paths.)
-        _ => true,
-    }
+    let (pre, post) = (pre?, post?);
+    let (before, after) = (pre.disk_present?, post.disk_present?);
+    Some((!before || after) && post.queue_depth >= pre.queue_depth)
 }

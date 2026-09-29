@@ -271,8 +271,8 @@ if run_check guards "Destructive call-site per-file ratchet (#5071 T3-A4)"; then
 fi
 
 if run_check guards "H2 tmux boundary measurer and admission self-tests"; then
-# The gates are inert in CI until the baseline lands; their unit tests, module map included, run now.
-"$PYTHON" -m unittest tests.test_h2_measure tests.test_h2_admission tests.test_h2_modmap tests.test_h2_cfg_compare
+# Baseline gates skip until activation; driver/cfg canary and these unit tests already run in CI.
+"$PYTHON" -m unittest tests.test_h2_measure tests.test_h2_admission tests.test_h2_modmap tests.test_h2_cfg_compare tests.test_h2_cfg_collect tests.test_h2_session_driver tests.test_h2_session tests.test_h2_items
 fi
 
 if run_check guards "Reachability row-independence + change-surface gate (#5071 T4-B1)"; then
@@ -346,6 +346,13 @@ if run_check guards "Durable frontier writer per-file call-site allowlist (#5071
 # measures each one.
 "$PYTHON" scripts/check_durable_frontier_writer_call_sites.py
 "$PYTHON" -m unittest tests.test_durable_frontier_writer_call_sites
+fi
+
+if run_check guards "TUI O writer census: Legacy send sites and cutover gates"; then
+# Pins every Discord send site's census row and every O cutover gate by exact
+# per-file count; the script docstring declares its lexical limits.
+"$PYTHON" scripts/check_tui_o_writer_census.py
+"$PYTHON" -m unittest tests.test_check_tui_o_writer_census
 fi
 
 if run_check guards "Intake-outbox done writer per-file call-site allowlist (#5071 T2)"; then
@@ -510,10 +517,6 @@ fi
 
 if run_check contracts "Scheduled-message PG path-filter wiring contract"; then
 "$PYTHON" -m unittest tests.test_scheduled_messages_ci_wiring
-fi
-
-if run_check contracts "macOS hosted-overflow routing contract"; then
-"$PYTHON" -m unittest tests.test_macos_runner_overflow_ci_wiring
 fi
 
 if run_check contracts "High-risk recovery path-filter selection contract (#5232)"; then
@@ -712,6 +715,7 @@ SHELL_TESTS_FAILED=0
 required_shell_suites=(
   tests/test_cluster_deploy_peer_verdict_5189.sh
   tests/test_deploy_migration_floor_fail_forward_6090.sh
+  tests/test_deploy_o_writer_rollback_guard_6325.sh
   tests/test_deploy_smoke_scope.sh
   tests/test_deploy_smoke_warn_scope_4511.sh
   tests/test_deploy_smoke_wedge_coverage_5244.sh
@@ -737,7 +741,8 @@ if run_check cargo "Agent maintenance freshness tests"; then
 fi
 
 if run_check cargo "Maintainability audit tests"; then
-"$PYTHON" -m unittest tests.test_audit_maintainability.FooterViewWritesCheck
+"$PYTHON" -m unittest tests.test_audit_maintainability.FooterViewWritesCheck \
+  tests.test_audit_maintainability.GiantFileRatchetCheck
 fi
 
 if run_check cargo "Maintainability audit"; then

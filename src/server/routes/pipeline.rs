@@ -42,17 +42,17 @@ fn pipeline_route_error_response(
             })),
         )),
         PipelineRouteError::NotFound(error) => Err(AppError::not_found(error)),
-        PipelineRouteError::Readonly { table, source } => Ok((
-            StatusCode::METHOD_NOT_ALLOWED,
-            Json(json!({
-                "error": format!(
-                    "table '{}' is file-canonical; edit policies/default-pipeline.yaml \
-                     and restart the server to apply changes",
-                    table
-                ),
-                "table": table,
-                "source_of_truth": source,
-            })),
+        PipelineRouteError::Conflict(error) => Err(AppError::conflict(error)),
+        PipelineRouteError::Unavailable(error) => Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Conflict,
+            error,
+        )),
+        PipelineRouteError::Conflict(error) => Err(AppError::conflict(error)),
+        PipelineRouteError::Unavailable(error) => Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Conflict,
+            error,
         )),
         PipelineRouteError::Database(error) => {
             Err(AppError::internal(error).with_code(ErrorCode::Database))
@@ -351,3 +351,7 @@ pub async fn get_pipeline_graph(
         Err(error) => pipeline_route_error_response(error),
     }
 }
+
+#[cfg(test)]
+#[path = "pipeline_stage_save_tests.rs"]
+mod stage_save_tests;

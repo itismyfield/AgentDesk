@@ -60,12 +60,14 @@ enum StaticSendSource {
     Voice,
     GithubSync,
     CatchUpTooOld,
+    BootCustodyNotice,
     QueueOverflowNotice,
     OutboxDeliveryAlert,
     LongTurnWatchdog,
     RelaySignalRollup,
     DispatchWatchdog,
     StallWatchdog,
+    TuiOAlarm,
     AgentdeskCli,
     Operator,
     Dashboard,
@@ -116,6 +118,7 @@ const POLICIES: &[SourcePolicy] = &[
     policy!(Voice, "voice", LOOPBACK),
     policy!(GithubSync, "github_sync", LOOPBACK),
     policy!(CatchUpTooOld, "catch_up_too_old", LOOPBACK),
+    policy!(BootCustodyNotice, "boot_custody_notice", LOOPBACK),
     policy!(QueueOverflowNotice, "queue_overflow_notice", LOOPBACK),
     policy!(OutboxDeliveryAlert, "outbox_delivery_alert", LOOPBACK),
     policy!(LongTurnWatchdog, "long_turn_watchdog", LOOPBACK),
@@ -124,6 +127,7 @@ const POLICIES: &[SourcePolicy] = &[
     // #4460: stall watchdog now MENTIONS the owner instead of force-terminating
     // a suspected-stall turn — it posts a rate-limited outbox alert.
     policy!(StallWatchdog, "stall_watchdog", LOOPBACK),
+    policy!(TuiOAlarm, "tui_o_alarm", LOOPBACK),
     policy!(AgentdeskCli, "agentdesk-cli", CLI),
     policy!(Operator, "operator", CLI),
     policy!(Dashboard, "dashboard", DASHBOARD),
@@ -182,12 +186,14 @@ mod tests {
         "scheduled_message",
         "github_sync",
         "catch_up_too_old",
+        "boot_custody_notice",
         "queue_overflow_notice",
         "outbox_delivery_alert",
         "long_turn_watchdog",
         "relay_signal_rollup",
         "dispatch_watchdog",
         "stall_watchdog",
+        "tui_o_alarm",
     ];
 
     #[test]

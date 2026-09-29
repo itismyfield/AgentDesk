@@ -1,7 +1,11 @@
 use super::*;
+use crate::services::cluster::node_registry::GatewayWaiterGuard;
 
 mod deferred_restart;
 mod framework_setup;
+mod gateway_handback_breaker;
+#[cfg(test)]
+mod gateway_handback_integration_tests;
 mod gateway_lease;
 mod gateway_lease_recovery;
 #[cfg(test)]
@@ -26,6 +30,7 @@ mod startup_doctor;
 mod voice;
 
 use self::framework_setup::{run_bot_build_slash_commands, run_bot_framework_setup};
+use self::gateway_handback_breaker::GatewayHandbackBreaker;
 use self::gateway_lease::{
     GatewayLeaseOutcome, run_bot_acquire_gateway_lease, run_bot_spawn_gateway_lease_keepalive,
 };
@@ -48,6 +53,7 @@ use self::voice::voice_auto_join_provider_map;
 use self::voice::{run_bot_init_voice_workers, run_bot_rehydrate_voice_handoffs};
 #[allow(unused_imports)]
 use self::{orphan_recovery::*, restored_state::*, session_gc::*, startup_doctor::*};
+use crate::services::tui_o::topology::HostRole;
 
 pub(crate) struct RunBotContext {
     pub(crate) global_active: Arc<std::sync::atomic::AtomicUsize>,
@@ -269,7 +275,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // passes here after the generation is allocated and before any mint surface.
     // Only the utility branch leaves earlier: it builds no runtime or mint surface. Its
     // doctor handles only health-registered runtimes, which register after their reaper.
-    super::inflight::reap_inflight_rows_at_boot_blocking(&provider).await;
+    super::inflight::reap_inflight_rows_at_boot_blocking(&provider, shared.pg_pool.clone()).await;
     super::tui_prompt_relay::spawn_tui_prompt_relay(shared.clone(), provider.clone());
 
     // Phase 5.2 of intake-node-routing (issue #2009): populate
@@ -295,7 +301,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         // REST workers persist the same mailbox state as Gateway runtimes.
         // Restore it before polling new intake; never replay Discord history.
         queued_recovery::restore_worker_queues(&shared, &provider).await;
-        run_bot_maybe_spawn_intake_worker(&shared, &provider);
+        run_bot_maybe_spawn_intake_worker(&shared, &provider, HostRole::Runner);
         run_startup_diagnostic_after_reconcile_barrier_for_provider(
             &provider,
             startup_reconcile_remaining,
@@ -315,6 +321,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // Resolve the gateway role before spawning the intake worker. Both gateway
     // and confirmed-standby runtimes start it in observe/enforce mode, while an
     // indeterminate lease failure leaves no health-blind detached worker.
+    let mut handback_breaker = GatewayHandbackBreaker::for_owner(provider.as_str(), &token_hash);
     let gateway_outcome = run_bot_acquire_gateway_lease(
         &shared,
         &token_hash,
@@ -323,6 +330,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         &startup_doctor_started,
         &health_registry,
         api_port,
+        &mut handback_breaker,
     )
     .await;
     if !gateway_outcome.starts_provider_runtime() {
@@ -338,8 +346,9 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // wall clock. The files remain owned by the external persistence barrier
     // and are never deleted by the respawned binary.
 
-    let gateway_lease = match gateway_outcome {
-        GatewayLeaseOutcome::Proceed(lease) => lease,
+    let (gateway_lease, gateway_waiter) = match gateway_outcome {
+        GatewayLeaseOutcome::Proceed(Some(acquired)) => (Some(acquired.lease), acquired.waiter),
+        GatewayLeaseOutcome::Proceed(None) => (None, None),
         GatewayLeaseOutcome::Standby => {
             // Standby can execute full turns through the intake worker. Always
             // register its SharedData so detailed health proves either the real
@@ -352,8 +361,14 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             spawns::run_bot_spawn_deferred_restart_poller(&shared, &provider);
             #[cfg(unix)]
             spawns::run_bot_spawn_reachability_observation(&shared, &provider);
-            run_bot_maybe_spawn_intake_worker(&shared, &provider);
-            spawn_standby_gateway_retry(shared.clone(), token_hash.clone(), provider.clone()).await;
+            run_bot_maybe_spawn_intake_worker(&shared, &provider, HostRole::Standby);
+            spawn_standby_gateway_retry(
+                shared.clone(),
+                token_hash.clone(),
+                provider.clone(),
+                handback_breaker,
+            )
+            .await;
             // Keep this provider's shutdown-barrier slot: the marker poller
             // consumes it exactly once after fencing and persisting state.
             return;
@@ -371,7 +386,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     spawns::run_bot_spawn_deferred_restart_poller(&shared, &provider);
     #[cfg(unix)]
     spawns::run_bot_spawn_reachability_observation(&shared, &provider);
-    run_bot_maybe_spawn_intake_worker(&shared, &provider);
+    run_bot_maybe_spawn_intake_worker(&shared, &provider, HostRole::Gateway);
+    crate::services::tui_o::shadow_host::spawn_if_enabled(boot_config.tui_o.as_ref());
 
     run_bot_start_gateway_runtime(
         token,
@@ -390,6 +406,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         voice_config,
         voice_receiver,
         gateway_lease,
+        gateway_waiter,
+        handback_breaker,
         &restored_model_overrides,
         &restored_fast_mode_channels,
     )
@@ -903,7 +921,7 @@ agents:
             .1;
         let body = body.split_once("\n}\n").unwrap().0;
         assert_eq!(body.matches("reap_inflight_rows_at_boot").count(), 1);
-        let call = "super::inflight::reap_inflight_rows_at_boot_blocking(&provider).await;";
+        let call = "super::inflight::reap_inflight_rows_at_boot_blocking(&provider, shared.pg_pool.clone()).await;";
         let at = body
             .find(call)
             .expect("the reaper call must be awaited in run_bot");

@@ -1,13 +1,4 @@
-//! #5176 R3 (partial) — a cancel must not discard queued user messages
-//! *silently*.
-//!
-//! The landed half names the loss as bare message ids (`queue_preserved`,
-//! `queue_dropped_message_ids`), which cannot rebuild the instruction. This
-//! module captures the queue before the cancel and writes what the cancel
-//! removed — author, id and the message text — to `relay_dead_letter`. It does
-//! not put messages back: a restore that actually runs needs a wake-up owner
-//! this slice does not have. Entry points are free functions on a
-//! `TurnLifecycleTarget` so any cancel surface reuses this path.
+//! Record captured queue removals and report a positive verdict only for proved non-removal.
 
 use std::collections::HashSet;
 
@@ -37,6 +28,34 @@ impl CancelQueueCapture {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PurgeCounts {
+    pub(crate) drained: usize,
+    pub(crate) disk_files_removed: usize,
+    pub(crate) own_files_removed: Option<usize>,
+    pub(crate) queue_len_after: Option<usize>,
+}
+
+impl From<crate::services::turn_orchestrator::PurgeQueueResult> for PurgeCounts {
+    fn from(result: crate::services::turn_orchestrator::PurgeQueueResult) -> Self {
+        Self {
+            drained: result.drained,
+            disk_files_removed: result.disk_files_removed,
+            own_files_removed: result.own_files_removed,
+            queue_len_after: Some(result.queue_len_after),
+        }
+    }
+}
+
+pub(crate) enum CancelRemovalWitness {
+    Preserve { disk_lost: Option<bool> },
+    Purge(Option<PurgeCounts>),
+}
+
+pub(crate) fn disk_queue_lost(before: Option<bool>, after: Option<bool>) -> Option<bool> {
+    before.zip(after).map(|(before, after)| before && !after)
+}
+
 /// What the guard managed to record about the items the cancel removed.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CancelQueueLoss {
@@ -44,21 +63,19 @@ pub(crate) struct CancelQueueLoss {
     /// Removed with no durable record anywhere. Non-empty is the contract
     /// violation itself.
     pub(crate) unpreserved_message_ids: Vec<u64>,
-    /// Depth of the channel queue after the cancel, when the mailbox answered.
-    /// A mailbox that never answered is indistinguishable from an empty one
-    /// here (#6046), so this is a report, never a basis for a claim.
+    /// Depth of the channel queue after the cancel; `None` when the mailbox never answered.
     pub(crate) queue_depth_after: Option<usize>,
-    /// Whether every queue this cancel could have taken from was readable.
-    pub(crate) observed: bool,
+    /// True only when observed queues and the removal witness prove that nothing was removed.
+    pub(crate) proved_nothing_removed: bool,
 }
 
 impl CancelQueueLoss {
-    /// `None` when a queue this cancel could have emptied was never read. Two
-    /// blind witnesses do not compose into a proof, so an unread queue means
-    /// this cancel does not get to answer the question at all.
+    /// Unrecorded loss is false; only proved non-removal is true, and all other cases are unknown.
     pub(crate) fn loss_recorded(&self) -> Option<bool> {
-        self.observed
-            .then(|| self.unpreserved_message_ids.is_empty())
+        if !self.unpreserved_message_ids.is_empty() {
+            return Some(false);
+        }
+        self.proved_nothing_removed.then_some(true)
     }
 }
 
@@ -76,28 +93,37 @@ pub(crate) async fn capture_queue_before_cancel(
     let Some(handle) = ChannelMailboxRegistry::global_handle(channel_id) else {
         return CancelQueueCapture::default();
     };
-    CancelQueueCapture {
-        items: handle.snapshot().await.intervention_queue,
-        observed: true,
+    match handle.try_snapshot().await {
+        Ok(snapshot) => CancelQueueCapture {
+            items: snapshot.intervention_queue,
+            observed: true,
+        },
+        Err(_) => CancelQueueCapture::default(),
     }
 }
 
-/// Durably record every captured message the cancel removed.
-///
-/// Call after the cancel and after any existing post-cancel drain, so only
-/// items that are still gone get recorded. `disk_lost` says whether the
-/// disk-backed queue file disappeared across the cancel: this guard reads only
-/// the in-memory queue, so a disk file that vanished while the capture was
-/// empty is a removal it cannot enumerate, and it will not claim otherwise.
+/// Record captured losses after the last mutation; the witness bounds positive verdicts to no removal.
 pub(crate) async fn record_queue_loss_after_cancel(
     target: &TurnLifecycleTarget,
     capture: &CancelQueueCapture,
     pool: Option<&PgPool>,
-    disk_lost: bool,
+    witness: CancelRemovalWitness,
     reason: &'static str,
 ) -> CancelQueueLoss {
     let mut outcome = CancelQueueLoss {
-        observed: capture.observed && !(capture.is_empty() && disk_lost),
+        proved_nothing_removed: capture.observed
+            && match witness {
+                CancelRemovalWitness::Preserve {
+                    disk_lost: Some(false),
+                } => true,
+                CancelRemovalWitness::Purge(Some(c)) => {
+                    capture.is_empty()
+                        && c.drained == 0
+                        && c.disk_files_removed == 0
+                        && c.own_files_removed == Some(0)
+                }
+                _ => false,
+            },
         ..Default::default()
     };
     if capture.is_empty() {
@@ -109,9 +135,11 @@ pub(crate) async fn record_queue_loss_after_cancel(
     };
 
     let snapshot = match ChannelMailboxRegistry::global_handle(channel_id) {
-        Some(handle) => Some(handle.snapshot().await),
+        Some(handle) => handle.try_snapshot().await.ok(),
         None => None,
     };
+    // An unread post-cancel queue proves nothing kept, so the cancel gets no verdict.
+    outcome.proved_nothing_removed &= snapshot.is_some();
     outcome.queue_depth_after = snapshot
         .as_ref()
         .map(|snapshot| snapshot.intervention_queue.len());
@@ -136,6 +164,8 @@ pub(crate) async fn record_queue_loss_after_cancel(
             outcome.unpreserved_message_ids.push(message_id);
         }
     }
+    outcome.proved_nothing_removed &=
+        outcome.dead_lettered_message_ids.is_empty() && outcome.unpreserved_message_ids.is_empty();
     report(target, &outcome, reason);
     outcome
 }
@@ -248,6 +278,105 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn queue_truth_purge_requires_a_complete_no_removal_witness() {
+        let temp = tempfile::tempdir().unwrap();
+        let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let registry = ChannelMailboxRegistry::default();
+        let provider = ProviderKind::Claude;
+        let mut wrong = Vec::new();
+        for (index, row) in ["empty", "memory", "token", "flat", "unknown"]
+            .into_iter()
+            .enumerate()
+        {
+            let channel = ChannelId::new(6038760 + index as u64);
+            let handle = registry.handle(channel);
+            let target = target(channel);
+            let persistence = QueuePersistenceContext::new(&provider, "", None);
+            let capture = capture_queue_before_cancel(&target).await;
+            if row == "memory" {
+                handle
+                    .replace_queue(vec![queued(42, "late")], persistence.clone())
+                    .await;
+                crate::services::turn_orchestrator::save_channel_queue(
+                    &provider,
+                    "",
+                    channel,
+                    &[],
+                    None,
+                )
+                .unwrap();
+            }
+            if row == "token" || row == "flat" {
+                crate::services::turn_orchestrator::save_channel_queue(
+                    &provider,
+                    if row == "token" { "other" } else { "" },
+                    channel,
+                    &[queued(42, "disk")],
+                    None,
+                )
+                .unwrap();
+            }
+            let mut purge = handle.try_purge_queue(persistence, true).await.unwrap();
+            assert_eq!(purge.drained, usize::from(row == "memory"));
+            assert_eq!(purge.disk_files_removed, usize::from(row == "token"));
+            assert_eq!(purge.own_files_removed, Some(usize::from(row == "flat")));
+            if row == "unknown" {
+                purge.own_files_removed = None;
+            }
+            let witness = CancelRemovalWitness::Purge(Some(purge.into()));
+            let outcome =
+                record_queue_loss_after_cancel(&target, &capture, None, witness, "test").await;
+            registry.remove_fixture_for_test(channel);
+            let expected = (row == "empty").then_some(true);
+            if outcome.loss_recorded() != expected {
+                wrong.push(format!(
+                    "{row}: {:?} expected {expected:?}",
+                    outcome.loss_recorded()
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
+
+    #[test]
+    fn queue_truth_disk_loss_needs_both_readings() {
+        for (before, after, expected) in [
+            (None, None, None),
+            (None, Some(false), None),
+            (None, Some(true), None),
+            (Some(false), None, None),
+            (Some(true), None, None),
+            (Some(false), Some(false), Some(false)),
+            (Some(false), Some(true), Some(false)),
+            (Some(true), Some(false), Some(true)),
+            (Some(true), Some(true), Some(false)),
+        ] {
+            assert_eq!(disk_queue_lost(before, after), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn queue_truth_preserved_capture_requires_measured_disk() {
+        let temp = tempfile::tempdir().unwrap();
+        let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let registry = ChannelMailboxRegistry::default();
+        let channel = ChannelId::new(6038768);
+        let handle = registry.handle(channel);
+        let ctx = QueuePersistenceContext::new(&ProviderKind::Claude, "", None);
+        handle.replace_queue(vec![queued(42, "kept")], ctx).await;
+        let target = target(channel);
+        let capture = capture_queue_before_cancel(&target).await;
+        for (disk_lost, expected) in [(None, None), (Some(true), None), (Some(false), Some(true))] {
+            let witness = CancelRemovalWitness::Preserve { disk_lost };
+            let result =
+                record_queue_loss_after_cancel(&target, &capture, None, witness, "test").await;
+            assert_eq!(result.loss_recorded(), expected);
+            assert!(result.dead_lettered_message_ids.is_empty());
+        }
+        registry.remove_fixture_for_test(channel);
+    }
+
     fn ids(capture: &CancelQueueCapture) -> Vec<u64> {
         capture.items.iter().map(|i| i.message_id.get()).collect()
     }
@@ -259,7 +388,16 @@ mod tests {
         capture: &CancelQueueCapture,
         disk_lost: bool,
     ) -> CancelQueueLoss {
-        record_queue_loss_after_cancel(target, capture, None, disk_lost, "test_cancel").await
+        record_queue_loss_after_cancel(
+            target,
+            capture,
+            None,
+            CancelRemovalWitness::Preserve {
+                disk_lost: Some(disk_lost),
+            },
+            "test_cancel",
+        )
+        .await
     }
 
     /// Replaces the removed restore test. It protected the detection of what a
@@ -393,12 +531,30 @@ mod tests {
             )
             .await;
         let capture = capture_queue_before_cancel(&target(channel_id)).await;
+        handle
+            .replace_queue(
+                vec![
+                    queued(9_003, "still queued"),
+                    queued(9_004, "arrived after capture"),
+                ],
+                QueuePersistenceContext::new(&provider, "", None),
+            )
+            .await;
 
         let outcome = record(&target(channel_id), &capture, false).await;
 
         assert!(outcome.unpreserved_message_ids.is_empty());
         assert_eq!(outcome.loss_recorded(), Some(true));
-        assert_eq!(handle.snapshot().await.intervention_queue.len(), 1);
+        assert_eq!(
+            handle
+                .snapshot()
+                .await
+                .intervention_queue
+                .iter()
+                .map(|i| i.message_id.get())
+                .collect::<Vec<_>>(),
+            [9_003, 9_004]
+        );
     }
 
     /// The union is the whole guard against a false loss report, so it is
@@ -453,5 +609,72 @@ mod tests {
             None,
             "a disk queue that vanished unseen must not be reported as fully recorded"
         );
+    }
+
+    type BreakMailbox = fn(&ChannelMailboxRegistry, ChannelId);
+    const DEAD_MAILBOXES: [(&str, BreakMailbox); 2] = [
+        (
+            "closed",
+            ChannelMailboxRegistry::insert_unreachable_for_test,
+        ),
+        (
+            "reply-dropping",
+            ChannelMailboxRegistry::insert_reply_dropping_for_test,
+        ),
+    ];
+
+    /// A mailbox that exists but never answers is unread, not an empty queue.
+    #[tokio::test]
+    async fn a_dead_mailbox_capture_reports_no_verdict() {
+        for (offset, (kind, kill)) in DEAD_MAILBOXES.into_iter().enumerate() {
+            let channel_id = ChannelId::new(6_038_301 + offset as u64);
+            kill(&ChannelMailboxRegistry::default(), channel_id);
+            let capture = capture_queue_before_cancel(&target(channel_id)).await;
+            assert!(
+                !capture.observed,
+                "{kind}: a dead mailbox was read as empty"
+            );
+            assert_eq!(
+                record(&target(channel_id), &capture, false)
+                    .await
+                    .loss_recorded(),
+                None,
+                "{kind}: an unread queue must not be reported as a kept promise"
+            );
+        }
+    }
+
+    /// The mailbox dies between capture and record: nothing is provably kept, and an
+    /// unrecorded removal still reports `false` rather than hiding behind the unread queue.
+    #[tokio::test]
+    async fn a_mailbox_that_dies_after_capture_keeps_nothing_and_still_reports_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        for (offset, (kind, kill)) in DEAD_MAILBOXES.into_iter().enumerate() {
+            let channel_id = ChannelId::new(6_038_311 + offset as u64);
+            let registry = ChannelMailboxRegistry::default();
+            registry
+                .handle(channel_id)
+                .replace_queue(
+                    vec![queued(9_311, "captured, then unreadable")],
+                    QueuePersistenceContext::new(&ProviderKind::Claude, "", None),
+                )
+                .await;
+            let capture = capture_queue_before_cancel(&target(channel_id)).await;
+            assert_eq!(
+                ids(&capture),
+                vec![9_311],
+                "{kind}: fixture must capture one item"
+            );
+            kill(&registry, channel_id);
+
+            let outcome = record(&target(channel_id), &capture, false).await;
+            assert_eq!(
+                outcome.queue_depth_after, None,
+                "{kind}: no reading, no depth"
+            );
+            assert_eq!(outcome.unpreserved_message_ids, vec![9_311], "{kind}");
+            assert_eq!(outcome.loss_recorded(), Some(false), "{kind}");
+        }
     }
 }

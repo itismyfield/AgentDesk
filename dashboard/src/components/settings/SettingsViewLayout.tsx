@@ -89,6 +89,7 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
     tr,
     updateVoiceAgent,
     updateVoiceGlobal,
+    updateVoiceModels,
     voiceAliasConflict,
     voiceDirty,
     voiceDraft,
@@ -160,6 +161,7 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
             tr={tr}
             updateVoiceAgent={updateVoiceAgent}
             updateVoiceGlobal={updateVoiceGlobal}
+            updateVoiceModels={updateVoiceModels}
             voiceAliasConflict={voiceAliasConflict}
             voiceDirty={voiceDirty}
             voiceDraft={voiceDraft}

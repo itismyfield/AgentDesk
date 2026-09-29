@@ -1,12 +1,9 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
-use std::time::Duration;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::remote::RemoteProfile;
-use crate::services::stream_json_cli::{ConfiguredToolPolicy, ProviderTurnRequest};
 
 pub fn execute_command_streaming(
     prompt: &str,
@@ -23,28 +20,6 @@ pub fn execute_command_streaming(
     model: Option<&str>,
     compact_percent: Option<u64>,
 ) -> Result<(), String> {
-    if matches!(report_provider.as_ref(), Some(ProviderKind::Grok)) {
-        return crate::services::stream_json_cli::execute_streaming(
-            crate::services::provider::StreamJsonDialectId::Grok,
-            ProviderTurnRequest::for_discord_turn(
-                ProviderKind::Grok,
-                prompt.to_string(),
-                system_prompt.map(str::to_string),
-                ConfiguredToolPolicy::from_legacy_allowed_tools(allowed_tools.unwrap_or(&[])),
-                model.map(str::to_string),
-                None,
-                PathBuf::from(working_dir),
-                session_id,
-                false,
-                remote_profile.cloned(),
-                Duration::from_secs(300),
-                cancel_token,
-                report_channel_id,
-            )?,
-            sender,
-        );
-    }
-
     super::execute_command_streaming_inner(
         prompt,
         session_id,

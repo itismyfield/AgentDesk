@@ -35,14 +35,19 @@ PATH_ATTR_ALLOWED: frozenset[str] = frozenset()
 # R-E: low-level tmux owner API inventory; each pub fn is EXEC (clippy.toml) or a non-exec helper.
 INVENTORY_FILES = ("src/services/platform/tmux.rs", "src/services/platform/tmux/availability.rs",
                    "src/services/platform/tmux/liveness.rs")
+# pub(super) Command preparer for the owner runner; reclassify as EXEC if visibility widens.
 NONEXEC = frozenset(f"agentdesk::services::platform::tmux::availability::{name}" for name in (
-    "mark_available_from_live_session", "invalidate_cache", "cached_unavailable_due_to_missing"))
+    "mark_available_from_live_session", "invalidate_cache", "cached_unavailable_due_to_missing")) | frozenset({
+        "agentdesk::services::platform::tmux::liveness::prepared_tmux_command"})
 PS = frozenset(f"agentdesk::services::platform::tmux::{name}" for name in ("read_process_args", "process_start_time"))
 SUBPROC_PATHS = frozenset({"std::process::Command::new", "tokio::process::Command::new"})
 W_TYPES = frozenset({"agentdesk::services::codex_tui::input::TmuxTuiActionExecutor",
                      "agentdesk::services::claude_tui::tui_relay::TmuxSendBackend"})
 # Hand-kept entries allowed to have no diagnostic in a lane; the data PR pins these.
-KNOWN_UNREFERENCED: dict[str, frozenset[str]] = {lane: frozenset() for lane in m.LANES}
+# Owner EXEC APIs with no production callers.
+KNOWN_UNREFERENCED: dict[str, frozenset[str]] = {lane: frozenset({
+    "agentdesk::services::platform::tmux::kill_session_checked",
+    "agentdesk::services::platform::tmux::get_option"}) for lane in m.LANES}
 # H9: files no measured lane compiles; they must not mention tmux at all.
 WINDOWS_ONLY_FILES = ("src/runtime_layout/windows_links.rs",)
 
@@ -122,12 +127,12 @@ def owner_pub_fns(root: Path, rel: str, modpath: str) -> set[str]:
     code = production_views(root / rel)[0]
     src = m.SourceFile(code)
     found = set()
-    for start, _end, names, registrable in src.items:
+    for start, _end, names in src.items:
         line_start = code.rfind("\n", 0, start) + 1
         if names[-1].startswith(("const ", "static ")) or not PUB_PREFIX_RE.search(code[line_start:start]):
             continue
-        # trait-impl methods have no registrable path; a `pub` one cannot exist, so this keeps a marker
-        found.add("::".join([modpath, *(registrable or names)]))
+        # the walker's qualified name; a trait-impl method (never `pub`) keeps its `<Ty as Tr>` marker
+        found.add("::".join([modpath, *names]))
     return found
 
 def doc_value_ranges(code: str) -> list[tuple[int, int]]:
@@ -194,13 +199,13 @@ def owner_shape_problems(root: Path) -> list[str]:
                      f"`{call.group(1) or call.group(2)}!`; owner files must be plain items"
                      for call in ITEM_MACRO_RE.finditer(code)
                      if call.group(1) or (not any(s <= call.start() < e for s, e in doc_values)
-                                         and not any(s <= call.start() <= e for s, e, _, _ in items))]
+                                         and not any(s <= call.start() <= e for s, e, _ in items))]
         if rel not in INVENTORY_FILES:
             continue
         # a fn with a body whose parent scope is a trait declared here is a default method
         traits = set(TRAIT_RE.findall(code))
         problems += [f"R-E: {rel} trait default method {'::'.join(names)}; owner API must be plain fns"
-                     for _, _, names, _ in items if len(names) > 1 and names[-2] in traits]
+                     for _, _, names in items if len(names) > 1 and names[-2] in traits]
     return problems
 
 def tmux_literal_sites(code: str, mixed: str, literals: list[tuple[int, str]]) -> collections.Counter:
@@ -283,7 +288,7 @@ def inventory(root: Path, config: dict, lane: str, lines: list[str], result: dic
                      for path in sorted(derived - registered)]
         problems += [f"R-E: stale {set_name} ({lane}) entry {path}; run h2_measure.py --regen"
                      for path in sorted(registered - derived)]
-    problems += [f"R-E: {item} cannot be registered; move the call into a fn" for item in sorted(result["derived"]["unregistrable"])]
+    problems += [f"R-E: {item} cannot be registered; restructure the call site" for item in sorted(result["derived"]["unregistrable"])]
     seen = {callee for *_, callee in m.diagnostics(lines)}
     dead = {p for p, (s, lanes) in config.items() if s not in m.DERIVED_SETS and lane in lanes and p not in seen}
     for path in sorted(dead ^ KNOWN_UNREFERENCED[lane]):
@@ -324,23 +329,21 @@ def _totals(baseline: dict) -> dict:
                 totals[key][lane] += counts.get(lane, 0)
     return totals
 
-def rw_problem(root: Path, config: dict, key: tuple[str, str, str]) -> str | None:
-    """R-W: an item gaining an EXEC/W/TYPES reference must itself be a registered W* fn."""
+def rw_problem(config: dict, lane: str, key: tuple[str, str, str], reg: dict) -> str | None:
+    """R-W: every measured site of a key that grew here must resolve to a W path registered for this lane."""
     file, item, callee = key
-    if config.get(callee, ("",))[0] not in ("EXEC", "W", "TYPES") or item == "<module>":
+    if config.get(callee, ("",))[0] not in ("EXEC", "W", "TYPES"):
         return None
-    trait_impl = re.match(r"<(\w+) as ", item)
-    if trait_impl and any(s == "TYPES" and p.rsplit("::", 1)[-1] == trait_impl.group(1) for p, (s, _) in config.items()):
-        return None  # a registered Self type covers its trait-impl bodies (same rule as the measurer)
-    modpath, parts = m._module_table(root).get(file), item.split("::")
-    registered = {p for p, (s, _) in config.items() if s == "W"}
-    # nested fns register as their outermost fn, so any prefix of the item path counts
-    if modpath and any("::".join([modpath, *parts[:n]]) in registered for n in range(1, len(parts) + 1)):
+    paths = reg.get(key, [])
+    registered = {p for p, (s, lanes) in config.items() if s == "W" and lane in lanes}
+    if paths and all(p == m.MODULE_LEVEL or p in registered for p in paths):
         return None
-    return f"R-W: {file} :: {item} gained {callee} but is not a registered W* fn; run h2_measure.py --regen"
+    why = ("no measured site" if not paths else "an unregistrable site" if None in paths
+           else "site path " + ", ".join(sorted({p for p in paths if p not in registered and p != m.MODULE_LEVEL})))
+    return f"R-W: {file} :: {item} gained {callee} but {why} is not a registered {lane} W* fn; run h2_measure.py --regen"
 
-def check_admissions(root: Path, base_rows: list[dict], head_rows: list[dict], base: dict, head: dict,
-                     config: dict, lane: str, sites: dict) -> list[str]:
+def check_admissions(base_rows: list[dict], head_rows: list[dict], base: dict, head: dict,
+                     config: dict, lane: str, sites: dict, reg: dict) -> list[str]:
     """Suffix one-shot admissions must cover exactly the grown keys, with old/new == base/head."""
     if head_rows[:len(base_rows)] != base_rows:
         return [f"admission: entries already on base were edited or removed in {ADMISSIONS_FILE}"]
@@ -361,7 +364,8 @@ def check_admissions(root: Path, base_rows: list[dict], head_rows: list[dict], b
             if (a["old"], a["new"]) != (before[key][t], after[key][t]):
                 problems.append(f"admission: {key} {t} says {a['old']}->{a['new']}, "
                                 f"base/head are {before[key][t]}->{after[key][t]}")
-        if (problem := rw_problem(root, config, key)) is not None:
+        # the other lane's growth is judged by its own session (both lanes run admission)
+        if after[key][lane] > before[key][lane] and (problem := rw_problem(config, lane, key, reg)) is not None:
             problems.append(problem)
         if a["lane"] in (lane, "both"):  # H8: folded anonymous items must name their site lines
             if key in sites and a.get("lines") != sites[key]:
@@ -383,7 +387,8 @@ def base_state(root: Path, rev: str) -> tuple[dict | None, dict, str | None]:
                 (Path(tmp) / rel).write_text(text, encoding="utf-8")
         return m.load_baseline(Path(tmp)), m.load_config(Path(tmp) / "clippy.toml"), git_show(root, rev, ADMISSIONS_FILE)
 
-def evaluate(root: Path, lane: str, base_rev: str, lines: list[str], modmap: Path) -> list[str]:
+def evaluate(root: Path, lane: str, base_rev: str, items, modmap: Path) -> list[str]:
+    """Every rule over one sealed session of this lane; its lines are the Clippy JSONL the items were bound to."""
     head = m.load_baseline(root)
     base, base_config, base_admissions = base_state(root, base_rev)
     if base is None:
@@ -391,9 +396,10 @@ def evaluate(root: Path, lane: str, base_rev: str, lines: list[str], modmap: Pat
     if not any(s == "W" for s, _ in base_config.values()):
         return [f"base {base_rev} clippy.toml has no H2 W entries; rebase onto a main that has them"]
     config = m.load_config(root / "clippy.toml")
-    result = m.measure(root, lines, config)
+    result, lines = m.measure(root, items, m.lane_config(config, lane)), items.lines
+    clippy_config = Path(items.manifest["request"]["conf_dir"]) / "clippy.toml"
     problems = zero_rules(root) + owner_shape_problems(root) + untagged_entries(root / "clippy.toml")
-    problems += h2_depinfo.ro_problems(root, lines, modmap)
+    problems += h2_depinfo.ro_problems(root, lines, modmap, clippy_config=clippy_config)
     problems += m.compare(result["rows"], head, lane)
     if result["total"] < m.LIVENESS_FLOOR:
         problems.append(f"only {result['total']} H2 diagnostics (< liveness floor {m.LIVENESS_FLOOR})")
@@ -404,14 +410,14 @@ def evaluate(root: Path, lane: str, base_rev: str, lines: list[str], modmap: Pat
     except AdmissionError as exc:
         return problems + [str(exc)]
     sites = {key: found for section in result["sites"].values() for key, found in section.items()}
-    return problems + check_admissions(root, base_rows, head_rows, base, head, config, lane, sites)
+    return problems + check_admissions(base_rows, head_rows, base, head, config, lane, sites, result["reg"])
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--lane", choices=m.LANES, required=True)
     parser.add_argument("--repo", type=Path, default=m.REPO_ROOT)
     parser.add_argument("--base", help="base commit (PR base SHA or merge-base with main)")
-    parser.add_argument("--json", type=Path, help="read clippy JSON from a file instead of running cargo")
+    parser.add_argument("--session", type=Path, help="sealed h2_session run of this lane instead of running one")
     parser.add_argument("--modmap", type=Path, help="module map TSV written by scripts/ci/h2_modmap.py")
     parser.add_argument("--inert", action="store_true", help="no-op without a baseline; report without failing")
     args = parser.parse_args(argv)
@@ -425,8 +431,10 @@ def main(argv=None) -> int:
     if not args.base or not args.modmap:
         parser.error("--base and --modmap are required once a baseline exists")
     try:
-        lines = args.json.read_text(encoding="utf-8").splitlines() if args.json else m.run_clippy(root, None)
-        problems = evaluate(root, args.lane, args.base, lines, args.modmap)
+        config = m.load_config(root / "clippy.toml")
+        items = (m.load_session(root, args.session, config, args.lane) if args.session
+                 else m.lane_session(root, config, args.lane)[0])
+        problems = evaluate(root, args.lane, args.base, items, args.modmap)
     except (m.MeasureError, AdmissionError) as exc:
         problems = [str(exc)]
     for problem in problems:

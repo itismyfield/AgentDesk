@@ -115,8 +115,6 @@ export function clonePhaseGate(phaseGate: PhaseGateConfig): PhaseGateConfig {
   return {
     dispatch_to: phaseGate.dispatch_to,
     dispatch_type: phaseGate.dispatch_type,
-    pass_verdict: phaseGate.pass_verdict,
-    checks: [...phaseGate.checks],
   };
 }
 

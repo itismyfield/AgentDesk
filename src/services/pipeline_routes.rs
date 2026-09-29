@@ -1,8 +1,12 @@
-use serde::Deserialize;
-use serde_json::{Value, json};
-use sqlx::{PgPool, Row};
+use std::collections::HashMap;
 
-use crate::db::table_metadata;
+mod stage_validation;
+use stage_validation::{validate_pipeline_stages, validate_supported_stage_changes};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sqlx::{PgPool, Postgres, Row, Transaction};
+
 use crate::utils::api::clamp_api_limit;
 
 /// Accepted `on_failure` values for a `pipeline_stages` row.
@@ -12,16 +16,28 @@ pub const STAGE_ON_FAILURE_VALUES: &[&str] =
 /// #1082 -- accepted `backoff` policy values.
 pub const STAGE_BACKOFF_VALUES: &[&str] = &["exponential", "linear", "none"];
 
-/// `replace_stages` upsert. `backoff` ($14) added by #3868 so the validated
-/// value is persisted instead of silently dropped. Column order MUST match the
-/// `.bind(...)` chain in `replace_stages`.
+/// Upsert on `(repo_id, stage_name)` so a kept stage keeps the id cards point at.
+/// Column order MUST match the `.bind(...)` chain in `replace_stages`.
 const INSERT_STAGE_SQL: &str = "INSERT INTO pipeline_stages (
     repo_id, stage_name, stage_order, trigger_after, entry_skill,
     timeout_minutes, on_failure, skip_condition, provider, agent_override_id,
     on_failure_target, max_retries, parallel_with, backoff
  ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
- )";
+ )
+ ON CONFLICT (repo_id, stage_name) DO UPDATE SET
+    stage_order = EXCLUDED.stage_order,
+    trigger_after = EXCLUDED.trigger_after,
+    entry_skill = EXCLUDED.entry_skill,
+    timeout_minutes = EXCLUDED.timeout_minutes,
+    on_failure = EXCLUDED.on_failure,
+    skip_condition = EXCLUDED.skip_condition,
+    provider = EXCLUDED.provider,
+    agent_override_id = EXCLUDED.agent_override_id,
+    on_failure_target = EXCLUDED.on_failure_target,
+    max_retries = EXCLUDED.max_retries,
+    parallel_with = EXCLUDED.parallel_with,
+    backoff = EXCLUDED.backoff";
 
 /// `list_pipeline_stages_pg` projection. `backoff` added by #3868 so it
 /// round-trips back through the list/GET path. Column order MUST match
@@ -35,14 +51,26 @@ const SELECT_STAGES_SQL: &str =
    AND ($2::text IS NULL OR agent_override_id = $2)
  ORDER BY stage_order ASC";
 
+/// Saves take a repo's stage lock exclusively and card moves take it shared, so
+/// a move never reads a stage order that a save is changing.
+const STAGE_SAVE_LOCK_SQL: &str =
+    "SELECT pg_advisory_xact_lock(hashtext('pipeline_stages:' || $1))";
+const STAGE_MOVE_LOCK_SQL: &str =
+    "SELECT pg_advisory_xact_lock_shared(hashtext('pipeline_stages:' || $1))";
+
+/// Worker capability path a build advertises once its card moves take the stage lock.
+pub(crate) const STAGE_LOCK_CAPABILITY: [&str; 2] = ["pipeline", "stage_lock_v1"];
+
 #[derive(Debug)]
 pub enum PipelineRouteError {
     BadRequest { stage: String, error: String },
     NotFound(String),
-    Readonly { table: String, source: &'static str },
+    Conflict(String),
+    Unavailable(String),
     Database(String),
 }
 
+/// Metadata fields no executor reads keep their stored value when a save omits them.
 #[derive(Debug, Deserialize)]
 pub struct PipelineStageInput {
     pub stage_name: String,
@@ -61,6 +89,24 @@ pub struct PipelineStageInput {
     pub backoff: Option<String>,
     pub skip_condition: Option<String>,
     pub parallel_with: Option<String>,
+}
+
+/// A repo's stored stage row, read under the save lock.
+#[derive(Clone, Default, sqlx::FromRow)]
+struct StoredStage {
+    id: i64,
+    stage_name: Option<String>,
+    stage_order: Option<i64>,
+    provider: Option<String>,
+    skip_condition: Option<String>,
+    agent_override_id: Option<String>,
+    entry_skill: Option<String>,
+    timeout_minutes: Option<i64>,
+    on_failure: Option<String>,
+    on_failure_target: Option<String>,
+    max_retries: Option<i64>,
+    parallel_with: Option<String>,
+    backoff: Option<String>,
 }
 
 pub struct CardPipelineState {
@@ -92,7 +138,6 @@ impl<'a> PipelineRouteService<'a> {
         repo: &str,
         stages: &[PipelineStageInput],
     ) -> Result<Vec<Value>, PipelineRouteError> {
-        self.ensure_table_writable("pipeline_stages").await?;
         validate_pipeline_stages(stages)?;
 
         let mut tx = self
@@ -101,33 +146,65 @@ impl<'a> PipelineRouteService<'a> {
             .await
             .map_err(|error| PipelineRouteError::Database(format!("begin tx: {error}")))?;
 
-        sqlx::query("DELETE FROM pipeline_stages WHERE repo_id = $1")
-            .bind(repo)
+        let stored = lock_repo_stages(&mut tx, repo).await?;
+        validate_supported_stage_changes(stages, &stored)?;
+        let orders: HashMap<&str, i64> = stages
+            .iter()
+            .enumerate()
+            .map(|(idx, stage)| {
+                let order = stage.stage_order.unwrap_or(idx as i64 + 1);
+                (stage.stage_name.as_str(), order)
+            })
+            .collect();
+        ensure_cards_keep_their_path(&mut tx, &stored, &orders).await?;
+
+        let removed: Vec<i64> = stored
+            .iter()
+            .filter(|row| {
+                !row.stage_name
+                    .as_deref()
+                    .is_some_and(|name| orders.contains_key(name))
+            })
+            .map(|row| row.id)
+            .collect();
+        sqlx::query("DELETE FROM pipeline_stages WHERE id = ANY($1)")
+            .bind(&removed)
             .execute(&mut *tx)
             .await
             .map_err(|error| PipelineRouteError::Database(format!("delete: {error}")))?;
 
-        for (idx, stage) in stages.iter().enumerate() {
-            let order = stage.stage_order.unwrap_or(idx as i64 + 1);
-            let timeout = stage.timeout_minutes.unwrap_or(60);
-            let on_failure = stage.on_failure.as_deref().unwrap_or("fail");
-            let max_retries = stage.max_retries.unwrap_or(0);
+        for stage in stages {
+            let kept = stored
+                .iter()
+                .find(|row| row.stage_name.as_deref() == Some(stage.stage_name.as_str()))
+                .cloned()
+                .unwrap_or_default();
+            let backoff = match stage.backoff.as_deref() {
+                Some(value) => normalize_optional(Some(value)).map(str::to_string),
+                None => kept.backoff,
+            };
 
             sqlx::query(INSERT_STAGE_SQL)
                 .bind(repo)
                 .bind(&stage.stage_name)
-                .bind(order)
+                .bind(orders[stage.stage_name.as_str()])
                 .bind(stage.trigger_after.as_deref())
-                .bind(stage.entry_skill.as_deref())
-                .bind(timeout)
-                .bind(on_failure)
+                .bind(stage.entry_skill.clone().or(kept.entry_skill))
+                .bind(stage.timeout_minutes.or(kept.timeout_minutes).unwrap_or(60))
+                .bind(
+                    stage
+                        .on_failure
+                        .clone()
+                        .or(kept.on_failure)
+                        .unwrap_or_else(|| "fail".to_string()),
+                )
                 .bind(stage.skip_condition.as_deref())
                 .bind(stage.provider.as_deref())
                 .bind(stage.agent_override_id.as_deref())
-                .bind(stage.on_failure_target.as_deref())
-                .bind(max_retries)
-                .bind(stage.parallel_with.as_deref())
-                .bind(normalize_optional(stage.backoff.as_deref()))
+                .bind(stage.on_failure_target.clone().or(kept.on_failure_target))
+                .bind(stage.max_retries.or(kept.max_retries).unwrap_or(0))
+                .bind(stage.parallel_with.clone().or(kept.parallel_with))
+                .bind(backoff)
                 .execute(&mut *tx)
                 .await
                 .map_err(|error| {
@@ -146,12 +223,21 @@ impl<'a> PipelineRouteService<'a> {
     }
 
     pub async fn delete_stages(&self, repo: &str) -> Result<u64, PipelineRouteError> {
-        self.ensure_table_writable("pipeline_stages").await?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| PipelineRouteError::Database(format!("begin tx: {error}")))?;
+        let stored = lock_repo_stages(&mut tx, repo).await?;
+        ensure_cards_keep_their_path(&mut tx, &stored, &HashMap::new()).await?;
         let result = sqlx::query("DELETE FROM pipeline_stages WHERE repo_id = $1")
             .bind(repo)
-            .execute(self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(database_error)?;
+        tx.commit()
+            .await
+            .map_err(|error| PipelineRouteError::Database(format!("commit: {error}")))?;
         Ok(result.rows_affected())
     }
 
@@ -263,19 +349,6 @@ impl<'a> PipelineRouteService<'a> {
 
         let effective = crate::pipeline::resolve_for_card_pg(self.pool, repo, agent_id).await;
         Ok(effective.to_graph())
-    }
-
-    async fn ensure_table_writable(&self, table: &str) -> Result<(), PipelineRouteError> {
-        let source = table_metadata::source_of_truth_pg(self.pool, table).await;
-        if let Some(source) = source
-            && source.is_readonly()
-        {
-            return Err(PipelineRouteError::Readonly {
-                table: table.to_string(),
-                source: source_label(source),
-            });
-        }
-        Ok(())
     }
 
     async fn ensure_card_exists(&self, card_id: &str) -> Result<(), PipelineRouteError> {
@@ -392,34 +465,214 @@ pub fn validate_backoff(value: Option<&str>) -> Result<(), String> {
     }
 }
 
-fn validate_pipeline_stages(stages: &[PipelineStageInput]) -> Result<(), PipelineRouteError> {
-    for stage in stages {
-        if let Err(error) = validate_on_failure(stage.on_failure.as_deref()) {
-            return Err(PipelineRouteError::BadRequest {
-                stage: stage.stage_name.clone(),
-                error,
-            });
-        }
-        // Validate the *normalized* value so a blank/whitespace-only backoff is
-        // treated identically to absent (both persist as NULL), instead of an
-        // empty string passing but "   " erroring — consistent with the INSERT,
-        // which also binds `normalize_optional(stage.backoff)`.
-        if let Err(error) = validate_backoff(normalize_optional(stage.backoff.as_deref())) {
-            return Err(PipelineRouteError::BadRequest {
-                stage: stage.stage_name.clone(),
-                error,
-            });
-        }
-        if let Some(max_retries) = stage.max_retries
-            && max_retries < 0
-        {
-            return Err(PipelineRouteError::BadRequest {
-                stage: stage.stage_name.clone(),
-                error: format!("max_retries={max_retries} must be >= 0"),
-            });
+/// Takes the repo's save lock, then reads its stages in a fresh snapshot.
+async fn lock_repo_stages(
+    tx: &mut Transaction<'_, Postgres>,
+    repo: &str,
+) -> Result<Vec<StoredStage>, PipelineRouteError> {
+    sqlx::query(STAGE_SAVE_LOCK_SQL)
+        .bind(repo)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| PipelineRouteError::Database(format!("lock stages: {error}")))?;
+    ensure_every_node_locks_stage_moves(tx).await?;
+    sqlx::query_as::<_, StoredStage>(
+        "SELECT id, stage_name, stage_order, provider, skip_condition, agent_override_id,
+                entry_skill, timeout_minutes, on_failure,
+                on_failure_target, max_retries, parallel_with, backoff
+           FROM pipeline_stages
+          WHERE repo_id = $1",
+    )
+    .bind(repo)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| PipelineRouteError::Database(format!("load stages: {error}")))
+}
+
+/// Older builds move cards without the stage lock, so saves wait until no online node runs one.
+async fn ensure_every_node_locks_stage_moves(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<(), PipelineRouteError> {
+    let ready = sqlx::query_scalar::<_, bool>(
+        "SELECT NOT EXISTS (
+             SELECT 1 FROM worker_nodes
+              WHERE status = 'online'
+                AND COALESCE(capabilities #>> $1::text[], 'false') <> 'true'
+         )",
+    )
+    .bind(&STAGE_LOCK_CAPABILITY[..])
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| PipelineRouteError::Database(format!("check node builds: {error}")))?;
+    if ready {
+        Ok(())
+    } else {
+        Err(PipelineRouteError::Unavailable(
+            "stage edits wait until every online node runs a build that locks card stage moves"
+                .to_string(),
+        ))
+    }
+}
+
+/// A save may not remove a stage an open card is in, or move a kept stage to its
+/// other side: either would skip or repeat work for that card.
+async fn ensure_cards_keep_their_path(
+    tx: &mut Transaction<'_, Postgres>,
+    stored: &[StoredStage],
+    orders: &HashMap<&str, i64>,
+) -> Result<(), PipelineRouteError> {
+    let ids: Vec<String> = stored.iter().map(|row| row.id.to_string()).collect();
+    let occupied = sqlx::query_as::<_, (String, i64)>(
+        "SELECT pipeline_stage_id, COUNT(*)
+           FROM kanban_cards
+          WHERE pipeline_stage_id = ANY($1)
+            AND COALESCE(status, '') NOT IN ('done', 'cancelled')
+          GROUP BY pipeline_stage_id",
+    )
+    .bind(&ids)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| PipelineRouteError::Database(format!("load stage cards: {error}")))?;
+
+    for (stage_id, cards) in occupied {
+        let Some(stage) = stored.iter().find(|row| row.id.to_string() == stage_id) else {
+            continue;
+        };
+        let name = stage.stage_name.as_deref().unwrap_or_default();
+        let Some(&order) = orders.get(name) else {
+            return Err(PipelineRouteError::Conflict(format!(
+                "stage '{name}' has {cards} open card(s) in it; finish or move them before removing the stage"
+            )));
+        };
+        for other in stored {
+            let Some(other_name) = other.stage_name.as_deref() else {
+                continue;
+            };
+            let Some(&other_order) = orders.get(other_name) else {
+                continue;
+            };
+            if other.stage_order.cmp(&stage.stage_order) != other_order.cmp(&order) {
+                return Err(PipelineRouteError::Conflict(format!(
+                    "stage '{name}' has {cards} open card(s) in it; moving '{other_name}' to its other side would skip or repeat work for them"
+                )));
+            }
         }
     }
     Ok(())
+}
+
+/// Where a card's stage move starts from.
+#[derive(Clone, Copy)]
+pub enum StageStep<'a> {
+    /// Put the card in the first stage this trigger starts.
+    Enter(&'a str),
+    /// Move the card past its current stage, or enter at this trigger when it has none.
+    Advance(&'a str),
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+struct MovedStage {
+    id: i64,
+    stage_name: Option<String>,
+    agent_override_id: Option<String>,
+    provider: Option<String>,
+    skip_condition: Option<String>,
+}
+
+/// Moves a card's `pipeline_stage_id` under the repo's shared stage lock. Returns
+/// `{status, stage}` with status entered, advanced, completed, missing or unchanged.
+pub async fn move_card_stage(
+    pool: &PgPool,
+    card_id: &str,
+    step: StageStep<'_>,
+) -> Result<Value, String> {
+    let without_move = |status: &str| json!({ "status": status, "stage": null });
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin stage move for {card_id}: {error}"))?;
+    let repo_id =
+        sqlx::query_scalar::<_, Option<String>>("SELECT repo_id FROM kanban_cards WHERE id = $1")
+            .bind(card_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| format!("load card {card_id}: {error}"))?
+            .flatten();
+    let Some(repo_id) = repo_id else {
+        return Ok(without_move("unchanged"));
+    };
+    sqlx::query(STAGE_MOVE_LOCK_SQL)
+        .bind(&repo_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("lock stages of {repo_id}: {error}"))?;
+    let current = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT pipeline_stage_id FROM kanban_cards WHERE id = $1 FOR UPDATE",
+    )
+    .bind(card_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| format!("lock card {card_id}: {error}"))?;
+
+    let (status, stage) = match (step, current) {
+        (StageStep::Advance(_), Some(current)) => {
+            let Some(order) = sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT stage_order FROM pipeline_stages WHERE id::text = $1",
+            )
+            .bind(&current)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| format!("load stage {current}: {error}"))?
+            else {
+                return Ok(without_move("missing"));
+            };
+            let next = sqlx::query_as::<_, MovedStage>(
+                "SELECT id, stage_name, agent_override_id, provider, skip_condition
+                   FROM pipeline_stages
+                  WHERE repo_id = $1 AND stage_order > $2
+                  ORDER BY stage_order ASC
+                  LIMIT 1",
+            )
+            .bind(&repo_id)
+            .bind(order)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| format!("load stage after {current}: {error}"))?;
+            match next {
+                Some(stage) => ("advanced", Some(stage)),
+                None => ("completed", None),
+            }
+        }
+        (StageStep::Enter(trigger_after), _) | (StageStep::Advance(trigger_after), None) => {
+            let first = sqlx::query_as::<_, MovedStage>(
+                "SELECT id, stage_name, agent_override_id, provider, skip_condition
+                   FROM pipeline_stages
+                  WHERE repo_id = $1 AND trigger_after = $2
+                  ORDER BY stage_order ASC
+                  LIMIT 1",
+            )
+            .bind(&repo_id)
+            .bind(trigger_after)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| format!("load first {trigger_after} stage: {error}"))?;
+            match first {
+                Some(stage) => ("entered", Some(stage)),
+                None => return Ok(without_move("unchanged")),
+            }
+        }
+    };
+
+    sqlx::query("UPDATE kanban_cards SET pipeline_stage_id = $2, updated_at = NOW() WHERE id = $1")
+        .bind(card_id)
+        .bind(stage.as_ref().map(|stage| stage.id.to_string()))
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("move card {card_id}: {error}"))?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit stage move for {card_id}: {error}"))?;
+    Ok(json!({ "status": status, "stage": stage }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -656,14 +909,6 @@ fn find_current_stage(stages: &[Value], history: &[Value]) -> Value {
         .unwrap_or(Value::Null)
 }
 
-fn source_label(source: table_metadata::Source) -> &'static str {
-    match source {
-        table_metadata::Source::File => "file",
-        table_metadata::Source::FileCanonical => "file-canonical",
-        table_metadata::Source::Db => "db",
-    }
-}
-
 fn database_error(error: sqlx::Error) -> PipelineRouteError {
     PipelineRouteError::Database(error.to_string())
 }
@@ -801,16 +1046,6 @@ mod tests {
         };
         let pool = pg_db.connect_and_migrate().await;
 
-        // `pipeline_stages` seeds as `file-canonical` (read-only) in 0019; flip
-        // it to `db` so the API write path is exercised rather than rejected.
-        sqlx::query(
-            "UPDATE db_table_metadata SET source_of_truth = 'db' \
-             WHERE table_name = 'pipeline_stages'",
-        )
-        .execute(&pool)
-        .await
-        .expect("flip pipeline_stages to db source-of-truth");
-
         let service = PipelineRouteService::new(&pool);
 
         // (1) A real backoff written via replace_stages reads back identically
@@ -827,15 +1062,16 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0]["backoff"], json!("exponential"));
 
-        // (2) Absent backoff round-trips as null (no spurious default).
+        // (2) A save that leaves backoff out keeps the stored value.
         let listed = service
             .replace_stages("repo-rt", &[stage_with_backoff(None)])
             .await
             .expect("replace_stages without backoff should succeed");
-        assert_eq!(listed[0]["backoff"], Value::Null);
+        assert_eq!(listed[0]["backoff"], json!("exponential"));
+        assert_eq!(listed[0]["id"], written[0]["id"]);
 
-        // (3) Whitespace-only backoff normalizes to NULL (consistent with
-        // absent/""), neither a BadRequest nor a stored "   ".
+        // (3) Whitespace-only backoff clears it to NULL, neither a BadRequest
+        // nor a stored "   ".
         let listed = service
             .replace_stages("repo-rt", &[stage_with_backoff(Some("   "))])
             .await
@@ -855,6 +1091,322 @@ mod tests {
             .expect("list_stages should succeed");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0]["backoff"], Value::Null);
+
+        pg_db.drop().await;
+    }
+
+    fn dashboard_stage(name: &str) -> PipelineStageInput {
+        PipelineStageInput {
+            stage_name: name.to_string(),
+            stage_order: None,
+            trigger_after: Some("review_pass".to_string()),
+            entry_skill: None,
+            provider: None,
+            agent_override_id: None,
+            timeout_minutes: None,
+            on_failure: None,
+            on_failure_target: None,
+            max_retries: None,
+            backoff: None,
+            skip_condition: None,
+            parallel_with: None,
+        }
+    }
+
+    /// A card in a stage keeps pointing at that stage's id; a save must not
+    /// strand it or reroute it past stages it has not run.
+    #[tokio::test]
+    async fn stage_saves_refuse_to_strand_open_cards_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_pipeline_stage_cards",
+            "pipeline stage card guard",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        let service = PipelineRouteService::new(&pool);
+        let names = |names: &[&str]| {
+            names
+                .iter()
+                .copied()
+                .map(dashboard_stage)
+                .collect::<Vec<_>>()
+        };
+
+        let stages = service
+            .replace_stages("repo-rt", &names(&["lint", "e2e", "qa"]))
+            .await
+            .expect("seed stages");
+        let e2e_id = stages[1]["id"].as_i64().expect("e2e id");
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, repo_id, title, status, pipeline_stage_id)
+             VALUES ('card-e2e', 'repo-rt', 'in e2e', 'review', $1)",
+        )
+        .bind(e2e_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("seed card");
+
+        for (label, attempt) in [
+            ("remove e2e", names(&["lint", "qa"])),
+            ("rename e2e", names(&["lint", "e2e-v2", "qa"])),
+            ("move qa before e2e", names(&["lint", "qa", "e2e"])),
+            ("move lint after e2e", names(&["e2e", "lint", "qa"])),
+        ] {
+            let err = service
+                .replace_stages("repo-rt", &attempt)
+                .await
+                .expect_err(label);
+            assert!(
+                matches!(err, PipelineRouteError::Conflict(_)),
+                "{label}: {err:?}"
+            );
+        }
+        assert!(matches!(
+            service.delete_stages("repo-rt").await,
+            Err(PipelineRouteError::Conflict(_))
+        ));
+
+        let saved = service
+            .replace_stages("repo-rt", &names(&["lint", "e2e", "smoke", "qa"]))
+            .await
+            .expect("adding a stage leaves the card's path intact");
+        assert_eq!(saved[1]["id"], json!(e2e_id));
+
+        sqlx::query("UPDATE kanban_cards SET status = 'done' WHERE id = 'card-e2e'")
+            .execute(&pool)
+            .await
+            .expect("close card");
+        service
+            .replace_stages("repo-rt", &names(&["qa"]))
+            .await
+            .expect("closed cards do not hold stages");
+        assert_eq!(service.delete_stages("repo-rt").await.expect("delete"), 1);
+
+        pg_db.drop().await;
+    }
+
+    /// Holds a repo's save lock, as a save does while it runs.
+    async fn hold_stage_lock(pool: &PgPool, repo: &str) -> Transaction<'static, Postgres> {
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query(STAGE_SAVE_LOCK_SQL)
+            .bind(repo)
+            .execute(&mut *tx)
+            .await
+            .expect("hold stage lock");
+        tx
+    }
+
+    async fn wait_for_lock_waiters(pool: &PgPool, waiters: i64) {
+        for _ in 0..400 {
+            let queued = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM pg_locks
+                  WHERE locktype = 'advisory' AND NOT granted
+                    AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("count lock waiters");
+            if queued >= waiters {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("{waiters} stage lock waiter(s) never queued");
+    }
+
+    fn spawn_save(
+        pool: &PgPool,
+        repo: &'static str,
+        stages: Vec<PipelineStageInput>,
+    ) -> tokio::task::JoinHandle<Result<Vec<Value>, PipelineRouteError>> {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            PipelineRouteService::new(&pool)
+                .replace_stages(repo, &stages)
+                .await
+        })
+    }
+
+    fn spawn_advance(pool: &PgPool) -> tokio::task::JoinHandle<Result<Value, String>> {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            move_card_stage(&pool, "card-walk", StageStep::Advance("review_pass")).await
+        })
+    }
+
+    async fn card_stage(pool: &PgPool) -> Option<String> {
+        sqlx::query_scalar("SELECT pipeline_stage_id FROM kanban_cards WHERE id = 'card-walk'")
+            .fetch_one(pool)
+            .await
+            .expect("card stage")
+    }
+
+    /// A card move and a stage save on one repo run one after the other, so the
+    /// move never follows an order the save is changing.
+    #[tokio::test]
+    async fn card_stage_moves_take_turns_with_stage_saves_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_pipeline_stage_moves",
+            "pipeline stage moves",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+        let service = PipelineRouteService::new(&pool);
+        let names = |names: &[&str]| {
+            names
+                .iter()
+                .copied()
+                .map(dashboard_stage)
+                .collect::<Vec<_>>()
+        };
+        let seeded = service
+            .replace_stages("repo-rt", &names(&["lint", "e2e", "qa"]))
+            .await
+            .expect("seed stages");
+        let [lint, e2e, qa] =
+            [0, 1, 2].map(|idx| seeded[idx]["id"].as_i64().expect("stage id").to_string());
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, repo_id, title, status)
+             VALUES ('card-walk', 'repo-rt', 'walks the stages', 'review')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed card");
+
+        let moved = spawn_advance(&pool).await.expect("join").expect("enter");
+        assert_eq!(moved["status"], json!("entered"));
+        assert_eq!(card_stage(&pool).await, Some(lint.clone()));
+
+        // The save queued first reorders qa ahead of e2e; the move then takes qa.
+        let hold = hold_stage_lock(&pool, "repo-rt").await;
+        let save = spawn_save(&pool, "repo-rt", names(&["lint", "qa", "e2e"]));
+        wait_for_lock_waiters(&pool, 1).await;
+        let advance = spawn_advance(&pool);
+        wait_for_lock_waiters(&pool, 2).await;
+        hold.commit().await.expect("release");
+        save.await.expect("join").expect("reorder behind the card");
+        let moved = advance.await.expect("join").expect("advance");
+        assert_eq!(moved["stage"]["stage_name"], json!("qa"));
+        assert_eq!(card_stage(&pool).await, Some(qa.clone()));
+
+        // The move queued first takes e2e; the save then sees the card there.
+        sqlx::query("UPDATE kanban_cards SET pipeline_stage_id = $1 WHERE id = 'card-walk'")
+            .bind(&lint)
+            .execute(&pool)
+            .await
+            .expect("back to lint");
+        service
+            .replace_stages("repo-rt", &names(&["lint", "e2e", "qa"]))
+            .await
+            .expect("restore order");
+        let hold = hold_stage_lock(&pool, "repo-rt").await;
+        let advance = spawn_advance(&pool);
+        wait_for_lock_waiters(&pool, 1).await;
+        let save = spawn_save(&pool, "repo-rt", names(&["lint", "qa", "e2e"]));
+        wait_for_lock_waiters(&pool, 2).await;
+        hold.commit().await.expect("release");
+        let moved = advance.await.expect("join").expect("advance");
+        assert_eq!(moved["stage"]["stage_name"], json!("e2e"));
+        assert!(matches!(
+            save.await.expect("join"),
+            Err(PipelineRouteError::Conflict(_))
+        ));
+        assert_eq!(card_stage(&pool).await, Some(e2e));
+
+        spawn_advance(&pool).await.expect("join").expect("to qa");
+        let moved = spawn_advance(&pool).await.expect("join").expect("past qa");
+        assert_eq!(moved["status"], json!("completed"));
+        assert_eq!(card_stage(&pool).await, None);
+
+        sqlx::query("UPDATE kanban_cards SET pipeline_stage_id = '999999' WHERE id = 'card-walk'")
+            .execute(&pool)
+            .await
+            .expect("point at a gone stage");
+        let moved = spawn_advance(&pool)
+            .await
+            .expect("join")
+            .expect("gone stage");
+        assert_eq!(moved["status"], json!("missing"));
+        assert_eq!(card_stage(&pool).await, Some("999999".to_string()));
+
+        pg_db.drop().await;
+    }
+
+    /// Saves on one repo run one after the other, including the first saves on
+    /// an empty repo, so each reads what the one before it wrote.
+    #[tokio::test]
+    async fn stage_saves_take_turns_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_pipeline_stage_saves",
+            "pipeline stage saves",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+        let service = PipelineRouteService::new(&pool);
+
+        let hold = hold_stage_lock(&pool, "repo-empty").await;
+        let first = spawn_save(&pool, "repo-empty", vec![dashboard_stage("e2e")]);
+        wait_for_lock_waiters(&pool, 1).await;
+        let second = spawn_save(&pool, "repo-empty", vec![dashboard_stage("qa")]);
+        wait_for_lock_waiters(&pool, 2).await;
+        hold.commit().await.expect("release");
+        first.await.expect("join").expect("first save");
+        let listed = second.await.expect("join").expect("second save");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["stage_name"], json!("qa"));
+
+        let hold = hold_stage_lock(&pool, "repo-timeout").await;
+        let first = spawn_save(
+            &pool,
+            "repo-timeout",
+            vec![PipelineStageInput {
+                timeout_minutes: Some(120),
+                ..dashboard_stage("qa")
+            }],
+        );
+        wait_for_lock_waiters(&pool, 1).await;
+        let second = spawn_save(&pool, "repo-timeout", vec![dashboard_stage("qa")]);
+        wait_for_lock_waiters(&pool, 2).await;
+        hold.commit().await.expect("release");
+        first.await.expect("join").expect("first save");
+        let listed = second.await.expect("join").expect("second save");
+        assert_eq!(listed[0]["timeout_minutes"], json!(120));
+
+        // A node on a build that moves cards without the lock holds saves back.
+        sqlx::query(
+            "INSERT INTO worker_nodes (instance_id, status, capabilities, last_heartbeat_at)
+             VALUES ('old-build', 'online', '{}'::jsonb, NOW())",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed node");
+        assert!(matches!(
+            service
+                .replace_stages("repo-timeout", &[dashboard_stage("qa")])
+                .await,
+            Err(PipelineRouteError::Unavailable(_))
+        ));
+        sqlx::query(
+            "UPDATE worker_nodes
+                SET capabilities = '{\"pipeline\": {\"stage_lock_v1\": true}}'::jsonb
+              WHERE instance_id = 'old-build'",
+        )
+        .execute(&pool)
+        .await
+        .expect("upgrade node");
+        service
+            .replace_stages("repo-timeout", &[dashboard_stage("qa")])
+            .await
+            .expect("every node takes the lock");
 
         pg_db.drop().await;
     }

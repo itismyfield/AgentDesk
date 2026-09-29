@@ -19,9 +19,15 @@ pub mod codex;
 pub mod codex_remote_policy;
 pub mod codex_tmux_wrapper;
 pub mod codex_tui;
+// Storage primitives remain dormant until the input actor is wired.
 pub mod cswap;
 pub mod discord;
 pub mod discord_config_audit;
+#[allow(dead_code)]
+pub(crate) mod tui_input;
+// Read only by its tests until the `adk custody status` wiring lands on top of it.
+#[allow(dead_code)]
+pub(crate) mod discord_custody;
 // #1693: `discord_delivery` moved to `dispatches::discord_delivery`. The
 // flat path is preserved as a re-export so existing import sites and
 // tests keep working without churn.
@@ -145,10 +151,17 @@ pub mod tmux_wrapper;
 pub mod tool_output_guard;
 #[allow(dead_code)]
 pub(crate) mod writer_protocol;
-// Shadow-only output track; unreferenced until its spawn is wired behind the off-by-default flag.
+// Output track: the shadow and the dormant writer store, each behind an off-by-default flag.
 #[allow(dead_code)]
 pub(crate) mod tui_o {
+    pub(crate) mod alarm;
+    pub(crate) mod cutover;
+    pub(crate) mod ownership;
     pub(crate) mod shadow;
+    pub(crate) mod shadow_host;
+    pub(crate) mod store;
+    pub(crate) mod topology;
+    pub(crate) mod writer;
 }
 // #3034: 4 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during tui_prompt_dedupe dead-code cleanup.
@@ -164,6 +177,7 @@ pub mod turn_cancel_finalizer;
 pub mod turn_cancel_queue_guard;
 pub mod turn_lifecycle;
 pub mod turn_orchestrator;
+pub(crate) mod voice_conductor;
 
 // Compatibility alias only: code referencing `services::remote::*` still
 // compiles, but the target module is disabled per #1606/#2175/#2193. A real

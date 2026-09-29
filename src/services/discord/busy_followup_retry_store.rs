@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::services::discord::runtime_store;
 use crate::services::provider::ProviderKind;
+use crate::services::turn_orchestrator::SourceMessageQueuedGeneration;
 
 use super::{
     InflightTurnState, Intervention, MailboxEnqueueOutcome, SharedData,
@@ -171,26 +172,27 @@ pub(in crate::services::discord) async fn requeue_inflight_for_followup_retry(
     let message_id = MessageId::new(user_msg_id);
     let retry_message_id = MessageId::new(retry_user_msg_id);
     let queued_generation = shared.restart.current_generation;
-    let source_message_queued_generations = if inflight_state.followup_preserve_on_cancel {
-        vec![
-            crate::services::turn_orchestrator::SourceMessageQueuedGeneration::user_instruction(
-                message_id,
-                queued_generation,
-            ),
-        ]
+    let source_message_ids = if retry_message_id == message_id {
+        vec![message_id]
     } else {
-        Vec::new()
+        vec![message_id, retry_message_id]
     };
+    let source_message_queued_generations = source_message_ids
+        .iter()
+        .map(|&source_id| {
+            if source_id == message_id && inflight_state.followup_preserve_on_cancel {
+                SourceMessageQueuedGeneration::user_instruction(source_id, queued_generation)
+            } else {
+                SourceMessageQueuedGeneration::new(source_id, queued_generation)
+            }
+        })
+        .collect();
     let intervention = Intervention {
         author_id: UserId::new(inflight_state.request_owner_user_id),
         author_is_bot: false,
         message_id,
         queued_generation,
-        source_message_ids: if retry_message_id == message_id {
-            vec![message_id]
-        } else {
-            vec![message_id, retry_message_id]
-        },
+        source_message_ids,
         source_message_queued_generations,
         source_text_segments: Vec::new(),
         text: inflight_state.user_text.clone(),

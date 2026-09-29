@@ -603,10 +603,13 @@ class H2ContractCliTest(unittest.TestCase):
         self.assertIn("H2 contract: sym:missing::entry has no imported reference", proc.stdout)
 
     def test_import_only_symbol_fails_the_script_with_diagnostic(self):
-        text = CHECKER.H2_DOC.read_text(encoding="utf-8").replace("`sym:h2_cfg_compare::compare_cfgs`", "")
-        proc = self.run_contract(text)
-        self.assertNotEqual(proc.returncode, 0, proc.stdout)
-        self.assertIn("H2 contract: imported h2_cfg_compare::compare_cfgs is not documented", proc.stdout)
+        for symbol in ("h2_cfg_compare::compare_cfgs", "h2_cfg_collect::seal", "h2_cfg_collect::read_manifest",
+                       "h2_env::environment", "h2_env::check_host"):
+            with self.subTest(symbol=symbol):
+                text = CHECKER.H2_DOC.read_text(encoding="utf-8").replace(f"`sym:{symbol}`", "")
+                proc = self.run_contract(text)
+                self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                self.assertIn(f"H2 contract: imported {symbol} is not documented", proc.stdout)
 
     def test_main_preserves_import_search_path_on_h2_success_and_error(self):
         probe = textwrap.dedent("""

@@ -7,8 +7,9 @@ use std::io::Write;
 use super::super::CatchUpRetryState;
 use super::*;
 use crate::services::discord::outbound::completed_turn_ledger;
+use crate::services::discord::queue_io::mailbox_enqueue_observed_intervention as observed_enqueue;
 use crate::services::discord::{self as discord, MailboxEnqueueOutcome, SharedData};
-use crate::services::turn_orchestrator::EnqueueRefusalReason;
+use crate::services::turn_orchestrator::{ClaimObservation, EnqueueRefusalReason};
 
 #[derive(Clone, Copy)]
 enum Hook {
@@ -18,6 +19,16 @@ enum Hook {
     /// #6035: the given primary's merged head absorbs the id and claims its
     /// turn between the scan snapshot and the enqueue.
     AbsorbInto(MessageId),
+    /// Like `AbsorbInto`, then the turn ends (delivered or not)
+    /// before the enqueue lands.
+    AbsorbAndEnd {
+        primary: MessageId,
+        delivered: bool,
+    },
+    /// The channel's actor is purged first, so a fresh actor runs
+    /// the undelivered `AbsorbAndEnd`.
+    PurgeAbsorbAndEnd(MessageId),
+    AbsorbAndDeliverEpisode(MessageId),
 }
 
 #[derive(Debug)]
@@ -151,8 +162,13 @@ impl CatchUpDiscordApi for StrictApi {
         provider: &ProviderKind,
         channel_id: ChannelId,
         intervention: Intervention,
+        observed: ClaimObservation,
     ) -> MailboxEnqueueOutcome {
         let message_id = intervention.message_id;
+        let enqueue = |intervention| {
+            let observed = Some(observed);
+            observed_enqueue(shared, provider, channel_id, intervention, observed)
+        };
         let hook =
             (self.hooks.lock().unwrap().get_mut(&message_id.get())).and_then(VecDeque::pop_front);
         let outcome = match hook {
@@ -164,8 +180,7 @@ impl CatchUpDiscordApi for StrictApi {
             },
             Some(Hook::PreQueue) => {
                 queue(shared, provider, channel_id, message_id).await;
-                discord::mailbox_enqueue_intervention(shared, provider, channel_id, intervention)
-                    .await
+                enqueue(intervention).await
             }
             Some(Hook::AbsorbInto(primary)) => {
                 let absorbed = [message_id];
@@ -173,13 +188,38 @@ impl CatchUpDiscordApi for StrictApi {
                     shared, provider, channel_id, &absorbed, primary,
                 )
                 .await;
-                discord::mailbox_enqueue_intervention(shared, provider, channel_id, intervention)
-                    .await
+                enqueue(intervention).await
             }
-            None => {
-                discord::mailbox_enqueue_intervention(shared, provider, channel_id, intervention)
-                    .await
+            Some(Hook::AbsorbAndEnd { primary, delivered }) => {
+                let end = claim_cas_tests::absorb_and_end;
+                end(shared, provider, channel_id, message_id, primary, delivered).await;
+                enqueue(intervention).await
             }
+            Some(Hook::AbsorbAndDeliverEpisode(primary)) => {
+                let nonce = absorbed_active_tests::absorb_and_claim(
+                    shared,
+                    provider,
+                    channel_id,
+                    &[message_id],
+                    primary,
+                )
+                .await;
+                completed_turn_ledger::append_completed_episode(
+                    provider,
+                    channel_id.get(),
+                    primary.get(),
+                    Some(&nonce),
+                );
+                discord::mailbox_finish_turn(shared, provider, channel_id).await;
+                enqueue(intervention).await
+            }
+            Some(Hook::PurgeAbsorbAndEnd(primary)) => {
+                claim_cas_tests::purge(shared, channel_id).await;
+                let end = claim_cas_tests::absorb_and_end;
+                end(shared, provider, channel_id, message_id, primary, false).await;
+                enqueue(intervention).await
+            }
+            None => enqueue(intervention).await,
         };
         let record = (message_id.get(), outcome.enqueued, outcome.refusal_reason);
         self.enqueues.lock().unwrap().push(record);
@@ -642,7 +682,7 @@ enum Resolution {
     LeftQueueUnprocessed,
     BecameActiveTurn,
     /// M is the newest primary of a merged head that also carries older H. H is
-    /// held while M's turn runs (#6205), then re-offered once, never leapt.
+    /// held while M's turn runs, then settled by M's delivered episode.
     MergedHeadClaimed,
     /// `/clear`: the user discarded M, so neither sweep may run it again.
     IntentionallyCleared,
@@ -674,6 +714,7 @@ async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
     assert_eq!(held.checkpoint, checkpoint.get(), "{resolution:?}");
 
     let token = Arc::new(crate::services::provider::CancelToken::new());
+    let turn_nonce = token.turn_nonce().map(str::to_owned);
     let owner = serenity::UserId::new(HUMAN_ID);
     match resolution {
         Resolution::LeftQueueUnprocessed => {
@@ -735,7 +776,14 @@ async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
             assert_eq!(fx.surfaces(channel_id), held, "{resolution:?}");
             let retry = fx.pending(channel_id).expect("H keeps the barrier retry");
             assert_eq!(retry.checkpoint, checkpoint.get(), "{resolution:?}");
-            completed_turn_ledger::append_completed_turn(&fx.provider, channel_id.get(), m.get());
+            // M's episode is delivered, so its durable alias settles H.
+            let (provider, nonce) = (&fx.provider, turn_nonce.as_deref());
+            completed_turn_ledger::append_completed_episode(
+                provider,
+                channel_id.get(),
+                m.get(),
+                nonce,
+            );
             discord::mailbox_finish_turn(&fx.shared, &fx.provider, channel_id).await;
             second = StrictApi::new(&fx.shared).with_history(channel_id, history);
             fx.retry_sweep(&second, channel_id).await;
@@ -745,8 +793,8 @@ async fn t9_case(channel_id: ChannelId, resolution: Resolution) {
     let rerun = accepted(&second);
     let expected_rerun = match resolution {
         Resolution::LeftQueueUnprocessed => vec![m.get()],
-        Resolution::MergedHeadClaimed => vec![h.get()],
-        Resolution::BecameActiveTurn
+        Resolution::MergedHeadClaimed
+        | Resolution::BecameActiveTurn
         | Resolution::IntentionallyCleared
         | Resolution::OrphanedReservationCleared => Vec::new(),
     };
@@ -826,6 +874,41 @@ async fn t9b_clear_during_a_synthetic_active_turn_keeps_later_messages_visible()
     fx.sweep(&api).await;
     assert_phase1_read(&api, after(m), &[n]);
     assert_eq!(api.enqueue_log(), [(n.get(), true, None)]);
+}
+
+/// A `/clear` whose persist fails restores the queue, so it keeps the retry and
+/// the checkpoint: advancing past the released turn would leap queued M.
+#[tokio::test(flavor = "current_thread")]
+async fn t9c_clear_that_fails_to_persist_keeps_the_retry_and_checkpoint() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(4_603_525);
+    let (checkpoint, m, active) = (id(1, 600), id(2, 120), id(3, 60));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    fx.queue(channel_id, m).await;
+    let token = Arc::new(crate::services::provider::CancelToken::new());
+    let owner = serenity::UserId::new(HUMAN_ID);
+    assert!(discord::mailbox_try_start_turn(&fx.shared, channel_id, token, owner, active).await);
+    let retry = CatchUpRetryState::new(checkpoint.get());
+    fx.shared.catch_up_retry_pending.insert(channel_id, retry);
+    // A directory in the queue file's place makes the emptied queue's removal fail.
+    let queue_file = crate::services::discord::runtime_store::discord_pending_queue_root()
+        .expect("queue root")
+        .join(fx.provider.as_str())
+        .join(&fx.shared.token_hash)
+        .join(format!("{}.json", channel_id.get()));
+    std::fs::remove_file(&queue_file).unwrap();
+    std::fs::create_dir(&queue_file).unwrap();
+
+    let discard = super::super::retry_state::clear_channel_discarding_catch_up_backlog;
+    let cleared = discard(&fx.shared, &fx.provider, channel_id).await;
+
+    assert!(cleared.persistence_error.is_some(), "the clear must fail");
+    let held = (Some(checkpoint.get()), Some(checkpoint.get()));
+    assert_eq!(fx.surfaces(channel_id), held, "checkpoint leapt queued M");
+    assert_eq!(
+        fx.pending(channel_id).map(|p| p.checkpoint),
+        Some(checkpoint.get())
+    );
 }
 
 /// T10: without an earlier barrier, active-turn and terminal messages advance.
@@ -1068,3 +1151,8 @@ impl Write for LogWriter {
 
 #[path = "absorbed_active_tests.rs"]
 mod absorbed_active_tests;
+#[path = "claim_cas_tests.rs"]
+mod claim_cas_tests;
+
+#[path = "merged_alias_tests.rs"]
+mod merged_alias_tests;

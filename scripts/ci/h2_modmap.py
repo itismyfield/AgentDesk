@@ -11,15 +11,20 @@ import argparse
 import json
 import os
 import platform
+import re
+import signal
 import subprocess
 import sys
 import uuid
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import h2_depinfo  # noqa: E402
 import h2_measure as m  # noqa: E402
 import h2_cfg_compare as cfg_compare  # noqa: E402
+import h2_cfg_collect as collect  # noqa: E402
+import h2_env  # noqa: E402
 
 DRIVER = "tools/modmap-driver"
 MIN_MODULES = 1000
@@ -40,14 +45,160 @@ CANARY_CFG = {
     ("h2_probe_escape", 'quote=" slash=\\ newline=\n한글'),
 }
 
+ITEM_FIELDS = ("file", "lo", "hi", "kind", "path", "unregistrable", "display",
+               "line", "def", "parent", "def_kind", "macro", "fold", "escape")
+
+
+def item_record(row) -> dict:
+    if (not isinstance(row, list) or len(row) not in (12, 14)
+            or len(row) != (14 if row[3] == "nested_fn" else 12)):
+        raise ValueError("items record schema mismatch")
+    item = dict(zip(ITEM_FIELDS, row))
+    integers = ("lo", "hi", "line", "def", "parent") + (("fold",) if len(row) == 14 else ())
+    if (any(type(item[k]) is not int or item[k] < 0 for k in integers)
+            or item["lo"] >= item["hi"] or item["line"] == 0 or item["def"] == 0 or item["def"] == item["parent"]
+            or any(not isinstance(item[k], str) or not item[k] for k in ("file", "kind", "display", "def_kind"))
+            or item["kind"] not in {"fn", "nested_fn", "trait_method", "trait_impl_method", "inherent_method", "const", "header"}
+            or type(item["macro"]) is not bool or (len(row) == 14 and type(item["escape"]) is not bool)
+            or any(item[k] is not None and (not isinstance(item[k], str) or not item[k]) for k in ("path", "unregistrable"))
+            or (item["path"] is None) == (item["unregistrable"] is None)):
+        raise ValueError("items record fields invalid")
+    return item
+
+
+def item_records(arrays) -> list[dict]:
+    rows = [item_record(row) for row in arrays]
+    by_def = {row["def"]: row for row in rows}
+    functions = {"fn", "nested_fn", "trait_method", "trait_impl_method", "inherent_method"}
+    containers = {"trait_method": "Trait", "trait_impl_method": "Impl { of_trait: true }",
+                  "inherent_method": "Impl { of_trait: false }"}
+    if not rows or len(by_def) != len(rows):
+        raise ValueError("items empty or duplicate def IDs")
+    for row in rows:
+        parent = by_def.get(row["parent"])
+        if row["kind"] in functions and row["def_kind"] != ("Fn" if row["kind"] in {"fn", "nested_fn"} else "AssocFn"):
+            raise ValueError("items function kind mismatch")
+        if row["kind"] in containers and (parent is None
+                or parent["kind"] != "header" or parent["def_kind"] != containers[row["kind"]]):
+            raise ValueError("items associated container mismatch")
+        if row["def_kind"] == "AssocConst" and (parent is None or parent["kind"] != "header" or parent["def_kind"] not in containers.values()):
+            raise ValueError("items associated const container mismatch")
+        if row["kind"] == "nested_fn":
+            if row["fold"] >= len(rows):
+                raise ValueError("items fold outside records")
+            owner = rows[row["fold"]]
+            seen = {row["def"]}
+            while parent is not None and parent["kind"] not in functions:
+                if parent["def"] in seen:
+                    raise ValueError("items parent cycle")
+                seen.add(parent["def"])
+                parent = by_def.get(parent["parent"])
+            if (owner["kind"] not in functions or owner is row or row["def_kind"] != "Fn"
+                    or (parent is not None and parent is not owner)
+                    or row["escape"] != (row["unregistrable"] == "fold-escape")
+                    or (not row["escape"] and (row["path"], row["unregistrable"]) != (owner["path"], owner["unregistrable"]))):
+                raise ValueError("items fold owner mismatch")
+    for row in rows:
+        seen = set()
+        while row["kind"] == "nested_fn":
+            if row["def"] in seen:
+                raise ValueError("items fold cycle")
+            seen.add(row["def"])
+            row = rows[row["fold"]]
+    return rows
+
+
+# Anchors describe source text, never coordinates copied from compiler output.
+CANARY_ITEMS = [
+    ("fn", "items_probe::under_clippy", "items_probe.rs", rb"pub fn under_clippy\(\) \{\}"),
+    ("trait_method", "items_probe::ports::Port::go", "items_probe.rs", rb"fn go\(&self\);"),
+    ("trait_method", "items_probe::ports::Port::defaulted", "items_probe.rs", rb"fn defaulted\(&self\) \{\}"),
+    ("inherent_method", "items_probe::ports::S::inherent", "items_probe.rs", rb"pub fn inherent\(&self\) \{\}"),
+    ("trait_impl_method", "items_probe::ports::Port::go", "items_probe.rs", rb"(?<=impl Port for S \{ )fn go\(&self\) \{\}"),
+    ("fn", "items_probe::impl_in_fn", "items_probe.rs", rb"pub fn impl_in_fn\(\) \{.*?\n\}"),
+    ("trait_impl_method", "items_probe::ports::Port::go", "items_probe.rs", rb"fn go\(&self\) \{ let _ = 1; \}"),
+    ("inherent_method", "items_probe::ports::InConst::from_fn", "items_probe.rs", rb"pub fn from_fn\(&self\) \{\}"),
+    ("const", "const-item", "items_probe.rs", rb"const _: \(\) = \{.*?\};"),
+    ("trait_impl_method", "items_probe::ports::Port::go", "items_probe.rs", rb"fn go\(&self\) \{ let _ = 2; \}"),
+    ("fn", "items_probe::local_trait", "items_probe.rs", rb"pub fn local_trait\(\) \{.*?\n\}"),
+    ("trait_method", "in-function", "items_probe.rs", rb"fn local\(&self\);"),
+    ("inherent_method", "in-function", "items_probe.rs", rb"fn local_inherent\(&self\) \{\}"),
+    ("fn", "items_probe::fold_ok", "items_probe.rs", rb"pub fn fold_ok\(\) \{[^\n]+\}"),
+    ("nested_fn", "items_probe::fold_ok", "items_probe.rs", rb"fn folded\(\) \{\}"),
+    ("fn", "items_probe::fold_escape", "items_probe.rs", rb"pub fn fold_escape\(\) \{.*?\n\}"),
+    ("nested_fn", "fold-escape", "items_probe.rs", rb"fn escaped\(\) \{\}"),
+    ("inherent_method", "in-function", "items_probe.rs", rb"fn later\(\) \{ escaped\(\); \}"),
+    ("trait_impl_method", "external:core", "items_probe.rs", rb"fn fmt\([^\n]+\{ Ok\(\(\)\) \}"),
+    ("inherent_method", "self-not-adt", "items_probe.rs", rb"pub fn on_dyn\(&self\) \{\}"),
+    ("fn", "items_probe::made_a", "items_probe.rs", rb"(?m)^two!\(\)"),
+    ("fn", "items_probe::made_b", "items_probe.rs", rb"(?m)^two!\(\)"),
+    ("fn", "items_probe::mixed_fn", "items_probe.rs", rb"(?m)^mixed!\(\)"),
+    ("const", "const-item", "items_probe.rs", rb"(?m)^mixed!\(\)"),
+    ("const", "anon-const", "items_probe.rs", rb"(?m)^mixed!\(\)"),
+    ("trait_impl_method", "items_probe::ports::Port::go", "items_probe.rs", rb"(?m)^made_impl!\(\)"),
+    ("const", "const-item", "items_probe.rs", rb"pub const INLINE: \(\) = const \{ \(\) \};"),
+    ("const", "anon-const", "items_probe.rs", rb"(?<=const )\{ \(\) \}"),
+    ("fn", "items_crlf::decoy", "items_crlf.rs", rb"pub fn decoy\(\) \{[^\r\n]+\}"),
+    ("fn", "items_crlf::inside", "items_crlf.rs", rb"pub fn inside\(\) \{\}"),
+    ("fn", "items_crlf::outside", "items_crlf.rs", rb"pub fn outside\(\) \{ inside\(\); \}"),
+]
+
+
+def check_canary_items(crate: Path, path: Path, manifest: dict) -> None:
+    body = collect.regular(path)
+    digest = collect.digest(body)
+    if digest != manifest["digests"]["items.jsonl"] or digest != manifest["proof"]["items_sha256"]:
+        raise ModmapError("items changed after sealing")
+    try:
+        rows = item_records([json.loads(line) for line in body.splitlines()[1:]])
+    except ValueError as exc:
+        raise ModmapError(str(exc)) from exc
+    crlf = (crate / "src/items_crlf.rs").read_bytes()
+    if not crlf.startswith(b"\xef\xbb\xbf") or b"\r\n" not in crlf or b"\n" in crlf.replace(b"\r\n", b""):
+        raise ModmapError("items canary: BOM/CRLF fixture normalized")
+    expected = Counter()
+    for kind, value, filename, anchor in CANARY_ITEMS:
+        raw = (crate / "src" / filename).read_bytes()
+        matches = list(re.finditer(anchor, raw, re.S))
+        if len(matches) != 1:
+            raise ModmapError(f"items canary: anchor is not unique: {anchor!r}")
+        match = matches[0]
+        value = "modmap_canary::" + value if value.startswith("items_") else value
+        expected[kind, value, "src/" + filename, match.start(), match.end()] += 1
+    actual = Counter((r["kind"], r["path"] or r["unregistrable"], r["file"], r["lo"], r["hi"])
+                     for r in rows if r["kind"] != "header" and r["file"] in {"src/items_probe.rs", "src/items_crlf.rs"})
+    if actual != expected:
+        raise ModmapError(f"items canary: anchor/path drift; missing={expected - actual}, extra={actual - expected}")
+    for row in rows:
+        raw = (crate / row["file"]).read_bytes()
+        lo, hi = row["lo"], row["hi"]
+        if not 0 <= lo < hi <= len(raw) or raw.count(b"\n", 0, lo) + 1 != row["line"]:
+            raise ModmapError("items canary: original byte coordinates drifted")
+        text = raw[lo:hi]
+        if row["macro"] and not re.match(rb"(?:[\w:]+\s*!\s*[({\[]|#\[)", text):
+            raise ModmapError("items canary: macro span is not its source callsite")
+        if not row["macro"] and row["kind"] != "header" and row["unregistrable"] != "anon-const":
+            if not re.match(rb"(?:pub(?:\([^)]*\))?\s+)?(?:fn|const|static)\s+", text):
+                raise ModmapError("items canary: item span is not its source declaration")
+        if row["kind"] == "nested_fn":
+            owner = rows[row["fold"]]
+            if owner["def"] != row["parent"] or row["escape"] != (row["unregistrable"] == "fold-escape"):
+                raise ModmapError("items canary: fold identity/escape drifted")
+    for kind in ("AnonConst", "InlineConst"):
+        if not any(r["def_kind"] == kind and r["kind"] == "const" for r in rows):
+            raise ModmapError(f"items canary: missing {kind} owner")
+    methods = [r for r in rows if r["macro"] and r["kind"] == "trait_impl_method"]
+    if not methods or any(not any(h["def"] == r["parent"] and h["def_kind"] == "Impl { of_trait: true }"
+                                and (h["lo"], h["hi"]) == (r["lo"], r["hi"]) for h in rows) for r in methods):
+        raise ModmapError("items canary: macro impl container identity missing")
+
 class ModmapError(RuntimeError):
     pass
 
-def cargo(root: Path, *args: str, log: Path | None = None, **env: str) -> list[dict]:
+def cargo(root: Path, *args: str, log: Path | None = None, record: Path | None = None, mode: str = "map", **env: str) -> list[dict]:
     """No rustc wrapper: sccache cannot wrap the driver, and a cache hit would skip writing the map."""
-    full = {k: v for k, v in os.environ.items() if k not in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET")}
-    full.pop("RUSTC_BOOTSTRAP", None)
-    full.update(RUSTC_WRAPPER="", CARGO_BUILD_RUSTC_WRAPPER="", CARGO_INCREMENTAL="0", **env)
+    full = h2_env.environment(mode)
+    full.update(env)
     proc = subprocess.run(["cargo", *args], cwd=root, env=full, capture_output=log is not None, text=True)
     events = []
     if log is not None:
@@ -64,6 +215,8 @@ def cargo(root: Path, *args: str, log: Path | None = None, **env: str) -> list[d
                 events.append(event)
                 if event.get("reason") == "compiler-message":
                     print(event["message"].get("rendered") or event["message"]["message"], end="\n", file=sys.stderr)
+    if record is not None:
+        collect.write_json(record, dict(rc=proc.returncode, argv=["cargo", *args]))
     if proc.returncode:
         raise ModmapError(f"`cargo {' '.join(args)}` failed ({proc.returncode})")
     return events
@@ -76,7 +229,7 @@ def build_driver(root: Path) -> Path:
     target = root / "target/modmap-driver"
     # rustc_private is nightly-gated; the bootstrap flag stays on this build, never on a crate the driver checks
     cargo(root, "build", "--release", "--locked", "--manifest-path", f"{DRIVER}/Cargo.toml",
-          "--target-dir", str(target), RUSTC_BOOTSTRAP="1")
+          "--target-dir", str(target), mode="driver")
     return target / "release/modmap-driver"
 
 def fresh(path: Path, start: int) -> None:
@@ -88,6 +241,8 @@ def fresh(path: Path, start: int) -> None:
 def check_canary_cfg(path: Path, nonce: str, driver: Path, crate: Path, events: list[dict]) -> None:
     atoms = cfg_compare.read_cfg(path)
     raw = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(raw, dict):
+        raw = raw.get("atoms")
     if raw != [list(atom) for atom in sorted(atoms)]:
         raise ModmapError("cfg canary: snapshot is not sorted and unique")
     probes = {atom for atom in atoms if atom[0].startswith("h2_probe_") or atom[0] == "feature"}
@@ -138,7 +293,7 @@ def map_modules(root: Path, driver: Path, crate: Path, out: Path, min_modules: i
     marker.touch()
     start = marker.stat().st_mtime_ns  # the file clock, which also stamps the map
     nonce = uuid.uuid4().hex
-    events = cargo(root, "check", "--lib", "-q", "--message-format=json", "--manifest-path", str(crate / "Cargo.toml"), *extra,
+    events = cargo(root, "check", "--lib", "--message-format=json", "--manifest-path", str(crate / "Cargo.toml"), *extra,
                    log=out.with_suffix(".cargo.jsonl"), RUSTC_WORKSPACE_WRAPPER=str(driver), MODMAP_OUT=str(out),
                    MODMAP_CFG_OUT=str(cfg_out) if cfg_out else "", MODMAP_CFG_NONCE=nonce)
     for path in outputs:
@@ -150,32 +305,196 @@ def map_modules(root: Path, driver: Path, crate: Path, out: Path, min_modules: i
         check_canary_cfg(cfg_out, nonce, driver, crate, events)
     return rows
 
+def source_state(root: Path) -> dict:
+    return source_capture(root)[0]
+
+
+STAT = ("dev", "ino", "size", "mtime_ns", "ctime_ns")
+
+
+def stat_of(path: Path | str | int) -> list[int]:
+    """The identity a write, rename or hard-link write changes, even when it restores the bytes."""
+    st = os.stat(path)
+    return [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+
+
+def read_stable(path: Path) -> tuple[bytes, list[int]]:
+    """Bytes adopted only when stat, the open file and a second stat agree; no retry."""
+    before = stat_of(path)
+    with open(path, "rb") as handle:
+        held = stat_of(handle.fileno())
+        body = handle.read()
+        if before != held or stat_of(handle.fileno()) != held or stat_of(path) != held or len(body) != held[2]:
+            raise ModmapError(f"source {path} changed while it was captured")
+    return body, before
+
+
+def source_capture(root: Path) -> tuple[dict, dict[str, bytes], dict[str, list[int]]]:
+    """The state, the listed file bytes it digests and each file's stat; one listing, each file read once."""
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
+    names = sorted({name for name in git("ls-files", "-c", "-o", "--exclude-standard", "-z").split("\0") if name})
+    reads = {name: read_stable(root / name) for name in names if (root / name).is_file()}
+    bodies = {name: body for name, (body, _) in reads.items()}
+    inputs = {name: collect.digest(bodies[name]) if name in bodies else None for name in names}
+    return dict(sha=git("rev-parse", "HEAD"), tree=git("rev-parse", "HEAD^{tree}"),
+                dirty_digest=collect.digest(git("diff", "HEAD", "--binary").encode()),
+                inputs_digest=collect.digest(json.dumps(inputs, sort_keys=True).encode()),
+                config={name: inputs.get(name) for name in
+                        ("Cargo.lock", "Cargo.toml", "clippy.toml", ".cargo/config.toml", "rust-toolchain.toml")}), bodies, \
+        {name: stat for name, (_, stat) in reads.items()}
+
+
+def map_run(root: Path, driver: Path, crate: Path, out: Path, cfg: Path, meta: Path,
+            lane: str, run_id: str, kind: str, context: dict) -> list:
+    run = out.parent
+    run.mkdir(parents=True, exist_ok=True)
+    if any(run.iterdir()):
+        raise ModmapError("metadata: run directory must be empty")
+    marker = run / "start"
+    marker.touch()
+    nonce = uuid.uuid4().hex
+    paths = dict(tsv=str(out), cfg=str(cfg), invocation=str(cfg) + ".invocation.json",
+                 cargo=str(run / "cargo.json"), stdout=str(run / "cargo.jsonl"), stderr=str(run / "cargo.stderr"))
+    request = dict(schema=collect.SCHEMA, run_dir=str(run), kind=kind, run_id=run_id, nonce=nonce,
+                   root=str(crate), lane=lane, driver=str(driver), manifest=str(meta), paths=paths, **context)
+    collect.write_json(run / "request.json", request)
+    extra = ("--locked", "--target-dir", str(root / "target/h2/canary"), "--features", "h2_cfg_probe") if kind == "canary" else ()
+    events = cargo(root, "check", "--lib", "--message-format=json", "--manifest-path", str(crate / "Cargo.toml"), *extra,
+                   log=Path(paths["stdout"]), record=Path(paths["cargo"]), RUSTC_WORKSPACE_WRAPPER=str(driver),
+                   MODMAP_OUT=str(out), MODMAP_CFG_OUT=str(cfg), MODMAP_CFG_NONCE=nonce,
+                   MODMAP_RUN_ID=run_id, MODMAP_KIND=kind)
+    for path in paths.values():
+        fresh(Path(path), marker.stat().st_mtime_ns)
+    if kind == "canary":
+        check_canary_cfg(cfg, nonce, driver, crate, events)
+    elif source_state(root) != context["source"]:
+        raise ModmapError("metadata: source changed during map run")
+    collect.seal(run, meta)
+    return h2_depinfo.load_modmap(out)
+
+
+def collection_context(root: Path, lane: str) -> dict:
+    versions = {tool: subprocess.check_output([tool, "-vV"], cwd=root, text=True).strip()
+                for tool in ("rustc", "clippy-driver")}
+    host = h2_env.check_host(lane, versions["rustc"])
+    target = h2_env.LANES[lane]
+    return dict(host=host, target=target, source=source_state(root), toolchain=versions)
+
+
+# Driver-backed suites --canary runs with the driver it built, and the fewest tests each must run.
+SESSION_SUITES = {"tests.test_h2_session_driver": 8, "tests.test_h2_session_e2e": 10}
+
+
+def run_suite(root: Path, driver: Path, module: str, *, timeout: float = 1200) -> None:
+    env = dict(os.environ, H2_SESSION_DRIVER=str(driver), PYTHONDONTWRITEBYTECODE="1")
+    with subprocess.Popen([sys.executable, "-m", "unittest", module], cwd=root, env=env,
+                          stderr=subprocess.PIPE, text=True, start_new_session=True) as result:
+        try:
+            _, stderr = result.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(result.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            _, stderr = result.communicate()
+            sys.stderr.write(stderr)
+            raise ModmapError(f"session canary: TIMEOUT {module} after {timeout}s") from None
+    sys.stderr.write(stderr)
+    if result.returncode:
+        raise ModmapError(f"session canary: {module} failed")
+    # An empty or skipped suite exits 0 on older Pythons; only a full, unskipped run counts.
+    ran = re.search(r"^Ran (\d+) tests? in ", stderr, re.M)
+    if not ran or int(ran.group(1)) < SESSION_SUITES[module] or not re.search(r"^OK$", stderr, re.M):
+        raise ModmapError(f"session canary: {module} ran incompletely or skipped tests")
+
+
+def check_session_canary(root: Path, driver: Path, crate: Path, run: Path, lane: str, suites: list[str]) -> None:
+    import h2_session
+
+    target = run / "session-target"
+    if target.exists():
+        raise ModmapError("session canary requires a cold target")
+    conf = run / "session-config"
+    conf.mkdir(parents=True)
+    (conf / "clippy.toml").write_text("", encoding="utf-8")
+    manifest = h2_session.session(root, crate, run / "session", conf, lane, driver=driver,
+                                 extra=("--locked", "--target-dir", str(target), "--features", "h2_cfg_probe"))
+    if not {"clippy", "h2_items_bs_clippy"} <= set(manifest["proof"]["cfg"]):
+        raise ModmapError("session canary: missing Clippy/build-script cfg")
+    check_canary_items(crate, run / "session/items.jsonl", manifest)
+    for module in suites:
+        run_suite(root, driver, module)
+    if sorted(suites) == sorted(SESSION_SUITES):
+        print("h2-modmap: cold Clippy session, items anchors, driver controls and workspace e2e hold")
+    else:
+        print("h2-modmap: cold Clippy session and items anchors hold; suites not run")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo", type=Path, default=m.REPO_ROOT)
-    parser.add_argument("--out", type=Path, help="map path (default <repo>/target/h2/modmap.tsv)")
+    parser.add_argument("--out", type=Path, help="the only root TSV (with --lane: new run directory)")
+    parser.add_argument("--lane", choices=h2_env.LANES, help="collect a bound cfg and metadata manifest")
+    parser.add_argument("--cfg-out", type=Path)
+    parser.add_argument("--meta-out", type=Path)
     parser.add_argument("--inert", action="store_true", help="skip the repo map while no baseline is committed")
     parser.add_argument("--canary", action="store_true", help="self-test the driver even when --inert skips the map")
+    parser.add_argument("--suite", action="append", default=[], choices=SESSION_SUITES,
+                        help="driver-backed unittest module --canary runs; --canary must name every one")
     args = parser.parse_args(argv)
     root = args.repo.resolve()
+    if not root.is_dir():
+        parser.error("--repo must be an existing directory")
+    # The CI step names each suite so wiring checks see it; a dropped or repeated one must not pass as skipped.
+    if args.suite and not args.canary:
+        parser.error("--suite requires --canary")
+    if args.canary and sorted(args.suite) != sorted(SESSION_SUITES):
+        parser.error("--canary must name each of --suite " + " --suite ".join(SESSION_SUITES) + " once")
+    if (args.cfg_out or args.meta_out) and not args.lane:
+        parser.error("--cfg-out/--meta-out require --lane")
+    run_id = uuid.uuid4().hex
+    run_base = root / "target/h2/runs" / run_id
+    out = (args.out or (run_base / "root/modmap.tsv" if args.lane else root / "target/h2/modmap.tsv")).absolute()
+    cfg = (args.cfg_out or out.with_suffix(".cfg.json")).absolute()
+    meta = (args.meta_out or out.with_suffix(".meta.json")).absolute()
+    if args.lane:
+        outputs = {out, cfg, meta, Path(str(cfg) + ".invocation.json")}
+        if (len(outputs) != 4 or any(p.parent != out.parent or p.resolve() != p for p in outputs)
+                or any(p.name.endswith(".partial") or p.name in ("start", "request.json", "cargo.json", "cargo.jsonl", "cargo.stderr") for p in outputs)):
+            parser.error("outputs must be distinct canonical files in the same new run directory")
+        if out.parent.exists() and (not out.parent.is_dir() or any(out.parent.iterdir())):
+            parser.error("root run directory must be new or empty")
     skip_map = args.inert and not any((root / rel).exists() for rel in m.BASELINE_FILES)
     if skip_map and not args.canary:
-        print("h2-modmap: no baseline committed; inert no-op")
+        print("h2-modmap: no baseline committed; inert no-op; root=skipped")
         return 0
-    out = args.out or root / "target/h2/modmap.tsv"
     try:
+        context = collection_context(root, args.lane) if args.lane else None
         driver = build_driver(root)
         canary = root / DRIVER / "canary"
-        got = h2_depinfo.modmap_problems(map_modules(root, driver, canary, root / "target/h2/canary.tsv", 1,
-                                                     "--locked", "--target-dir", str(root / "target/h2/canary"),
-                                                     "--features", "h2_cfg_probe", cfg_out=root / "target/h2/canary.cfg.json"))
+        if args.lane:
+            canary_run = run_base / "canary"
+            rows = map_run(root, driver, canary, canary_run / "modmap.tsv", canary_run / "cfg.json",
+                           canary_run / "metadata.json", args.lane, run_id, "canary", context)
+        else:
+            rows = map_modules(root, driver, canary, root / "target/h2/canary.tsv", 1,
+                               "--locked", "--target-dir", str(root / "target/h2/canary"),
+                               "--features", "h2_cfg_probe", cfg_out=root / "target/h2/canary.cfg.json")
+        got = h2_depinfo.modmap_problems(rows)
         if got != CANARY_PROBLEMS:
             raise ModmapError("driver canary drifted; got:\n  " + "\n  ".join(got or ["(no problems)"]))
+        check_session_canary(root, driver, canary, run_base, args.lane or ("macos" if sys.platform == "darwin" else "linux"),
+                             args.suite)
         if skip_map:
-            print("h2-modmap: driver canary holds; no baseline committed, repo map skipped")
+            print("h2-modmap: driver canary holds; no baseline committed, repo map skipped; root=skipped")
             return 0
-        rows = map_modules(root, driver, root, out, MIN_MODULES)
-    except (ModmapError, m.MeasureError, OSError, ValueError) as exc:
+        rows = (map_run(root, driver, root, out, cfg, meta, args.lane, run_id, "root", context)
+                if args.lane else map_modules(root, driver, root, out, MIN_MODULES))
+    except h2_env.HostMismatch as exc:
+        print(f"h2-modmap: {exc}", file=sys.stderr)
+        return 3
+    except (ModmapError, m.MeasureError, OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
         print(f"h2-modmap: {exc}", file=sys.stderr)
         return 1
     print(f"h2-modmap: {sum(row.kind == 'file' for row in rows)} file modules -> {out}")

@@ -20,7 +20,7 @@ use crate::services::session_backend::{
 };
 use crate::services::tmux_diagnostics::{
     build_tmux_death_diagnostic, read_tmux_exit_reason, record_tmux_exit_reason,
-    tmux_exit_reason_is_normal_completion, tmux_session_exists, tmux_session_has_live_pane,
+    tmux_exit_reason_is_normal_completion,
 };
 
 use super::formatting::{

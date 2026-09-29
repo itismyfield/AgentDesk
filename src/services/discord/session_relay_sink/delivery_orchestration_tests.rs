@@ -2,6 +2,9 @@ use super::tests::{inflight_with_identity_offset, matched, terminal_frame_offset
 use super::*;
 use crate::services::discord::inflight::RelayOwnerKind;
 
+#[path = "o_delivery_e2e_tests.rs"]
+mod o_delivery_e2e_tests;
+
 // Kills M6: removing the fenced-terminal disjunct must lose this terminal outcome.
 #[tokio::test]
 async fn fenced_terminal_without_parser_delivery_is_terminal_not_delivered() {
@@ -608,6 +611,77 @@ async fn relay_deliver_observes_landed_unrecorded_proof() {
         .expect("landed unrecorded delivery");
 
     assert_eq!(outcome, RelaySinkOutcome::TerminalDelivered);
+    crate::services::discord::inflight::clear_inflight_state(&ProviderKind::Claude, channel_id);
+}
+
+// An O-delegated idle range is consumed once: no transport, no delivery record, frontier committed.
+#[tokio::test]
+async fn o_delegated_idle_range_is_consumed_once_without_transport_or_evidence() {
+    let temp = tempfile::tempdir().expect("temp runtime root");
+    let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+    let channel_id = 44_010;
+    let channel = ChannelId::new(channel_id);
+    let binding = matched(&channel_id.to_string());
+    let session = &binding.expected_session_name;
+    let generation_path = crate::services::tmux_common::session_temp_path(session, "generation");
+    std::fs::create_dir_all(std::path::Path::new(&generation_path).parent().unwrap()).unwrap();
+    std::fs::write(&generation_path, b"o-delegated").expect("generation marker");
+    let generation = dr::current_generation_mtime_ns(session);
+    let started_at = "2026-08-03T00:00:10Z";
+    let mut inflight = inflight_with_identity_offset(channel_id, session, 710, started_at, Some(0));
+    inflight.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+    inflight.current_msg_id = 88_010;
+    crate::services::discord::inflight::save_inflight_state(&inflight).expect("persist inflight");
+    let registry = Arc::new(HealthRegistry::new());
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    registry
+        .register(ProviderKind::Claude.as_str().to_string(), shared.clone())
+        .await;
+    let gateway = Arc::new(RelayContractFakeGateway::edited());
+    let mut sink = SessionBoundDiscordRelaySink::new(registry);
+    sink.test_gateway = Some(gateway.clone());
+    let payload = concat!(
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n",
+        "{\"type\":\"result\",\"result\":\"answer\"}\n"
+    );
+    let rollout = std::path::Path::new(&binding.expected_rollout_path);
+    std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    std::fs::write(rollout, format!("{payload: <256}")).unwrap();
+    let mut idle = terminal_frame_offset(&binding, payload, 1, 256, 710, started_at, Some(0));
+    idle.relay_generation_mtime_ns = Some(generation);
+    idle.relay_range = Some((0, 256));
+    let _tui = crate::services::tui_o::cutover::test_override::bind_claude_tui_session(
+        session,
+        &binding.expected_rollout_path,
+    );
+    let _o = crate::services::tui_o::cutover::test_override::force_on();
+
+    for attempt in ["first", "replay"] {
+        let outcome = sink.deliver(&idle).await.expect("delegated idle range");
+        assert_eq!(outcome, RelaySinkOutcome::TerminalDelivered, "{attempt}");
+        let transport = (
+            gateway.send_calls.load(Ordering::Acquire),
+            gateway.replace_calls.load(Ordering::Acquire),
+        );
+        assert_eq!(transport, (0, 0), "{attempt}: O posts this body");
+        assert_eq!(
+            dr::effective_committed_offset(
+                &shared,
+                &ProviderKind::Claude,
+                channel,
+                session,
+                Some(256)
+            ),
+            256,
+            "{attempt}: the consumed range stays committed"
+        );
+    }
+    assert!(
+        dr::read_record(&ProviderKind::Claude, channel_id)
+            .and_then(|record| record.delivered_frontier)
+            .is_none(),
+        "a delegated range writes no delivery record frontier"
+    );
     crate::services::discord::inflight::clear_inflight_state(&ProviderKind::Claude, channel_id);
 }
 

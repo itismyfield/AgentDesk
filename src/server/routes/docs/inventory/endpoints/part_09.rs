@@ -5,48 +5,6 @@ use super::super::{EndpointDoc, ParamDoc, body_param, ep, header_param, path_par
 
 pub(super) fn endpoints() -> Vec<EndpointDoc> {
     vec![
-        ep(
-            "GET",
-            "/api/v1/stream",
-            "v1",
-            "Versioned Server-Sent Events stream with optional last-event-id replay.",
-        ),
-        ep(
-            "GET",
-            "/api/v1/activity",
-            "v1",
-            "Versioned activity feed with limit and cursor pagination.",
-        )
-        .with_params([
-            ("limit", query_param("integer", false, "Maximum activity items")),
-            ("before", query_param("string", false, "Cursor returned by a prior page")),
-        ]),
-        ep(
-            "GET",
-            "/api/v1/achievements",
-            "v1",
-            "Versioned achievement bundle, optionally scoped to an agent.",
-        )
-        .with_params([(
-            "agentId",
-            query_param("string", false, "Optional agent id filter"),
-        )]),
-        ep(
-            "GET",
-            "/api/v1/settings",
-            "v1",
-            "Versioned settings list compatible with the dashboard settings surface.",
-        ),
-        ep(
-            "PATCH",
-            "/api/v1/settings/{key}",
-            "v1",
-            "Patch one versioned settings value using the dashboard-compatible settings contract.",
-        )
-        .with_params([
-            ("key", path_param("Settings key")),
-            ("value", body_param("any", true, "New settings value")),
-        ]),
         // provider-cli safe migration
         ep(
             "GET",

@@ -523,6 +523,15 @@ pub(super) async fn run_bridge_stream_tick(
         last_status_panel_edit = tokio::time::Instant::now();
         status_panel_dirty = false;
     }
+    // O posts this body: consume streamed bytes so no anchor, rollover or edit carries them.
+    let o_body_cut = super::terminal_controller_cutover::bridge_o_body_cut_decision(
+        inflight_state.runtime_kind,
+        gateway.can_deliver_directly(),
+    );
+    if o_body_cut {
+        response_sent_offset = full_response.len();
+        inflight_state.response_sent_offset = response_sent_offset;
+    }
     let anchor_ready = if !done
         && !response_portion_after_offset(&full_response, response_sent_offset).is_empty()
         && durable_current_msg_id_from_detached(current_msg_id) == 0
@@ -571,6 +580,7 @@ pub(super) async fn run_bridge_stream_tick(
     };
     if !bridge_stream_relay_suppressed(watcher_owns_assistant_relay, standby_relay_owns_output)
         && anchor_ready
+        && !o_body_cut
     {
         // #3805 P2 (PR-D): track whether an answer rollover created a fresh
         // tail message this interval, so the two-message status panel is

@@ -870,10 +870,18 @@ trait TuiActionExecutor {
     fn send_keys(&mut self, session_name: &str, keys: &[&str]) -> Result<Output, String>;
 }
 
-#[derive(Default)]
 struct TmuxTuiActionExecutor {
     composer_mutated: bool,
     enter_attempted: bool,
+}
+
+impl TmuxTuiActionExecutor {
+    fn new() -> Self {
+        Self {
+            composer_mutated: false,
+            enter_attempted: false,
+        }
+    }
 }
 
 impl TuiActionExecutor for TmuxTuiActionExecutor {
@@ -1253,7 +1261,7 @@ fn submit_codex_followup_prompt_under_lock(
             error: "Codex TUI warm follow-up final pane snapshot rejected submit".to_string(),
         };
     }
-    let mut executor = TmuxTuiActionExecutor::default();
+    let mut executor = TmuxTuiActionExecutor::new();
     let action_result =
         run_actions_with_executor(session_name, &actions, cancel_token, &mut executor);
     if action_result
@@ -1694,22 +1702,6 @@ fn pane_has_codex_prompt_draft(pane: &str) -> bool {
             .is_some()
 }
 
-#[allow(dead_code)] // #3034: test-only (draft-clear path retired).
-fn codex_visible_prompt_draft_backspace_budget(
-    snapshot: &PromptReadinessSnapshot,
-) -> Option<usize> {
-    if !snapshot.prompt_draft_detected || !snapshot.tmux_pane_alive {
-        return None;
-    }
-    let visible_chars = snapshot
-        .pane_tail
-        .lines()
-        .filter_map(codex_visible_prompt_draft_text)
-        .map(|text| text.chars().count())
-        .sum::<usize>();
-    (visible_chars > 0).then_some(visible_chars.saturating_add(16).min(512))
-}
-
 fn codex_visible_prompt_draft_text(line: &str) -> Option<&str> {
     let trimmed = line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
     if let Some(rest) = trimmed.strip_prefix('›') {
@@ -1913,6 +1905,22 @@ mod tests {
     use std::os::windows::process::ExitStatusExt;
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
+
+    // Only tests use this budget now that the draft-clear path is retired.
+    fn codex_visible_prompt_draft_backspace_budget(
+        snapshot: &PromptReadinessSnapshot,
+    ) -> Option<usize> {
+        if !snapshot.prompt_draft_detected || !snapshot.tmux_pane_alive {
+            return None;
+        }
+        let visible_chars = snapshot
+            .pane_tail
+            .lines()
+            .filter_map(codex_visible_prompt_draft_text)
+            .map(|text| text.chars().count())
+            .sum::<usize>();
+        (visible_chars > 0).then_some(visible_chars.saturating_add(16).min(512))
+    }
 
     #[test]
     fn try_composer_lock_rejects_held_and_poisoned_lock() {
@@ -2741,15 +2749,7 @@ The documentation example ends with:
 
     #[test]
     fn current_codex_idle_pane_uses_dim_evidence_to_override_plain_draft() {
-        let pane = concat!(
-            "╭─────────────────────────────────────────╮\n",
-            "│ >_ OpenAI Codex (v0.144.4)              │\n",
-            "╰─────────────────────────────────────────╯\n",
-            "\n",
-            "\x1b[0;1m›\x1b[0m \x1b[2mUse /skills to list available skills\x1b[0m\n",
-            "\n",
-            "  Fast off · fix/4411-codex-warm-pane-reuse · Context 100% left",
-        );
+        let pane = include_str!("../../../tests/fixtures/tui_input/codex-idle-dim.ansi");
         let plain = strip_ansi_escape_sequences(pane);
         let (marker, draft, _) = prompt_readiness_from_ansi_pane(pane);
 
@@ -2851,16 +2851,8 @@ The documentation example ends with:
 
     #[test]
     fn canonical_ansi_snapshot_draft_and_busy_state_block_reuse() {
-        let draft = "\
-› Use /skills to list available skills\n\
-\n\
-  gpt-5.5 xhigh · ~/.adk/release/workspaces/baby";
-        let busy = "\
-• Working (0s • esc to interrupt)\n\
-\n\
-\x1b[0;1m›\x1b[0m \x1b[2mUse /skills to list available skills\x1b[0m\n\
-\n\
-  gpt-5.5 xhigh · ~/.adk/release/workspaces/baby";
+        let draft = include_str!("../../../tests/fixtures/tui_input/codex-draft.ansi");
+        let busy = include_str!("../../../tests/fixtures/tui_input/codex-busy-dim.ansi");
 
         let (draft_marker, draft_detected, _) = prompt_readiness_from_ansi_pane(draft);
         let (busy_marker, busy_detected, _) = prompt_readiness_from_ansi_pane(busy);

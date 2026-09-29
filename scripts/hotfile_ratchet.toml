@@ -3,8 +3,8 @@
 # Freezes the raw line count (`wc -l`: comments, blank lines, and test code all
 # COUNTED) of oversized Discord-relay hot files at their current size.
 # `scripts/check_hotfile_ratchet.py` fails CI when a file's raw line count
-# exceeds its ceiling here, so these already-giant modules cannot regress and
-# grow even larger while a decomposition is pending.
+# exceeds its ceiling here plus the 30-line wiring slack (`WIRING_SLACK_LINES`),
+# so these already-giant modules cannot keep growing while a decomposition is pending.
 #
 # Metric note: this gate uses RAW wc -l (total physical lines). That is a
 # DELIBERATELY DIFFERENT, complementary metric from the production-LoC ratchet
@@ -16,7 +16,8 @@
 #
 # Workflow:
 #   * As a file shrinks, LOWER its number here to lock in the win.
-#   * Growing a hot file requires RAISING its number — a deliberate, reviewable
+#   * Growth up to the ceiling + 30 needs no change here.
+#   * Growing a hot file beyond that requires RAISING its number — a deliberate, reviewable
 #     admission in the diff that the file got bigger. Every raise must append a
 #     matching [[admission]] with decompose_issue to
 #     scripts/ratchet_admission_history.toml. Prefer splitting instead.

@@ -42,7 +42,7 @@ pub struct RoutineSessionControlResult {
     pub inflight_cleared: bool,
     pub lifecycle_path: &'static str,
     pub queued_remaining: Option<usize>,
-    pub queue_preserved: bool,
+    pub queue_preserved: Option<bool>,
     pub disconnected_sessions: u64,
 }
 
@@ -92,7 +92,7 @@ impl RoutineSessionController {
         let mut inflight_cleared = false;
         let mut lifecycle_path = "registry-unavailable";
         let mut queued_remaining = None;
-        let mut queue_preserved = true;
+        let mut queue_preserved = None;
         let mut disconnected_sessions = 0;
 
         match command {
@@ -320,7 +320,7 @@ impl RoutineSessionController {
                 .map(|l| l.lifecycle_path)
                 .unwrap_or("skipped_remote_owned_session"),
             queued_remaining: lifecycle.as_ref().and_then(|l| l.queue_depth),
-            queue_preserved: lifecycle.as_ref().is_none_or(|l| l.queue_preserved),
+            queue_preserved: lifecycle.as_ref().and_then(|l| l.queue_preserved),
             disconnected_sessions,
         })
     }
@@ -902,6 +902,48 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use serde_json::json;
+
+    async fn routine_truth_result(remote: bool) {
+        let temp = tempfile::tempdir().unwrap();
+        let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        sqlx::query("INSERT INTO agents (id, name, provider, discord_channel_cc) VALUES ('agent-1', 'queue truth', 'claude', '6038771')").execute(&pool).await.unwrap();
+        let controller = RoutineSessionController::new(Arc::new(pool.clone()), None);
+        let routine = routine_with_thread(if remote { "fresh" } else { "persistent" }, None);
+        let result = if remote {
+            controller
+                .teardown_fresh_session_by_name(
+                    &routine,
+                    "other-host:AgentDesk-queue-truth",
+                    "test",
+                )
+                .await
+                .unwrap()
+        } else {
+            controller
+                .control_persistent_session(&routine, RoutineSessionCommand::Reset, "test")
+                .await
+                .unwrap()
+        };
+        if remote {
+            assert_eq!(result.lifecycle_path, "skipped_remote_owned_session");
+        }
+        let body = serde_json::to_value(result).unwrap();
+        assert_eq!(body.get("queue_preserved"), Some(&Value::Null));
+        pool.close().await;
+        db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn queue_truth_routine_reset_reports_unknown_pg() {
+        routine_truth_result(false).await;
+    }
+
+    #[tokio::test]
+    async fn queue_truth_routine_remote_teardown_reports_unknown_pg() {
+        routine_truth_result(true).await;
+    }
 
     fn routine_with_thread(
         execution_strategy: &str,

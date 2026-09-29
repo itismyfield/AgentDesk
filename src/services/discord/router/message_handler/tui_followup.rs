@@ -16,6 +16,7 @@ pub(super) fn claude_tui_busy_followup_refusal_notice(
         Some(
             crate::services::turn_orchestrator::EnqueueRefusalReason::AlreadyActiveTurn
             | crate::services::turn_orchestrator::EnqueueRefusalReason::AbsorbedByActiveTurn
+            | crate::services::turn_orchestrator::EnqueueRefusalReason::ClaimedSinceObservation
             | crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdPendingOrActive,
         ) => CLAUDE_TUI_BUSY_FOLLOWUP_ALREADY_ACTIVE_NOTICE,
         Some(crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued) => {

@@ -67,6 +67,7 @@ NON_PG_SKIP_ARGS=(
   --skip server::routes::escalation::manual_decision_gate_tests
   --skip server::routes::memory_api::request_body_tests
   --skip server::routes::message_outbox::tests
+  --skip server::routes::pipeline::stage_save_tests
   --skip server::routes::queue_api::cancel_queue_preserve_pg_tests
   --skip server::routes::scheduled_messages::postgres_tests
   --skip server::routes::stats::memento_feedback_stats_pg_tests
@@ -100,15 +101,18 @@ NON_PG_SKIP_ARGS=(
   --skip services::cluster::intake_worker::dispatch_stamp_tests
   --skip services::cluster::machine_resources::store::tests
   --skip services::discord::catch_up::too_old_notice::tests
+  --skip services::discord::commands::control::clear_persist_failure_tests
   --skip services::discord::health::recovery::stall_alert::tests
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
   --skip services::discord::idle_cleanup_selector_tests
   --skip services::discord::idle_recap_interaction::tests
+  --skip services::discord::inflight::removal::custody_notice_tests
   --skip services::discord::relay_recovery::circuit_breaker::tests
   --skip services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
   --skip services::discord::router::intake_dispatch::tests
   --skip services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
   --skip services::discord::router::message_handler::voice_announcement_route::voice_route_tests
+  --skip services::discord::runtime_bootstrap::gateway_handback_integration_tests
   --skip services::discord::runtime_bootstrap::gateway_lease_recovery_tests
   --skip services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
   --skip services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
@@ -142,6 +146,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests
   --skip services::pipeline_override::pipeline_override_pg_tests
   --skip services::pipeline_routes::tests
+  --skip services::routines::session_control::tests
   --skip services::scheduled_messages::context_snapshot::postgres_tests
   --skip services::scheduled_messages::postgres_tests
   --skip services::session_forwarding::tests
@@ -288,6 +293,11 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::intake_router_hook::owner_record::tests::advisory_lock_key_is_stable
   services::cluster::intake_router_hook::owner_record::tests::idempotency_key_is_composed_and_normalized
   services::cluster::machine_resources::store::tests::recorder_queue_is_bounded_without_waiting_for_the_database
+  services::discord::commands::control::clear_persist_failure_tests::clear_callers_propagate_a_failed_clear_before_their_success_effect
+  services::discord::commands::control::clear_persist_failure_tests::failed_clear_holds_the_transition_through_the_stop_and_one_restored_turn_runs
+  services::discord::commands::control::clear_persist_failure_tests::failed_clear_persist_is_not_reported_as_cleared_and_keeps_the_session
+  services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_managed_process
+  services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_session_and_arms_no_kick
   services::discord::health::recovery::stall_alert::tests::owner_zero_and_tui_sentinel_never_render_mentions
   services::discord::health::recovery::stall_alert::tests::producer_liveness_suppresses_stall_page
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::idle_tmux_stale_turn_clear_refusal_preserves_mailbox_and_session
@@ -310,6 +320,9 @@ NON_PG_FILTER_REPLAY=(
   services::discord::idle_recap_interaction::tests::recap_prompt_route_rejects_unrelated_custom_ids
   services::discord::idle_recap_interaction::tests::recap_prompt_route_sends_suggest_to_internal_followup_handler
   services::discord::idle_recap_interaction::tests::recap_prompt_sent_ephemeral_includes_actual_prompt_text
+  services::discord::inflight::removal::custody_notice_tests::a_dm_sessions_notice_is_delivered_by_the_provider_bot
+  services::discord::inflight::removal::custody_notice_tests::an_unreadable_or_garbled_marker_is_warned_and_skipped
+  services::discord::inflight::removal::custody_notice_tests::the_notice_reports_a_failed_copy_and_promises_nothing_more
   services::discord::relay_recovery::circuit_breaker::tests::alert_enqueue_failure_stays_pending_and_retry_marks_only_alert_flag
   services::discord::relay_recovery::circuit_breaker::tests::alert_marker_is_exact_episode_scoped
   services::discord::relay_recovery::circuit_breaker::tests::crash_after_local_alert_commit_resumes_same_held_row_without_reenqueue
@@ -456,6 +469,14 @@ NON_PG_FILTER_REPLAY=(
   services::pipeline_routes::tests::persistence_sql_includes_backoff_column
   services::pipeline_routes::tests::stage_json_absent_backoff_is_null
   services::pipeline_routes::tests::stage_json_emits_backoff_field
+  services::routines::session_control::tests::fallback_tmux_channel_name_preserves_thread_suffix
+  services::routines::session_control::tests::fresh_teardown_fallback_tmux_name_matches_spawn_time_routine_label
+  services::routines::session_control::tests::fresh_teardown_prefers_routine_thread_and_never_primary_channel
+  services::routines::session_control::tests::fresh_teardown_rejects_persistent_routine
+  services::routines::session_control::tests::provider_clear_behavior_documents_supported_reset_paths
+  services::routines::session_control::tests::session_key_remote_owned_gates_local_tmux_kill
+  services::routines::session_control::tests::target_channel_prefers_session_thread_then_routine_thread_then_primary
+  services::routines::session_control::tests::tmux_name_from_session_key_uses_suffix_after_host
   services::scheduled_messages::postgres_tests::postgres_precision_normalizes_linux_nanosecond_timestamps
   services::session_forwarding::tests::cancel_retry_accepts_ack_and_authenticated_structured_not_found
   services::session_forwarding::tests::cancel_retry_reloads_owner_only_for_conflict

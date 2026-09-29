@@ -351,16 +351,13 @@ unless changes_job.is_a?(Hash)
   exit 1
 end
 
-# Keep both branch-protection publishers and their finite needs closure on the
-# exact fail-closed scheduling policy for their roles. The needs-bearing result
-# publisher must use `if: always()` so upstream failure still reaches its
-# mirror; the independent publisher and internal execution jobs must not gain
-# job-level conditions. Every closure job forbids `continue-on-error`, including
-# an explicit false value, because the key is an unreviewed failure-masking
-# channel. Keep this closed set exact as the needs graph evolves.
+# Publishers must always mirror failures; execution jobs must run unconditionally.
+# Pin the complete needs closure and forbid failure-masking job keys.
 expected_unconditional_closure = %w[
   changes
   relay-authority-contract
+  relay_authority_targets
+  relay_authority_mutations
   scripts
   scripts_contracts
   scripts_guards
@@ -385,8 +382,8 @@ until frontier.empty?
       exit 1
     end
   when "relay-authority-contract"
-    if job.key?("if")
-      warn "#{path}: relay-authority-contract must not define an if key so the independent publisher always runs"
+    unless job.key?("if") && job["if"] == "always()"
+      warn "#{path}: relay-authority-contract publisher must carry `if: always()` so upstream failure still runs the fail-closed mirror"
       exit 1
     end
   else
@@ -420,6 +417,21 @@ until frontier.empty?
 end
 unless unconditional_closure.sort == expected_unconditional_closure
   warn "#{path}: required unconditional needs closure changed; expected #{expected_unconditional_closure.inspect}, found #{unconditional_closure.sort.inspect}"
+  exit 1
+end
+
+# The independent backstop must never inherit the path-filter job's status.
+relay_closure = []
+frontier = ["relay-authority-contract"]
+until frontier.empty?
+  job_id = frontier.shift
+  next if relay_closure.include?(job_id)
+
+  relay_closure << job_id
+  frontier.concat(Array(jobs.fetch(job_id)["needs"]))
+end
+if relay_closure.include?("changes")
+  warn "#{path}: relay-authority-contract needs closure must not include changes"
   exit 1
 end
 
@@ -954,33 +966,14 @@ targets = {
       },
     },
   },
-  "relay-authority-contract" => {
-    "label" => "relay-authority contract job",
-    "name" => "relay-authority-contract",
+  "relay_authority_targets" => {
+    "label" => "relay-authority targets job",
+    "name" => "Relay authority targets",
     "needs" => nil,
     "if" => nil,
     "runs_on" => "ubuntu-latest",
-    # #5071 registers this unconditional candidate in the existing semantic
-    # hardening registry so order-independent job keys cannot disable it silently.
-    # #5321 re-pins after making the independent backstop verify both the
-    # result helper and the gate before executing that verified gate.
-    # #5464 A12 re-pins after adding two existing S4 named witnesses;
-    # no commands or enforcement checks are removed or relaxed.
-    # #5908 adds four S7a witnesses and the C1 module; retain their exact
-    # commands below and refresh both workflow gate pins with this file.
-    # T6 D1 re-pins after renaming one existing S4 witness selector; no command
-    # is added, removed, or relaxed and the lane minimum stays 1.
-    # #5997 re-pins after adding the mutation-surface paths-filter step and
-    # gating the mutation step alone on it. No command is removed or relaxed,
-    # and the job still declares neither `if:` nor `needs:`.
-    # #5997 V2 re-pins after appending the scenario-census target to the named
-    # command list. Nothing is removed; the census target now inherits this
-    # inventory pin, so dropping its line from the workflow fails here too.
-    # The target is nested under `tests::` because declaring it at the relay
-    # root would push tui_prompt_relay.rs past its hotfile ceiling, and the
-    # ceiling may not be raised.
-    "job_sha256" => "5e5923cd9624a060781099c8cbd8f366eaedcb00d7d36f40e4754a8c2f8c38a2",
-    "job_timeout_minutes" => 50,
+    "job_sha256" => "6ea23c9f5dd58b547b88d3c3489df0d0aac31c2c2b0acc3dcff8418d191740e1",
+    "job_timeout_minutes" => 30,
     "cargo_steps" => {
       "Verify named relay-authority targets and selection floors" => {
         "commands" => ["python3 scripts/check_relay_authority_contract.py"],
@@ -1002,14 +995,38 @@ targets = {
         ],
         "timeout_minutes" => 30,
       },
+    },
+  },
+  "relay_authority_mutations" => {
+    "label" => "relay-authority mutations job",
+    "name" => "Relay authority mutations (${{ matrix.shard }})",
+    "needs" => nil,
+    "if" => nil,
+    "runs_on" => "ubuntu-latest",
+    "job_sha256" => "1cad90577d2118651ea88b3de4c650afd4bc5777d7228a90f588da5b58e012e4",
+    "job_timeout_minutes" => 45,
+    "cargo_steps" => {
+      "Fetch Cargo dependencies" => {
+        "commands" => ["cargo fetch --locked"],
+        "timeout_minutes" => 10,
+        "if_condition" => "steps.mutation_paths.outputs.mutation_sources != 'false'",
+      },
       "Require relay-authority mutations to be killed" => {
         "commands" => ["bash scripts/run_relay_authority_mutations.sh"],
         "timeout_minutes" => 45,
-        # #5997: the one conditional step inside this unconditional job. The
-        # negative form runs the gate unless the filter positively answered
-        # "unrelated", so a missing or empty output cannot skip it silently.
         "if_condition" => "steps.mutation_paths.outputs.mutation_sources != 'false'",
       },
+    },
+  },
+  "relay-authority-contract" => {
+    "label" => "relay-authority contract job",
+    "name" => "relay-authority-contract",
+    "needs" => %w[relay_authority_targets relay_authority_mutations],
+    "if" => "always()",
+    "runs_on" => "ubuntu-latest",
+    "job_sha256" => "188f42334c40446fd80b192f8c23a19310010c25ef3a4d9b70cecc97659053a7",
+    "job_timeout_minutes" => 10,
+    "cargo_steps" => {
       "Pin required-check mirror content (#5321)" => {
         "commands" => [
           "helper_path=scripts/required-check-mirror.sh",
@@ -1029,6 +1046,36 @@ targets = {
           "scripts/check-ci-runner-hardening.sh",
         ],
         "timeout_minutes" => 10,
+      },
+      "Mirror relay authority targets result for branch protection" => {
+        "commands" => ["./scripts/required-check-mirror.sh"],
+        "timeout_minutes" => 10,
+        "env" => {
+          "BASH_ENV" => "/dev/null",
+          "CARGO_PROFILE_DEV_DEBUG" => "0",
+          "CARGO_PROFILE_TEST_DEBUG" => "0",
+          "PYTHON" => "python3",
+          "CHANGED_PATHS_RESULT" => "success",
+          "FILTER_NAME" => "relay_authority",
+          "FILTER_OUTPUT" => "true",
+          "UPSTREAM_JOB_NAME" => "relay_authority_targets",
+          "UPSTREAM_RESULT" => "${{ needs.relay_authority_targets.result }}",
+        },
+      },
+      "Mirror relay authority mutations result for branch protection" => {
+        "commands" => ["./scripts/required-check-mirror.sh"],
+        "timeout_minutes" => 10,
+        "env" => {
+          "BASH_ENV" => "/dev/null",
+          "CARGO_PROFILE_DEV_DEBUG" => "0",
+          "CARGO_PROFILE_TEST_DEBUG" => "0",
+          "PYTHON" => "python3",
+          "CHANGED_PATHS_RESULT" => "success",
+          "FILTER_NAME" => "relay_authority",
+          "FILTER_OUTPUT" => "true",
+          "UPSTREAM_JOB_NAME" => "relay_authority_mutations",
+          "UPSTREAM_RESULT" => "${{ needs.relay_authority_mutations.result }}",
+        },
       },
     },
   },
@@ -1163,7 +1210,7 @@ targets.each do |job_id, spec|
       unless raw_step.is_a?(Hash) && raw_step["timeout-minutes"] == expected_raw_timeout
         errors << "#{label} #{name.inspect} must retain exact raw timeout policy"
       end
-      unless step_env == protected_step_env
+      unless step_env == step_spec.fetch("env", protected_step_env)
         errors << "#{label} #{name.inspect} must pin exact step env and disable BASH_ENV"
       end
       lines = run.lines.map(&:strip).reject(&:empty?)
@@ -1231,6 +1278,101 @@ jobs = document.is_a?(Hash) ? document["jobs"] : nil
 unless jobs.is_a?(Hash)
   warn "#{path}: jobs must be a YAML mapping"
   exit 1
+end
+# Keep this explicit: deriving approval from workflow values would admit custom runners.
+HOSTED_RUNNER_LABELS = %w[ubuntu-latest ubuntu-22.04 macos-15 macos-latest windows-latest].freeze
+
+def retired_runner_reference?(value, implicit_expression = false)
+  case value
+  when Hash
+    value.values.any? { |item| retired_runner_reference?(item) }
+  when Array
+    value.any? { |item| retired_runner_reference?(item) }
+  when String
+    expressions = value.scan(/\$\{\{((?:'(?:[^']|'')*'|(?!\}\}).)*)\}\}/m).flatten
+    expressions << value if implicit_expression && !value.include?("${{")
+    expressions.any? do |expression|
+      # Quoted expression literals are one token, so documentation is not a variable read.
+      tokens = expression.scan(/'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_-]*|[^\s]/)
+      tokens.each_index.any? do |index|
+        next false unless tokens[index].casecmp("vars").zero? && tokens[index - 1] != "."
+
+        property = tokens[index + 1, 2].map(&:downcase)
+        property == [".", "macos_runner"] ||
+          (property == ["[", "'macos_runner'"] && tokens[index + 3] == "]")
+      end
+    end
+  else
+    false
+  end
+end
+
+def static_matrix_value?(value)
+  case value
+  when Hash then value.all? { |key, item| static_matrix_value?(key) && static_matrix_value?(item) }
+  when Array then value.all? { |item| static_matrix_value?(item) }
+  when String then !value.include?("${{")
+  else true
+  end
+end
+
+# Repository policy requires explicit static runner values, including in every include row.
+# Exclude cannot approve forbidden candidates; matrix merge semantics are not evaluated.
+def matrix_runner_labels(job, axis)
+  strategy = job["strategy"]
+  matrix = strategy.is_a?(Hash) ? strategy["matrix"] : nil
+  return [] unless matrix.is_a?(Hash) && static_matrix_value?(matrix)
+
+  dimensions = matrix.reject { |key, _value| %w[include exclude].include?(key) }
+  return [] unless dimensions.all? { |key, values| key.is_a?(String) && values.is_a?(Array) && !values.empty? }
+  return [] unless dimensions.key?(axis) || dimensions.empty?
+
+  included = matrix.fetch("include", [])
+  excluded = matrix.fetch("exclude", [])
+  return [] unless included.is_a?(Array) && excluded.is_a?(Array)
+  return [] unless excluded.all? { |row| row.is_a?(Hash) }
+  return [] unless included.all? { |row| row.is_a?(Hash) && row.key?(axis) }
+
+  dimensions.fetch(axis, []) + included.map { |row| row[axis] }
+end
+
+def hosted_runner?(runner, job)
+  case runner
+  when String
+    return true if HOSTED_RUNNER_LABELS.include?(runner)
+
+    reference = /\A\$\{\{\s*matrix\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}\z/.match(runner)
+    return false unless reference
+
+    labels = matrix_runner_labels(job, reference[1])
+    !labels.empty? && labels.all? { |label| label.is_a?(String) && HOSTED_RUNNER_LABELS.include?(label) }
+  when Array
+    # Multiple labels require one runner to match all of them, so allow only one selector.
+    runner.length == 1 && runner.all? { |label| label.is_a?(String) && hosted_runner?(label, job) }
+  when Hash
+    labels = runner["labels"]
+    runner.keys == ["labels"] && (labels.is_a?(String) || labels.is_a?(Array)) && hosted_runner?(labels, job)
+  else
+    false
+  end
+end
+
+implicit_retired_reference = jobs.values.any? do |job|
+  next false unless job.is_a?(Hash)
+
+  [job, *job.fetch("steps", [])].any? do |entry|
+    entry.is_a?(Hash) && retired_runner_reference?(entry["if"], true)
+  end
+end
+if retired_runner_reference?(document) || implicit_retired_reference
+  warn "#{path}: hosted runner policy forbids vars.MACOS_RUNNER references"
+  exit 1
+end
+jobs.each do |job_id, job|
+  unless job.is_a?(Hash) && hosted_runner?(job["runs-on"], job)
+    warn "#{path}: jobs.#{job_id}.runs-on violates repository hosted runner policy: use one approved label (scalar or singleton array), optionally under labels, or an explicitly enumerated static matrix runner axis; every include row must specify that axis and exclude cannot approve forbidden candidates; each matrix runner value must be an approved scalar label (#{HOSTED_RUNNER_LABELS.join(', ')})"
+    exit 1
+  end
 end
 non_string_job_ids = jobs.keys.reject { |job_id| job_id.is_a?(String) }
 unless non_string_job_ids.empty?
@@ -1557,16 +1699,6 @@ verify_required_check_mirror_hash
 validate_workflow_entries
 
 while IFS= read -r -d '' workflow; do
-  if grep -Eq '^[[:space:]]+pull_request(_target)?:' "$workflow"; then
-    if grep -Eq 'MACOS_RUNNER|self-hosted' "$workflow"; then
-      error "$workflow is pull_request-triggered and must not reference self-hosted macOS routing"
-    fi
-  fi
-
-  if [ "$workflow" != "$trusted_workflow" ] && grep -q 'MACOS_RUNNER' "$workflow"; then
-    error "$workflow references MACOS_RUNNER outside $trusted_workflow"
-  fi
-
   if grep -q 'RUSTC_WRAPPER=' "$workflow" && ! grep -q 'SCCACHE_GHA_ENABLED=' "$workflow"; then
     error "$workflow clears RUSTC_WRAPPER but not SCCACHE_GHA_ENABLED"
   fi
@@ -1585,8 +1717,6 @@ if [ -f "$trusted_workflow" ]; then
     || error "$trusted_workflow must have a workflow_dispatch trigger"
   grep -Eq '^[[:space:]]+merge_group:' "$trusted_workflow" \
     || error "$trusted_workflow must have a merge_group trigger"
-  grep -q 'MACOS_RUNNER_GROUP' "$trusted_workflow" \
-    || error "$trusted_workflow must require MACOS_RUNNER_GROUP for self-hosted routing"
 fi
 
 # Superseded PR heads must release hosted runners immediately. Required

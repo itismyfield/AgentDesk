@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::{ShadowRecord, ShadowSink};
 
@@ -39,6 +40,36 @@ impl ShadowRoot {
 
     pub fn records_path(&self) -> PathBuf {
         self.0.join(RECORDS_FILE_NAME)
+    }
+
+    /// Atomically reserves a run/window before emitting any verdict; even a torn receipt blocks retries.
+    pub(super) fn claim_report_attempt(
+        &self,
+        run_line: usize,
+        run: &StoredRecord,
+        t0: DateTime<Utc>,
+        reported_at: DateTime<Utc>,
+    ) -> io::Result<bool> {
+        real_dir(self.path())?;
+        let identity = serde_json::to_vec(&(run_line, run, t0)).map_err(io::Error::other)?;
+        let key = hex::encode(Sha256::digest(identity));
+        let path = self.path().join(format!("report-attempt-{key}.jsonl"));
+        let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let receipt = serde_json::json!({
+            "at": reported_at,
+            "record": {"type": "report_attempt", "run_line": run_line, "run": run, "t0": t0}
+        });
+        let mut line = serde_json::to_vec(&receipt).map_err(io::Error::other)?;
+        line.push(b'\n');
+        file.write_all(&line)?;
+        file.sync_all()?;
+        crate::services::discord::runtime_store::fsync_parent_dir(&path)?;
+        crate::services::discord::runtime_store::fsync_parent_dir(self.path())?;
+        Ok(true)
     }
 }
 
