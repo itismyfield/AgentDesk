@@ -388,6 +388,11 @@ pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str>
     if old.config_hot_reload != new.config_hot_reload {
         changed.push("config_hot_reload");
     }
+    if crate::services::tui_o::channel_policy::configured_channels(old)
+        != crate::services::tui_o::channel_policy::configured_channels(new)
+    {
+        changed.push("tui_o.writer.channels");
+    }
     changed
 }
 

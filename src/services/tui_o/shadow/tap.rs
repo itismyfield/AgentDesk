@@ -32,6 +32,7 @@ use super::{
 #[serde(default)]
 pub struct TuiOConfig {
     pub shadow: ShadowConfig,
+    pub writer: super::super::channel_policy::WriterChannelsConfig,
     /// Operator channel for writer alarms; absent keeps them to health and logs.
     pub alert_channel_id: Option<u64>,
 }
