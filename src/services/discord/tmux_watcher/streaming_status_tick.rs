@@ -690,6 +690,11 @@ pub(super) async fn update_streaming_status_tick(
             }
         }
 
+        // O posts this body; skip rollover and body writes, keep the panel and progress above.
+        if crate::services::tui_o::cutover::o_owns_tui_output_for_tmux_session(&tmux_session_name) {
+            commit_streaming_status_tick_state!();
+            return StreamingStatusTickOutcome::Fallthrough;
+        }
         let banner_identity = turn_identity_for_panel.as_ref();
         let banner_user_msg_id = banner_identity
             .map(|identity| identity.user_msg_id)

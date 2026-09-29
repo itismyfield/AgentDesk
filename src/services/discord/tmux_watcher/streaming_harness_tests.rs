@@ -16,6 +16,9 @@ use std::time::Duration;
 #[path = "streaming_baseline_tests.rs"]
 mod streaming_baseline_tests;
 
+#[path = "o_delegated_watcher_tests.rs"]
+mod o_delegated_watcher_tests;
+
 const CHILD: &str = "ADK_STREAMING_HARNESS_CHILD";
 const CLAUDE: ProviderKind = ProviderKind::Claude;
 static LOG: Mutex<Vec<u8>> = Mutex::new(Vec::new());
@@ -49,6 +52,11 @@ impl std::io::Write for Capture {
 /// True inside the isolated child. The parent re-runs `test` there with its own
 /// runtime root, fake `tmux` on `PATH` and a zero streaming interval, then checks it passed.
 pub(super) fn isolated(test: &str) -> bool {
+    isolated_in("streaming_baseline_tests", test, &[])
+}
+
+/// `isolated` for a test in the sibling module `submodule`, with extra child env.
+pub(super) fn isolated_in(submodule: &str, test: &str, envs: &[(&str, &str)]) -> bool {
     if std::env::var_os(CHILD).is_some() {
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
@@ -70,9 +78,10 @@ pub(super) fn isolated(test: &str) -> bool {
     std::fs::write(&tmux, FAKE_TMUX.replace("ROOT", &dir)).unwrap();
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
     let module = module_path!().split_once("::").unwrap().1;
-    let exact = format!("{module}::streaming_baseline_tests::{test}");
+    let exact = format!("{module}::{submodule}::{test}");
     let out = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", &exact, "--nocapture", "--test-threads=1"])
+        .envs(envs.iter().copied())
         .env(CHILD, "1")
         .env("AGENTDESK_ROOT_DIR", root.path())
         .env("PATH", root.path())

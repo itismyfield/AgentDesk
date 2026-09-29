@@ -7,12 +7,15 @@ use serde_json::{Value, json};
 
 use super::{
     CodexHookSourceClaim, CodexHookSourceRejection, CodexHookSourceRoute, CodexRolloutSource,
-    before_final_identity, verify_codex_hook_source,
+    VerifyStep, at_verify_step, before_final_identity, verify_codex_hook_source,
 };
 use crate::services::claude_tui::hook_bundle::{
     CodexHookActivation, CodexTrustHashEvidence, codex_hook_capability,
 };
-use crate::services::codex_tui::rollout_index::lock_cache_for_tests;
+use crate::services::codex_tui::rollout_index::{
+    cached_meta_for_tests, fail_header_reads_for_tests, lock_cache_for_tests,
+    reset_cache_for_tests, warm_cache_for_tests,
+};
 
 fn fixture() -> Value {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -566,6 +569,183 @@ fn incomplete_rollout_index_lookup_is_retryable_not_a_single_candidate() {
         crate::services::codex_tui::rollout_index::rollout_files_under(dir.path()).len();
     std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     assert_eq!(discovered, 1);
+}
+
+/// Writes the rollout named for `id` plus a differently named competitor whose header claims `id`.
+fn named_and_competitor(root: &Path, id: &str, header: &Value) -> PathBuf {
+    let day = root.join("2026/09/27");
+    write_rollout(
+        &day.join(format!("rollout-2026-09-27T21-04-25-{id}.jsonl")),
+        header,
+    );
+    let competitor = day.join(format!(
+        "rollout-2026-09-27T21-04-26-{}.jsonl",
+        uuid::Uuid::new_v4()
+    ));
+    write_rollout(&competitor, header);
+    competitor
+}
+
+#[cfg(unix)]
+#[test]
+fn rollout_index_rereads_competitors_the_discovery_cache_cannot_vouch_for() {
+    use std::os::unix::fs::PermissionsExt;
+    let _index = lock_cache_for_tests();
+    let fixture = fixture();
+    let (_, startup, _) = captured_ids(&fixture);
+    let header = meta_for(&runs(&fixture)[1], &startup);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let competitor = named_and_competitor(dir.path(), &startup, header);
+    let set_mode = |mode| {
+        std::fs::set_permissions(&competitor, std::fs::Permissions::from_mode(mode)).expect("chmod")
+    };
+    let verify =
+        || verify_codex_hook_source(dir.path(), &claim(&startup, None, CodexRolloutSource::Cli));
+    assert_eq!(
+        verify(),
+        Err(CodexHookSourceRejection::AmbiguousCandidates(2))
+    );
+
+    // Unreadable while discovery fills the cache, so the cache holds a negative header.
+    set_mode(0o000);
+    let unreadable = std::fs::File::open(&competitor).is_err();
+    warm_cache_for_tests(dir.path());
+    let cached_negative = cached_meta_for_tests(dir.path(), &competitor);
+    let result = verify();
+    set_mode(0o644);
+    assert!(unreadable, "the test user must not bypass file permissions");
+    assert_eq!(
+        cached_negative,
+        Some(None),
+        "discovery must have cached the unreadable header as absent"
+    );
+    assert_eq!(
+        result,
+        Err(CodexHookSourceRejection::IndexIncomplete),
+        "a cached negative header must not hide an unreadable competitor"
+    );
+    assert!(result.unwrap_err().may_resolve_later());
+
+    // Readable while the cache fills, unreadable at lookup: permissions leave (mtime, len) alone.
+    reset_cache_for_tests();
+    warm_cache_for_tests(dir.path());
+    let cached_header = cached_meta_for_tests(dir.path(), &competitor);
+    set_mode(0o000);
+    let result = verify();
+    let discovered = warm_cache_for_tests(dir.path());
+    set_mode(0o644);
+    assert!(matches!(cached_header, Some(Some(_))));
+    assert_eq!(
+        result,
+        Err(CodexHookSourceRejection::IndexIncomplete),
+        "a cached header must not stand in for a competitor that can no longer be read"
+    );
+    assert!(result.unwrap_err().may_resolve_later());
+    // Discovery itself still serves the cached header for the unchanged file.
+    let served = discovered
+        .iter()
+        .find(|item| item.path == competitor)
+        .and_then(|item| item.meta.as_ref())
+        .and_then(|meta| meta.id.clone());
+    assert_eq!(served.as_deref(), Some(startup.as_str()));
+}
+
+#[test]
+fn rollout_index_header_read_error_is_incomplete_not_absent() {
+    let _index = lock_cache_for_tests();
+    let fixture = fixture();
+    let (_, startup, _) = captured_ids(&fixture);
+    let header = meta_for(&runs(&fixture)[1], &startup);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let competitor = named_and_competitor(dir.path(), &startup, header);
+    let verify =
+        || verify_codex_hook_source(dir.path(), &claim(&startup, None, CodexRolloutSource::Cli));
+
+    fail_header_reads_for_tests(Some(competitor.clone()));
+    let result = verify();
+    fail_header_reads_for_tests(None);
+    assert_eq!(
+        result,
+        Err(CodexHookSourceRejection::IndexIncomplete),
+        "a competitor whose header read fails must not count as absent"
+    );
+    assert!(result.unwrap_err().may_resolve_later());
+    assert_eq!(
+        verify(),
+        Err(CodexHookSourceRejection::AmbiguousCandidates(2))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn header_is_read_from_the_open_descriptor_not_by_reopening_the_path() {
+    use std::cell::RefCell;
+    use std::os::unix::fs::MetadataExt;
+    use std::rc::Rc;
+    let fixture = fixture();
+    let (_, startup, _) = captured_ids(&fixture);
+    let a_header = meta_for(&runs(&fixture)[1], &startup);
+    let mut b_header = a_header.clone();
+    b_header["payload"]["id"] = json!(uuid::Uuid::new_v4().to_string());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir
+        .path()
+        .join("2026/09/27")
+        .join(format!("rollout-2026-09-27T21-04-25-{startup}.jsonl"));
+    write_rollout(&path, a_header);
+    let original = std::fs::metadata(&path).expect("stat");
+    let a_identity = crate::services::cluster::stream_relay::SourceFileIdentity::Unix {
+        dev: original.dev(),
+        ino: original.ino(),
+    };
+    let b = dir.path().join("replacement.jsonl");
+    let spare = dir.path().join("parked.jsonl");
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let verify = || {
+        verify_codex_hook_source(
+            dir.path(),
+            &claim(&startup, Some(&path), CodexRolloutSource::Cli),
+        )
+    };
+    let swap_in = {
+        let (a, b, spare, log) = (path.clone(), b.clone(), spare.clone(), log.clone());
+        move || {
+            let ok = std::fs::rename(&a, &spare).is_ok() && std::fs::rename(&b, &a).is_ok();
+            log.borrow_mut().push(("after-open", ok));
+        }
+    };
+
+    // B names another session while the header is read; A is back before the final check.
+    write_rollout(&b, &b_header);
+    at_verify_step(VerifyStep::AfterOpen, swap_in.clone());
+    at_verify_step(VerifyStep::AfterHeader, {
+        let (a, b, spare, log) = (path.clone(), b.clone(), spare.clone(), log.clone());
+        move || {
+            let ok = std::fs::rename(&a, &b).is_ok() && std::fs::rename(&spare, &a).is_ok();
+            log.borrow_mut().push(("after-header", ok));
+        }
+    });
+    let result = verify().map(|verified| verified.identity);
+    assert_eq!(
+        log.take(),
+        [("after-open", true), ("after-header", true)],
+        "both read-window seams must fire in order and swap the files"
+    );
+    assert_eq!(
+        result,
+        Ok(a_identity),
+        "the header must come from A's descriptor, not from B at the reopened path"
+    );
+
+    // B stays in place: the path no longer names the descriptor whose header was read.
+    at_verify_step(VerifyStep::AfterOpen, swap_in);
+    let result = verify();
+    assert_eq!(log.take(), [("after-open", true)]);
+    assert_eq!(
+        result,
+        Err(CodexHookSourceRejection::RolloutReplaced),
+        "a header read through the descriptor sees A and the final check must see B"
+    );
 }
 
 #[test]

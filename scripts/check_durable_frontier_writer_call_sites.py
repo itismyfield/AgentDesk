@@ -317,9 +317,10 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
         "src/services/discord/queue_io/turn_admission.rs": 1,
     },
     # -- store 3: in-memory watermark CAS ------------------------------------
+    # delivery_commit.rs: the fenced terminal advance and the O-delegated idle advance.
     "advance_watcher_confirmed_end": {
         "src/services/discord/session_relay_sink.rs": 1,
-        "src/services/discord/session_relay_sink/delivery_commit.rs": 1,
+        "src/services/discord/session_relay_sink/delivery_commit.rs": 2,
         "src/services/discord/tmux.rs": 1,
         "src/services/discord/tmux_watcher.rs": 1,
         "src/services/discord/tmux_watcher/no_result_exits.rs": 1,

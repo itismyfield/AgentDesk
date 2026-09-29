@@ -289,12 +289,24 @@ async fn run_tick(
     fx: &Fixture,
     delivered: bool,
 ) -> StreamingStatusTickOutcome {
+    run_tick_body(locals, rec, shared, fx, delivered, TRAILING_BODY).await
+}
+
+#[rustfmt::skip]
+async fn run_tick_body(
+    locals: &mut TickLocals,
+    rec: &Recorder,
+    shared: &Arc<SharedData>,
+    fx: &Fixture,
+    delivered: bool,
+    body: &str,
+) -> StreamingStatusTickOutcome {
     locals.last = tokio::time::Instant::now()
         - crate::services::discord::status_update_interval()
         - Duration::from_millis(1);
     let tools = WatcherToolState::new();
     let delivered_flag = Arc::new(AtomicBool::new(delivered));
-    let full = TRAILING_BODY.to_string();
+    let full = body.to_string();
     let ctx = StreamingStatusTickContext {
         http: &rec.http, shared, channel_id: fx.channel, watcher_provider: &fx.provider,
         tmux_session_name: &fx.tmux, output_path: &fx.output_path,
@@ -560,6 +572,55 @@ fn active_progress_tick_emits_once() {
         run_tick(&mut locals, &rec, &shared, &fx, false).await;
         assert_eq!(rec.seen("POST").len(), 1, "no duplicate on the next tick");
         assert_eq!(locals.placeholder, msg(SERVER_MSG), "anchor retained");
+    });
+}
+
+/// A delegated TUI session with a live placeholder and a body long enough to roll over
+/// writes none of that body to Discord, while the Legacy owner of the same tick does.
+#[test]
+fn o_delegated_rollover_tick_writes_no_body() {
+    let (_lock, guard) = isolate_root();
+    capture_warns(async {
+        let body: String = (0..300)
+            .map(|line| format!("ADK-W02 rollover line {line}\n"))
+            .collect();
+        for (case, delegated) in [(14, false), (15, true)] {
+            let fx = seed_row(guard.root.path(), case, false, false);
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let rec = recorder(fx.channel, true).await;
+            let mut locals = tick_locals(&fx, Some(PLACEHOLDER_MSG));
+            let _bound = delegated.then(|| {
+                crate::services::tui_o::cutover::test_override::bind_claude_tui_session(
+                    &fx.tmux,
+                    &fx.output_path,
+                )
+            });
+            let _forced = delegated.then(crate::services::tui_o::cutover::test_override::force_on);
+            run_tick_body(&mut locals, &rec, &shared, &fx, false, &body).await;
+            let body_writes = rec
+                .bodies
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|content| content.contains("ADK-W02 rollover line"))
+                .count();
+            if delegated {
+                assert_eq!(
+                    body_writes, 0,
+                    "O owns the body: no rollover edit or tail send"
+                );
+                assert_eq!(
+                    locals.placeholder,
+                    msg(PLACEHOLDER_MSG),
+                    "placeholder untouched"
+                );
+            } else {
+                assert!(
+                    body_writes >= 2,
+                    "Legacy control must reach the rollover writes"
+                );
+            }
+        }
     });
 }
 
