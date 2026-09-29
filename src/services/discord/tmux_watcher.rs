@@ -927,10 +927,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             && has_direct_terminal_response
             && !direct_terminal_response_refused_duplicate;
         // O posts this body: consume the range without a lease, a journal or transport.
-        let o_delegated_session =
-            crate::services::tui_o::cutover::o_owns_tui_output_for_tmux_session(&tmux_session_name);
-        let o_delegated_terminal = o_delegated_session && watcher_will_direct_send;
-        let watcher_will_direct_send = watcher_will_direct_send && !o_delegated_terminal;
+        let o_ownership = crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux(
+            channel_id.get(),
+            Some(&tmux_session_name),
+        );
+        let o_delegated_session = o_ownership.unwrap_or(true);
+        let o_delegated_terminal = o_ownership == Ok(true) && watcher_will_direct_send;
+        let watcher_will_direct_send = watcher_will_direct_send && !o_delegated_session;
         // #3089/#3998: the unified controller owns one lease for eligible non-task
         // terminals. Task responses keep the watcher lease around card+reference send;
         // empty/TUI-gated and placeholderless fresh sends remain legacy.
@@ -1126,6 +1129,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 lease_end = watcher_lease_end,
                 "watcher: refused degenerate-key duplicate terminal response without committing delivery; waiting for fresh in-range output"
             );
+            false
+        } else if o_ownership.is_err() {
             false
         } else if o_delegated_terminal {
             match o_delegated_arm::consume_delegated_terminal(o_delegated_arm::DelegatedTerminal {

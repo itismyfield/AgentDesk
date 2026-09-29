@@ -241,7 +241,7 @@ async fn run(turn: Turn) {
         std::fs::write(path, bytes).unwrap();
     }
     let before = paths.each_ref().map(|p| snapshot(p));
-    let _delegated = cutover::test_override::force_on();
+    let _delegated = cutover::test_override::force_channels(&[(channel_id, kind)]);
     for _ in 0..2 {
         assert_eq!(
             sink.deliver(&frame).await.unwrap(),

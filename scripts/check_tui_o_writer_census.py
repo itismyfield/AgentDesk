@@ -60,13 +60,14 @@ PRIMITIVES: dict[str, str] = {
     "edit_outbound_message": r"\bedit_outbound_message\s*\(",
 }
 GATE_RE = re.compile(
-    r"\b(?:o_owns_tui_output(?:_for_tmux_session|_with)?|bridge_o_body_cut_decision)\b"
+    r"\b(?:o_owns_tui_output(?:_for_channel_tmux|_for_channel|_for_tmux_session|_with)?|bridge_o_body_cut_decision)\b"
 )
 FLAG_RE = re.compile(r"\bO_TUI_WRITER\b")
 DEFN_RE = re.compile(r"\bfn\s+$")
 # The switch is defined in topology.rs; the intake gate and its health probe read it there.
 O_TUI_WRITER_FILES = {
     "src/services/tui_o/cutover.rs",
+    "src/services/tui_o/cutover/channel_gate.rs",
     "src/services/tui_o/topology.rs",
     "src/services/discord/runtime_bootstrap/intake.rs",
     "src/services/discord/health/provider_probe.rs",
@@ -308,7 +309,7 @@ EXPECTED_GATES: dict[str, int] = {
     "src/services/discord/idle_recap.rs": 1,
     "src/services/discord/recovery_engine/completion_delivery.rs": 2,
     "src/services/discord/recovery_paths/restart.rs": 1,
-    "src/services/discord/session_relay_sink.rs": 1,
+    "src/services/discord/session_relay_sink.rs": 2,
     "src/services/discord/session_relay_sink/task_notification_context.rs": 1,
     "src/services/discord/tmux_watcher.rs": 1,
     "src/services/discord/tmux_watcher/completion_producer.rs": 1,
@@ -317,11 +318,12 @@ EXPECTED_GATES: dict[str, int] = {
     "src/services/discord/turn_bridge/runtime_handoff_loop/watcher_handoff.rs": 1,
     "src/services/discord/turn_bridge/stream_tick.rs": 1,
     "src/services/discord/turn_bridge/terminal_controller_cutover.rs": 1,
+    "src/services/discord/turn_bridge/terminal_controller_cutover/o_body.rs": 1,
     "src/services/discord/turn_bridge/terminal_outcome_delivery.rs": 1,
     "src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs": 1,
     "src/services/discord/turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs": 1,
     "src/services/discord/turn_finalizer/watcher_backstop.rs": 1,
-    "src/services/tui_o/cutover.rs": 2,
+    "src/services/tui_o/cutover.rs": 4,
 }
 # Funnel -> tests that drive it with O owning the channel. Each must exist as a
 # non-ignored test-attributed `fn` in src/; empty funnels or missing tests block the flip.

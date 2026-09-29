@@ -151,11 +151,13 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel_with_sniffe
         task_notification_kind,
         Some(TaskNotificationKind::Background | TaskNotificationKind::MonitorAutoTurn)
     );
-    // O owns this body message, so Legacy writes no completion footer onto it.
+    // Withhold body footers for O ownership or unresolved selected identities.
     if single_message_panel_footer_mode
-        && tmux_session_name
-            .as_deref()
-            .is_some_and(crate::services::tui_o::cutover::o_owns_tui_output_for_tmux_session)
+        && crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux(
+            channel_id.get(),
+            tmux_session_name.as_deref(),
+        )
+        .unwrap_or(true)
     {
         return;
     }

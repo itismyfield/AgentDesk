@@ -364,15 +364,17 @@ pub(super) async fn run_terminal_outcome_delivery(
             &mut preserve_inflight_for_cleanup_retry,
         )
         .await;
-        // O posts this body: commit the turn with no transport and drop the Legacy placeholder.
+        // Resolve body ownership before committing or publishing a terminal response.
         let o_body_cut = terminal_controller_cutover::bridge_o_body_cut_decision(
-            inflight_state.runtime_kind,
+            channel_id,
+            &inflight_state,
             can_deliver_directly,
         );
-        if silent_turn_handled {
+        if o_body_cut.is_err() || silent_turn_handled {
+            preserve_inflight_for_cleanup_retry |= o_body_cut.is_err();
         } else if delivery_response.trim().is_empty() {
             if empty_sink_commits_fully_consumed_response(&full_response, response_sent_offset) {
-                if o_body_cut {
+                if o_body_cut == Ok(true) {
                     let _ = gateway.delete_message(channel_id, current_msg_id).await;
                 }
                 (terminal_delivery_committed, terminal_body_visible) = (true, true);
@@ -405,7 +407,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 inflight_state.turn_start_offset,
             )
             .format_and_prefix(response_sent_offset == 0, &delivery_response);
-            if o_body_cut {
+            if o_body_cut == Ok(true) {
                 let _ = gateway.delete_message(channel_id, current_msg_id).await;
                 (terminal_delivery_committed, terminal_body_visible) = (true, true);
             } else if can_deliver_directly {

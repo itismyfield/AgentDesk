@@ -116,13 +116,8 @@ pub(super) fn bridge_long_chunks_cutover_decision(
         && !formatted_response.is_empty()
 }
 
-/// O posts the TUI body of a direct-delivery turn; headless gateway turns keep the Legacy body.
-pub(super) fn bridge_o_body_cut_decision(
-    kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
-    can_deliver_directly: bool,
-) -> bool {
-    crate::services::tui_o::cutover::o_owns_tui_output(kind) && can_deliver_directly
-}
+mod o_body;
+pub(super) use o_body::bridge_o_body_cut_decision;
 
 /// #3089 A5: pure no-double-acquire gate. The legacy site-5 arm acquires its OWN
 /// `BridgeDeliveryLease` over `cutover_range` (mod.rs ~6134). When the
