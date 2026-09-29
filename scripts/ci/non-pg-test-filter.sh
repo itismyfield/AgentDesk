@@ -111,6 +111,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::router::intake_dispatch::tests
   --skip services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
   --skip services::discord::router::message_handler::voice_announcement_route::voice_route_tests
+  --skip services::discord::runtime_bootstrap::gateway_handback_integration_tests
   --skip services::discord::runtime_bootstrap::gateway_lease_recovery_tests
   --skip services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
   --skip services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests

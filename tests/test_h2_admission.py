@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,14 +20,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
 import h2_admission as adm  # noqa: E402
 import h2_depinfo  # noqa: E402
+import h2_items  # noqa: E402
 import h2_measure as h2  # noqa: E402
-from tests.test_h2_measure import CLEARED, POISON, WRAPPERS, diag, locate  # noqa: E402
+from tests.test_h2_measure import diag, locate, session_items  # noqa: E402
 from tests.test_h2_modmap import write_modmap  # noqa: E402
 
 TMUX = "agentdesk::services::platform::tmux::has_session"
 CMD, TOKIO = "std::process::Command::new", "tokio::process::Command::new"
 TYPE = "agentdesk::services::relay::TmuxBackend"
-W_PATHS = ("agentdesk::services::probe::alive", "agentdesk::services::probe::user", "agentdesk::services::relay::build")
+W_PATHS = ("agentdesk::services::probe::alive", "agentdesk::services::probe::user", "agentdesk::services::relay::build",
+           "agentdesk::services::relay::Backend::send")
 PROBE, RELAY, OWNER = "src/services/probe.rs", "src/services/relay_impl.rs", "src/services/platform/tmux.rs"
 SOURCES = {
     "src/lib.rs": "pub mod services;\n",
@@ -63,6 +66,9 @@ CLIPPY_TOML = "\n".join([
     f'  {{ path = "{CMD}", reason = "H2 SUBPROC both" }},',
     f'  {{ path = "{TOKIO}", reason = "H2 SUBPROC both" }},',
     "]", "disallowed-types = [", f'  {{ path = "{TYPE}", reason = "H2 TYPES both" }},', "]", ""])
+# compiler item paths of the fixture fns (the trait impl registers its trait method)
+PATHS = {(PROBE, "alive"): W_PATHS[0], (PROBE, "user"): W_PATHS[1], (PROBE, "fresh"): "agentdesk::services::probe::fresh",
+         (RELAY, "build"): W_PATHS[2], (RELAY, "send"): W_PATHS[3]}
 # (file, needle, callee, lint) for every diagnostic the fixture sources produce
 NEEDLES = [(OWNER, "pub fn has_session", TMUX, None), (PROBE, "crate::services::platform::tmux::has_session(name)", TMUX, None),
            (PROBE, 'alive("x")', "agentdesk::services::probe::alive", None), (PROBE, 'Command::new("git")', CMD, None),
@@ -114,7 +120,7 @@ class Tree(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name)
+        self.root = Path(tmp.name).resolve()
         for name, value in PATCHES.items():
             patcher = mock.patch.object(adm, name, value)
             patcher.start()
@@ -146,7 +152,12 @@ class Tree(unittest.TestCase):
 
     def measure(self) -> dict:
         h2._MODULE_TABLES.clear()
-        return h2.measure(self.root, diag_lines(self.sources), h2.load_config(self.root / "clippy.toml"))
+        return h2.measure(self.root, self.items(lines=diag_lines(self.sources)), h2.load_config(self.root / "clippy.toml"))
+
+    def items(self, lane: str = "linux", lines=None, conf: Path | None = None, run: Path | None = None):
+        conf = conf or self.root.parent / f"{self.root.name}-conf"
+        return session_items(self.root, self.sources, self.lines() if lines is None else lines, PATHS,
+                             conf=conf, run=run or conf.parent / f"{self.root.name}-run", lane=lane)
 
     def regen_baseline(self) -> None:
         h2.write_baseline(self.root, {s: {k: dict.fromkeys(h2.LANES, v) for k, v in r.items()}
@@ -163,14 +174,21 @@ class Tree(unittest.TestCase):
         return [*diag_lines(self.sources), artifact(self.root, "00aa"), *self.extra]
 
     def evaluate(self, lane: str = "linux") -> list[str]:
-        return adm.evaluate(self.root, lane, self.base, self.lines(), self.modmap)
+        return adm.evaluate(self.root, lane, self.base, self.items(lane), self.modmap)
 
     def run_main(self, *args: str) -> tuple[int, str, str]:
-        (json_path := self.root.parent / f"{self.root.name}.json").write_text("\n".join(self.lines()))
-        self.addCleanup(json_path.unlink, missing_ok=True)
+        """admission --session over a sealed run of this lane (its load is the fixture's Items)."""
+        lane = args[args.index("--lane") + 1]
+        conf = self.root.parent / f"{self.root.name}-{lane}-conf"
+        conf.mkdir(exist_ok=True)
+        self.addCleanup(shutil.rmtree, conf, ignore_errors=True)
+        h2.write_conf(conf, h2.load_config(self.root / "clippy.toml"), lane)
+        run = conf.parent / f"{self.root.name}-{lane}-run"
         out, err = io.StringIO(), io.StringIO()
-        with redirect_stdout(out), redirect_stderr(err):
-            code = adm.main(["--repo", str(self.root), "--json", str(json_path), "--modmap", str(self.modmap), *args])
+        with redirect_stdout(out), redirect_stderr(err), \
+                mock.patch.object(h2_items, "load", return_value=self.items(lane, conf=conf, run=run)), \
+                mock.patch.object(h2, "session_runner", side_effect=AssertionError("--session runs no session")):
+            code = adm.main(["--repo", str(self.root), "--session", str(run), "--modmap", str(self.modmap), *args])
         return code, out.getvalue(), err.getvalue()
 
 GROW = """\
@@ -192,9 +210,9 @@ class MeasurerSites(Tree):
         # both anonymous consts fold into one key; their span lines stay as aux metadata
         self.assertEqual(result["sites"]["subproc"], {(PROBE, "const _", CMD): [4, 5]})
         self.assertEqual(result["sites"]["exec"], {})
-        (self.root / "d.json").write_text("\n".join(diag_lines(self.sources)))
-        with redirect_stdout(out := io.StringIO()):
-            h2.main(["--repo", str(self.root), "--lane", "linux", "--json", str(self.root / "d.json")])
+        with redirect_stdout(out := io.StringIO()), mock.patch.object(h2, "session_runner", return_value=lambda conf, run:
+                self.items(lines=diag_lines(self.sources), conf=conf, run=run)):
+            h2.main(["--repo", str(self.root), "--lane", "linux"])
         rows = json.loads(out.getvalue())["rows"]
         self.assertEqual([r.get("lines") for r in rows["subproc"]], [[4, 5]])
         self.assertNotIn("lines", rows["exec"][0])
@@ -205,37 +223,30 @@ class EndToEnd(Tree):
         self.assertEqual(self.evaluate("macos"), [])
         self.assertEqual(self.run_main("--lane", "macos", "--base", self.base)[0], 0)
 
-    def test_cargo_enforces_only_lane_paths_with_clean_environment(self) -> None:
+    def test_own_session_uses_only_lane_paths_and_exempts_only_its_config(self) -> None:
         config = h2.load_config(self.root / "clippy.toml")
         config["agentdesk::linux_only"] = ("W", frozenset({"linux"}))
         (self.root / "clippy.toml").write_text(h2.render_clippy_toml(config))
-        run, generated = subprocess.run, []
-        def cargo(command, **kwargs):
-            if command[0] != "cargo":
-                return run(command, **kwargs)
-            env = kwargs["env"]
-            conf = Path(env["CLIPPY_CONF_DIR"]) / "clippy.toml"
-            generated.append(conf)
-            self.assertEqual(command[:3], ["cargo", "clippy", "--lib"])
-            self.assertEqual(kwargs["cwd"], self.root.resolve())
-            self.assertEqual(h2.load_config(Path(env["CLIPPY_CONF_DIR"]) / "clippy.toml"),
-                             {p: e for p, e in config.items() if "macos" in e[1]})
-            for key in CLEARED:
-                self.assertNotIn(key, env, key)
-            self.assertEqual({key: env.get(key) for key in WRAPPERS}, dict.fromkeys(WRAPPERS, ""))
-            write_depinfo(self.root, "00aa", [*SOURCES, "Cargo.toml", conf])
-            return subprocess.CompletedProcess(command, 0, "\n".join(self.lines()), "")
-        with mock.patch.dict(os.environ, POISON), mock.patch.object(h2.subprocess, "run", side_effect=cargo), \
+        generated = []
+        def runner(conf, run):
+            generated.append(conf / "clippy.toml")
+            self.assertEqual(run, conf.parent / "check")
+            self.assertEqual(h2.load_config(conf / "clippy.toml"), {p: e for p, e in config.items() if "macos" in e[1]})
+            write_depinfo(self.root, "00aa", [*SOURCES, "Cargo.toml", conf / "clippy.toml"])
+            return self.items("macos", conf=conf, run=run)
+        with mock.patch.object(h2, "session_runner", return_value=runner) as start, \
                 redirect_stdout(io.StringIO()), redirect_stderr(err := io.StringIO()):
             self.assertEqual(adm.main(["--repo", str(self.root), "--lane", "macos", "--base", self.base,
                                       "--modmap", str(self.modmap)]), 0, err.getvalue())
-        self.assertEqual(len(generated), 1)
-        self.assertFalse(generated[0].exists())
-        self.assertEqual(self.evaluate("macos"), [f"R-O: lib compile input {generated[0]} is outside the repo"])
+        start.assert_called_once_with(self.root, "macos")
+        self.assertTrue(generated[0].is_relative_to(self.root / h2.SESSIONS))
+        rel = generated[0].relative_to(self.root)
+        self.assertEqual(self.evaluate("macos"), [f"R-O: lib compile input {rel} is not in the data allowlist"])
 
-    def test_generated_config_does_not_exempt_other_external_inputs(self) -> None:
-        for extra in ("other.json", "nested/clippy.toml", "alias.rs"):
-            def runner(root, conf):
+    def test_session_config_does_not_exempt_other_inputs_beside_it(self) -> None:
+        for extra, problem in (("other.json", "is not in the data allowlist"), ("nested/clippy.toml", "is not in the data allowlist"),
+                               ("alias.rs", "is compiled into the lib but is not in the module tree")):
+            def runner(conf, run):
                 path = conf / extra
                 path.parent.mkdir(parents=True, exist_ok=True)
                 if extra == "alias.rs":
@@ -243,34 +254,42 @@ class EndToEnd(Tree):
                 else:
                     path.write_text("unrelated")
                 write_depinfo(self.root, "00aa", [*SOURCES, "Cargo.toml", conf / "clippy.toml", path])
-                return self.lines()
-            with self.subTest(extra=extra), mock.patch.object(h2, "run_clippy", side_effect=runner), \
+                return self.items("macos", conf=conf, run=run)
+            with self.subTest(extra=extra), mock.patch.object(h2, "session_runner", return_value=runner), \
                     redirect_stderr(err := io.StringIO()):
                 rc = adm.main(["--repo", str(self.root), "--lane", "macos", "--base", self.base,
                                "--modmap", str(self.modmap)])
                 self.assertEqual(rc, 1)
-                self.assertIn("outside the repo", err.getvalue())
+                self.assertIn(f"{extra} {problem}", err.getvalue())
 
-    def test_evaluate_filters_external_json_by_lane(self) -> None:
+    def test_evaluate_filters_session_by_lane(self) -> None:
         config = h2.load_config(self.root / "clippy.toml")
         config["agentdesk::linux_only"] = ("W", frozenset({"linux"}))
         (self.root / "clippy.toml").write_text(h2.render_clippy_toml(config))
         lines = [*self.lines(), diag(PROBE, 1, 1, "agentdesk::linux_only")]
-        self.assertEqual(adm.evaluate(self.root, "macos", self.base, lines, self.modmap), [])
+        self.assertEqual(adm.evaluate(self.root, "macos", self.base, self.items("macos", lines), self.modmap), [])
 
-    def test_config_warning_rejects_external_json_with_or_without_code(self) -> None:
+    def test_config_warning_rejects_a_session_with_or_without_code(self) -> None:
         for code in (None, "clippy::disallowed_methods", "unused_imports"):
             warning = json.loads(diag("clippy.toml", 2, 1, "agentdesk::missing"))
             warning["message"]["code"] = {"code": code} if code else None
-            path = self.root / "invalid.jsonl"
-            path.write_text("\n".join([*self.lines(), json.dumps(warning)]))
-            with self.subTest(code=code), mock.patch.object(h2, "run_clippy") as cargo, \
-                    redirect_stderr(err := io.StringIO()), redirect_stdout(io.StringIO()):
-                rc = adm.main(["--repo", str(self.root), "--lane", "macos", "--base", self.base,
-                               "--modmap", str(self.modmap), "--json", str(path)])
+            self.extra = [json.dumps(warning)]
+            with self.subTest(code=code):
+                rc, _, err = self.run_main("--lane", "macos", "--base", self.base)
                 self.assertEqual(rc, 1)
-                self.assertIn("clippy could not use an H2 path", err.getvalue())
-                cargo.assert_not_called()
+                self.assertIn("clippy could not use an H2 path", err)
+
+    def test_without_a_sealed_session_nothing_is_evaluated(self) -> None:
+        empty = self.root.parent / f"{self.root.name}-unsealed"
+        empty.mkdir()
+        self.addCleanup(empty.rmdir)
+        with redirect_stderr(err := io.StringIO()), redirect_stdout(io.StringIO()):
+            rc = adm.main(["--repo", str(self.root), "--lane", "linux", "--base", self.base, "--modmap", str(self.modmap),
+                           "--session", str(empty)])
+        self.assertEqual((rc, "unsealed" in err.getvalue()), (1, True))
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):  # the unbound JSONL input is gone
+            adm.main(["--repo", str(self.root), "--lane", "linux", "--base", self.base, "--modmap", str(self.modmap),
+                      "--json", str(empty)])
 
     def test_growth_needs_exactly_one_suffix_admission(self) -> None:
         self.edit(PROBE, 'alive("x")', 'alive("x") && crate::services::platform::tmux::has_session("y")')
@@ -318,14 +337,39 @@ class EndToEnd(Tree):
         self.assertIn("R-E: stale W (linux) entry agentdesk::services::probe::gone; run h2_measure.py --regen",
                       self.evaluate())
 
-    def test_rw_prefix_trait_impl_and_types(self) -> None:
-        config = h2.load_config(self.root / "clippy.toml")
-        self.assertIsNone(adm.rw_problem(self.root, config, (PROBE, "user::inner", TMUX)))  # nested fn
-        self.assertIsNone(adm.rw_problem(self.root, config, (RELAY, "<TmuxBackend as Backend>::send", TMUX)))
-        self.assertIsNone(adm.rw_problem(self.root, config, (PROBE, "user", CMD)))  # SUBPROC is not R-W
-        self.assertIsNotNone(adm.rw_problem(self.root, config, (RELAY, "<Other as Backend>::send", TMUX)))
-        self.assertIsNotNone(adm.rw_problem(self.root, config, (RELAY, "make", TYPE)))  # TYPES mention
-        self.assertIsNotNone(adm.rw_problem(self.root, config, (PROBE, "const X", TMUX)))
+    def test_rw_reads_each_measured_site_path(self) -> None:
+        config, key = h2.load_config(self.root / "clippy.toml"), (RELAY, "<TmuxBackend as Backend>::send", TMUX)
+        self.assertIsNone(adm.rw_problem(config, "linux", key, {key: [W_PATHS[3]]}))  # T22: the site's own path
+        self.assertIsNone(adm.rw_problem(config, "linux", (PROBE, "user", CMD), {}))  # SUBPROC is not R-W
+        self.assertIsNone(adm.rw_problem(config, "linux", (RELAY, "<module>", TYPE), {(RELAY, "<module>", TYPE): ["<module>"]}))
+        for reg, why in (({}, "no measured site"), ({key: []}, "no measured site"),  # T23: never all([])
+                         ({key: [W_PATHS[3], "agentdesk::services::relay::Other::send"]}, "site path agentdesk::services::relay::Other::send"),
+                         ({key: [W_PATHS[3], None]}, "an unregistrable site")):  # T24, T25
+            with self.subTest(why=why):
+                self.assertEqual(adm.rw_problem(config, "linux", key, reg),
+                                 f"R-W: {RELAY} :: {key[1]} gained {TMUX} but {why} is not a registered linux W* fn; "
+                                 "run h2_measure.py --regen")
+        # a registered Self type or an item-name prefix no longer exempts a site
+        config[W_PATHS[3]] = ("W", frozenset({"macos"}))
+        self.assertIsNotNone(adm.rw_problem(config, "linux", key, {key: [W_PATHS[3]]}))
+        self.assertIsNotNone(adm.rw_problem(config, "linux", (PROBE, "user::inner", TMUX), {(PROBE, "user::inner", TMUX): [None]}))
+
+    def test_rw_judges_only_growth_in_this_lane(self) -> None:
+        self.edit(RELAY, 'has_session("s"); }', 'has_session("s"); let _ = crate::services::platform::tmux::has_session("t"); }')
+        NEEDLES.append((RELAY, 'has_session("t")', TMUX, None))
+        self.addCleanup(NEEDLES.pop)
+        PATHS[(RELAY, "send")] = "!external:core"
+        self.addCleanup(PATHS.__setitem__, (RELAY, "send"), W_PATHS[3])
+        baseline = h2.load_baseline(self.root)
+        baseline["exec"][(RELAY, "<TmuxBackend as Backend>::send", TMUX)] = {"linux": 1, "macos": 2}
+        h2.write_baseline(self.root, baseline)
+        self.admit(GROW.replace('"user"', '"<TmuxBackend as Backend>::send"').replace('"both"', '"macos"')
+                   .replace("old = 0", "old = 1").replace("new = 1", "new = 2").replace(PROBE, RELAY))
+        rw = [p for p in self.evaluate("linux") if p.startswith("R-W")]
+        self.assertEqual(rw, [])  # grew only in macos: linux's session does not judge it
+        self.assertEqual([p for p in self.evaluate("macos") if p.startswith("R-W")],
+                         [f"R-W: {RELAY} :: <TmuxBackend as Backend>::send gained {TMUX} but an unregistrable site "
+                          "is not a registered macos W* fn; run h2_measure.py --regen"])
 
     def test_h8_admission_names_folded_lines(self) -> None:
         self.edit(PROBE, 'Command::new("gh"); };', 'Command::new("gh"); };\nconst _: () = { Command::new("git").arg("tmux"); };')

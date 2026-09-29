@@ -87,6 +87,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/claude_tui/hook_payload_fixture_tests.rs",
         "src/services/claude_tui/hook_server_memento_tests.rs",
         "src/services/claude_tui/session/auto_compact_launch_tests.rs",
+        "src/services/codex_tui/session/source_observation_tests.rs",
         "src/services/kakao/transport_tests.rs",
         "src/services/cluster/attachment_transfer/tests.rs",
         "src/services/cluster/execution_requirements/tests.rs",
@@ -135,6 +136,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/router/message_handler/intake_turn/race_loss/requeue_tests.rs",
         "src/services/discord/router/message_handler/session_strategy_lifecycle_tests.rs",
         "src/services/discord/runtime_bootstrap/gateway_handback_breaker_tests.rs",
+        "src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs",
         "src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs",
         "src/services/discord/runtime_bootstrap/gateway_lease_tests.rs",
         "src/services/discord/runtime_bootstrap/intake_delivery_capability/tests.rs",
@@ -231,12 +233,15 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/queue_io/ledger_settlement_tests.rs",
         "src/services/discord/health/relay_auto_heal/orphan_token_tests.rs",
         "src/server/routes/health_api/unread_tail_attribution_tests.rs",
+        "src/services/tui_o/writer/writer_tests.rs",
+        "src/services/tui_o/writer/actor_tests.rs",
     }
 )
 
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/discord/runtime_bootstrap/gateway_handback_mock.rs",
         "src/services/kakao/test_support.rs",
         "src/config/test_env.rs",
         "src/config/test_env/teardown_probe.rs",

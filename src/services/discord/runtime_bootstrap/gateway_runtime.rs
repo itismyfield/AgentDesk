@@ -23,6 +23,7 @@ pub(super) async fn run_bot_start_gateway_runtime(
     voice_receiver: crate::voice::VoiceReceiver,
     gateway_lease: Option<crate::db::postgres::AdvisoryLockLease>,
     gateway_waiter: Option<GatewayWaiterGuard>,
+    handback_breaker: GatewayHandbackBreaker,
     restored_model_overrides: &[(ChannelId, String)],
     restored_fast_mode_channels: &[ChannelId],
 ) {
@@ -125,6 +126,7 @@ pub(super) async fn run_bot_start_gateway_runtime(
             &provider,
             settings::discord_token_hash(token),
             client.shard_manager.clone(),
+            handback_breaker,
         )
     });
 

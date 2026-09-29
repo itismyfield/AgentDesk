@@ -16,9 +16,11 @@ use crate::services::git::GitCommand;
 #[cfg(unix)]
 use crate::services::platform::binary_resolver;
 #[cfg(unix)]
+use crate::services::session_host::legacy_collapse::tmux_live_pane_bool;
+#[cfg(unix)]
 use crate::services::tmux_common::tmux_exact_target;
 #[cfg(unix)]
-use crate::services::tmux_diagnostics::{build_tmux_death_diagnostic, tmux_session_has_live_pane};
+use crate::services::tmux_diagnostics::build_tmux_death_diagnostic;
 use crate::utils::format::tail_with_ellipsis;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -219,7 +221,7 @@ use self::analytics_transcript::{
 };
 
 #[cfg(not(unix))]
-fn tmux_session_has_live_pane(_name: &str) -> bool {
+fn tmux_live_pane_bool(_name: &str) -> bool {
     false
 }
 

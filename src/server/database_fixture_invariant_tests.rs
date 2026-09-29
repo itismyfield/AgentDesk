@@ -102,6 +102,12 @@ mod tests {
             include_str!("../services/discord/mod.rs"),
         ),
         (
+            "services::discord::runtime_bootstrap::gateway_handback_integration_tests",
+            include_str!(
+                "../services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs"
+            ),
+        ),
+        (
             "services::discord::runtime_bootstrap::gateway_lease_recovery_tests",
             include_str!("../services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs"),
         ),

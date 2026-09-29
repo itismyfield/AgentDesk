@@ -191,6 +191,8 @@ async fn finish_gateway_backend<E, F>(
             );
         }
     }
+    // The backend is gone: close O admission before the lease task is aborted and drops the lease.
+    crate::services::tui_o::ownership::gate(provider_for_error.as_str()).lost();
     drop(gateway_waiter);
     release_catalog_before_diagnostic(model_catalog_refresh_task, diagnostic).await;
     abort_and_join_task(gateway_lease_task).await;
@@ -360,6 +362,47 @@ mod gateway_waiter_tests {
             assert!(lease_watch.is_finished());
             assert!(!advertised(&provider));
         }
+    }
+
+    /// Records the ownership its lease task saw when the abort dropped it.
+    struct LeaseDropProbe(std::sync::Arc<std::sync::Mutex<Option<GatewayOwnership>>>);
+
+    impl Drop for LeaseDropProbe {
+        fn drop(&mut self) {
+            let seen = crate::services::tui_o::ownership::gate("qwen").current();
+            *self.0.lock().unwrap() = Some(seen);
+        }
+    }
+
+    use crate::services::tui_o::ownership::GatewayOwnership;
+
+    #[tokio::test]
+    async fn backend_exit_closes_o_admission_before_the_lease_task_drops_the_lease() {
+        let gate = crate::services::tui_o::ownership::gate(ProviderKind::Qwen.as_str());
+        gate.acquired();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let probe = LeaseDropProbe(std::sync::Arc::clone(&seen));
+        let lease = tokio::spawn(async move {
+            let _probe = probe;
+            std::future::pending::<()>().await;
+        });
+        let backend = tokio::spawn(async { Ok::<(), &str>(()) });
+        finish_gateway_backend(
+            backend,
+            &ProviderKind::Qwen,
+            None,
+            Some(lease),
+            None,
+            async {
+                assert_eq!(
+                    gate.admit(|epoch| epoch),
+                    None,
+                    "admission open after backend exit"
+                );
+            },
+        )
+        .await;
+        assert_eq!(*seen.lock().unwrap(), Some(GatewayOwnership::Lost));
     }
 
     #[tokio::test]
