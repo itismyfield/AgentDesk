@@ -168,31 +168,6 @@ fn mainline_issue_numbers_for_repo(repo: &str) -> Vec<i64> {
     }
 }
 
-/// Sync GitHub issue state with kanban cards for a single repo.
-///
-/// - If a linked issue is CLOSED on GitHub -> update card to "done"
-/// - If a linked issue is OPEN but card is "done" -> log inconsistency
-///
-/// Returns (closed_count, inconsistency_count).
-pub fn sync_github_issues_for_repo(
-    engine: &crate::engine::PolicyEngine,
-    repo: &str,
-    issues: &[GhIssue],
-) -> Result<SyncResult, String> {
-    let pool = engine
-        .pg_pool()
-        .ok_or_else(|| "postgres backend required for GitHub issue sync".to_string())?;
-    let repo = repo.to_string();
-    let issues = issues.to_vec();
-    crate::utils::async_bridge::block_on_pg_result(
-        pool,
-        move |bridge_pool| async move {
-            sync_github_issues_for_repo_pg(&bridge_pool, &repo, &issues).await
-        },
-        |error| error,
-    )
-}
-
 #[derive(Debug, Clone)]
 struct PgCardRecord {
     id: String,
@@ -1371,46 +1346,6 @@ pub(crate) async fn sync_review_state_on_pg(
     .map_err(|error| format!("sync review state for {card_id}: {error}"))?;
 
     Ok(())
-}
-
-/// Sync all registered repos (orchestration function).
-#[allow(dead_code)]
-pub fn sync_all_repos(engine: &crate::engine::PolicyEngine) -> Result<SyncResult, String> {
-    let pool = engine
-        .pg_pool()
-        .ok_or_else(|| "postgres backend required for GitHub repo sync".to_string())?;
-    let repos = crate::utils::async_bridge::block_on_pg_result(
-        pool,
-        |bridge_pool| async move { super::list_repos_pg(&bridge_pool).await },
-        |error| error,
-    )?;
-    let mut total = SyncResult::default();
-
-    for repo in &repos {
-        if !repo.sync_enabled {
-            continue;
-        }
-
-        match fetch_issues(&repo.id) {
-            Ok(issues) => match sync_github_issues_for_repo(engine, &repo.id, &issues) {
-                Ok(r) => {
-                    total.closed_count += r.closed_count;
-                    total.inconsistency_count += r.inconsistency_count;
-                    total.stale_card_issue_check_count += r.stale_card_issue_check_count;
-                    total.stale_card_issue_batch_count += r.stale_card_issue_batch_count;
-                    total.stale_card_issue_error_count += r.stale_card_issue_error_count;
-                }
-                Err(e) => {
-                    tracing::error!("[github-sync] sync failed for {}: {e}", repo.id);
-                }
-            },
-            Err(e) => {
-                tracing::warn!("[github-sync] fetch failed for {}: {e}", repo.id);
-            }
-        }
-    }
-
-    Ok(total)
 }
 
 #[derive(Debug, Default)]

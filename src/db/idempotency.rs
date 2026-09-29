@@ -243,28 +243,6 @@ pub async fn record_response(
     Ok(())
 }
 
-/// Best-effort cleanup of slots whose handler died before calling
-/// [`record_response`]. Without this an interrupted request would
-/// permanently occupy the slot until `expires_at`. Callers can invoke
-/// this when they hit a code path that wants to release ownership
-/// (e.g. validation failed before any business mutation ran).
-// reason: best-effort idempotency-slot cleanup invoked on selected validation
-// failure paths, not every compile target. See #3034.
-#[allow(dead_code)]
-pub async fn release_unclaimed(pool: &PgPool, scope: &str, key: &str) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "DELETE FROM idempotency_keys
-          WHERE scope = $1
-            AND key   = $2
-            AND response_status IS NULL",
-    )
-    .bind(scope)
-    .bind(key)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 /// Sweep expired rows. Intended for the existing OnTick5min tick loop.
 /// Returns the number of rows deleted so the caller can emit a metric.
 pub async fn gc_expired(pool: &PgPool) -> Result<u64, sqlx::Error> {
