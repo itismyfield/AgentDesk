@@ -10,9 +10,16 @@
 
 | Gate | ci-main.yml job | ci-pr.yml job | ci-nightly.yml 대응 | 실행 조건 |
 | --- | --- | --- | --- | --- |
-| **Full tests** | `full_non_pg` | `library_sweep` (+ `check_fast` compile/policy) | `full_macos` + `full_windows` | main/nightly always run non-PG tests. PR side: `library_sweep` runs the whole `--lib` harness minus the `_pg`/`pg_`/`postgres` id filters on the broad `rust_or_policy` filter (#5185), **with its own PostgreSQL service** — those filters are substring matches over ids and 61 PG-dependent tests carry none of them; `check_fast` stays compile/policy only. |
+| **Full tests** | `full_non_pg` | `library_sweep` (+ `check_fast` compile/policy) | `full_macos` + `full_windows` | main/nightly always run non-PG tests. PR side: `library_sweep` runs the whole `--lib` harness minus the `_pg`/`pg_`/`postgres` id filters on `rust_tests` (the broad `rust_or_policy` filter unless the PR is comment-only, see below) (#5185), **with its own PostgreSQL service** — those filters are substring matches over ids and 61 PG-dependent tests carry none of them; `check_fast` stays compile/policy only. |
 | **PostgreSQL tests** | `postgres` | `test_fast`의 PG 서비스 | `postgres_full` | main/nightly는 항상 실행. PR의 `test_fast`와 selection observer는 `pg_db` path filter가 true일 때만 실행하며, false이면 required mirror가 명시적으로 green을 반환. |
 | **High-risk recovery** | `high-risk-recovery` | `high-risk-recovery` | `high_risk_recovery_full` | main/nightly는 무조건 실행 — #5232 R3 에서 `ci-main.yml`의 path filter를 제거했다. PR의 `high-risk-recovery`만 path filter hit 시 실행. |
+
+**주석 전용 PR.** `ci-pr.yml`의 `changes` job은 `scripts/ci/comment_only_gate.py`로
+PR이 주석만 바꾼 `.rs`(+ 어떤 path filter도 고르지 않는 `*.md`)인지 판정한다. 참이면
+`pg_db`·`high_risk_recovery`·`cross_os_rust`·`rust_tests` 출력을 `false`로 내보내
+`test_fast`·`high-risk-recovery`·Windows 두 job·`library_sweep`이 skip되고, 같은 출력을
+읽는 required mirror가 green을 게시한다. `check_fast`·`lint`·Script checks·relay authority·
+dashboard는 원래 조건 그대로 돈다. 판정 오류·입력 누락은 전부 원래 필터값(전체 실행)으로 간다.
 
 Selection observer required gate가 red로 만드는 observer 사망은 **프로세스 수준
 사망**이다. observer의 비정상 종료 코드나 시그널, summary 0줄 또는 2줄 이상,
@@ -182,7 +189,7 @@ write 사이에 끼어드는 것이라 바이트를 **추가**할 수 있을 뿐
    오염은 확률적이고, 실제로 5회 스윕 중 1회 오탐이 관측된 적이 있다.
 4. 등록할 컨텍스트 이름은 **`Library test sweep (ubuntu-latest)`**
    (= `library_sweep_required_context` job)이다. sweep 잡 본체인
-   `Library test sweep`을 등록하면 `rust_or_policy` path filter가 false인 PR에서
+   `Library test sweep`을 등록하면 `rust_tests` 출력이 false인 PR에서
    잡이 skip되어 **pending으로 영구 블록**된다. mirror job은 `if: always()`로
    돌면서 skip을 명시적 green으로 변환하고 upstream 실패/취소에는 fail-closed다.
 
