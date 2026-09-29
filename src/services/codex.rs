@@ -589,12 +589,12 @@ fn direct_tui_material_fallback_reason(options: &CodexLaunchOptions) -> Option<&
 fn register_codex_tui_idle_relay_binding(
     tmux_session_name: &str,
     tail_result: &crate::services::codex_tui::rollout_tail::CodexTuiTailResult,
-) {
+) -> bool {
     crate::services::codex_tui::session::install_launched_codex_tui_runtime_binding(
         tmux_session_name,
         None,
         codex_tui_idle_relay_binding(tmux_session_name, tail_result),
-    );
+    )
 }
 
 fn codex_tui_idle_relay_binding(
@@ -1693,8 +1693,6 @@ fn execute_streaming_local_tui_tmux(
         ProviderKind::Codex,
         tmux_session_name,
     )?;
-    let auth_env_lines =
-        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
     let session_exists = tmux_present_bool(tmux_session_name);
     let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
         tmux_session_name,
@@ -1805,7 +1803,7 @@ fn execute_streaming_local_tui_tmux(
         report_channel_id,
         report_provider,
         warm_followup_enabled,
-        &auth_env_lines,
+        &auth_overlay,
     )?;
     if let Some(channel_id) = report_channel_id {
         crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
@@ -1975,7 +1973,7 @@ fn resolve_codex_tui_tail_result(
 /// the cancel-suppression guards, the SessionDied failure `Done`, the idle
 /// relay binding, and the gated RuntimeReady handoff (with its readiness /
 /// session-death / timeout outcomes). Always returns `Ok(())`; early returns
-/// stand in for the orchestrator's post-cancel suppression paths.
+/// stand in for post-cancel suppression and for a source a hook already replaced.
 #[cfg(unix)]
 pub(crate) fn emit_codex_tui_post_tail_handoff(
     tail_result: crate::services::codex_tui::rollout_tail::CodexTuiTailResult,
@@ -2030,7 +2028,10 @@ pub(crate) fn emit_codex_tui_post_tail_handoff(
         // different: it scans Codex's rollout after the bridge has gone idle,
         // so it still needs the rollout binding even when RuntimeReady is
         // suppressed by the post-turn readiness guard.
-        register_codex_tui_idle_relay_binding(tmux_session_name, &tail_result);
+        if !register_codex_tui_idle_relay_binding(tmux_session_name, &tail_result) {
+            // A hook already moved the pane to a newer source; handing off this one would reclaim it.
+            return Ok(());
+        }
 
         // #2325: gate the RuntimeReady handoff on the Codex TUI composer
         // actually being ready for input. RuntimeReady is the signal the

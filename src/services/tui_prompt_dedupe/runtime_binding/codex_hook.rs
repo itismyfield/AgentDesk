@@ -166,3 +166,78 @@ pub(crate) fn observe_codex_hook(
         })
     })
 }
+
+/// The hook-recorded source of this execution when `binding` names one it already retired.
+fn retiring_source(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    channel_id: u64,
+    binding: &TuiRuntimeBinding,
+) -> Option<binding_events::SourceId> {
+    let SpawnNonceMarker::Known(nonce) = observe_spawn_nonce_marker(authority.session()) else {
+        return None;
+    };
+    if binding.runtime_kind != RuntimeHandoffKind::CodexTui {
+        return None;
+    }
+    binding_events::codex::source_ahead(
+        channel_id,
+        authority.session(),
+        &nonce,
+        binding.session_id.as_deref(),
+        std::path::Path::new(&binding.output_path),
+    )
+    .unwrap_or_else(|error| {
+        tracing::warn!(%error, tmux_session = authority.session(), "Codex binding history unreadable");
+        None
+    })
+}
+
+/// A finished tail must not republish a source that a later hook already replaced.
+pub(crate) fn codex_tail_source_retired(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    binding: &TuiRuntimeBinding,
+) -> bool {
+    let channel = with_runtime_binding_state_under_source_authority(authority, |state| {
+        state
+            .channel_by_tmux
+            .get(authority.session())
+            .map(|c| c.value)
+    });
+    channel.is_some_and(|channel| retiring_source(authority, channel, binding).is_some())
+}
+
+/// Restore completes a hook source whose event is durable but whose marker was never written.
+pub(super) fn restored_source(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    provider: &str,
+    channel_id: u64,
+    binding: TuiRuntimeBinding,
+) -> Option<TuiRuntimeBinding> {
+    let Some(current) = (provider == "codex")
+        .then(|| retiring_source(authority, channel_id, &binding))
+        .flatten()
+        .filter(binding_events::codex::source_file_matches)
+    else {
+        return Some(binding);
+    };
+    let session_id = Some(current.session_id.as_str()).filter(|id| !id.is_empty());
+    if let Err(error) = session::write_codex_tui_rollout_marker_under_source_authority(
+        authority,
+        &current.path,
+        session_id,
+        Some(0),
+    ) {
+        tracing::warn!(
+            error,
+            tmux_session = authority.session(),
+            "Codex restore deferred"
+        );
+        return None;
+    }
+    Some(TuiRuntimeBinding {
+        output_path: current.path.display().to_string(),
+        session_id: session_id.map(str::to_owned),
+        last_offset: std::fs::metadata(&current.path).map_or(0, |meta| meta.len()),
+        ..binding
+    })
+}

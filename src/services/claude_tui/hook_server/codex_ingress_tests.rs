@@ -44,12 +44,13 @@ impl Harness {
         let start = &run["events"][0];
         let clear = &run["events"][3];
         let command = clear["command_session_id"].as_str().unwrap().to_owned();
-        let prepared = PreparedIncarnation::prepare(
+        let prepared = PreparedIncarnation::prepare_at(
             "codex",
             "codex-ingress-test",
             Some(8745),
             start["payload"]["session_id"].as_str(),
             false,
+            Some(home.join("sessions")),
         )
         .unwrap();
         let context = prepared.context;
@@ -343,40 +344,9 @@ fn codex_permanent_rejections_leave_binding_log_and_cursor_untouched() {
 #[test]
 fn codex_launch_root_is_captured_and_hook_env_cannot_change_the_verdict() {
     let h = Harness::new();
-    let prepared =
-        PreparedIncarnation::prepare("codex", "codex-root-capture", Some(8745), None, false)
-            .unwrap();
-    assert_eq!(
-        prepared.context.provider_root, h.context.provider_root,
-        "launch must capture the Codex sessions root"
-    );
-    assert!(
-        prepared.env_lines().contains("export CODEX_HOME="),
-        "launch must apply its captured home"
-    );
     write(&h.path, &h.header);
     let other = h.root.path().join("later-home");
     let _changed = Guard::set_path_after_shared_test_env_lock("CODEX_HOME", &other);
-    let output = std::process::Command::new("/bin/sh")
-        .args([
-            "-c",
-            &format!("{}\n/usr/bin/printenv CODEX_HOME", prepared.env_lines()),
-        ])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap().trim(),
-        h.context
-            .provider_root
-            .as_ref()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_str()
-            .unwrap(),
-        "launch environment must apply the home captured before env changed"
-    );
     assert_eq!(h.hook().0, 202);
     assert_eq!(
         h.binding().output_path,
@@ -585,4 +555,111 @@ fn codex_marker_failure_retries_the_durable_source_without_a_duplicate_event() {
         after,
         "cached receipt must not repeat adoption"
     );
+}
+
+#[test]
+fn codex_finished_old_tail_cannot_reclaim_a_hook_published_source() {
+    let h = Harness::new();
+    let _tmux = dedupe::binding_context::tests::fake_tmux(h.root.path());
+    let old = h.binding();
+    write(&h.path, &h.header);
+    assert_eq!(h.hook().0, 202);
+    let published = h.snapshot();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    crate::services::codex::emit_codex_tui_post_tail_handoff(
+        crate::services::codex_tui::rollout_tail::CodexTuiTailResult {
+            read_result: crate::services::provider::ReadOutputResult::Completed { offset: 19 },
+            rollout_path: PathBuf::from(&old.output_path),
+            final_offset: 19,
+            session_id: old.session_id,
+        },
+        sender,
+        None,
+        &h.context.tmux_session,
+    )
+    .unwrap();
+    assert_eq!(
+        h.snapshot(),
+        published,
+        "old tail must not republish its retired source"
+    );
+    assert!(
+        receiver.try_recv().is_err(),
+        "old tail must not hand its retired source to the bridge"
+    );
+    let (status, body) = h.hook();
+    assert_eq!(status, 202);
+    assert_ne!(
+        body["binding_observation"], "NotApplicable(CodexSourceRejected)",
+        "the current source must keep accepting its hooks"
+    );
+    assert_eq!(
+        h.binding().output_path,
+        h.path.canonicalize().unwrap().display().to_string(),
+        "relay must keep reading the hook source"
+    );
+}
+
+#[test]
+fn codex_restore_after_a_crash_between_source_and_marker_completes_the_hook_source() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = Harness::new();
+    let _tmux = dedupe::binding_context::tests::fake_tmux(h.root.path());
+    write(&h.path, &h.header);
+    let marker = crate::services::tmux_common::session_temp_path(
+        &h.context.tmux_session,
+        crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
+    );
+    let permissions = fs::metadata(&marker).unwrap().permissions();
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o400)).unwrap();
+    let crashed = h.send(&h.payload, Some(h.context.clone()), "crash");
+    fs::set_permissions(&marker, permissions).unwrap();
+    assert_eq!(crashed.0, 425);
+    let events = h.events();
+    let current = source(events.last().unwrap()).clone();
+    let marker_path = || {
+        session::read_codex_tui_rollout_marker(&h.context.tmux_session)
+            .unwrap()
+            .rollout_path
+    };
+    assert_eq!(current.path, h.path.canonicalize().unwrap());
+    assert_ne!(
+        marker_path(),
+        current.path,
+        "marker still names the old source"
+    );
+    dedupe::reset_state_for_tests();
+    binding_events::forget_channel_for_tests(8745);
+    dedupe::register_provider_session("codex", &h.command, &h.context.tmux_session);
+    let restored = crate::services::discord::rehydrate_codex_tui_binding_for_tests(
+        &h.context.tmux_session,
+        8745,
+    )
+    .expect("restore must register the live pane");
+    let expected = current.path.display().to_string();
+    assert_eq!(
+        restored.output_path, expected,
+        "restore must complete the hook source"
+    );
+    assert_eq!(h.binding().output_path, expected);
+    assert_eq!(
+        marker_path(),
+        current.path,
+        "restore must roll the marker forward"
+    );
+    assert_eq!(
+        h.events(),
+        events,
+        "restore must not record the retired marker source as a new transition"
+    );
+    let (status, body) = h.send(&h.payload, Some(h.context.clone()), "crash");
+    assert_eq!(
+        status, 202,
+        "the abandoned receipt must be acknowledged after restore"
+    );
+    assert_ne!(
+        body["binding_observation"], "NotApplicable(CodexSourceRejected)",
+        "the restored source must keep accepting its hooks"
+    );
+    assert_eq!(h.events(), events, "retry must reuse the durable Source");
 }

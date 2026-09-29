@@ -2,7 +2,7 @@ use super::*;
 use binding_events::{BindingPersistError, CauseSource, HookSignal, Proposal};
 mod adopt_skip;
 mod codex_hook;
-pub(crate) use codex_hook::observe_codex_hook;
+pub(crate) use codex_hook::{codex_tail_source_retired, observe_codex_hook};
 pub(crate) mod pane_registration;
 pub(crate) use adopt_skip::{AdoptSkip, adopt_claude_continuation_explained};
 
@@ -224,6 +224,8 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
     {
         return false;
     }
+    #[rustfmt::skip]
+    let Some(binding) = codex_hook::restored_source(authority, &provider, channel_id, binding) else { return false };
     let session_id = binding.session_id.clone();
     if !publish_runtime_binding(authority, binding, Some(channel_id), CauseSource::Observed) {
         return false;
@@ -264,10 +266,11 @@ pub(crate) fn reconcile_rehydrated_tmux_runtime_binding(
         let (binding, replace) = decide(runtime_binding_for_tmux_session_under_source_authority(authority))?;
         if replace {
             observe_before_replace();
-            // A binding whose event could not be persisted was not published, so report none.
+            // An unpublished binding reports none; a published one reports what restore stored.
             if !register_rehydrated_tmux_runtime_binding_under_source_authority(authority, provider, channel_id, binding.clone()) {
                 return None;
             }
+            return runtime_binding_for_tmux_session_under_source_authority(authority);
         }
         Some(binding)
     })
