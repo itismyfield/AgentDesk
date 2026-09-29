@@ -20,7 +20,6 @@ fn writes_tui_output(provider: &str) -> bool {
     provider.eq_ignore_ascii_case("claude") || provider.eq_ignore_ascii_case("codex")
 }
 
-/// Whether a node in `role` may start the intake worker for `provider`.
 pub(crate) fn intake_worker_allowed(o_tui_writer: bool, provider: &str, role: HostRole) -> bool {
     !o_tui_writer || role == HostRole::Gateway || !writes_tui_output(provider)
 }
