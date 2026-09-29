@@ -1205,7 +1205,10 @@ async fn o_delegated_tui_body_is_cut_on_direct_gateways_but_not_headless() {
             Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
         crate::services::discord::inflight::save_inflight_state(&driver.inflight)
             .expect("seed the TUI-kind row");
-        let _forced = crate::services::tui_o::cutover::test_override::force_on();
+        let _forced = crate::services::tui_o::cutover::test_override::force_channels(&[(
+            DRIVER_CHANNEL_ID,
+            crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        )]);
 
         let (offset, full_response, inflight) =
             drive_bridge_stream_tick(&driver, driver.inflight.clone()).await;
@@ -1251,7 +1254,7 @@ async fn o_delegated_tui_body_is_cut_on_direct_gateways_but_not_headless() {
             assert_eq!(
                 (output.full_response, output.response_sent_offset),
                 (format!("{DRIVER_BODY}{TAIL}"), 0),
-                "the headless delivery still owns the whole original body"
+                "a held headless gateway retains the whole original body"
             );
             assert!(
                 !observed.iter().any(|o| o.call == DriverCall::Delete),
@@ -1259,7 +1262,160 @@ async fn o_delegated_tui_body_is_cut_on_direct_gateways_but_not_headless() {
             );
             assert!(
                 !output.terminal_delivery_committed && output.preserve_inflight_for_cleanup_retry,
-                "with no outbox or http here the headless body is preserved for retry, not dropped"
+                "a selected TUI destination without a direct gateway is held for retry"
+            );
+        }
+    }
+}
+
+// Cancellation uses the destination membership and holds uncertain selected identities without consuming them.
+#[tokio::test]
+async fn o_channel_cancel_uses_destination_and_holds_unknown_kind() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
+
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(CapturingWriter(buffer.clone()))
+        .finish();
+    crate::logging::test_capture::pin_callsite_interest();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let a = DRIVER_CHANNEL_ID;
+    let b = DRIVER_CHANNEL_ID + 100;
+    let cases = [
+        (
+            "selected_destination",
+            a,
+            b,
+            true,
+            true,
+            Some(ClaudeTui),
+            0,
+            false,
+        ),
+        (
+            "selected_owner_only",
+            b,
+            a,
+            true,
+            true,
+            Some(ClaudeTui),
+            1,
+            false,
+        ),
+        (
+            "empty_membership",
+            a,
+            b,
+            false,
+            true,
+            Some(ClaudeTui),
+            1,
+            false,
+        ),
+        ("selected_unknown_kind", a, b, true, true, None, 0, true),
+        ("outside_unknown_kind", b, a, true, true, None, 1, false),
+        (
+            "selected_changed_kind",
+            a,
+            b,
+            true,
+            true,
+            Some(CodexTui),
+            0,
+            true,
+        ),
+        (
+            "flag_off_selected",
+            a,
+            b,
+            true,
+            false,
+            Some(ClaudeTui),
+            1,
+            false,
+        ),
+    ];
+    for (name, destination, owner, selected, enabled, kind, writes, held) in cases {
+        buffer.lock().unwrap().clear();
+        let body = format!("writer cancellation body for {name}");
+        let driver =
+            TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0).with_body(body.clone());
+        let (mut ctx, mut state) = driver.parts();
+        ctx.cancelled = true;
+        ctx.channel_id = ChannelId::new(destination);
+        ctx.watcher_owner_channel_id = ChannelId::new(owner);
+        ctx.watcher_delivery_pin = None;
+        ctx.user_msg_id = None;
+        state.inflight_state.channel_id = destination;
+        state.inflight_state.runtime_kind = kind;
+        state.terminal_full_replay_cleanup_msg_ids.clear();
+        crate::services::discord::inflight::save_inflight_state(&state.inflight_state)
+            .expect("seed matching destination row");
+        let channels = if selected {
+            vec![(a, ClaudeTui)]
+        } else {
+            Vec::new()
+        };
+        let _o = crate::services::tui_o::cutover::test_override::force_channels(&channels);
+        let _disabled = (!enabled).then(crate::services::tui_o::cutover::test_override::force_off);
+
+        let output =
+            tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
+                .await
+                .expect("cancel delivery must finish");
+        let logs = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            logs.contains("tui_o output identity held"),
+            held,
+            "{name}: {logs}"
+        );
+        let observed = driver.observations();
+        let body_calls = observed
+            .iter()
+            .filter(|observation| {
+                matches!(
+                    observation.call,
+                    DriverCall::Replace | DriverCall::Send | DriverCall::Edit
+                )
+            })
+            .count();
+        assert_eq!(body_calls, writes, "{name}: {observed:?}");
+        assert_eq!(driver.completed_publications(), writes, "{name}");
+        let published = driver.published_bodies.lock().unwrap();
+        assert_eq!(published.len(), writes, "{name}: {published:?}");
+        if writes == 1 {
+            assert!(published[0].contains(&body), "{name}: body preserved");
+            assert!(
+                published[0].contains("[Stopped]"),
+                "{name}: cancel lifecycle preserved"
+            );
+        }
+        if held {
+            assert!(
+                output.preserve_inflight_for_cleanup_retry,
+                "{name}: hold preserves retry"
+            );
+            assert!(
+                !output.status_panel_terminal_committed,
+                "{name}: hold is not successful consumption"
+            );
+            assert!(
+                !output.terminal_delivery_committed,
+                "{name}: hold is not delivery evidence"
+            );
+            assert_eq!(
+                output.response_sent_offset, 0,
+                "{name}: hold retains body offset"
+            );
+            assert_eq!(output.full_response, body, "{name}: hold retains body");
+            assert!(
+                !observed
+                    .iter()
+                    .any(|observation| observation.call == DriverCall::Delete),
+                "{name}: hold retains the existing placeholder"
             );
         }
     }

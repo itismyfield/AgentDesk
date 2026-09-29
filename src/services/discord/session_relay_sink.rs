@@ -645,6 +645,11 @@ impl SessionBoundDiscordRelaySink {
         #[cfg(not(test))]
         let gateway: Option<&dyn super::gateway::TurnGateway> = None;
         let channel_id = delivery.channel_id;
+        let o_delegated = crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux(
+            channel_id,
+            Some(&delivery.session_name),
+        )
+        .map_err(|error| RelaySinkError::Transient(format!("TUI output identity held: {error}")))?;
         let provider = delivery.provider.clone();
         let inflight = super::inflight::load_inflight_state(&provider, channel_id);
         // #3041 P1-3 (Part a, B1 — frame-carried): this pre-POST `inflight` is for the
@@ -880,9 +885,7 @@ impl SessionBoundDiscordRelaySink {
             return Ok(SessionRelayDeliveryOutcome::Delivered);
         }
         // O posts this body: consume the range without transport or delivery evidence.
-        if crate::services::tui_o::cutover::o_owns_tui_output_for_tmux_session(
-            &delivery.session_name,
-        ) {
+        if o_delegated {
             self.advance_after_o_delegated_terminal(
                 &shared,
                 &provider,

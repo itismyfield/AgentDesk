@@ -166,9 +166,12 @@ async fn task_response_claim_for_card(
     delivery: &super::SessionRelayDelivery,
     card: Option<MessageId>,
 ) -> Result<Option<ResponseDeliveryClaimOutcome>, RelaySinkError> {
-    let response_claim = if crate::services::tui_o::cutover::o_owns_tui_output_for_tmux_session(
-        &delivery.session_name,
-    ) {
+    let response_claim = if crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux(
+        delivery.channel_id,
+        Some(&delivery.session_name),
+    )
+    .map_err(|error| RelaySinkError::Transient(format!("TUI output identity held: {error}")))?
+    {
         None
     } else if card.is_some()
         && delivery.task_notification_context.is_some()
@@ -937,7 +940,10 @@ mod tests {
             &delivery.session_name,
             "/tmp/adk-o-delegated-claim.jsonl",
         );
-        let _o = crate::services::tui_o::cutover::test_override::force_on();
+        let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+            delivery.channel_id,
+            crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        )]);
 
         let claim =
             task_response_claim_for_card(&shared, &delivery, Some(MessageId::new(4_055_911)))

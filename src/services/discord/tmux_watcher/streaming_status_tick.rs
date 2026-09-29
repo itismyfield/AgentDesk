@@ -690,8 +690,13 @@ pub(super) async fn update_streaming_status_tick(
             }
         }
 
-        // O posts this body; skip rollover and body writes, keep the panel and progress above.
-        if crate::services::tui_o::cutover::o_owns_tui_output_for_tmux_session(&tmux_session_name) {
+        // Withhold Legacy body writes for O ownership or unresolved selected identities.
+        if crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux(
+            channel_id.get(),
+            Some(&tmux_session_name),
+        )
+        .unwrap_or(true)
+        {
             commit_streaming_status_tick_state!();
             return StreamingStatusTickOutcome::Fallthrough;
         }

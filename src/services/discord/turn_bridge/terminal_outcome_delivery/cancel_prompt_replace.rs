@@ -186,10 +186,12 @@ pub(super) async fn handle_cancel_prompt_replace(
         // bridge's `channel_id`), so the two CONTEND on one cell (single-holder
         // B2) instead of both delivering = duplicate.
         let o_body_cut = terminal_controller_cutover::bridge_o_body_cut_decision(
-            inflight_state.runtime_kind,
+            channel_id, &inflight_state,
             gateway.can_deliver_directly(),
         );
-        let stop_lease_acquire = if o_body_cut {
+        let identity_held = o_body_cut.is_err();
+        let o_body_cut = o_body_cut.unwrap_or(false);
+        let stop_lease_acquire = if o_body_cut || identity_held {
             BridgeLeaseAcquire::NoRange
         } else {
             bridge_delivery_lease_for_inflight(
@@ -200,7 +202,9 @@ pub(super) async fn handle_cancel_prompt_replace(
                 tmux_last_offset,
             )
         };
-        if o_body_cut {
+        if identity_held {
+            preserve_inflight_for_cleanup_retry = true;
+        } else if o_body_cut {
             // O posts the partial body; only the Legacy placeholder goes, the /stop lifecycle stays.
             let _ = gateway.delete_message(channel_id, current_msg_id).await;
             status_panel_terminal_committed = true;

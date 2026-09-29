@@ -1401,6 +1401,7 @@ src/
 │   │   │   │   ├── guarded_persist.rs
 │   │   │   │   └── guarded_persist_tests.rs
 │   │   │   ├── terminal_controller_cutover/
+│   │   │   │   ├── o_body.rs
 │   │   │   │   └── unix_journal.rs
 │   │   │   ├── terminal_outcome_delivery/
 │   │   │   │   ├── delivery_epilogue_tests/
@@ -1918,6 +1919,8 @@ src/
 │   ├── tui_o/
 │   │   ├── channel_policy/
 │   │   │   └── tests.rs
+│   │   ├── cutover/
+│   │   │   └── channel_gate.rs
 │   │   ├── shadow/
 │   │   │   ├── binding_reader.rs
 │   │   │   ├── capture.rs

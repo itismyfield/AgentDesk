@@ -595,7 +595,12 @@ fn o_delegated_rollover_tick_writes_no_body() {
                     &fx.output_path,
                 )
             });
-            let _forced = delegated.then(crate::services::tui_o::cutover::test_override::force_on);
+            let _forced = delegated.then(|| {
+                crate::services::tui_o::cutover::test_override::force_channels(&[(
+                    fx.channel.get(),
+                    crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                )])
+            });
             run_tick_body(&mut locals, &rec, &shared, &fx, false, &body).await;
             let body_writes = rec
                 .bodies

@@ -56,13 +56,14 @@ PRIMITIVES: dict[str, str] = {
     "edit_outbound_message": r"\bedit_outbound_message\s*\(",
 }
 GATE_RE = re.compile(
-    r"\b(?:o_owns_tui_output(?:_for_tmux_session|_with)?|bridge_o_body_cut_decision)\b"
+    r"\b(?:o_owns_tui_output(?:_for_channel_tmux|_for_channel|_for_tmux_session|_with)?|bridge_o_body_cut_decision)\b"
 )
 FLAG_RE = re.compile(r"\bO_TUI_WRITER\b")
 DEFN_RE = re.compile(r"\bfn\s+$")
 # The switch is defined in topology.rs; the intake gate and its health probe read it there.
 O_TUI_WRITER_FILES = {
     "src/services/tui_o/cutover.rs",
+    "src/services/tui_o/cutover/channel_gate.rs",
     "src/services/tui_o/topology.rs",
     "src/services/discord/runtime_bootstrap/intake.rs",
     "src/services/discord/health/provider_probe.rs",
@@ -308,9 +309,10 @@ EXPECTED_GATES: dict[str, int] = {
     "src/services/discord/turn_bridge/runtime_handoff_loop/watcher_handoff.rs": 1,
     "src/services/discord/turn_bridge/stream_tick.rs": 1,
     "src/services/discord/turn_bridge/terminal_controller_cutover.rs": 1,
+    "src/services/discord/turn_bridge/terminal_controller_cutover/o_body.rs": 1,
     "src/services/discord/turn_bridge/terminal_outcome_delivery.rs": 1,
     "src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs": 1,
-    "src/services/tui_o/cutover.rs": 2,
+    "src/services/tui_o/cutover.rs": 4,
 }
 
 

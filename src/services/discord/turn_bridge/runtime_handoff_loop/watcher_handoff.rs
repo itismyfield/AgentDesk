@@ -260,7 +260,11 @@ pub(super) fn handle_watcher_runtime_handoff(
                     .remove_tmux_session_if_current(&tmux_session_name, &cancel);
                 *watcher_delivery_pin = None;
                 // O posts TUI bodies itself; a standby relay would be a second writer.
-                if !crate::services::tui_o::cutover::o_owns_tui_output(Some(runtime_kind))
+                if !crate::services::tui_o::cutover::o_owns_tui_output_for_channel(
+                    channel_id.get(),
+                    Some(runtime_kind),
+                )
+                .unwrap_or(true)
                     && let Some(http_for_standby) = shared_owned.serenity_http_or_token_fallback()
                 {
                     let placeholder_msg_id_opt = if inflight_state.current_msg_id == 0 {

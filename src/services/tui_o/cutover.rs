@@ -1,4 +1,4 @@
-//! Static ownership of a channel's TUI body: Legacy while `O_TUI_WRITER` is false, O afterwards.
+//! Channel ownership uses the immutable boot policy; uncertain identities withhold the body.
 //! This is an ownership fact, never delivery evidence; evidence readers must not consult it.
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
@@ -7,7 +7,15 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 /// While false every guard below is a no-op.
 pub(crate) use super::topology::O_TUI_WRITER;
 
-/// Whether O, not Legacy, posts this channel's TUI body. Static: build flag + runtime kind.
+mod channel_gate;
+pub(crate) use channel_gate::{
+    IdentityError, o_owns_tui_output_for_channel, o_owns_tui_output_for_channel_tmux,
+};
+
+// Channel-free callers must migrate before an enabled build can compile.
+const _: () = assert!(!O_TUI_WRITER);
+
+/// Channel-free compatibility helper; enabled builds must remove this API.
 pub(crate) fn o_owns_tui_output(kind: Option<RuntimeHandoffKind>) -> bool {
     o_owns_tui_output_with(O_TUI_WRITER || test_override::forced(), kind)
 }
@@ -96,6 +104,72 @@ pub(crate) mod test_override {
         fn drop(&mut self) {
             crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&self.0);
         }
+    }
+    use crate::services::tui_o::channel_policy::{self, BootChannels};
+    use std::cell::RefCell;
+
+    pub(crate) const CHANNELS_ENV: &str = "ADK_TEST_O_TUI_CHANNELS";
+    thread_local! {
+        static CHANNELS: RefCell<Option<BootChannels>> = const { RefCell::new(None) };
+    }
+
+    fn snapshot(channels: &[(u64, super::RuntimeHandoffKind)]) -> BootChannels {
+        let agents: Vec<_> = channels
+            .iter()
+            .map(|(id, kind)| {
+                let provider = match kind {
+                    super::RuntimeHandoffKind::ClaudeTui => "claude",
+                    super::RuntimeHandoffKind::CodexTui => "codex",
+                    _ => panic!("test writer channel must be TUI"),
+                };
+                serde_json::json!({"id": format!("writer-{id}"), "name": "Writer", "channels": {
+                    provider: {"id": id.to_string(), "runtime": "tui"}
+                }})
+            })
+            .collect();
+        let ids: Vec<_> = channels.iter().map(|(id, _)| *id).collect();
+        let config = serde_json::from_value(serde_json::json!({
+            "server": {}, "agents": agents, "tui_o": {"writer": {"channels": ids}}
+        }))
+        .unwrap();
+        BootChannels::validate(&config).unwrap()
+    }
+
+    pub(crate) struct ChannelsGuard {
+        _forced: ForceGuard,
+        previous: Option<BootChannels>,
+    }
+
+    pub(crate) fn force_channels(channels: &[(u64, super::RuntimeHandoffKind)]) -> ChannelsGuard {
+        ChannelsGuard {
+            _forced: force_on(),
+            previous: CHANNELS.with(|cell| cell.replace(Some(snapshot(channels)))),
+        }
+    }
+
+    impl Drop for ChannelsGuard {
+        fn drop(&mut self) {
+            CHANNELS.with(|cell| cell.replace(self.previous.take()));
+        }
+    }
+
+    pub(crate) fn with_channels<R>(evaluate: impl FnOnce(Option<&BootChannels>) -> R) -> R {
+        CHANNELS.with(|cell| {
+            let value = cell.borrow();
+            if let Some(snapshot) = value.as_ref() {
+                return evaluate(Some(snapshot));
+            }
+            if let Ok(raw) = std::env::var(CHANNELS_ENV) {
+                let entries =
+                    serde_json::from_str::<Vec<(u64, super::RuntimeHandoffKind)>>(&raw).unwrap();
+                return evaluate(Some(&snapshot(&entries)));
+            }
+            evaluate(channel_policy::boot())
+        })
+    }
+
+    pub(crate) fn force_off() -> ForceGuard {
+        ForceGuard(FORCED.with(|cell| cell.replace(false)))
     }
 }
 

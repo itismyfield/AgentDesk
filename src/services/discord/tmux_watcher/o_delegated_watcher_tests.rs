@@ -32,7 +32,13 @@ async fn o_delegated_watcher_turn_shows_no_body_and_records_no_frontier() {
     if !isolated_in(
         "o_delegated_watcher_tests",
         "o_delegated_watcher_turn_shows_no_body_and_records_no_frontier",
-        &[(flag, "1")],
+        &[
+            (flag, "1"),
+            (
+                crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+                "[[6284122,\"claude_tui\"]]",
+            ),
+        ],
     ) {
         return;
     }
