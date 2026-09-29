@@ -1247,6 +1247,7 @@ src/
 │   │   │   ├── liveness.rs
 │   │   │   ├── loop_poll_prologue.rs
 │   │   │   ├── no_result_exits.rs
+│   │   │   ├── o_delegated_arm.rs
 │   │   │   ├── orphan_status_panel_cleanup.rs
 │   │   │   ├── orphan_terminal_frame.rs
 │   │   │   ├── owed_range_baseline_tests.rs
@@ -1938,6 +1939,7 @@ src/
 │   │   │   ├── pieces.rs
 │   │   │   ├── round_trip.rs
 │   │   │   └── writer_tests.rs
+│   │   ├── cutover.rs
 │   │   ├── ownership.rs
 │   │   └── shadow_host.rs
 │   ├── tui_prompt_dedupe/

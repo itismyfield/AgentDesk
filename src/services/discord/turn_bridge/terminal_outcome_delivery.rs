@@ -47,6 +47,7 @@ mod delivery_epilogue;
 mod delivery_epilogue_tests;
 mod empty_response_recovery;
 mod foreign_terminal_handoff;
+pub(in crate::services::discord) use foreign_terminal_handoff::resume as resume_foreign_terminal_custody;
 mod prompt_too_long_guidance;
 mod queue_retry_silence;
 mod recovery_retry;
@@ -884,12 +885,4 @@ pub(super) async fn run_terminal_outcome_delivery(
         response_sent_offset,
         turn_start,
     }
-}
-
-pub(in crate::services::discord) async fn resume_foreign_terminal_custody(
-    registry: &crate::services::discord::health::HealthRegistry,
-    payload: &mut serde_json::Value,
-    checkpoint: &crate::services::discord::terminal_delivery_custody::CustodyCheckpoint,
-) -> Result<bool, String> {
-    foreign_terminal_handoff::resume(registry, payload, checkpoint).await
 }

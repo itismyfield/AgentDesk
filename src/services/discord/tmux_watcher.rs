@@ -1130,8 +1130,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         } else if o_delegated_terminal {
             tui_direct_anchor_terminal_body_visible = true;
             last_relayed_offset = Some(turn_data_start_offset);
-            let generation_mtime_ns = read_generation_file_mtime_ns(&tmux_session_name);
-            last_observed_generation_mtime_ns = Some(generation_mtime_ns);
             o_delegated_arm::consume_delegated_terminal(o_delegated_arm::DelegatedTerminal {
                 http: &http,
                 shared: &shared,
@@ -1141,14 +1139,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 placeholder_msg_id,
                 inflight_before_relay: inflight_before_relay.as_ref(),
                 inflight_identity_before_relay: inflight_identity_before_relay.as_ref(),
-                consumed_range: (
-                    turn_data_start_offset,
-                    terminal_event_consumed_offset(current_offset, &all_data),
-                ),
+                consumed_end: terminal_event_consumed_offset(current_offset, &all_data),
                 response_sent_offset,
                 last_edit_text: &last_edit_text,
                 turn_data_start_offset,
-                generation_mtime_ns,
+                observed_generation_mtime_ns: &mut last_observed_generation_mtime_ns,
             })
             .await;
             true

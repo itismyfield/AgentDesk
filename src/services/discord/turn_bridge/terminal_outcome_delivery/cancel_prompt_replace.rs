@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use super::foreign_terminal_handoff::cancelled_terminal_response;
 use super::*;
 use crate::services::discord::session_banner::DiscordTurnSessionBanner;
 
@@ -428,26 +429,4 @@ pub(super) async fn settle_cancelled_episode_work(
         return true;
     }
     !children.is_empty()
-}
-
-/// Render the existing cancellation/restart terminal body independently of its
-/// transport, so a detached episode can POST it without touching a foreign card.
-pub(super) fn cancelled_terminal_response(
-    full_response: &str,
-    response_sent_offset: usize,
-    restart_mode: Option<crate::services::discord::restart_mode::InflightRestartMode>,
-    banner: &DiscordTurnSessionBanner<'_>,
-) -> String {
-    let remaining_response = response_portion_after_offset(full_response, response_sent_offset);
-    let response = if let Some(restart_mode) = restart_mode {
-        handoff_interrupted_message(restart_mode, remaining_response)
-    } else if remaining_response.trim().is_empty() {
-        "[Stopped]".to_string()
-    } else {
-        format!(
-            "{}\n\n[Stopped]",
-            banner.format_discord_body(remaining_response)
-        )
-    };
-    banner.prefix(response_sent_offset == 0, response)
 }
