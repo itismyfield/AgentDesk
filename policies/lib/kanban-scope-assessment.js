@@ -1,11 +1,7 @@
 /** @module policies/lib/kanban-scope-assessment
  *
- * #3605 (T2): scope-assessment side-path result recording. Extracted from
- * kanban-rules.js so the missed-hook fallback in timeouts/reconciliation.js can
- * call the SAME recorder instead of dropping the result. Both the live
- * onDispatchCompleted hook (kanban-rules.js) and the DB-fallback replay
- * (reconciliation.js) must record scope_depth + fall back to "full" identically;
- * keeping the logic in one module is the only way to guarantee parity.
+ * #3605 (T2): scope-assessment side-path result recording for kanban-rules.js
+ * onDispatchCompleted: records scope_depth, falling back to "full".
  *
  * The recorder is inert: it writes metadata only and never advances the card.
  * It depends on the global `agentdesk` surface via kanban-card-metadata.

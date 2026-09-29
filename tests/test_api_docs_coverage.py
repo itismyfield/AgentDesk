@@ -220,16 +220,6 @@ class ApiDocsCoverageTest(unittest.TestCase):
                 [pair("GET", "/api/one"), pair("POST", "/api/two")],
             )
 
-    def test_mounted_route_collection_includes_v1_router(self) -> None:
-        mounted = set(CHECKER.collect_mounted_api_endpoints())
-
-        self.assertIn(pair("GET", "/api/v1/overview"), mounted)
-
-    def test_generated_route_inventory_includes_v1_router(self) -> None:
-        route_inventory = CHECKER.inventory.generated_route_inventory()
-
-        self.assertIn("| `GET` | `/api/v1/overview` |", route_inventory)
-
     def test_generated_route_inventory_includes_browser_entry_routes(self) -> None:
         route_inventory = CHECKER.inventory.generated_route_inventory()
         for path in ("/", "/settings", "/ws"):

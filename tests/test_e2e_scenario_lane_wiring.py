@@ -1,4 +1,4 @@
-"""Contract tests for the #5997 e2e scenario lane wiring.
+"""Contract tests for the e2e scenario lane wiring.
 
 The expected Python module set is derived from the directory, not listed here,
 so a new `scripts/e2e/tui_relay/test_*.py` that nobody wires fails this gate
@@ -11,12 +11,14 @@ import re
 import unittest
 from pathlib import Path
 
+import yaml
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CI_SCRIPT_CHECKS = REPO_ROOT / "scripts/ci-script-checks.sh"
 CI_PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 TUI_RELAY_TESTS = REPO_ROOT / "scripts/e2e/tui_relay"
-UNCONDITIONAL_JOB = "relay-authority-contract"
+UNCONDITIONAL_JOB = "relay_authority_targets"
 CENSUS_TARGET = "services::discord::tui_prompt_relay::tests::scenario_census_e2e"
 
 
@@ -84,6 +86,17 @@ class E2eScenarioLaneWiring(unittest.TestCase):
                 line.startswith("    if:") or line.startswith("    needs:"),
                 f"{UNCONDITIONAL_JOB} must stay unconditional; found {line.strip()!r}",
             )
+
+    def test_census_target_remains_required_by_the_always_publisher(self) -> None:
+        jobs = yaml.safe_load(self.workflow)["jobs"]
+        publisher = jobs["relay-authority-contract"]
+        self.assertEqual(publisher["if"], "always()")
+        self.assertEqual(publisher["needs"], [UNCONDITIONAL_JOB, "relay_authority_mutations"])
+        census_steps = [step for step in jobs[UNCONDITIONAL_JOB]["steps"]
+                        if CENSUS_TARGET in step.get("run", "")]
+        self.assertEqual(len(census_steps), 1)
+        self.assertNotIn("if", census_steps[0])
+        self.assertNotIn("continue-on-error", census_steps[0])
 
     def test_commented_wiring_does_not_count(self) -> None:
         fixture = '# "$PYTHON" -m unittest scripts.e2e.tui_relay.test_fixtures'

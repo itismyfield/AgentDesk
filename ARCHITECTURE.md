@@ -196,6 +196,7 @@ src/
 ├── dispatch/
 │   ├── dispatch_status/
 │   │   └── terminal_timestamp_tests.rs
+│   ├── completion_hooks.rs
 │   ├── dispatch_cancel.rs
 │   ├── dispatch_channel.rs
 │   ├── dispatch_context.rs
@@ -354,8 +355,6 @@ src/
 │   │   │   │   ├── types.rs
 │   │   │   │   └── validation.rs
 │   │   │   └── auto_queue_preflight_harness_tests.rs
-│   │   ├── v1/
-│   │   │   └── agent_read.rs
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
 │   │   ├── agents_setup.rs
@@ -418,7 +417,6 @@ src/
 │   │   ├── stats.rs
 │   │   ├── termination_events.rs
 │   │   ├── turn_lease.rs
-│   │   ├── v1.rs
 │   │   ├── voice_audio.rs
 │   │   ├── voice_conductor.rs
 │   │   └── voice_config.rs
@@ -1917,6 +1915,14 @@ src/
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
 │   │   └── tests_pg.rs
+│   ├── tui_input/
+│   │   ├── blob.rs
+│   │   ├── bounded_tmux.rs
+│   │   ├── bounded_tmux_tests.rs
+│   │   ├── durability_tests.rs
+│   │   ├── durable.rs
+│   │   ├── ledger.rs
+│   │   └── mod.rs
 │   ├── tui_o/
 │   │   ├── shadow/
 │   │   │   ├── binding_reader.rs

@@ -1,8 +1,9 @@
-"""Tests for the relay-authority named-target selection-floor gate (#5071)."""
+"""Tests for the relay-authority named-target selection-floor gate."""
 
 from __future__ import annotations
 
 import contextlib
+import copy
 import importlib.util
 import io
 import json
@@ -13,6 +14,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "check_relay_authority_contract.py"
@@ -52,21 +55,28 @@ def write_workflow(
         "name": contract.RELAY_TARGET_STEP,
         "run": "\n".join(commands) + "\n",
     }]
-    if mutation_step is not None:
-        steps.append({"name": "Run condition-3 mutations", "run": mutation_step})
+    mutation_steps = (
+        [{"name": "Run condition-3 mutations", "run": mutation_step}]
+        if mutation_step is not None else []
+    )
     workflow = repo_root / contract.PR_WORKFLOW
     workflow.parent.mkdir(parents=True, exist_ok=True)
     workflow.write_text(
-        "jobs:\n"
-        f"  {contract.RELAY_AUTHORITY_JOB}:\n"
-        "    steps:\n"
-        + "".join(
-            f"      - name: {step['name']}\n        run:"
-            + (f" |\n          {str(step['run']).replace(chr(10), chr(10) + '          ').rstrip()}\n"
-               if "\n" in str(step["run"])
-               else f" {step['run']}\n")
-            for step in steps
-        ),
+        yaml.safe_dump({"jobs": {
+            contract.RELAY_AUTHORITY_JOB: {
+                "if": "always()",
+                "needs": [contract.RELAY_AUTHORITY_TARGETS_JOB, contract.RELAY_AUTHORITY_MUTATIONS_JOB],
+            },
+            contract.RELAY_AUTHORITY_TARGETS_JOB: {"steps": steps},
+            contract.RELAY_AUTHORITY_MUTATIONS_JOB: {
+                "strategy": {"fail-fast": False, "matrix": {"shard": [0, 1, 2]}},
+                "env": {
+                    "RELAY_AUTHORITY_MUTATION_SHARD_INDEX": "${{ matrix.shard }}",
+                    "RELAY_AUTHORITY_MUTATION_SHARD_TOTAL": "3",
+                },
+                "steps": mutation_steps,
+            },
+        }}),
         encoding="utf-8",
     )
 
@@ -93,6 +103,69 @@ def manifest_path(
 
 
 class ManifestContract(unittest.TestCase):
+    def test_execution_graph_cannot_skip_contract_lanes(self) -> None:
+        lanes, _ = contract.load_active_lanes(REPO_ROOT / contract.DEFAULT_MANIFEST)
+        original = yaml.safe_load((REPO_ROOT / contract.PR_WORKFLOW).read_text(encoding="utf-8"))
+        mutations = [
+            (contract.RELAY_AUTHORITY_JOB, "if", None),
+            (contract.RELAY_AUTHORITY_JOB, "needs", [contract.RELAY_AUTHORITY_TARGETS_JOB]),
+            (contract.RELAY_AUTHORITY_JOB, "continue-on-error", True),
+            (contract.RELAY_AUTHORITY_TARGETS_JOB, "needs", ["changes"]),
+            (contract.RELAY_AUTHORITY_TARGETS_JOB, "if", "false"),
+            (contract.RELAY_AUTHORITY_TARGETS_JOB, "continue-on-error", True),
+            (contract.RELAY_AUTHORITY_MUTATIONS_JOB, "needs", ["changes"]),
+            (contract.RELAY_AUTHORITY_MUTATIONS_JOB, "if", "false"),
+            (contract.RELAY_AUTHORITY_MUTATIONS_JOB, "continue-on-error", True),
+        ]
+        for job_id, key, value in mutations:
+            with self.subTest(job=job_id, key=key), tempfile.TemporaryDirectory() as temporary:
+                payload = copy.deepcopy(original)
+                job = payload["jobs"][job_id]
+                if value is None:
+                    job.pop(key)
+                else:
+                    job[key] = value
+                root = Path(temporary)
+                workflow = root / contract.PR_WORKFLOW
+                workflow.parent.mkdir(parents=True)
+                workflow.write_text(yaml.safe_dump(payload), encoding="utf-8")
+                with self.assertRaisesRegex(contract.ManifestError, "must always publish|must execute unconditionally"):
+                    contract.validate_workflow_contract(root, lanes, True)
+
+    def test_mutation_matrix_and_shard_environment_cannot_drop_rows(self) -> None:
+        lanes, _ = contract.load_active_lanes(REPO_ROOT / contract.DEFAULT_MANIFEST)
+        original = yaml.safe_load((REPO_ROOT / contract.PR_WORKFLOW).read_text(encoding="utf-8"))
+        mutations = [
+            ("strategy", {"fail-fast": False, "matrix": {"shard": [0, 1]}}),
+            ("strategy", {"fail-fast": False, "matrix": {"shard": [0, 1, 1]}}),
+            ("strategy", {"fail-fast": True, "matrix": {"shard": [0, 1, 2]}}),
+            ("env", {"RELAY_AUTHORITY_MUTATION_SHARD_INDEX": "0", "RELAY_AUTHORITY_MUTATION_SHARD_TOTAL": "3"}),
+            ("env", {"RELAY_AUTHORITY_MUTATION_SHARD_INDEX": "${{ matrix.shard }}", "RELAY_AUTHORITY_MUTATION_SHARD_TOTAL": "4"}),
+        ]
+        for key, value in mutations:
+            with self.subTest(key=key, value=value), tempfile.TemporaryDirectory() as temporary:
+                payload = copy.deepcopy(original)
+                payload["jobs"][contract.RELAY_AUTHORITY_MUTATIONS_JOB][key] = value
+                root = Path(temporary)
+                workflow = root / contract.PR_WORKFLOW
+                workflow.parent.mkdir(parents=True)
+                workflow.write_text(yaml.safe_dump(payload), encoding="utf-8")
+                with self.assertRaisesRegex(contract.ManifestError, "must execute all three|must pass its shard"):
+                    contract.validate_workflow_contract(root, lanes, True)
+
+    def test_target_step_cannot_skip_or_mask_command_failure(self) -> None:
+        for key, value in (("if", "false"), ("continue-on-error", True)):
+            with self.subTest(key=key):
+                temporary, path = manifest_path([active_lane()])
+                with temporary:
+                    root = Path(temporary.name)
+                    workflow = root / contract.PR_WORKFLOW
+                    payload = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+                    payload["jobs"][contract.RELAY_AUTHORITY_TARGETS_JOB]["steps"][0][key] = value
+                    workflow.write_text(yaml.safe_dump(payload), encoding="utf-8")
+                    with self.assertRaisesRegex(contract.ManifestError, "step must be unconditional and fail closed"):
+                        contract.load_active_lanes(path, root)
+
     def test_checked_in_manifest_declares_active_and_gap_rows(self) -> None:
         lanes, gaps = contract.load_active_lanes(
             REPO_ROOT / "scripts" / "relay_authority_contract_targets.json",
@@ -226,13 +299,14 @@ class ManifestContract(unittest.TestCase):
             mutation_script.write_text("#!/usr/bin/env bash\nset -euo pipefail\ntrue\n", encoding="utf-8")
             mutation_script.chmod(0o755)
             workflow = repo_root / contract.PR_WORKFLOW
-            text = workflow.read_text(encoding="utf-8")
+            payload = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+            payload["jobs"][contract.RELAY_AUTHORITY_MUTATIONS_JOB]["steps"].append({
+                "name": "Run condition-3 mutations",
+                "if": "${{ false }}",
+                "run": contract.CONDITION3_MUTATION_COMMAND,
+            })
             workflow.write_text(
-                text + (
-                    "      - name: Run condition-3 mutations\n"
-                    "        if: ${{ false }}\n"
-                    f"        run: {contract.CONDITION3_MUTATION_COMMAND}\n"
-                ),
+                yaml.safe_dump(payload),
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(
