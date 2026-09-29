@@ -464,12 +464,38 @@ _health_json_reasons() {
   _health_json_get_string_array_csv "$health_json" "degraded_reasons"
 }
 
+_health_json_tui_gateway_verified_providers() {
+  # Providers every `tui_output_gateway_channels` entry verifies (worker/standby, complete,
+  # channels > 0), as an ERE alternation; the shared CSV reader keeps jq and jq-less alike.
+  local health_json="$1" csv entry name verified="" refused="" out=""
+  local entry_ere='^[a-z][a-z0-9_-]*:(worker|standby):complete:[1-9][0-9]*$'
+  csv=$(_health_json_get_string_array_csv "$health_json" "tui_output_gateway_channels" || true)
+  _health_json_reasons_csv_is_well_formed "$csv" || return 0
+  local IFS=','
+  for entry in $csv; do
+    name="${entry%%:*}"
+    if [[ "$entry" =~ $entry_ere ]] && [ "$name" != "unsupported" ]; then
+      verified="$verified,$name,"
+    else
+      refused="$refused,$name,"
+    fi
+  done
+  for entry in $csv; do
+    name="${entry%%:*}"
+    case "$refused" in *",$name,"*) continue ;; esac
+    case "|$out|" in *"|$name|"*) continue ;; esac
+    case "$verified" in *",$name,"*) out="${out:+$out|}$name" ;; esac
+  done
+  printf '%s' "$out"
+}
+
 _health_json_gateway_standby_only() {
-  local health_json="$1"
+  local health_json="$1" tui ere='^(gateway_standby|provider:[^:]+:gateway_standby'
   _health_json_field_is_true "$health_json" "server_up" || return 1
   _health_json_field_is_true "$health_json" "cluster_standby" || return 1
-  _health_json_degraded_reasons_all_match "$health_json" \
-    '^(gateway_standby|provider:[^:]+:(gateway_standby|tui_output_requires_gateway))$'
+  tui=$(_health_json_tui_gateway_verified_providers "$health_json")
+  [ -n "$tui" ] && ere="$ere|provider:($tui):tui_output_requires_gateway"
+  _health_json_degraded_reasons_all_match "$health_json" "$ere)\$"
 }
 
 _health_json_reconcile_only() {
@@ -623,25 +649,29 @@ _health_json_degraded_reasons_all_match() {
 }
 
 _health_json_deploy_nonblocking_ere() {
-  # $1 allow_reconcile_degraded, $2 deploy verdict, $3 cluster_standby proven.
+  # $1 allow_reconcile_degraded, $2 deploy verdict, $3 cluster_standby proven,
+  # $4 providers whose TUI gateway restriction the body verifies (alternation).
   # A relay verdict label cycles with placeholder state, so it cannot judge a
   # deploy (2026-09-07 measurement). A queue depth is backlog, so it only stops
   # counting for a deploy verdict. Standby tokens join the set only once the
-  # body proves the node is a standby. Everything else, including an
+  # body proves the node is a standby, and a TUI gateway reason only for a
+  # provider whose role the body verifies. Everything else, including an
   # unrecognised reason, blocks. No comma: the fallback splits on one.
   local ere='^(relay_verdict_[^,]+'
   [ "${1:-0}" = "1" ] && ere="$ere|provider:[^:,]+:reconcile_in_progress"
   [ "${2:-0}" = "1" ] && ere="$ere|provider:[^:,]+:pending_queue_depth:[0-9]+"
-  [ "${3:-0}" = "1" ] && ere="$ere|gateway_standby|provider:[^:,]+:(gateway_standby|tui_output_requires_gateway)"
+  [ "${3:-0}" = "1" ] && ere="$ere|gateway_standby|provider:[^:,]+:gateway_standby"
+  [ -n "${4:-}" ] && ere="$ere|provider:(${4}):tui_output_requires_gateway"
   printf '%s)$' "$ere"
 }
 
 _health_json_deploy_nonblocking_ere_for_body() {
   # The only way to build the accepted set: structural proof comes from the
   # body itself, so no caller can reconstruct a policy that drifts.
-  local health_json="$1" standby=0
+  local health_json="$1" standby=0 tui
   _health_json_field_is_true "$health_json" "cluster_standby" && standby=1
-  _health_json_deploy_nonblocking_ere "${2:-0}" "${3:-0}" "$standby"
+  tui=$(_health_json_tui_gateway_verified_providers "$health_json")
+  _health_json_deploy_nonblocking_ere "${2:-0}" "${3:-0}" "$standby" "$tui"
 }
 
 _health_json_deploy_blocking_reasons() {

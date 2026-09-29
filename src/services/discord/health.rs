@@ -377,20 +377,12 @@ impl HealthRegistry {
         self.utility_bot_http_clone(UtilityBotRole::Announce).await
     }
 
-    pub(in crate::services::discord) async fn register_standby(
-        &self,
-        name: String,
-        shared: Arc<SharedData>,
-    ) {
+    pub(crate) async fn register_standby(&self, name: String, shared: Arc<SharedData>) {
         self.register_with_role(name, shared, ProviderRuntimeRole::Standby)
             .await;
     }
 
-    pub(in crate::services::discord) async fn register_worker(
-        &self,
-        name: String,
-        shared: Arc<SharedData>,
-    ) {
+    pub(crate) async fn register_worker(&self, name: String, shared: Arc<SharedData>) {
         self.register_with_role(name, shared, ProviderRuntimeRole::Worker)
             .await;
     }
