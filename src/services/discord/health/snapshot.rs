@@ -1060,6 +1060,10 @@ pub(super) async fn build_health_snapshot_with_options(
         status = status.worsen(HealthStatus::Degraded);
         degraded_reasons.push(reason);
     }
+    for reason in crate::services::tui_o::alarm::health_reasons() {
+        status = status.worsen(HealthStatus::Degraded);
+        degraded_reasons.push(reason);
+    }
 
     DiscordHealthSnapshot {
         status,

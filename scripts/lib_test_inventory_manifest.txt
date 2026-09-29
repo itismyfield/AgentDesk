@@ -2900,6 +2900,7 @@ services::discord::health::provider_probe::tests::classifier_preserves_healthy_p
 services::discord::health::provider_probe::tests::classifier_reports_probe_degradation_reasons
 services::discord::health::provider_probe::tests::mixed_gateway_and_standby_is_not_classified_as_cluster_standby
 services::discord::health::provider_probe::tests::provider_health_counts_fence_cells_that_outlive_their_actor
+services::discord::health::provider_probe::tests::refused_tui_intake_is_a_degraded_reason_on_every_non_gateway_role
 services::discord::health::provider_probe::tests::registered_idle_standby_is_degraded_but_http_ready
 services::discord::health::provider_probe::tests::stalled_reconcile_keeps_the_in_progress_health_axes
 services::discord::health::provider_probe::tests::standby_live_and_finalizing_evidence_remains_visible_for_fail_closed_restart
@@ -9305,6 +9306,10 @@ services::tool_output_guard::tests::line_heavy_small_error_is_sanitized_once_wit
 services::tool_output_guard::tests::small_output_is_preserved_exactly
 services::tool_output_guard::tests::very_large_non_ascii_error_aligns_context_window_to_utf8
 services::tool_output_guard::tests::very_large_single_line_error_keeps_projection_memory_bounded
+services::tui_o::alarm::tests::an_alarm_is_never_sent_to_its_own_channel
+services::tui_o::alarm::tests::first_event_raises_health_and_one_operator_message
+services::tui_o::alarm::tests::not_found_alarms_only_at_three_within_an_hour
+services::tui_o::alarm::tests::without_an_alert_channel_or_notifier_alarms_stay_in_health
 services::tui_o::ownership::tests::a_transition_waits_for_an_admission_in_progress_and_admits_nothing_after
 services::tui_o::ownership::tests::release_records_lost_before_the_release_runs
 services::tui_o::ownership::tests::transitions_close_admission_and_epochs_grow_per_acquisition
@@ -9392,6 +9397,8 @@ services::tui_o::store::tests::enabling_the_store_is_refused_where_directory_fsy
 services::tui_o::store::tests::init_and_ledger_round_trip_the_anchor_serials_and_outcomes
 services::tui_o::store::tests::missing_or_damaged_state_of_an_era_channel_halts_instead_of_reinitializing
 services::tui_o::store::tests::the_store_is_dormant_unless_its_flag_is_set
+services::tui_o::topology::tests::switch_off_keeps_every_intake_worker
+services::tui_o::topology::tests::switch_on_refuses_tui_intake_off_the_gateway_only
 services::tui_o::writer::tests::a_blocked_record_or_a_ledger_violation_stops_the_channel_before_any_post
 services::tui_o::writer::tests::a_created_reply_by_another_author_is_settled_from_history_rather_than_trusted
 services::tui_o::writer::tests::a_piece_is_prepared_under_ownership_then_posted_once
@@ -9427,6 +9434,19 @@ services::tui_prompt_dedupe::binding_context::tests::binding_context_t1_create_n
 services::tui_prompt_dedupe::binding_context::tests::binding_context_t3_env_is_the_only_launch_source
 services::tui_prompt_dedupe::binding_context::tests::binding_context_t8_gc_requires_retirement_and_rotates
 services::tui_prompt_dedupe::binding_context::tests::binding_context_tmp_sweep_preserves_live_writers_and_uncertain_evidence
+services::tui_prompt_dedupe::binding_events::lane_tests::a_b_c_chain_links_seq_and_old_and_a_late_b_is_only_audited
+services::tui_prompt_dedupe::binding_events::lane_tests::a_deferred_b_is_adopted_and_handed_to_the_rotation_before_a_deferred_c
+services::tui_prompt_dedupe::binding_events::lane_tests::a_follow_up_hook_keeps_the_first_session_start_as_the_deferred_evidence
+services::tui_prompt_dedupe::binding_events::lane_tests::a_new_source_after_recovery_waits_until_the_retried_b_rotation_settles
+services::tui_prompt_dedupe::binding_events::lane_tests::a_reloaded_log_is_made_durable_before_the_same_source_is_published
+services::tui_prompt_dedupe::binding_events::lane_tests::a_retry_paused_before_its_artifacts_cannot_overwrite_a_later_hooks_cutover
+services::tui_prompt_dedupe::binding_events::lane_tests::a_transcript_replaced_on_the_same_path_is_a_new_source
+services::tui_prompt_dedupe::binding_events::lane_tests::b_hook_handled_before_the_a_tail_is_read_still_records_old_a
+services::tui_prompt_dedupe::binding_events::lane_tests::binding_judgment_is_the_same_with_and_without_the_log
+services::tui_prompt_dedupe::binding_events::lane_tests::crash_leaves_log_and_memory_on_the_same_source
+services::tui_prompt_dedupe::binding_events::lane_tests::fork_fixture_is_pending_until_its_transcript_exists_then_resolved_with_parent_a
+services::tui_prompt_dedupe::binding_events::lane_tests::launch_cause_comes_from_the_execution_context_only_once
+services::tui_prompt_dedupe::binding_events::lane_tests::log_outage_defers_a_hook_adoption_and_the_idle_poll_adopts_b_without_another_hook
 services::tui_prompt_dedupe::runtime_binding::shadow_session_tests::observer_discovery_lists_live_sessions_without_changing_relay_state
 services::tui_prompt_dedupe::session_rotation::tests::drain_progress_resets_the_stall_counter_and_stall_accumulates
 services::tui_prompt_dedupe::session_rotation::tests::second_hop_preserves_the_original_frozen_transcript

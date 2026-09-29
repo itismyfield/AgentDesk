@@ -36,7 +36,10 @@ pub(crate) fn is_non_turn_operational_alert(source: &str, reason_code: Option<&s
     is_actionable_ops_alert(source, reason_code)
         || matches!(
             source,
-            "stall_watchdog" | "quality_regression_alerter" | "queue_overflow_notice"
+            "stall_watchdog"
+                | "quality_regression_alerter"
+                | "queue_overflow_notice"
+                | "tui_o_alarm"
         )
         || (source == "auto-queue-monitor"
             && reason_code.is_some_and(|reason| reason.starts_with("auto_queue.monitor_")))
