@@ -72,6 +72,7 @@ export default function PipelineVisualEditorStagePanel({ ctx, actions }: Props) 
 
 function StageCard({ ctx, actions, stage, index }: Props & { stage: StageDraft; index: number }) {
   const tr = ctx.tr;
+  const assignedAgent = ctx.agents.find((agent: any) => agent.id === stage.agent_override_id);
 
   return (
     <div className="min-w-0 rounded-[20px] border p-4 space-y-3" style={PANEL_SOFT_STYLE}>
@@ -101,24 +102,24 @@ function StageCard({ ctx, actions, stage, index }: Props & { stage: StageDraft; 
             ["review_pass", tr("리뷰 통과 후", "After review pass")],
           ]}
         />
-        <SelectField
+        <ReadOnlyField
           label={tr("실행 방식", "Provider")}
-          value={stage.provider === "counter" ? "counter" : ""}
-          onChange={(value) => actions.updateStage(index, { provider: value })}
-          options={[
-            ["", tr("담당 에이전트", "Assigned agent")],
-            ["counter", tr("교차 모델 (e2e 항목이 있을 때만)", "Counter model (only with an e2e item)")],
-          ]}
+          value={stage.provider === "counter" ? tr("교차 모델", "Counter model") : stage.provider || tr("담당 에이전트", "Assigned agent")}
+          note={tr("읽기 전용", "Read-only")}
         />
-        <AgentSelect ctx={ctx} label={tr("담당 에이전트 지정", "Agent override")} value={stage.agent_override_id} emptyLabel={tr("카드 담당자", "Card assignee")} onChange={(value) => actions.updateStage(index, { agent_override_id: value })} />
-        <SelectField
+        {stage.provider === "counter" ? (
+          <ReadOnlyField
+            label={tr("담당 에이전트 지정", "Agent override")}
+            value={assignedAgent ? localeName(ctx.locale, assignedAgent) : stage.agent_override_id || tr("카드 담당자", "Card assignee")}
+            note={tr("읽기 전용", "Read-only")}
+          />
+        ) : (
+          <AgentSelect ctx={ctx} label={tr("담당 에이전트 지정", "Agent override")} value={stage.agent_override_id} emptyLabel={tr("카드 담당자", "Card assignee")} onChange={(value) => actions.updateStage(index, { agent_override_id: value })} />
+        )}
+        <ReadOnlyField
           label={tr("건너뛰기", "Skip")}
-          value={stage.skip_condition === "no_rs_changes" ? "no_rs_changes" : ""}
-          onChange={(value) => actions.updateStage(index, { skip_condition: value })}
-          options={[
-            ["", tr("건너뛰지 않음", "Never")],
-            ["no_rs_changes", tr("Rust 변경이 없으면", "When no Rust files changed")],
-          ]}
+          value={stage.skip_condition === "no_rs_changes" ? tr("Rust 변경이 없으면", "When no Rust files changed") : stage.skip_condition || tr("건너뛰지 않음", "Never")}
+          note={tr("읽기 전용", "Read-only")}
         />
       </div>
 
@@ -137,6 +138,16 @@ function StageCard({ ctx, actions, stage, index }: Props & { stage: StageDraft; 
           {tr("삭제", "Delete")}
         </button>
       </div>
+    </div>
+  );
+}
+
+function ReadOnlyField(props: { label: string; value: string; note: string }) {
+  return (
+    <div>
+      <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>{props.label}</label>
+      <p className="whitespace-pre-wrap break-words text-sm" style={INPUT_STYLE}>{props.value}</p>
+      <span className="text-xs" style={MUTED_TEXT_STYLE}>{props.note}</span>
     </div>
   );
 }
@@ -173,4 +184,3 @@ function AgentSelect(props: { ctx: any; label: string; value: string; emptyLabel
     </div>
   );
 }
-

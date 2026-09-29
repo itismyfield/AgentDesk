@@ -22,8 +22,7 @@ export interface FsmEdgeBinding {
 
 export interface StageDraft {
   stage_name: string;
-  // Only "counter" and "no_rs_changes" change behaviour (review-automation.js). Other stored
-  // values are kept as they are so a save does not rewrite them.
+  // Keep stored values verbatim so editing other fields does not rewrite existing settings.
   provider: string;
   agent_override_id: string;
   skip_condition: string;
