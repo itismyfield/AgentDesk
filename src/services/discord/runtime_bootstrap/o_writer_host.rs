@@ -63,19 +63,17 @@ pub(super) fn spawn(
         "codex" => ShadowProvider::Codex,
         _ => return,
     };
-    let alarms = Arc::new(AlarmRouter::for_process(config, shared.pg_pool.clone()));
-    let io = Arc::new(GatewayHost {
-        shared: Arc::clone(shared),
-        alarms,
+    // Nothing below runs unless this bot owns a channel, so an off or empty writer takes no lock.
+    host::start(shadow, pg_gateway, || {
+        let alarms = Arc::new(AlarmRouter::for_process(config, shared.pg_pool.clone()));
+        host::HostParts {
+            io: Arc::new(GatewayHost {
+                shared: Arc::clone(shared),
+                alarms,
+            }),
+            runtime_root: crate::config::runtime_root(),
+            gate: crate::services::tui_o::ownership::gate(provider.as_str()),
+            readiness: host::process_readiness(),
+        }
     });
-    let gate = crate::services::tui_o::ownership::gate(provider.as_str());
-    let root = crate::config::runtime_root();
-    host::start(
-        io,
-        shadow,
-        pg_gateway,
-        root,
-        gate,
-        host::process_readiness(),
-    );
 }

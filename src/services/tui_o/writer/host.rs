@@ -74,23 +74,39 @@ pub(crate) fn channel_ready(channel: u64) -> bool {
     PROCESS.is_ready(channel)
 }
 
+/// What hosting needs once a channel is owned; built only then, so an off or empty writer takes nothing.
+pub struct HostParts<I> {
+    pub io: Arc<I>,
+    pub runtime_root: Option<PathBuf>,
+    pub gate: Arc<OwnershipGate>,
+    pub readiness: Arc<Readiness>,
+}
+
 /// Spawns one host task per channel this provider's bot owns. Without a PG gateway lease the gate
 /// never becomes Owned, so those channels are held with an alarm and get no actor.
 pub fn start<I: HostIo>(
-    io: Arc<I>,
     provider: ShadowProvider,
     pg_gateway: bool,
-    runtime_root: Option<PathBuf>,
-    gate: Arc<OwnershipGate>,
-    readiness: Arc<Readiness>,
+    prepare: impl FnOnce() -> HostParts<I>,
 ) -> Vec<JoinHandle<()>> {
     let kind = match provider {
         ShadowProvider::Claude => RuntimeHandoffKind::ClaudeTui,
         ShadowProvider::Codex => RuntimeHandoffKind::CodexTui,
     };
+    let ours = |&(_, channel_kind, owned): &(u64, _, bool)| owned && channel_kind == Some(kind);
+    let channels: Vec<_> = cutover::boot_ownership().into_iter().filter(ours).collect();
+    if channels.is_empty() {
+        return Vec::new();
+    }
+    let HostParts {
+        io,
+        runtime_root,
+        gate,
+        readiness,
+    } = prepare();
     let mut tasks = Vec::new();
-    for (channel, channel_kind, owned) in cutover::boot_ownership() {
-        if !owned || channel_kind != Some(kind) || !readiness.claim(channel) {
+    for (channel, _, owned) in channels {
+        if !readiness.claim(channel) {
             continue;
         }
         let root = match (pg_gateway, &runtime_root) {

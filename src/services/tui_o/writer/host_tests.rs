@@ -1,7 +1,7 @@
 use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
 use crate::services::tui_o::cutover::{self, test_override};
 use crate::services::tui_o::writer::binding::ChannelBindingLog;
-use crate::services::tui_o::writer::host::{HostIo, Readiness, start};
+use crate::services::tui_o::writer::host::{HostIo, HostParts, Readiness, start};
 
 use super::*;
 use crate::services::tui_prompt_dedupe::binding_events as p5;
@@ -91,17 +91,13 @@ fn root(harness: &Harness) -> PathBuf {
 
 fn host(harness: &Harness, io: &Arc<TestIo>, pg: bool, ready: &Arc<Readiness>) -> usize {
     p5::set_test_root(Some(harness._runtime.path()));
-    let gate = Arc::clone(&harness.gate);
-    let (io, ready) = (Arc::clone(io), Arc::clone(ready));
-    start(
-        io,
-        ShadowProvider::Claude,
-        pg,
-        Some(root(harness)),
-        gate,
-        ready,
-    )
-    .len()
+    let parts = || HostParts {
+        io: Arc::clone(io),
+        runtime_root: Some(root(harness)),
+        gate: Arc::clone(&harness.gate),
+        readiness: Arc::clone(ready),
+    };
+    start(ShadowProvider::Claude, pg, parts).len()
 }
 
 fn empty_init(channel: u64) -> Initialized {
@@ -162,22 +158,17 @@ async fn only_a_selected_channel_gets_an_actor_and_it_is_ready_only_while_owned(
     assert_eq!(io.alarms.halted(), []);
 }
 
-#[tokio::test(start_paused = true)]
-async fn nothing_is_hosted_while_the_writer_is_off_or_selects_no_channel() {
-    let (harness, _, _) = switched_over(&row("m0", "before the switch"));
-    harness.gate.acquired();
-    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+#[test]
+fn nothing_is_hosted_while_the_writer_is_off_or_selects_no_channel() {
+    let unprepared =
+        || -> HostParts<TestIo> { panic!("nothing is owned, yet host parts were built") };
     let selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
     let off = test_override::force_off();
-    assert_eq!(host(&harness, &io, true, &ready), 0);
+    assert!(start(ShadowProvider::Claude, true, unprepared).is_empty());
     drop(off);
     drop(selected);
     let _empty = test_override::force_channels(&[]);
-    assert_eq!(host(&harness, &io, true, &ready), 0);
-    polls(2).await;
-    assert_eq!(io.calls(), []);
-    assert!(io.alarms.0.lock().unwrap().is_empty());
-    assert!(!ready.is_ready(CHANNEL));
+    assert!(start(ShadowProvider::Claude, true, unprepared).is_empty());
 }
 
 #[tokio::test(start_paused = true)]
