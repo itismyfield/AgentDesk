@@ -1281,6 +1281,75 @@ pr_workflow=".github/workflows/ci-pr.yml"
 main_workflow=".github/workflows/ci-main.yml"
 ruby -ryaml -e 'j=YAML.load_file(ARGV[0]).fetch("jobs").fetch("scripts"); r=j.fetch("steps").find{|s|s["name"]=="Run script checks"}; u=j.fetch("steps").find{|s|s["name"]=="Upload giant-file progress evidence"}; abort unless r.fetch("env")=={"GFP_EVENT_NAME"=>"${{ github.event_name }}","GFP_REPOSITORY"=>"${{ github.repository }}","GFP_CANDIDATE_SHA"=>"${{ github.sha }}","TEST_LANE_BASELINE_REF"=>"HEAD"} && u=={"name"=>"Upload giant-file progress evidence","if"=>"always()","uses"=>"actions/upload-artifact@v4","with"=>{"path"=>"target/giant-file-progress/evidence.json"}}' "$main_workflow" || error "$main_workflow must preserve fail-closed giant-file selector and evidence wiring"
 
+# The main-only Windows warm job must save the cache keys the PR Windows jobs
+# restore: same workflow/job env, setup steps, rust-cache inputs and compile.
+validate_main_windows_cache_warm() {
+  if ! ruby - "$main_workflow" "$pr_workflow" <<'RUBY'
+require "yaml"
+main_path, pr_path = ARGV
+main = YAML.load_file(main_path)
+pr = YAML.load_file(pr_path)
+errors = []
+label = "#{main_path} job windows_cache_warm"
+job = main.fetch("jobs", {})["windows_cache_warm"]
+unless job.is_a?(Hash)
+  warn "#{label} is missing; PR Windows jobs would compile cold"
+  exit 1
+end
+
+# rust-cache and sccache hash these env prefixes, so both workflows must agree.
+hashed = ->(env) { (env || {}).select { |key, _| key.to_s.match?(/\A(CARGO|CC|CFLAGS|CXX|CMAKE|RUST)/) } }
+errors << "#{label}: workflow CARGO/RUST env must equal #{pr_path}" unless hashed.(main["env"]) == hashed.(pr["env"])
+
+setup = ->(steps) do
+  Array(steps).take_while { |step| step["uses"].to_s.start_with?("actions/checkout", "actions/setup-python", "dtolnay/", "mozilla-actions/", "Swatinem/") || step["if"] == "runner.os == 'macOS'" }
+    .reject { |step| step["if"] == "runner.os == 'macOS'" }
+    .map { |step| step.reject { |key, _| %w[name if].include?(key) } }
+end
+compile = ->(steps) { Array(steps).select { |step| step["run"].to_s.include?("cargo") } }
+main_compile = compile.(job["steps"])
+
+pr_compile_steps = {
+  "check_fast_cross_os" => "cargo check",
+  "check_fast_cross_os_targets" => "Writer namespace exact Windows targets",
+}
+pr_compile_steps.each do |pr_id, step_name|
+  pr_job = pr.fetch("jobs", {})[pr_id]
+  unless pr_job.is_a?(Hash)
+    errors << "#{pr_path} job #{pr_id} is missing"
+    next
+  end
+  errors << "#{label}: env must equal #{pr_id}" unless job["env"] == pr_job["env"]
+  errors << "#{label}: setup steps before the compile must equal #{pr_id}" unless setup.(job["steps"]) == setup.(pr_job["steps"])
+  pr_shape = Array(pr_job["steps"]).select { |step| step["name"] == step_name }.map { |step| step.slice("shell", "env") }
+  errors << "#{label}: compile step shell/env must equal #{pr_id} #{step_name.inspect}" unless pr_shape.length == 1 && main_compile.map { |step| step.slice("shell", "env") }.uniq == pr_shape
+end
+pr_check = compile.(pr.dig("jobs", "check_fast_cross_os", "steps")).map { |step| step["run"].strip }
+errors << "#{label}: cargo check must equal check_fast_cross_os" unless main_compile.first&.fetch("run", "")&.strip == pr_check.first
+
+expected_cache = {
+  "cache-targets" => false,
+  "cache-bin" => false,
+  "shared-key" => "cargo-dependencies-v2",
+  "save-if" => "${{ github.ref == 'refs/heads/main' }}",
+}
+cache_steps = Array(job["steps"]).select { |step| step["uses"] == "Swatinem/rust-cache@v2" }
+errors << "#{label}: rust-cache must save the shared key from main only" unless cache_steps.map { |step| step["with"] } == [expected_cache]
+commands = main_compile.map { |step| step["run"].strip }
+errors << "#{label}: must build exactly check + lib test binary without running tests" unless commands == ["cargo check --workspace --all-targets", "cargo test --lib --no-run"]
+errors << "#{label}: must not gate or depend on other jobs" if job.key?("needs") || job.key?("if")
+errors << "#{label}: must stay advisory (continue-on-error: true)" unless job["continue-on-error"] == true
+errors << "#{label}: must run on windows-latest" unless job["runs-on"] == "windows-latest"
+
+errors.each { |message| warn message }
+exit(errors.empty? ? 0 : 1)
+RUBY
+  then
+    error "$main_workflow must warm the Windows cargo cache the PR Windows jobs restore"
+  fi
+}
+validate_main_windows_cache_warm
+
 workflow_files() {
   find .github/workflows -maxdepth 1 -type f \
     \( -name '*.yml' -o -name '*.yaml' \) -print0

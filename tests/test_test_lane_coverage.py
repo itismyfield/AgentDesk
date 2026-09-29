@@ -211,6 +211,26 @@ class LaneFilterTests(unittest.TestCase):
                 (coverage.LaneFilter(("retained_tests",), ()),),
             )
 
+    def test_build_only_cargo_test_is_not_a_coverage_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / "justfile").write_text(
+                "test-non-pg:\n    cargo test --lib retained_tests\n",
+                encoding="utf-8",
+            )
+            (root / ".github/workflows/ci-main.yml").write_text(
+                "run: just test-non-pg\nrun: cargo test --lib --no-run\n",
+                encoding="utf-8",
+            )
+
+            lanes = coverage.discover_lane_filters(root)
+
+            self.assertEqual(lanes, (coverage.LaneFilter(("retained_tests",), ()),))
+            self.assertEqual(
+                coverage.uncovered_modules({"other::tests"}, lanes), {"other::tests"}
+            )
+
     def test_discovers_shared_non_pg_filter_without_treating_variable_as_positive(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

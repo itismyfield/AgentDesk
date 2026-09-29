@@ -300,3 +300,62 @@ jobs:
           path: target/maintainability-audit.yaml
           if-no-files-found: ignore
           retention-days: 14
+
+  # Warms the shared cargo registry cache and the Windows sccache entries that
+  # the ci-pr.yml `check_fast_cross_os*` jobs restore; main never ran Windows.
+  windows_cache_warm:
+    name: Windows cache warm (windows-latest)
+    runs-on: windows-latest
+    # Advisory: deploys pin on a green CI Main run, so a warm miss must not fail it.
+    continue-on-error: true
+    timeout-minutes: 60
+    env:
+      # rust-cache and sccache both hash CARGO_* env; keep the PR Windows job env.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Provision Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Same compile as the PR `cargo check` job.
+      - name: cargo check
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: cargo check --workspace --all-targets
+
+      # Builds the lib test binary the PR exact-targets runner filters; runs nothing.
+      - name: Build lib test binary
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: cargo test --lib --no-run
+
+      - name: sccache stats
+        if: always()
+        shell: bash
+        run: sccache --show-stats || true
