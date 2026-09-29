@@ -1,31 +1,22 @@
-//! Concurrency-safe refresh of the managed skill cache (#4256).
+//! Concurrency-safe refresh of the managed skill cache.
 //!
-//! `skill_sync::ensure_managed_skill_dir` calls [`refresh_managed_skill_dir`] whenever the
-//! managed copy of a skill drifts from its source. Layout preparation
-//! (`ensure_runtime_layout` -> `migrate_legacy_skill_links` -> `ensure_managed_skill_dir`)
-//! is reachable from concurrent server routes and CLI paths with no outer lock, so the
-//! delete+copy+rename swap here must stay safe when two processes refresh the same skill.
+//! Layout preparation reaches [`refresh_managed_skill_dir`] from concurrent server routes and
+//! CLI paths with no outer lock, so its swap must be safe when two processes refresh one skill.
 
 use super::*;
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-/// Monotonic per-process counter that, combined with `std::process::id()`, makes every
-/// staging/grave path and lock owner token unique so concurrent refreshes never collide.
+/// Per-process counter; with the PID it makes staging/grave paths and owner tokens unique.
 static REFRESH_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Backstop age after which a lock whose holder liveness is *indeterminate* (no liveness probe
-/// on this platform, or an empty/unreadable/malformed owner token) is treated as abandoned. A live, readable PID is
-/// never aged out. Generous because it must never race a genuinely slow-but-live refresh.
+/// Backstop age for a lock whose holder liveness is indeterminate (no probe, or a bad token).
+/// Generous so it never races a slow-but-live refresh.
 const STALE_LOCK_TTL: Duration = Duration::from_secs(300);
 
-/// Releases a skill's refresh lock on drop (every exit path, including panic unwind) so a
-/// failed refresh cannot deadlock later ones.
-///
-/// The release is ownership-safe: it removes the lockfile only if it still carries THIS
-/// guard's exact `<pid>:<seq>` token, so even a mistaken steal can never delete the new
-/// owner's lock and let a third entrant into the swap critical section.
+/// Releases a skill's refresh lock on drop (including unwind) so a failed refresh cannot
+/// deadlock later ones. Only a lockfile still carrying this guard's token is removed.
 struct SkillRefreshLock {
     path: PathBuf,
     token: String,
@@ -33,11 +24,8 @@ struct SkillRefreshLock {
 
 impl Drop for SkillRefreshLock {
     fn drop(&mut self) {
-        // Atomic compare-and-remove, not a read-then-unlink TOCTOU: we first `rename` the
-        // lock aside to a unique grave, so we then inspect and act on THE EXACT FILE WE
-        // MOVED -- never "whatever happens to be at lock_path now" (which a recoverer could
-        // have replaced between a naive read and unlink, so the unlink would delete the
-        // recoverer's fresh lock and reopen the third-entrant hole).
+        // Rename the lock aside and judge the file we moved: a read-then-unlink could delete
+        // a recoverer's fresh lock and let a third entrant into the swap.
         let Some(dir) = self.path.parent() else {
             return;
         };
@@ -62,11 +50,8 @@ impl Drop for SkillRefreshLock {
             let _ = fs::remove_file(&grave);
             return;
         }
-        // We moved a FOREIGN lock (a recoverer superseded us on the indeterminate path).
-        // Restore it create-exclusively via a hard link so a third party's freshly
-        // re-created lock is never clobbered; then drop our extra grave name. If the slot is
-        // already retaken (hard_link EEXIST), the new owner keeps its lock and we warn
-        // rather than silently discarding the graved token.
+        // We moved a foreign lock (a recoverer superseded us). Restore it via hard link,
+        // which fails rather than clobbering a lock re-created in the meantime.
         if fs::hard_link(&grave, &self.path).is_err() {
             tracing::warn!(
                 lock = %self.path.display(),
@@ -77,17 +62,10 @@ impl Drop for SkillRefreshLock {
     }
 }
 
-/// Re-copies the source skill into the managed cache through a per-invocation staging dir
-/// that atomically replaces `managed_dir`, so a mid-copy failure never leaves a half-written
-/// cache `discover_skill_dirs` could pick up.
+/// Re-copies the source skill into the managed cache through a unique staging dir under
+/// `.skill-refresh` that is renamed into place, so a failed copy is never discoverable.
 ///
-/// Concurrency-safe (#4256): an exclusive per-skill lockfile serializes the
-/// delete+copy+rename swap across processes -- if another process already holds it we skip
-/// this round (that process produces the fresh copy) rather than racing. The staging path is
-/// unique (pid + [`REFRESH_SEQ`]) so two refreshes can never delete, share, or expose each
-/// other's staging, and it stays under `.skill-refresh` (outside the discoverable skills
-/// root). The swap tolerates `managed_dir` already being gone (a concurrent winner swapped
-/// first), and the staging dir is cleaned up on success and error alike.
+/// An exclusive per-skill lockfile serializes the delete+copy+rename swap across processes.
 pub(super) fn refresh_managed_skill_dir(
     root: &Path,
     skill_name: &str,
@@ -103,14 +81,8 @@ pub(super) fn refresh_managed_skill_dir(
         return Ok(());
     };
 
-    // Residual-risk bound: the rename-based release (see SkillRefreshLock::drop) has a
-    // sub-instant where lock_path is absent, so on the INDETERMINATE path only (no liveness
-    // probe, or a malformed/empty token -- NEVER with a well-formed token, where liveness is
-    // authoritative and a live holder is never stolen) two refreshers can transiently
-    // overlap in the copy/swap below. This is NOT corrupting: each refresher's staging dir is
-    // unique and a COMPLETE copy of the same source, the swap is an atomic full-dir rename,
-    // so both converge on identical correct content. The worst case is a transient absent
-    // `managed` dir plus a redundant copy, which self-heals on the next ensure_managed_skill_dir.
+    // With indeterminate liveness two refreshers can briefly overlap here. Harmless: each
+    // stages a complete copy and swaps by rename; at worst `managed` is briefly absent.
     let staging = refresh_dir.join(format!(
         "{skill_name}.{}.{}",
         std::process::id(),
@@ -125,9 +97,8 @@ pub(super) fn refresh_managed_skill_dir(
     result
 }
 
-/// Acquires the per-skill refresh lock, recovering a lock abandoned by a crashed holder so a
-/// dead process can never wedge refresh forever (#4256). Returns `Ok(None)` only when a
-/// genuinely live holder is refreshing this skill (skip and let it produce the fresh copy).
+/// Acquires the per-skill refresh lock, recovering one abandoned by a crashed holder.
+/// Returns `Ok(None)` only when a live holder is refreshing this skill.
 fn acquire_skill_refresh_lock(
     refresh_dir: &Path,
     skill_name: &str,
@@ -139,10 +110,8 @@ fn acquire_skill_refresh_lock(
     if !skill_refresh_lock_is_stale(&lock_path) {
         return Ok(None);
     }
-    // Atomically claim removal of the stale lock: whoever wins the rename is the unique
-    // recoverer, so two simultaneous recoverers can never both clobber a peer's fresh lock
-    // (only the rename winner touches it). Then take the lock; losing the still-exclusive
-    // create_new means a peer beat us to it, so we skip.
+    // Only the rename winner recovers, so two recoverers cannot both clobber a peer's fresh
+    // lock; losing the create_new afterwards means a peer beat us, so we skip.
     let grave = refresh_dir.join(format!(
         "{skill_name}.lock.dead.{}.{}",
         std::process::id(),
@@ -154,9 +123,8 @@ fn acquire_skill_refresh_lock(
     try_take_lock(&lock_path)
 }
 
-/// Atomically creates the lockfile, stamping a unique `<pid>:<seq>` owner token, and returns
-/// `Ok(None)` if a holder already exists. The token drives both stale-owner recovery (its
-/// PID) and ownership-safe release (the whole token; see [`SkillRefreshLock`]).
+/// Atomically creates the lockfile with a unique `<pid>:<seq>` owner token, or returns
+/// `Ok(None)` if a holder exists. Recovery reads its PID; release matches the whole token.
 fn try_take_lock(lock_path: &Path) -> Result<Option<SkillRefreshLock>, String> {
     match fs::OpenOptions::new()
         .write(true)
@@ -182,14 +150,8 @@ fn try_take_lock(lock_path: &Path) -> Result<Option<SkillRefreshLock>, String> {
     }
 }
 
-/// A lock is stale (safe to steal) only when its holder is provably gone:
-///   * the recorded PID is readable and confirmed NOT alive (unix `kill(pid, 0)` -> `ESRCH`,
-///     Windows `OpenProcess` -> `ERROR_INVALID_PARAMETER` or a signaled handle), or
-///   * liveness is indeterminate (no probe on this platform, or an empty/unreadable/malformed
-///     token) AND the lock is older than [`STALE_LOCK_TTL`].
-///
-/// Liveness is authoritative: a readable, live PID is NEVER stolen regardless of age, so a
-/// slow-but-active holder cannot be stolen out from under its own copy/swap.
+/// Stale only when the holder is provably gone: a dead PID, or indeterminate liveness and an
+/// age past [`STALE_LOCK_TTL`]. A live PID is never stolen, whatever its age.
 fn skill_refresh_lock_is_stale(lock_path: &Path) -> bool {
     match read_lock_pid(lock_path).and_then(pid_liveness) {
         Some(alive) => !alive,
@@ -197,13 +159,8 @@ fn skill_refresh_lock_is_stale(lock_path: &Path) -> bool {
     }
 }
 
-/// Parses the holder PID from a STRICT `<pid>:<seq>` owner token -- both fields non-empty
-/// and pure ASCII digits, exactly two colon-separated fields -- or the legacy bare `<pid>`
-/// stamp (pure ASCII digits, no colon). Every other shape (empty, sign-prefixed like
-/// `+123`/`-5`, `123:`, `123:garbage`, `123:456:extra`, embedded spaces, trailing junk)
-/// returns `None` so liveness stays indeterminate and the caller falls back to the TTL
-/// branch rather than trusting a garbled PID. The digit check is required because
-/// `str::parse::<u32>` would otherwise accept a leading `+`.
+/// Parses the holder PID from a strict `<pid>:<seq>` token or a legacy bare `<pid>`. Any
+/// other shape is `None`, so liveness stays indeterminate instead of trusting a garbled PID.
 fn read_lock_pid(lock_path: &Path) -> Option<u32> {
     let contents = fs::read_to_string(lock_path).ok()?;
     let mut fields = contents.trim().split(':');
@@ -211,7 +168,6 @@ fn read_lock_pid(lock_path: &Path) -> Option<u32> {
     let pid = parse_lock_digits::<u32>(pid_field)?;
     match fields.next() {
         None => Some(pid), // legacy bare `<pid>`
-        // `<pid>:<seq>`: seq must be pure digits and the final field (reject extra fields).
         Some(seq) if parse_lock_digits::<u64>(seq).is_some() && fields.next().is_none() => {
             Some(pid)
         }
@@ -219,8 +175,7 @@ fn read_lock_pid(lock_path: &Path) -> Option<u32> {
     }
 }
 
-/// Parses a lock-token field only when it is non-empty and composed solely of ASCII digits,
-/// so no sign prefix (`+`/`-`), space, or other junk `str::parse` might tolerate slips through.
+/// Parses a non-empty, all-digit token field; plain `str::parse` would accept a leading `+`.
 fn parse_lock_digits<T: std::str::FromStr>(field: &str) -> Option<T> {
     if field.is_empty() || !field.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -233,9 +188,8 @@ fn lock_file_age(lock_path: &Path) -> Option<Duration> {
     SystemTime::now().duration_since(modified).ok()
 }
 
-/// Probes whether `pid` is alive via `kill(pid, 0)` (delivers no signal): `Some(true)` when
-/// reachable or `EPERM` (alive, not ours), `Some(false)` on `ESRCH` (gone). `None` means
-/// liveness is indeterminate on this platform and the caller must fall back to the TTL.
+/// Probes `pid` with `kill(pid, 0)` (no signal sent): `Some(true)` when reachable or `EPERM`
+/// (alive, not ours), otherwise `Some(false)` (`ESRCH`: gone).
 #[cfg(unix)]
 #[allow(unsafe_code)]
 fn pid_liveness(pid: u32) -> Option<bool> {
@@ -279,8 +233,8 @@ fn pid_liveness(_pid: u32) -> Option<bool> {
     None // no cheap liveness probe here; fall back to the TTL backstop
 }
 
-/// Atomically replaces `managed_dir` with `staging`. Tolerates `managed_dir` already being
-/// absent (a concurrent winner removed it), so the swap never errors on a missing target.
+/// Replaces `managed_dir` with `staging` (remove, then rename), tolerating an already-absent
+/// `managed_dir` (a concurrent winner removed it).
 fn swap_managed_skill_dir(staging: &Path, managed_dir: &Path) -> Result<(), String> {
     if let Err(e) = fs::remove_dir_all(managed_dir) {
         if e.kind() != std::io::ErrorKind::NotFound {
@@ -306,10 +260,7 @@ fn swap_managed_skill_dir(staging: &Path, managed_dir: &Path) -> Result<(), Stri
 mod tests {
     use super::*;
 
-    /// #4256: dropping a guard whose token no longer matches the on-disk lock (it was
-    /// stolen/superseded) must NOT delete that lock -- otherwise a third entrant could
-    /// acquire and race the delete+rename critical section. The atomic rename-based release
-    /// moves the file aside, sees a foreign token, and restores it intact (no leftover grave).
+    /// A guard whose token no longer matches the on-disk lock must restore it, not delete it.
     #[test]
     fn superseded_guard_does_not_delete_new_owners_lock() {
         let temp = tempfile::tempdir().unwrap();
@@ -333,7 +284,6 @@ mod tests {
             "a superseded release must not leak a grave file"
         );
 
-        // Sanity: a guard whose token still matches DOES release its own lock on drop.
         let guard = SkillRefreshLock {
             path: lock_path.clone(),
             token: "222:2".to_string(),
@@ -349,8 +299,6 @@ mod tests {
         );
     }
 
-    /// #4256 Finding A: only a strict `<pid>:<seq>` token or a legacy bare `<pid>` yields a
-    /// PID; every malformed shape stays indeterminate (`None`) so the caller uses the TTL.
     #[test]
     fn read_lock_pid_rejects_malformed_tokens() {
         let temp = tempfile::tempdir().unwrap();

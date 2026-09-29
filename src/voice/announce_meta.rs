@@ -10,9 +10,8 @@ use sqlx::PgPool;
 use super::prompt::VoiceTranscriptAnnouncement;
 
 const ANNOUNCEMENT_META_TTL: Duration = Duration::from_secs(30);
-/// Durable voice transcript announcement metadata can outlive the short
-/// process-local TTL because intake may be queued to another process or sit
-/// behind an active turn before worker execution.
+/// Durable announcement rows outlive the local TTL: intake may be queued to another
+/// process or wait behind an active turn.
 pub(crate) const DURABLE_ANNOUNCEMENT_META_TTL_SECS: i64 = 24 * 60 * 60;
 /// Keep voice routing metadata available through long background turns.
 const HANDOFF_META_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -26,34 +25,19 @@ struct StoredVoiceTranscriptAnnouncement {
     accepted_replay: bool,
 }
 
-/// Typed marker recorded by the voice foreground → background dispatch path
-/// (`dispatch_voice_background_handoff`). The turn bridge consults this on
-/// terminal delivery to decide whether the spoken summary should be routed
-/// into the foreground voice channel.
-///
-/// This replaces the user-controllable Korean-prefix substring match that
-/// the old voice-background handoff prompt classifier used (issue #2236).
+/// Typed marker stamped by `dispatch_voice_background_handoff`; terminal delivery
+/// reads it to decide whether the spoken summary goes to the voice channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VoiceBackgroundHandoffMeta {
-    /// Voice channel that originated the handoff (where the spoken summary
-    /// should be routed if it is delivered).
+    /// Voice channel that originated the handoff and receives the spoken summary.
     pub voice_channel_id: u64,
     /// Background text channel where the handoff prompt was posted.
     pub background_channel_id: u64,
-    /// Agent id from the active voice route. Used by
-    /// `voice_channel_for_background` to disambiguate when multiple agents
-    /// map onto the same background channel.
+    /// Agent from the active voice route; lets `voice_channel_for_background`
+    /// disambiguate agents that share a background channel.
     pub agent_id: Option<String>,
-    /// Legacy escape hatch for markers that were explicitly flagged by
-    /// older dispatch code. New PG-enabled dispatches refuse to publish
-    /// when the pre-publish durable reservation fails (#2355), and no-PG
-    /// development mode already consumes local markers without consulting
-    /// this flag. Always `false` for markers loaded from PG, since those
-    /// rows are themselves the durable source of truth.
-    ///
-    /// Codex #2274 round-2 finding: terminal delivery still understands
-    /// the old flagged state so already-created local fallback markers do
-    /// not become plain-text drops after an upgrade.
+    /// Legacy flag set by older dispatch code; terminal delivery still honours it.
+    /// Always `false` for markers loaded from PG, which are the source of truth.
     pub local_only_fallback: bool,
 }
 
@@ -108,7 +92,7 @@ impl VoiceAnnouncementMetaStore {
         }
     }
 
-    #[allow(dead_code)] // voice runtime wired only when voice config enabled; no target exercises it. See #3034
+    #[allow(dead_code)] // only tests call this. See #3034
     pub(crate) fn take(&self, message_id: MessageId) -> Option<VoiceTranscriptAnnouncement> {
         self.take_with_acceptance(message_id)
             .map(|(announcement, _)| announcement)
@@ -135,7 +119,7 @@ impl VoiceAnnouncementMetaStore {
             .map(|stored| (stored.announcement, stored.accepted_replay))
     }
 
-    #[allow(dead_code)] // voice runtime wired only when voice config enabled; no target exercises it. See #3034
+    #[allow(dead_code)] // only tests call this. See #3034
     pub(crate) fn contains(&self, message_id: MessageId) -> bool {
         let mut entries = match self.entries.write() {
             Ok(entries) => entries,
@@ -146,7 +130,7 @@ impl VoiceAnnouncementMetaStore {
         entries.contains_key(&message_id.get())
     }
 
-    #[allow(dead_code)] // voice runtime wired only when voice config enabled; no target exercises it. See #3034
+    #[allow(dead_code)] // only tests call this. See #3034
     pub(crate) fn insert_handoff(&self, message_id: MessageId, meta: VoiceBackgroundHandoffMeta) {
         self.insert_handoff_with_remaining_ttl(message_id, meta, HANDOFF_META_TTL);
     }
@@ -206,13 +190,8 @@ impl VoiceAnnouncementMetaStore {
         entries.remove(correlation_id).is_some()
     }
 
-    /// Insert with an explicit remaining-lifetime override. Used by
-    /// `rehydrate_handoffs_from_pg` (#2274 Codex review finding #3) so a
-    /// row that already survived 59 minutes in PG only gets the matching
-    /// remaining-TTL in memory — not a fresh 24-hour lease. Without this,
-    /// a stale local marker could outlive its durable row and route a
-    /// completion summary after PG GC has already deleted the source of
-    /// truth.
+    /// Insert with an explicit lifetime; `rehydrate_handoffs_from_pg` passes the row's
+    /// remaining PG TTL so the local marker never outlives its durable row.
     pub(crate) fn insert_handoff_with_remaining_ttl(
         &self,
         message_id: MessageId,
@@ -232,24 +211,15 @@ impl VoiceAnnouncementMetaStore {
         }
     }
 
-    /// Drop a specific marker from the in-memory store without consuming
-    /// it. Used to clear stale local state when the durable PG claim is
-    /// the authoritative source and reports the row is gone (#2274 Codex
-    /// review finding #1).
+    /// Drop a local marker without returning it, e.g. once the authoritative PG claim
+    /// has settled the outcome.
     pub(crate) fn forget_handoff(&self, message_id: MessageId) {
         if let Ok(mut entries) = self.handoff_entries.write() {
             entries.remove(&message_id.get());
         }
     }
 
-    /// Flip the `local_only_fallback` flag on an in-memory marker for
-    /// legacy completion-path tests. Runtime PG-enabled dispatch no
-    /// longer creates this state: it refuses to publish when the durable
-    /// pre-publish reservation fails (#2355).
-    /// Returns true iff a marker existed and was updated.
-    ///
-    /// Codex #2274 round-2 finding: see the `local_only_fallback` doc
-    /// comment on `VoiceBackgroundHandoffMeta`.
+    /// Test helper: set `local_only_fallback` on a stored marker. True iff it existed.
     #[cfg(test)]
     pub(crate) fn mark_handoff_local_only_fallback(&self, message_id: MessageId) -> bool {
         let Ok(mut entries) = self.handoff_entries.write() else {
@@ -303,18 +273,8 @@ impl VoiceAnnouncementMetaStore {
         entries.remove(correlation_id).map(|stored| stored.meta)
     }
 
-    /// Refresh the in-memory TTL for a bound handoff marker when the
-    /// background turn's watchdog deadline is extended (#2352).
-    ///
-    /// The new `expires_at` is set to `Instant::now() + HANDOFF_META_TTL`,
-    /// giving the entry a fresh full-TTL window from the moment of the
-    /// extension. The update is skipped when the existing TTL already
-    /// reaches further than the fresh window (i.e. the entry was very
-    /// recently created or previously extended), so callers can invoke
-    /// this unconditionally without risk of shrinking the TTL.
-    ///
-    /// Returns `true` when the entry existed and the TTL was extended,
-    /// `false` when the entry was absent or already had a later expiry.
+    /// Extend a bound marker to a fresh `HANDOFF_META_TTL` window, never shortening it.
+    /// Returns `true` only if the entry existed and its expiry moved later.
     pub(crate) fn refresh_handoff_deadline(&self, message_id: MessageId) -> bool {
         let Ok(mut entries) = self.handoff_entries.write() else {
             return false;
@@ -333,13 +293,8 @@ impl VoiceAnnouncementMetaStore {
         }
     }
 
-    /// #2266: non-consuming clone of the stored announcement so the intake-gate
-    /// busy-channel paths can embed the payload in the queued `Intervention`
-    /// WITHOUT draining the store. The active dispatch path still calls
-    /// `take()` to consume the entry once the queued turn finally runs and
-    /// reinserts the payload — but for the intake-time queue paths the
-    /// metadata must travel inside the Intervention because the in-memory
-    /// store TTL (30s) is shorter than typical queue dwell times.
+    /// Non-consuming read, so intake-gate queue paths can carry the payload inside the
+    /// queued `Intervention`: the 30s local TTL is shorter than typical queue dwell.
     pub(crate) fn peek_clone(&self, message_id: MessageId) -> Option<VoiceTranscriptAnnouncement> {
         let mut entries = match self.entries.write() {
             Ok(entries) => entries,
@@ -530,16 +485,13 @@ mod tests {
         let message_id = MessageId::new(997);
         let meta = handoff_meta(500, 400, None);
 
-        // Insert with a 1-second TTL (very short).
         store.insert_handoff_with_remaining_ttl(message_id, meta.clone(), Duration::from_secs(1));
 
-        // Refresh should succeed and extend the TTL to HANDOFF_META_TTL.
         assert!(
             store.refresh_handoff_deadline(message_id),
             "refresh on an existing short-TTL entry must return true"
         );
 
-        // Entry must still be accessible (was not pruned).
         assert_eq!(
             store.get_handoff(message_id),
             Some(meta),
@@ -553,15 +505,11 @@ mod tests {
         let message_id = MessageId::new(996);
         let meta = handoff_meta(501, 401, None);
 
-        // Insert with the full TTL — already at the maximum window.
         store.insert_handoff_with_remaining_ttl(message_id, meta.clone(), HANDOFF_META_TTL);
 
-        // The refresh computes new_expires_at = now + HANDOFF_META_TTL,
-        // which equals the existing expires_at (modulo sub-millisecond
-        // difference).  Either way the method must not shorten the window.
+        // The result depends on sub-millisecond timing; only survival is asserted.
         let _ = store.refresh_handoff_deadline(message_id);
 
-        // Entry must be present regardless.
         assert!(
             store.get_handoff(message_id).is_some(),
             "entry must remain after no-op refresh"
@@ -1179,8 +1127,6 @@ mod tests {
         pg_db.drop().await;
     }
 
-    /// Two concurrent terminal-delivery callers race to consume the same
-    /// durable handoff. Exactly one must win.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn durable_handoff_concurrent_consumers_yield_exactly_one_claim() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -1248,10 +1194,7 @@ mod tests {
             .await
             .expect("persist durable handoff");
 
-        // Push expires_at into the past so the GC sweep deletes the row.
-        // We set expires_at directly (rather than backdating created_at)
-        // because the updated_at trigger fires on any UPDATE and would
-        // reset updated_at to NOW(); expires_at has no such trigger.
+        // The GC sweep keys on `expires_at`, so expire the row directly.
         sqlx::query(
             "UPDATE voice_background_handoff_meta
              SET expires_at = NOW() - INTERVAL '1 second'
@@ -1296,8 +1239,7 @@ mod tests {
             .await
             .expect("persist durable handoff");
 
-        // Shrink expires_at to 10 seconds from now so we can confirm the
-        // refresh pushes it back to a full TTL window.
+        // Shrink expires_at so the refresh has something to extend.
         sqlx::query(
             "UPDATE voice_background_handoff_meta
              SET expires_at = NOW() + INTERVAL '10 seconds'
@@ -1313,7 +1255,6 @@ mod tests {
             .expect("refresh durable ttl");
         assert!(refreshed, "refresh must return true for a live row");
 
-        // After refresh, expires_at must be significantly in the future.
         let remaining_secs: f64 = sqlx::query_scalar(
             "SELECT EXTRACT(EPOCH FROM (expires_at - NOW()))::float8
              FROM voice_background_handoff_meta

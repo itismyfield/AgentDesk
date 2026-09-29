@@ -1,26 +1,8 @@
-//! Home dashboard KPI trend endpoint (#1242).
+//! Home dashboard KPI trend endpoint: the four sparkline series (`tokens`, `cost`,
+//! `in_progress`, `rate_limit`) in one response, all `days` long (default 14, [1, 30]).
 //!
-//! Surfaces the 4 sparkline series the home KPI tiles need in a single
-//! response so the dashboard can hydrate every tile with one round-trip:
-//!
-//!   - `tokens`       — daily total tokens (mirrors /api/token-analytics.daily)
-//!   - `cost`         — daily USD cost (same source as tokens)
-//!   - `in_progress`  — daily count of `task_dispatches` rows created on the
-//!                      day, used as a proxy for "active card throughput"
-//!                      (no historical snapshot of `kanban_cards.status` is
-//!                      kept yet — see issue #1242 risk note).
-//!   - `rate_limit`   — current per-provider utilization plus a flat 14-day
-//!                      sparkline derived from the latest cached value.
-//!                      `rate_limit_cache` only stores the most recent
-//!                      snapshot per provider, so the sparkline replays the
-//!                      current value across the window. Providers without
-//!                      data (e.g. unsupported, no recent session) come back
-//!                      with `unsupported: true` + an empty `values` array
-//!                      so the dashboard can render a placeholder.
-//!
-//! All four series share the same length (`days`, default 14, clamped to
-//! [1, 30]) so a sparkline component can render any of them with the same
-//! axis.
+//! No history is kept for card status or rate limits, so `in_progress` counts dispatches
+//! created per day as a proxy, and `rate_limit` repeats each provider's latest cached value.
 
 use axum::{
     Json,
@@ -37,8 +19,7 @@ use super::{AppState, analytics};
 
 /// Default lookback window for the home KPI sparklines.
 const DEFAULT_DAYS: i64 = 14;
-/// Hard ceiling. Any larger request would force the caller to use the heavier
-/// `/api/token-analytics?period=30d|90d` endpoint instead.
+/// Longer windows belong to the heavier `/api/token-analytics?period=90d`.
 const MAX_DAYS: i64 = 30;
 /// Minimum window — anything below this would render a degenerate sparkline.
 const MIN_DAYS: i64 = 1;
@@ -49,8 +30,6 @@ pub struct HomeKpiTrendsQuery {
 }
 
 /// GET /api/home/kpi-trends?days=14
-///
-/// Returns the four KPI sparkline series in a single payload.
 pub async fn home_kpi_trends(
     State(state): State<AppState>,
     Query(params): Query<HomeKpiTrendsQuery>,
@@ -72,17 +51,7 @@ pub async fn home_kpi_trends(
     let date_keys = day_window(local_today, days);
 
     // ── Tokens + cost ─────────────────────────────────────────────────────
-    // Reuse the shared receipt::token-analytics 30 s in-process cache (#1303)
-    // so cold dashboard loads don't pay two ~9 s filesystem scans (one here,
-    // one for /api/token-analytics).
-    //
-    // The cache is keyed by the canonical analytics periods (7d / 30d / 90d)
-    // that `prewarm_token_analytics_cache` populates and `/api/token-analytics`
-    // writes. Round the home-trends `days` value up to the nearest covering
-    // canonical period so a `days=14` request hits the same `30d` cache slot
-    // that the token-analytics endpoint and prewarm already populate. The
-    // sparkline slice afterwards is already keyed off `date_keys`, so the
-    // wider cached payload naturally narrows down to the requested window.
+    // Share the token-analytics cache so cold loads don't pay a second ~9 s filesystem scan.
     let (cache_period_id, cache_days, cache_label) = canonical_cache_window(days);
     let analytics_data = super::receipt::cached_or_collect_token_analytics(
         cache_period_id,
@@ -150,13 +119,8 @@ pub async fn home_kpi_trends(
     (StatusCode::OK, Json(body))
 }
 
-/// Round the requested home-trends `days` value up to the nearest canonical
-/// token-analytics period (7d / 30d / 90d) so the cache slot collides with
-/// what `prewarm_token_analytics_cache` and `/api/token-analytics` populate.
-/// Returns (period_id, days_for_scan, label) consumed by
-/// `cached_or_collect_token_analytics`. The home sparkline already slices
-/// down to the requested window via `date_keys`, so a wider cached payload
-/// is harmless.
+/// Round `days` up to a canonical token-analytics period so the lookup hits the cache slot
+/// that prewarm and `/api/token-analytics` fill; `date_keys` slices it back down.
 fn canonical_cache_window(days: i64) -> (&'static str, i64, &'static str) {
     if days <= 7 {
         ("7d", 7, "Last 7 Days")
@@ -179,17 +143,8 @@ fn day_window(today: NaiveDate, days: i64) -> Vec<String> {
     out
 }
 
-/// Returns one entry per date in `date_keys` containing the count of
-/// `task_dispatches` rows whose `created_at` falls on that local date.
-/// Rows with a NULL `created_at` are ignored.
-///
-/// Codex P2 on #1298: previous implementation cast `created_at::date` in PG,
-/// which uses the PG session timezone — when that differs from the server's
-/// `chrono::Local`, dispatches near midnight are bucketed under the wrong
-/// day and the in-progress sparkline silently miscounts. Fetch the raw
-/// TIMESTAMPTZ values (filtered by a UTC lower bound derived from the first
-/// local date) and bucket them in Rust using `chrono::Local` so the bucket
-/// boundaries match `date_keys` regardless of PG TZ config.
+/// Count `task_dispatches` rows per local date in `date_keys`. Bucketed in Rust because PG's
+/// `created_at::date` uses the session timezone, which can differ from `chrono::Local`.
 async fn collect_in_progress_trend_pg(
     pool: &sqlx::PgPool,
     date_keys: &[String],
@@ -211,9 +166,8 @@ async fn collect_in_progress_trend_pg(
         return vec![json!(0); date_keys.len()];
     };
     let Some(local_start) = Local.from_local_datetime(&local_start_naive).single() else {
-        // Skip ambiguous DST transitions — the upper bound only narrows the
-        // result set, so falling back to "no lower bound" still produces a
-        // correct (just larger) row scan.
+        // Ambiguous or skipped local midnight (DST): the lower bound only narrows the
+        // scan, so dropping it is still correct.
         return collect_in_progress_trend_pg_with_lower_bound(pool, date_keys, None).await;
     };
     let utc_lower = local_start.with_timezone(&chrono::Utc);
@@ -265,10 +219,8 @@ async fn collect_in_progress_trend_pg_with_lower_bound(
         .collect()
 }
 
-/// Convert the existing `/api/rate-limits` payload into the home-KPI shape:
-/// each provider gets a `current_pct` (max bucket utilization 0..100), a flat
-/// `values` sparkline filled with that current_pct (or empty for unsupported
-/// providers), and the original `unsupported` / `stale` flags.
+/// Reshape `/api/rate-limits` providers into home-KPI entries: `current_pct` is the max
+/// bucket utilization (0..100) and `values` repeats it (empty when unknown).
 fn build_rate_limit_kpi(
     providers: &[serde_json::Value],
     sparkline_len: usize,
@@ -298,9 +250,6 @@ fn build_rate_limit_kpi(
             } else {
                 bucket_max_utilization_pct(provider)
             };
-            // No historical rate-limit snapshot exists yet (#1242 risk note),
-            // so we paint a flat sparkline using the current value. When data
-            // is missing the dashboard can render an empty placeholder.
             let values: Vec<serde_json::Value> = match current_pct {
                 Some(pct) => vec![json!(pct); sparkline_len],
                 None => Vec::new(),
@@ -323,9 +272,8 @@ fn build_rate_limit_kpi(
     })
 }
 
-/// Pick the largest `used / limit` ratio across this provider's buckets.
-/// Returns a 0..100 percentage, or `None` if no bucket carries usable
-/// numeric fields.
+/// Largest `used / limit` across the provider's buckets as a 0..100 percentage, or `None`
+/// when no bucket has usable numbers.
 fn bucket_max_utilization_pct(provider: &serde_json::Value) -> Option<f64> {
     let buckets = provider.get("buckets").and_then(|v| v.as_array())?;
     let mut max_pct: Option<f64> = None;

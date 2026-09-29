@@ -1,43 +1,8 @@
-//! #2374 — voice cancel tombstone, keyed by voice-background handoff
-//! `message_id`.
+//! Cancel tombstones keyed by the voice background handoff's `message_id`.
 //!
-//! Background
-//! ----------
-//! PR #2373 (#2335) added a cancel-during-handoff handler in
-//! `VoiceBargeInRuntime::dispatch_voice_background_handoff` that, after
-//! the background turn is created on the target channel, observes a
-//! barge-in / explicit-stop that arrived DURING the await and
-//! synchronously cancels the just-started target-channel turn.
-//!
-//! Codex round-3 review of that PR flagged a residual architectural
-//! concern: the cancel propagation is in-memory only and is tied to the
-//! cancel-token of the brand-new target-channel turn. A SECOND cancel
-//! that arrives slightly later for the SAME handoff (e.g. a retried
-//! voice utterance triggers `process_voice_foreground_request` a second
-//! time for the same source channel, the prior turn already finished /
-//! was finalized, and the mailbox issues a new cancel token) could
-//! re-fire downstream actions (ack synthesis, spoken reply playback)
-//! because the second caller does not see the in-memory cancel state
-//! the first cancel already wrote.
-//!
-//! Fix
-//! ---
-//! Record a process-local tombstone keyed by the handoff prompt's
-//! `message_id` whenever a cancel-during-handoff happens. The handoff
-//! `message_id` is durable across both callers (it is the same posted
-//! message on the background text channel), so the second caller can
-//! consult the tombstone before re-firing actions and discard itself.
-//!
-//! Storage is in-memory with a TTL slightly longer than the typical
-//! handoff dispatch window (`TOMBSTONE_TTL`). Pruning is opportunistic
-//! on every write; reads also re-check the expiry so a stale read
-//! returns `None`.
-//!
-//! This module is intentionally narrow: it does NOT persist tombstones
-//! to PG. The race window it closes is process-local (both callers run
-//! in the same dcserver), and a dcserver restart between the two cancel
-//! attempts is already covered by the background turn's own
-//! cancel-on-restart recovery in `runtime_bootstrap`.
+//! A cancel observed for a handoff records one; a later caller for the same handoff
+//! looks it up and discards itself instead of re-firing the spoken ack or reply.
+//! In-memory only: both callers run in the same dcserver, so nothing survives a restart.
 
 use std::{
     collections::HashMap,
@@ -47,15 +12,8 @@ use std::{
 
 use poise::serenity_prelude::MessageId;
 
-/// Tombstones survive long enough to cover the typical handoff dispatch
-/// window (seconds to a minute) plus generous slack for retry waves.
-/// Five minutes matches the upper bound of legitimate "second cancel for
-/// the same handoff" arrivals seen in production traces; anything older
-/// than this almost certainly belongs to an unrelated handoff that
-/// happens to reuse a `MessageId` (impossible in practice — Discord
-/// message ids are monotonically increasing snowflakes — but the TTL
-/// also bounds memory growth in case of pathological never-pruned
-/// channels).
+/// Covers the handoff dispatch window plus slack for retry waves, and bounds memory
+/// for tombstones nobody looks up again.
 const TOMBSTONE_TTL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone)]
@@ -70,14 +28,8 @@ pub(crate) struct VoiceCancelTombstoneStore {
 }
 
 impl VoiceCancelTombstoneStore {
-    /// Acquire the write guard, recovering in place if the lock was poisoned.
-    ///
-    /// #3914: the prior code matched `if let Ok(..) = self.entries.write()` and
-    /// silently dropped the operation on a poisoned lock. That defeats the whole
-    /// re-fire guard with no signal — a single panic while a guard was held would
-    /// permanently stop both recording and pruning tombstones. A poisoned
-    /// `RwLock` only means a writer panicked; the `HashMap` itself is still
-    /// consistent, so we log once and recover the inner map.
+    /// Write guard that recovers from poisoning: the map stays consistent after a
+    /// writer panic, and dropping writes instead would silently disable the guard.
     fn write_entries(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<u64, StoredTombstone>> {
         self.entries.write().unwrap_or_else(|poisoned| {
             tracing::warn!(
@@ -88,10 +40,8 @@ impl VoiceCancelTombstoneStore {
         })
     }
 
-    /// Record (or refresh) a tombstone for `handoff_message_id`. Idempotent;
-    /// a later record with a different reason overwrites the prior reason
-    /// (last-cancel-wins for the label, but presence-of-tombstone is what
-    /// downstream consumers branch on).
+    /// Record (or refresh) a tombstone. The last reason wins; callers branch only on
+    /// whether a tombstone exists.
     pub(crate) fn record(&self, handoff_message_id: MessageId, reason: impl Into<String>) {
         let mut entries = self.write_entries();
         let now = Instant::now();
@@ -105,12 +55,8 @@ impl VoiceCancelTombstoneStore {
         );
     }
 
-    /// Return the recorded cancel reason if a non-expired tombstone exists.
-    ///
-    /// The tombstone is NOT consumed by lookup — multiple late callers may
-    /// each need to observe it. #3914: lookups now also prune expired entries,
-    /// so eviction no longer depends solely on a steady stream of `record`
-    /// writes (a channel that stops writing tombstones is still bounded by reads).
+    /// Reason of a live tombstone. Not consumed, since several late callers may each
+    /// need it; also prunes, so eviction does not wait for another `record`.
     pub(crate) fn lookup(&self, handoff_message_id: MessageId) -> Option<String> {
         let mut entries = self.write_entries();
         let now = Instant::now();
@@ -120,7 +66,7 @@ impl VoiceCancelTombstoneStore {
             .map(|stored| stored.reason.clone())
     }
 
-    /// Explicit removal (test helper / future graceful-shutdown path).
+    /// Remove a tombstone (tests only).
     #[cfg(test)]
     pub(crate) fn forget(&self, handoff_message_id: MessageId) {
         self.write_entries().remove(&handoff_message_id.get());
@@ -138,9 +84,7 @@ fn prune_expired_locked(entries: &mut HashMap<u64, StoredTombstone>, now: Instan
 
 static GLOBAL_STORE: OnceLock<VoiceCancelTombstoneStore> = OnceLock::new();
 
-/// Process-wide tombstone store. Shared because the dispatch path and
-/// the late-cancel path both run in the same dcserver process and need a
-/// common view of "this handoff was already cancelled".
+/// Process-wide store shared by the cancel path and the handoff dispatch path.
 pub(crate) fn global_store() -> &'static VoiceCancelTombstoneStore {
     GLOBAL_STORE.get_or_init(VoiceCancelTombstoneStore::default)
 }
@@ -208,14 +152,11 @@ mod tests {
         assert!(store.lookup(msg(9)).is_none());
     }
 
-    /// #3914: a lookup must prune already-expired tombstones, so eviction no
-    /// longer depends solely on a steady stream of `record` writes.
     #[test]
     fn lookup_prunes_expired_entries() {
         let store = VoiceCancelTombstoneStore::default();
         {
-            // Bypass `record()` (which always stores a future expiry) to seed one
-            // already-expired entry and one fresh entry.
+            // `record()` always sets a future expiry, so seed the entries directly.
             let mut entries = store.write_entries();
             entries.insert(
                 1,
@@ -240,14 +181,11 @@ mod tests {
         assert!(store.lookup(msg(1)).is_none());
     }
 
-    /// #3914: a poisoned lock must NOT silently disable the re-fire guard — the
-    /// store recovers in place and keeps recording/looking up.
     #[test]
     fn recovers_from_a_poisoned_lock() {
         let store = std::sync::Arc::new(VoiceCancelTombstoneStore::default());
         store.record(msg(1), "before");
 
-        // Poison the RwLock by panicking while holding the write guard.
         let poison_store = store.clone();
         let _ = std::thread::spawn(move || {
             let _guard = poison_store.write_entries();
@@ -255,7 +193,6 @@ mod tests {
         })
         .join();
 
-        // Recovery: subsequent operations still work (not silent no-ops).
         store.record(msg(2), "after");
         assert_eq!(store.lookup(msg(2)).as_deref(), Some("after"));
         assert_eq!(

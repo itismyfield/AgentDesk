@@ -53,23 +53,15 @@ const POLICY_TICK_WARN_MS: u128 = 500;
 const POLICY_TICK_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 const CLAUDE_RATE_LIMIT_FORCED_REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// Set once the rate-limit sync loop has emitted its first WARN about absent
-/// Gemini OAuth credentials. When Gemini is simply not configured, the loop runs
-/// every 2 minutes and would otherwise spam an identical WARN forever (#3566).
-/// First miss logs at WARN; subsequent misses drop to DEBUG. Transient errors
-/// (network/API) bypass this flag and keep WARNing every cycle.
+/// Set after the first WARN about absent Gemini OAuth credentials, so an unconfigured Gemini
+/// logs later misses at DEBUG instead of every 2 minutes. Transient errors still WARN.
 static GEMINI_CREDS_MISSING_WARNED: AtomicBool = AtomicBool::new(false);
 
-/// Monotonically increasing count of policy tick hook timeouts (#747).
-/// Incremented each time `fire_tick_hook_by_name_with_timeout` returns
-/// because the wall-clock timeout elapsed before the spawn_blocking task
-/// finished. Observable via `policy_tick_timeout_count()` in tests or logs.
+/// Count of policy tick hooks that hit `POLICY_TICK_HOOK_TIMEOUT`.
 static POLICY_TICK_TIMEOUT_COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// Monotonically increasing count of tick hooks that *did* finish, but only
-/// after their owning call already timed out (#747). Helps operators notice
-/// when the tick actor is holding onto work well past the user-visible
-/// deadline, which is the failure mode this counter was added to track.
+/// Count of tick hooks that finished only after their call had already timed out, i.e. the
+/// tick actor held work well past the deadline.
 static POLICY_TICK_POST_TIMEOUT_COMPLETIONS: AtomicU64 = AtomicU64::new(0);
 
 fn claude_rate_limit_refresh_lock() -> &'static tokio::sync::Mutex<()> {
@@ -212,8 +204,7 @@ async fn run_slo_api_friction_aggregation_tick(
         );
     }
 
-    // #1072 turn-lifecycle SLO aggregation (Epic #905 Phase 1):
-    // compute + persist + alert on threshold breach.
+    // Turn-lifecycle SLO aggregation: compute, persist, and alert on threshold breach.
     let now_ms = chrono::Utc::now().timestamp_millis();
     let aggregates = crate::services::slo::run_aggregation_tick(pool, now_ms).await;
     tracing::debug!(
@@ -275,10 +266,8 @@ pub(crate) async fn run(
     crate::config::validate_config(&config)?;
     let modules = config.cluster.runtime_profile.modules();
     crate::services::dispatches::wait_queue::set_runtime_cluster_config(config.cluster.clone());
-    // Publish the boot config as the shared live snapshot and (when enabled)
-    // start the config-file watcher so hot-swappable settings reload without a
-    // restart, mirroring the policies watcher. The guard is held for the
-    // lifetime of `run`; dropping it on shutdown joins the watcher thread.
+    // Hot-swappable settings reload without a restart. The guard lives for all of `run`;
+    // dropping it on shutdown joins the watcher thread.
     crate::config_live_reload::install(config.clone());
     let _config_hot_reload_guard = crate::config_live_reload::start(
         crate::config::resolved_config_path(),
@@ -320,10 +309,8 @@ pub(crate) async fn run(
         None
     };
     if let Some(pool) = pg_pool.as_ref() {
-        // #1309: publish the runtime PG pool so cancel-tombstone helpers
-        // called from contexts without a SharedData / PgPool argument
-        // (e.g. `turn_lifecycle::stop_turn_with_policy`) can still mirror
-        // cancel tombstones to the durable store across dcserver restarts.
+        // Lets cancel-tombstone helpers with no pool argument still persist tombstones
+        // across dcserver restarts.
         crate::db::cancel_tombstones::set_global_pool(pool.clone());
     }
     crate::services::observability::init_observability(pg_pool.clone());
@@ -399,12 +386,8 @@ pub(crate) async fn run(
         _claude_tui_hook_endpoint.is_some(),
     );
 
-    // #3870 — fail closed on the dangerous combination of a non-loopback bind
-    // host with no `server.auth_token`. The control-plane auth middleware is
-    // fail-open when no token is set, so exposing it on the LAN would hand the
-    // entire mutating control-plane (deploy gate, agent CRUD, dispatch create)
-    // to any LAN peer. Force the bind to loopback instead of refusing to boot,
-    // so the server still serves locally — graceful degradation, not a brick.
+    // Auth is fail-open without `server.auth_token`, so a non-loopback bind would hand the
+    // mutating control plane to any LAN peer. Force loopback rather than refuse to boot.
     let (bind_host, bind_decision) = routes::resolve_secure_bind_host(&config);
     if let routes::BindSecurityDecision::ForcedLoopback { requested_host } = &bind_decision {
         tracing::error!(
@@ -431,32 +414,15 @@ pub(crate) async fn run(
     Ok(())
 }
 
-/// Background task that fires tiered OnTick hooks at different intervals (#127).
-///
-/// 3 tiers to prevent slow sections from blocking time-critical recovery:
-/// - OnTick30s (30s): retry, unsent notification recovery, deadlock detection [I], orphan recovery [K]
-/// - OnTick1min (1m): non-critical timeouts [A][C][D][E][L], stale detection
-/// - OnTick5min (5m): non-critical reconciliation [B][F][G][H][M][O], missed completion-hook replay
-/// - OnTick (legacy, 5m): backward compat for policies that only register onTick
+/// Background task that fires OnTick30s / OnTick1min / OnTick5min hooks in separate tiers, so
+/// slow non-critical sections (see `policies/timeouts.js`) cannot delay critical recovery.
 async fn policy_tick_loop(
     engine: PolicyEngine,
     pg_pool: Option<Arc<PgPool>>,
     cluster_runtime: Option<cluster::ClusterRuntime>,
     shutdown: Option<Arc<AtomicBool>>,
-    // #5142 D-4: the auto-queue cleanup replay below tears down provider runtime
-    // state (`clear_provider_channel_runtime`) for the slot threads it clears,
-    // and that teardown is reachable only through the health registry. This loop
-    // used to have no registry parameter at all and hard-coded `None`, so the
-    // runtime half of the cleanup was permanently skipped on every replayed task.
-    //
-    // It is still an `Option`, and `None` is still a legitimate value: a process
-    // started without Discord providers has no registry to hand over
-    // (`launch.rs` calls `server::run(.., None, ..)`). What changed is only that
-    // the tick now receives whatever the process actually has instead of
-    // discarding it — see `worker_registry::policy_tick_health_registry`. On a
-    // registry-less node the replay converges every PostgreSQL-visible part of
-    // the cleanup and skips only the in-memory teardown, which is correct there
-    // because there is no provider runtime to tear down.
+    // `None` only without Discord providers; the cleanup replay then converges its
+    // PostgreSQL side and skips the in-memory teardown, as there is no runtime to tear down.
     health_registry: Option<Arc<HealthRegistry>>,
 ) {
     tracing::info!("[policy-tick] 3-tier tick started: 30s / 1min / 5min");
@@ -490,7 +456,7 @@ async fn policy_tick_loop(
 
     let mut interval_30s = tokio::time::interval(Duration::from_secs(30));
 
-    // Skip the first immediate tick
+    // Skip the immediate first tick.
     interval_30s.tick().await;
 
     loop {
@@ -577,10 +543,8 @@ async fn policy_tick_loop(
                     }
                 }
 
-                // #5142: resume the post-commit cleanup a previous process left
-                // owed. The rows were committed with the cancel/end state
-                // change, so this is the path by which a restarted process
-                // converges residual provider sessions and slot tokens.
+                // Resume post-commit cleanup a previous process left owed; this is how a
+                // restarted process converges residual provider sessions and slot tokens.
                 match crate::services::auto_queue::cleanup_tasks::replay_pending_run_cleanup_tasks_pg(
                     health_registry.clone(),
                     pool,
@@ -1037,21 +1001,12 @@ pub(crate) async fn trigger_claude_rate_limit_refresh_if_leader(
     }
 }
 
-/// Rebuild the in-memory snapshots consumed by
-/// `crate::services::dispatch_gate` from the freshly-synced `rate_limit_cache`
-/// and the current agent/channel bindings. Runs off the hot dispatch path (once
-/// per ~120s rate-limit tick), so any DB cost here never touches activation.
-///
-/// Note: `RateLimitSync` is leader-only, so this leader-side refresh only keeps
-/// the leader's snapshots warm. Non-leader serving nodes refresh their own
-/// process-local snapshots lazily from the shared DB cache on the activation
-/// path (`dispatch_gate::refresh_snapshots_if_stale`), so the gate is populated
-/// on every node — not silently a no-op on followers.
+/// Rebuild the `dispatch_gate` snapshots off the hot dispatch path, once per rate-limit tick.
+/// This only warms the leader; followers refresh lazily via `refresh_snapshots_if_stale`.
 async fn refresh_dispatch_gate_snapshots(pg_pool: &PgPool) {
     let now = chrono::Utc::now().timestamp();
     crate::services::dispatch_gate::refresh_snapshots_from_db(pg_pool, now).await;
-    // Record the refresh so the activation-path throttle treats the leader's
-    // snapshots as fresh and does not redundantly re-read the cache here.
+    // Keeps the activation-path throttle from redundantly re-reading the cache.
     crate::services::dispatch_gate::mark_snapshots_refreshed(now);
 }
 
@@ -1099,7 +1054,6 @@ async fn fetch_openai_rate_limits(api_key: &str) -> Result<Vec<serde_json::Value
     let headers = resp.headers().clone();
     let mut buckets = Vec::new();
 
-    // OpenAI rate limit headers: x-ratelimit-limit-requests, x-ratelimit-remaining-requests, etc.
     if let Some(limit) = parse_header_i64(&headers, "x-ratelimit-limit-requests") {
         let remaining =
             parse_header_i64(&headers, "x-ratelimit-remaining-requests").unwrap_or(limit);
@@ -1132,10 +1086,8 @@ fn parse_header_i64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<
     headers.get(name)?.to_str().ok()?.parse().ok()
 }
 
-/// Parse reset timestamp from a rate-limit header into unix epoch seconds.
-///
-/// Anthropic returns RFC3339 timestamps. OpenAI commonly returns relative
-/// durations such as `1s` or `6m0s`, so accept both forms.
+/// Parse a rate-limit reset header into unix epoch seconds. Accepts RFC3339 (Anthropic) and
+/// relative durations such as `6m0s` (OpenAI).
 fn parse_header_reset(headers: &reqwest::header::HeaderMap, name: &str) -> i64 {
     headers
         .get(name)
@@ -1238,9 +1190,8 @@ fn push_claude_oauth_usage_bucket(
         .get("resets_at")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
-    // Convert utilization (0-100 float) to used/limit format for
-    // consistency, but keep the precise value so the dispatch gate does
-    // not round 99.5% into a false 100% saturation.
+    // Also report used/limit, but keep the precise `utilization` so the dispatch gate
+    // cannot round 99.5% into a false 100% saturation.
     let limit = 100i64;
     let used = utilization.floor().clamp(0.0, 100.0) as i64;
     let reset_ts = chrono::DateTime::parse_from_rfc3339(resets_at)
@@ -1424,16 +1375,10 @@ async fn fetch_codex_oauth_usage(token: &str) -> Result<Vec<serde_json::Value>, 
 
 // ── Gemini rate-limit helpers ─────────────────────────────────────────────────
 
-/// Extract OAuth2 app credentials (client_id, client_secret) for the Gemini CLI
-/// "installed app" flow.  These are public client credentials distributed inside
-/// the Gemini CLI npm bundle — not server secrets.  The refresh_token in
-/// ~/.gemini/oauth_creds.json is the actual per-user secret.
-///
-/// Resolution order:
-///   1. env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET
-///   2. parse from the installed Gemini CLI bundle (e.g. Homebrew path)
+/// Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. These are
+/// public client credentials; the per-user secret is the refresh_token in oauth_creds.json.
 fn load_gemini_oauth_app_creds() -> Result<(String, String), anyhow::Error> {
-    // 1. Environment variables take precedence (CI / custom installs)
+    // Env vars take precedence (CI / custom installs).
     if let (Ok(id), Ok(secret)) = (
         std::env::var("GEMINI_CLIENT_ID"),
         std::env::var("GEMINI_CLIENT_SECRET"),
@@ -1441,8 +1386,6 @@ fn load_gemini_oauth_app_creds() -> Result<(String, String), anyhow::Error> {
         return Ok((id, secret));
     }
 
-    // 2. Parse from the Gemini CLI bundle on disk.
-    //    Support both Homebrew Cellar installs and npm-global installs.
     let candidate_globs = [
         "/opt/homebrew/Cellar/gemini-cli/*/libexec/lib/node_modules/@google/gemini-cli/bundle/chunk-*.js",
         "/usr/local/Cellar/gemini-cli/*/libexec/lib/node_modules/@google/gemini-cli/bundle/chunk-*.js",
@@ -1459,11 +1402,8 @@ fn load_gemini_oauth_app_creds() -> Result<(String, String), anyhow::Error> {
             let Ok(content) = std::fs::read_to_string(&entry) else {
                 continue;
             };
-            // Gemini CLI 0.38.x bundles export OAuth constants like:
-            //   var OAUTH_CLIENT_ID = "<id>";
-            //   var OAUTH_CLIENT_SECRET = "<secret>";
-            // Older bundles also inline:
-            //   clientId:"<id>",clientSecret:"<secret>"
+            // 0.38.x bundles use `var OAUTH_CLIENT_ID = "<id>";`; older ones inline
+            // `clientId:"<id>",clientSecret:"<secret>"`.
             let id = extract_assigned_string(&content, "OAUTH_CLIENT_ID")
                 .or_else(|| extract_quoted_value(&content, "clientId"));
             let secret = extract_assigned_string(&content, "OAUTH_CLIENT_SECRET")
@@ -1480,9 +1420,8 @@ fn load_gemini_oauth_app_creds() -> Result<(String, String), anyhow::Error> {
     ))
 }
 
-/// Extract the value of a key from a JS bundle snippet like `key:"value"`.
+/// Extract the value of a key from a JS bundle snippet like `key:"value"` or `key:'value'`.
 fn extract_quoted_value(src: &str, key: &str) -> Option<String> {
-    // Match:  clientId:"<value>"  or  clientId:'<value>'
     let needle = format!("{key}:\"");
     if let Some(start) = src.find(&needle) {
         let rest = &src[start + needle.len()..];
@@ -1514,8 +1453,8 @@ fn extract_assigned_string(src: &str, key: &str) -> Option<String> {
     None
 }
 
-/// Read (and refresh if expired) the Gemini OAuth2 access token from
-/// `~/.gemini/oauth_creds.json`.  Writes back the new token on refresh.
+/// Read the Gemini OAuth2 access token from `~/.gemini/oauth_creds.json`, refreshing and
+/// writing back an expired one.
 async fn load_gemini_access_token() -> Result<String, anyhow::Error> {
     let (creds_path, mut creds) = crate::services::provider_auth::read_gemini_oauth_creds()?;
 
@@ -1534,7 +1473,6 @@ async fn load_gemini_access_token() -> Result<String, anyhow::Error> {
             .ok_or_else(|| anyhow::anyhow!("no access_token in oauth_creds.json"));
     }
 
-    // Token expired — refresh via Google token endpoint
     let refresh_token = creds
         .get("refresh_token")
         .and_then(|v| v.as_str())
@@ -1573,7 +1511,6 @@ async fn load_gemini_access_token() -> Result<String, anyhow::Error> {
         .and_then(|v| v.as_i64())
         .unwrap_or(3600);
 
-    // Persist refreshed token so the next call doesn't need to refresh again
     creds["access_token"] = serde_json::json!(new_access_token.clone());
     creds["expiry_date"] = serde_json::json!(now_ms + expires_in * 1000);
     if let Ok(updated) = serde_json::to_string_pretty(&creds) {
@@ -1632,8 +1569,7 @@ fn extract_gemini_quota_limits(data: &serde_json::Value) -> (i64, i64) {
                     let is_per_day = unit.starts_with("1/d/");
 
                     if let Some(buckets) = limit.get("quotaBuckets").and_then(|b| b.as_array()) {
-                        // Take the minimum positive limit across all model buckets —
-                        // this reflects the tightest constraint a user is likely to hit.
+                        // The tightest positive limit across model buckets binds first.
                         let min_positive = buckets
                             .iter()
                             .filter_map(|b| {
@@ -1686,12 +1622,8 @@ fn build_gemini_rate_limit_buckets(rpm_limit: i64, rpd_limit: i64) -> Vec<serde_
     ]
 }
 
-/// Fetch Gemini quota limits via the Google Cloud ServiceUsage API.
-///
-/// Returns RPM and RPD buckets sourced from `generate_content_free_tier_requests`
-/// quota metrics. The API does not expose real-time usage counters, so the
-/// returned buckets use non-negative placeholder usage (`used = 0`,
-/// `remaining = limit`) to keep downstream UI math stable.
+/// Fetch Gemini free-tier RPM/RPD quota limits via the ServiceUsage API. It exposes no usage
+/// counters, so buckets report `used = 0` to keep downstream UI math stable.
 async fn fetch_gemini_rate_limits() -> Result<Vec<serde_json::Value>, anyhow::Error> {
     let token = load_gemini_access_token().await?;
     let project_id = discover_gemini_project_id(&token).await?;
@@ -1847,8 +1779,7 @@ async fn github_sync_loop(pg_pool: Arc<PgPool>, interval_minutes: u64) {
     }
 }
 
-/// Async worker that drains the message_outbox table via the in-process Discord delivery path (#120).
-/// Runs every 2 seconds, processes up to 10 messages per tick.
+/// A `message_outbox` row claimed (up to 10 per batch) for in-process Discord delivery.
 #[derive(Clone, Debug)]
 struct PendingMessageOutboxRow {
     id: i64,
@@ -1869,10 +1800,7 @@ enum MessageOutboxFailureAction {
     Fail { retry_count: i64 },
 }
 
-// reason: the `Db` payload and `StaleLeaseLost` fields are retained for
-// `Debug` diagnostics and future structured logging; callers currently branch
-// on the variant (`is_ok`/`matches!`) without reading the fields, so the lib
-// build sees them as dead. See #3312.
+// reason: callers branch on the variant only; the fields are kept for `Debug` diagnostics.
 #[allow(dead_code)]
 #[derive(Debug)]
 enum MessageOutboxLeaseUpdateError {
@@ -1985,9 +1913,8 @@ mod message_outbox_retry_tests {
         assert!(snippet.ends_with('…'));
     }
 
-    /// #5993 through the hourly relay-signal job entry point: a breached signal
-    /// is reported (WARN + event, see `relay_signal_alert` tests) with no
-    /// operator configuration, and never becomes an outbox row.
+    /// Via the hourly `relay_signal_alerter` entry point, a breached signal is reported with no
+    /// operator configuration and never becomes an outbox row.
     #[tokio::test]
     async fn relay_signal_threshold_report_enqueues_nothing_pg() {
         let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
@@ -2180,8 +2107,7 @@ mod message_outbox_retry_tests {
         pg_db.drop().await;
     }
 
-    /// #4460/#4446 integration: the real message-outbox claim/drain path must
-    /// retain the stall alert's provider-owned DM identity through delivery.
+    /// The real claim/drain path keeps the stall alert's provider-owned DM identity.
     #[tokio::test]
     async fn stall_alert_dm_row_drains_with_provider_bot_pg() {
         let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
@@ -2253,11 +2179,7 @@ mod message_outbox_retry_tests {
         pg_db.drop().await;
     }
 
-    /// #4615 S3b mutation sentinel: a claimed circuit row whose authority is
-    /// superseded (here: no matching authority row) must be fenced by the drain
-    /// loop — never handed to `deliver()` — and left `cancelled` with
-    /// `delivery_fence_checked_at` stamped. Removing the fence call regresses
-    /// this into a delivery + `sent`.
+    /// Mutation sentinel: removing the drain loop's fence call turns this into a delivery.
     #[tokio::test]
     async fn drain_fences_superseded_circuit_row_before_delivery_pg() {
         let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
@@ -2269,10 +2191,7 @@ mod message_outbox_retry_tests {
             return;
         };
         let pool = pg_db.connect_and_migrate().await;
-        // Build a genuine circuit-stamped pending row through the validated S3a
-        // producers (whose inserts live in the exempt `services::message_outbox_*`
-        // boundary — #4424), then supersede its authority so the fence must
-        // cancel it at delivery instead of sending.
+        // Stage a genuine circuit-stamped row through the validated producers.
         use crate::services::message_outbox_circuit_authority as circuit;
         sqlx::query(
             "INSERT INTO intake_session_owners(provider,raw_channel_id,owner_instance_id,generation,status)
@@ -2641,13 +2560,8 @@ where
     }
 
     for row in &pending {
-        // #4615 S3b: re-validate circuit authority under the claim lease before
-        // the Discord send. A row whose circuit episode/authority was superseded
-        // or revoked after it was claimed (and therefore escaped
-        // `revoke_on_fresh_vouch`, which only cancels held/pending rows) is
-        // fenced off instead of delivered. Non-circuit rows clear trivially. The
-        // fence fails closed: a lease-loss or DB error skips this row this cycle
-        // rather than risk delivering an un-validated alert.
+        // Re-check circuit authority under the claim lease: `revoke_on_fresh_vouch` misses rows
+        // superseded after their claim. Fails closed: any error skips the row this cycle.
         use crate::services::message_outbox_circuit_authority::DeliveryFenceOutcome;
         match crate::services::message_outbox_circuit_authority::fence_claimed_delivery(
             pg_pool,
@@ -2710,8 +2624,8 @@ where
                         row.claimed_at,
                     )
                     .await;
-                    // Release only terminal turn-delivery rows, and only if no newer
-                    // session heartbeat proves another turn has since taken the channel.
+                    // Release only terminal turn-delivery rows, and only while the session
+                    // still points at this row (no newer turn has taken the channel).
                     if failed_update.is_ok() && is_terminal_turn_delivery_outbox_source(&row.source)
                     {
                         if let Some(channel_id_str) = row.target.strip_prefix("channel:") {
@@ -2743,11 +2657,8 @@ where
                             );
                         }
                     }
-                    // #4260 vector 3: every terminal failure surfaces — warn +
-                    // quality event inline (#5993 retired the ops card). Sited
-                    // AFTER the session release (dual r1 codex#1) so reporting
-                    // never delays freeing the channel; the destination channel
-                    // is never notified (it may be the failing target itself).
+                    // After the release, so reporting never delays freeing the channel. The
+                    // destination is never notified: it may be the failing target itself.
                     if failed_update.is_ok() {
                         outbox_delivery_alert::note_terminal_outbox_delivery_failure(
                             row,
@@ -2843,10 +2754,8 @@ async fn routine_runtime_loop(
     match store.recover_stale_running_runs().await {
         Ok(recovered) if !recovered.is_empty() => {
             for run in &recovered {
-                // #3022: reap the orphaned fresh session the interrupted run
-                // owned (positive ownership proof required) before logging, so a
-                // dcserver restart no longer leaves a stranded fresh session to
-                // be later misreported as an abrupt "session ended".
+                // Reap the interrupted run's orphaned fresh session (ownership proof required),
+                // or it is later misreported as an abrupt "session ended".
                 agent_executor
                     .teardown_recovered_fresh_session(&store, run)
                     .await;
@@ -2864,26 +2773,16 @@ async fn routine_runtime_loop(
         tokio::time::interval(std::time::Duration::from_secs(tick_interval_secs.get()));
     loop {
         interval.tick().await;
-        // Per-tick tunables (hot_reload toggle, poll/due-per-tick caps) are read
-        // from the live config snapshot so a config-file edit takes effect on the
-        // next tick without a restart. Boot-bound values (script dirs, store
-        // timezone/checkpoint limits, agent timeout) keep their startup values
-        // because they are already wired into long-lived objects above.
+        // Per-tick tunables follow the live config; boot-bound values (script dirs, store
+        // limits, agent timeout) keep their startup values in the objects built above.
         let routines_config = crate::config_live_reload::current()
             .map(|cfg| cfg.routines.clone())
             .unwrap_or_else(|| routines_config.clone());
         match store.recover_stale_running_runs().await {
             Ok(recovered) if !recovered.is_empty() => {
                 for run in &recovered {
-                    // #3022: deliberately NO fresh-session reap here. Periodic
-                    // recovery runs concurrently with claims/run-now, so the
-                    // routine can be re-claimed and a replacement fresh run can
-                    // create a new session under the same deterministic tmux
-                    // name before any reap completes — racing the reap against a
-                    // live turn. The reap is therefore confined to boot recovery
-                    // (above), which runs before the tick loop with no concurrent
-                    // claimer. An expired-lease orphan that slips through here is
-                    // still collected by the idle-kill backstop.
+                    // No fresh-session reap here: a concurrent re-claim can reuse the same tmux
+                    // name, so the reap would race a live turn. Idle-kill collects any orphan.
                     discord_logger.log_recovery(&store, run).await;
                 }
                 tracing::info!(
@@ -2911,12 +2810,8 @@ async fn routine_runtime_loop(
                 ),
             }
         }
-        // #3564: surface routines that have been stuck in `paused` past the
-        // configured threshold. A failed/timed-out routine can otherwise stay
-        // paused forever because paused routines are excluded from claims, so we
-        // alert the operator instead of letting it silently never run again. The
-        // knob defaults to 0 (disabled), so this is a no-op for deployments that
-        // have not opted in.
+        // Paused routines are never claimed, so alert on ones paused past the threshold
+        // instead of letting them silently never run again. 0 (the default) disables it.
         let stale_paused_alert_secs = routines_config.stale_paused_alert_secs;
         if stale_paused_alert_secs > 0 {
             let now = chrono::Utc::now();
@@ -2942,12 +2837,8 @@ async fn routine_runtime_loop(
                 }
             }
         }
-        // #3573/#3628: opt-in auto-resume for failure-paused routines. Only
-        // routines with `pause_reason = 'failure'` are eligible; manual/
-        // migration_invalid/NULL rows are never touched. The
-        // `ResumeRequiresNextDueAt` guard is applied inside
-        // `auto_resume_failure_paused_routine`. The knob defaults to 0
-        // (disabled); set to e.g. 3600 to enable with a 1-hour backoff.
+        // Opt-in auto-resume, only for `pause_reason = 'failure'` routines; 0 (the default)
+        // disables it, e.g. 3600 resumes after a 1-hour backoff.
         let auto_resume_secs = routines_config.failure_pause_auto_resume_secs;
         let pause_on_terminal_failure = routines_config.failure_pause_auto_resume_secs > 0;
         if pause_on_terminal_failure {
@@ -3025,12 +2916,8 @@ async fn routine_runtime_loop(
     }
 }
 
-/// Auth-boundary integration tests for the root-mounted control-plane routers
-/// (`/tui/*`, `/hooks/*`). These live in the server layer because composing a
-/// router with `auth::auth_middleware` is a server-layer responsibility — the
-/// service modules only own the handler/validation behavior (#3311). The
-/// service-layer tests (control-character rejection, handler success) stay
-/// next to their handlers in `services::claude_tui`.
+/// Auth-boundary tests for the root-mounted control-plane routers (`/tui/*`, `/hooks/*`).
+/// They live here because composing a router with `auth_middleware` is a server-layer job.
 #[cfg(test)]
 mod control_plane_auth_tests {
     use std::net::SocketAddr;

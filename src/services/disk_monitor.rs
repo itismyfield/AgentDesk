@@ -1,42 +1,25 @@
-//! Lightweight free-disk-space probe for the AgentDesk runtime root.
+//! Free-disk-space probe for the AgentDesk runtime root.
 //!
-//! Issue #1203: when `/Users` (or whatever partition holds
-//! `~/.adk/release/runtime/`) hits ENOSPC, dcserver/claude/tmux silently fail
-//! to write inflight state, mailbox checkpoints, and tool buffers. The
-//! `⏳` reaction sticks to the user message but no further progress happens
-//! and operators have no early signal. Surfacing free bytes through `/health`
-//! gives the dashboard and `agentdesk doctor` a way to warn before the
-//! cliff.
-//!
-//! Implementation note: we deliberately avoid pulling in a new crate (`fs2`,
-//! `nix`) because the codebase already depends on `libc` 0.2 and the Unix
-//! `statvfs` syscall is sufficient. On non-Unix builds the probe returns
-//! `None` and callers treat it as "unknown" rather than "low disk".
-//!
-//! Threshold rationale (`LOW_DISK_THRESHOLD_BYTES`): 5 GiB. Smaller than the
-//! recent 47 GB cargo target/debug accident yet large enough that one round
-//! of cargo build, a Discord message-attachment burst, or a tracing log
-//! rotation cannot cross it inside a single 30 s tick.
+//! On ENOSPC, dcserver/claude/tmux fail to write state without any visible error, so free
+//! bytes are surfaced through `/health` and a monitoring banner to warn before the cliff.
+//! A `None` probe (non-Unix, syscall failure) means "unknown", not "low".
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Free-byte threshold below which we mark the partition as "low".
+/// Free-byte threshold for "low": large enough that one cargo build, attachment burst or
+/// log rotation cannot cross it inside a single 30 s tick.
 pub const LOW_DISK_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
-/// Window in seconds after a recent ENOSPC fault during which we keep the
-/// "disk full" banner up even if free-space probes recover. Gives the
-/// operator a chance to see the warning even when the cause was transient
-/// (e.g. a build that briefly hit the cliff and exited).
+/// Seconds the "disk full" banner stays up after an ENOSPC fault, so a transient cause
+/// (a build that briefly hit the cliff) is still visible to the operator.
 pub const ENOSPC_BANNER_LINGER_SECS: u64 = 5 * 60;
 
 /// Process-global last ENOSPC timestamp (Unix epoch seconds, 0 = never).
-/// Written by `record_enospc_now`, read by `seconds_since_last_enospc`.
 static LAST_ENOSPC_EPOCH_SECS: AtomicU64 = AtomicU64::new(0);
 
-/// Mark that a write just failed with ENOSPC. Reaches the monitoring tick
-/// out-of-band so we don't have to thread a context handle through every
-/// runtime_store call site.
+/// Mark that a write just failed with ENOSPC. Global so runtime_store call sites need no
+/// context handle to reach the monitoring tick.
 pub fn record_enospc_now() {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -89,8 +72,7 @@ impl DiskSpaceSnapshot {
 
 /// Probe free space for the partition that hosts `path`.
 ///
-/// Returns `None` on non-Unix builds or if the underlying syscall fails (the
-/// caller treats unknown as "no signal" rather than "low").
+/// Returns `None` on non-Unix builds or if the syscall fails.
 pub fn probe(path: &Path) -> Option<DiskSpaceSnapshot> {
     #[cfg(unix)]
     {
@@ -111,8 +93,7 @@ fn unix_statvfs(path: &Path) -> Option<DiskSpaceSnapshot> {
     let cpath = CString::new(path.as_os_str().as_bytes()).ok()?;
     let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
     // SAFETY: `cpath` is a NUL-terminated path; `buf` has the right layout for
-    // `statvfs`. Failure (rc != 0) is reported via `errno` which we ignore —
-    // the caller treats `None` as "no signal".
+    // `statvfs`.
     let rc = unsafe { libc::statvfs(cpath.as_ptr(), &mut buf) };
     if rc != 0 {
         return None;
@@ -161,30 +142,21 @@ fn format_bytes_gib(bytes: u64) -> String {
     }
 }
 
-/// Banner key under which the disk-space entry is tracked in
-/// [`crate::services::monitoring_store::MonitoringStore`]. Stable so upsert/remove can
-/// find the same row across ticks.
+/// Banner key in [`crate::services::monitoring_store::MonitoringStore`]; stable so
+/// upsert/remove hit the same row across ticks.
 pub const MONITORING_BANNER_KEY: &str = "disk_space";
 
-/// Spawn a background tick that probes the runtime partition every 30 s and
-/// upserts a banner entry on every channel that already has any monitoring
-/// row, recovering by removing the entry when disk health returns. Also logs
-/// a tracing warning so operators on a terminal see the signal even when no
-/// channel has an active banner.
+/// Spawn a 30 s tick that runs [`run_disk_monitor_tick_once`].
 ///
-/// The tick deliberately only touches channels that already have monitoring
-/// entries. Pushing to every channel in `agentdesk.yaml` would be more
-/// thorough but would create unsolicited noise on idle channels — operators
-/// can read `/api/health` (`disk_*` fields) for the off-banner signal and
-/// the dashboard surfaces the same info.
+/// Only channels that already have monitoring rows get the banner, to avoid noise on idle
+/// channels; `/api/health` (`disk_*`) carries the signal everywhere else.
 pub fn spawn_disk_monitor_tick(probe_path: PathBuf) {
     use std::sync::Arc;
     use tokio::time::{Duration, interval};
 
     tokio::spawn(async move {
         let mut iv = interval(Duration::from_secs(30));
-        // Skip the first immediate tick — the probe right at boot has no
-        // useful baseline yet and would race startup recovery.
+        // Skip the immediate first tick: a probe at boot would race startup recovery.
         iv.tick().await;
         let store: Arc<_> = crate::services::monitoring_store::global_monitoring_store();
         loop {
@@ -194,8 +166,8 @@ pub fn spawn_disk_monitor_tick(probe_path: PathBuf) {
     });
 }
 
-/// One-shot version of the monitoring tick. Exposed for tests and for
-/// operators wiring a custom interval.
+/// One monitoring tick: probe, log any banner as a warning, then upsert or clear it on
+/// every channel that already has a monitoring row.
 pub async fn run_disk_monitor_tick_once(
     probe_path: &Path,
     monitoring: &std::sync::Arc<
