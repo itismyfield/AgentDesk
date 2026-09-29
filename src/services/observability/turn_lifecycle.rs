@@ -63,7 +63,7 @@ pub struct TurnCancellationDetails {
     pub tmux_killed: bool,
     pub inflight_cleared: bool,
     pub queue_depth: Option<usize>,
-    pub queue_preserved: bool,
+    pub queue_preserved: Option<bool>,
     pub termination_recorded: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub emitted_no_op: bool,
@@ -80,7 +80,7 @@ impl TurnCancellationDetails {
         tmux_killed: bool,
         inflight_cleared: bool,
         queue_depth: Option<usize>,
-        queue_preserved: bool,
+        queue_preserved: Option<bool>,
         termination_recorded: bool,
     ) -> Self {
         Self::new_with_no_op(
@@ -104,7 +104,7 @@ impl TurnCancellationDetails {
         tmux_killed: bool,
         inflight_cleared: bool,
         queue_depth: Option<usize>,
-        queue_preserved: bool,
+        queue_preserved: Option<bool>,
         termination_recorded: bool,
         emitted_no_op: bool,
     ) -> Self {

@@ -76,7 +76,8 @@ MANUAL_CLASSIFICATION = [
     # T6 unrecorded dead-code sweep slice 1: 3 -> 2 production / 12 -> 11 blind.
     # The unwired `shadow_mirror_same_channel_frontier_with_body` entry point
     # (zero production and zero test callers) was deleted with its funnel call.
-    ("src/services/discord/outbound/delivery_record.rs", "shadow_mirror_delivered_frontier", 2, 11),
+    # The nonce-provenance tests' `bridge_delivery` helper adds one: 11 -> 12 blind.
+    ("src/services/discord/outbound/delivery_record.rs", "shadow_mirror_delivered_frontier", 2, 12),
     ("src/services/discord/outbound/delivery_record.rs", "append_completed_turn", 2, 2),
     # #5071 T1 S7. Hand-verified: the recovery file's `#[cfg(test)] mod tests`
     # opens at the end of the file, and the ONE production spelling of the new

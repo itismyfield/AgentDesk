@@ -71,6 +71,8 @@ src/
 │   ├── migrate.rs
 │   ├── mod.rs
 │   ├── monitoring.rs
+│   ├── o.rs
+│   ├── o_shadow.rs
 │   ├── query.rs
 │   ├── restart_terminal_proof.rs
 │   ├── run.rs
@@ -546,6 +548,7 @@ src/
 │   │   │   ├── ordered_queue.rs
 │   │   │   └── queue_retention.rs
 │   │   ├── hook_server/
+│   │   │   ├── adoption_retry.rs
 │   │   │   └── relay_receipts.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
@@ -653,7 +656,8 @@ src/
 │   │   ├── rollout_tail/
 │   │   │   └── parser.rs
 │   │   ├── session/
-│   │   │   └── source_observation.rs
+│   │   │   ├── source_observation.rs
+│   │   │   └── source_observation_tests.rs
 │   │   ├── input.rs
 │   │   ├── mod.rs
 │   │   ├── rollout_index.rs
@@ -666,10 +670,12 @@ src/
 │   │   ├── catch_up/
 │   │   │   ├── absorbed_active_tests.rs
 │   │   │   ├── api.rs
+│   │   │   ├── claim_cas_tests.rs
 │   │   │   ├── classification.rs
 │   │   │   ├── classification_order_tests.rs
 │   │   │   ├── frontier_evidence.rs
 │   │   │   ├── frontier_sweep_tests.rs
+│   │   │   ├── merged_alias_tests.rs
 │   │   │   ├── phase2.rs
 │   │   │   ├── retry_state.rs
 │   │   │   ├── settled_frontier.rs
@@ -736,6 +742,8 @@ src/
 │   │   │   ├── reachability/
 │   │   │   │   ├── composite.rs
 │   │   │   │   ├── composite_tests.rs
+│   │   │   │   ├── coverage.rs
+│   │   │   │   ├── coverage_tests.rs
 │   │   │   │   ├── discovery.rs
 │   │   │   │   ├── divergence.rs
 │   │   │   │   ├── external_verdict.rs
@@ -799,6 +807,8 @@ src/
 │   │   │   │   ├── identity.rs
 │   │   │   │   ├── serde_adapters.rs
 │   │   │   │   └── turn_kinds.rs
+│   │   │   ├── rebind_reap/
+│   │   │   │   └── tests.rs
 │   │   │   ├── removal/
 │   │   │   │   ├── boot_custody.rs
 │   │   │   │   ├── boot_custody_tests.rs
@@ -888,6 +898,7 @@ src/
 │   │   │   ├── manual_delivery.rs
 │   │   │   ├── message.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── o_writer_io.rs
 │   │   │   ├── policy.rs
 │   │   │   ├── reaction_control.rs
 │   │   │   ├── receipt_index.rs
@@ -1102,6 +1113,10 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── deferred_restart.rs
 │   │   │   ├── framework_setup.rs
+│   │   │   ├── gateway_handback_breaker.rs
+│   │   │   ├── gateway_handback_breaker_tests.rs
+│   │   │   ├── gateway_handback_integration_tests.rs
+│   │   │   ├── gateway_handback_mock.rs
 │   │   │   ├── gateway_lease.rs
 │   │   │   ├── gateway_lease_recovery.rs
 │   │   │   ├── gateway_lease_recovery_tests.rs
@@ -1186,6 +1201,8 @@ src/
 │   │   │   ├── monitor_auto_turn_inflight_tests.rs
 │   │   │   └── task_notification_kind_restart_roundtrip_tests.rs
 │   │   ├── tmux_output_stream/
+│   │   │   ├── tests/
+│   │   │   │   └── compact_summary_tests.rs
 │   │   │   ├── native_codex.rs
 │   │   │   └── provider_output_guard_tests.rs
 │   │   ├── tmux_placeholder_suppression/
@@ -1202,6 +1219,8 @@ src/
 │   │   │   │   ├── backstop_tests.rs
 │   │   │   │   └── idle_gate.rs
 │   │   │   ├── loop_poll_prologue/
+│   │   │   │   ├── post_terminal_disposal_tests/
+│   │   │   │   │   └── compact_summary_tests.rs
 │   │   │   │   ├── post_terminal_disposal_tests.rs
 │   │   │   │   └── watcher_resume.rs
 │   │   │   ├── streaming_status_tick/
@@ -1232,6 +1251,8 @@ src/
 │   │   │   ├── liveness.rs
 │   │   │   ├── loop_poll_prologue.rs
 │   │   │   ├── no_result_exits.rs
+│   │   │   ├── o_delegated_arm.rs
+│   │   │   ├── o_delegated_watcher_tests.rs
 │   │   │   ├── orphan_status_panel_cleanup.rs
 │   │   │   ├── orphan_terminal_frame.rs
 │   │   │   ├── owed_range_baseline_tests.rs
@@ -1307,6 +1328,7 @@ src/
 │   │   │   │   ├── claim.rs
 │   │   │   │   └── stale_reclaim.rs
 │   │   │   ├── tests/
+│   │   │   │   ├── compact_summary_tests.rs
 │   │   │   │   ├── fenced_admission_tests.rs
 │   │   │   │   ├── retired_pending_start_claim_tests.rs
 │   │   │   │   ├── scenario_census_e2e.rs
@@ -1895,13 +1917,50 @@ src/
 │   ├── tmux_turn_liveness/
 │   │   └── tests_pg.rs
 │   ├── tui_o/
-│   │   └── shadow/
-│   │       ├── binding_reader.rs
-│   │       ├── capture.rs
-│   │       ├── mod.rs
-│   │       └── root.rs
+│   │   ├── shadow/
+│   │   │   ├── binding_reader.rs
+│   │   │   ├── capture.rs
+│   │   │   ├── derive.rs
+│   │   │   ├── diff.rs
+│   │   │   ├── identity.rs
+│   │   │   ├── metrics.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── report.rs
+│   │   │   ├── root.rs
+│   │   │   ├── seal.rs
+│   │   │   ├── tap.rs
+│   │   │   └── unit_plan.rs
+│   │   ├── store/
+│   │   │   ├── durable.rs
+│   │   │   ├── ledger.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── rotation.rs
+│   │   │   ├── rotation_tests.rs
+│   │   │   └── spool.rs
+│   │   ├── writer/
+│   │   │   ├── actor.rs
+│   │   │   ├── actor_tests.rs
+│   │   │   ├── binding.rs
+│   │   │   ├── confirm.rs
+│   │   │   ├── deliver.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── pieces.rs
+│   │   │   ├── rotation.rs
+│   │   │   ├── rotation_tests.rs
+│   │   │   ├── round_trip.rs
+│   │   │   ├── switch.rs
+│   │   │   ├── switch_tests.rs
+│   │   │   └── writer_tests.rs
+│   │   ├── alarm.rs
+│   │   ├── cutover.rs
+│   │   ├── ownership.rs
+│   │   ├── shadow_host.rs
+│   │   └── topology.rs
 │   ├── tui_prompt_dedupe/
+│   │   ├── binding_events/
+│   │   │   └── lane_tests.rs
 │   │   ├── binding_context.rs
+│   │   ├── binding_events.rs
 │   │   ├── extract.rs
 │   │   ├── observation.rs
 │   │   ├── runtime_binding.rs
@@ -1916,6 +1975,7 @@ src/
 │   │   ├── registry_purge/
 │   │   │   └── closed_gate_tests.rs
 │   │   ├── active_source_dedup.rs
+│   │   ├── claim_observation.rs
 │   │   ├── clear_channel.rs
 │   │   ├── closed_verdict.rs
 │   │   ├── dispatch_cleanup.rs
@@ -1930,6 +1990,7 @@ src/
 │   │   ├── overflow.rs
 │   │   ├── pending_queue_persistence.rs
 │   │   ├── queue_cancellation.rs
+│   │   ├── queue_enqueue.rs
 │   │   ├── recovery_kickoff.rs
 │   │   ├── recovery_kickoff_tests.rs
 │   │   ├── registry_purge.rs

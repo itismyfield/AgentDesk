@@ -1,8 +1,79 @@
-use super::{SessionBoundDiscordRelaySink, SessionRelayDelivery};
+use super::{SessionBoundDiscordRelaySink, SessionRelayDelivery, SinkDeliveryLeaseGuard};
 use crate::services::provider::ProviderKind;
 use serenity::model::id::ChannelId;
 
 impl SessionBoundDiscordRelaySink {
+    /// Consume a turn whose body O posts: advance the relay frontier and the
+    /// session-bound marker, but write no receipt, durable frontier or fingerprint.
+    pub(super) fn advance_after_o_delegated_terminal(
+        &self,
+        shared: &crate::services::discord::SharedData,
+        provider: &ProviderKind,
+        channel_id: u64,
+        session_name: &str,
+        delivery: &SessionRelayDelivery,
+        sink_lease_guard: Option<&SinkDeliveryLeaseGuard>,
+    ) {
+        let advanced = if let Some(range) = delivery.relay_range {
+            self.advance_o_delegated_idle_range(
+                shared,
+                provider,
+                channel_id,
+                session_name,
+                range,
+                delivery,
+            )
+        } else {
+            let fresh_inflight =
+                crate::services::discord::inflight::load_inflight_state(provider, channel_id);
+            self.advance_offset_for_confirmed_delegated_terminal(
+                shared,
+                provider,
+                channel_id,
+                session_name,
+                delivery,
+                fresh_inflight.as_ref(),
+            )
+        };
+        if let Some(guard) = sink_lease_guard {
+            guard.commit(if advanced {
+                crate::services::discord::LeaseOutcome::Delivered
+            } else {
+                crate::services::discord::LeaseOutcome::NotDelivered
+            });
+        }
+    }
+
+    /// Same generation/EOF checks as the posted idle commit, minus the durable writes.
+    fn advance_o_delegated_idle_range(
+        &self,
+        shared: &crate::services::discord::SharedData,
+        provider: &ProviderKind,
+        channel_id: u64,
+        session_name: &str,
+        (start, end): (u64, u64),
+        delivery: &SessionRelayDelivery,
+    ) -> bool {
+        let current_generation = super::dr::current_generation_mtime_ns(session_name);
+        let current_eof = super::idle_jsonl_current_eof(provider, session_name);
+        if end <= start
+            || current_generation == 0
+            || delivery.relay_generation_mtime_ns != Some(current_generation)
+            || current_eof.is_none_or(|eof| end > eof)
+        {
+            return false;
+        }
+        crate::services::discord::tmux::advance_watcher_confirmed_end(
+            shared,
+            provider,
+            ChannelId::new(channel_id),
+            session_name,
+            end,
+            "src/services/discord/session_relay_sink.rs:sink_o_delegated_idle_advance",
+        );
+        true
+    }
+
     pub(super) fn advance_offset_for_confirmed_delegated_terminal(
         &self,
         shared: &crate::services::discord::SharedData,

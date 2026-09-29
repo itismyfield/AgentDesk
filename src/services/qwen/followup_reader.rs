@@ -66,7 +66,7 @@ pub(super) fn send_followup_to_tmux(
                 let output_exists = std::fs::metadata(output_path).is_ok();
                 let current_file_len = std::fs::metadata(output_path).ok().map(|meta| meta.len());
                 let input_exists = std::path::Path::new(input_fifo_path).exists();
-                let session_alive = tmux_session_has_live_pane(tmux_session_name);
+                let session_alive = tmux_live_pane_bool(tmux_session_name);
                 let ready_for_input = session_alive
                     && crate::services::provider::tmux_session_fallback_ready_for_input(
                         tmux_session_name,

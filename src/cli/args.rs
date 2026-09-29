@@ -559,6 +559,10 @@ pub(crate) enum Commands {
         #[arg(long = "no-agentdesk")]
         no_agentdesk: bool,
     },
+    /// Read-only TUI output shadow: window start, report, synthetic manifest
+    #[command(subcommand)]
+    OShadow(crate::cli::o_shadow::OShadowCommand),
+    O(crate::cli::o::OArgs),
 }
 
 /// Subcommands for `adk query` (issue #2651).
@@ -1139,6 +1143,8 @@ mod tests {
             "health",
             "machine-compare",
             "activity",
+            "o-shadow",
+            "o",
             "help",
         ];
 

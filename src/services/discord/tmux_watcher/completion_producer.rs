@@ -151,6 +151,14 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel_with_sniffe
         task_notification_kind,
         Some(TaskNotificationKind::Background | TaskNotificationKind::MonitorAutoTurn)
     );
+    // O owns this body message, so Legacy writes no completion footer onto it.
+    if single_message_panel_footer_mode
+        && tmux_session_name
+            .as_deref()
+            .is_some_and(crate::services::tui_o::cutover::o_owns_tui_output_for_tmux_session)
+    {
+        return;
+    }
     let background_agent_pending = sniff_background_agent_pending(tmux_session_name).await;
     complete_watcher_terminal_footer_or_status_panel(
         http,
