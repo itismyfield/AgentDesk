@@ -1939,6 +1939,8 @@ src/
 │   │   │   ├── deliver.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── pieces.rs
+│   │   │   ├── rotation.rs
+│   │   │   ├── rotation_tests.rs
 │   │   │   ├── round_trip.rs
 │   │   │   └── writer_tests.rs
 │   │   ├── ownership.rs
