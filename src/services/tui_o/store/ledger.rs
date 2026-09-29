@@ -275,8 +275,13 @@ pub(super) fn append(
 }
 
 /// The `from` of a durable `BoundaryResolved` for `source`, read without recovering the ledger.
+/// An unfinished last line is refused: a line appended after it would become mid-file damage.
 pub(super) fn resolution(path: &Path, source: &SourceId) -> Result<Option<u64>, StoreError> {
     let bytes = std::fs::read(path)?;
+    if bytes.last().is_some_and(|byte| *byte != b'\n') {
+        let detail = "the ledger ends in an unfinished entry; start the writer to recover it";
+        return Err(StoreError::Rejected(detail.into()));
+    }
     for line in bytes.split(|byte| *byte == b'\n') {
         if let Ok(LedgerLine {
             entry: LedgerEntry::BoundaryResolved {
