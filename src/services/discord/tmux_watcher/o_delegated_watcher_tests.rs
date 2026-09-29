@@ -267,6 +267,14 @@ async fn streamed_then_delegated_turn(case: u64) -> Harness {
     }
     let bound =
         crate::services::tui_o::cutover::test_override::bind_claude_tui_session(&h.tmux, &h.path);
+    // A held identity also suppresses the Legacy body, so pin the production decision to O ownership.
+    assert_eq!(
+        crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux(
+            h.channel.get(),
+            Some(&h.tmux)
+        ),
+        Ok(true)
+    );
     h.append(format!("{}{}", said(BODY), stop()).as_bytes());
     h.drained("terminal frame").await;
     drop(bound);
