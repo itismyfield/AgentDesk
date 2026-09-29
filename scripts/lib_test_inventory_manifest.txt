@@ -9363,6 +9363,15 @@ services::tui_o::store::tests::enabling_the_store_is_refused_where_directory_fsy
 services::tui_o::store::tests::init_and_ledger_round_trip_the_anchor_serials_and_outcomes
 services::tui_o::store::tests::missing_or_damaged_state_of_an_era_channel_halts_instead_of_reinitializing
 services::tui_o::store::tests::the_store_is_dormant_unless_its_flag_is_set
+services::tui_o::writer::tests::a_blocked_record_or_a_ledger_violation_stops_the_channel_before_any_post
+services::tui_o::writer::tests::a_piece_is_prepared_under_ownership_then_posted_once
+services::tui_o::writer::tests::a_prepared_left_by_a_crash_is_settled_before_the_next_post
+services::tui_o::writer::tests::a_refused_post_blocks_the_channel_even_after_reopening
+services::tui_o::writer::tests::an_unclear_post_is_settled_from_history_and_never_posted_again
+services::tui_o::writer::tests::an_unclear_post_sharing_an_earlier_unsettled_payload_stays_ambiguous
+services::tui_o::writer::tests::derivation_splits_each_unit_once_and_excludes_or_blocks_the_rest
+services::tui_o::writer::tests::nothing_is_prepared_or_posted_without_ownership_and_the_delivery_lease
+services::tui_o::writer::tests::settlement_stays_ambiguous_or_unresolved_when_history_cannot_single_out_the_post
 services::tui_prompt_control::tests::absolute_path_prompts_are_never_taken_as_codex_commands
 services::tui_prompt_control::tests::codex_local_controls_carry_the_normalized_name_and_the_raw_args
 services::tui_prompt_control::tests::command_shaped_input_outside_the_registry_is_refused_not_forwarded
