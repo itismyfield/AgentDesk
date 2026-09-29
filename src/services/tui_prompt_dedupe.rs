@@ -285,7 +285,7 @@ pub use extract::*;
 use extract::{
     is_discord_relayed_user_prompt, is_user_prefixed_subagent_notification_machine_event,
     normalize_provider, record_relayed_entry_id, relayed_entry_id_already_seen,
-    resolve_tmux_session_name, take_matching_pending_prompt, take_or_record_recent_observed_prompt,
+    take_matching_pending_prompt, take_or_record_recent_observed_prompt,
 };
 use observation::clear_ssh_direct_observation_pending;
 pub use observation::*;

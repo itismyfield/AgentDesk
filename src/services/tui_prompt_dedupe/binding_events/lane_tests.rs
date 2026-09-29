@@ -615,3 +615,239 @@ fn a_transcript_replaced_on_the_same_path_is_a_new_source() {
     assert_eq!(log[1].old, Some(first));
     assert_eq!(log[1].new, BindingTarget::Source(src(&a_path, &a)));
 }
+
+#[test]
+fn a_deferred_b_is_adopted_and_handed_to_the_rotation_before_a_deferred_c() {
+    use crate::services::claude_tui::hook_server::relay_receipts::{
+        RELAY_DEADLINE_HEADER, RELAY_PUBLISHED_AT_HEADER, RELAY_REQUEST_ID_HEADER,
+    };
+    use crate::services::claude_tui::hook_server::{
+        HookServerState, adoption_retry::deferred_adoption_count, hook_receiver_router_with_state,
+        retry_deferred_claude_adoptions,
+    };
+    use crate::services::tui_prompt_dedupe::{
+        advance_tmux_runtime_binding_offset, claude_session_rotation_for_tmux,
+        clear_claude_session_rotation,
+    };
+    use tower::ServiceExt;
+    let lane = Lane::new();
+    let (channel, tmux) = (7_090, "p5-queue");
+    let (a, b, c) = (uuid(), uuid(), uuid());
+    let (a_path, b_path, c_path) = (
+        lane.transcript(&a),
+        lane.transcript(&b),
+        lane.transcript(&c),
+    );
+    let prompt = b"{\"type\":\"user\",\"text\":\"B-only prompt\"}\n";
+    let answer = b"{\"type\":\"assistant\",\"text\":\"B-only answer\"}\n";
+    fs::write(&b_path, [&prompt[..], &answer[..]].concat()).unwrap();
+    filetime::set_file_mtime(&b_path, filetime::FileTime::from_unix_time(20, 0)).unwrap();
+    filetime::set_file_mtime(&c_path, filetime::FileTime::from_unix_time(30, 0)).unwrap();
+    register_provider_session("claude", &a, tmux);
+    register_tmux_channel(tmux, channel);
+    register_tmux_runtime_binding(tmux, claude(&a_path, &a));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let app = hook_receiver_router_with_state(HookServerState::new());
+    let send = |event: &str, session: &str, source: Option<&str>| {
+        let now = Utc::now();
+        let payload = serde_json::json!({
+            "session_id": session,
+            "source": source,
+            "transcript_path": lane.dir.path().join(format!("{session}.jsonl")),
+        });
+        let request = axum::http::Request::post(format!("/hooks/claude/{event}?session_id={a}"))
+            .header("content-type", "application/json")
+            .header(RELAY_REQUEST_ID_HEADER, uuid())
+            .header(RELAY_PUBLISHED_AT_HEADER, now.to_rfc3339())
+            .header(
+                RELAY_DEADLINE_HEADER,
+                (now + chrono::Duration::minutes(5)).to_rfc3339(),
+            )
+            .body(axum::body::Body::from(payload.to_string()))
+            .unwrap();
+        runtime.block_on(async {
+            let response = app.clone().oneshot(request).await.unwrap();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["binding_adoption"].clone()
+        })
+    };
+
+    APPEND_FAULT.with(|fault| fault.set(Some("write")));
+    for (event, session, source) in [
+        ("SessionStart", &b, Some("clear")),
+        ("UserPromptSubmit", &b, None),
+        ("Stop", &b, None),
+        ("SessionStart", &c, Some("clear")),
+    ] {
+        assert_eq!(
+            send(event, session, source),
+            "deferred",
+            "{event} {session}"
+        );
+    }
+    assert_eq!(deferred_adoption_count(), 2, "B and C stay separate");
+    APPEND_FAULT.with(|fault| fault.set(None));
+
+    retry_deferred_claude_adoptions();
+    let binding = runtime_binding_for_tmux_session(tmux).unwrap();
+    assert_eq!(bound(tmux), (b_path.display().to_string(), Some(b.clone())));
+    assert_eq!(
+        binding.last_offset, 0,
+        "B's own lines are owed from its head"
+    );
+    let rotation = claude_session_rotation_for_tmux(tmux).unwrap();
+    assert_eq!(rotation.old_output_path, a_path.display().to_string());
+    retry_deferred_claude_adoptions();
+    assert_eq!(
+        bound(tmux).1.as_deref(),
+        Some(b.as_str()),
+        "C waits for A→B"
+    );
+
+    // The relay reads B's prompt, then the settle pass retires A→B.
+    let b_str = b_path.display().to_string();
+    assert!(advance_tmux_runtime_binding_offset(
+        tmux,
+        &b_str,
+        prompt.len() as u64
+    ));
+    assert!(clear_claude_session_rotation(tmux));
+    retry_deferred_claude_adoptions();
+    assert_eq!(bound(tmux), (c_path.display().to_string(), Some(c.clone())));
+    assert_eq!(deferred_adoption_count(), 0);
+    let rotation = claude_session_rotation_for_tmux(tmux).unwrap();
+    assert_eq!(
+        (rotation.old_output_path, rotation.old_last_offset),
+        (b_str, prompt.len() as u64),
+        "B's unread answer is handed to the B→C rotation"
+    );
+    let log = events(channel);
+    let tail: Vec<_> = log[log.len() - 2..]
+        .iter()
+        .map(|e| (e.new.clone(), e.cause, e.evidence.hook_event.clone()))
+        .collect();
+    let start = Some("session_start".to_owned());
+    assert_eq!(
+        tail,
+        [
+            (
+                BindingTarget::Source(src(&b_path, &b)),
+                BindingCause::Clear,
+                start.clone()
+            ),
+            (
+                BindingTarget::Source(src(&c_path, &c)),
+                BindingCause::Clear,
+                start
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_follow_up_hook_keeps_the_first_session_start_as_the_deferred_evidence() {
+    use crate::services::claude_tui::hook_server::adoption_retry::{
+        AdoptionReport, adopt_from_hook, deferred_adoption_count,
+    };
+    use crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions;
+    let lane = Lane::new();
+    let (channel, tmux) = (7_100, "p5-evidence");
+    let (a, b) = (uuid(), uuid());
+    let (a_path, b_path) = (lane.transcript(&a), lane.transcript(&b));
+    register_provider_session("claude", &a, tmux);
+    register_tmux_channel(tmux, channel);
+    register_tmux_runtime_binding(tmux, claude(&a_path, &a));
+
+    APPEND_FAULT.with(|fault| fault.set(Some("write")));
+    let start = hook("session_start", Some("clear"));
+    assert_eq!(adopt_from_hook(&a, &b, &start), AdoptionReport::Deferred);
+    let stop = hook("stop", None);
+    assert_eq!(adopt_from_hook(&a, &b, &stop), AdoptionReport::Deferred);
+    assert_eq!(deferred_adoption_count(), 1);
+    APPEND_FAULT.with(|fault| fault.set(None));
+    retry_deferred_claude_adoptions();
+
+    assert_eq!(bound(tmux).0, b_path.display().to_string());
+    let switch = events(channel).pop().unwrap();
+    assert_eq!(
+        (switch.cause, switch.evidence.hook_event.as_deref()),
+        (BindingCause::Clear, Some("session_start"))
+    );
+    assert_eq!(switch.evidence.received_at, start.received_at);
+}
+
+#[test]
+fn a_retry_paused_before_its_artifacts_cannot_overwrite_a_later_hooks_cutover() {
+    use crate::services::claude_tui::hook_server::adoption_retry::{
+        AdoptionReport, adopt_from_hook, set_artifact_probe,
+    };
+    use crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions;
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+    let lane = Lane::new();
+    let (channel, tmux) = (7_110, "p5-barrier");
+    let (a, b, c) = (uuid(), uuid(), uuid());
+    let (a_path, b_path, c_path) = (
+        lane.transcript(&a),
+        lane.transcript(&b),
+        lane.transcript(&c),
+    );
+    filetime::set_file_mtime(&b_path, filetime::FileTime::from_unix_time(20, 0)).unwrap();
+    filetime::set_file_mtime(&c_path, filetime::FileTime::from_unix_time(30, 0)).unwrap();
+    register_provider_session("claude", &a, tmux);
+    register_tmux_channel(tmux, channel);
+    register_tmux_runtime_binding(tmux, claude(&a_path, &a));
+    let clear = hook("session_start", Some("clear"));
+    APPEND_FAULT.with(|fault| fault.set(Some("write")));
+    assert_eq!(adopt_from_hook(&a, &b, &clear), AdoptionReport::Deferred);
+    APPEND_FAULT.with(|fault| fault.set(None));
+
+    // The probe stands in for the artifact write; B holds it until C finishes or 300ms pass.
+    let (paused_tx, paused_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    let done_rx = Mutex::new(done_rx);
+    let written = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (probe_b, probe_c, log) = (b.clone(), c.clone(), written.clone());
+    set_artifact_probe(Some(Arc::new(move |session: &str| {
+        if session == probe_b {
+            paused_tx.send(()).unwrap();
+            let _ = done_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_millis(300));
+        }
+        if session == probe_b || session == probe_c {
+            log.lock().unwrap().push(session.to_owned());
+        }
+    })));
+    let root = lane.root.path().to_path_buf();
+    let retry_root = root.clone();
+    let retry = std::thread::spawn(move || {
+        set_test_root(Some(&retry_root));
+        retry_deferred_claude_adoptions();
+    });
+    paused_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (live_a, live_c) = (a.clone(), c.clone());
+    let live = std::thread::spawn(move || {
+        set_test_root(Some(&root));
+        let report = adopt_from_hook(&live_a, &live_c, &clear);
+        done_tx.send(()).ok();
+        report
+    });
+    retry.join().unwrap();
+    let report = live.join().unwrap();
+    set_artifact_probe(None);
+
+    assert_eq!(report, AdoptionReport::Adopted);
+    assert_eq!(bound(tmux).1.as_deref(), Some(c.as_str()));
+    assert_eq!(
+        *written.lock().unwrap(),
+        [b, c],
+        "the last cutover is the bound C"
+    );
+}
