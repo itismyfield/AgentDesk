@@ -49,7 +49,6 @@ src/server/routes/health_api.rs
 src/server/routes/kanban.rs
 src/server/routes/meetings.rs
 src/server/routes/resume.rs
-src/server/routes/v1.rs
 src/services/claude.rs
 src/services/claude_tui/input.rs
 src/services/codex.rs

@@ -2,8 +2,8 @@
   "schema_version": 2,
   "refreshed_at": "2026-09-06T22:50:07Z",
   "ratchets": {
-    "closed_deadline_entries": 75,
-    "transition_list_entries": 75
+    "closed_deadline_entries": 74,
+    "transition_list_entries": 74
   },
   "issues": [
     {
@@ -34,7 +34,6 @@
         "src/server/routes/kanban.rs",
         "src/server/routes/meetings.rs",
         "src/server/routes/resume.rs",
-        "src/server/routes/v1.rs",
         "src/services/claude.rs",
         "src/services/claude_tui/input.rs",
         "src/services/codex.rs",

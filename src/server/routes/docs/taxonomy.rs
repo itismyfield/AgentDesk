@@ -38,7 +38,7 @@ pub(super) fn canonical_category(category: &str) -> &'static str {
         "dispatches" | "dispatched-sessions" | "internal" | "messages" | "sessions" => "dispatches",
         "auto-queue" | "campaigns" | "cron" | "queue" => "queue",
         "routines" => "routines",
-        "analytics" | "auth" | "cluster" | "docs" | "health" | "monitoring" | "stats" | "v1"
+        "analytics" | "auth" | "cluster" | "docs" | "health" | "monitoring" | "stats"
         | "provider-cli" | "claude-accounts" => "ops",
         "discord" | "github" | "github-dashboard" | "meetings" | "kakao-calendar" => "integrations",
         "departments" | "memory" | "onboarding" | "policies" | "settings" | "skills" => "admin",
@@ -214,7 +214,6 @@ pub(super) fn category_description(category: &str) -> &'static str {
         "settings" => "Settings surfaces, live overrides, precedence, and onboarding contracts.",
         "skills" => "Skill catalog and usage ranking.",
         "stats" => "Aggregate system counters.",
-        "v1" => "Versioned dashboard read models and compatibility settings endpoints.",
         _ => "Miscellaneous API endpoints.",
     }
 }
