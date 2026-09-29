@@ -653,7 +653,8 @@ src/
 │   │   ├── rollout_tail/
 │   │   │   └── parser.rs
 │   │   ├── session/
-│   │   │   └── source_observation.rs
+│   │   │   ├── source_observation.rs
+│   │   │   └── source_observation_tests.rs
 │   │   ├── input.rs
 │   │   ├── mod.rs
 │   │   ├── rollout_index.rs
