@@ -5402,6 +5402,7 @@ services::discord::runtime_bootstrap::relay_dlq_redelivery::tests::plan_trims_mu
 services::discord::runtime_bootstrap::relay_dlq_redelivery::tests::watcher_reason_format_still_carries_every_key_this_module_parses
 services::discord::runtime_bootstrap::restart_lifecycle_characterization_tests::check_deferred_restart_is_noop_without_restart_pending
 services::discord::runtime_bootstrap::restart_lifecycle_characterization_tests::deferred_restart_poller_consumes_marker_token_and_decrements_exactly_once
+services::discord::runtime_bootstrap::shutdown::gateway_waiter_tests::a_lease_reacquired_during_the_exit_diagnostic_keeps_o_admission_closed
 services::discord::runtime_bootstrap::shutdown::gateway_waiter_tests::backend_exit_closes_o_admission_before_the_lease_task_drops_the_lease
 services::discord::runtime_bootstrap::shutdown::gateway_waiter_tests::gateway_waiter_cancel_and_prebackend_panic_withdraw_intent
 services::discord::runtime_bootstrap::shutdown::gateway_waiter_tests::gateway_waiter_exit_arms_withdraw_before_diagnostic_and_lease_abort
@@ -9396,6 +9397,7 @@ services::tui_o::writer::tests::a_created_reply_by_another_author_is_settled_fro
 services::tui_o::writer::tests::a_piece_is_prepared_under_ownership_then_posted_once
 services::tui_o::writer::tests::a_prepared_left_by_a_crash_is_settled_before_the_next_post
 services::tui_o::writer::tests::a_refused_post_blocks_the_channel_even_after_reopening
+services::tui_o::writer::tests::a_violation_recorded_while_running_stops_the_writer_before_the_next_post
 services::tui_o::writer::tests::actor::a_full_spool_pauses_capture_until_delivered_segments_are_collected
 services::tui_o::writer::tests::actor::a_source_rewritten_behind_the_cursor_halts_the_channel_before_any_post
 services::tui_o::writer::tests::actor::an_announced_unit_keeps_its_segment_until_it_is_sealed_and_posted
@@ -9406,8 +9408,10 @@ services::tui_o::writer::tests::actor::without_ownership_the_actor_keeps_spoolin
 services::tui_o::writer::tests::an_unclear_post_is_settled_from_history_and_never_posted_again
 services::tui_o::writer::tests::an_unclear_post_sharing_an_earlier_unsettled_payload_stays_ambiguous
 services::tui_o::writer::tests::derivation_splits_each_unit_once_and_excludes_or_blocks_the_rest
+services::tui_o::writer::tests::no_post_starts_its_request_after_ownership_closes
 services::tui_o::writer::tests::nothing_is_prepared_or_posted_without_ownership_and_the_delivery_lease
 services::tui_o::writer::tests::settlement_stays_ambiguous_or_unresolved_when_history_cannot_single_out_the_post
+services::tui_o::writer::tests::the_delivery_lease_is_held_until_the_post_task_ends
 services::tui_prompt_control::tests::absolute_path_prompts_are_never_taken_as_codex_commands
 services::tui_prompt_control::tests::codex_local_controls_carry_the_normalized_name_and_the_raw_args
 services::tui_prompt_control::tests::command_shaped_input_outside_the_registry_is_refused_not_forwarded
