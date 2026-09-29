@@ -13,7 +13,7 @@ use super::*;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{CapturedRecord, ShadowProvider, UnitKey, UnitKind};
 use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
-use crate::services::tui_o::store::{ChannelStore, Initialized, OStore, StoreConfig};
+use crate::services::tui_o::store::{ChannelStore, InitSource, Initialized, OStore, StoreConfig};
 
 const BOT: u64 = 42;
 const CHANNEL: u64 = 7;
@@ -26,6 +26,10 @@ enum Reply {
     /// The request never reached Discord and the response was lost.
     Unsent,
     Refused(u16),
+    /// Created, but Discord stored different content.
+    Transformed,
+    /// A created message whose author is not this bot.
+    CreatedByOther,
 }
 
 #[derive(Default)]
@@ -92,6 +96,8 @@ impl DiscordPort for FakePort {
             }
             Reply::Unsent => PostOutcome::Uncertain("connection reset".into()),
             Reply::Refused(status) => PostOutcome::Refused(status),
+            Reply::Transformed => PostOutcome::Created(self.say(BOT, &content.to_uppercase())),
+            Reply::CreatedByOther => PostOutcome::Created(self.say(BOT + 1, &content)),
         };
         async move { outcome }
     }
@@ -171,15 +177,21 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::build(|_| Vec::new())
+    }
+
+    /// `sources` may create transcripts under the runtime root before the era begins.
+    fn build(sources: impl FnOnce(&std::path::Path) -> Vec<InitSource>) -> Self {
         let runtime = tempfile::tempdir().unwrap();
         let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, runtime.path())
             .unwrap()
             .unwrap();
+        let sources = sources(runtime.path());
         let init = |channel| {
             let (initial_anchor, build_digest, at) = (100, "b".to_string(), Utc::now());
             Ok(Initialized {
                 channel,
-                sources: Vec::new(),
+                sources: sources.clone(),
                 initial_anchor,
                 build_digest,
                 at,
@@ -315,6 +327,18 @@ async fn an_unclear_post_is_settled_from_history_and_never_posted_again() {
         harness.alarms.taken(),
         [WriterAlarm::NotFound { serial: 1 }]
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_created_reply_by_another_author_is_settled_from_history_rather_than_trusted() {
+    let harness = Harness::new();
+    harness.gate.acquired();
+    let mut writer = harness.writer();
+    let replies = [Reply::CreatedByOther];
+    harness.port.replies.lock().unwrap().extend(replies);
+    assert_eq!(writer.deliver(&piece("m1", "first")).await, Step::Done);
+    assert_eq!(outcome(&mut writer, "m1"), Some(PieceOutcome::NotFound));
+    assert_eq!(harness.port.posts(), ["first"]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -523,3 +547,6 @@ fn derivation_splits_each_unit_once_and_excludes_or_blocks_the_rest() {
         [Derived::Blocked { .. }]
     ));
 }
+
+#[path = "actor_tests.rs"]
+mod actor;

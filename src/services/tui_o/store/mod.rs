@@ -494,3 +494,11 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+impl ChannelStore {
+    /// Shrinks the segment and spool limits so a test can fill the spool.
+    pub(crate) fn set_limits_for_test(&mut self, segment_max: u64, spool_cap: u64) {
+        (self.segment_max, self.spool_cap) = (segment_max, spool_cap);
+    }
+}

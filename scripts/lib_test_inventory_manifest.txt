@@ -3996,6 +3996,9 @@ services::discord::outbound::manual_delivery::manual_v3_delivery_tests::voice_an
 services::discord::outbound::manual_delivery::manual_v3_delivery_tests::voice_announce_same_utterance_and_generation_dedupes_at_health_layer
 services::discord::outbound::manual_delivery::production_nonce_tests::production_serenity_inline_path_serializes_canonical_durable_row_nonces
 services::discord::outbound::message::tests::legacy_outbound_envelope_defaults_create_nonce_fields
+services::discord::outbound::o_writer_io::tests::o_holds_the_same_cell_legacy_contends_on_and_releases_it_after_each_piece
+services::discord::outbound::o_writer_io::tests::only_400_403_and_404_count_as_refused
+services::discord::outbound::o_writer_io::tests::round_trip_on_an_approved_test_channel
 services::discord::outbound::reaction_control::tests::queue_reaction_delivery_uses_fallback_only_on_failure
 services::discord::outbound::reaction_control::tests::reaction_control_reply_ids_are_stable_for_queued_card_failure
 services::discord::outbound::receipt_index::tests::a_contained_receipt_after_a_wider_one_does_not_shrink_the_merge
@@ -9364,9 +9367,17 @@ services::tui_o::store::tests::init_and_ledger_round_trip_the_anchor_serials_and
 services::tui_o::store::tests::missing_or_damaged_state_of_an_era_channel_halts_instead_of_reinitializing
 services::tui_o::store::tests::the_store_is_dormant_unless_its_flag_is_set
 services::tui_o::writer::tests::a_blocked_record_or_a_ledger_violation_stops_the_channel_before_any_post
+services::tui_o::writer::tests::a_created_reply_by_another_author_is_settled_from_history_rather_than_trusted
 services::tui_o::writer::tests::a_piece_is_prepared_under_ownership_then_posted_once
 services::tui_o::writer::tests::a_prepared_left_by_a_crash_is_settled_before_the_next_post
 services::tui_o::writer::tests::a_refused_post_blocks_the_channel_even_after_reopening
+services::tui_o::writer::tests::actor::a_full_spool_pauses_capture_until_delivered_segments_are_collected
+services::tui_o::writer::tests::actor::a_source_rewritten_behind_the_cursor_halts_the_channel_before_any_post
+services::tui_o::writer::tests::actor::an_announced_unit_keeps_its_segment_until_it_is_sealed_and_posted
+services::tui_o::writer::tests::actor::the_actor_posts_each_unit_after_the_switch_once_even_across_a_restart
+services::tui_o::writer::tests::actor::the_round_trip_reads_back_every_case_and_reports_any_difference
+services::tui_o::writer::tests::actor::the_writer_stays_dormant_unless_enabled
+services::tui_o::writer::tests::actor::without_ownership_the_actor_keeps_spooling_and_posts_once_ownership_returns
 services::tui_o::writer::tests::an_unclear_post_is_settled_from_history_and_never_posted_again
 services::tui_o::writer::tests::an_unclear_post_sharing_an_earlier_unsettled_payload_stays_ambiguous
 services::tui_o::writer::tests::derivation_splits_each_unit_once_and_excludes_or_blocks_the_rest
