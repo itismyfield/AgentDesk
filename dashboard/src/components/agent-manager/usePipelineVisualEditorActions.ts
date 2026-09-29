@@ -1,7 +1,7 @@
 import type { Dispatch, SetStateAction } from "react";
 
 import * as api from "../../api";
-import type { PipelineConfigFull } from "../../types";
+import type { PipelineConfigFull, PipelineStage } from "../../types";
 import {
   buildFsmEdgeBindingKey,
   buildOverridePayload,
@@ -31,6 +31,7 @@ interface Params {
   level: EditLevel;
   pipelineDraft: PipelineConfigFull | null;
   stageDrafts: StageDraft[];
+  allRepoStages: PipelineStage[];
   overrideExtras: Record<string, unknown>;
   pipelineChanged: boolean;
   stagesChanged: boolean;
@@ -59,6 +60,7 @@ export function usePipelineVisualEditorActions(params: Params) {
     level,
     pipelineDraft,
     stageDrafts,
+    allRepoStages,
     overrideExtras,
     pipelineChanged,
     stagesChanged,
@@ -420,7 +422,7 @@ export function usePipelineVisualEditorActions(params: Params) {
         }
       }
       if (!isFsmVariant && stagesChanged) {
-        await api.savePipelineStages(repo, buildStageSavePayload(stageDrafts));
+        await api.savePipelineStages(repo, buildStageSavePayload(stageDrafts, allRepoStages));
       }
       await refreshAfterMutation(level);
       setSuccess(tr("비주얼 파이프라인 편집 내용을 저장했습니다.", "Saved visual pipeline editor changes."));

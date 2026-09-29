@@ -97,15 +97,18 @@ it("offers no counter provider or conditional skip for a new stage", async () =>
   expect(field("Skip").textContent).toContain("Never");
 });
 
-it("shows a stored counter provider read-only and preserves it on save", async () => {
-  const values = { provider: "counter", agent_override_id: "existing-agent" };
+it.each([
+  { provider: "counter", agent_override_id: "existing-agent" },
+  { provider: "counter", agent_override_id: "" },
+  { provider: " counter ", agent_override_id: "existing-agent" },
+])("shows a stored counter provider read-only and preserves it on save: %j", async (values) => {
   await mountStage(values);
   await saveTriggerEdit(values);
 
   expect(field("Provider").querySelector("select")).toBeNull();
   expect(field("Provider").textContent).toContain("Counter model");
   expect(field("Agent override").querySelector("select")).toBeNull();
-  expect(field("Agent override").textContent).toContain("existing-agent");
+  expect(field("Agent override").textContent).toContain(values.agent_override_id || "Card assignee");
 });
 
 it("shows a stored conditional skip read-only and preserves it on save", async () => {
@@ -120,6 +123,7 @@ it("shows a stored conditional skip read-only and preserves it on save", async (
 it.each([
   { provider: "codex", skip_condition: "label:hotfix" },
   { provider: " codex ", skip_condition: "  " },
+  { provider: "", skip_condition: "" },
 ])("displays and preserves stored values verbatim: %j", async (values) => {
   await mountStage(values);
   await saveTriggerEdit(values);

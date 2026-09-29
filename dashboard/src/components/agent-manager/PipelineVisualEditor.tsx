@@ -528,6 +528,7 @@ export default function PipelineVisualEditor({
     level,
     pipelineDraft,
     stageDrafts,
+    allRepoStages,
     overrideExtras,
     pipelineChanged,
     stagesChanged,

@@ -146,22 +146,38 @@ export function emptyStageDraft(): StageDraft {
   };
 }
 
-export function stageInputFromDraft(stage: StageDraft) {
+// The server treats trimmed "counter" as a counter stage, so the editor must match.
+export function isCounterProvider(provider: string | null | undefined) {
+  return provider?.trim() === "counter";
+}
+
+type StoredStageField = "provider" | "agent_override_id" | "skip_condition";
+
+// An empty draft field is sent as null unless the stored row holds that exact empty string,
+// so unedited legacy values reach the server unchanged.
+function storedEmptyOrNull(value: string, stored: PipelineStage | undefined, key: StoredStageField) {
+  return value || (stored?.[key] === "" ? "" : null);
+}
+
+export function stageInputFromDraft(stage: StageDraft, stored?: PipelineStage) {
   return {
     stage_name: stage.stage_name.trim(),
-    provider: stage.provider || null,
-    agent_override_id: stage.agent_override_id || null,
-    skip_condition: stage.skip_condition || null,
+    provider: storedEmptyOrNull(stage.provider, stored, "provider"),
+    agent_override_id: storedEmptyOrNull(stage.agent_override_id, stored, "agent_override_id"),
+    skip_condition: storedEmptyOrNull(stage.skip_condition, stored, "skip_condition"),
     trigger_after: normalizeStageTrigger(stage.trigger_after),
   };
 }
 
 // Stages belong to the repo as a whole; saving replaces the repo's full list. The server keeps
 // each stage's id and its unedited settings (timeouts, retries) as long as the name stays.
-export function buildStageSavePayload(stageDrafts: StageDraft[]) {
+export function buildStageSavePayload(stageDrafts: StageDraft[], storedStages: PipelineStage[]) {
   return stageDrafts
     .filter((stage) => stage.stage_name.trim())
-    .map((stage) => stageInputFromDraft(stage));
+    .map((stage) => stageInputFromDraft(
+      stage,
+      storedStages.find((row) => row.stage_name === stage.stage_name.trim()),
+    ));
 }
 
 export function extractOverrideExtras(rawConfig: unknown): Record<string, unknown> {

@@ -72,14 +72,14 @@ describe("pipeline-visual-editor-model", () => {
 
     expect(normalizeStageTrigger(undefined)).toBe("ready");
     expect(stage).toMatchObject({ trigger_after: "ready", provider: "codex", skip_condition: "label:hotfix" });
-    expect(buildStageSavePayload([stage])[0]).toMatchObject({ provider: "codex", skip_condition: "label:hotfix" });
+    expect(buildStageSavePayload([stage], [])[0]).toMatchObject({ provider: "codex", skip_condition: "label:hotfix" });
   });
 
   it("saves the repo's full stage list with only runtime fields", () => {
     const payload = buildStageSavePayload([
       { stage_name: " e2e ", provider: "counter", agent_override_id: "", skip_condition: "no_rs_changes", trigger_after: "review_pass" },
       { stage_name: "  ", provider: "", agent_override_id: "", skip_condition: "", trigger_after: "ready" },
-    ]);
+    ], []);
 
     expect(payload).toEqual([
       { stage_name: "e2e", provider: "counter", agent_override_id: null, skip_condition: "no_rs_changes", trigger_after: "review_pass" },

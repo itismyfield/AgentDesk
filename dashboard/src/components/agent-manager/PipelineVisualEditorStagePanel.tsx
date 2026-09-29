@@ -1,5 +1,5 @@
 import { localeName } from "../../i18n";
-import type { StageDraft } from "./pipeline-visual-editor-model";
+import { isCounterProvider, type StageDraft } from "./pipeline-visual-editor-model";
 import {
   BUTTON_DANGER_STYLE,
   BUTTON_INFO_STYLE,
@@ -104,10 +104,10 @@ function StageCard({ ctx, actions, stage, index }: Props & { stage: StageDraft; 
         />
         <ReadOnlyField
           label={tr("실행 방식", "Provider")}
-          value={stage.provider === "counter" ? tr("교차 모델", "Counter model") : stage.provider || tr("담당 에이전트", "Assigned agent")}
+          value={isCounterProvider(stage.provider) ? tr("교차 모델", "Counter model") : stage.provider || tr("담당 에이전트", "Assigned agent")}
           note={tr("읽기 전용", "Read-only")}
         />
-        {stage.provider === "counter" ? (
+        {isCounterProvider(stage.provider) ? (
           <ReadOnlyField
             label={tr("담당 에이전트 지정", "Agent override")}
             value={assignedAgent ? localeName(ctx.locale, assignedAgent) : stage.agent_override_id || tr("카드 담당자", "Card assignee")}
