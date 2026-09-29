@@ -258,7 +258,8 @@ fn read_log(path: &Path) -> io::Result<LogRead> {
     })
 }
 
-/// Records of `channel_id` with `seq > after_seq`, in log order. Read-only.
+/// Records of `channel_id` with `seq > after_seq`, in log order. Read-only; a corrupt line fails
+/// the read, since skipping it would hide a binding from the reader.
 pub(crate) fn binding_events_since(
     channel_id: u64,
     after_seq: u64,
@@ -268,7 +269,15 @@ pub(crate) fn binding_events_since(
     };
     // Holding the lock keeps a record that is being rolled back out of every read.
     let _logs = lock_logs();
-    let records = read_log(&path)?.records.into_iter();
+    let read = read_log(&path)?;
+    if read.lines != read.records.len() as u64 {
+        let unreadable = read.lines - read.records.len() as u64;
+        return Err(io::Error::other(format!(
+            "{unreadable} unreadable binding event line(s) in {}",
+            path.display()
+        )));
+    }
+    let records = read.records.into_iter();
     Ok(records.filter(|record| record.seq > after_seq).collect())
 }
 

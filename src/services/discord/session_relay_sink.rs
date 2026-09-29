@@ -879,6 +879,20 @@ impl SessionBoundDiscordRelaySink {
             );
             return Ok(SessionRelayDeliveryOutcome::Delivered);
         }
+        // O posts this body: consume the range without transport or delivery evidence.
+        if crate::services::tui_o::cutover::o_owns_tui_output_for_tmux_session(
+            &delivery.session_name,
+        ) {
+            self.advance_after_o_delegated_terminal(
+                &shared,
+                &provider,
+                channel_id,
+                &delivery.session_name,
+                &delivery,
+                sink_lease_guard.as_ref(),
+            );
+            return Ok(SessionRelayDeliveryOutcome::Delivered);
+        }
 
         if let SessionBoundTerminalDeliveryRoute::PlaceholderEdit(msg_id) = route {
             if let Some((start, end)) = cutover_range.filter(|_| cutover_short_replace) {

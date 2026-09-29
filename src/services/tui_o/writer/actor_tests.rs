@@ -68,7 +68,7 @@ fn spawn_as(
 fn spawn_with(
     writer: Writer,
     provider: ShadowProvider,
-    bindings: Arc<FakeBindings>,
+    bindings: Arc<impl BindingEvents>,
 ) -> (watch::Sender<bool>, tokio::task::JoinHandle<()>) {
     let (stop, stopped) = watch::channel(false);
     let task = tokio::spawn(run_channel(writer, provider, bindings, stopped));
