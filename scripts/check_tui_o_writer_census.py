@@ -301,7 +301,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "voice_barge_in/runtime_lifecycle.rs": ("1-E", "KEEP_36"),
 }
 EXPECTED_GATES: dict[str, int] = {
-    "src/services/discord/session_relay_sink.rs": 1,
+    "src/services/discord/session_relay_sink.rs": 2,
     "src/services/discord/session_relay_sink/task_notification_context.rs": 1,
     "src/services/discord/tmux_watcher.rs": 1,
     "src/services/discord/tmux_watcher/completion_producer.rs": 1,

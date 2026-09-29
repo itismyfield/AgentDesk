@@ -370,14 +370,11 @@ pub(super) async fn run_terminal_outcome_delivery(
             &inflight_state,
             can_deliver_directly,
         );
-        let identity_held = o_body_cut.is_err();
-        let o_body_cut = o_body_cut.unwrap_or(false);
-        if identity_held {
-            preserve_inflight_for_cleanup_retry = true;
-        } else if silent_turn_handled {
+        if o_body_cut.is_err() || silent_turn_handled {
+            preserve_inflight_for_cleanup_retry |= o_body_cut.is_err();
         } else if delivery_response.trim().is_empty() {
             if empty_sink_commits_fully_consumed_response(&full_response, response_sent_offset) {
-                if o_body_cut {
+                if o_body_cut == Ok(true) {
                     let _ = gateway.delete_message(channel_id, current_msg_id).await;
                 }
                 (terminal_delivery_committed, terminal_body_visible) = (true, true);
@@ -410,7 +407,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 inflight_state.turn_start_offset,
             )
             .format_and_prefix(response_sent_offset == 0, &delivery_response);
-            if o_body_cut {
+            if o_body_cut == Ok(true) {
                 let _ = gateway.delete_message(channel_id, current_msg_id).await;
                 (terminal_delivery_committed, terminal_body_visible) = (true, true);
             } else if can_deliver_directly {
