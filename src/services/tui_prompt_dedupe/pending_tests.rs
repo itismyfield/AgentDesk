@@ -556,6 +556,37 @@ fn a_pending_refused_before_the_restart_stays_refused_until_it_resolves() {
         exact.session_id, b,
         "a Resolved after the refusal restores B"
     );
+
+    // The restart forgot every binding; the pane is back on B, as a rehydrate leaves it.
+    let bound = claude(&b_path, &b);
+    assert!(register_rehydrated_tmux_runtime_binding(
+        "claude", tmux, channel, bound
+    ));
+    register_provider_session("claude", &a, tmux);
+    let back_to_c = adopt_claude_continuation_session(&a, &c, &clear(&c_path));
+    assert!(back_to_c.unwrap().is_some(), "newer C is bound again");
+    fs::remove_file(&b_path).unwrap();
+    let again = adopt_claude_continuation_session(&a, &b, &clear(&b_path));
+    assert!(again.unwrap().is_none(), "B is a candidate again");
+    lane.touch(&b);
+    let refused = adopt_claude_continuation_session(&a, &b, &clear(&b_path));
+    assert!(
+        refused.unwrap().is_none(),
+        "the second B is older than C too"
+    );
+    let records = records_strict(channel).unwrap().unwrap();
+    let last = &records.last().unwrap().new;
+    assert!(
+        matches!(last, BindingTarget::Rejected { .. }),
+        "second refusal on record: {last:?}"
+    );
+    restart(channel);
+    let skip = PendingRestore::NotEligible(NotEligible::Rejected);
+    assert_eq!(
+        lane.judge(channel, tmux, &a),
+        RestoreStep::Finished(skip),
+        "a B refused again is not restored"
+    );
 }
 
 #[test]

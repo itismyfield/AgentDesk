@@ -484,7 +484,11 @@ impl Writer {
         }
         match &record.new {
             BindingTarget::Source(source) => pane.current = Some(source.clone()),
-            BindingTarget::Pending { .. } => pane.pending = Some(record.clone()),
+            BindingTarget::Pending { .. } => {
+                pane.pending = Some(record.clone());
+                // A new candidate's refusal must reach the log again: restore reads it.
+                pane.rejected = None;
+            }
             BindingTarget::Resolved {
                 pending_seq,
                 source,
