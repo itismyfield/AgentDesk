@@ -9101,6 +9101,7 @@ services::session_forwarding::trusted_target::tests::pinned_client_connects_to_v
 services::session_forwarding::trusted_target::tests::private_and_tailscale_addresses_require_operator_opt_in
 services::session_forwarding::trusted_target::tests::resolver_answer_is_pinned_once_before_request_builder_exists
 services::session_host::herdr::transport::tests::herdr_socket_handshake_checks_protocol_not_version
+services::session_host::herdr::transport::tests::herdr_socket_observation_keeps_the_snapshot_generation_across_a_concurrent_reconnect
 services::session_host::herdr::transport::tests::herdr_socket_observation_never_spans_a_reconnect
 services::session_host::herdr::transport::tests::herdr_socket_partial_write_is_indeterminate
 services::session_host::herdr::transport::tests::herdr_socket_reads_retry_within_the_deadline_on_a_new_connection

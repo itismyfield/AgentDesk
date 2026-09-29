@@ -33,11 +33,19 @@ struct FakeTransport {
 }
 
 impl HerdrTransport for FakeTransport {
-    fn call(&self, call: &HerdrCall) -> contract::HerdrOutcome {
+    fn call(&self, call: &HerdrCall) -> (contract::HerdrOutcome, u64) {
         self.calls.lock().unwrap().push(call.clone());
-        if self.reconnects {
-            self.generation.fetch_add(1, Ordering::SeqCst);
-        }
+        let generation = if self.reconnects {
+            self.generation.fetch_add(1, Ordering::SeqCst) + 1
+        } else {
+            self.generation.load(Ordering::SeqCst)
+        };
+        (self.reply(call), generation)
+    }
+}
+
+impl FakeTransport {
+    fn reply(&self, call: &HerdrCall) -> contract::HerdrOutcome {
         let next = self.script.lock().unwrap().pop_front();
         let (expected, reply) = next.expect("fake transport called more often than scripted");
         assert_eq!(call.request, expected, "fake transport request mismatch");
@@ -50,10 +58,6 @@ impl HerdrTransport for FakeTransport {
             }
         };
         Ok(serde_json::from_value::<HerdrReply>(body).expect("fixture matches the schema"))
-    }
-
-    fn generation(&self) -> u64 {
-        self.generation.load(Ordering::SeqCst)
     }
 }
 

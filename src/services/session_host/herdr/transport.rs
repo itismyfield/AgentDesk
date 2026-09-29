@@ -129,41 +129,47 @@ impl<F: HerdrFraming> HerdrSocketTransport<F> {
         Ok((connection, hello))
     }
 
+    /// Generation of the current connection, 0 when none is open. Test-only:
+    /// callers take the generation from `call`, never from a later read.
+    #[cfg(test)]
+    fn generation(&self) -> u64 {
+        self.slot()
+            .as_ref()
+            .map_or(0, |connection| connection.generation)
+    }
+
     /// Mutations never open a connection: a replaced server is not written to.
-    fn attempt(&self, call: &HerdrCall) -> HerdrOutcome {
+    /// The generation is read under the same lock as the exchange; 0 if none ran.
+    fn attempt(&self, call: &HerdrCall) -> (HerdrOutcome, u64) {
         let mut slot = self.slot();
         if slot.is_none() && call.request.is_read_only() {
-            let (connection, _) = self
-                .open()
-                .map_err(|error| HerdrTransportError::NotSent(format!("{error:?}")))?;
-            *slot = Some(connection);
+            match self.open() {
+                Ok((connection, _)) => *slot = Some(connection),
+                Err(error) => {
+                    return (Err(HerdrTransportError::NotSent(format!("{error:?}"))), 0);
+                }
+            }
         }
         let Some(connection) = slot.as_mut() else {
-            return Err(HerdrTransportError::NotSent(
-                "no herdr connection".to_string(),
-            ));
+            let error = HerdrTransportError::NotSent("no herdr connection".to_string());
+            return (Err(error), 0);
         };
+        let generation = connection.generation;
         let outcome = connection.exchange(&self.framing, call, self.config.max_frame_bytes);
         if !matches!(&outcome, Ok(reply) if reply.id == call.id) {
             *slot = None;
         }
-        outcome
+        (outcome, generation)
     }
 }
 
 impl<F: HerdrFraming> HerdrTransport for HerdrSocketTransport<F> {
-    fn call(&self, call: &HerdrCall) -> HerdrOutcome {
+    fn call(&self, call: &HerdrCall) -> (HerdrOutcome, u64) {
         if !call.request.is_read_only() {
             return self.attempt(call);
         }
         let deadline = Instant::now() + self.config.read_deadline;
         observe::retry_read(deadline, self.config.retry_backoff, || self.attempt(call))
-    }
-
-    fn generation(&self) -> u64 {
-        self.slot()
-            .as_ref()
-            .map_or(0, |connection| connection.generation)
     }
 }
 

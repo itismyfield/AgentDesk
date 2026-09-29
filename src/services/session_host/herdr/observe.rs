@@ -52,12 +52,12 @@ pub(crate) fn hello_result(
 pub(crate) fn retry_read(
     deadline: Instant,
     backoff: Duration,
-    mut attempt: impl FnMut() -> HerdrOutcome,
-) -> HerdrOutcome {
+    mut attempt: impl FnMut() -> (HerdrOutcome, u64),
+) -> (HerdrOutcome, u64) {
     loop {
-        let outcome = attempt();
+        let (outcome, generation) = attempt();
         if outcome.is_ok() || Instant::now() + backoff >= deadline {
-            return outcome;
+            return (outcome, generation);
         }
         thread::sleep(backoff);
     }

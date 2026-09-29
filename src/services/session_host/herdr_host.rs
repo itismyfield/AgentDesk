@@ -45,14 +45,15 @@ impl<T: HerdrTransport> HerdrHost<T> {
         }
     }
 
-    fn call(&self, request: HerdrRequest) -> (HerdrCall, contract::HerdrOutcome) {
+    /// The call, its outcome and the generation of the connection that answered.
+    fn call(&self, request: HerdrRequest) -> (HerdrCall, contract::HerdrOutcome, u64) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let call = HerdrCall {
             id: format!("adk-{id}"),
             request,
         };
-        let outcome = self.transport.call(&call);
-        (call, outcome)
+        let (outcome, generation) = self.transport.call(&call);
+        (call, outcome, generation)
     }
 
     fn exchange<R>(
@@ -62,33 +63,32 @@ impl<T: HerdrTransport> HerdrHost<T> {
         adapt: fn(&HerdrCall, contract::HerdrOutcome, &str) -> Result<R, HostError>,
     ) -> Result<R, HostError> {
         let pane = pane_id(session)?;
-        let (call, outcome) = self.call(request(pane.to_string()));
+        let (call, outcome, _) = self.call(request(pane.to_string()));
         adapt(&call, outcome, pane)
     }
 
-    fn observe_pane(&self, session: HostSessionRef<'_>) -> HerdrObservation {
+    /// The snapshot observation and the generation of the connection it came from.
+    fn observe_pane(&self, session: HostSessionRef<'_>) -> (HerdrObservation, u64) {
         let Ok(pane) = pane_id(session) else {
-            return HerdrObservation::failed(ControlPlane::Reachable);
+            return (HerdrObservation::failed(ControlPlane::Reachable), 0);
         };
-        let (call, outcome) = self.call(HerdrRequest::SessionSnapshot {});
-        contract::snapshot_observation(&call, outcome, pane)
+        let (call, outcome, generation) = self.call(HerdrRequest::SessionSnapshot {});
+        (
+            contract::snapshot_observation(&call, outcome, pane),
+            generation,
+        )
     }
 
     pub(crate) fn observe(&self, session: HostSessionRef<'_>) -> HerdrObservation {
-        let observation = self.observe_pane(session);
-        let snapshot_generation = self.transport.generation();
+        let (observation, snapshot_generation) = self.observe_pane(session);
         let (Ok(pane), HostPresence::Present) = (pane_id(session), observation.presence()) else {
             return observation;
         };
-        let (call, outcome) = self.call(HerdrRequest::PaneProcessInfo {
+        let (call, outcome, process_generation) = self.call(HerdrRequest::PaneProcessInfo {
             pane_id: pane.to_string(),
         });
         let observation = contract::with_process_info(observation, &call, outcome, pane);
-        observe::fence_generation(
-            observation,
-            snapshot_generation,
-            self.transport.generation(),
-        )
+        observe::fence_generation(observation, snapshot_generation, process_generation)
     }
 }
 
@@ -109,7 +109,7 @@ impl<T: HerdrTransport> InteractiveSessionHost for HerdrHost<T> {
     }
 
     fn presence(&self, session: HostSessionRef<'_>) -> HostPresence {
-        self.observe_pane(session).presence()
+        self.observe_pane(session).0.presence()
     }
 
     fn liveness(&self, session: HostSessionRef<'_>) -> HostLiveness {

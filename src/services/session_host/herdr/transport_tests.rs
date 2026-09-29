@@ -497,3 +497,58 @@ fn herdr_socket_observation_never_spans_a_reconnect() {
     let herdr = host(&server, config());
     assert_eq!(herdr.liveness(pane()), HostLiveness::Live);
 }
+
+/// Runs `between` right after a snapshot exchange returns, before the caller resumes.
+struct PauseAfterSnapshot<'a> {
+    inner: HerdrSocketTransport,
+    between: &'a (dyn Fn() + Sync),
+}
+
+impl HerdrTransport for PauseAfterSnapshot<'_> {
+    fn call(&self, call: &HerdrCall) -> (HerdrOutcome, u64) {
+        let exchange = self.inner.call(call);
+        if call.request == (HerdrRequest::SessionSnapshot {}) {
+            (self.between)();
+        }
+        exchange
+    }
+}
+
+#[test]
+fn herdr_socket_observation_keeps_the_snapshot_generation_across_a_concurrent_reconnect() {
+    let server = serve(vec![
+        conn(vec![snapshot(), Turn::Close]),
+        conn(vec![process_info(PANE); 2]),
+    ]);
+    let (go, done) = (Barrier::new(2), Barrier::new(2));
+    let between = || {
+        go.wait();
+        done.wait();
+    };
+    let transport = PauseAfterSnapshot {
+        inner: transport(&server, config()),
+        between: &between,
+    };
+    let herdr = HerdrHost::new(endpoint(&server), transport);
+    let observation = thread::scope(|scope| {
+        let other = scope.spawn(|| {
+            go.wait();
+            let pid = herdr.execution_pid(pane());
+            done.wait();
+            pid
+        });
+        let observation = herdr.observe(pane());
+        assert_eq!(
+            other.join().unwrap(),
+            Ok(Some(4242)),
+            "the other read reconnected"
+        );
+        observation
+    });
+    assert_eq!(observation.presence(), HostPresence::Present);
+    assert_eq!(
+        (observation.execution, observation.shell_pid),
+        (ExecutionState::Unknown, None),
+        "a snapshot from the first connection must not join a pid from the second"
+    );
+}
