@@ -7,11 +7,12 @@ use serde_json::{Value, json};
 
 use super::{
     CodexHookSourceClaim, CodexHookSourceRejection, CodexHookSourceRoute, CodexRolloutSource,
-    verify_codex_hook_source,
+    before_final_identity, verify_codex_hook_source,
 };
 use crate::services::claude_tui::hook_bundle::{
     CodexHookActivation, CodexTrustHashEvidence, codex_hook_capability,
 };
+use crate::services::codex_tui::rollout_index::lock_cache_for_tests;
 
 fn fixture() -> Value {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -236,10 +237,9 @@ fn rollout_without_session_meta_is_never_accepted() {
         .find(|hook| hook.0 == startup)
         .expect("startup")
         .1;
-    for body in [
-        "",
-        "{\"type\":\"event_msg\"}\n{\"type\":\"response_item\"}\n",
-    ] {
+    let header = meta_for(&runs(&fixture)[1], &startup).to_string();
+    // Nothing yet, or a header still being written: retry later.
+    for body in [String::new(), header.clone()] {
         std::fs::write(startup_path, body).expect("write old rollout");
         let result = verify_codex_hook_source(
             dir.path(),
@@ -248,6 +248,164 @@ fn rollout_without_session_meta_is_never_accepted() {
         assert_eq!(result, Err(CodexHookSourceRejection::SessionMetaMissing));
         assert!(result.unwrap_err().may_resolve_later());
     }
+    std::fs::write(
+        startup_path,
+        "{\"type\":\"event_msg\"}\n{\"type\":\"response_item\"}\n",
+    )
+    .expect("write old rollout");
+    let result = verify_codex_hook_source(
+        dir.path(),
+        &claim(&startup, Some(startup_path), CodexRolloutSource::Cli),
+    );
+    assert_eq!(
+        result,
+        Err(CodexHookSourceRejection::FirstRecordNotSessionMeta)
+    );
+    assert!(!result.unwrap_err().may_resolve_later());
+}
+
+#[test]
+fn malformed_first_record_is_rejected_even_with_a_valid_header_after_it() {
+    let fixture = fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hooks = materialize(dir.path(), &fixture);
+    let (_, startup, _) = captured_ids(&fixture);
+    let startup_path = &hooks
+        .iter()
+        .find(|hook| hook.0 == startup)
+        .expect("startup")
+        .1;
+    let header = meta_for(&runs(&fixture)[1], &startup);
+    let mut without_cwd = header.clone();
+    without_cwd["payload"]
+        .as_object_mut()
+        .expect("payload")
+        .remove("cwd");
+    for first in [
+        "{\"type\":\"session_meta\",".to_string(),
+        json!({"type": "event_msg"}).to_string(),
+        without_cwd.to_string(),
+    ] {
+        std::fs::write(startup_path, format!("{first}\n{header}\n")).expect("write rollout");
+        let result = verify_codex_hook_source(
+            dir.path(),
+            &claim(&startup, Some(startup_path), CodexRolloutSource::Cli),
+        );
+        assert_eq!(
+            result,
+            Err(CodexHookSourceRejection::FirstRecordNotSessionMeta),
+            "{first}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_payload_path_must_resolve_to_its_own_rollout_inside_the_root() {
+    let fixture = fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    let (_, startup, cleared) = captured_ids(&fixture);
+    let header = meta_for(&runs(&fixture)[1], &startup);
+    let name = format!("rollout-2026-09-27T21-04-25-{startup}.jsonl");
+    let link = dir.path().join("2026/09/27").join(&name);
+    std::fs::create_dir_all(link.parent().expect("parent")).expect("mkdir");
+
+    let other_name = dir
+        .path()
+        .join(format!("rollout-2026-09-27T21-04-26-{cleared}.jsonl"));
+    write_rollout(&other_name, header);
+    std::os::unix::fs::symlink(&other_name, &link).expect("symlink");
+    let result = verify_codex_hook_source(
+        dir.path(),
+        &claim(&startup, Some(&link), CodexRolloutSource::Cli),
+    );
+    assert_eq!(result, Err(CodexHookSourceRejection::FileNameMismatch));
+
+    let outside = elsewhere.path().join(&name);
+    write_rollout(&outside, header);
+    std::fs::remove_file(&link).expect("unlink");
+    std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+    let result = verify_codex_hook_source(
+        dir.path(),
+        &claim(&startup, Some(&link), CodexRolloutSource::Cli),
+    );
+    assert_eq!(result, Err(CodexHookSourceRejection::OutsideSessionsRoot));
+
+    let same_name = dir.path().join("moved").join(&name);
+    write_rollout(&same_name, header);
+    std::fs::remove_file(&link).expect("unlink");
+    std::os::unix::fs::symlink(&same_name, &link).expect("symlink");
+    let verified = verify_codex_hook_source(
+        dir.path(),
+        &claim(&startup, Some(&link), CodexRolloutSource::Cli),
+    )
+    .expect("in-root target with its own name");
+    assert_eq!(
+        verified.rollout_path,
+        same_name.canonicalize().expect("canonical")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rollout_replaced_during_verification_is_not_accepted() {
+    let fixture = fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    let (_, startup, _) = captured_ids(&fixture);
+    let header = meta_for(&runs(&fixture)[1], &startup);
+    let day = dir.path().join("2026/09/27");
+    let name = format!("rollout-2026-09-27T21-04-25-{startup}.jsonl");
+    let path = day.join(&name);
+    write_rollout(&path, header);
+    let replacement = dir.path().join("replacement.jsonl");
+    let parked = dir.path().join("parked.jsonl");
+    let verify = || {
+        verify_codex_hook_source(
+            dir.path(),
+            &claim(&startup, Some(&path), CodexRolloutSource::Cli),
+        )
+    };
+
+    // Same header, different inode: the header read is no longer what the path names.
+    write_rollout(&replacement, header);
+    let (from, to) = (replacement.clone(), path.clone());
+    before_final_identity(move || std::fs::rename(from, to).expect("swap"));
+    assert_eq!(verify(), Err(CodexHookSourceRejection::RolloutReplaced));
+
+    // A -> B -> A: the header came from A's descriptor and A is back, so A is the source.
+    let original = std::fs::metadata(&path).expect("stat");
+    write_rollout(&replacement, header);
+    let (a, b, spare) = (path.clone(), replacement.clone(), parked.clone());
+    before_final_identity(move || {
+        std::fs::rename(&a, &spare).expect("park A");
+        std::fs::rename(&b, &a).expect("B in");
+        std::fs::rename(&a, &b).expect("B out");
+        std::fs::rename(&spare, &a).expect("A back");
+    });
+    let verified = verify().expect("restored original");
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(
+        verified.identity,
+        crate::services::cluster::stream_relay::SourceFileIdentity::Unix {
+            dev: original.dev(),
+            ino: original.ino(),
+        }
+    );
+
+    // The dated directory swapped for a symlink out of the root after the open.
+    write_rollout(&elsewhere.path().join(&name), header);
+    let (leaf, outside, spare_dir) = (
+        day.clone(),
+        elsewhere.path().to_path_buf(),
+        dir.path().join("old-day"),
+    );
+    before_final_identity(move || {
+        std::fs::rename(&leaf, spare_dir).expect("move day");
+        std::os::unix::fs::symlink(outside, &leaf).expect("symlink day");
+    });
+    assert_eq!(verify(), Err(CodexHookSourceRejection::OutsideSessionsRoot));
 }
 
 #[test]
@@ -292,6 +450,7 @@ fn payload_path_outside_the_root_or_not_yet_written_is_not_accepted() {
 
 #[test]
 fn missing_payload_path_uses_the_single_rollout_index_candidate() {
+    let _index = lock_cache_for_tests();
     let fixture = fixture();
     let dir = tempfile::tempdir().expect("tempdir");
     let hooks = materialize(dir.path(), &fixture);
@@ -320,6 +479,7 @@ fn missing_payload_path_uses_the_single_rollout_index_candidate() {
 
 #[test]
 fn rollout_index_without_a_candidate_is_pending_not_accepted() {
+    let _index = lock_cache_for_tests();
     let fixture = fixture();
     let dir = tempfile::tempdir().expect("tempdir");
     let (_, startup, _) = captured_ids(&fixture);
@@ -331,6 +491,7 @@ fn rollout_index_without_a_candidate_is_pending_not_accepted() {
 
 #[test]
 fn rollout_index_with_two_candidates_rejects_instead_of_picking_one() {
+    let _index = lock_cache_for_tests();
     let fixture = fixture();
     let tui = &runs(&fixture)[1];
     let (_, startup, _) = captured_ids(&fixture);
@@ -373,6 +534,38 @@ fn rollout_index_with_two_candidates_rejects_instead_of_picking_one() {
         result,
         Err(CodexHookSourceRejection::AmbiguousCandidates(2))
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn incomplete_rollout_index_lookup_is_retryable_not_a_single_candidate() {
+    use std::os::unix::fs::PermissionsExt;
+    let _index = lock_cache_for_tests();
+    let fixture = fixture();
+    let (_, startup, _) = captured_ids(&fixture);
+    let header = meta_for(&runs(&fixture)[1], &startup);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let name = format!("rollout-2026-09-27T21-04-25-{startup}.jsonl");
+    write_rollout(&dir.path().join("2026/09/27").join(&name), header);
+    let hidden = dir.path().join("2026/09/28");
+    write_rollout(&hidden.join(&name), header);
+    std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let unreadable = std::fs::read_dir(&hidden).is_err();
+    let result =
+        verify_codex_hook_source(dir.path(), &claim(&startup, None, CodexRolloutSource::Cli));
+    std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert!(
+        unreadable,
+        "the test user must not bypass directory permissions"
+    );
+    assert_eq!(result, Err(CodexHookSourceRejection::IndexIncomplete));
+    assert!(result.unwrap_err().may_resolve_later());
+    // The existing discovery path still skips the unreadable directory silently.
+    std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let discovered =
+        crate::services::codex_tui::rollout_index::rollout_files_under(dir.path()).len();
+    std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert_eq!(discovered, 1);
 }
 
 #[test]
