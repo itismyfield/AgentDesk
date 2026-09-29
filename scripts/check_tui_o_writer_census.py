@@ -307,7 +307,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
 EXPECTED_GATES: dict[str, int] = {
     "src/services/discord/health/recovery.rs": 1,
     "src/services/discord/idle_recap.rs": 1,
-    "src/services/discord/recovery_engine/completion_delivery.rs": 2,
+    "src/services/discord/recovery_engine/completion_delivery.rs": 1,
     "src/services/discord/recovery_paths/restart.rs": 1,
     "src/services/discord/session_relay_sink.rs": 2,
     "src/services/discord/session_relay_sink/task_notification_context.rs": 1,
@@ -323,7 +323,7 @@ EXPECTED_GATES: dict[str, int] = {
     "src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs": 1,
     "src/services/discord/turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs": 1,
     "src/services/discord/turn_finalizer/watcher_backstop.rs": 1,
-    "src/services/tui_o/cutover.rs": 4,
+    "src/services/tui_o/cutover.rs": 2,
 }
 # Funnel -> tests that drive it with O owning the channel. Each must exist as a
 # non-ignored test-attributed `fn` in src/; empty funnels or missing tests block the flip.
@@ -337,7 +337,7 @@ FLIP_READY_TESTS: dict[str, tuple[str, ...]] = {
     "W04": ("o_delegated_single_message_footer_completion_sends_no_body",),
     "W10": ("o_delegated_tui_body_is_cut_on_direct_gateways_but_not_headless",),
     "W11": ("o_delegated_cancelled_partial_body_is_not_replaced",),
-    "W13": ("o_delegated_foreign_custody_settles_without_post_or_evidence",),
+    "W13": ("o_delegated_foreign_custody_follows_destination_membership",),
     "W20": ("o_delegated_idle_range_is_consumed_once_without_transport_or_evidence",),
     "W21": ("o_delegated_task_response_leaves_no_legacy_claim",),
     "W30": ("o_delegated_recovery_body_posts_only_the_marker_without_evidence",),

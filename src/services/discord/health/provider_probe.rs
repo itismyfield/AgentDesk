@@ -366,10 +366,15 @@ mod tests {
         let json = serde_json::to_value(snapshot).expect("serialize standby health");
         assert_eq!(json["providers"][0]["connected"], false);
         assert_eq!(json["providers"][0]["runtime_state_complete"], true);
-        assert_eq!(
-            json["degraded_reasons"],
-            serde_json::json!(["provider:codex:gateway_standby"])
-        );
+        // TUI-O writer alarms are process-global and raised by concurrent tests.
+        let reasons: Vec<&str> = json["degraded_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|reason| reason.as_str())
+            .filter(|reason| !reason.starts_with("tui_o:"))
+            .collect();
+        assert_eq!(reasons, ["provider:codex:gateway_standby"]);
     }
 
     /// #5951 — the fence cell of a purged channel stays, and health says so.

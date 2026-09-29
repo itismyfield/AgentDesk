@@ -32,5 +32,8 @@
 /// sibling) so the frozen `recovery_engine.rs` 4090 baseline gains only the
 /// 1-arm gate call; the cutover body lives off the frozen file.
 pub(super) mod controller_cutover;
+// The anchor fixture keys its record by a tmux generation marker, which exists only on unix.
+#[cfg(all(test, unix))]
+mod o_anchor_repost_tests;
 pub(super) mod restart;
 pub(super) mod shared;

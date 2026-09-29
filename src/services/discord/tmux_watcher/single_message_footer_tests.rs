@@ -109,13 +109,13 @@ async fn watcher_single_message_completion_footer_producer_threads_sniffed_backg
     }
 }
 
-/// O owns the TUI body message, so the footer completion writes nothing onto it.
+/// O owns the listed channel's TUI body message, so the footer completion writes nothing onto it.
 #[tokio::test(flavor = "current_thread")]
 async fn o_delegated_single_message_footer_completion_sends_no_body() {
     use super::single_message_footer::WatcherCompletionFooterTerminalTarget;
     use crate::services::discord::recovery_engine::o_cut_recorder::start;
     const BODY: &str = "ADK-A14B-footer-body";
-    let _on = crate::services::tui_o::cutover::test_override::force_channels(&[(
+    let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
         4_047_122,
         crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
     )]);

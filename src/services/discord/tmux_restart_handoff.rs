@@ -282,7 +282,15 @@ pub(super) async fn start_restart_handoff_from_state(
     best_response: &str,
 ) -> bool {
     // O posts this channel's TUI body, so the handoff notice keeps only its marker.
-    let o_owns_body = crate::services::tui_o::cutover::o_owns_tui_output(state.runtime_kind);
+    // A held destination identity keeps the inflight for retry, like a failed notice.
+    let kind = (state.channel_id == channel_id.get())
+        .then_some(state.runtime_kind)
+        .flatten();
+    let Ok(o_owns_body) =
+        crate::services::tui_o::cutover::o_owns_tui_output_for_channel(channel_id.get(), kind)
+    else {
+        return false;
+    };
     let stale_text =
         super::turn_bridge::stale_inflight_message(if o_owns_body { "" } else { best_response });
     match restart_handoff_notice_target(&state) {
@@ -616,8 +624,8 @@ mod o_cut_tests {
 
     const BODY: &str = "ADK-A14B-handoff-body";
 
-    /// A watcher-death handoff on a channel whose TUI body O posts edits in only the restart
-    /// marker; the same turn with the flag off still carries the saved body.
+    /// A watcher-death handoff on a listed channel whose TUI body O posts edits in only the
+    /// restart marker; flag off or an unlisted destination still carries the saved body.
     #[tokio::test(flavor = "current_thread")]
     async fn o_delegated_restart_handoff_keeps_only_the_marker() {
         with_isolated_runtime_root(|| async move {
@@ -659,11 +667,19 @@ mod o_cut_tests {
                 flag_off.iter().any(|content| content.contains(BODY)),
                 "{flag_off:?}"
             );
-            let _on = crate::services::tui_o::cutover::test_override::force_on();
+            let _on = crate::services::tui_o::cutover::test_override::force_channels(&[(
+                9_425_022,
+                RuntimeHandoffKind::CodexTui,
+            )]);
             assert_eq!(
                 handoff_contents(9_425_022).await,
                 vec![super::super::turn_bridge::stale_inflight_message("")],
                 "O owns the body: only the marker is edited in"
+            );
+            let outside = handoff_contents(9_425_023).await;
+            assert!(
+                outside.iter().any(|content| content.contains(BODY)),
+                "a destination outside the list keeps Legacy's body: {outside:?}"
             );
         })
         .await;
