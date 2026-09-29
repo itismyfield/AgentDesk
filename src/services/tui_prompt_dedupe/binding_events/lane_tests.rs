@@ -537,13 +537,14 @@ fn log_outage_defers_a_hook_adoption_and_the_idle_poll_adopts_b_without_another_
     APPEND_FAULT.with(|fault| fault.set(Some("write")));
     let (status, body) = send();
     assert_eq!(
-        (status, &body["binding_adoption"]),
-        (202, &serde_json::json!("deferred"))
+        (status, &body["reason"]),
+        (425, &serde_json::json!("NotDurable(Append)")),
+        "an adoption whose binding event is not durable is not acknowledged"
     );
     assert_eq!(
-        send().1,
-        body,
-        "the receipt replays the deferral, not a plain success"
+        send(),
+        (status, body),
+        "the refused receipt was abandoned, so the same id is judged again"
     );
     retry_deferred_claude_adoptions();
     assert_eq!(
@@ -565,6 +566,13 @@ fn log_outage_defers_a_hook_adoption_and_the_idle_poll_adopts_b_without_another_
     crate::services::tui_prompt_dedupe::clear_claude_session_rotation(tmux);
     retry_deferred_claude_adoptions();
     assert_eq!(deferred_adoption_count(), 0);
+    let logged = events(channel).len();
+    assert_eq!(
+        send().0,
+        202,
+        "the sender's retry is acknowledged once B is logged"
+    );
+    assert_eq!(events(channel).len(), logged, "the retry adds no record");
     let switch = events(channel).pop().unwrap();
     assert_eq!(switch.new, BindingTarget::Source(src(&b_path, &b)));
     assert_eq!(
@@ -675,11 +683,12 @@ fn a_deferred_b_is_adopted_and_handed_to_the_rotation_before_a_deferred_c() {
             .body(axum::body::Body::from(payload.to_string()))
             .unwrap();
         runtime.block_on(async {
-            let response = app.clone().oneshot(request).await.unwrap();
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            app.clone()
+                .oneshot(request)
                 .await
-                .unwrap();
-            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["binding_adoption"].clone()
+                .unwrap()
+                .status()
+                .as_u16()
         })
     };
 
@@ -690,17 +699,13 @@ fn a_deferred_b_is_adopted_and_handed_to_the_rotation_before_a_deferred_c() {
         ("Stop", &b, None),
         ("SessionStart", &c, Some("clear")),
     ] {
-        assert_eq!(
-            send(event, session, source),
-            "deferred",
-            "{event} {session}"
-        );
+        assert_eq!(send(event, session, source), 425, "{event} {session}");
     }
     assert_eq!(deferred_adoption_count(), 2, "B and C stay separate");
     APPEND_FAULT.with(|fault| fault.set(None));
     assert_eq!(
         send("Stop", &c, None),
-        "deferred",
+        425,
         "a C hook after recovery still waits behind B"
     );
     assert_eq!(deferred_adoption_count(), 2);
@@ -764,7 +769,7 @@ fn a_deferred_b_is_adopted_and_handed_to_the_rotation_before_a_deferred_c() {
 #[test]
 fn a_follow_up_hook_keeps_the_first_session_start_as_the_deferred_evidence() {
     use crate::services::claude_tui::hook_server::adoption_retry::{
-        AdoptionReport, adopt_from_hook, deferred_adoption_count,
+        AdoptionHttp, NotDurableReason, adopt_from_hook, deferred_adoption_count,
     };
     use crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions;
     let lane = Lane::new();
@@ -777,9 +782,10 @@ fn a_follow_up_hook_keeps_the_first_session_start_as_the_deferred_evidence() {
 
     APPEND_FAULT.with(|fault| fault.set(Some("write")));
     let start = hook("session_start", Some("clear"));
-    assert_eq!(adopt_from_hook(&a, &b, &start), AdoptionReport::Deferred);
+    let refused = AdoptionHttp::NotDurable(NotDurableReason::Append);
+    assert_eq!(adopt_from_hook(&a, &b, &start), refused);
     let stop = hook("stop", None);
-    assert_eq!(adopt_from_hook(&a, &b, &stop), AdoptionReport::Deferred);
+    assert_eq!(adopt_from_hook(&a, &b, &stop), refused);
     assert_eq!(deferred_adoption_count(), 1);
     APPEND_FAULT.with(|fault| fault.set(None));
     retry_deferred_claude_adoptions();
@@ -796,7 +802,7 @@ fn a_follow_up_hook_keeps_the_first_session_start_as_the_deferred_evidence() {
 #[test]
 fn a_retry_paused_before_its_artifacts_cannot_overwrite_a_later_hooks_cutover() {
     use crate::services::claude_tui::hook_server::adoption_retry::{
-        AdoptionReport, adopt_from_hook, set_artifact_probe,
+        AdoptionHttp, DurableKind, NotDurableReason, adopt_from_hook, set_artifact_probe,
     };
     use crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions;
     use crate::services::tui_prompt_dedupe::clear_claude_session_rotation;
@@ -817,7 +823,8 @@ fn a_retry_paused_before_its_artifacts_cannot_overwrite_a_later_hooks_cutover() 
     register_tmux_runtime_binding(tmux, claude(&a_path, &a));
     let clear = hook("session_start", Some("clear"));
     APPEND_FAULT.with(|fault| fault.set(Some("write")));
-    assert_eq!(adopt_from_hook(&a, &b, &clear), AdoptionReport::Deferred);
+    let refused = AdoptionHttp::NotDurable(NotDurableReason::Append);
+    assert_eq!(adopt_from_hook(&a, &b, &clear), refused);
     APPEND_FAULT.with(|fault| fault.set(None));
     retry_deferred_claude_adoptions();
     assert!(clear_claude_session_rotation(tmux));
@@ -858,7 +865,7 @@ fn a_retry_paused_before_its_artifacts_cannot_overwrite_a_later_hooks_cutover() 
     let report = live.join().unwrap();
     set_artifact_probe(None);
 
-    assert_eq!(report, AdoptionReport::Adopted);
+    assert_eq!(report, AdoptionHttp::Durable(DurableKind::Adopted));
     assert_eq!(bound(tmux).1.as_deref(), Some(c.as_str()));
     assert_eq!(
         *written.lock().unwrap(),
@@ -870,7 +877,7 @@ fn a_retry_paused_before_its_artifacts_cannot_overwrite_a_later_hooks_cutover() 
 #[test]
 fn a_new_source_after_recovery_waits_until_the_retried_b_rotation_settles() {
     use crate::services::claude_tui::hook_server::adoption_retry::{
-        AdoptionReport, adopt_from_hook, deferred_adoption_count,
+        AdoptionHttp, NotDurableReason, adopt_from_hook, deferred_adoption_count,
     };
     use crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions;
     use crate::services::tui_prompt_dedupe::{
@@ -891,14 +898,15 @@ fn a_new_source_after_recovery_waits_until_the_retried_b_rotation_settles() {
     register_tmux_runtime_binding(tmux, claude(&a_path, &a));
     let clear = hook("session_start", Some("clear"));
     APPEND_FAULT.with(|fault| fault.set(Some("write")));
-    assert_eq!(adopt_from_hook(&a, &b, &clear), AdoptionReport::Deferred);
+    let append = AdoptionHttp::NotDurable(NotDurableReason::Append);
+    assert_eq!(adopt_from_hook(&a, &b, &clear), append);
     APPEND_FAULT.with(|fault| fault.set(None));
     retry_deferred_claude_adoptions();
     assert_eq!(bound(tmux).1.as_deref(), Some(b.as_str()));
 
     assert_eq!(
         adopt_from_hook(&a, &c, &clear),
-        AdoptionReport::Deferred,
+        AdoptionHttp::NotDurable(NotDurableReason::QueuedBehind),
         "C's first hook lands before A→B settles"
     );
     assert_eq!(bound(tmux).1.as_deref(), Some(b.as_str()));
