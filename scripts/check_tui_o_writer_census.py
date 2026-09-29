@@ -324,7 +324,7 @@ EXPECTED_GATES: dict[str, int] = {
     "src/services/tui_o/cutover.rs": 2,
 }
 # Funnel -> tests that drive it with O owning the channel. Each must exist as a
-# test-attributed `fn` in src/; empty funnels or missing tests block the flip.
+# non-ignored test-attributed `fn` in src/; empty funnels or missing tests block the flip.
 FLIP_READY_TESTS: dict[str, tuple[str, ...]] = {
     "W01": (
         "o_delegated_watcher_turn_shows_no_body_and_records_no_frontier",
@@ -454,18 +454,23 @@ def flip_readiness(root: Path) -> tuple[bool, str]:
     if names and src.is_dir():
         classifier = _load_classifier()
         fn_re = re.compile(
-            r"#\s*\[\s*(?:test|tokio\s*::\s*test(?:\s*\([^\[\]]*\))?)\s*\]\s*"
-            r"(?:#\s*\[[^\[\]]*\]\s*)*"
+            r"((?:#\s*\[[^\[\]]*\]\s*)+)"
             r"(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+("
             + "|".join(map(re.escape, names)) + r")\s*\("
         )
+        test_attr = re.compile(r"#\s*\[\s*(?:test|tokio\s*::\s*test(?:\s*\([^\[\]]*\))?)\s*\]")
+        ignore_attr = re.compile(r"#\s*\[\s*ignore\b")
         for path in src.rglob("*.rs"):
             state = classifier.StripState()
             text = "\n".join(
                 classifier.strip_line(line, state)
                 for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
             )
-            defined.update(fn_re.findall(text))
+            # An #[ignore] test never runs by default, so it cannot vouch for the funnel.
+            defined.update(
+                name for attrs, name in fn_re.findall(text)
+                if test_attr.search(attrs) and not ignore_attr.search(attrs)
+            )
     missing = [name for name in names if name not in defined]
     if missing:
         reasons.append(f"funnel tests missing from src/: {', '.join(missing)}")

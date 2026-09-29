@@ -179,6 +179,10 @@ class FlipReadinessTests(unittest.TestCase):
             "ordinary function": ("fn required() {}", False),
             "commented attribute": ("// #[test]\nfn required() {}", False),
             "attribute on preceding function": ("#[test]\nfn other() {}\nfn required() {}", False),
+            "ignored test": ("#[test]\n#[ignore]\nfn required() {}", False),
+            "ignore before async test": (
+                '#[ignore = "slow"]\n#[tokio::test]\nasync fn required() {}', False,
+            ),
             "synchronous test": ("#[test]\nfn required() {}", True),
             "async test": ("#[tokio::test]\nasync fn required() {}", True),
             "async test options and attributes": (
