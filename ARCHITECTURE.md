@@ -543,10 +543,16 @@ src/
 │   │   └── spawn_queue.rs
 │   ├── claude_tui/
 │   │   ├── hook_relay/
+│   │   │   ├── ordered_queue/
+│   │   │   │   └── tests/
+│   │   │   │       └── tq_tests.rs
 │   │   │   ├── ordered_queue.rs
-│   │   │   └── queue_retention.rs
+│   │   │   ├── queue_retention.rs
+│   │   │   └── response_window.rs
 │   │   ├── hook_server/
 │   │   │   ├── adoption_retry.rs
+│   │   │   ├── observation_ingress.rs
+│   │   │   ├── observation_ingress_tests.rs
 │   │   │   └── relay_receipts.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
@@ -1952,6 +1958,8 @@ src/
 │   ├── tui_prompt_dedupe/
 │   │   ├── binding_events/
 │   │   │   └── lane_tests.rs
+│   │   ├── runtime_binding/
+│   │   │   └── adopt_skip.rs
 │   │   ├── binding_context.rs
 │   │   ├── binding_events.rs
 │   │   ├── extract.rs

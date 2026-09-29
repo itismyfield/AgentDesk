@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 pub(crate) const RELAY_REQUEST_ID_HEADER: &str = "x-agentdesk-relay-request-id";
 pub(crate) const RELAY_PUBLISHED_AT_HEADER: &str = "x-agentdesk-relay-published-at";
 pub(crate) const RELAY_DEADLINE_HEADER: &str = "x-agentdesk-relay-deadline";
+pub(crate) const RELAY_RESPOND_BY_HEADER: &str = "x-agentdesk-relay-respond-by";
 pub(crate) const DELIVERY_TTL: Duration = Duration::from_secs(60 * 60);
 pub(crate) const LEDGER_RETENTION: Duration = Duration::from_secs(2 * 60 * 60);
 
@@ -25,6 +26,7 @@ pub(crate) struct RelayReceiptPin {
     payload_hash: String,
     published_at: Option<String>,
     deadline: Option<String>,
+    respond_by: Option<String>,
 }
 
 impl RelayReceiptPin {
@@ -43,6 +45,7 @@ impl RelayReceiptPin {
             payload_hash: blake3::hash(&encoded).to_hex().to_string(),
             published_at: header_string(headers, RELAY_PUBLISHED_AT_HEADER),
             deadline: header_string(headers, RELAY_DEADLINE_HEADER),
+            respond_by: header_string(headers, RELAY_RESPOND_BY_HEADER),
         }
     }
 }
@@ -201,6 +204,16 @@ impl RelayReceiptLedger {
         self.finish(ticket, status, body, false);
     }
 
+    /// Forgets a request refused before any effect, so its retry is handled as new.
+    pub(crate) fn abandon(&self, ticket: RelayReceiptTicket) {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(RelayReceiptEntry::InFlight { pin, .. }) = entries.get(&ticket.request_id)
+            && pin == &ticket.pin
+        {
+            entries.remove(&ticket.request_id);
+        }
+    }
+
     fn finish(&self, ticket: RelayReceiptTicket, status: StatusCode, body: Value, accepted: bool) {
         let response = RelayReceiptResponse { status, body };
         let entry = if accepted {
@@ -265,6 +278,17 @@ fn validate_freshness(headers: &HeaderMap, now: DateTime<Utc>) -> Result<(), Rel
             "relay deadline exceeds the delivery TTL contract",
         ));
     }
+    if let Some(respond_by) = header_string(headers, RELAY_RESPOND_BY_HEADER) {
+        let respond_by = DateTime::parse_from_rfc3339(&respond_by)
+            .map(|value| value.with_timezone(&Utc))
+            .map_err(|_| error_response(StatusCode::BAD_REQUEST, "invalid relay respond-by"))?;
+        if respond_by < published || respond_by > deadline {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "relay respond-by lies outside the delivery window",
+            ));
+        }
+    }
     if deadline <= now {
         return Err(error_response(
             StatusCode::GONE,
@@ -272,6 +296,13 @@ fn validate_freshness(headers: &HeaderMap, now: DateTime<Utc>) -> Result<(), Rel
         ));
     }
     Ok(())
+}
+
+/// The sender stopped waiting for a reply, so the request is delivered detached.
+pub(crate) fn reply_window_closed(headers: &HeaderMap, now: DateTime<Utc>) -> bool {
+    header_string(headers, RELAY_RESPOND_BY_HEADER)
+        .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
+        .is_some_and(|respond_by| respond_by <= now)
 }
 
 fn prune_entries(entries: &mut BTreeMap<String, RelayReceiptEntry>, now: DateTime<Utc>) {

@@ -339,11 +339,18 @@ pub(super) fn rehydrate_existing_claude_tui_bindings(shared: &Arc<SharedData>) {
                 None => true,
             };
             if should_refresh {
-                crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
-                    ProviderKind::Claude.as_str(),
+                let registered =
+                    crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
+                        ProviderKind::Claude.as_str(),
+                        &tmux_session_name,
+                        channel_id,
+                        fresh.clone(),
+                    );
+                let launch_session = fresh.session_id.as_deref();
+                crate::services::claude_tui::hook_server::note_claude_pane_registration(
                     &tmux_session_name,
-                    channel_id,
-                    fresh.clone(),
+                    launch_session,
+                    registered,
                 );
                 tracing::info!(
                     tmux_session_name = %tmux_session_name,
@@ -377,6 +384,7 @@ pub(super) fn rehydrate_existing_claude_tui_bindings(shared: &Arc<SharedData>) {
             continue;
         }
     }
+    crate::services::claude_tui::hook_server::mark_boot_discovery_complete();
 }
 
 #[cfg(unix)]

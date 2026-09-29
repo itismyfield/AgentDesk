@@ -15,8 +15,10 @@ use crate::services::claude_tui::memento_feedback::{
 };
 
 pub(crate) mod adoption_retry;
+pub(crate) mod observation_ingress;
 pub(crate) mod relay_receipts;
 pub(crate) use adoption_retry::retry_deferred_claude_adoptions;
+pub(crate) use observation_ingress::{mark_boot_discovery_complete, note_claude_pane_registration};
 use relay_receipts::{RelayReceiptBegin, RelayReceiptLedger, RelayReceiptPin, RelayReceiptTicket};
 
 const EVENT_BUFFER_CAPACITY: usize = 256;
@@ -144,6 +146,11 @@ impl HookServerState {
     pub fn subscribe(&self) -> broadcast::Receiver<HookEvent> {
         self.event_tx.subscribe()
     }
+
+    #[cfg(test)]
+    pub(crate) fn memento_feedback_pending_for_tests(&self, session_id: &str) -> usize {
+        self.memento_feedback.pending_count(session_id)
+    }
 }
 
 impl Default for HookServerState {
@@ -196,6 +203,7 @@ pub fn subscribe_hook_events() -> broadcast::Receiver<HookEvent> {
 }
 
 pub fn hook_receiver_router() -> Router {
+    observation_ingress::note_receiver_start();
     hook_receiver_router_with_state(HOOK_SERVER_STATE.clone())
 }
 
@@ -270,22 +278,28 @@ async fn receive_hook(
 
     let command_session_id = query.session_id.as_deref().and_then(non_empty_string);
     let observed_payload_session_id = payload_session_id(&payload);
-    let mut adoption_deferred = false;
-    if provider == "claude"
-        && let (Some(command_session_id), Some(payload_session_id)) = (
-            command_session_id.as_deref(),
-            observed_payload_session_id.as_deref(),
-        )
-        && command_session_id != payload_session_id
-    {
-        let hook_event = HookEventKind::from_path(&event);
-        let hook = crate::services::tui_prompt_dedupe::binding_events::HookSignal::from_payload(
-            hook_event.as_str(),
-            &payload,
-        );
-        let adoption =
-            adoption_retry::adopt_from_hook(command_session_id, payload_session_id, &hook);
-        adoption_deferred = adoption == adoption_retry::AdoptionReport::Deferred;
+    // Persist-before-ACK: nothing below may run for a hook whose binding evidence is not durable.
+    let ingress = observation_ingress::observe_binding_hook(
+        &provider,
+        &event,
+        command_session_id.as_deref(),
+        observed_payload_session_id.as_deref(),
+        &payload,
+    );
+    if let Some(refused) = observation_ingress::refusal(
+        &state.relay_receipts,
+        receipt_ticket.clone(),
+        ingress,
+        &provider,
+        &event,
+    ) {
+        return refused;
+    }
+    // The sender stopped waiting: a late reply or wake-up would reach the next turn instead.
+    if relay_receipts::reply_window_closed(&headers, Utc::now()) {
+        tracing::info!(provider, event, ?ingress, "late hook observed detached");
+        let body = json!({ "ok": true, "provider": provider, "event": event, "detached": true });
+        return finish_hook_receipt(&state, receipt_ticket, StatusCode::ACCEPTED, body, true);
     }
     // Keep the launch-time query UUID as the hook wait/routing identity while
     // it is registered; replacing it would strand callers already waiting on
@@ -541,10 +555,6 @@ async fn receive_hook(
     });
     if let Some(flush) = memento_transition.flush {
         body["memento_tool_feedback_flush"] = flush.to_json();
-    }
-    // The receipt says the adoption is still owed, retried by the idle poll without another hook.
-    if adoption_deferred {
-        body["binding_adoption"] = json!("deferred");
     }
 
     finish_hook_receipt(&state, receipt_ticket, StatusCode::ACCEPTED, body, true)

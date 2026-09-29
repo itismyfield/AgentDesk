@@ -1,5 +1,7 @@
 use super::*;
 use binding_events::{BindingPersistError, CauseSource, HookSignal, Proposal};
+mod adopt_skip;
+pub(crate) use adopt_skip::{AdoptSkip, adopt_claude_continuation_explained};
 
 fn with_runtime_binding_state_under_source_authority<R>(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
@@ -197,9 +199,10 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding(
     tmux_session_name: &str,
     channel_id: u64,
     binding: TuiRuntimeBinding,
-) {
+) -> bool {
     #[rustfmt::skip]
-    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| register_rehydrated_tmux_runtime_binding_under_source_authority(authority, provider, channel_id, binding));
+    let registered = crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| register_rehydrated_tmux_runtime_binding_under_source_authority(authority, provider, channel_id, binding));
+    registered
 }
 
 pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
@@ -645,20 +648,22 @@ pub(crate) fn adopt_claude_continuation_session(
     payload_session_id: &str,
     hook: &HookSignal,
 ) -> Result<Option<(String, String)>, BindingPersistError> {
-    let mut failure = None;
-    let adopted = adopt_continuation(command_session_id, payload_session_id, hook, &mut failure);
-    failure.map_or(Ok(adopted), Err)
+    adopt_claude_continuation_explained(command_session_id, payload_session_id, hook)
+        .map(|(adopted, _)| adopted)
 }
 
 /// `failure` is set only when the adoption was decided but its binding event could not be persisted.
+/// `skip` names why nothing was adopted or logged; each check below sets it before it can return.
 fn adopt_continuation(
     command_session_id: &str,
     payload_session_id: &str,
     hook: &HookSignal,
     failure: &mut Option<BindingPersistError>,
+    skip: &mut Option<AdoptSkip>,
 ) -> Option<(String, String)> {
     let command_session_id = command_session_id.trim();
     let payload_session_id = payload_session_id.trim();
+    *skip = Some(AdoptSkip::PayloadNotUuid);
     if command_session_id.is_empty()
         || payload_session_id.is_empty()
         || command_session_id == payload_session_id
@@ -670,15 +675,18 @@ fn adopt_continuation(
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
     let command_key = PromptKey::new("claude", command_session_id);
+    *skip = Some(AdoptSkip::UnmappedCommandSession);
     let tmux_session_name = state
         .tmux_by_provider_session
         .get(&command_key)?
         .value
         .clone();
     let binding = state.runtime_by_tmux.get(&tmux_session_name)?;
+    *skip = Some(AdoptSkip::NotClaudeTui);
     if binding.value.runtime_kind != RuntimeHandoffKind::ClaudeTui {
         return None;
     }
+    *skip = Some(AdoptSkip::MalformedBindingPath);
     let old_output_path = PathBuf::from(&binding.value.output_path);
     let new_output_path = old_output_path
         .parent()?
@@ -698,32 +706,40 @@ fn adopt_continuation(
         cause: CauseSource::Hook(hook.cause()),
         hook: Some(hook),
     });
+    let unlogged = proposal.is_none().then_some(AdoptSkip::NoChannel);
+    *skip = unlogged;
     let audit = |result: std::io::Result<()>, kind: &str| {
         if let Err(error) = result {
             tracing::warn!(tmux_session_name, kind, %error, "binding event audit record not persisted");
         }
     };
+    let persist_error = |error| BindingPersistError {
+        tmux_session: tmux_session_name.clone(),
+        error,
+    };
     if !new_output_path.is_file() {
-        // The candidate stays Pending in the log until its transcript exists.
-        audit(
-            proposal
-                .as_ref()
-                .map_or(Ok(()), binding_events::record_source),
-            "pending",
-        );
+        // The candidate stays Pending in the log until its transcript exists; that record is the hook's ACK.
+        *failure = proposal
+            .as_ref()
+            .map(binding_events::record_source)
+            .and_then(Result::err)
+            .map(persist_error);
         return None;
     }
     if let Some(current_session_id) = binding.value.session_id.as_deref()
         && current_session_id != command_session_id
         && current_session_id != payload_session_id
     {
+        *skip = Some(AdoptSkip::MtimeUnreadable);
         let current_mtime = std::fs::metadata(&old_output_path)
             .and_then(|metadata| metadata.modified())
             .ok()?;
         let candidate_mtime = std::fs::metadata(&new_output_path)
             .and_then(|metadata| metadata.modified())
             .ok()?;
+        *skip = unlogged;
         if candidate_mtime <= current_mtime {
+            *skip = Some(AdoptSkip::OlderThanBound);
             let reject =
                 |p: &Proposal| binding_events::record_rejected(p, "older_than_bound_transcript");
             audit(proposal.as_ref().map_or(Ok(()), reject), "rejected");
@@ -770,10 +786,7 @@ fn adopt_continuation(
             %error,
             "binding event log append failed; Claude continuation not adopted"
         );
-        *failure = Some(BindingPersistError {
-            tmux_session: tmux_session_name.clone(),
-            error,
-        });
+        *failure = Some(persist_error(error));
         return None;
     }
     let binding = state.runtime_by_tmux.get_mut(&tmux_session_name)?;
