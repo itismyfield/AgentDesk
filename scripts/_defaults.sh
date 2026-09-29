@@ -469,7 +469,7 @@ _health_json_gateway_standby_only() {
   _health_json_field_is_true "$health_json" "server_up" || return 1
   _health_json_field_is_true "$health_json" "cluster_standby" || return 1
   _health_json_degraded_reasons_all_match "$health_json" \
-    '^(gateway_standby|provider:[^:]+:gateway_standby)$'
+    '^(gateway_standby|provider:[^:]+:(gateway_standby|tui_output_requires_gateway))$'
 }
 
 _health_json_reconcile_only() {
@@ -632,7 +632,7 @@ _health_json_deploy_nonblocking_ere() {
   local ere='^(relay_verdict_[^,]+'
   [ "${1:-0}" = "1" ] && ere="$ere|provider:[^:,]+:reconcile_in_progress"
   [ "${2:-0}" = "1" ] && ere="$ere|provider:[^:,]+:pending_queue_depth:[0-9]+"
-  [ "${3:-0}" = "1" ] && ere="$ere|gateway_standby|provider:[^:,]+:gateway_standby"
+  [ "${3:-0}" = "1" ] && ere="$ere|gateway_standby|provider:[^:,]+:(gateway_standby|tui_output_requires_gateway)"
   printf '%s)$' "$ere"
 }
 

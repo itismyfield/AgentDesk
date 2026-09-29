@@ -1939,8 +1939,10 @@ src/
 │   │   │   ├── pieces.rs
 │   │   │   ├── round_trip.rs
 │   │   │   └── writer_tests.rs
+│   │   ├── alarm.rs
 │   │   ├── ownership.rs
-│   │   └── shadow_host.rs
+│   │   ├── shadow_host.rs
+│   │   └── topology.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── binding_context.rs
 │   │   ├── extract.rs
