@@ -859,10 +859,8 @@ exit 101
 
 
 class MutationPathFilterContractTests(unittest.TestCase):
-    """The unconditional mutation job filters only its mutation step.
-
-    The filter must cover all mutated sources, judges, and fixture owners.
-    """
+    """The unconditional mutation job filters its setup and execution steps.
+    The filter must cover all mutated sources, judges, and fixture owners."""
 
     maxDiff = None
 
@@ -922,7 +920,7 @@ class MutationPathFilterContractTests(unittest.TestCase):
                 source = (REPO_ROOT / judge).read_text(encoding="utf-8")
                 self.assertRegex(source, rf"\bfn {re.escape(named)}\b")
 
-    def test_only_the_mutation_step_is_gated_on_the_filter(self) -> None:
+    def test_mutation_setup_and_execution_steps_are_gated_on_the_filter(self) -> None:
         job = yaml.safe_load((REPO_ROOT / PR_WORKFLOW).read_text(encoding="utf-8"))["jobs"][
             MUTATION_JOB
         ]
@@ -934,7 +932,14 @@ class MutationPathFilterContractTests(unittest.TestCase):
             for step in job["steps"]
             if "name" in step and FILTER_ID in str(step.get("if", ""))
         }
-        self.assertEqual(gated, {MUTATION_STEP: STEP_CONDITION})
+        self.assertEqual(gated, {
+            "Install Rust toolchain": STEP_CONDITION,
+            "Setup sccache": STEP_CONDITION,
+            "Cache Cargo dependencies": STEP_CONDITION,
+            "Fetch Cargo dependencies": STEP_CONDITION,
+            MUTATION_STEP: STEP_CONDITION,
+            "sccache stats": f"always() && {STEP_CONDITION}",
+        })
 
     def test_the_condition_runs_the_gate_unless_the_filter_said_unrelated(self) -> None:
         """The negative form is load-bearing: a missing or empty filter output
