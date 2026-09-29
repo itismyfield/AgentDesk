@@ -2104,7 +2104,7 @@ pub(crate) fn emit_claude_tui_watcher_handoff(
     let last_offset = std::fs::metadata(transcript_path)
         .map(|meta| meta.len())
         .unwrap_or(0);
-    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+    crate::services::tui_prompt_dedupe::register_launched_tmux_runtime_binding(
         tmux_session_name,
         crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
             runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,

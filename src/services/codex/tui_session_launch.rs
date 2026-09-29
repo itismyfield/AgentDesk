@@ -50,33 +50,37 @@ pub(super) fn prepare_codex_tui_launch_script(
     env_lines.push_str(auth_env_lines);
     env_lines.push_str(&prepared.env_lines());
     let mut args = build_codex_tui_args(launch_options);
-    let codex_hook_overrides = if codex_direct_tui_hook_overrides_enabled() {
-        prepare_codex_tui_hook_overrides(
-            tmux_session_name,
-            session_id,
-            &codex_bin,
-            resolution.exec_path.as_deref(),
-        )
-    } else {
+    let hooks_injected = codex_direct_tui_hook_overrides_enabled()
+        && {
+            let capability = crate::services::claude_tui::hook_bundle::codex_hook_capability(
+                crate::services::claude_tui::hook_bundle::probe_codex_cli_version_with_path(
+                    &codex_bin,
+                    resolution.exec_path.as_deref(),
+                )
+                .as_deref(),
+                codex_resume_supports_hook_trust_bypass(&codex_bin, &resolution),
+            );
+            if !capability.hooks_available() {
+                tracing::warn!(
+                    codex_bin,
+                    trust_hash = ?capability.trust_hash,
+                    "Codex resume does not advertise --dangerously-bypass-hook-trust; launching without hook relays"
+                );
+            }
+            add_codex_tui_hooks(&mut args, capability, || {
+                prepare_codex_tui_hook_overrides(
+                    tmux_session_name,
+                    session_id,
+                    &codex_bin,
+                    resolution.exec_path.as_deref(),
+                )
+            })
+        };
+    if !hooks_injected {
         tracing::info!(
             tmux_session_name,
-            "Codex direct TUI session hook overrides disabled; using rollout transcript tail for relay"
+            "Codex direct TUI session hook overrides not injected; using rollout transcript tail for relay"
         );
-        Vec::new()
-    };
-    if !codex_hook_overrides.is_empty() {
-        append_codex_config_overrides(&mut args, codex_hook_overrides);
-        if codex_resume_supports_hook_trust_bypass(&codex_bin, &resolution) {
-            insert_codex_resume_option_before_other_options(
-                &mut args,
-                "--dangerously-bypass-hook-trust",
-            );
-        } else {
-            tracing::warn!(
-                codex_bin,
-                "Codex resume does not advertise --dangerously-bypass-hook-trust; relying on session hook trust hashes"
-            );
-        }
     }
     let script_content = render_codex_tui_tmux_script(&env_lines, &codex_bin, &args);
     let rollout_modified_since = std::time::SystemTime::now();
@@ -104,6 +108,24 @@ pub(super) fn prepare_codex_tui_launch_script(
     })
 }
 
+/// Hook overrides enter the argv only together with the trust bypass; trust hashes alone never do.
+fn add_codex_tui_hooks(
+    args: &mut Vec<String>,
+    capability: crate::services::claude_tui::hook_bundle::CodexHookCapability,
+    overrides: impl FnOnce() -> Vec<String>,
+) -> bool {
+    if !capability.hooks_available() {
+        return false;
+    }
+    let overrides = overrides();
+    if overrides.is_empty() {
+        return false;
+    }
+    append_codex_config_overrides(args, overrides);
+    insert_codex_resume_option_before_other_options(args, "--dangerously-bypass-hook-trust");
+    true
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -115,5 +137,43 @@ mod tests {
             |t| launch(t, None, "", &options, None, None, false, "").map(|_| ()),
             "sh",
         );
+    }
+
+    #[test]
+    fn codex_tui_hooks_need_the_advertised_bypass_not_trust_hashes() {
+        use crate::services::claude_tui::hook_bundle::codex_hook_capability;
+        let base = build_codex_tui_args(&CodexLaunchOptions::new(""));
+        let overrides = || vec!["hooks.SessionStart=[]".to_string()];
+        for version in [Some("codex-cli 0.157.1"), Some("codex-cli 0.130.0"), None] {
+            let mut args = base.clone();
+            let mut built = false;
+            let injected =
+                add_codex_tui_hooks(&mut args, codex_hook_capability(version, false), || {
+                    built = true;
+                    overrides()
+                });
+            assert!(!injected && !built, "{version:?}");
+            assert_eq!(
+                args, base,
+                "no hook override or trust hash without the bypass"
+            );
+        }
+
+        let mut args = base.clone();
+        assert!(!add_codex_tui_hooks(
+            &mut args,
+            codex_hook_capability(None, true),
+            Vec::new
+        ));
+        assert_eq!(args, base, "no bypass without hook overrides");
+
+        let mut args = base.clone();
+        assert!(add_codex_tui_hooks(
+            &mut args,
+            codex_hook_capability(Some("codex-cli 0.157.1"), true),
+            overrides
+        ));
+        assert_eq!(args[0], "--dangerously-bypass-hook-trust");
+        assert!(args.iter().any(|arg| arg == "hooks.SessionStart=[]"));
     }
 }

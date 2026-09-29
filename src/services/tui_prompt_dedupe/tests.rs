@@ -1,5 +1,10 @@
 use super::*;
 
+fn adopt(command: &str, payload: &str) -> Option<(String, String)> {
+    let hook = binding_events::HookSignal::from_payload("stop", &serde_json::Value::Null);
+    adopt_claude_continuation_session(command, payload, &hook).expect("no binding event failure")
+}
+
 fn reset_state() {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     *state = TuiPromptDedupeState::default();
@@ -81,8 +86,7 @@ fn claude_hook_payload_adopts_sibling_continuation_once_without_cursor_reset() {
         },
     );
 
-    let adopted = adopt_claude_continuation_session(&old_session, &new_session)
-        .expect("safe sibling continuation adoption");
+    let adopted = adopt(&old_session, &new_session).expect("safe sibling continuation adoption");
     assert_eq!(adopted.0, tmux);
     assert_eq!(adopted.1, new_path.display().to_string());
     let binding = runtime_binding_for_tmux_session(&tmux).unwrap();
@@ -95,11 +99,11 @@ fn claude_hook_payload_adopts_sibling_continuation_once_without_cursor_reset() {
         "future waits must keep using the live process's cached hook command UUID"
     );
 
-    assert!(adopt_claude_continuation_session(&old_session, &new_session).is_some());
+    assert!(adopt(&old_session, &new_session).is_some());
     let mut progressed = runtime_binding_for_tmux_session(&tmux).unwrap();
     progressed.last_offset = 4;
     register_tmux_runtime_binding(&tmux, progressed);
-    assert!(adopt_claude_continuation_session(&old_session, &new_session).is_some());
+    assert!(adopt(&old_session, &new_session).is_some());
     assert_eq!(
         runtime_binding_for_tmux_session(&tmux).unwrap().last_offset,
         4,
@@ -143,9 +147,8 @@ fn claude_hook_payload_can_advance_multiple_continuation_hops_but_not_rewind() {
         },
     );
 
-    adopt_claude_continuation_session(&command_session, &first_continuation)
-        .expect("first continuation hop");
-    adopt_claude_continuation_session(&command_session, &second_continuation)
+    adopt(&command_session, &first_continuation).expect("first continuation hop");
+    adopt(&command_session, &second_continuation)
         .expect("newer second continuation hop through cached command UUID");
     let binding = runtime_binding_for_tmux_session(&tmux).unwrap();
     assert_eq!(
@@ -153,7 +156,7 @@ fn claude_hook_payload_can_advance_multiple_continuation_hops_but_not_rewind() {
         Some(second_continuation.as_str())
     );
     assert!(
-        adopt_claude_continuation_session(&command_session, &stale_continuation).is_none(),
+        adopt(&command_session, &stale_continuation).is_none(),
         "a delayed historical payload must not rewind the current continuation"
     );
     assert_eq!(
@@ -204,7 +207,7 @@ fn hook_re_report_restates_the_adopted_session_authority() {
         },
     );
 
-    let adopted = adopt_claude_continuation_session(&command_session, &payload_session)
+    let adopted = adopt(&command_session, &payload_session)
         .expect("a re-report of the adopted session still resolves the pane");
     assert_eq!(adopted, (tmux.clone(), adopted_path.display().to_string()));
     assert!(
@@ -225,7 +228,7 @@ fn hook_re_report_restates_the_adopted_session_authority() {
 
     // The pane is alive and keeps reporting, which is what makes 12h
     // unreachable in production.
-    adopt_claude_continuation_session(&command_session, &payload_session)
+    adopt(&command_session, &payload_session)
         .expect("a still-bound pane keeps adopting on every later hook");
     assert_eq!(
         hook_adopted_claude_session_id(&tmux).as_deref(),
