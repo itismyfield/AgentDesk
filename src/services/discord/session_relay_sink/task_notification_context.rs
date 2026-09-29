@@ -150,12 +150,33 @@ pub(super) async fn ensure_card_and_route(
         delivery.task_notification_context.as_ref(),
     )
     .await?;
-    let response_claim = if card.is_some()
+    let route = if card.is_some() {
+        super::SessionBoundTerminalDeliveryRoute::NewMessage
+    } else {
+        route
+    };
+    let response_claim = task_response_claim_for_card(shared, delivery, card).await?;
+    Ok((route, card, response_claim))
+}
+
+/// Durable response claim for a confirmed task card. None when O posts the
+/// response, so a delegated turn leaves no Legacy claim behind.
+async fn task_response_claim_for_card(
+    shared: &Arc<SharedData>,
+    delivery: &super::SessionRelayDelivery,
+    card: Option<MessageId>,
+) -> Result<Option<ResponseDeliveryClaimOutcome>, RelaySinkError> {
+    let response_claim = if crate::services::tui_o::cutover::o_owns_tui_output_for_tmux_session(
+        &delivery.session_name,
+    ) {
+        None
+    } else if card.is_some()
         && delivery.task_notification_context.is_some()
         && defer_task_response_to_watcher(
             delivery.frame_turn_start_offset,
             delivery.terminal_consumed_end,
-        ) {
+        )
+    {
         // A frame with no monotonic coordinate cannot be reconciled against
         // delivered tombstones without risking either suppression or replay.
         // The watcher owns the real consumed end and will retry this response.
@@ -257,12 +278,7 @@ pub(super) async fn ensure_card_and_route(
     } else {
         None
     };
-    let route = if card.is_some() {
-        super::SessionBoundTerminalDeliveryRoute::NewMessage
-    } else {
-        route
-    };
-    Ok((route, card, response_claim))
+    Ok(response_claim)
 }
 
 pub(super) fn answer_reference(
@@ -895,6 +911,64 @@ mod tests {
             delivered.outcome,
             ResponseDeliveryClaimOutcome::Delivered { .. }
         ));
+    }
+
+    // O posts a delegated task response, so the confirmed card must not open a Legacy claim.
+    #[tokio::test]
+    async fn o_delegated_task_response_leaves_no_legacy_claim() {
+        let context = context("o-delegated");
+        let delivery = super::super::SessionRelayDelivery {
+            provider: ProviderKind::Claude,
+            channel_id: 4_055_910,
+            session_name: "AgentDesk-claude-4055-o-delegated".to_string(),
+            response_text: "answer".to_string(),
+            task_notification_kind: Some(TaskNotificationKind::Background),
+            task_notification_context: Some(context),
+            terminal_consumed_end: Some(4_300),
+            frame_turn_user_msg_id: 0,
+            frame_turn_started_at: "2026-07-11T01:38:00Z".to_string(),
+            frame_turn_start_offset: Some(4_055),
+            relay_range: None,
+            relay_generation_mtime_ns: None,
+            relay_source_stamp: None,
+        };
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let _tui = crate::services::tui_o::cutover::test_override::bind_claude_tui_session(
+            &delivery.session_name,
+            "/tmp/adk-o-delegated-claim.jsonl",
+        );
+        let _o = crate::services::tui_o::cutover::test_override::force_on();
+
+        let claim =
+            task_response_claim_for_card(&shared, &delivery, Some(MessageId::new(4_055_911)))
+                .await
+                .expect("delegated claim gate");
+
+        assert!(claim.is_none(), "{claim:?}");
+        let turn_key = durable_response_turn_key(
+            delivery.channel_id,
+            delivery.provider.as_str(),
+            &delivery.session_name,
+            delivery.frame_turn_user_msg_id,
+            &delivery.frame_turn_started_at,
+            delivery.frame_turn_start_offset,
+            4_300,
+            &delivery.response_text,
+        );
+        let row = claim_existing_task_response_delivery(
+            None,
+            delivery.channel_id,
+            delivery.provider.as_str(),
+            &delivery.session_name,
+            &turn_key,
+            ResponseDeliveryOwner::Watcher,
+        )
+        .await
+        .expect("load response claim");
+        assert!(
+            row.is_none(),
+            "no Owned, sent or delivered row for an O-posted response"
+        );
     }
 
     #[test]
