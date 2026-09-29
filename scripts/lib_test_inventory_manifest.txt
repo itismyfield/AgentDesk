@@ -6805,6 +6805,10 @@ services::discord::tui_prompt_relay::local_model_queue_wake_e2e::promoted_b_comp
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_alias_binding_envelope_uses_the_failed_incarnation
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_alias_outer_pass_refuses_until_binding_and_alias_are_ready
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_launch_outer_pass_refuses_until_binding_and_alias_are_ready
+services::discord::tui_prompt_relay::rehydration::claude_pass_tests::registration_alias_conflict_keeps_original_pane_unready
+services::discord::tui_prompt_relay::rehydration::claude_pass_tests::registration_completion_accepts_adoption_advanced_binding
+services::discord::tui_prompt_relay::rehydration::claude_pass_tests::registration_nonce_replacement_preserves_new_failure
+services::discord::tui_prompt_relay::rehydration::claude_pass_tests::registration_nonce_replacement_retires_old_failure
 services::discord::tui_prompt_relay::rehydration::idempotency_tests::concurrent_rehydrations_install_once
 services::discord::tui_prompt_relay::rehydration::idempotency_tests::incomplete_session_metadata_does_not_reset_a_valid_rollout_cursor
 services::discord::tui_prompt_relay::rehydration::idempotency_tests::live_marker_rotation_replaces_even_when_old_rollout_still_exists
