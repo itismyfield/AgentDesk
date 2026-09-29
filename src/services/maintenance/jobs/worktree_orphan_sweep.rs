@@ -1,48 +1,15 @@
-//! `storage.worktree_orphan_sweep` — hourly detection and cleanup of orphaned
-//! git worktree directories under `~/.adk/release/worktrees/`.
+//! `storage.worktree_orphan_sweep`: hourly cleanup of orphaned git worktrees under
+//! `~/.adk/release/worktrees/`.
 //!
-//! Two passes share one DB keep-set + one live-tmux owner set:
-//!
-//! **A — per-channel/thread worktrees (flat root)**: the runtime provisions
-//! per-channel reuse worktrees directly under `~/.adk/release/worktrees/`
-//! (`{provider}-{channel}-{ts}`, branch `wt/{provider}-…`). A flat-root dir is
-//! KEPT when it is the cwd (or a parent of the cwd) of a `sessions` row carrying
-//! a non-null resume GUID (`claude_session_id` OR `raw_provider_session_id`) —
-//! the deterministic resumable signal (#3231) — OR it is a live `AgentDesk-*`
-//! tmux pane path OR an active-dispatch cwd. A flat-root dir is DISCARDED only
-//! when, on top of having no owner, its NAME matches the runtime naming
-//! whitelist (`wt/<provider>-…` branch / `claude-adk-cc…` / `codex-adk-cdx…`
-//! dir). Manual dev worktrees (`worker-*`, `integration-*`, `codex-*`,
-//! `release-*`, `fix-*`, `e2e-*`, …) are NOT runtime-created and are NEVER
-//! discard candidates (#3231 key safety fix).
-//!
-//! **B — managed dispatch/automation worktrees (managed root)**: dispatch and
-//! automation worktrees live one level deeper under
-//! `~/.adk/release/worktrees/<repo_name>/`. The flat-root scan is 1-depth and
-//! misses these, so we recurse one level into each managed-root child. A managed
-//! worktree is DISCARDED when it has no active-dispatch/live-tmux owner (i.e. its
-//! dispatch is terminal) AND it is a managed worktree path AND the
-//! [`crate::services::git::cleanup_managed_worktree`] guards pass (skips dirty
-//! and mainline-unmerged trees). A far age backstop catches cancel-leaks (a
-//! cancelled dispatch whose worktree was never terminal-cleaned).
-//!
-//! **Name-prefix infra protection (#3276)**: BOTH passes share a hard
-//! name-prefix guard inside [`should_sweep_worktree`]: a directory whose NAME
-//! starts with `release-` (e.g. the reusable `release-main-deploy-*` deploy
-//! worktree that `scripts/deploy-release.sh` runs from) is deployment
-//! infrastructure, not a runtime session worktree — it is never a dispatch
-//! cwd, never a resumable session cwd, and never a live AgentDesk tmux pane,
-//! so every ownership keep-set source misses it by construction. It is KEPT
-//! unconditionally, before any owner check.
-//!
-//! Fail-closed by design — it would rather leak an orphan than risk deleting a
-//! live worktree:
-//!   * when Postgres is not wired up it returns `Ok(())` (no DB keep-set, no
-//!     deletes); and
-//!   * when the tmux query FAILS (#3216 P0-1) it skips ALL deletions for the
-//!     run, because a failed query cannot prove a worktree has no live owner.
-//!     Only a SUCCESSFUL tmux query (even one with zero panes) lets the sweep
-//!     proceed.
+//! - Flat root: a per-channel worktree is removed only when no kept session cwd,
+//!   active dispatch or PR worktree path, or live `AgentDesk-*` tmux pane sits at or
+//!   under it, and its name is runtime-created ([`is_runtime_named_worktree`]).
+//! - Managed root (`worktrees/<repo>/`): unowned dispatch/automation worktrees older
+//!   than [`MANAGED_FRESH_PROVISION_MIN_AGE`] go through
+//!   [`crate::services::git::cleanup_managed_worktree`], which keeps dirty or unmerged trees.
+//! - `release-*` names are never swept ([`PROTECTED_INFRA_NAME_PREFIXES`]).
+//! - Fail-closed: with no Postgres pool, or when any keep-set or tmux query fails, the
+//!   run deletes nothing, because it cannot prove a worktree is unowned.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -80,17 +47,13 @@ pub struct SweepReport {
     pub orphan_count: u64,
     pub removed_dirs: u64,
     pub errors: u64,
-    /// #3231 (B): managed dispatch/automation worktrees discarded by the
-    /// recursive managed-root pass (counted separately from flat-root orphans).
+    /// Worktrees scanned by the managed-root pass; its removals go to `managed_removed`.
     pub managed_scanned: u64,
     pub managed_removed: u64,
-    /// #3231 (A): flat-root dirs that had no owner but were SKIPPED because their
-    /// name did not match the runtime naming whitelist (manual dev worktrees).
+    /// Unowned flat-root dirs kept because their name is not runtime-created.
     pub protected_unmatched: u64,
-    /// #3231 (codex re-review, TOCTOU): managed worktrees that had no owner but
-    /// were SKIPPED because they were created too recently (within
-    /// [`MANAGED_FRESH_PROVISION_MIN_AGE`]) — i.e. possibly still inside the
-    /// dispatch-create create→insert race window before their owning row landed.
+    /// Unowned managed worktrees kept because they are younger than
+    /// [`MANAGED_FRESH_PROVISION_MIN_AGE`].
     pub protected_fresh: u64,
 }
 
@@ -182,20 +145,13 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
     }
 
     let Some(pool) = pg_pool else {
-        // No PG — deliberately do not delete anything; otherwise we'd orphan
-        // legitimately active worktrees on a misconfigured host.
+        // Without the DB keep-set no worktree can be proven unowned, so delete nothing.
         return Ok(report);
     };
     report.pg_available = true;
 
-    // #3231 (codex #2, fail-closed): EVERY DB keep-set query is load-bearing — a
-    // worktree absent from the keep-set is a deletion candidate. If any keep-set
-    // query FAILS (PG down, schema drift, query error) `unwrap_or_default()` would
-    // silently substitute an EMPTY set and we would then delete live resumable /
-    // active-dispatch worktrees. That is exactly the failure the tmux-probe path
-    // already guards against by returning early. So we mirror that semantics here:
-    // a keep-set query error means we cannot prove a worktree is unowned — warn and
-    // skip ALL deletions for this run.
+    // A failed keep-set query must skip all deletions: an empty fallback set would make
+    // every live worktree look unowned.
     let mut active_cwds = match fetch_active_cwds(&pool).await {
         Ok(set) => set,
         Err(error) => {
@@ -208,17 +164,6 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
             return Ok(report);
         }
     };
-    // #3207 (part 2): a reused worktree owned by a live/resumable channel session
-    // must survive BETWEEN turns and across restarts so `--resume` can find the
-    // sid's transcript. Between turns there is no `pending`/`dispatched` dispatch,
-    // so the active-dispatch keep-set alone would let the hourly sweep delete the
-    // very worktree the next message will resume into — re-creating the original
-    // "worktree rotation → resume impossible" loss. Also protect cwds of recent
-    // resumable sessions (a recorded provider session id + a fresh heartbeat).
-    // The keep-set is bounded — only the LATEST fresh-heartbeat resumable session
-    // PER CHANNEL is protected (see `fetch_resumable_cwds`) — so abandoned /
-    // never-heartbeated sessions can no longer pin a worktree forever, while a
-    // live channel still keeps its single in-flight reuse worktree.
     let resumable_cwds = match fetch_resumable_cwds(&pool).await {
         Ok(set) => set,
         Err(error) => {
@@ -232,14 +177,6 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
         }
     };
     active_cwds.extend(resumable_cwds);
-    // #3231 (codex #1): an active managed dispatch records its worktree under
-    // `task_dispatches.context.worktree_path` (and `result.completed_worktree_path`)
-    // at CREATE time — BEFORE the dispatched agent's `sessions.cwd` / live tmux pane
-    // exist. So a freshly-provisioned managed worktree for a `pending`/`dispatched`
-    // dispatch is owned by NO session cwd and NO tmux pane yet, and the managed
-    // recursion below would delete it out from under the dispatch. Reuse the same
-    // active-worktree-ref signal that terminal cleanup relies on (pending/dispatched
-    // dispatch JSON + `pr_tracking.worktree_path`) as an additional keep-set source.
     let active_dispatch_worktrees = match fetch_active_dispatch_worktree_paths(&pool).await {
         Ok(set) => set,
         Err(error) => {
@@ -255,23 +192,8 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
     active_cwds.extend(active_dispatch_worktrees);
     report.active_cwd_count = active_cwds.len() as u64;
 
-    // #3216 (gap 3): a divorced/phantom per-channel worktree (provisioned by a
-    // restart-time rotation, then abandoned when reconciliation pointed the DB
-    // cwd back to the ORIGINAL worktree) has no kept session cwd and no live
-    // owner — it must be swept. But the live tmux that actually owns the
-    // original worktree is the SOURCE OF TRUTH: a managed worktree whose path is
-    // the `#{pane_current_path}` of a live AgentDesk tmux pane must NEVER be
-    // deleted, even if the DB keep-set transiently disagrees (e.g. before
-    // reconciliation backfills `channel_id`). We add this live-tmux guard as an
-    // independent safety net layered on top of the DB keep-set.
-    //
-    // #3216 P0-1 (fail-closed): a FAILED tmux query is indistinguishable, by an
-    // empty path set alone, from "tmux is up with zero AgentDesk panes". If we
-    // treated failure as "no live owners" we would sweep a live AgentDesk
-    // worktree the moment tmux was momentarily unavailable AND its DB cwd was
-    // transiently missing. So when the tmux query FAILS we cannot prove any
-    // worktree is unowned — skip ALL deletions for this run. Only a SUCCESSFUL
-    // query (even one returning zero panes) lets deletion proceed.
+    // A live AgentDesk pane owns its worktree even when the DB keep-set disagrees.
+    // A failed tmux query cannot prove a worktree unowned, so skip all deletions.
     let Some(live_tmux_paths) = run_blocking_filesystem(collect_live_tmux_pane_paths).await? else {
         tracing::warn!(
             target: "maintenance",
@@ -281,18 +203,13 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
         return Ok(report);
     };
 
-    // Directory enumeration and metadata probes are blocking filesystem calls.
-    // Keep them off Tokio's runtime worker so a large worktree population cannot
-    // consume a runtime worker while readdir waits on the filesystem.
     let directories = collect_child_directories_off_runtime(config.worktrees_root.clone()).await?;
 
     for dir_path in directories {
         report.scanned_dirs = report.scanned_dirs.saturating_add(1);
 
-        // #3231 (B): a managed-root child (`worktrees/<repo_name>/`) is not a
-        // per-channel worktree itself — its CHILDREN are the dispatch/automation
-        // worktrees. Recurse one level into it (the flat 1-depth scan misses
-        // them) and skip the directory itself from the flat-root A decision.
+        // A managed-root container is never a flat-root candidate; its children are the
+        // managed worktrees the flat scan would miss.
         if is_managed_root_child_off_runtime(dir_path.clone()).await? {
             sweep_managed_root(
                 &dir_path,
@@ -309,11 +226,6 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
             continue;
         }
 
-        // #3231 (A): naming whitelist — only runtime-named per-channel worktrees
-        // (`wt/<provider>-…` branch / `claude-adk-cc…` / `codex-adk-cdx…` dir)
-        // are ever discard candidates. Manual dev worktrees (worker-*,
-        // integration-*, codex-*, release-*, fix-*, e2e-*, …) are NOT
-        // runtime-created and must NEVER be swept, even with no owning row.
         if !is_runtime_named_worktree(&dir_path) {
             report.protected_unmatched = report.protected_unmatched.saturating_add(1);
             continue;
@@ -344,29 +256,10 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
     Ok(report)
 }
 
-/// #3231 (B): recurse one level into a managed-root child
-/// (`worktrees/<repo_name>/`) and sweep terminal dispatch/automation worktrees.
+/// Sweeps unowned worktrees one level inside a managed-root child (`worktrees/<repo>/`).
 ///
-/// A managed worktree is discarded when ALL of the following hold:
-///   * it has no active-dispatch / live-tmux / kept-session owner (its dispatch
-///     is terminal — an active dispatch pins its `sessions.cwd` into the
-///     keep-set, so absence from the keep-set IS the terminal signal); AND
-///   * it is recognized as a managed worktree path AND passes the
-///     [`crate::services::git::cleanup_managed_worktree`] guards (dirty trees and
-///     mainline-unmerged trees are skipped — never force-removed here).
-///
-/// We reuse `should_sweep_worktree` for the owner check so the fail-closed
-/// tmux + keep-set semantics are identical to the flat-root pass. The actual
-/// removal goes through `cleanup_managed_worktree` (NOT the flat-root
-/// `--force` path) so dirty/unmerged work is preserved. A far age backstop
-/// (`MANAGED_CANCEL_LEAK_BACKSTOP`) lets a long-abandoned managed worktree be
-/// reconsidered even if it would otherwise be skipped — see [`is_old_enough`].
-///
-/// #3231 (codex #3): when the worktree's `.git` pointer cannot be resolved the
-/// managed pass NEVER force-removes. A present-but-unreadable `.git` (a registered
-/// worktree we merely failed to read) is SKIPPED; only a genuinely `.git`-less
-/// leftover directory is eligible for a plain `remove_dir_all`, and only once
-/// age-backstopped. The flat-root `--force` remover is never reachable from here.
+/// Removal uses [`crate::services::git::cleanup_managed_worktree`] (keeps dirty and
+/// unmerged trees) or the [`GitPointerState`] fallback, never the flat-root `--force` path.
 async fn sweep_managed_root(
     repo_root_dir: &Path,
     active_cwds: &HashSet<String>,
@@ -381,9 +274,7 @@ async fn sweep_managed_root(
             continue;
         }
 
-        // #3231 TOCTOU: protect a newly provisioned worktree until its owning
-        // dispatch row lands; otherwise an early keep-set snapshot could delete
-        // an unowned-looking clean worktree. Fail closed toward KEEP.
+        // A new worktree may look unowned only because its dispatch row has not landed.
         let age_path = wt_path.clone();
         if run_blocking_filesystem(move || {
             is_freshly_provisioned(&age_path, MANAGED_FRESH_PROVISION_MIN_AGE)
@@ -400,7 +291,6 @@ async fn sweep_managed_root(
             continue;
         }
 
-        // Keep managed cleanup (including .git probes and recursive deletion) off Tokio.
         let cleanup_path = wt_path.clone();
         let cleanup = cleanup_managed_candidate_off_runtime(cleanup_path).await;
 
@@ -464,10 +354,7 @@ fn cleanup_managed_candidate(path: &Path) -> Result<Option<CleanupOutcome>> {
     Ok(Some((result.removed, result.failed)))
 }
 
-/// Returns the set of `sessions.cwd` values where the session is tied to an
-/// active dispatch. `task_dispatches.status IN ('pending','dispatched')` is the
-/// de-facto "active" set in this codebase (see `src/integration_tests.rs`
-/// callers).
+/// `sessions.cwd` of sessions bound to an active (`pending`/`dispatched`) dispatch.
 async fn fetch_active_cwds(pool: &PgPool) -> Result<HashSet<String>> {
     let rows: Vec<(Option<String>,)> = sqlx::query_as(
         "SELECT DISTINCT s.cwd
@@ -486,33 +373,11 @@ async fn fetch_active_cwds(pool: &PgPool) -> Result<HashSet<String>> {
         .collect())
 }
 
-/// #3207 (part 2) P1 / #3231 (A): cwds of resumable sessions — those carrying a
-/// recorded provider session GUID (`claude_session_id` /
-/// `raw_provider_session_id`) whose worktree the next turn's `--resume` reuses,
-/// so they must not be swept while idle between turns.
+/// Cwds of resumable sessions, so the next turn's `--resume` still finds its worktree.
 ///
-/// #3231: the RESUME GUID is the PRIMARY keep signal — it is deterministic
-/// (session clear records the GUID as NULL in the DB, see
-/// `clear_provider_session_id`), so a non-null GUID means a resumable transcript
-/// genuinely exists for that worktree, whereas a heartbeat is only an
-/// approximate liveness proxy. The previous query made a fresh `last_heartbeat`
-/// (7d) the gate AND excluded NULL-heartbeat rows, so a session that recorded a
-/// GUID but never heartbeated lost its worktree even though `--resume` could
-/// still find the transcript. We now key on GUID-presence and keep TIME only as
-/// a GENEROUS far backstop via `COALESCE(last_heartbeat, created_at)` so disk is
-/// still bounded:
-///   * non-null GUID is required (nothing to resume into otherwise — a cleared /
-///     never-recorded GUID is collectable);
-///   * `COALESCE(last_heartbeat, created_at) >= NOW() - 30d` — a row that never
-///     heartbeated survives until 30d after creation, not forever, while a
-///     genuinely abandoned (very old) worktree becomes collectable again;
-///   * only the LATEST such row PER CHANNEL is protected
-///     (`DISTINCT ON (channel partition) ... ORDER BY ... DESC`), so a channel
-///     reuses ONE worktree rather than pinning every historical row.
-///
-/// The channel partition prefers the unique `channel_id` (#3207 P0), falling
-/// back to `thread_channel_id`/`session_key` for legacy rows that predate the
-/// `channel_id` column so each still collapses to a single protected worktree.
+/// Keyed on a non-null provider session GUID (clearing a session nulls it); the 30-day
+/// `COALESCE(last_heartbeat, created_at)` window only bounds disk use. Only the latest
+/// row per channel is kept, so each channel pins at most one worktree.
 async fn fetch_resumable_cwds(pool: &PgPool) -> Result<HashSet<String>> {
     let rows: Vec<(Option<String>,)> = sqlx::query_as(
         "SELECT DISTINCT ON (COALESCE(channel_id, thread_channel_id, session_key)) cwd
@@ -533,28 +398,19 @@ async fn fetch_resumable_cwds(pool: &PgPool) -> Result<HashSet<String>> {
         .collect())
 }
 
-/// #3231 (codex #1): JSON keys under which a dispatch records the worktree it
-/// owns — mirrors `WORKTREE_PATH_REFERENCE_KEYS` in
-/// `crate::kanban::terminal_cleanup`, the active-ref signal terminal cleanup uses
-/// to refuse removing a worktree still claimed by another live dispatch.
+/// Dispatch JSON keys naming an owned worktree; mirrors `WORKTREE_PATH_REFERENCE_KEYS`
+/// in `crate::kanban::terminal_cleanup`.
 const DISPATCH_WORKTREE_PATH_KEYS: &[&str] = &["worktree_path", "completed_worktree_path"];
 
-/// #3231 (codex #1): worktree paths claimed by an ACTIVE (`pending`/`dispatched`,
-/// i.e. not-yet-terminal) managed dispatch, plus live `pr_tracking` worktrees.
+/// Worktree paths claimed by active (`pending`/`dispatched`) dispatches or by
+/// `pr_tracking`: the refs `terminal_cleanup::active_worktree_refs_pg` also honors.
 ///
-/// A managed dispatch's `worktree_path` is injected into `task_dispatches.context`
-/// at CREATE time, BEFORE the dispatched agent produces a `sessions.cwd` or a live
-/// tmux pane. Between create and first turn the freshly-provisioned worktree is
-/// therefore owned by NOTHING the other keep-set sources can see, so the managed
-/// recursion would delete it. This reuses the exact active-reference signal that
-/// `crate::kanban::terminal_cleanup::active_worktree_refs_pg` relies on (the same
-/// status filter, the same JSON keys, the same `pr_tracking` source) so the sweep
-/// never removes a worktree terminal cleanup itself would refuse to remove.
+/// A dispatch records its worktree at create time, before any session cwd or tmux pane
+/// exists, so without this set a new managed worktree would look unowned.
 async fn fetch_active_dispatch_worktree_paths(pool: &PgPool) -> Result<HashSet<String>> {
     let mut paths = HashSet::new();
 
-    // Cast JSON-ish TEXT columns to TEXT explicitly so the decode is uniform
-    // regardless of whether the column is stored as TEXT or JSON/JSONB.
+    // `::TEXT` decodes the same whether the column is TEXT or JSON/JSONB.
     let rows: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT context::TEXT, result::TEXT
          FROM task_dispatches
@@ -585,8 +441,6 @@ async fn fetch_active_dispatch_worktree_paths(pool: &PgPool) -> Result<HashSet<S
         }
     }
 
-    // `pr_tracking.worktree_path` pins a worktree that a PR still tracks — same
-    // source terminal cleanup consults before removing a managed worktree.
     let pr_rows: Vec<(Option<String>,)> = sqlx::query_as(
         "SELECT worktree_path
          FROM pr_tracking
@@ -603,11 +457,8 @@ async fn fetch_active_dispatch_worktree_paths(pool: &PgPool) -> Result<HashSet<S
     Ok(paths)
 }
 
-/// True when `candidate` equals `dir` OR is nested directly/transitively under
-/// it (a real path boundary — `dir` followed by `/`). Shared by both the
-/// kept-cwd check ([`is_dir_active`]) and the live-tmux check
-/// ([`has_live_tmux_owner`]) so a pane/cwd sitting in a SUBDIR of a worktree
-/// (e.g. `/worktree/src`) protects the worktree root in both cases.
+/// True when `candidate` is `dir` or lies under it at a `/` boundary, so a cwd or pane
+/// in a subdirectory still protects the worktree root.
 pub(crate) fn path_equals_or_nested_under(candidate: &str, dir: &str) -> bool {
     if candidate == dir {
         return true;
@@ -620,57 +471,26 @@ pub(crate) fn path_equals_or_nested_under(candidate: &str, dir: &str) -> bool {
             .unwrap_or(false)
 }
 
-/// #3231 (B): far age backstop for managed cancel-leaks. A managed worktree
-/// whose dispatch was cancelled but whose terminal cleanup never ran can linger
-/// even when its `.git` pointer is unreadable; only such directories OLDER than
-/// this horizon are eligible for the plain-delete fallback in
-/// [`sweep_managed_root`]. Generous on purpose — the keep-set + live-tmux gate
-/// already prove no live owner; age is only a final guard against deleting a
-/// freshly-provisioned dir whose `.git` we momentarily failed to read.
+/// Minimum mtime age before a managed dir with no `.git` (a cancel leak that terminal
+/// cleanup never removed) may be plain-deleted.
 const MANAGED_CANCEL_LEAK_BACKSTOP: std::time::Duration =
     std::time::Duration::from_secs(60 * 60 * 24); // 24h
 
-/// #3231 (codex re-review, TOCTOU): minimum age a managed worktree must reach
-/// before the recursive managed-root pass may delete it. Closes the create→insert
-/// race in dispatch creation: [`crate::dispatch::dispatch_create`] provisions the
-/// worktree FIRST (`ensure_card_worktree`) and only commits the owning
-/// `task_dispatches` row a moment LATER. If the hourly sweep's keep-set snapshot is
-/// taken inside that window, the just-provisioned clean/merged worktree is in NO
-/// keep-set source and has NO live tmux owner yet, so the managed pass would delete
-/// it out from under the in-flight dispatch. The row lands within seconds of
-/// creation, so a generous 30-minute floor guarantees the window has closed before
-/// any managed worktree becomes a delete candidate — fail-closed toward KEEP.
-///
-/// This is a CREATION-age floor, deliberately NOT an idle gate: a fresh managed
-/// worktree may be actively building (heavy `target/` churn) and then fall idle
-/// the instant the build finishes — possibly still before the row lands — so an
-/// idle/mtime-quiescence signal could mis-classify it as collectable. "Created
-/// recently" is the only signal that reliably protects the whole window.
+/// Creation-age floor before a managed worktree may be deleted. Dispatch creation
+/// provisions the worktree before committing its `task_dispatches` row, so a keep-set
+/// snapshot taken in between sees it unowned. Creation age, not idle time, because a
+/// new worktree can go idle right after a build, before its row lands.
 const MANAGED_FRESH_PROVISION_MIN_AGE: std::time::Duration =
     std::time::Duration::from_secs(60 * 30); // 30m
 
-/// #3276: infrastructure worktree NAME prefixes protected from the sweep in
-/// BOTH passes, regardless of any owner signal. The release deploy worktree
-/// (`release-main-deploy-<ts>`, the cwd `scripts/deploy-release.sh` reuses
-/// across deploys) is created once by an operator and is never a dispatch cwd,
-/// never a resumable session cwd, and never a live AgentDesk tmux pane — so
-/// every ownership keep-set source misses it by construction and an
-/// owner-based decision would always (wrongly) select it. Deleting it breaks
-/// the next deploy, hence the unconditional name guard.
-///
-/// `release-` (broader than the exact `release-main-deploy` form, per the
-/// issue's recommendation) is safe to protect wholesale WITHOUT pinning real
-/// orphans forever: the runtime NEVER creates `release-*` names — flat-root
-/// worktrees are `{provider}-…` (`claude-…` / `codex-adk-cdx…` / `wt-…`, see
-/// [`is_runtime_named_worktree`]) and managed worktrees are `issue-<n>-<ts>` /
-/// `automation-<card>-iter-<n>` (`crate::services::git::worktree_resolver`) —
-/// so no genuine runtime orphan can ever hide behind this prefix.
+/// Name prefixes never swept by either pass, whatever the owner signals say. Deploy
+/// worktrees (`release-main-deploy-*`) have no dispatch, session or tmux owner, so an
+/// owner check would always pick them; the runtime never creates `release-*` names,
+/// so this cannot hide a real orphan.
 const PROTECTED_INFRA_NAME_PREFIXES: &[&str] = &["release-"];
 
-/// #3276: true when `dir`'s NAME (the final path segment only — the scan root
-/// itself lives under `~/.adk/release/`, so matching the full path would
-/// protect everything) starts with a protected infrastructure prefix.
-/// Case-insensitive, mirroring [`is_runtime_named_worktree`].
+/// True when `dir`'s final segment starts with a protected prefix, case-insensitive.
+/// Only the name is checked because the scan root itself lives under `~/.adk/release/`.
 pub(crate) fn is_protected_infra_worktree(dir: &Path) -> bool {
     let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
         return false;
@@ -681,21 +501,10 @@ pub(crate) fn is_protected_infra_worktree(dir: &Path) -> bool {
         .any(|prefix| lower.starts_with(prefix))
 }
 
-/// #3231 (A): true when the worktree dir name matches the runtime per-channel
-/// naming the AgentDesk runtime actually creates — `{provider}-…` flat-root dirs
-/// (`create_git_worktree`: `claude-…` / `codex-…`, branch `wt/<provider>-…`).
-/// Returning `false` PROTECTS manual dev worktrees (`worker-*`, `integration-*`,
-/// `codex-*`-without-`-adk-cdx`, `release-*`, `fix-*`, `e2e-*`, …) that a human
-/// dropped into the flat root — they are never runtime-created and must NEVER be
-/// discard candidates. This is the key #3231 safety fix.
-///
-/// Matched dir-name prefixes (case-insensitive on the leading provider token):
-///   * `claude-`  — `create_git_worktree` provider `claude`
-///   * `codex-adk-cdx` — the runtime codex per-channel worktree
-///   * `wt-`/`wt/` — defensive: a branch-derived `wt/<provider>-…` name
-///
-/// Note `codex-` ALONE is intentionally NOT whitelisted: a manual `codex-*` dev
-/// worktree must survive. Only the runtime's `codex-adk-cdx…` form is matched.
+/// True when the dir name is one the runtime creates for per-channel worktrees:
+/// `claude-`, `codex-adk-cdx`, `wt-` or `wt/` prefixes, case-insensitive. Anything else
+/// (`worker-*`, `integration-*`, plain `codex-*`, `fix-*`, …) is a manual dev worktree
+/// and is never a discard candidate.
 pub(crate) fn is_runtime_named_worktree(dir: &Path) -> bool {
     let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
         return false;
@@ -707,15 +516,9 @@ pub(crate) fn is_runtime_named_worktree(dir: &Path) -> bool {
         || lower.starts_with("wt/")
 }
 
-/// #3231 (B): true when `dir` is a managed-root child — i.e. the per-repo
-/// container `worktrees/<repo_name>/` whose CHILDREN are managed dispatch /
-/// automation worktrees, NOT a per-channel worktree itself. Heuristic: it is
-/// NOT a git worktree (no `.git` gitdir pointer) AND is NOT runtime-named, yet
-/// contains at least one child that IS a git worktree. This keeps a manual dev
-/// worktree (which has a `.git` file) from being treated as a managed root.
+/// True when `dir` is a managed-root container (`worktrees/<repo>/`): no `.git` of its
+/// own, but at least one child directory that has one.
 pub(crate) fn is_managed_root_child(dir: &Path) -> bool {
-    // A registered git worktree has a `.git` FILE (gitdir pointer); a managed
-    // root is a plain container directory, so it must NOT have one.
     if dir.join(".git").exists() {
         return false;
     }
@@ -727,9 +530,8 @@ pub(crate) fn is_managed_root_child(dir: &Path) -> bool {
     })
 }
 
-/// True when `dir`'s modification time is older than `min_age`. Used as the
-/// far cancel-leak backstop in [`sweep_managed_root`]. A missing/unreadable mtime
-/// returns `false` (conservative — do not delete what we cannot age).
+/// True when `dir`'s mtime is at least `min_age` old; an unreadable mtime is `false`,
+/// so an unknown age never licenses a delete.
 fn is_old_enough(dir: &Path, min_age: std::time::Duration) -> bool {
     let Ok(modified) = dir.metadata().and_then(|m| m.modified()) else {
         return false;
@@ -740,43 +542,24 @@ fn is_old_enough(dir: &Path, min_age: std::time::Duration) -> bool {
         .unwrap_or(false)
 }
 
-/// #3231 (codex re-review, TOCTOU): true when `dir` was created too recently to be
-/// a safe delete candidate — i.e. it may still be inside the dispatch-create
-/// create→insert window (see [`MANAGED_FRESH_PROVISION_MIN_AGE`]). Used by the
-/// managed-root pass to PROTECT a just-provisioned worktree whose owning
-/// `task_dispatches` row has not yet been committed to (or become visible in) the
-/// keep-set snapshot.
-///
-/// Age is read from the directory's CREATION time (`created()`), falling back to
-/// its modification time when the platform/FS does not expose a birth time. Unlike
-/// [`is_old_enough`] (which fails toward "do not delete" by returning `false` on an
-/// unreadable timestamp), this gate is biased toward PROTECTION: if the age cannot
-/// be determined at all, the worktree is treated AS IF freshly provisioned
-/// (`true`) so an indeterminate timestamp never licenses a delete inside the race
-/// window. "Doubtful → KEEP."
+/// True when `dir` is younger than `min_age` by birth time (mtime where unsupported).
+/// An unreadable or future timestamp counts as fresh: doubt means keep.
 fn is_freshly_provisioned(dir: &Path, min_age: std::time::Duration) -> bool {
     let Ok(metadata) = dir.metadata() else {
-        // Cannot stat the dir at all → assume fresh and protect it.
         return true;
     };
-    // Prefer the birth time; fall back to mtime where `created()` is unsupported.
     let created = metadata.created().or_else(|_| metadata.modified());
     let Ok(created) = created else {
         return true;
     };
     match created.elapsed() {
-        // Younger than the floor (or a future-dated clock skew gave a tiny/zero
-        // elapsed) → still inside the window → protect.
         Ok(elapsed) => elapsed < min_age,
-        // `elapsed()` errors when the timestamp is in the FUTURE (clock skew) →
-        // by definition not old enough → protect.
+        // `elapsed()` fails for a future timestamp (clock skew).
         Err(_) => true,
     }
 }
 
-/// A worktree dir is "active" if ANY session cwd equals it or is nested under
-/// it (subshell cwds sometimes land inside `src/...` relative to the worktree
-/// root).
+/// True when any kept cwd is `dir` or nested under it (subshells may sit in `src/`).
 pub(crate) fn is_dir_active(dir: &Path, active_cwds: &HashSet<String>) -> bool {
     let dir_str = dir.to_string_lossy();
     active_cwds
@@ -784,33 +567,13 @@ pub(crate) fn is_dir_active(dir: &Path, active_cwds: &HashSet<String>) -> bool {
         .any(|cwd| path_equals_or_nested_under(cwd, dir_str.as_ref()))
 }
 
-/// #3216 (gap 3): the pure sweep decision for a single managed worktree dir.
-///
-/// A worktree is swept ONLY when ALL of the following hold:
-///   * its NAME does not carry a protected infrastructure prefix (`release-`,
-///     #3276) — deploy worktrees are owned by NO keep-set source, so they must
-///     be excluded by name BEFORE any owner-based reasoning; AND
-///   * the tmux query SUCCEEDED (`live_tmux_paths` is `Some`). When it FAILED
-///     (`None`, #3216 P0-1) we cannot prove the worktree has no live owner, so
-///     we fail-closed and KEEP everything; AND
-///   * it is not the cwd (nor a parent of the cwd) of any kept session — the DB
-///     keep-set built from active dispatches + recent resumable sessions; AND
-///   * it is not the live `#{pane_current_path}` of any AgentDesk tmux pane
-///     (equal OR a parent of one — #3216 P0-2) — the authoritative live owner.
-///
-/// Factored out as a pure fn (path + kept-cwd set + optional live-tmux-path set)
-/// so the divorced-phantom sweep decision AND the fail-closed tmux-unavailable
-/// behavior are unit-testable without touching Postgres or the real tmux server.
-/// Returning `false` (KEEP) is the conservative default: if tmux is unavailable
-/// OR either source claims the worktree, it survives.
+/// Owner check shared by both passes: true only when `dir` has no protected name, the
+/// tmux query succeeded, and no kept cwd or live pane sits at or under it.
 pub(crate) fn should_sweep_worktree(
     dir: &Path,
     kept_cwds: &HashSet<String>,
     live_tmux_paths: Option<&HashSet<String>>,
 ) -> bool {
-    // #3276: infrastructure worktrees (release deploy trees) are protected by
-    // NAME, unconditionally — no keep-set source can ever own them, so any
-    // owner-based decision below would always (wrongly) select them.
     if is_protected_infra_worktree(dir) {
         tracing::info!(
             target: "maintenance",
@@ -820,7 +583,6 @@ pub(crate) fn should_sweep_worktree(
         );
         return false;
     }
-    // Fail-closed: a failed tmux query proves nothing about live ownership.
     let Some(live_tmux_paths) = live_tmux_paths else {
         return false;
     };
@@ -833,14 +595,8 @@ pub(crate) fn should_sweep_worktree(
     true
 }
 
-/// True when `dir` is the live `pane_current_path` of some AgentDesk tmux
-/// session — OR a parent of one (a live pane often sits in a SUBDIR of the
-/// worktree, e.g. pane cwd `/worktree/src` while the scanned dir is
-/// `/worktree`). Mirrors [`is_dir_active`]'s nested-path rule via the shared
-/// [`path_equals_or_nested_under`] predicate so a worktree with a live pane in a
-/// subdir is never swept. Compares both the raw `dir` string and its
-/// canonicalized form so a symlinked / non-normalized `read_dir` path still
-/// matches the canonical path tmux reports (and vice-versa).
+/// True when a live pane path is `dir` or nested under it. Compares both the raw and
+/// the canonical `dir`, so a symlinked scan path still matches tmux's reported path.
 pub(crate) fn has_live_tmux_owner(dir: &Path, live_tmux_paths: &HashSet<String>) -> bool {
     if live_tmux_paths.is_empty() {
         return false;
@@ -855,17 +611,10 @@ pub(crate) fn has_live_tmux_owner(dir: &Path, live_tmux_paths: &HashSet<String>)
     })
 }
 
-/// Gather the `#{pane_current_path}` of every AgentDesk-owned tmux session, both
-/// raw and canonicalized, so [`has_live_tmux_owner`] can protect a worktree that
-/// is the live cwd of a running pane.
+/// `#{pane_current_path}` of every AgentDesk tmux session, raw and canonicalized.
 ///
-/// Returns `None` when the tmux query FAILS — which is fundamentally different
-/// from "tmux is up but has zero AgentDesk panes" (`Some(empty set)`). A FAILURE
-/// means we cannot prove a worktree has no live owner, so the caller MUST
-/// fail-closed and skip all deletions for this run (#3216 P0-1: a live pane
-/// whose DB cwd is momentarily missing must not be swept merely because tmux was
-/// temporarily unavailable). Only a SUCCESSFUL query (even an empty one) lets the
-/// sweep proceed.
+/// `None` means the query failed, unlike `Some(empty)` (no panes): a failed query
+/// cannot prove a worktree unowned, so the caller must skip all deletions.
 pub(crate) fn collect_live_tmux_pane_paths() -> Option<HashSet<String>> {
     let sessions = crate::services::platform::tmux::list_session_names().ok()?;
     fold_pane_paths(sessions, |session| {
@@ -873,29 +622,18 @@ pub(crate) fn collect_live_tmux_pane_paths() -> Option<HashSet<String>> {
     })
 }
 
-/// Pure core of [`collect_live_tmux_pane_paths`], parameterised on the pane-path
-/// query so it can be unit-tested without a live tmux server.
-///
-/// Fail-closed (returns `None`) the moment an AgentDesk-owned session's pane path
-/// cannot be determined — either the query FAILS (`None`) or returns an empty
-/// string. A per-session failure means the live-owner set would be INCOMPLETE,
-/// and an incomplete set could let the caller sweep a worktree whose live pane we
-/// simply failed to read (#3216 P0). Non-AgentDesk sessions are skipped BEFORE the
-/// query, so an unrelated operator session failing has no effect.
+/// Core of [`collect_live_tmux_pane_paths`] with the pane query injected for tests.
+/// `None` if any AgentDesk session's pane path is unreadable or empty, since a partial
+/// set could miss a live owner. Other sessions are never queried.
 fn fold_pane_paths(
     sessions: Vec<String>,
     query: impl Fn(&str) -> Option<String>,
 ) -> Option<HashSet<String>> {
     let mut paths = HashSet::new();
     for session in sessions {
-        // Only AgentDesk-managed panes are relevant; operator-created sessions
-        // must not influence the sweep.
         if !session.starts_with("AgentDesk-") {
             continue;
         }
-        // A live AgentDesk session must report a non-empty pane cwd. If we cannot
-        // read it, fail-closed for the whole run rather than proceed with a
-        // partial set (which would risk deleting a live worktree).
         let path = query(&session)?;
         if path.is_empty() {
             return None;
@@ -915,9 +653,7 @@ pub(crate) async fn remove_orphan_worktree(path: &Path) -> Result<()> {
 }
 
 fn remove_orphan_worktree_blocking(path: &Path) -> Result<()> {
-    // Try `git worktree remove --force <path>` first. This requires running
-    // from the parent repo, which we infer by reading the .git file inside
-    // the worktree (format: `gitdir: /abs/path/.git/worktrees/<name>`).
+    // Best effort: if `git worktree remove` fails, `remove_dir_all` below still runs.
     if let Some(repo_root) = infer_repo_root_from_worktree(path) {
         let _ = GitCommand::new()
             .repo(&repo_root)
@@ -932,38 +668,25 @@ fn remove_orphan_worktree_blocking(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// #3231 (codex #3): classification of a managed worktree's `.git` entry for the
-/// fallback in [`sweep_managed_root`] when [`infer_repo_root_from_worktree`]
-/// could not resolve the parent repo. Only [`GitPointerState::Missing`] (truly no
-/// `.git`) is eligible for the plain age-backstopped delete; a present-but-
-/// unreadable `.git` belongs to a registered worktree whose pointer we merely
-/// failed to read and must be left untouched.
+/// `.git` state of a managed worktree whose parent repo could not be resolved. Only
+/// [`GitPointerState::Missing`] may be plain-deleted, after [`MANAGED_CANCEL_LEAK_BACKSTOP`];
+/// an unreadable pointer may belong to a registered, possibly dirty worktree.
 enum GitPointerState {
-    /// No `.git` entry at all — not a registered worktree, just a leftover dir.
+    /// No `.git` entry: a leftover dir, not a registered worktree.
     Missing,
-    /// A `.git` entry EXISTS but could not be read / did not yield a gitdir — a
-    /// registered worktree with an unresolvable pointer; never deleted here.
+    /// `.git` exists, or its existence is unknown; never deleted here.
     PresentUnreadable,
 }
 
-/// #3231 (codex #3): inspect the worktree's `.git` entry WITHOUT force-deleting
-/// anything. `try_exists` distinguishes "definitively absent" from "exists but
-/// unreadable" (a permission/IO error is treated conservatively as present, since
-/// we could not prove absence).
+/// Classifies `path/.git` by existence only; an I/O error counts as present.
 fn git_pointer_state(path: &Path) -> GitPointerState {
     match path.join(".git").try_exists() {
         Ok(false) => GitPointerState::Missing,
-        // Exists, OR we could not even determine existence — conservatively treat
-        // as a registered worktree we must not blow away.
         Ok(true) | Err(_) => GitPointerState::PresentUnreadable,
     }
 }
 
-/// #3231 (codex #3): plain recursive directory delete for an age-backstopped
-/// managed leftover that has NO `.git` pointer (so there is no git-tracked or
-/// uncommitted state to preserve). Deliberately does NOT invoke
-/// `git worktree remove --force` — the force path is reserved for the flat-root
-/// pass and must never run in the managed fallback.
+/// Deletes a `.git`-less managed leftover; there is no git state to preserve.
 fn remove_dir_all_plain(path: &Path) -> std::io::Result<()> {
     if path.exists() {
         std::fs::remove_dir_all(path)?;
@@ -991,9 +714,6 @@ mod resumable_keep_set_tests {
     use std::collections::HashSet;
     use std::path::Path;
 
-    /// #3207 (part 2): a worktree whose path is in the keep-set (the union of
-    /// active-dispatch cwds AND recent resumable-session cwds) must be treated as
-    /// active and therefore NOT swept while idle between turns.
     #[test]
     fn resumable_cwd_protects_its_worktree_dir() {
         let dir = "/home/u/.adk/release/worktrees/claude-chan-20260101-000000";
@@ -1005,8 +725,6 @@ mod resumable_keep_set_tests {
         );
     }
 
-    /// A nested subshell cwd inside the resumable worktree still protects the
-    /// worktree root (mirrors the active-dispatch nesting rule).
     #[test]
     fn nested_resumable_cwd_protects_worktree_root() {
         let dir = "/home/u/.adk/release/worktrees/claude-chan-20260101-000000";
@@ -1016,7 +734,6 @@ mod resumable_keep_set_tests {
         assert!(is_dir_active(Path::new(dir), &keep));
     }
 
-    /// A worktree NOT referenced by any keep-set cwd remains an orphan candidate.
     #[test]
     fn unreferenced_worktree_is_not_protected() {
         let dir = "/home/u/.adk/release/worktrees/claude-chan-stale";
@@ -1028,10 +745,6 @@ mod resumable_keep_set_tests {
 
 #[cfg(test)]
 mod naming_whitelist_tests {
-    //! #3231 (A): the naming whitelist is the KEY safety fix — only worktrees the
-    //! runtime actually creates (`claude-…`, `codex-adk-cdx…`, `wt-…`) are ever
-    //! discard candidates. Manual dev worktrees dropped into the flat root must
-    //! NEVER be swept, regardless of whether any session row owns them.
     use super::is_runtime_named_worktree;
     use std::path::Path;
 
@@ -1054,7 +767,6 @@ mod naming_whitelist_tests {
 
     #[test]
     fn manual_dev_worktrees_are_never_discard_candidates() {
-        // None of these are runtime-created — they must be protected forever.
         for manual in [
             "worker-1",
             "integration-main",
@@ -1074,12 +786,7 @@ mod naming_whitelist_tests {
 
 #[cfg(test)]
 mod phantom_sweep_decision_tests {
-    //! #3216 (gap 3): unit-test the pure `should_sweep_worktree` decision for the
-    //! divorced/phantom per-channel worktree scenario. After gap1+gap2
-    //! reconciliation points the DB cwd back to the ORIGINAL worktree, the
-    //! phantom (a full checkout with its own branch, no transcript, no live
-    //! owner) is a genuine orphan and must be swept — while the worktree that is
-    //! a kept session's cwd OR the live tmux pane's cwd must survive.
+    //! Owner-check cases, including a phantom worktree left behind by a rotation.
     use super::{fold_pane_paths, has_live_tmux_owner, should_sweep_worktree};
     use std::collections::HashSet;
     use std::path::Path;
@@ -1087,12 +794,8 @@ mod phantom_sweep_decision_tests {
     const ORIGINAL: &str = "/home/u/.adk/release/worktrees/claude-adk-cc-20260607-113822";
     const PHANTOM: &str = "/home/u/.adk/release/worktrees/claude-adk-cc-20260607-212437";
 
-    /// A divorced managed worktree with no live owner and not matching any kept
-    /// session cwd IS selected for sweep (tmux query SUCCEEDED).
     #[test]
     fn divorced_phantom_with_no_owner_is_swept() {
-        // The kept-set points at the ORIGINAL worktree (post-reconciliation),
-        // and the live tmux pane is the ORIGINAL too — the phantom is divorced.
         let mut kept: HashSet<String> = HashSet::new();
         kept.insert(ORIGINAL.to_string());
         let mut live: HashSet<String> = HashSet::new();
@@ -1104,7 +807,6 @@ mod phantom_sweep_decision_tests {
         );
     }
 
-    /// A worktree that IS a kept session's cwd is NOT swept.
     #[test]
     fn kept_session_cwd_is_not_swept() {
         let mut kept: HashSet<String> = HashSet::new();
@@ -1117,9 +819,6 @@ mod phantom_sweep_decision_tests {
         );
     }
 
-    /// A worktree with a live tmux owner is NOT swept — even if the DB keep-set
-    /// transiently disagrees (e.g. before channel_id backfill), the live pane is
-    /// the source of truth.
     #[test]
     fn live_tmux_owner_is_not_swept_even_if_not_in_keep_set() {
         let kept: HashSet<String> = HashSet::new(); // keep-set has NOTHING for it
@@ -1132,8 +831,6 @@ mod phantom_sweep_decision_tests {
         );
     }
 
-    /// (b) tmux AVAILABLE with ZERO panes (`Some(empty)`): a phantom with no
-    /// kept cwd and no live pane IS swept — a successful query proved no owner.
     #[test]
     fn phantom_is_swept_when_tmux_available_with_zero_panes() {
         let kept: HashSet<String> = HashSet::new();
@@ -1145,21 +842,15 @@ mod phantom_sweep_decision_tests {
         ));
     }
 
-    /// (a) tmux UNAVAILABLE (`None`, the query FAILED): NOTHING is swept — not
-    /// even a phantom that has no kept cwd and no live pane — because a failed
-    /// query cannot prove the absence of a live owner (#3216 P0-1 fail-closed).
     #[test]
     fn nothing_is_swept_when_tmux_unavailable() {
         let kept: HashSet<String> = HashSet::new();
-        // Even the most clearly-orphaned phantom must survive a failed tmux query.
         assert!(
             !should_sweep_worktree(Path::new(PHANTOM), &kept, None),
             "tmux-unavailable (failed query) must suppress ALL deletions, even of phantoms"
         );
     }
 
-    /// (c) A live pane sitting in a SUBDIR of a worktree (e.g. `/worktree/src`)
-    /// protects the worktree root — it must be KEPT (#3216 P0-2 nested match).
     #[test]
     fn live_pane_in_subdir_keeps_worktree() {
         let kept: HashSet<String> = HashSet::new();
@@ -1176,8 +867,6 @@ mod phantom_sweep_decision_tests {
         );
     }
 
-    /// A pane path that merely shares a STRING PREFIX (no `/` boundary) with the
-    /// worktree must NOT be treated as an owner — guards the nested-match logic.
     #[test]
     fn sibling_prefix_pane_does_not_keep_worktree() {
         let kept: HashSet<String> = HashSet::new();
@@ -1193,8 +882,6 @@ mod phantom_sweep_decision_tests {
         ));
     }
 
-    /// `has_live_tmux_owner` returns false against an empty live set and true on
-    /// an exact path match.
     #[test]
     fn has_live_tmux_owner_basic() {
         let empty: HashSet<String> = HashSet::new();
@@ -1206,8 +893,6 @@ mod phantom_sweep_decision_tests {
         assert!(!has_live_tmux_owner(Path::new(PHANTOM), &live));
     }
 
-    /// #3216 P0: a successful, complete query yields `Some(set)` containing every
-    /// AgentDesk pane path; non-AgentDesk sessions are excluded.
     #[test]
     fn fold_pane_paths_collects_agentdesk_panes_only() {
         let sessions = vec![
@@ -1223,9 +908,6 @@ mod phantom_sweep_decision_tests {
         assert_eq!(result.len(), 1);
     }
 
-    /// #3216 P0 (fail-closed): if ANY AgentDesk session's pane path cannot be read
-    /// (`None`), the whole collection fails-closed (`None`) so the caller skips
-    /// deletion — a partial set must never drive a sweep.
     #[test]
     fn fold_pane_paths_fails_closed_on_agentdesk_query_failure() {
         let sessions = vec![
@@ -1242,7 +924,6 @@ mod phantom_sweep_decision_tests {
         );
     }
 
-    /// #3216 P0 (fail-closed): an empty pane path is also indeterminate.
     #[test]
     fn fold_pane_paths_fails_closed_on_empty_pane_path() {
         let sessions = vec!["AgentDesk-claude-adk-cc".to_string()];
@@ -1253,13 +934,6 @@ mod phantom_sweep_decision_tests {
 
 #[cfg(test)]
 mod deploy_worktree_protection_tests {
-    //! #3276: the release deploy worktree (`release-main-deploy-*`) under the
-    //! flat scan root is deployment infrastructure — never a dispatch cwd,
-    //! never a resumable session cwd, never a live AgentDesk tmux pane — so
-    //! EVERY owner-based KEEP condition misses it by construction. The
-    //! name-prefix guard in `should_sweep_worktree` must keep it
-    //! unconditionally, in BOTH the flat-root and managed-root passes, while
-    //! non-protected names keep the existing sweep behavior.
     use super::{is_protected_infra_worktree, should_sweep_worktree};
     use std::collections::HashSet;
     use std::path::Path;
@@ -1267,9 +941,6 @@ mod deploy_worktree_protection_tests {
     const DEPLOY: &str = "/home/u/.adk/release/worktrees/release-main-deploy-20260530";
     const PHANTOM: &str = "/home/u/.adk/release/worktrees/claude-adk-cc-20260607-212437";
 
-    /// The exact #3276 failure mode: tmux query SUCCEEDED with zero panes and
-    /// the DB keep-set is empty — every KEEP condition misses, yet the deploy
-    /// worktree must never be swept.
     #[test]
     fn deploy_worktree_is_never_swept_when_all_keep_conditions_miss() {
         let kept: HashSet<String> = HashSet::new();
@@ -1280,8 +951,6 @@ mod deploy_worktree_protection_tests {
         );
     }
 
-    /// A populated keep-set / live-pane set that points elsewhere changes
-    /// nothing — the protection is independent of every owner signal.
     #[test]
     fn deploy_worktree_is_kept_with_unrelated_keepset_and_panes() {
         let mut kept: HashSet<String> = HashSet::new();
@@ -1295,9 +964,6 @@ mod deploy_worktree_protection_tests {
         ));
     }
 
-    /// The managed-root pass (`sweep_managed_root`) reuses the same
-    /// `should_sweep_worktree` — a `release-*` name one level deeper
-    /// (`worktrees/<repo>/release-…`) is protected there too.
     #[test]
     fn deploy_worktree_under_managed_root_is_protected_too() {
         let nested = "/home/u/.adk/release/worktrees/agentdesk/release-main-deploy-20260530";
@@ -1310,10 +976,6 @@ mod deploy_worktree_protection_tests {
         ));
     }
 
-    /// Protection matches on the directory NAME only — the scan root itself
-    /// lives under `~/.adk/release/`, so a full-path match would protect
-    /// everything. A non-protected runtime-named orphan with no owner keeps
-    /// the existing sweep behavior (it IS swept).
     #[test]
     fn non_protected_names_keep_existing_sweep_behavior() {
         let kept: HashSet<String> = HashSet::new();
@@ -1324,9 +986,6 @@ mod deploy_worktree_protection_tests {
         );
     }
 
-    /// Predicate basics: prefix match on the dir NAME, case-insensitive
-    /// (mirroring `is_runtime_named_worktree`); names merely CONTAINING
-    /// `release` (or with it mid-name) are not protected.
     #[test]
     fn protected_infra_name_predicate() {
         assert!(is_protected_infra_worktree(Path::new(DEPLOY)));
@@ -1344,20 +1003,7 @@ mod deploy_worktree_protection_tests {
 
 #[cfg(test)]
 mod resumable_keep_set_query_pg_tests {
-    //! #3207 P1 / #3231 (A): exercise the REAL `fetch_resumable_cwds` query
-    //! against Postgres so the GUID-primary keep rule is verified, not just the
-    //! `is_dir_active` path-matching stub.
-    //!
-    //! #3231 makes the resume GUID the PRIMARY keep signal with TIME only as a
-    //! generous 30d backstop over `COALESCE(last_heartbeat, created_at)`:
-    //!   * a non-null GUID is REQUIRED (a cleared / never-recorded GUID is
-    //!     collectable — nothing to `--resume` into);
-    //!   * a GUID row that NEVER heartbeated is KEPT until 30d after creation
-    //!     (the previous query excluded all NULL-heartbeat rows, losing a
-    //!     resumable transcript between turns);
-    //!   * a very old row (beyond the 30d backstop) is collectable again so disk
-    //!     stays bounded;
-    //!   * only the LATEST row PER CHANNEL is protected (per-channel bound).
+    //! Runs the real `fetch_resumable_cwds` query against Postgres.
     use super::fetch_resumable_cwds;
     use crate::db::auto_queue::test_support::TestPostgresDb;
 
@@ -1403,8 +1049,7 @@ mod resumable_keep_set_query_pg_tests {
             "NOW()",
         )
         .await;
-        // (2) #3231: NULL heartbeat but a GUID + fresh created_at → KEPT now
-        //     (GUID is the primary signal; the next turn can still --resume).
+        // (2) GUID but never heartbeated → kept.
         seed(
             &pool,
             "k-null-hb",
@@ -1415,8 +1060,7 @@ mod resumable_keep_set_query_pg_tests {
             "NOW()",
         )
         .await;
-        // (3) GUID row beyond the 30d far backstop (both heartbeat AND created_at
-        //     old) → EXCLUDED so disk stays bounded.
+        // (3) GUID row older than the 30-day backstop → excluded.
         seed(
             &pool,
             "k-stale",
@@ -1427,8 +1071,7 @@ mod resumable_keep_set_query_pg_tests {
             "NOW() - INTERVAL '60 days'",
         )
         .await;
-        // (4) #3231: GUID was CLEARED (NULL) → EXCLUDED (nothing to resume into),
-        //     even with a fresh heartbeat.
+        // (4) cleared GUID → excluded, even with a fresh heartbeat.
         seed(
             &pool,
             "k-no-sid",
@@ -1439,8 +1082,7 @@ mod resumable_keep_set_query_pg_tests {
             "NOW()",
         )
         .await;
-        // (5) two resumable sessions for the SAME channel → only the LATEST
-        //     cwd is kept (per-channel bound).
+        // (5) two sessions on one channel → only the latest cwd is kept.
         seed(
             &pool,
             "k-chan5-old",
@@ -1496,12 +1138,7 @@ mod resumable_keep_set_query_pg_tests {
 
 #[cfg(test)]
 mod active_dispatch_worktree_keep_set_pg_tests {
-    //! #3231 (codex #1): an active managed dispatch records its worktree under
-    //! `task_dispatches.context.worktree_path` at CREATE time — before any
-    //! `sessions.cwd` or live tmux pane exists. `fetch_active_dispatch_worktree_paths`
-    //! must surface those paths (from context AND result, for `pending`/`dispatched`
-    //! dispatches) plus `pr_tracking.worktree_path`, so a just-provisioned worktree
-    //! is not deleted out from under the dispatch.
+    //! Runs the real `fetch_active_dispatch_worktree_paths` queries against Postgres.
     use super::fetch_active_dispatch_worktree_paths;
     use crate::db::auto_queue::test_support::TestPostgresDb;
 
@@ -1548,8 +1185,7 @@ mod active_dispatch_worktree_keep_set_pg_tests {
             Some(r#"{"completed_worktree_path":"/wt/managed-completed"}"#),
         )
         .await;
-        // (3) terminal (completed) dispatch → its worktree is NOT kept by this set
-        //     (terminal cleanup owns it; absence from the active set is correct).
+        // (3) terminal dispatch → not in the active set (terminal cleanup owns it).
         seed_dispatch(
             &pool,
             "d-completed",
@@ -1740,43 +1376,20 @@ mod blocking_directory_walk_tests {
 
 #[cfg(test)]
 mod managed_root_recursion_tests {
-    //! #3231 (B): the managed dispatch/automation worktrees live one level deeper
-    //! under `worktrees/<repo_name>/` — the flat 1-depth scan never reached them.
-    //! These tests build a real git repo + managed worktree on disk and verify
-    //! the recursion classifier (`is_managed_root_child`) reaches managed-root
-    //! children, that a terminal (unowned) managed worktree is swept while an
-    //! owned one survives, and that dirty managed worktrees are preserved.
+    //! Managed-root recursion against a real repo and managed worktree on disk.
     use super::{Config, is_managed_root_child, is_runtime_named_worktree, run_inner};
     use crate::services::git::GitCommand;
     use std::collections::HashSet;
     use std::path::Path;
-    // `cleanup_managed_worktree` resolves the managed root via the PROCESS-GLOBAL
-    // `AGENTDESK_ROOT_DIR` env var (`managed_worktrees_root`), so the tests that
-    // drive it must serialize against every env-mutating test in the crate.
-    //
-    // #5400: `AGENTDESK_ROOT_DIR` is not the only process-global these tests
-    // depend on. Every helper below shells out to git, and on non-Windows
-    // `binary_resolver::git_binary` resolves to the bare name `git` — so each
-    // spawn does its own `PATH` lookup at spawn time. A test on another harness
-    // thread that REPLACES `PATH` (binary_resolver's
-    // `resolve_provider_binary_redacts_claude_paths_in_attempts` points it at a
-    // temp dir holding only a `claude` stub) makes those spawns fail with
-    // `ENOENT` for the length of its override. That is why EVERY git-spawning
-    // test in this module holds `shared_test_env_lock` across its git calls,
-    // not merely across the `AGENTDESK_ROOT_DIR` write.
+    // Git-spawning tests hold the env lock across their git calls, not just env writes:
+    // other tests mutate `PATH` (bare `git` lookup) and `AGENTDESK_ROOT_DIR`.
 
-    /// Acquire the crate-wide test-env lock. Held across the git subprocesses
-    /// below, not just across the env writes — see the module note on `PATH`.
     fn env_lock() -> crate::config::test_env_lock::SharedTestEnvLockGuard {
         crate::config::test_env_lock::acquire_shared_test_env_lock()
     }
 
-    /// Run `git <args>` in `repo` via the centralised `GitCommand` helper (the
-    /// audit gate forbids raw `Command::new("git")` outside `src/services/git`).
-    ///
-    /// Both failure arms name the underlying cause: a spawn error here means the
-    /// git binary could not be resolved/launched at all (the #5400 `PATH` race),
-    /// which is a very different fault from git running and rejecting the args.
+    /// Runs git via `GitCommand` (an audit gate bans raw `Command::new("git")` here).
+    /// A spawn failure panics separately: it means git never ran, not that it failed.
     fn git(repo: &Path, args: &[&str]) {
         let output = GitCommand::new()
             .repo(repo)
@@ -1794,9 +1407,8 @@ mod managed_root_recursion_tests {
         );
     }
 
-    /// Build a repo with `main`, an `origin/main` ref (so the mainline-merged
-    /// guard can resolve), and a managed worktree checked out at `main` HEAD.
-    /// Returns (worktrees_root, managed_root, managed_worktree_path).
+    /// Builds a repo whose `origin/main` equals `main`, plus a managed worktree at that
+    /// commit. Returns `(worktrees_root, managed_root, managed_worktree_path)`.
     fn setup_repo_with_managed_worktree(
         base: &Path,
     ) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
@@ -1812,15 +1424,12 @@ mod managed_root_recursion_tests {
         std::fs::create_dir_all(&origin).unwrap();
         std::fs::copy(&head, origin.join("main")).unwrap();
 
-        // managed root = worktrees/<repo_name>/ ; the flat worktrees root is its
-        // parent (mirrors `managed_worktrees_root`).
+        // Mirrors `managed_worktrees_root`: `worktrees/<repo_name>/`.
         let worktrees_root = base.join("worktrees");
         let managed_root = worktrees_root.join("agentdesk");
         std::fs::create_dir_all(&managed_root).unwrap();
         let wt = managed_root.join("issue-3231-20260607");
-        // `--detach` at `main` HEAD: git refuses to check out `main` in a second
-        // worktree while it is the primary checkout, so detach instead. HEAD is
-        // still the mainline commit, so `merge-base --is-ancestor` reports merged.
+        // Detached because `main` is already checked out in the primary worktree.
         git(
             &repo,
             &["worktree", "add", "--detach", wt.to_str().unwrap(), "main"],
@@ -1831,32 +1440,23 @@ mod managed_root_recursion_tests {
     #[test]
     fn managed_root_child_is_classified_and_worktree_is_not() {
         let tmp = tempfile::tempdir().unwrap();
-        // #5400: the lock only has to cover the git subprocesses in setup — the
-        // classifier itself reads the filesystem and no process-global state.
+        // Only setup spawns git; the classifier touches no process-global state.
         let (_root, managed_root, wt) = {
             let _lock = env_lock();
             setup_repo_with_managed_worktree(tmp.path())
         };
-        // The managed root has no `.git` file but contains a child worktree.
         assert!(
             is_managed_root_child(&managed_root),
             "worktrees/<repo>/ must be recognized as a managed-root container"
         );
-        // A registered worktree (has a `.git` FILE) is NOT a managed root.
         assert!(
             !is_managed_root_child(&wt),
             "a registered git worktree must not be treated as a managed root"
         );
     }
 
-    /// Build the repo with the managed root resolving to `tmp` (so
-    /// `is_managed_worktree_path` recognizes the worktree) under the env lock,
-    /// then run `body` with the lock still held.
-    ///
-    /// The lock must span `body` — not just the `set_var` — for two independent
-    /// reasons: `body` reads `AGENTDESK_ROOT_DIR` back through
-    /// `managed_worktrees_root`, and (#5400) every git subprocess it launches
-    /// resolves the bare name `git` against the process-global `PATH`.
+    /// Runs `body` with the env lock held and `AGENTDESK_ROOT_DIR` at a temp root that
+    /// holds the repo, so `is_managed_worktree_path` accepts the worktree.
     fn with_managed_root_env<R>(body: impl FnOnce(&Path, &Path, &Path, &Path) -> R) -> R {
         let _guard = env_lock();
         let tmp = tempfile::tempdir().unwrap();
@@ -1891,21 +1491,13 @@ mod managed_root_recursion_tests {
     fn terminal_managed_worktree_is_swept_via_recursion() {
         with_managed_root_env(|repo, worktrees_root, _managed_root, wt| {
             assert!(wt.exists());
-            // Clean + mainline-merged managed worktree, no owner → cleanup removes
-            // it. (The owner-gate + recursion dispatch is covered by the pure
-            // `should_sweep_worktree` tests and `is_managed_root_child`; here we
-            // assert the removal arm the recursion delegates to.)
+            // Tests the removal step the recursion delegates to, not the owner check.
             let cleanup = crate::services::git::cleanup_managed_worktree(
                 repo.to_str().unwrap(),
                 wt.to_str().unwrap(),
             );
-            // #5400: report WHICH guard held the worktree back. `removed == 0`
-            // alone is ambiguous — every `cleanup_managed_worktree` guard is
-            // fail-closed, so an environment fault (a git subprocess that could
-            // not be spawned) is indistinguishable from a genuine KEEP decision
-            // unless the skip counters are printed. `skipped_dirty` on a tree
-            // this test never wrote to, or `skipped_unmerged` on a detached HEAD
-            // that IS the mainline commit, means git did not run at all.
+            // Every guard fails closed, so print the skip counters: an impossible skip
+            // (dirty or unmerged here) means git failed to spawn.
             assert_eq!(
                 cleanup.removed,
                 1,
@@ -1927,7 +1519,6 @@ mod managed_root_recursion_tests {
     #[test]
     fn dirty_managed_worktree_is_preserved() {
         with_managed_root_env(|repo, _worktrees_root, _managed_root, wt| {
-            // Make the worktree dirty — the cleanup guard must skip it.
             std::fs::write(wt.join("DIRTY"), b"uncommitted").unwrap();
             let cleanup = crate::services::git::cleanup_managed_worktree(
                 repo.to_str().unwrap(),
@@ -1945,14 +1536,11 @@ mod managed_root_recursion_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn no_pg_is_noop_even_with_managed_orphans() {
         let tmp = tempfile::tempdir().unwrap();
-        // #5400: scope the env lock to setup's git subprocesses so it is released
-        // before the `.await` below (the no-PG sweep spawns no git of its own),
-        // keeping this off the `await_holding_lock` surface.
+        // Drop the lock before `.await` (`await_holding_lock`); the sweep spawns no git.
         let (worktrees_root, _managed_root, wt) = {
             let _lock = env_lock();
             setup_repo_with_managed_worktree(tmp.path())
         };
-        // No PG → the whole sweep is a no-op (fail-closed): nothing is deleted.
         let config = Config {
             worktrees_root,
             dry_run: false,
@@ -1966,8 +1554,6 @@ mod managed_root_recursion_tests {
 
     #[test]
     fn manual_worktree_in_flat_root_is_protected_by_naming() {
-        // A `worker-*` style manual worktree dropped in the flat root: even with
-        // no owning row it is NOT a discard candidate (naming whitelist).
         let _keep: HashSet<String> = HashSet::new();
         let manual = Path::new("/home/u/.adk/release/worktrees/worker-1");
         assert!(!is_runtime_named_worktree(manual));
@@ -1976,11 +1562,6 @@ mod managed_root_recursion_tests {
 
 #[cfg(test)]
 mod git_pointer_fallback_tests {
-    //! #3231 (codex #3): the managed fallback (used when the `.git` gitdir pointer
-    //! cannot be resolved) must NEVER force-remove. A present-but-unreadable `.git`
-    //! belongs to a registered worktree (possibly dirty/unmerged) and must be
-    //! SKIPPED; only a genuinely `.git`-less leftover dir is eligible for a plain
-    //! delete, and only when age-backstopped.
     use super::{GitPointerState, git_pointer_state, remove_dir_all_plain};
 
     #[test]
@@ -1988,7 +1569,6 @@ mod git_pointer_fallback_tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("leftover");
         std::fs::create_dir_all(&dir).unwrap();
-        // No `.git` entry at all → eligible for the plain age-backstopped delete.
         assert!(matches!(git_pointer_state(&dir), GitPointerState::Missing));
     }
 
@@ -1997,15 +1577,11 @@ mod git_pointer_fallback_tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("registered");
         std::fs::create_dir_all(&dir).unwrap();
-        // A `.git` FILE that does NOT yield a resolvable gitdir pointer — this is a
-        // registered worktree whose pointer we could not resolve. It must be
-        // classified PresentUnreadable so the fallback SKIPS it (never deletes).
         std::fs::write(dir.join(".git"), b"garbage-not-a-gitdir-pointer").unwrap();
         assert!(matches!(
             git_pointer_state(&dir),
             GitPointerState::PresentUnreadable
         ));
-        // The dir must still exist — classification never deletes.
         assert!(dir.exists());
     }
 
@@ -2014,8 +1590,6 @@ mod git_pointer_fallback_tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("with-git-dir");
         std::fs::create_dir_all(dir.join(".git")).unwrap();
-        // A `.git` DIRECTORY (not a worktree pointer file) also counts as present —
-        // we conservatively never force-delete it via the managed fallback.
         assert!(matches!(
             git_pointer_state(&dir),
             GitPointerState::PresentUnreadable
@@ -2030,25 +1604,19 @@ mod git_pointer_fallback_tests {
         std::fs::write(dir.join("file"), b"x").unwrap();
         remove_dir_all_plain(&dir).expect("plain remove succeeds");
         assert!(!dir.exists());
-        // Idempotent: removing a non-existent path is a no-op (no error).
         remove_dir_all_plain(&dir).expect("plain remove of missing dir is a no-op");
     }
 }
 
 #[cfg(test)]
 mod keep_set_query_failure_fail_closed_pg_tests {
-    //! #3231 (codex #2): a FAILED keep-set query must suppress ALL deletions for
-    //! the run (fail-closed), exactly like a failed tmux probe. A closed pool makes
-    //! every keep-set query error, so the sweep must delete nothing even though a
-    //! runtime-named orphan sits in the flat root with no owner.
+    //! A closed pool makes every keep-set query fail; the sweep must delete nothing.
     use super::{Config, run_inner};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn closed_pool_keep_set_query_error_skips_all_deletions() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
-        // Closing the pool makes the keep-set queries return Err — simulating a
-        // PG/schema/query failure mid-run.
         pool.close().await;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -2080,22 +1648,7 @@ mod keep_set_query_failure_fail_closed_pg_tests {
 
 #[cfg(test)]
 mod fresh_provision_toctou_tests {
-    //! #3231 (codex re-review, TOCTOU): the keep-set snapshot is built once at the
-    //! start of the run, but dispatch creation provisions a managed worktree BEFORE
-    //! it commits the owning `task_dispatches` row. A snapshot taken inside that
-    //! create→insert window sees a just-provisioned clean/merged worktree with NO
-    //! keep-set owner and NO live tmux pane — the managed pass would delete it out
-    //! from under the in-flight dispatch.
-    //!
-    //! The fix is a creation-age floor (`MANAGED_FRESH_PROVISION_MIN_AGE`): a
-    //! managed worktree younger than the floor is PROTECTED regardless of owner.
-    //! These tests prove (a) a too-young managed worktree is SKIPPED even with no
-    //! owner and a successful (zero-pane) tmux query, and exercise the pure age
-    //! predicate at the boundaries. The "sufficiently old terminal managed worktree
-    //! is still removed" guarantee is covered by
-    //! `managed_root_recursion_tests::terminal_managed_worktree_is_swept_via_recursion`
-    //! plus the `min_age == ZERO` boundary case below (a real dir clears a zero
-    //! floor, so the gate does not block deletion of old-enough worktrees).
+    //! The creation-age floor that protects just-provisioned managed worktrees.
     use super::{
         Config, MANAGED_FRESH_PROVISION_MIN_AGE, SweepReport, is_freshly_provisioned,
         sweep_managed_root,
@@ -2107,7 +1660,6 @@ mod fresh_provision_toctou_tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("fresh");
         std::fs::create_dir_all(&dir).unwrap();
-        // Created microseconds ago → well under the 30m floor → protected.
         assert!(
             is_freshly_provisioned(&dir, MANAGED_FRESH_PROVISION_MIN_AGE),
             "a just-created worktree must be treated as freshly provisioned"
@@ -2119,8 +1671,7 @@ mod fresh_provision_toctou_tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("any");
         std::fs::create_dir_all(&dir).unwrap();
-        // With a ZERO floor a real (non-future) dir is always "old enough" → NOT
-        // protected → the gate does not block deletion of sufficiently-aged trees.
+        // Stands in for an old worktree: any existing dir clears a zero floor.
         assert!(
             !is_freshly_provisioned(&dir, std::time::Duration::ZERO),
             "a zero min-age floor must never protect an existing dir"
@@ -2129,8 +1680,6 @@ mod fresh_provision_toctou_tests {
 
     #[test]
     fn unstatable_path_is_protected() {
-        // A path we cannot stat at all (does not exist) must fail-closed toward
-        // protection — an indeterminate age must never license a delete.
         let missing = std::path::Path::new("/nonexistent/worktree/path/xyz");
         assert!(
             is_freshly_provisioned(missing, MANAGED_FRESH_PROVISION_MIN_AGE),
@@ -2138,22 +1687,14 @@ mod fresh_provision_toctou_tests {
         );
     }
 
-    /// (a) End-to-end: a freshly-created managed worktree with NO owner and a
-    /// successful (zero-pane) tmux query is SKIPPED by the managed recursion —
-    /// `protected_fresh` is incremented and nothing is removed. This is the exact
-    /// TOCTOU scenario: the worktree exists on disk but its owning dispatch row has
-    /// not yet landed in the keep-set snapshot (here: empty keep-sets).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fresh_managed_worktree_with_no_owner_is_skipped() {
         let tmp = tempfile::tempdir().unwrap();
-        // managed root = worktrees/<repo>/ ; create a child dir that looks like a
-        // just-provisioned managed worktree (created now → inside the floor).
         let managed_root = tmp.path().join("worktrees").join("agentdesk");
         let wt = managed_root.join("issue-9999-fresh");
         std::fs::create_dir_all(&wt).unwrap();
 
-        // Empty keep-sets (the row has not landed) + a SUCCESSFUL tmux query with
-        // zero panes — so the owner gate alone would select the worktree for sweep.
+        // No owner and zero panes: only the age floor keeps this worktree.
         let kept: HashSet<String> = HashSet::new();
         let live: HashSet<String> = HashSet::new();
         let config = Config {
