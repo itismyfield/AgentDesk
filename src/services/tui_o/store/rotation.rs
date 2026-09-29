@@ -1,14 +1,20 @@
 //! Source rotation state: the consumed binding seq and each bound source's start boundary.
-//! Both files are replaced atomically; a decided boundary is never rewritten.
+//! Both files are replaced atomically; a decided boundary changes only by an operator's
+//! durable `BoundaryResolved`.
 
 use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::ledger::{self, LedgerEntry};
 use super::spool::source_key;
-use super::{ChannelStore, StoreError, damage, durable};
+use super::{ChannelStore, LEDGER_FILE, OStore, StoreError, damage, durable};
 use crate::services::tui_o::shadow::SourceId;
+use crate::services::tui_o::shadow::capture::file_identity;
 
 pub const CHECKPOINT_FILE: &str = "binding_checkpoint";
 pub const BOUNDARY_FILE: &str = "boundary";
@@ -100,6 +106,120 @@ impl ChannelStore {
         let rotation = self.rotation()?;
         let boundary = rotation.link(source).map(|link| &link.boundary);
         Ok(matches!(boundary, None | Some(Boundary::Owed { .. })))
+    }
+
+    /// Moves each pending boundary to the start its durable `BoundaryResolved` names.
+    pub fn apply_resolved_boundaries(&mut self) -> Result<Vec<SourceId>, StoreError> {
+        let mut rotation = self.rotation()?;
+        let mut applied = Vec::new();
+        for link in rotation.links.values_mut() {
+            let from = self.ledger.boundary_resolved(&link.source);
+            if let (Boundary::Pending { .. }, Some(from)) = (&link.boundary, from) {
+                link.boundary = Boundary::Owed { from };
+                applied.push(link.source.clone());
+            }
+        }
+        if !applied.is_empty() {
+            let bytes = serde_json::to_vec(&rotation)?;
+            self.mutate(|store| Ok(durable::replace(&store.dir.join(BOUNDARY_FILE), &bytes)?))?;
+        }
+        Ok(applied)
+    }
+}
+
+/// Where an operator's resolved boundary starts: a byte offset, or the record with this uuid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResolveFrom {
+    Offset(u64),
+    Uuid(String),
+}
+
+fn rejected(detail: String) -> StoreError {
+    StoreError::Rejected(detail)
+}
+
+impl OStore {
+    /// Appends an operator's start for a pending source to the ledger and fsyncs it, without
+    /// opening the channel: nothing is swept or rewritten, and the writer applies it on start.
+    pub fn record_boundary_resolved(
+        &self,
+        channel: u64,
+        source: &str,
+        from: &ResolveFrom,
+        operator: &str,
+    ) -> Result<(SourceId, u64), StoreError> {
+        if self.read_init(channel)?.is_none() {
+            return Err(rejected(format!("channel {channel} has no O store")));
+        }
+        let dir = self.channel_dir(channel);
+        let rotation: Rotation = durable::read_json(&dir.join(BOUNDARY_FILE))?.unwrap_or_default();
+        let mut named = rotation
+            .links
+            .iter()
+            .filter(|(key, link)| key.as_str() == source || link.source.path == Path::new(source));
+        let link = match (named.next(), named.next()) {
+            (Some((_, link)), None) => link,
+            (None, _) => {
+                return Err(rejected(format!(
+                    "channel {channel} has no source {source}"
+                )));
+            }
+            _ => return Err(rejected(format!("{source} names more than one source"))),
+        };
+        if !matches!(link.boundary, Boundary::Pending { .. }) {
+            return Err(rejected(format!("the boundary of {source} is not pending")));
+        }
+        let path = dir.join(LEDGER_FILE);
+        if let Some(recorded) = ledger::resolution(&path, &link.source)? {
+            let detail = format!("{source} is already resolved at {recorded}; restart the writer");
+            return Err(rejected(detail));
+        }
+        let from = record_start(&link.source, from)?;
+        let (operator, at) = (operator.to_string(), Utc::now());
+        let entry = LedgerEntry::BoundaryResolved {
+            source: link.source.clone(),
+            from,
+            excluded_range: 0..from,
+            operator,
+            at,
+        };
+        ledger::append(&path, at, &entry)?;
+        Ok((link.source.clone(), from))
+    }
+}
+
+/// The byte offset `from` names in the source file, which must be the start of a record.
+fn record_start(source: &SourceId, from: &ResolveFrom) -> Result<u64, StoreError> {
+    let file = File::open(&source.path)?;
+    if file_identity(&file.metadata()?) != (source.dev, source.ino) {
+        return Err(rejected("the source file was replaced".into()));
+    }
+    let (mut reader, mut line) = (BufReader::new(file), Vec::new());
+    let (mut start, mut found) = (0u64, Vec::new());
+    loop {
+        if *from == ResolveFrom::Offset(start) {
+            return Ok(start);
+        }
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line)? as u64;
+        if read == 0 || line.last() != Some(&b'\n') {
+            break;
+        }
+        if let ResolveFrom::Uuid(uuid) = from {
+            let value: Option<serde_json::Value> = serde_json::from_slice(&line).ok();
+            if value.is_some_and(|value| value["uuid"].as_str() == Some(uuid)) {
+                found.push(start);
+            }
+        }
+        start += read;
+    }
+    match (from, found.as_slice()) {
+        (ResolveFrom::Uuid(_), [start]) => Ok(*start),
+        (ResolveFrom::Uuid(uuid), []) => Err(rejected(format!("no record has uuid {uuid}"))),
+        (ResolveFrom::Uuid(uuid), _) => Err(rejected(format!("uuid {uuid} is not unique"))),
+        (ResolveFrom::Offset(offset), _) => {
+            Err(rejected(format!("byte {offset} is not a record start")))
+        }
     }
 }
 

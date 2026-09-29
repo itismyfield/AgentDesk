@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader};
+use std::ops::Range;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -54,6 +55,15 @@ pub enum LedgerEntry {
         segment_start: u64,
         through: u64,
     },
+    /// An operator's start for a pending source; `excluded_range` is never posted. The writer
+    /// moves the boundary to `Owed { from }` only once this entry is durable.
+    BoundaryResolved {
+        source: SourceId,
+        from: u64,
+        excluded_range: Range<u64>,
+        operator: String,
+        at: DateTime<Utc>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -92,6 +102,7 @@ pub struct LedgerState {
     latest: HashMap<(UnitKey, u32), u64>,
     excluded: BTreeMap<UnitKey, String>,
     gc: HashMap<SourceId, Vec<(u64, u64)>>,
+    resolved: HashMap<SourceId, u64>,
     violation: Option<String>,
 }
 
@@ -135,6 +146,11 @@ impl LedgerState {
     /// Logged GC spans `(segment_start, through)` in order; each starts where the previous ended.
     pub fn gc_segments(&self, source: &SourceId) -> &[(u64, u64)] {
         self.gc.get(source).map_or(&[], Vec::as_slice)
+    }
+
+    /// The start an operator resolved for a pending source; the first entry stands.
+    pub fn boundary_resolved(&self, source: &SourceId) -> Option<u64> {
+        self.resolved.get(source).copied()
     }
 
     /// Ownership evidence that pauses the channel: a serial out of order, two open pieces,
@@ -213,6 +229,9 @@ impl LedgerState {
                     ));
                 }
             }
+            LedgerEntry::BoundaryResolved { source, from, .. } => {
+                self.resolved.entry(source).or_insert(from);
+            }
         }
     }
 
@@ -253,6 +272,24 @@ pub(super) fn append(
     let mut line = serde_json::to_vec(&LedgerLine { at, entry })?;
     line.push(b'\n');
     Ok(durable::append_synced(path, &line)?)
+}
+
+/// The `from` of a durable `BoundaryResolved` for `source`, read without recovering the ledger.
+pub(super) fn resolution(path: &Path, source: &SourceId) -> Result<Option<u64>, StoreError> {
+    let bytes = std::fs::read(path)?;
+    for line in bytes.split(|byte| *byte == b'\n') {
+        if let Ok(LedgerLine {
+            entry: LedgerEntry::BoundaryResolved {
+                source: s, from, ..
+            },
+            ..
+        }) = serde_json::from_slice(line)
+            && s == *source
+        {
+            return Ok(Some(from));
+        }
+    }
+    Ok(None)
 }
 
 /// Replays the ledger from `initial_anchor`; an unfinished last line is cut, any other bad line is damage.

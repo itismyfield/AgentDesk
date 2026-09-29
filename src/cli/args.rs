@@ -562,6 +562,9 @@ pub(crate) enum Commands {
     /// Read-only TUI output shadow: window start, report, synthetic manifest
     #[command(subcommand)]
     OShadow(crate::cli::o_shadow::OShadowCommand),
+    /// O writer store operations: resolve a pending source boundary
+    #[command(subcommand)]
+    O(crate::cli::o::OCommand),
 }
 
 /// Subcommands for `adk query` (issue #2651).
