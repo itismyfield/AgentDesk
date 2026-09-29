@@ -65,7 +65,8 @@ impl Drop for SkillRefreshLock {
 /// Re-copies the source skill into the managed cache through a unique staging dir under
 /// `.skill-refresh` that is renamed into place, so a failed copy is never discoverable.
 ///
-/// An exclusive per-skill lockfile serializes the delete+copy+rename swap across processes.
+/// An exclusive per-skill lockfile serializes the delete+copy+rename swap across processes,
+/// bar the brief overlaps noted in the body.
 pub(super) fn refresh_managed_skill_dir(
     root: &Path,
     skill_name: &str,
@@ -76,13 +77,13 @@ pub(super) fn refresh_managed_skill_dir(
     fs::create_dir_all(&refresh_dir)
         .map_err(|e| format!("Failed to create '{}': {e}", refresh_dir.display()))?;
 
-    // A live holder means another process is refreshing this skill; skip and let it win.
+    // Another process holds a lock that is not stale; skip and let it finish.
     let Some(lock) = acquire_skill_refresh_lock(&refresh_dir, skill_name)? else {
         return Ok(());
     };
 
-    // With indeterminate liveness two refreshers can briefly overlap here. Harmless: each
-    // stages a complete copy and swaps by rename; at worst `managed` is briefly absent.
+    // Two refreshers can briefly overlap here (unknown liveness, or the recovery race below).
+    // Each stages a complete copy; at worst `managed` is briefly absent or one swap fails.
     let staging = refresh_dir.join(format!(
         "{skill_name}.{}.{}",
         std::process::id(),
@@ -97,8 +98,8 @@ pub(super) fn refresh_managed_skill_dir(
     result
 }
 
-/// Acquires the per-skill refresh lock, recovering one abandoned by a crashed holder.
-/// Returns `Ok(None)` only when a live holder is refreshing this skill.
+/// Acquires the per-skill refresh lock, first recovering a stale one. `Ok(None)` when the
+/// lock is not stale (see `skill_refresh_lock_is_stale`) or a peer re-took it first.
 fn acquire_skill_refresh_lock(
     refresh_dir: &Path,
     skill_name: &str,
@@ -110,8 +111,8 @@ fn acquire_skill_refresh_lock(
     if !skill_refresh_lock_is_stale(&lock_path) {
         return Ok(None);
     }
-    // Only the rename winner recovers, so two recoverers cannot both clobber a peer's fresh
-    // lock; losing the create_new afterwards means a peer beat us, so we skip.
+    // Nothing rechecks the stale verdict before this rename, so a slow recoverer can move a
+    // peer's fresh lock aside; `create_new` below then decides who holds the lock.
     let grave = refresh_dir.join(format!(
         "{skill_name}.lock.dead.{}.{}",
         std::process::id(),
@@ -150,8 +151,8 @@ fn try_take_lock(lock_path: &Path) -> Result<Option<SkillRefreshLock>, String> {
     }
 }
 
-/// Stale only when the holder is provably gone: a dead PID, or indeterminate liveness and an
-/// age past [`STALE_LOCK_TTL`]. A live PID is never stolen, whatever its age.
+/// Stale when the holder PID is dead, or liveness is indeterminate and the lock is older than
+/// [`STALE_LOCK_TTL`]. A live PID is never stolen, whatever its age.
 fn skill_refresh_lock_is_stale(lock_path: &Path) -> bool {
     match read_lock_pid(lock_path).and_then(pid_liveness) {
         Some(alive) => !alive,
