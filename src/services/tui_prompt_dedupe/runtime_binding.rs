@@ -1,5 +1,5 @@
 use super::*;
-use binding_events::{CauseSource, HookSignal, Proposal};
+use binding_events::{BindingPersistError, CauseSource, HookSignal, Proposal};
 
 fn with_runtime_binding_state_under_source_authority<R>(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
@@ -644,6 +644,18 @@ pub(crate) fn adopt_claude_continuation_session(
     command_session_id: &str,
     payload_session_id: &str,
     hook: &HookSignal,
+) -> Result<Option<(String, String)>, BindingPersistError> {
+    let mut failure = None;
+    let adopted = adopt_continuation(command_session_id, payload_session_id, hook, &mut failure);
+    failure.map_or(Ok(adopted), Err)
+}
+
+/// `failure` is set only when the adoption was decided but its binding event could not be persisted.
+fn adopt_continuation(
+    command_session_id: &str,
+    payload_session_id: &str,
+    hook: &HookSignal,
+    failure: &mut Option<BindingPersistError>,
 ) -> Option<(String, String)> {
     let command_session_id = command_session_id.trim();
     let payload_session_id = payload_session_id.trim();
@@ -758,6 +770,10 @@ pub(crate) fn adopt_claude_continuation_session(
             %error,
             "binding event log append failed; Claude continuation not adopted"
         );
+        *failure = Some(BindingPersistError {
+            tmux_session: tmux_session_name.clone(),
+            error,
+        });
         return None;
     }
     let binding = state.runtime_by_tmux.get_mut(&tmux_session_name)?;

@@ -74,6 +74,13 @@ pub(crate) struct BindingEvent {
     pub committed_at: DateTime<Utc>,
 }
 
+/// A binding change whose event could not be persisted; the binding was not published.
+#[derive(Debug)]
+pub(crate) struct BindingPersistError {
+    pub tmux_session: String,
+    pub error: io::Error,
+}
+
 /// What one hook said about a session switch; `source` is the SessionStart reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HookSignal {
@@ -339,10 +346,16 @@ fn source_id(session: Option<&str>, path: &str, meta: &fs::Metadata) -> SourceId
     }
 }
 
-/// A session filled in later on the same path is still the same source.
-fn same_source(current: &SourceId, session: Option<&str>, path: &str) -> bool {
+/// A session filled in later is still the same source; a replaced file on the same path is not.
+fn same_source(
+    current: &SourceId,
+    session: Option<&str>,
+    path: &str,
+    meta: Option<&fs::Metadata>,
+) -> bool {
     current.path == Path::new(path)
         && session.is_none_or(|id| current.session_id.is_empty() || current.session_id == id)
+        && meta.is_none_or(|meta| file_identity(meta) == (current.dev, current.ino))
 }
 
 fn pending_matches(pending: &BindingEvent, session: Option<&str>, path: &str) -> bool {
@@ -369,16 +382,22 @@ impl Writer {
             _ => {}
         }
         let read = read_log(path)?;
-        if read.complete_len < read.total_len {
-            // A crash mid-append left a line that was never published; drop it before appending.
+        if read.total_len > 0 {
             let file = OpenOptions::new().write(true).open(path)?;
-            file.set_len(read.complete_len)?;
+            if read.complete_len < read.total_len {
+                // A crash mid-append left a line that was never published; drop it before appending.
+                file.set_len(read.complete_len)?;
+            }
+            // Lines read back after a restart may predate their fsync, so make them durable before use.
+            fault("reload")?;
             file.sync_all()?;
+            fsync_parent_dir(path)?;
+            fsync_parent_dir(dir)?;
         }
         let mut writer = Self {
             last_seq: read.lines,
             panes: HashMap::new(),
-            parents_synced: false,
+            parents_synced: read.total_len > 0,
             poisoned: false,
         };
         read.records.iter().for_each(|record| writer.apply(record));
@@ -422,6 +441,7 @@ impl Writer {
         });
         let old = pane.current.clone().or(replaced);
         let payload_session_id = session.unwrap_or_default().to_owned();
+        let meta = fs::metadata(p.path);
         let (new, inherited) = if let Some(reason) = rejected {
             if pane.rejected.as_deref() == Some(payload_session_id.as_str()) {
                 return None;
@@ -437,13 +457,13 @@ impl Writer {
         } else if pane
             .current
             .as_ref()
-            .is_some_and(|c| same_source(c, session, p.path))
+            .is_some_and(|current| same_source(current, session, p.path, meta.as_ref().ok()))
         {
             return None;
         } else {
             let pending = pane.pending.as_ref();
             let pending = pending.filter(|e| pending_matches(e, session, p.path));
-            match (fs::metadata(p.path), pending) {
+            match (meta, pending) {
                 (Err(_), Some(_)) => return None,
                 (Err(_), None) => {
                     let payload_transcript_path = p.payload_path();

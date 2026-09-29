@@ -75,6 +75,10 @@ fn hook(event: &str, source: Option<&str>) -> HookSignal {
     HookSignal::from_payload(event, &payload)
 }
 
+fn adopt(command: &str, payload: &str, hook: &HookSignal) -> Option<(String, String)> {
+    adopt_claude_continuation_session(command, payload, hook).expect("binding event persisted")
+}
+
 fn uuid() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -116,7 +120,7 @@ fn b_hook_handled_before_the_a_tail_is_read_still_records_old_a() {
         tail.write_all(b"{\"unread\":\"A[n:]\"}\n").unwrap();
         let b_path = lane.transcript(&b);
 
-        assert!(adopt_claude_continuation_session(&a, &b, &hook("stop", None)).is_some());
+        assert!(adopt(&a, &b, &hook("stop", None)).is_some());
 
         let log = events(channel);
         let switch = log.last().unwrap();
@@ -143,13 +147,13 @@ fn a_b_c_chain_links_seq_and_old_and_a_late_b_is_only_audited() {
     register_tmux_channel(tmux, channel);
     register_tmux_runtime_binding(tmux, claude(&a_path, &a));
     let clear = hook("session_start", Some("clear"));
-    assert!(adopt_claude_continuation_session(&a, &b, &clear).is_some());
-    assert!(adopt_claude_continuation_session(&a, &c, &clear).is_some());
+    assert!(adopt(&a, &b, &clear).is_some());
+    assert!(adopt(&a, &c, &clear).is_some());
     let mut rx = subscribe_binding_events(channel).unwrap();
     assert_eq!(*rx.borrow_and_update(), 3);
 
-    assert!(adopt_claude_continuation_session(&a, &b, &hook("stop", None)).is_none());
-    assert!(adopt_claude_continuation_session(&a, &b, &hook("stop", None)).is_none());
+    assert!(adopt(&a, &b, &hook("stop", None)).is_none());
+    assert!(adopt(&a, &b, &hook("stop", None)).is_none());
 
     let log = events(channel);
     let seqs: Vec<u64> = log.iter().map(|e| e.seq).collect();
@@ -220,7 +224,7 @@ fn fork_fixture_is_pending_until_its_transcript_exists_then_resolved_with_parent
         let signal = HookSignal::from_payload(event.as_str(), payload);
         let command = step["command_session_id"].as_str().unwrap();
         let session = payload["session_id"].as_str().unwrap();
-        adopted.push(adopt_claude_continuation_session(command, session, &signal).is_some());
+        adopted.push(adopt(command, session, &signal).is_some());
     }
 
     assert_eq!(
@@ -272,7 +276,7 @@ fn crash_leaves_log_and_memory_on_the_same_source() {
     register_provider_session("claude", &a, tmux);
     register_tmux_channel(tmux, channel);
     register_tmux_runtime_binding(tmux, claude(&a_path, &a));
-    assert!(adopt_claude_continuation_session(&a, &b, &hook("stop", None)).is_some());
+    assert!(adopt(&a, &b, &hook("stop", None)).is_some());
     let restart = |binding: TuiRuntimeBinding| {
         forget_channel_for_tests(channel);
         reset_state_for_tests();
@@ -298,7 +302,7 @@ fn crash_leaves_log_and_memory_on_the_same_source() {
     let size = fs::metadata(lane.log(channel)).unwrap().len();
     let rx = subscribe_binding_events(channel).unwrap();
     APPEND_FAULT.with(|fault| fault.set(Some("sync")));
-    assert!(adopt_claude_continuation_session(&a, &c, &hook("stop", None)).is_none());
+    assert!(adopt_claude_continuation_session(&a, &c, &hook("stop", None)).is_err());
     APPEND_FAULT.with(|fault| fault.set(None));
     assert_eq!(bound(tmux).0, b_path.display().to_string(), "fail-closed");
     assert_eq!(fs::metadata(lane.log(channel)).unwrap().len(), size);
@@ -311,7 +315,7 @@ fn crash_leaves_log_and_memory_on_the_same_source() {
         "registration too"
     );
     assert!(!rx.has_changed().unwrap());
-    assert!(adopt_claude_continuation_session(&a, &c, &hook("stop", None)).is_some());
+    assert!(adopt(&a, &c, &hook("stop", None)).is_some());
     assert_eq!(
         events(channel).last().map(|e| e.seq),
         Some(3),
@@ -377,26 +381,14 @@ fn judgment_trace(dir: &Path, tmux: &str, channel: u64) -> Vec<String> {
     let _ = fs::remove_file(path(b));
     note(
         "b missing",
-        adopt_claude_continuation_session(a, b, &hook("session_start", Some("clear"))),
+        adopt(a, b, &hook("session_start", Some("clear"))),
     );
     fs::write(path(b), b"{}\n").unwrap();
     filetime::set_file_mtime(path(b), filetime::FileTime::from_unix_time(20, 0)).unwrap();
-    note(
-        "b present",
-        adopt_claude_continuation_session(a, b, &hook("stop", None)),
-    );
-    note(
-        "b again",
-        adopt_claude_continuation_session(a, b, &hook("stop", None)),
-    );
-    note(
-        "c",
-        adopt_claude_continuation_session(a, c, &hook("session_start", Some("compact"))),
-    );
-    note(
-        "late b",
-        adopt_claude_continuation_session(a, b, &hook("stop", None)),
-    );
+    note("b present", adopt(a, b, &hook("stop", None)));
+    note("b again", adopt(a, b, &hook("stop", None)));
+    note("c", adopt(a, c, &hook("session_start", Some("compact"))));
+    note("late b", adopt(a, b, &hook("stop", None)));
     let mut progressed = runtime_binding_for_tmux_session(tmux).unwrap();
     progressed.last_offset = 9;
     register_tmux_runtime_binding(tmux, progressed);
@@ -482,4 +474,144 @@ fn launch_cause_comes_from_the_execution_context_only_once() {
     assert_eq!(log[0].execution_nonce.as_deref(), Some(fresh.as_str()));
     assert!(log.iter().all(|e| e.parent_hint.is_none()));
     let _ = fs::remove_file(tc::session_temp_path(tmux, "spawn_nonce"));
+}
+
+#[test]
+fn log_outage_defers_a_hook_adoption_and_the_idle_poll_adopts_b_without_another_hook() {
+    use crate::services::claude_tui::hook_server::relay_receipts::{
+        RELAY_DEADLINE_HEADER, RELAY_PUBLISHED_AT_HEADER, RELAY_REQUEST_ID_HEADER,
+    };
+    use crate::services::claude_tui::hook_server::{
+        HookServerState, adoption_retry::deferred_adoption_count, hook_receiver_router_with_state,
+        retry_deferred_claude_adoptions,
+    };
+    use tower::ServiceExt;
+    let lane = Lane::new();
+    let (channel, tmux) = (7_060, "p5-deferred");
+    let (a, b) = (uuid(), uuid());
+    let (a_path, b_path) = (lane.transcript(&a), lane.transcript(&b));
+    register_provider_session("claude", &a, tmux);
+    register_tmux_channel(tmux, channel);
+    register_tmux_runtime_binding(tmux, claude(&a_path, &a));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let app = hook_receiver_router_with_state(HookServerState::new());
+    let (request_id, now) = (uuid(), Utc::now());
+    let payload = serde_json::json!({
+        "hook_event_name": "SessionStart",
+        "session_id": b,
+        "source": "clear",
+        "transcript_path": b_path,
+    });
+    let send = || {
+        let request =
+            axum::http::Request::post(format!("/hooks/claude/SessionStart?session_id={a}"))
+                .header("content-type", "application/json")
+                .header(RELAY_REQUEST_ID_HEADER, &request_id)
+                .header(RELAY_PUBLISHED_AT_HEADER, now.to_rfc3339())
+                .header(
+                    RELAY_DEADLINE_HEADER,
+                    (now + chrono::Duration::minutes(5)).to_rfc3339(),
+                )
+                .body(axum::body::Body::from(payload.to_string()))
+                .unwrap();
+        runtime.block_on(async {
+            let response = app.clone().oneshot(request).await.unwrap();
+            let status = response.status().as_u16();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            )
+        })
+    };
+    let b_len = fs::metadata(&b_path).unwrap().len();
+
+    APPEND_FAULT.with(|fault| fault.set(Some("write")));
+    let (status, body) = send();
+    assert_eq!(
+        (status, &body["binding_adoption"]),
+        (202, &serde_json::json!("deferred"))
+    );
+    assert_eq!(
+        send().1,
+        body,
+        "the receipt replays the deferral, not a plain success"
+    );
+    retry_deferred_claude_adoptions();
+    assert_eq!(
+        bound(tmux).0,
+        a_path.display().to_string(),
+        "still A during the outage"
+    );
+    assert_eq!(deferred_adoption_count(), 1);
+
+    APPEND_FAULT.with(|fault| fault.set(None));
+    retry_deferred_claude_adoptions();
+    assert_eq!(bound(tmux), (b_path.display().to_string(), Some(b.clone())));
+    assert_eq!(
+        fs::metadata(&b_path).unwrap().len(),
+        b_len,
+        "B did not grow"
+    );
+    assert_eq!(deferred_adoption_count(), 0);
+    let switch = events(channel).pop().unwrap();
+    assert_eq!(switch.new, BindingTarget::Source(src(&b_path, &b)));
+    assert_eq!(
+        switch.cause,
+        BindingCause::Clear,
+        "the original hook is the evidence"
+    );
+    assert_eq!(switch.evidence.hook_event.as_deref(), Some("session_start"));
+}
+
+#[test]
+fn a_reloaded_log_is_made_durable_before_the_same_source_is_published() {
+    let lane = Lane::new();
+    let (channel, tmux) = (7_070, "p5-reload");
+    let a = uuid();
+    let a_path = lane.transcript(&a);
+    register_tmux_channel(tmux, channel);
+    register_tmux_runtime_binding(tmux, claude(&a_path, &a));
+    forget_channel_for_tests(channel);
+    reset_state_for_tests();
+
+    APPEND_FAULT.with(|fault| fault.set(Some("reload")));
+    register_rehydrated_tmux_runtime_binding("claude", tmux, channel, claude(&a_path, &a));
+    assert!(runtime_binding_for_tmux_session(tmux).is_none());
+    APPEND_FAULT.with(|fault| fault.set(None));
+    register_rehydrated_tmux_runtime_binding("claude", tmux, channel, claude(&a_path, &a));
+    assert_eq!(bound(tmux).0, a_path.display().to_string());
+    assert_eq!(
+        events(channel).len(),
+        1,
+        "the reloaded record needs no second append"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_transcript_replaced_on_the_same_path_is_a_new_source() {
+    let lane = Lane::new();
+    let (channel, tmux) = (7_080, "p5-replaced");
+    let a = uuid();
+    let a_path = lane.transcript(&a);
+    register_tmux_channel(tmux, channel);
+    register_tmux_runtime_binding(tmux, claude(&a_path, &a));
+    let first = src(&a_path, &a);
+    let replacement = lane.dir.path().join("replacement.jsonl");
+    fs::write(&replacement, b"{}\n").unwrap();
+    fs::rename(&replacement, &a_path).unwrap();
+    register_tmux_runtime_binding(tmux, claude(&a_path, &a));
+    register_tmux_runtime_binding(tmux, claude(&a_path, &a));
+
+    let log = events(channel);
+    assert_eq!(log.len(), 2);
+    assert_ne!(src(&a_path, &a), first);
+    assert_eq!(log[1].old, Some(first));
+    assert_eq!(log[1].new, BindingTarget::Source(src(&a_path, &a)));
 }
