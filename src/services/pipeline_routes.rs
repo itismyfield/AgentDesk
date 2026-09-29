@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+
+mod stage_validation;
+use stage_validation::{validate_pipeline_stages, validate_supported_stage_changes};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -94,6 +97,9 @@ struct StoredStage {
     id: i64,
     stage_name: Option<String>,
     stage_order: Option<i64>,
+    provider: Option<String>,
+    skip_condition: Option<String>,
+    agent_override_id: Option<String>,
     entry_skill: Option<String>,
     timeout_minutes: Option<i64>,
     on_failure: Option<String>,
@@ -141,6 +147,7 @@ impl<'a> PipelineRouteService<'a> {
             .map_err(|error| PipelineRouteError::Database(format!("begin tx: {error}")))?;
 
         let stored = lock_repo_stages(&mut tx, repo).await?;
+        validate_supported_stage_changes(stages, &stored)?;
         let orders: HashMap<&str, i64> = stages
             .iter()
             .enumerate()
@@ -470,7 +477,8 @@ async fn lock_repo_stages(
         .map_err(|error| PipelineRouteError::Database(format!("lock stages: {error}")))?;
     ensure_every_node_locks_stage_moves(tx).await?;
     sqlx::query_as::<_, StoredStage>(
-        "SELECT id, stage_name, stage_order, entry_skill, timeout_minutes, on_failure,
+        "SELECT id, stage_name, stage_order, provider, skip_condition, agent_override_id,
+                entry_skill, timeout_minutes, on_failure,
                 on_failure_target, max_retries, parallel_with, backoff
            FROM pipeline_stages
           WHERE repo_id = $1",
@@ -665,43 +673,6 @@ pub async fn move_card_stage(
         .await
         .map_err(|error| format!("commit stage move for {card_id}: {error}"))?;
     Ok(json!({ "status": status, "stage": stage }))
-}
-
-fn validate_pipeline_stages(stages: &[PipelineStageInput]) -> Result<(), PipelineRouteError> {
-    let mut names = HashSet::new();
-    for stage in stages {
-        if !names.insert(stage.stage_name.as_str()) {
-            return Err(PipelineRouteError::BadRequest {
-                stage: stage.stage_name.clone(),
-                error: "stage names must be unique within a repo".to_string(),
-            });
-        }
-        if let Err(error) = validate_on_failure(stage.on_failure.as_deref()) {
-            return Err(PipelineRouteError::BadRequest {
-                stage: stage.stage_name.clone(),
-                error,
-            });
-        }
-        // Validate the *normalized* value so a blank/whitespace-only backoff is
-        // treated identically to absent (both persist as NULL), instead of an
-        // empty string passing but "   " erroring — consistent with the INSERT,
-        // which also binds `normalize_optional(stage.backoff)`.
-        if let Err(error) = validate_backoff(normalize_optional(stage.backoff.as_deref())) {
-            return Err(PipelineRouteError::BadRequest {
-                stage: stage.stage_name.clone(),
-                error,
-            });
-        }
-        if let Some(max_retries) = stage.max_retries
-            && max_retries < 0
-        {
-            return Err(PipelineRouteError::BadRequest {
-                stage: stage.stage_name.clone(),
-                error: format!("max_retries={max_retries} must be >= 0"),
-            });
-        }
-    }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

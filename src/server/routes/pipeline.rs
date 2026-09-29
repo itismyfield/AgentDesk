@@ -351,3 +351,7 @@ pub async fn get_pipeline_graph(
         Err(error) => pipeline_route_error_response(error),
     }
 }
+
+#[cfg(test)]
+#[path = "pipeline_stage_save_tests.rs"]
+mod stage_save_tests;

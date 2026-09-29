@@ -18077,6 +18077,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/server/routes/pipeline_stage_save_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b53e8ca3b78596fbe1bc5f444287c526712fa655dbb399576f89b00f5057e3a4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/server/routes/queue_api.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -31500,7 +31509,7 @@
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
-      "fingerprint": "sha256:165978026dde5875d13daa1484b8b658c6a027af195abc3823dc07b3ac22bf61"
+      "fingerprint": "sha256:20595f7401b6a472734c42125ee185f1690474ce84a24907362815e8fd87465b"
     },
     {
       "root": "src",
@@ -31509,7 +31518,7 @@
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
-      "fingerprint": "sha256:20595f7401b6a472734c42125ee185f1690474ce84a24907362815e8fd87465b"
+      "fingerprint": "sha256:350512053017e9c872cb5334dc2b3422c2010d342a9c53cd95a3a5bbf9fb8ff4"
     },
     {
       "root": "src",
