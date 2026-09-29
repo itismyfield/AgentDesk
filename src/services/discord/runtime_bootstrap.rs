@@ -875,15 +875,19 @@ agents:
             "standby must settle its reconcile: nothing downstream of this branch calls mark_reconcile_complete"
         );
         assert_eq!(registry.registered_provider_count().await, 1);
-        let reasons = serde_json::to_value(
+        let snapshot = serde_json::to_value(
             crate::services::discord::health::build_health_snapshot(&registry).await,
         )
-        .expect("serialize standby health")["degraded_reasons"]
-            .clone();
-        assert_eq!(
-            reasons,
-            serde_json::json!(["provider:codex:gateway_standby"])
-        );
+        .expect("serialize standby health");
+        // TUI-O writer alarms are process-global and raised by concurrent tests.
+        let reasons: Vec<&str> = snapshot["degraded_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|reason| reason.as_str())
+            .filter(|reason| !reason.starts_with("tui_o:"))
+            .collect();
+        assert_eq!(reasons, ["provider:codex:gateway_standby"]);
     }
 
     /// The startup doctor observes the registration through the registry's
