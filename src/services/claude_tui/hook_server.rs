@@ -14,7 +14,9 @@ use crate::services::claude_tui::memento_feedback::{
     PendingMementoFeedbackTracker, PendingMementoFeedbackTransition,
 };
 
+pub(crate) mod adoption_retry;
 pub(crate) mod relay_receipts;
+pub(crate) use adoption_retry::retry_deferred_claude_adoptions;
 use relay_receipts::{RelayReceiptBegin, RelayReceiptLedger, RelayReceiptPin, RelayReceiptTicket};
 
 const EVENT_BUFFER_CAPACITY: usize = 256;
@@ -268,6 +270,7 @@ async fn receive_hook(
 
     let command_session_id = query.session_id.as_deref().and_then(non_empty_string);
     let observed_payload_session_id = payload_session_id(&payload);
+    let mut adoption_deferred = false;
     if provider == "claude"
         && let (Some(command_session_id), Some(payload_session_id)) = (
             command_session_id.as_deref(),
@@ -275,50 +278,14 @@ async fn receive_hook(
         )
         && command_session_id != payload_session_id
     {
-        match crate::services::tui_prompt_dedupe::adopt_claude_continuation_session(
-            command_session_id,
-            payload_session_id,
-        ) {
-            Some((tmux_session_name, transcript_path)) => {
-                match crate::services::claude_tui::session::persist_claude_continuation_session(
-                    &tmux_session_name,
-                    payload_session_id,
-                ) {
-                    // #5188: the old wording ("adopted Claude continuation
-                    // session") read as if the whole delivery path had followed
-                    // the rotation. It had not — only the in-memory runtime
-                    // binding was rebound, and the launch-script rehydration pass
-                    // could then revert even that. The message now states exactly
-                    // what this call site changes and defers the rest to the
-                    // rotation ledger, so a reader cannot mistake it for
-                    // end-to-end success.
-                    Ok(changed) => tracing::warn!(
-                        provider,
-                        command_session_id,
-                        payload_session_id,
-                        tmux_session_name,
-                        transcript_path,
-                        persistent_artifacts_changed = changed,
-                        "rebound Claude TUI runtime binding to the continuation session reported by \
-                         the hook payload; rotation queued for delivery-path propagation (#5188)"
-                    ),
-                    Err(error) => tracing::error!(
-                        provider,
-                        command_session_id,
-                        payload_session_id,
-                        tmux_session_name,
-                        error,
-                        "adopted Claude continuation in memory but failed to persist cutover artifacts"
-                    ),
-                }
-            }
-            None => tracing::debug!(
-                provider,
-                command_session_id,
-                payload_session_id,
-                "Claude hook payload session differs from command identity but no safe runtime binding adoption was available"
-            ),
-        }
+        let hook_event = HookEventKind::from_path(&event);
+        let hook = crate::services::tui_prompt_dedupe::binding_events::HookSignal::from_payload(
+            hook_event.as_str(),
+            &payload,
+        );
+        let adoption =
+            adoption_retry::adopt_from_hook(command_session_id, payload_session_id, &hook);
+        adoption_deferred = adoption == adoption_retry::AdoptionReport::Deferred;
     }
     // Keep the launch-time query UUID as the hook wait/routing identity while
     // it is registered; replacing it would strand callers already waiting on
@@ -574,6 +541,10 @@ async fn receive_hook(
     });
     if let Some(flush) = memento_transition.flush {
         body["memento_tool_feedback_flush"] = flush.to_json();
+    }
+    // The receipt says the adoption is still owed, retried by the idle poll without another hook.
+    if adoption_deferred {
+        body["binding_adoption"] = json!("deferred");
     }
 
     finish_hook_receipt(&state, receipt_ticket, StatusCode::ACCEPTED, body, true)

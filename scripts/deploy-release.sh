@@ -617,6 +617,7 @@ _write_release_source_manifest() {
     AGENTDESK_MANIFEST_SKIP_TURN_DRAIN="${AGENTDESK_SKIP_TURN_DRAIN:-1}" \
     AGENTDESK_MANIFEST_SKIP_FRESHNESS="${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}" \
     AGENTDESK_MANIFEST_SKIP_REMOTE_FRESHNESS="${AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS:-0}" \
+    AGENTDESK_MANIFEST_O_TUI_WRITER="$(_source_o_tui_writer)" \
     python3 - "$manifest_tmp" <<PY
 import json
 import os
@@ -641,6 +642,7 @@ payload = {
     "skip_turn_drain": os.environ.get("AGENTDESK_MANIFEST_SKIP_TURN_DRAIN", "1"),
     "skip_freshness": os.environ.get("AGENTDESK_MANIFEST_SKIP_FRESHNESS", "0"),
     "skip_remote_freshness": os.environ.get("AGENTDESK_MANIFEST_SKIP_REMOTE_FRESHNESS", "0"),
+    "o_tui_writer": os.environ.get("AGENTDESK_MANIFEST_O_TUI_WRITER", "unknown"),
 }
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
@@ -937,6 +939,66 @@ _rollback_would_brick_on_migration() {
     return 1
 }
 
+_source_o_tui_writer() {
+    # The O writer build switch in this source: true, false (no switch in the
+    # source) or unknown when a definition exists but does not read as one value.
+    local defs values
+    defs="$(grep -rhE 'const O_TUI_WRITER\b' "$REPO/src" 2>/dev/null || true)"
+    if [ -z "$defs" ]; then
+        echo false
+        return 0
+    fi
+    if printf '%s\n' "$defs" \
+        | grep -qvE '^[[:space:]]*pub\(crate\) const O_TUI_WRITER: bool = (true|false);[[:space:]]*$'; then
+        echo unknown
+        return 0
+    fi
+    values="$(printf '%s\n' "$defs" | sed -E 's/.*= (true|false);.*/\1/' | sort -u)"
+    case "$values" in
+        true|false) echo "$values" ;;
+        *) echo unknown ;;
+    esac
+}
+
+_manifest_o_tui_writer() {
+    # The O writer switch recorded by the last successful deploy, i.e. the build
+    # now at .prev. Non-zero when the manifest or the field is absent.
+    local manifest="$ADK_REL/runtime/release-source.json"
+    [ -f "$manifest" ] || return 1
+    python3 - "$manifest" <<'PY' 2>/dev/null
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(1)
+value = data.get("o_tui_writer")
+if not isinstance(value, str) or not value:
+    sys.exit(1)
+print(value)
+PY
+}
+
+_rollback_would_revert_o_writer() {
+    # Returns 0 (refuse) when this source may have the O writer on and the
+    # rollback target is not recorded as an O writer build: the old binary would
+    # take Discord output back to the Legacy relay. No override reaches it.
+    local new_value old_value
+    new_value="$(_source_o_tui_writer)"
+    if [ "$new_value" = "false" ]; then
+        return 1
+    fi
+    old_value="$(_manifest_o_tui_writer || true)"
+    if [ "$old_value" = "true" ]; then
+        echo "  ▸ [rollback-guard] the rollback target is also an O writer build — safe to roll back" >&2
+        return 1
+    fi
+    echo "  ▸ [rollback-guard] O writer switch is ${new_value} here and ${old_value:-unrecorded} on the rollback target — unsafe to roll back" >&2
+    return 0
+}
+
 # #3858: restore the last-known-good release binary and restart the service.
 # Invoked from the EXIT trap (via _cleanup_on_exit) whenever the binary was
 # promoted but the deploy never reached DEPLOY_OK — i.e. ANY non-zero exit after
@@ -983,6 +1045,17 @@ _rollback_release_binary() {
         echo "        Postgres. To force the classic auto-rollback on a re-run (once the DB is"
         echo "        reverted), set AGENTDESK_DEPLOY_FORCE_ROLLBACK=1."
         echo "     4. Release logs: ${ADK_REL:-}/logs/"
+        echo ""
+        return 0
+    fi
+
+    if _rollback_would_revert_o_writer; then
+        echo ""
+        echo "🛑 ROLLBACK REFUSED — the rollback target is not an O writer build"
+        echo "   Restarting $rel_backup would hand Discord output back to the Legacy relay."
+        echo "   FAIL-FORWARD: the NEW binary stays live; $rel_backup is preserved for manual use."
+        echo "   Check http://${ADK_DEFAULT_LOOPBACK}:${rel_port}/api/health and fix forward."
+        echo "   Release logs: ${ADK_REL:-}/logs/"
         echo ""
         return 0
     fi

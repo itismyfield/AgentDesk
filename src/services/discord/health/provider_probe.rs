@@ -47,6 +47,8 @@ struct ProviderProbeSignals {
     deferred_hooks: usize,
     queue_depth: usize,
     recovering_channels: usize,
+    /// This node refuses the provider's intake because only the gateway may deliver TUI output.
+    tui_output_requires_gateway: bool,
 }
 
 struct ProviderHealthClassification {
@@ -119,6 +121,7 @@ pub(super) async fn probe_provider(entry: &ProviderEntry) -> ProviderProbe {
             deferred_hooks,
             queue_depth,
             recovering_channels,
+            tui_output_requires_gateway: tui_output_requires_gateway(&entry.name, entry.role),
         },
     );
 
@@ -161,6 +164,13 @@ fn classify_provider(
     } else if role == ProviderRuntimeRole::Standby {
         status = status.worsen(HealthStatus::Degraded);
         degraded_reasons.push(format!("provider:{provider_name}:gateway_standby"));
+    }
+    if signals.tui_output_requires_gateway {
+        status = status.worsen(HealthStatus::Degraded);
+        degraded_reasons.push(format!(
+            "provider:{provider_name}:{}",
+            crate::services::tui_o::topology::TUI_OUTPUT_REQUIRES_GATEWAY
+        ));
     }
     if signals.restart_pending {
         status = status.worsen(HealthStatus::Unhealthy);
@@ -210,6 +220,17 @@ fn classify_provider(
         fully_recovered,
         degraded_reasons,
     }
+}
+
+/// Mirrors the intake-worker gate in `runtime_bootstrap::intake` for this entry's role.
+fn tui_output_requires_gateway(provider_name: &str, role: ProviderRuntimeRole) -> bool {
+    use crate::services::tui_o::topology::{self, HostRole};
+    let role = match role {
+        ProviderRuntimeRole::Gateway => HostRole::Gateway,
+        ProviderRuntimeRole::Standby => HostRole::Standby,
+        ProviderRuntimeRole::Worker => HostRole::Runner,
+    };
+    !topology::intake_worker_allowed(topology::O_TUI_WRITER, provider_name, role)
 }
 
 /// Whether an unfinished reconcile has outlived its boot-relative deadline and
@@ -290,6 +311,7 @@ mod tests {
                 deferred_hooks: 0,
                 queue_depth: 0,
                 recovering_channels: 0,
+                tui_output_requires_gateway: false,
             },
         );
 
@@ -311,6 +333,7 @@ mod tests {
                 deferred_hooks: 2,
                 queue_depth: 3,
                 recovering_channels: 1,
+                tui_output_requires_gateway: false,
             },
         );
 
@@ -457,6 +480,7 @@ mod tests {
                 deferred_hooks: 2,
                 queue_depth: 3,
                 recovering_channels: 1,
+                tui_output_requires_gateway: false,
             },
         );
 
@@ -475,6 +499,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn refused_tui_intake_is_a_degraded_reason_on_every_non_gateway_role() {
+        for (role, expected) in [
+            (
+                ProviderRuntimeRole::Standby,
+                &[
+                    "provider:claude:gateway_standby",
+                    "provider:claude:tui_output_requires_gateway",
+                ][..],
+            ),
+            (
+                ProviderRuntimeRole::Worker,
+                &["provider:claude:tui_output_requires_gateway"][..],
+            ),
+        ] {
+            let result = classify_provider(
+                "claude",
+                role,
+                ProviderProbeSignals {
+                    tui_output_requires_gateway: true,
+                    ..reconcile_pending_signals(Duration::ZERO)
+                },
+            );
+            assert_eq!(result.status, HealthStatus::Degraded, "{role:?}");
+            assert_eq!(
+                &result.degraded_reasons[..expected.len()],
+                expected,
+                "{role:?}"
+            );
+        }
+    }
+
     fn reconcile_pending_signals(reconcile_age: Duration) -> ProviderProbeSignals {
         ProviderProbeSignals {
             connected: true,
@@ -484,6 +540,7 @@ mod tests {
             deferred_hooks: 0,
             queue_depth: 0,
             recovering_channels: 0,
+            tui_output_requires_gateway: false,
         }
     }
 

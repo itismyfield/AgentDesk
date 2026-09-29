@@ -115,6 +115,10 @@ HEALTHY_STANDBY_EMPTY_BODY='{"ok":true,"status":"healthy","db":true,"dashboard":
 # the multi-reason body is the ORDINARY case, not an exotic one -- this is the
 # shape measured on the mac-mini peer (2026-08-18).
 MULTI_PROVIDER_STANDBY_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":true,"degraded":true,"degraded_reasons":["provider:codex:gateway_standby","provider:claude:gateway_standby"]}'
+# With the O writer on, a standby also names each TUI provider whose intake it
+# refuses; that is its settled shape, while the same reason on a runner blocks.
+TUI_GATEWAY_STANDBY_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":true,"degraded":true,"degraded_reasons":["provider:codex:gateway_standby","provider:codex:tui_output_requires_gateway","provider:claude:gateway_standby","provider:claude:tui_output_requires_gateway"]}'
+TUI_RUNNER_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["provider:codex:tui_output_requires_gateway"]}'
 # Both element FORMS together (the bare reason and the per-provider one), to keep
 # the alternation covering each branch off the first position.
 MULTI_FORM_STANDBY_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":true,"degraded":true,"degraded_reasons":["provider:codex:gateway_standby","gateway_standby","provider:claude:gateway_standby"]}'
@@ -288,6 +292,12 @@ run_gate_cases() {
     health_json_is_ready "$MULTI_PROVIDER_STANDBY_BODY" 1 1
   assert_rc "[$mode] multi-provider standby → READY under deploy flags" 0 \
     health_json_is_ready "$MULTI_PROVIDER_STANDBY_BODY" 1 1 1
+  assert_rc "[$mode] standby refusing TUI intake → gateway_standby_only matches" 0 \
+    _health_json_gateway_standby_only "$TUI_GATEWAY_STANDBY_BODY"
+  assert_rc "[$mode] standby refusing TUI intake → READY under deploy flags" 0 \
+    health_json_is_ready "$TUI_GATEWAY_STANDBY_BODY" 1 1 1
+  assert_rc "[$mode] runner refusing TUI intake → NOT ready" 1 \
+    health_json_is_ready "$TUI_RUNNER_BODY" 1 1 1
   assert_rc "[$mode] both standby reason forms mixed → gateway_standby_only matches" 0 \
     _health_json_gateway_standby_only "$MULTI_FORM_STANDBY_BODY"
   # ONLY semantics preserved: one intruder anywhere rejects the whole array.
