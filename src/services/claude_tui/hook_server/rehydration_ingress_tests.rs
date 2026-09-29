@@ -627,3 +627,6 @@ fn registration_alias_conflict_keeps_original_pane_unready() {
         (1, 0, 2)
     );
 }
+
+#[path = "../../discord/tui_prompt_relay/rehydration_pending_tests.rs"]
+mod pending;

@@ -1,5 +1,5 @@
-//! Claude continuation adoption requested by a hook, plus a per-pane queue of adoptions whose
-//! binding event could not be persisted, so recovery does not wait for another hook.
+//! Claude continuation adoption requested by a hook, plus a per-pane queue of adoptions not yet
+//! persisted or still waiting for their transcript, so recovery does not wait for another hook.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{LazyLock, Mutex};
@@ -50,8 +50,10 @@ struct DeferredAdoption {
     command_session_id: String,
     payload_session_id: String,
     hook: HookSignal,
-    /// The entry's binding event is in the log; it only waits for its rotation to settle.
+    /// The entry's binding event is in the log; it only waits for its rotation or its transcript.
     recorded: bool,
+    /// Recorded as a Pending whose transcript does not exist yet.
+    pending: bool,
 }
 
 // Deferred sources of a pane, oldest first; only repeat hooks of one source share an entry.
@@ -82,13 +84,18 @@ fn front(tmux_session_name: &str) -> Option<DeferredAdoption> {
     deferred().get(tmux_session_name)?.front().cloned()
 }
 
-fn mark_front_recorded(tmux_session_name: &str) {
+fn mark_front_recorded(tmux_session_name: &str, pending: bool) {
     if let Some(front) = deferred()
         .get_mut(tmux_session_name)
         .and_then(VecDeque::front_mut)
     {
         front.recorded = true;
+        front.pending = pending;
     }
+}
+
+fn queued_count(tmux_session_name: &str) -> usize {
+    deferred().get(tmux_session_name).map_or(0, VecDeque::len)
 }
 
 fn pop_front(tmux_session_name: &str) {
@@ -111,10 +118,17 @@ pub(crate) fn adopt_from_hook(
         payload_session_id: payload_session_id.to_owned(),
         hook: hook.clone(),
         recorded: false,
+        pending: false,
     };
     let tmux = resolve_tmux_session_name("claude", command_session_id.trim()).unwrap_or_default();
     // Adoption and artifact cutover share the pane authority so a retry cannot rewrite them late.
     with_tmux_source_authority(&tmux, |_| {
+        // A hook naming another session replaces a recorded Pending still waiting for its file.
+        if claude_session_rotation_for_tmux(&tmux).is_none()
+            && front(&tmux).is_some_and(|f| f.pending && f.payload_session_id != payload_session_id)
+        {
+            pop_front(&tmux);
+        }
         let Some((own_recorded, own_is_front)) = own_entry(&tmux, payload_session_id) else {
             if !deferred().contains_key(&tmux) {
                 return settle(&tmux, &request, false).http;
@@ -123,14 +137,19 @@ pub(crate) fn adopt_from_hook(
             return AdoptionHttp::NotDurable(NotDurableReason::QueuedBehind);
         };
         queue_behind(&tmux, &request);
+        let settles_now = own_is_front && claude_session_rotation_for_tmux(&tmux).is_none();
         match own_recorded {
-            true => AdoptionHttp::Durable(DurableKind::AlreadyRecorded),
-            false if own_is_front && claude_session_rotation_for_tmux(&tmux).is_none() => {
-                front(&tmux).map_or(
-                    AdoptionHttp::NotDurable(NotDurableReason::QueuedBehind),
-                    |own| settle(&tmux, &own, true).http,
-                )
+            true => {
+                // The entry is already durable; settling it now only saves the poll's delay.
+                if let Some(own) = front(&tmux).filter(|_| settles_now) {
+                    settle(&tmux, &own, true);
+                }
+                AdoptionHttp::Durable(DurableKind::AlreadyRecorded)
             }
+            false if settles_now => front(&tmux).map_or(
+                AdoptionHttp::NotDurable(NotDurableReason::QueuedBehind),
+                |own| settle(&tmux, &own, true).http,
+            ),
             false => AdoptionHttp::NotDurable(NotDurableReason::QueuedBehind),
         }
     })
@@ -153,17 +172,34 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
     match adopt_claude_continuation_explained(command_session_id, payload_session_id, &request.hook)
     {
         Ok((adopted, skip)) => {
-            // An adopted source stays queued until its rotation settles, so later hooks wait behind it.
-            let held = adopted.is_some() && claude_session_rotation_for_tmux(tmux).is_some();
+            // An adopted source stays queued until its rotation settles and a recorded Pending until
+            // its transcript exists, so later hooks wait behind it; a later queued session replaces it.
+            let pending = adopted.is_none() && skip.is_none();
+            let held = if pending {
+                !(queued && queued_count(tmux) > 1)
+            } else {
+                adopted.is_some() && claude_session_rotation_for_tmux(tmux).is_some()
+            };
             let queue = if held {
                 QueueStep::Hold
             } else {
                 QueueStep::Pop
             };
             if queued && held {
-                mark_front_recorded(tmux);
+                mark_front_recorded(tmux, pending);
             } else if queued {
                 pop_front(tmux);
+            } else if pending {
+                let (recorded, pending) = (true, true);
+                let request = request.clone();
+                queue_behind(
+                    tmux,
+                    &DeferredAdoption {
+                        recorded,
+                        pending,
+                        ..request
+                    },
+                );
             }
             let http = match skip {
                 Some(skip) => AdoptionHttp::Skipped(skip),
@@ -225,6 +261,26 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
             }
         }
     }
+}
+
+/// Queues a Pending restored from the log as recorded, so the poll adopts it once its transcript
+/// exists and a hook naming another session replaces it.
+pub(crate) fn seed_restored(
+    tmux_session_name: &str,
+    command_session_id: &str,
+    payload_session_id: &str,
+    hook: &HookSignal,
+) {
+    let request = DeferredAdoption {
+        command_session_id: command_session_id.to_owned(),
+        payload_session_id: payload_session_id.to_owned(),
+        hook: hook.clone(),
+        recorded: true,
+        pending: true,
+    };
+    with_tmux_source_authority(tmux_session_name, |_| {
+        queue_behind(tmux_session_name, &request);
+    });
 }
 
 /// Re-runs each pane's deferred adoptions in hook order with their original evidence.
