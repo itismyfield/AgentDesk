@@ -1209,12 +1209,14 @@ async fn o_delegated_tui_body_is_cut_on_direct_gateways_but_not_headless() {
 
         let (offset, full_response, inflight) =
             drive_bridge_stream_tick(&driver, driver.inflight.clone()).await;
+        // The last chunk lands after the final tick, so the terminal sees an unsent tail.
+        const TAIL: &str = "\nADK tail streamed after the last tick";
         let (ctx, mut state) = driver.parts();
         (
             state.response_sent_offset,
             state.full_response,
             state.inflight_state,
-        ) = (offset, full_response, inflight);
+        ) = (offset, format!("{full_response}{TAIL}"), inflight);
         let output =
             tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
                 .await
@@ -1247,8 +1249,8 @@ async fn o_delegated_tui_body_is_cut_on_direct_gateways_but_not_headless() {
         } else {
             assert_eq!(offset, 0, "a headless turn keeps its body unconsumed");
             assert_eq!(
-                (output.full_response.as_str(), output.response_sent_offset),
-                (DRIVER_BODY, 0),
+                (output.full_response, output.response_sent_offset),
+                (format!("{DRIVER_BODY}{TAIL}"), 0),
                 "the headless delivery still owns the whole original body"
             );
             assert!(
