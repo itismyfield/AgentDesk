@@ -191,8 +191,9 @@ async fn finish_gateway_backend<E, F>(
             );
         }
     }
-    // The backend is gone: close O admission before the lease task is aborted and drops the lease.
-    crate::services::tui_o::ownership::gate(provider_for_error.as_str()).lost();
+    // The backend is gone: close O admission, even against a late re-acquisition, before the
+    // lease task is aborted and drops the lease.
+    crate::services::tui_o::ownership::gate(provider_for_error.as_str()).close();
     drop(gateway_waiter);
     release_catalog_before_diagnostic(model_catalog_refresh_task, diagnostic).await;
     abort_and_join_task(gateway_lease_task).await;
@@ -403,6 +404,22 @@ mod gateway_waiter_tests {
         )
         .await;
         assert_eq!(*seen.lock().unwrap(), Some(GatewayOwnership::Lost));
+    }
+
+    /// Guards that a re-acquisition landing while backend-exit diagnostics run keeps O closed.
+    #[tokio::test]
+    async fn a_lease_reacquired_during_the_exit_diagnostic_keeps_o_admission_closed() {
+        let provider = ProviderKind::Unsupported("o-late-reacquire".into());
+        let gate = crate::services::tui_o::ownership::gate(provider.as_str());
+        gate.acquired();
+        let lease = tokio::spawn(std::future::pending::<()>());
+        let backend = tokio::spawn(async { Ok::<(), &str>(()) });
+        finish_gateway_backend(backend, &provider, None, Some(lease), None, async {
+            // The lease task's in-flight re-acquisition completes here.
+            assert_eq!(gate.reacquired(), None);
+        })
+        .await;
+        assert_eq!(gate.admit(|epoch| epoch), None);
     }
 
     #[tokio::test]

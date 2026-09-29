@@ -93,7 +93,7 @@ impl DiscordPort for GatewayPort {
         }
     }
 
-    /// Unproven until a permission check exists, so a wholly empty history stays Unresolved.
+    /// Unproven until a permission check exists, so a read without a candidate stays Unresolved.
     fn history_readable(&self, _channel: u64) -> bool {
         false
     }

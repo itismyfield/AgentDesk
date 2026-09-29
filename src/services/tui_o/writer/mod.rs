@@ -38,7 +38,8 @@ pub enum PostOutcome {
 /// Discord as the writer uses it: one POST per piece and forward history reads.
 pub trait DiscordPort: Send + Sync + 'static {
     fn bot_id(&self) -> u64;
-    /// The future is spawned under the ownership gate, so it owns everything it needs.
+    /// The first poll runs under the ownership gate and starts the request; the future owns
+    /// everything it needs.
     fn post(
         &self,
         channel: u64,
@@ -54,9 +55,10 @@ pub trait DiscordPort: Send + Sync + 'static {
     fn history_readable(&self, channel: u64) -> bool;
 }
 
-/// The channel's shared delivery lease, held from before admission until the result is recorded.
+/// The channel's shared delivery lease, held from before admission until the result is recorded
+/// and the POST task has ended.
 pub trait DeliveryLease: Send + Sync {
-    type Held: Send;
+    type Held: Send + 'static;
     /// `None` when another holder has it; the piece waits and is never posted without it.
     fn try_acquire(&self, channel: u64, serial: u64) -> Option<Self::Held>;
 }
