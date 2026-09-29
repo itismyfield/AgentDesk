@@ -1,9 +1,16 @@
 //! `agentdesk o`: operator actions on the O writer's store.
 
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 
 use crate::services::tui_o::store::OStore;
 use crate::services::tui_o::store::rotation::ResolveFrom;
+
+#[derive(Args)]
+#[command(about = "O writer store operations: resolve a pending source boundary")]
+pub(crate) struct OArgs {
+    #[command(subcommand)]
+    command: OCommand,
+}
 
 #[derive(Subcommand)]
 pub(crate) enum OCommand {
@@ -29,13 +36,13 @@ pub(crate) enum BoundaryCommand {
     },
 }
 
-pub(crate) fn run(command: OCommand) -> Result<(), String> {
+pub(crate) fn run(args: OArgs) -> Result<(), String> {
     let OCommand::Boundary(BoundaryCommand::Resolve {
         channel,
         source,
         from,
         operator,
-    }) = command;
+    }) = args.command;
     let runtime_root = crate::config::runtime_root().ok_or("runtime root is unresolved")?;
     let store = OStore::existing(&runtime_root).ok_or("no O store under the runtime root")?;
     let from = match from.parse::<u64>() {
