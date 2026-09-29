@@ -129,6 +129,15 @@ async fn o_delegated_single_message_footer_completion_sends_no_body() {
                 "/tmp/adk-o-footer.jsonl",
             )
         });
+        // A held identity also writes no footer, so pin the production decision to O ownership.
+        assert_eq!(
+            crate::services::tui_o::cutover::o_owns_tui_output_for_channel_tmux(
+                channel_raw,
+                Some(&tmux)
+            ),
+            Ok(delegated),
+            "delegated={delegated}"
+        );
         let target = WatcherCompletionFooterTerminalTarget {
             msg_id: serenity::all::MessageId::new(9_425_931),
             text: BODY.to_string(),
