@@ -18,7 +18,7 @@
 | `DELETE` | `/api/agents/{id}` | `agents_crud::delete_agent` | `src/server/routes/agents_crud.rs:896` | `src/server/routes/domains/agents.rs:26` |
 | `GET` | `/api/agents/{id}` | `agents_crud::get_agent` | `src/server/routes/agents_crud.rs:396` | `src/server/routes/domains/agents.rs:26` |
 | `PATCH` | `/api/agents/{id}` | `agents_crud::update_agent` | `src/server/routes/agents_crud.rs:482` | `src/server/routes/domains/agents.rs:26` |
-| `GET` | `/api/agents/{id}/cron` | `cron_api::agent_cron_jobs` | `src/server/routes/cron_api.rs:174` | `src/server/routes/domains/agents.rs:45` |
+| `GET` | `/api/agents/{id}/cron` | `cron_api::agent_cron_jobs` | `src/server/routes/cron_api.rs:164` | `src/server/routes/domains/agents.rs:45` |
 | `GET` | `/api/agents/{id}/dispatched-sessions` | `agents::agent_dispatched_sessions` | `src/server/routes/agents.rs:665` | `src/server/routes/domains/runtime.rs:131` |
 | `POST` | `/api/agents/{id}/duplicate` | `agents_crud::duplicate_agent` | `src/server/routes/agents_crud.rs:743` | `src/server/routes/domains/agents.rs:41` |
 | `GET` | `/api/agents/{id}/execution-node` | `execution_requirements::get_node` | `src/server/routes/execution_requirements.rs:12` | `src/server/routes/domains/agents.rs:37` |
@@ -50,10 +50,10 @@
 | `GET` | `/api/automation-candidates/{card_id}/iterations` | `automation_candidates::list_iterations` | `src/server/routes/automation_candidates.rs:190` | `src/server/routes/domains/kanban.rs:69` |
 | `POST` | `/api/automation-candidates/{card_id}/prepare-worktree` | `automation_candidates::prepare_worktree` | `src/server/routes/automation_candidates.rs:286` | `src/server/routes/domains/kanban.rs:81` |
 | `GET` | `/api/campaigns` | `campaigns::list` | `src/server/routes/campaigns.rs:80` | `src/server/routes/domains/admin.rs:18` |
-| `POST` | `/api/campaigns` | `campaigns::create` | `src/server/routes/campaigns.rs:109` | `src/server/routes/domains/admin.rs:18` |
-| `GET` | `/api/campaigns/{id}` | `campaigns::get` | `src/server/routes/campaigns.rs:94` | `src/server/routes/domains/admin.rs:19` |
-| `PUT` | `/api/campaigns/{id}` | `campaigns::replace` | `src/server/routes/campaigns.rs:120` | `src/server/routes/domains/admin.rs:19` |
-| `GET` | `/api/campaigns/{id}/history` | `campaigns::history` | `src/server/routes/campaigns.rs:100` | `src/server/routes/domains/admin.rs:23` |
+| `POST` | `/api/campaigns` | `campaigns::create` | `src/server/routes/campaigns.rs:115` | `src/server/routes/domains/admin.rs:18` |
+| `GET` | `/api/campaigns/{id}` | `campaigns::get` | `src/server/routes/campaigns.rs:96` | `src/server/routes/domains/admin.rs:19` |
+| `PUT` | `/api/campaigns/{id}` | `campaigns::replace` | `src/server/routes/campaigns.rs:126` | `src/server/routes/domains/admin.rs:19` |
+| `GET` | `/api/campaigns/{id}/history` | `campaigns::history` | `src/server/routes/campaigns.rs:106` | `src/server/routes/domains/admin.rs:23` |
 | `GET` | `/api/channels/{channel_id}/monitoring` | `monitoring::list_monitoring` | `src/server/routes/monitoring.rs:69` | `src/server/routes/domains/runtime.rs:118` |
 | `POST` | `/api/channels/{channel_id}/monitoring` | `monitoring::upsert_monitoring` | `src/server/routes/monitoring.rs:19` | `src/server/routes/domains/runtime.rs:118` |
 | `DELETE` | `/api/channels/{channel_id}/monitoring/{key}` | `monitoring::remove_monitoring` | `src/server/routes/monitoring.rs:52` | `src/server/routes/domains/runtime.rs:122` |
@@ -80,7 +80,7 @@
 | `GET` | `/api/cluster/test-phase-runs/evidence` | `cluster::latest_test_phase_evidence` | `src/server/routes/cluster.rs:379` | `src/server/routes/domains/ops.rs:80` |
 | `POST` | `/api/cluster/test-phase-runs/start` | `cluster::start_test_phase_run` | `src/server/routes/cluster.rs:350` | `src/server/routes/domains/ops.rs:72` |
 | `POST` | `/api/cluster/test-phase-runs/upsert` | `cluster::upsert_test_phase_run` | `src/server/routes/cluster.rs:339` | `src/server/routes/domains/ops.rs:68` |
-| `GET` | `/api/cron-jobs` | `cron_api::list_cron_jobs` | `src/server/routes/cron_api.rs:166` | `src/server/routes/domains/ops.rs:157` |
+| `GET` | `/api/cron-jobs` | `cron_api::list_cron_jobs` | `src/server/routes/cron_api.rs:156` | `src/server/routes/domains/ops.rs:157` |
 | `GET` | `/api/departments` | `departments::list_departments` | `src/server/routes/departments.rs:61` | `src/server/routes/domains/admin.rs:32` |
 | `POST` | `/api/departments` | `departments::create_department` | `src/server/routes/departments.rs:70` | `src/server/routes/domains/admin.rs:32` |
 | `PATCH` | `/api/departments/reorder` | `departments::reorder_departments` | `src/server/routes/departments.rs:166` | `src/server/routes/domains/admin.rs:36` |

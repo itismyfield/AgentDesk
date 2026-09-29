@@ -187,8 +187,8 @@ write 사이에 끼어드는 것이라 바이트를 **추가**할 수 있을 뿐
    돌면서 skip을 명시적 green으로 변환하고 upstream 실패/취소에는 fail-closed다.
 
 `scripts/check-ci-runner-hardening.sh`의 `targets`에 등재된 `test_fast`,
-`high-risk-recovery`, `check_fast_cross_os`, `library_sweep`에는 **강도가 다른 두
-층**이 있다.
+`high-risk-recovery`, `check_fast_cross_os`, `check_fast_cross_os_targets`,
+`library_sweep`에는 **강도가 다른 두 층**이 있다.
 섞어 읽으면 안 된다.
 
 1. **whole-job semantic hash — 변경 탐지기이지 보장이 아니다.** 같은 diff 안에서

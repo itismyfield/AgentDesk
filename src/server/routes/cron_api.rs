@@ -127,16 +127,6 @@ async fn build_cron_jobs(state: &AppState, _agent_filter: Option<&str>) -> Vec<s
         }));
     }
 
-    // #1091: surface dynamically-registered maintenance jobs alongside cron.
-    for info in crate::services::maintenance::list_maintenance_jobs() {
-        match serde_json::to_value(info) {
-            Ok(value) => jobs.push(value),
-            Err(error) => {
-                tracing::warn!("[cron_api] failed to encode services::maintenance job: {error}");
-            }
-        }
-    }
-
     // #1239 (843g): SQLite path removed; runtime is PG-only.
     let maintenance_jobs = match state.pg_pool_ref() {
         Some(pool) => crate::server::maintenance::list_job_statuses_pg(pool.clone()).await,

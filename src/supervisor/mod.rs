@@ -422,35 +422,6 @@ impl RuntimeSupervisor {
         Ok(false)
     }
 
-    #[allow(dead_code)]
-    fn mark_dispatch_completed(&self, dispatch_id: &str) -> Result<usize, String> {
-        let result = json!({
-            "auto_completed": true,
-            "completion_source": "orphan_recovery"
-        });
-        let Some(pool) = self.pg_pool.as_ref() else {
-            return Err("runtime supervisor postgres backend is unavailable".to_string());
-        };
-        let dispatch_id = dispatch_id.to_string();
-        crate::utils::async_bridge::block_on_pg_result(
-            pool,
-            move |bridge_pool| async move {
-                crate::dispatch::set_dispatch_status_on_pg_async(
-                    &bridge_pool,
-                    &dispatch_id,
-                    "completed",
-                    Some(&result),
-                    "orphan_recovery",
-                    Some(ACTIVE_DISPATCH_STATUSES),
-                    true,
-                )
-                .await
-                .map_err(|error| format!("mark dispatch completed {dispatch_id}: {error}"))
-            },
-            |error| error,
-        )
-    }
-
     fn mark_dispatch_failed(&self, dispatch_id: &str) -> Result<usize, String> {
         let result = json!({
             "orphan_failed": true,

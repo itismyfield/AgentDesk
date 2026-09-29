@@ -15,6 +15,10 @@ gated funnels. This gate keeps that cut honest on every intermediate head:
       delegated verdict can never be read as Posted evidence. The
       `O_TUI_WRITER` token itself may appear only in the O_TUI_WRITER_FILES.
 
+Census PASS is not flip readiness. `flip_ready` is reported on its own line and
+is true only when no census row is deferred and every FLIP_READY_TESTS funnel
+test exists in src/; `--require-flip-ready` turns a false verdict into rc 1.
+
 TO CHANGE A COUNT: edit the map in this file in the same commit that moves the
 call, and say in the commit message which site moved and why. A new file with a
 primitive also needs a CENSUS row.
@@ -71,12 +75,12 @@ O_TUI_WRITER_FILES = {
 # CUT_D/CUT_T: gated here. COV:<row>: covered by that row's funnel gate.
 # UNREACH_G: guarded in the third field's file. KEEP_36: kept output (§3.6).
 # KEEP_NONBODY: panel/card/notice/command reply. KEEP_TRANSPORT: raw transport
-# or primitive owner, cut at its callers. DEFER_A1_4B: recovery resend rows cut
-# in the next slice; ungated until then.
+# or primitive owner, cut at its callers. DEFER_*: ungated for now; census passes
+# but flip_ready stays false.
 TARGETS = {
     "CUT_D", "CUT_T", "KEEP_36", "KEEP_NONBODY", "KEEP_TRANSPORT", "UNREACH_G",
-    "DEFER_A1_4B",
 }
+DEFER_RE = re.compile(r"DEFER_[A-Z0-9_]+")
 R_EVID = (
     "src/services/discord/outbound/delivery_record.rs",
     "src/services/discord/outbound/completed_turn_ledger.rs",
@@ -135,8 +139,8 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "placeholder_controller.rs": {".edit_message": 1},
     "placeholder_controller/queued_card_gate.rs": {"edit_channel_message*": 1},
     "placeholder_sweeper.rs": {"edit_outbound_message": 1},
-    "recovery_engine/completion_delivery.rs": {"relay_recovered_terminal_text_to_placeholder": 1},
-    "recovery_engine/restore_inflight.rs": {"relay_recovered_terminal_text_to_placeholder": 5},
+    "recovery_engine/completion_delivery.rs": {"relay_recovered_terminal_text_to_placeholder": 2},
+    "recovery_engine/restore_inflight.rs": {"relay_recovered_terminal_text_to_placeholder": 2},
     "recovery_engine/terminal_text_idempotency.rs": {"replace_long_message*": 2, "send_long_message*": 2},
     "recovery_engine/two_message_panel.rs": {"send_channel_message*": 1},
     "recovery_paths/controller_cutover.rs": {"deliver_turn_output*": 1},
@@ -222,7 +226,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "formatting/long_send_rollback.rs": ("W19", "KEEP_TRANSPORT"),
     "formatting/replace_long_message.rs": ("W19", "KEEP_TRANSPORT"),
     "gateway.rs": ("W19", "KEEP_TRANSPORT"),
-    "health/recovery.rs": ("W33", "DEFER_A1_4B"),
+    "health/recovery.rs": ("W33", "CUT_D"),
     "http.rs": ("W19", "KEEP_TRANSPORT"),
     "idle_recap/card.rs": ("W25", "KEEP_NONBODY"),
     "meeting_orchestrator/records.rs": ("MEETING", "KEEP_NONBODY"),
@@ -240,12 +244,12 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "placeholder_controller.rs": ("1-B-panel", "KEEP_NONBODY"),
     "placeholder_controller/queued_card_gate.rs": ("1-B-panel", "KEEP_NONBODY"),
     "placeholder_sweeper.rs": ("1-D-notice", "KEEP_NONBODY"),
-    "recovery_engine/completion_delivery.rs": ("W30,W31", "DEFER_A1_4B"),
-    "recovery_engine/restore_inflight.rs": ("W30", "DEFER_A1_4B"),
+    "recovery_engine/completion_delivery.rs": ("W30,W31", "CUT_D"),
+    "recovery_engine/restore_inflight.rs": ("1-D-notice", "KEEP_NONBODY"),
     "recovery_engine/terminal_text_idempotency.rs": ("W32", "COV:W32"),
     "recovery_engine/two_message_panel.rs": ("1-D-panel", "KEEP_NONBODY"),
     "recovery_paths/controller_cutover.rs": ("W30a", "COV:W30"),
-    "recovery_paths/restart.rs": ("W35", "DEFER_A1_4B"),
+    "recovery_paths/restart.rs": ("W35", "CUT_D"),
     "router/intake_dispatch/notice.rs": ("INTAKE", "KEEP_NONBODY"),
     "router/intake_gate.rs": ("INTAKE", "KEEP_NONBODY"),
     "router/message_handler/attachments.rs": ("INTAKE", "KEEP_NONBODY"),
@@ -263,7 +267,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "task_notification_delivery/response_chunks.rs": ("W21", "COV:W20"),
     "terminal_ui_obligation.rs": ("1-B-panel", "KEEP_NONBODY"),
     "tmux_placeholder_suppression/ops.rs": ("W05", "KEEP_NONBODY"),
-    "tmux_restart_handoff.rs": ("W34", "DEFER_A1_4B"),
+    "tmux_restart_handoff.rs": ("W34", "CUT_D"),
     "tmux_watcher.rs": ("W01,W03", "CUT_D"),
     "tmux_watcher/no_result_exits.rs": ("1-A-notice", "KEEP_NONBODY"),
     "tmux_watcher/pre_emit_guard.rs": ("1-A-notice", "KEEP_NONBODY"),
@@ -291,7 +295,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "turn_bridge/terminal_delivery.rs": ("W10d", "COV:W10"),
     "turn_bridge/terminal_outcome_delivery.rs": ("W10", "CUT_D"),
     "turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs": ("W11", "CUT_D"),
-    "turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs": ("W13", "DEFER_A1_4B"),
+    "turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs": ("W13", "CUT_D"),
     "turn_bridge/terminal_outcome_delivery/recovery_retry.rs": ("W18", "KEEP_NONBODY"),
     "turn_bridge/two_message_panel.rs": ("1-B-panel", "KEEP_NONBODY"),
     "voice_barge_in/final_result_playback.rs": ("1-E", "KEEP_36"),
@@ -300,17 +304,47 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "voice_barge_in/runtime_lifecycle.rs": ("1-E", "KEEP_36"),
 }
 EXPECTED_GATES: dict[str, int] = {
+    "src/services/discord/health/recovery.rs": 1,
+    "src/services/discord/idle_recap.rs": 1,
+    "src/services/discord/recovery_engine/completion_delivery.rs": 2,
+    "src/services/discord/recovery_paths/restart.rs": 1,
     "src/services/discord/session_relay_sink.rs": 1,
     "src/services/discord/session_relay_sink/task_notification_context.rs": 1,
     "src/services/discord/tmux_watcher.rs": 1,
     "src/services/discord/tmux_watcher/completion_producer.rs": 1,
+    "src/services/discord/tmux_restart_handoff.rs": 1,
     "src/services/discord/tmux_watcher/streaming_status_tick.rs": 1,
     "src/services/discord/turn_bridge/runtime_handoff_loop/watcher_handoff.rs": 1,
     "src/services/discord/turn_bridge/stream_tick.rs": 1,
     "src/services/discord/turn_bridge/terminal_controller_cutover.rs": 1,
     "src/services/discord/turn_bridge/terminal_outcome_delivery.rs": 1,
     "src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs": 1,
+    "src/services/discord/turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs": 1,
+    "src/services/discord/turn_finalizer/watcher_backstop.rs": 1,
     "src/services/tui_o/cutover.rs": 2,
+}
+# Funnel -> tests that drive it with O owning the channel. Each must exist as a
+# non-ignored test-attributed `fn` in src/; empty funnels or missing tests block the flip.
+FLIP_READY_TESTS: dict[str, tuple[str, ...]] = {
+    "W01": (
+        "o_delegated_watcher_turn_shows_no_body_and_records_no_frontier",
+        "o_delegated_task_notification_turn_promotes_card_without_body_or_claim",
+        "o_delegated_mid_turn_cutover_shows_no_post_cutover_body",
+    ),
+    "W02": ("o_delegated_rollover_tick_writes_no_body",),
+    "W04": ("o_delegated_single_message_footer_completion_sends_no_body",),
+    "W10": ("o_delegated_tui_body_is_cut_on_direct_gateways_but_not_headless",),
+    "W11": ("o_delegated_cancelled_partial_body_is_not_replaced",),
+    "W13": ("o_delegated_foreign_custody_settles_without_post_or_evidence",),
+    "W20": ("o_delegated_idle_range_is_consumed_once_without_transport_or_evidence",),
+    "W21": ("o_delegated_task_response_leaves_no_legacy_claim",),
+    "W30": ("o_delegated_recovery_body_posts_only_the_marker_without_evidence",),
+    "W31": ("o_delegated_captured_recovery_range_is_consumed_without_send",),
+    "W33": ("o_delegated_stale_leak_recovery_resends_nothing",),
+    "W34": ("o_delegated_restart_handoff_keeps_only_the_marker",),
+    "W35": ("o_delegated_anchor_repost_is_skipped",),
+    "backstop": ("o_delegated_done_turn_needs_no_legacy_delivery_confirmation",),
+    "idle_recap": ("o_delegated_idle_recap_probe_reports_unknown",),
 }
 
 
@@ -379,7 +413,11 @@ def problems_for(primitives, gates, flags) -> list[str]:
         if rel not in primitives:
             problems.append(f"census: stale CENSUS row for {rel} (no primitive left)")
         target = row[1] if len(row) > 1 else ""
-        if target not in TARGETS and not re.fullmatch(r"COV:W\d+", target):
+        if (
+            target not in TARGETS
+            and not re.fullmatch(r"COV:W\d+", target)
+            and not DEFER_RE.fullmatch(target)
+        ):
             problems.append(f"census: {rel} has undecided target {target!r}")
             continue
         gate_file = PRIMITIVE_ROOT + (row[2] if len(row) > 2 else rel)
@@ -399,6 +437,48 @@ def problems_for(primitives, gates, flags) -> list[str]:
     return problems
 
 
+def flip_readiness(root: Path) -> tuple[bool, str]:
+    """Fail closed: deferred rows, no funnel tests, or a missing test all block the flip."""
+    reasons: list[str] = []
+    deferred = sorted(rel for rel, row in CENSUS.items() if DEFER_RE.fullmatch(row[1]))
+    if deferred:
+        reasons.append(f"deferred census rows: {', '.join(deferred)}")
+    names = sorted({name for tests in FLIP_READY_TESTS.values() for name in tests})
+    if not names:
+        reasons.append("FLIP_READY_TESTS is empty")
+    empty = sorted(funnel for funnel, tests in FLIP_READY_TESTS.items() if not tests)
+    if empty:
+        reasons.append(f"funnel test lists empty: {', '.join(empty)}")
+    defined: set[str] = set()
+    src = root / "src"
+    if names and src.is_dir():
+        classifier = _load_classifier()
+        fn_re = re.compile(
+            r"((?:#\s*\[[^\[\]]*\]\s*)+)"
+            r"(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+("
+            + "|".join(map(re.escape, names)) + r")\s*\("
+        )
+        test_attr = re.compile(r"#\s*\[\s*(?:test|tokio\s*::\s*test(?:\s*\([^\[\]]*\))?)\s*\]")
+        ignore_attr = re.compile(r"#\s*\[\s*ignore\b")
+        for path in src.rglob("*.rs"):
+            state = classifier.StripState()
+            text = "\n".join(
+                classifier.strip_line(line, state)
+                for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+            )
+            # An #[ignore] test never runs by default, so it cannot vouch for the funnel.
+            defined.update(
+                name for attrs, name in fn_re.findall(text)
+                if test_attr.search(attrs) and not ignore_attr.search(attrs)
+            )
+    missing = [name for name in names if name not in defined]
+    if missing:
+        reasons.append(f"funnel tests missing from src/: {', '.join(missing)}")
+    if reasons:
+        return False, "flip_ready=false: " + "; ".join(reasons)
+    return True, f"flip_ready=true: {len(names)} funnel tests over {len(FLIP_READY_TESTS)} rows"
+
+
 def check(root: Path, pinned_test_only_files=None) -> tuple[bool, str]:
     try:
         primitives, gates, flags = measure(root, pinned_test_only_files)
@@ -406,7 +486,7 @@ def check(root: Path, pinned_test_only_files=None) -> tuple[bool, str]:
         return False, str(exc)
     problems = problems_for(primitives, gates, flags)
     sites = sum(sum(m.values()) for m in primitives.values())
-    deferred = sorted(rel for rel, row in CENSUS.items() if row[1] == "DEFER_A1_4B")
+    deferred = sorted(rel for rel, row in CENSUS.items() if DEFER_RE.fullmatch(row[1]))
     if problems:
         return False, (
             "FAIL: TUI O writer census drifted.\n  " + "\n  ".join(problems)
@@ -416,14 +496,20 @@ def check(root: Path, pinned_test_only_files=None) -> tuple[bool, str]:
     return True, (
         f"OK: TUI O writer census: {sites} send sites in {len(primitives)} files, "
         f"{sum(gates.values())} cutover gate tokens in {len(gates)} files, "
-        f"{len(deferred)} rows deferred to A1-4b; lexical scan (see docstring)"
+        f"{len(deferred)} rows deferred; lexical scan (see docstring)"
     )
 
 
-def main() -> int:
-    ok, message = check(Path(__file__).resolve().parent.parent)
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    root = Path(__file__).resolve().parent.parent
+    ok, message = check(root)
     print(message, file=sys.stdout if ok else sys.stderr)
-    return 0 if ok else 1
+    ready, verdict = flip_readiness(root)
+    print(verdict)
+    if not ok:
+        return 1
+    return 1 if "--require-flip-ready" in args and not ready else 0
 
 
 if __name__ == "__main__":

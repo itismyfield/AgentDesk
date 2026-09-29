@@ -11,10 +11,12 @@ use url::Url;
 
 use crate::services::claude_tui::hook_server::relay_receipts::{
     RELAY_DEADLINE_HEADER, RELAY_PUBLISHED_AT_HEADER, RELAY_REQUEST_ID_HEADER,
+    RELAY_RESPOND_BY_HEADER,
 };
 use crate::services::claude_tui::memento_feedback;
 
 mod ordered_queue;
+mod response_window;
 pub(crate) use ordered_queue::OrderedHookRelayRecoveryOwner;
 #[cfg(all(test, unix))]
 use ordered_queue::relay_queue_dir;
@@ -468,6 +470,7 @@ fn relay_hook_event_with_request(
     request_id: &str,
     published_at: DateTime<Utc>,
     delivery_deadline: DateTime<Utc>,
+    respond_by: Option<DateTime<Utc>>,
     binding: Option<&HookBindingEnvelope>,
 ) -> Result<(), String> {
     post_hook_event_with_request_timeout(
@@ -477,7 +480,13 @@ fn relay_hook_event_with_request(
         session_id,
         payload,
         RELAY_TIMEOUT,
-        Some((request_id, published_at, delivery_deadline, binding)),
+        Some((
+            request_id,
+            published_at,
+            delivery_deadline,
+            respond_by,
+            binding,
+        )),
     )
     .map(|_| ())
 }
@@ -508,6 +517,7 @@ fn relay_hook_event_response_with_request_timeout(
     request_id: &str,
     published_at: DateTime<Utc>,
     delivery_deadline: DateTime<Utc>,
+    respond_by: Option<DateTime<Utc>>,
     binding: Option<&HookBindingEnvelope>,
     timeout: Duration,
 ) -> Result<Value, String> {
@@ -518,7 +528,13 @@ fn relay_hook_event_response_with_request_timeout(
         session_id,
         payload,
         timeout,
-        Some((request_id, published_at, delivery_deadline, binding)),
+        Some((
+            request_id,
+            published_at,
+            delivery_deadline,
+            respond_by,
+            binding,
+        )),
     )?;
     response
         .into_json()
@@ -539,6 +555,15 @@ fn post_hook_event_with_timeout(
     )
 }
 
+/// `(request id, published at, delivery deadline, respond by, binding)` of a queued request.
+type RelayRequestHeaders<'a> = (
+    &'a str,
+    DateTime<Utc>,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+    Option<&'a HookBindingEnvelope>,
+);
+
 #[allow(clippy::too_many_arguments)]
 fn post_hook_event_with_request_timeout(
     endpoint: &str,
@@ -547,19 +572,14 @@ fn post_hook_event_with_request_timeout(
     session_id: &str,
     payload: Value,
     timeout: Duration,
-    request: Option<(
-        &str,
-        DateTime<Utc>,
-        DateTime<Utc>,
-        Option<&HookBindingEnvelope>,
-    )>,
+    request: Option<RelayRequestHeaders<'_>>,
 ) -> Result<ureq::Response, String> {
     let url = hook_url(endpoint, provider, event, session_id)?;
     let agent = ureq::AgentBuilder::new().timeout(timeout).build();
     let mut request_builder = agent
         .post(url.as_str())
         .set("Content-Type", "application/json");
-    if let Some((request_id, published_at, delivery_deadline, binding)) = request {
+    if let Some((request_id, published_at, delivery_deadline, respond_by, binding)) = request {
         let header = binding
             .unwrap_or(&HookBindingEnvelope::legacy_request())
             .encode()?;
@@ -568,6 +588,10 @@ fn post_hook_event_with_request_timeout(
             .set(RELAY_REQUEST_ID_HEADER, request_id)
             .set(RELAY_PUBLISHED_AT_HEADER, &published_at.to_rfc3339())
             .set(RELAY_DEADLINE_HEADER, &delivery_deadline.to_rfc3339());
+        if let Some(respond_by) = respond_by {
+            request_builder =
+                request_builder.set(RELAY_RESPOND_BY_HEADER, &respond_by.to_rfc3339());
+        }
     }
     let response = match request_builder.send_json(payload) {
         Ok(response) => response,

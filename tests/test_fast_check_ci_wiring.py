@@ -19,7 +19,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "b23cb16675728a6d470bda30a74489ed64c072e60a452c7d484deff5cfd9386c"
+    "c62ee7ce75baa156c6bb7f68f670a477c2147a45fce5d8ec5c169b26fb879345"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Path-filtered required contexts: (mirror job, required name, runner job,
@@ -575,48 +575,55 @@ class FastCheckCiWiringTests(unittest.TestCase):
 
     def test_pr_cross_os_lane_allows_only_targeted_writer_runtime(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        job = job_block(workflow, "check_fast_cross_os")
-        parsed = yaml.safe_load(job_block(workflow, "check_fast_cross_os"))[
-            "check_fast_cross_os"
-        ]
-        steps = parsed["steps"]
+        jobs = yaml.safe_load(workflow)["jobs"]
+        check, targets = jobs["check_fast_cross_os"], jobs["check_fast_cross_os_targets"]
         python_step_name = (
             "Provision Python 3.11 (tomllib owner for "
             "check_test_target_integrity, a2a-C PR-1)"
         )
-        python_steps = [
-            (i, step)
-            for i, step in enumerate(steps)
-            if step.get("name") == python_step_name
-        ]
-        self.assertEqual(len(python_steps), 1)
-        python_index, python_step = python_steps[0]
-        rust = next(
-            i
-            for i, step in enumerate(steps)
-            if step.get("name") == "Install Rust toolchain"
+        self.assertEqual(check["name"], "Fast check + non-PG tests (${{ matrix.os }})")
+        self.assertEqual(targets["name"], "Windows exact targets (${{ matrix.os }})")
+        for key in ("needs", "if", "runs-on", "env", "strategy"):
+            self.assertEqual(targets[key], check[key], key)
+        self.assertEqual(check["strategy"], {"fail-fast": False, "matrix": {"os": ["windows-latest"]}})
+        self.assertEqual(
+            check["if"],
+            "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
         )
-        cargo_check = next(i for i, step in enumerate(steps) if step.get("name") == "cargo check")
-        writer = next(i for i, step in enumerate(steps) if step.get("name") == "Writer namespace exact Windows targets")
-
-        self.assertIn("name: Fast check + non-PG tests (${{ matrix.os }})", job)
-        self.assertIn("os: [windows-latest]", job)
-        self.assertIn("- name: cargo check", job)
-        self.assertEqual(parsed["strategy"]["matrix"]["os"], ["windows-latest"])
+        # Both runners share the setup prefix that ends at the dependency cache.
+        setup = [step.get("name", step.get("uses")) for step in check["steps"]]
+        setup = setup[: setup.index("Cache Cargo dependencies") + 1]
+        self.assertEqual(check["steps"][: len(setup)], targets["steps"][: len(setup)])
+        self.assertLess(setup.index(python_step_name), setup.index("Install Rust toolchain"))
+        python_step = check["steps"][setup.index(python_step_name)]
         self.assertEqual(python_step["uses"], "actions/setup-python@v5")
         self.assertEqual(python_step["with"]["python-version"], "3.11")
-        self.assertLess(python_index, rust)
-        self.assertLess(cargo_check, writer)
-        self.assertEqual(steps[writer]["if"], "runner.os == 'Windows'")
-        self.assertEqual(steps[writer]["timeout-minutes"], 30)
-        self.assertEqual(steps[writer]["shell"], "bash")
-        self.assertEqual(steps[writer]["run"], "./scripts/ci/run-writer-namespace-windows-targets.sh")
-        self.assertEqual(job.count("run-writer-namespace-windows-targets.sh"), 1)
-        self.assertIn("needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'", job)
-        self.assertIn("FILTER_OUTPUT: ${{ needs.changes.outputs.cross_os_rust }}", job_block(workflow, "check_fast_cross_os_required_context"))
-        self.assertNotIn("cargo test", job)
-        self.assertNotRegex(job, r"(?m)^\s*cargo test\b")
-        self.assertNotIn("- name: cargo test", job)
+
+        # The two runners together execute exactly the pre-split command set.
+        runs = [
+            (job_id, step["run"])
+            for job_id in ("check_fast_cross_os", "check_fast_cross_os_targets")
+            for step in jobs[job_id]["steps"][len(setup) :]
+            if step.get("name") != "sccache stats"
+        ]
+        self.assertEqual(
+            runs,
+            [
+                ("check_fast_cross_os", "cargo check --workspace --all-targets"),
+                ("check_fast_cross_os_targets", "./scripts/ci/run-writer-namespace-windows-targets.sh"),
+            ],
+        )
+        writer = targets["steps"][len(setup)]
+        self.assertEqual(writer["name"], "Writer namespace exact Windows targets")
+        self.assertEqual(writer["if"], "runner.os == 'Windows'")
+        self.assertEqual(writer["timeout-minutes"], 30)
+        self.assertEqual(writer["shell"], "bash")
+        for job_id in ("check_fast_cross_os", "check_fast_cross_os_targets"):
+            # A job-level continue-on-error reports failure to the mirror as success.
+            self.assertNotIn("continue-on-error", jobs[job_id])
+            job = job_block(workflow, job_id)
+            self.assertNotRegex(job, r"(?m)^\s*cargo test\b")
+            self.assertNotIn("- name: cargo test", job)
         filters = paths_filter_definitions(workflow)
         proof_paths = (
             "scripts/ci/run-writer-namespace-windows-targets.sh",
@@ -626,7 +633,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             for proof_path in proof_paths:
                 self.assertEqual(filters[selector].count(proof_path), 1)
         self.assertEqual(filters["cross_os_rust"].count("src/services/writer_protocol/**"), 1)
-        self.assertNotIn(proof_paths[1], job)
+        self.assertNotIn(proof_paths[1], job_block(workflow, "check_fast_cross_os_targets"))
         for proof_path in proof_paths:
             filter_line = f"              - '{proof_path}'"
             mutations = (
@@ -734,22 +741,29 @@ class FastCheckCiWiringTests(unittest.TestCase):
             "needs.changes.outputs.cross_os_rust == 'true'",
         )
         self.assertEqual(cross_os["strategy"]["matrix"]["os"], ["windows-latest"])
-        self.assertEqual(mirror["needs"], ["changes", "check_fast_cross_os"])
+        self.assertEqual(
+            mirror["needs"],
+            ["changes", "check_fast_cross_os", "check_fast_cross_os_targets"],
+        )
         self.assertEqual(mirror["if"], "always()")
-        mirror_step = next(
+        mirror_steps = [
             step
             for step in mirror["steps"]
             if step.get("run") == "./scripts/required-check-mirror.sh"
-        )
+        ]
         self.assertEqual(
-            mirror_step["env"],
-            {
-                "CHANGED_PATHS_RESULT": "${{ needs.changes.result }}",
-                "FILTER_NAME": "cross_os_rust",
-                "FILTER_OUTPUT": "${{ needs.changes.outputs.cross_os_rust }}",
-                "UPSTREAM_JOB_NAME": "check_fast_cross_os",
-                "UPSTREAM_RESULT": "${{ needs.check_fast_cross_os.result }}",
-            },
+            [step["env"] for step in mirror_steps],
+            [
+                {
+                    "BASH_ENV": "/dev/null",
+                    "CHANGED_PATHS_RESULT": "${{ needs.changes.result }}",
+                    "FILTER_NAME": "cross_os_rust",
+                    "FILTER_OUTPUT": "${{ needs.changes.outputs.cross_os_rust }}",
+                    "UPSTREAM_JOB_NAME": runner,
+                    "UPSTREAM_RESULT": "${{ needs.%s.result }}" % runner,
+                }
+                for runner in ("check_fast_cross_os", "check_fast_cross_os_targets")
+            ],
         )
 
     def test_provider_and_session_host_trees_select_native_windows_lane(self) -> None:
@@ -1359,6 +1373,69 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     env = {**os.environ, **step["env"], "UPSTREAM_RESULT": result}
                     process = subprocess.run(["bash", "scripts/required-check-mirror.sh"], cwd=REPO_ROOT, env=env, text=True, capture_output=True, check=False)
                     self.assertEqual(process.returncode == 0, result == "success", process.stderr)
+
+    def run_cross_os_mirror(self, mirror: dict, cross_os_rust: str, results: dict[str, str]) -> bool:
+        """Evaluate the mirror steps as Actions would; unlisted needs read as ''."""
+        context = {"changes": "success", **results}
+
+        def expand(value: str) -> str:
+            def lookup(match: re.Match[str]) -> str:
+                job, field = match.groups()
+                if job not in mirror["needs"]:
+                    return ""
+                return cross_os_rust if field == "outputs.cross_os_rust" else context[job]
+
+            return re.sub(r"\$\{\{ needs\.([\w-]+)\.(result|outputs\.\w+) \}\}", lookup, value)
+
+        for step in mirror["steps"]:
+            if "run" not in step:
+                continue
+            env = {**os.environ, **{key: expand(value) for key, value in step["env"].items()}}
+            process = subprocess.run(["bash", "-c", step["run"]], cwd=REPO_ROOT, env=env, text=True, capture_output=True, check=False)
+            if process.returncode != 0:
+                return False
+        return True
+
+    def test_cross_os_required_context_fails_closed_on_either_runner(self) -> None:
+        mirror = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"][
+            "check_fast_cross_os_required_context"
+        ]
+        outcomes = ("success", "failure", "cancelled", "skipped")
+        for cross_os_rust in ("true", "false"):
+            for check in outcomes:
+                for targets in outcomes:
+                    with self.subTest(cross_os_rust=cross_os_rust, check=check, targets=targets):
+                        allowed = {"success"} if cross_os_rust == "true" else {"success", "skipped"}
+                        self.assertEqual(
+                            self.run_cross_os_mirror(
+                                mirror,
+                                cross_os_rust,
+                                {"check_fast_cross_os": check, "check_fast_cross_os_targets": targets},
+                            ),
+                            check in allowed and targets in allowed,
+                        )
+
+    def test_cross_os_split_rejects_fail_open_mutations(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        mirror = job_block(workflow, "check_fast_cross_os_required_context")
+        targets = job_block(workflow, "check_fast_cross_os_targets")
+        targets_mirror = step_block(mirror, "Mirror check_fast_cross_os_targets result for branch protection")
+        writer = step_block(targets, "Writer namespace exact Windows targets")
+        mutations = (
+            (mirror, mirror.replace("      - check_fast_cross_os_targets\n", "", 1), "cross-OS required-context mirror must retain exact needs"),
+            (mirror, mirror.replace("    if: always()\n", "", 1), "cross-OS required-context mirror must retain exact if"),
+            (mirror, mirror.replace(targets_mirror, "", 1), 'must retain exactly one "Mirror check_fast_cross_os_targets result for branch protection" step'),
+            (mirror, mirror.replace(targets_mirror, targets_mirror.replace("${{ needs.changes.outputs.cross_os_rust }}", "'false'"), 1), "must pin exact step env"),
+            (targets, targets.replace("    runs-on:", "    continue-on-error: true\n    runs-on:", 1), "cross-OS exact targets job must not be allowed to continue on error"),
+            (targets, targets.replace("    if: needs.changes.outputs.rust_compile == 'true' && ", "    if: ", 1), "cross-OS exact targets job must retain exact if"),
+            (targets, targets.replace(writer, "", 1), 'must retain exactly one "Writer namespace exact Windows targets" step'),
+        )
+        for original, changed, diagnostic in mutations:
+            with self.subTest(diagnostic=diagnostic):
+                self.assertNotEqual(original, changed)
+                result = self.run_hardening_fixture(workflow.replace(original, changed, 1))
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(diagnostic, result.stderr)
 
     def test_required_job_needs_closure_has_role_specific_scheduling_policy(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
@@ -2615,6 +2692,38 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             {path.name: path.read_text(encoding="utf-8") for path in workflow_paths()},
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_hardening_rejects_main_windows_warm_that_misses_pr_cache_key(self) -> None:
+        source = MAIN_WORKFLOW.read_text(encoding="utf-8")
+        warm = source.index("\n  # Warms the shared cargo registry cache")
+        variants = {
+            "missing": (source[:warm] + "\n", "windows_cache_warm is missing"),
+            "save-if": (
+                source[:warm] + source[warm:].replace(
+                    "${{ github.ref == 'refs/heads/main' }}",
+                    "${{ github.event_name == 'pull_request' }}",
+                ),
+                "rust-cache must save the shared key from main only",
+            ),
+            "env drift": (
+                source[:warm] + source[warm:].replace(
+                    '      CARGO_PROFILE_TEST_DEBUG: "0"\n    steps:', "    steps:", 1
+                ),
+                "env must equal check_fast_cross_os",
+            ),
+            "runs tests": (
+                source.replace("cargo test --lib --no-run", "cargo test --lib"),
+                "without running tests",
+            ),
+        }
+        for name, (mutated, reason) in variants.items():
+            with self.subTest(name):
+                self.assertNotEqual(mutated, source)
+                result = self.run_hardening_fixture(
+                    PR_WORKFLOW.read_text(encoding="utf-8"), {"ci-main.yml": mutated}
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(reason, result.stderr)
 
     def test_hardening_rejects_flow_sequence_manual_trigger(self) -> None:
         source = PR_WORKFLOW.read_text(encoding="utf-8")

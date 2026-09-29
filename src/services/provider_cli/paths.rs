@@ -24,15 +24,6 @@ pub fn launch_artifact_path(root: &Path, session_key: &str) -> PathBuf {
     launch_artifacts_dir(root).join(format!("{}.json", session_key_file_stem(session_key)))
 }
 
-/// `~/.adk/{env}/runtime/provider-cli-diagnostics/{timestamp}.json`
-// #3034: path builder for the unwired snapshot-to-disk diagnostics surface.
-#[allow(dead_code)]
-pub fn diagnostics_snapshot_path(root: &Path, timestamp_ms: u128) -> PathBuf {
-    root.join("runtime")
-        .join("provider-cli-diagnostics")
-        .join(format!("{timestamp_ms}.json"))
-}
-
 /// `~/.adk/{env}/runtime/provider-cli-smoke/{provider}-{channel}.json`
 pub fn smoke_result_path(root: &Path, provider: &str, channel: &str) -> PathBuf {
     root.join("runtime")

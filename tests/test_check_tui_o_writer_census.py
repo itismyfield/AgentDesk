@@ -114,9 +114,99 @@ class CensusGateTests(unittest.TestCase):
         ok, message = self.run_gate()
         self.assertTrue(ok, message)
 
+    def test_deferred_row_still_passes_the_census(self) -> None:
+        self.maps["CENSUS"]["sink.rs"] = ("W20", "DEFER_A1_4B")
+        ok, message = self.run_gate()
+        self.assertTrue(ok, message)
+        self.assertIn("1 rows deferred", message)
+
     def test_real_tree_passes(self) -> None:
         ok, message = census.check(ROOT)
         self.assertTrue(ok, message)
+
+
+class FlipReadinessTests(unittest.TestCase):
+    """Census PASS must not read as flip readiness: each gap keeps flip_ready false."""
+
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        tests = self.root / "src/services/discord/funnel_tests.rs"
+        tests.parent.mkdir(parents=True)
+        tests.write_text("#[test]\nfn o_delegated_funnel_cut() {}\n", encoding="utf-8")
+
+    def readiness(self, **overrides) -> tuple[bool, str]:
+        maps = {
+            "CENSUS": {"sink.rs": ("W20", "CUT_D")},
+            "FLIP_READY_TESTS": {"W20": ("o_delegated_funnel_cut",)},
+            **overrides,
+        }
+        with mock.patch.multiple(census, **maps):
+            return census.flip_readiness(self.root)
+
+    def test_complete_funnels_are_flip_ready(self) -> None:
+        self.assertEqual(self.readiness(), (True, "flip_ready=true: 1 funnel tests over 1 rows"))
+
+    def test_each_gap_keeps_flip_ready_false(self) -> None:
+        gaps = {
+            "deferred census rows: sink.rs": ("CENSUS", {"sink.rs": ("W30", "DEFER_A1_4B")}),
+            "FLIP_READY_TESTS is empty": ("FLIP_READY_TESTS", {}),
+            "funnel tests missing from src/: o_delegated_gone": (
+                "FLIP_READY_TESTS", {"W20": ("o_delegated_funnel_cut", "o_delegated_gone")}
+            ),
+        }
+        for reason, (key, value) in gaps.items():
+            with self.subTest(reason=reason):
+                ready, verdict = self.readiness(**{key: value})
+                self.assertFalse(ready, verdict)
+                self.assertIn(reason, verdict)
+
+    def test_empty_funnel_blocks_readiness_with_another_funnel_present(self) -> None:
+        ready, verdict = self.readiness(FLIP_READY_TESTS={
+            "W20": ("o_delegated_funnel_cut",), "W33": (),
+        })
+        self.assertFalse(ready, verdict)
+        self.assertIn("funnel test lists empty: W33", verdict)
+
+    def test_funnel_names_require_attached_test_attributes_outside_prose(self) -> None:
+        source = self.root / "src/services/discord/funnel_tests.rs"
+        cases = {
+            "line comment": ("// #[test]\n// fn required() {}\n", False),
+            "nested block comment": ("/* outer /* #[test] */ fn required() {} */", False),
+            "string": ('const TEXT: &str = "#[test] fn required() {}";', False),
+            "raw string": ('const TEXT: &str = r#"\n#[tokio::test]\nasync fn required() {}\n"#;', False),
+            "ordinary function": ("fn required() {}", False),
+            "commented attribute": ("// #[test]\nfn required() {}", False),
+            "attribute on preceding function": ("#[test]\nfn other() {}\nfn required() {}", False),
+            "ignored test": ("#[test]\n#[ignore]\nfn required() {}", False),
+            "ignore before async test": (
+                '#[ignore = "slow"]\n#[tokio::test]\nasync fn required() {}', False,
+            ),
+            "synchronous test": ("#[test]\nfn required() {}", True),
+            "async test": ("#[tokio::test]\nasync fn required() {}", True),
+            "async test options and attributes": (
+                '#[tokio::test(flavor = "multi_thread", worker_threads = 2)]\n'
+                '#[cfg(test)]\n/* note */ async fn required() {}', True,
+            ),
+        }
+        for label, (text, expected) in cases.items():
+            with self.subTest(case=label):
+                source.write_text(text, encoding="utf-8")
+                ready, verdict = self.readiness(FLIP_READY_TESTS={"W20": ("required",)})
+                self.assertEqual(ready, expected, verdict)
+                if not expected:
+                    self.assertIn("funnel tests missing from src/: required", verdict)
+
+    def test_require_flip_ready_turns_a_false_verdict_into_rc_1(self) -> None:
+        passing = (True, "OK")
+        for ready, args, rc in ((False, [], 0), (False, ["--require-flip-ready"], 1),
+                                (True, ["--require-flip-ready"], 0)):
+            with self.subTest(ready=ready, args=args):
+                with mock.patch.object(census, "check", return_value=passing), \
+                        mock.patch.object(census, "flip_readiness", return_value=(ready, "v")), \
+                        mock.patch("sys.stdout"):
+                    self.assertEqual(census.main(args), rc)
 
 
 def _copy(value):
