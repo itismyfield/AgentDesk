@@ -2,6 +2,7 @@
 //! is Owned and the channel's delivery lease is held, and settles unclear results from history.
 
 pub mod actor;
+pub mod binding;
 pub mod confirm;
 pub mod deliver;
 pub mod pieces;
@@ -10,6 +11,8 @@ pub mod round_trip;
 use std::future::Future;
 
 use serde::{Deserialize, Serialize};
+
+use crate::services::tui_o::shadow::SourceId;
 
 /// `tui_o.writer` settings; nothing is posted unless explicitly enabled.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +97,30 @@ pub enum WriterAlarm {
     },
     /// Capture waits until delivered segments are collected; nothing is dropped.
     SpoolFull,
+    /// The binding log skipped a seq; the channel stops before applying anything past it.
+    BindingGap {
+        expected: u64,
+        found: u64,
+    },
+    /// A bind whose transcript file is still unnamed; later binds wait behind it.
+    BindingPending {
+        seq: u64,
+    },
+    /// The source spools but posts nothing until its start is resolved.
+    BoundaryPending {
+        source: SourceId,
+    },
+    /// An old source kept growing well after its successor was bound; both stay read.
+    SourceStillGrowing {
+        source: SourceId,
+    },
+    TooManyReaders {
+        count: usize,
+    },
+    /// A retired source grew; it is read again.
+    RetiredSourceGrew {
+        source: SourceId,
+    },
 }
 
 pub trait AlarmSink: Send + Sync {

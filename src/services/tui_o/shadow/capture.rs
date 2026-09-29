@@ -86,6 +86,11 @@ impl SourceCapture {
         hex::encode(self.prefix.clone().finalize())
     }
 
+    /// The open file's length now, even after its path is renamed.
+    pub fn file_len(&self) -> io::Result<u64> {
+        Ok(self.file.metadata()?.len())
+    }
+
     /// Rehashes `0..captured_through` from disk; polls only re-check the tail guard.
     pub fn verify_prefix(&self) -> io::Result<bool> {
         let (disk, _) = hash_prefix(&self.file, self.captured_through)?;

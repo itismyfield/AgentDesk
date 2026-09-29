@@ -3,6 +3,7 @@
 
 mod durable;
 pub mod ledger;
+pub mod rotation;
 pub mod spool;
 
 use std::collections::BTreeMap;
