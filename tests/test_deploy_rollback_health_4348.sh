@@ -310,11 +310,13 @@ run_gate_cases() {
     health_json_is_ready "$TUI_UNPROVEN_STANDBY_BODY" 1 1 1
   assert_rc "[$mode] runner without TUI role evidence → NOT ready" 1 \
     health_json_is_ready "$TUI_RUNNER_BODY" 1 1 1
-  for body_name in TUI_COMMA_ELEMENT_BODY TUI_COMMA_GARBAGE_BODY; do
-    assert_rc "[$mode] $body_name → NOT ready (release)" 1 \
-      health_json_is_ready "${!body_name}" 1 1 1 1
-    assert_rc "[$mode] $body_name → NOT ready" 1 \
-      health_json_is_ready "${!body_name}" 0 1
+  comma_case=0
+  for body in "$TUI_COMMA_ELEMENT_BODY" "$TUI_COMMA_GARBAGE_BODY"; do
+    comma_case=$((comma_case + 1))
+    assert_rc "[$mode] comma inside evidence element #$comma_case → NOT ready (release)" 1 \
+      health_json_is_ready "$body" 1 1 1 1
+    assert_rc "[$mode] comma inside evidence element #$comma_case → NOT ready" 1 \
+      health_json_is_ready "$body" 0 1
   done
   assert_rc "[$mode] evidence with array whitespace → READY (release)" 0 \
     health_json_is_ready "$TUI_SPACED_EVIDENCE_BODY" 1 1 1 1
