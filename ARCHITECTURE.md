@@ -71,6 +71,7 @@ src/
 │   ├── migrate.rs
 │   ├── mod.rs
 │   ├── monitoring.rs
+│   ├── o.rs
 │   ├── o_shadow.rs
 │   ├── query.rs
 │   ├── restart_terminal_proof.rs
@@ -1256,6 +1257,8 @@ src/
 │   │   │   ├── liveness.rs
 │   │   │   ├── loop_poll_prologue.rs
 │   │   │   ├── no_result_exits.rs
+│   │   │   ├── o_delegated_arm.rs
+│   │   │   ├── o_delegated_watcher_tests.rs
 │   │   │   ├── orphan_status_panel_cleanup.rs
 │   │   │   ├── orphan_terminal_frame.rs
 │   │   │   ├── owed_range_baseline_tests.rs
@@ -1951,8 +1954,11 @@ src/
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs
 │   │   │   ├── round_trip.rs
+│   │   │   ├── switch.rs
+│   │   │   ├── switch_tests.rs
 │   │   │   └── writer_tests.rs
 │   │   ├── alarm.rs
+│   │   ├── cutover.rs
 │   │   ├── ownership.rs
 │   │   ├── shadow_host.rs
 │   │   └── topology.rs

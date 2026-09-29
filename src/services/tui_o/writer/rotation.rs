@@ -60,7 +60,7 @@ struct Reader {
     growth_alarmed: bool,
     /// Set while retired: the source is only stat-watched until then.
     watch_until: Option<Instant>,
-    /// The old source's length at its rotation; later readers wait until it is read and spooled.
+    /// The old source's length at its rotation; its successor waits until it is read and spooled.
     drain_to: Option<u64>,
 }
 
@@ -157,6 +157,22 @@ fn scan_lineage(provider: ShadowProvider, parent: &SourceId) -> Option<Keys> {
     Some(keys)
 }
 
+/// How many successor links lead back from a source; a predecessor's spool replays before it.
+fn predecessors(rotation: &Rotation, source: &SourceId) -> usize {
+    let (mut key, mut count) = (source_key(source), 0);
+    while count < rotation.successors.len() {
+        let Some(prev) = rotation
+            .successors
+            .iter()
+            .find(|(_, next)| source_key(next) == key)
+        else {
+            break;
+        };
+        (key, count) = (prev.0.clone(), count + 1);
+    }
+    count
+}
+
 fn bound_source(event: &BindingEvent) -> Option<&SourceId> {
     match &event.record {
         BindingRecord::Bound {
@@ -166,6 +182,18 @@ fn bound_source(event: &BindingEvent) -> Option<&SourceId> {
         | BindingRecord::Resolved { source, .. } => Some(source),
         _ => None,
     }
+}
+
+/// The last event binding a source `attached` accepts; the binding checkpoint starts there.
+pub fn binding_baseline(
+    events: &[BindingEvent],
+    attached: impl Fn(&SourceId) -> bool,
+) -> Option<u64> {
+    let bound = events
+        .iter()
+        .rev()
+        .find(|e| bound_source(e).is_some_and(&attached));
+    bound.map(|event| event.seq)
 }
 
 impl<B: BindingEvents> Sources<B> {
@@ -188,18 +216,24 @@ impl<B: BindingEvents> Sources<B> {
         }
     }
 
-    /// Re-derives every retained spool in bind order, then reopens each source at its cursor.
+    /// Applies operator-resolved boundaries, re-derives every retained spool with predecessors
+    /// first, then reopens each source at its cursor.
     pub fn resume<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
         deriver: &mut UnitDeriver,
         owed: &mut VecDeque<Derived>,
     ) -> Result<(), WriterAlarm> {
+        let resolved = writer.store().apply_resolved_boundaries();
+        resolved.map_err(halted("resolved boundary"))?;
         self.rotation = writer.store().rotation().map_err(halted("rotation"))?;
         let checkpoint = writer.store().binding_checkpoint();
         self.checkpoint = checkpoint.map_err(halted("binding checkpoint"))?;
         let mut cursors: Vec<_> = writer.store().cursors().cloned().collect();
-        cursors.sort_by_key(|cursor| self.rotation.link(&cursor.source).map_or(0, |l| l.seq));
+        cursors.sort_by_key(|cursor| {
+            let seq = self.rotation.link(&cursor.source).map_or(0, |l| l.seq);
+            (predecessors(&self.rotation, &cursor.source), seq)
+        });
         let now = Instant::now();
         for cursor in cursors {
             let (key, mut captured_any) = (source_key(&cursor.source), false);
@@ -346,15 +380,9 @@ impl<B: BindingEvents> Sources<B> {
             return Ok(None);
         };
         let store = writer.store();
-        let attached = |source: &SourceId| store.cursor(source).is_some();
-        let seq = events
-            .iter()
-            .rev()
-            .find(|event| bound_source(event).is_some_and(attached))
-            .map(|event| event.seq)
-            .ok_or_else(|| {
-                halt("no binding baseline: no event binds a source attached at the switch")
-            })?;
+        let seq = binding_baseline(&events, |source| store.cursor(source).is_some()).ok_or_else(
+            || halt("no binding baseline: no event binds a source attached at the switch"),
+        )?;
         let seeded = writer.store().set_binding_checkpoint(seq);
         seeded.map_err(halted("binding checkpoint"))?;
         self.checkpoint = Some(seq);
@@ -463,8 +491,8 @@ impl<B: BindingEvents> Sources<B> {
         Ok(())
     }
 
-    /// Spools each read source in bind order. Readers after an old source still short of its
-    /// rotation-time length wait, so that whole backlog is owed before anything bound later.
+    /// Spools each read source once. A successor waits while a predecessor is still short of its
+    /// rotation-time length, so that backlog is owed first whatever the reader order.
     pub fn capture<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
@@ -474,55 +502,93 @@ impl<B: BindingEvents> Sources<B> {
         if self.checkpoint.is_none() {
             return Ok(());
         }
-        for index in 0..self.readers.len() {
-            let reader = &mut self.readers[index];
-            let Some(capture) = reader
-                .capture
-                .as_mut()
-                .filter(|_| reader.watch_until.is_none())
-            else {
-                reader.drain_to = None;
-                continue;
-            };
-            let retried = reader.pending.is_some();
-            let batch = match reader.pending.take() {
-                Some(batch) => batch,
-                None => match capture.poll(MAX_READ_BYTES) {
-                    CaptureOutcome::Batch(batch) => batch,
-                    CaptureOutcome::Anomaly(anomaly) => {
-                        let (kind, detail) = (anomaly.kind, anomaly.detail);
-                        return Err(halt(format!("source {kind:?}: {detail}")));
-                    }
-                },
-            };
-            let read_through = capture.read_through();
-            match writer.store().append_spool(&batch, &capture.prefix_hash()) {
-                Ok(()) => reader.captured_any |= !batch.records.is_empty(),
-                Err(StoreError::SpoolFull) => {
-                    if !retried {
-                        writer.alarm(WriterAlarm::SpoolFull);
-                    }
-                    reader.pending = Some(batch);
-                    if reader.drain_to.is_some() {
-                        break;
-                    }
-                    continue;
-                }
-                Err(error) => return Err(halt(format!("spool append: {error:?}"))),
-            }
-            let held = reader.drain_to.is_some_and(|end| read_through < end);
-            if !held {
-                reader.drain_to = None;
-            }
-            let key = source_key(&batch.source);
-            for record in &batch.records {
-                self.owe(deriver, owed, &key, record);
-            }
-            if held {
-                break;
-            }
+        let mut left: Vec<usize> = (0..self.readers.len()).collect();
+        while let Some(at) = left.iter().position(|&index| !self.held(index)) {
+            let index = left.remove(at);
+            self.capture_one(writer, deriver, owed, index)?;
         }
-        self.flush(writer)
+        self.flush(writer)?;
+        if let Some(source) = self.stalled(deriver) {
+            return Err(WriterAlarm::RotationStalled { source });
+        }
+        Ok(())
+    }
+
+    fn capture_one<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+        &mut self,
+        writer: &mut ChannelWriter<P, L, A>,
+        deriver: &mut UnitDeriver,
+        owed: &mut VecDeque<Derived>,
+        index: usize,
+    ) -> Result<(), WriterAlarm> {
+        let reader = &mut self.readers[index];
+        let Some(capture) = reader
+            .capture
+            .as_mut()
+            .filter(|_| reader.watch_until.is_none())
+        else {
+            reader.drain_to = None;
+            return Ok(());
+        };
+        let retried = reader.pending.is_some();
+        let batch = match reader.pending.take() {
+            Some(batch) => batch,
+            None => match capture.poll(MAX_READ_BYTES) {
+                CaptureOutcome::Batch(batch) => batch,
+                CaptureOutcome::Anomaly(anomaly) => {
+                    let (kind, detail) = (anomaly.kind, anomaly.detail);
+                    return Err(halt(format!("source {kind:?}: {detail}")));
+                }
+            },
+        };
+        let read_through = capture.read_through();
+        match writer.store().append_spool(&batch, &capture.prefix_hash()) {
+            Ok(()) => reader.captured_any |= !batch.records.is_empty(),
+            Err(StoreError::SpoolFull) => {
+                if !retried {
+                    writer.alarm(WriterAlarm::SpoolFull);
+                }
+                reader.pending = Some(batch);
+                return Ok(());
+            }
+            Err(error) => return Err(halt(format!("spool append: {error:?}"))),
+        }
+        if !reader.drain_to.is_some_and(|end| read_through < end) {
+            reader.drain_to = None;
+        }
+        let key = source_key(&batch.source);
+        for record in &batch.records {
+            self.owe(deriver, owed, &key, record);
+        }
+        Ok(())
+    }
+
+    /// A reading predecessor of this reader has not yet spooled through its rotation-time length.
+    fn held(&self, index: usize) -> bool {
+        let source = &self.readers[index].source;
+        self.readers.iter().any(|reader| {
+            reader.drain_to.is_some()
+                && reader.reading()
+                && self.rotation.successors.get(&source_key(&reader.source)) == Some(source)
+        })
+    }
+
+    /// An old source the full spool refuses while it holds a successor, with an announced unit
+    /// keeping GC off: its sealing record may sit behind the barrier, so no step frees the spool.
+    fn stalled(&self, deriver: &UnitDeriver) -> Option<SourceId> {
+        if !deriver.has_unsealed() {
+            return None;
+        }
+        let holds = |old: &Reader| {
+            let successor = self.rotation.successors.get(&source_key(&old.source));
+            let successor = successor.and_then(|s| self.readers.iter().find(|r| r.source == *s));
+            successor.is_some_and(Reader::reading)
+        };
+        let stuck = |old: &&Reader| old.pending.is_some() && old.drain_to.is_some() && holds(old);
+        self.readers
+            .iter()
+            .find(stuck)
+            .map(|old| old.source.clone())
     }
 
     /// Derives a record unless the source's boundary withholds it or its parent already has it.
