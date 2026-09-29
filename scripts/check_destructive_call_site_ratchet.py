@@ -98,15 +98,19 @@ not the caller, resolves the inflight path.  Its limits:
   that the earlier pattern let grow without limit.
 
 ``host_terminate`` counts spellings of the Herdr close RPCs (``pane.close``,
-``server.stop``) across all of ``src/**`` including tests: string literals after
-escape decoding, adjacent literals joined across ``,``/``+`` (``concat!``), and
-the method names as identifier word parts in any case style (``PaneClose``,
-``herdr_server_stop``, ``CLOSE_PANE``), which also covers ``use ... as`` aliases
-and wrapper definitions. It is owner-only, not merely no-growth: a count in any file
-but ``HOST_TERMINATE_OWNER`` fails even when the baseline lists it, and owner
-growth still needs a reviewed baseline diff. Literals assembled out of order
-(``format!("{}.close", "pane")``), character-by-character, at runtime or from
-a non-Rust file stay unseen, and the count proves nothing about the warrant a call receives.
+``server.stop``) across all of ``src/**`` including tests: each string or char
+literal after escape decoding, and ``stringify!`` tokens; pieces joined only by a
+real concatenation (``concat!`` arguments, ``+`` chains, ``[..].concat()`` or
+``.join(sep)``, positional ``format!``-family arguments), counted when a match
+spans a join so no piece counts twice; and the method names as identifier word
+parts in any case style (``PaneClose``, ``RPCPaneClose``, ``herdr_server_stop``,
+``CLOSE_PANE``), which also covers ``use ... as`` aliases and wrapper
+definitions. Array elements, tuple items and call arguments are never joined, and
+completed-state names (``PANE_CLOSED``) do not count. It is owner-only, not merely
+no-growth: a count in any file but ``HOST_TERMINATE_OWNER`` fails even when the
+baseline lists it, and owner growth still needs a reviewed baseline diff. Pieces
+passed through a variable, built at runtime (``push_str``, ``+=``) or read from a
+non-Rust file stay unseen, and the count proves nothing about the warrant a call receives.
 
 ``--check`` rejects growth in an existing file, every UNLISTED file, any
 host_terminate spelling outside its owner, and any identity/delivery pairing
@@ -205,15 +209,24 @@ HOST_TERMINATE_LITERAL_PATTERN = re.compile(
     r"(?i)\bpane\s*\.\s*close\b|\bserver\s*\.\s*stop\b"
 )
 # Word parts in any case style, so prefixes and suffixes (`herdr_pane_close`,
-# `PaneCloseRequest`) still count while `pane_closed` and `server_stopped` do not.
+# `RPCPaneClose`) still count while `pane_closed` and `PANE_CLOSED` do not.
 HOST_TERMINATE_IDENT_PATTERN = re.compile(
-    r"(?:(?<![A-Za-z0-9])|(?<=[a-z0-9])(?=[A-Z]))"
-    r"(?i:pane_?close|server_?stop|close_?pane|stop_?server)(?![a-z])"
+    r"(?:(?<![A-Za-z0-9])|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z]))"
+    r"(?i:pane_?close|server_?stop|close_?pane|stop_?server)"
+    r"(?:(?<=[a-z])(?![a-z])|(?<=[A-Z])(?![A-Za-z]))"
 )
-# Code between two literals that still concatenates them.
-_LITERAL_JOINERS = re.compile(r"^(?:concat!\(|[,+&()])*$")
-_ESCAPE = re.compile(r"\\(?:x([0-9A-Fa-f]{2})|u\{([0-9A-Fa-f_]{1,6})\}|\n\s*|(.))", re.S)
-_HOST_TERMINATE_PREFILTER = re.compile(r"(?i)close|stop|\\x|\\u\{")
+_ESCAPE = re.compile(
+    r"\\(?:x([0-9A-Fa-f]{2})|u\{([0-9A-Fa-f_]+)\}|\n\s*|(.))", re.S
+)
+_CODE_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\S")
+_CONCAT_MACROS = frozenset({"concat", "concat_bytes"})
+# Macros whose first argument (after the writer for `write*!`) is a format string.
+_FORMAT_MACROS = frozenset(
+    {"format", "format_args", "print", "println", "eprint", "eprintln", "panic"}
+)
+_WRITE_MACROS = frozenset({"write", "writeln"})
+# `lit.to_owned()` and friends keep a literal's value inside a `+` chain.
+_STRING_CONVERSIONS = frozenset({"to_owned", "to_string", "into", "as_str", "clone"})
 _SIMPLE_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "0": "\0"}
 
 
@@ -269,8 +282,11 @@ def _literal_content(token: str) -> str:
         hex_byte, unicode, simple = match.groups()
         if hex_byte:
             return chr(int(hex_byte, 16))
-        if unicode:
-            return chr(int(unicode.replace("_", ""), 16))
+        if unicode is not None:
+            digits = unicode.replace("_", "")
+            if not digits or int(digits, 16) > 0x10FFFF:
+                return "\0"
+            return chr(int(digits, 16))
         if simple is None:
             return ""
         return _SIMPLE_ESCAPES.get(simple, simple)
@@ -278,42 +294,276 @@ def _literal_content(token: str) -> str:
     return _ESCAPE.sub(decode, body)
 
 
-def host_terminate_count(text: str) -> int:
-    """Close-RPC spellings in comment-free source; see the module docstring."""
-    # Every counted form spells close/stop or hides a letter behind an escape.
-    if not _HOST_TERMINATE_PREFILTER.search(text):
-        return 0
+def _host_terminate_tokens(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Comment-free code text plus a token stream of decoded literals and code."""
     state = RUST_LEX.StripState()
     code: list[str] = []
-    literals: list[str] = []
-    pending: list[str] = []
+    tokens: list[tuple[str, str]] = []
     open_literal: list[str] | None = None
+
+    def close_literal() -> None:
+        nonlocal open_literal
+        tokens.append(("lit", _literal_content("\n".join(open_literal))))
+        open_literal = None
+
     for line in text.splitlines():
         for kind, chunk in RUST_LEX.lex_segments(line, state):
             if kind == RUST_LEX.LITERAL:
                 if open_literal is not None:
                     open_literal.append(chunk)
                     continue
-                if pending and not _LITERAL_JOINERS.match("".join(pending)):
-                    literals.append("\0")
-                pending = []
                 open_literal = [chunk]
-            else:
-                if open_literal is not None:
-                    literals.append(_literal_content("\n".join(open_literal)))
-                    open_literal = None
-                if kind == RUST_LEX.CODE:
-                    code.append(chunk)
-                    pending.append(chunk)
+                continue
+            if open_literal is not None:
+                close_literal()
+            if kind == RUST_LEX.CODE:
+                code.append(chunk)
+                tokens.extend(("code", tok) for tok in _CODE_TOKEN.findall(chunk))
         # A literal still open at end of line continues on the next one.
         if open_literal is not None and not (state.in_string or state.raw_hashes is not None):
-            literals.append(_literal_content("\n".join(open_literal)))
-            open_literal = None
+            close_literal()
         code.append("\n")
     if open_literal is not None:
-        literals.append(_literal_content("\n".join(open_literal)))
-    found = len(HOST_TERMINATE_IDENT_PATTERN.findall(" ".join(code)))
-    return found + len(HOST_TERMINATE_LITERAL_PATTERN.findall("".join(literals)))
+        close_literal()
+    return " ".join(code), tokens
+
+
+def _host_terminate_tree(tokens: list[tuple[str, str]]) -> list[list[tuple]]:
+    """Nest tokens into delimiter groups ``("group", macro, opener, args)``.
+
+    Commas split a group's arguments; a group opened right after ``name!``
+    records that macro name.  The root is one argument list.
+    """
+    stack: list[tuple[str | None, str | None, list[list[tuple]]]] = [(None, None, [[]])]
+    for kind, value in tokens:
+        current = stack[-1][2][-1]
+        if kind == "code" and value in "([{":
+            macro = None
+            if (
+                len(current) >= 2
+                and current[-1] == ("code", "!")
+                and current[-2][0] == "code"
+                and current[-2][1].isidentifier()
+            ):
+                macro = current[-2][1]
+                del current[-2:]
+            stack.append((macro, value, [[]]))
+        elif kind == "code" and value in ")]}" and len(stack) > 1:
+            macro, opener, args = stack.pop()
+            stack[-1][2][-1].append(("group", macro, opener, args))
+        elif kind == "code" and value == "," and len(stack) > 1:
+            stack[-1][2].append([])
+        else:
+            current.append((kind, value))
+    while len(stack) > 1:
+        macro, opener, args = stack.pop()
+        stack[-1][2][-1].append(("group", macro, opener, args))
+    return stack[0][2]
+
+
+def _units(arg: list[tuple]) -> list[tuple]:
+    """Fold ``[..].concat()``/``.join(sep)`` and conversion suffixes into one unit."""
+    units: list[tuple] = []
+    i = 0
+    while i < len(arg):
+        node = arg[i]
+        tail = arg[i + 1 : i + 4]
+        if (
+            node[0] == "group"
+            and node[2] == "["
+            and node[1] in (None, "vec")
+            and len(tail) == 3
+            and tail[0] == ("code", ".")
+            and tail[1] in (("code", "concat"), ("code", "join"))
+            and tail[2][0] == "group"
+            and tail[2][2] == "("
+        ):
+            units.append(("arraycat", node, tail[2]))
+            i += 4
+        else:
+            units.append(node)
+            i += 1
+        while (
+            i + 2 < len(arg)
+            and arg[i] == ("code", ".")
+            and arg[i + 1][0] == "code"
+            and arg[i + 1][1] in _STRING_CONVERSIONS
+            and arg[i + 2][0] == "group"
+            and arg[i + 2][2] == "("
+            and _unit_value(units[-1]) is not None
+        ):
+            i += 3
+    return units
+
+
+def _arg_value(arg: list[tuple]) -> str | None:
+    """Value of an argument that is one string unit or a ``+`` chain of them."""
+    units = [unit for unit in _units(arg) if unit != ("code", "&")]
+    values: list[str] = []
+    for index, unit in enumerate(units):
+        if index % 2:
+            if unit != ("code", "+"):
+                return None
+            continue
+        value = _unit_value(unit)
+        if value is None:
+            return None
+        values.append(value)
+    return "".join(values) if values and len(units) % 2 else None
+
+
+def _format_parts(format_string: str, args: list[list[tuple]]) -> list[str | None]:
+    """Pieces of a format string interleaved with the positional arguments it names."""
+    named: dict[str, str | None] = {}
+    positional: list[str | None] = []
+    for arg in args:
+        is_named = len(arg) > 2 and arg[1] == ("code", "=") and arg[2] != ("code", "=")
+        value = _arg_value(arg[2:] if is_named else arg)
+        if is_named:
+            named[arg[0][1]] = value
+        positional.append(value)
+    parts: list[str | None] = []
+    piece, index, cursor = "", 0, 0
+    while index < len(format_string):
+        pair = format_string[index : index + 2]
+        if pair in ("{{", "}}"):
+            piece += pair[0]
+            index += 2
+            continue
+        close = format_string.find("}", index) if format_string[index] == "{" else -1
+        if close < 0:
+            piece += format_string[index]
+            index += 1
+            continue
+        name, _colon, spec = format_string[index + 1 : close].partition(":")
+        name = name.strip()
+        if not name:
+            value = positional[cursor] if cursor < len(positional) else None
+            cursor += 1
+        elif name.isdigit():
+            slot = int(name)
+            value = positional[slot] if slot < len(positional) else None
+        else:
+            value = named.get(name)
+        parts.extend([piece, None if "?" in spec else value])
+        piece, index = "", close + 1
+    parts.append(piece)
+    return parts
+
+
+def _composite_parts(unit: tuple) -> list[str | None] | None:
+    """The joined pieces a concatenating unit evaluates to, or None."""
+    if unit[0] == "arraycat":
+        _tag, array, call = unit
+        sep_args = [arg for arg in call[3] if arg]
+        if len(sep_args) > 1:
+            return None
+        sep = _arg_value(sep_args[0]) if sep_args else ""
+        parts: list[str | None] = []
+        for index, arg in enumerate(arg for arg in array[3] if arg):
+            if index:
+                parts.append(sep)
+            parts.append(_arg_value(arg))
+        return parts
+    if unit[0] != "group":
+        return None
+    _tag, macro, _opener, args = unit
+    args = [arg for arg in args if arg]
+    if macro in _CONCAT_MACROS:
+        return [_arg_value(arg) for arg in args]
+    if macro in _WRITE_MACROS:
+        args = args[1:]
+    elif macro not in _FORMAT_MACROS:
+        return None
+    format_string = _unit_value(args[0][0]) if args and len(args[0]) == 1 else None
+    if format_string is None:
+        return None
+    return _format_parts(format_string, args[1:])
+
+
+def _unit_value(unit: tuple) -> str | None:
+    """String value of one unit; unknown pieces inside it become NUL."""
+    if unit[0] == "lit":
+        return unit[1]
+    if unit[0] == "group" and unit[1] == "stringify":
+        return "".join(value for arg in unit[3] for value in _token_texts(arg))
+    if unit[0] == "group" and unit[1] is None and unit[2] == "(":
+        args = [arg for arg in unit[3] if arg]
+        return _arg_value(args[0]) if len(args) == 1 else None
+    parts = _composite_parts(unit)
+    if parts is None:
+        return None
+    return "".join("\0" if part is None else part for part in parts)
+
+
+def _token_texts(arg: list[tuple]) -> list[str]:
+    """Token spelling of one argument, as ``stringify!`` renders it minus spaces."""
+    texts: list[str] = []
+    for node in arg:
+        if node[0] == "group":
+            texts.append(node[2])
+            for index, inner in enumerate(node[3]):
+                texts.extend([","] * bool(index) + _token_texts(inner))
+            texts.append({"(": ")", "[": "]", "{": "}"}[node[2]])
+        else:
+            texts.append(node[1])
+    return texts
+
+
+def _joined_count(parts: list[str | None]) -> int:
+    """Matches that span a boundary between parts, so no part is counted twice."""
+    if len(parts) < 2:
+        return 0
+    text, bounds = "", []
+    for index, part in enumerate(parts):
+        if index:
+            bounds.append(len(text))
+        text += "\0" if part is None else part
+    return sum(
+        any(match.start() < bound < match.end() for bound in bounds)
+        for match in HOST_TERMINATE_LITERAL_PATTERN.finditer(text)
+    )
+
+
+def _literal_count(args: list[list[tuple]]) -> int:
+    found = 0
+    for arg in args:
+        units = _units(arg)
+        for unit in units:
+            parts = _composite_parts(unit)
+            if parts is not None:
+                found += _joined_count(parts)
+        # `a + "pane" + ".close"`: each maximal run of string units joined by `+`.
+        run: list[str | None] = []
+        joined = False
+        for unit in units + [("code", ";")]:
+            if unit == ("code", "&"):
+                continue
+            if unit == ("code", "+"):
+                joined = bool(run)
+                continue
+            value = _unit_value(unit)
+            if value is None or not joined:
+                found += _joined_count(run)
+                run = []
+            if value is not None:
+                run.append(value)
+            joined = False
+        for node in arg:
+            if node[0] == "lit":
+                found += len(HOST_TERMINATE_LITERAL_PATTERN.findall(node[1]))
+            elif node[0] == "group":
+                if node[1] == "stringify":
+                    found += len(HOST_TERMINATE_LITERAL_PATTERN.findall(_unit_value(node)))
+                found += _literal_count(node[3])
+    return found
+
+
+def host_terminate_count(text: str) -> int:
+    """Close-RPC spellings in comment-free source; see the module docstring."""
+    code, tokens = _host_terminate_tokens(text)
+    found = len(HOST_TERMINATE_IDENT_PATTERN.findall(code))
+    return found + _literal_count(_host_terminate_tree(tokens))
 
 
 def _is_whole_test_file(path: Path, rel: str) -> bool:
