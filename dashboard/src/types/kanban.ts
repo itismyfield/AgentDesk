@@ -249,11 +249,10 @@ export interface PipelineConfigFull {
   phase_gate: PhaseGateConfig;
 }
 
+// Pass verdict and required checks come from the gate kind (GET /api/queue/phase-gates/catalog).
 export interface PhaseGateConfig {
   dispatch_to: string;
   dispatch_type: string;
-  pass_verdict: string;
-  checks: string[];
 }
 
 export interface PipelineOverride {
