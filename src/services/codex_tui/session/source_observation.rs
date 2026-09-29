@@ -342,11 +342,11 @@ fn verify_rollout(
         .map_err(|_| Reject::RolloutUnavailable)?;
     let canonical = rooted_rollout(&root, path, suffix)?;
     let file = open_regular_file(&canonical).ok_or(Reject::RolloutUnavailable)?;
+    run_verify_step(VerifyStep::AfterOpen);
     let identity = SourceFileIdentity::from_open_file(&file);
     if identity == SourceFileIdentity::Unavailable {
         return Err(Reject::RolloutUnavailable);
     }
-    run_verify_step(VerifyStep::AfterOpen);
     let meta = first_record_session_meta(&file)?;
     run_verify_step(VerifyStep::AfterHeader);
     let meta_id = meta

@@ -550,6 +550,7 @@ src/
 │   │   │   └── response_window.rs
 │   │   ├── hook_server/
 │   │   │   ├── adoption_retry.rs
+│   │   │   ├── codex_ingress_tests.rs
 │   │   │   ├── observation_ingress.rs
 │   │   │   ├── observation_ingress_tests.rs
 │   │   │   ├── rehydration_ingress_tests.rs
@@ -1988,9 +1989,11 @@ src/
 │   │   └── topology.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── binding_events/
+│   │   │   ├── codex.rs
 │   │   │   └── lane_tests.rs
 │   │   ├── runtime_binding/
 │   │   │   ├── adopt_skip.rs
+│   │   │   ├── codex_hook.rs
 │   │   │   └── pane_registration.rs
 │   │   ├── binding_context.rs
 │   │   ├── binding_events.rs

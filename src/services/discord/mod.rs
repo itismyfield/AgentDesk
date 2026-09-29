@@ -687,6 +687,8 @@ fn increment_counter(counter: &AtomicUsize, reason: &str) -> usize {
 pub(crate) use router::try_intake_runtime_transition_after_redirect;
 #[cfg(test)]
 pub(crate) use session_runtime::resume_launch_state_for_tests;
+#[cfg(all(unix, test))]
+pub(crate) use tui_prompt_relay::rehydration::rehydrate_codex_tui_binding_for_tests;
 
 #[cfg(test)]
 pub(crate) fn register_resume_watcher_for_tests(

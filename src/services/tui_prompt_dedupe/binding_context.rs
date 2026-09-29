@@ -226,6 +226,21 @@ impl PreparedIncarnation {
         expected: Option<&str>,
         resume: bool,
     ) -> Result<Self, String> {
+        let root = (provider == "claude")
+            .then(configured_claude_projects_root)
+            .flatten();
+        Self::prepare_at(provider, tmux, channel_id, expected, resume, root)
+    }
+
+    /// Records `provider_root` as the source root the launched child will write under.
+    pub(crate) fn prepare_at(
+        provider: &str,
+        tmux: &str,
+        channel_id: Option<u64>,
+        expected: Option<&str>,
+        resume: bool,
+        provider_root: Option<PathBuf>,
+    ) -> Result<Self, String> {
         let context = BindingContext {
             schema: 1,
             provider: provider.to_owned(),
@@ -237,9 +252,7 @@ impl PreparedIncarnation {
             host: stable_host_identity(),
             expected_native_session_id: expected.map(str::to_owned),
             launch_mode: if resume { "resume" } else { "fresh" }.to_owned(),
-            provider_root: (provider == "claude")
-                .then(configured_claude_projects_root)
-                .flatten(),
+            provider_root,
         };
         sweep(
             provider,
@@ -435,6 +448,16 @@ pub(crate) mod tests {
     pub(crate) fn fixture() -> (tempfile::TempDir, [Guard; 2]) {
         let root = tempfile::tempdir().unwrap();
         let env = Guard::set_path("AGENTDESK_ROOT_DIR", root.path());
+        with_config(root, env)
+    }
+    /// `fixture` for a caller that already holds the shared env lock, so it can
+    /// take that lock before `TEST_LOCK` (the env -> dedupe order).
+    pub(crate) fn fixture_after_shared_test_env_lock() -> (tempfile::TempDir, [Guard; 2]) {
+        let root = tempfile::tempdir().unwrap();
+        let env = Guard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+        with_config(root, env)
+    }
+    fn with_config(root: tempfile::TempDir, env: Guard) -> (tempfile::TempDir, [Guard; 2]) {
         let config = root.path().join("config.yaml");
         fs::write(&config, "server: {}").unwrap();
         let config_env = Guard::set_path_after_shared_test_env_lock("AGENTDESK_CONFIG", &config);

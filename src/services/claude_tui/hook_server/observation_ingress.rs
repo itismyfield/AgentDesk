@@ -38,7 +38,8 @@ pub(crate) enum ProceedReason {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NotApplicableReason {
-    CodexNotApplicableInThisSlice,
+    CodexContextUnavailable,
+    CodexSourceRejected,
     OtherProvider,
     PayloadNotUuid,
     NotClaudeTui,
@@ -127,26 +128,33 @@ pub(crate) fn observe_binding_hook(
     let (Some(command), Some(payload_session)) = (command_session_id, payload_session_id) else {
         return IngressOutcome::Proceed(ProceedReason::NoSessionSwitch);
     };
-    if command == payload_session {
+    if command == payload_session
+        && !(provider == "codex"
+            && HookEventKind::from_path(event) == HookEventKind::SessionStart
+            && payload["source"] == "clear")
+    {
         return IngressOutcome::Proceed(ProceedReason::NoSessionSwitch);
-    }
-    match provider {
-        "claude" => {}
-        "codex" => {
-            return IngressOutcome::NotApplicable(
-                NotApplicableReason::CodexNotApplicableInThisSlice,
-            );
-        }
-        _ => return IngressOutcome::NotApplicable(NotApplicableReason::OtherProvider),
     }
     let envelope = headers
         .get(BINDING_HEADER)
         .and_then(|h| h.to_str().ok())
         .and_then(|h| decode_binding_header(h).ok());
+    let hook = HookSignal::from_payload(HookEventKind::from_path(event).as_str(), payload);
+    match provider {
+        "claude" => {}
+        "codex" => {
+            return crate::services::tui_prompt_dedupe::observe_codex_hook(
+                command,
+                payload_session,
+                &hook,
+                envelope.as_ref(),
+            );
+        }
+        _ => return IngressOutcome::NotApplicable(NotApplicableReason::OtherProvider),
+    }
     if pane_registration_failed(command, envelope.as_ref()) {
         return IngressOutcome::Unavailable(UnavailableReason::PaneRegistrationFailed);
     }
-    let hook = HookSignal::from_payload(HookEventKind::from_path(event).as_str(), payload);
     match adoption_retry::adopt_from_hook(command, payload_session, &hook) {
         AdoptionHttp::Durable(kind) => IngressOutcome::Durable(kind),
         AdoptionHttp::NotDurable(reason) => IngressOutcome::NotDurable(reason),

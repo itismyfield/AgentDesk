@@ -19,6 +19,7 @@ pub(crate) use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::file_identity;
 
 pub(crate) const BINDING_EVENTS_DIR: &str = "binding_events";
+pub(crate) mod codex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -309,8 +310,18 @@ pub(crate) fn record_rejected(proposal: &Proposal, reason: &str) -> io::Result<(
 }
 
 fn commit(proposal: &Proposal, rejected: Option<&str>) -> io::Result<()> {
-    let Some(path) = log_path(proposal.channel_id)? else {
-        return Ok(());
+    commit_with(proposal.channel_id, |writer| {
+        writer.plan(proposal, rejected)
+    })
+    .map(|_| ())
+}
+
+fn commit_with(
+    channel_id: u64,
+    plan: impl FnOnce(&mut Writer) -> Option<BindingEvent>,
+) -> io::Result<bool> {
+    let Some(path) = log_path(channel_id)? else {
+        return Ok(false);
     };
     let mut logs = lock_logs();
     let log = logs.entry(path.clone()).or_insert_with(|| ChannelLog {
@@ -328,10 +339,10 @@ fn commit(proposal: &Proposal, rejected: Option<&str>) -> io::Result<()> {
         log.writer = Some(writer);
     }
     let Some(writer) = log.writer.as_mut() else {
-        return Ok(());
+        return Ok(false);
     };
-    let Some(record) = writer.plan(proposal, rejected) else {
-        return Ok(());
+    let Some(record) = plan(writer) else {
+        return Ok(false);
     };
     if let Err(error) = writer.append(&path, &record) {
         // A line that could not be cut back off is re-read from disk before the next append.
@@ -342,7 +353,7 @@ fn commit(proposal: &Proposal, rejected: Option<&str>) -> io::Result<()> {
     }
     writer.apply(&record);
     log.notify.send_replace(record.seq);
-    Ok(())
+    Ok(true)
 }
 
 fn source_id(session: Option<&str>, path: &str, meta: &fs::Metadata) -> SourceId {

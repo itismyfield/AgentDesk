@@ -299,7 +299,8 @@ async fn receive_hook(
     // The sender stopped waiting: a late reply or wake-up would reach the next turn instead.
     if relay_receipts::reply_window_closed(&headers, Utc::now()) {
         tracing::info!(provider, event, ?ingress, "late hook observed detached");
-        let body = json!({ "ok": true, "provider": provider, "event": event, "detached": true });
+        let body = json!({ "ok": true, "provider": provider, "event": event, "detached": true,
+            "binding_observation": format!("{ingress:?}") });
         return finish_hook_receipt(&state, receipt_ticket, StatusCode::ACCEPTED, body, true);
     }
     // Keep the launch-time query UUID as the hook wait/routing identity while
@@ -552,7 +553,8 @@ async fn receive_hook(
         "ok": true,
         "provider": provider,
         "event": event_name,
-        "session_id": session_id
+        "session_id": session_id,
+        "binding_observation": format!("{ingress:?}")
     });
     if let Some(flush) = memento_transition.flush {
         body["memento_tool_feedback_flush"] = flush.to_json();
@@ -689,13 +691,13 @@ fn normalize_hook_event_name(value: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Method, Request};
     use tower::ServiceExt;
 
-    static ENDPOINT_TEST_LOCK: LazyLock<std::sync::Mutex<()>> =
+    pub(crate) static ENDPOINT_TEST_LOCK: LazyLock<std::sync::Mutex<()>> =
         LazyLock::new(|| std::sync::Mutex::new(()));
 
     #[test]
@@ -1314,3 +1316,6 @@ mod tests {
         assert_eq!(current_hook_endpoint(), None);
     }
 }
+
+#[cfg(all(test, unix))]
+mod codex_ingress_tests;

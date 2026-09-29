@@ -1,5 +1,3 @@
-// Hook source verification is read only by its tests until the Codex hook wiring lands.
-#[allow(dead_code)]
 pub(crate) mod source_observation;
 
 use serde_json::Value;
@@ -150,12 +148,13 @@ pub(crate) fn install_codex_tui_runtime_binding(
 }
 
 /// The launch path, whose first binding of an execution takes its cause from the launch context.
+/// Returns false when a hook already moved the pane past this tail's source.
 pub(crate) fn install_launched_codex_tui_runtime_binding(
     tmux_session_name: &str,
     rollout_start_offset: Option<u64>,
     binding: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
-) {
-    install_binding(tmux_session_name, rollout_start_offset, binding, true);
+) -> bool {
+    install_binding(tmux_session_name, rollout_start_offset, binding, true)
 }
 
 fn install_binding(
@@ -163,10 +162,18 @@ fn install_binding(
     rollout_start_offset: Option<u64>,
     binding: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
     launched: bool,
-) {
+) -> bool {
+    use crate::services::tui_prompt_dedupe as dedupe;
     let rollout_path = PathBuf::from(&binding.output_path);
     let session_id = binding.session_id.clone();
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+        if launched && dedupe::codex_tail_source_retired(authority, &binding) {
+            tracing::info!(
+                tmux_session_name,
+                "Codex tail source already retired by a hook"
+            );
+            return false;
+        }
         if let Err(error) = write_codex_tui_rollout_marker_under_source_authority(
             authority,
             &rollout_path,
@@ -178,10 +185,9 @@ fn install_binding(
                 error,
                 "failed to persist Codex TUI rollout marker; runtime binding unchanged"
             );
-            return;
+            return true;
         }
         source_observation::observe(&rollout_path, session_id.as_deref());
-        use crate::services::tui_prompt_dedupe as dedupe;
         if launched {
             dedupe::register_launched_tmux_runtime_binding_under_source_authority(
                 authority, binding,
@@ -189,7 +195,8 @@ fn install_binding(
         } else {
             dedupe::register_tmux_runtime_binding_under_source_authority(authority, binding);
         }
-    });
+        true
+    })
 }
 
 pub fn advance_codex_tui_rollout_marker_start_offset(

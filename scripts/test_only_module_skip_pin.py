@@ -34,6 +34,7 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/claude_tui/hook_server/codex_ingress_tests.rs",
         "src/config/writer_channels_tests.rs",
         "src/server/routes/pipeline_stage_save_tests.rs",
         "src/services/pipeline_routes/stage_validation_tests.rs",

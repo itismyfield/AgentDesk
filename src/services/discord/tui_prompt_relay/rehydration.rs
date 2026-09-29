@@ -588,6 +588,25 @@ fn rehydrate_codex_tui_binding_transaction(
     )
 }
 
+/// One boot restore pass for a live pane, with no other pane's claims.
+#[cfg(all(unix, test))]
+pub(crate) fn rehydrate_codex_tui_binding_for_tests(
+    tmux_session_name: &str,
+    channel_id: u64,
+) -> Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding> {
+    let none = HashSet::new();
+    let claims = claimed_codex_tui_rollout_paths();
+    rehydrate_codex_tui_binding_transaction(
+        tmux_session_name,
+        channel_id,
+        &claims,
+        &none,
+        &none,
+        false,
+        || {},
+    )
+}
+
 #[cfg(unix)]
 pub(super) fn rehydrated_claude_tui_binding_for_tmux_session(
     tmux_session_name: &str,
