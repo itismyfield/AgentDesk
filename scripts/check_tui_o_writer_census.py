@@ -60,7 +60,13 @@ GATE_RE = re.compile(
 )
 FLAG_RE = re.compile(r"\bO_TUI_WRITER\b")
 DEFN_RE = re.compile(r"\bfn\s+$")
-O_TUI_WRITER_FILES = {"src/services/tui_o/cutover.rs"}
+# The switch is defined in topology.rs; the intake gate and its health probe read it there.
+O_TUI_WRITER_FILES = {
+    "src/services/tui_o/cutover.rs",
+    "src/services/tui_o/topology.rs",
+    "src/services/discord/runtime_bootstrap/intake.rs",
+    "src/services/discord/health/provider_probe.rs",
+}
 
 # CUT_D/CUT_T: gated here. COV:<row>: covered by that row's funnel gate.
 # UNREACH_G: guarded in the third field's file. KEEP_36: kept output (§3.6).

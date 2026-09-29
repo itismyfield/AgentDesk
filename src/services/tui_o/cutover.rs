@@ -3,8 +3,9 @@
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
 
-/// Off on every head until the flip PR; while false every guard below is a no-op.
-pub const O_TUI_WRITER: bool = false;
+/// The one O writer build switch, shared with the intake topology so both flip together.
+/// While false every guard below is a no-op.
+pub(crate) use super::topology::O_TUI_WRITER;
 
 /// Whether O, not Legacy, posts this channel's TUI body. Static: build flag + runtime kind.
 pub(crate) fn o_owns_tui_output(kind: Option<RuntimeHandoffKind>) -> bool {
