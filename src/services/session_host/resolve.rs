@@ -1,3 +1,4 @@
+use super::herdr_host::UnconfiguredHerdrHost;
 use super::model::{HostKind, HostKindResolution, HostKindSource};
 use super::process_host::ProcessHost;
 use super::tmux_host::TmuxHost;
@@ -62,11 +63,14 @@ fn kind_hint(kind: RuntimeHandoffKind) -> HostKind {
 
 static TMUX_HOST: TmuxHost = TmuxHost;
 static PROCESS_HOST: ProcessHost = ProcessHost;
+static UNCONFIGURED_HERDR_HOST: UnconfiguredHerdrHost = UnconfiguredHerdrHost;
 
+/// Herdr has no static endpoint, so it gets the fail-closed host, never a default socket.
 pub(crate) fn host_for(kind: HostKind) -> &'static dyn InteractiveSessionHost {
     match kind {
         HostKind::Tmux => &TMUX_HOST,
         HostKind::Process => &PROCESS_HOST,
+        HostKind::Herdr => &UNCONFIGURED_HERDR_HOST,
     }
 }
 
@@ -199,5 +203,41 @@ mod tests {
         for kind in [HostKind::Tmux, HostKind::Process] {
             assert_eq!(host_for(kind).kind(), kind);
         }
+    }
+
+    #[test]
+    fn herdr_host_for_without_endpoint_fails_explicitly() {
+        let host = host_for(HostKind::Herdr);
+        let session = crate::services::session_host::HostSessionRef::herdr_pane("w1-1");
+        assert_eq!(
+            host.send_text(session, "x"),
+            Err(crate::services::session_host::HostError::Unsupported(
+                HostKind::Herdr,
+                "endpoint_missing"
+            )),
+            "host_for(Herdr) must not pick a default socket"
+        );
+        assert_eq!(host.kind(), HostKind::Herdr);
+        assert_eq!(
+            host.presence(session),
+            crate::services::session_host::HostPresence::ProbeFailed
+        );
+    }
+
+    #[test]
+    fn herdr_tui_runtime_kinds_without_host_evidence_stay_non_herdr() {
+        // No runtime kind names a host of Herdr; persisted values are unchanged.
+        for runtime in [R::ClaudeTui, R::CodexTui] {
+            assert_eq!(kind_hint(runtime), HostKind::Tmux);
+        }
+        let herdr_named = HostEvidence {
+            session_name: Some("w1-1"),
+            ..HostEvidence::default()
+        };
+        assert_eq!(
+            resolve_host_kind(herdr_named),
+            HostKindResolution::Unknown,
+            "Unknown must not become a tmux default"
+        );
     }
 }

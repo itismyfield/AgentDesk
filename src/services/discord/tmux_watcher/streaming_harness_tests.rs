@@ -130,6 +130,52 @@ struct Discord {
     visible: BTreeMap<u64, String>,
     shown: Vec<String>,
     calls: usize,
+    post_retry: Option<Arc<PostRetry>>,
+}
+
+/// Rejects one matching POST without storing it, then holds its retry for state inspection.
+struct PostRetry {
+    content: &'static str,
+    attempts: AtomicU64,
+    release: tokio::sync::Notify,
+}
+
+impl PostRetry {
+    fn new(content: &'static str) -> Arc<Self> {
+        Arc::new(Self {
+            content,
+            attempts: AtomicU64::new(0),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+
+    async fn intercept(&self, method: &Method, uri: &Uri, body: &Bytes) -> Option<Response> {
+        let payload: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+        if method != Method::POST
+            || !uri.path().ends_with("/messages")
+            || !payload["content"]
+                .as_str()
+                .is_some_and(|s| s.contains(self.content))
+        {
+            return None;
+        }
+        match self.attempts.fetch_add(1, Ordering::AcqRel) {
+            0 => Some(
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    axum::Json(
+                        serde_json::json!({"message": "temporary card POST failure", "code": 0}),
+                    ),
+                )
+                    .into_response(),
+            ),
+            1 => {
+                self.release.notified().await;
+                None
+            }
+            _ => None,
+        }
+    }
 }
 
 impl Discord {
@@ -225,6 +271,12 @@ impl Harness {
             move |method: Method, uri: Uri, body: Bytes| {
                 let discord = discord.clone();
                 async move {
+                    let retry = discord.lock().unwrap().post_retry.clone();
+                    if let Some(retry) = retry
+                        && let Some(response) = retry.intercept(&method, &uri, &body).await
+                    {
+                        return response;
+                    }
                     discord
                         .lock()
                         .unwrap()

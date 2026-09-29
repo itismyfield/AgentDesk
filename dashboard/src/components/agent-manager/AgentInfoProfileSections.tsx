@@ -1,12 +1,10 @@
 import { formatElapsedCompact } from "../../agent-insights";
 import { localeName } from "../../i18n";
 import type { Agent, Department } from "../../types";
-import type { AgentOfficeMembership, DiscordBinding } from "../../api/client";
+import type { DiscordBinding } from "../../api/client";
 import {
   SurfaceCard,
-  SurfaceEmptyState,
   SurfaceMetricPill,
-  SurfaceNotice,
   SurfaceSubsection,
 } from "../common/SurfacePrimitives";
 import type { Translator } from "./types";
@@ -32,10 +30,6 @@ interface AgentInfoProfileSectionsProps {
   authProfileOptions: string[];
   savingAuthProfile: boolean;
   onSaveAuthProfile: (profileId: string) => void;
-  loadingOffices: boolean;
-  officeMemberships: AgentOfficeMembership[];
-  savingOfficeIds: Record<string, boolean>;
-  onToggleOfficeMembership: (office: AgentOfficeMembership) => void;
   currentWorkSummary: string | null;
   currentWorkElapsedMs: number | null;
   currentWorkDetails: string[];
@@ -63,10 +57,6 @@ export function AgentInfoProfileSections({
   authProfileOptions,
   savingAuthProfile,
   onSaveAuthProfile,
-  loadingOffices,
-  officeMemberships,
-  savingOfficeIds,
-  onToggleOfficeMembership,
   currentWorkSummary,
   currentWorkElapsedMs,
   currentWorkDetails,
@@ -158,46 +148,6 @@ export function AgentInfoProfileSections({
             {savingProvider ? tr("저장 중...", "Saving...") : null}
           </span>
         </div>
-      </SurfaceSubsection>
-
-      <SurfaceSubsection title={tr("소속 오피스", "Offices")} className="min-w-0 md:col-span-2">
-        {loadingOffices ? (
-          <SurfaceNotice tone="neutral" compact>
-            {tr("불러오는 중...", "Loading...")}
-          </SurfaceNotice>
-        ) : officeMemberships.length === 0 ? (
-          <SurfaceEmptyState className="text-xs">
-            {tr("등록된 오피스가 없습니다", "No offices")}
-          </SurfaceEmptyState>
-        ) : (
-          <div className="flex flex-wrap gap-2">
-            {officeMemberships.map((office) => {
-              const assigned = office.assigned;
-              const savingOffice = !!savingOfficeIds[office.id];
-
-              return (
-                <button
-                  key={office.id}
-                  onClick={() => onToggleOfficeMembership(office)}
-                  disabled={savingOffice}
-                  className="rounded-xl px-2.5 py-1.5 text-xs font-medium transition-all disabled:opacity-50"
-                  style={
-                    assigned
-                      ? { background: office.color, color: "#ffffff" }
-                      : {
-                          background: "var(--th-bg-surface)",
-                          color: "var(--th-text-secondary)",
-                          border:
-                            "1px solid color-mix(in srgb, var(--th-border) 72%, transparent)",
-                        }
-                  }
-                >
-                  {office.icon} {localeName(locale, office)}
-                </button>
-              );
-            })}
-          </div>
-        )}
       </SurfaceSubsection>
 
       <SurfaceSubsection title={tr("상태 요약", "Status Summary")} className="min-w-0 md:col-span-2">

@@ -490,12 +490,6 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         )
         .with_curl("curl -X POST http://localhost:8787/api/agents/setup -H 'Content-Type: application/json' -d '{\"agent_id\":\"project-agentdesk\",\"channel_id\":\"1473922824350601297\",\"provider\":\"codex\",\"prompt_template_path\":\"config/agents/_shared.prompt.md\",\"dry_run\":true}'"),
         ep(
-            "GET",
-            "/api/agents/{id}/offices",
-            "agents",
-            "List offices for agent",
-        ),
-        ep(
             "POST",
             "/api/agents/{id}/signal",
             "agents",

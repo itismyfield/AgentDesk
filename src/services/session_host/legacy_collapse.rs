@@ -17,7 +17,11 @@ pub(crate) fn dead_only_if_dead_or_absent(liveness: HostLiveness) -> bool {
 }
 
 /// The existing bool probe unchanged, including its unbounded `list-panes`.
+/// A Herdr ref never reaches tmux and reads as not-dead.
 pub(crate) fn has_live_pane_bool(session: HostSessionRef<'_>) -> bool {
+    if session.kind == HostKind::Herdr {
+        return true;
+    }
     debug_assert_eq!(session.kind, HostKind::Tmux);
     tmux_diagnostics::tmux_session_has_live_pane(session.name)
 }
@@ -80,5 +84,16 @@ mod tests {
             assert!(!tmux_present_bool(name));
             assert!(!tmux_live_pane_bool(name));
         }
+    }
+
+    #[test]
+    fn herdr_ref_is_never_collapsed_into_a_tmux_probe() {
+        // A missing tmux session named like the pane would read false.
+        assert!(
+            has_live_pane_bool(HostSessionRef::herdr_pane(
+                "session-host-herdr-no-such-tmux"
+            )),
+            "a Herdr ref must not reach the tmux live-pane probe"
+        );
     }
 }

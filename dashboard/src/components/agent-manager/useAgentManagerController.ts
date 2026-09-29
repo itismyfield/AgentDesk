@@ -19,7 +19,6 @@ interface UseAgentManagerControllerParams {
   agents: Agent[];
   departments: Department[];
   language: UiLanguage;
-  officeId?: string | null;
   onAgentsChange: () => void;
   onDepartmentsChange: () => void;
   sessions?: DispatchedSession[];
@@ -32,7 +31,6 @@ export function useAgentManagerController({
   agents,
   departments,
   language,
-  officeId,
   onAgentsChange,
   onDepartmentsChange,
   sessions,
@@ -181,10 +179,6 @@ export function useAgentManagerController({
         auto_commit: values.auto_commit,
       };
 
-      if (!agentModal.editAgent && officeId) {
-        payload.office_id = officeId;
-      }
-
       if (agentModal.editAgent) {
         await api.updateAgent(agentModal.editAgent.id, payload);
       } else {
@@ -198,7 +192,7 @@ export function useAgentManagerController({
     } finally {
       setSaving(false);
     }
-  }, [agentModal.editAgent, officeId, onAgentsChange]);
+  }, [agentModal.editAgent, onAgentsChange]);
 
   const handleDeleteAgent = useCallback(async (id: string) => {
     setSaving(true);

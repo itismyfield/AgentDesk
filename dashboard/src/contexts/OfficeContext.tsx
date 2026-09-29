@@ -13,7 +13,6 @@ import type {
   AuditLogEntry,
   Department,
   DispatchedSession,
-  Office,
   RoundTableMeeting,
   SubAgent,
   WSEvent,
@@ -27,7 +26,7 @@ import {
 
 // ── Per-dataset loading/error state ──
 
-export type DatasetKey = "offices" | "agents" | "allAgents" | "departments" | "allDepartments" | "auditLogs";
+export type DatasetKey = "agents" | "allAgents" | "departments" | "allDepartments" | "auditLogs";
 
 interface DatasetState {
   loading: boolean;
@@ -42,9 +41,6 @@ const INITIAL_DATASET: DatasetState = { loading: false, error: null };
 
 interface OfficeContextValue {
   // Data
-  offices: Office[];
-  selectedOfficeId: string | null;
-  setSelectedOfficeId: (id: string | null) => void;
   agents: Agent[];
   allAgents: Agent[];
   departments: Department[];
@@ -66,7 +62,6 @@ interface OfficeContextValue {
   refreshing: boolean;
 
   // Refresh functions
-  refreshOffices: () => void;
   refreshAgents: () => void;
   refreshAllAgents: () => void;
   refreshDepartments: () => void;
@@ -79,7 +74,6 @@ const OfficeContext = createContext<OfficeContextValue | null>(null);
 // ── Provider ──
 
 interface OfficeProviderProps {
-  initialOffices: Office[];
   initialAgents: Agent[];
   initialAllAgents?: Agent[];
   initialDepartments: Department[];
@@ -87,13 +81,11 @@ interface OfficeProviderProps {
   initialSessions: DispatchedSession[];
   initialRoundTableMeetings: RoundTableMeeting[];
   initialAuditLogs: AuditLogEntry[];
-  initialSelectedOfficeId: string | null;
   pushNotification: (msg: string, level: "info" | "success" | "warning" | "error") => void;
   children: ReactNode;
 }
 
 export function OfficeProvider({
-  initialOffices,
   initialAgents,
   initialAllAgents,
   initialDepartments,
@@ -101,12 +93,9 @@ export function OfficeProvider({
   initialSessions,
   initialRoundTableMeetings,
   initialAuditLogs,
-  initialSelectedOfficeId,
   pushNotification,
   children,
 }: OfficeProviderProps) {
-  const [offices, setOffices] = useState<Office[]>(initialOffices);
-  const [selectedOfficeId, setSelectedOfficeId] = useState<string | null>(initialSelectedOfficeId);
   const [agents, setAgents] = useState<Agent[]>(initialAgents);
   const [allAgents, setAllAgents] = useState<Agent[]>(initialAllAgents ?? initialAgents);
   const [departments, setDepartments] = useState<Department[]>(initialDepartments);
@@ -120,22 +109,9 @@ export function OfficeProvider({
   const sessionAwareAllAgents = useMemo(() => applySessionOverlay(allAgents, sessions), [allAgents, sessions]);
   useEffect(() => { allAgentsRef.current = sessionAwareAllAgents; }, [sessionAwareAllAgents]);
 
-  // ── Reload scoped data when office selection changes ──
-  const mountedRef = useRef(false);
-  useEffect(() => {
-    if (!mountedRef.current) {
-      mountedRef.current = true;
-      return;
-    }
-    refreshAgents();
-    refreshDepartments();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedOfficeId]);
-
   // ── Per-dataset loading/error tracking ──
 
   const [datasetStates, setDatasetStates] = useState<DatasetStates>({
-    offices: INITIAL_DATASET,
     agents: INITIAL_DATASET,
     allAgents: INITIAL_DATASET,
     departments: INITIAL_DATASET,
@@ -160,21 +136,17 @@ export function OfficeProvider({
     [],
   );
 
-  const refreshOffices = useCallback(() => {
-    trackedFor("offices", api.getOffices()).then(setOffices).catch(() => {});
-  }, [trackedFor]);
-
   const refreshAgents = useCallback(() => {
-    trackedFor("agents", api.getAgents(selectedOfficeId ?? undefined)).then(setAgents).catch(() => {});
-  }, [selectedOfficeId, trackedFor]);
+    trackedFor("agents", api.getAgents()).then(setAgents).catch(() => {});
+  }, [trackedFor]);
 
   const refreshAllAgents = useCallback(() => {
     trackedFor("allAgents", api.getAgents()).then(setAllAgents).catch(() => {});
   }, [trackedFor]);
 
   const refreshDepartments = useCallback(() => {
-    trackedFor("departments", api.getDepartments(selectedOfficeId ?? undefined)).then(setDepartments).catch(() => {});
-  }, [selectedOfficeId, trackedFor]);
+    trackedFor("departments", api.getDepartments()).then(setDepartments).catch(() => {});
+  }, [trackedFor]);
 
   const refreshAllDepartments = useCallback(() => {
     trackedFor("allDepartments", api.getDepartments()).then(setAllDepartments).catch(() => {});
@@ -224,10 +196,9 @@ export function OfficeProvider({
         case "agent_deleted":
           refreshAgents();
           refreshAllAgents();
-          refreshOffices();
           break;
-        // #2050 P1 finding 1 — departments_changed / offices_changed had no
-        // server emit path; removed from WSEventType.
+        // #2050 P1 finding 1 — departments_changed had no server emit path;
+        // removed from WSEventType.
         case "dispatched_session_new": {
           const s = event.payload as DispatchedSession;
           setSessions((prev) => [s, ...prev.filter((p) => p.id !== s.id)]);
@@ -276,8 +247,7 @@ export function OfficeProvider({
         auditDebounceRef.current = null;
       }
     };
-    // selectedOfficeId is needed for scoped refresh calls inside the handler
-  }, [selectedOfficeId]);
+  }, [refreshAgents, refreshAllAgents, refreshAuditLogs]);
 
   // ── Derived values ──
 
@@ -291,9 +261,6 @@ export function OfficeProvider({
   return (
     <OfficeContext.Provider
       value={{
-        offices,
-        selectedOfficeId,
-        setSelectedOfficeId,
         agents: sessionAwareAgents,
         allAgents: sessionAwareAllAgents,
         departments,
@@ -308,7 +275,6 @@ export function OfficeProvider({
         agentsWithDispatched,
         datasetStates,
         refreshing,
-        refreshOffices,
         refreshAgents,
         refreshAllAgents,
         refreshDepartments,

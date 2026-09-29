@@ -48,6 +48,7 @@ src/server/routes/dispatches/crud.rs
 src/server/routes/escalation.rs
 src/server/routes/memory_api.rs
 src/server/routes/message_outbox.rs
+src/server/routes/pipeline_stage_save_tests.rs
 src/server/routes/queue_api.rs
 src/server/routes/scheduled_messages/postgres_tests.rs
 src/server/routes/stats.rs
@@ -184,6 +185,7 @@ server::routes::dispatches::crud::tests::dispatch_api_pg_tests
 server::routes::escalation::manual_decision_gate_tests
 server::routes::memory_api::request_body_tests
 server::routes::message_outbox::tests
+server::routes::pipeline::stage_save_tests
 server::routes::queue_api::cancel_queue_preserve_pg_tests
 server::routes::scheduled_messages::postgres_tests
 server::routes::stats::memento_feedback_stats_pg_tests
@@ -376,6 +378,9 @@ db::calendar_sync::postgres_tests::unknown_create_blocks_only_its_target_and_acc
 db::campaigns::tests::postgres_campaign_concurrent_cas_and_reconnect_preserve_canonical_history_pg
 db::campaigns::tests::postgres_campaign_revision_history_stays_bounded_by_retention_pg
 db::campaigns::tests::postgres_campaign_revision_prune_keeps_newest_by_rank_across_gaps_pg
+db::campaigns::tests::postgres_live_status_keeps_older_worker_with_latest_completed_sidecar_pg
+db::campaigns::tests::postgres_live_status_keeps_older_worker_with_latest_pending_sidecar_pg
+db::campaigns::tests::postgres_live_status_reads_the_issue_card_without_touching_the_ledger_pg
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_actor_pin_missing_insert_and_retry_pg
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_actor_pin_missing_rejects_intervening_insert_pg
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_actor_pin_nullable_and_prior_nonce_alias_update_pg
@@ -649,6 +654,8 @@ server::routes::memory_api::request_body_tests::local_memory_api_uses_migrated_t
 server::routes::memory_api::request_body_tests::local_memory_migration_preserves_preexisting_route_table_rows
 server::routes::memory_api::request_body_tests::memory_recall_forget_handlers_use_local_when_memento_runtime_unavailable
 server::routes::message_outbox::tests::monitor_alert_action_id_is_durable_and_idempotent_pg
+server::routes::pipeline::stage_save_tests::stage_save_routes_preserve_legacy_settings_only_for_the_same_stage_pg
+server::routes::pipeline::stage_save_tests::stage_save_routes_reject_unsupported_settings_without_writes_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::a_recorded_removal_with_an_unread_post_cancel_queue_reports_no_verdict_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::force_cancel_dead_letters_the_queued_message_it_purges_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::preserve_cancel_keeps_the_queued_message_and_records_nothing_pg

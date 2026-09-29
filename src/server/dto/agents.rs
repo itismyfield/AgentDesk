@@ -2,11 +2,6 @@ use serde::Serialize;
 use serde_json::Value;
 
 #[derive(Debug, Serialize)]
-pub struct AgentOfficesResponse {
-    pub offices: Vec<Value>,
-}
-
-#[derive(Debug, Serialize)]
 pub struct AgentSkillsResponse {
     pub skills: Vec<Value>,
     #[serde(rename = "sharedSkills")]

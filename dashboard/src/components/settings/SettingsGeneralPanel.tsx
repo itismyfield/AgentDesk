@@ -60,8 +60,8 @@ export function SettingsGeneralPanel({
       >
         <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
           {tr(
-            "회사 이름은 필수입니다. 저장하면 입력값 앞뒤 공백을 정리한 뒤 대시보드와 오피스 화면에 함께 반영됩니다.",
-            "Company name is required. Saved text is trimmed and applied across the dashboard and office views.",
+            "회사 이름은 필수입니다. 저장하면 입력값 앞뒤 공백을 정리한 뒤 대시보드에 반영됩니다.",
+            "Company name is required. Saved text is trimmed and applied across the dashboard.",
           )}
         </p>
       </SettingsCallout>

@@ -1264,3 +1264,41 @@ async fn o_delegated_tui_body_is_cut_on_direct_gateways_but_not_headless() {
         }
     }
 }
+
+/// A /stop on a delegated TUI turn drops only the Legacy placeholder: the cancelled partial
+/// body is O's, so no replace carries it, while a Legacy turn still shows it.
+#[tokio::test]
+async fn o_delegated_cancelled_partial_body_is_not_replaced() {
+    for delegated in [false, true] {
+        let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
+        driver.inflight.runtime_kind =
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        crate::services::discord::inflight::save_inflight_state(&driver.inflight)
+            .expect("seed the TUI-kind row");
+        let _forced = delegated.then(crate::services::tui_o::cutover::test_override::force_on);
+        let (mut ctx, state) = driver.parts();
+        ctx.cancelled = true;
+        let output =
+            tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
+                .await
+                .expect("terminal outcome delivery must not hang");
+        let observed = driver.observations();
+        let shown = driver.published_bodies.lock().unwrap().clone();
+        let body_shown = shown.iter().any(|body| body.contains(DRIVER_BODY));
+        assert_eq!(body_shown, !delegated, "delegated={delegated}: {shown:?}");
+        if delegated {
+            let writes = observed.iter().filter(|o| {
+                matches!(
+                    o.call,
+                    DriverCall::Replace | DriverCall::Send | DriverCall::Edit
+                )
+            });
+            assert_eq!(writes.count(), 0, "observed={observed:?}");
+            assert!(
+                observed.iter().any(|o| o.call == DriverCall::Delete),
+                "the Legacy placeholder is dropped; observed={observed:?}"
+            );
+            assert!(!output.preserve_inflight_for_cleanup_retry);
+        }
+    }
+}

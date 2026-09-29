@@ -89,7 +89,8 @@ src/
 │   ├── cluster_role.rs
 │   ├── runtime_profile.rs
 │   ├── runtime_settings.rs
-│   └── test_env.rs
+│   ├── test_env.rs
+│   └── writer_channels_tests.rs
 ├── db/
 │   ├── auto_queue/
 │   │   ├── entries/
@@ -191,11 +192,11 @@ src/
 │   ├── session_observability.rs
 │   ├── session_status.rs
 │   ├── session_transcripts.rs
-│   ├── table_metadata.rs
 │   └── turns.rs
 ├── dispatch/
 │   ├── dispatch_status/
 │   │   └── terminal_timestamp_tests.rs
+│   ├── completion_hooks.rs
 │   ├── dispatch_cancel.rs
 │   ├── dispatch_channel.rs
 │   ├── dispatch_context.rs
@@ -354,8 +355,6 @@ src/
 │   │   │   │   ├── types.rs
 │   │   │   │   └── validation.rs
 │   │   │   └── auto_queue_preflight_harness_tests.rs
-│   │   ├── v1/
-│   │   │   └── agent_read.rs
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
 │   │   ├── agents_setup.rs
@@ -395,9 +394,9 @@ src/
 │   │   ├── messages.rs
 │   │   ├── mod.rs
 │   │   ├── monitoring.rs
-│   │   ├── offices.rs
 │   │   ├── onboarding.rs
 │   │   ├── pipeline.rs
+│   │   ├── pipeline_stage_save_tests.rs
 │   │   ├── pr_summary.rs
 │   │   ├── prompt_manifest_retention.rs
 │   │   ├── provider_auth_profiles.rs
@@ -418,7 +417,6 @@ src/
 │   │   ├── stats.rs
 │   │   ├── termination_events.rs
 │   │   ├── turn_lease.rs
-│   │   ├── v1.rs
 │   │   ├── voice_audio.rs
 │   │   ├── voice_conductor.rs
 │   │   └── voice_config.rs
@@ -994,6 +992,8 @@ src/
 │   │   │   ├── jsonl_extract.rs
 │   │   │   ├── manual_rebind_output_path.rs
 │   │   │   ├── manual_rebind_override.rs
+│   │   │   ├── o_cut_recorder.rs
+│   │   │   ├── o_recovery_cut_tests.rs
 │   │   │   ├── output_path_detect.rs
 │   │   │   ├── phase_policy.rs
 │   │   │   ├── rebind_runtime.rs
@@ -1147,6 +1147,8 @@ src/
 │   │   │   ├── startup_doctor.rs
 │   │   │   └── voice.rs
 │   │   ├── session_relay_sink/
+│   │   │   ├── fixtures/
+│   │   │   │   └── o_writer.rs
 │   │   │   ├── journal/
 │   │   │   │   ├── controller.rs
 │   │   │   │   ├── pg_store.rs
@@ -1162,6 +1164,7 @@ src/
 │   │   │   ├── delivery_outcome_classify.rs
 │   │   │   ├── idle_jsonl.rs
 │   │   │   ├── journal.rs
+│   │   │   ├── o_delivery_e2e_tests.rs
 │   │   │   ├── orphan_reclaim.rs
 │   │   │   ├── relay_format.rs
 │   │   │   ├── short_controller.rs
@@ -1788,6 +1791,9 @@ src/
 │   ├── opencode/
 │   │   ├── server_launch.rs
 │   │   └── streaming_entry.rs
+│   ├── pipeline_routes/
+│   │   ├── stage_validation.rs
+│   │   └── stage_validation_tests.rs
 │   ├── platform/
 │   │   ├── binary_resolver/
 │   │   │   ├── grok.rs
@@ -1896,6 +1902,10 @@ src/
 │   │   ├── probe.rs
 │   │   └── trusted_target.rs
 │   ├── session_host/
+│   │   ├── herdr/
+│   │   │   ├── contract.rs
+│   │   │   └── model.rs
+│   │   ├── herdr_host.rs
 │   │   ├── legacy_collapse.rs
 │   │   ├── model.rs
 │   │   ├── process_host.rs
@@ -1923,7 +1933,17 @@ src/
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
 │   │   └── tests_pg.rs
+│   ├── tui_input/
+│   │   ├── blob.rs
+│   │   ├── bounded_tmux.rs
+│   │   ├── bounded_tmux_tests.rs
+│   │   ├── durability_tests.rs
+│   │   ├── durable.rs
+│   │   ├── ledger.rs
+│   │   └── mod.rs
 │   ├── tui_o/
+│   │   ├── channel_policy/
+│   │   │   └── tests.rs
 │   │   ├── shadow/
 │   │   │   ├── binding_reader.rs
 │   │   │   ├── capture.rs
@@ -1959,6 +1979,7 @@ src/
 │   │   │   ├── switch_tests.rs
 │   │   │   └── writer_tests.rs
 │   │   ├── alarm.rs
+│   │   ├── channel_policy.rs
 │   │   ├── cutover.rs
 │   │   ├── ownership.rs
 │   │   ├── shadow_host.rs

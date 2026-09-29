@@ -2,7 +2,6 @@ import { expect, test, type Page } from "@playwright/test";
 
 const ROUTES = [
   { path: "/home", label: /홈|Home/ },
-  { path: "/office", label: /오피스|Office/ },
   { path: "/agents", label: /에이전트|Agents/ },
   { path: "/kanban", label: /칸반|Kanban/ },
   { path: "/stats", label: /통계|Stats/ },
@@ -271,21 +270,6 @@ const MOCK_OPS_HEALTH_BASE = {
 };
 
 const AGENTS_HUB_NOW = 1760918400000;
-const MOCK_OFFICES = [
-  {
-    id: "office-agentdesk",
-    name: "AgentDesk",
-    name_ko: "에이전트데스크",
-    icon: "🏢",
-    color: "#38bdf8",
-    description: "AgentDesk release office",
-    sort_order: 0,
-    created_at: AGENTS_HUB_NOW - 604_800_000,
-    agent_count: 2,
-    department_count: 2,
-  },
-];
-
 const MOCK_DASHBOARD_STATS = {
   agents: {
     total: 2,
@@ -514,7 +498,6 @@ const MOCK_AGENT_DEPARTMENTS = [
     color: "#38bdf8",
     description: "플랫폼 자동화와 파이프라인을 담당합니다.",
     prompt: null,
-    office_id: "office-agentdesk",
     sort_order: 0,
     created_at: AGENTS_HUB_NOW - 86_400_000,
   },
@@ -528,7 +511,6 @@ const MOCK_AGENT_DEPARTMENTS = [
     color: "#f97316",
     description: "운영 UI와 backlog triage를 담당합니다.",
     prompt: null,
-    office_id: "office-agentdesk",
     sort_order: 1,
     created_at: AGENTS_HUB_NOW - 86_400_000,
   },
@@ -904,24 +886,15 @@ const MOCK_SETTINGS_FSM_PIPELINE = {
   phase_gate: {
     dispatch_to: "project-agentdesk",
     dispatch_type: "review",
-    pass_verdict: "approved",
-    checks: ["artifact_attached"],
   },
 };
 
 const MOCK_SETTINGS_PIPELINE_STAGES = [
   {
     stage_name: "implementation",
-    entry_skill: "adk-dashboard",
-    provider: "codex",
+    provider: null,
     agent_override_id: null,
-    timeout_minutes: 60,
-    on_failure: "previous",
-    on_failure_target: null,
-    max_retries: 1,
     skip_condition: null,
-    parallel_with: null,
-    applies_to_agent_id: null,
     trigger_after: "ready",
   },
 ];
@@ -1025,14 +998,6 @@ async function mockAgentsHubApis(page: Page) {
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({ sessions: [] }),
-    });
-  });
-
-  await page.route(/\/api\/agents\/[^/]+\/offices$/, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ offices: [] }),
     });
   });
 
@@ -1156,14 +1121,6 @@ async function mockDashboardBootstrap(page: Page) {
     await route.fulfill({ json: { ticket: "s".repeat(64), expires_in: 15 } });
   });
 
-  await page.route(/\/api\/offices$/, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ offices: MOCK_OFFICES }),
-    });
-  });
-
   await page.route(/\/api\/agents(?:\?.*)?$/, async (route) => {
     await route.fulfill({
       status: 200,
@@ -1278,7 +1235,7 @@ async function mockDashboardBootstrap(page: Page) {
     });
   });
 
-  await page.route(/\/api\/v1\/achievements(?:\?.*)?$/, async (route) => {
+  await page.route(/\/api\/achievements(?:\?.*)?$/, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -1602,7 +1559,7 @@ test.describe("Dashboard smoke tests", () => {
       localStorage.setItem("agentdesk.settings.pipeline.repo-cache.v1", '{"previous":"private"}');
     });
     page.on("request", (request) => {
-      if (new URL(request.url()).pathname === "/api/offices") protectedRequests++;
+      if (new URL(request.url()).pathname === "/api/agents") protectedRequests++;
     });
     await page.route(/\/api\/auth\/session$/, async (route) => {
       await route.fulfill({ json: {
@@ -1767,7 +1724,7 @@ test.describe("Dashboard smoke tests", () => {
     await expect(bottomNav.locator("button")).toHaveCount(5);
     await expect(page.getByTestId("app-mobile-tab-voice")).toBeVisible();
     await expect(page.getByTestId("app-mobile-tab-home")).toBeVisible();
-    await expect(page.getByTestId("app-mobile-tab-office")).toBeVisible();
+    await expect(page.getByTestId("app-mobile-tab-stats")).toBeVisible();
     await expect(page.getByTestId("app-mobile-tab-kanban")).toBeVisible();
 
     const tabMetrics = await bottomNav.locator("button").evaluateAll((buttons) =>
@@ -1910,8 +1867,8 @@ test.describe("Dashboard smoke tests", () => {
 
     await expectNoHorizontalOverflow(page);
 
-    await page.getByTestId("app-mobile-tab-office").click();
-    await expect(page).toHaveURL(/\/office$/);
+    await page.getByTestId("app-mobile-tab-stats").click();
+    await expect(page).toHaveURL(/\/stats$/);
     await expectNoHorizontalOverflow(page);
 
     await page.getByTestId("app-mobile-tab-kanban").click();
@@ -1939,22 +1896,6 @@ test.describe("Dashboard smoke tests", () => {
     await page.getByTestId("app-mobile-more-menu").getByRole("button", { name: /설정|Settings/ }).click();
     await expect(page).toHaveURL(/\/settings$/);
     await expectNoHorizontalOverflow(page);
-  });
-
-  test("office: desktop spatial scene exposes an accessible summary", async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name === "mobile", "Desktop-only test");
-    await page.goto("/office");
-
-    const officeScene = page.getByRole("img", { name: /오피스 공간 보기|Spatial office view/ });
-    await expect(officeScene).toBeVisible({ timeout: 15000 });
-    await expect(page.locator("#office-scene-status-summary")).toContainText(/Ada Dashboard|아다 대시보드/);
-    await expect(officeScene.locator("canvas")).toHaveAttribute("aria-hidden", "true");
-
-    const [mainBox, sceneBox] = await Promise.all([
-      page.getByTestId("app-main-scroll").boundingBox(),
-      officeScene.boundingBox(),
-    ]);
-    expect((sceneBox?.x ?? 0) - (mainBox?.x ?? 0)).toBeLessThan(80);
   });
 
   test("home: widget order persists from storage and reset restores defaults", async ({ page }, testInfo) => {
@@ -2484,7 +2425,6 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("ops-providers-card")).toBeVisible();
     await expect(page.getByTestId("ops-control-handoff")).toBeVisible();
     await expect(page.getByTestId("ops-handoff-agents")).toHaveAttribute("href", "/agents");
-    await expect(page.getByTestId("ops-handoff-office")).toHaveAttribute("href", "/office");
   });
 
   test("ops: cluster controls distinguish readiness, bound output and stale state", async ({ page }, testInfo) => {

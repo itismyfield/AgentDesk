@@ -127,20 +127,15 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
       case "pipeline":
         return (
           <SettingsPipelinePanel
-            configDirty={configDirty}
             configEntries={configEntries}
-            configSaving={configSaving}
             groupedConfigEntries={groupedConfigEntries}
             inputStyle={inputStyle}
             isKo={isKo}
-            onConfigSave={handleConfigSave}
             pipelineAgents={pipelineAgents}
             pipelineMetas={pipelineMetas}
             pipelineRepos={pipelineRepos}
             pipelineSelectorError={pipelineSelectorError}
             pipelineSelectorLoading={pipelineSelectorLoading}
-            primaryActionClass={primaryActionClass}
-            primaryActionStyle={primaryActionStyle}
             renderSettingGroupCard={renderSettingGroupCard}
             renderSettingRow={renderSettingRow}
             selectedPipelineAgentId={selectedPipelineAgentId}

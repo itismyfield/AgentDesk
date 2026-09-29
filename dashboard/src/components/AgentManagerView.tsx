@@ -22,7 +22,6 @@ interface AgentManagerViewProps {
   agents: Agent[];
   departments: Department[];
   language: UiLanguage;
-  officeId?: string | null;
   onAgentsChange: () => void;
   onDepartmentsChange: () => void;
   sessions?: DispatchedSession[];
@@ -44,7 +43,6 @@ export default function AgentManagerView({
   agents,
   departments,
   language,
-  officeId,
   onAgentsChange,
   onDepartmentsChange,
   sessions,
@@ -114,7 +112,6 @@ export default function AgentManagerView({
     agents,
     departments,
     language,
-    officeId,
     onAgentsChange,
     onDepartmentsChange,
     sessions,
@@ -486,7 +483,6 @@ export default function AgentManagerView({
           tr={tr}
           department={deptModal.editDept}
           departments={departments}
-          officeId={officeId}
           onSave={() => {
             setDeptModal({ open: false, editDept: null });
             onDepartmentsChange();

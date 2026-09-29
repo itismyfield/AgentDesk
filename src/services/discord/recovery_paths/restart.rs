@@ -427,6 +427,10 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
     if !super::shared::recovery_anchor_repost_enabled() {
         return AnchorRepostOutcome::NotReposted;
     }
+    // O posts this channel's TUI body; Legacy never reposts it.
+    if crate::services::tui_o::cutover::o_owns_tui_output(state.runtime_kind) {
+        return AnchorRepostOutcome::NotReposted;
+    }
 
     // G2a: never repost a blank body.
     if terminal_text.trim().is_empty() {

@@ -351,16 +351,13 @@ unless changes_job.is_a?(Hash)
   exit 1
 end
 
-# Keep both branch-protection publishers and their finite needs closure on the
-# exact fail-closed scheduling policy for their roles. The needs-bearing result
-# publisher must use `if: always()` so upstream failure still reaches its
-# mirror; the independent publisher and internal execution jobs must not gain
-# job-level conditions. Every closure job forbids `continue-on-error`, including
-# an explicit false value, because the key is an unreviewed failure-masking
-# channel. Keep this closed set exact as the needs graph evolves.
+# Publishers must always mirror failures; execution jobs must run unconditionally.
+# Pin the complete needs closure and forbid failure-masking job keys.
 expected_unconditional_closure = %w[
   changes
   relay-authority-contract
+  relay_authority_targets
+  relay_authority_mutations
   scripts
   scripts_contracts
   scripts_guards
@@ -385,8 +382,8 @@ until frontier.empty?
       exit 1
     end
   when "relay-authority-contract"
-    if job.key?("if")
-      warn "#{path}: relay-authority-contract must not define an if key so the independent publisher always runs"
+    unless job.key?("if") && job["if"] == "always()"
+      warn "#{path}: relay-authority-contract publisher must carry `if: always()` so upstream failure still runs the fail-closed mirror"
       exit 1
     end
   else
@@ -420,6 +417,21 @@ until frontier.empty?
 end
 unless unconditional_closure.sort == expected_unconditional_closure
   warn "#{path}: required unconditional needs closure changed; expected #{expected_unconditional_closure.inspect}, found #{unconditional_closure.sort.inspect}"
+  exit 1
+end
+
+# The independent backstop must never inherit the path-filter job's status.
+relay_closure = []
+frontier = ["relay-authority-contract"]
+until frontier.empty?
+  job_id = frontier.shift
+  next if relay_closure.include?(job_id)
+
+  relay_closure << job_id
+  frontier.concat(Array(jobs.fetch(job_id)["needs"]))
+end
+if relay_closure.include?("changes")
+  warn "#{path}: relay-authority-contract needs closure must not include changes"
   exit 1
 end
 
@@ -836,19 +848,56 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
     "runs_on" => '${{ matrix.os }}',
-    # #5670 adds one bounded Windows owner runner; broad runtime remains nightly.
-    "job_sha256" => "58d905a59149419525d3dcc7fece3019ed652ff7d758c236f1cc10fbc307f94d",
+    "job_sha256" => "79745b96e7fc4d02c7744ac9141e4da962ea56c603b5926401294c1af8a56cee",
     "cargo_steps" => {
       "cargo check" => {
         "commands" => ["cargo check --workspace --all-targets"],
         "timeout_minutes" => nil,
       },
+    },
+  },
+  "check_fast_cross_os_targets" => {
+    "label" => "cross-OS exact targets job",
+    "name" => 'Windows exact targets (${{ matrix.os }})',
+    "needs" => "changes",
+    "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
+    "runs_on" => '${{ matrix.os }}',
+    # The bounded Windows owner runner; broad runtime remains nightly.
+    "job_sha256" => "c8f9edc04ab62774a5c79006def01569c603c90286b2b903f9be728c0532434d",
+    "cargo_steps" => {
       "Writer namespace exact Windows targets" => {
         "commands" => ["./scripts/ci/run-writer-namespace-windows-targets.sh"],
         "timeout_minutes" => 30,
         "if_condition" => "runner.os == 'Windows'",
       },
     },
+  },
+  # Publishes the required cross-OS context from both runner results.
+  "check_fast_cross_os_required_context" => {
+    "label" => "cross-OS required-context mirror",
+    "name" => "Fast check cross OS required context (ubuntu-latest)",
+    "needs" => %w[changes check_fast_cross_os check_fast_cross_os_targets],
+    "if" => "always()",
+    "runs_on" => "ubuntu-latest",
+    "job_sha256" => "b3f62e36af947ceaede19310676c24f3eb09e33ee2bbbda186df545443bd2390",
+    "require_debug_env" => false,
+    "cargo_steps" => %w[check_fast_cross_os check_fast_cross_os_targets].to_h do |runner|
+      [
+        "Mirror #{runner} result for branch protection",
+        {
+          "commands" => ["./scripts/required-check-mirror.sh"],
+          "timeout_minutes" => nil,
+          "env" => {
+            "BASH_ENV" => "/dev/null",
+            "CHANGED_PATHS_RESULT" => "${{ needs.changes.result }}",
+            "FILTER_NAME" => "cross_os_rust",
+            "FILTER_OUTPUT" => "${{ needs.changes.outputs.cross_os_rust }}",
+            "UPSTREAM_JOB_NAME" => runner,
+            "UPSTREAM_RESULT" => "${{ needs.#{runner}.result }}",
+          },
+        },
+      ]
+    end,
   },
   "test_fast" => {
     "label" => "PostgreSQL job",
@@ -954,33 +1003,14 @@ targets = {
       },
     },
   },
-  "relay-authority-contract" => {
-    "label" => "relay-authority contract job",
-    "name" => "relay-authority-contract",
+  "relay_authority_targets" => {
+    "label" => "relay-authority targets job",
+    "name" => "Relay authority targets",
     "needs" => nil,
     "if" => nil,
     "runs_on" => "ubuntu-latest",
-    # #5071 registers this unconditional candidate in the existing semantic
-    # hardening registry so order-independent job keys cannot disable it silently.
-    # #5321 re-pins after making the independent backstop verify both the
-    # result helper and the gate before executing that verified gate.
-    # #5464 A12 re-pins after adding two existing S4 named witnesses;
-    # no commands or enforcement checks are removed or relaxed.
-    # #5908 adds four S7a witnesses and the C1 module; retain their exact
-    # commands below and refresh both workflow gate pins with this file.
-    # T6 D1 re-pins after renaming one existing S4 witness selector; no command
-    # is added, removed, or relaxed and the lane minimum stays 1.
-    # #5997 re-pins after adding the mutation-surface paths-filter step and
-    # gating the mutation step alone on it. No command is removed or relaxed,
-    # and the job still declares neither `if:` nor `needs:`.
-    # #5997 V2 re-pins after appending the scenario-census target to the named
-    # command list. Nothing is removed; the census target now inherits this
-    # inventory pin, so dropping its line from the workflow fails here too.
-    # The target is nested under `tests::` because declaring it at the relay
-    # root would push tui_prompt_relay.rs past its hotfile ceiling, and the
-    # ceiling may not be raised.
-    "job_sha256" => "5e5923cd9624a060781099c8cbd8f366eaedcb00d7d36f40e4754a8c2f8c38a2",
-    "job_timeout_minutes" => 50,
+    "job_sha256" => "6ea23c9f5dd58b547b88d3c3489df0d0aac31c2c2b0acc3dcff8418d191740e1",
+    "job_timeout_minutes" => 30,
     "cargo_steps" => {
       "Verify named relay-authority targets and selection floors" => {
         "commands" => ["python3 scripts/check_relay_authority_contract.py"],
@@ -1002,14 +1032,38 @@ targets = {
         ],
         "timeout_minutes" => 30,
       },
+    },
+  },
+  "relay_authority_mutations" => {
+    "label" => "relay-authority mutations job",
+    "name" => "Relay authority mutations (${{ matrix.shard }})",
+    "needs" => nil,
+    "if" => nil,
+    "runs_on" => "ubuntu-latest",
+    "job_sha256" => "1cad90577d2118651ea88b3de4c650afd4bc5777d7228a90f588da5b58e012e4",
+    "job_timeout_minutes" => 45,
+    "cargo_steps" => {
+      "Fetch Cargo dependencies" => {
+        "commands" => ["cargo fetch --locked"],
+        "timeout_minutes" => 10,
+        "if_condition" => "steps.mutation_paths.outputs.mutation_sources != 'false'",
+      },
       "Require relay-authority mutations to be killed" => {
         "commands" => ["bash scripts/run_relay_authority_mutations.sh"],
         "timeout_minutes" => 45,
-        # #5997: the one conditional step inside this unconditional job. The
-        # negative form runs the gate unless the filter positively answered
-        # "unrelated", so a missing or empty output cannot skip it silently.
         "if_condition" => "steps.mutation_paths.outputs.mutation_sources != 'false'",
       },
+    },
+  },
+  "relay-authority-contract" => {
+    "label" => "relay-authority contract job",
+    "name" => "relay-authority-contract",
+    "needs" => %w[relay_authority_targets relay_authority_mutations],
+    "if" => "always()",
+    "runs_on" => "ubuntu-latest",
+    "job_sha256" => "188f42334c40446fd80b192f8c23a19310010c25ef3a4d9b70cecc97659053a7",
+    "job_timeout_minutes" => 10,
+    "cargo_steps" => {
       "Pin required-check mirror content (#5321)" => {
         "commands" => [
           "helper_path=scripts/required-check-mirror.sh",
@@ -1029,6 +1083,36 @@ targets = {
           "scripts/check-ci-runner-hardening.sh",
         ],
         "timeout_minutes" => 10,
+      },
+      "Mirror relay authority targets result for branch protection" => {
+        "commands" => ["./scripts/required-check-mirror.sh"],
+        "timeout_minutes" => 10,
+        "env" => {
+          "BASH_ENV" => "/dev/null",
+          "CARGO_PROFILE_DEV_DEBUG" => "0",
+          "CARGO_PROFILE_TEST_DEBUG" => "0",
+          "PYTHON" => "python3",
+          "CHANGED_PATHS_RESULT" => "success",
+          "FILTER_NAME" => "relay_authority",
+          "FILTER_OUTPUT" => "true",
+          "UPSTREAM_JOB_NAME" => "relay_authority_targets",
+          "UPSTREAM_RESULT" => "${{ needs.relay_authority_targets.result }}",
+        },
+      },
+      "Mirror relay authority mutations result for branch protection" => {
+        "commands" => ["./scripts/required-check-mirror.sh"],
+        "timeout_minutes" => 10,
+        "env" => {
+          "BASH_ENV" => "/dev/null",
+          "CARGO_PROFILE_DEV_DEBUG" => "0",
+          "CARGO_PROFILE_TEST_DEBUG" => "0",
+          "PYTHON" => "python3",
+          "CHANGED_PATHS_RESULT" => "success",
+          "FILTER_NAME" => "relay_authority",
+          "FILTER_OUTPUT" => "true",
+          "UPSTREAM_JOB_NAME" => "relay_authority_mutations",
+          "UPSTREAM_RESULT" => "${{ needs.relay_authority_mutations.result }}",
+        },
       },
     },
   },
@@ -1109,7 +1193,7 @@ targets.each do |job_id, spec|
       (!raw_job.is_a?(Hash) || raw_job["timeout-minutes"] != spec["job_timeout_minutes"].to_s)
     errors << "#{label} must retain exact raw timeout-minutes"
   end
-  if job_id == "check_fast_cross_os"
+  if %w[check_fast_cross_os check_fast_cross_os_targets].include?(job_id)
     strategy = job["strategy"]
     unless strategy.is_a?(Hash)
       errors << "#{label} must retain its matrix strategy"
@@ -1163,7 +1247,7 @@ targets.each do |job_id, spec|
       unless raw_step.is_a?(Hash) && raw_step["timeout-minutes"] == expected_raw_timeout
         errors << "#{label} #{name.inspect} must retain exact raw timeout policy"
       end
-      unless step_env == protected_step_env
+      unless step_env == step_spec.fetch("env", protected_step_env)
         errors << "#{label} #{name.inspect} must pin exact step env and disable BASH_ENV"
       end
       lines = run.lines.map(&:strip).reject(&:empty?)

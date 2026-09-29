@@ -281,7 +281,10 @@ pub(super) async fn start_restart_handoff_from_state(
     state: super::inflight::InflightTurnState,
     best_response: &str,
 ) -> bool {
-    let stale_text = super::turn_bridge::stale_inflight_message(best_response);
+    // O posts this channel's TUI body, so the handoff notice keeps only its marker.
+    let o_owns_body = crate::services::tui_o::cutover::o_owns_tui_output(state.runtime_kind);
+    let stale_text =
+        super::turn_bridge::stale_inflight_message(if o_owns_body { "" } else { best_response });
     match restart_handoff_notice_target(&state) {
         RestartHandoffNoticeTarget::Edit(current_msg_id) => {
             let current_msg_id = serenity::MessageId::new(current_msg_id);
@@ -599,5 +602,70 @@ mod notice_target_tests {
         super::super::footer_view_reconciler::completion_footer_forget_registered_target(
             channel_id,
         );
+    }
+}
+
+#[cfg(test)]
+mod o_cut_tests {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::discord::inflight::InflightTurnState;
+    use crate::services::discord::recovery_engine::o_cut_recorder::start;
+    use crate::services::discord::turn_finalizer::tests::with_isolated_runtime_root;
+    use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude::ChannelId;
+
+    const BODY: &str = "ADK-A14B-handoff-body";
+
+    /// A watcher-death handoff on a channel whose TUI body O posts edits in only the restart
+    /// marker; the same turn with the flag off still carries the saved body.
+    #[tokio::test(flavor = "current_thread")]
+    async fn o_delegated_restart_handoff_keeps_only_the_marker() {
+        with_isolated_runtime_root(|| async move {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let handoff_contents = |channel: u64| {
+                let shared = shared.clone();
+                async move {
+                    let recorder = start(channel).await;
+                    let mut state = InflightTurnState::new(
+                        ProviderKind::Codex,
+                        channel,
+                        None,
+                        1,
+                        10,
+                        9_425_911,
+                        "restart me".to_string(),
+                        None,
+                        Some(format!("AgentDesk-codex-o-cut-{channel}")),
+                        None,
+                        None,
+                        0,
+                    );
+                    state.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
+                    let handled = super::start_restart_handoff_from_state(
+                        ChannelId::new(channel),
+                        &recorder.http,
+                        &shared,
+                        &ProviderKind::Codex,
+                        state,
+                        BODY,
+                    )
+                    .await;
+                    assert!(handled, "the handoff still completes its lifecycle clear");
+                    recorder.contents()
+                }
+            };
+            let flag_off = handoff_contents(9_425_021).await;
+            assert!(
+                flag_off.iter().any(|content| content.contains(BODY)),
+                "{flag_off:?}"
+            );
+            let _on = crate::services::tui_o::cutover::test_override::force_on();
+            assert_eq!(
+                handoff_contents(9_425_022).await,
+                vec![super::super::turn_bridge::stale_inflight_message("")],
+                "O owns the body: only the marker is edited in"
+            );
+        })
+        .await;
     }
 }

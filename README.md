@@ -195,7 +195,6 @@ Business logic lives in JavaScript files under `policies/`, hot-reloaded without
 | `kanban-rules.js` | Core lifecycle: dispatch completion, PM decision gates |
 | `review-automation.js` | Counter-model review dispatch, verdict processing, review state sync |
 | `auto-queue.js` | Batch-phased card queuing, phase gate dispatch, slot management |
-| `phase_gate.js` | Phase gate verification before opening the next batch |
 | `ci-recovery.js` | CI failure detection, auto-rerun, and recovery card creation |
 | `timeouts.js` (+ `timeouts/` modules) | Stale card detection, deadlock recovery, idle session kill, branch guard, dispatch maintenance |
 | `triage-rules.js` | GitHub issue auto-classification and agent assignment |
@@ -223,7 +222,6 @@ Where to add tests:
 - `policies/__tests__/kanban-rules.test.js`
 - `policies/__tests__/auto-queue.test.js`
 - `policies/__tests__/review-automation.test.js`
-- `policies/__tests__/phase_gate.test.js`
 - `policies/__tests__/timeouts.test.js`
 - Shared helpers live in `policies/__tests__/support/harness.js`
 
@@ -253,10 +251,8 @@ Each bot identity has a distinct role so message intent stays unambiguous:
 ### Web Dashboard
 A React-based dashboard served from the same binary:
 
-- **Office View** — Virtual 2D office with agent avatars (Pixi.js)
 - **Kanban Board** — Drag-and-drop card management with column filters
 - **Agent Manager** — Agent configuration, skills, timeline, sessions, kanban tab
-- **Control Center** — Runtime controls, dispatch monitoring, system health
 - **Analytics** — Streaks, achievements, activity heatmaps, audit logs
 - **Meeting Minutes** — Round-table meeting transcripts with issue extraction
 - **Settings** — Runtime configuration, onboarding re-run, policy management, escalation routing
@@ -674,7 +670,6 @@ AgentDesk exposes 270 REST API endpoints. Key groups:
 | `/api/queue` | Generate, dispatch-next, reorder, status, slots | Batch-phased work queuing |
 | `/api/sessions` | List, update, cleanup | Agent runtime sessions |
 | `/api/round-table-meetings` | Start, transcript, issues | Multi-agent meetings |
-| `/api/offices` | CRUD + agent assignment, ordering | Virtual office management |
 | `/api/departments` | CRUD + ordering | Department management |
 | `/api/pipeline` | Stages, config, graphs, card history | Pipeline configuration |
 | `/api/settings` | Company + config/runtime/escalation subroutes | Platform configuration surfaces |
@@ -776,7 +771,7 @@ AgentDesk/
 AgentDesk incorporates and builds upon code from the following projects:
 
 - **[cokacdir](https://github.com/itismyfield/cokacdir)** (MIT License) — A Rust-based Telegram relay for Claude Code sessions. AgentDesk was originally forked from cokacdir's Telegram relay foundation, then extended with Discord support, session management, tmux lifecycle, and turn bridge functionality.
-- **[claw-empire](https://github.com/GreenSheep01201/claw-empire)** (Apache 2.0 License) — Sprite images used in the office view dashboard were sourced from claw-empire.
+- **[claw-empire](https://github.com/GreenSheep01201/claw-empire)** (Apache 2.0 License) — Agent avatar sprite images used in the dashboard were sourced from claw-empire.
 
 ## License
 

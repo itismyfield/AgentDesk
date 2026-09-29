@@ -1,8 +1,9 @@
-//! Watcher terminal arm for channels whose TUI body O posts: Legacy consumes the range with no
-//! transport, no lease and no delivery evidence, then clears its own "..." placeholder.
+//! Watcher terminal arm for channels whose TUI body O posts: Legacy promotes any task card, then
+//! consumes the range with no body transport, lease or evidence and clears its "..." placeholder.
 
 use std::sync::Arc;
 
+use super::task_response_authority::PrepareWatcherTaskResponseError;
 use super::*;
 
 use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
@@ -21,11 +22,26 @@ pub(super) struct DelegatedTerminal<'a> {
     pub(super) last_edit_text: &'a str,
     pub(super) turn_data_start_offset: u64,
     pub(super) observed_generation_mtime_ns: &'a mut Option<i64>,
+    pub(super) task_card:
+        Option<&'a crate::services::discord::task_notification_delivery::TaskNotificationContext>,
 }
 
 /// Mirrors the delegated-success watermark epilogue; the confirmed end advances later through
 /// the watcher's lease-free commit path.
-pub(super) async fn consume_delegated_terminal(arm: DelegatedTerminal<'_>) {
+pub(super) async fn consume_delegated_terminal(
+    arm: DelegatedTerminal<'_>,
+) -> Result<(), PrepareWatcherTaskResponseError> {
+    if let Some(context) = arm.task_card {
+        super::task_response_authority::promote_delegated_task_card(
+            arm.http,
+            arm.shared,
+            arm.provider,
+            arm.channel_id,
+            arm.tmux_session_name,
+            context,
+        )
+        .await?;
+    }
     let generation_mtime_ns = read_generation_file_mtime_ns(arm.tmux_session_name);
     *arm.observed_generation_mtime_ns = Some(generation_mtime_ns);
     if let Some(msg_id) = arm.placeholder_msg_id {
@@ -59,4 +75,5 @@ pub(super) async fn consume_delegated_terminal(arm: DelegatedTerminal<'_>) {
         );
     }
     clear_provider_overload_retry_state(arm.channel_id);
+    Ok(())
 }
