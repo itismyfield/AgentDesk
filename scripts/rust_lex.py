@@ -121,7 +121,7 @@ def strip_line(line: str, state: StripState) -> str:
 # Char literal including escapes (`'\''`, `'\u{2F}'`) and the `b'x'` byte form.
 # Lifetimes (`'a`) do not match and fall through as ordinary code.
 _CHAR_LITERAL_FULL = re.compile(
-    r"b?'(?:\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]{1,6}\}|.)|[^'\\\n])'"
+    r"b?'(?:\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]+\}|.)|[^'\\\n])'"
 )
 
 # String openers, raw form first so `r#"` never degrades to `r` + `#"`.

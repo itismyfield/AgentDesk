@@ -1,3 +1,5 @@
+pub(crate) mod host_terminate;
+
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone, Default)]
