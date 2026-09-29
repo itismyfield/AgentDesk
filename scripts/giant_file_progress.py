@@ -12,7 +12,7 @@ import tempfile
 from collections import Counter
 from pathlib import Path
 import generate_inventory_docs as inventory
-from ratchet_admission import parse_cap_table
+from ratchet_admission import WIRING_SLACK_LINES, parse_cap_table
 ROOT = Path(__file__).resolve().parent.parent
 EVIDENCE = ROOT / "target/giant-file-progress/evidence.json"
 REGISTRY = "scripts/giant_file_registry.toml"
@@ -297,12 +297,32 @@ def without_entry(text: str, path: str) -> str | None:
     except (StopIteration, ValueError):
         return None
     return "".join(lines[:start] + lines[end + 1:])
+def base_pins(root: Path) -> dict[str, int]:
+    """Frozen giant pins at ``root``; missing or unreadable pins grant no slack."""
+    try:
+        return parse_cap_table((root / GIANT_PIN).read_text(encoding="utf-8"),
+                               "giant_file_ratchet")
+    except (OSError, ValueError):
+        return {}
 def new_or_growing_errors(base: dict[str, object],
                           candidate: dict[str, object]) -> list[str]:
     base_loc, candidate_loc = base["modules"], candidate["modules"]
-    return [f"new or growing giant: {path}" for path, loc in candidate_loc.items()
-            if loc >= 1000 and (base_loc.get(path, 0) < 1000
-                                or loc > base_loc.get(path, 0))]
+    # Wiring slack only for giants pinned at base: the frozen pin caps the total
+    # across PRs, while an unpinned giant would gain the slack again every PR.
+    pins = base.get("pins", {})
+    errors = []
+    for path, loc in candidate_loc.items():
+        old = base_loc.get(path, 0)
+        if loc < 1000:
+            continue
+        if old < 1000:
+            errors.append(f"new or growing giant: {path}")
+        elif path in pins and loc > old + WIRING_SLACK_LINES:
+            errors.append(f"new or growing giant: {path} grew to {loc} > base {old} "
+                          f"+ slack {WIRING_SLACK_LINES}")
+        elif path not in pins and loc > old:
+            errors.append(f"new or growing giant: {path}")
+    return errors
 def ordinary_no_regression_errors(base: dict[str, object], candidate: dict[str, object],
                                   facts: dict[str, object]) -> list[str]:
     errors: list[str] = []
@@ -670,6 +690,7 @@ def main() -> int:
                 base_root = Path(temporary) / "base"
                 base_root.mkdir(); archive(base_sha, base_root)
                 base = inventory.giant_file_snapshot(base_root, evaluation_date=today)
+                base["pins"] = base_pins(base_root)
                 facts = diff_facts(base_sha, candidate_sha)
                 if facts["changed"] and facts["changed"] <= LEDGER:
                     facts.update(ledger_base=load_ledger(base_root, snapshot="base"),

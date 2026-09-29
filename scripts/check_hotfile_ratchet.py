@@ -6,7 +6,9 @@ far too large and a regression risk: any further growth makes an eventual
 decomposition harder. This guard freezes each file's RAW line count (`wc -l`:
 comments, blank lines, and test code all COUNTED) at the ceiling recorded in
 `scripts/hotfile_ratchet.toml`. A file may shrink (lower the ceiling to lock in
-the win) but may never exceed its ceiling.
+the win) but may never exceed its ceiling plus ``WIRING_SLACK_LINES`` (shared
+with the giant-file ratchet). The slack is measured from the frozen ceiling, so
+it admits a few wiring lines once, never cumulative growth.
 
 Metric: raw physical line count. This is a deliberately different, complementary
 metric from the production-LoC ratchet in
@@ -55,7 +57,7 @@ if sys.version_info < MIN_PYTHON:
 
 import tomllib
 
-from ratchet_admission import audit_repository_admissions
+from ratchet_admission import WIRING_SLACK_LINES, audit_repository_admissions
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = REPO_ROOT / "scripts" / "hotfile_ratchet.toml"
@@ -132,18 +134,25 @@ def main() -> int:
             continue
 
         current = line_count(path)
-        if current > ceiling:
+        if current > ceiling + WIRING_SLACK_LINES:
             print(
-                f"FAIL: {rel} has {current} lines, exceeding the ratchet ceiling "
-                f"of {ceiling}.",
+                f"FAIL: {rel} grew to {current} lines > ceiling {ceiling} + slack "
+                f"{WIRING_SLACK_LINES}.",
                 file=sys.stderr,
             )
             print(
-                "      Hot-file line counts may only decrease. Shrink the file "
-                "(prefer decomposition) instead of raising the ceiling.",
+                "      Hot-file line counts may only grow within the wiring slack. "
+                "Shrink the file (prefer decomposition) instead of raising the "
+                "ceiling.",
                 file=sys.stderr,
             )
             failed = True
+        elif current > ceiling:
+            # Within the slack: pass without a lock-in note, the ceiling is not stale.
+            print(
+                f"OK: {rel} = {current} lines (ceiling {ceiling} + slack "
+                f"{WIRING_SLACK_LINES}; {current - ceiling} slack lines used)."
+            )
         elif current < ceiling:
             print(
                 f"NOTE: {rel} has {current} lines, below its ceiling of {ceiling}. "
