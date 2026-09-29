@@ -1,6 +1,5 @@
-//! One channel's O actor: replays the spool, follows source binds, spools newly captured
-//! transcript bytes, and delivers owed pieces in order. Capture goes on while the gateway is not
-//! Owned; delivery waits for it.
+//! One channel's O actor: replays the spool, follows source binds, spools captured bytes and
+//! delivers owed pieces in order. Capture goes on while the gateway is not Owned.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -91,9 +90,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         }
     }
 
-    /// With nothing owed, unsealed or open, every retained segment of a source with a decided
-    /// start is settled. The open segment is kept unless the spool is full, so a busy transcript
-    /// does not churn segment files.
+    /// With nothing owed, unsealed or open, every retained segment of a source with a decided start
+    /// is settled. The open segment stays unless the spool is full, so segment files do not churn.
     fn collect_settled(&mut self) {
         let open = self.writer.store().ledger().unresolved().is_some();
         if self.writer.is_stopped() || open || !self.owed.is_empty() || self.deriver.has_unsealed()
