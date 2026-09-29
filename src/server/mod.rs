@@ -407,8 +407,8 @@ pub(crate) async fn run(
     Ok(())
 }
 
-/// Background task firing OnTick30s every tick, OnTick1min every 2nd and OnTick5min every 10th.
-/// The tiers are awaited in turn on one loop, so a slow tier still delays the next 30s tick.
+/// Fires OnTick30s each tick, OnTick1min every 2nd and OnTick5min every 10th, but a tick that
+/// misses the advisory lock skips all three. Tiers run in turn: a slow one delays the next tick.
 async fn policy_tick_loop(
     engine: PolicyEngine,
     pg_pool: Option<Arc<PgPool>>,
