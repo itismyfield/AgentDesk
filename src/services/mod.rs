@@ -19,9 +19,12 @@ pub mod codex;
 pub mod codex_remote_policy;
 pub mod codex_tmux_wrapper;
 pub mod codex_tui;
+// Storage primitives remain dormant until the input actor is wired.
 pub mod cswap;
 pub mod discord;
 pub mod discord_config_audit;
+#[allow(dead_code)]
+pub(crate) mod tui_input;
 // Read only by its tests until the `adk custody status` wiring lands on top of it.
 #[allow(dead_code)]
 pub(crate) mod discord_custody;
