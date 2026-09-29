@@ -50,7 +50,7 @@ pub(super) fn send_followup_to_tmux(
                 // written to a named input FIFO, so the FIFO file is the input
                 // transport and can be stat'd directly.
                 let input_exists = std::fs::metadata(input_fifo_path).is_ok();
-                let session_alive = tmux_session_has_live_pane(tmux_session_name);
+                let session_alive = tmux_live_pane_bool(tmux_session_name);
                 let ready_for_input = session_alive
                     && crate::services::tui_turn_state::jsonl_ready_for_input(
                         &ProviderKind::Codex,

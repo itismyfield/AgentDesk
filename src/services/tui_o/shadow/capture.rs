@@ -82,8 +82,18 @@ impl SourceCapture {
     }
 
     /// Hex sha256 of bytes `0..captured_through`.
+    /// Bytes read so far, including a buffered line still missing its newline.
+    pub fn read_through(&self) -> u64 {
+        self.captured_through + self.partial.len() as u64
+    }
+
     pub fn prefix_hash(&self) -> String {
         hex::encode(self.prefix.clone().finalize())
+    }
+
+    /// The open file's length now, even after its path is renamed.
+    pub fn file_len(&self) -> io::Result<u64> {
+        Ok(self.file.metadata()?.len())
     }
 
     /// Rehashes `0..captured_through` from disk; polls only re-check the tail guard.

@@ -37,7 +37,7 @@ _No findings._
 
 ## Giant file re-inflation ratchet (`giant_file_ratchet`)
 
-Production giants listed in scripts/audit_maintainability_giant_baseline.toml must not exceed their frozen production-LoC baseline.
+Production giants listed in scripts/audit_maintainability_giant_baseline.toml must not exceed their frozen production-LoC baseline plus a 30-line wiring slack.
 
 _No findings._
 

@@ -252,23 +252,21 @@ class GitMergeBaseTests(unittest.TestCase):
     def test_migration_with_newline_in_name_runs(self) -> None:
         self.assert_branch_change_runs("migrations/a\nb.sql")
 
-    def test_both_macos_jobs_skip_docs_only_push(self) -> None:
-        # Overflow can send a docs-only push to the hosted job instead.
+    def test_hosted_macos_skips_heavy_steps_on_docs_only_push(self) -> None:
         self.git("checkout", "-q", "-b", "topic")
         self.commit("docs/a.md")
         self.git("update-ref", "refs/remotes/origin/main", "main")
         jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-        for job in ("macos_hosted", "macos_self_hosted"):
-            with self.subTest(job=job):
-                step = next(s for s in jobs[job]["steps"] if s.get("id") == "rust_filter")
-                output = self.repo.parent / f"{self.repo.name}-{job}.out"
-                subprocess.run(
-                    ["bash", "-c", step["run"].replace("scripts/", f"{ROOT}/scripts/")],
-                    cwd=self.repo, check=True, capture_output=True, text=True,
-                    env={**self.env, **step["env"], "EVENT_NAME": "push", "GITHUB_OUTPUT": str(output)},
-                )
-                self.assertEqual(output.read_text(), "run=false\n")
-                output.unlink()
+        self.assertNotIn("macos_self_hosted", jobs)
+        step = next(s for s in jobs["macos_hosted"]["steps"] if s.get("id") == "rust_filter")
+        output = self.repo.parent / f"{self.repo.name}-macos_hosted.out"
+        subprocess.run(
+            ["bash", "-c", step["run"].replace("scripts/", f"{ROOT}/scripts/")],
+            cwd=self.repo, check=True, capture_output=True, text=True,
+            env={**self.env, **step["env"], "EVENT_NAME": "push", "GITHUB_OUTPUT": str(output)},
+        )
+        self.assertEqual(output.read_text(), "run=false\n")
+        output.unlink()
 
 
 if __name__ == "__main__":

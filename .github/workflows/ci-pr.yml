@@ -296,6 +296,7 @@ jobs:
               - 'src/services/discord/router/intake_dispatch/tests.rs'
               - 'src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs'
               - 'src/services/discord/router/message_handler/voice_announcement_route.rs'
+              - 'src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs'
               - 'src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_capability.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs'
@@ -326,6 +327,7 @@ jobs:
               - 'src/services/observability/turn_lifecycle.rs'
               - 'src/services/pipeline_override.rs'
               - 'src/services/pipeline_routes.rs'
+              - 'src/services/routines/session_control.rs'
               - 'src/services/scheduled_messages/context_snapshot.rs'
               - 'src/services/scheduled_messages/postgres_tests.rs'
               - 'src/services/session_forwarding.rs'
@@ -1797,10 +1799,12 @@ jobs:
 
       # H2 R-O module map: module/cfg driver self-tests are required; only the repo map stays inert until activation.
       # sccache cannot wrap the driver, and a cached compile would skip writing the map.
+      # --canary then runs each --suite against the driver it built; skips or a short run fail the step.
       - name: H2 module map (linux, inert)
+        timeout-minutes: 30
         env:
           RUSTC_WRAPPER: ""
-        run: python3 scripts/ci/h2_modmap.py --lane linux --inert --canary
+        run: python3 scripts/ci/h2_modmap.py --lane linux --inert --canary --suite tests.test_h2_session_driver --suite tests.test_h2_session_e2e
 
       - name: Upload maintainability audit artifact
         if: always()
@@ -1914,7 +1918,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=503881cce0ed2fe2482efe338b3355f4c8260677db1a86e0e41d12f3fcf94e15
+          expected=3734874adee95f0edf070e41c3c975f6ca7fcb451c11927c067f81e234cb1057
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2092,7 +2096,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=503881cce0ed2fe2482efe338b3355f4c8260677db1a86e0e41d12f3fcf94e15
+          expected=3734874adee95f0edf070e41c3c975f6ca7fcb451c11927c067f81e234cb1057
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

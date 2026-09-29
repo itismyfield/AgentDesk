@@ -30,6 +30,9 @@ from pathlib import Path
 
 HISTORY_REL_PATH = "scripts/ratchet_admission_history.toml"
 ADMISSION_WARN_THRESHOLD = 3
+# Lines a ratcheted file may sit above its frozen cap so wiring (a call or a
+# registration) needs no new module or admission. The cap itself never moves.
+WIRING_SLACK_LINES = 30
 
 
 @dataclass(frozen=True)

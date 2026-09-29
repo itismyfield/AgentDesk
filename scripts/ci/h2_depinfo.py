@@ -186,11 +186,12 @@ def walker_problems(root: Path, walk: tuple[dict[str, str], list[Path]], rows) -
             f"{', '.join(sorted(walker[file])) or 'no module'}"
             for file, paths in sorted(rustc.items()) if walker[file] != paths]
 
-def ro_problems(root: Path, lines, modmap: Path) -> list[str]:
+def ro_problems(root: Path, lines, modmap: Path, *, clippy_config: Path | None = None) -> list[str]:
     """R-O over the lib compile inputs, the module map, the text walker and duplicate_mod; each fails on its own."""
     # selecting, reading and parsing the .d share one error boundary
     classified, depinfo_errors = _read(
-        "root lib dep-info", lambda: classify(root, depinfo_inputs(root, root_lib_depinfo(root, lines))))
+        "root lib dep-info", lambda: classify(root, (dep for dep in depinfo_inputs(root, root_lib_depinfo(root, lines))
+                                                   if clippy_config is None or root / dep != clippy_config)))
     rows, map_errors = _read("module map", lambda: load_modmap(modmap))
     walk, walker_errors = _read("text walker module table", lambda: m._module_walk(root))
     problems = duplicate_mod_problems(lines) + depinfo_errors + map_errors + walker_errors + modmap_problems(rows or [])

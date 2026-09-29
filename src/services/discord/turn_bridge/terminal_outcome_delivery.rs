@@ -47,6 +47,7 @@ mod delivery_epilogue;
 mod delivery_epilogue_tests;
 mod empty_response_recovery;
 mod foreign_terminal_handoff;
+pub(in crate::services::discord) use foreign_terminal_handoff::resume as resume_foreign_terminal_custody;
 mod prompt_too_long_guidance;
 mod queue_retry_silence;
 mod recovery_retry;
@@ -363,9 +364,17 @@ pub(super) async fn run_terminal_outcome_delivery(
             &mut preserve_inflight_for_cleanup_retry,
         )
         .await;
+        // O posts this body: commit the turn with no transport and drop the Legacy placeholder.
+        let o_body_cut = terminal_controller_cutover::bridge_o_body_cut_decision(
+            inflight_state.runtime_kind,
+            can_deliver_directly,
+        );
         if silent_turn_handled {
         } else if delivery_response.trim().is_empty() {
             if empty_sink_commits_fully_consumed_response(&full_response, response_sent_offset) {
+                if o_body_cut {
+                    let _ = gateway.delete_message(channel_id, current_msg_id).await;
+                }
                 (terminal_delivery_committed, terminal_body_visible) = (true, true);
             } else if empty_sink_preserves_retry(
                 &full_response,
@@ -396,7 +405,10 @@ pub(super) async fn run_terminal_outcome_delivery(
                 inflight_state.turn_start_offset,
             )
             .format_and_prefix(response_sent_offset == 0, &delivery_response);
-            if can_deliver_directly {
+            if o_body_cut {
+                let _ = gateway.delete_message(channel_id, current_msg_id).await;
+                (terminal_delivery_committed, terminal_body_visible) = (true, true);
+            } else if can_deliver_directly {
                 // #5264 PR-B: the admitted latch narrows the PINNED receipt/frontier end
                 // only. The legacy #3041 exclusion lease keeps the observed tmux end;
                 // narrowing it made a non-admitted CodexTui turn shadow a real
@@ -873,12 +885,4 @@ pub(super) async fn run_terminal_outcome_delivery(
         response_sent_offset,
         turn_start,
     }
-}
-
-pub(in crate::services::discord) async fn resume_foreign_terminal_custody(
-    registry: &crate::services::discord::health::HealthRegistry,
-    payload: &mut serde_json::Value,
-    checkpoint: &crate::services::discord::terminal_delivery_custody::CustodyCheckpoint,
-) -> Result<bool, String> {
-    foreign_terminal_handoff::resume(registry, payload, checkpoint).await
 }

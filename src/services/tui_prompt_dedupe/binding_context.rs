@@ -318,6 +318,12 @@ fn read_context(path: &Path) -> io::Result<BindingContext> {
     serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)
 }
 
+/// `fresh` or `resume` as recorded when execution `nonce` was prepared.
+pub(crate) fn launch_mode(provider: &str, nonce: &str) -> Option<String> {
+    let context = read_context(&context_path(provider, nonce).ok()?).ok()?;
+    (context.execution_nonce == nonce).then_some(context.launch_mode)
+}
+
 fn read_hook_context(path: &Path) -> io::Result<BindingContext> {
     let mut bytes = Vec::new();
     fs::File::open(path)?

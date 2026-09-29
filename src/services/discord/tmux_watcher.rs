@@ -83,6 +83,9 @@ pub(in crate::services::discord) mod terminal_long_chunks;
 #[path = "tmux_watcher/terminal_direct_fallback.rs"]
 mod terminal_direct_fallback;
 
+#[path = "tmux_watcher/o_delegated_arm.rs"]
+mod o_delegated_arm;
+
 #[path = "tmux_watcher/task_response_authority.rs"]
 mod task_response_authority;
 
@@ -923,6 +926,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let watcher_will_direct_send = watcher_direct_fallback_after_session_bound_ack
             && has_direct_terminal_response
             && !direct_terminal_response_refused_duplicate;
+        // O posts this body: consume the range without a lease, a journal or transport.
+        let o_delegated_session =
+            crate::services::tui_o::cutover::o_owns_tui_output_for_tmux_session(&tmux_session_name);
+        let o_delegated_terminal = o_delegated_session && watcher_will_direct_send;
+        let watcher_will_direct_send = watcher_will_direct_send && !o_delegated_terminal;
         // #3089/#3998: the unified controller owns one lease for eligible non-task
         // terminals. Task responses keep the watcher lease around card+reference send;
         // empty/TUI-gated and placeholderless fresh sends remain legacy.
@@ -1119,6 +1127,26 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 "watcher: refused degenerate-key duplicate terminal response without committing delivery; waiting for fresh in-range output"
             );
             false
+        } else if o_delegated_terminal {
+            tui_direct_anchor_terminal_body_visible = true;
+            last_relayed_offset = Some(turn_data_start_offset);
+            o_delegated_arm::consume_delegated_terminal(o_delegated_arm::DelegatedTerminal {
+                http: &http,
+                shared: &shared,
+                provider: &watcher_provider,
+                channel_id,
+                tmux_session_name: &tmux_session_name,
+                placeholder_msg_id,
+                inflight_before_relay: inflight_before_relay.as_ref(),
+                inflight_identity_before_relay: inflight_identity_before_relay.as_ref(),
+                consumed_end: terminal_event_consumed_offset(current_offset, &all_data),
+                response_sent_offset,
+                last_edit_text: &last_edit_text,
+                turn_data_start_offset,
+                observed_generation_mtime_ns: &mut last_observed_generation_mtime_ns,
+            })
+            .await;
+            true
         } else if watcher_direct_fallback_after_session_bound_ack {
             terminal_direct_fallback::apply_watcher_direct_fallback_send(
                 &http,
@@ -1901,6 +1929,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             && !lifecycle_stage_paused
             && !completion_chrome_timed_out
             && !single_message_panel_footer_mode
+            && !o_delegated_session
             && let Some(placeholder) = placeholder_msg_id
             && let Some(finalized) = finalize_watcher_streaming_footer(
                 single_message_panel_footer_mode,

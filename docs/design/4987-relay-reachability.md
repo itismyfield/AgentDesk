@@ -777,6 +777,31 @@ enum ReachabilityUnknownReason {
 | `plan_relay_recovery` (`relay_recovery/decision.rs:314`) | `RelayStallState` 단독 입력 | `(RelayStallState, ReachabilityVerdict)` 입력. `ActiveForegroundStream + Unreachable` 조합에 대해 **비파괴 행동** 신설 (§7.1) |
 | 워치독 `evaluate_active_foreground_coverage` (`relay_watchdog.py:1973`) | `relay_stall_state=="active_foreground_stream"` 을 coverage 근거로 씀 | `reachability != Reachable`이면 coverage를 **부여하지 않는다**. 즉 현재 "활성 스트림이니 desync는 정상"이라는 면죄부가 도달 신호에 종속된다 |
 
+`/api/health/detail`의 `mailboxes[].reachability.coverage`는 schema_version=1의 additive 관측 객체다. 같은 평가의 동일 coverage sweep을 판정과 공유하며 `reachable`(120초 유예 안)에서도 수를 생략하지 않는다. 배달·복구 권한, health polarity, grace/fail bound, 기존 covers 판정은 바뀌지 않는다.
+
+| coverage 필드 | 의미 |
+|---|---|
+| `schema_version` | `1` |
+| `observation_state` | `current`: 관측 cursor가 EOF에 도달하고 불완전 관측 이력이 없음; `incomplete`: 원장의 누적 `incomplete_observations > 0`; `lagging`: cursor가 기록된 EOF 또는 현재 파일 EOF보다 뒤처짐, 또는 bounded read 미완료; `never_observed`: 원장 없음; `unreadable`: 원장/receipt store 조회·해석 실패; `unresolved`: provider/transcript/좌표 미확정 또는 원장 cursor/관측 EOF가 축소된 현재 파일 길이보다 큼; `expired`: 기존 TTL 판정으로 관측 만료 |
+| `uncovered_ranges` | exact confirmed receipt union도 frontier prefix도 덮지 않는 의무 수 |
+| `unproven_ranges` | coverage는 있으나 incarnation spawn nonce witness가 없는 의무 수. uncovered와 겹치지 않음 |
+| `pending_ranges` | uncovered + unproven. 모두 incarnation 원장의 의무 수이며 현재 턴의 배달 증명이 아님 |
+| `oldest_uncovered_age_secs`, `oldest_unproven_age_secs`, `oldest_pending_age_secs` | 각 집합의 최대 나이. `age_basis=first_observed`는 원장 최초 관측 시각 기준이며 provider timestamp 기준이 아님. 집합이 비면 count=0, age=null |
+| `cursor_offset`, `observed_eof` | 원장에 기록한 다음 읽기 위치와 `last_observed_len`. 현재 파일 EOF 값을 대신 넣지 않음 |
+| `observation_committed_at_epoch_ms` | 같은 열린 원장 파일의 mtime(atomic commit 시각). 본문과 다른 교체 파일의 시각을 섞지 않음 |
+| `provenance.exact_receipt_ranges` | exact confirmed receipt union만으로 전 구간이 덮인 의무 수. prefix도 충분하면 exact를 우선 표시 |
+| `provenance.frontier_prefix_ranges` | exact union만으로 충분하지 않고 frontier prefix만으로 덮인 의무 수 |
+| `provenance.mixed_ranges` | prefix와 exact union을 결합해야 전 구간을 덮는 의무 수 |
+
+provenance 세 수는 서로 겹치지 않으며 covered-proven과 covered-unproven 모두 포함한다. uncovered 의무의 부분 coverage는 이 수에 포함하지 않는다. coverage 출처와 generation 증명은 독립이다. exact receipt가 있어도 witness가 없으면 unproven이다. frontier-prefix를 exact receipt로 표시하지 않는다.
+
+sweep을 실행하지 못한 상태에서는 count·age·provenance가 null이며, 읽을 수 있는 원장 좌표/commit 시각만 남는다. receipt store가 실제로 없으면 coverage가 없는 것으로 계산하지만 읽기 실패를 빈 store로 바꾸지 않는다. `lagging`의 수는 이미 관측된 의무에 한정된다. pending=0도 EOF 전체 관측이나 모든 배달 완료를 보장하지 않는다. `expired`도 빈 현재 관측으로 표시하지 않는다. 파일 축소에 따른 `unresolved`에서는 기존 sweep으로 계산 가능한 원장 수를 유지하지만 현재 source 관측 완료로 해석하지 않는다. 구조/합성 switch와 외부 tier가 판정을 악화시킨 경우 모두 같은 coverage를 게시한다.
+
+`incomplete_observations`는 일시적인 cap 지연과 영구적으로 건너뛴 구간을 구별하지 않는 누적값이다. 해소 증거가 없으므로 EOF 도달·후속 정상 관측·incarnation 재부트스트랩으로 해제하지 않는다. 기존 오류 상태가 우선하며, sweep 가능한 정상 좌표에서는 이력이 있으면 `lagging`/`current` 대신 `incomplete`로 표시한다. 알려진 원장 의무 수는 유지하므로 0도 나올 수 있지만 관측 완료를 뜻하지 않는다. 이 표시는 기존 verdict와 health polarity를 바꾸지 않는다.
+
+기존 최상위 `reachability.uncovered_ranges`는 호환을 위해 그대로 유지한다. 존재·값은 **in-band variant**를 따른다: in-band가 Degraded/Unreachable이면 **판정용 held 수**(uncovered + unproven)이며 Reachable이면 생략한다. external tier가 최종 verdict를 악화시켜도 legacy 필드를 새로 만들거나 재계산하지 않는다. 기존 `rowless_active_turn` 예외는 실제 uncovered 수이고 최상위 `unproven_ranges`가 별도로 붙는다. 새 소비자는 이름만으로 legacy 수를 해석하지 말고 `coverage`의 명시적 집합을 사용한다.
+
+
 마지막 행이 #4986 형상1의 워치독 측 대응이다: 워치독은 27틱 동안
 `attached_but_desynced`를 보고했지만 coverage 로직이 `active_foreground_stream`을
 면죄부로 인정할 여지가 있었다 [확인 `relay_watchdog.py:1988-1993, 2044-2056`].

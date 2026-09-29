@@ -2,6 +2,8 @@
 //! stays countable while it keeps today's semantics.
 
 use super::model::{HostKind, HostLiveness, HostPresence, HostSessionRef};
+use super::tmux_host::TmuxHost;
+use super::traits::InteractiveSessionHost;
 use crate::services::tmux_diagnostics;
 
 /// Same answer as `platform::tmux::has_session`: `ProbeFailed` reads as missing.
@@ -18,6 +20,16 @@ pub(crate) fn dead_only_if_dead_or_absent(liveness: HostLiveness) -> bool {
 pub(crate) fn has_live_pane_bool(session: HostSessionRef<'_>) -> bool {
     debug_assert_eq!(session.kind, HostKind::Tmux);
     tmux_diagnostics::tmux_session_has_live_pane(session.name)
+}
+
+/// `probe_failed_to_missing` over the tmux presence probe, taking the name.
+pub(crate) fn tmux_present_bool(name: &str) -> bool {
+    probe_failed_to_missing(TmuxHost.presence(HostSessionRef::tmux(name)))
+}
+
+/// `has_live_pane_bool` for a tmux session name.
+pub(crate) fn tmux_live_pane_bool(name: &str) -> bool {
+    has_live_pane_bool(HostSessionRef::tmux(name))
 }
 
 #[cfg(test)]
@@ -52,5 +64,21 @@ mod tests {
             tmux_diagnostics::tmux_session_has_live_pane("")
         );
         assert!(!has_live_pane_bool(blank));
+    }
+
+    #[test]
+    fn name_helpers_match_the_wrappers_they_replace() {
+        for name in ["", "   "] {
+            assert_eq!(
+                tmux_present_bool(name),
+                tmux_diagnostics::tmux_session_exists(name)
+            );
+            assert_eq!(
+                tmux_live_pane_bool(name),
+                tmux_diagnostics::tmux_session_has_live_pane(name)
+            );
+            assert!(!tmux_present_bool(name));
+            assert!(!tmux_live_pane_bool(name));
+        }
     }
 }

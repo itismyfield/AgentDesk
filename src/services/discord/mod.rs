@@ -1208,7 +1208,7 @@ impl SharedData {
 }
 
 #[cfg(test)]
-pub(super) fn make_shared_data_for_tests() -> Arc<SharedData> {
+pub(crate) fn make_shared_data_for_tests() -> Arc<SharedData> {
     make_shared_data_for_tests_with_storage(None)
 }
 
@@ -1334,7 +1334,7 @@ use queue_dispatch::persistence_context as queue_persistence_context;
 async fn mailbox_snapshot(shared: &SharedData, channel_id: ChannelId) -> ChannelMailboxSnapshot {
     match shared.mailbox_peek(channel_id) {
         Some(handle) => handle.snapshot().await,
-        None => ChannelMailboxSnapshot::default(),
+        None => ChannelMailboxSnapshot::no_actor(channel_id),
     }
 }
 
@@ -1647,38 +1647,14 @@ async fn mailbox_enqueue_intervention(
     channel_id: ChannelId,
     intervention: Intervention,
 ) -> MailboxEnqueueOutcome {
-    // #3297 r3 — tombstone refusal ⇒ retry on a fresh registered actor
-    // instead of orphaning the queue on a purged one.
-    let result = shared
-        .mailboxes
-        .enqueue_with_closed_retry(
-            channel_id,
-            intervention,
-            queue_persistence_context(shared, provider, channel_id),
-        )
-        .await;
-    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
-    if let Some(error) = result.persistence_error.as_ref() {
-        tracing::error!(
-            provider = provider.as_str(),
-            channel_id = channel_id.get(),
-            error = %error,
-            "mailbox enqueue failed durable pending-queue persistence"
-        );
-    }
-    if result.enqueued && result.persistence_error.is_none() {
-        queue_io::schedule_post_enqueue_idle_queue_kick(
-            shared.clone(),
-            provider.clone(),
-            channel_id,
-        );
-    }
-    MailboxEnqueueOutcome {
-        enqueued: result.enqueued,
-        merged: result.merged,
-        refusal_reason: result.refusal_reason,
-        persistence_error: result.persistence_error,
-    }
+    queue_io::mailbox_enqueue_observed_intervention(
+        shared,
+        provider,
+        channel_id,
+        intervention,
+        None,
+    )
+    .await
 }
 
 pub(in crate::services::discord) fn queue_exit_feedback_emoji(kind: QueueExitKind) -> char {
@@ -1709,6 +1685,12 @@ fn queue_exit_card_body(kind: QueueExitKind) -> &'static str {
 #[cfg(test)]
 mod queue_exit_feedback_reconciler_tests {
     use super::*;
+
+    impl SharedData {
+        pub(crate) fn queue_fixture_parts(&self) -> (&ChannelMailboxRegistry, &str) {
+            (&self.mailboxes, &self.token_hash)
+        }
+    }
 
     struct ScopedRuntimeRoot {
         _lock: std::sync::MutexGuard<'static, ()>,
@@ -2614,17 +2596,17 @@ async fn mailbox_merge_restored_dispatch_marker(
     .await
 }
 
-/// #1683: actor-local disk -> in-memory hydration helper. The mailbox
-/// actor reads the queue file and merges it in one serialized message,
-/// preventing stale out-of-actor disk snapshots from reintroducing an
-/// item that another actor message already dequeued and removed from disk.
+/// Read and merge disk items inside the actor so stale snapshots cannot reintroduce dequeued work.
 async fn mailbox_hydrate_pending_queue_from_disk(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
-) -> HydratePendingQueueResult {
+) -> Result<
+    HydratePendingQueueResult,
+    crate::services::turn_orchestrator::registry_purge::MailboxRefusal,
+> {
     let persistence = queue_persistence_context(shared, provider, channel_id);
-    mailbox_finish::restitution(shared, channel_id, |h| {
+    mailbox_finish::try_restitution(shared, channel_id, |h| {
         let p = persistence.clone();
         async move { h.hydrate_pending_queue_from_disk_or_refused(p).await }
     })

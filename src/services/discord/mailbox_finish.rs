@@ -337,13 +337,34 @@ pub(super) async fn restitution<Fut>(
 where
     Fut: std::future::Future<Output = Result<HydratePendingQueueResult, MailboxRefusal>>,
 {
+    try_restitution(shared, channel_id, op)
+        .await
+        .unwrap_or_else(legacy_restitution_refusal)
+}
+
+/// Retry closed actors before returning a typed refusal, retaining the actor's response.
+pub(super) async fn try_restitution<Fut>(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    op: impl FnMut(ChannelMailboxHandle) -> Fut,
+) -> Result<HydratePendingQueueResult, MailboxRefusal>
+where
+    Fut: std::future::Future<Output = Result<HydratePendingQueueResult, MailboxRefusal>>,
+{
     match retry_while_closed(channel_id, || Some(shared.mailbox(channel_id)), op).await {
-        Some((_, Ok(result))) => result,
-        Some((_, Err(MailboxRefusal::Closed))) => HydratePendingQueueResult {
+        Some((_, result)) => result,
+        None => Err(MailboxRefusal::Unreachable),
+    }
+}
+
+/// Preserve legacy defaults and the exhausted-Closed error for existing callers.
+pub(super) fn legacy_restitution_refusal(refusal: MailboxRefusal) -> HydratePendingQueueResult {
+    match refusal {
+        MailboxRefusal::Closed => HydratePendingQueueResult {
             persistence_error: Some("mailbox still purge-closed after retries".to_string()),
             ..Default::default()
         },
-        Some((_, Err(MailboxRefusal::Unreachable))) | None => HydratePendingQueueResult::default(),
+        MailboxRefusal::Unreachable => HydratePendingQueueResult::default(),
     }
 }
 
