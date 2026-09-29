@@ -1924,6 +1924,7 @@ src/
 │   │   │   ├── ledger.rs
 │   │   │   ├── mod.rs
 │   │   │   └── spool.rs
+│   │   ├── ownership.rs
 │   │   └── shadow_host.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── binding_context.rs

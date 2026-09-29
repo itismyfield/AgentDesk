@@ -5301,6 +5301,7 @@ services::discord::runtime_bootstrap::bootstrap_tests::voice_auto_join_provider_
 services::discord::runtime_bootstrap::bootstrap_tests::wait_for_local_http_bind_returns_quickly_when_port_is_bound
 services::discord::runtime_bootstrap::framework_setup::slash_command_registration_tests::node_command_is_registered
 services::discord::runtime_bootstrap::gateway_lease::tests::configured_self_id_is_trimmed
+services::discord::runtime_bootstrap::gateway_lease::tests::every_gateway_lease_release_path_closes_o_admission_first
 services::discord::runtime_bootstrap::gateway_lease::tests::failed_lease_does_not_authorize_worker_or_poller_startup
 services::discord::runtime_bootstrap::gateway_lease::tests::gateway_self_fence_publishes_process_restart_marker
 services::discord::runtime_bootstrap::gateway_lease::tests::never_yields_to_a_preferred_node_that_is_merely_online
@@ -5375,6 +5376,7 @@ services::discord::runtime_bootstrap::relay_dlq_redelivery::tests::plan_trims_mu
 services::discord::runtime_bootstrap::relay_dlq_redelivery::tests::watcher_reason_format_still_carries_every_key_this_module_parses
 services::discord::runtime_bootstrap::restart_lifecycle_characterization_tests::check_deferred_restart_is_noop_without_restart_pending
 services::discord::runtime_bootstrap::restart_lifecycle_characterization_tests::deferred_restart_poller_consumes_marker_token_and_decrements_exactly_once
+services::discord::runtime_bootstrap::shutdown::gateway_waiter_tests::backend_exit_closes_o_admission_before_the_lease_task_drops_the_lease
 services::discord::runtime_bootstrap::shutdown::gateway_waiter_tests::gateway_waiter_cancel_and_prebackend_panic_withdraw_intent
 services::discord::runtime_bootstrap::shutdown::gateway_waiter_tests::gateway_waiter_exit_arms_withdraw_before_diagnostic_and_lease_abort
 services::discord::runtime_bootstrap::shutdown::gateway_waiter_tests::gateway_waiter_last_same_provider_owner_controls_advertisement
@@ -9274,6 +9276,9 @@ services::tool_output_guard::tests::line_heavy_small_error_is_sanitized_once_wit
 services::tool_output_guard::tests::small_output_is_preserved_exactly
 services::tool_output_guard::tests::very_large_non_ascii_error_aligns_context_window_to_utf8
 services::tool_output_guard::tests::very_large_single_line_error_keeps_projection_memory_bounded
+services::tui_o::ownership::tests::a_transition_waits_for_an_admission_in_progress_and_admits_nothing_after
+services::tui_o::ownership::tests::release_records_lost_before_the_release_runs
+services::tui_o::ownership::tests::transitions_close_admission_and_epochs_grow_per_acquisition
 services::tui_o::shadow::binding_reader::tests::binding_reader_reports_source_changes_once_and_keeps_the_last_on_gaps
 services::tui_o::shadow::binding_reader::tests::binding_view_reads_the_native_transcript_of_tui_runtimes_only
 services::tui_o::shadow::capture::tests::capture_emits_complete_lines_only_and_tracks_the_prefix_hash
