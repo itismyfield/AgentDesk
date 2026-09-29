@@ -104,7 +104,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_SOURCE_ZPROFILE` | `src/services/routines/migrated.rs:619` |  |
 | `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/mod.rs:509` | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |
 | `AGENTDESK_TEST_POSTGRES_ACQUIRE_TIMEOUT_MS` | `src/db/postgres.rs:1045` (+1 more) | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
-| `AGENTDESK_TOKEN` | `src/cli/run.rs:143` |  |
+| `AGENTDESK_TOKEN` | `src/cli/run.rs:144` |  |
 | `AGENTDESK_VOICE_REQUIRE_ALIASES` | `src/services/discord_config_audit.rs:206` | - On collision when `AGENTDESK_VOICE_REQUIRE_ALIASES=1`: return an `Err` describing the collision so callers can choose to fail fast. |
 | `AGENTDESK_WORKSPACE_ROOT` | `src/services/routines/migrated.rs:309` (+1 more) |  |
 
@@ -120,8 +120,8 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `COKACDIR_DEBUG` | `src/services/claude.rs:264` | Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var. |
 | `COMPUTERNAME` | `src/services/tmux_common.rs:1142` |  |
 | `DATABASE_URL` | `src/db/postgres.rs:1009` |  |
-| `GEMINI_CLIENT_ID` | `src/server/mod.rs:1439` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
-| `GEMINI_CLIENT_SECRET` | `src/server/mod.rs:1440` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
+| `GEMINI_CLIENT_ID` | `src/server/mod.rs:1438` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
+| `GEMINI_CLIENT_SECRET` | `src/server/mod.rs:1439` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
 | `GEMINI_CLI_HOME` | `src/services/mcp_config.rs:708` |  |
 | `HOME` | `src/cli/doctor/orchestrator.rs:467` (+9 more) | #2655: handler for the `install-memento-session-hook` CLI surface. |
 | `HOSTNAME` | `src/server/outbox_worker.rs:24` (+2 more) |  |

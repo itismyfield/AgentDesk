@@ -11,8 +11,8 @@ subcommand starts the server.
 
 Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this file drifts.
 
-- Top-level commands: 55
-- Commands including nested subcommands: 97
+- Top-level commands: 56
+- Commands including nested subcommands: 99
 
 ## Global options
 
@@ -123,6 +123,8 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk machine-compare`](#agentdesk-machine-compare) | Compare release/main/dev state across every registered worker node (`mac-mini`, `mac-book`, …). Renders a side-by-side table with dcserver pid, last deploy, queue lag, and a `diff` column. |  |
 | [`agentdesk activity`](#agentdesk-activity) | Time-windowed activity report: commits / closed issues / merged PRs / deploys / incidents in a single table. Uses gh + git + AgentDesk API. |  |
 | [`agentdesk o-shadow`](#agentdesk-o-shadow) | Read-only TUI output shadow: window start, report, synthetic manifest |  |
+| [`agentdesk o`](#agentdesk-o) |  |  |
+| [`agentdesk o boundary`](#agentdesk-o-boundary) | Source boundaries the writer could not decide |  |
 
 ## Commands
 
@@ -1244,3 +1246,17 @@ Usage: `agentdesk activity [OPTIONS]`
 Read-only TUI output shadow: window start, report, synthetic manifest
 
 Usage: `agentdesk o-shadow`
+
+## `agentdesk o`
+
+Usage: `agentdesk o <COMMAND>`
+
+Subcommands:
+
+- `boundary` — Source boundaries the writer could not decide
+
+### `agentdesk o boundary`
+
+Source boundaries the writer could not decide
+
+Usage: `agentdesk o boundary`

@@ -279,5 +279,77 @@ class MacMiniAnchorTests(AnchorTests):
         cls.wrappers = SCRIPT.with_name("session-anchor-mac-mini.zsh").read_text()
 
 
+INPUT_FIXTURES = SCRIPT.parent.parent / "tests/fixtures/tui_input"
+
+
+class InputFixtureTests(unittest.TestCase):
+    def test_trust_preflight_preserves_project_configuration_boundary(self):
+        fixture = json.loads((INPUT_FIXTURES / "trust-preflight.json").read_text())
+        for case in fixture["cases"]:
+            with self.subTest(case=case["name"]):
+                cwd = Path(case["cwd"])
+                user = {"developer_instructions": "user", "projects": case["projects"],
+                        "profiles": {"fixture": {"developer_instructions": "profile"}}}
+                files = {Path("/etc/codex/config.toml"): {"developer_instructions": "system"},
+                         Path("/fixture/codex-home/config.toml"): user,
+                         cwd / ".codex/config.toml": {"developer_instructions": "project"}}
+                with patch.dict(anchor.os.environ, {"CODEX_HOME": "/fixture/codex-home"}), \
+                        patch.object(anchor, "read_toml", side_effect=lambda path: files.get(path, {})), \
+                        patch.object(anchor.os, "execvpe", side_effect=AssertionError("spawn forbidden")):
+                    config, returned_user = anchor.codex_config(["--profile", "fixture"], cwd)
+                self.assertEqual(config["developer_instructions"], case["expected"])
+                self.assertEqual(returned_user, user)
+
+    def test_provider_corpus_is_redacted_and_labels_static_evidence(self):
+        manifest = json.loads((INPUT_FIXTURES / "manifest.json").read_text())
+        observed = set()
+        operations = set()
+        for entry in manifest["provider_files"]:
+            with self.subTest(file=entry["file"]):
+                body = (INPUT_FIXTURES / entry["file"]).read_text()
+                records = [json.loads(line) for line in body.splitlines()]
+                self.assertEqual(len(records), entry["records"])
+                self.assertNotIn("/Users/", body)
+                self.assertNotIn("/private/", body)
+                self.assertTrue(entry["source"])
+                observed.add((entry["provider"], entry["version"]))
+                if entry["version"] == "2.1.284":
+                    self.assertEqual(entry["provenance"], "synthetic-static-schema")
+                else:
+                    self.assertTrue(entry["provenance"].startswith("captured"))
+                for record in records:
+                    for value in self.body_values(record):
+                        self.assertTrue(value.startswith("<redacted>"), value)
+                    if record["type"] == "queue-operation":
+                        operations.add(record["operation"])
+                    elif record["type"] == "attachment":
+                        self.assertEqual(record["attachment"]["type"], "queued_command")
+                        self.assertEqual(record["attachment"]["commandMode"], "prompt")
+                        self.assertNotIn("promptId", record["attachment"])
+                    elif record["type"] == "user":
+                        self.assertEqual(record["promptSource"], "queued")
+                        self.assertEqual(record["message"]["role"], "user")
+                    elif record["type"] == "event_msg":
+                        self.assertEqual(record["payload"]["type"], "turn_aborted")
+                        self.assertTrue(record["payload"]["turn_id"])
+                    else:
+                        self.fail(f"unexpected fixture shape: {record['type']}")
+        self.assertEqual(observed, {("claude", "2.1.281"), ("claude", "2.1.283"),
+                                    ("claude", "2.1.284"), ("codex", "0.157.1")})
+        self.assertEqual(operations, {"enqueue", "remove", "dequeue", "popAll"})
+
+    @classmethod
+    def body_values(cls, value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in {"content", "prompt"} and isinstance(child, str):
+                    yield child
+                else:
+                    yield from cls.body_values(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from cls.body_values(child)
+
+
 if __name__ == "__main__":
     unittest.main()

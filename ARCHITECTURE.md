@@ -71,6 +71,7 @@ src/
 │   ├── migrate.rs
 │   ├── mod.rs
 │   ├── monitoring.rs
+│   ├── o.rs
 │   ├── o_shadow.rs
 │   ├── query.rs
 │   ├── restart_terminal_proof.rs
@@ -191,11 +192,11 @@ src/
 │   ├── session_observability.rs
 │   ├── session_status.rs
 │   ├── session_transcripts.rs
-│   ├── table_metadata.rs
 │   └── turns.rs
 ├── dispatch/
 │   ├── dispatch_status/
 │   │   └── terminal_timestamp_tests.rs
+│   ├── completion_hooks.rs
 │   ├── dispatch_cancel.rs
 │   ├── dispatch_channel.rs
 │   ├── dispatch_context.rs
@@ -354,8 +355,6 @@ src/
 │   │   │   │   ├── types.rs
 │   │   │   │   └── validation.rs
 │   │   │   └── auto_queue_preflight_harness_tests.rs
-│   │   ├── v1/
-│   │   │   └── agent_read.rs
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
 │   │   ├── agents_setup.rs
@@ -398,6 +397,7 @@ src/
 │   │   ├── offices.rs
 │   │   ├── onboarding.rs
 │   │   ├── pipeline.rs
+│   │   ├── pipeline_stage_save_tests.rs
 │   │   ├── pr_summary.rs
 │   │   ├── prompt_manifest_retention.rs
 │   │   ├── provider_auth_profiles.rs
@@ -418,7 +418,6 @@ src/
 │   │   ├── stats.rs
 │   │   ├── termination_events.rs
 │   │   ├── turn_lease.rs
-│   │   ├── v1.rs
 │   │   ├── voice_audio.rs
 │   │   ├── voice_conductor.rs
 │   │   └── voice_config.rs
@@ -1139,6 +1138,8 @@ src/
 │   │   │   ├── startup_doctor.rs
 │   │   │   └── voice.rs
 │   │   ├── session_relay_sink/
+│   │   │   ├── fixtures/
+│   │   │   │   └── o_writer.rs
 │   │   │   ├── journal/
 │   │   │   │   ├── controller.rs
 │   │   │   │   ├── pg_store.rs
@@ -1154,6 +1155,7 @@ src/
 │   │   │   ├── delivery_outcome_classify.rs
 │   │   │   ├── idle_jsonl.rs
 │   │   │   ├── journal.rs
+│   │   │   ├── o_delivery_e2e_tests.rs
 │   │   │   ├── orphan_reclaim.rs
 │   │   │   ├── relay_format.rs
 │   │   │   ├── short_controller.rs
@@ -1780,6 +1782,9 @@ src/
 │   ├── opencode/
 │   │   ├── server_launch.rs
 │   │   └── streaming_entry.rs
+│   ├── pipeline_routes/
+│   │   ├── stage_validation.rs
+│   │   └── stage_validation_tests.rs
 │   ├── platform/
 │   │   ├── binary_resolver/
 │   │   │   ├── grok.rs
@@ -1915,6 +1920,14 @@ src/
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
 │   │   └── tests_pg.rs
+│   ├── tui_input/
+│   │   ├── blob.rs
+│   │   ├── bounded_tmux.rs
+│   │   ├── bounded_tmux_tests.rs
+│   │   ├── durability_tests.rs
+│   │   ├── durable.rs
+│   │   ├── ledger.rs
+│   │   └── mod.rs
 │   ├── tui_o/
 │   │   ├── channel_policy/
 │   │   │   └── tests.rs
@@ -1949,6 +1962,8 @@ src/
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs
 │   │   │   ├── round_trip.rs
+│   │   │   ├── switch.rs
+│   │   │   ├── switch_tests.rs
 │   │   │   └── writer_tests.rs
 │   │   ├── alarm.rs
 │   │   ├── channel_policy.rs
