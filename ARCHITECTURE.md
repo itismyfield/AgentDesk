@@ -71,6 +71,7 @@ src/
 │   ├── migrate.rs
 │   ├── mod.rs
 │   ├── monitoring.rs
+│   ├── o.rs
 │   ├── o_shadow.rs
 │   ├── query.rs
 │   ├── restart_terminal_proof.rs
@@ -1944,6 +1945,7 @@ src/
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs
 │   │   │   ├── round_trip.rs
+│   │   │   ├── switch.rs
 │   │   │   └── writer_tests.rs
 │   │   ├── alarm.rs
 │   │   ├── ownership.rs
