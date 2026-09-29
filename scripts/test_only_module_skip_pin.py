@@ -233,6 +233,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/server/routes/health_api/unread_tail_attribution_tests.rs",
         "src/services/tui_o/writer/writer_tests.rs",
         "src/services/tui_o/writer/actor_tests.rs",
+        "src/services/tui_o/store/rotation_tests.rs",
     }
 )
 
