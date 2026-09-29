@@ -35,11 +35,13 @@ struct TqLocks {
 
 impl TqLocks {
     fn take() -> Self {
+        // The ROOT guard holds the shared env lock, so it comes before `TEST_LOCK` (env -> dedupe).
+        let root = tempfile::tempdir().unwrap();
+        let runtime_root = crate::config::set_agentdesk_root_for_test(root.path());
         let state = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let rotations = lock_claude_session_rotations_for_tests();
-        let root = tempfile::tempdir().unwrap();
         Self {
-            _runtime_root: crate::config::set_agentdesk_root_for_test(root.path()),
+            _runtime_root: runtime_root,
             _root: root,
             _rotations: rotations,
             _state: state,

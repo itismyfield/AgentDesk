@@ -26,12 +26,15 @@ struct Harness {
     payload: Value,
     header: Value,
     path: PathBuf,
+    // Last field: the env guards above restore while this lock is still held.
+    _env_lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
 }
 
 impl Harness {
     fn new() -> Self {
+        let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let (root, env) = dedupe::binding_context::tests::fixture();
+        let (root, env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
         let home = root.path().join("launch-home");
         let home_env = Guard::set_path_after_shared_test_env_lock("CODEX_HOME", &home);
         dedupe::reset_state_for_tests();
@@ -105,6 +108,7 @@ impl Harness {
             payload,
             header: run["rollout_session_meta"][1].clone(),
             path,
+            _env_lock: env_lock,
         }
     }
 

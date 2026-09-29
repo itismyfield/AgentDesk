@@ -213,8 +213,9 @@ mod tests {
         use crate::services::provider_auth_profile::ProviderAuthOverlay;
         use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context::tests};
         use std::os::unix::fs::PermissionsExt;
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let _lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let (root, _env) = tests::fixture();
+        let (root, _env) = tests::fixture_after_shared_test_env_lock();
         let _tmux = tests::fake_tmux(root.path());
         let _endpoint = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
             .lock()
