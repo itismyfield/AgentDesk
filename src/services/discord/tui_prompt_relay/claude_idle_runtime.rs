@@ -100,8 +100,6 @@ pub(super) fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                     // and its unit-testable logic are unchanged).
                     let shared_for_rehydrate = shared.clone();
                     let rehydrate_result = tokio::task::spawn_blocking(move || {
-                        // Deferred hook adoptions go first so rehydration sees the adopted binding.
-                        crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions();
                         rehydrate_existing_claude_tui_bindings(&shared_for_rehydrate);
                     })
                     .await;

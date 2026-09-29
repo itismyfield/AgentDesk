@@ -546,6 +546,7 @@ src/
 │   │   │   ├── ordered_queue.rs
 │   │   │   └── queue_retention.rs
 │   │   ├── hook_server/
+│   │   │   ├── adoption_retry.rs
 │   │   │   └── relay_receipts.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
