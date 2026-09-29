@@ -1940,6 +1940,8 @@ src/
 │   │   ├── request.rs
 │   │   ├── runner.rs
 │   │   └── session.rs
+│   ├── termination_audit/
+│   │   └── host_terminate.rs
 │   ├── tmux_common/
 │   │   ├── host_marker.rs
 │   │   └── session_markers.rs
