@@ -238,6 +238,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/actor_tests.rs",
         "src/services/tui_o/store/rotation_tests.rs",
         "src/services/tui_o/writer/rotation_tests.rs",
+        "src/services/tui_o/writer/switch_tests.rs",
     }
 )
 

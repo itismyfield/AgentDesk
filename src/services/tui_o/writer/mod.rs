@@ -8,6 +8,7 @@ pub mod deliver;
 pub mod pieces;
 pub mod rotation;
 pub mod round_trip;
+pub mod switch;
 
 use std::future::Future;
 
@@ -125,6 +126,11 @@ pub enum WriterAlarm {
     },
     /// A retired source grew; it is read again.
     RetiredSourceGrew {
+        source: SourceId,
+    },
+    /// The full spool refuses an old source's tail, its successor waits behind that tail, and an
+    /// announced unit keeps GC off; nothing can move, so the channel stops for an operator.
+    RotationStalled {
         source: SourceId,
     },
 }
