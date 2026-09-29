@@ -19,7 +19,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "8be1f1ea00cb47e08491ba20c29d4d3f13f6b552e10d7f8c88582b9eee460da2"
+    "c62ee7ce75baa156c6bb7f68f670a477c2147a45fce5d8ec5c169b26fb879345"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Path-filtered required contexts: (mirror job, required name, runner job,
@@ -2692,6 +2692,38 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             {path.name: path.read_text(encoding="utf-8") for path in workflow_paths()},
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_hardening_rejects_main_windows_warm_that_misses_pr_cache_key(self) -> None:
+        source = MAIN_WORKFLOW.read_text(encoding="utf-8")
+        warm = source.index("\n  # Warms the shared cargo registry cache")
+        variants = {
+            "missing": (source[:warm] + "\n", "windows_cache_warm is missing"),
+            "save-if": (
+                source[:warm] + source[warm:].replace(
+                    "${{ github.ref == 'refs/heads/main' }}",
+                    "${{ github.event_name == 'pull_request' }}",
+                ),
+                "rust-cache must save the shared key from main only",
+            ),
+            "env drift": (
+                source[:warm] + source[warm:].replace(
+                    '      CARGO_PROFILE_TEST_DEBUG: "0"\n    steps:', "    steps:", 1
+                ),
+                "env must equal check_fast_cross_os",
+            ),
+            "runs tests": (
+                source.replace("cargo test --lib --no-run", "cargo test --lib"),
+                "without running tests",
+            ),
+        }
+        for name, (mutated, reason) in variants.items():
+            with self.subTest(name):
+                self.assertNotEqual(mutated, source)
+                result = self.run_hardening_fixture(
+                    PR_WORKFLOW.read_text(encoding="utf-8"), {"ci-main.yml": mutated}
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(reason, result.stderr)
 
     def test_hardening_rejects_flow_sequence_manual_trigger(self) -> None:
         source = PR_WORKFLOW.read_text(encoding="utf-8")

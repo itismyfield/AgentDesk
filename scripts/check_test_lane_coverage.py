@@ -444,6 +444,9 @@ def cargo_test_filter(command: str) -> LaneFilter | None:
         before, after = args[:split], args[split + 1 :]
     if any(option in before for option in _NON_LIB_TARGET_OPTIONS) and "--all-targets" not in before:
         return None
+    # A build-only invocation runs no test, so it must not count as a lane.
+    if "--no-run" in before:
+        return None
 
     positives: list[str] = []
     skip_next = False
