@@ -57,9 +57,11 @@ use self::backend_routing::{
     should_preserve_live_reused_provider_session, should_refuse_process_backend_demotion,
 };
 #[cfg(unix)]
-use crate::services::tmux_diagnostics::{
-    record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
-    tmux_session_exists, tmux_session_has_live_pane,
+use crate::services::{
+    session_host::legacy_collapse::{tmux_live_pane_bool, tmux_present_bool},
+    tmux_diagnostics::{
+        record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
+    },
 };
 
 #[cfg(unix)]
@@ -1734,7 +1736,7 @@ fn execute_streaming_local_tui_tmux(
     )?;
     let auth_env_lines =
         crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
-    let session_exists = tmux_session_exists(tmux_session_name);
+    let session_exists = tmux_present_bool(tmux_session_name);
     let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
         tmux_session_name,
         &auth_overlay.profile_id,
@@ -1760,7 +1762,7 @@ fn execute_streaming_local_tui_tmux(
     let mut transcript_path_string = transcript_path.display().to_string();
     let mut resume = session_resolution.resume;
 
-    let has_live_pane = tmux_session_has_live_pane(tmux_session_name) && profile_matches;
+    let has_live_pane = tmux_live_pane_bool(tmux_session_name) && profile_matches;
     if session_exists
         && has_live_pane
         && !resume
@@ -2102,7 +2104,7 @@ pub(crate) fn emit_claude_tui_watcher_handoff(
     let last_offset = std::fs::metadata(transcript_path)
         .map(|meta| meta.len())
         .unwrap_or(0);
-    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+    crate::services::tui_prompt_dedupe::register_launched_tmux_runtime_binding(
         tmux_session_name,
         crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
             runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
@@ -2144,7 +2146,7 @@ pub(crate) fn read_claude_tui_transcript_until_done(
     let tmux_name_alive = tmux_session_name.to_string();
     let transcript_path_for_ready = std::path::PathBuf::from(transcript_path);
     let probe = SessionProbe::new(
-        move || tmux_session_has_live_pane(&tmux_name_alive),
+        move || tmux_live_pane_bool(&tmux_name_alive),
         move || {
             log_claude_tui_hook_relay_failures(&expected_session_id);
             claude_tui_stop_hook_seen_or_ready_with_probe(
@@ -2197,7 +2199,7 @@ fn wait_for_claude_tui_transcript_file(
         tmux_session_name,
         CLAUDE_TUI_TRANSCRIPT_INITIAL_WAIT_TIMEOUT,
         || std::fs::metadata(transcript_path).is_ok(),
-        || tmux_session_has_live_pane(tmux_session_name),
+        || tmux_live_pane_bool(tmux_session_name),
         || crate::services::claude_tui::input::prompt_readiness_snapshot(tmux_session_name),
     )
 }
@@ -2503,7 +2505,7 @@ fn execute_streaming_local_tmux(
     )?;
     let auth_env_lines =
         crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
-    let session_exists = tmux_session_exists(tmux_session_name);
+    let session_exists = tmux_present_bool(tmux_session_name);
     let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
         tmux_session_name,
         &auth_overlay.profile_id,
@@ -2529,7 +2531,7 @@ fn execute_streaming_local_tmux(
     // (under `runtime_root()/runtime/sessions/`) or the legacy `/tmp/` path
     // that older wrappers still hold open fds to — so a dcserver restart
     // that lost its /tmp files does not invalidate a still-alive tmux pane.
-    let has_live_pane = tmux_session_has_live_pane(tmux_session_name) && profile_matches;
+    let has_live_pane = tmux_live_pane_bool(tmux_session_name) && profile_matches;
     let resolved_output =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "jsonl");
     let resolved_input =

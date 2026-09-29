@@ -34,7 +34,7 @@ pub(super) async fn terminal_success_output_drained_for_recovery(
         return false;
     };
     let tmux_alive = tmux_session_name
-        .map(crate::services::platform::tmux::has_session)
+        .map(crate::services::session_host::legacy_collapse::tmux_present_bool)
         .unwrap_or(false);
 
     if !tmux_alive {

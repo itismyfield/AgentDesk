@@ -45,6 +45,14 @@ impl SealRegistry {
         }
     }
 
+    pub fn is_sealed(&self, key: &UnitKey) -> bool {
+        self.sealed.contains_key(key)
+    }
+
+    pub fn knows(&self, key: &UnitKey) -> bool {
+        self.sealed.contains_key(key) || self.announced.contains(key)
+    }
+
     /// Announced units whose sealing record has not been captured yet.
     pub fn unsealed(&self) -> Vec<UnitKey> {
         self.announced.iter().cloned().collect()

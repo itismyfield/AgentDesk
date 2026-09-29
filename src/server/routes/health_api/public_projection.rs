@@ -59,6 +59,7 @@ const PROVIDER_BARE_REASONS: &[&str] = &[
     // health.
     "reconcile_stalled",
     "gateway_standby",
+    "tui_output_requires_gateway",
 ];
 /// Counted (`<keyword>:<N>`) provider degraded-reason classifications emitted by
 /// `provider_probe::classify_provider`. Keep in sync with that producer.

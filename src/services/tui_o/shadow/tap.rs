@@ -32,6 +32,8 @@ use super::{
 #[serde(default)]
 pub struct TuiOConfig {
     pub shadow: ShadowConfig,
+    /// Operator channel for writer alarms; absent keeps them to health and logs.
+    pub alert_channel_id: Option<u64>,
 }
 
 /// Bounded copy of bot-authored message events for allowlisted channels.

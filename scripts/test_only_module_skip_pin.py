@@ -87,6 +87,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/claude_tui/hook_payload_fixture_tests.rs",
         "src/services/claude_tui/hook_server_memento_tests.rs",
         "src/services/claude_tui/session/auto_compact_launch_tests.rs",
+        "src/services/codex_tui/session/source_observation_tests.rs",
         "src/services/kakao/transport_tests.rs",
         "src/services/cluster/attachment_transfer/tests.rs",
         "src/services/cluster/execution_requirements/tests.rs",
@@ -159,6 +160,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tmux_watcher/completion_gate_tests.rs",
         "src/services/discord/tmux_watcher/jsonl_rotation/backstop_tests.rs",
         "src/services/discord/tmux_watcher/loop_poll_prologue/post_terminal_disposal_tests.rs",
+        "src/services/discord/tmux_watcher/o_delegated_watcher_tests.rs",
         "src/services/discord/tmux_watcher/owed_range_baseline_tests.rs",
         "src/services/discord/tmux_watcher/panel_decisions_tests.rs",
         "src/services/discord/tmux_watcher/session_bound_ack_tests.rs",
@@ -222,6 +224,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/provider_output_guard_tests.rs",
         "src/services/session_forwarding/probe/tests.rs",
         "src/services/scheduled_messages/postgres_tests.rs",
+        "src/services/tui_prompt_dedupe/binding_events/lane_tests.rs",
         "src/services/tui_prompt_dedupe/tests.rs",
         "src/services/turn_orchestrator/mailbox_unreachable_tests.rs",
         "src/services/turn_orchestrator/recovery_kickoff_tests.rs",
@@ -231,6 +234,11 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/queue_io/ledger_settlement_tests.rs",
         "src/services/discord/health/relay_auto_heal/orphan_token_tests.rs",
         "src/server/routes/health_api/unread_tail_attribution_tests.rs",
+        "src/services/tui_o/writer/writer_tests.rs",
+        "src/services/tui_o/writer/actor_tests.rs",
+        "src/services/tui_o/store/rotation_tests.rs",
+        "src/services/tui_o/writer/rotation_tests.rs",
+        "src/services/tui_o/writer/switch_tests.rs",
     }
 )
 

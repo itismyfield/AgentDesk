@@ -71,6 +71,7 @@ src/
 │   ├── migrate.rs
 │   ├── mod.rs
 │   ├── monitoring.rs
+│   ├── o.rs
 │   ├── o_shadow.rs
 │   ├── query.rs
 │   ├── restart_terminal_proof.rs
@@ -543,6 +544,7 @@ src/
 │   │   │   ├── ordered_queue.rs
 │   │   │   └── queue_retention.rs
 │   │   ├── hook_server/
+│   │   │   ├── adoption_retry.rs
 │   │   │   └── relay_receipts.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
@@ -650,7 +652,8 @@ src/
 │   │   ├── rollout_tail/
 │   │   │   └── parser.rs
 │   │   ├── session/
-│   │   │   └── source_observation.rs
+│   │   │   ├── source_observation.rs
+│   │   │   └── source_observation_tests.rs
 │   │   ├── input.rs
 │   │   ├── mod.rs
 │   │   ├── rollout_index.rs
@@ -891,6 +894,7 @@ src/
 │   │   │   ├── manual_delivery.rs
 │   │   │   ├── message.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── o_writer_io.rs
 │   │   │   ├── policy.rs
 │   │   │   ├── reaction_control.rs
 │   │   │   ├── receipt_index.rs
@@ -1243,6 +1247,8 @@ src/
 │   │   │   ├── liveness.rs
 │   │   │   ├── loop_poll_prologue.rs
 │   │   │   ├── no_result_exits.rs
+│   │   │   ├── o_delegated_arm.rs
+│   │   │   ├── o_delegated_watcher_tests.rs
 │   │   │   ├── orphan_status_panel_cleanup.rs
 │   │   │   ├── orphan_terminal_frame.rs
 │   │   │   ├── owed_range_baseline_tests.rs
@@ -1924,10 +1930,33 @@ src/
 │   │   │   ├── durable.rs
 │   │   │   ├── ledger.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── rotation.rs
+│   │   │   ├── rotation_tests.rs
 │   │   │   └── spool.rs
-│   │   └── shadow_host.rs
+│   │   ├── writer/
+│   │   │   ├── actor.rs
+│   │   │   ├── actor_tests.rs
+│   │   │   ├── binding.rs
+│   │   │   ├── confirm.rs
+│   │   │   ├── deliver.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── pieces.rs
+│   │   │   ├── rotation.rs
+│   │   │   ├── rotation_tests.rs
+│   │   │   ├── round_trip.rs
+│   │   │   ├── switch.rs
+│   │   │   ├── switch_tests.rs
+│   │   │   └── writer_tests.rs
+│   │   ├── alarm.rs
+│   │   ├── cutover.rs
+│   │   ├── ownership.rs
+│   │   ├── shadow_host.rs
+│   │   └── topology.rs
 │   ├── tui_prompt_dedupe/
+│   │   ├── binding_events/
+│   │   │   └── lane_tests.rs
 │   │   ├── binding_context.rs
+│   │   ├── binding_events.rs
 │   │   ├── extract.rs
 │   │   ├── observation.rs
 │   │   ├── runtime_binding.rs

@@ -9,6 +9,7 @@ use super::gateway_lease_recovery::{
     gateway_lease_application_name, reap_orphaned_gateway_lease_once, restart_file_nonce,
     try_create_restart_marker,
 };
+use crate::services::tui_o::ownership::release_gateway;
 
 /// #4351: resolved view of `cluster.gateway_preferred_instance_id` for this node.
 struct GatewayPreference {
@@ -546,6 +547,9 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
     let shared_for_lease = shared.clone();
     let provider_for_lease = provider.clone();
     let mut current_lease = Some(lease);
+    // O admission follows this gate; each transition below lands before its lease effect.
+    let gate = crate::services::tui_o::ownership::gate(provider.as_str());
+    gate.acquired();
     tokio::spawn(async move {
         // Resolved once, inside the task because it may await bootstrap (#4356):
         // the self-id is stable for the life of the process, and a hot config
@@ -563,7 +567,7 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                 .load(std::sync::atomic::Ordering::SeqCst)
             {
                 if let Some(lease) = current_lease.take() {
-                    let _ = lease.unlock().await;
+                    let _ = release_gateway(&gate, lease.unlock()).await;
                 }
                 return;
             }
@@ -593,7 +597,7 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                             // Release first: the preferred node is an unbounded
                             // waiter and can only win once the lock is free.
                             if let Some(lease) = current_lease.take() {
-                                let _ = lease.unlock().await;
+                                let _ = release_gateway(&gate, lease.unlock()).await;
                             }
                             self_fence_gateway(
                                 &shared_for_lease,
@@ -620,6 +624,7 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                             provider_for_lease.display_name(),
                             error
                         );
+                        gate.uncertain();
                         current_lease = None;
                     }
                 }
@@ -644,6 +649,7 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                         "  [{ts}] 🔐 GATEWAY-LEASE: {} re-acquired singleton lease after transient loss",
                         provider_for_lease.display_name()
                     );
+                    gate.reacquired();
                     current_lease = Some(new_lease);
                 }
                 Err(error) => {
@@ -664,6 +670,7 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                         "  [{ts}] ⛔ GATEWAY-LEASE: {} singleton lease taken by another instance — self-fencing",
                         provider_for_lease.display_name()
                     );
+                    gate.lost();
                     self_fence_gateway(&shared_for_lease, &provider_for_lease, &shard_manager)
                         .await;
                     return;

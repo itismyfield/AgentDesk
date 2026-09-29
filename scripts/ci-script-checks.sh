@@ -348,6 +348,13 @@ if run_check guards "Durable frontier writer per-file call-site allowlist (#5071
 "$PYTHON" -m unittest tests.test_durable_frontier_writer_call_sites
 fi
 
+if run_check guards "TUI O writer census: Legacy send sites and cutover gates"; then
+# Pins every Discord send site's census row and every O cutover gate by exact
+# per-file count; the script docstring declares its lexical limits.
+"$PYTHON" scripts/check_tui_o_writer_census.py
+"$PYTHON" -m unittest tests.test_check_tui_o_writer_census
+fi
+
 if run_check guards "Intake-outbox done writer per-file call-site allowlist (#5071 T2)"; then
 # Pins the pre-T2 `mark_done` owner by exact per-file textual count over src/;
 # the script docstring declares the lexical forms and semantic facts it cannot see.
@@ -708,6 +715,7 @@ SHELL_TESTS_FAILED=0
 required_shell_suites=(
   tests/test_cluster_deploy_peer_verdict_5189.sh
   tests/test_deploy_migration_floor_fail_forward_6090.sh
+  tests/test_deploy_o_writer_rollback_guard_6325.sh
   tests/test_deploy_smoke_scope.sh
   tests/test_deploy_smoke_warn_scope_4511.sh
   tests/test_deploy_smoke_wedge_coverage_5244.sh

@@ -3,6 +3,7 @@
 
 mod durable;
 pub mod ledger;
+pub mod rotation;
 pub mod spool;
 
 use std::collections::BTreeMap;
@@ -13,6 +14,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::shadow::SourceId;
+use crate::services::discord::runtime_store::PARENT_DIR_FSYNC_FLUSHES;
 use ledger::{LedgerEntry, LedgerState};
 
 pub const STORE_DIR_NAME: &str = "o_store";
@@ -118,12 +120,32 @@ pub struct OStore {
 
 impl OStore {
     pub fn open_if_enabled(config: &StoreConfig, runtime_root: &Path) -> io::Result<Option<Self>> {
+        Self::open_checked(config, runtime_root, PARENT_DIR_FSYNC_FLUSHES)
+    }
+
+    /// Refuses to enable where a directory fsync is a no-op: names and cursors would not be durable.
+    fn open_checked(
+        config: &StoreConfig,
+        runtime_root: &Path,
+        dir_fsync_flushes: bool,
+    ) -> io::Result<Option<Self>> {
         if !config.enabled {
             return Ok(None);
         }
+        if !dir_fsync_flushes {
+            let detail = "o_store needs a directory fsync this platform does not provide";
+            return Err(io::Error::new(io::ErrorKind::Unsupported, detail));
+        }
         let root = runtime_root.join(STORE_DIR_NAME);
         durable::ensure_dir(&root)?;
+        durable::sweep_tmp(&root)?;
         Ok(Some(Self { root }))
+    }
+
+    /// The store as an operator tool reads it: nothing is created or swept.
+    pub fn existing(runtime_root: &Path) -> Option<Self> {
+        let root = runtime_root.join(STORE_DIR_NAME);
+        root.is_dir().then_some(Self { root })
     }
 
     fn channel_dir(&self, channel: u64) -> PathBuf {
@@ -200,6 +222,9 @@ impl OStore {
             None => return Ok(None),
         };
         let dir = self.channel_dir(channel);
+        for swept in [dir.clone(), dir.join(SPOOL_DIR), dir.join(CURSOR_DIR)] {
+            durable::sweep_tmp(&swept).map_err(StoreError::from)?;
+        }
         let ledger = ledger::recover(&dir.join(LEDGER_FILE), init.initial_anchor)?;
         let sources = spool::recover_sources(&dir, &init, &ledger)?;
         let (segment_max, spool_cap) = (spool::SEGMENT_MAX_BYTES, spool::SPOOL_CAP_BYTES);
@@ -235,7 +260,11 @@ impl ChannelStore {
         &self.ledger
     }
 
+    /// Delivery entries only; `SpoolGc` is written solely by the GC path that deletes the segment.
     pub fn append_ledger(&mut self, entry: LedgerEntry) -> Result<(), StoreError> {
+        if matches!(entry, LedgerEntry::SpoolGc { .. }) {
+            return Err(StoreError::Rejected("SpoolGc is written by GC only".into()));
+        }
         self.mutate(|store| store.write_ledger(entry))
     }
 
@@ -328,6 +357,18 @@ mod tests {
             OStore::open_if_enabled(&config, runtime.path())
                 .unwrap()
                 .is_none()
+        );
+        assert!(!runtime.path().join(STORE_DIR_NAME).exists());
+    }
+
+    #[test]
+    fn enabling_the_store_is_refused_where_directory_fsync_is_a_no_op() {
+        let runtime = tempfile::tempdir().unwrap();
+        let config = StoreConfig { enabled: true };
+        let refused = OStore::open_checked(&config, runtime.path(), false);
+        assert_eq!(
+            refused.err().map(|error| error.kind()),
+            Some(io::ErrorKind::Unsupported)
         );
         assert!(!runtime.path().join(STORE_DIR_NAME).exists());
     }
@@ -458,5 +499,13 @@ mod tests {
             (last.ledger().anchor(), last.ledger().unresolved()),
             (300, None)
         );
+    }
+}
+
+#[cfg(test)]
+impl ChannelStore {
+    /// Shrinks the segment and spool limits so a test can fill the spool.
+    pub(crate) fn set_limits_for_test(&mut self, segment_max: u64, spool_cap: u64) {
+        (self.segment_max, self.spool_cap) = (segment_max, spool_cap);
     }
 }

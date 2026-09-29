@@ -67,6 +67,7 @@ enum StaticSendSource {
     RelaySignalRollup,
     DispatchWatchdog,
     StallWatchdog,
+    TuiOAlarm,
     AgentdeskCli,
     Operator,
     Dashboard,
@@ -126,6 +127,7 @@ const POLICIES: &[SourcePolicy] = &[
     // #4460: stall watchdog now MENTIONS the owner instead of force-terminating
     // a suspected-stall turn — it posts a rate-limited outbox alert.
     policy!(StallWatchdog, "stall_watchdog", LOOPBACK),
+    policy!(TuiOAlarm, "tui_o_alarm", LOOPBACK),
     policy!(AgentdeskCli, "agentdesk-cli", CLI),
     policy!(Operator, "operator", CLI),
     policy!(Dashboard, "dashboard", DASHBOARD),
@@ -191,6 +193,7 @@ mod tests {
         "relay_signal_rollup",
         "dispatch_watchdog",
         "stall_watchdog",
+        "tui_o_alarm",
     ];
 
     #[test]
