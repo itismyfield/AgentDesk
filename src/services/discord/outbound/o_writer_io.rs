@@ -22,8 +22,6 @@ pub(crate) struct GatewayPort {
 }
 
 impl GatewayPort {
-    /// Built where the channel actor is spawned; the writer is dormant until then.
-    #[allow(dead_code)]
     pub(crate) fn new(http: Arc<serenity::Http>, bot_id: u64) -> Self {
         Self { http, bot_id }
     }
@@ -105,8 +103,6 @@ pub(crate) struct ChannelLeases {
 }
 
 impl ChannelLeases {
-    /// Built where the channel actor is spawned; the writer is dormant until then.
-    #[allow(dead_code)]
     pub(crate) fn from_shared(shared: Arc<SharedData>) -> Self {
         Self {
             cell_for: Box::new(move |channel| shared.delivery_lease(channel)),

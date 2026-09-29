@@ -71,7 +71,8 @@ fn spawn_with(
     bindings: Arc<impl BindingEvents>,
 ) -> (watch::Sender<bool>, tokio::task::JoinHandle<()>) {
     let (stop, stopped) = watch::channel(false);
-    let task = tokio::spawn(run_channel(writer, provider, bindings, stopped));
+    let resumed = watch::channel(false).0;
+    let task = tokio::spawn(run_channel(writer, provider, bindings, stopped, resumed));
     (stop, task)
 }
 
@@ -314,7 +315,15 @@ async fn the_writer_stays_dormant_unless_enabled() {
     let (_stop, stopped) = watch::channel(false);
     let mut writer = harness.writer();
     let log = startup_log(&mut writer);
-    let spawned = spawn_if_enabled(&config, writer, ShadowProvider::Claude, log, stopped);
+    let resumed = watch::channel(false).0;
+    let spawned = spawn_if_enabled(
+        &config,
+        writer,
+        ShadowProvider::Claude,
+        log,
+        stopped,
+        resumed,
+    );
     assert!(spawned.is_none());
     polls(3).await;
     assert!(harness.port.posts().is_empty());
@@ -322,7 +331,15 @@ async fn the_writer_stays_dormant_unless_enabled() {
     let (stop, stopped) = watch::channel(false);
     let mut writer = harness.writer();
     let log = startup_log(&mut writer);
-    let spawned = spawn_if_enabled(&enabled, writer, ShadowProvider::Claude, log, stopped);
+    let resumed = watch::channel(false).0;
+    let spawned = spawn_if_enabled(
+        &enabled,
+        writer,
+        ShadowProvider::Claude,
+        log,
+        stopped,
+        resumed,
+    );
     polls(3).await;
     assert_eq!(harness.port.posts(), ["first"]);
     halt(stop, spawned.unwrap()).await;
@@ -355,3 +372,6 @@ async fn the_round_trip_reads_back_every_case_and_reports_any_difference() {
 
 #[path = "rotation_tests.rs"]
 mod rotation;
+
+#[path = "host_tests.rs"]
+mod host_start;

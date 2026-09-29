@@ -90,6 +90,45 @@ impl BindingEvents for BindingLog {
     }
 }
 
+/// One channel's P5 log as its actor reads it; an event of another channel or provider is an
+/// error, so the actor alarms instead of following a foreign bind.
+pub struct ChannelBindingLog {
+    channel: u64,
+    provider: ShadowProvider,
+}
+
+impl ChannelBindingLog {
+    pub fn new(channel: u64, provider: ShadowProvider) -> Self {
+        Self { channel, provider }
+    }
+}
+
+impl BindingEvents for ChannelBindingLog {
+    fn binding_events_since(&self, channel: u64, after: u64) -> Result<Vec<BindingEvent>, String> {
+        if channel != self.channel {
+            return Err(format!(
+                "channel {}'s binding log read for {channel}",
+                self.channel
+            ));
+        }
+        let events = BindingLog.binding_events_since(channel, after)?;
+        let foreign = events
+            .iter()
+            .find(|event| event.channel_id != channel || event.provider != self.provider);
+        match foreign {
+            Some(event) => Err(format!(
+                "binding event {} names channel {} {:?}",
+                event.seq, event.channel_id, event.provider
+            )),
+            None => Ok(events),
+        }
+    }
+
+    fn subscribe(&self, _channel: u64) -> watch::Receiver<u64> {
+        BindingLog.subscribe(self.channel)
+    }
+}
+
 fn from_p5(event: p5::BindingEvent) -> Result<BindingEvent, String> {
     let provider = match event.provider.as_str() {
         "claude" => ShadowProvider::Claude,

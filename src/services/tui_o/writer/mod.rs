@@ -5,6 +5,7 @@ pub mod actor;
 pub mod binding;
 pub mod confirm;
 pub mod deliver;
+pub mod host;
 pub mod pieces;
 pub mod rotation;
 pub mod round_trip;
@@ -16,7 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::services::tui_o::shadow::SourceId;
 
-/// `tui_o.writer` settings; nothing is posted unless explicitly enabled.
+/// Derived per channel from its boot ownership, never read from config; nothing is posted unless
+/// enabled.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WriterConfig {
