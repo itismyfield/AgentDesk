@@ -1,6 +1,5 @@
 //! Source rotation state: the consumed binding seq and each bound source's start boundary.
-//! Both files are replaced atomically; a decided boundary changes only by an operator's
-//! durable `BoundaryResolved`.
+//! Both files are replaced atomically; a decided boundary changes only by `BoundaryResolved`.
 
 use std::collections::BTreeMap;
 use std::fs::File;
