@@ -5,6 +5,11 @@
 mod herdr {
     pub(crate) mod contract;
     pub(crate) mod model;
+    pub(crate) mod observe;
+    // Unix-socket only; no Windows transport exists.
+    #[cfg(unix)]
+    pub(crate) mod transport;
+    pub(crate) mod wire;
 }
 mod herdr_host;
 pub(crate) mod legacy_collapse;

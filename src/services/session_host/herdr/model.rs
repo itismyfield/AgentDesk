@@ -131,6 +131,8 @@ pub(crate) enum HerdrReadSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "method", content = "params")]
 pub(crate) enum HerdrRequest {
+    #[serde(rename = "ping")]
+    Ping {},
     #[serde(rename = "session.snapshot")]
     SessionSnapshot {},
     #[serde(rename = "pane.get")]
@@ -147,6 +149,13 @@ pub(crate) enum HerdrRequest {
     },
     #[serde(rename = "pane.send_text")]
     PaneSendText { pane_id: String, text: String },
+}
+
+impl HerdrRequest {
+    /// Only these may be resent: a retry cannot deliver input twice.
+    pub(crate) fn is_read_only(&self) -> bool {
+        !matches!(self, Self::PaneSendText { .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -192,6 +201,10 @@ pub(crate) struct HerdrRead {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum HerdrResult {
+    Pong {
+        version: String,
+        protocol: u32,
+    },
     SessionSnapshot {
         snapshot: HerdrSnapshot,
     },

@@ -1905,8 +1905,13 @@ src/
 │   ├── session_host/
 │   │   ├── herdr/
 │   │   │   ├── contract.rs
-│   │   │   └── model.rs
+│   │   │   ├── model.rs
+│   │   │   ├── observe.rs
+│   │   │   ├── transport.rs
+│   │   │   ├── transport_tests.rs
+│   │   │   └── wire.rs
 │   │   ├── herdr_host.rs
+│   │   ├── herdr_host_tests.rs
 │   │   ├── legacy_collapse.rs
 │   │   ├── model.rs
 │   │   ├── process_host.rs

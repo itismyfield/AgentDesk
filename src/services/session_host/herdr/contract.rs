@@ -24,7 +24,9 @@ pub(crate) type HerdrOutcome = Result<HerdrReply, HerdrTransportError>;
 
 /// One request, one reply; framing and connection reuse belong to the transport.
 pub(crate) trait HerdrTransport: Send + Sync {
-    fn call(&self, call: &HerdrCall) -> HerdrOutcome;
+    /// The outcome and the generation of the connection that carried it, read
+    /// together so a concurrent reconnect cannot relabel the reply.
+    fn call(&self, call: &HerdrCall) -> (HerdrOutcome, u64);
 }
 
 enum Fault {

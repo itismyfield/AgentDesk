@@ -1,0 +1,178 @@
+//! Unix-socket transport. Nothing connects until a caller asks; one request
+//! is in flight per connection, and any unclear exchange drops the connection.
+#![cfg_attr(not(test), allow(dead_code))]
+
+use std::io::BufReader;
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
+
+use super::contract::{HerdrOutcome, HerdrTransport, HerdrTransportError};
+use super::model::{HerdrCall, HerdrEndpoint, HerdrRequest};
+use super::observe::{self, HerdrHello};
+use super::wire::{self, HerdrFraming, LineJsonFraming, MAX_FRAME_BYTES};
+use crate::services::session_host::model::HostError;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HerdrSocketConfig {
+    /// Per read or write on the socket.
+    pub io_timeout: Duration,
+    /// Total budget for one read-only call, retries included.
+    pub read_deadline: Duration,
+    pub retry_backoff: Duration,
+    pub max_frame_bytes: usize,
+}
+
+impl Default for HerdrSocketConfig {
+    fn default() -> Self {
+        Self {
+            io_timeout: Duration::from_secs(2),
+            read_deadline: Duration::from_secs(5),
+            retry_backoff: Duration::from_millis(200),
+            max_frame_bytes: MAX_FRAME_BYTES,
+        }
+    }
+}
+
+struct Connection {
+    reader: BufReader<UnixStream>,
+    writer: UnixStream,
+    generation: u64,
+}
+
+impl Connection {
+    fn exchange(
+        &mut self,
+        framing: &dyn HerdrFraming,
+        call: &HerdrCall,
+        max: usize,
+    ) -> HerdrOutcome {
+        let frame = framing.encode(call).map_err(HerdrTransportError::NotSent)?;
+        if let Err(failure) = wire::write_frame(&mut self.writer, &frame) {
+            let detail = format!(
+                "{} of {} bytes: {}",
+                failure.written,
+                frame.len(),
+                failure.error
+            );
+            return Err(if failure.written == 0 {
+                HerdrTransportError::NotSent(detail)
+            } else {
+                HerdrTransportError::AfterWrite(detail)
+            });
+        }
+        let reply = framing
+            .read_frame(&mut self.reader, max)
+            .map_err(|error| HerdrTransportError::AfterWrite(error.to_string()))?;
+        wire::decode_reply(&reply).map_err(HerdrTransportError::AfterWrite)
+    }
+}
+
+pub(crate) struct HerdrSocketTransport<F: HerdrFraming = LineJsonFraming> {
+    socket_path: PathBuf,
+    config: HerdrSocketConfig,
+    framing: F,
+    connection: Mutex<Option<Connection>>,
+    generations: AtomicU64,
+}
+
+impl<F: HerdrFraming> HerdrSocketTransport<F> {
+    /// No I/O: the socket is opened by `connect` or a read-only call.
+    pub(crate) fn new(endpoint: &HerdrEndpoint, config: HerdrSocketConfig, framing: F) -> Self {
+        Self {
+            socket_path: endpoint.socket_path().to_path_buf(),
+            config,
+            framing,
+            connection: Mutex::new(None),
+            generations: AtomicU64::new(0),
+        }
+    }
+
+    fn slot(&self) -> MutexGuard<'_, Option<Connection>> {
+        self.connection
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Replaces any current connection with a fresh, handshaken one.
+    pub(crate) fn connect(&self) -> Result<HerdrHello, HostError> {
+        let mut slot = self.slot();
+        *slot = None;
+        let (connection, hello) = self.open()?;
+        *slot = Some(connection);
+        Ok(hello)
+    }
+
+    fn open(&self) -> Result<(Connection, HerdrHello), HostError> {
+        let transport = |error: std::io::Error| HostError::Transport(error.to_string());
+        let stream = UnixStream::connect(&self.socket_path).map_err(transport)?;
+        stream
+            .set_read_timeout(Some(self.config.io_timeout))
+            .map_err(transport)?;
+        stream
+            .set_write_timeout(Some(self.config.io_timeout))
+            .map_err(transport)?;
+        let generation = self.generations.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut connection = Connection {
+            reader: BufReader::new(stream.try_clone().map_err(transport)?),
+            writer: stream,
+            generation,
+        };
+        let ping = HerdrCall {
+            id: format!("adk-hello-{generation}"),
+            request: HerdrRequest::Ping {},
+        };
+        let outcome = connection.exchange(&self.framing, &ping, self.config.max_frame_bytes);
+        let hello = observe::hello_result(&ping, outcome)?;
+        Ok((connection, hello))
+    }
+
+    /// Generation of the current connection, 0 when none is open. Test-only:
+    /// callers take the generation from `call`, never from a later read.
+    #[cfg(test)]
+    fn generation(&self) -> u64 {
+        self.slot()
+            .as_ref()
+            .map_or(0, |connection| connection.generation)
+    }
+
+    /// Mutations never open a connection: a replaced server is not written to.
+    /// The generation is read under the same lock as the exchange; 0 if none ran.
+    fn attempt(&self, call: &HerdrCall) -> (HerdrOutcome, u64) {
+        let mut slot = self.slot();
+        if slot.is_none() && call.request.is_read_only() {
+            match self.open() {
+                Ok((connection, _)) => *slot = Some(connection),
+                Err(error) => {
+                    return (Err(HerdrTransportError::NotSent(format!("{error:?}"))), 0);
+                }
+            }
+        }
+        let Some(connection) = slot.as_mut() else {
+            let error = HerdrTransportError::NotSent("no herdr connection".to_string());
+            return (Err(error), 0);
+        };
+        let generation = connection.generation;
+        let outcome = connection.exchange(&self.framing, call, self.config.max_frame_bytes);
+        if !matches!(&outcome, Ok(reply) if reply.id == call.id) {
+            *slot = None;
+        }
+        (outcome, generation)
+    }
+}
+
+impl<F: HerdrFraming> HerdrTransport for HerdrSocketTransport<F> {
+    fn call(&self, call: &HerdrCall) -> (HerdrOutcome, u64) {
+        if !call.request.is_read_only() {
+            return self.attempt(call);
+        }
+        let deadline = Instant::now() + self.config.read_deadline;
+        observe::retry_read(deadline, self.config.retry_backoff, || self.attempt(call))
+    }
+}
+
+#[cfg(test)]
+#[path = "transport_tests.rs"]
+mod tests;
