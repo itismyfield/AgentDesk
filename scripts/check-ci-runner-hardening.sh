@@ -1003,9 +1003,14 @@ targets = {
     "needs" => nil,
     "if" => nil,
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "8a52fb0d88680f1f1d6ec0232f9ff0c3763e128886cf19b9fd6477c2017470dd",
+    "job_sha256" => "1cad90577d2118651ea88b3de4c650afd4bc5777d7228a90f588da5b58e012e4",
     "job_timeout_minutes" => 45,
     "cargo_steps" => {
+      "Fetch Cargo dependencies" => {
+        "commands" => ["cargo fetch --locked"],
+        "timeout_minutes" => 10,
+        "if_condition" => "steps.mutation_paths.outputs.mutation_sources != 'false'",
+      },
       "Require relay-authority mutations to be killed" => {
         "commands" => ["bash scripts/run_relay_authority_mutations.sh"],
         "timeout_minutes" => 45,

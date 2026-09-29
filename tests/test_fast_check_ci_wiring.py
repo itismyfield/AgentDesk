@@ -19,7 +19,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "191b83c5639c4bfa4f21226626e0a1be11b38cee4d7ba36381f72a528003e62e"
+    "b23cb16675728a6d470bda30a74489ed64c072e60a452c7d484deff5cfd9386c"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Path-filtered required contexts: (mirror job, required name, runner job,
@@ -840,7 +840,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
             self.assertEqual(runner["env"]["CARGO_PROFILE_DEV_DEBUG"], "0")
             self.assertEqual(runner["env"]["CARGO_PROFILE_TEST_DEBUG"], "0")
             setup.append([step for step in runner["steps"] if "uses" in step and step.get("id") != "mutation_paths"])
-        self.assertEqual(setup[0], setup[1])
+        self.assertEqual(
+            setup[0],
+            [{key: value for key, value in step.items() if key != "if"} for step in setup[1]],
+        )
         self.assertEqual(setup[0][0], {"uses": "actions/checkout@v4"})
         self.assertEqual(setup[0][1]["with"]["toolchain"], "1.94.1")
         mutation = jobs["relay_authority_mutations"]
@@ -880,6 +883,45 @@ class FastCheckCiWiringTests(unittest.TestCase):
             r"        timeout-minutes: 45\n"
             r"        run: bash scripts/run_relay_authority_mutations\.sh$",
         )
+
+    def assert_mutation_dependency_preparation(self, job: dict) -> None:
+        condition = "steps.mutation_paths.outputs.mutation_sources != 'false'"
+        self.assertNotIn("if", job)
+        self.assertNotIn("continue-on-error", job)
+        steps = job["steps"]
+        self.assertEqual(steps[0], {"uses": "actions/checkout@v4"})
+        path_filter = steps[1]
+        self.assertEqual(path_filter.get("id"), "mutation_paths")
+        self.assertEqual(path_filter.get("uses"), "dorny/paths-filter@v3")
+        self.assertNotIn("if", path_filter)
+        self.assertNotIn("continue-on-error", path_filter)
+        names = [step.get("name") for step in steps]
+        mutation_index = names.index("Require relay-authority mutations to be killed")
+        self.assertEqual(steps[mutation_index].get("if"), condition)
+        preparation = (
+            "Install Rust toolchain",
+            "Setup sccache",
+            "Cache Cargo dependencies",
+            "Fetch Cargo dependencies",
+        )
+        for name in preparation:
+            self.assertIn(name, names, f"missing mutation preparation step: {name}")
+            index = names.index(name)
+            self.assertGreater(index, 1, f"{name} must follow the path filter")
+            self.assertLess(index, mutation_index, f"{name} must precede mutations")
+            self.assertEqual(steps[index].get("if"), condition, name)
+            self.assertNotIn("continue-on-error", steps[index], name)
+        fetch = steps[names.index("Fetch Cargo dependencies")]
+        self.assertEqual(fetch.get("run", "").strip(), "cargo fetch --locked")
+        self.assertEqual(fetch.get("shell"), "bash")
+        self.assertEqual(fetch.get("env", {}).get("BASH_ENV"), "/dev/null")
+        self.assertEqual(fetch.get("timeout-minutes"), 10)
+
+    def test_mutation_job_prepares_online_dependencies_before_offline_mutations(self) -> None:
+        job = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"][
+            "relay_authority_mutations"
+        ]
+        self.assert_mutation_dependency_preparation(job)
 
     def test_required_relay_job_backstops_mirror_content_hash(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
