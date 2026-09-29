@@ -184,14 +184,26 @@ pub(super) async fn handle_cancel_prompt_replace(
         // channel the WATCHER uses (a reused watcher can own a channel != this
         // bridge's `channel_id`), so the two CONTEND on one cell (single-holder
         // B2) instead of both delivering = duplicate.
-        let stop_lease_acquire = bridge_delivery_lease_for_inflight(
-            shared_owned.as_ref(),
-            watcher_owner_channel_id,
-            shared_owned.restart.current_generation,
-            &inflight_state,
-            tmux_last_offset,
+        let o_body_cut = terminal_controller_cutover::bridge_o_body_cut_decision(
+            inflight_state.runtime_kind,
+            gateway.can_deliver_directly(),
         );
-        if matches!(stop_lease_acquire, BridgeLeaseAcquire::Skip) {
+        let stop_lease_acquire = if o_body_cut {
+            BridgeLeaseAcquire::NoRange
+        } else {
+            bridge_delivery_lease_for_inflight(
+                shared_owned.as_ref(),
+                watcher_owner_channel_id,
+                shared_owned.restart.current_generation,
+                &inflight_state,
+                tmux_last_offset,
+            )
+        };
+        if o_body_cut {
+            // O posts the partial body; only the Legacy placeholder goes, the /stop lifecycle stays.
+            let _ = gateway.delete_message(channel_id, current_msg_id).await;
+            status_panel_terminal_committed = true;
+        } else if matches!(stop_lease_acquire, BridgeLeaseAcquire::Skip) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 channel_id = channel_id.get(),

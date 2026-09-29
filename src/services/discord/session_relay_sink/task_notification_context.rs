@@ -150,12 +150,33 @@ pub(super) async fn ensure_card_and_route(
         delivery.task_notification_context.as_ref(),
     )
     .await?;
-    let response_claim = if card.is_some()
+    let route = if card.is_some() {
+        super::SessionBoundTerminalDeliveryRoute::NewMessage
+    } else {
+        route
+    };
+    let response_claim = task_response_claim_for_card(shared, delivery, card).await?;
+    Ok((route, card, response_claim))
+}
+
+/// Durable response claim for a confirmed task card. None when O posts the
+/// response, so a delegated turn leaves no Legacy claim behind.
+async fn task_response_claim_for_card(
+    shared: &Arc<SharedData>,
+    delivery: &super::SessionRelayDelivery,
+    card: Option<MessageId>,
+) -> Result<Option<ResponseDeliveryClaimOutcome>, RelaySinkError> {
+    let response_claim = if crate::services::tui_o::cutover::o_owns_tui_output_for_tmux_session(
+        &delivery.session_name,
+    ) {
+        None
+    } else if card.is_some()
         && delivery.task_notification_context.is_some()
         && defer_task_response_to_watcher(
             delivery.frame_turn_start_offset,
             delivery.terminal_consumed_end,
-        ) {
+        )
+    {
         // A frame with no monotonic coordinate cannot be reconciled against
         // delivered tombstones without risking either suppression or replay.
         // The watcher owns the real consumed end and will retry this response.
@@ -257,12 +278,7 @@ pub(super) async fn ensure_card_and_route(
     } else {
         None
     };
-    let route = if card.is_some() {
-        super::SessionBoundTerminalDeliveryRoute::NewMessage
-    } else {
-        route
-    };
-    Ok((route, card, response_claim))
+    Ok(response_claim)
 }
 
 pub(super) fn answer_reference(

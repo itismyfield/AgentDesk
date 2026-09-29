@@ -151,6 +151,7 @@ pub(crate) mod writer_protocol;
 // Output track: the shadow and the dormant writer store, each behind an off-by-default flag.
 #[allow(dead_code)]
 pub(crate) mod tui_o {
+    pub(crate) mod cutover;
     pub(crate) mod ownership;
     pub(crate) mod shadow;
     pub(crate) mod shadow_host;
