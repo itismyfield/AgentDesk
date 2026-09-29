@@ -9062,6 +9062,7 @@ services::session_forwarding::trusted_target::tests::private_and_tailscale_addre
 services::session_forwarding::trusted_target::tests::resolver_answer_is_pinned_once_before_request_builder_exists
 services::session_host::legacy_collapse::tests::blank_name_collapses_like_the_platform_probes
 services::session_host::legacy_collapse::tests::liveness_collapse_treats_probe_error_as_not_dead
+services::session_host::legacy_collapse::tests::name_helpers_match_the_wrappers_they_replace
 services::session_host::legacy_collapse::tests::presence_collapse_matches_has_session
 services::session_host::model::tests::liveness_maps_one_to_one_with_pane_liveness
 services::session_host::model::tests::presence_maps_one_to_one_with_session_presence
@@ -9270,6 +9271,7 @@ services::tmux_common::watcher_jsonl_owner_tests::anything_else_is_unknown_and_r
 services::tmux_common::watcher_jsonl_owner_tests::files_under_a_provider_home_are_foreign
 services::tmux_common::watcher_jsonl_owner_tests::provider_home_containment_is_decided_on_inode_identity
 services::tmux_common::watcher_jsonl_owner_tests::this_sessions_own_relay_jsonl_is_owned
+services::tmux_diagnostics::tests::probe_tmux_session_exists_truth_table
 services::tmux_diagnostics::tests::process_backend_stopped_error_forces_recreate
 services::tmux_turn_liveness::idle_cleanup_tests::idle_cleanup_preserves_busy_unknown_and_approval_waiting_provider
 services::tmux_turn_liveness::idle_cleanup_tests::idle_cleanup_uses_native_provider_state_even_when_relay_is_absent_or_stale
