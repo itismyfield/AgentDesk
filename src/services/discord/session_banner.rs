@@ -464,6 +464,8 @@ mod tests {
         let bridge_terminal = include_str!("turn_bridge/terminal_outcome_delivery.rs");
         let bridge_cancel =
             include_str!("turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs");
+        let bridge_cancel_render =
+            include_str!("turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs");
         let watcher_terminal = include_str!("tmux_watcher/terminal_direct_fallback.rs");
         let session_sink = include_str!("session_relay_sink/relay_format.rs");
         let standby = include_str!("standby_relay.rs");
@@ -485,7 +487,8 @@ mod tests {
         );
         assert!(bridge_terminal.contains("DiscordTurnSessionBanner"));
         assert!(bridge_cancel.contains("DiscordTurnSessionBanner"));
-        assert!(bridge_cancel.matches("banner.prefix").count() >= 2);
+        assert!(bridge_cancel.contains("banner.prefix"));
+        assert!(bridge_cancel_render.matches("banner.prefix").count() >= 2);
         assert!(watcher_terminal.contains("prefix_watcher_terminal_session_banner"));
         assert!(session_sink.contains("with_discord_turn_session_banner_identity_prefix"));
         assert!(standby.contains("turn_session_banner_identity_prefix"));
