@@ -19,6 +19,7 @@ use crate::db::intake_outbox::{
 };
 use crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
 use crate::db::intake_outbox_status::IntakeOutboxStatus;
+use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
 use sqlx::PgPool;
 
 #[cfg(test)]
@@ -31,6 +32,8 @@ mod capacity_tests;
 mod edge_case_tests;
 #[cfg(test)]
 mod execution_requirement_tests;
+#[cfg(test)]
+mod o_route_tests;
 pub(crate) mod owner_record;
 mod session_owner;
 
@@ -117,6 +120,22 @@ pub(crate) async fn try_route_intake(
     pool: &PgPool,
     ctx: &IntakeRouterContext<'_>,
 ) -> IntakeRouterDecision {
+    // The actual Discord destination decides O ownership, never the policy channel.
+    match intake_route::route_text(ctx.provider, ctx.channel_id) {
+        IntakeRoute::Unselected => route_intake(pool, ctx).await,
+        IntakeRoute::Hold(detail) => required_block(detail),
+        IntakeRoute::Gateway => match route_intake(pool, ctx).await {
+            IntakeRouterDecision::DeferredOpenRoute {
+                target_instance_id, ..
+            } if target_instance_id != ctx.leader_instance_id => required_block(format!(
+                "O channel has an open route on {target_instance_id}, off its gateway"
+            )),
+            decision => decision,
+        },
+    }
+}
+
+async fn route_intake(pool: &PgPool, ctx: &IntakeRouterContext<'_>) -> IntakeRouterDecision {
     let requirements = match super::execution_requirements::for_channel(pool, ctx.policy_channel_id)
         .await
     {
@@ -557,6 +576,14 @@ async fn route_to_instance(
     observe_target_kind: ObserveTargetKind,
     requirements: &ExecutionRequirements,
 ) -> IntakeRouterDecision {
+    // An O channel is never placed off its gateway, whatever the owner, override or preference.
+    let off_gateway = target != ctx.leader_instance_id;
+    if off_gateway
+        && intake_route::route_text(ctx.provider, ctx.channel_id) != IntakeRoute::Unselected
+    {
+        let detail = format!("O channel runs only on its gateway, not {target}");
+        return apply_observe_mode(ctx.mode, required_block(detail));
+    }
     let resolved_owner = match observe_target_kind {
         ObserveTargetKind::LiveForeignOwner => ResolvedSessionOwner::LiveForeign,
         ObserveTargetKind::NodeOverride

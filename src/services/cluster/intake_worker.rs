@@ -21,12 +21,13 @@
 //!     and the operator alert path takes over.
 
 use crate::db::intake_outbox::{
-    IntakeOutboxRow, claim_pending_for_target, mark_accepted, mark_done, mark_failed_post_accept,
-    mark_failed_pre_accept, mark_spawned, return_claimed_to_pending,
+    IntakeOutboxRow, claim_pending_for_target_except, mark_accepted, mark_done,
+    mark_failed_post_accept, mark_failed_pre_accept, mark_spawned, return_claimed_to_pending,
 };
 use crate::db::intake_outbox_dispatch_stamp::observe_status;
 use crate::db::intake_outbox_status::IntakeOutboxStatus;
 use crate::services::discord::{IntakeRequest, SharedData, TurnKind, execute_intake_turn_core};
+use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 use sqlx::PgPool;
@@ -248,6 +249,8 @@ pub(crate) enum TickOutcome {
     /// The restart admission fence stopped the tick before claim, or returned
     /// its owned claim to pending before accept.
     Cancelled,
+    /// The row's O channel cannot run here now; its claim went back to pending.
+    Held,
 }
 
 /// Run a single poll cycle: claim one row, run it through accept →
@@ -278,7 +281,10 @@ pub(crate) async fn run_intake_worker_tick(
         return Ok(TickOutcome::Cancelled);
     }
 
-    let claimed = claim_pending_for_target(pool, target_instance_id, provider, claim_owner).await?;
+    let held = intake_route::held_channels(provider);
+    let claimed =
+        claim_pending_for_target_except(pool, target_instance_id, provider, claim_owner, &held)
+            .await?;
     super::readiness::record_poller_progress(provider);
     let Some(row) = claimed else {
         return Ok(TickOutcome::QueueEmpty);
@@ -312,6 +318,9 @@ pub(crate) async fn run_intake_worker_tick(
             return Ok(TickOutcome::Processed);
         }
     };
+    if hold_off_o_gateway(pool, &row, claim_owner, provider, request.channel_id).await? {
+        return Ok(TickOutcome::Held);
+    }
 
     let runtime = match crate::services::discord::health::resolve_intake_worker_runtime(
         shared,
@@ -379,6 +388,11 @@ pub(crate) async fn run_intake_worker_tick(
     {
         release_cancelled_claim(pool, &row, claim_owner).await?;
         return Ok(TickOutcome::Cancelled);
+    }
+
+    // Readiness may have changed while the runtime and uploads resolved.
+    if hold_off_o_gateway(pool, &row, claim_owner, provider, request.channel_id).await? {
+        return Ok(TickOutcome::Held);
     }
 
     // Transition: claimed → accepted. If the sweep beat us to it,
@@ -470,6 +484,28 @@ async fn release_cancelled_claim(
     Ok(())
 }
 
+/// Returns an O channel's claim to pending unless this node's writer can take it right now, so the
+/// row waits for its gateway instead of running here or failing into a retry.
+async fn hold_off_o_gateway(
+    pool: &PgPool,
+    row: &IntakeOutboxRow,
+    claim_owner: &str,
+    provider: &str,
+    channel_id: ChannelId,
+) -> Result<bool, sqlx::Error> {
+    let IntakeRoute::Hold(detail) = intake_route::route(provider, channel_id.get()) else {
+        return Ok(false);
+    };
+    let released = return_claimed_to_pending(pool, row.id, claim_owner).await?;
+    tracing::warn!(
+        row_id = row.id,
+        channel_id = row.channel_id,
+        released,
+        "[intake_worker] O channel held before accept: {detail}"
+    );
+    Ok(true)
+}
+
 /// Run the poll loop forever. Returns when the shutdown probe reads true.
 /// Each tick claims at most one row; backoff between ticks adapts to
 /// whether the previous tick had work.
@@ -530,7 +566,7 @@ pub(crate) async fn run_intake_worker_loop(
         .await;
 
         let sleep_for = match tick {
-            Ok(TickOutcome::QueueEmpty) => config.idle_poll_interval,
+            Ok(TickOutcome::QueueEmpty) | Ok(TickOutcome::Held) => config.idle_poll_interval,
             Ok(TickOutcome::Processed) | Ok(TickOutcome::LostClaimBeforeAccept) => {
                 config.busy_poll_interval
             }
@@ -909,23 +945,12 @@ mod tests {
 mod dispatch_stamp_tests;
 
 #[cfg(test)]
+#[path = "intake_worker/o_route_tests.rs"]
+mod o_route_tests;
+
+#[cfg(test)]
 #[path = "intake_worker/drain_tests.rs"]
 mod drain_tests;
 
-// PG-backed tick coverage is intentionally NOT in this file:
-// `run_intake_worker_tick` calls `execute_intake_turn_core` →
-// `handle_text_message`, which requires a fully-populated
-// `Arc<SharedData>` + Discord runtime. Constructing that from outside
-// `services::discord` is not supported today (the prod-shape test
-// harness `TestHealthHarness` lived in the removed SQLite-only feature). The
-// pre-execute branches we DO want to pin are already
-// covered at the helper level:
-//   - marker after loop check but before claim: extracted admission policy above
-//   - marker after claim but before accept: extracted policy above plus
-//     `db::intake_outbox::postgres_tests::cancelled_owned_claim_returns_exact_row_to_pending_without_failure_pollution`
-//   - lost-claim race (sweep wins between claim and accept):
-//     `db::intake_outbox::postgres_tests::mark_accepted_returns_false_when_sweep_already_reset_the_claim`
-//   - 23505 classification, claim ordering, sweep correctness:
-//     same module's other 13 tests.
-// Phase 4 (leader hook integration) will re-add tick-level integration
-// tests once it has access to the harness.
+// No test drives a tick into `execute_intake_turn_core`, which needs a full Discord runtime;
+// `o_route_tests` runs ticks only as far as runtime resolution.

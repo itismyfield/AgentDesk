@@ -600,12 +600,14 @@ src/
 │   │   │   ├── edge_case_tests.rs
 │   │   │   ├── execution_requirement_tests.rs
 │   │   │   ├── model.rs
+│   │   │   ├── o_route_tests.rs
 │   │   │   ├── owner_record.rs
 │   │   │   ├── placement.rs
 │   │   │   └── session_owner.rs
 │   │   ├── intake_worker/
 │   │   │   ├── dispatch_stamp_tests.rs
-│   │   │   └── drain_tests.rs
+│   │   │   ├── drain_tests.rs
+│   │   │   └── o_route_tests.rs
 │   │   ├── machine_resources/
 │   │   │   ├── gpu/
 │   │   │   │   ├── macos.rs
@@ -1955,7 +1957,8 @@ src/
 │   │   ├── channel_policy/
 │   │   │   └── tests.rs
 │   │   ├── cutover/
-│   │   │   └── channel_gate.rs
+│   │   │   ├── channel_gate.rs
+│   │   │   └── intake_route.rs
 │   │   ├── shadow/
 │   │   │   ├── binding_reader.rs
 │   │   │   ├── capture.rs

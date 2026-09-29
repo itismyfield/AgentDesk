@@ -76,8 +76,10 @@ src/services/cluster/intake_router_hook/attachment_tests.rs
 src/services/cluster/intake_router_hook/capacity_tests.rs
 src/services/cluster/intake_router_hook/edge_case_tests.rs
 src/services/cluster/intake_router_hook/execution_requirement_tests.rs
+src/services/cluster/intake_router_hook/o_route_tests.rs
 src/services/cluster/intake_router_hook/owner_record.rs
 src/services/cluster/intake_worker/dispatch_stamp_tests.rs
+src/services/cluster/intake_worker/o_route_tests.rs
 src/services/cluster/machine_resources/store.rs
 src/services/discord/catch_up/too_old_notice.rs
 src/services/discord/commands/control.rs
@@ -214,9 +216,11 @@ services::cluster::intake_router_hook::attachment_tests
 services::cluster::intake_router_hook::capacity_tests
 services::cluster::intake_router_hook::edge_case_tests
 services::cluster::intake_router_hook::execution_requirement_tests
+services::cluster::intake_router_hook::o_route_tests
 services::cluster::intake_router_hook::owner_record::tests
 services::cluster::intake_router_hook::pg_tests
 services::cluster::intake_worker::dispatch_stamp_tests
+services::cluster::intake_worker::o_route_tests
 services::cluster::machine_resources::store::tests
 services::discord::catch_up::too_old_notice::tests
 services::discord::commands::control::clear_persist_failure_tests
@@ -775,6 +779,7 @@ services::cluster::intake_router_hook::edge_case_tests::per_agent_primary_race_r
 services::cluster::intake_router_hook::edge_case_tests::primary_readiness_loss_and_removed_registration_only_use_compatible_fallback_pg
 services::cluster::intake_router_hook::execution_requirement_tests::execution_requirements_block_fallback_and_survive_recovery_pg
 services::cluster::intake_router_hook::execution_requirement_tests::execution_requirements_reject_incompatible_existing_owner_without_reassignment_pg
+services::cluster::intake_router_hook::o_route_tests::an_o_channel_is_placed_only_on_its_ready_gateway_pg
 services::cluster::intake_router_hook::owner_record::tests::acquire_covers_each_generation_rule
 services::cluster::intake_router_hook::owner_record::tests::admission_idempotency_conflict_returns_prior_row
 services::cluster::intake_router_hook::owner_record::tests::admission_insert_stamps_owner_and_returns_id
@@ -837,6 +842,7 @@ services::cluster::intake_router_hook::pg_tests::stale_owner_recovers_when_worke
 services::cluster::intake_router_hook::pg_tests::unmapped_channel_records_no_agent_for_channel
 services::cluster::intake_worker::dispatch_stamp_tests::worker_mark_done_false_on_dispatched_is_not_a_divergence_pg
 services::cluster::intake_worker::dispatch_stamp_tests::worker_mark_done_false_on_missing_row_is_a_divergence_pg
+services::cluster::intake_worker::o_route_tests::a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg
 services::cluster::machine_resources::store::tests::postgres_machine_history_is_durable_ordered_deduplicated_and_retained
 services::discord::catch_up::too_old_notice::tests::default_adapter_preserves_outbox_contract_and_pg_dedupe_pg
 services::discord::catch_up::too_old_notice::tests::persistent_dedupe_suppresses_too_old_notice_across_restart_gap_pg
