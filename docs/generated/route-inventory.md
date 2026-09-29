@@ -135,7 +135,7 @@
 | `GET` | `/api/health` | `health_api::health_handler` | `src/server/routes/health_api.rs:763` | `src/server/routes/domains/access.rs:15` |
 | `GET` | `/api/health/detail` | `health_api::health_detail_handler` | `src/server/routes/health_api.rs:768` | `src/server/routes/domains/runtime.rs:21` |
 | `GET` | `/api/help` | `docs::api_help` | `src/server/routes/docs.rs:38` | `src/server/routes/domains/ops.rs:265` |
-| `GET` | `/api/home/kpi-trends` | `home_metrics::home_kpi_trends` | `src/server/routes/home_metrics.rs:54` | `src/server/routes/domains/admin.rs:74` |
+| `GET` | `/api/home/kpi-trends` | `home_metrics::home_kpi_trends` | `src/server/routes/home_metrics.rs:33` | `src/server/routes/domains/admin.rs:74` |
 | `POST` | `/api/hook/reset-status` | `hooks::reset_status` | `src/server/routes/hooks.rs:36` | `src/server/routes/domains/runtime.rs:151` |
 | `DELETE` | `/api/hook/session/{sessionKey}` | `hooks::disconnect_session` | `src/server/routes/hooks.rs:72` | `src/server/routes/domains/runtime.rs:153` |
 | `POST` | `/api/hook/skill-usage` | `hooks::skill_usage` | `src/server/routes/hooks.rs:55` | `src/server/routes/domains/runtime.rs:152` |

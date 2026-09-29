@@ -1,30 +1,11 @@
-//! VoiceTurnLink durable store (#2362 / #2164 Voice A).
+//! Durable `voice_turn_link`: which background text channel owns a routed voice
+//! turn. Written by the voice background handoff; survives restarts so terminal
+//! delivery can resolve the final TTS playback channel.
 //!
-//! Canonical bridge between a voice channel and the background text channel
-//! that owns a routed voice turn. Survives process restarts and powers
-//! reverse lookups for final TTS playback target resolution (#2164 C6),
-//! barge-in cancel routing (#2164 C7), and agent:done feedback routing
-//! (#2164 C8).
-//!
-//! The lifecycle is intentionally narrow:
-//!
-//!   * [`upsert_active_voice_turn_link_pg`] — create or advance the active
-//!     durable link, attaching identifiers learned after initial dispatch.
-//!   * [`retarget_voice_turn_link_pg`] — atomic "cancel previous generation,
-//!     insert new active generation" used by the upsert path.
-//!   * `lookup_active_voice_turn_link_by_*` — active-only reverse lookups for
-//!     call sites that know a dispatch, announce message, turn, or utterance.
-//!   * [`attach_voice_turn_link_ids_pg`] — fill announce/dispatch/turn
-//!     identifiers when downstream models learn them after link creation.
-//!   * [`mark_terminal_voice_turn_link_pg`] — flip status when the routed
-//!     turn completes (TTS done, run_completed, etc.).
-//!   * [`gc_terminal_voice_turn_links_pg`] — leader-only maintenance sweep
-//!     for old terminal rows. Active and cancelled rows are intentionally
-//!     left in place to preserve durable history for long-lived background
-//!     turns (24h+ runs are normal).
-//!
-//! The live call sites are wired through voice background handoff, barge-in,
-//! final playback resolution, and leader maintenance.
+//! - At most one `active` row per utterance; a higher generation cancels older ones.
+//! - A `terminal` latest generation closes the utterance for good.
+//! - `lookup_active_voice_turn_link_by_*` sees `active` rows only.
+//! - GC removes old `terminal` rows only.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -67,8 +48,7 @@ pub struct VoiceTurnLink {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Payload accepted by [`upsert_active_voice_turn_link_pg`] and
-/// [`retarget_voice_turn_link_pg`].
+/// Row payload for [`upsert_active_voice_turn_link_pg`] and [`retarget_voice_turn_link_pg`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VoiceTurnLinkInsert {
     pub guild_id: u64,
@@ -81,9 +61,8 @@ pub struct VoiceTurnLinkInsert {
     pub turn_id: Option<String>,
 }
 
-/// Optional identifiers learned after the initial voice link row exists.
-/// Each supplied value is "attach only": it fills a NULL column or confirms
-/// an identical value, but never overwrites a different durable identity.
+/// Ids learned after the link row exists. Attach-only: a value fills a NULL column or
+/// matches the stored one; a different stored id is never overwritten.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VoiceTurnLinkIdentityPatch {
     pub guild_id: u64,
@@ -95,17 +74,12 @@ pub struct VoiceTurnLinkIdentityPatch {
     pub turn_id: Option<String>,
 }
 
-/// The result of [`attach_voice_turn_link_ids_pg`].
-///
-/// Callers distinguish "nothing existed" from "something conflicted" by
-/// matching on this outcome directly.
+/// Result of [`attach_voice_turn_link_ids_pg`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachOutcome {
     /// At least one NULL column was filled in; `updated_at` was bumped.
     Attached(VoiceTurnLink),
-    /// Row found but no column needed updating — all-None patch or every
-    /// supplied value already matched the stored durable identity.
-    /// `updated_at` was **not** touched.
+    /// Row found and nothing needed writing; `updated_at` was **not** touched.
     Unchanged(VoiceTurnLink),
     /// No row exists for the supplied `(guild_id, voice_channel_id,
     /// utterance_id, generation)` key.
@@ -126,9 +100,7 @@ fn i64_to_u64(value: i64) -> u64 {
 fn row_to_link(row: &sqlx::postgres::PgRow) -> VoiceTurnLink {
     let status_raw: String = row.get("status");
     let status = VoiceTurnLinkStatus::parse(&status_raw).unwrap_or_else(|| {
-        // Defensive: the CHECK constraint should make this unreachable, but
-        // if a future migration ever loosens the constraint we want a sane
-        // fallback rather than a panic in production.
+        // The CHECK constraint makes this unreachable; fall back rather than panic.
         tracing::warn!(
             status = %status_raw,
             "[voice_turn_link] unknown status value in row; defaulting to active"
@@ -153,36 +125,24 @@ fn row_to_link(row: &sqlx::postgres::PgRow) -> VoiceTurnLink {
     }
 }
 
-/// SQL `RETURNING` projection used by every helper that yields a
-/// [`VoiceTurnLink`]. Kept centralised so column drift is impossible.
+/// Column list for every query whose rows become a [`VoiceTurnLink`].
 const RETURNING_COLUMNS: &str = "id, guild_id, voice_channel_id, background_channel_id, \
     utterance_id, generation, announce_message_id, dispatch_id, turn_id, status, created_at, \
     updated_at";
 
-/// Atomic retarget: mark every strictly-prior `active` row for
-/// `(guild_id, voice_channel_id, utterance_id)` as `cancelled`, then insert
-/// the new generation as `active`. Wrapped in a single transaction with a
-/// per-utterance `pg_advisory_xact_lock` so concurrent retargets for the
-/// same utterance run serially and cannot both leave `active` rows behind.
-/// The partial unique index `voice_turn_link_unique_active` provides a
-/// schema-level backstop for the same invariant.
+/// Cancel older `active` rows for the utterance and insert this generation as
+/// `active`, in one transaction under the per-utterance advisory lock. The partial
+/// unique index `voice_turn_link_unique_active` backs the one-active-row rule.
 ///
-/// Stale-retry semantics: if a delayed retry arrives for `generation = N`
-/// after a later retarget has already advanced the utterance to
-/// `generation = M > N`, the stale call is treated as a no-op. The newer
-/// active row is **not** cancelled, and `Ok(None)` is returned. Likewise a
-/// same-generation retry of the most recent active row deduplicates to
-/// `Ok(None)` without mutation.
+/// Returns `Ok(None)` without mutating for a stale or same-generation retry, when the
+/// latest generation is `terminal`, or when the `turn_id` belongs to another row.
 pub async fn retarget_voice_turn_link_pg(
     pool: &PgPool,
     insert: &VoiceTurnLinkInsert,
 ) -> Result<Option<VoiceTurnLink>> {
     let mut tx = pool.begin().await?;
 
-    // 0. Serialize concurrent retargets for the same utterance. The lock
-    //    key is derived from (guild_id, voice_channel_id, utterance_id)
-    //    so it does not collide across utterances. `xact` flavour
-    //    releases automatically at COMMIT/ROLLBACK.
+    // Held until COMMIT/ROLLBACK; shared with `mark_terminal_voice_turn_link_pg`.
     let lock_key = advisory_lock_key(
         insert.guild_id,
         insert.voice_channel_id,
@@ -193,23 +153,8 @@ pub async fn retarget_voice_turn_link_pg(
         .execute(&mut *tx)
         .await?;
 
-    // 1. Look at the latest generation for this utterance and its
-    //    status. The state machine treats 'terminal' as closing the
-    //    *current* generation (i.e. the utterance as a whole) only when
-    //    the latest generation is terminal. A late completion that
-    //    terminalises an older, already-cancelled generation must NOT
-    //    block a newer retarget — gen1 can still legitimately retarget
-    //    to gen2 even if gen0 just transitioned cancelled→terminal.
-    //
-    //    Concretely:
-    //      latest_row.status = 'terminal' → utterance closed, no-op.
-    //      latest_row.status = 'active'   → proceed with normal retarget.
-    //      latest_row.status = 'cancelled'→ proceed (history watermark
-    //        still applies via the generation check below).
-    //      no rows                        → proceed (fresh insert).
-    //
-    //    The generation-watermark check (`<= latest_generation`) catches
-    //    stale retries regardless of latest_status.
+    // Only the LATEST generation's status closes the utterance: a late terminal on an
+    // older, cancelled generation must not block a newer retarget.
     #[derive(sqlx::FromRow)]
     struct LatestRow {
         generation: i32,
@@ -232,8 +177,7 @@ pub async fn retarget_voice_turn_link_pg(
 
     if let Some(latest_row) = latest.as_ref() {
         if latest_row.status == "terminal" {
-            // The current generation of this utterance is closed.
-            // Further retargets would resurrect a finished turn.
+            // Retargeting now would resurrect a finished turn.
             tx.commit().await?;
             return Ok(None);
         }
@@ -244,9 +188,7 @@ pub async fn retarget_voice_turn_link_pg(
         }
     }
 
-    // 2. Cancel strictly-prior active rows. Using `<` (not `<>`) protects
-    //    a future-generation that may already exist in 'cancelled' or
-    //    'terminal' state — those are immutable history.
+    // `<`, not `<>`: rows at later generations are immutable history.
     sqlx::query(
         "UPDATE voice_turn_link
             SET status = 'cancelled', updated_at = NOW()
@@ -263,10 +205,7 @@ pub async fn retarget_voice_turn_link_pg(
     .execute(&mut *tx)
     .await?;
 
-    // 3. Insert the new generation. ON CONFLICT covers the rare case where
-    //    the same (utterance, generation) was inserted by a prior commit
-    //    that we somehow raced past — defensive only, since the advisory
-    //    lock already serialises us.
+    // ON CONFLICT is defensive only; the advisory lock already serializes writers.
     let sql = format!(
         "INSERT INTO voice_turn_link (
              guild_id, voice_channel_id, background_channel_id,
@@ -289,9 +228,8 @@ pub async fn retarget_voice_turn_link_pg(
         .fetch_optional(&mut *tx)
         .await;
 
-    // A turn_id collision with a different row is treated as a dedup: the
-    // caller gets Ok(None) rather than a propagated UniqueViolation. The tx
-    // drops here and auto-rolls back in the conflict branch.
+    // A `turn_id` owned by another row dedups to Ok(None); dropping `tx` also rolls
+    // back the cancel above.
     let inserted = match result {
         Ok(row) => row,
         Err(sqlx::Error::Database(e)) if e.constraint() == Some("voice_turn_link_turn_id_uq") => {
@@ -305,19 +243,11 @@ pub async fn retarget_voice_turn_link_pg(
     Ok(inserted.as_ref().map(row_to_link))
 }
 
-/// Create or advance the active link for an utterance.
+/// Create or advance the active link: insert or retarget to a new generation, or
+/// attach newly learned ids to the same generation's active row.
 ///
-/// This is the C-series friendly entry point: with no existing row it creates
-/// generation 0 (or whichever generation the caller supplies); with a higher
-/// generation it cancels prior active rows and inserts the new active row; with
-/// an already-present same generation it attaches any newly learned identifiers
-/// and returns the active row. Stale or post-terminal attempts return `None`.
-///
-/// **Conflict semantics**: if the row already carries a different durable
-/// identity for any supplied non-`None` field (dispatch_id, announce_message_id,
-/// or turn_id), the call returns `Ok(None)` — the conflicting insert is
-/// rejected, not silently ignored. Callers must not treat that `None` as
-/// success; the stored link belongs to a different identity set.
+/// `Ok(None)` means rejected, never success: a stale or post-terminal attempt, or a
+/// supplied id that conflicts with the stored one.
 pub async fn upsert_active_voice_turn_link_pg(
     pool: &PgPool,
     insert: &VoiceTurnLinkInsert,
@@ -343,8 +273,7 @@ pub async fn upsert_active_voice_turn_link_pg(
             // Row exists but is not active (cancelled/terminal) — fall through.
         }
         AttachOutcome::Conflict => {
-            // Caller supplied IDs that conflict with stored durable identities.
-            // Reject rather than silently returning the old link.
+            // Never hand back the old link for conflicting ids.
             return Ok(None);
         }
         AttachOutcome::NotFound => {
@@ -362,26 +291,12 @@ pub async fn upsert_active_voice_turn_link_pg(
     Ok(active.filter(|link| link.generation == insert.generation))
 }
 
-/// Attach announce/dispatch/turn identifiers to an existing durable link.
-///
-/// Returns [`AttachOutcome`] so callers can distinguish the four cases:
-///
-/// * `Attached(row)` — at least one NULL column was filled; `updated_at`
-///   was bumped.
-/// * `Unchanged(row)` — row found but nothing was written (all-None patch or
-///   every supplied value already matched the stored identity); `updated_at`
-///   was **not** touched, so route resolution order is preserved.
-/// * `NotFound` — no row exists for `(guild_id, voice_channel_id,
-///   utterance_id, generation)`.
-/// * `Conflict` — the row exists but already carries a different durable
-///   identity for at least one supplied non-`None` field; the row is
-///   unchanged.
+/// Fill NULL announce/dispatch/turn ids on an existing link; see [`AttachOutcome`].
 pub async fn attach_voice_turn_link_ids_pg(
     pool: &PgPool,
     patch: &VoiceTurnLinkIdentityPatch,
 ) -> Result<AttachOutcome> {
-    // Read the current row first so we can detect conflicts and no-ops
-    // without an UPDATE that would spuriously bump updated_at.
+    // Read first so conflicts and no-ops are found without an UPDATE bumping updated_at.
     let select_sql = format!(
         "SELECT {RETURNING_COLUMNS}
            FROM voice_turn_link
@@ -403,9 +318,6 @@ pub async fn attach_voice_turn_link_ids_pg(
     };
     let current = row_to_link(&current_row);
 
-    // Detect conflicts: a supplied non-None value that differs from an
-    // already-stored non-None value. First-writer wins; the identity is
-    // durable once set.
     if let (Some(new), Some(old)) = (patch.announce_message_id, current.announce_message_id) {
         if new != old {
             return Ok(AttachOutcome::Conflict);
@@ -422,22 +334,18 @@ pub async fn attach_voice_turn_link_ids_pg(
         }
     }
 
-    // Determine which columns actually need to be written.
     let needs_announce =
         patch.announce_message_id.is_some() && current.announce_message_id.is_none();
     let needs_dispatch = patch.dispatch_id.is_some() && current.dispatch_id.is_none();
     let needs_turn = patch.turn_id.is_some() && current.turn_id.is_none();
 
     if !needs_announce && !needs_dispatch && !needs_turn {
-        // Nothing to write — return the row without touching updated_at so
-        // route resolution order (ORDER BY updated_at DESC) is not disturbed.
+        // Leave updated_at alone so `ORDER BY updated_at DESC` lookups keep their order.
         return Ok(AttachOutcome::Unchanged(current));
     }
 
-    // At least one NULL column can be filled. Do the UPDATE.  The WHERE
-    // clause is still conflict-safe for any race between the SELECT above
-    // and this UPDATE.  A concurrent writer that beat us to one of these
-    // columns will cause the UPDATE to return nothing → Conflict.
+    // The WHERE guard re-checks conflicts, so a writer that raced in after the
+    // SELECT makes this return no row (Conflict).
     let update_sql = format!(
         "UPDATE voice_turn_link
             SET announce_message_id = COALESCE(announce_message_id, $5),
@@ -467,8 +375,7 @@ pub async fn attach_voice_turn_link_ids_pg(
     match result {
         Ok(Some(row)) => Ok(AttachOutcome::Attached(row_to_link(&row))),
         Ok(None) => {
-            // A concurrent writer filled in a conflicting value between our
-            // SELECT and this UPDATE.
+            // A concurrent writer set a conflicting value after our SELECT.
             Ok(AttachOutcome::Conflict)
         }
         Err(sqlx::Error::Database(e)) if e.constraint() == Some("voice_turn_link_turn_id_uq") => {
@@ -479,20 +386,8 @@ pub async fn attach_voice_turn_link_ids_pg(
     }
 }
 
-/// Derive a stable i64 advisory-lock key from the
-/// `(guild_id, voice_channel_id, utterance_id)` triple.
-///
-/// Stability is load-bearing here: during a rolling deploy, two
-/// different binaries on different nodes must compute identical keys
-/// for the same utterance, otherwise `mark_terminal` and `retarget` can
-/// take different advisory locks and reintroduce the READ COMMITTED
-/// interleaving the lock is designed to prevent.
-///
-/// We therefore use a hand-rolled FNV-1a 64-bit hash over a fixed byte
-/// encoding: domain tag, little-endian guild_id, little-endian
-/// voice_channel_id, utf-8 utterance_id bytes. FNV-1a is documented and
-/// trivially stable across Rust versions and platforms. The fixed-vector
-/// test in `tests::advisory_lock_key_is_stable` pins the output.
+/// Per-utterance advisory-lock key: FNV-1a over a fixed byte encoding, so every binary
+/// in a rolling deploy takes the same lock. Pinned by `tests::advisory_lock_key_is_stable`.
 fn advisory_lock_key(guild_id: u64, voice_channel_id: u64, utterance_id: &str) -> i64 {
     const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -505,8 +400,7 @@ fn advisory_lock_key(guild_id: u64, voice_channel_id: u64, utterance_id: &str) -
         }
     };
 
-    // Domain tag so other future advisory-lock users in the same DB
-    // cannot collide on the same numeric key by accident.
+    // Domain tag keeps other advisory-lock users in this DB from colliding.
     absorb(b"voice_turn_link\0");
     absorb(&guild_id.to_le_bytes());
     absorb(&voice_channel_id.to_le_bytes());
@@ -594,12 +488,8 @@ pub async fn lookup_active_voice_turn_link_by_utterance_pg(
     Ok(row.as_ref().map(row_to_link))
 }
 
-/// Flip a specific (guild, voice channel, utterance, generation) row to
-/// `terminal`. Returns the updated row, or `None` if no matching row
-/// exists. Status transitions from `active` and `cancelled` are both
-/// permitted: a turn that gets retargeted *and then* completes from the
-/// cancelled branch (rare race, but possible during reconnection) is
-/// still observable as terminal.
+/// Mark one generation `terminal`, from `active` or `cancelled` (a retargeted turn
+/// can still complete late). Returns `None` if no such row exists.
 pub async fn mark_terminal_voice_turn_link_pg(
     pool: &PgPool,
     guild_id: u64,
@@ -609,9 +499,7 @@ pub async fn mark_terminal_voice_turn_link_pg(
 ) -> Result<Option<VoiceTurnLink>> {
     let mut tx = pool.begin().await?;
 
-    // Same advisory lock as retarget/upsert so completion can never
-    // interleave with a concurrent retarget in a way that resurrects the
-    // closed utterance back to active.
+    // Same lock as retarget, so a racing retarget cannot resurrect the utterance.
     let lock_key = advisory_lock_key(guild_id, voice_channel_id, utterance_id);
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(lock_key)
@@ -639,13 +527,8 @@ pub async fn mark_terminal_voice_turn_link_pg(
     Ok(row.as_ref().map(row_to_link))
 }
 
-/// GC sweep for old terminal rows. Only `terminal` rows older than
-/// `older_than` are deleted; `active` and `cancelled` rows are
-/// intentionally preserved because background turns can live 24h+ and the
-/// cancelled tombstones preserve durable history during late completion and
-/// reconciliation (e.g. after a retarget already happened).
-///
-/// Returns the number of rows actually deleted.
+/// Delete `terminal` rows last updated before `older_than`; returns the count. `active`
+/// and `cancelled` rows stay: background turns run 24h+ and can complete late.
 pub async fn gc_terminal_voice_turn_links_pg(
     pool: &PgPool,
     older_than: DateTime<Utc>,
@@ -778,7 +661,6 @@ mod tests {
         assert_eq!(inserted.background_channel_id, 999);
         assert_eq!(inserted.status, VoiceTurnLinkStatus::Active);
 
-        // Prior generation should now be cancelled.
         let prior: (i32, String) =
             sqlx::query_as("SELECT generation, status FROM voice_turn_link WHERE dispatch_id = $1")
                 .bind("dispatch-0")
@@ -803,8 +685,6 @@ mod tests {
             .await
             .unwrap()
             .expect("first retarget inserts");
-        // Re-applying the same generation is a no-op; the existing row
-        // stays active and no new row is inserted.
         let again = retarget_voice_turn_link_pg(&pool, &sample_insert(0))
             .await
             .unwrap();
@@ -983,8 +863,7 @@ mod tests {
         active.turn_id = Some("turn-active".to_string());
         retarget_voice_turn_link_pg(&pool, &active).await.unwrap();
 
-        // Cancelled row — must survive GC (long-lived background turn
-        // tombstone preserved for late lookups).
+        // Cancelled row — must survive GC.
         let mut cancelled = sample_insert(0);
         cancelled.utterance_id = "utt-cancelled".to_string();
         cancelled.dispatch_id = Some("dispatch-cancelled".to_string());
@@ -1011,10 +890,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Backdate the terminal row's updated_at past the cutoff. We rely
-        // on the test DB's NOW() being close to wall clock; setting
-        // updated_at to an explicit past timestamp is more deterministic
-        // than sleeping.
+        // Backdate past the cutoff instead of sleeping.
         sqlx::query(
             "UPDATE voice_turn_link
                 SET updated_at = NOW() - INTERVAL '48 hours'
@@ -1061,8 +937,7 @@ mod tests {
                 .unwrap();
         assert_eq!(terminal_count, 0, "terminal row deleted by GC");
 
-        // Young terminal rows (after cutoff) must not be deleted. Add a
-        // fresh terminal row and rerun GC.
+        // A terminal row newer than the cutoff survives.
         let mut fresh = sample_insert(0);
         fresh.utterance_id = "utt-fresh-terminal".to_string();
         fresh.dispatch_id = Some("dispatch-fresh".to_string());
@@ -1080,10 +955,6 @@ mod tests {
         pg.drop().await;
     }
 
-    /// Stale-retry regression (Codex review #2362): a delayed retarget
-    /// retry for generation N must NOT cancel a newer active row at
-    /// generation M (M > N). Reapplying gen 1 after gen 2 is active is
-    /// a no-op.
     #[tokio::test]
     async fn stale_retarget_retry_does_not_cancel_newer_active_pg() {
         let Some(pg) = TestPostgresDb::try_create().await else {
@@ -1091,7 +962,6 @@ mod tests {
         };
         let pool = pg.connect_and_migrate().await;
 
-        // Establish initial active gen 0.
         retarget_voice_turn_link_pg(&pool, &sample_insert(0))
             .await
             .unwrap()
@@ -1116,8 +986,6 @@ mod tests {
             "stale retarget retry must dedupe to None, not mutate newer rows"
         );
 
-        // The newer gen 2 row must still be active. We look it up by
-        // dispatch_id directly to be unambiguous.
         let gen2 = lookup_active_voice_turn_link_by_dispatch_id_pg(&pool, "dispatch-2")
             .await
             .unwrap()
@@ -1129,7 +997,6 @@ mod tests {
             "newer active row must NOT be cancelled by stale retry"
         );
 
-        // And there must be exactly one active row for this utterance.
         let active_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM voice_turn_link
               WHERE guild_id = 100
@@ -1146,17 +1013,10 @@ mod tests {
         pg.drop().await;
     }
 
-    /// Stable advisory-lock key (Codex review #2362 round 3).
-    /// `mark_terminal` and `retarget` must compute the same key for the
-    /// same utterance across any binary that touches the table; a
-    /// rolling deploy with two different hashers would silently
-    /// reintroduce the READ COMMITTED interleaving the lock is supposed
-    /// to prevent. This fixed-vector test pins the FNV-1a output.
     #[test]
     fn advisory_lock_key_is_stable() {
-        // Pinned value — change here breaks rolling-deploy safety.
-        // Regenerate ONLY together with a deliberate, communicated
-        // schema/protocol bump.
+        // Changing this value splits locks across a rolling deploy; only with a
+        // deliberate protocol bump.
         assert_eq!(
             advisory_lock_key(100, 200, "utt-42"),
             4_421_636_910_427_734_922
@@ -1176,11 +1036,6 @@ mod tests {
         );
     }
 
-    /// Stale-terminal regression (Codex review #2362 round 3). A late
-    /// completion that terminalises an already-cancelled prior
-    /// generation must NOT block a fresh retarget of the live
-    /// generation. The "is utterance closed" probe must look at the
-    /// LATEST generation, not "any terminal row anywhere".
     #[tokio::test]
     async fn late_terminal_on_cancelled_generation_does_not_block_retarget_pg() {
         let Some(pg) = TestPostgresDb::try_create().await else {
@@ -1188,27 +1043,21 @@ mod tests {
         };
         let pool = pg.connect_and_migrate().await;
 
-        // gen0 active.
         retarget_voice_turn_link_pg(&pool, &sample_insert(0))
             .await
             .unwrap()
             .expect("seed gen0");
-        // Retarget to gen1: gen0 -> cancelled, gen1 -> active.
         retarget_voice_turn_link_pg(&pool, &sample_insert(1))
             .await
             .unwrap()
             .expect("retarget to gen1");
 
-        // Late completion arrives for gen0 (which is now cancelled).
-        // This flips gen0 cancelled -> terminal. gen1 stays active.
+        // Late completion flips the cancelled gen0 to terminal; gen1 stays active.
         mark_terminal_voice_turn_link_pg(&pool, 100, 200, "utt-42", 0)
             .await
             .unwrap()
             .expect("late terminal on cancelled gen0");
 
-        // Now retarget to gen2 should STILL proceed because gen1 is the
-        // current live generation and gen0's late terminal is just
-        // tombstone hygiene.
         let result = retarget_voice_turn_link_pg(&pool, &sample_insert(2))
             .await
             .unwrap()
@@ -1216,8 +1065,6 @@ mod tests {
         assert_eq!(result.generation, 2);
         assert_eq!(result.status, VoiceTurnLinkStatus::Active);
 
-        // Verify state: exactly one active (gen2), gen0 terminal, gen1
-        // cancelled.
         let active_gen: i32 = sqlx::query_scalar(
             "SELECT generation FROM voice_turn_link
               WHERE guild_id = 100
@@ -1234,11 +1081,6 @@ mod tests {
         pg.drop().await;
     }
 
-    /// Resurrection regression (Codex review #2362 round 2): once the
-    /// LATEST generation for an utterance is `terminal`, no subsequent
-    /// retarget — even at a strictly higher generation — may resurrect
-    /// the utterance back to `active`. The closed turn must stay closed
-    /// and remain GC-eligible.
     #[tokio::test]
     async fn retarget_after_mark_terminal_does_not_resurrect_pg() {
         let Some(pg) = TestPostgresDb::try_create().await else {
@@ -1255,9 +1097,7 @@ mod tests {
             .unwrap()
             .expect("mark_terminal");
 
-        // A late retarget arrives — try gen 1 (strictly higher than the
-        // terminalised gen 0). It MUST become a no-op; otherwise the
-        // closed turn is resurrected.
+        // Even a strictly higher generation must not reopen a terminal utterance.
         let result = retarget_voice_turn_link_pg(&pool, &sample_insert(1))
             .await
             .unwrap();
@@ -1266,7 +1106,6 @@ mod tests {
             "retarget after mark_terminal must NOT resurrect the utterance"
         );
 
-        // No active rows must exist for this utterance.
         let active_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM voice_turn_link
               WHERE guild_id = 100
@@ -1279,7 +1118,6 @@ mod tests {
         .unwrap();
         assert_eq!(active_count, 0, "no active row may exist post-terminal");
 
-        // And the terminal row must still be the gen 0 we created.
         let terminal_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM voice_turn_link
               WHERE guild_id = 100
@@ -1296,11 +1134,6 @@ mod tests {
         pg.drop().await;
     }
 
-    /// Concurrent mark_terminal vs retarget (Codex review #2362 round 2):
-    /// these two ops on the same utterance must serialize via the
-    /// advisory lock. Whichever commits first wins; the other becomes a
-    /// no-op rather than violating the "one active row" invariant or
-    /// resurrecting a terminal turn.
     #[tokio::test]
     async fn concurrent_mark_terminal_and_retarget_serialize_pg() {
         let Some(pg) = TestPostgresDb::try_create().await else {
@@ -1325,13 +1158,8 @@ mod tests {
         let _ = terminal_handle.await.unwrap().unwrap();
         let _ = retarget_handle.await.unwrap().unwrap();
 
-        // Either order:
-        //  (A) terminal commits first → retarget sees has_terminal=true → no-op.
-        //      Final: 1 terminal row, 0 active.
-        //  (B) retarget commits first → terminal then flips gen 0 to terminal.
-        //      Final: 1 active row (gen 1), 1 terminal row (gen 0).
-        // Both orders are valid. The invariant we enforce: at most one
-        // active row for the utterance.
+        // Terminal first: the retarget sees a terminal latest row and no-ops. Retarget
+        // first: gen 1 active, gen 0 terminal. Either way at most one active row.
         let active_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM voice_turn_link
               WHERE guild_id = 100
@@ -1351,13 +1179,6 @@ mod tests {
         pg.drop().await;
     }
 
-    /// Concurrent-retarget regression (Codex review #2362): two
-    /// retargets running in parallel for the same utterance must
-    /// serialize and leave exactly one active row. The partial unique
-    /// index `voice_turn_link_unique_active` is the schema-level
-    /// backstop; the advisory lock makes the failure path observable as
-    /// "the late writer becomes a no-op" rather than "constraint
-    /// violation".
     #[tokio::test]
     async fn concurrent_retarget_leaves_exactly_one_active_pg() {
         let Some(pg) = TestPostgresDb::try_create().await else {
@@ -1370,10 +1191,6 @@ mod tests {
             .unwrap()
             .expect("seed insert");
 
-        // Fire two retargets concurrently — one to gen 1, one to gen 2.
-        // Whichever commits second observes the other's active row and
-        // either no-ops (if its own generation is now stale) or cancels
-        // the older one and inserts itself.
         let pool_a = pool.clone();
         let pool_b = pool.clone();
         let handle_a =
@@ -1402,12 +1219,7 @@ mod tests {
             "concurrent retargets must leave exactly one active row"
         );
 
-        // The winning generation must be the higher of the two we fired
-        // (gen 2). Either order of commit yields gen 2 active because:
-        //   - if gen 1 commits first, gen 2 sees active_max=1, 2>1 →
-        //     cancels gen 1, inserts gen 2.
-        //   - if gen 2 commits first, gen 1 sees active_max=2, 1<=2 →
-        //     no-op; gen 2 stays active.
+        // Either commit order leaves gen 2 active: a gen 1 running second is stale.
         let winning_generation: i32 = sqlx::query_scalar(
             "SELECT generation FROM voice_turn_link
               WHERE guild_id = 100
@@ -1427,9 +1239,6 @@ mod tests {
         pg.drop().await;
     }
 
-    /// all-None attach must return Unchanged and must NOT bump updated_at.
-    /// A spurious updated_at bump would reorder route resolution results
-    /// (`ORDER BY updated_at DESC`) without any semantic change.
     #[tokio::test]
     async fn attach_all_none_does_not_bump_updated_at_pg() {
         let Some(pg) = TestPostgresDb::try_create().await else {
@@ -1479,10 +1288,6 @@ mod tests {
         pg.drop().await;
     }
 
-    /// Same-generation conflicting dispatch_id: upsert must return None
-    /// (rejected), not silently hand back the old active link. This was
-    /// the original NOT CLEAN finding: callers could not tell a conflict
-    /// from success.
     #[tokio::test]
     async fn upsert_conflicting_ids_returns_none_not_old_link_pg() {
         let Some(pg) = TestPostgresDb::try_create().await else {
@@ -1490,7 +1295,6 @@ mod tests {
         };
         let pool = pg.connect_and_migrate().await;
 
-        // Establish an active row with a specific dispatch_id.
         let mut first = sample_insert(0);
         first.dispatch_id = Some("dispatch-first".to_string());
         first.announce_message_id = None;
@@ -1512,7 +1316,6 @@ mod tests {
             "upsert with conflicting dispatch_id must return None, not the old link"
         );
 
-        // The original row must be entirely unchanged.
         let row = lookup_active_voice_turn_link_by_dispatch_id_pg(&pool, "dispatch-first")
             .await
             .unwrap()
@@ -1548,9 +1351,6 @@ mod tests {
         pg.drop().await;
     }
 
-    /// turn_id global-unique index conflict (attach path): attaching a
-    /// turn_id that already belongs to a different row must return Conflict,
-    /// not propagate a UniqueViolation panic.
     #[tokio::test]
     async fn turn_id_conflict_on_attach_returns_conflict_not_error_pg() {
         let Some(pg) = TestPostgresDb::try_create().await else {
@@ -1558,7 +1358,7 @@ mod tests {
         };
         let pool = pg.connect_and_migrate().await;
 
-        // Row A owns "shared-turn".
+        // Row A owns "shared-turn-attach".
         let mut row_a = sample_insert(0);
         row_a.utterance_id = "utt-turnid-attach-a".to_string();
         row_a.turn_id = Some("shared-turn-attach".to_string());
@@ -1580,7 +1380,6 @@ mod tests {
             .unwrap()
             .expect("insert row B");
 
-        // Trying to attach row A's turn_id to row B must return Conflict.
         let outcome = attach_voice_turn_link_ids_pg(
             &pool,
             &VoiceTurnLinkIdentityPatch {

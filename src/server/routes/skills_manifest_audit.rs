@@ -1,10 +1,7 @@
-//! Manifest-to-agent-roster audit for managed skill manifests (#5720).
+//! Manifest-to-agent-roster audit for managed skill manifests.
 //!
-//! Two earlier rounds guessed which agents a manifest entry reaches - one from
-//! `config.agents`, one from `<runtime_root>/workspaces` directory names - and
-//! produced a vacuous pass and eleven false positives in turn. So nothing is
-//! graded until its premise is confirmed at runtime: an unconfirmed premise
-//! becomes a named skip, and `audited` stays false while any skip is present.
+//! Nothing is graded until its premise is confirmed at runtime; an unconfirmed premise
+//! becomes a named skip in `audit_skipped` instead of a guess.
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -16,8 +13,8 @@ use super::skills_api::{SkillRootKind, skill_roots};
 
 /// Both existence sources are empty, so every id would look dead.
 const EMPTY_ROSTER: &str = "empty_roster";
-/// An existence source failed. Grading on the surviving half is how round
-/// three manufactured false positives, so a partial roster grades nothing.
+/// An existence source failed. Grading on the surviving half yields false
+/// positives, so a partial roster grades nothing.
 const ROSTER_SOURCE_UNAVAILABLE: &str = "roster_source_unavailable";
 const NO_MANIFEST: &str = "no_manifest";
 const UNREADABLE_MANIFEST: &str = "unreadable_manifest";
@@ -28,12 +25,8 @@ const FLAT_ROSTER_UNAVAILABLE: &str = "flat_distribution_roster_unavailable";
 /// The distributor does not walk this workspace. A manually created, renamed
 /// or deleted directory is indistinguishable from a dead id, so this is a skip.
 const NESTED_ID_MISMATCH: &str = "nested_workspace_id_mismatch";
-/// `<runtime_root>/workspaces/` is not an agent-id-only namespace, so "walked
-/// but off the roster" is not evidence of a dead id: `agents_setup` creates
-/// `workspaces/<agent_id>` while `services::git::repo_resolver` keeps the
-/// AgentDesk checkout at `workspaces/agentdesk`, and `discover_workspaces`
-/// collects both without an agent test. The roster axis had names for its own
-/// failures and this axis had none, which is what made the guess look graded.
+/// `<runtime_root>/workspaces/` also holds non-agent dirs (the AgentDesk checkout at
+/// `workspaces/agentdesk`), so "walked but off the roster" is not evidence of a dead id.
 const WORKSPACE_NAMESPACE_UNCONFIRMED: &str = "workspace_namespace_unconfirmed";
 
 /// `None` means "source failed", which is not an empty set and never becomes one.
@@ -53,8 +46,7 @@ pub(super) struct ManifestAuditReport {
 impl ManifestAuditReport {
     pub(super) fn to_json(&self) -> Value {
         json!({
-            // False while any premise went unconfirmed, so `findings: []` on
-            // its own can never be serialized as an audited-clean manifest.
+            // False while any premise is unconfirmed, so empty `findings` never reads as clean.
             "audited": self.skipped.is_empty(),
             "audit_skipped": &self.skipped,
             "findings": &self.findings,
@@ -62,9 +54,8 @@ impl ManifestAuditReport {
     }
 }
 
-/// `version` and `global_core_skills` are declared for the same reason
-/// `runtime_layout::skill_sync` declares them: `#[serde(flatten)]` would
-/// otherwise sweep them into the legacy map and fail to type them.
+/// `version` and `global_core_skills` are declared, as in `runtime_layout::skill_sync`,
+/// so `#[serde(flatten)]` does not sweep them into the legacy map and fail to type them.
 #[derive(Debug, Default, Deserialize)]
 #[allow(dead_code)]
 struct AuditManifest {
@@ -87,14 +78,8 @@ struct AuditEntry {
     agents: Vec<String>,
 }
 
-/// Trim, drop blanks, drop the bare `*` wildcard — the one reserved token the
-/// consumers already share. No other token gets a reserved meaning here.
-///
-/// The wildcard test reads the raw bytes because the consumer's does
-/// (`distribute_agent_skills.py`: `if pattern == "*"` before any fnmatch, with
-/// no trim). ` * ` is a pattern that matches no agent there, so trimming it
-/// into the wildcard first would fold an entry that reaches nobody into the
-/// one token that needs no roster at all.
+/// Trim, drop blanks and the bare `*` wildcard. `*` is matched before trimming, as the
+/// Python distributor does: there ` * ` matches no agent and must not become the wildcard.
 fn pinned_agent_ids(raw: &[String]) -> BTreeSet<String> {
     raw.iter()
         .filter(|value| value.as_str() != "*")
@@ -105,12 +90,7 @@ fn pinned_agent_ids(raw: &[String]) -> BTreeSet<String> {
 }
 
 /// Only `Directory` roots carry a `manifest.json`; the markdown-file root must not.
-///
-/// `is_file()` reports false for every error it meets, `PermissionDenied`
-/// included, so it erased the difference between "there is no manifest" and
-/// "the manifest cannot be read" and dropped the second before
-/// `UNREADABLE_MANIFEST` could name it. Only a definite `Ok(false)` drops a
-/// path here now; a probe that errored stays in and is graded as unreadable.
+/// Only a definite `Ok(false)` drops a path: a probe error stays in as unreadable.
 fn skill_manifest_paths(runtime_root: Option<PathBuf>, home: Option<PathBuf>) -> Vec<PathBuf> {
     skill_roots(runtime_root, home)
         .into_iter()
@@ -120,9 +100,8 @@ fn skill_manifest_paths(runtime_root: Option<PathBuf>, home: Option<PathBuf>) ->
         .collect()
 }
 
-/// Both manifest path sources, read in one sync seam instead of at the
-/// database-bound caller: the home half carries three of the four directory
-/// roots, so a dropped home silently shrinks the audit to the runtime root.
+/// Both manifest path sources, read together: the home half carries three of the four
+/// directory roots, so a dropped home would silently shrink the audit to the runtime root.
 fn manifest_path_sources() -> (Option<PathBuf>, Option<PathBuf>) {
     (crate::config::runtime_root(), dirs::home_dir())
 }
@@ -180,12 +159,8 @@ pub(super) fn audit_skill_manifest_agents(request: ManifestAuditRequest) -> Mani
         Some(_) => false,
     };
     let roster = request.roster.as_ref().filter(|roster| !roster.is_empty());
-    // Reading a walked directory no agent answers to as a dead id assumes
-    // `<runtime_root>/workspaces/` is an agent-id namespace, and that premise
-    // has a counterexample here (`WORKSPACE_NAMESPACE_UNCONFIRMED`). The
-    // roster is this module's only authority for "an agent by this id
-    // exists", so the premise survives only while it answers for every walked
-    // directory; a roster that never answered named its own failure above.
+    // The workspace namespace counts as agent-only only while the roster answers for
+    // every walked directory (see `WORKSPACE_NAMESPACE_UNCONFIRMED`).
     let namespace_unconfirmed = roster.is_some_and(|roster| {
         request
             .distributed_workspaces
@@ -204,11 +179,8 @@ pub(super) fn audit_skill_manifest_agents(request: ManifestAuditRequest) -> Mani
             report.skipped.insert(UNPARSABLE_MANIFEST);
             continue;
         };
-        // Both keys are answered in both maps: `agents` is flat wherever it
-        // appears and `workspaces` is nested wherever it appears, so no parsed
-        // (location, key) pair passes without a grade or a named skip. The
-        // flat skip must not swallow the nested entries beside it either, so
-        // grading continues and a mixed manifest keeps both verdicts.
+        // `agents` is flat and `workspaces` nested in both maps; the flat skip does not
+        // stop grading, so a mixed manifest keeps both verdicts.
         for (skill, entry) in manifest.skills.iter().chain(manifest.legacy.iter()) {
             if !pinned_agent_ids(&entry.agents).is_empty() {
                 report.skipped.insert(FLAT_ROSTER_UNAVAILABLE);
@@ -223,12 +195,8 @@ pub(super) fn audit_skill_manifest_agents(request: ManifestAuditRequest) -> Mani
                 } else if namespace_unconfirmed {
                     report.skipped.insert(WORKSPACE_NAMESPACE_UNCONFIRMED);
                 } else if roster.is_some_and(|roster| !roster.contains(&agent_id)) {
-                    // Under this roster-only namespace check, this branch
-                    // is unreachable for all inputs: a walked off-roster id
-                    // unconfirms the premise instead of proving a dead id.
-                    // A live finding rule requires an independent namespace
-                    // authority and separately reviewed grading logic.
-                    // Keep this shape dormant; current findings are always empty.
+                    // Unreachable: a walked off-roster id sets `namespace_unconfirmed`
+                    // first. Dormant until an independent namespace authority exists.
                     report.findings.push(json!({
                         "manifest": path.display().to_string(),
                         "skill": skill,
