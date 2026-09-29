@@ -414,8 +414,8 @@ pub(crate) async fn run(
     Ok(())
 }
 
-/// Background task that fires OnTick30s / OnTick1min / OnTick5min hooks in separate tiers, so
-/// slow non-critical sections (see `policies/timeouts.js`) cannot delay critical recovery.
+/// Background task firing OnTick30s every tick, OnTick1min every 2nd and OnTick5min every 10th.
+/// The tiers are awaited in turn on one loop, so a slow tier still delays the next 30s tick.
 async fn policy_tick_loop(
     engine: PolicyEngine,
     pg_pool: Option<Arc<PgPool>>,
@@ -1913,8 +1913,8 @@ mod message_outbox_retry_tests {
         assert!(snippet.ends_with('…'));
     }
 
-    /// Via the hourly `relay_signal_alerter` entry point, a breached signal is reported with no
-    /// operator configuration and never becomes an outbox row.
+    /// Via the hourly `relay_signal_alerter` entry point, a breached signal is reported (WARN and
+    /// event, see the `relay_signal_alert` tests) and never becomes an outbox row.
     #[tokio::test]
     async fn relay_signal_threshold_report_enqueues_nothing_pg() {
         let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(

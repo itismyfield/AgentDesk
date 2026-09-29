@@ -16,10 +16,10 @@
 //! | `load_dispatch_gate_runtime_overrides` | 1        | a `health_registry` (dcserver)   |
 //! | `is_recent_cluster_worker`             | 1        | …and a standby with no providers |
 //!
-//! Each acquire can wait out the pool's 10s `acquire_timeout`, so the 9
-//! unconditional ones alone can take 90s against a 5s probe: a slow database,
-//! not a deadlock, is the leading explanation for watchdog kills. Functions here
-//! that never wrap their pool are not on that path.
+//! Counts assume every query succeeds; an error ends that loader early. Each acquire can wait
+//! up to the pool's 10s `acquire_timeout`, so even the always-reached ones outlast a 5s probe:
+//! a slow database, not a deadlock, is the leading explanation for watchdog kills. Functions
+//! here that never wrap their pool are not on that path.
 
 use serde::Serialize;
 use sqlx::{PgPool, Row, postgres::PgRow};

@@ -1,5 +1,5 @@
-//! Home dashboard KPI trend endpoint: the four sparkline series (`tokens`, `cost`,
-//! `in_progress`, `rate_limit`) in one response, all `days` long (default 14, [1, 30]).
+//! Home dashboard KPI trend endpoint: `tokens`, `cost`, `in_progress` and `rate_limit` series
+//! in one response, `days` long (default 14, [1, 30]); unknown rate-limit usage gets `[]`.
 //!
 //! No history is kept for card status or rate limits, so `in_progress` counts dispatches
 //! created per day as a proxy, and `rate_limit` repeats each provider's latest cached value.

@@ -3,7 +3,7 @@
 //! delivery can resolve the final TTS playback channel.
 //!
 //! - At most one `active` row per utterance; a higher generation cancels older ones.
-//! - A `terminal` latest generation closes the utterance for good.
+//! - While the stored latest generation is `terminal`, the utterance takes no new ones.
 //! - `lookup_active_voice_turn_link_by_*` sees `active` rows only.
 //! - GC removes old `terminal` rows only.
 

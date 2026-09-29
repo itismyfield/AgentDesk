@@ -215,8 +215,8 @@ pub(crate) enum RuntimeLiveness {
     /// Rules out a wedged runtime, not partial starvation (N-1 blocked workers
     /// still tick it), so weigh any `handler_*` verdict against `runtime_workers=`.
     Scheduling { age_ms: u64 },
-    /// No tick for [`RUNTIME_TICK_STALE_MS`]: no worker ran the beacon for as long
-    /// as the probe waited for a byte, which only a fully wedged runtime does.
+    /// No tick for [`RUNTIME_TICK_STALE_MS`], the probe's own wait for a byte. Consistent
+    /// with a wedged runtime, not proof of one.
     Stalled { age_ms: u64 },
     /// Never ticked: the beacon was never started or never polled. The counters
     /// cannot tell which, so this concludes nothing rather than guess `Stalled`.
@@ -549,8 +549,8 @@ mod tests {
         }
     }
 
-    /// Upper bound on beacon age at kill time: three 30s `CHECK_INTERVAL`s from
-    /// the last successful check to the exit.
+    /// Beacon age the tests use for kill time: three 30s `CHECK_INTERVAL`s after the last
+    /// successful check. A test input for the stalled verdict, not a bound on real ages.
     const AGE_AT_KILL_MS: u64 = 90_000;
 
     #[test]

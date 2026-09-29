@@ -7,8 +7,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Free-byte threshold for "low": large enough that one cargo build, attachment burst or
-/// log rotation cannot cross it inside a single 30 s tick.
+/// Free-byte threshold for "low": a warning margin meant to leave room for a cargo build or
+/// attachment burst between 30 s ticks, not a guarantee that one tick cannot exhaust it.
 pub const LOW_DISK_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
 /// Seconds the "disk full" banner stays up after an ENOSPC fault, so a transient cause
