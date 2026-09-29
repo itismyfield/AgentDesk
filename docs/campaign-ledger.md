@@ -32,14 +32,20 @@ All routes are under `/api` and use the same protected admin middleware as
 
 `live` is the execution projection the ledger itself does not hold. For each node
 whose `issue_url` is a GitHub issue that has a kanban card, it reports `card_id`,
-`card_status`, the card's newest `dispatch_type`/`dispatch_status`, the
+`card_status`, the card's newest `dispatch_id`/`dispatch_type`/`dispatch_status`, the
 `session_status` and `session_seen_at` heartbeat of the session holding that
 dispatch, and the newest auto-queue `queue_status` (list: campaign id → node id →
 status; single read: node id → status). A dispatch row can stay `dispatched` after
-its session is gone, so only `running` claims work is happening now: the dispatch
-is out and its session is `turn_active` or `awaiting_bg` with a heartbeat inside
-the stale-turn grace window. `live` is computed on every read and never written
-back, so it can disagree with a node's saved `status`.
+its session is gone, so only `running` claims work is happening now: any dispatch
+on the card is `dispatched` and has a `turn_active` or `awaiting_bg` session with a
+heartbeat inside the stale-turn grace window. The nullable `working_dispatch_id`,
+`working_dispatch_type`, `working_session_id` (database ID as text),
+`working_session_status`, and `working_session_seen_at` identify a matching pair,
+preferring the freshest heartbeat. Newer pending or completed sidecars do not
+hide older running work. The dashboard uses this pair for running labels and
+session details; the existing dispatch/session fields retain their latest-record
+meaning. `live` is computed on every read and never written back, so it can
+disagree with a node's saved `status`.
 
 Campaign fields: `id`, `title`, `description`, `status`, `round`, `revision`,
 `nodes`, `created_at`, `updated_at`. Status is `planned`, `active`, `paused`,

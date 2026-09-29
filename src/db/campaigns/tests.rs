@@ -384,23 +384,36 @@ async fn postgres_live_status_reads_the_issue_card_without_touching_the_ledger_p
     let nodes = &live["live"];
     assert_eq!(nodes.len(), 1, "issue 8 has no card");
     let status = &nodes["implement"];
+    let session_id: String =
+        sqlx::query_scalar("SELECT id::TEXT FROM sessions WHERE session_key = 'session-7'")
+            .fetch_one(&pool)
+            .await
+            .expect("session id");
     assert_eq!(
         NodeLiveStatus {
             session_seen_at: None,
+            working_session_seen_at: None,
             ..status.clone()
         },
         NodeLiveStatus {
             card_id: "card-7".into(),
             card_status: "in_progress".into(),
+            dispatch_id: Some("d-new".into()),
             dispatch_type: Some("review".into()),
             dispatch_status: Some("dispatched".into()),
             session_status: Some("turn_active".into()),
             session_seen_at: None,
+            working_dispatch_id: Some("d-new".into()),
+            working_dispatch_type: Some("review".into()),
+            working_session_id: Some(session_id),
+            working_session_status: Some("turn_active".into()),
+            working_session_seen_at: None,
             running: true,
             queue_status: Some("dispatched".into()),
         }
     );
     assert!(status.session_seen_at.is_some());
+    assert_eq!(status.working_session_seen_at, status.session_seen_at);
 
     // A dispatched row whose session went quiet is not running work.
     sqlx::query("UPDATE sessions SET last_heartbeat = NOW() - INTERVAL '1 hour'")
@@ -417,4 +430,124 @@ async fn postgres_live_status_reads_the_issue_card_without_touching_the_ledger_p
     );
     pool.close().await;
     fixture.drop().await;
+}
+
+async fn assert_live_status_keeps_older_worker(sidecar_status: &str, working_session_status: &str) {
+    let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    for statement in [
+        "INSERT INTO kanban_cards (id, title, status, repo_id, github_issue_number)
+         VALUES ('card-7', 'Seven', 'in_progress', 'Owner/Repo', 7)",
+        "INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status, created_at)
+         VALUES ('d-working', 'card-7', 'implementation', 'dispatched', NOW() - INTERVAL '1 hour'),
+                ('d-stale', 'card-7', 'review', 'dispatched', NOW() - INTERVAL '30 minutes'),
+                ('d-unseen', 'card-7', 'review', 'dispatched', NOW() - INTERVAL '20 minutes')",
+        "INSERT INTO sessions (session_key, status, active_dispatch_id, last_heartbeat)
+         VALUES ('session-stale', 'turn_active', 'd-stale', NOW() - INTERVAL '1 hour'),
+                ('session-unseen', 'turn_active', 'd-unseen', NULL)",
+    ] {
+        sqlx::query(statement)
+            .execute(&pool)
+            .await
+            .expect("seed older worker");
+    }
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status, created_at)
+         VALUES ('d-sidecar', 'card-7', 'consultation', $1, NOW())",
+    )
+    .bind(sidecar_status)
+    .execute(&pool)
+    .await
+    .expect("seed latest sidecar");
+    let working_session_id: String = sqlx::query_scalar(
+        "INSERT INTO sessions (session_key, status, active_dispatch_id, last_heartbeat)
+         VALUES ('session-working', $1, 'd-working', NOW() - INTERVAL '1 second')
+         RETURNING id::TEXT",
+    )
+    .bind(working_session_status)
+    .fetch_one(&pool)
+    .await
+    .expect("seed working session");
+    // A fresh session cannot make a pending or completed sidecar count as work.
+    sqlx::query(
+        "INSERT INTO sessions (session_key, status, active_dispatch_id, last_heartbeat)
+         VALUES ('session-sidecar', 'turn_active', 'd-sidecar', NOW()),
+                ('session-idle', 'idle', 'd-working', NOW())",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed sidecar session");
+    let mut document = input();
+    document.nodes[0].status = NodeStatus::Pending;
+    document.nodes[0].issue_url = Some("https://github.com/owner/repo/issues/7".into());
+    let campaign = create(&pool, "live-sidecar".into(), document)
+        .await
+        .expect("create");
+    assert_eq!(campaign.nodes[0].input.status, NodeStatus::Pending);
+
+    let live = live_status(&pool, std::slice::from_ref(&campaign))
+        .await
+        .expect("live status with sidecar");
+    let status = &live["live-sidecar"]["implement"];
+    assert!(status.running);
+    assert_eq!(status.dispatch_id.as_deref(), Some("d-sidecar"));
+    assert_eq!(status.dispatch_type.as_deref(), Some("consultation"));
+    assert_eq!(status.dispatch_status.as_deref(), Some(sidecar_status));
+    assert_eq!(status.session_status.as_deref(), Some("turn_active"));
+    assert!(status.session_seen_at.is_some());
+    assert_eq!(status.working_dispatch_id.as_deref(), Some("d-working"));
+    assert_eq!(
+        status.working_dispatch_type.as_deref(),
+        Some("implementation")
+    );
+    assert_eq!(
+        status.working_session_id.as_deref(),
+        Some(working_session_id.as_str())
+    );
+    assert_eq!(
+        status.working_session_status.as_deref(),
+        Some(working_session_status)
+    );
+    assert!(status.working_session_seen_at.is_some());
+
+    // Once the only working session goes stale, the other rows must not keep it running.
+    sqlx::query(
+        "UPDATE sessions SET last_heartbeat = NOW() - INTERVAL '1 hour'
+         WHERE session_key = 'session-working'",
+    )
+    .execute(&pool)
+    .await
+    .expect("age working heartbeat");
+    let live = live_status(&pool, std::slice::from_ref(&campaign))
+        .await
+        .expect("live status without a worker");
+    let status = &live["live-sidecar"]["implement"];
+    assert!(!status.running);
+    assert_eq!(status.dispatch_id.as_deref(), Some("d-sidecar"));
+    assert_eq!(status.dispatch_status.as_deref(), Some(sidecar_status));
+    assert_eq!(status.working_dispatch_id, None);
+    assert_eq!(status.working_dispatch_type, None);
+    assert_eq!(status.working_session_id, None);
+    assert_eq!(status.working_session_status, None);
+    assert_eq!(status.working_session_seen_at, None);
+    assert_eq!(
+        serde_json::to_value(get(&pool, "live-sidecar").await.expect("ledger")).unwrap(),
+        serde_json::to_value(&campaign).unwrap()
+    );
+    assert_eq!(
+        history(&pool, "live-sidecar").await.expect("history").len(),
+        1
+    );
+    pool.close().await;
+    fixture.drop().await;
+}
+
+#[tokio::test]
+async fn postgres_live_status_keeps_older_worker_with_latest_pending_sidecar_pg() {
+    assert_live_status_keeps_older_worker("pending", "turn_active").await;
+}
+
+#[tokio::test]
+async fn postgres_live_status_keeps_older_worker_with_latest_completed_sidecar_pg() {
+    assert_live_status_keeps_older_worker("completed", "awaiting_bg").await;
 }

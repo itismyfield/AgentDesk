@@ -3,7 +3,11 @@ import { request } from "./httpClient";
 
 const campaignStatusSchema = z.enum(["planned", "active", "paused", "completed", "cancelled"]);
 const campaignNodeStatusSchema = z.enum(["pending", "running", "blocked", "completed", "failed", "skipped"]);
-const idSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9_.-]+$/);
+const idSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9_.-]+$/);
 const roundSchema = z.number().int().positive().max(4_294_967_295);
 const timestampSchema = z.iso.datetime({ offset: true });
 const nullableText = z.string().nullable().default(null);
@@ -21,9 +25,17 @@ export const campaignEvidenceSchema = z.looseObject({
 
 export const campaignNodeSchema = z.looseObject({
   id: idSchema,
-  title: z.string().min(1).max(512).refine((value) => value.trim().length > 0),
+  title: z
+    .string()
+    .min(1)
+    .max(512)
+    .refine((value) => value.trim().length > 0),
   status: campaignNodeStatusSchema,
-  stage: z.string().min(1).max(128).refine((value) => value.trim().length > 0),
+  stage: z
+    .string()
+    .min(1)
+    .max(128)
+    .refine((value) => value.trim().length > 0),
   group: nullableText,
   round: roundSchema,
   assignee: nullableText,
@@ -47,7 +59,11 @@ export const campaignNodeSchema = z.looseObject({
 
 export const campaignSchema = z.looseObject({
   id: idSchema,
-  title: z.string().min(1).max(512).refine((value) => value.trim().length > 0),
+  title: z
+    .string()
+    .min(1)
+    .max(512)
+    .refine((value) => value.trim().length > 0),
   description: z.string().default(""),
   status: campaignStatusSchema,
   round: roundSchema,
@@ -61,10 +77,16 @@ export const campaignSchema = z.looseObject({
 export const campaignNodeLiveSchema = z.looseObject({
   card_id: z.string(),
   card_status: z.string(),
+  dispatch_id: z.string().nullable().optional(),
   dispatch_type: nullableText,
   dispatch_status: nullableText,
   session_status: nullableText,
   session_seen_at: nullableText,
+  working_dispatch_id: z.string().nullable().optional(),
+  working_dispatch_type: z.string().nullable().optional(),
+  working_session_id: z.string().nullable().optional(),
+  working_session_status: z.string().nullable().optional(),
+  working_session_seen_at: z.string().nullable().optional(),
   running: z.boolean().default(false),
   queue_status: nullableText,
 });
@@ -86,7 +108,10 @@ export type CampaignNodeLive = z.infer<typeof campaignNodeLiveSchema>;
 /** Campaign id, then node id. */
 export type CampaignLive = Record<string, Record<string, CampaignNodeLive>>;
 
-export async function getCampaigns(): Promise<{ campaigns: Campaign[]; live: CampaignLive }> {
+export async function getCampaigns(): Promise<{
+  campaigns: Campaign[];
+  live: CampaignLive;
+}> {
   const campaigns = new Map<string, Campaign>();
   const live: CampaignLive = {};
   const limit = 100;
@@ -99,17 +124,21 @@ export async function getCampaigns(): Promise<{ campaigns: Campaign[]; live: Cam
 }
 
 export async function updateCampaignNode(campaign: Campaign, updated: CampaignNode): Promise<Campaign> {
-  const result = await request(`/api/campaigns/${encodeURIComponent(campaign.id)}`, {
-    method: "PUT",
-    suppressErrorToast: true,
-    body: JSON.stringify({
-      expected_revision: campaign.revision,
-      title: campaign.title,
-      description: campaign.description,
-      status: campaign.status,
-      round: campaign.round,
-      nodes: campaign.nodes.map((node) => node.id === updated.id ? updated : node),
-    }),
-  }, campaignResponseSchema);
+  const result = await request(
+    `/api/campaigns/${encodeURIComponent(campaign.id)}`,
+    {
+      method: "PUT",
+      suppressErrorToast: true,
+      body: JSON.stringify({
+        expected_revision: campaign.revision,
+        title: campaign.title,
+        description: campaign.description,
+        status: campaign.status,
+        round: campaign.round,
+        nodes: campaign.nodes.map((node) => (node.id === updated.id ? updated : node)),
+      }),
+    },
+    campaignResponseSchema,
+  );
   return result.campaign;
 }
