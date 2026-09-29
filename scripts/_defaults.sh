@@ -219,7 +219,7 @@ _health_json_get_string_field() {
 
 _health_json_get_string_array_csv() {
   # Joins a top-level string array with commas after reading every element whole: an element
-  # outside printable ASCII, holding a comma, or an unparseable array yields nothing at all.
+  # holding a comma or control character, or an unparseable array, yields nothing at all.
   local health_json="$1"
   local key="$2"
   local raw
@@ -230,7 +230,7 @@ _health_json_get_string_array_csv() {
     printf '%s' "$health_json" | jq -r --arg key "$key" '
       (.[$key] // []) as $a
       | if ($a | type) == "array"
-          and all($a[]; type == "string" and all(explode[]; . >= 32 and . < 127 and . != 44))
+          and all($a[]; type == "string" and all(explode[]; . >= 32 and . != 44))
         then $a | join(",") else "" end' 2>/dev/null
     return
   fi
@@ -248,7 +248,7 @@ _health_json_string_array_csv() (
   # Pure-bash reader for one raw JSON array token with the same element rule as the jq path;
   # anything but an array of such strings (absent, null, scalar, object) prints nothing.
   export LC_ALL=C
-  local raw="$1" n i ch hex code expect=first in_string=0 elem="" out="" count=0
+  local raw="$1" n i ch hex code low fmt expect=first in_string=0 elem="" out="" count=0
   case "$raw" in \[*\]) ;; *) exit 0 ;; esac
   raw="${raw:1:${#raw}-2}"
   n=${#raw}
@@ -273,13 +273,35 @@ _health_json_string_array_csv() (
             case "$hex" in [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;; *) exit 0 ;; esac
             i=$((i + 4))
             code=$((16#$hex))
-            { [ "$code" -ge 32 ] && [ "$code" -lt 127 ]; } || exit 0
-            printf -v ch "\\$(printf '%03o' "$code")"
+            # A surrogate pair joins into one code point; a lone low half reads as U+FFFD, as in jq.
+            if [ "$code" -ge 55296 ] && [ "$code" -lt 56320 ]; then
+              hex="${raw:i+1:6}"
+              case "$hex" in '\u'[dD][c-fC-F][0-9a-fA-F][0-9a-fA-F]) ;; *) exit 0 ;; esac
+              low=$((16#${hex:2}))
+              i=$((i + 6))
+              code=$((65536 + (code - 55296) * 1024 + low - 56320))
+            elif [ "$code" -ge 56320 ] && [ "$code" -lt 57344 ]; then
+              code=65533
+            fi
+            { [ "$code" -ge 32 ] && [ "$code" -ne 44 ]; } || exit 0
+            # UTF-8 bytes as printf octal escapes, the encoding jq prints the decoded element in.
+            if [ "$code" -lt 128 ]; then
+              fmt=$(printf '\\%03o' "$code")
+            elif [ "$code" -lt 2048 ]; then
+              fmt=$(printf '\\%03o\\%03o' $((192 | code >> 6)) $((128 | (code & 63))))
+            elif [ "$code" -lt 65536 ]; then
+              fmt=$(printf '\\%03o\\%03o\\%03o' $((224 | code >> 12)) \
+                $((128 | (code >> 6 & 63))) $((128 | (code & 63))))
+            else
+              fmt=$(printf '\\%03o\\%03o\\%03o\\%03o' $((240 | code >> 18)) \
+                $((128 | (code >> 12 & 63))) $((128 | (code >> 6 & 63))) $((128 | (code & 63))))
+            fi
+            printf -v ch "$fmt"
             ;;
           *) exit 0 ;;
         esac
       else
-        case "$ch" in [[:print:]]) ;; *) exit 0 ;; esac
+        case "$ch" in [$'\001'-$'\037']) exit 0 ;; esac
       fi
       [ "$ch" = ',' ] && exit 0
       elem+="$ch"
