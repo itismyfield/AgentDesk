@@ -370,8 +370,13 @@ pub(crate) fn probe_relay_integrity(
         return base_unknown("inflight state does not match recap session");
     }
     // O posts this channel's TUI body, so Legacy's delivery frontier is not its evidence.
-    if crate::services::tui_o::cutover::o_owns_tui_output(state.runtime_kind) {
-        return base_unknown("O owns this channel's TUI body");
+    let kind = (state.channel_id == channel_id)
+        .then_some(state.runtime_kind)
+        .flatten();
+    match crate::services::tui_o::cutover::o_owns_tui_output_for_channel(channel_id, kind) {
+        Ok(false) => {}
+        Ok(true) => return base_unknown("O owns this channel's TUI body"),
+        Err(_) => return base_unknown("O output identity held"),
     }
 
     let Some(output_path) = state
@@ -1999,7 +2004,7 @@ mod tests {
     }
 
     /// Legacy's delivery frontier is not evidence for a channel whose TUI body O posts, so the
-    /// probe reports unknown instead of comparing it; wrapper runtimes keep the comparison.
+    /// probe reports unknown instead of comparing it; unlisted destinations keep the comparison.
     #[test]
     fn o_delegated_idle_recap_probe_reports_unknown() {
         use crate::services::agent_protocol::RuntimeHandoffKind;
@@ -2011,7 +2016,7 @@ mod tests {
         let output = temp.path().join("out.jsonl");
         std::fs::write(&output, "{\"type\":\"result\"}\n").unwrap();
         let snapshot = snapshot_with_sessions(None, None);
-        let probe_reason = |kind: RuntimeHandoffKind| {
+        let probe_reason = |channel_id: u64, kind: RuntimeHandoffKind| {
             let mut state = make_inflight(channel_id);
             state.session_key = Some(snapshot.session_key.clone());
             state.output_path = Some(output.to_str().unwrap().to_string());
@@ -2024,16 +2029,22 @@ mod tests {
         let o_reason = "O owns this channel's TUI body";
 
         assert_ne!(
-            probe_reason(RuntimeHandoffKind::CodexTui),
+            probe_reason(channel_id, RuntimeHandoffKind::CodexTui),
             o_reason,
             "flag off"
         );
-        let _on = crate::services::tui_o::cutover::test_override::force_on();
-        assert_eq!(probe_reason(RuntimeHandoffKind::CodexTui), o_reason);
+        let _on = crate::services::tui_o::cutover::test_override::force_channels(&[(
+            channel_id,
+            RuntimeHandoffKind::CodexTui,
+        )]);
+        assert_eq!(
+            probe_reason(channel_id, RuntimeHandoffKind::CodexTui),
+            o_reason
+        );
         assert_ne!(
-            probe_reason(RuntimeHandoffKind::LegacyTmuxWrapper),
+            probe_reason(channel_id + 1, RuntimeHandoffKind::CodexTui),
             o_reason,
-            "a wrapper runtime still compares Legacy's own frontier"
+            "an unlisted destination still compares Legacy's own frontier"
         );
     }
 }

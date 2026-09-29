@@ -31,12 +31,14 @@ fn boot_membership_survives_reload_until_restart() {
             .args(["--exact", "services::tui_o::channel_policy::tests::boot_membership_survives_reload_until_restart", "--nocapture"])
             .env(CHILD, "1")
             .output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
+            "{stdout}\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        // A filter that matches nothing also exits 0; require the child to have run this test.
+        assert!(stdout.contains("1 passed; 0 failed; 0 ignored"), "{stdout}");
         return;
     }
     let root = tempfile::tempdir().unwrap();

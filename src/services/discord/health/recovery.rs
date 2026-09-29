@@ -2114,10 +2114,16 @@ async fn maybe_recover_completed_stale_leak(
         return false;
     };
     // O posts this channel's TUI body; the detection above stays, Legacy resends nothing.
-    if crate::services::tui_o::cutover::o_owns_tui_output(state.runtime_kind) {
+    // A held identity also resends nothing until the destination is known.
+    let kind = (state.channel_id == channel_id.get())
+        .then_some(state.runtime_kind)
+        .flatten();
+    if crate::services::tui_o::cutover::o_owns_tui_output_for_channel(channel_id.get(), kind)
+        != Ok(false)
+    {
         tracing::info!(
             channel_id = channel_id.get(),
-            "stale-leak recovery skipped: O owns this channel's TUI body"
+            "stale-leak recovery skipped: O owns or holds this channel's TUI body"
         );
         return false;
     }

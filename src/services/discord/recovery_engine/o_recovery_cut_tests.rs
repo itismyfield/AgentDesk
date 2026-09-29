@@ -8,7 +8,7 @@ use super::o_cut_recorder::start;
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::turn_finalizer::tests::with_isolated_runtime_root;
-use crate::services::tui_o::cutover::test_override::force_on;
+use crate::services::tui_o::cutover::test_override::force_channels;
 
 const BODY: &str = "ADK-A14B-recovered-body";
 
@@ -45,7 +45,11 @@ fn no_delivery_record(channel: u64) -> bool {
 async fn o_delegated_recovery_body_posts_only_the_marker_without_evidence() {
     with_isolated_runtime_root(|| async move {
         let shared = crate::services::discord::make_shared_data_for_tests();
-        let _on = force_on();
+        let _o = force_channels(&[
+            (9_425_001, RuntimeHandoffKind::ClaudeTui),
+            (9_425_002, RuntimeHandoffKind::ClaudeTui),
+            (9_425_004, RuntimeHandoffKind::ClaudeTui),
+        ]);
         for (channel, placeholder) in [(9_425_001u64, 0u64), (9_425_002, 9_425_902)] {
             let recorder = start(channel).await;
             let state = recovery_state(channel, placeholder, RuntimeHandoffKind::ClaudeTui);
@@ -76,11 +80,36 @@ async fn o_delegated_recovery_body_posts_only_the_marker_without_evidence() {
             );
         }
 
-        let channel = 9_425_003;
+        for (channel, kind) in [
+            (9_425_003, RuntimeHandoffKind::LegacyTmuxWrapper),
+            (9_425_005, RuntimeHandoffKind::ClaudeTui),
+        ] {
+            let recorder = start(channel).await;
+            let state = recovery_state(channel, 0, kind);
+            let text = interrupted_recovery_message(&state, &state.full_response);
+            relay_recovery_body_notice(
+                &recorder.http,
+                &shared,
+                &ProviderKind::Claude,
+                &state,
+                &text,
+            )
+            .await;
+            assert!(
+                recorder
+                    .contents()
+                    .iter()
+                    .any(|content| content.contains(BODY)),
+                "an unlisted {kind:?} channel keeps relaying the recovered body"
+            );
+        }
+
+        let channel = 9_425_004;
         let recorder = start(channel).await;
-        let state = recovery_state(channel, 0, RuntimeHandoffKind::LegacyTmuxWrapper);
+        let mut state = recovery_state(channel, 0, RuntimeHandoffKind::ClaudeTui);
+        state.runtime_kind = None;
         let text = interrupted_recovery_message(&state, &state.full_response);
-        relay_recovery_body_notice(
+        let outcome = relay_recovery_body_notice(
             &recorder.http,
             &shared,
             &ProviderKind::Claude,
@@ -88,12 +117,10 @@ async fn o_delegated_recovery_body_posts_only_the_marker_without_evidence() {
             &text,
         )
         .await;
+        assert_eq!(outcome, RecoveryRelayOutcome::TransientFailure);
         assert!(
-            recorder
-                .contents()
-                .iter()
-                .any(|content| content.contains(BODY)),
-            "a wrapper runtime keeps relaying the recovered body"
+            recorder.calls().is_empty(),
+            "an unknown kind on a listed channel is held for retry"
         );
     })
     .await;
@@ -103,7 +130,7 @@ async fn o_delegated_recovery_body_posts_only_the_marker_without_evidence() {
 async fn o_delegated_captured_recovery_range_is_consumed_without_send() {
     with_isolated_runtime_root(|| async move {
         let shared = crate::services::discord::make_shared_data_for_tests();
-        let _on = force_on();
+        let _o = force_channels(&[(9_425_011, RuntimeHandoffKind::ClaudeTui)]);
         let channel = 9_425_011;
         let recorder = start(channel).await;
         let state = recovery_state(channel, 0, RuntimeHandoffKind::ClaudeTui);
@@ -142,7 +169,7 @@ async fn o_delegated_captured_recovery_range_is_consumed_without_send() {
                 .contents()
                 .iter()
                 .any(|content| content.contains(BODY)),
-            "a wrapper runtime keeps relaying the captured range"
+            "an unlisted channel keeps relaying the captured range"
         );
     })
     .await;

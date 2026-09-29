@@ -422,9 +422,16 @@ pub(super) async fn resume_with_gateway(
             full_response: &snapshot.full_response,
         })
     };
-    // O posts this channel's TUI body: settle the custody without posting or recording it.
-    let o_owns_body =
-        crate::services::tui_o::cutover::o_owns_tui_output(snapshot.local.runtime_kind);
+    // O posts this destination's TUI body: settle the custody without posting or recording it.
+    // A held destination identity keeps the custody for a later retry.
+    let kind = (snapshot.local.channel_id == snapshot.channel_id)
+        .then_some(snapshot.local.runtime_kind)
+        .flatten();
+    let Ok(o_owns_body) =
+        crate::services::tui_o::cutover::o_owns_tui_output_for_channel(snapshot.channel_id, kind)
+    else {
+        return Ok(false);
+    };
     let mut delivered = o_owns_body
         || snapshot.delivery_receipts.len() == chunks.len()
         || decision() == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered;

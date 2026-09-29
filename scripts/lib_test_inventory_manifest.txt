@@ -4878,6 +4878,7 @@ services::discord::recovery_paths::controller_cutover::tests::partial_failure_ru
 services::discord::recovery_paths::controller_cutover::tests::sent_fallback_maps_to_delivered_commit_on_fallback
 services::discord::recovery_paths::controller_cutover::tests::should_cutover_pins_each_condition
 services::discord::recovery_paths::controller_cutover::tests::should_cutover_truth_table
+services::discord::recovery_paths::o_anchor_repost_tests::o_delegated_anchor_repost_is_skipped
 services::discord::recovery_paths::restart::tests::anchor_panel_channel_must_match_delivery_channel
 services::discord::recovery_paths::restart::tests::anchor_probe_reposts_only_on_message_gone
 services::discord::recovery_paths::restart::tests::anchor_probe_sequence_reposts_only_when_all_candidates_are_gone
@@ -7586,7 +7587,7 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::exact_receipt_rowless_terminal_survives_newer_frontier_at_another_anchor_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::exact_receipt_rowless_terminal_uncovered_or_stale_still_publishes_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::exact_receipt_short_fallback_settles_original_actor_and_preserves_successor_5521
-services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::o_delegated_foreign_custody_settles_without_post_or_evidence
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::o_delegated_foreign_custody_follows_destination_membership
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_custody_retains_failed_child_ids_until_pg_close_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_cancellation_settles_work_before_postlude_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_custody_ack_survives_dispatch_failure_5521
@@ -9395,8 +9396,6 @@ services::tui_o::alarm::tests::not_found_alarms_only_at_three_within_an_hour
 services::tui_o::alarm::tests::without_an_alert_channel_or_notifier_alarms_stay_in_health
 services::tui_o::channel_policy::tests::boot_membership_survives_reload_until_restart
 services::tui_o::channel_policy::tests::ownership_uses_flag_membership_and_tui_kind_together
-services::tui_o::cutover::tests::o_owns_tui_output_truth_table
-services::tui_o::cutover::tests::o_tui_writer_is_off_until_flip
 services::tui_o::ownership::tests::a_transition_waits_for_an_admission_in_progress_and_admits_nothing_after
 services::tui_o::ownership::tests::release_records_lost_before_the_release_runs
 services::tui_o::ownership::tests::transitions_close_admission_and_epochs_grow_per_acquisition

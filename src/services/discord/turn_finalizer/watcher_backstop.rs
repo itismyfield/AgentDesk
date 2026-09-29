@@ -118,8 +118,12 @@ pub(super) fn watcher_backstop_turn_is_terminal(
     // still preventing the seconds-long fast path from clearing an undelivered
     // produced tail.
     // O posts this channel's TUI body from the transcript itself, so a Done turn needs no
-    // Legacy delivery confirmation; the live/paused guards above still apply.
-    let o_owns_body = crate::services::tui_o::cutover::o_owns_tui_output(runtime_kind);
+    // Legacy delivery confirmation; the live/paused guards above still apply. A held identity
+    // keeps the Legacy confirmation requirement.
+    let o_owns_body = crate::services::tui_o::cutover::o_owns_tui_output_for_channel(
+        channel_id.get(),
+        runtime_kind,
+    ) == Ok(true);
     let delivery_confirmed_or_natural_deadline_escape =
         o_owns_body || delivery_confirmed || at_deadline;
     if matches!(signal, CompletionSignal::Done) && !delivery_confirmed && !o_owns_body {
@@ -485,7 +489,17 @@ mod tests {
             std::fs::write(&transcript, done).unwrap();
             assert!(!terminal(), "flag off: a TUI channel still waits for Legacy delivery proof");
             {
-                let _on = crate::services::tui_o::cutover::test_override::force_on();
+                let _on = crate::services::tui_o::cutover::test_override::force_channels(&[(
+                    channel.get() + 1,
+                    crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                )]);
+                assert!(!terminal(), "an unlisted channel still waits for Legacy delivery proof");
+            }
+            {
+                let _on = crate::services::tui_o::cutover::test_override::force_channels(&[(
+                    channel.get(),
+                    crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                )]);
                 assert!(
                     terminal(),
                     "O owns the body: Done with no produced frontier or lease still finalizes"

@@ -1,10 +1,8 @@
 //! Channel ownership uses the immutable boot policy; uncertain identities withhold the body.
 //! This is an ownership fact, never delivery evidence; evidence readers must not consult it.
 
-use crate::services::agent_protocol::RuntimeHandoffKind;
-
 /// The one O writer build switch, shared with the intake topology so both flip together.
-/// While false every guard below is a no-op.
+/// While false every ownership guard is a no-op.
 pub(crate) use super::topology::O_TUI_WRITER;
 
 mod channel_gate;
@@ -12,35 +10,8 @@ pub(crate) use channel_gate::{
     IdentityError, o_owns_tui_output_for_channel, o_owns_tui_output_for_channel_tmux,
 };
 
-// Channel-free callers must migrate before an enabled build can compile.
+// Enabling the writer is a later activation step; this build must stay off.
 const _: () = assert!(!O_TUI_WRITER);
-
-/// Channel-free compatibility helper; enabled builds must remove this API.
-pub(crate) fn o_owns_tui_output(kind: Option<RuntimeHandoffKind>) -> bool {
-    o_owns_tui_output_with(O_TUI_WRITER || test_override::forced(), kind)
-}
-
-pub(crate) fn o_owns_tui_output_with(enabled: bool, kind: Option<RuntimeHandoffKind>) -> bool {
-    enabled
-        && matches!(
-            kind,
-            Some(RuntimeHandoffKind::ClaudeTui | RuntimeHandoffKind::CodexTui)
-        )
-}
-
-/// Same decision keyed by tmux session: runtime binding first, then the session kind marker.
-pub(crate) fn o_owns_tui_output_for_tmux_session(tmux_session_name: &str) -> bool {
-    if !(O_TUI_WRITER || test_override::forced()) {
-        return false;
-    }
-    let kind =
-        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name)
-            .map(|binding| binding.runtime_kind)
-            .or_else(|| {
-                crate::services::tmux_common::resolve_tmux_runtime_kind_marker(tmux_session_name)
-            });
-    o_owns_tui_output(kind)
-}
 
 #[cfg(not(test))]
 mod test_override {
@@ -53,6 +24,7 @@ mod test_override {
 /// without touching the constant.
 #[cfg(test)]
 pub(crate) mod test_override {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
     use std::cell::Cell;
 
     /// Set only on re-exec'd child test processes that own their whole runtime.
@@ -68,7 +40,8 @@ pub(crate) mod test_override {
 
     pub(crate) struct ForceGuard(bool);
 
-    pub(crate) fn force_on() -> ForceGuard {
+    // Private: the flag alone leaves no channel list, so every gate would hold; use `force_channels`.
+    fn force_on() -> ForceGuard {
         ForceGuard(FORCED.with(|cell| cell.replace(true)))
     }
 
@@ -88,7 +61,7 @@ pub(crate) mod test_override {
         crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
             tmux_session,
             crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-                runtime_kind: super::RuntimeHandoffKind::ClaudeTui,
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
                 output_path: output_path.to_string(),
                 relay_output_path: None,
                 input_fifo_path: None,
@@ -113,13 +86,13 @@ pub(crate) mod test_override {
         static CHANNELS: RefCell<Option<BootChannels>> = const { RefCell::new(None) };
     }
 
-    fn snapshot(channels: &[(u64, super::RuntimeHandoffKind)]) -> BootChannels {
+    fn snapshot(channels: &[(u64, RuntimeHandoffKind)]) -> BootChannels {
         let agents: Vec<_> = channels
             .iter()
             .map(|(id, kind)| {
                 let provider = match kind {
-                    super::RuntimeHandoffKind::ClaudeTui => "claude",
-                    super::RuntimeHandoffKind::CodexTui => "codex",
+                    RuntimeHandoffKind::ClaudeTui => "claude",
+                    RuntimeHandoffKind::CodexTui => "codex",
                     _ => panic!("test writer channel must be TUI"),
                 };
                 serde_json::json!({"id": format!("writer-{id}"), "name": "Writer", "channels": {
@@ -140,7 +113,7 @@ pub(crate) mod test_override {
         previous: Option<BootChannels>,
     }
 
-    pub(crate) fn force_channels(channels: &[(u64, super::RuntimeHandoffKind)]) -> ChannelsGuard {
+    pub(crate) fn force_channels(channels: &[(u64, RuntimeHandoffKind)]) -> ChannelsGuard {
         ChannelsGuard {
             _forced: force_on(),
             previous: CHANNELS.with(|cell| cell.replace(Some(snapshot(channels)))),
@@ -160,8 +133,7 @@ pub(crate) mod test_override {
                 return evaluate(Some(snapshot));
             }
             if let Ok(raw) = std::env::var(CHANNELS_ENV) {
-                let entries =
-                    serde_json::from_str::<Vec<(u64, super::RuntimeHandoffKind)>>(&raw).unwrap();
+                let entries = serde_json::from_str::<Vec<(u64, RuntimeHandoffKind)>>(&raw).unwrap();
                 return evaluate(Some(&snapshot(&entries)));
             }
             evaluate(channel_policy::boot())
@@ -191,32 +163,5 @@ pub(crate) mod test_override {
         );
         assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed; 0 ignored;"));
         false
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn o_tui_writer_is_off_until_flip() {
-        assert!(!O_TUI_WRITER);
-        assert!(!o_owns_tui_output(Some(RuntimeHandoffKind::ClaudeTui)));
-    }
-
-    #[test]
-    fn o_owns_tui_output_truth_table() {
-        let kinds = [
-            (Some(RuntimeHandoffKind::ClaudeTui), true),
-            (Some(RuntimeHandoffKind::CodexTui), true),
-            (Some(RuntimeHandoffKind::LegacyTmuxWrapper), false),
-            (Some(RuntimeHandoffKind::ProcessBackend), false),
-            (Some(RuntimeHandoffKind::ClaudeEAdapter), false),
-            (None, false),
-        ];
-        for (kind, tui) in kinds {
-            assert!(!o_owns_tui_output_with(false, kind), "{kind:?} off");
-            assert_eq!(o_owns_tui_output_with(true, kind), tui, "{kind:?} on");
-        }
     }
 }

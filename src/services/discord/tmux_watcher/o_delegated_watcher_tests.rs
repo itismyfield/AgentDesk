@@ -134,7 +134,13 @@ async fn o_delegated_task_notification_turn_promotes_card_without_body_or_claim(
     if !isolated_in(
         "o_delegated_watcher_tests",
         "o_delegated_task_notification_turn_promotes_card_without_body_or_claim",
-        &[(flag, "1")],
+        &[
+            (flag, "1"),
+            (
+                crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+                "[[6284124,\"claude_tui\"]]",
+            ),
+        ],
     ) {
         return;
     }
@@ -165,7 +171,13 @@ async fn o_delegated_task_card_post_failure_retries_before_consuming_turn() {
     if !isolated_in(
         "o_delegated_watcher_tests",
         "o_delegated_task_card_post_failure_retries_before_consuming_turn",
-        &[(flag, "1")],
+        &[
+            (flag, "1"),
+            (
+                crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+                "[[6284126,\"claude_tui\"]]",
+            ),
+        ],
     ) {
         return;
     }
@@ -237,9 +249,9 @@ async fn o_delegated_task_card_post_failure_retries_before_consuming_turn() {
     );
 }
 
-const PARTIAL: &str = "Working ADK-O partial Legacy streamed before O owned the channel";
+const PARTIAL: &str = "Working ADK-O partial streamed before the TUI binding resolved";
 
-/// Legacy streams part of T1 into its placeholder, then O takes the channel before T1 ends.
+/// On a listed channel, part of T1 streams before its TUI binding resolves and the rest after.
 async fn streamed_then_delegated_turn(case: u64) -> Harness {
     let seed = turn("T0", T0);
     let mut h = Harness::new(case, &seed).await;
@@ -248,7 +260,11 @@ async fn streamed_then_delegated_turn(case: u64) -> Harness {
     h.row_at(f);
     h.spawn(f);
     h.append(format!("{}{}", user("T1"), said(PARTIAL)).as_bytes());
-    h.until("streamed partial", |h| h.showing(PARTIAL)).await;
+    // A held partial leaves no frame to wait on; two poll-loop returns prove the watcher read it.
+    for _ in 0..2 {
+        let seen = crate::services::discord::tmux_watcher_now_ms();
+        h.until("poll loop return", |h| h.heartbeat() > seen).await;
+    }
     let bound =
         crate::services::tui_o::cutover::test_override::bind_claude_tui_session(&h.tmux, &h.path);
     h.append(format!("{}{}", said(BODY), stop()).as_bytes());
@@ -263,14 +279,22 @@ async fn o_delegated_mid_turn_cutover_shows_no_post_cutover_body() {
     if !isolated_in(
         "o_delegated_watcher_tests",
         "o_delegated_mid_turn_cutover_shows_no_post_cutover_body",
-        &[(flag, "1")],
+        &[
+            (flag, "1"),
+            (
+                crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+                "[[6284125,\"claude_tui\"]]",
+            ),
+        ],
     ) {
         return;
     }
     let h = streamed_then_delegated_turn(25).await;
     let shown = h.discord.lock().unwrap().shown.clone();
     assert!(
-        !shown.iter().any(|text| text.contains(BODY)),
-        "Legacy writes nothing O posts onto its streamed anchor: {shown:?}"
+        !shown
+            .iter()
+            .any(|text| text.contains(BODY) || text.contains(PARTIAL)),
+        "Legacy writes no part of a listed channel's TUI body: {shown:?}"
     );
 }

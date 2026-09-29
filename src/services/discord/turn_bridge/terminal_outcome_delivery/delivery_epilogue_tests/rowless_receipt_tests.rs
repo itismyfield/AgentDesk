@@ -1119,33 +1119,95 @@ async fn exact_receipt_short_fallback_settles_original_actor_and_preserves_succe
     }
 }
 
-/// Custody parked before O owned the channel settles on resume without posting its body.
+/// Custody parked before O owned the channel follows its real destination on resume: an
+/// O-owned destination settles without posting, and an unknown selected kind keeps the record.
 #[tokio::test]
-async fn o_delegated_foreign_custody_settles_without_post_or_evidence() {
-    let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
-    let (mut ctx, state, _) = receipt_parts(&driver, ProviderKind::Codex);
-    let held = bridge_delivery_lease_for_inflight(
-        &driver.shared,
-        ctx.watcher_owner_channel_id,
-        driver.shared.restart.current_generation,
-        &state.inflight_state,
-        ctx.tmux_last_offset,
-    );
-    assert!(matches!(held, BridgeLeaseAcquire::Held(_)));
-    let mut successor = state.inflight_state.clone();
-    successor.turn_nonce = Some("successor".into());
-    inflight::save_inflight_state(&successor).unwrap();
-    ctx.bridge_output_owner = None;
-    let output = run(ctx, state).await;
-    assert!(matches!(
-        output.outcome,
-        TerminalOutcomeDeliveryOutcome::DeferredToCustody { .. }
-    ));
-    run_postlude(&driver, output, false, false).await;
-    drop(held);
-    let _on = crate::services::tui_o::cutover::test_override::force_on();
-    assert_eq!(drain_custody(&driver).await.unwrap(), 1);
-    assert_eq!(driver.completed_publications(), 0, "O posts this body");
-    assert!(driver.observations().is_empty());
-    assert!(custody_records(&driver).is_empty(), "custody still settles");
+async fn o_delegated_foreign_custody_follows_destination_membership() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::CodexTui;
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(CapturingWriter(buffer.clone()))
+        .finish();
+    crate::logging::test_capture::pin_callsite_interest();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let (a, b) = (DRIVER_CHANNEL_ID, DRIVER_CHANNEL_ID + 100);
+    // (case, parked owner, listed channel, recorded kind, Legacy posts, held)
+    let cases = [
+        ("listed_destination", a, Some(a), true, 0, false),
+        ("unlisted_destination", a, Some(b), true, 1, false),
+        ("empty_membership", a, None, true, 1, false),
+        ("destination_listed_owner_not", b, Some(a), true, 0, false),
+        ("owner_listed_destination_not", b, Some(b), true, 1, false),
+        ("listed_unknown_kind", a, Some(a), false, 0, true),
+    ];
+    for (name, owner, listed, kind_known, posts, held_identity) in cases {
+        buffer.lock().unwrap().clear();
+        let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+        let (mut ctx, state, _) = receipt_parts(&driver, ProviderKind::Codex);
+        let held = bridge_delivery_lease_for_inflight(
+            &driver.shared,
+            ctx.watcher_owner_channel_id,
+            driver.shared.restart.current_generation,
+            &state.inflight_state,
+            ctx.tmux_last_offset,
+        );
+        assert!(matches!(held, BridgeLeaseAcquire::Held(_)), "{name}");
+        let mut successor = state.inflight_state.clone();
+        successor.turn_nonce = Some("successor".into());
+        inflight::save_inflight_state(&successor).unwrap();
+        ctx.bridge_output_owner = None;
+        let output = run(ctx, state).await;
+        assert!(
+            matches!(
+                output.outcome,
+                TerminalOutcomeDeliveryOutcome::DeferredToCustody { .. }
+            ),
+            "{name}"
+        );
+        run_postlude(&driver, output, false, false).await;
+        drop(held);
+        let channels: Vec<_> = listed.map(|id| (id, CodexTui)).into_iter().collect();
+        let _o = crate::services::tui_o::cutover::test_override::force_channels(&channels);
+        let settled = crate::services::discord::terminal_delivery_custody::drain_for_test(
+            |mut payload, checkpoint| {
+                let (shared, gateway) = (driver.shared.clone(), driver.gateway.clone());
+                payload["watcher_owner_channel_id"] = owner.into();
+                if !kind_known {
+                    payload["local"]["runtime_kind"] = serde_json::Value::Null;
+                }
+                async move {
+                    let outcome =
+                        super::super::foreign_terminal_handoff::resume_payload_with_gateway(
+                            &shared,
+                            gateway.as_ref(),
+                            &mut payload,
+                            &checkpoint,
+                        )
+                        .await;
+                    (payload, outcome)
+                }
+            },
+        )
+        .await
+        .unwrap();
+        let logs = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            logs.contains("tui_o output identity held"),
+            held_identity,
+            "{name}: {logs}"
+        );
+        assert_eq!(settled, usize::from(!held_identity), "{name}");
+        assert_eq!(
+            custody_records(&driver).len(),
+            usize::from(held_identity),
+            "{name}: a held identity keeps the custody for retry"
+        );
+        assert_eq!(driver.completed_publications(), posts, "{name}");
+        if posts == 0 {
+            assert!(driver.observations().is_empty(), "{name}: no Discord write");
+        }
+    }
 }

@@ -1421,8 +1421,8 @@ async fn o_channel_cancel_uses_destination_and_holds_unknown_kind() {
     }
 }
 
-/// A /stop on a delegated TUI turn drops only the Legacy placeholder: the cancelled partial
-/// body is O's, so no replace carries it, while a Legacy turn still shows it.
+/// A /stop on a listed channel's TUI turn drops only the Legacy placeholder: the cancelled
+/// partial body is O's, so no replace carries it, while an unlisted channel still shows it.
 #[tokio::test]
 async fn o_delegated_cancelled_partial_body_is_not_replaced() {
     for delegated in [false, true] {
@@ -1431,7 +1431,15 @@ async fn o_delegated_cancelled_partial_body_is_not_replaced() {
             Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
         crate::services::discord::inflight::save_inflight_state(&driver.inflight)
             .expect("seed the TUI-kind row");
-        let _forced = delegated.then(crate::services::tui_o::cutover::test_override::force_on);
+        let listed = if delegated {
+            vec![(
+                driver.inflight.channel_id,
+                crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            )]
+        } else {
+            Vec::new()
+        };
+        let _o = crate::services::tui_o::cutover::test_override::force_channels(&listed);
         let (mut ctx, state) = driver.parts();
         ctx.cancelled = true;
         let output =

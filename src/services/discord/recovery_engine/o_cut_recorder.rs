@@ -1,5 +1,5 @@
 //! Test-only Discord REST recorder for the O-owned body cuts: records every request and its
-//! `content`, answers POST/PATCH with a message and DELETE with 204.
+//! `content`, answers POST/PATCH with a message, DELETE with 204 and, if asked, GET with 404.
 
 use std::sync::{Arc, Mutex};
 
@@ -45,6 +45,14 @@ impl Drop for DiscordRecorder {
 }
 
 pub(in crate::services::discord) async fn start(channel_id: u64) -> DiscordRecorder {
+    start_with(channel_id, false).await
+}
+
+/// `gone_messages` answers every GET with 404, so a probed anchor reads as deleted.
+pub(in crate::services::discord) async fn start_with(
+    channel_id: u64,
+    gone_messages: bool,
+) -> DiscordRecorder {
     let calls: Arc<Mutex<Vec<Call>>> = Arc::default();
     let next_id = Arc::new(std::sync::atomic::AtomicU64::new(900_001));
     let recorded = calls.clone();
@@ -58,6 +66,10 @@ pub(in crate::services::discord) async fn start(channel_id: u64) -> DiscordRecor
             });
             if method == Method::DELETE {
                 return (StatusCode::NO_CONTENT, String::new()).into_response();
+            }
+            if gone_messages && method == Method::GET {
+                let body = r#"{"message":"Unknown Message","code":10008}"#;
+                return (StatusCode::NOT_FOUND, body).into_response();
             }
             let path_id = uri.path().rsplit('/').next().and_then(|id| id.parse().ok());
             let id = match method {
