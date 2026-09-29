@@ -146,6 +146,24 @@ pub(crate) fn install_codex_tui_runtime_binding(
     rollout_start_offset: Option<u64>,
     binding: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
 ) {
+    install_binding(tmux_session_name, rollout_start_offset, binding, false);
+}
+
+/// The launch path, whose first binding of an execution takes its cause from the launch context.
+pub(crate) fn install_launched_codex_tui_runtime_binding(
+    tmux_session_name: &str,
+    rollout_start_offset: Option<u64>,
+    binding: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+) {
+    install_binding(tmux_session_name, rollout_start_offset, binding, true);
+}
+
+fn install_binding(
+    tmux_session_name: &str,
+    rollout_start_offset: Option<u64>,
+    binding: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    launched: bool,
+) {
     let rollout_path = PathBuf::from(&binding.output_path);
     let session_id = binding.session_id.clone();
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
@@ -163,9 +181,14 @@ pub(crate) fn install_codex_tui_runtime_binding(
             return;
         }
         source_observation::observe(&rollout_path, session_id.as_deref());
-        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding_under_source_authority(
-            authority, binding,
-        );
+        use crate::services::tui_prompt_dedupe as dedupe;
+        if launched {
+            dedupe::register_launched_tmux_runtime_binding_under_source_authority(
+                authority, binding,
+            );
+        } else {
+            dedupe::register_tmux_runtime_binding_under_source_authority(authority, binding);
+        }
     });
 }
 

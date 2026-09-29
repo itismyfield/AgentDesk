@@ -124,8 +124,10 @@ pub(crate) enum CodexHookSourceRejection {
     RolloutUnavailable,
     RolloutReplaced,
     SessionMetaMissing,
+    FirstRecordNotSessionMeta,
     SessionMetaIdMismatch,
     SourceMismatch { found: Option<String> },
+    IndexIncomplete,
     NoCandidate,
     AmbiguousCandidates(usize),
 }
@@ -138,6 +140,7 @@ impl CodexHookSourceRejection {
             Self::RolloutUnavailable
                 | Self::RolloutReplaced
                 | Self::SessionMetaMissing
+                | Self::IndexIncomplete
                 | Self::NoCandidate
         )
     }
@@ -157,7 +160,10 @@ pub(crate) fn verify_codex_hook_source(
         return verify_rollout(sessions_root, path, id, &suffix, claim.expected_source)
             .map(|source| source.via(CodexHookSourceRoute::PayloadPath));
     }
-    let mut candidates: Vec<PathBuf> = cached_indexed_rollouts(sessions_root)
+    let indexed =
+        crate::services::codex_tui::rollout_index::complete_indexed_rollouts(sessions_root)
+            .map_err(|_| CodexHookSourceRejection::IndexIncomplete)?;
+    let mut candidates: Vec<PathBuf> = indexed
         .into_iter()
         .filter(|item| {
             rollout_file_name_matches(&item.path, &suffix)
@@ -193,7 +199,25 @@ fn rollout_file_name_matches(path: &Path, suffix: &str) -> bool {
         .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(suffix))
 }
 
-fn open_rollout_identity(path: &Path) -> Option<SourceFileIdentity> {
+/// Resolves symlinks and requires the resolved file to keep the rollout name and stay under root.
+fn rooted_rollout(
+    root: &Path,
+    path: &Path,
+    suffix: &str,
+) -> Result<PathBuf, CodexHookSourceRejection> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| CodexHookSourceRejection::RolloutUnavailable)?;
+    if !canonical.starts_with(root) {
+        return Err(CodexHookSourceRejection::OutsideSessionsRoot);
+    }
+    if !rollout_file_name_matches(&canonical, suffix) {
+        return Err(CodexHookSourceRejection::FileNameMismatch);
+    }
+    Ok(canonical)
+}
+
+fn open_regular_file(path: &Path) -> Option<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -204,7 +228,81 @@ fn open_rollout_identity(path: &Path) -> Option<SourceFileIdentity> {
     let file = options.open(path).ok()?;
     file.metadata()
         .is_ok_and(|meta| meta.is_file())
-        .then(|| SourceFileIdentity::from_open_file(&file))
+        .then_some(file)
+}
+
+fn path_identity(path: &Path) -> SourceFileIdentity {
+    #[cfg(unix)]
+    if let Ok(metadata) = std::fs::metadata(path) {
+        use std::os::unix::fs::MetadataExt;
+        return SourceFileIdentity::Unix {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        };
+    }
+    let _ = path;
+    SourceFileIdentity::Unavailable
+}
+
+// Real 0.157.1 headers are about 23 KiB; a longer unterminated line is not a header.
+const FIRST_RECORD_BYTES: u64 = 1024 * 1024;
+
+/// Judges only the first record: unfinished is retryable, a finished non-header is final.
+fn first_record_session_meta(
+    file: &std::fs::File,
+) -> Result<crate::services::codex_tui::rollout_index::RolloutSessionMeta, CodexHookSourceRejection>
+{
+    use CodexHookSourceRejection as Reject;
+    let mut line = Vec::new();
+    BufReader::new(file.take(FIRST_RECORD_BYTES))
+        .read_until(b'\n', &mut line)
+        .map_err(|_| Reject::RolloutUnavailable)?;
+    if line.last() != Some(&b'\n') {
+        return Err(if (line.len() as u64) < FIRST_RECORD_BYTES {
+            Reject::SessionMetaMissing
+        } else {
+            Reject::FirstRecordNotSessionMeta
+        });
+    }
+    let record: Value =
+        serde_json::from_slice(&line).map_err(|_| Reject::FirstRecordNotSessionMeta)?;
+    let payload = &record["payload"];
+    let text = |key: &str| {
+        payload[key]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    };
+    match (record["type"].as_str(), text("cwd")) {
+        (Some("session_meta"), Some(cwd)) => Ok(
+            crate::services::codex_tui::rollout_index::RolloutSessionMeta {
+                id: text("id"),
+                cwd: PathBuf::from(cwd),
+                source: payload["source"].as_str().map(ToString::to_string),
+                originator: payload["originator"].as_str().map(ToString::to_string),
+            },
+        ),
+        _ => Err(Reject::FirstRecordNotSessionMeta),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_FINAL_IDENTITY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn before_final_identity(hook: impl FnOnce() + 'static) {
+    BEFORE_FINAL_IDENTITY.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+fn run_before_final_identity() {
+    #[cfg(test)]
+    if let Some(hook) = BEFORE_FINAL_IDENTITY.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
 }
 
 fn verify_rollout(
@@ -218,15 +316,16 @@ fn verify_rollout(
     if !rollout_file_name_matches(path, suffix) {
         return Err(Reject::FileNameMismatch);
     }
-    let (Ok(root), Ok(canonical)) = (sessions_root.canonicalize(), path.canonicalize()) else {
+    let root = sessions_root
+        .canonicalize()
+        .map_err(|_| Reject::RolloutUnavailable)?;
+    let canonical = rooted_rollout(&root, path, suffix)?;
+    let file = open_regular_file(&canonical).ok_or(Reject::RolloutUnavailable)?;
+    let identity = SourceFileIdentity::from_open_file(&file);
+    if identity == SourceFileIdentity::Unavailable {
         return Err(Reject::RolloutUnavailable);
-    };
-    if !canonical.starts_with(&root) {
-        return Err(Reject::OutsideSessionsRoot);
     }
-    let identity = open_rollout_identity(&canonical).ok_or(Reject::RolloutUnavailable)?;
-    let meta = crate::services::codex_tui::rollout_index::read_rollout_session_meta(&canonical)
-        .ok_or(Reject::SessionMetaMissing)?;
+    let meta = first_record_session_meta(&file)?;
     let meta_id = meta
         .id
         .as_deref()
@@ -239,8 +338,10 @@ fn verify_rollout(
     if !source_matches {
         return Err(Reject::SourceMismatch { found: meta.source });
     }
-    // The header must have been read from the same inode that was pinned above.
-    if open_rollout_identity(&canonical) != Some(identity) {
+    run_before_final_identity();
+    // The header came from this descriptor; the path must still resolve, inside root, to it.
+    let current = rooted_rollout(&root, path, suffix)?;
+    if current != canonical || path_identity(&current) != identity {
         return Err(Reject::RolloutReplaced);
     }
     Ok(VerifiedCodexHookSource {
