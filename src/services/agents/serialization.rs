@@ -12,16 +12,6 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 #[derive(Debug, Serialize)]
-pub struct AgentOfficeView {
-    pub id: String,
-    pub name: Option<String>,
-    pub layout: Option<String>,
-    pub assigned: bool,
-    pub office_department_id: Option<String>,
-    pub joined_at: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
 pub struct AgentSkillView {
     pub id: String,
     pub name: Option<String>,
@@ -84,23 +74,6 @@ pub struct TranscriptView {
     pub events: Value,
     pub duration_ms: Option<i64>,
     pub created_at: String,
-}
-
-pub fn agent_office_json(
-    id: String,
-    name: Option<String>,
-    layout: Option<String>,
-    office_department_id: Option<String>,
-    joined_at: Option<String>,
-) -> Value {
-    json!(AgentOfficeView {
-        id,
-        name,
-        layout,
-        assigned: true,
-        office_department_id,
-        joined_at,
-    })
 }
 
 pub fn agent_skill_json(
@@ -359,24 +332,6 @@ mod tests {
 
     #[test]
     fn agent_leaf_response_shapes_are_stable() {
-        assert_eq!(
-            agent_office_json(
-                "office-1".to_string(),
-                Some("Ops".to_string()),
-                Some("grid".to_string()),
-                Some("dept-1".to_string()),
-                Some("2026-05-06T01:00:00+00:00".to_string()),
-            ),
-            json!({
-                "id": "office-1",
-                "name": "Ops",
-                "layout": "grid",
-                "assigned": true,
-                "office_department_id": "dept-1",
-                "joined_at": "2026-05-06T01:00:00+00:00",
-            })
-        );
-
         assert_eq!(
             timeline_event_json(
                 "dispatch-1".to_string(),

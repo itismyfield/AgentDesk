@@ -2151,24 +2151,10 @@ async fn persist_onboarding_pg(
                 _ => ("General", "일반", "📁", "#6b7280"),
             };
 
-        let office_id = "hq";
-        sqlx::query(
-            "INSERT INTO offices (id, name, name_ko, icon)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (id) DO NOTHING",
-        )
-        .bind(office_id)
-        .bind("Headquarters")
-        .bind("본사")
-        .bind("🏛️")
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("failed to upsert postgres default office: {error}"))?;
-
         let dept_id = body.template.as_deref().unwrap_or("general").to_string();
         sqlx::query(
-            "INSERT INTO departments (id, name, name_ko, icon, color, office_id, sort_order)
-             VALUES ($1, $2, $3, $4, $5, $6, 0)
+            "INSERT INTO departments (id, name, name_ko, icon, color, sort_order)
+             VALUES ($1, $2, $3, $4, $5, 0)
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(&dept_id)
@@ -2176,30 +2162,11 @@ async fn persist_onboarding_pg(
         .bind(template_name_ko)
         .bind(template_icon)
         .bind(template_color)
-        .bind(office_id)
         .execute(&mut *tx)
         .await
         .map_err(|error| format!("failed to upsert postgres onboarding department: {error}"))?;
 
         for mapping in resolved_channels {
-            sqlx::query(
-                "INSERT INTO office_agents (office_id, agent_id, department_id)
-                 VALUES ($1, $2, $3)
-                 ON CONFLICT (office_id, agent_id)
-                 DO UPDATE SET department_id = EXCLUDED.department_id",
-            )
-            .bind(office_id)
-            .bind(&mapping.role_id)
-            .bind(&dept_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| {
-                format!(
-                    "failed to assign postgres office agent {}: {error}",
-                    mapping.role_id
-                )
-            })?;
-
             sqlx::query("UPDATE agents SET department = $1, updated_at = NOW() WHERE id = $2")
                 .bind(&dept_id)
                 .bind(&mapping.role_id)

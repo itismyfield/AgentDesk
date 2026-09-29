@@ -34,6 +34,10 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/config/writer_channels_tests.rs",
+        "src/server/routes/pipeline_stage_save_tests.rs",
+        "src/services/pipeline_routes/stage_validation_tests.rs",
+        "src/services/tui_o/channel_policy/tests.rs",
         "src/services/discord/tmux_output_stream/tests/compact_summary_tests.rs",
         "src/services/discord/tmux_watcher/loop_poll_prologue/post_terminal_disposal_tests/compact_summary_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/compact_summary_tests.rs",
@@ -145,6 +149,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/runtime_bootstrap/relay_dlq_redelivery/tests.rs",
         "src/services/discord/runtime_bootstrap/spawns_tests.rs",
         "src/services/discord/session_relay_sink/delivery_orchestration_tests.rs",
+        "src/services/discord/session_relay_sink/o_delivery_e2e_tests.rs",
         "src/services/discord/session_relay_sink/tests.rs",
         "src/services/discord/session_relay_sink/turn_parser/resend_dedupe_tests.rs",
         "src/services/discord/status_panel_orphan_store_tests.rs",
@@ -268,6 +273,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/relay_recovery/tests/incarnation_follow_up.rs",
         "src/services/discord/relay_recovery/tests/orphan_token_finish.rs",
         "src/services/discord/relay_recovery/tests/unread_tail_seed.rs",
+        "src/services/discord/session_relay_sink/fixtures/o_writer.rs",
         "src/services/discord/session_relay_sink/tests/stream_frame_fixtures.rs",
         "src/services/discord/tui_prompt_relay/local_model_queue_wake_e2e.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/catch_up_pagination_e2e.rs",

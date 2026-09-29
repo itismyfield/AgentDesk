@@ -601,18 +601,6 @@ export default function OpsPageView({
                   {tr("조직 구조와 파견 세션 관리", "Organization and dispatch-session management")}
                 </span>
               </Link>
-              <Link
-                to="/office"
-                className="ops-handoff-link"
-                data-testid="ops-handoff-office"
-              >
-                <span className="block truncate text-sm font-semibold">
-                  {tr("오피스", "Office")}
-                </span>
-                <span className="ops-copy block text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
-                  {tr("공간, 좌석, 실시간 에이전트 보기", "Space, seats, and live agent view")}
-                </span>
-              </Link>
             </div>
           </div>
         </div>

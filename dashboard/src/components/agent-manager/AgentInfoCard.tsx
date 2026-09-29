@@ -23,7 +23,6 @@ import type {
   CronJob,
   AgentSkill,
   DiscordBinding,
-  AgentOfficeMembership,
 } from "../../api/client";
 import { getAgentLevel, getAgentTitle } from "./agentProgress";
 import { AgentInfoOperationsSections } from "./AgentInfoOperationsSections";
@@ -89,13 +88,6 @@ export default function AgentInfoCard({
   const [providerAuthProfiles, setProviderAuthProfiles] = useState<ProviderAuthProvider[]>([]);
   const [selectedAuthProfile, setSelectedAuthProfile] = useState("__primary__");
   const [savingAuthProfile, setSavingAuthProfile] = useState(false);
-  const [officeMemberships, setOfficeMemberships] = useState<
-    AgentOfficeMembership[]
-  >([]);
-  const [loadingOffices, setLoadingOffices] = useState(true);
-  const [savingOfficeIds, setSavingOfficeIds] = useState<
-    Record<string, boolean>
-  >({});
   const [timeline, setTimeline] = useState<api.TimelineEvent[]>([]);
   const [loadingTimeline, setLoadingTimeline] = useState(true);
   const [timelineOpen, setTimelineOpen] = useState(false);
@@ -212,39 +204,6 @@ export default function AgentInfoCard({
       ?.accounts ?? [{ id: "default", home: "" }]),
   ];
 
-  const toggleOfficeMembership = async (office: AgentOfficeMembership) => {
-    const nextAssigned = !office.assigned;
-
-    setSavingOfficeIds((prev) => ({ ...prev, [office.id]: true }));
-    setOfficeMemberships((prev) =>
-      prev.map((item) =>
-        item.id === office.id ? { ...item, assigned: nextAssigned } : item,
-      ),
-    );
-
-    try {
-      if (nextAssigned) {
-        await api.addAgentToOffice(office.id, agent.id);
-      } else {
-        await api.removeAgentFromOffice(office.id, agent.id);
-      }
-      onAgentUpdated?.();
-    } catch (e) {
-      setOfficeMemberships((prev) =>
-        prev.map((item) =>
-          item.id === office.id ? { ...item, assigned: office.assigned } : item,
-        ),
-      );
-      console.error("Office membership toggle failed:", e);
-    } finally {
-      setSavingOfficeIds((prev) => {
-        const next = { ...prev };
-        delete next[office.id];
-        return next;
-      });
-    }
-  };
-
   const dept = departments.find((d) => d.id === selectedDeptId);
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -293,18 +252,6 @@ export default function AgentInfoCard({
       .catch(() => {
         setDiscordBindings([]);
         setLoadingBindings(false);
-      });
-
-    setLoadingOffices(true);
-    api
-      .getAgentOffices(agent.id)
-      .then((offices) => {
-        setOfficeMemberships(offices);
-        setLoadingOffices(false);
-      })
-      .catch(() => {
-        setOfficeMemberships([]);
-        setLoadingOffices(false);
       });
 
     setLoadingTimeline(true);
@@ -607,10 +554,6 @@ export default function AgentInfoCard({
               authProfileOptions={authProfileOptions.map((account) => account.id)}
               savingAuthProfile={savingAuthProfile}
               onSaveAuthProfile={(profileId) => void saveAuthProfile(profileId)}
-              loadingOffices={loadingOffices}
-              officeMemberships={officeMemberships}
-              savingOfficeIds={savingOfficeIds}
-              onToggleOfficeMembership={(office) => void toggleOfficeMembership(office)}
               currentWorkSummary={currentWorkSummary}
               currentWorkElapsedMs={currentWorkElapsedMs}
               currentWorkDetails={currentWorkDetails}

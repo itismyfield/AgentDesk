@@ -60,8 +60,8 @@ export function SessionPanel({ sessions, departments, agents, onAssign }: Props)
 
       <p className="text-th-text-muted text-sm">
         {t({
-          ko: "AgentDesk 세션이 감지되면 파견 인력으로 등록됩니다. 각 세션을 부서에 배치하여 오피스에서 시각화할 수 있습니다.",
-          en: "Detected AgentDesk sessions are registered as dispatched staff. Assign each session to a department to visualize them in the office.",
+          ko: "AgentDesk 세션이 감지되면 파견 인력으로 등록됩니다. 각 세션을 부서에 배치할 수 있습니다.",
+          en: "Detected AgentDesk sessions are registered as dispatched staff. Assign each session to a department.",
         })}
       </p>
 

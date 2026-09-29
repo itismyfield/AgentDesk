@@ -2,8 +2,8 @@ use chrono::{DateTime, Utc};
 use sqlx::{Row, postgres::PgRow};
 
 use crate::services::agents::serialization::{
-    agent_office_json, agent_skill_json, build_channel_deeplinks, dedup_dispatched_sessions,
-    dispatched_session_json, timeline_event_json,
+    agent_skill_json, build_channel_deeplinks, dedup_dispatched_sessions, dispatched_session_json,
+    timeline_event_json,
 };
 use crate::services::session_activity::SessionActivityResolver;
 
@@ -141,41 +141,6 @@ pub async fn find_diag_session_pg(
         })
     })
     .transpose()
-}
-
-pub async fn list_agent_offices_pg_json(
-    pool: &sqlx::PgPool,
-    agent_id: &str,
-) -> Result<Vec<serde_json::Value>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT o.id, o.name, o.layout, oa.department_id, oa.joined_at
-         FROM office_agents oa
-         INNER JOIN offices o ON o.id = oa.office_id
-         WHERE oa.agent_id = $1
-         ORDER BY o.id",
-    )
-    .bind(agent_id)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .iter()
-        .map(|row| {
-            agent_office_json(
-                row.try_get::<String, _>("id").unwrap_or_default(),
-                row.try_get::<Option<String>, _>("name").ok().flatten(),
-                row.try_get::<Option<String>, _>("layout").ok().flatten(),
-                row.try_get::<Option<String>, _>("department_id")
-                    .ok()
-                    .flatten(),
-                pg_timestamp_to_rfc3339(
-                    row.try_get::<Option<DateTime<Utc>>, _>("joined_at")
-                        .ok()
-                        .flatten(),
-                ),
-            )
-        })
-        .collect())
 }
 
 pub async fn list_agent_skills_pg_json(

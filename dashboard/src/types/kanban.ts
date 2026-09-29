@@ -199,23 +199,17 @@ export interface KanbanCard {
 }
 
 // Pipeline
+// Fields the runtime reads (policies/pipeline.js, review-automation.js). The API also returns
+// retired settings the dashboard neither shows nor sends.
 export interface PipelineStage {
   id: string;
   repo: string;
   stage_name: string;
   stage_order: number;
-  entry_skill: string | null;
   provider: string | null;
   agent_override_id: string | null;
-  timeout_minutes: number;
-  on_failure: "fail" | "retry" | "previous" | "goto";
-  on_failure_target: string | null;
-  max_retries: number;
   skip_condition: string | null;
-  parallel_with: string | null;
-  applies_to_agent_id: string | null;
   trigger_after: "ready" | "review_pass";
-  created_at: number;
 }
 
 export interface PipelineHistoryEntry {

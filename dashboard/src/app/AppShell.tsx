@@ -8,8 +8,6 @@ import { useOffice } from "../contexts/OfficeContext";
 import { useSettings } from "../contexts/SettingsContext";
 import { useSpriteMap } from "../components/AgentAvatar";
 import type { Notification } from "../components/NotificationCenter";
-import { deriveOfficeAgentState } from "../components/office-view/officeAgentState";
-import OfficeSelectorBar from "../components/OfficeSelectorBar";
 import { useFocusTrap } from "../components/common/overlay";
 import { MOBILE_LAYOUT_MEDIA_QUERY } from "./breakpoints";
 import { PRIMARY_ROUTES, findRouteByPath, type AppRouteEntry, type AppRouteId } from "./routes";
@@ -33,7 +31,6 @@ import AppShellRoutes from "./AppShellRoutes";
 import AppShellOverlays from "./AppShellOverlays";
 import AppViewSkeleton from "./AppViewSkeleton";
 import { countOpenMeetingIssues } from "./meetingSummary";
-import { selectedOfficeLabel } from "./shellLabels";
 import { MOBILE_PRIMARY_ROUTE_IDS, SIDEBAR_SECTION_ORDER } from "./shellNavigationConfig";
 import { iconForRoute } from "./shellRouteIcons";
 import { getOperatorLevelTitle } from "./HomeOverviewConfig";
@@ -86,9 +83,6 @@ export default function AppShell({
   const { settings, setSettings, stats, refreshStats, isKo, locale, tr } =
     useSettings();
   const {
-    offices,
-    selectedOfficeId,
-    setSelectedOfficeId,
     agents,
     allAgents,
     departments,
@@ -96,11 +90,8 @@ export default function AppShell({
     setSessions,
     roundTableMeetings,
     setRoundTableMeetings,
-    auditLogs,
     visibleDispatchedSessions,
-    subAgents,
     agentsWithDispatched,
-    refreshOffices,
     refreshAgents,
     refreshAllAgents,
     refreshDepartments,
@@ -110,10 +101,7 @@ export default function AppShell({
   const { kanbanCards, taskDispatches, upsertKanbanCard, setKanbanCards } =
     useKanban();
 
-  const [officeInfoAgent, setOfficeInfoAgent] = useState<Agent | null>(null);
-  const [officeInfoMode, setOfficeInfoMode] = useState<"default" | "office">(
-    "default",
-  );
+  const [agentInfoAgent, setAgentInfoAgent] = useState<Agent | null>(null);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [showShortcutHelp, setShowShortcutHelp] = useState(false);
   const [showNotificationPanel, setShowNotificationPanel] = useState(false);
@@ -138,10 +126,6 @@ export default function AppShell({
   });
 
   const spriteMap = useSpriteMap(agents);
-  const officeAgentState = useMemo(
-    () => deriveOfficeAgentState(agentsWithDispatched, kanbanCards),
-    [agentsWithDispatched, kanbanCards],
-  );
   const unresolvedMeetingsCount = roundTableMeetings.filter(
     (meeting) => countOpenMeetingIssues(meeting) > 0,
   ).length;
@@ -161,10 +145,6 @@ export default function AppShell({
     [prefersDarkScheme, themePreference],
   );
   const recentNotifications = notifications.slice(0, 6);
-  const currentOfficeName = useMemo(
-    () => selectedOfficeLabel(offices, selectedOfficeId, tr),
-    [offices, selectedOfficeId, tr],
-  );
   const currentUserXp = useMemo(() => {
     if (stats?.top_agents?.length) {
       const samples = stats.top_agents.slice(0, 3);
@@ -290,35 +270,12 @@ export default function AppShell({
     [persistSettingsPatch],
   );
 
-  const handleOfficeChanged = useCallback(() => {
-    refreshOffices();
-    refreshAgents();
-    refreshAllAgents();
-    refreshDepartments();
-    refreshAllDepartments();
-    refreshAuditLogs();
-  }, [
-    refreshAgents,
-    refreshAllAgents,
-    refreshAllDepartments,
-    refreshAuditLogs,
-    refreshDepartments,
-    refreshOffices,
-  ]);
-
   const openDefaultAgentInfo = useCallback((agent: Agent) => {
-    setOfficeInfoMode("default");
-    setOfficeInfoAgent(agent);
+    setAgentInfoAgent(agent);
   }, []);
 
-  const openOfficeAgentInfo = useCallback((agent: Agent) => {
-    setOfficeInfoMode("office");
-    setOfficeInfoAgent(agent);
-  }, []);
-
-  const closeOfficeInfo = useCallback(() => {
-    setOfficeInfoAgent(null);
-    setOfficeInfoMode("default");
+  const closeAgentInfo = useCallback(() => {
+    setAgentInfoAgent(null);
   }, []);
 
   const toggleShellTheme = useCallback(() => {
@@ -328,12 +285,6 @@ export default function AppShell({
       return activeTheme === "dark" ? "light" : "dark";
     });
   }, [resolvedTheme]);
-
-  useEffect(() => {
-    if (officeInfoMode === "office" && currentRoute?.id !== "office") {
-      closeOfficeInfo();
-    }
-  }, [closeOfficeInfo, currentRoute?.id, officeInfoMode]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -462,16 +413,6 @@ export default function AppShell({
           unresolvedMeetingsCount={unresolvedMeetingsCount}
         />
 
-        {currentRoute?.showOfficeSelector && offices.length > 0 && (
-          <OfficeSelectorBar
-            offices={offices}
-            selectedOfficeId={selectedOfficeId}
-            onSelectOffice={setSelectedOfficeId}
-            onManageOffices={() => navigateToRoute("/ops")}
-            isKo={isKo}
-          />
-        )}
-
         <main
           data-testid="app-main-scroll"
           className="min-h-0 flex-1 overflow-hidden"
@@ -501,7 +442,6 @@ export default function AppShell({
                 agentsWithDispatched,
                 allAgents,
                 allDepartments,
-                auditLogs,
                 departments,
                 handleSettingsSave,
                 isKo,
@@ -511,11 +451,8 @@ export default function AppShell({
                 navigateToRoute,
                 notifications,
                 openDefaultAgentInfo,
-                openOfficeAgentInfo,
                 pushNotification,
-                resolvedTheme,
                 roundTableMeetings,
-                selectedOfficeId,
                 setAgentsPageTab,
                 setKanbanCards,
                 setKanbanSignalFocus,
@@ -523,19 +460,16 @@ export default function AppShell({
                 setSessions,
                 settings,
                 stats,
-                subAgents,
                 taskDispatches,
                 updateNotification,
                 upsertKanbanCard,
                 visibleDispatchedSessions,
                 wsConnected,
                 wsLastEventTs,
-                currentOfficeName,
                 refreshAgents,
                 refreshAllAgents,
                 refreshAllDepartments,
                 refreshDepartments,
-                refreshOffices,
               }}
             />
           </Suspense>
@@ -563,8 +497,9 @@ export default function AppShell({
       <AppShellOverlays
         ctx={{
           accentPreset,
+          agentInfoAgent,
           allAgents,
-          closeOfficeInfo,
+          closeAgentInfo,
           departments,
           dismissNotification,
           isKo,
@@ -572,15 +507,11 @@ export default function AppShell({
           modalZIndex: SHELL_MODAL_Z_INDEX,
           navigateToRoute,
           notifications,
-          officeAgentState,
-          officeInfoAgent,
-          officeInfoMode,
           openDefaultAgentInfo,
           popoverZIndex: SHELL_POPOVER_Z_INDEX,
           refreshAgents,
           refreshAllAgents,
           refreshAuditLogs,
-          refreshOffices,
           setAccentPreset,
           setShowCommandPalette,
           setShowShortcutHelp,

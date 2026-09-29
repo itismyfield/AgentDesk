@@ -208,6 +208,8 @@ config::secret_bearing_config_file_tests::load_from_path_rejects_invalid_escalat
 config::secret_bearing_config_file_tests::load_from_path_rejects_invalid_escalation_schedule_timezone
 config::secret_bearing_config_file_tests::save_and_load_harden_secret_bearing_config_file
 config::shared_test_env_lock_tests::acquire_shared_test_env_lock_panics_on_same_thread_reentry_before_deadlock
+config::writer_channels_tests::writer_channels_disk_loader_normalizes_and_reports_restart_required
+config::writer_channels_tests::writer_channels_disk_loader_rejects_invalid_membership_and_identity
 config_live_reload::tests::gateway_handback_breaker_changes_need_no_restart
 config_live_reload::tests::intake_owner_authority_allowlist_change_needs_no_restart
 config_live_reload::tests::load_graceful_uses_live_snapshot_when_file_is_invalid
@@ -1153,6 +1155,8 @@ server::routes::message_outbox::tests::monitor_alert_action_id_is_durable_and_id
 server::routes::message_outbox::tests::monitor_alert_routing_separates_actionable_and_informational_kinds
 server::routes::message_outbox::tests::protected_message_outbox_routes_are_registered_contract
 server::routes::message_outbox::tests::redrive_contract_defaults_to_dry_run_and_denies_mass_field
+server::routes::pipeline::stage_save_tests::stage_save_routes_preserve_legacy_settings_only_for_the_same_stage_pg
+server::routes::pipeline::stage_save_tests::stage_save_routes_reject_unsupported_settings_without_writes_pg
 server::routes::pr_summary::tests::ensure_valid_query_accepts_good_input
 server::routes::pr_summary::tests::ensure_valid_query_bad_repo_preserves_400_and_message
 server::routes::pr_summary::tests::ensure_valid_query_nonpositive_pr_preserves_400_and_message
@@ -5480,6 +5484,9 @@ services::discord::session_identity::tests::parses_namespaced_session_key
 services::discord::session_identity::tests::rejects_missing_or_empty_parts
 services::discord::session_relay_sink::delivery_orchestration_tests::fenced_terminal_without_parser_delivery_is_terminal_not_delivered
 services::discord::session_relay_sink::delivery_orchestration_tests::o_delegated_idle_range_is_consumed_once_without_transport_or_evidence
+services::discord::session_relay_sink::delivery_orchestration_tests::o_delivery_e2e_tests::claude_consumed_body_reaches_o_transport_once
+services::discord::session_relay_sink::delivery_orchestration_tests::o_delivery_e2e_tests::codex_consumed_body_reaches_o_transport_once
+services::discord::session_relay_sink::delivery_orchestration_tests::o_delivery_e2e_tests::task_consumed_body_reaches_o_transport_once
 services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_observes_landed_stale_proof
 services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_observes_landed_unrecorded_proof
 services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof
@@ -8483,6 +8490,11 @@ services::pipeline_override::pipeline_override_pg_tests::agent_write_rejects_sta
 services::pipeline_override::pipeline_override_pg_tests::repo_write_accepts_unassigned_repo_card_without_default_agent_fallback
 services::pipeline_override::pipeline_override_pg_tests::repo_write_rejects_state_id_that_would_fail_kanban_status_check
 services::pipeline_override::pipeline_override_pg_tests::repo_write_repairs_the_pair_when_the_existing_agent_override_is_unreadable
+services::pipeline_routes::stage_validation::tests::duplicate_effective_stage_order_is_bad_request
+services::pipeline_routes::stage_validation::tests::existing_unsupported_values_can_be_saved_but_not_copied_or_changed
+services::pipeline_routes::stage_validation::tests::new_counter_stage_is_bad_request
+services::pipeline_routes::stage_validation::tests::new_stage_skip_condition_is_bad_request
+services::pipeline_routes::stage_validation::tests::supported_stages_with_distinct_orders_remain_valid
 services::pipeline_routes::tests::card_stage_moves_take_turns_with_stage_saves_pg
 services::pipeline_routes::tests::invalid_backoff_is_bad_request
 services::pipeline_routes::tests::normalize_optional_blanks_to_none
@@ -9364,6 +9376,8 @@ services::tui_o::alarm::tests::an_alarm_is_never_sent_to_its_own_channel
 services::tui_o::alarm::tests::first_event_raises_health_and_one_operator_message
 services::tui_o::alarm::tests::not_found_alarms_only_at_three_within_an_hour
 services::tui_o::alarm::tests::without_an_alert_channel_or_notifier_alarms_stay_in_health
+services::tui_o::channel_policy::tests::boot_membership_survives_reload_until_restart
+services::tui_o::channel_policy::tests::ownership_uses_flag_membership_and_tui_kind_together
 services::tui_o::cutover::tests::o_owns_tui_output_truth_table
 services::tui_o::cutover::tests::o_tui_writer_is_off_until_flip
 services::tui_o::ownership::tests::a_transition_waits_for_an_admission_in_progress_and_admits_nothing_after

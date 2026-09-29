@@ -89,7 +89,8 @@ src/
 │   ├── cluster_role.rs
 │   ├── runtime_profile.rs
 │   ├── runtime_settings.rs
-│   └── test_env.rs
+│   ├── test_env.rs
+│   └── writer_channels_tests.rs
 ├── db/
 │   ├── auto_queue/
 │   │   ├── entries/
@@ -191,7 +192,6 @@ src/
 │   ├── session_observability.rs
 │   ├── session_status.rs
 │   ├── session_transcripts.rs
-│   ├── table_metadata.rs
 │   └── turns.rs
 ├── dispatch/
 │   ├── dispatch_status/
@@ -394,9 +394,9 @@ src/
 │   │   ├── messages.rs
 │   │   ├── mod.rs
 │   │   ├── monitoring.rs
-│   │   ├── offices.rs
 │   │   ├── onboarding.rs
 │   │   ├── pipeline.rs
+│   │   ├── pipeline_stage_save_tests.rs
 │   │   ├── pr_summary.rs
 │   │   ├── prompt_manifest_retention.rs
 │   │   ├── provider_auth_profiles.rs
@@ -1137,6 +1137,8 @@ src/
 │   │   │   ├── startup_doctor.rs
 │   │   │   └── voice.rs
 │   │   ├── session_relay_sink/
+│   │   │   ├── fixtures/
+│   │   │   │   └── o_writer.rs
 │   │   │   ├── journal/
 │   │   │   │   ├── controller.rs
 │   │   │   │   ├── pg_store.rs
@@ -1152,6 +1154,7 @@ src/
 │   │   │   ├── delivery_outcome_classify.rs
 │   │   │   ├── idle_jsonl.rs
 │   │   │   ├── journal.rs
+│   │   │   ├── o_delivery_e2e_tests.rs
 │   │   │   ├── orphan_reclaim.rs
 │   │   │   ├── relay_format.rs
 │   │   │   ├── short_controller.rs
@@ -1778,6 +1781,9 @@ src/
 │   ├── opencode/
 │   │   ├── server_launch.rs
 │   │   └── streaming_entry.rs
+│   ├── pipeline_routes/
+│   │   ├── stage_validation.rs
+│   │   └── stage_validation_tests.rs
 │   ├── platform/
 │   │   ├── binary_resolver/
 │   │   │   ├── grok.rs
@@ -1926,6 +1932,8 @@ src/
 │   │   ├── ledger.rs
 │   │   └── mod.rs
 │   ├── tui_o/
+│   │   ├── channel_policy/
+│   │   │   └── tests.rs
 │   │   ├── shadow/
 │   │   │   ├── binding_reader.rs
 │   │   │   ├── capture.rs
@@ -1961,6 +1969,7 @@ src/
 │   │   │   ├── switch_tests.rs
 │   │   │   └── writer_tests.rs
 │   │   ├── alarm.rs
+│   │   ├── channel_policy.rs
 │   │   ├── cutover.rs
 │   │   ├── ownership.rs
 │   │   ├── shadow_host.rs

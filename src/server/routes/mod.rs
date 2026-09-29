@@ -36,7 +36,6 @@ pub mod memory_api;
 pub mod message_outbox;
 pub mod messages;
 pub mod monitoring;
-pub mod offices;
 pub mod onboarding;
 pub mod pipeline;
 pub mod pr_summary;

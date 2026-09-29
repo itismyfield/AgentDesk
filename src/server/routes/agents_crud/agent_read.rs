@@ -2,11 +2,8 @@
 
 use super::*;
 
-pub(super) async fn list_agents_pg(
-    pool: &sqlx::PgPool,
-    office_id: Option<&str>,
-) -> Result<Vec<serde_json::Value>, String> {
-    let rows = crate::db::agent_read::list_agent_rows(pool, office_id).await?;
+pub(super) async fn list_agents_pg(pool: &sqlx::PgPool) -> Result<Vec<serde_json::Value>, String> {
+    let rows = crate::db::agent_read::list_agent_rows(pool).await?;
 
     Ok(rows
         .into_iter()

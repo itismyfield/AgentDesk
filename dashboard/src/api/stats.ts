@@ -7,9 +7,8 @@ import {
   type RequestOptions,
 } from "./httpClient";
 
-export async function getStats(officeId?: string): Promise<DashboardStats> {
-  const q = officeId ? `?officeId=${officeId}` : "";
-  return request(`/api/stats${q}`);
+export async function getStats(): Promise<DashboardStats> {
+  return request("/api/stats");
 }
 
 export async function getTokenAnalytics(

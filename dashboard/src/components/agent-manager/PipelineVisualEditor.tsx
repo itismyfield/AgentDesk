@@ -10,7 +10,6 @@ import {
   buildPipelineGraph,
   clonePipelineConfig,
   extractOverrideExtras,
-  filterVisibleStages,
   hasRawOverride,
   inferFsmEventName,
   stageDraftFromApi,
@@ -186,7 +185,7 @@ export default function PipelineVisualEditor({
     persistedDraft: PersistedFsmDraftEntry | null,
     scopeKey: string | null,
   ) {
-    const visibleStages = filterVisibleStages(snapshot.repoStages, selectedAgentId).map(stageDraftFromApi);
+    const visibleStages = snapshot.repoStages.map(stageDraftFromApi);
     const draftPipeline = persistedDraft ? clonePipelineConfig(persistedDraft.pipeline) : snapshot.pipeline;
     const draftStageDrafts = persistedDraft ? cloneStageDrafts(persistedDraft.stageDrafts) : cloneStageDrafts(visibleStages);
     const persistedSelection = persistedDraft
@@ -428,8 +427,8 @@ export default function PipelineVisualEditor({
         "Select a line and tune its transition name and execution rule in the side panel.",
       )
     : tr(
-        "노드는 상태, 화살표는 전환입니다. 캔버스는 드래그로 이동하고, 노드/전환을 눌러 우측 속성을 수정합니다.",
-        "Nodes are states, arrows are transitions. Drag the canvas to move, then click a node or edge to edit its properties.",
+        "노드는 상태, 화살표는 전환입니다. 노드나 전환을 누르면 속성 패널에서 수정할 수 있습니다.",
+        "Nodes are states, arrows are transitions. Click a node or edge to edit it in the properties panel.",
       );
   const graphGridClass = isFsmVariant
     ? "grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_280px]"
@@ -438,10 +437,10 @@ export default function PipelineVisualEditor({
     ? tr(
         useScrollableMobileFsmCanvas
           ? "모바일은 편집 패널을 먼저 보여주고, FSM 캔버스는 아래에서 가로 스크롤 가능한 프리뷰로 유지합니다."
-          : "FSM 캔버스는 1100×420 viewBox로 고정되고, 좁은 화면에서는 패널이 아래로 떨어집니다.",
+          : "좁은 화면에서는 편집 패널이 캔버스 아래로 내려갑니다.",
         useScrollableMobileFsmCanvas
           ? "Mobile leads with the editor panel, and keeps the FSM canvas below as a horizontally scrollable preview."
-          : "The FSM canvas uses a fixed 1100×420 viewBox, and the side panel drops below on narrow screens.",
+          : "On narrow screens the editing panel moves below the canvas.",
       )
     : tr(
         "캔버스는 보기 좋은 크기로 맞춰 열리고, 이동은 드래그만 사용합니다.",
@@ -528,8 +527,8 @@ export default function PipelineVisualEditor({
     isFsmVariant,
     level,
     pipelineDraft,
-    allRepoStages,
     stageDrafts,
+    allRepoStages,
     overrideExtras,
     pipelineChanged,
     stagesChanged,

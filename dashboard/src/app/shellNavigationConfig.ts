@@ -3,7 +3,7 @@ import type { AppRouteId } from "./routes";
 export const MOBILE_PRIMARY_ROUTE_IDS: AppRouteId[] = [
   "voice",
   "home",
-  "office",
+  "stats",
   "kanban",
 ];
 

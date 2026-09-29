@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::StatusCode,
 };
 use serde::Deserialize;
@@ -13,21 +13,13 @@ use crate::error::{AppError, AppResult, ErrorCode};
 // ── Query / Body types ────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-pub struct ListDepartmentsQuery {
-    #[serde(rename = "officeId")]
-    pub office_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct CreateDepartmentBody {
     pub name: String,
-    pub office_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateDepartmentBody {
     pub name: Option<String>,
-    pub office_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,12 +60,9 @@ fn db_error(error: sqlx::Error) -> AppError {
 /// GET /api/departments
 pub async fn list_departments(
     State(state): State<AppState>,
-    Query(params): Query<ListDepartmentsQuery>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
     let pool = ensure_pg(&state)?;
-    let departments = list_departments_pg(pool, params.office_id.as_deref())
-        .await
-        .map_err(db_error)?;
+    let departments = list_departments_pg(pool).await.map_err(db_error)?;
     Ok((StatusCode::OK, Json(json!({"departments": departments}))))
 }
 
@@ -86,12 +75,11 @@ pub async fn create_department(
     let pool = ensure_pg(&state)?;
 
     sqlx::query(
-        "INSERT INTO departments (id, name, office_id, sort_order, created_at)
-         VALUES ($1, $2, $3, 0, NOW())",
+        "INSERT INTO departments (id, name, sort_order, created_at)
+         VALUES ($1, $2, 0, NOW())",
     )
     .bind(&id)
     .bind(body.name.as_str())
-    .bind(body.office_id.as_deref())
     .execute(pool)
     .await
     .map_err(db_error)?;
@@ -102,7 +90,6 @@ pub async fn create_department(
             "department": {
                 "id": id,
                 "name": body.name,
-                "office_id": body.office_id,
             }
         })),
     ))
@@ -124,12 +111,6 @@ pub async fn update_department(
             separated.push("name = ").push_bind_unseparated(name);
             has_updates = true;
         }
-        if let Some(ref office_id) = body.office_id {
-            separated
-                .push("office_id = ")
-                .push_bind_unseparated(office_id);
-            has_updates = true;
-        }
     }
 
     if !has_updates {
@@ -144,7 +125,7 @@ pub async fn update_department(
         return Err(AppError::not_found("department not found"));
     }
 
-    let row = sqlx::query("SELECT id, name, office_id FROM departments WHERE id = $1")
+    let row = sqlx::query("SELECT id, name FROM departments WHERE id = $1")
         .bind(&id)
         .fetch_one(pool)
         .await
@@ -156,7 +137,6 @@ pub async fn update_department(
             "department": {
                 "id": row.get::<String, _>("id"),
                 "name": row.get::<Option<String>, _>("name"),
-                "office_id": row.get::<Option<String>, _>("office_id"),
             }
         })),
     ))
@@ -222,27 +202,17 @@ pub async fn reorder_departments(
     ))
 }
 
-async fn list_departments_pg(
-    pool: &PgPool,
-    office_id: Option<&str>,
-) -> Result<Vec<serde_json::Value>, sqlx::Error> {
-    let mut query = QueryBuilder::<sqlx::Postgres>::new(
-        "SELECT d.id, d.name, d.name_ko, d.icon, d.color, d.description, d.office_id,
+async fn list_departments_pg(pool: &PgPool) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT d.id, d.name, d.name_ko, d.icon, d.color, d.description,
                 d.sort_order::BIGINT AS sort_order,
                 d.created_at::TEXT AS created_at,
-                (SELECT COUNT(*)::BIGINT FROM office_agents oa WHERE oa.department_id = d.id) AS agent_count
+                (SELECT COUNT(*)::BIGINT FROM agents a WHERE a.department = d.id) AS agent_count
          FROM departments d
-         WHERE TRUE",
-    );
-
-    if let Some(office_id) = office_id {
-        query.push(" AND d.office_id = ");
-        query.push_bind(office_id);
-    }
-
-    query.push(" ORDER BY d.sort_order, d.id");
-
-    let rows = query.build().fetch_all(pool).await?;
+         ORDER BY d.sort_order, d.id",
+    )
+    .fetch_all(pool)
+    .await?;
     Ok(rows.iter().map(department_row_to_json_pg).collect())
 }
 
@@ -256,7 +226,6 @@ fn department_row_to_json_pg(row: &sqlx::postgres::PgRow) -> serde_json::Value {
         "icon": row.get::<Option<String>, _>("icon"),
         "color": row.get::<Option<String>, _>("color"),
         "description": row.get::<Option<String>, _>("description"),
-        "office_id": row.get::<Option<String>, _>("office_id"),
         "sort_order": row.get::<i64, _>("sort_order"),
         "created_at": row.get::<Option<String>, _>("created_at"),
         "agent_count": row.get::<i64, _>("agent_count"),

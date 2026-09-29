@@ -303,10 +303,10 @@ function BottleneckWidgetImpl({ t }: BottleneckWidgetProps) {
               zh: "暂无 kanban 卡片",
             })}
             description={t({
-              ko: "선택된 오피스에서 카드가 만들어지면 병목 검사가 활성화됩니다.",
-              en: "Bottleneck analysis activates once cards exist in the selected office.",
-              ja: "選択中のオフィスにカードが作成されると分析が有効化されます。",
-              zh: "在所选 office 中创建卡片后，瓶颈分析将被激活。",
+              ko: "카드가 만들어지면 병목 검사가 활성화됩니다.",
+              en: "Bottleneck analysis activates once cards exist.",
+              ja: "カードが作成されると分析が有効化されます。",
+              zh: "创建卡片后，瓶颈分析将被激活。",
             })}
           />
         </div>

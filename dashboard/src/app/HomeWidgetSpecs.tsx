@@ -4,7 +4,7 @@ import { ChevronRight, Flame, Gauge, Sparkles, Zap } from "lucide-react";
 import AgentAvatar from "../components/AgentAvatar";
 import { AgentQualityWidget } from "../components/dashboard/ExtraWidgets";
 import { RoutinesTimelineWidget } from "../components/dashboard/RoutinesTimelineWidget";
-import { MiniRateLimitBar } from "../components/office-view/OfficeInsightPanel";
+import { MiniRateLimitBar } from "../components/dashboard/MiniRateLimitBar";
 import { DailyMissions, StreakCounter } from "../components/gamification/GamificationShared";
 import { HomeMetricTile, HomeWidgetShell } from "./HomeOverviewWidgets";
 
@@ -15,7 +15,6 @@ export function buildHomeWidgetSpecs(ctx: any) {
     agents,
     analytics,
     costTrend,
-    currentOfficeLabel,
     dailyMissions,
     fallbackActivity,
     formatCompact,
@@ -134,10 +133,9 @@ export function buildHomeWidgetSpecs(ctx: any) {
       m_rate_limit: {
         className: "lg:col-span-6",
         /* User reported "한도 UI 정보 밀도 낮음" — replace the previous
-           single-percentage HomeMetricTile + sparkline with the same
-           per-provider/per-bucket gauge rows used by the office "운영신호"
-           panel (`MiniRateLimitBar`). One card now shows every provider's
-           5h/7d bucket utilization with the same color/glow language as
+           single-percentage HomeMetricTile + sparkline with the
+           per-provider/per-bucket gauge rows of `MiniRateLimitBar`.
+           One card now shows every provider's 5h/7d bucket utilization with the same color/glow language as
            /stats, and fetches its own data on a 30 s timer so the home
            tile no longer needs the manual fetch + summary state.
            The header mirrors HomeMetricTile (icon + uppercase title +
@@ -177,66 +175,6 @@ export function buildHomeWidgetSpecs(ctx: any) {
               </div>
             </div>
           </div>
-        ),
-      },
-      office: {
-        className: "lg:col-span-8",
-        render: () => (
-          <HomeWidgetShell
-            title={tr("오피스 뷰", "Office view")}
-            subtitle={tr(
-              `${currentOfficeLabel} 기준으로 지금 일하는 에이전트를 요약합니다.`,
-              `Summarized live roster for ${currentOfficeLabel}.`,
-            )}
-            action={
-              <Link
-                to="/office"
-                className="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-white/5"
-                style={{ borderColor: "var(--th-border-subtle)", color: "var(--th-text-primary)" }}
-              >
-                {tr("전체 보기", "Open office")}
-                <ChevronRight size={14} />
-              </Link>
-            }
-          >
-            <div className="relative overflow-hidden rounded-[1.5rem] border p-4 sm:p-5" style={{ borderColor: "var(--th-border-subtle)", background: "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 92%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 92%, transparent) 100%)" }}>
-              <div
-                className="pointer-events-none absolute inset-0 opacity-30"
-                style={{
-                  backgroundImage:
-                    "radial-gradient(circle, color-mix(in srgb, var(--th-text-muted) 38%, transparent) 1px, transparent 1px)",
-                  backgroundSize: "14px 14px",
-                }}
-              />
-              <div className="relative grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-                {topAgents.length === 0 ? (
-                  <div className="col-span-full rounded-2xl border px-4 py-8 text-center text-sm" style={{ borderColor: "var(--th-border-subtle)", color: "var(--th-text-muted)", background: "var(--th-overlay-subtle)" }}>
-                    {tr("표시할 활성 에이전트가 없습니다.", "No active agents to show right now.")}
-                  </div>
-                ) : (
-                  topAgents.map((agent: any) => {
-                    const progress = Math.min(100, Math.max(12, Math.round(agent.stats_tokens / 100_000)));
-                    return (
-                      <div key={agent.id} className="rounded-2xl border px-3 py-3 text-center" style={{ borderColor: "var(--th-border-subtle)", background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)" }}>
-                        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl border" style={{ borderColor: "var(--th-border-subtle)", background: "var(--th-card-bg)" }}>
-                          <AgentAvatar agent={agent} agents={agents} size={40} rounded="2xl" />
-                        </div>
-                        <div className="mt-3 truncate text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
-                          {isKo ? agent.name_ko : agent.name}
-                        </div>
-                        <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                          {tr(`${agent.stats_tasks_done}건 완료`, `${agent.stats_tasks_done} tasks done`)}
-                        </div>
-                        <div className="mt-3 h-1.5 rounded-full" style={{ background: "color-mix(in srgb, var(--th-border-subtle) 70%, transparent)" }}>
-                          <div className="h-full rounded-full" style={{ width: `${progress}%`, background: "var(--th-accent-primary)" }} />
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </div>
-          </HomeWidgetShell>
         ),
       },
       missions: {
