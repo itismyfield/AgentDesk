@@ -562,6 +562,7 @@ pub(crate) enum Commands {
     /// Read-only TUI output shadow: window start, report, synthetic manifest
     #[command(subcommand)]
     OShadow(crate::cli::o_shadow::OShadowCommand),
+    O(crate::cli::o::OArgs),
 }
 
 /// Subcommands for `adk query` (issue #2651).
@@ -1143,6 +1144,7 @@ mod tests {
             "machine-compare",
             "activity",
             "o-shadow",
+            "o",
             "help",
         ];
 

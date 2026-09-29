@@ -1,11 +1,14 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
 use super::super::actor::{POLL_INTERVAL, run_channel, spawn_if_enabled};
-use super::super::binding::{BindingEvent, BindingEvents};
+use super::super::binding::{
+    BindingCause, BindingEvent, BindingEvents, BindingEvidence, BindingRecord, BindingTarget,
+};
 use super::super::round_trip::{RoundTrip, cases, round_trip};
 use super::*;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
@@ -55,36 +58,88 @@ fn spawn(writer: Writer) -> (watch::Sender<bool>, tokio::task::JoinHandle<()>) {
 }
 
 fn spawn_as(
-    writer: Writer,
+    mut writer: Writer,
     provider: ShadowProvider,
 ) -> (watch::Sender<bool>, tokio::task::JoinHandle<()>) {
-    spawn_with(writer, provider, Arc::new(FakeBindings::new()))
+    let bindings = startup_log(&mut writer);
+    spawn_with(writer, provider, bindings)
 }
 
 fn spawn_with(
     writer: Writer,
     provider: ShadowProvider,
-    bindings: Arc<FakeBindings>,
+    bindings: Arc<impl BindingEvents>,
 ) -> (watch::Sender<bool>, tokio::task::JoinHandle<()>) {
     let (stop, stopped) = watch::channel(false);
     let task = tokio::spawn(run_channel(writer, provider, bindings, stopped));
     (stop, task)
 }
 
-fn none() -> Arc<FakeBindings> {
-    Arc::new(FakeBindings::new())
+fn event(seq: u64, record: BindingRecord, committed_at: DateTime<Utc>) -> BindingEvent {
+    BindingEvent {
+        seq,
+        channel_id: CHANNEL,
+        provider: ShadowProvider::Claude,
+        tmux_session: "tmux".into(),
+        execution_nonce: "nonce".into(),
+        record,
+        committed_at,
+    }
+}
+
+fn bound(
+    seq: u64,
+    old: Option<&SourceId>,
+    new: BindingTarget,
+    cause: BindingCause,
+    parent_hint: Option<&SourceId>,
+) -> BindingEvent {
+    let evidence = BindingEvidence {
+        hook_event: "SessionStart".into(),
+        received_at: Utc::now(),
+    };
+    let record = BindingRecord::Bound {
+        old: old.cloned(),
+        new,
+        cause,
+        parent_hint: parent_hint.cloned(),
+        evidence,
+    };
+    event(seq, record, Utc::now())
+}
+
+/// A binding log whose startup binds name every source the channel was switched over.
+fn startup_log(writer: &mut Writer) -> Arc<FakeBindings> {
+    let bindings = Arc::new(FakeBindings::new());
+    let sources: Vec<SourceId> = writer.store().cursors().map(|c| c.source.clone()).collect();
+    for (seq, source) in (1..).zip(sources) {
+        let target = BindingTarget::Source(source);
+        bindings.commit(bound(seq, None, target, BindingCause::Startup, None));
+    }
+    bindings
 }
 
 /// An in-memory binding log with the channel's seq notice.
 struct FakeBindings {
     events: Mutex<Vec<BindingEvent>>,
     notice: watch::Sender<u64>,
+    /// Set while every read of the log fails with this error.
+    failing: Mutex<Option<String>>,
 }
 
 impl FakeBindings {
     fn new() -> Self {
         let (events, notice) = (Mutex::new(Vec::new()), watch::channel(0).0);
-        Self { events, notice }
+        let failing = Mutex::new(None);
+        Self {
+            events,
+            notice,
+            failing,
+        }
+    }
+
+    fn fail(&self, error: Option<&str>) {
+        *self.failing.lock().unwrap() = error.map(str::to_string);
     }
 
     /// Commits `event` and moves the notice to its seq.
@@ -97,6 +152,9 @@ impl FakeBindings {
 
 impl BindingEvents for FakeBindings {
     fn binding_events_since(&self, channel: u64, after: u64) -> Result<Vec<BindingEvent>, String> {
+        if let Some(error) = self.failing.lock().unwrap().clone() {
+            return Err(error);
+        }
         let events = self.events.lock().unwrap();
         let mine = events
             .iter()
@@ -254,25 +312,17 @@ async fn the_writer_stays_dormant_unless_enabled() {
     let config: WriterConfig = serde_json::from_str("{}").unwrap();
     assert!(!config.enabled);
     let (_stop, stopped) = watch::channel(false);
-    let spawned = spawn_if_enabled(
-        &config,
-        harness.writer(),
-        ShadowProvider::Claude,
-        none(),
-        stopped,
-    );
+    let mut writer = harness.writer();
+    let log = startup_log(&mut writer);
+    let spawned = spawn_if_enabled(&config, writer, ShadowProvider::Claude, log, stopped);
     assert!(spawned.is_none());
     polls(3).await;
     assert!(harness.port.posts().is_empty());
     let enabled = WriterConfig { enabled: true };
     let (stop, stopped) = watch::channel(false);
-    let spawned = spawn_if_enabled(
-        &enabled,
-        harness.writer(),
-        ShadowProvider::Claude,
-        none(),
-        stopped,
-    );
+    let mut writer = harness.writer();
+    let log = startup_log(&mut writer);
+    let spawned = spawn_if_enabled(&enabled, writer, ShadowProvider::Claude, log, stopped);
     polls(3).await;
     assert_eq!(harness.port.posts(), ["first"]);
     halt(stop, spawned.unwrap()).await;

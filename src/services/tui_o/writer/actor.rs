@@ -101,8 +101,14 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         for (source, keep) in self.sources.collectable() {
             while self.writer.store().retained_segments(&source) > keep {
                 if let Err(error) = self.writer.store().gc_oldest_segment(&source) {
-                    let detail = format!("spool gc: {error:?}");
-                    self.writer.stop(WriterAlarm::Halted { detail });
+                    let violation = self.writer.store().ledger().violation().map(str::to_string);
+                    let alarm = match violation {
+                        Some(detail) => WriterAlarm::LedgerViolation { detail },
+                        None => WriterAlarm::Halted {
+                            detail: format!("spool gc: {error:?}"),
+                        },
+                    };
+                    self.writer.stop(alarm);
                     return;
                 }
             }

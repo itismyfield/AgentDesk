@@ -96,6 +96,17 @@ impl UnitDeriver {
         })
     }
 
+    /// Whether a unit with this native key was already derived here.
+    pub fn sealed(&self, native_key: &str, kind: UnitKind) -> bool {
+        let (channel_id, provider, native_key) = (self.channel, self.provider, native_key.into());
+        self.seals.is_sealed(&UnitKey {
+            channel_id,
+            provider,
+            native_key,
+            kind,
+        })
+    }
+
     /// An announced unit whose sealing record is still to come keeps its spool from GC.
     pub fn has_unsealed(&self) -> bool {
         !self.seals.unsealed().is_empty()

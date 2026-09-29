@@ -8,6 +8,7 @@ pub mod deliver;
 pub mod pieces;
 pub mod rotation;
 pub mod round_trip;
+pub mod switch;
 
 use std::future::Future;
 
@@ -103,6 +104,11 @@ pub enum WriterAlarm {
         expected: u64,
         found: u64,
     },
+    /// The binding log could not be read; binds past `checkpoint` wait until it can.
+    BindingLogUnavailable {
+        checkpoint: Option<u64>,
+        detail: String,
+    },
     /// A bind whose transcript file is still unnamed; later binds wait behind it.
     BindingPending {
         seq: u64,
@@ -120,6 +126,11 @@ pub enum WriterAlarm {
     },
     /// A retired source grew; it is read again.
     RetiredSourceGrew {
+        source: SourceId,
+    },
+    /// The full spool refuses an old source's tail, its successor waits behind that tail, and an
+    /// announced unit keeps GC off; nothing can move, so the channel stops for an operator.
+    RotationStalled {
         source: SourceId,
     },
 }
