@@ -154,6 +154,10 @@
         "src/services/discord/router/intake_gate/stale_turn.rs": 1,
         "src/services/stale_turn_reconciler.rs": 1
       }
+    },
+    "host_terminate": {
+      "comment": "Herdr close RPC spellings (pane.close, server.stop, their method names and aliases). Owner-only: any count outside src/services/termination_audit/host_terminate.rs fails regardless of this map, and an owner count needs a reviewed diff here.",
+      "files": {}
     }
   }
 }

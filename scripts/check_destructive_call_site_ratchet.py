@@ -97,8 +97,20 @@ not the caller, resolves the inflight path.  Its limits:
   enumeration and are in the pattern as of S5 r2; each has production consumers
   that the earlier pattern let grow without limit.
 
-``--check`` rejects growth in an existing file, every UNLISTED file, and any
-identity/delivery pairing mismatch.  A decrease is allowed for growth: this is a
+``host_terminate`` counts spellings of the Herdr close RPCs (``pane.close``,
+``server.stop``) across all of ``src/**`` including tests: string literals after
+escape decoding, adjacent literals joined across ``,``/``+`` (``concat!``), and
+the method names as identifier word parts in any case style (``PaneClose``,
+``herdr_server_stop``, ``CLOSE_PANE``), which also covers ``use ... as`` aliases
+and wrapper definitions. It is owner-only, not merely no-growth: a count in any file
+but ``HOST_TERMINATE_OWNER`` fails even when the baseline lists it, and owner
+growth still needs a reviewed baseline diff. Literals assembled out of order
+(``format!("{}.close", "pane")``), character-by-character, at runtime or from
+a non-Rust file stay unseen, and the count proves nothing about the warrant a call receives.
+
+``--check`` rejects growth in an existing file, every UNLISTED file, any
+host_terminate spelling outside its owner, and any identity/delivery pairing
+mismatch.  A decrease is allowed for growth: this is a
 no-growth ratchet.  For an intentional change, run ``--write-baseline`` and
 review the JSON diff in the same commit.
 """
@@ -127,8 +139,15 @@ CATEGORIES = (
     "inflight_row_clear_call",
     "structural_candidate_apply",
     "destructive_warrant_bind",
+    "host_terminate",
 )
 WARNING = "These counts are a growth-blocking baseline, not proof of safety."
+HOST_TERMINATE_COMMENT = (
+    "Herdr close RPC spellings (pane.close, server.stop, their method names and "
+    "aliases). Owner-only: any count outside "
+    "src/services/termination_audit/host_terminate.rs fails regardless of this "
+    "map, and an owner count needs a reviewed diff here."
+)
 REPIN = (
     "Intentional change: run scripts/check_destructive_call_site_ratchet.py "
     "--write-baseline and commit the reviewed JSON diff."
@@ -181,6 +200,21 @@ INFLIGHT_ROW_CLEAR_PATTERN = re.compile(
     r"|request_inflight_abandon_if_matches\w*)\s*\("
 )
 INFLIGHT_ROW_CLEAR_OWNER_PREFIX = "src/services/discord/inflight/clear_store/"
+HOST_TERMINATE_OWNER = "src/services/termination_audit/host_terminate.rs"
+HOST_TERMINATE_LITERAL_PATTERN = re.compile(
+    r"(?i)\bpane\s*\.\s*close\b|\bserver\s*\.\s*stop\b"
+)
+# Word parts in any case style, so prefixes and suffixes (`herdr_pane_close`,
+# `PaneCloseRequest`) still count while `pane_closed` and `server_stopped` do not.
+HOST_TERMINATE_IDENT_PATTERN = re.compile(
+    r"(?:(?<![A-Za-z0-9])|(?<=[a-z0-9])(?=[A-Z]))"
+    r"(?i:pane_?close|server_?stop|close_?pane|stop_?server)(?![a-z])"
+)
+# Code between two literals that still concatenates them.
+_LITERAL_JOINERS = re.compile(r"^(?:concat!\(|[,+&()])*$")
+_ESCAPE = re.compile(r"\\(?:x([0-9A-Fa-f]{2})|u\{([0-9A-Fa-f_]{1,6})\}|\n\s*|(.))", re.S)
+_HOST_TERMINATE_PREFILTER = re.compile(r"(?i)close|stop|\\x|\\u\{")
+_SIMPLE_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "0": "\0"}
 
 
 class RatchetError(RuntimeError):
@@ -202,12 +236,84 @@ def _load_rust_lexer():
 RUST_LEXER = _load_rust_lexer()
 
 
+def _load_rust_lex():
+    path = REPO_ROOT / "scripts/rust_lex.py"
+    spec = importlib.util.spec_from_file_location("destructive_ratchet_rust_lex", path)
+    if spec is None or spec.loader is None:
+        raise RatchetError(f"cannot load Rust segment lexer: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+RUST_LEX = _load_rust_lex()
+
+
 def _stripped_text(path: Path) -> str:
     state = RUST_LEXER.StripState()
     return "\n".join(
         RUST_LEXER.strip_line(line, state)
         for line in path.read_text(encoding="utf-8").splitlines()
     )
+
+
+def _literal_content(token: str) -> str:
+    """Decoded text of one complete string or char literal token."""
+    raw = re.fullmatch(r'b?r(#*)"(.*)"\1', token, flags=re.S)
+    if raw:
+        return raw.group(2)
+    quoted = re.fullmatch(r"b?([\"'])(.*)\1", token, flags=re.S)
+    body = quoted.group(2) if quoted else token
+
+    def decode(match: re.Match[str]) -> str:
+        hex_byte, unicode, simple = match.groups()
+        if hex_byte:
+            return chr(int(hex_byte, 16))
+        if unicode:
+            return chr(int(unicode.replace("_", ""), 16))
+        if simple is None:
+            return ""
+        return _SIMPLE_ESCAPES.get(simple, simple)
+
+    return _ESCAPE.sub(decode, body)
+
+
+def host_terminate_count(text: str) -> int:
+    """Close-RPC spellings in comment-free source; see the module docstring."""
+    # Every counted form spells close/stop or hides a letter behind an escape.
+    if not _HOST_TERMINATE_PREFILTER.search(text):
+        return 0
+    state = RUST_LEX.StripState()
+    code: list[str] = []
+    literals: list[str] = []
+    pending: list[str] = []
+    open_literal: list[str] | None = None
+    for line in text.splitlines():
+        for kind, chunk in RUST_LEX.lex_segments(line, state):
+            if kind == RUST_LEX.LITERAL:
+                if open_literal is not None:
+                    open_literal.append(chunk)
+                    continue
+                if pending and not _LITERAL_JOINERS.match("".join(pending)):
+                    literals.append("\0")
+                pending = []
+                open_literal = [chunk]
+            else:
+                if open_literal is not None:
+                    literals.append(_literal_content("\n".join(open_literal)))
+                    open_literal = None
+                if kind == RUST_LEX.CODE:
+                    code.append(chunk)
+                    pending.append(chunk)
+        # A literal still open at end of line continues on the next one.
+        if open_literal is not None and not (state.in_string or state.raw_hashes is not None):
+            literals.append(_literal_content("\n".join(open_literal)))
+            open_literal = None
+        code.append("\n")
+    if open_literal is not None:
+        literals.append(_literal_content("\n".join(open_literal)))
+    found = len(HOST_TERMINATE_IDENT_PATTERN.findall(" ".join(code)))
+    return found + len(HOST_TERMINATE_LITERAL_PATTERN.findall("".join(literals)))
 
 
 def _is_whole_test_file(path: Path, rel: str) -> bool:
@@ -232,6 +338,9 @@ def scan(repo_root: Path) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
             raise RatchetError(f"source symlink is outside the lexical model: {path}")
         rel = path.relative_to(root).as_posix()
         stripped = _stripped_text(path)
+        close_found = host_terminate_count(path.read_text(encoding="utf-8"))
+        if close_found:
+            counts["host_terminate"][rel] = close_found
         for category, pattern in ALL_SOURCE_PATTERNS.items():
             found = len(pattern.findall(stripped))
             if found:
@@ -352,6 +461,24 @@ def pairing_errors(actual: Mapping[str, Mapping[str, int]]) -> list[str]:
     return errors
 
 
+def owner_only_errors(
+    actual: Mapping[str, Mapping[str, int]],
+    baseline: Mapping[str, Mapping[str, int]],
+) -> list[str]:
+    """Close RPC spellings may live only in the owner, whatever the baseline says."""
+    errors: list[str] = []
+    for path, found in sorted(actual.get("host_terminate", {}).items()):
+        if path != HOST_TERMINATE_OWNER:
+            errors.append(
+                f"host_terminate: close RPC spelled outside {HOST_TERMINATE_OWNER} "
+                f"in {path} ({found}x)"
+            )
+    for path in sorted(baseline.get("host_terminate", {})):
+        if path != HOST_TERMINATE_OWNER:
+            errors.append(f"host_terminate: baseline lists non-owner file {path}")
+    return errors
+
+
 def _snapshot(
     counts: Mapping[str, Mapping[str, int]],
     registry_subcounts: Mapping[str, int],
@@ -428,6 +555,10 @@ def _snapshot(
                 "comment": '#5464 T5 S6b-B: per-file warrant/structural counts are a two-sided pairing check, not no-growth; calls do not prove result consumption, argument identity, or control-flow dominance. The stale-sweep behavioral witness enforces veto consumption. See the module docstring.',
                 "files": dict(sorted(counts["destructive_warrant_bind"].items())),
             },
+            "host_terminate": {
+                "comment": HOST_TERMINATE_COMMENT,
+                "files": dict(sorted(counts["host_terminate"].items())),
+            },
         },
     }
 
@@ -470,7 +601,11 @@ def main(argv: Sequence[str] | None = None, repo_root: Path = REPO_ROOT) -> int:
             print(f"WROTE destructive call-site baseline at {sha}: {_totals(counts)}")
             return 0
         baseline, _payload = load_baseline(root / BASELINE_PATH)
-        errors = growth_errors(counts, baseline) + pairing_errors(counts)
+        errors = (
+            growth_errors(counts, baseline)
+            + owner_only_errors(counts, baseline)
+            + pairing_errors(counts)
+        )
     except Exception as exc:
         print(f"FAIL: destructive call-site ratchet: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
