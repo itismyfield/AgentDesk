@@ -191,7 +191,6 @@ src/
 │   ├── session_observability.rs
 │   ├── session_status.rs
 │   ├── session_transcripts.rs
-│   ├── table_metadata.rs
 │   └── turns.rs
 ├── dispatch/
 │   ├── dispatch_status/
@@ -397,6 +396,7 @@ src/
 │   │   ├── offices.rs
 │   │   ├── onboarding.rs
 │   │   ├── pipeline.rs
+│   │   ├── pipeline_stage_save_tests.rs
 │   │   ├── pr_summary.rs
 │   │   ├── prompt_manifest_retention.rs
 │   │   ├── provider_auth_profiles.rs
@@ -1778,6 +1778,9 @@ src/
 │   ├── opencode/
 │   │   ├── server_launch.rs
 │   │   └── streaming_entry.rs
+│   ├── pipeline_routes/
+│   │   ├── stage_validation.rs
+│   │   └── stage_validation_tests.rs
 │   ├── platform/
 │   │   ├── binary_resolver/
 │   │   │   ├── grok.rs

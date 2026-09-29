@@ -254,6 +254,7 @@ jobs:
               - 'src/server/routes/escalation.rs'
               - 'src/server/routes/memory_api.rs'
               - 'src/server/routes/message_outbox.rs'
+              - 'src/server/routes/pipeline_stage_save_tests.rs'
               - 'src/server/routes/queue_api.rs'
               - 'src/server/routes/scheduled_messages/postgres_tests.rs'
               - 'src/server/routes/stats.rs'
