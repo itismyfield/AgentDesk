@@ -155,6 +155,7 @@ pub(crate) mod writer_protocol;
 #[allow(dead_code)]
 pub(crate) mod tui_o {
     pub(crate) mod alarm;
+    pub(crate) mod channel_policy;
     pub(crate) mod cutover;
     pub(crate) mod ownership;
     pub(crate) mod shadow;

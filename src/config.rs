@@ -2857,6 +2857,7 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
 }
 
 pub(crate) fn validate_config(config: &Config) -> Result<()> {
+    crate::services::tui_o::channel_policy::BootChannels::validate(config)?;
     config.cluster.runtime_profile.validate(&config.cluster)?;
     config.onboarding.warn_invalid_rules();
     validate_escalation_schedule(&config.escalation.schedule)?;
@@ -3467,3 +3468,6 @@ mod shared_test_env_lock_tests {
         handle.join().expect("reentry proof thread should finish");
     }
 }
+
+#[cfg(test)]
+mod writer_channels_tests;

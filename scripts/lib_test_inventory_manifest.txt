@@ -208,6 +208,8 @@ config::secret_bearing_config_file_tests::load_from_path_rejects_invalid_escalat
 config::secret_bearing_config_file_tests::load_from_path_rejects_invalid_escalation_schedule_timezone
 config::secret_bearing_config_file_tests::save_and_load_harden_secret_bearing_config_file
 config::shared_test_env_lock_tests::acquire_shared_test_env_lock_panics_on_same_thread_reentry_before_deadlock
+config::writer_channels_tests::writer_channels_disk_loader_normalizes_and_reports_restart_required
+config::writer_channels_tests::writer_channels_disk_loader_rejects_invalid_membership_and_identity
 config_live_reload::tests::gateway_handback_breaker_changes_need_no_restart
 config_live_reload::tests::intake_owner_authority_allowlist_change_needs_no_restart
 config_live_reload::tests::load_graceful_uses_live_snapshot_when_file_is_invalid
@@ -9354,6 +9356,8 @@ services::tui_o::alarm::tests::an_alarm_is_never_sent_to_its_own_channel
 services::tui_o::alarm::tests::first_event_raises_health_and_one_operator_message
 services::tui_o::alarm::tests::not_found_alarms_only_at_three_within_an_hour
 services::tui_o::alarm::tests::without_an_alert_channel_or_notifier_alarms_stay_in_health
+services::tui_o::channel_policy::tests::boot_membership_survives_reload_until_restart
+services::tui_o::channel_policy::tests::ownership_uses_flag_membership_and_tui_kind_together
 services::tui_o::cutover::tests::o_owns_tui_output_truth_table
 services::tui_o::cutover::tests::o_tui_writer_is_off_until_flip
 services::tui_o::ownership::tests::a_transition_waits_for_an_admission_in_progress_and_admits_nothing_after
