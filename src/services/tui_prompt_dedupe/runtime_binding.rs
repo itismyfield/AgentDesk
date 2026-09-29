@@ -1,6 +1,7 @@
 use super::*;
 use binding_events::{BindingPersistError, CauseSource, HookSignal, Proposal};
 mod adopt_skip;
+pub(crate) mod pane_registration;
 pub(crate) use adopt_skip::{AdoptSkip, adopt_claude_continuation_explained};
 
 fn with_runtime_binding_state_under_source_authority<R>(

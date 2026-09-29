@@ -1704,6 +1704,7 @@ services::claude_tui::hook_relay::tests::scan_search_event_id_handles_escaped_an
 services::claude_tui::hook_relay::tests::scan_search_event_id_rejects_false_positives
 services::claude_tui::hook_server::observation_ingress::tests::a_codex_session_switch_is_not_adopted_as_claude
 services::claude_tui::hook_server::observation_ingress::tests::a_hook_behind_an_unlogged_front_is_refused_until_its_own_source_is_logged
+services::claude_tui::hook_server::observation_ingress::tests::a_legacy_command_alias_is_kept_until_its_mapping_is_ready
 services::claude_tui::hook_server::observation_ingress::tests::a_legacy_hook_that_cannot_be_logged_is_refused_and_counted
 services::claude_tui::hook_server::observation_ingress::tests::a_pane_whose_boot_registration_failed_stays_refused_after_discovery
 services::claude_tui::hook_server::observation_ingress::tests::a_pending_fsync_failure_is_refused_and_leaves_no_line
@@ -1712,6 +1713,7 @@ services::claude_tui::hook_server::observation_ingress::tests::a_poll_over_a_fro
 services::claude_tui::hook_server::observation_ingress::tests::a_refused_hook_has_no_effect_until_its_resend_is_acknowledged
 services::claude_tui::hook_server::observation_ingress::tests::a_repeat_hook_of_a_recorded_source_waiting_for_its_rotation_is_acknowledged
 services::claude_tui::hook_server::observation_ingress::tests::an_unmapped_hook_is_refused_until_the_first_discovery_pass_finishes
+services::claude_tui::hook_server::observation_ingress::tests::discovery_grace_uses_the_production_sixty_second_boundary
 services::claude_tui::hook_server::relay_receipts::tests::ledger_retention_covers_every_deliverable_request
 services::claude_tui::hook_server::relay_receipts::tests::managed_inflight_deadline_never_reissues_fresh
 services::claude_tui::hook_server::relay_receipts::tests::managed_missing_freshness_never_inserts_and_legacy_survives
@@ -6785,6 +6787,9 @@ services::discord::tui_prompt_relay::local_model_queue_wake_e2e::completion_life
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e::completion_lifecycle_rejects_queue_eligible_before_mailbox_release
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e::local_model_observation_wakes_idle_durable_queue_through_production_workers
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e::promoted_b_completion_lifecycle_validates_order_and_cardinality
+services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_alias_binding_envelope_uses_the_failed_incarnation
+services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_alias_outer_pass_refuses_until_binding_and_alias_are_ready
+services::discord::tui_prompt_relay::rehydration::claude_pass_tests::f4_launch_outer_pass_refuses_until_binding_and_alias_are_ready
 services::discord::tui_prompt_relay::rehydration::idempotency_tests::concurrent_rehydrations_install_once
 services::discord::tui_prompt_relay::rehydration::idempotency_tests::incomplete_session_metadata_does_not_reset_a_valid_rollout_cursor
 services::discord::tui_prompt_relay::rehydration::idempotency_tests::live_marker_rotation_replaces_even_when_old_rollout_still_exists

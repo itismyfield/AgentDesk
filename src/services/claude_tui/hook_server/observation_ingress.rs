@@ -1,13 +1,15 @@
 //! Binding observation of a hook, judged before the hook has any other effect. A hook whose
 //! binding evidence is not durable is refused with 425 so its sender retries it.
 
-use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::services::tui_prompt_dedupe::binding_context::{BINDING_HEADER, decode_binding_header};
+pub(crate) use crate::services::tui_prompt_dedupe::pane_registration::note_claude_pane_registration;
+use crate::services::tui_prompt_dedupe::pane_registration::pane_registration_failed;
 use axum::Json;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use serde_json::{Value, json};
 
 use super::HookEventKind;
@@ -61,14 +63,12 @@ impl IngressOutcome {
 static DISCOVERY_DONE: AtomicBool = AtomicBool::new(false);
 static GRACE_WARNED: AtomicBool = AtomicBool::new(false);
 static RECEIVER_STARTED: LazyLock<Instant> = LazyLock::new(Instant::now);
-/// Launch session → tmux of managed panes whose launch binding could not be registered.
-static FAILED_PANES: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(Default::default);
 static UNMAPPED_COMMAND_SESSIONS: AtomicU64 = AtomicU64::new(0);
 static LEGACY_NOT_DURABLE: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
 thread_local! {
-    static TEST_DISCOVERY_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_DISCOVERY_CLOCK: std::cell::Cell<(bool, Duration)> = const { std::cell::Cell::new((true, Duration::ZERO)) };
 }
 
 pub(crate) fn note_receiver_start() {
@@ -79,40 +79,23 @@ pub(crate) fn note_receiver_start() {
 pub(crate) fn mark_boot_discovery_complete() {
     DISCOVERY_DONE.store(true, Ordering::Release);
     #[cfg(test)]
-    TEST_DISCOVERY_PENDING.set(false);
+    TEST_DISCOVERY_CLOCK.set((true, Duration::ZERO));
 }
 
-/// Keeps a managed pane refusable until its launch binding is registered.
-pub(crate) fn note_claude_pane_registration(tmux: &str, launch_session: Option<&str>, ok: bool) {
-    let Some(launch_session) = launch_session.map(str::trim).filter(|id| !id.is_empty()) else {
-        return;
-    };
-    let mut failed = FAILED_PANES.lock().unwrap_or_else(|p| p.into_inner());
-    if ok {
-        failed.remove(launch_session);
-    } else if failed
-        .insert(launch_session.to_owned(), tmux.to_owned())
-        .is_none()
-    {
-        tracing::error!(
-            tmux,
-            launch_session,
-            "managed Claude pane binding not registered"
-        );
-    }
-}
-
-fn pane_registration_failed(command_session_id: &str) -> bool {
-    let failed = FAILED_PANES.lock().unwrap_or_else(|p| p.into_inner());
-    failed.contains_key(command_session_id.trim())
-}
-
-#[cfg(not(test))]
 fn discovery_done() -> bool {
-    if DISCOVERY_DONE.load(Ordering::Acquire) {
+    let clock = (
+        DISCOVERY_DONE.load(Ordering::Acquire),
+        RECEIVER_STARTED.elapsed(),
+    );
+    #[cfg(test)]
+    let clock = {
+        let _ = clock;
+        TEST_DISCOVERY_CLOCK.get()
+    };
+    if clock.0 {
         return true;
     }
-    let expired = RECEIVER_STARTED.elapsed() >= DISCOVERY_GRACE;
+    let expired = clock.1 >= DISCOVERY_GRACE;
     if expired && !GRACE_WARNED.swap(true, Ordering::AcqRel) {
         tracing::warn!("no rehydrate pass listed tmux in time; unmapped Claude hooks are accepted");
     }
@@ -120,14 +103,8 @@ fn discovery_done() -> bool {
 }
 
 #[cfg(test)]
-fn discovery_done() -> bool {
-    let _ = (&GRACE_WARNED, DISCOVERY_GRACE);
-    !TEST_DISCOVERY_PENDING.get()
-}
-
-#[cfg(test)]
 pub(crate) fn set_discovery_pending_for_tests(pending: bool) {
-    TEST_DISCOVERY_PENDING.set(pending);
+    TEST_DISCOVERY_CLOCK.set((!pending, Duration::ZERO));
 }
 
 #[cfg(test)]
@@ -145,6 +122,7 @@ pub(crate) fn observe_binding_hook(
     command_session_id: Option<&str>,
     payload_session_id: Option<&str>,
     payload: &Value,
+    headers: &HeaderMap,
 ) -> IngressOutcome {
     let (Some(command), Some(payload_session)) = (command_session_id, payload_session_id) else {
         return IngressOutcome::Proceed(ProceedReason::NoSessionSwitch);
@@ -161,19 +139,32 @@ pub(crate) fn observe_binding_hook(
         }
         _ => return IngressOutcome::NotApplicable(NotApplicableReason::OtherProvider),
     }
+    let envelope = headers
+        .get(BINDING_HEADER)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| decode_binding_header(h).ok());
+    if pane_registration_failed(command, envelope.as_ref()) {
+        return IngressOutcome::Unavailable(UnavailableReason::PaneRegistrationFailed);
+    }
     let hook = HookSignal::from_payload(HookEventKind::from_path(event).as_str(), payload);
     match adoption_retry::adopt_from_hook(command, payload_session, &hook) {
         AdoptionHttp::Durable(kind) => IngressOutcome::Durable(kind),
         AdoptionHttp::NotDurable(reason) => IngressOutcome::NotDurable(reason),
-        AdoptionHttp::Skipped(skip) => classify_skip(skip, command),
+        AdoptionHttp::Skipped(skip) => classify_skip(skip, command, envelope.as_ref()),
     }
 }
 
-fn classify_skip(skip: AdoptSkip, command_session_id: &str) -> IngressOutcome {
+fn classify_skip(
+    skip: AdoptSkip,
+    command_session_id: &str,
+    envelope: Option<&crate::services::tui_prompt_dedupe::binding_context::HookBindingEnvelope>,
+) -> IngressOutcome {
     use IngressOutcome::{NotApplicable, Unavailable};
     match skip {
         // A pane whose launch binding failed stays refused even after discovery or its grace.
-        AdoptSkip::UnmappedCommandSession if pane_registration_failed(command_session_id) => {
+        AdoptSkip::UnmappedCommandSession
+            if pane_registration_failed(command_session_id, envelope) =>
+        {
             Unavailable(UnavailableReason::PaneRegistrationFailed)
         }
         AdoptSkip::UnmappedCommandSession if !discovery_done() => {
@@ -231,4 +222,4 @@ pub(crate) fn refusal(
 
 #[cfg(test)]
 #[path = "observation_ingress_tests.rs"]
-mod tests;
+pub(crate) mod tests;

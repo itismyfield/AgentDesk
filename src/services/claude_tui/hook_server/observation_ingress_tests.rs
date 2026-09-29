@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::MutexGuard;
@@ -14,6 +15,7 @@ use crate::services::claude_tui::hook_server::adoption_retry::{
 };
 use crate::services::claude_tui::hook_server::relay_receipts::{
     RELAY_DEADLINE_HEADER, RELAY_PUBLISHED_AT_HEADER, RELAY_REQUEST_ID_HEADER,
+    RELAY_RESPOND_BY_HEADER,
 };
 use crate::services::claude_tui::hook_server::{
     HookEvent, HookServerState, hook_receiver_router_with_state, retry_deferred_claude_adoptions,
@@ -29,18 +31,19 @@ use crate::services::tui_prompt_dedupe::{
 };
 
 /// One receiver over a scratch binding log, with the dedupe state held for the test.
-struct Ingress {
+pub(crate) struct Ingress {
     _root: tempfile::TempDir,
     dir: tempfile::TempDir,
-    state: HookServerState,
+    pub(crate) state: HookServerState,
     app: Router,
+    pins: std::cell::RefCell<HashMap<String, (String, Value, HeaderMap)>>,
     runtime: tokio::runtime::Runtime,
     _rotations: MutexGuard<'static, ()>,
     _state: MutexGuard<'static, ()>,
 }
 
 impl Ingress {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let state_lock = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let rotations = lock_claude_session_rotations_for_tests();
         reset_state_for_tests();
@@ -54,6 +57,7 @@ impl Ingress {
             dir: tempfile::tempdir().unwrap(),
             app: hook_receiver_router_with_state(state.clone()),
             state,
+            pins: Default::default(),
             runtime: tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -63,18 +67,22 @@ impl Ingress {
         }
     }
 
-    fn path(&self, session: &str) -> PathBuf {
+    pub(crate) fn pending_feedback(&self, session: &str) -> usize {
+        self.state.memento_feedback.pending_count(session)
+    }
+
+    pub(crate) fn path(&self, session: &str) -> PathBuf {
         self.dir.path().join(format!("{session}.jsonl"))
     }
 
-    fn transcript(&self, session: &str) -> PathBuf {
+    pub(crate) fn transcript(&self, session: &str) -> PathBuf {
         let path = self.path(session);
         fs::write(&path, b"{}\n").unwrap();
         path
     }
 
     /// A managed Claude pane bound to `a`, logging to `channel`.
-    fn pane(&self, tmux: &str, channel: u64, a: &str) -> PathBuf {
+    pub(crate) fn pane(&self, tmux: &str, channel: u64, a: &str) -> PathBuf {
         let a_path = self.transcript(a);
         register_provider_session("claude", a, tmux);
         register_tmux_channel(tmux, channel);
@@ -82,24 +90,75 @@ impl Ingress {
         a_path
     }
 
-    fn payload(&self, session: &str, source: Option<&str>) -> Value {
+    pub(crate) fn payload(&self, session: &str, source: Option<&str>) -> Value {
         json!({ "session_id": session, "source": source, "transcript_path": self.path(session) })
     }
 
-    fn send(&self, uri: &str, payload: &Value, request_id: Option<&str>) -> (u16, Value) {
-        let now = chrono::Utc::now();
-        let mut request = axum::http::Request::post(uri).header("content-type", "application/json");
-        if let Some(request_id) = request_id {
-            request = request
-                .header(RELAY_REQUEST_ID_HEADER, request_id)
-                .header(RELAY_PUBLISHED_AT_HEADER, now.to_rfc3339())
-                .header(
-                    RELAY_DEADLINE_HEADER,
-                    (now + chrono::Duration::minutes(5)).to_rfc3339(),
-                );
+    pub(crate) fn send(
+        &self,
+        uri: &str,
+        payload: &Value,
+        request_id: Option<&str>,
+    ) -> (u16, Value) {
+        self.send_envelope(uri, payload, request_id, None)
+    }
+
+    pub(crate) fn send_envelope(
+        &self,
+        uri: &str,
+        payload: &Value,
+        request_id: Option<&str>,
+        envelope: Option<&str>,
+    ) -> (u16, Value) {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "application/json".parse().unwrap());
+        if let Some(envelope) = envelope {
+            headers.insert(
+                crate::services::tui_prompt_dedupe::binding_context::BINDING_HEADER,
+                envelope.parse().unwrap(),
+            );
         }
+        let mut frozen_payload = payload.clone();
+        let mut frozen_uri = uri.to_owned();
+        if let Some(request_id) = request_id {
+            let mut pins = self.pins.borrow_mut();
+            let pin = pins.entry(request_id.to_owned()).or_insert_with(|| {
+                let now = chrono::Utc::now();
+                headers.insert(RELAY_REQUEST_ID_HEADER, request_id.parse().unwrap());
+                headers.insert(RELAY_PUBLISHED_AT_HEADER, now.to_rfc3339().parse().unwrap());
+                headers.insert(
+                    RELAY_DEADLINE_HEADER,
+                    (now + chrono::Duration::minutes(5))
+                        .to_rfc3339()
+                        .parse()
+                        .unwrap(),
+                );
+                headers.insert(
+                    RELAY_RESPOND_BY_HEADER,
+                    (now + chrono::Duration::minutes(4))
+                        .to_rfc3339()
+                        .parse()
+                        .unwrap(),
+                );
+                (uri.to_owned(), payload.clone(), headers.clone())
+            });
+            assert_eq!(
+                (&pin.0, &pin.1),
+                (&uri.to_owned(), payload),
+                "retry must keep URI and payload"
+            );
+            assert_eq!(
+                pin.2
+                    .get(crate::services::tui_prompt_dedupe::binding_context::BINDING_HEADER),
+                headers.get(crate::services::tui_prompt_dedupe::binding_context::BINDING_HEADER),
+                "retry must keep binding envelope"
+            );
+            (frozen_uri, frozen_payload, headers) = pin.clone();
+        }
+        let mut request = axum::http::Request::post(frozen_uri);
+        *request.headers_mut().unwrap() = headers;
         let request = request
-            .body(axum::body::Body::from(payload.to_string()))
+            .body(axum::body::Body::from(frozen_payload.to_string()))
             .unwrap();
         self.runtime.block_on(async {
             let response = self.app.clone().oneshot(request).await.unwrap();
@@ -111,13 +170,19 @@ impl Ingress {
         })
     }
 
-    fn claude_hook(&self, event: &str, command: &str, payload: &Value, id: Option<&str>) -> u16 {
+    pub(crate) fn claude_hook(
+        &self,
+        event: &str,
+        command: &str,
+        payload: &Value,
+        id: Option<&str>,
+    ) -> u16 {
         let uri = format!("/hooks/claude/{event}?session_id={command}");
         self.send(&uri, payload, id).0
     }
 
     /// Seeds one memento recall whose feedback the next Stop of `session` must flush.
-    fn seed_feedback(&self, session: &str) {
+    pub(crate) fn seed_feedback(&self, session: &str) {
         let recall = json!({
             "tool_name": "mcp__memento__recall",
             "tool_response": {"_meta": {"searchEventId": "4308"}}
@@ -138,7 +203,7 @@ impl Drop for Ingress {
     }
 }
 
-fn claude(path: &std::path::Path, session: &str) -> TuiRuntimeBinding {
+pub(crate) fn claude(path: &std::path::Path, session: &str) -> TuiRuntimeBinding {
     TuiRuntimeBinding {
         runtime_kind: RuntimeHandoffKind::ClaudeTui,
         output_path: path.display().to_string(),
@@ -150,15 +215,15 @@ fn claude(path: &std::path::Path, session: &str) -> TuiRuntimeBinding {
     }
 }
 
-fn uuid() -> String {
+pub(crate) fn uuid() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-fn events(channel: u64) -> Vec<BindingEvent> {
+pub(crate) fn events(channel: u64) -> Vec<BindingEvent> {
     binding_events_since(channel, 0).unwrap()
 }
 
-fn pending_lines(channel: u64, session: &str) -> usize {
+pub(crate) fn pending_lines(channel: u64, session: &str) -> usize {
     let is_pending = |e: &BindingEvent| matches!(&e.new, BindingTarget::Pending { payload_session_id, .. } if payload_session_id == session);
     events(channel).iter().filter(|e| is_pending(e)).count()
 }
@@ -177,12 +242,12 @@ fn session_lines(channel: u64, session: &str) -> Vec<u64> {
         .collect()
 }
 
-fn buffered(session: &str) -> usize {
+pub(crate) fn buffered(session: &str) -> usize {
     let key = RegistryKey::new("claude", Some(session), None).unwrap();
     hook_registry::global().buffered_len(&key)
 }
 
-fn drain(rx: &mut tokio::sync::broadcast::Receiver<HookEvent>) -> usize {
+pub(crate) fn drain(rx: &mut tokio::sync::broadcast::Receiver<HookEvent>) -> usize {
     std::iter::from_fn(|| rx.try_recv().ok()).count()
 }
 
@@ -193,6 +258,8 @@ fn check_refused_until_durable(fault: &'static str) {
     ingress.pane(tmux, channel, &a);
     let fork = ingress.payload(&b, Some("fork"));
     let before = events(channel).len();
+    let base = buffered(&a);
+    let mut rx = ingress.state.subscribe();
 
     APPEND_FAULT.with(|slot| slot.set(Some(fault)));
     let (status, body) = ingress.send(
@@ -207,10 +274,32 @@ fn check_refused_until_durable(fault: &'static str) {
         "no line survives a failed {fault}"
     );
 
+    assert_eq!(
+        (buffered(&a) - base, buffered(&b), drain(&mut rx)),
+        (0, 0, 0)
+    );
     APPEND_FAULT.with(|slot| slot.set(None));
     let resend = ingress.claude_hook("SessionStart", &a, &fork, Some(&request_id));
     assert_eq!(resend, 202, "resend.status == 202");
     assert_eq!(pending_lines(channel, &b), 1, "Pending line count == 1");
+    assert_eq!(
+        events(channel).len(),
+        before + 1,
+        "accepted adds exactly one log line"
+    );
+    assert_eq!(
+        (buffered(&a) - base, buffered(&b), drain(&mut rx)),
+        (1, 0, 1)
+    );
+    let logged = events(channel).len();
+    let cached = ingress.claude_hook("SessionStart", &a, &fork, Some(&request_id));
+    assert_ne!(cached, 409, "same pin never conflicts (409)");
+    assert_eq!(cached, 202, "cached status == 202");
+    assert_eq!(events(channel).len(), logged);
+    assert_eq!(
+        (buffered(&a) - base, buffered(&b), drain(&mut rx)),
+        (1, 0, 0)
+    );
 }
 
 #[test]
@@ -467,4 +556,62 @@ fn a_poll_over_a_front_that_cannot_be_logged_returns() {
         1,
         "the unlogged front stays queued"
     );
+}
+
+#[test]
+fn discovery_grace_uses_the_production_sixty_second_boundary() {
+    let ingress = Ingress::new();
+    let (a, b) = (uuid(), uuid());
+    let payload = ingress.payload(&b, Some("clear"));
+    TEST_DISCOVERY_CLOCK.set((false, Duration::from_secs(60) - Duration::from_nanos(1)));
+    assert_eq!(
+        ingress.claude_hook("SessionStart", &a, &payload, Some(&uuid())),
+        425
+    );
+    TEST_DISCOVERY_CLOCK.set((false, Duration::from_secs(60)));
+    assert_eq!(
+        ingress.claude_hook("SessionStart", &a, &payload, Some(&uuid())),
+        202
+    );
+    note_claude_pane_registration("ingress-grace-failure", Some(&a), false);
+    assert_eq!(
+        ingress.claude_hook("SessionStart", &a, &payload, Some(&uuid())),
+        425,
+        "grace never clears pane failure"
+    );
+}
+
+#[test]
+fn a_legacy_command_alias_is_kept_until_its_mapping_is_ready() {
+    let ingress = Ingress::new();
+    let (a, h, b, id) = (uuid(), uuid(), uuid(), uuid());
+    let (tmux, channel) = ("ingress-old-alias", 7491);
+    let path = ingress.pane(tmux, channel, &a);
+    register_provider_session("claude", &uuid(), tmux);
+    register_provider_session("claude", &h, tmux);
+    note_claude_pane_registration(tmux, Some(&a), false);
+    reset_state_for_tests();
+    let payload = ingress.payload(&b, Some("clear"));
+    assert_eq!(
+        ingress.claude_hook("SessionStart", &h, &payload, Some(&id)),
+        425,
+        "old alias status == 425"
+    );
+    assert!(register_rehydrated_tmux_runtime_binding(
+        "claude",
+        tmux,
+        channel,
+        claude(&path, &a)
+    ));
+    note_claude_pane_registration(tmux, Some(&a), true);
+    assert_eq!(
+        crate::services::tui_prompt_dedupe::provider_session_for_tmux("claude", tmux).as_deref(),
+        Some(h.as_str()),
+        "newest legacy command remains the wait key among multiple aliases"
+    );
+    assert_eq!(
+        ingress.claude_hook("SessionStart", &h, &payload, Some(&id)),
+        202
+    );
+    assert_eq!(pending_lines(channel, &b), 1);
 }

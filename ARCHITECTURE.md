@@ -553,6 +553,7 @@ src/
 │   │   │   ├── adoption_retry.rs
 │   │   │   ├── observation_ingress.rs
 │   │   │   ├── observation_ingress_tests.rs
+│   │   │   ├── rehydration_ingress_tests.rs
 │   │   │   └── relay_receipts.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
@@ -1959,7 +1960,8 @@ src/
 │   │   ├── binding_events/
 │   │   │   └── lane_tests.rs
 │   │   ├── runtime_binding/
-│   │   │   └── adopt_skip.rs
+│   │   │   ├── adopt_skip.rs
+│   │   │   └── pane_registration.rs
 │   │   ├── binding_context.rs
 │   │   ├── binding_events.rs
 │   │   ├── extract.rs

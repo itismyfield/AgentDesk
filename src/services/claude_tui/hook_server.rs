@@ -285,6 +285,7 @@ async fn receive_hook(
         command_session_id.as_deref(),
         observed_payload_session_id.as_deref(),
         &payload,
+        &headers,
     );
     if let Some(refused) = observation_ingress::refusal(
         &state.relay_receipts,
