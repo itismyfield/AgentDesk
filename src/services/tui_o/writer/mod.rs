@@ -6,6 +6,7 @@ pub mod binding;
 pub mod confirm;
 pub mod deliver;
 pub mod pieces;
+pub mod rotation;
 pub mod round_trip;
 
 use std::future::Future;
