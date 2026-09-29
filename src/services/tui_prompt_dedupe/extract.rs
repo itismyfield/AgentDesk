@@ -272,7 +272,7 @@ pub enum PromptObservation {
     Ignored,
 }
 
-pub(super) fn resolve_tmux_session_name(
+pub(crate) fn resolve_tmux_session_name(
     provider: &str,
     provider_session_id: &str,
 ) -> Option<String> {
