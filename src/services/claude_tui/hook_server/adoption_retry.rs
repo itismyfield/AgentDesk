@@ -7,14 +7,42 @@ use std::sync::{LazyLock, Mutex};
 use crate::services::tmux_common::with_tmux_source_authority;
 use crate::services::tui_prompt_dedupe::binding_events::HookSignal;
 use crate::services::tui_prompt_dedupe::{
-    adopt_claude_continuation_session, claude_session_rotation_for_tmux, resolve_tmux_session_name,
+    AdoptSkip, adopt_claude_continuation_explained, claude_session_rotation_for_tmux,
+    resolve_tmux_session_name,
 };
 
+/// What the hook that asked for an adoption may be told, judged by its own binding evidence only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AdoptionReport {
+pub(crate) enum AdoptionHttp {
+    Durable(DurableKind),
+    Skipped(AdoptSkip),
+    NotDurable(NotDurableReason),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DurableKind {
+    Pending,
     Adopted,
-    NotAdopted,
-    Deferred,
+    AlreadyRecorded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NotDurableReason {
+    Append,
+    QueuedBehind,
+}
+
+/// Whether the pane's queue moves on to its next entry in this poll.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QueueStep {
+    Pop,
+    Hold,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SettleOutcome {
+    pub(crate) http: AdoptionHttp,
+    pub(crate) queue: QueueStep,
 }
 
 #[derive(Clone)]
@@ -22,6 +50,8 @@ struct DeferredAdoption {
     command_session_id: String,
     payload_session_id: String,
     hook: HookSignal,
+    /// The entry's binding event is in the log; it only waits for its rotation to settle.
+    recorded: bool,
 }
 
 // Deferred sources of a pane, oldest first; only repeat hooks of one source share an entry.
@@ -52,6 +82,15 @@ fn front(tmux_session_name: &str) -> Option<DeferredAdoption> {
     deferred().get(tmux_session_name)?.front().cloned()
 }
 
+fn mark_front_recorded(tmux_session_name: &str) {
+    if let Some(front) = deferred()
+        .get_mut(tmux_session_name)
+        .and_then(VecDeque::front_mut)
+    {
+        front.recorded = true;
+    }
+}
+
 fn pop_front(tmux_session_name: &str) {
     let mut queues = deferred();
     if let Some(queue) = queues.get_mut(tmux_session_name) {
@@ -66,41 +105,80 @@ pub(crate) fn adopt_from_hook(
     command_session_id: &str,
     payload_session_id: &str,
     hook: &HookSignal,
-) -> AdoptionReport {
+) -> AdoptionHttp {
     let request = DeferredAdoption {
         command_session_id: command_session_id.to_owned(),
         payload_session_id: payload_session_id.to_owned(),
         hook: hook.clone(),
+        recorded: false,
     };
     let tmux = resolve_tmux_session_name("claude", command_session_id.trim()).unwrap_or_default();
     // Adoption and artifact cutover share the pane authority so a retry cannot rewrite them late.
     with_tmux_source_authority(&tmux, |_| {
-        if deferred().contains_key(&tmux) {
+        let Some((own_recorded, own_is_front)) = own_entry(&tmux, payload_session_id) else {
+            if !deferred().contains_key(&tmux) {
+                return settle(&tmux, &request, false).http;
+            }
             queue_behind(&tmux, &request);
-            return AdoptionReport::Deferred;
+            return AdoptionHttp::NotDurable(NotDurableReason::QueuedBehind);
+        };
+        queue_behind(&tmux, &request);
+        match own_recorded {
+            true => AdoptionHttp::Durable(DurableKind::AlreadyRecorded),
+            false if own_is_front && claude_session_rotation_for_tmux(&tmux).is_none() => {
+                front(&tmux).map_or(
+                    AdoptionHttp::NotDurable(NotDurableReason::QueuedBehind),
+                    |own| settle(&tmux, &own, true).http,
+                )
+            }
+            false => AdoptionHttp::NotDurable(NotDurableReason::QueuedBehind),
         }
-        settle(&tmux, &request, false)
     })
 }
 
-fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> AdoptionReport {
+/// `(recorded, at front)` of the queued entry of `payload_session_id`, if the pane queues one.
+fn own_entry(tmux: &str, payload_session_id: &str) -> Option<(bool, bool)> {
+    let queues = deferred();
+    let queue = queues.get(tmux)?;
+    let at = queue
+        .iter()
+        .position(|q| q.payload_session_id == payload_session_id)?;
+    Some((queue[at].recorded, at == 0))
+}
+
+fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome {
     let provider = "claude";
     let command_session_id = request.command_session_id.as_str();
     let payload_session_id = request.payload_session_id.as_str();
-    match adopt_claude_continuation_session(command_session_id, payload_session_id, &request.hook) {
-        Ok(adopted) => {
+    match adopt_claude_continuation_explained(command_session_id, payload_session_id, &request.hook)
+    {
+        Ok((adopted, skip)) => {
             // An adopted source stays queued until its rotation settles, so later hooks wait behind it.
-            if queued && (adopted.is_none() || claude_session_rotation_for_tmux(tmux).is_none()) {
+            let held = adopted.is_some() && claude_session_rotation_for_tmux(tmux).is_some();
+            let queue = if held {
+                QueueStep::Hold
+            } else {
+                QueueStep::Pop
+            };
+            if queued && held {
+                mark_front_recorded(tmux);
+            } else if queued {
                 pop_front(tmux);
             }
+            let http = match skip {
+                Some(skip) => AdoptionHttp::Skipped(skip),
+                None if adopted.is_some() => AdoptionHttp::Durable(DurableKind::Adopted),
+                None => AdoptionHttp::Durable(DurableKind::Pending),
+            };
             let Some((tmux_session_name, transcript_path)) = adopted else {
                 tracing::debug!(
                     provider,
                     command_session_id,
                     payload_session_id,
-                    "Claude hook payload session differs from command identity but no safe runtime binding adoption was available"
+                    ?skip,
+                    "Claude hook payload session differs from command identity; no runtime binding was adopted"
                 );
-                return AdoptionReport::NotAdopted;
+                return SettleOutcome { http, queue };
             };
             before_artifacts(payload_session_id);
             match crate::services::claude_tui::session::persist_claude_continuation_session(
@@ -128,7 +206,7 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> AdoptionRepor
                     "adopted Claude continuation in memory but failed to persist cutover artifacts"
                 ),
             }
-            AdoptionReport::Adopted
+            SettleOutcome { http, queue }
         }
         Err(failure) => {
             if !queued {
@@ -141,7 +219,10 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> AdoptionRepor
                 error = %failure.error,
                 "Claude continuation adoption deferred until its binding event can be persisted"
             );
-            AdoptionReport::Deferred
+            SettleOutcome {
+                http: AdoptionHttp::NotDurable(NotDurableReason::Append),
+                queue: QueueStep::Hold,
+            }
         }
     }
 }
@@ -154,7 +235,7 @@ pub(crate) fn retry_deferred_claude_adoptions() {
             // The rotation ledger keeps only the first old transcript, so B→C waits until A→B settles.
             while claude_session_rotation_for_tmux(&tmux).is_none()
                 && let Some(request) = front(&tmux)
-                && settle(&tmux, &request, true) != AdoptionReport::Deferred
+                && settle(&tmux, &request, true).queue == QueueStep::Pop
             {}
         });
     }

@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::response_window::{budget_millis, may_publish, respond_by};
 use super::{
     FAILURE_MARKER_WORKER_ENV, HookRelayFailureMarker, HookRelayFailureMarkerWriteRequest,
     NON_WAIT_RELAY_WORKER_ENV, failure_marker_dir, marker_component,
@@ -408,7 +409,7 @@ pub(super) fn enqueue_ordered_hook_relay_request_with_binding(
     event: &str,
     session_id: &str,
     payload: Value,
-    response_timeout: Option<Duration>,
+    respond_until: Option<Instant>,
     binding: Option<HookBindingEnvelope>,
 ) -> Result<(PathBuf, Option<PathBuf>), String> {
     let marker_dir =
@@ -422,19 +423,18 @@ pub(super) fn enqueue_ordered_hook_relay_request_with_binding(
     };
     let request_id = uuid::Uuid::new_v4().to_string();
     let published_at = Utc::now();
-    let delivery_timeout = response_timeout.unwrap_or(DELIVERY_TTL).min(DELIVERY_TTL);
     let delivery_deadline = published_at
-        + chrono::Duration::from_std(delivery_timeout)
+        + chrono::Duration::from_std(DELIVERY_TTL)
             .map_err(|err| format!("convert hook relay delivery TTL: {err}"))?;
-    let response = response_timeout
-        .map(|timeout| {
+    let response = respond_until
+        .map(|until| {
             Ok::<_, String>(OrderedHookRelayResponseTarget {
                 path: queue_dir.join("responses").join(format!(
                     "{}-{}.response.json",
                     request_id,
                     uuid::Uuid::new_v4().simple(),
                 )),
-                timeout_millis: timeout.as_millis().try_into().unwrap_or(u64::MAX),
+                timeout_millis: budget_millis(until),
             })
         })
         .transpose()?;
@@ -548,7 +548,7 @@ pub(super) fn handoff_ordered_hook_event_response_with_timeout(
         event,
         session_id,
         payload,
-        Some(timeout),
+        Some(started + timeout),
         Some(binding),
     )?;
     let response_path = response_path
@@ -723,7 +723,12 @@ fn process_ordered_hook_relay_request(
         let _ = record_request_failure(&request, &error);
         return Ok(OrderedHookRelayProcessOutcome::Quarantine(error));
     }
-    if let Some(response) = request.response.as_ref() {
+    let respond_by =
+        (request.response.as_ref()).map(|r| respond_by(request.published_at, r.timeout_millis));
+    // Past `respond_by` the caller has stopped waiting, so the hook is sent as a plain observation.
+    if let Some(response) =
+        (request.response.as_ref()).filter(|_| may_publish(respond_by, Utc::now()))
+    {
         let result = relay_hook_event_response_with_request_timeout(
             &request.endpoint,
             &request.provider,
@@ -733,8 +738,9 @@ fn process_ordered_hook_relay_request(
             &request.request_id,
             request.published_at,
             request.delivery_deadline,
+            respond_by,
             request.binding.as_ref(),
-            Duration::from_millis(response.timeout_millis),
+            super::RELAY_TIMEOUT,
         );
         let pin_mismatch = result
             .as_ref()
@@ -749,7 +755,9 @@ fn process_ordered_hook_relay_request(
         }
         let encoded = serde_json::to_vec(&OrderedHookRelayResponse { result })
             .map_err(|err| format!("serialize ordered hook relay response: {err}"))?;
-        publish_atomic_file(&response.path, &encoded, "ordered hook relay response")?;
+        if may_publish(respond_by, Utc::now()) {
+            publish_atomic_file(&response.path, &encoded, "ordered hook relay response")?;
+        }
         if pin_mismatch {
             let error = "receiver rejected relay request id pin with HTTP 409";
             record_request_failure(&request, error)?;
@@ -768,6 +776,7 @@ fn process_ordered_hook_relay_request(
         &request.request_id,
         request.published_at,
         request.delivery_deadline,
+        respond_by,
         request.binding.as_ref(),
     ) {
         Ok(()) => Ok(OrderedHookRelayProcessOutcome::Completed),
@@ -980,7 +989,7 @@ pub(super) fn enqueue_ordered_hook_relay_request(
         event,
         session_id,
         payload,
-        response_timeout,
+        response_timeout.map(|timeout| Instant::now() + timeout),
         None,
     )
 }
@@ -2273,6 +2282,62 @@ mod tests {
         })
     }
 
+    /// Hands one worker request to the receiver router: `(request id, path, status, body)`.
+    #[cfg(unix)]
+    async fn forward_actual_request(
+        socket: &mut tokio::net::TcpStream,
+        app: Router,
+    ) -> (String, String, axum::http::StatusCode, axum::body::Bytes) {
+        let encoded = read_async_http_request(socket).await;
+        let path = request_path(&encoded);
+        let body_start = http_body_bounds(&encoded).unwrap().0;
+        let request_id = request_header(&encoded, RELAY_REQUEST_ID_HEADER)
+            .expect("worker relay request id header");
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri(&path)
+            .header("content-type", "application/json");
+        for name in [
+            RELAY_REQUEST_ID_HEADER,
+            RELAY_PUBLISHED_AT_HEADER,
+            RELAY_DEADLINE_HEADER,
+            crate::services::claude_tui::hook_server::relay_receipts::RELAY_RESPOND_BY_HEADER,
+        ] {
+            if let Some(value) = request_header(&encoded, name) {
+                request = request.header(name, value);
+            }
+        }
+        let response = app
+            .oneshot(
+                request
+                    .body(Body::from(encoded[body_start..].to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (request_id, path, status, body)
+    }
+
+    #[cfg(unix)]
+    async fn answer_actual_request(
+        socket: &mut tokio::net::TcpStream,
+        status: axum::http::StatusCode,
+        body: &[u8],
+    ) {
+        let reason = status.canonical_reason().unwrap_or("Accepted");
+        let headers = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            status.as_u16(),
+            reason,
+            body.len()
+        );
+        let _ = socket.write_all(headers.as_bytes()).await;
+        let _ = socket.write_all(body).await;
+        let _ = socket.flush().await;
+    }
+
     #[cfg(unix)]
     async fn spawn_actual_receiver_proxy(
         listener: tokio::net::TcpListener,
@@ -2283,48 +2348,14 @@ mod tests {
         let mut first_release = Some(first_release);
         for index in 0..2 {
             let (mut socket, _) = listener.accept().await.expect("accept worker relay");
-            let encoded = read_async_http_request(&mut socket).await;
-            let path = request_path(&encoded);
-            let body_start = http_body_bounds(&encoded).unwrap().0;
             let app = router.read().await.clone();
-            let request_id = request_header(&encoded, RELAY_REQUEST_ID_HEADER)
-                .expect("worker relay request id header");
-            let mut request = Request::builder()
-                .method(Method::POST)
-                .uri(&path)
-                .header("content-type", "application/json");
-            for name in [
-                RELAY_REQUEST_ID_HEADER,
-                RELAY_PUBLISHED_AT_HEADER,
-                RELAY_DEADLINE_HEADER,
-            ] {
-                request = request.header(name, request_header(&encoded, name).unwrap());
-            }
-            let response = app
-                .oneshot(
-                    request
-                        .body(Body::from(encoded[body_start..].to_vec()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            let status = response.status();
-            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let (request_id, _, status, body) = forward_actual_request(&mut socket, app).await;
             let value: Value = serde_json::from_slice(&body).unwrap();
             accepted_tx.send((request_id, value)).await.unwrap();
             if index == 0 {
                 let _ = first_release.take().unwrap().await;
             }
-            let reason = status.canonical_reason().unwrap_or("Accepted");
-            let headers = format!(
-                "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                status.as_u16(),
-                reason,
-                body.len()
-            );
-            let _ = socket.write_all(headers.as_bytes()).await;
-            let _ = socket.write_all(&body).await;
-            let _ = socket.flush().await;
+            answer_actual_request(&mut socket, status, &body).await;
         }
     }
 
@@ -2491,4 +2522,7 @@ mod tests {
             "worker-crash replay must leave the sole Stop retry available to the next fresh boundary"
         );
     }
+
+    #[cfg(unix)]
+    mod tq_tests;
 }

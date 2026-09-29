@@ -324,6 +324,15 @@ pub(crate) fn launch_mode(provider: &str, nonce: &str) -> Option<String> {
     (context.execution_nonce == nonce).then_some(context.launch_mode)
 }
 
+pub(super) fn pane_context(tmux: &str, nonce: &str) -> Option<BindingContext> {
+    let ctx = read_hook_context(&context_path("claude", nonce).ok()?).ok()?;
+    (ctx.schema == 1
+        && ctx.provider == "claude"
+        && ctx.tmux_session == tmux
+        && ctx.execution_nonce == nonce)
+        .then_some(ctx)
+}
+
 fn read_hook_context(path: &Path) -> io::Result<BindingContext> {
     let mut bytes = Vec::new();
     fs::File::open(path)?
