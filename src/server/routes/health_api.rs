@@ -17,8 +17,7 @@ use crate::services::{disk_monitor, health_diagnostics};
 
 use super::AppState;
 
-/// #5942 r4: the unauthenticated-body disclosure rules, split out of this file
-/// because it is a registered `shrink` giant (#4710).
+/// Disclosure rules for the unauthenticated `/api/health` body.
 mod public_projection;
 mod runtime_profile;
 mod session_repair;
@@ -55,9 +54,8 @@ struct StaleMailboxRepairRequest {
     #[serde(default)]
     provider: Option<String>,
     expected_has_cancel_token: Option<bool>,
-    /// #3293 (c): when true AND the repair fully applied, also unlink the
-    /// channel's idle in-memory mailbox registry entry (no disk/DB mutation).
-    /// `#[serde(default)]` keeps existing clients compatible.
+    /// When true and the repair fully applied, also unlink the channel's idle
+    /// in-memory mailbox registry entry (no disk/DB mutation).
     #[serde(default)]
     purge: bool,
 }
@@ -90,10 +88,8 @@ pub(super) fn local_or_configured_control_endpoint_allowed(
     matches!(config.server.host.trim(), "127.0.0.1" | "localhost" | "::1")
 }
 
-/// `fully_recovered` tracks startup/recovery completion, not whether the
-/// runtime is currently degraded. Runtime readiness lives in `status` and
-/// `degraded_reasons`; preserving this axis lets operators distinguish
-/// recovery-in-progress from ordinary live runtime degradation.
+/// `fully_recovered` tracks startup/recovery completion only; live degradation is
+/// reported by `status` and `degraded_reasons`, so operators can tell the two apart.
 fn compute_fully_recovered(
     snapshot_fully_recovered: bool,
     status: health::HealthStatus,
@@ -166,14 +162,12 @@ fn discord_send_caller_class(
     }
 }
 
-/// Build combined DB + Discord provider health.
-/// Public callers receive only a redacted safe summary; authenticated/local
-/// detail callers receive provider/config/outbox diagnostics.
+/// Build combined DB + Discord provider health: a redacted summary for public
+/// callers, full diagnostics for authenticated/local detail callers.
 async fn health_response(state: &AppState, detailed: bool) -> Response {
     let server_up = health_diagnostics::probe_server_up(state.pg_pool_ref()).await;
     let release_source = crate::services::release_source::health_json(detailed);
 
-    // Check if dashboard dist is available
     let dashboard_ok = state.config.cluster.runtime_profile.modules().dashboard && {
         let dashboard_dir = crate::cli::agentdesk_runtime_root()
             .map(|r| r.join("dashboard/dist"))
@@ -181,9 +175,8 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         dashboard_dir.join("index.html").exists()
     };
 
-    // #1203: surface free disk on the runtime partition. ENOSPC silently
-    // breaks inflight state writes and tool buffers; a numeric signal lets
-    // the dashboard / `agentdesk doctor` warn before we hit the cliff.
+    // ENOSPC silently breaks inflight state writes and tool buffers, so surface free
+    // disk on the runtime partition for the dashboard and `agentdesk doctor` to warn on.
     let disk_probe_path =
         crate::cli::agentdesk_runtime_root().unwrap_or_else(|| std::path::PathBuf::from("/"));
     let disk_snapshot = disk_monitor::probe(&disk_probe_path);
@@ -201,37 +194,8 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         .as_ref()
         .map(|stats| stats.oldest_pending_age)
         .unwrap_or(0);
-    // #5142: standing backlog of the auto-queue post-commit cleanup outbox.
-    // `dead_lettered` counts rows that burned through the attempt cap and will
-    // never be retried again, so their run's slot token and residual provider
-    // session id are stranded.
-    //
-    // Attached to the detail payload here and projected count-only onto the
-    // public one by `public_health_json`, because this gauge has no other
-    // reader. An earlier round of this change made it detail-only by analogy
-    // with `dispatch_outbox.permanent_failures`; four of the five premises of
-    // that analogy were measured false and the change is reverted here:
-    //
-    //   * `agentdesk doctor` is NOT the operator surface. It checks
-    //     `dispatch_outbox` and references `auto_queue_cleanup` nowhere
-    //     (`src/cli/doctor/orchestrator.rs`).
-    //   * `/api/health/detail` is NOT credential-free. It is mounted under
-    //     `protected_api_domain` (`routes/domains/ops.rs`), so once a token is
-    //     configured a loopback caller still needs a Bearer or same-origin
-    //     header before `health_detail_handler`'s local allowance is even
-    //     reached (`routes/auth.rs`).
-    //   * `dispatch_outbox.permanent_failures` is NOT a structural twin. It has
-    //     a row-level list endpoint, an ack endpoint and a doctor Core check;
-    //     a dead-lettered cleanup row has none of those, and what it strands is
-    //     a slot token plus a residual provider session.
-    //   * Publishing it does NOT move the deploy gate. `ok` is computed purely
-    //     from `status`, and this backlog worsens neither `status` nor
-    //     `degraded_reasons` — see
-    //     `public_auto_queue_cleanup_backlog_does_not_move_ok_or_degraded_reasons`.
-    //
-    // The one true premise was "no consumer reads it yet", which licenses
-    // removal but does not require it. Keeping it public preserves the only
-    // credential-free standing signal that cleanup has stopped converging.
+    // Auto-queue cleanup outbox backlog. `dead_lettered` rows hit the attempt cap and are
+    // never retried, stranding a slot token and provider session.
     let auto_queue_cleanup_json =
         health_diagnostics::load_auto_queue_cleanup_backlog(state.pg_pool_ref())
             .await
@@ -257,10 +221,7 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             serde_json::to_value(discord_snapshot).unwrap_or_else(|_| serde_json::json!({}));
         if detailed {
             health_diagnostics::enrich_mailbox_session_state(&mut json, state.pg_pool_ref()).await;
-            // #stale-running-session-reconciler-audit: read-only DB active-session
-            // mismatch audit. Detail-only (never on public GET), additive block,
-            // no DB/session/runtime mutation. Runs AFTER mailbox enrichment so it
-            // is off the hot public health path (REQ-003/REQ-004).
+            // Read-only DB active-session mismatch audit; detail-only, mutates nothing.
             json["active_session_audit"] = health_diagnostics::build_active_session_audit(
                 state.pg_pool_ref(),
                 state.cluster_instance_id.as_deref(),
@@ -272,10 +233,8 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             .as_array()
             .cloned()
             .unwrap_or_default();
-        // #2049 Finding 3: detect cluster-standby up-front (so we know to
-        // suppress the `no_providers_registered` noise), but defer the
-        // `status = Healthy` rewrite until *after* every worsen check below
-        // — otherwise standby would mask the worsen signal it just unmasked.
+        // Must run before the `retain` below: it keys on the `no_providers_registered`
+        // reason that a standby node then drops as noise.
         let cluster_standby_without_gateway =
             cluster_standby_without_gateway(state, server_up, &degraded_reasons).await;
         let all_registered_providers_standby = registry.all_providers_are_standby().await;
@@ -317,30 +276,19 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             )));
         }
 
-        // Resident OpenCode warm-pool diagnostics (additive, read-only). The
-        // reasons worsen status to Degraded only; the per-server array is
-        // detailed-only and the count summary is public-safe.
         for reason in opencode_warm_pool_degraded_reasons() {
             status = status.worsen(health::HealthStatus::Degraded);
             degraded_reasons.push(reason);
         }
 
-        // #4515 PR2: worker-local recovery circuit. Budget exhaustion of a
-        // necessary worker (dispatch_outbox / session_discovery) worsens to
-        // Unhealthy → readiness 503; an un-migrated LoopOwned worker's
-        // unexpected death worsens to Degraded. Flapping is intentionally kept
-        // OUT of degraded_reasons (§9.3 deploy-gate safety) and exposed as a
-        // separate informational field below.
         apply_worker_recovery_reasons(&mut status, &mut degraded_reasons);
         let worker_restart_flapping = crate::server::worker_recovery::recovery_flapping_info();
         if !worker_restart_flapping.is_empty() {
             json["worker_restart_flapping"] = serde_json::Value::Array(worker_restart_flapping);
         }
 
-        // Startup doctor warnings are boot/recovery diagnostics, not proof
-        // that the current runtime is unhealthy. Keep them on a separate
-        // startup axis so deploy/restart gates that read runtime health do
-        // not block unrelated live-turn-safe operations.
+        // Startup doctor findings are boot diagnostics, not runtime health; a separate
+        // startup axis keeps them from blocking gates that read runtime health.
         let live_deferred_hooks = json["deferred_hooks"].as_u64().unwrap_or(0);
         let suppress_recovered_provider_deferred_hooks_backlog =
             provider_deferred_hooks_backlog_recovered(live_deferred_hooks, &degraded_reasons);
@@ -351,9 +299,8 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         json["startup_degraded_reasons"] =
             startup_doctor_count_reasons(doctor_failed, doctor_warned);
 
-        // A standby without a gateway is operationally degraded even when its
-        // HTTP server and worker heartbeat remain live. Keep this explicit so
-        // health checks cannot report a relay-dead node as healthy.
+        // A standby without a gateway is relay-dead even while HTTP and the worker
+        // heartbeat are live, so it must never read as healthy.
         if cluster_standby_without_gateway {
             status = status.worsen(health::HealthStatus::Degraded);
             degraded_reasons.push(serde_json::json!("gateway_standby"));
@@ -393,13 +340,8 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             json["opencode"] = opencode_block;
         }
 
-        // feature: rate-limit-aware-dispatch-gate (REQ-004). Aggregate,
-        // credential-free dispatch-gate counters (no API tokens, no provider
-        // credentials, no raw cache rows — only counts, the active threshold,
-        // and the last-defer timestamp). Added on the `detailed` axis only;
-        // `public_health_json` is an explicit allowlist so this never leaks on
-        // the public `/api/health` endpoint. Additive: a NEW diagnostic block,
-        // not a new `degraded_reasons` category.
+        // Credential-free dispatch-gate counters. Attached on both paths, but only the detail
+        // body carries them: `public_health_json` does not allowlist this key.
         let (gate_enabled_override, gate_danger_override) =
             health_diagnostics::load_dispatch_gate_runtime_overrides(state.pg_pool_ref()).await;
         json["rate_limit_dispatch_gate"] =
@@ -437,22 +379,13 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             degraded_reasons.push(serde_json::json!("db_unavailable"));
         }
 
-        // Resident OpenCode warm-pool diagnostics (additive, read-only). Mirror
-        // the registry branch above so a stopped or suspicious resident server
-        // degrades standalone health too — otherwise top-level `/api/health`
-        // and `/api/health/detail` could keep reporting `status: healthy` /
-        // `ok: true` while a bad warm server is surfaced under `opencode`.
-        // Per spec C-8 the `stopped_resident` reason is intentional worsening
-        // and is kept consistent with the registry branch.
+        // Mirror the registry branch so a bad resident warm server cannot sit under
+        // `opencode` while standalone health still reports `ok: true`.
         for reason in opencode_warm_pool_degraded_reasons() {
             health_state = health_state.worsen(health::HealthStatus::Degraded);
             degraded_reasons.push(reason);
         }
 
-        // #4515 PR2: mirror the registry branch so a fatal worker recovery
-        // circuit also drives standalone `/api/health` readiness — otherwise a
-        // HealthRegistry-less node would report ready while a necessary worker
-        // is permanently dead.
         apply_worker_recovery_reasons(&mut health_state, &mut degraded_reasons);
         let worker_restart_flapping = crate::server::worker_recovery::recovery_flapping_info();
 
@@ -466,14 +399,8 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         // `ok` tracks full health: a degraded warm pool keeps the server
         // HTTP-ready but is not "ok".
         let healthy = health_state == health::HealthStatus::Healthy;
-        // `fully_recovered` tracks the startup/recovery (server_up) axis, NOT
-        // live runtime degradation — mirroring `compute_fully_recovered` in the
-        // registry branch, whose doc explicitly excludes warm-pool health. A
-        // degraded warm pool must not flip `fully_recovered` to false here, or
-        // the standalone branch would be asymmetric with the registry branch
-        // (where warm-pool reasons never touch `fully_recovered`). In
-        // standalone mode the only non-warm-pool degradation is
-        // `db_unavailable`, so the recovery axis is exactly `server_up`.
+        // Recovery axis only, as in `compute_fully_recovered`: warm-pool and worker-recovery
+        // reasons must not flip it.
         let fully_recovered = server_up;
         let mut json = serde_json::json!({
             "status": health_status,
@@ -664,18 +591,8 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     let delivery_record_rollout = json.get("delivery_record_rollout").cloned();
     let release_source = json.get("release_source").cloned();
     let intake_routing = json.get("intake_routing").cloned();
-    // #5142: the auto-queue cleanup backlog is carried onto the public shape,
-    // count-only. `dead_lettered > 0` means cleanup rows burned the attempt cap
-    // and will never be retried, so a slot token and a provider session stay
-    // stranded — and nothing else reports that: `agentdesk doctor` does not read
-    // this block, and `/api/health/detail` is behind `protected_api_domain`.
-    // Without this the only credential-free reading of a permanently stalled
-    // cleanup outbox is `ok: true`.
-    //
-    // Re-projected field by field rather than cloned, so a later field added to
-    // the detail block (an id, a run id, an error string) cannot reach the
-    // unauthenticated shape by default. It is deliberately NOT fed into
-    // `degraded_reasons` or `status`; see the comment in `health_response`.
+    // Only credential-free signal of stranded cleanup. Field by field so new detail fields (run
+    // id, error) cannot leak; kept out of `degraded_reasons`/`status` so it never moves `ok`.
     let auto_queue_cleanup = json.get("auto_queue_cleanup").map(|block| {
         serde_json::json!({
             "pending": block.get("pending").cloned().unwrap_or(serde_json::json!(0)),
@@ -685,10 +602,7 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
                 .unwrap_or(serde_json::json!(0)),
         })
     });
-    // Public OpenCode summary is count-only and never includes the per-server
-    // `warm_servers` array, pids, ports, or startup tails (spec C-3). The
-    // upstream `opencode_warm_pool_json(false)` already produced a count-only
-    // object for the public path; defensively strip `warm_servers` if present.
+    // Count-only: never the per-server `warm_servers` array, pids, ports or startup tails.
     let opencode_public = json.get("opencode").map(|block| {
         serde_json::json!({
             "warm_server_count": block.get("warm_server_count").cloned().unwrap_or(serde_json::json!(0)),
@@ -697,20 +611,13 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
         })
     });
     let degraded = status.as_str().is_some_and(|status| status != "healthy");
-    // #4382: carry the live `degraded_reasons` (the axis that actually decides
-    // `degraded`/`status`) into the public object instead of dropping it, so
-    // public-only consumers stop misattributing the cause to the unrelated
-    // `startup_degraded_reasons`. Always present (empty array when absent) so the
-    // `degraded <=> degraded_reasons non-empty` invariant holds on the public shape.
-    // Sanitized to strip operator-chosen provider ids before public exposure
-    // (#4386-review defect 1); see `sanitize_public_degraded_reasons`.
+    // Always an array, so `degraded <=> non-empty degraded_reasons` holds on the public
+    // shape and callers need not guess the cause from `startup_degraded_reasons`.
     let degraded_reasons = public_projection::sanitize_public_degraded_reasons(
         json.get("degraded_reasons")
             .cloned()
             .unwrap_or_else(|| serde_json::json!([])),
     );
-    // #5942: see `public_projection::expired_relay_ledgers` for why this key
-    // rides the public body and why it never moves `ok`.
     let expired_relay_ledgers = public_projection::expired_relay_ledgers(&json);
     let mut public = serde_json::json!({
         "ok": !degraded,
@@ -763,8 +670,8 @@ fn stale_mailbox_repair_applied(
     removed_token || inflight_cleared || session_disconnected_count > 0
 }
 
-/// #3293 (c): whether the optional mailbox-registry purge may run after a
-/// stale-mailbox repair, and the skip reason to report when it may not.
+/// Whether the optional mailbox-registry purge may run after a stale-mailbox
+/// repair, and the skip reason to report when it may not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegistryPurgeDecision {
     /// `purge` was not requested — report nothing.
@@ -787,13 +694,8 @@ fn registry_purge_decision(purge_requested: bool, repair_status: &str) -> Regist
     }
 }
 
-/// Build the additive `opencode` warm-pool diagnostics block.
-///
-/// `detailed=true` (authenticated/local) includes the full redacted per-server
-/// snapshot array; public callers get count-only aggregates. Returns `None`
-/// when no resident warm servers exist so the field is omitted entirely
-/// (cold-start safe — spec C-6/C-7). Snapshot collection performs no network
-/// probes and copies pool data under short locks (REQ-002).
+/// Build the `opencode` warm-pool diagnostics block: counts only, plus the redacted
+/// per-server array when `detailed`. `None` (field omitted) when no resident server exists.
 fn opencode_warm_pool_json(detailed: bool) -> Option<serde_json::Value> {
     let snapshots = crate::services::opencode::warm_server_snapshots();
     if snapshots.is_empty() {
@@ -817,9 +719,8 @@ fn opencode_warm_pool_json(detailed: bool) -> Option<serde_json::Value> {
     Some(block)
 }
 
-/// Additive `degraded_reasons` for the resident warm pool (REQ-004). These are
-/// classified by the existing `classify_degraded_reason` table and are distinct
-/// from the fresh-serve / MCP doctor checks.
+/// `degraded_reasons` for the resident warm pool, distinct from the fresh-serve / MCP
+/// doctor checks.
 fn opencode_warm_pool_degraded_reasons() -> Vec<serde_json::Value> {
     let snapshots = crate::services::opencode::warm_server_snapshots();
     let mut reasons = Vec::new();
@@ -841,10 +742,8 @@ fn opencode_warm_pool_degraded_reasons() -> Vec<serde_json::Value> {
     reasons
 }
 
-/// #4515 PR2: fold worker-local recovery reasons into a health snapshot. Shared
-/// by the registry and standalone `/api/health` branches so a fatal worker
-/// recovery circuit drives readiness identically in both. Flapping is handled
-/// separately (informational field) and never appears here.
+/// Fold worker recovery reasons into health for both `health_response` branches. Flapping
+/// stays out (reported as `worker_restart_flapping`) so it cannot trip the deploy gate.
 fn apply_worker_recovery_reasons(
     status: &mut health::HealthStatus,
     degraded_reasons: &mut Vec<serde_json::Value>,
@@ -1489,12 +1388,9 @@ pub async fn relay_recovery_handler(
 
 /// POST /api/discord/send — agent-to-agent native routing.
 ///
-/// Requires `ConnectInfo<SocketAddr>` injected by the server bootstrap
-/// (see `boot.rs::run_with_state` and `mod.rs::launch_*` which both call
-/// `into_make_service_with_connect_info::<SocketAddr>`). The
-/// Non-loopback callers must present an explicit bearer token even though the
-/// route is also in the protected API domain; that keeps control traffic out
-/// of the same-origin dashboard bypass used by ordinary dashboard routes.
+/// Requires `ConnectInfo<SocketAddr>`, which `server::run` provides via
+/// `into_make_service_with_connect_info`. Non-loopback callers must send a bearer token
+/// even inside the protected API domain, so the same-origin dashboard bypass never applies.
 pub async fn send_handler(
     State(state): State<AppState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
@@ -1540,13 +1436,9 @@ pub async fn send_handler(
 
 /// POST /api/discord/bot-tokens/reload — reload announce/notify REST clients.
 ///
-/// This only rotates the utility bots backed by `HealthRegistry`
-/// (`credential/announce_bot_token`, `credential/notify_bot_token`). Provider
-/// runtime gateway token caches are `OnceCell`s and still require a dcserver
-/// restart; the response reports each reload scope explicitly.
-///
-/// See `send_handler` for the rationale on the mandatory
-/// `ConnectInfo<SocketAddr>` extractor and non-loopback Bearer requirement.
+/// Only the `HealthRegistry` utility bots rotate; provider runtime token caches are
+/// `OnceCell`s that need a dcserver restart, and the response reports each scope.
+/// Auth and `ConnectInfo` requirements as for `send_handler`.
 pub async fn reload_discord_bot_tokens_handler(
     State(state): State<AppState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
@@ -1604,16 +1496,11 @@ pub async fn reload_discord_bot_tokens_handler(
         .into_response()
 }
 
-/// POST /api/inflight/rebind — #896 orphan recovery endpoint.
+/// POST /api/inflight/rebind — orphan recovery endpoint.
 ///
-/// Rebinds a live tmux session to a freshly-created inflight state and
-/// respawns the output watcher. Intended for operators recovering from
-/// situations where the tmux session is alive (agent is actively working)
-/// but the inflight JSON was cleared by a prior turn's cleanup, leaving
-/// subsequent output with no Discord relay path.
-///
-/// See `send_handler` for the rationale on the mandatory
-/// `ConnectInfo<SocketAddr>` extractor.
+/// Rebinds a live tmux session to fresh inflight state and respawns the output watcher,
+/// for when a prior turn's cleanup cleared the inflight JSON and left no relay path.
+/// Auth and `ConnectInfo` requirements as for `send_handler`.
 pub async fn rebind_inflight_handler(
     State(state): State<AppState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
@@ -1648,8 +1535,7 @@ pub async fn rebind_inflight_handler(
 
 /// POST /api/discord/send-to-agent — role_id-based agent routing.
 ///
-/// See `send_handler` for the rationale on the mandatory
-/// `ConnectInfo<SocketAddr>` extractor.
+/// Auth and `ConnectInfo` requirements as for `send_handler`.
 pub async fn send_to_agent_handler(
     State(state): State<AppState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
@@ -1690,8 +1576,7 @@ pub async fn send_to_agent_handler(
 
 /// POST /api/discord/send-dm — send a DM to a Discord user.
 ///
-/// See `send_handler` for the rationale on the mandatory
-/// `ConnectInfo<SocketAddr>` extractor.
+/// Auth and `ConnectInfo` requirements as for `send_handler`.
 pub async fn senddm_handler(
     State(state): State<AppState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
@@ -1944,11 +1829,8 @@ mod tests {
 
     #[tokio::test]
     async fn discord_control_router_rejects_same_origin_bypass_without_bearer() {
-        // #2047 Finding 3 — the auth middleware now also requires the peer
-        // address itself to be loopback before honouring an `Origin: localhost`
-        // header. A LAN attacker (10.0.0.5) who forges the same-origin header
-        // is rejected by the middleware at 401 (Unauthorized), strictly tighter
-        // than the previous handler-layer 403.
+        // The auth middleware honours `Origin: localhost` only from a loopback peer, so a
+        // forged same-origin header from the LAN is rejected with 401.
         let mut config = crate::config::Config::default();
         config.server.host = "0.0.0.0".to_string();
         config.server.auth_token = Some("secret".to_string());
@@ -2224,21 +2106,14 @@ mod tests {
         assert!(public.get("providers").is_none());
         assert!(public.get("mailboxes").is_none());
         assert!(public.get("config_audit").is_none());
-        // #4382: the live `degraded_reasons` that DECIDES `degraded` must now be
-        // carried into public health verbatim (was dropped, forcing consumers to
-        // misattribute the cause to the unrelated `startup_degraded_reasons`).
+        // Known-provider reasons are carried verbatim.
         assert_eq!(
             public["degraded_reasons"],
             json!(["provider:codex:pending_queue_depth:2"])
         );
-        // TEST-004: the detail-only audit block is dropped from public health.
         assert!(public.get("active_session_audit").is_none());
     }
 
-    /// #4382 invariant: on the PUBLIC projection, `degraded` is true IFF
-    /// `degraded_reasons` is present and non-empty (both directions). A degraded
-    /// health with no reasons, or a healthy one carrying reasons, is unreachable
-    /// through this projection contract.
     #[test]
     fn public_health_json_degraded_iff_reasons_nonempty() {
         // degraded => reasons present AND non-empty.
@@ -2275,8 +2150,7 @@ mod tests {
         assert_eq!(healthy["degraded"], json!(false));
         assert_eq!(healthy["degraded_reasons"], json!([]));
 
-        // absent upstream array => still present as [] (the invariant never sees
-        // a missing key), and healthy stays not-degraded.
+        // absent upstream array => still present as [].
         let absent = public_health_json(json!({
             "status": "healthy",
             "version": "0.1.2",
@@ -2288,10 +2162,8 @@ mod tests {
         assert_eq!(absent["degraded_reasons"], json!([]));
     }
 
-    /// #4382 regression: `degraded_reasons` (the live axis that decides
-    /// `degraded`) and `startup_degraded_reasons` (a startup-only axis that does
-    /// NOT decide `degraded`) must surface as two DISTINCT public fields so a
-    /// consumer can no longer misattribute a runtime-degraded cause to startup.
+    /// `degraded_reasons` decides `degraded`; `startup_degraded_reasons` does not, so the
+    /// two must stay distinct public fields.
     #[test]
     fn public_health_json_keeps_degraded_and_startup_reasons_distinct() {
         let public = public_health_json(json!({
@@ -2313,21 +2185,14 @@ mod tests {
             public["startup_degraded_reasons"],
             json!(["startup_doctor:disk_check:warned"])
         );
-        // The two axes are genuinely different values, not aliases.
         assert_ne!(
             public["degraded_reasons"],
             public["startup_degraded_reasons"]
         );
     }
 
-    /// #4386-review defect 1 + round-2 (P0 security): an operator-chosen provider
-    /// id — a legacy `bot_settings.json` value preserved verbatim as
-    /// `Unsupported(_)`, and thus possibly containing `:` — must NOT leak in ANY
-    /// part on the unauthenticated public `/api/health`. The public projection
-    /// replaces the WHOLE name with `unsupported`, keeping only the fixed reason
-    /// classification (and an all-digits count); unknown shapes fail closed to
-    /// `provider:unsupported`. Known providers pass through verbatim; the detail
-    /// path (raw snapshot json) retains the value untouched.
+    /// No part of an operator-chosen provider id, colons included, may reach the public
+    /// body; known providers pass through verbatim.
     #[test]
     fn public_health_json_sanitizes_provider_ids_including_colons() {
         // (raw provider name, reason suffix, sensitive tokens that must NOT
@@ -2418,7 +2283,6 @@ mod tests {
                 json!([expected]),
                 "wrong sanitized value for raw {raw:?}"
             );
-            // 1:1 rewrite keeps the degraded<=>non-empty invariant.
             assert_eq!(public["degraded"], json!(true));
         }
 
@@ -2450,11 +2314,7 @@ mod tests {
         assert!(!mixed_text.contains("customerA"));
     }
 
-    /// T-S0-4 (#5449): the two provider reasons an operator needs in order to
-    /// tell a standby node from a wedged reconcile survive the public projection
-    /// with their keyword intact. Both are absent from the pre-#5449 bare-reason
-    /// vocabulary, so the fail-closed sanitizer flattened them to a shape that
-    /// names neither the provider nor the state.
+    /// Operators need these keywords publicly to tell a standby node from a wedged reconcile.
     #[test]
     fn public_health_json_preserves_standby_and_stalled_reconcile_reasons() {
         let public = public_health_json(json!({
@@ -2473,8 +2333,7 @@ mod tests {
             json!([
                 "provider:codex:gateway_standby",
                 "provider:codex:reconcile_stalled",
-                // The unknown provider id is still replaced wholesale; only the
-                // reason keyword is allowed to survive.
+                // Unknown provider id is still replaced wholesale.
                 "provider:unsupported:reconcile_stalled",
                 // Cluster-level reason: no `provider:` prefix, passed through.
                 "gateway_standby",
@@ -2483,10 +2342,7 @@ mod tests {
         assert!(!public.to_string().contains("prod-mini-01"));
     }
 
-    /// Guards the whitelist source: the sanitizer trusts exactly the registry
-    /// ids, and those ids must never contain `:` (the delimiter the right-anchor
-    /// parser relies on to tell a single-segment trusted name from a crafted
-    /// multi-segment one).
+    /// The right-anchored sanitizer trusts registry ids only because they never contain `:`.
     #[test]
     fn supported_provider_ids_contain_no_colon() {
         for id in crate::services::provider::supported_provider_ids() {
@@ -2497,8 +2353,6 @@ mod tests {
         }
     }
 
-    /// [TEST-003] public health omits the per-server OpenCode warm_servers
-    /// array but may keep the count-only summary; no pid/port/tail leaks.
     #[test]
     fn public_health_json_omits_opencode_warm_server_array() {
         let public = public_health_json(json!({
@@ -2521,7 +2375,6 @@ mod tests {
         assert_eq!(opencode["warm_server_count"], 2);
         assert_eq!(opencode["warm_server_active_sessions"], 3);
         assert_eq!(opencode["warm_server_suspicious_count"], 1);
-        // The per-server array and all sensitive fields are gone.
         assert!(opencode.get("warm_servers").is_none());
         let text = public.to_string();
         assert!(!text.contains("12345"));
@@ -2531,10 +2384,7 @@ mod tests {
         assert!(!text.contains("abcdef0123456789"));
     }
 
-    /// The standalone (no-HealthRegistry) branch now mirrors the registry
-    /// branch: when `opencode_warm_pool_degraded_reasons()` reports a bad warm
-    /// server it sets `status: "degraded"`, which the public projection turns
-    /// into `ok: false` / `degraded: true` instead of leaving health "healthy".
+    /// A warm-pool reason degrades status, and the projection must turn that into `ok: false`.
     #[test]
     fn public_health_json_degraded_status_reports_not_ok() {
         let public = public_health_json(json!({
@@ -2550,16 +2400,8 @@ mod tests {
         assert_eq!(public["degraded"], json!(true));
     }
 
-    /// #5736 r2: the relay-verdict axis must survive the SERIALIZATION, not just
-    /// the snapshot build.
-    ///
-    /// `snapshot.rs` proves the two BUILDS agree, but the body an operator and
-    /// every deploy gate read is `public_health_json`'s projection. Nothing
-    /// pinned that hop, so re-dropping `degraded_reasons` there — or teaching
-    /// `sanitize_public_degraded_reasons` to filter the non-`provider:` reasons
-    /// it passes through verbatim — reopens #5736 with the snapshot-level test
-    /// still green. The reasons below are the exact shape the polarity pass
-    /// emits, `{provider}_{channel_id}` suffix included.
+    /// Pins the `public_health_json` hop, which snapshot-level tests cannot see; the
+    /// reasons are the exact shape the relay polarity pass emits.
     #[test]
     fn public_health_json_carries_the_relay_verdict_axis_onto_the_summary() {
         let detail = json!({
@@ -2587,15 +2429,8 @@ mod tests {
         assert_eq!(public["degraded"], json!(true));
     }
 
-    /// #5942 r4 (P1-2): the expired-ledger vector must survive the PROJECTION.
-    ///
-    /// Same defect shape as #5736 above, and the same fix. #5942 takes three
-    /// routine channels OUT of `degraded_reasons`; `expired_relay_ledgers` is
-    /// the signal that replaces them. `public_health_json` is an explicit
-    /// allowlist, so a field that is not named there is dropped — and the r3
-    /// guard for this lived in `health::snapshot` and serialized the STRUCT
-    /// BUILDER, which cannot see the allowlist at all. It stayed green while
-    /// `/api/health` published nothing. This is the layer that was unpinned.
+    /// Pins the allowlist hop for `expired_relay_ledgers`, which snapshot-level tests
+    /// cannot see.
     #[test]
     fn public_health_json_carries_the_expired_relay_ledgers_onto_the_summary() {
         let detail = json!({
@@ -2622,14 +2457,6 @@ mod tests {
         );
     }
 
-    /// #5942 r4 (P1-2): an expiry records a channel; it never moves `ok`.
-    ///
-    /// The counterpart of the test above. Publishing the vector must not
-    /// re-create the saturation #5942 removed, so a node whose only finding is
-    /// a set of expired ledgers still reads `ok: true` / `degraded: false`, and
-    /// the key is present-and-empty — never absent — when there is nothing to
-    /// report, because the reader is told to COUNT entries and must not have to
-    /// tell a missing key from an empty array first.
     #[test]
     fn public_expired_relay_ledgers_never_move_ok_and_default_to_an_empty_vector() {
         let expired_only = public_health_json(json!({
@@ -2663,13 +2490,8 @@ mod tests {
         );
     }
 
-    /// #5942 r4 (P1-2): and the two ROUTES must publish the same vector.
-    ///
-    /// The mirror of `summary_and_detail_routes_agree_on_status_and_degraded_reasons`:
-    /// one registry, both URLs, through the real router. An empty fixture cannot
-    /// prove the CONTENTS agree, so what this pins is the projection hop that
-    /// `public_health_json` performs — the summary must not drop a key the
-    /// detail build published.
+    /// Both URLs off one registry. The fixture has no expired ledgers, so this pins that
+    /// the summary keeps the key, not that the contents agree.
     #[test]
     fn summary_and_detail_routes_agree_on_expired_relay_ledgers() {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -2699,12 +2521,8 @@ mod tests {
         );
     }
 
-    /// #5736 r2: and the two ROUTES must project the same snapshot.
-    ///
-    /// The URL selects the projection, not the source. This drives both URLs off
-    /// ONE registry through the real router. The relay axis itself is covered by
-    /// `health::snapshot::tests::summary_and_detail_agree_on_the_composite_relay_verdict_polarity`,
-    /// which needs registry internals this module cannot reach.
+    /// Both URLs off one registry; the relay axis itself is covered in `health::snapshot`,
+    /// which can reach registry internals.
     #[test]
     fn summary_and_detail_routes_agree_on_status_and_degraded_reasons() {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -2822,9 +2640,8 @@ mod tests {
         request
     }
 
-    /// Serve one health request against a freshly built router and return the
-    /// decoded body. `registry` selects which arm of `health_response` runs:
-    /// `Some` is the Discord-registry arm, `None` the standalone arm.
+    /// Serve one health request on a fresh router and return the decoded body.
+    /// `Some(registry)` runs the registry arm of `health_response`, `None` the standalone arm.
     async fn health_body(
         uri: &str,
         registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
@@ -2875,8 +2692,7 @@ mod tests {
                 body["release_source"]["deployed_latest_postgres_migration"],
                 "0104_example.sql"
             );
-            // #5071 T1 S8-1r2: the checkout-cleanliness verdict rides the same
-            // public whitelist entry as the head it qualifies.
+            // The checkout-cleanliness verdict rides the same public entry as its head.
             assert_eq!(body["release_source"]["deployed_repo_dirty"], "false");
             assert!(body["release_source"].get("node_hostname").is_none());
         }
@@ -2887,12 +2703,8 @@ mod tests {
 
     #[test]
     fn public_health_exposes_rollout_flag_source_on_both_assembly_points() {
-        // #5071 T1 S8-1r2 gate (d): the peer-rollout comparison is run against the
-        // PUBLIC endpoint across two nodes, so provenance has to survive the public
-        // whitelist rather than live in the protected detail response — unlike
-        // `release_source.node_hostname`, which stays detail-only. `health_response`
-        // has mutually exclusive registry and standalone assembly branches; the URL
-        // selects the projection, not the assembly branch, so both axes are explicit.
+        // Peer-rollout comparison reads the PUBLIC endpoint, so provenance must survive the
+        // allowlist; registry and standalone assembly are separate branches, so check both.
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -3032,23 +2844,8 @@ mod tests {
         )
     }
 
-    /// **#5142 r5 — the auto-queue cleanup backlog reaches the credential-free
-    /// endpoint, measured on a real HTTP response.**
-    ///
-    /// `dead_lettered > 0` means cleanup rows burned the attempt cap and will
-    /// never be retried, leaving a slot token and a provider session stranded.
-    /// Nothing else reports that: `agentdesk doctor` does not read this block,
-    /// and `/api/health/detail` sits under `protected_api_domain`. Drop it from
-    /// the public projection and a permanently stalled cleanup outbox reads as
-    /// `ok: true` to every credential-free monitor.
-    ///
-    /// Round 4 pinned this with `public_health_json(json!(…))` over a fixture
-    /// built inside the test. That could not see the two things that actually
-    /// decide the answer — whether the loader is reached at all, and whether
-    /// anything re-shapes the payload after the projection — so a re-exposure
-    /// gated on `outbox_age`, or a loader stubbed to `None`, both passed it.
-    /// This drives the router instead: the value is injected at the loader and
-    /// read back off the serialized body.
+    /// Injects at the loader and reads the served body, so an unreached loader or a
+    /// reshape after the projection is caught.
     #[tokio::test]
     async fn public_auto_queue_cleanup_backlog_is_served_on_the_unauthenticated_endpoint() {
         let _injected = injected_backlog(4, 5);
@@ -3064,8 +2861,6 @@ mod tests {
              provider session are stranded: {public}"
         );
         assert_eq!(public["auto_queue_cleanup"]["pending"], json!(4));
-        // `outbox_age` is 0 on this path, so a re-exposure conditional on a
-        // non-zero outbox age would leave the block absent here.
         assert_eq!(
             public["outbox_age"],
             serde_json::Value::Null,
@@ -3080,11 +2875,7 @@ mod tests {
         );
     }
 
-    /// The standalone arm of `health_response` (no Discord registry) builds its
-    /// payload from scratch rather than from a health snapshot, so it is a
-    /// second, independent attachment site. Round 4 covered both arms by
-    /// counting `json["auto_queue_cleanup"] = backlog;` in the file's own text,
-    /// which a comment carrying the same characters satisfied.
+    /// The standalone arm builds its JSON from scratch, so it is a second attachment site.
     #[tokio::test]
     async fn auto_queue_cleanup_backlog_is_served_from_both_health_response_arms() {
         let _injected = injected_backlog(1, 2);
@@ -3114,12 +2905,8 @@ mod tests {
         }
     }
 
-    /// T6-2 removed the `relay_authority_observation` and `axis_b_observation`
-    /// blocks from `/api/health/detail`, and T6-3 the `relay_authority_rollout`
-    /// block. `health::snapshot`'s retirement test only drives the registry
-    /// snapshot layer; the standalone arm of `health_response` (no registry)
-    /// builds its JSON from scratch and is a separate attachment site, so it
-    /// needs its own pin.
+    /// `health::snapshot`'s retirement test cannot see the standalone arm, which builds
+    /// its JSON from scratch.
     #[tokio::test]
     async fn retired_observation_blocks_are_absent_from_both_health_response_arms() {
         for registry in [
@@ -3143,12 +2930,6 @@ mod tests {
         }
     }
 
-    /// **The deploy gate must not move.** `ok` is computed from `status` alone,
-    /// and the cleanup backlog worsens neither `status` nor `degraded_reasons`
-    /// — it is a gauge, not a verdict. Publishing it therefore cannot flip a
-    /// readiness probe or a deploy gate, and this pins that separation from
-    /// both directions: a parked backlog and an empty one must produce byte
-    /// identical verdict fields.
     #[tokio::test]
     async fn public_auto_queue_cleanup_backlog_does_not_move_ok_or_degraded_reasons() {
         let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
@@ -3181,9 +2962,6 @@ mod tests {
         );
     }
 
-    /// The public block is re-projected field by field, not cloned. A field
-    /// added to the detail block later — a run id, a task id, an error string —
-    /// must not reach the unauthenticated shape by inheritance.
     #[test]
     fn public_auto_queue_cleanup_projection_is_count_only() {
         let public = public_health_json(json!({
@@ -3218,9 +2996,7 @@ mod tests {
         assert!(!stale_mailbox_repair_applied(false, false, 0));
     }
 
-    /// #3293 (c): the registry purge runs ONLY when explicitly requested AND
-    /// the repair fully applied; a partial repair reports the skip reason that
-    /// surfaces as `registry_purge_skipped_reason` in the response.
+    /// A partial repair's skip reason surfaces as `registry_purge_skipped_reason`.
     #[test]
     fn registry_purge_decision_gates_on_request_and_fully_applied_repair() {
         assert_eq!(
@@ -3241,22 +3017,17 @@ mod tests {
         );
     }
 
-    /// `fully_recovered` is the startup/recovery completion signal. Runtime
-    /// degradation is reported separately through status and degraded reasons.
     #[test]
     fn compute_fully_recovered_preserves_recovery_axis_when_runtime_degrades() {
         use super::compute_fully_recovered;
         use crate::services::discord::health;
 
-        // Clean state — healthy + no reasons → fully_recovered=true.
         assert!(compute_fully_recovered(
             true,
             health::HealthStatus::Healthy,
             &[]
         ));
 
-        // Runtime degradations are exposed through status/degraded_reasons,
-        // but do not rewrite the startup/recovery axis.
         let reasons_db = vec![json!("db_unavailable")];
         assert!(compute_fully_recovered(
             true,
@@ -3264,7 +3035,6 @@ mod tests {
             &reasons_db
         ));
 
-        // Multiple reasons with a Degraded status still leave fully_recovered=true.
         let reasons_outbox_disk = vec![
             json!("dispatch_outbox_oldest_pending_age:120"),
             json!("disk_low_free_bytes:104857600"),
@@ -3275,14 +3045,12 @@ mod tests {
             &reasons_outbox_disk
         ));
 
-        // Unhealthy runtime status also stays separate from recovery state.
         assert!(compute_fully_recovered(
             true,
             health::HealthStatus::Unhealthy,
             &[]
         ));
 
-        // Existing recovery-in-progress state remains false.
         assert!(!compute_fully_recovered(
             false,
             health::HealthStatus::Healthy,
