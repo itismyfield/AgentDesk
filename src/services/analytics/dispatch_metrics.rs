@@ -97,15 +97,6 @@ pub async fn achievements_pg(
     pool: &PgPool,
     agent_id: Option<&str>,
 ) -> Result<AchievementsResponse, sqlx::Error> {
-    let milestones: &[(i64, &str, &str, &str)] = &[
-        (10, "first_task", "첫 번째 작업 완료", "common"),
-        (50, "getting_started", "본격적인 시작", "uncommon"),
-        (100, "centurion", "100 XP 달성", "rare"),
-        (250, "veteran", "베테랑", "epic"),
-        (500, "expert", "전문가", "legendary"),
-        (1000, "master", "마스터", "mythic"),
-    ];
-
     let mut query = QueryBuilder::new(
         "SELECT id, COALESCE(name, id), COALESCE(name_ko, name, id), xp, avatar_emoji FROM agents WHERE xp > 0",
     );
@@ -146,8 +137,27 @@ pub async fn achievements_pg(
         agent_completed_times.insert(agent_id.clone(), times);
     }
 
+    Ok(AchievementsResponse {
+        achievements: build_achievements(&agents, &agent_completed_times),
+        daily_missions: daily_missions_pg(pool).await?,
+    })
+}
+
+fn build_achievements(
+    agents: &[(String, String, String, i64, String)],
+    agent_completed_times: &HashMap<String, Vec<i64>>,
+) -> Vec<Value> {
+    let milestones: &[(i64, &str, &str, &str)] = &[
+        (10, "first_task", "첫 번째 작업 완료", "common"),
+        (50, "getting_started", "본격적인 시작", "uncommon"),
+        (100, "centurion", "100 XP 달성", "rare"),
+        (250, "veteran", "베테랑", "epic"),
+        (500, "expert", "전문가", "legendary"),
+        (1000, "master", "마스터", "mythic"),
+    ];
+
     let mut achievements = Vec::new();
-    for (agent_id, name, name_ko, xp, avatar_emoji) in &agents {
+    for (agent_id, name, name_ko, xp, avatar_emoji) in agents {
         let completion_times = agent_completed_times.get(agent_id.as_str());
         for (index, (threshold, achievement_type, description, rarity)) in
             milestones.iter().enumerate()
@@ -159,7 +169,7 @@ pub async fn achievements_pg(
                     .unwrap_or(100);
                 let approx_index = (*threshold as usize / 10).saturating_sub(1);
                 let earned_at = completion_times
-                    .and_then(|times| times.get(approx_index.min(times.len().saturating_sub(1))))
+                    .and_then(|times| times.get(approx_index))
                     .copied()
                     .unwrap_or(0);
 
@@ -185,10 +195,7 @@ pub async fn achievements_pg(
         }
     }
 
-    Ok(AchievementsResponse {
-        achievements,
-        daily_missions: daily_missions_pg(pool).await?,
-    })
+    achievements
 }
 
 async fn daily_missions_pg(pool: &PgPool) -> Result<Vec<Value>, sqlx::Error> {
@@ -272,6 +279,36 @@ pub async fn activity_heatmap_pg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn achievement_date_stays_unknown_when_xp_outpaces_completion_history() {
+        let mut agent = (
+            "agent-a".to_string(),
+            "Agent A".to_string(),
+            "에이전트 A".to_string(),
+            60,
+            "🤖".to_string(),
+        );
+        let mut times = HashMap::from([(agent.0.clone(), vec![1_000, 2_000])]);
+        let before = build_achievements(std::slice::from_ref(&agent), &times);
+        agent.3 = 90;
+        times.get_mut(&agent.0).unwrap().push(3_000);
+        let after = build_achievements(std::slice::from_ref(&agent), &times);
+        let milestone = |items: Vec<Value>| {
+            items
+                .into_iter()
+                .find(|item| item["type"] == "getting_started")
+                .unwrap()
+        };
+        let before = milestone(before);
+        let after = milestone(after);
+
+        assert_eq!(before["id"], after["id"]);
+        assert_eq!(before["earned_at"], after["earned_at"]);
+        assert_eq!(after["earned_at"], 0);
+        assert_eq!(before["progress"]["current_xp"], 60);
+        assert_eq!(after["progress"]["current_xp"], 90);
+    }
 
     #[test]
     fn compute_streak_counts_consecutive_days_from_today() {

@@ -1346,6 +1346,7 @@ services::agents::turn::tests::turn_lookup_falls_back_to_latest_session_when_non
 services::agents::turn::tests::turn_lookup_prefers_working_session_over_latest_idle
 services::analytics::api_usage::tests::sort_provider_payloads_uses_stable_dashboard_order
 services::analytics::api_usage::tests::test_011_missing_profile_id_reads_as_default
+services::analytics::dispatch_metrics::tests::achievement_date_stays_unknown_when_xp_outpaces_completion_history
 services::analytics::dispatch_metrics::tests::compute_streak_counts_adjacent_days_across_month_boundary
 services::analytics::dispatch_metrics::tests::compute_streak_counts_adjacent_days_across_year_boundary
 services::analytics::dispatch_metrics::tests::compute_streak_counts_consecutive_days_from_today
