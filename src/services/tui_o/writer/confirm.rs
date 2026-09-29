@@ -37,22 +37,22 @@ async fn scan<P: DiscordPort>(
     anchor: u64,
     payload: &str,
 ) -> Result<Vec<u64>, String> {
-    let (mut after, mut seen_any, mut found) = (anchor, false, Vec::new());
+    let (mut after, mut found) = (anchor, Vec::new());
     for _ in 0..MAX_PAGES {
         let mut page = port
             .history_after(channel, after)
             .await
             .map_err(|error| format!("history read failed: {error}"))?;
         page.sort_by_key(|message| message.id);
-        seen_any |= !page.is_empty();
         let exact = page
             .iter()
             .filter(|m| m.author_id == port.bot_id() && m.content == payload);
         found.extend(exact.map(|message| message.id));
         match page.last() {
             Some(last) if page.len() >= HISTORY_PAGE => after = last.id,
-            _ if !seen_any && !port.history_readable(channel) => {
-                return Err("empty history without read permission proof".into());
+            // Other authors' messages prove nothing about reading this bot's.
+            _ if found.is_empty() && !port.history_readable(channel) => {
+                return Err("no candidate without read permission proof".into());
             }
             _ => return Ok(found),
         }

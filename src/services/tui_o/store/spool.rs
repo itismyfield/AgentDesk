@@ -568,11 +568,14 @@ impl ChannelStore {
     }
 
     /// Deletes the oldest segment the cursor has passed. The caller vouches that every unit in it
-    /// is settled in the ledger and that its source is not boundary-pending.
+    /// is settled in the ledger; a source without a decided owed start is refused.
     pub fn gc_oldest_segment(&mut self, source: &SourceId) -> Result<(), StoreError> {
         self.mutate(|store| {
             if store.ledger.violation().is_some() {
                 return Err(rejected("ledger violation withholds GC"));
+            }
+            if !store.gc_allowed(source)? {
+                return Err(rejected("boundary of the source is not decided"));
             }
             let key = source_key(source);
             let spool = store

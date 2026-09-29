@@ -1932,14 +1932,19 @@ src/
 │   │   │   ├── durable.rs
 │   │   │   ├── ledger.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── rotation.rs
+│   │   │   ├── rotation_tests.rs
 │   │   │   └── spool.rs
 │   │   ├── writer/
 │   │   │   ├── actor.rs
 │   │   │   ├── actor_tests.rs
+│   │   │   ├── binding.rs
 │   │   │   ├── confirm.rs
 │   │   │   ├── deliver.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── pieces.rs
+│   │   │   ├── rotation.rs
+│   │   │   ├── rotation_tests.rs
 │   │   │   ├── round_trip.rs
 │   │   │   └── writer_tests.rs
 │   │   ├── alarm.rs

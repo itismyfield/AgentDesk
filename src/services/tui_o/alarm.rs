@@ -65,6 +65,12 @@ fn alarm_kind(alarm: &WriterAlarm) -> Option<&'static str> {
         WriterAlarm::Ambiguous { .. } => "ambiguous",
         WriterAlarm::Unresolved { .. } => "unresolved",
         WriterAlarm::SpoolFull => "spool_full",
+        WriterAlarm::BindingGap { .. } => "binding_gap",
+        WriterAlarm::BindingPending { .. } => "binding_pending",
+        WriterAlarm::BoundaryPending { .. } => "boundary_pending",
+        WriterAlarm::SourceStillGrowing { .. } => "source_still_growing",
+        WriterAlarm::TooManyReaders { .. } => "too_many_readers",
+        WriterAlarm::RetiredSourceGrew { .. } => "retired_source_grew",
         WriterAlarm::NotFound { .. } => return None,
     })
 }

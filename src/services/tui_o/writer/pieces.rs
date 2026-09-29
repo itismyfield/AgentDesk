@@ -5,7 +5,7 @@ use crate::services::discord::formatting::split_for_shadow;
 use crate::services::tui_o::shadow::identity::{RecordFact, UnitContent, classify};
 use crate::services::tui_o::shadow::seal::{SealOutcome, SealRegistry};
 use crate::services::tui_o::shadow::unit_plan::{UnitPlan, plan};
-use crate::services::tui_o::shadow::{CapturedRecord, ShadowProvider, UnitKey};
+use crate::services::tui_o::shadow::{CapturedRecord, ShadowProvider, UnitKey, UnitKind};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PieceWork {
@@ -83,6 +83,17 @@ impl UnitDeriver {
             }
         }
         out
+    }
+
+    /// Whether a unit with this native key was already derived or announced here.
+    pub fn knows(&self, native_key: &str, kind: UnitKind) -> bool {
+        let (channel_id, provider, native_key) = (self.channel, self.provider, native_key.into());
+        self.seals.knows(&UnitKey {
+            channel_id,
+            provider,
+            native_key,
+            kind,
+        })
     }
 
     /// An announced unit whose sealing record is still to come keeps its spool from GC.

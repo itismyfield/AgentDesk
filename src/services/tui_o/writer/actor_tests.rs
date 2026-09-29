@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
 use super::super::actor::{POLL_INTERVAL, run_channel, spawn_if_enabled};
+use super::super::binding::{BindingEvent, BindingEvents};
 use super::super::round_trip::{RoundTrip, cases, round_trip};
 use super::*;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
@@ -57,9 +58,55 @@ fn spawn_as(
     writer: Writer,
     provider: ShadowProvider,
 ) -> (watch::Sender<bool>, tokio::task::JoinHandle<()>) {
+    spawn_with(writer, provider, Arc::new(FakeBindings::new()))
+}
+
+fn spawn_with(
+    writer: Writer,
+    provider: ShadowProvider,
+    bindings: Arc<FakeBindings>,
+) -> (watch::Sender<bool>, tokio::task::JoinHandle<()>) {
     let (stop, stopped) = watch::channel(false);
-    let task = tokio::spawn(run_channel(writer, provider, stopped));
+    let task = tokio::spawn(run_channel(writer, provider, bindings, stopped));
     (stop, task)
+}
+
+fn none() -> Arc<FakeBindings> {
+    Arc::new(FakeBindings::new())
+}
+
+/// An in-memory binding log with the channel's seq notice.
+struct FakeBindings {
+    events: Mutex<Vec<BindingEvent>>,
+    notice: watch::Sender<u64>,
+}
+
+impl FakeBindings {
+    fn new() -> Self {
+        let (events, notice) = (Mutex::new(Vec::new()), watch::channel(0).0);
+        Self { events, notice }
+    }
+
+    /// Commits `event` and moves the notice to its seq.
+    fn commit(&self, event: BindingEvent) {
+        let seq = event.seq;
+        self.events.lock().unwrap().push(event);
+        self.notice.send_replace(seq);
+    }
+}
+
+impl BindingEvents for FakeBindings {
+    fn binding_events_since(&self, channel: u64, after: u64) -> Result<Vec<BindingEvent>, String> {
+        let events = self.events.lock().unwrap();
+        let mine = events
+            .iter()
+            .filter(|e| e.channel_id == channel && e.seq > after);
+        Ok(mine.cloned().collect())
+    }
+
+    fn subscribe(&self, _channel: u64) -> watch::Receiver<u64> {
+        self.notice.subscribe()
+    }
 }
 
 fn writer_over(harness: &Harness, store: ChannelStore) -> Writer {
@@ -207,13 +254,25 @@ async fn the_writer_stays_dormant_unless_enabled() {
     let config: WriterConfig = serde_json::from_str("{}").unwrap();
     assert!(!config.enabled);
     let (_stop, stopped) = watch::channel(false);
-    let spawned = spawn_if_enabled(&config, harness.writer(), ShadowProvider::Claude, stopped);
+    let spawned = spawn_if_enabled(
+        &config,
+        harness.writer(),
+        ShadowProvider::Claude,
+        none(),
+        stopped,
+    );
     assert!(spawned.is_none());
     polls(3).await;
     assert!(harness.port.posts().is_empty());
     let enabled = WriterConfig { enabled: true };
     let (stop, stopped) = watch::channel(false);
-    let spawned = spawn_if_enabled(&enabled, harness.writer(), ShadowProvider::Claude, stopped);
+    let spawned = spawn_if_enabled(
+        &enabled,
+        harness.writer(),
+        ShadowProvider::Claude,
+        none(),
+        stopped,
+    );
     polls(3).await;
     assert_eq!(harness.port.posts(), ["first"]);
     halt(stop, spawned.unwrap()).await;
@@ -243,3 +302,6 @@ async fn the_round_trip_reads_back_every_case_and_reports_any_difference() {
     assert!(!trips[1].matched() && trips[1].error.is_some());
     assert!(trips[2..].iter().all(RoundTrip::matched));
 }
+
+#[path = "rotation_tests.rs"]
+mod rotation;

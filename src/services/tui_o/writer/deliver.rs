@@ -1,8 +1,13 @@
 //! One channel's delivery. For each piece: take the delivery lease, then under the ownership gate
-//! fsync `Prepared` and hand the POST to the client, record the result, and settle unclear ones.
+//! fsync `Prepared` and start the POST, record the result, and settle unclear ones.
 
+use std::future::{Future, poll_fn};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
+
+use tokio::sync::oneshot;
 
 use super::confirm::{self, Verdict};
 use super::pieces::{Derived, PieceWork};
@@ -24,6 +29,34 @@ pub enum Step {
     NoGateway,
     /// The channel stays stopped until an operator acts; its alarm is raised.
     Stopped,
+}
+
+type Request = Pin<Box<dyn Future<Output = PostOutcome> + Send>>;
+
+/// A POST admitted under the gate: finished on its first poll, or still running.
+enum Started {
+    Done(PostOutcome),
+    Running(Request),
+}
+
+enum Refusal {
+    Store(String),
+    Violation(String),
+}
+
+/// Rides in the POST task so the delivery lease is released only once that task can no longer
+/// send; it goes back to the writer if the writer is still waiting.
+struct LeaseReturn<H> {
+    held: Option<H>,
+    back: Option<oneshot::Sender<H>>,
+}
+
+impl<H> Drop for LeaseReturn<H> {
+    fn drop(&mut self) {
+        if let (Some(held), Some(back)) = (self.held.take(), self.back.take()) {
+            let _ = back.send(held);
+        }
+    }
 }
 
 pub struct ChannelWriter<P, L, A> {
@@ -97,13 +130,17 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         Step::Stopped
     }
 
+    /// Appends one ledger entry; a store error or a violation the entry exposed stops the channel.
     fn record(&mut self, entry: LedgerEntry) -> Result<(), Step> {
-        let appended = self.store.append_ledger(entry);
-        appended.map_err(|error| {
-            self.stop(WriterAlarm::Halted {
+        if let Err(error) = self.store.append_ledger(entry) {
+            return Err(self.stop(WriterAlarm::Halted {
                 detail: format!("{error:?}"),
-            })
-        })
+            }));
+        }
+        match self.store.ledger().violation().map(str::to_string) {
+            Some(detail) => Err(self.stop(WriterAlarm::LedgerViolation { detail })),
+            None => Ok(()),
+        }
     }
 
     pub async fn deliver(&mut self, item: &Derived) -> Step {
@@ -151,41 +188,68 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             return Step::LeaseBusy;
         };
         let (gate, port, channel) = (Arc::clone(&self.gate), Arc::clone(&self.port), self.channel);
-        let (unit_key, piece_index, payload) =
-            (piece.unit_key.clone(), piece.index, piece.payload.clone());
-        let admitted = gate.admit(|epoch| {
-            let prepared = LedgerEntry::Prepared {
-                serial,
-                unit_key,
-                piece_index,
-                payload: payload.clone(),
-                anchor_id,
-                epoch,
-            };
-            let appended = self.store.append_ledger(prepared);
-            appended.map(|()| tokio::spawn(port.post(channel, payload)))
-        });
-        let mut request = match admitted {
+        let store = &mut self.store;
+        // The first poll of the request runs under the gate, so no request starts after a
+        // transition; the rest runs outside the lock.
+        let admitted = poll_fn(|cx| {
+            Poll::Ready(gate.admit(|epoch| {
+                let prepared = LedgerEntry::Prepared {
+                    serial,
+                    unit_key: piece.unit_key.clone(),
+                    piece_index: piece.index,
+                    payload: piece.payload.clone(),
+                    anchor_id,
+                    epoch,
+                };
+                store
+                    .append_ledger(prepared)
+                    .map_err(|error| Refusal::Store(format!("{error:?}")))?;
+                if let Some(detail) = store.ledger().violation() {
+                    return Err(Refusal::Violation(detail.to_string()));
+                }
+                let mut request: Request = Box::pin(port.post(channel, piece.payload.clone()));
+                Ok(match request.as_mut().poll(cx) {
+                    Poll::Ready(outcome) => Started::Done(outcome),
+                    Poll::Pending => Started::Running(request),
+                })
+            }))
+        })
+        .await;
+        let started = match admitted {
             None => {
                 if !std::mem::replace(&mut self.paused, true) {
                     self.alarms.raise(channel, WriterAlarm::PausedNoGateway);
                 }
                 return Step::NoGateway;
             }
-            Some(Err(error)) => {
-                return self.stop(WriterAlarm::Halted {
-                    detail: format!("{error:?}"),
-                });
+            Some(Err(Refusal::Store(detail))) => return self.stop(WriterAlarm::Halted { detail }),
+            Some(Err(Refusal::Violation(detail))) => {
+                return self.stop(WriterAlarm::LedgerViolation { detail });
             }
-            Some(Ok(request)) => request,
+            Some(Ok(started)) => started,
         };
         self.paused = false;
-        let outcome = match tokio::time::timeout(POST_TIMEOUT, &mut request).await {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(join)) => PostOutcome::Uncertain(format!("post task ended: {join}")),
-            Err(_) => {
-                request.abort();
-                PostOutcome::Uncertain("post timed out".into())
+        let (outcome, held) = match started {
+            Started::Done(outcome) => (outcome, Some(held)),
+            Started::Running(request) => {
+                let (back, returned) = oneshot::channel();
+                let (held, back) = (Some(held), Some(back));
+                let guard = LeaseReturn { held, back };
+                let mut task = tokio::spawn(async move {
+                    let _guard = guard;
+                    request.await
+                });
+                let outcome = match tokio::time::timeout(POST_TIMEOUT, &mut task).await {
+                    Ok(Ok(outcome)) => outcome,
+                    Ok(Err(join)) => PostOutcome::Uncertain(format!("post task ended: {join}")),
+                    Err(_) => {
+                        // Settle only after the aborted request is gone.
+                        task.abort();
+                        let _ = (&mut task).await;
+                        PostOutcome::Uncertain("post timed out".into())
+                    }
+                };
+                (outcome, returned.await.ok())
             }
         };
         let step = self.record_outcome(serial, &piece.payload, outcome).await;

@@ -20,6 +20,8 @@ pub enum GatewayOwnership {
 struct GateState {
     ownership: GatewayOwnership,
     last_epoch: u64,
+    /// Set by `close`; a re-acquisition by the closed lease task cannot reopen admission.
+    closed: bool,
 }
 
 pub struct OwnershipGate {
@@ -33,6 +35,7 @@ impl Default for OwnershipGate {
         let state = Mutex::new(GateState {
             ownership,
             last_epoch: 0,
+            closed: false,
         });
         Self {
             state,
@@ -59,12 +62,23 @@ impl OwnershipGate {
         self.tx.subscribe()
     }
 
-    /// The lease was (re)acquired; returns the new epoch.
+    /// A new lease task was granted the lease; returns the new epoch.
     pub fn acquired(&self) -> u64 {
         let mut state = self.locked();
+        state.closed = false;
+        self.own(&mut state)
+    }
+
+    /// The running lease task won the lease back; `None` once `close` has retired that task.
+    pub fn reacquired(&self) -> Option<u64> {
+        let mut state = self.locked();
+        (!state.closed).then(|| self.own(&mut state))
+    }
+
+    fn own(&self, state: &mut GateState) -> u64 {
         state.last_epoch += 1;
         let epoch = state.last_epoch;
-        self.set(&mut state, GatewayOwnership::Owned { epoch });
+        self.set(state, GatewayOwnership::Owned { epoch });
         epoch
     }
 
@@ -78,6 +92,13 @@ impl OwnershipGate {
 
     pub fn lost(&self) {
         let mut state = self.locked();
+        self.set(&mut state, GatewayOwnership::Lost);
+    }
+
+    /// The lease is being released for good: `Lost` until the next `acquired`.
+    pub fn close(&self) {
+        let mut state = self.locked();
+        state.closed = true;
         self.set(&mut state, GatewayOwnership::Lost);
     }
 
@@ -100,9 +121,9 @@ pub fn gate(provider: &str) -> Arc<OwnershipGate> {
     Arc::clone(gates.entry(provider.to_string()).or_default())
 }
 
-/// Every normal lease release goes through here: `Lost` lands before the unlock or drop runs.
+/// Every normal lease release goes through here: the gate closes before the unlock or drop runs.
 pub async fn release_gateway<F: Future>(gate: &OwnershipGate, release: F) -> F::Output {
-    gate.lost();
+    gate.close();
     release.await
 }
 

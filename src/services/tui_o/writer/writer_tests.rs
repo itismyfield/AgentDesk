@@ -30,6 +30,8 @@ enum Reply {
     Transformed,
     /// A created message whose author is not this bot.
     CreatedByOther,
+    /// Created by this bot with an id behind the anchor, which the ledger treats as a violation.
+    CreatedBehind,
 }
 
 #[derive(Default)]
@@ -40,6 +42,13 @@ struct FakePort {
     prepared_before_post: Mutex<Vec<bool>>,
     ledger: Mutex<Option<PathBuf>>,
     unreadable: AtomicBool,
+    /// When set, a POST's HTTP request starts at the future's first poll, like the real client.
+    lazy: AtomicBool,
+    /// Each lazy request logs `http` when it starts.
+    started: Arc<Mutex<Vec<&'static str>>>,
+    /// A lazy request waits on this before it completes.
+    hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    on_post: Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 
 impl FakePort {
@@ -98,8 +107,28 @@ impl DiscordPort for FakePort {
             Reply::Refused(status) => PostOutcome::Refused(status),
             Reply::Transformed => PostOutcome::Created(self.say(BOT, &content.to_uppercase())),
             Reply::CreatedByOther => PostOutcome::Created(self.say(BOT + 1, &content)),
+            Reply::CreatedBehind => PostOutcome::Created(SeenMessage {
+                id: 50,
+                author_id: BOT,
+                content,
+            }),
         };
-        async move { outcome }
+        if let Some(hook) = self.on_post.lock().unwrap().as_ref() {
+            hook();
+        }
+        let lazy = self.lazy.load(Ordering::SeqCst).then(|| {
+            let hold = self.hold.lock().unwrap().take();
+            (Arc::clone(&self.started), hold)
+        });
+        async move {
+            if let Some((started, hold)) = lazy {
+                started.lock().unwrap().push("http");
+                if let Some(hold) = hold {
+                    let _ = hold.await;
+                }
+            }
+            outcome
+        }
     }
 
     fn history_after(
@@ -367,6 +396,14 @@ async fn settlement_stays_ambiguous_or_unresolved_when_history_cannot_single_out
         confirm::settle(&port, CHANNEL, 1001, "same", false).await,
         Verdict::Unresolved(_)
     ));
+    port.say(BOT + 1, "someone else");
+    assert!(
+        matches!(
+            confirm::settle(&port, CHANNEL, 1001, "same", false).await,
+            Verdict::Unresolved(_)
+        ),
+        "another author's message is no proof that history is readable"
+    );
     port.unreadable.store(false, Ordering::SeqCst);
     let pages = confirm::HISTORY_PAGE * confirm::MAX_PAGES;
     for _ in 0..pages {
@@ -545,6 +582,86 @@ fn derivation_splits_each_unit_once_and_excludes_or_blocks_the_rest() {
     assert!(matches!(
         deriver.derive(&torn).as_slice(),
         [Derived::Blocked { .. }]
+    ));
+}
+
+/// Guards that no POST's HTTP request starts after ownership closes, for Unknown and Lost alike.
+#[tokio::test(start_paused = true)]
+async fn no_post_starts_its_request_after_ownership_closes() {
+    let closes: [fn(&OwnershipGate); 2] = [OwnershipGate::uncertain, OwnershipGate::lost];
+    for close in closes {
+        let harness = Harness::new();
+        harness.gate.acquired();
+        harness.port.lazy.store(true, Ordering::SeqCst);
+        let log = Arc::clone(&harness.port.started);
+        let (wake, woken) = tokio::sync::oneshot::channel::<()>();
+        let (gate, closed_log) = (Arc::clone(&harness.gate), Arc::clone(&log));
+        // Runs as soon as the writer yields after handing the POST over.
+        let closer = tokio::spawn(async move {
+            woken.await.unwrap();
+            close(&gate);
+            closed_log.lock().unwrap().push("closed");
+        });
+        tokio::task::yield_now().await;
+        let wake = Mutex::new(Some(wake));
+        *harness.port.on_post.lock().unwrap() = Some(Box::new(move || {
+            wake.lock().unwrap().take().map(|wake| wake.send(()));
+        }));
+        let mut writer = harness.writer();
+        writer.deliver(&piece("m1", "a")).await;
+        closer.await.unwrap();
+        assert_eq!(*log.lock().unwrap(), ["http", "closed"]);
+    }
+}
+
+/// Guards that the delivery lease outlives an aborted writer until its POST can no longer send,
+/// and that a timed-out POST hands the lease back exactly once.
+#[tokio::test(start_paused = true)]
+async fn the_delivery_lease_is_held_until_the_post_task_ends() {
+    let harness = Harness::new();
+    harness.gate.acquired();
+    harness.port.lazy.store(true, Ordering::SeqCst);
+    let (release, hold) = tokio::sync::oneshot::channel();
+    *harness.port.hold.lock().unwrap() = Some(hold);
+    let mut writer = harness.writer();
+    let parent = tokio::spawn(async move { writer.deliver(&piece("m1", "a")).await });
+    while harness.port.started.lock().unwrap().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    parent.abort();
+    assert!(parent.await.unwrap_err().is_cancelled());
+    let released = || harness.lease.released.load(Ordering::SeqCst);
+    assert_eq!(
+        released(),
+        0,
+        "lease released while the POST could still send"
+    );
+    release.send(()).unwrap();
+    while released() == 0 {
+        tokio::task::yield_now().await;
+    }
+    let (_never, hold) = tokio::sync::oneshot::channel();
+    *harness.port.hold.lock().unwrap() = Some(hold);
+    let mut writer = harness.writer();
+    assert_eq!(writer.deliver(&piece("m2", "b")).await, Step::Done);
+    assert_eq!(released(), 2);
+    assert_eq!(harness.port.posts(), ["a", "b"]);
+}
+
+/// Guards that a ledger violation raised while running stops the same writer before its next POST.
+#[tokio::test(start_paused = true)]
+async fn a_violation_recorded_while_running_stops_the_writer_before_the_next_post() {
+    let harness = Harness::new();
+    harness.gate.acquired();
+    let replies = [Reply::CreatedBehind];
+    harness.port.replies.lock().unwrap().extend(replies);
+    let mut writer = harness.writer();
+    assert_eq!(writer.deliver(&piece("m1", "a")).await, Step::Stopped);
+    assert_eq!(writer.deliver(&piece("m2", "b")).await, Step::Stopped);
+    assert_eq!(harness.port.posts(), ["a"]);
+    assert!(matches!(
+        harness.alarms.taken().as_slice(),
+        [WriterAlarm::LedgerViolation { .. }]
     ));
 }
 
