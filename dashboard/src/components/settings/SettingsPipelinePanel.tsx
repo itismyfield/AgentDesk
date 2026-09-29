@@ -29,20 +29,15 @@ import type {
 const PipelineVisualEditor = lazy(() => import("../agent-manager/PipelineVisualEditor"));
 
 interface SettingsPipelinePanelProps {
-  configDirty: boolean;
   configEntries: ConfigEntry[];
-  configSaving: boolean;
   groupedConfigEntries: Record<string, ConfigEntry[]>;
   inputStyle: CSSProperties;
   isKo: boolean;
-  onConfigSave: () => Promise<void>;
   pipelineAgents: Agent[];
   pipelineMetas: SettingRowMeta[];
   pipelineRepos: GitHubRepoOption[];
   pipelineSelectorError: string | null;
   pipelineSelectorLoading: boolean;
-  primaryActionClass: string;
-  primaryActionStyle: CSSProperties;
   renderSettingGroupCard: RenderSettingGroupCard;
   renderSettingRow: RenderSettingRow;
   selectedPipelineAgentId: string | null;
@@ -53,20 +48,15 @@ interface SettingsPipelinePanelProps {
 }
 
 export function SettingsPipelinePanel({
-  configDirty,
   configEntries,
-  configSaving,
   groupedConfigEntries,
   inputStyle,
   isKo,
-  onConfigSave,
   pipelineAgents,
   pipelineMetas,
   pipelineRepos,
   pipelineSelectorError,
   pipelineSelectorLoading,
-  primaryActionClass,
-  primaryActionStyle,
   renderSettingGroupCard,
   renderSettingRow,
   selectedPipelineAgentId,
@@ -110,22 +100,11 @@ export function SettingsPipelinePanel({
         </SettingsEmptyState>
       ) : (
         <div className="space-y-5">
-          <SettingsCallout
-            action={(
-              <button
-                onClick={onConfigSave}
-                disabled={configSaving || !configDirty}
-                className={primaryActionClass}
-                style={primaryActionStyle}
-              >
-                {configSaving ? tr("저장 중...", "Saving...") : tr("파이프라인 저장", "Save pipeline")}
-              </button>
-            )}
-          >
+          <SettingsCallout>
             <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
               {tr(
-                "작업이 어떤 단계로 이동하는지 정합니다. 변경 후 저장하면 이후 작업 흐름에 반영됩니다.",
-                "Set how work moves between stages. Saved changes apply to upcoming workflow changes.",
+                "아래 설정 값은 화면 위쪽 저장 버튼으로, 세부 흐름 편집기는 편집기 안의 저장 버튼으로 따로 저장됩니다.",
+                "The settings below save with the Save button at the top; the detailed workflow editor has its own Save button.",
               )}
             </p>
           </SettingsCallout>
