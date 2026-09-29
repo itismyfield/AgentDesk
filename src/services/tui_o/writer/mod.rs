@@ -103,6 +103,11 @@ pub enum WriterAlarm {
         expected: u64,
         found: u64,
     },
+    /// The binding log could not be read; binds past `checkpoint` wait until it can.
+    BindingLogUnavailable {
+        checkpoint: Option<u64>,
+        detail: String,
+    },
     /// A bind whose transcript file is still unnamed; later binds wait behind it.
     BindingPending {
         seq: u64,
