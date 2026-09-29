@@ -51,9 +51,11 @@ use crate::services::session_backend::{
 #[cfg(unix)]
 use crate::services::tmux_common::{tmux_owner_path, write_tmux_owner_marker};
 #[cfg(unix)]
-use crate::services::tmux_diagnostics::{
-    record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
-    tmux_session_exists, tmux_session_has_live_pane,
+use crate::services::{
+    session_host::legacy_collapse::{tmux_live_pane_bool, tmux_present_bool},
+    tmux_diagnostics::{
+        record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
+    },
 };
 
 #[cfg(unix)]
