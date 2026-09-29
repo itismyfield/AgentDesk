@@ -38,7 +38,14 @@ const PENDING_BIND_ALARM_SECS: i64 = 60;
 /// A first new record older than its bind by more than this may be an unrelated old session.
 const BIND_SLACK_SECS: i64 = 60;
 
-type Keys = HashSet<(String, UnitKind)>;
+/// How a record names a native key: as the unit itself or as an announcement of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Seen {
+    Sealed,
+    Announced,
+}
+
+type Keys = HashSet<(String, UnitKind, Seen)>;
 
 struct Reader {
     source: SourceId,
@@ -53,6 +60,8 @@ struct Reader {
     growth_alarmed: bool,
     /// Set while retired: the source is only stat-watched until then.
     watch_until: Option<Instant>,
+    /// The old source's length at its rotation; later readers wait until it is read and spooled.
+    drain_to: Option<u64>,
 }
 
 impl Reader {
@@ -66,11 +75,17 @@ impl Reader {
             rotated_at: None,
             growth_alarmed: false,
             watch_until: None,
+            drain_to: None,
         }
     }
 
     fn reading(&self) -> bool {
         self.capture.is_some() && self.watch_until.is_none()
+    }
+
+    fn backlog_end(&self) -> Option<u64> {
+        let capture = self.capture.as_ref().filter(|_| self.watch_until.is_none());
+        capture.and_then(|capture| capture.file_len().ok())
     }
 }
 
@@ -90,6 +105,8 @@ pub struct Sources<B> {
     raised: Vec<WriterAlarm>,
     readers_alarmed: bool,
     pending_alarmed: Option<u64>,
+    /// Set while the binding log cannot be read, so the outage alarms once.
+    log_alarmed: bool,
 }
 
 fn halted(context: &'static str) -> impl Fn(StoreError) -> WriterAlarm {
@@ -105,7 +122,7 @@ fn halt(detail: impl Into<String>) -> WriterAlarm {
 }
 
 /// Native keys a record would seal or announce; `None` when it cannot be read as units.
-fn record_keys(provider: ShadowProvider, line: &[u8]) -> Option<Vec<(String, UnitKind)>> {
+fn record_keys(provider: ShadowProvider, line: &[u8]) -> Option<Vec<(String, UnitKind, Seen)>> {
     if line.iter().all(u8::is_ascii_whitespace) {
         return Some(Vec::new());
     }
@@ -113,9 +130,8 @@ fn record_keys(provider: ShadowProvider, line: &[u8]) -> Option<Vec<(String, Uni
     let mut keys = Vec::new();
     for fact in classify(provider, &value) {
         match fact {
-            RecordFact::Unit(key, kind, _) | RecordFact::Announced(key, kind) => {
-                keys.push((key, kind));
-            }
+            RecordFact::Unit(key, kind, _) => keys.push((key, kind, Seen::Sealed)),
+            RecordFact::Announced(key, kind) => keys.push((key, kind, Seen::Announced)),
             RecordFact::Blocked(_) => return None,
             _ => {}
         }
@@ -168,6 +184,7 @@ impl<B: BindingEvents> Sources<B> {
             raised: Vec::new(),
             readers_alarmed: false,
             pending_alarmed: None,
+            log_alarmed: false,
         }
     }
 
@@ -222,6 +239,8 @@ impl<B: BindingEvents> Sources<B> {
                     .is_empty();
             reader.rotated_at = self.rotation.successors.contains_key(&key).then_some(now);
             reader.watch_until = cursor.retired.then_some(now + RETIRED_WATCH);
+            // The rotation-time length is not kept, so the old source's length now stands in.
+            reader.drain_to = reader.rotated_at.and(reader.backlog_end());
             self.readers.push(reader);
         }
         self.flush(writer)
@@ -242,7 +261,7 @@ impl<B: BindingEvents> Sources<B> {
         if *self.notice.borrow() <= checkpoint {
             return Ok(());
         }
-        let Ok(events) = self.bindings.binding_events_since(self.channel, checkpoint) else {
+        let Some(events) = self.read_log(writer, checkpoint) else {
             return Ok(());
         };
         let resolved: HashMap<u64, SourceId> = events
@@ -296,25 +315,46 @@ impl<B: BindingEvents> Sources<B> {
         Ok(())
     }
 
-    /// Without a checkpoint, the last bind of a source attached at the switch is where O starts.
+    /// Reads binding events past `after`; a failed read alarms once per outage and applies nothing.
+    fn read_log<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+        &mut self,
+        writer: &ChannelWriter<P, L, A>,
+        after: u64,
+    ) -> Option<Vec<BindingEvent>> {
+        match self.bindings.binding_events_since(self.channel, after) {
+            Ok(events) => {
+                self.log_alarmed = false;
+                Some(events)
+            }
+            Err(detail) => {
+                if !std::mem::replace(&mut self.log_alarmed, true) {
+                    let checkpoint = self.checkpoint;
+                    writer.alarm(WriterAlarm::BindingLogUnavailable { checkpoint, detail });
+                }
+                None
+            }
+        }
+    }
+
+    /// Without a checkpoint, the last bind of a source attached at the switch is where O starts;
+    /// a log naming none has no baseline, and nothing is captured until one is seeded.
     fn seed<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
     ) -> Result<Option<u64>, WriterAlarm> {
-        let Ok(events) = self.bindings.binding_events_since(self.channel, 0) else {
+        let Some(events) = self.read_log(writer, 0) else {
             return Ok(None);
         };
         let store = writer.store();
         let attached = |source: &SourceId| store.cursor(source).is_some();
-        let seq = match events.last() {
-            None => 0,
-            Some(_) => events
-                .iter()
-                .rev()
-                .find(|event| bound_source(event).is_some_and(attached))
-                .map(|event| event.seq)
-                .ok_or_else(|| halt("the binding log names no source bound at the switch"))?,
-        };
+        let seq = events
+            .iter()
+            .rev()
+            .find(|event| bound_source(event).is_some_and(attached))
+            .map(|event| event.seq)
+            .ok_or_else(|| {
+                halt("no binding baseline: no event binds a source attached at the switch")
+            })?;
         let seeded = writer.store().set_binding_checkpoint(seq);
         seeded.map_err(halted("binding checkpoint"))?;
         self.checkpoint = Some(seq);
@@ -380,6 +420,7 @@ impl<B: BindingEvents> Sources<B> {
                 .insert(source_key(old), new.clone());
             if let Some(reader) = self.readers.iter_mut().find(|r| r.source == *old) {
                 (reader.rotated_at, reader.growth_alarmed) = (Some(Instant::now()), false);
+                reader.drain_to = reader.backlog_end();
             }
         }
         let written = writer.store().write_rotation(&self.rotation);
@@ -422,13 +463,17 @@ impl<B: BindingEvents> Sources<B> {
         Ok(())
     }
 
-    /// Spools each read source in bind order, so an old tail is owed before its successor.
+    /// Spools each read source in bind order. Readers after an old source still short of its
+    /// rotation-time length wait, so that whole backlog is owed before anything bound later.
     pub fn capture<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
         deriver: &mut UnitDeriver,
         owed: &mut VecDeque<Derived>,
     ) -> Result<(), WriterAlarm> {
+        if self.checkpoint.is_none() {
+            return Ok(());
+        }
         for index in 0..self.readers.len() {
             let reader = &mut self.readers[index];
             let Some(capture) = reader
@@ -436,6 +481,7 @@ impl<B: BindingEvents> Sources<B> {
                 .as_mut()
                 .filter(|_| reader.watch_until.is_none())
             else {
+                reader.drain_to = None;
                 continue;
             };
             let retried = reader.pending.is_some();
@@ -449,6 +495,7 @@ impl<B: BindingEvents> Sources<B> {
                     }
                 },
             };
+            let read_through = capture.read_through();
             match writer.store().append_spool(&batch, &capture.prefix_hash()) {
                 Ok(()) => reader.captured_any |= !batch.records.is_empty(),
                 Err(StoreError::SpoolFull) => {
@@ -456,13 +503,23 @@ impl<B: BindingEvents> Sources<B> {
                         writer.alarm(WriterAlarm::SpoolFull);
                     }
                     reader.pending = Some(batch);
+                    if reader.drain_to.is_some() {
+                        break;
+                    }
                     continue;
                 }
                 Err(error) => return Err(halt(format!("spool append: {error:?}"))),
             }
+            let held = reader.drain_to.is_some_and(|end| read_through < end);
+            if !held {
+                reader.drain_to = None;
+            }
             let key = source_key(&batch.source);
             for record in &batch.records {
                 self.owe(deriver, owed, &key, record);
+            }
+            if held {
+                break;
             }
         }
         self.flush(writer)
@@ -518,7 +575,8 @@ impl<B: BindingEvents> Sources<B> {
         }
     }
 
-    /// Every unit key of the record is in the parent's lineage or already derived here.
+    /// Every key of the record is already held by the parent or here. A unit counts only as a
+    /// sealed unit: an announcement alone does not carry the output its sealing record posts.
     fn inherited(
         &mut self,
         link: &SourceLink,
@@ -534,10 +592,14 @@ impl<B: BindingEvents> Sources<B> {
         let Some(lineage) = self.lineage_of(parent) else {
             return false;
         };
-        !keys.is_empty()
-            && keys
-                .iter()
-                .all(|key| lineage.contains(key) || deriver.knows(&key.0, key.1))
+        let held = |key: &String, kind: UnitKind, seen: Seen| {
+            let sealed = lineage.contains(&(key.clone(), kind, Seen::Sealed));
+            let announced = seen == Seen::Announced
+                && (lineage.contains(&(key.clone(), kind, Seen::Announced))
+                    || deriver.knows(key, kind));
+            sealed || deriver.sealed(key, kind) || announced
+        };
+        !keys.is_empty() && keys.iter().all(|(key, kind, seen)| held(key, *kind, *seen))
     }
 
     fn lineage_of(&mut self, parent: &SourceId) -> Option<&Keys> {
