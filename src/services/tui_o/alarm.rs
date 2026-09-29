@@ -71,6 +71,7 @@ fn alarm_kind(alarm: &WriterAlarm) -> Option<&'static str> {
         WriterAlarm::SourceStillGrowing { .. } => "source_still_growing",
         WriterAlarm::TooManyReaders { .. } => "too_many_readers",
         WriterAlarm::RetiredSourceGrew { .. } => "retired_source_grew",
+        WriterAlarm::BindingLogUnavailable { .. } => "binding_log_unavailable",
         WriterAlarm::NotFound { .. } => return None,
     })
 }

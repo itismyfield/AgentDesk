@@ -1,6 +1,5 @@
 use chrono::{DateTime, TimeDelta, Utc};
 
-use super::super::super::binding::{BindingCause, BindingEvidence, BindingRecord, BindingTarget};
 use super::*;
 
 fn row_at(id: &str, text: &str, at: DateTime<Utc>) -> Vec<u8> {
@@ -9,39 +8,6 @@ fn row_at(id: &str, text: &str, at: DateTime<Utc>) -> Vec<u8> {
     let mut line = serde_json::to_vec(&value).unwrap();
     line.push(b'\n');
     line
-}
-
-fn event(seq: u64, record: BindingRecord, committed_at: DateTime<Utc>) -> BindingEvent {
-    BindingEvent {
-        seq,
-        channel_id: CHANNEL,
-        provider: ShadowProvider::Claude,
-        tmux_session: "tmux".into(),
-        execution_nonce: "nonce".into(),
-        record,
-        committed_at,
-    }
-}
-
-fn bound(
-    seq: u64,
-    old: Option<&SourceId>,
-    new: BindingTarget,
-    cause: BindingCause,
-    parent_hint: Option<&SourceId>,
-) -> BindingEvent {
-    let evidence = BindingEvidence {
-        hook_event: "SessionStart".into(),
-        received_at: Utc::now(),
-    };
-    let record = BindingRecord::Bound {
-        old: old.cloned(),
-        new,
-        cause,
-        parent_hint: parent_hint.cloned(),
-        evidence,
-    };
-    event(seq, record, Utc::now())
 }
 
 fn rotate(seq: u64, old: &SourceId, new: &SourceId, cause: BindingCause) -> BindingEvent {
@@ -304,5 +270,157 @@ async fn a_compact_that_keeps_the_same_source_reposts_nothing() {
     );
     assert_eq!(harness.channel().binding_checkpoint().unwrap(), Some(2));
     assert_eq!(harness.alarms.taken(), []);
+    halt(stop, task).await;
+}
+
+fn codex_line(value: serde_json::Value) -> Vec<u8> {
+    let mut line = serde_json::to_vec(&value).unwrap();
+    line.push(b'\n');
+    line
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_body_the_parent_only_announced_is_posted_from_the_resumed_source() {
+    let (harness, a_path, a, bindings) = started(b"");
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Codex, bindings.clone());
+    let announced = codex_line(serde_json::json!({"type": "event_msg", "payload": {
+        "type": "item_completed", "item": {"type": "AgentMessage", "id": "msg_k"}}}));
+    append(&a_path, &announced);
+    polls(3).await;
+    let body = codex_line(serde_json::json!({"type": "response_item",
+        "timestamp": Utc::now().to_rfc3339(), "payload": {
+        "type": "message", "role": "assistant", "id": "msg_k",
+        "content": [{"type": "output_text", "text": "the answer"}]}}));
+    let (_, b) = transcript(&a_path, "b.jsonl", "s2", &[announced, body].concat());
+    bindings.commit(rotate(2, &a, &b, BindingCause::Resume));
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["the answer"]);
+    assert_eq!(harness.alarms.taken(), []);
+    halt(stop, task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_channel_whose_binding_log_names_no_switched_source_halts_before_capture() {
+    for other in [false, true] {
+        let (harness, path, _) = switched_over(&row("m0", "before the switch"));
+        harness.gate.acquired();
+        append(&path, &row("m1", "after the switch"));
+        let bindings = Arc::new(FakeBindings::new());
+        if other {
+            let (_, x) = transcript(&path, "x.jsonl", "sx", b"");
+            let target = BindingTarget::Source(x);
+            bindings.commit(bound(1, None, target, BindingCause::Startup, None));
+        }
+        let (_stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings);
+        polls(3).await;
+        assert!(task.is_finished(), "other={other}");
+        assert!(harness.port.posts().is_empty(), "other={other}");
+        let alarms = harness.alarms.taken();
+        let baseline = |a: &WriterAlarm| matches!(a, WriterAlarm::Halted { detail } if detail.contains("baseline"));
+        assert!(
+            matches!(alarms.as_slice(), [a] if baseline(a)),
+            "{alarms:?}"
+        );
+        assert_eq!(harness.channel().binding_checkpoint().unwrap(), None);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failing_binding_log_holds_capture_and_binds_until_it_reads_again() {
+    let (harness, a_path, a, bindings) = started(&row("m0", "before the switch"));
+    bindings.fail(Some("no log yet"));
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    append(&a_path, &row("m1", "a after"));
+    polls(3).await;
+    assert!(harness.port.posts().is_empty());
+    let unseeded = WriterAlarm::BindingLogUnavailable {
+        checkpoint: None,
+        detail: "no log yet".into(),
+    };
+    assert_eq!(harness.alarms.taken(), [unseeded]);
+    bindings.fail(None);
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["a after"]);
+    bindings.fail(Some("log unreachable"));
+    let (_, b) = transcript(&a_path, "b.jsonl", "s2", &row("n1", "b one"));
+    let (_, c) = transcript(&a_path, "c.jsonl", "s3", &row("k1", "c one"));
+    bindings.commit(rotate(2, &a, &b, BindingCause::Clear));
+    bindings.commit(rotate(3, &b, &c, BindingCause::Clear));
+    polls(5).await;
+    assert_eq!(harness.port.posts(), ["a after"]);
+    let unavailable = WriterAlarm::BindingLogUnavailable {
+        checkpoint: Some(1),
+        detail: "log unreachable".into(),
+    };
+    assert_eq!(harness.alarms.taken(), [unavailable]);
+    assert_eq!(harness.channel().binding_checkpoint().unwrap(), Some(1));
+    assert!(harness.channel().cursor(&b).is_none());
+    bindings.fail(None);
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["a after", "b one", "c one"]);
+    assert_eq!(harness.channel().binding_checkpoint().unwrap(), Some(3));
+    assert_eq!(harness.alarms.taken(), []);
+    halt(stop, task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_old_backlog_longer_than_one_read_is_posted_before_the_new_source() {
+    let (harness, a_path, a, bindings) = started(&row("m0", "before the switch"));
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    polls(3).await;
+    let thinking = |i: u32| {
+        let text = "x".repeat(256 << 10);
+        codex_line(
+            serde_json::json!({"type": "assistant", "uuid": format!("u-t{i}"),
+            "apiBlockIndex": 0, "message": {"id": format!("t{i}"),
+            "content": [{"type": "thinking", "thinking": text}]}}),
+        )
+    };
+    let backlog: Vec<u8> = (0..6).flat_map(thinking).collect();
+    assert!(backlog.len() as u64 > MAX_READ_BYTES);
+    append(&a_path, &[backlog, row("m1", "old last")].concat());
+    let (_, b) = transcript(&a_path, "b.jsonl", "s2", &row("n1", "new first"));
+    bindings.commit(rotate(2, &a, &b, BindingCause::Clear));
+    polls(4).await;
+    assert_eq!(harness.port.posts(), ["old last", "new first"]);
+    assert_eq!(harness.alarms.taken(), []);
+    halt(stop, task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_old_tail_the_full_spool_refuses_still_goes_before_the_new_source() {
+    let body = row("m0", "before the switch");
+    let (harness, a_path, a) = switched_over(&body);
+    let bindings = Arc::new(FakeBindings::new());
+    let target = BindingTarget::Source(a.clone());
+    bindings.commit(bound(1, None, target, BindingCause::Startup, None));
+    let long = "x".repeat(1800);
+    append(&a_path, &row("m1", &long));
+    let mut store = harness.channel();
+    let mut capture = SourceCapture::open(a.clone(), body.len() as u64).unwrap();
+    let CaptureOutcome::Batch(batch) = capture.poll(MAX_READ_BYTES) else {
+        panic!("capture failed");
+    };
+    store.append_spool(&batch, &capture.prefix_hash()).unwrap();
+    // Room for the new source's row but not for the old tail until `long` is collected.
+    let room = store.spool_bytes() + 1024;
+    store.set_limits_for_test(1, room);
+    let tail = "y".repeat(1500);
+    append(&a_path, &row("m2", &tail));
+    let (stop, task) = spawn_with(
+        writer_over(&harness, store),
+        ShadowProvider::Claude,
+        bindings.clone(),
+    );
+    polls(2).await;
+    let (_, b) = transcript(&a_path, "b.jsonl", "s2", &row("n1", "new first"));
+    bindings.commit(rotate(2, &a, &b, BindingCause::Clear));
+    polls(2).await;
+    harness.gate.acquired();
+    polls(4).await;
+    assert_eq!(
+        harness.port.posts(),
+        [long.as_str(), tail.as_str(), "new first"]
+    );
     halt(stop, task).await;
 }
