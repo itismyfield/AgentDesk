@@ -1928,6 +1928,12 @@ src/
 │   │   │   ├── ledger.rs
 │   │   │   ├── mod.rs
 │   │   │   └── spool.rs
+│   │   ├── writer/
+│   │   │   ├── confirm.rs
+│   │   │   ├── deliver.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── pieces.rs
+│   │   │   └── writer_tests.rs
 │   │   ├── ownership.rs
 │   │   └── shadow_host.rs
 │   ├── tui_prompt_dedupe/
