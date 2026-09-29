@@ -36,7 +36,7 @@ MUTATION_FILES = (
 MUTATION_COUNT = 7
 MUTATION_NAMES = ("M10", "M6", "M8", "anchor-drop", "S4-m5", "S4-m6", "S4-m7")
 PR_WORKFLOW = Path(".github/workflows/ci-pr.yml")
-MUTATION_JOB = "relay-authority-contract"
+MUTATION_JOB = "relay_authority_mutations"
 MUTATION_STEP = "Require relay-authority mutations to be killed"
 FILTER_ID = "mutation_paths"
 FILTER_NAME = "mutation_sources"
@@ -203,12 +203,17 @@ class RelayAuthorityMutationScriptTests(unittest.TestCase):
         return temp
 
     @staticmethod
-    def run_script(root: Path, runner: Path) -> subprocess.CompletedProcess[str]:
+    def run_script(
+        root: Path, runner: Path, extra_env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
+        env.pop("RELAY_AUTHORITY_MUTATION_SHARD_INDEX", None)
+        env.pop("RELAY_AUTHORITY_MUTATION_SHARD_TOTAL", None)
         env.update(
             RELAY_AUTHORITY_MUTATION_TEST_MODE="fixture",
             RELAY_AUTHORITY_MUTATION_FIXTURE_RUNNER=str(runner),
         )
+        env.update(extra_env or {})
         return subprocess.run(
             ["bash", str(root / MUTATION_SCRIPT)],
             cwd=root,
@@ -259,6 +264,8 @@ exit 101
         env = os.environ.copy()
         env.pop("RELAY_AUTHORITY_MUTATION_TEST_MODE", None)
         env.pop("RELAY_AUTHORITY_MUTATION_FIXTURE_RUNNER", None)
+        env.pop("RELAY_AUTHORITY_MUTATION_SHARD_INDEX", None)
+        env.pop("RELAY_AUTHORITY_MUTATION_SHARD_TOTAL", None)
         env["CARGO_TERM_COLOR"] = "always"
         env["PATH"] = str(cargo.parent) + os.pathsep + env.get("PATH", "")
         env.update(extra_env or {})
@@ -601,6 +608,121 @@ exit 101
         )
         self.assert_sources_restored(self, root)
 
+    def test_shards_cover_each_mutation_exactly_once(self) -> None:
+        for total in (2, 3, MUTATION_COUNT):
+            executed = []
+            for index in range(total):
+                with self.subTest(index=index, total=total):
+                    root = self.copy_fixture()
+                    runner = self.write_runner(root, KILLED_RUNNER)
+                    result = self.run_script(root, runner, {
+                        "RELAY_AUTHORITY_MUTATION_SHARD_INDEX": str(index),
+                        "RELAY_AUTHORITY_MUTATION_SHARD_TOTAL": str(total),
+                    })
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    expected = list(MUTATION_NAMES[index::total])
+                    actual = re.findall(r"^MUTATION_RESULT mutation=(\S+)", result.stdout, re.M)
+                    self.assertEqual(actual, expected)
+                    self.assertIn(
+                        f"MUTATION_SHARD index={index} total={total} count={len(expected)} "
+                        f"ids={','.join(expected)}",
+                        result.stdout,
+                    )
+                    self.assertIn(
+                        f"MUTATION_SUMMARY killed={len(expected)} survived=0 minimum=4 status=PASS",
+                        result.stdout,
+                    )
+                    self.assert_sources_restored(self, root)
+                    executed.extend(actual)
+            self.assertCountEqual(executed, MUTATION_NAMES)
+            self.assertEqual(len(executed), MUTATION_COUNT)
+            self.assertEqual(len(set(executed)), MUTATION_COUNT)
+
+    def test_invalid_shard_arguments_fail_before_source_changes(self) -> None:
+        root = self.copy_fixture()
+        runner = self.write_runner(root, KILLED_RUNNER)
+        for index, total in (
+            ("-1", "3"), ("3", "3"), ("0", "0"), ("0", "-1"),
+            ("0", "8"), ("one", "3"), ("0", "three"), ("", "3"),
+            ("0", ""), ("1.0", "3"), ("0", "1.0"), ("00", "3"),
+            ("0", "03"), ("9999999999999999999999999999999", "3"),
+            ("0", "9999999999999999999999999999999"),
+        ):
+            with self.subTest(index=index, total=total):
+                result = self.run_script(root, runner, {
+                    "RELAY_AUTHORITY_MUTATION_SHARD_INDEX": index,
+                    "RELAY_AUTHORITY_MUTATION_SHARD_TOTAL": total,
+                })
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("ERROR invalid mutation shard", result.stderr)
+                self.assertNotIn("MUTATION_RESULT", result.stdout)
+                self.assertFalse((root / "target/relay-authority-mutations.lock").exists())
+                self.assert_sources_restored(self, root)
+
+    def test_mutation_registration_rejects_missing_and_duplicate_rows(self) -> None:
+        for fault in ("missing", "duplicate"):
+            with self.subTest(fault=fault):
+                root = self.copy_fixture()
+                runner = self.write_runner(root, KILLED_RUNNER)
+                script_path = root / MUTATION_SCRIPT
+                script = script_path.read_text(encoding="utf-8")
+                if fault == "missing":
+                    script, replacements = re.subn(
+                        r"^register_mutation \\\n  M10 .*?(?=\n\n)",
+                        "", script, count=1, flags=re.M | re.S,
+                    )
+                    self.assertEqual(replacements, 1)
+                    error = "ERROR mutation row count=6 expected=7"
+                else:
+                    old = '\n  M6 "$TERMINAL_HANDOFF"'
+                    self.assertEqual(script.count(old), 1)
+                    script = script.replace(old, '\n  M10 "$TERMINAL_HANDOFF"')
+                    error = "ERROR duplicate mutation id=M10"
+                script_path.write_text(script, encoding="utf-8")
+                result = self.run_script(root, runner)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn(error, result.stderr)
+                self.assertNotIn("MUTATION_RESULT", result.stdout)
+                self.assert_sources_restored(self, root)
+
+    def test_shard_plan_rejects_omitted_and_duplicate_assignments(self) -> None:
+        for condition, assignments in (("&& index != 0", 0), ("|| index == 0", 3)):
+            with self.subTest(assignments=assignments):
+                root = self.copy_fixture()
+                runner = self.write_runner(root, KILLED_RUNNER)
+                script_path = root / MUTATION_SCRIPT
+                script = script_path.read_text(encoding="utf-8")
+                old = "index % SHARD_TOTAL == shard"
+                self.assertEqual(script.count(old), 1)
+                script_path.write_text(script.replace(old, f"{old} {condition}"), encoding="utf-8")
+                result = self.run_script(root, runner, {
+                    "RELAY_AUTHORITY_MUTATION_SHARD_INDEX": "0",
+                    "RELAY_AUTHORITY_MUTATION_SHARD_TOTAL": "3",
+                })
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn(
+                    f"ERROR mutation id=M10 shard assignments={assignments} expected=1",
+                    result.stderr,
+                )
+                self.assertNotIn("MUTATION_RESULT", result.stdout)
+                self.assert_sources_restored(self, root)
+
+    def test_survivor_in_one_shard_fails_that_shard(self) -> None:
+        root = self.copy_fixture()
+        runner = self.write_runner(
+            root, 'if [[ "$1" == "S4-m5" ]]; then\n' + SURVIVED_RUNNER + "fi\n" + KILLED_RUNNER,
+        )
+        result = self.run_script(root, runner, {
+            "RELAY_AUTHORITY_MUTATION_SHARD_INDEX": "1",
+            "RELAY_AUTHORITY_MUTATION_SHARD_TOTAL": "3",
+        })
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("MUTATION_SHARD index=1 total=3 count=2 ids=M6,S4-m5", result.stdout)
+        self.assertIn("MUTATION_RESULT mutation=M6 status=KILLED", result.stdout)
+        self.assertIn("MUTATION_RESULT mutation=S4-m5 status=SURVIVED", result.stderr)
+        self.assertNotIn("MUTATION_SUMMARY", result.stdout)
+        self.assert_sources_restored(self, root)
+
     def test_manifest_declares_the_same_mutation_rows_the_script_runs(self) -> None:
         """The manifest's `condition3_mutations` list is documentation until
         something compares it to the script. Compare it to a real run: the names
@@ -737,10 +859,10 @@ exit 101
 
 
 class MutationPathFilterContractTests(unittest.TestCase):
-    """#5997: the mutation step is the only path-gated step in an otherwise
-    unconditional required job, so its filter must stay exactly as wide as what
-    the step grades. A filter that drifts narrow skips the gate silently and CI
-    stays green, so the two lists are compared rather than trusted."""
+    """The unconditional mutation job filters only its mutation step.
+
+    The filter must cover all mutated sources, judges, and fixture owners.
+    """
 
     maxDiff = None
 
@@ -804,9 +926,7 @@ class MutationPathFilterContractTests(unittest.TestCase):
         job = yaml.safe_load((REPO_ROOT / PR_WORKFLOW).read_text(encoding="utf-8"))["jobs"][
             MUTATION_JOB
         ]
-        # `check-ci-runner-hardening.sh` forbids both keys here so the #5321
-        # backstop stays independent of the `changes` job; that is why this is a
-        # step-level filter and not a job-level one.
+        # The mutation job must run independently of path-filter job results.
         self.assertNotIn("if", job)
         self.assertNotIn("needs", job)
         gated = {
