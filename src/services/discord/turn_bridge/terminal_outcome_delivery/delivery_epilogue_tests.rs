@@ -348,6 +348,7 @@ impl Future for Yields {
 
 struct DriverGateway {
     chain_locally: bool,
+    direct: bool,
     marker: Arc<AtomicBool>,
     observations: Arc<Mutex<Vec<DriverObservation>>>,
     /// Bumped only after a publishing call has RESOLVED to a success outcome —
@@ -503,7 +504,7 @@ impl TurnGateway for DriverGateway {
     }
 
     fn can_deliver_directly(&self) -> bool {
-        true
+        self.direct
     }
 
     fn bot_owner_provider(&self) -> Option<ProviderKind> {
@@ -597,6 +598,7 @@ impl TerminalDeliveryDriver {
         let published_bodies = Arc::new(Mutex::new(Vec::new()));
         let gateway: Arc<dyn TurnGateway> = Arc::new(DriverGateway {
             chain_locally: true,
+            direct: true,
             marker: Arc::clone(&marker),
             observations: Arc::clone(&observations),
             completed_publications: Arc::clone(&completed_publications),
@@ -1061,3 +1063,202 @@ async fn resume_pin_delivery_epilogue_stamps_only_current_incarnation() {
 }
 
 mod rest_delivery_tests;
+
+/// One real bridge stream tick over `inflight`'s body; returns the tick's offset and row.
+async fn drive_bridge_stream_tick(
+    driver: &TerminalDeliveryDriver,
+    mut inflight_state: InflightTurnState,
+) -> (usize, String, InflightTurnState) {
+    use crate::services::discord::turn_bridge::stream_tick::{
+        BridgeStreamTickContext, BridgeStreamTickState, run_bridge_stream_tick,
+    };
+    let expected =
+        crate::services::discord::inflight::InflightTurnIdentity::from_state(&inflight_state);
+    let mut baseline = inflight_state.clone();
+    let mut expected_current_message = (
+        inflight_state.current_msg_id,
+        inflight_state.current_msg_len,
+    );
+    let mut current_msg_id = crate::services::discord::turn_bridge::current_message_anchor::detached_current_msg_id_from_durable(
+        inflight_state.current_msg_id,
+    );
+    let mut full_response = driver.body.clone();
+    let (mut response_sent_offset, mut confirmed_offset) = (0usize, 0usize);
+    let (mut state_dirty, mut status_panel_dirty, mut first_answer_relayed) = (false, false, true);
+    let (mut watcher_owns, mut watcher_available, mut standby_owns) = (false, false, false);
+    let (mut any_tool_used, mut has_post_tool_text) = (false, false);
+    let now = tokio::time::Instant::now;
+    let (mut lifecycle_refresh, mut panel_edit, mut status_edit) = (now(), now(), now());
+    let (mut spin_idx, mut status_panel_generation) = (0usize, 0u64);
+    let mut status_panel_msg_id: Option<MessageId> = None;
+    let mut last_status_panel_text = String::new();
+    let mut watcher_delivery_pin = None;
+    let mut watcher_owner_channel_id = ChannelId::new(DRIVER_CHANNEL_ID);
+    let mut frozen: Vec<MessageId> = Vec::new();
+    let (mut pending_candidate, mut created_placeholder): (Option<MessageId>, Option<MessageId>) =
+        (None, None);
+    let mut last_edit_text = String::new();
+    let (mut current_tool_line, mut prev_tool_status) = (None, None);
+    let (mut last_tool_name, mut last_tool_summary) = (None, None);
+    let mut tmux_last_offset: Option<u64> = None;
+    let mut bridge_spans = crate::services::discord::turn_bridge::bridge_latency_spans::BridgeLatencySpans::starting_at(
+        std::time::Instant::now(),
+    );
+    let (mut open_after_save, mut retarget_after_save, mut long_running_active) =
+        (None, None, None);
+    let (mut adk_heartbeat, mut long_run_heartbeat) =
+        (std::time::Instant::now(), std::time::Instant::now());
+    let outcome = run_bridge_stream_tick(
+        BridgeStreamTickContext {
+            shared_owned: Arc::clone(&driver.shared),
+            gateway: Arc::clone(&driver.gateway),
+            channel_id: ChannelId::new(DRIVER_CHANNEL_ID),
+            provider: &ProviderKind::Claude,
+            turn_id: "terminal-delivery-driver-5191",
+            expected_identity: &expected,
+            status_interval: std::time::Duration::from_secs(3_600),
+            single_message_panel_footer_mode: false,
+            footer_owner:
+                crate::services::discord::footer_view_reconciler::CompletionFooterOwner::new(
+                    DRIVER_USER_MSG_ID,
+                    0,
+                ),
+            status_panel_started_at: 0,
+            done: false,
+            dispatch_id: None,
+            adk_session_key: None,
+            adk_session_name: None,
+            adk_session_info: None,
+            adk_cwd: None,
+            role_binding: None,
+            spinner: &["|"],
+            live_long_run_heartbeat_interval: std::time::Duration::from_secs(3_600),
+        },
+        BridgeStreamTickState {
+            state_dirty: &mut state_dirty,
+            last_session_panel_lifecycle_refresh: &mut lifecycle_refresh,
+            status_panel_dirty: &mut status_panel_dirty,
+            spin_idx: &mut spin_idx,
+            last_status_panel_edit: &mut panel_edit,
+            last_status_edit: &mut status_edit,
+            status_panel_msg_id: &mut status_panel_msg_id,
+            last_status_panel_text: &mut last_status_panel_text,
+            watcher_owns_assistant_relay: &mut watcher_owns,
+            watcher_relay_available_for_turn: &mut watcher_available,
+            watcher_delivery_pin: &mut watcher_delivery_pin,
+            standby_relay_owns_output: &mut standby_owns,
+            watcher_owner_channel_id: &mut watcher_owner_channel_id,
+            full_response: &mut full_response,
+            response_sent_offset: &mut response_sent_offset,
+            bridge_confirmed_response_sent_offset: &mut confirmed_offset,
+            streaming_rollover_frozen_msg_ids: &mut frozen,
+            current_msg_id: &mut current_msg_id,
+            expected_current_message: &mut expected_current_message,
+            pending_current_message_candidate: &mut pending_candidate,
+            bridge_created_response_placeholder_msg_id: &mut created_placeholder,
+            last_edit_text: &mut last_edit_text,
+            first_answer_relayed: &mut first_answer_relayed,
+            current_tool_line: &mut current_tool_line,
+            prev_tool_status: &mut prev_tool_status,
+            last_tool_name: &mut last_tool_name,
+            last_tool_summary: &mut last_tool_summary,
+            any_tool_used: &mut any_tool_used,
+            has_post_tool_text: &mut has_post_tool_text,
+            tmux_last_offset: &mut tmux_last_offset,
+            persisted_inflight_baseline: &mut baseline,
+            inflight_state: &mut inflight_state,
+            bridge_spans: &mut bridge_spans,
+            status_panel_generation: &mut status_panel_generation,
+            pending_long_running_open_after_state_save: &mut open_after_save,
+            pending_long_running_retarget_after_state_save: &mut retarget_after_save,
+            long_running_placeholder_active: &mut long_running_active,
+            last_adk_heartbeat: &mut adk_heartbeat,
+            last_inflight_long_run_heartbeat: &mut long_run_heartbeat,
+        },
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        crate::services::discord::turn_bridge::stream_tick::StreamTickOutcome::Continue,
+        "the tick must run to its body section"
+    );
+    (response_sent_offset, full_response, inflight_state)
+}
+
+/// A delegated TUI turn on a direct gateway leaves the body to O through tick and terminal,
+/// while a headless gateway turn of the same kind keeps its whole body for Legacy delivery.
+#[tokio::test]
+async fn o_delegated_tui_body_is_cut_on_direct_gateways_but_not_headless() {
+    for direct in [true, false] {
+        let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
+        driver.gateway = Arc::new(DriverGateway {
+            chain_locally: true,
+            direct,
+            marker: driver.marker.clone(),
+            observations: driver.observations.clone(),
+            completed_publications: driver.completed_publications.clone(),
+            published_bodies: driver.published_bodies.clone(),
+            replace: ReplaceBehaviour::Edited,
+            yields_per_call: 0,
+        });
+        driver.inflight.runtime_kind =
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        crate::services::discord::inflight::save_inflight_state(&driver.inflight)
+            .expect("seed the TUI-kind row");
+        let _forced = crate::services::tui_o::cutover::test_override::force_on();
+
+        let (offset, full_response, inflight) =
+            drive_bridge_stream_tick(&driver, driver.inflight.clone()).await;
+        let (ctx, mut state) = driver.parts();
+        (
+            state.response_sent_offset,
+            state.full_response,
+            state.inflight_state,
+        ) = (offset, full_response, inflight);
+        let output =
+            tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
+                .await
+                .expect("terminal outcome delivery must not hang");
+
+        let observed = driver.observations();
+        let body_writes = observed
+            .iter()
+            .filter(|o| {
+                matches!(
+                    o.call,
+                    DriverCall::Replace | DriverCall::Send | DriverCall::Edit
+                )
+            })
+            .count();
+        assert_eq!(
+            body_writes, 0,
+            "direct={direct}: no gateway body write; observed={observed:?}"
+        );
+        if direct {
+            assert_eq!(
+                offset,
+                DRIVER_BODY.len(),
+                "the tick consumes the delegated body"
+            );
+            assert!(
+                output.terminal_delivery_committed,
+                "consumed turn commits without transport"
+            );
+        } else {
+            assert_eq!(offset, 0, "a headless turn keeps its body unconsumed");
+            assert_eq!(
+                (output.full_response.as_str(), output.response_sent_offset),
+                (DRIVER_BODY, 0),
+                "the headless delivery still owns the whole original body"
+            );
+            assert!(
+                !observed.iter().any(|o| o.call == DriverCall::Delete),
+                "headless placeholder is not dropped by the O cut; observed={observed:?}"
+            );
+            assert!(
+                !output.terminal_delivery_committed && output.preserve_inflight_for_cleanup_retry,
+                "with no outbox or http here the headless body is preserved for retry, not dropped"
+            );
+        }
+    }
+}

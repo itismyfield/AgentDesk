@@ -68,6 +68,34 @@ pub(crate) mod test_override {
             FORCED.with(|cell| cell.set(self.0));
         }
     }
+
+    /// Binds a tmux session as a Claude TUI until dropped, so session-keyed gates see a TUI kind.
+    pub(crate) struct TuiSessionGuard(String);
+
+    pub(crate) fn bind_claude_tui_session(
+        tmux_session: &str,
+        output_path: &str,
+    ) -> TuiSessionGuard {
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            tmux_session,
+            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                runtime_kind: super::RuntimeHandoffKind::ClaudeTui,
+                output_path: output_path.to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: None,
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        TuiSessionGuard(tmux_session.to_string())
+    }
+
+    impl Drop for TuiSessionGuard {
+        fn drop(&mut self) {
+            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&self.0);
+        }
+    }
 }
 
 #[cfg(test)]

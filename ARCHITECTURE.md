@@ -1248,6 +1248,7 @@ src/
 │   │   │   ├── loop_poll_prologue.rs
 │   │   │   ├── no_result_exits.rs
 │   │   │   ├── o_delegated_arm.rs
+│   │   │   ├── o_delegated_watcher_tests.rs
 │   │   │   ├── orphan_status_panel_cleanup.rs
 │   │   │   ├── orphan_terminal_frame.rs
 │   │   │   ├── owed_range_baseline_tests.rs
