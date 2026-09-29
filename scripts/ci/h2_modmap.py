@@ -383,7 +383,7 @@ def collection_context(root: Path, lane: str) -> dict:
 
 
 # Driver-backed suites --canary runs with the driver it built, and the fewest tests each must run.
-SESSION_SUITES = {"tests.test_h2_session_driver": 8, "tests.test_h2_session_e2e": 9}
+SESSION_SUITES = {"tests.test_h2_session_driver": 8, "tests.test_h2_session_e2e": 10}
 
 
 def run_suite(root: Path, driver: Path, module: str, *, timeout: float = 1200) -> None:

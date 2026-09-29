@@ -583,6 +583,7 @@ pub(super) async fn spawn_standby_gateway_retry(
     shared: Arc<SharedData>,
     token_hash: String,
     provider: ProviderKind,
+    mut handback_breaker: super::GatewayHandbackBreaker,
 ) {
     let Some(pool) = shared.pg_pool.clone() else {
         return;
@@ -597,10 +598,11 @@ pub(super) async fn spawn_standby_gateway_retry(
             {
                 return;
             }
-            match super::gateway_lease::try_acquire_discord_gateway_lease(
+            match super::gateway_lease::try_acquire_observing_handback(
                 &pool,
                 &token_hash,
                 &provider,
+                &mut handback_breaker,
             )
             .await
             {

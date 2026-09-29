@@ -654,7 +654,8 @@ src/
 │   │   ├── rollout_tail/
 │   │   │   └── parser.rs
 │   │   ├── session/
-│   │   │   └── source_observation.rs
+│   │   │   ├── source_observation.rs
+│   │   │   └── source_observation_tests.rs
 │   │   ├── input.rs
 │   │   ├── mod.rs
 │   │   ├── rollout_index.rs
@@ -895,6 +896,7 @@ src/
 │   │   │   ├── manual_delivery.rs
 │   │   │   ├── message.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── o_writer_io.rs
 │   │   │   ├── policy.rs
 │   │   │   ├── reaction_control.rs
 │   │   │   ├── receipt_index.rs
@@ -1111,6 +1113,8 @@ src/
 │   │   │   ├── framework_setup.rs
 │   │   │   ├── gateway_handback_breaker.rs
 │   │   │   ├── gateway_handback_breaker_tests.rs
+│   │   │   ├── gateway_handback_integration_tests.rs
+│   │   │   ├── gateway_handback_mock.rs
 │   │   │   ├── gateway_lease.rs
 │   │   │   ├── gateway_lease_recovery.rs
 │   │   │   ├── gateway_lease_recovery_tests.rs
@@ -1922,6 +1926,21 @@ src/
 │   │   │   ├── seal.rs
 │   │   │   ├── tap.rs
 │   │   │   └── unit_plan.rs
+│   │   ├── store/
+│   │   │   ├── durable.rs
+│   │   │   ├── ledger.rs
+│   │   │   ├── mod.rs
+│   │   │   └── spool.rs
+│   │   ├── writer/
+│   │   │   ├── actor.rs
+│   │   │   ├── actor_tests.rs
+│   │   │   ├── confirm.rs
+│   │   │   ├── deliver.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── pieces.rs
+│   │   │   ├── round_trip.rs
+│   │   │   └── writer_tests.rs
+│   │   ├── ownership.rs
 │   │   └── shadow_host.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── binding_events/
