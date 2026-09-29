@@ -220,35 +220,42 @@ fn verify_tail(cursor: &Cursor, tail: &[SpoolFrame], end: u64) -> io::Result<Opt
 }
 
 /// Proves coverage of `[retained, cursor]`, finishes a logged GC, then settles a spool tail past the cursor.
+/// `gc` is the source's logged GC chain; `violated` withholds every deletion.
 fn recover_source(
     dir: &Path,
     key: &str,
     cursor: Cursor,
     origin: u64,
-    gc: Option<u64>,
+    gc: &[(u64, u64)],
+    violated: bool,
     mut paths: Vec<(u64, PathBuf)>,
 ) -> Result<SourceSpool, StoreError> {
     paths.sort();
-    let retained = gc.map_or(origin, |through| through.max(origin));
+    if gc.first().is_some_and(|&(start, _)| start != origin) {
+        return Err(damage(format!(
+            "spool {key} GC chain does not start at {origin}"
+        )));
+    }
+    let retained = gc.last().map_or(origin, |&(_, through)| through);
     let through = cursor.captured_through;
     let (mut expected, mut at_boundary) = (retained, through == retained);
     let (mut segments, mut tail, mut torn) = (Vec::new(), Vec::new(), None);
     let last = paths.len().saturating_sub(1);
     for (index, (start, path)) in paths.into_iter().enumerate() {
-        if gc.is_some_and(|point| start < point) {
-            // Its SpoolGc entry is durable, so the interrupted delete is completed.
-            if scan_segment(&path, |_| ())?.end > retained {
-                return Err(gap(format!(
-                    "{}: straddles GC point {retained}",
-                    path.display()
-                )));
+        if start < retained && !violated {
+            // Only a segment matching a logged span exactly is deleted; its entry is durable.
+            let span = (start, scan_segment(&path, |_| ())?.end);
+            if gc.contains(&span) {
+                fs::remove_file(&path)?;
+                fsync_parent_dir(&path)?;
+                continue;
             }
-            fs::remove_file(&path)?;
-            fsync_parent_dir(&path)?;
-            continue;
         }
+        let mut bad_skip = false;
         let scan = scan_segment(&path, |frame| {
             at_boundary |= frame.end() == through;
+            // A skip is only the torn first line of a source that began mid-file.
+            bad_skip |= matches!(frame, SpoolFrame::Skipped { start, .. } if start != origin || origin == 0);
             if frame.start() >= through {
                 tail.push(frame);
             }
@@ -257,8 +264,12 @@ fn recover_source(
         if header.start_offset != start
             || header.source_id != cursor.source
             || header.identity_version != IDENTITY_VERSION
+            || bad_skip
         {
-            return Err(damage(format!("{}: header disagrees", path.display())));
+            return Err(damage(format!(
+                "{}: header or frames disagree",
+                path.display()
+            )));
         }
         if start != expected {
             return Err(gap(format!(
@@ -357,47 +368,47 @@ pub(super) fn recover_sources(
     }
     let mut spools = BTreeMap::new();
     for (key, (cursor, origin)) in cursors {
-        let gc = ledger.gc_through(&cursor.source);
+        let (gc, violated) = (
+            ledger.gc_segments(&cursor.source),
+            ledger.violation().is_some(),
+        );
         let paths = segments.remove(&key).unwrap_or_default();
-        let spool = recover_source(dir, &key, cursor, origin, gc, paths)?;
+        let spool = recover_source(dir, &key, cursor, origin, gc, violated, paths)?;
         spools.insert(key, spool);
     }
     Ok(spools)
 }
 
-/// Frames a batch contiguously after `pos`; skipped bytes are allowed only at the spool origin.
+/// Frames a batch contiguously after the spool end. One leading skip is allowed: the torn first
+/// line of a source that began mid-file, before anything was spooled.
 fn frames_for(spool: &SourceSpool, batch: &CaptureBatch) -> Result<Vec<SpoolFrame>, StoreError> {
     let mut pos = spool.end();
-    let may_skip = spool.segments.is_empty() && pos == spool.origin;
+    let at_origin = spool.segments.is_empty() && pos == spool.origin && spool.origin > 0;
     let mut frames = Vec::new();
-    for record in &batch.records {
-        let whole = record.end == record.start + record.line.len() as u64 + 1;
-        if record.start < pos || !whole || record.line.contains(&b'\n') {
-            return Err(rejected("record overlaps the spool or is malformed"));
+    let ends = batch
+        .records
+        .iter()
+        .map(|record| (record.start, Some(record)));
+    for (start, record) in ends.chain([(batch.captured_through, None)]) {
+        if start < pos {
+            return Err(rejected("batch overlaps or runs behind the spool"));
         }
-        if record.start > pos {
+        if start > pos {
+            if !(at_origin && frames.is_empty()) {
+                return Err(rejected("batch skips bytes past the spool origin"));
+            }
             frames.push(SpoolFrame::Skipped {
                 start: pos,
-                end: record.start,
+                end: start,
             });
+        }
+        let Some(record) = record else { break };
+        let whole = record.end == record.start + record.line.len() as u64 + 1;
+        if !whole || record.line.contains(&b'\n') {
+            return Err(rejected("malformed record"));
         }
         frames.push(SpoolFrame::Record(record.clone()));
         pos = record.end;
-    }
-    if batch.captured_through < pos {
-        return Err(rejected("captured_through is behind the spool"));
-    }
-    if batch.captured_through > pos {
-        frames.push(SpoolFrame::Skipped {
-            start: pos,
-            end: batch.captured_through,
-        });
-    }
-    let skips = frames
-        .iter()
-        .any(|frame| matches!(frame, SpoolFrame::Skipped { .. }));
-    if skips && !may_skip {
-        return Err(rejected("batch skips bytes past the spool origin"));
     }
     Ok(frames)
 }
@@ -528,30 +539,36 @@ impl ChannelStore {
     }
 
     /// Streams retained frames up to the cursor, oldest first, for re-derivation.
+    /// A read I/O error also stops the channel's writes until it is reopened.
     pub fn for_each_frame(
-        &self,
+        &mut self,
         source: &SourceId,
         mut visit: impl FnMut(SpoolFrame),
     ) -> Result<(), StoreError> {
-        let spool = self
-            .sources
-            .get(&source_key(source))
-            .ok_or_else(|| rejected("source not attached"))?;
-        let through = spool.cursor.captured_through;
-        for segment in &spool.segments {
-            scan_segment(&segment.path, |frame| {
-                if frame.end() <= through {
-                    visit(frame);
-                }
-            })?;
-        }
-        Ok(())
+        self.mutate(|store| {
+            let spool = store
+                .sources
+                .get(&source_key(source))
+                .ok_or_else(|| rejected("source not attached"))?;
+            let through = spool.cursor.captured_through;
+            for segment in &spool.segments {
+                scan_segment(&segment.path, |frame| {
+                    if frame.end() <= through {
+                        visit(frame);
+                    }
+                })?;
+            }
+            Ok(())
+        })
     }
 
     /// Deletes the oldest segment the cursor has passed. The caller vouches that every unit in it
     /// is settled in the ledger and that its source is not boundary-pending.
     pub fn gc_oldest_segment(&mut self, source: &SourceId) -> Result<(), StoreError> {
         self.mutate(|store| {
+            if store.ledger.violation().is_some() {
+                return Err(rejected("ledger violation withholds GC"));
+            }
             let key = source_key(source);
             let spool = store
                 .sources
@@ -664,7 +681,7 @@ mod tests {
         }
     }
 
-    fn lines(channel: &ChannelStore, source: &SourceId) -> Vec<String> {
+    fn lines(channel: &mut ChannelStore, source: &SourceId) -> Vec<String> {
         let mut lines = Vec::new();
         channel
             .for_each_frame(source, |frame| {
@@ -702,11 +719,11 @@ mod tests {
         let (batch, hash) = poll(&mut capture);
         channel.append_spool(&batch, &hash).unwrap();
         channel.set_retired(&fixture.source, true).unwrap();
-        let reopened = fixture.open().unwrap();
+        let mut reopened = fixture.open().unwrap();
         let cursor = reopened.cursor(&fixture.source).unwrap();
         assert_eq!((cursor.captured_through, cursor.retired), (11, true));
         assert_eq!(cursor.prefix_hash, hash);
-        assert_eq!(lines(&reopened, &fixture.source), ["skip 6..8", "CC"]);
+        assert_eq!(lines(&mut reopened, &fixture.source), ["skip 6..8", "CC"]);
     }
 
     #[test]
@@ -730,7 +747,7 @@ mod tests {
         let (batch, hash) = poll(&mut capture);
         reopened.append_spool(&batch, &hash).unwrap();
         assert_eq!(
-            lines(&fixture.open().unwrap(), &fixture.source),
+            lines(&mut fixture.open().unwrap(), &fixture.source),
             ["L1", "L2", "L3"]
         );
     }
@@ -770,7 +787,7 @@ mod tests {
             std::fs::write(lost, bytes).unwrap();
         }
         assert_eq!(
-            lines(&fixture.open().unwrap(), &fixture.source),
+            lines(&mut fixture.open().unwrap(), &fixture.source),
             ["L1", "L2"]
         );
     }
@@ -786,9 +803,9 @@ mod tests {
         channel.gc_oldest_segment(&fixture.source).unwrap();
         assert_eq!(channel.ledger().gc_through(&fixture.source), Some(3));
         std::fs::write(&oldest, bytes).unwrap();
-        let reopened = fixture.open().unwrap();
+        let mut reopened = fixture.open().unwrap();
         assert!(!oldest.exists());
-        assert_eq!(lines(&reopened, &fixture.source), ["L2"]);
+        assert_eq!(lines(&mut reopened, &fixture.source), ["L2"]);
     }
 
     #[test]
@@ -823,8 +840,146 @@ mod tests {
             Err(StoreError::SpoolFull)
         ));
         assert_eq!(channel.cursor(&fixture.source).cloned(), before);
-        let reopened = fixture.open().unwrap();
+        let mut reopened = fixture.open().unwrap();
         assert_eq!(reopened.cursor(&fixture.source).cloned(), before);
-        assert_eq!(lines(&reopened, &fixture.source), ["L1"]);
+        assert_eq!(lines(&mut reopened, &fixture.source), ["L1"]);
+    }
+
+    #[test]
+    fn reopening_sweeps_crash_aliases_so_gc_frees_the_segment() {
+        let fixture = Fixture::new(b"L1\n", None);
+        let mut channel = fixture.open().unwrap();
+        channel.segment_max = 1;
+        two_batches(&fixture, &mut channel);
+        let oldest = fixture.segments()[0].clone();
+        let alias = PathBuf::from(format!("{}.tmp", oldest.display()));
+        fs::hard_link(&oldest, &alias).unwrap();
+        let mut reopened = fixture.open().unwrap();
+        assert!(!alias.exists());
+        reopened.gc_oldest_segment(&fixture.source).unwrap();
+        assert!(!oldest.exists() && !alias.exists());
+    }
+
+    #[test]
+    fn a_spool_read_error_stops_writes_until_the_channel_is_reopened() {
+        let fixture = Fixture::new(b"L1\n", None);
+        let mut channel = fixture.open().unwrap();
+        two_batches(&fixture, &mut channel);
+        let segment = fixture.segments()[0].clone();
+        let bytes = fs::read(&segment).unwrap();
+        fs::remove_file(&segment).unwrap();
+        fs::create_dir(&segment).unwrap();
+        let read = channel.for_each_frame(&fixture.source, |_| ());
+        assert!(matches!(read, Err(StoreError::Io(_))));
+        fs::remove_dir(&segment).unwrap();
+        fs::write(&segment, bytes).unwrap();
+        let excluded = |reason: &str| LedgerEntry::Excluded {
+            unit_key: crate::services::tui_o::shadow::UnitKey {
+                channel_id: 7,
+                provider: crate::services::tui_o::shadow::ShadowProvider::Claude,
+                native_key: "u".into(),
+                kind: crate::services::tui_o::shadow::UnitKind::Body,
+            },
+            reason: reason.into(),
+        };
+        assert!(matches!(
+            channel.append_ledger(excluded("a")),
+            Err(StoreError::Rejected(_))
+        ));
+        assert!(channel.set_retired(&fixture.source, true).is_err());
+        fixture
+            .open()
+            .unwrap()
+            .append_ledger(excluded("b"))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_first_batch_may_skip_only_the_torn_first_line() {
+        let fixture = Fixture::new(b"L1\nL2\nL3\n", None);
+        let mut channel = fixture.open().unwrap();
+        channel.attach_source(&fixture.source).unwrap();
+        let record = |start: u64, line: &str| CapturedRecord {
+            start,
+            end: start + line.len() as u64 + 1,
+            line: line.as_bytes().to_vec(),
+        };
+        let (source, records) = (
+            fixture.source.clone(),
+            vec![record(0, "L1"), record(6, "L3")],
+        );
+        let holed = CaptureBatch {
+            source,
+            records,
+            captured_through: 9,
+        };
+        assert!(matches!(
+            channel.append_spool(&holed, "h"),
+            Err(StoreError::Rejected(_))
+        ));
+        let (source, records) = (fixture.source.clone(), vec![record(0, "L1")]);
+        let trailing = CaptureBatch {
+            source,
+            records,
+            captured_through: 6,
+        };
+        assert!(matches!(
+            channel.append_spool(&trailing, "h"),
+            Err(StoreError::Rejected(_))
+        ));
+        let (source, records) = (fixture.source.clone(), vec![record(0, "L1")]);
+        let whole = CaptureBatch {
+            source,
+            records,
+            captured_through: 3,
+        };
+        let hash = |end: usize| hex::encode(Sha256::digest(&b"L1\nL2\nL3\n"[..end]));
+        channel.append_spool(&whole, &hash(3)).unwrap();
+        // A mid-spool skip written behind the API is refused on recovery as well.
+        durable::append_synced(&fixture.segments()[0], b"s 3 6\nr 6 9 L3\n").unwrap();
+        let cursor = Cursor {
+            captured_through: 9,
+            prefix_hash: hash(9),
+            ..channel.cursor(&fixture.source).cloned().unwrap()
+        };
+        fs::write(fixture.cursor_path(), serde_json::to_vec(&cursor).unwrap()).unwrap();
+        assert_eq!(reason(fixture.open()), HaltReason::StoreDamage);
+    }
+
+    #[test]
+    fn a_gc_entry_outside_the_logged_chain_deletes_nothing_and_halts() {
+        let fixture = Fixture::new(b"L1\n", None);
+        let mut channel = fixture.open().unwrap();
+        channel.segment_max = 1;
+        two_batches(&fixture, &mut channel);
+        let source = fixture.source.clone();
+        let forged = LedgerEntry::SpoolGc {
+            source: source.clone(),
+            segment_start: 0,
+            through: 6,
+        };
+        assert!(matches!(
+            channel.append_ledger(forged),
+            Err(StoreError::Rejected(_))
+        ));
+        let ledger = fixture.channel_dir().join(super::super::LEDGER_FILE);
+        let segments = fixture.segments();
+        for (segment_start, through) in [(999, 6), (0, 6)] {
+            let entry = LedgerEntry::SpoolGc {
+                source: source.clone(),
+                segment_start,
+                through,
+            };
+            let line = serde_json::json!({ "at": Utc::now(), "entry": entry });
+            let saved = fs::read(&ledger).unwrap();
+            durable::append_synced(&ledger, format!("{line}\n").as_bytes()).unwrap();
+            assert!(
+                fixture.open().is_err(),
+                "forged GC {segment_start}..{through} opened"
+            );
+            assert!(segments.iter().all(|segment| segment.exists()));
+            fs::write(&ledger, saved).unwrap();
+        }
+        assert_eq!(lines(&mut fixture.open().unwrap(), &source), ["L1", "L2"]);
     }
 }

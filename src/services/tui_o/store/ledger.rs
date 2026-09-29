@@ -91,7 +91,7 @@ pub struct LedgerState {
     pieces: BTreeMap<u64, PieceRecord>,
     latest: HashMap<(UnitKey, u32), u64>,
     excluded: BTreeMap<UnitKey, String>,
-    gc_through: HashMap<SourceId, u64>,
+    gc: HashMap<SourceId, Vec<(u64, u64)>>,
     violation: Option<String>,
 }
 
@@ -129,7 +129,12 @@ impl LedgerState {
     }
 
     pub fn gc_through(&self, source: &SourceId) -> Option<u64> {
-        self.gc_through.get(source).copied()
+        self.gc_segments(source).last().map(|&(_, through)| through)
+    }
+
+    /// Logged GC spans `(segment_start, through)` in order; each starts where the previous ended.
+    pub fn gc_segments(&self, source: &SourceId) -> &[(u64, u64)] {
+        self.gc.get(source).map_or(&[], Vec::as_slice)
     }
 
     /// Ownership evidence that pauses the channel: a serial out of order, two open pieces,
@@ -195,10 +200,18 @@ impl LedgerState {
                 self.excluded.insert(unit_key, reason);
             }
             LedgerEntry::SpoolGc {
-                source, through, ..
+                source,
+                segment_start,
+                through,
             } => {
-                let slot = self.gc_through.entry(source).or_default();
-                *slot = (*slot).max(through);
+                let spans = self.gc.entry(source).or_default();
+                let joins = spans.last().is_none_or(|&(_, last)| last == segment_start);
+                spans.push((segment_start, through));
+                if !joins || through <= segment_start {
+                    self.violate(format!(
+                        "SpoolGc {segment_start}..{through} breaks the GC chain"
+                    ));
+                }
             }
         }
     }
