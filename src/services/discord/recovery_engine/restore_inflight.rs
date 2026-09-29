@@ -289,9 +289,10 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                         .map(|confirmed_end| (state.last_offset, confirmed_end)),
                     shared.restart.current_generation,
                 );
-                let relay_ok = relay_recovered_terminal_text_to_placeholder(
+                let relay_ok = relay_recovery_body_to_placeholder(
                     http,
                     shared,
+                    &state,
                     channel_id,
                     optional_message_id(state.current_msg_id),
                     &final_text,
@@ -937,9 +938,10 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 terminal_success_end.map(|confirmed_end| (state.last_offset, confirmed_end)),
                 shared.restart.current_generation,
             );
-            let relay_ok = relay_recovered_terminal_text_to_placeholder(
+            let relay_ok = relay_recovery_body_to_placeholder(
                 http,
                 shared,
+                &state,
                 channel_id,
                 current_msg_id,
                 &final_text,
@@ -1194,9 +1196,10 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 terminal_success_end.map(|confirmed_end| (state.last_offset, confirmed_end)),
                 shared.restart.current_generation,
             );
-            let relay_ok = relay_recovered_terminal_text_to_placeholder(
+            let relay_ok = relay_recovery_body_to_placeholder(
                 http,
                 shared,
+                &state,
                 channel_id,
                 current_msg_id,
                 &final_text,
@@ -1490,7 +1493,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 );
             }
             let outcome =
-                relay_recovery_terminal_notice(http, shared, provider, &state, &stale_text).await;
+                relay_recovery_body_notice(http, shared, provider, &state, &stale_text).await;
             if let Some(ref sk) = state.session_key {
                 crate::services::termination_audit::record_termination_with_handles(
                     shared.pg_pool.as_ref(),

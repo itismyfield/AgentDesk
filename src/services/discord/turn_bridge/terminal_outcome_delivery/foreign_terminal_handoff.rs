@@ -422,7 +422,11 @@ pub(super) async fn resume_with_gateway(
             full_response: &snapshot.full_response,
         })
     };
-    let mut delivered = snapshot.delivery_receipts.len() == chunks.len()
+    // O posts this channel's TUI body: settle the custody without posting or recording it.
+    let o_owns_body =
+        crate::services::tui_o::cutover::o_owns_tui_output(snapshot.local.runtime_kind);
+    let mut delivered = o_owns_body
+        || snapshot.delivery_receipts.len() == chunks.len()
         || decision() == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered;
     let mut held_lease = None;
     if !delivered {
@@ -466,7 +470,8 @@ pub(super) async fn resume_with_gateway(
         // adopts its anchor. Drop releases only this held lease.
         held_lease = Some(lease);
     }
-    if let Some(admitted) = snapshot.admitted.as_ref()
+    if !o_owns_body
+        && let Some(admitted) = snapshot.admitted.as_ref()
         && let Some(message_id) = snapshot.delivery_receipts.last()
         && admitted.identity.matches_state(&snapshot.local)
         && admitted.result == snapshot.full_response

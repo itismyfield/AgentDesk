@@ -2113,6 +2113,14 @@ async fn maybe_recover_completed_stale_leak(
     let Some(state) = discord::inflight::load_inflight_state(provider, channel_id.get()) else {
         return false;
     };
+    // O posts this channel's TUI body; the detection above stays, Legacy resends nothing.
+    if crate::services::tui_o::cutover::o_owns_tui_output(state.runtime_kind) {
+        tracing::info!(
+            channel_id = channel_id.get(),
+            "stale-leak recovery skipped: O owns this channel's TUI body"
+        );
+        return false;
+    }
 
     // Planned restart / rebind flows re-deliver the answer themselves.
     if state.restart_mode.is_some() || state.rebind_origin {

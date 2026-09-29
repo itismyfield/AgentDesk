@@ -95,6 +95,10 @@ pub(super) async fn relay_captured_recovery_terminal_notice_with_gateway(
     text: &str,
     gateway: &dyn super::super::gateway::TurnGateway,
 ) -> CapturedRecoveryDelivery {
+    // O posts this channel's TUI body: consume the captured range without sending or recording it.
+    if crate::services::tui_o::cutover::o_owns_tui_output(state.runtime_kind) {
+        return RecoveryRelayOutcome::Delivered.into();
+    }
     if state.requires_pinned_terminal_recovery() {
         #[cfg(unix)]
         let committed = super::super::turn_bridge::publish_retained_terminal_recovery(
@@ -172,6 +176,58 @@ async fn relay_recovery_terminal_notice_with_capture(
             .as_ref()
             .and_then(RecoveryDeliveryContext::pending_anchor_after_delivery),
     }
+}
+
+/// The body-free marker Notice to show instead of a recovered body on an O-owned channel.
+fn o_recovery_marker(state: &super::inflight::InflightTurnState) -> Option<String> {
+    crate::services::tui_o::cutover::o_owns_tui_output(state.runtime_kind)
+        .then(|| interrupted_recovery_message(state, ""))
+}
+
+/// Recovered-body relay: unchanged for Legacy; on an O-owned channel only the marker, and
+/// without a recovery context so no delivery evidence is recorded for O's body.
+pub(super) async fn relay_recovery_body_to_placeholder(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    state: &super::inflight::InflightTurnState,
+    channel_id: ChannelId,
+    placeholder: Option<MessageId>,
+    text: &str,
+    recovery_context: Option<&RecoveryDeliveryContext>,
+) -> RecoveryRelayOutcome {
+    let marker = o_recovery_marker(state);
+    let (text, recovery_context) = match marker.as_deref() {
+        Some(marker) => (marker, None),
+        None => (text, recovery_context),
+    };
+    relay_recovered_terminal_text_to_placeholder(
+        http,
+        shared,
+        channel_id,
+        placeholder,
+        text,
+        recovery_context,
+    )
+    .await
+}
+
+/// `relay_recovery_terminal_notice` for notices that carry the recovered body.
+pub(super) async fn relay_recovery_body_notice(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &super::inflight::InflightTurnState,
+    text: &str,
+) -> RecoveryRelayOutcome {
+    if o_recovery_marker(state).is_none() {
+        return relay_recovery_terminal_notice(http, shared, provider, state, text).await;
+    }
+    let Some(channel_id) = super::inflight::opt_channel_id(state.channel_id) else {
+        return RecoveryRelayOutcome::TransientFailure;
+    };
+    let placeholder = super::inflight::opt_message_id(state.current_msg_id);
+    relay_recovery_body_to_placeholder(http, shared, state, channel_id, placeholder, text, None)
+        .await
 }
 
 /// Deliver the recovered terminal text to Discord: edit the placeholder in

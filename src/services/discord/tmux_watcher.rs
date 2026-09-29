@@ -1133,9 +1133,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         } else if o_ownership.is_err() {
             false
         } else if o_delegated_terminal {
-            tui_direct_anchor_terminal_body_visible = true;
-            last_relayed_offset = Some(turn_data_start_offset);
-            o_delegated_arm::consume_delegated_terminal(o_delegated_arm::DelegatedTerminal {
+            match o_delegated_arm::consume_delegated_terminal(o_delegated_arm::DelegatedTerminal {
                 http: &http,
                 shared: &shared,
                 provider: &watcher_provider,
@@ -1149,9 +1147,21 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 last_edit_text: &last_edit_text,
                 turn_data_start_offset,
                 observed_generation_mtime_ns: &mut last_observed_generation_mtime_ns,
+                task_card: task_notification_kind.and(task_notification_context.as_ref()),
             })
-            .await;
-            true
+            .await {
+                Ok(()) => {
+                    tui_direct_anchor_terminal_body_visible = true;
+                    last_relayed_offset = Some(turn_data_start_offset);
+                    true
+                }
+                Err(error) => {
+                    retry_terminal_delivery_from_offset = matches!(
+                        error, task_response_authority::PrepareWatcherTaskResponseError::Transient(_)
+                    );
+                    false
+                }
+            }
         } else if watcher_direct_fallback_after_session_bound_ack {
             terminal_direct_fallback::apply_watcher_direct_fallback_send(
                 &http,
