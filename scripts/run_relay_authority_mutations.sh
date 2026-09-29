@@ -1,32 +1,12 @@
 #!/usr/bin/env bash
-# #5071 condition-3: seven fixed, hand-written relay-authority mutations.
-#
-# The declared floor stays four (the condition-3 minimum). #5071 relay-tail S4
-# added the two destructive-fence rows S4-m5 and S4-m6 on top of it, and its r2
-# repair added S4-m7 for the fence's judge/commit atomicity.
-#
-# Deferred workflow wiring (apply only after the relay-authority lane lands):
-# in jobs.relay-authority-contract.steps, immediately after
-# "Run named relay-authority contract targets" and before "sccache stats", add:
-#
-#      - name: Require relay-authority mutations to be killed
-#        env:
-#          BASH_ENV: /dev/null
-#          CARGO_PROFILE_DEV_DEBUG: "0"
-#          CARGO_PROFILE_TEST_DEBUG: "0"
-#        shell: bash
-#        timeout-minutes: 30
-#        run: bash scripts/run_relay_authority_mutations.sh
-#
-# In that same follow-up commit, flip condition3_mutations_present to true in
-# scripts/relay_authority_contract_targets.json and re-pin the
-# relay-authority-contract job_sha256 in scripts/check-ci-runner-hardening.sh.
+# Run a deterministic shard of the fixed relay-authority mutations.
+# Every selected row must be killed by its named test.
 #
 # Exit codes. Every non-zero code below is a gate failure; there is no
 # "tolerated" non-zero exit.
 #     0  every mutation was killed by the test named for it
 #     1  a mutation SURVIVED the test that is supposed to kill it
-#     2  invalid invocation: bad test mode, missing fixture runner, bad source
+#     2  invalid invocation: bad shard, bad test mode, missing fixture runner, bad source
 #    75  another relay-authority mutation run holds the lock
 #    93  NO-VERDICT: incomplete run or exit status contradicts the test summary
 #    94  NO-TEST-RAN: the named test never executed, so nothing was proven (#5243)
@@ -47,6 +27,15 @@ readonly LOCK_DIR="$REPO_ROOT/target/relay-authority-mutations.lock"
 readonly MUTATION_COUNT=7
 readonly MODE="${RELAY_AUTHORITY_MUTATION_TEST_MODE:-cargo}"
 readonly FIXTURE_RUNNER="${RELAY_AUTHORITY_MUTATION_FIXTURE_RUNNER:-}"
+readonly SHARD_INDEX="${RELAY_AUTHORITY_MUTATION_SHARD_INDEX-0}"
+readonly SHARD_TOTAL="${RELAY_AUTHORITY_MUTATION_SHARD_TOTAL-1}"
+
+if [[ ! "$SHARD_TOTAL" =~ ^[1-9]$ || ! "$SHARD_INDEX" =~ ^[0-9]$ ]] ||
+  ((SHARD_TOTAL > MUTATION_COUNT || SHARD_INDEX >= SHARD_TOTAL)); then
+  printf 'ERROR invalid mutation shard index=%q total=%q (require 0 <= index < total <= %d)\n' \
+    "$SHARD_INDEX" "$SHARD_TOTAL" "$MUTATION_COUNT" >&2
+  exit 2
+fi
 
 if [[ "$MODE" != "cargo" && "$MODE" != "fixture" ]]; then
   printf 'ERROR invalid RELAY_AUTHORITY_MUTATION_TEST_MODE=%q\n' "$MODE" >&2
@@ -64,18 +53,8 @@ readonly SESSION_RELAY_SINK="src/services/discord/session_relay_sink.rs"
 # they mutate the child; the registry root no longer carries a mutated anchor.
 readonly WATCHER_FENCES="src/services/discord/tmux_watcher_registry/fences.rs"
 readonly DESTRUCTIVE_CANCEL_GATE="src/services/discord/destructive_cancel_gate.rs"
-# #5889: these four are the mutated sources, not the whole relay-authority
-# surface. The authority paths outside them -- soft-terminal direct send, the
-# turn_bridge entry-persist and stream-tick witnesses, the native recovered
-# preview and the tui_prompt_relay queue wake -- are graded by the named
-# targets of the "Run named relay-authority contract targets" step, which runs
-# unconditionally, rather than by a mutation row. They stay out because each
-# row pays one full crate build and seven already fill this step's 45-minute
-# budget, so widening the list would require raising that timeout. Add a target
-# in scripts/relay_authority_contract_targets.json instead.
-# The ci-pr.yml `mutation_sources` filter selects this list, the file that owns
-# each row's judging test, and the modules those judges import fixtures from;
-# tests/test_relay_authority_mutations.py fails if the groups drift apart.
+# The path filter selects these sources plus their judges and fixture owners.
+# Other authority paths are covered by the unconditional named contract targets.
 readonly -a MUTATION_FILES=(
   "$TERMINAL_HANDOFF"
   "$SESSION_RELAY_SINK"
@@ -359,6 +338,102 @@ run_mutation() {
   restore_after_row
 }
 
+declare -a MUTATION_IDS=() MUTATION_SOURCES=() MUTATION_EXPECTED=()
+declare -a MUTATION_REPLACEMENTS=() MUTATION_TARGETS=()
+declare -a SHARD_ROWS=() SHARD_IDS=() ASSIGNMENT_COUNTS=()
+
+register_mutation() {
+  MUTATION_IDS+=("$1")
+  MUTATION_SOURCES+=("$2")
+  MUTATION_EXPECTED+=("$3")
+  MUTATION_REPLACEMENTS+=("$4")
+  MUTATION_TARGETS+=("$5")
+}
+
+validate_shards() {
+  local index previous shard
+  if ((${#MUTATION_IDS[@]} != MUTATION_COUNT)); then
+    printf 'ERROR mutation row count=%d expected=%d\n' "${#MUTATION_IDS[@]}" "$MUTATION_COUNT" >&2
+    exit 2
+  fi
+  for index in "${!MUTATION_IDS[@]}"; do
+    for ((previous = 0; previous < index; previous++)); do
+      if [[ "${MUTATION_IDS[$previous]}" == "${MUTATION_IDS[$index]}" ]]; then
+        printf 'ERROR duplicate mutation id=%s\n' "${MUTATION_IDS[$index]}" >&2
+        exit 2
+      fi
+    done
+    ASSIGNMENT_COUNTS[$index]=0
+  done
+  for ((shard = 0; shard < SHARD_TOTAL; shard++)); do
+    for index in "${!MUTATION_IDS[@]}"; do
+      if ((index % SHARD_TOTAL == shard)); then
+        ASSIGNMENT_COUNTS[$index]=$((ASSIGNMENT_COUNTS[$index] + 1))
+        if ((shard == SHARD_INDEX)); then
+          SHARD_ROWS+=("$index")
+          SHARD_IDS+=("${MUTATION_IDS[$index]}")
+        fi
+      fi
+    done
+  done
+  for index in "${!MUTATION_IDS[@]}"; do
+    if ((ASSIGNMENT_COUNTS[$index] != 1)); then
+      printf 'ERROR mutation id=%s shard assignments=%d expected=1\n' \
+        "${MUTATION_IDS[$index]}" "${ASSIGNMENT_COUNTS[$index]}" >&2
+      exit 2
+    fi
+  done
+}
+
+register_mutation \
+  M10 "$TERMINAL_HANDOFF" \
+  'delivery_frontier::SinkDeliveryProofResult::Persisted => Self::Delivered,' \
+  'delivery_frontier::SinkDeliveryProofResult::Persisted => Self::NotDelivered,' \
+  'services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof'
+
+register_mutation \
+  M6 "$TERMINAL_HANDOFF" \
+  'terminal_not_delivered || fenced_terminal_without_delivery' \
+  'terminal_not_delivered' \
+  'services::discord::session_relay_sink::delivery_orchestration_tests::fenced_terminal_without_parser_delivery_is_terminal_not_delivered'
+
+register_mutation \
+  M8 "$TERMINAL_HANDOFF" \
+  'Err(error) => return Err(error),' \
+  'Err(_error) => { terminal_not_delivered = true; }' \
+  'services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_propagates_injected_transport_error'
+
+register_mutation \
+  anchor-drop "$SESSION_RELAY_SINK" \
+  $'formatting::watcher_completion_footer_anchor(\n                        last_chunk_anchor.as_ref(),\n                        msg_id,\n                        &relay_text,\n                    )' \
+  $'formatting::watcher_completion_footer_anchor(\n                        None,\n                        msg_id,\n                        &relay_text,\n                    )' \
+  'services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof'
+
+# Bypass the delivery lease while retaining a compilable commit path.
+register_mutation \
+  S4-m5 "$WATCHER_FENCES" \
+  '        Some(fence) => fence.commit_if_permitted(commit),' \
+  '        Some(_fence) => Some(commit()),' \
+  'services::discord::relay_recovery::tests::post_gate_identity_matched_live_delivery_lease_blocks_dead_frontier_watcher_cancel'
+
+# Let the terminal envelope bypass the relay frontier progress check.
+register_mutation \
+  S4-m6 "$DESTRUCTIVE_CANCEL_GATE" \
+  $'    let Some(expected_output_path) = snapshot.output_path.as_deref() else {' \
+  $'    if terminal_envelope_present(provider, snapshot) {\n        return DestructiveCancelGate::Allowed("terminal_envelope_present");\n    }\n    let Some(expected_output_path) = snapshot.output_path.as_deref() else {' \
+  'services::discord::destructive_cancel_gate::tests::terminal_envelope_does_not_outrank_relay_frontier_progress_on_reprobe'
+
+# Release the judgment lock before destruction to expose a racing acquire.
+register_mutation \
+  S4-m7 "$WATCHER_FENCES" \
+  $'            #[cfg(test)]\n            run_delivery_fence_permitted_hook_for_tests(self.site);\n            Some(commit())\n        })\n    }' \
+  $'            Some(())\n        })?;\n        #[cfg(test)]\n        run_delivery_fence_permitted_hook_for_tests(self.site);\n        Some(commit())\n    }' \
+  'services::discord::tmux_watcher_registry_restore_tests::delivery_fence_judgment_and_destruction_are_atomic_against_a_racing_acquire'
+
+validate_shards
+printf 'MUTATION_SHARD index=%d total=%d count=%d ids=%s\n' \
+  "$SHARD_INDEX" "$SHARD_TOTAL" "${#SHARD_ROWS[@]}" "$(IFS=,; printf '%s' "${SHARD_IDS[*]}")"
+
 mkdir -p "${TMPDIR:-$REPO_ROOT/target}" "$(dirname "$LOCK_DIR")"
 trap on_exit EXIT
 trap 'exit 129' HUP
@@ -367,67 +442,16 @@ trap 'exit 143' TERM
 acquire_lock
 prepare_backups
 printf 'MUTATION_COUNT count=%d minimum=4\n' "$MUTATION_COUNT"
-# Sizing evidence for the serial row loop: one crate build already saturates the
-# runner, so rows stay sequential until this reports many more cores than rows.
+# Rows within a shard stay sequential to reuse incremental builds.
 printf 'MUTATION_RUNNER cores=%s target_dir_avail_kb=%s\n' \
   "$( (nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo unknown) )" \
   "$( (df -Pk "$REPO_ROOT" 2>/dev/null | awk 'NR==2{print $4}') || echo unknown )"
 
-run_mutation \
-  M10 "$TERMINAL_HANDOFF" \
-  'delivery_frontier::SinkDeliveryProofResult::Persisted => Self::Delivered,' \
-  'delivery_frontier::SinkDeliveryProofResult::Persisted => Self::NotDelivered,' \
-  'services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof'
-
-run_mutation \
-  M6 "$TERMINAL_HANDOFF" \
-  'terminal_not_delivered || fenced_terminal_without_delivery' \
-  'terminal_not_delivered' \
-  'services::discord::session_relay_sink::delivery_orchestration_tests::fenced_terminal_without_parser_delivery_is_terminal_not_delivered'
-
-run_mutation \
-  M8 "$TERMINAL_HANDOFF" \
-  'Err(error) => return Err(error),' \
-  'Err(_error) => { terminal_not_delivered = true; }' \
-  'services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_propagates_injected_transport_error'
-
-run_mutation \
-  anchor-drop "$SESSION_RELAY_SINK" \
-  $'formatting::watcher_completion_footer_anchor(\n                        last_chunk_anchor.as_ref(),\n                        msg_id,\n                        &relay_text,\n                    )' \
-  $'formatting::watcher_completion_footer_anchor(\n                        None,\n                        msg_id,\n                        &relay_text,\n                    )' \
-  'services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof'
-
-# #5071 relay-tail S4 (I-1): neutralize the delivery-lease conjunct that both
-# fenced registry CAS cores gate their commit through. The bound fence is still
-# matched (just unused), and `commit` is still consumed exactly once, so the
-# mutant compiles and the only thing that changes is the verdict.
-run_mutation \
-  S4-m5 "$WATCHER_FENCES" \
-  '        Some(fence) => fence.commit_if_permitted(commit),' \
-  '        Some(_fence) => Some(commit()),' \
-  'services::discord::relay_recovery::tests::post_gate_identity_matched_live_delivery_lease_blocks_dead_frontier_watcher_cancel'
-
-# #5071 relay-tail S4 (I-2a): restore the terminal-envelope early return ahead of
-# the no-progress ladder, i.e. undo the demotion. The envelope is still present
-# in the target's fixture, so the mutant short-circuits to Allowed before the
-# reprobe ever observes the advancing relay frontier.
-run_mutation \
-  S4-m6 "$DESTRUCTIVE_CANCEL_GATE" \
-  $'    let Some(expected_output_path) = snapshot.output_path.as_deref() else {' \
-  $'    if terminal_envelope_present(provider, snapshot) {\n        return DestructiveCancelGate::Allowed("terminal_envelope_present");\n    }\n    let Some(expected_output_path) = snapshot.output_path.as_deref() else {' \
-  'services::discord::destructive_cancel_gate::tests::terminal_envelope_does_not_outrank_relay_frontier_progress_on_reprobe'
-
-# #5071 relay-tail S4 r2 (P1-1): reopen the r1 read/act split. The judgment
-# still happens under the cell's payload mutex, but the mutex is now DROPPED on
-# the way out of `with_state_locked` and the destruction runs after it, exactly
-# as the r1 `permits_destruction` -> bool shape did. Every sequential verdict is
-# unchanged, so only the atomicity target can see this: a racing acquirer wins
-# the judged key inside the reopened window and still observes the registry row
-# the judgment authorized destroying.
-run_mutation \
-  S4-m7 "$WATCHER_FENCES" \
-  $'            #[cfg(test)]\n            run_delivery_fence_permitted_hook_for_tests(self.site);\n            Some(commit())\n        })\n    }' \
-  $'            Some(())\n        })?;\n        #[cfg(test)]\n        run_delivery_fence_permitted_hook_for_tests(self.site);\n        Some(commit())\n    }' \
-  'services::discord::tmux_watcher_registry_restore_tests::delivery_fence_judgment_and_destruction_are_atomic_against_a_racing_acquire'
-
-printf 'MUTATION_SUMMARY killed=%d survived=0 minimum=4 status=PASS\n' "$MUTATION_COUNT"
+killed_count=0
+for index in "${SHARD_ROWS[@]}"; do
+  run_mutation "${MUTATION_IDS[$index]}" "${MUTATION_SOURCES[$index]}" \
+    "${MUTATION_EXPECTED[$index]}" "${MUTATION_REPLACEMENTS[$index]}" \
+    "${MUTATION_TARGETS[$index]}"
+  killed_count=$((killed_count + 1))
+done
+printf 'MUTATION_SUMMARY killed=%d survived=0 minimum=4 status=PASS\n' "$killed_count"
