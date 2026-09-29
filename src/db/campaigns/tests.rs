@@ -441,7 +441,7 @@ async fn assert_live_status_keeps_older_worker(sidecar_status: &str, working_ses
         "INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status, created_at)
          VALUES ('d-working', 'card-7', 'implementation', 'dispatched', NOW() - INTERVAL '1 hour'),
                 ('d-stale', 'card-7', 'review', 'dispatched', NOW() - INTERVAL '30 minutes'),
-                ('d-unseen', 'card-7', 'review', 'dispatched', NOW() - INTERVAL '20 minutes')",
+                ('d-unseen', 'card-7', 'review-decision', 'dispatched', NOW() - INTERVAL '20 minutes')",
         "INSERT INTO sessions (session_key, status, active_dispatch_id, last_heartbeat)
          VALUES ('session-stale', 'turn_active', 'd-stale', NOW() - INTERVAL '1 hour'),
                 ('session-unseen', 'turn_active', 'd-unseen', NULL)",
