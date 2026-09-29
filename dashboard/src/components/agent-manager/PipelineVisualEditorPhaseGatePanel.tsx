@@ -1,10 +1,4 @@
-import {
-  BUTTON_INFO_STYLE,
-  BUTTON_NEUTRAL_STYLE,
-  INPUT_CLASS,
-  INPUT_STYLE,
-  MUTED_TEXT_STYLE,
-} from "./pipeline-visual-editor-ui";
+import { INPUT_CLASS, INPUT_STYLE, MUTED_TEXT_STYLE } from "./pipeline-visual-editor-ui";
 
 interface Props {
   ctx: any;
@@ -19,64 +13,21 @@ export default function PipelineVisualEditorPhaseGatePanel({ ctx, actions }: Pro
     <div className="space-y-3">
       <p className="text-xs" style={MUTED_TEXT_STYLE}>
         {tr(
-          "검토 통과 조건과 전달 대상을 함께 조정합니다.",
-          "Tune review pass conditions and the handoff target together.",
+          "자동큐가 페이즈를 넘어가기 전에 확인 작업을 누구에게 보낼지 정합니다. 통과 조건(PR 머지, 이슈 종료, 빌드 통과)은 게이트 종류에 고정돼 있습니다.",
+          "Choose who runs the check before the auto-queue moves to the next phase. Pass conditions (PR merged, issue closed, build passed) are fixed by the gate kind.",
         )}
       </p>
       <div className="grid gap-3 sm:grid-cols-2">
         <TextField
-          label={tr("dispatch_to", "dispatch_to")}
+          label={tr("확인 담당 (self = 해당 에이전트)", "Checked by (self = the entry's agent)")}
           value={pipelineDraft.phase_gate.dispatch_to}
           onChange={(value) => actions.updatePhaseGate({ dispatch_to: value })}
         />
         <TextField
-          label={tr("dispatch_type", "dispatch_type")}
+          label={tr("디스패치 종류", "Dispatch type")}
           value={pipelineDraft.phase_gate.dispatch_type}
           onChange={(value) => actions.updatePhaseGate({ dispatch_type: value })}
         />
-        <div className="sm:col-span-2">
-          <TextField
-            label={tr("pass_verdict", "pass_verdict")}
-            value={pipelineDraft.phase_gate.pass_verdict}
-            onChange={(value) => actions.updatePhaseGate({ pass_verdict: value })}
-          />
-        </div>
-      </div>
-      <div>
-        <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
-          {tr("checks", "checks")}
-        </label>
-        <div className="flex flex-wrap gap-1.5">
-          {Array.from(new Set([
-            "merge_verified",
-            "issue_closed",
-            "build_passed",
-            ...(pipelineDraft.phase_gate.checks ?? []),
-          ])).map((checkName: string) => {
-            const active = (pipelineDraft.phase_gate.checks ?? []).includes(checkName);
-            return (
-              <button
-                key={checkName}
-                type="button"
-                onClick={() => {
-                  const current = pipelineDraft.phase_gate.checks ?? [];
-                  const next = active
-                    ? current.filter((check: string) => check !== checkName)
-                    : [...current, checkName];
-                  actions.updatePhaseGate({ checks: next });
-                }}
-                className="rounded-lg border px-2 py-1 text-xs font-mono transition-colors"
-                style={
-                  active
-                    ? BUTTON_INFO_STYLE
-                    : { ...BUTTON_NEUTRAL_STYLE, background: "transparent", color: "var(--th-text-muted)" }
-                }
-              >
-                {checkName}
-              </button>
-            );
-          })}
-        </div>
       </div>
     </div>
   );
