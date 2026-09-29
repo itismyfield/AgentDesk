@@ -1235,7 +1235,7 @@ async function mockDashboardBootstrap(page: Page) {
     });
   });
 
-  await page.route(/\/api\/v1\/achievements(?:\?.*)?$/, async (route) => {
+  await page.route(/\/api\/achievements(?:\?.*)?$/, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
