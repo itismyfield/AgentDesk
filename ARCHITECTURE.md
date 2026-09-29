@@ -1901,6 +1901,10 @@ src/
 │   │   ├── probe.rs
 │   │   └── trusted_target.rs
 │   ├── session_host/
+│   │   ├── herdr/
+│   │   │   ├── contract.rs
+│   │   │   └── model.rs
+│   │   ├── herdr_host.rs
 │   │   ├── legacy_collapse.rs
 │   │   ├── model.rs
 │   │   ├── process_host.rs

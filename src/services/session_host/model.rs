@@ -5,10 +5,11 @@ use crate::services::platform::tmux::{PaneLiveness, SessionPresence};
 pub(crate) enum HostKind {
     Tmux,
     Process,
+    Herdr,
 }
 
-/// Key a host finds a session by. The tmux session name doubles as the
-/// process-registry key.
+/// Key a host finds a session by. The tmux name doubles as the process-registry
+/// key; a Herdr ref holds only the pane id, its endpoint lives on the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HostSessionRef<'a> {
     pub kind: HostKind,
@@ -27,6 +28,21 @@ impl<'a> HostSessionRef<'a> {
         Self {
             kind: HostKind::Process,
             name,
+        }
+    }
+
+    pub(crate) fn herdr_pane(pane_id: &'a str) -> Self {
+        Self {
+            kind: HostKind::Herdr,
+            name: pane_id,
+        }
+    }
+
+    /// The name for a tmux/process-registry lookup; a Herdr pane id is never one.
+    pub(crate) fn legacy_name(self) -> Result<&'a str, HostError> {
+        match self.kind {
+            HostKind::Tmux | HostKind::Process => Ok(self.name),
+            HostKind::Herdr => Err(HostError::Unsupported(HostKind::Herdr, "legacy_name")),
         }
     }
 }
@@ -75,7 +91,7 @@ pub(crate) enum HostRefusal {
 }
 
 /// Outcome of a mutating call. `Indeterminate` means some input may have been
-/// delivered; hosts never produce it themselves, multi-step callers do.
+/// delivered; multi-step callers and socket hosts after a write produce it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HostMutation {
     Confirmed,
@@ -88,6 +104,13 @@ pub(crate) enum HostError {
     Transport(String),
     Timeout,
     Unsupported(HostKind, &'static str),
+    /// Error body returned by a socket host; no exit status is invented.
+    Remote {
+        code: String,
+        message: String,
+    },
+    /// Reply that breaks the typed contract (wrong id, tag, target, truncation).
+    Protocol(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -168,5 +191,17 @@ mod tests {
             }
         );
         assert_eq!(HostSessionRef::process("s").kind, HostKind::Process);
+    }
+
+    #[test]
+    fn herdr_pane_ref_is_never_a_legacy_name() {
+        let herdr = HostSessionRef::herdr_pane("AgentDesk-claude-x");
+        assert_eq!(herdr.kind, HostKind::Herdr);
+        assert_eq!(
+            herdr.legacy_name(),
+            Err(HostError::Unsupported(HostKind::Herdr, "legacy_name"))
+        );
+        assert_eq!(HostSessionRef::tmux("s").legacy_name(), Ok("s"));
+        assert_eq!(HostSessionRef::process("s").legacy_name(), Ok("s"));
     }
 }

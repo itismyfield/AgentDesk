@@ -31,9 +31,12 @@ impl InteractiveSessionHost for ProcessHost {
         }
     }
 
-    // The registry is local memory, so there is no probe-failure state.
+    // The registry is local memory: only a non-registry ref reads as ProbeFailed.
     fn presence(&self, session: HostSessionRef<'_>) -> HostPresence {
-        if session_backend::process_session_pid(session.name).is_some() {
+        let Ok(name) = session.legacy_name() else {
+            return HostPresence::ProbeFailed;
+        };
+        if session_backend::process_session_pid(name).is_some() {
             HostPresence::Present
         } else {
             HostPresence::Missing
@@ -41,7 +44,10 @@ impl InteractiveSessionHost for ProcessHost {
     }
 
     fn liveness(&self, session: HostSessionRef<'_>) -> HostLiveness {
-        if session_backend::process_session_is_alive(session.name) {
+        let Ok(name) = session.legacy_name() else {
+            return HostLiveness::ProbeError;
+        };
+        if session_backend::process_session_is_alive(name) {
             HostLiveness::Live
         } else {
             HostLiveness::DeadOrAbsent
@@ -53,7 +59,7 @@ impl InteractiveSessionHost for ProcessHost {
         session: HostSessionRef<'_>,
         text: &str,
     ) -> Result<HostMutation, HostError> {
-        session_backend::send_process_session_input(session.name, text, None)
+        session_backend::send_process_session_input(session.legacy_name()?, text, None)
             .map(|()| HostMutation::Confirmed)
             .map_err(HostError::Transport)
     }
@@ -86,7 +92,7 @@ impl InteractiveSessionHost for ProcessHost {
     }
 
     fn execution_pid(&self, session: HostSessionRef<'_>) -> Result<Option<u32>, HostError> {
-        Ok(session_backend::process_session_pid(session.name))
+        Ok(session_backend::process_session_pid(session.legacy_name()?))
     }
 }
 
@@ -143,5 +149,14 @@ mod tests {
             ProcessHost.capture_screen(session, -50),
             Err(HostError::Unsupported(HostKind::Process, "capture_screen"))
         );
+    }
+
+    #[test]
+    fn herdr_ref_is_not_a_registry_miss() {
+        let herdr = HostSessionRef::herdr_pane(UNREGISTERED);
+        assert_eq!(ProcessHost.presence(herdr), HostPresence::ProbeFailed);
+        assert_eq!(ProcessHost.liveness(herdr), HostLiveness::ProbeError);
+        assert!(ProcessHost.send_text(herdr, "x").is_err());
+        assert!(ProcessHost.execution_pid(herdr).is_err());
     }
 }
