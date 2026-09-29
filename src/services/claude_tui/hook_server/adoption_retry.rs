@@ -89,7 +89,8 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> AdoptionRepor
     let payload_session_id = request.payload_session_id.as_str();
     match adopt_claude_continuation_session(command_session_id, payload_session_id, &request.hook) {
         Ok(adopted) => {
-            if queued {
+            // An adopted source stays queued until its rotation settles, so later hooks wait behind it.
+            if queued && (adopted.is_none() || claude_session_rotation_for_tmux(tmux).is_none()) {
                 pop_front(tmux);
             }
             let Some((tmux_session_name, transcript_path)) = adopted else {
@@ -188,4 +189,9 @@ pub(crate) fn set_artifact_probe(probe: Option<ArtifactProbe>) {
 #[cfg(test)]
 pub(crate) fn deferred_adoption_count() -> usize {
     deferred().values().map(VecDeque::len).sum()
+}
+
+#[cfg(test)]
+pub(crate) fn reset_deferred_adoptions_for_tests() {
+    deferred().clear();
 }

@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::claude_tui::hook_server::HookEventKind;
+use crate::services::claude_tui::hook_server::adoption_retry::reset_deferred_adoptions_for_tests;
 use crate::services::tui_prompt_dedupe::{
     TEST_LOCK, adopt_claude_continuation_session, lock_claude_session_rotations_for_tests,
     register_launched_tmux_runtime_binding, register_provider_session,
@@ -20,6 +21,7 @@ impl Lane {
         let state = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let rotations = lock_claude_session_rotations_for_tests();
         reset_state_for_tests();
+        reset_deferred_adoptions_for_tests();
         let root = tempfile::tempdir().unwrap();
         set_test_root(Some(root.path()));
         Self {
@@ -46,6 +48,7 @@ impl Drop for Lane {
     fn drop(&mut self) {
         set_test_root(None);
         APPEND_FAULT.with(|fault| fault.set(None));
+        reset_deferred_adoptions_for_tests();
         reset_state_for_tests();
     }
 }
@@ -558,6 +561,9 @@ fn log_outage_defers_a_hook_adoption_and_the_idle_poll_adopts_b_without_another_
         b_len,
         "B did not grow"
     );
+    assert_eq!(deferred_adoption_count(), 1, "held until A→B settles");
+    crate::services::tui_prompt_dedupe::clear_claude_session_rotation(tmux);
+    retry_deferred_claude_adoptions();
     assert_eq!(deferred_adoption_count(), 0);
     let switch = events(channel).pop().unwrap();
     assert_eq!(switch.new, BindingTarget::Source(src(&b_path, &b)));
@@ -725,7 +731,7 @@ fn a_deferred_b_is_adopted_and_handed_to_the_rotation_before_a_deferred_c() {
     assert!(clear_claude_session_rotation(tmux));
     retry_deferred_claude_adoptions();
     assert_eq!(bound(tmux), (c_path.display().to_string(), Some(c.clone())));
-    assert_eq!(deferred_adoption_count(), 0);
+    assert_eq!(deferred_adoption_count(), 1, "C is held until B→C settles");
     let rotation = claude_session_rotation_for_tmux(tmux).unwrap();
     assert_eq!(
         (rotation.old_output_path, rotation.old_last_offset),
@@ -793,6 +799,7 @@ fn a_retry_paused_before_its_artifacts_cannot_overwrite_a_later_hooks_cutover() 
         AdoptionReport, adopt_from_hook, set_artifact_probe,
     };
     use crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions;
+    use crate::services::tui_prompt_dedupe::clear_claude_session_rotation;
     use std::sync::{Arc, mpsc};
     use std::time::Duration;
     let lane = Lane::new();
@@ -812,8 +819,10 @@ fn a_retry_paused_before_its_artifacts_cannot_overwrite_a_later_hooks_cutover() 
     APPEND_FAULT.with(|fault| fault.set(Some("write")));
     assert_eq!(adopt_from_hook(&a, &b, &clear), AdoptionReport::Deferred);
     APPEND_FAULT.with(|fault| fault.set(None));
+    retry_deferred_claude_adoptions();
+    assert!(clear_claude_session_rotation(tmux));
 
-    // The probe stands in for the artifact write; B holds it until C finishes or 300ms pass.
+    // B leaves the queue on the next retry. The probe stands in for the artifact write; B holds it until C finishes or 300ms pass.
     let (paused_tx, paused_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::channel::<()>();
     let done_rx = Mutex::new(done_rx);
@@ -856,4 +865,47 @@ fn a_retry_paused_before_its_artifacts_cannot_overwrite_a_later_hooks_cutover() 
         [b, c],
         "the last cutover is the bound C"
     );
+}
+
+#[test]
+fn a_new_source_after_recovery_waits_until_the_retried_b_rotation_settles() {
+    use crate::services::claude_tui::hook_server::adoption_retry::{
+        AdoptionReport, adopt_from_hook, deferred_adoption_count,
+    };
+    use crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions;
+    use crate::services::tui_prompt_dedupe::{
+        claude_session_rotation_for_tmux, clear_claude_session_rotation,
+    };
+    let lane = Lane::new();
+    let (channel, tmux) = (7_120, "p5-window");
+    let (a, b, c) = (uuid(), uuid(), uuid());
+    let (a_path, b_path, c_path) = (
+        lane.transcript(&a),
+        lane.transcript(&b),
+        lane.transcript(&c),
+    );
+    filetime::set_file_mtime(&b_path, filetime::FileTime::from_unix_time(20, 0)).unwrap();
+    filetime::set_file_mtime(&c_path, filetime::FileTime::from_unix_time(30, 0)).unwrap();
+    register_provider_session("claude", &a, tmux);
+    register_tmux_channel(tmux, channel);
+    register_tmux_runtime_binding(tmux, claude(&a_path, &a));
+    let clear = hook("session_start", Some("clear"));
+    APPEND_FAULT.with(|fault| fault.set(Some("write")));
+    assert_eq!(adopt_from_hook(&a, &b, &clear), AdoptionReport::Deferred);
+    APPEND_FAULT.with(|fault| fault.set(None));
+    retry_deferred_claude_adoptions();
+    assert_eq!(bound(tmux).1.as_deref(), Some(b.as_str()));
+
+    assert_eq!(
+        adopt_from_hook(&a, &c, &clear),
+        AdoptionReport::Deferred,
+        "C's first hook lands before A→B settles"
+    );
+    assert_eq!(bound(tmux).1.as_deref(), Some(b.as_str()));
+    assert_eq!(deferred_adoption_count(), 2);
+    assert!(clear_claude_session_rotation(tmux));
+    retry_deferred_claude_adoptions();
+    assert_eq!(bound(tmux).1.as_deref(), Some(c.as_str()));
+    let rotation = claude_session_rotation_for_tmux(tmux).unwrap();
+    assert_eq!(rotation.old_output_path, b_path.display().to_string());
 }
