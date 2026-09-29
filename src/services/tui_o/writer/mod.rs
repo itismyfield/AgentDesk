@@ -1,9 +1,11 @@
 //! The O writer: posts each transcript unit piece to its TUI channel once, only while the gateway
 //! is Owned and the channel's delivery lease is held, and settles unclear results from history.
 
+pub mod actor;
 pub mod confirm;
 pub mod deliver;
 pub mod pieces;
+pub mod round_trip;
 
 use std::future::Future;
 
@@ -62,15 +64,34 @@ pub trait DeliveryLease: Send + Sync {
 /// Raised from the first occurrence; A1-5 routes these to health and the operator channel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WriterAlarm {
-    Blocked { status: u16 },
+    Blocked {
+        status: u16,
+    },
     PausedNoGateway,
-    SchemaBlocked { reason: String },
-    LedgerViolation { detail: String },
-    Halted { detail: String },
-    ContentTransform { serial: u64 },
-    Ambiguous { serial: u64 },
-    Unresolved { serial: u64, reason: String },
-    NotFound { serial: u64 },
+    SchemaBlocked {
+        reason: String,
+    },
+    LedgerViolation {
+        detail: String,
+    },
+    Halted {
+        detail: String,
+    },
+    ContentTransform {
+        serial: u64,
+    },
+    Ambiguous {
+        serial: u64,
+    },
+    Unresolved {
+        serial: u64,
+        reason: String,
+    },
+    NotFound {
+        serial: u64,
+    },
+    /// Capture waits until delivered segments are collected; nothing is dropped.
+    SpoolFull,
 }
 
 pub trait AlarmSink: Send + Sync {

@@ -424,6 +424,11 @@ impl ChannelStore {
         self.sources.values().map(|spool| &spool.cursor)
     }
 
+    pub fn retained_segments(&self, source: &SourceId) -> usize {
+        let spool = self.sources.get(&source_key(source));
+        spool.map_or(0, |spool| spool.segments.len())
+    }
+
     pub fn spool_bytes(&self) -> u64 {
         let segments = self.sources.values().flat_map(|spool| &spool.segments);
         segments.map(|segment| segment.bytes).sum()

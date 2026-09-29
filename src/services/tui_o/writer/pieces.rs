@@ -70,10 +70,24 @@ impl UnitDeriver {
                     out.extend(self.unit(unit_key, content));
                 }
                 RecordFact::Blocked(reason) => out.push(Derived::Blocked { reason }),
+                RecordFact::Announced(native_key, kind) => {
+                    let (channel_id, provider) = (self.channel, self.provider);
+                    self.seals.announce(UnitKey {
+                        channel_id,
+                        provider,
+                        native_key,
+                        kind,
+                    });
+                }
                 _ => {}
             }
         }
         out
+    }
+
+    /// An announced unit whose sealing record is still to come keeps its spool from GC.
+    pub fn has_unsealed(&self) -> bool {
+        !self.seals.unsealed().is_empty()
     }
 
     fn unit(&mut self, unit_key: UnitKey, content: UnitContent) -> Vec<Derived> {

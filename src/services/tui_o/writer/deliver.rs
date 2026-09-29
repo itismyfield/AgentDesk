@@ -76,11 +76,20 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         &mut self.store
     }
 
+    pub fn channel(&self) -> u64 {
+        self.channel
+    }
+
     pub fn is_stopped(&self) -> bool {
         self.stopped
     }
 
-    fn stop(&mut self, alarm: WriterAlarm) -> Step {
+    pub fn alarm(&self, alarm: WriterAlarm) {
+        self.alarms.raise(self.channel, alarm);
+    }
+
+    /// Stops the channel once; only the first stop raises its alarm.
+    pub fn stop(&mut self, alarm: WriterAlarm) -> Step {
         if !self.stopped {
             self.stopped = true;
             self.alarms.raise(self.channel, alarm);
