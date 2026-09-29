@@ -135,6 +135,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/router/message_handler/intake_turn/race_loss/requeue_tests.rs",
         "src/services/discord/router/message_handler/session_strategy_lifecycle_tests.rs",
         "src/services/discord/runtime_bootstrap/gateway_handback_breaker_tests.rs",
+        "src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs",
         "src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs",
         "src/services/discord/runtime_bootstrap/gateway_lease_tests.rs",
         "src/services/discord/runtime_bootstrap/intake_delivery_capability/tests.rs",
@@ -236,6 +237,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/discord/runtime_bootstrap/gateway_handback_mock.rs",
         "src/services/kakao/test_support.rs",
         "src/config/test_env.rs",
         "src/config/test_env/teardown_probe.rs",
