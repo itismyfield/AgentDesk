@@ -287,23 +287,44 @@ fn first_record_session_meta(
     }
 }
 
+/// Points inside `verify_rollout` where tests may swap files under the open descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerifyStep {
+    AfterOpen,
+    AfterHeader,
+    BeforeFinalIdentity,
+}
+
 #[cfg(test)]
 thread_local! {
-    static BEFORE_FINAL_IDENTITY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        std::cell::RefCell::new(None);
+    static VERIFY_HOOKS: std::cell::RefCell<Vec<(VerifyStep, Box<dyn FnOnce()>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn at_verify_step(step: VerifyStep, hook: impl FnOnce() + 'static) {
+    VERIFY_HOOKS.with(|hooks| hooks.borrow_mut().push((step, Box::new(hook))));
 }
 
 #[cfg(test)]
 fn before_final_identity(hook: impl FnOnce() + 'static) {
-    BEFORE_FINAL_IDENTITY.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    at_verify_step(VerifyStep::BeforeFinalIdentity, hook);
 }
 
-fn run_before_final_identity() {
-    #[cfg(test)]
-    if let Some(hook) = BEFORE_FINAL_IDENTITY.with(|slot| slot.borrow_mut().take()) {
+#[cfg(test)]
+fn run_verify_step(step: VerifyStep) {
+    let hook = VERIFY_HOOKS.with(|hooks| {
+        let mut hooks = hooks.borrow_mut();
+        let index = hooks.iter().position(|(at, _)| *at == step)?;
+        Some(hooks.remove(index).1)
+    });
+    if let Some(hook) = hook {
         hook();
     }
 }
+
+#[cfg(not(test))]
+fn run_verify_step(_step: VerifyStep) {}
 
 fn verify_rollout(
     sessions_root: &Path,
@@ -325,7 +346,9 @@ fn verify_rollout(
     if identity == SourceFileIdentity::Unavailable {
         return Err(Reject::RolloutUnavailable);
     }
+    run_verify_step(VerifyStep::AfterOpen);
     let meta = first_record_session_meta(&file)?;
+    run_verify_step(VerifyStep::AfterHeader);
     let meta_id = meta
         .id
         .as_deref()
@@ -338,7 +361,7 @@ fn verify_rollout(
     if !source_matches {
         return Err(Reject::SourceMismatch { found: meta.source });
     }
-    run_before_final_identity();
+    run_verify_step(VerifyStep::BeforeFinalIdentity);
     // The header came from this descriptor; the path must still resolve, inside root, to it.
     let current = rooted_rollout(&root, path, suffix)?;
     if current != canonical || path_identity(&current) != identity {
