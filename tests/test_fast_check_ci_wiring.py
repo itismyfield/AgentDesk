@@ -2811,6 +2811,7 @@ jobs:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         mirror = job_block(workflow, "scripts_required_context")
         relay = job_block(workflow, "relay-authority-contract")
+        targets = job_block(workflow, "relay_authority_targets")
         relay_pin = step_block(relay, "Pin required-check mirror content (#5321)")
         cases = (
             (
@@ -2875,9 +2876,9 @@ jobs:
             (
                 "job timeout leading zero is not decimal 30",
                 workflow.replace(
-                    relay,
-                    relay.replace(
-                        "    timeout-minutes: 30", "    timeout-minutes: 036", 1
+                    targets,
+                    targets.replace(
+                        "    timeout-minutes: 30\n", "    timeout-minutes: 036\n", 1
                     ),
                     1,
                 ),
@@ -2886,6 +2887,7 @@ jobs:
         )
         for label, mutated, expected_rc in cases:
             with self.subTest(case=label):
+                self.assertNotEqual(mutated, workflow)
                 result = self.run_hardening_fixture(mutated)
                 self.assertEqual(result.returncode, expected_rc, result.stderr)
 
