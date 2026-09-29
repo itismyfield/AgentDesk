@@ -324,7 +324,7 @@ EXPECTED_GATES: dict[str, int] = {
     "src/services/tui_o/cutover.rs": 2,
 }
 # Funnel -> tests that drive it with O owning the channel. Each must exist as a
-# `fn` in src/; an empty map or a missing name keeps flip_ready false.
+# test-attributed `fn` in src/; empty funnels or missing tests block the flip.
 FLIP_READY_TESTS: dict[str, tuple[str, ...]] = {
     "W01": (
         "o_delegated_watcher_turn_shows_no_body_and_records_no_frontier",
@@ -446,12 +446,26 @@ def flip_readiness(root: Path) -> tuple[bool, str]:
     names = sorted({name for tests in FLIP_READY_TESTS.values() for name in tests})
     if not names:
         reasons.append("FLIP_READY_TESTS is empty")
+    empty = sorted(funnel for funnel, tests in FLIP_READY_TESTS.items() if not tests)
+    if empty:
+        reasons.append(f"funnel test lists empty: {', '.join(empty)}")
     defined: set[str] = set()
     src = root / "src"
     if names and src.is_dir():
-        fn_re = re.compile(r"\bfn\s+(" + "|".join(map(re.escape, names)) + r")\b")
+        classifier = _load_classifier()
+        fn_re = re.compile(
+            r"#\s*\[\s*(?:test|tokio\s*::\s*test(?:\s*\([^\[\]]*\))?)\s*\]\s*"
+            r"(?:#\s*\[[^\[\]]*\]\s*)*"
+            r"(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+("
+            + "|".join(map(re.escape, names)) + r")\s*\("
+        )
         for path in src.rglob("*.rs"):
-            defined.update(fn_re.findall(path.read_text(encoding="utf-8", errors="replace")))
+            state = classifier.StripState()
+            text = "\n".join(
+                classifier.strip_line(line, state)
+                for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+            )
+            defined.update(fn_re.findall(text))
     missing = [name for name in names if name not in defined]
     if missing:
         reasons.append(f"funnel tests missing from src/: {', '.join(missing)}")

@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use super::task_response_authority::PrepareWatcherTaskResponseError;
 use super::*;
 
 use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
@@ -27,7 +28,9 @@ pub(super) struct DelegatedTerminal<'a> {
 
 /// Mirrors the delegated-success watermark epilogue; the confirmed end advances later through
 /// the watcher's lease-free commit path.
-pub(super) async fn consume_delegated_terminal(arm: DelegatedTerminal<'_>) {
+pub(super) async fn consume_delegated_terminal(
+    arm: DelegatedTerminal<'_>,
+) -> Result<(), PrepareWatcherTaskResponseError> {
     if let Some(context) = arm.task_card {
         super::task_response_authority::promote_delegated_task_card(
             arm.http,
@@ -37,7 +40,7 @@ pub(super) async fn consume_delegated_terminal(arm: DelegatedTerminal<'_>) {
             arm.tmux_session_name,
             context,
         )
-        .await;
+        .await?;
     }
     let generation_mtime_ns = read_generation_file_mtime_ns(arm.tmux_session_name);
     *arm.observed_generation_mtime_ns = Some(generation_mtime_ns);
@@ -72,4 +75,5 @@ pub(super) async fn consume_delegated_terminal(arm: DelegatedTerminal<'_>) {
         );
     }
     clear_provider_overload_retry_state(arm.channel_id);
+    Ok(())
 }

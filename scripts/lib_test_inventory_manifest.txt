@@ -6389,6 +6389,7 @@ services::discord::tmux::tmux_watcher::tests::rollback_sender_marks_serenity_5xx
 services::discord::tmux::tmux_watcher::tests::stale_normal_completion_does_not_release_newer_active_turn
 services::discord::tmux::tmux_watcher::tests::status_panel_v2_watcher_streaming_edit_moves_processing_footer_to_response_message
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_mid_turn_cutover_shows_no_post_cutover_body
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_task_card_post_failure_retries_before_consuming_turn
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_task_notification_turn_promotes_card_without_body_or_claim
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::o_delegated_watcher_tests::o_delegated_watcher_turn_shows_no_body_and_records_no_frontier
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_against_a_same_identity_successor_baseline

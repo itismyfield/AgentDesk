@@ -18,7 +18,7 @@ struct PreparedWatcherTaskResponse {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum PrepareWatcherTaskResponseError {
+pub(super) enum PrepareWatcherTaskResponseError {
     #[error("{0}")]
     Transient(String),
     #[error("{0}")]
@@ -213,9 +213,10 @@ pub(super) async fn promote_delegated_task_card(
     channel_id: ChannelId,
     tmux_session_name: &str,
     context: &task_delivery::TaskNotificationContext,
-) {
+) -> Result<(), PrepareWatcherTaskResponseError> {
     let event = context.to_event(channel_id.get(), provider.as_str(), tmux_session_name);
-    if let Err(error) = ensure_watcher_task_card(http, shared, provider, channel_id, &event).await {
+    let result = ensure_watcher_task_card(http, shared, provider, channel_id, &event).await;
+    if let Err(error) = &result {
         tracing::warn!(
             provider = provider.as_str(),
             channel_id = channel_id.get(),
@@ -224,6 +225,7 @@ pub(super) async fn promote_delegated_task_card(
             "delegated watcher turn could not promote its task card"
         );
     }
+    result.map(|_| ())
 }
 
 async fn watcher_card_clients(

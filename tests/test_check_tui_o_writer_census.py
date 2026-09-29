@@ -162,6 +162,38 @@ class FlipReadinessTests(unittest.TestCase):
                 self.assertFalse(ready, verdict)
                 self.assertIn(reason, verdict)
 
+    def test_empty_funnel_blocks_readiness_with_another_funnel_present(self) -> None:
+        ready, verdict = self.readiness(FLIP_READY_TESTS={
+            "W20": ("o_delegated_funnel_cut",), "W33": (),
+        })
+        self.assertFalse(ready, verdict)
+        self.assertIn("funnel test lists empty: W33", verdict)
+
+    def test_funnel_names_require_attached_test_attributes_outside_prose(self) -> None:
+        source = self.root / "src/services/discord/funnel_tests.rs"
+        cases = {
+            "line comment": ("// #[test]\n// fn required() {}\n", False),
+            "nested block comment": ("/* outer /* #[test] */ fn required() {} */", False),
+            "string": ('const TEXT: &str = "#[test] fn required() {}";', False),
+            "raw string": ('const TEXT: &str = r#"\n#[tokio::test]\nasync fn required() {}\n"#;', False),
+            "ordinary function": ("fn required() {}", False),
+            "commented attribute": ("// #[test]\nfn required() {}", False),
+            "attribute on preceding function": ("#[test]\nfn other() {}\nfn required() {}", False),
+            "synchronous test": ("#[test]\nfn required() {}", True),
+            "async test": ("#[tokio::test]\nasync fn required() {}", True),
+            "async test options and attributes": (
+                '#[tokio::test(flavor = "multi_thread", worker_threads = 2)]\n'
+                '#[cfg(test)]\n/* note */ async fn required() {}', True,
+            ),
+        }
+        for label, (text, expected) in cases.items():
+            with self.subTest(case=label):
+                source.write_text(text, encoding="utf-8")
+                ready, verdict = self.readiness(FLIP_READY_TESTS={"W20": ("required",)})
+                self.assertEqual(ready, expected, verdict)
+                if not expected:
+                    self.assertIn("funnel tests missing from src/: required", verdict)
+
     def test_require_flip_ready_turns_a_false_verdict_into_rc_1(self) -> None:
         passing = (True, "OK")
         for ready, args, rc in ((False, [], 0), (False, ["--require-flip-ready"], 1),
