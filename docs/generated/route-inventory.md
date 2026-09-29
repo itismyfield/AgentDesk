@@ -18,7 +18,7 @@
 | `DELETE` | `/api/agents/{id}` | `agents_crud::delete_agent` | `src/server/routes/agents_crud.rs:896` | `src/server/routes/domains/agents.rs:26` |
 | `GET` | `/api/agents/{id}` | `agents_crud::get_agent` | `src/server/routes/agents_crud.rs:396` | `src/server/routes/domains/agents.rs:26` |
 | `PATCH` | `/api/agents/{id}` | `agents_crud::update_agent` | `src/server/routes/agents_crud.rs:482` | `src/server/routes/domains/agents.rs:26` |
-| `GET` | `/api/agents/{id}/cron` | `cron_api::agent_cron_jobs` | `src/server/routes/cron_api.rs:174` | `src/server/routes/domains/agents.rs:45` |
+| `GET` | `/api/agents/{id}/cron` | `cron_api::agent_cron_jobs` | `src/server/routes/cron_api.rs:164` | `src/server/routes/domains/agents.rs:45` |
 | `GET` | `/api/agents/{id}/dispatched-sessions` | `agents::agent_dispatched_sessions` | `src/server/routes/agents.rs:665` | `src/server/routes/domains/runtime.rs:131` |
 | `POST` | `/api/agents/{id}/duplicate` | `agents_crud::duplicate_agent` | `src/server/routes/agents_crud.rs:743` | `src/server/routes/domains/agents.rs:41` |
 | `GET` | `/api/agents/{id}/execution-node` | `execution_requirements::get_node` | `src/server/routes/execution_requirements.rs:12` | `src/server/routes/domains/agents.rs:37` |
@@ -80,7 +80,7 @@
 | `GET` | `/api/cluster/test-phase-runs/evidence` | `cluster::latest_test_phase_evidence` | `src/server/routes/cluster.rs:379` | `src/server/routes/domains/ops.rs:80` |
 | `POST` | `/api/cluster/test-phase-runs/start` | `cluster::start_test_phase_run` | `src/server/routes/cluster.rs:350` | `src/server/routes/domains/ops.rs:72` |
 | `POST` | `/api/cluster/test-phase-runs/upsert` | `cluster::upsert_test_phase_run` | `src/server/routes/cluster.rs:339` | `src/server/routes/domains/ops.rs:68` |
-| `GET` | `/api/cron-jobs` | `cron_api::list_cron_jobs` | `src/server/routes/cron_api.rs:166` | `src/server/routes/domains/ops.rs:157` |
+| `GET` | `/api/cron-jobs` | `cron_api::list_cron_jobs` | `src/server/routes/cron_api.rs:156` | `src/server/routes/domains/ops.rs:157` |
 | `GET` | `/api/departments` | `departments::list_departments` | `src/server/routes/departments.rs:61` | `src/server/routes/domains/admin.rs:32` |
 | `POST` | `/api/departments` | `departments::create_department` | `src/server/routes/departments.rs:70` | `src/server/routes/domains/admin.rs:32` |
 | `PATCH` | `/api/departments/reorder` | `departments::reorder_departments` | `src/server/routes/departments.rs:166` | `src/server/routes/domains/admin.rs:36` |

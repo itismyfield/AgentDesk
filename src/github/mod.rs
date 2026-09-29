@@ -603,47 +603,6 @@ pub fn fetch_pr_view(repo: &str, pr_number: i64) -> Result<PrView, String> {
     fetch_pr_view_with(adapter(), repo, pr_number)
 }
 
-/// Fetch only the head SHA + state of a PR. Used by the cache to cheaply
-/// validate freshness — if the SHA matches the cached entry we can serve a
-/// stale body without paying for the full payload.
-// reason: pub gh-integration probe (PR head/state) wired by the runtime-gated
-// PR-cache freshness path, not the default lib/test build. See #3034.
-#[allow(dead_code)]
-pub fn fetch_pr_head_state(repo: &str, pr_number: i64) -> Result<(Option<String>, String), String> {
-    fetch_pr_head_state_with(adapter(), repo, pr_number)
-}
-
-// reason: private impl of the runtime-gated fetch_pr_head_state probe above. See #3034.
-#[allow(dead_code)]
-fn fetch_pr_head_state_with(
-    adapter: &dyn GitHubAdapter,
-    repo: &str,
-    pr_number: i64,
-) -> Result<(Option<String>, String), String> {
-    let number = pr_number.to_string();
-    let output = adapter.run(&[
-        "pr",
-        "view",
-        &number,
-        "--repo",
-        repo,
-        "--json",
-        "headRefOid,state",
-    ])?;
-    let parsed: serde_json::Value =
-        serde_json::from_str(&output).map_err(|e| format!("parse gh pr head state: {e}"))?;
-    let head = parsed
-        .get("headRefOid")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let state = parsed
-        .get("state")
-        .and_then(|v| v.as_str())
-        .unwrap_or("UNKNOWN")
-        .to_string();
-    Ok((head, state))
-}
-
 /// Reopen a GitHub issue given its full URL (e.g. https://github.com/owner/repo/issues/42).
 pub async fn reopen_issue_by_url(url: &str) -> Result<(), String> {
     reopen_issue_by_url_with(adapter(), url).await

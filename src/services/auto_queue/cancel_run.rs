@@ -162,34 +162,6 @@ pub(crate) async fn load_live_dispatch_ids_for_runs_pg(
     })
 }
 
-async fn load_dispatched_card_ids_for_runs_pg(
-    pool: &PgPool,
-    run_ids: &[String],
-) -> Result<Vec<String>, String> {
-    if run_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    sqlx::query_scalar(
-        "SELECT DISTINCT e.kanban_card_id
-         FROM auto_queue_entries e
-         WHERE e.run_id = ANY($1)
-           AND e.status IN ('dispatched', 'user_cancelled')
-           AND e.kanban_card_id IS NOT NULL
-           AND BTRIM(e.kanban_card_id) <> ''
-         ORDER BY e.kanban_card_id",
-    )
-    .bind(run_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| {
-        format!(
-            "load postgres dispatched card ids for runs {:?}: {error}",
-            run_ids
-        )
-    })
-}
-
 pub(crate) async fn delete_phase_gate_rows_for_runs_pg(
     pool: &PgPool,
     run_ids: &[String],

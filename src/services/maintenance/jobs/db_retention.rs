@@ -79,6 +79,7 @@ impl RetentionReport {
             .sum()
     }
 
+    #[cfg(test)]
     pub fn get(&self, table: &str, action: &str) -> Option<&TableReport> {
         self.tables
             .iter()

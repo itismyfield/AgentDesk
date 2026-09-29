@@ -4,23 +4,7 @@ use std::collections::HashMap;
 
 use crate::services::provider::ProviderCatalogEntry;
 
-use super::registry::{MigrationState, ProviderCliChannel, ProviderCliMigrationState, SmokeResult};
-
-/// Top-level diagnostics snapshot for all providers.
-///
-/// Stored at `~/.adk/{env}/runtime/provider-cli-diagnostics/{timestamp_ms}.json`.
-/// Optional consumers (skills, watchers) may read this file; AgentDesk core
-/// migration does not depend on them reading it.
-// #3034: serde snapshot-to-disk diagnostics — intentional-but-unwired
-// (no writer is hooked up yet); kept for the documented optional consumers.
-#[allow(dead_code)]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DiagnosticsSnapshot {
-    pub generated_at: DateTime<Utc>,
-    pub providers: Vec<ProviderDiagnostics>,
-    pub active_sessions: Vec<SessionDiagnostics>,
-    pub migrations: Vec<MigrationDiagnostics>,
-}
+use super::registry::{MigrationState, ProviderCliChannel, SmokeResult};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderDiagnostics {
@@ -37,37 +21,6 @@ pub struct ProviderDiagnostics {
     pub smoke_candidate: Option<SmokeResult>,
     #[serde(default)]
     pub evidence: HashMap<String, String>,
-}
-
-// #3034: part of the unwired snapshot-to-disk diagnostics surface (serde).
-#[allow(dead_code)]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SessionDiagnostics {
-    pub agent_id: String,
-    pub provider: String,
-    pub channel: String,
-    pub cli_path: String,
-    pub cli_version: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tmux_session: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub process_id: Option<u32>,
-    pub runtime_consistency: RuntimeConsistency,
-}
-
-// #3034: part of the unwired snapshot-to-disk diagnostics surface (serde enum).
-#[allow(dead_code)]
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeConsistency {
-    /// Launch artifact path matches live process.
-    Consistent,
-    /// Launch artifact exists but process not detected.
-    ProcessNotFound,
-    /// No launch artifact for this session.
-    NoArtifact,
-    /// Path in launch artifact differs from live process.
-    Mismatch,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -106,32 +59,4 @@ pub struct ProviderCliActionRequest {
     pub action: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
-}
-
-/// Build a `DiagnosticsSnapshot` from available in-memory data.
-// #3034: builder for the unwired snapshot-to-disk diagnostics surface.
-#[allow(dead_code)]
-pub fn build_snapshot(
-    provider_diagnostics: Vec<ProviderDiagnostics>,
-    session_diagnostics: Vec<SessionDiagnostics>,
-    migration_states: &[ProviderCliMigrationState],
-) -> DiagnosticsSnapshot {
-    let migrations = migration_states
-        .iter()
-        .map(|s| MigrationDiagnostics {
-            provider: s.provider.clone(),
-            state: migration_state_wire_value(&s.state),
-            canary_agent_id: s.selected_agent_id.clone(),
-            started_at: Some(s.started_at),
-            updated_at: Some(s.updated_at),
-            history_len: s.history.len(),
-        })
-        .collect();
-
-    DiagnosticsSnapshot {
-        generated_at: Utc::now(),
-        providers: provider_diagnostics,
-        active_sessions: session_diagnostics,
-        migrations,
-    }
 }
