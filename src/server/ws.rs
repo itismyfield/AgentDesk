@@ -22,7 +22,7 @@ use serde_json::json;
 use tokio::sync::broadcast;
 
 pub use crate::eventbus::{
-    BatchBuffer, BroadcastEvent, BroadcastTx, emit_event, new_broadcast, spawn_batch_flusher,
+    BatchBuffer, BroadcastTx, emit_event, new_broadcast, spawn_batch_flusher,
 };
 
 pub(crate) async fn ws_handler(
