@@ -1,14 +1,6 @@
-//! Voice turn latency metrics — STT/agent/TTS stage millis aggregated per
-//! channel and emitted to the structured event log when the TTS stage completes.
-//!
-//! Hot path callers populate per-stage timing via `record_stt`, `record_agent`,
-//! and `record_tts`, all keyed by the channel that owns the active voice turn.
-//! When TTS finishes, `record_tts` consumes the partial state, builds a
-//! [`LatencyTurn`], pushes it into the structured event log
-//! (`event_type = "voice_latency_turn"`) and clears the channel slot.
-//!
-//! `recent_summary` exposes a snapshot for the `/voice latency` slash command
-//! by replaying the same JSONL we just wrote.
+//! Per-channel voice turn latency. Stage recorders fill a per-channel slot and
+//! `record_tts` finalizes it as a `voice_latency_turn` structured event, which
+//! `recent_summary` reads back from the in-memory event buffer for `/voice latency`.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -19,10 +11,8 @@ use serde_json::{Value, json};
 
 use crate::services::observability::events;
 
-/// Final per-turn latency record. Times are wall-clock millis spent inside the
-/// voice pipeline. `first_audio_out_ms` is the time-to-first-audio (start of
-/// playback) rather than total playback duration. `tts_play_ms` is retained as
-/// the legacy field name for existing dashboards/events.
+/// Final per-turn latency record, in wall-clock millis. `first_audio_out_ms` is time
+/// to first audio, not playback duration; `tts_play_ms` is its legacy name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatencyTurn {
     pub channel_id: u64,
@@ -52,13 +42,8 @@ impl LatencyTurn {
             tts_synth_ms,
             first_audio_out_ms,
             tts_play_ms,
-            // total_ms is the intake→first-audio wall clock: STT + agent + the
-            // TTS time-to-first-audio (`first_audio_out_ms`). `first_audio_out_ms`
-            // is measured from the start of TTS playback, so it already subsumes
-            // the first chunk's synthesis time (`tts_synth_ms`). `tts_synth_ms` is
-            // therefore retained only as a standalone observability sub-metric and
-            // must NOT be added here as well, otherwise the first-chunk synthesis
-            // would be double-counted and total_ms over-reported (#3913).
+            // Intake to first audio. `first_audio_out_ms` already includes the first
+            // chunk's synthesis, so adding `tts_synth_ms` would double-count it.
             total_ms: stt_ms
                 .saturating_add(agent_ms)
                 .saturating_add(first_audio_out_ms),
@@ -74,9 +59,6 @@ impl LatencyTurn {
     }
 
     pub fn to_payload(&self) -> Value {
-        // Single source of truth via Serialize derive — fields stay in sync if
-        // LatencyTurn grows. Falls back to an empty object if (somehow)
-        // serialization fails so callers never see Result here.
         serde_json::to_value(self).unwrap_or_else(|_| json!({}))
     }
 }
@@ -100,9 +82,8 @@ fn agent_start_registry() -> &'static Mutex<HashMap<u64, Instant>> {
     REG.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Mark the moment the agent turn was kicked off for `channel_id`. Replaces
-/// any prior pending start. Pair with [`finish_agent_start`] when the agent
-/// answer is about to enter TTS.
+/// Stamp the agent-turn start for `channel_id`, replacing any pending start.
+/// Paired with [`finish_agent_start`] once the answer is about to enter TTS.
 pub fn mark_agent_start(channel_id: u64) {
     if let Ok(mut map) = agent_start_registry().lock() {
         map.insert(channel_id, Instant::now());
@@ -119,19 +100,6 @@ pub fn finish_agent_start(channel_id: u64) -> Option<u64> {
     let ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
     record_agent(channel_id, ms);
     Some(ms)
-}
-
-/// Drop a pending [`mark_agent_start`] without recording an agent_ms — used
-/// when the turn fails before the answer is ready (e.g. `start_voice_turn`
-/// errors out) so the next turn's `mark_agent_start` doesn't carry a stale
-/// instant.
-// reason: voice runtime is wired only when voice config is enabled; no compile
-// target exercises it. See #3034.
-#[allow(dead_code)]
-pub fn discard_agent_start(channel_id: u64) {
-    if let Ok(mut map) = agent_start_registry().lock() {
-        map.remove(&channel_id);
-    }
 }
 
 fn now_millis() -> i64 {
@@ -168,9 +136,8 @@ pub fn record_agent(channel_id: u64, agent_ms: u64) {
     });
 }
 
-/// Record TTS stage timings and finalize the turn. The final argument is
-/// first-audio-out millis; it is stored under both `first_audio_out_ms` and the
-/// legacy `tts_play_ms` field until downstream readers migrate.
+/// Record TTS timings and finalize the turn. `first_audio_out_ms` is also stored
+/// under the legacy `tts_play_ms` field.
 pub fn record_tts(
     channel_id: u64,
     tts_synth_ms: u64,
@@ -203,12 +170,8 @@ pub fn discard(channel_id: u64) {
     }
 }
 
-/// #3914: terminal outcome of a file-mode STT transcription. STT previously
-/// swallowed low-volume skips and empty-after-retry results as
-/// `Ok(String::new())` with at most a debug log, so a systemic regression
-/// (whisper returning empty, the volume gate over-skipping, or `volumedetect`
-/// failing) was invisible. These outcomes are counted process-wide and the
-/// anomalous ones are emitted as a structured `voice_stt_outcome` event.
+/// Terminal outcome of a file-mode STT transcription, counted process-wide so empty
+/// or skipped transcripts are observable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SttOutcome {
     /// whisper produced a usable (non-empty, cleaned) transcript.
@@ -231,9 +194,8 @@ impl SttOutcome {
         }
     }
 
-    /// #4238: genuine STT failures worth an operator `warn!`, as opposed to the
-    /// benign `LowVolumeSkipped` (the silence gate firing on a quiet utterance,
-    /// which is the common expected case and must not spam the log).
+    /// Failures worth an operator `warn!`. `LowVolumeSkipped` is the expected quiet
+    /// utterance case and must not spam the log.
     fn is_failure(self) -> bool {
         matches!(self, Self::EmptyAfterRetry | Self::VolumeDetectFailed)
     }
@@ -244,10 +206,8 @@ fn stt_outcome_registry() -> &'static Mutex<HashMap<&'static str, u64>> {
     REG.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Record one STT outcome: bumps the process-wide counter and (for the
-/// anomalous outcomes) emits a structured `voice_stt_outcome` event. The common
-/// success path only bumps the counter so the shared event buffer is not
-/// crowded out of its `voice_latency_turn` samples.
+/// Count one STT outcome; non-success outcomes also emit `voice_stt_outcome`. Success
+/// is only counted so it does not crowd `voice_latency_turn` out of the event buffer.
 pub fn record_stt_outcome(outcome: SttOutcome) {
     if let Ok(mut map) = stt_outcome_registry().lock() {
         *map.entry(outcome.as_str()).or_insert(0) += 1;
@@ -259,10 +219,6 @@ pub fn record_stt_outcome(outcome: SttOutcome) {
             Some("voice"),
             json!({ "outcome": outcome.as_str() }),
         );
-        // #4238: the metric counter alone was invisible to operators watching
-        // logs. Surface genuine STT failures as a structured `warn!` so a
-        // recovery-worthy regression (whisper returning empty, volume pre-pass
-        // failing) is observable, not just silently tallied.
         if outcome.is_failure() {
             tracing::warn!(
                 outcome = outcome.as_str(),
@@ -293,13 +249,11 @@ pub struct LatencySummary {
     pub samples: Vec<LatencyTurn>,
 }
 
-/// Pull the most recent voice-latency events out of the structured event log
-/// and average the stage millis. Filters down to `voice_latency_turn` events
-/// then keeps the last `limit` entries (newest first in `samples`).
+/// Average the stage millis of the last `limit` `voice_latency_turn` events.
+/// `samples` is returned oldest first.
 pub fn recent_summary(limit: usize) -> LatencySummary {
     let limit = limit.max(1);
-    // Pull a generous window so non-voice traffic in the buffer doesn't crowd
-    // out our voice samples.
+    // Over-fetch so non-voice events in the shared buffer do not crowd out samples.
     let window = limit.saturating_mul(20).max(events::MAX_EVENTS / 4);
     let raw = events::recent(window);
     let mut samples: Vec<LatencyTurn> = raw
@@ -372,8 +326,7 @@ mod tests {
         assert_eq!(turn.tts_synth_ms, 300);
         assert_eq!(turn.first_audio_out_ms, 200);
         assert_eq!(turn.tts_play_ms, 200);
-        // total = stt(120) + agent(850) + first_audio_out(200); tts_synth_ms is a
-        // sub-metric already inside first_audio_out_ms and must not be re-added.
+        // stt(120) + agent(850) + first_audio_out(200); synth is not re-added.
         assert_eq!(turn.total_ms, 1170);
         assert_eq!(turn.utterance_id.as_deref(), Some("utt-1"));
         assert_eq!(turn.to_payload()["first_audio_out_ms"], 200);
@@ -394,31 +347,22 @@ mod tests {
 
     #[test]
     fn total_ms_does_not_double_count_first_chunk_synthesis() {
-        // Reproduces the call-site contract from
-        // voice_barge_in/final_result_playback.rs: `first_audio_out_ms`
-        // (the second record_tts arg) is measured from the START of TTS playback,
-        // so it ALREADY contains the first chunk's synthesis time. The synth time
-        // passed as the first arg is a sub-component of it, not an additive phase.
         let ch = fresh_channel(4);
         record_stt(ch, Some("utt-dbl"), 100);
         record_agent(ch, 500);
 
-        // Synthetic timing: first chunk took 300ms to synthesize, and first audio
-        // went out 360ms after playback began (300ms synth + 60ms queue/handoff).
+        // First audio went out 360ms after playback began: 300ms synth + 60ms handoff.
         let first_chunk_synthesis_ms = 300;
         let first_audio_out_ms = 360;
         let turn = record_tts(ch, first_chunk_synthesis_ms, first_audio_out_ms).expect("turn");
 
-        // synth is preserved as a standalone observability sub-metric.
         assert_eq!(turn.tts_synth_ms, 300);
         assert_eq!(turn.first_audio_out_ms, 360);
 
-        // Correct total: intake→first-audio = stt + agent + time-to-first-audio.
         let expected = 100 + 500 + first_audio_out_ms;
         assert_eq!(turn.total_ms, expected, "total must be intake→first-audio");
 
-        // Guard against regression to the old double-counting accounting, which
-        // would have produced stt + agent + synth + first_audio_out.
+        // A double-counted total would add synth on top of first_audio_out.
         let old_inflated = 100 + 500 + first_chunk_synthesis_ms + first_audio_out_ms;
         assert!(
             turn.total_ms < old_inflated,

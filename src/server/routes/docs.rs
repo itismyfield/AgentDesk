@@ -23,8 +23,6 @@ use taxonomy::{
 // their bodies live in focused child modules.
 #[allow(unused_imports)]
 pub(crate) use guides::{API_FRICTION_MARKERS_LAST_REFRESHED, CARD_LIFECYCLE_OPS_LAST_REFRESHED};
-#[allow(unused_imports)]
-pub(crate) use inventory::TOP_40_PAIRED_PATHS;
 
 // Category: ops
 

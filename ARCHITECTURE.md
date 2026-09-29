@@ -848,6 +848,7 @@ src/
 │   │   │   ├── destructive_commit.rs
 │   │   │   ├── episode_guard.rs
 │   │   │   ├── finalizer_identity.rs
+│   │   │   ├── host_locator.rs
 │   │   │   ├── invariant_test_capture.rs
 │   │   │   ├── model.rs
 │   │   │   ├── orphan_relay_reclaim.rs
@@ -1135,6 +1136,7 @@ src/
 │   │   │   ├── intake_delivery_capability.rs
 │   │   │   ├── intake_delivery_reconciler.rs
 │   │   │   ├── intake_delivery_sweep.rs
+│   │   │   ├── o_writer_host.rs
 │   │   │   ├── orphan_recovery.rs
 │   │   │   ├── queued_placeholders.rs
 │   │   │   ├── queued_recovery.rs
@@ -1938,6 +1940,7 @@ src/
 │   │   ├── runner.rs
 │   │   └── session.rs
 │   ├── tmux_common/
+│   │   ├── host_marker.rs
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
 │   │   └── tests_pg.rs
@@ -1980,6 +1983,8 @@ src/
 │   │   │   ├── binding.rs
 │   │   │   ├── confirm.rs
 │   │   │   ├── deliver.rs
+│   │   │   ├── host.rs
+│   │   │   ├── host_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── pieces.rs
 │   │   │   ├── rotation.rs
@@ -2006,6 +2011,8 @@ src/
 │   │   ├── binding_events.rs
 │   │   ├── extract.rs
 │   │   ├── observation.rs
+│   │   ├── pending.rs
+│   │   ├── pending_tests.rs
 │   │   ├── runtime_binding.rs
 │   │   ├── session_rotation.rs
 │   │   ├── shadow_peek.rs

@@ -106,13 +106,6 @@ impl WhisperStreamOverlapSegmenter {
         })
     }
 
-    // reason: voice runtime is wired only when voice config is enabled; no
-    // compile target exercises it. See #3034.
-    #[allow(dead_code)]
-    pub(crate) fn config(&self) -> StreamingOverlapConfig {
-        self.config
-    }
-
     pub(crate) fn feed(&mut self, samples: &[f32]) -> Vec<StreamingDecodeWindow> {
         self.pending_new.extend_from_slice(samples);
         let mut windows = Vec::new();

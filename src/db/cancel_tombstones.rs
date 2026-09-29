@@ -1,34 +1,17 @@
-//! Persistent backing store for cancel-induced watcher-death tombstones (#1309).
+//! PG mirror of the in-memory cancel tombstones (`RECENT_TURN_STOPS` in
+//! `services/discord/tmux_kill_policy.rs`), so a dcserver restart between a cancel and
+//! the watcher's death observation still suppresses the misleading 🔴 lifecycle notice.
 //!
-//! See the matching in-memory store at
-//! `crate::services::discord::tmux::RECENT_TURN_STOPS` (PR #1277). The
-//! in-memory copy is the fast path; this PG-backed mirror exists so a
-//! dcserver restart between the cancel and the watcher's death observation
-//! can still suppress the misleading 🔴 lifecycle notice.
-//!
-//! Lifecycle:
-//! - `insert_cancel_tombstone` is awaited by the cancel path before the
-//!   matching in-memory tombstone is allowed to be consumed as complete. The
-//!   10-minute `expires_at` window mirrors `RECENT_TURN_STOP_TTL`.
-//! - `delete_cancel_tombstones_by_client_ids` removes the exact PG rows for
-//!   in-memory hits. `consume_cancel_tombstone` handles the post-restart case
-//!   where memory is empty, returning the matching row AND deleting it in the
-//!   same transaction so suppression remains one-shot per cancel (codex P1 on
-//!   #1277).
-//! - `prune_expired_cancel_tombstones` is invoked periodically by the
-//!   `cancel_tombstone_pruner` maintenance worker so the table cannot grow
-//!   without bound when the watcher never observes the death.
+//! Rows are deleted by `client_id` after an in-memory hit, consumed one-shot after a
+//! restart, and swept by the `storage.cancel_tombstone_prune` maintenance job.
 
 use std::sync::OnceLock;
 
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-/// Global handle to the runtime PG pool, populated by `set_global_pool` from
-/// `crate::server::run` during boot. Lets call sites that don't already
-/// thread a `PgPool` through their signatures — for example
-/// `turn_lifecycle::stop_turn_with_policy` — still mirror cancel tombstones
-/// to PG (#1309).
+/// Runtime pool, set once at boot by `crate::server::run`, for callers with no
+/// `PgPool` in scope (e.g. `turn_lifecycle::stop_turn_with_policy`).
 static GLOBAL_PG_POOL: OnceLock<PgPool> = OnceLock::new();
 
 pub fn set_global_pool(pool: PgPool) {
@@ -39,37 +22,19 @@ pub fn global_pool() -> Option<&'static PgPool> {
     GLOBAL_PG_POOL.get()
 }
 
-/// Mirrors `crate::services::discord::tmux::RECENT_TURN_STOP_TTL`.
+/// Row lifetime; mirrors the in-memory `RECENT_TURN_STOP_TTL`.
 pub const CANCEL_TOMBSTONE_TTL_SECS: i64 = 10 * 60;
 
-/// Mirrors `RECENT_TURN_STOP_METADATA_FALLBACK_TTL` — a tighter window used
-/// when matching the watcher death back to a cancel that did not record an
-/// `stop_output_offset`. We over-fetch within the 10-minute outer TTL and
-/// re-check this 60s window in Rust.
+/// A watcher death only matches tombstones recorded within this window (enforced in
+/// SQL); mirrors the in-memory `RECENT_TURN_STOP_METADATA_FALLBACK_TTL`.
 pub const CANCEL_TOMBSTONE_FALLBACK_TTL_SECS: i64 = 60;
 
-/// Same teardown grace as the in-memory store
-/// (`CANCEL_TEARDOWN_GRACE_BYTES`). The wrapper writes ~2 KB of post-cancel
-/// teardown bytes after the cancel boundary; anything beyond this small
-/// buffer means the watcher already saw a follow-up turn's output and the
-/// death is no longer attributable to the cancel.
+/// Mirrors the in-memory `CANCEL_TEARDOWN_GRACE_BYTES`: output past the cancel offset
+/// plus this teardown slack belongs to a follow-up turn, not to the cancel.
 pub const CANCEL_TEARDOWN_GRACE_BYTES: i64 = 4 * 1024;
 
-// reason: public cancel-tombstone DTO for the read path; consumers are wired on
-// selected cancel-attribution routes, not every compile target. See #3034.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct CancelTombstone {
-    pub channel_id: i64,
-    pub tmux_session_name: Option<String>,
-    pub stop_output_offset: Option<i64>,
-    pub reason: String,
-}
-
-/// Insert a cancel tombstone with `expires_at = NOW() + ttl`. The `client_id`
-/// is the same UUID that the in-memory entry carries, letting the
-/// in-process watcher delete the exact PG mirror after the durable write has
-/// completed.
+/// Insert a tombstone. `client_id` is the in-memory entry's UUID, so an in-process
+/// hit can later delete exactly this row.
 pub async fn insert_cancel_tombstone(
     pool: &PgPool,
     client_id: Uuid,
@@ -96,10 +61,8 @@ pub async fn insert_cancel_tombstone(
     .map(|_| ())
 }
 
-/// Delete exact PG mirrors for tombstones already matched by the in-memory
-/// cache. The caller waits for the corresponding insert to finish before
-/// invoking this, so a zero-row delete means another consumer already removed
-/// the durable row.
+/// Delete the rows mirroring in-memory hits. Callers wait for the matching insert
+/// first, so a zero-row delete means another consumer already removed the row.
 pub async fn delete_cancel_tombstones_by_client_ids(
     pool: &PgPool,
     client_ids: &[Uuid],
@@ -114,21 +77,12 @@ pub async fn delete_cancel_tombstones_by_client_ids(
     Ok(result.rows_affected())
 }
 
-/// Look up + DELETE matching tombstones in a single transaction. Returns
-/// `true` when at least one row matched and was consumed; the caller treats
-/// that as "this watcher death was cancel-induced, suppress the lifecycle
-/// notification".
+/// Find and delete matching tombstones in one transaction, so suppression stays
+/// one-shot per cancel. `true` means the watcher death was cancel-induced.
 ///
-/// Matching rules mirror
-/// `crate::services::discord::tmux::cancel_induced_watcher_death`:
-/// 1. Same `channel_id`.
-/// 2. `tmux_session_name` matches OR is NULL on the tombstone (legacy
-///    cancels recorded without a session name).
-/// 3. Recorded within the 60s metadata-fallback window.
-/// 4. If both `stop_output_offset` and `current_output_offset` are known,
-///    require `current_output_offset <= stop_output_offset + grace`. Past
-///    the grace boundary the death belongs to a follow-up turn and must
-///    surface its own lifecycle signal.
+/// Matches like the in-memory `cancel_induced_watcher_death`, minus its generation check:
+/// same channel, session equal or NULL, recorded within the fallback window, and (when
+/// both offsets are known) `current <= stop + CANCEL_TEARDOWN_GRACE_BYTES`.
 pub async fn consume_cancel_tombstone(
     pool: &PgPool,
     channel_id: i64,
@@ -137,8 +91,7 @@ pub async fn consume_cancel_tombstone(
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    // Lock candidate rows so a concurrent consume on a different
-    // dcserver / worker cannot double-suppress.
+    // Row locks keep a concurrent consume (any worker or dcserver) from double-suppressing.
     let rows = sqlx::query(
         "SELECT id, tmux_session_name, stop_output_offset
          FROM cancel_tombstones
@@ -182,9 +135,7 @@ pub async fn consume_cancel_tombstone(
     Ok(true)
 }
 
-/// Sweep expired tombstones. Runs from the maintenance scheduler so the
-/// table cannot grow without bound when the watcher never observes a
-/// cancel-induced death.
+/// Sweep expired rows left behind when no watcher ever observes the death.
 pub async fn prune_expired_cancel_tombstones(pool: &PgPool) -> Result<u64, sqlx::Error> {
     let result = sqlx::query("DELETE FROM cancel_tombstones WHERE expires_at < NOW()")
         .execute(pool)

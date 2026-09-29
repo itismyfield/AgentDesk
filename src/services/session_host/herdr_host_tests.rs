@@ -644,6 +644,7 @@ fn herdr_items_have_no_production_caller() {
         ("src/services/session_host/legacy_collapse.rs", 1),
         ("src/services/session_host/tmux_host.rs", 0),
         ("src/services/session_host/process_host.rs", 0),
+        ("src/services/discord/inflight/host_locator.rs", 1),
     ];
     const NEEDLES: &[&str] = &[
         "HerdrHost",
@@ -661,6 +662,29 @@ fn herdr_items_have_no_production_caller() {
         "HerdrSocketTransport::new(",
         "HerdrSocketTransport::<",
     ];
+    // The host locator and `.host_kind` marker readers stay in their owners: nothing
+    // writes a locator or marker, and nothing reads one to choose a host.
+    const LOCATOR: &str = "src/services/discord/inflight/host_locator.rs";
+    const MARKER: &str = "src/services/tmux_common/host_marker.rs";
+    const INFLIGHT_MODEL: &str = "src/services/discord/inflight/model.rs";
+    const READERS: &[(&str, &[&str])] = &[
+        ("PersistedHostLocator", &[LOCATOR, INFLIGHT_MODEL]),
+        (
+            "HostedRuntimeLocator",
+            &[
+                LOCATOR,
+                "src/services/session_host.rs",
+                "src/services/session_host/model.rs",
+            ],
+        ),
+        ("HostKind::from_persisted", &[LOCATOR, MARKER]),
+        ("HostKindMarker", &[MARKER]),
+        ("read_host_kind_marker", &[MARKER]),
+        ("host_marker::", &[]),
+        (".host_locator", &[]),
+        ("host_locator: Some", &[]),
+        ("host_locator:", &[INFLIGHT_MODEL]),
+    ];
     let (probe, _) = production_text(
         "fn a() { b(\"}\"); }\n#[cfg(test)]\nmod t { const S: &str = \"{\"; }\nfn c() {}",
     );
@@ -671,8 +695,10 @@ fn herdr_items_have_no_production_caller() {
     let mut files = BTreeMap::new();
     let mut test_files = BTreeSet::new();
     while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
-            let path = entry.path();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry
+                .expect("source scan: unreadable directory entry")
+                .path();
             if path.is_dir() {
                 stack.push(path);
                 continue;
@@ -680,7 +706,9 @@ fn herdr_items_have_no_production_caller() {
             if path.extension().is_none_or(|ext| ext != "rs") {
                 continue;
             }
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+                panic!("source scan: unreadable {}: {error}", path.display())
+            });
             let (prod, test_mods) = production_text(&text);
             let stem = path.file_stem().unwrap().to_string_lossy().to_string();
             let base = match stem.as_str() {
@@ -723,6 +751,16 @@ fn herdr_items_have_no_production_caller() {
         );
         if prod.matches("herdr_pane(").count() > prod.matches("fn herdr_pane(").count() {
             violations.push(format!("{relative}: herdr_pane( call"));
+        }
+        violations.extend(
+            READERS
+                .iter()
+                .filter(|(n, owners)| !owners.contains(&relative.as_str()) && prod.contains(*n))
+                .map(|(n, _)| format!("{relative}: {n}")),
+        );
+        let fields = prod.matches("host_locator:").count() - prod.matches("host_locator::").count();
+        if relative == INFLIGHT_MODEL && fields > 2 {
+            violations.push(format!("{relative}: host_locator: x{fields} > 2"));
         }
         let routed = prod.matches("HostKind::Herdr").count();
         if let Some((_, ceiling)) = owner.filter(|(_, ceiling)| routed > *ceiling) {

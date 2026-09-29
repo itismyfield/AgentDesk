@@ -235,6 +235,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/session_forwarding/probe/tests.rs",
         "src/services/scheduled_messages/postgres_tests.rs",
         "src/services/tui_prompt_dedupe/binding_events/lane_tests.rs",
+        "src/services/tui_prompt_dedupe/pending_tests.rs",
         "src/services/claude_tui/hook_server/observation_ingress_tests.rs",
         "src/services/claude_tui/hook_server/rehydration_ingress_tests.rs",
         "src/services/claude_tui/hook_relay/ordered_queue/tests/tq_tests.rs",
@@ -255,6 +256,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_input/bounded_tmux_tests.rs",
         "src/services/tui_input/durability_tests.rs",
         "src/services/tui_o/writer/switch_tests.rs",
+        "src/services/tui_o/writer/host_tests.rs",
     }
 )
 

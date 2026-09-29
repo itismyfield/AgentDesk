@@ -16,6 +16,7 @@ pub(super) mod intake_delivery_capability;
 #[cfg(unix)]
 mod intake_delivery_reconciler;
 mod intake_delivery_sweep;
+mod o_writer_host;
 mod orphan_recovery;
 mod queued_placeholders;
 mod queued_recovery;
@@ -388,6 +389,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     spawns::run_bot_spawn_reachability_observation(&shared, &provider);
     run_bot_maybe_spawn_intake_worker(&shared, &provider, HostRole::Gateway);
     crate::services::tui_o::shadow_host::spawn_if_enabled(boot_config.tui_o.as_ref());
+    let pg_gateway = gateway_lease.is_some();
+    o_writer_host::spawn(&shared, &provider, boot_config.tui_o.as_ref(), pg_gateway);
 
     run_bot_start_gateway_runtime(
         token,

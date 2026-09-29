@@ -69,31 +69,6 @@ pub fn tail_with_ellipsis(text: &str, max_chars: usize) -> String {
     format!("…{}", &text[byte_start..])
 }
 
-/// 문자열 뒤에서 max_bytes 바이트 이내로 자르고, 앞에 "…"을 붙인다.
-/// 최종 문자열의 UTF-8 길이가 max_bytes를 넘지 않도록 보장한다.
-pub fn tail_with_ellipsis_bytes(text: &str, max_bytes: usize) -> String {
-    const ELLIPSIS: &str = "…";
-
-    if text.len() <= max_bytes {
-        return text.to_string();
-    }
-
-    if max_bytes == 0 {
-        return String::new();
-    }
-
-    if max_bytes < ELLIPSIS.len() {
-        return safe_suffix(text, max_bytes).to_string();
-    }
-
-    if max_bytes == ELLIPSIS.len() {
-        return ELLIPSIS.to_string();
-    }
-
-    let suffix = safe_suffix(text, max_bytes.saturating_sub(ELLIPSIS.len()));
-    format!("{ELLIPSIS}{suffix}")
-}
-
 fn has_expandable_tilde_prefix(path: &str) -> bool {
     path == "~" || path.starts_with("~/") || path.starts_with("~\\")
 }

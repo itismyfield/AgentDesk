@@ -9,8 +9,3 @@ pub use crate::services::settings::{
     RuntimeConfigResponse, SettingsConfigEntriesResponse, SettingsConfigEntry,
     SettingsConfigPatchResponse, SettingsDocument, SettingsOkResponse,
 };
-
-#[derive(Debug, serde::Serialize)]
-pub struct SettingsErrorResponse<'a> {
-    pub error: &'a str,
-}

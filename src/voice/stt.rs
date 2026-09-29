@@ -652,26 +652,6 @@ impl VoiceStt for WhisperStream {
     }
 }
 
-// reason: voice runtime is wired only when voice config is enabled; no compile
-// target exercises it. See #3034.
-#[allow(dead_code)]
-pub(crate) async fn transcribe(wav_path: impl AsRef<Path>) -> Result<String> {
-    let config = VoiceConfig::default();
-    transcribe_with_config(wav_path, &config).await
-}
-
-// reason: voice runtime is wired only when voice config is enabled; no compile
-// target exercises it. See #3034.
-#[allow(dead_code)]
-pub(crate) async fn transcribe_with_config(
-    wav_path: impl AsRef<Path>,
-    config: &VoiceConfig,
-) -> Result<String> {
-    SttRuntime::from_voice_config(config)
-        .transcribe(wav_path)
-        .await
-}
-
 async fn read_whisper_text(path: &Path, output: &SttCommandOutput) -> Result<String> {
     match fs::read_to_string(path).await {
         Ok(text) => {

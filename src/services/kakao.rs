@@ -109,10 +109,6 @@ impl KakaoEnvironment {
         })
     }
 
-    pub fn default_account() -> Result<String, KakaoError> {
-        Self::from_process(None).map(|config| config.account_id)
-    }
-
     fn credential(&self, suffix: &str) -> Option<String> {
         std::env::var(format!("{}_{suffix}", self.env_prefix))
             .ok()
@@ -160,11 +156,6 @@ impl KakaoClient {
         }
         Ok(environment.account_id)
     }
-    pub fn from_process(account_id: Option<&str>) -> Result<Self, KakaoError> {
-        let environment = KakaoEnvironment::from_process(account_id)?;
-        Self::from_environment(environment)
-    }
-
     fn from_environment(environment: KakaoEnvironment) -> Result<Self, KakaoError> {
         let rest_api_key = environment.credential("REST_API_KEY");
         let client_secret = environment.credential("CLIENT_SECRET");
