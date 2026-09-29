@@ -645,6 +645,7 @@ fn herdr_items_have_no_production_caller() {
         ("src/services/session_host/tmux_host.rs", 0),
         ("src/services/session_host/process_host.rs", 0),
         ("src/services/discord/inflight/host_locator.rs", 1),
+        ("src/services/provider/session_probe.rs", 2),
     ];
     const NEEDLES: &[&str] = &[
         "HerdrHost",

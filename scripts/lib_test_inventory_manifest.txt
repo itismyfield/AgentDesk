@@ -8691,6 +8691,10 @@ services::provider::ready_input_prompt_tests::detects_codex_tui_prompt_for_codex
 services::provider::ready_input_prompt_tests::detects_provider_scoped_wrapper_ready_marker
 services::provider::ready_input_prompt_tests::detects_ready_banner
 services::provider::ready_input_prompt_tests::rejects_non_ready_capture
+services::provider::session_probe::tests::legacy_pane_override_and_typed_probe_share_one_answer
+services::provider::session_probe::tests::qwen_common_probe_keeps_the_legacy_tmux_alias_only
+services::provider::session_probe::tests::tmux_alive_and_missing_collapse_like_the_legacy_bool
+services::provider::session_probe::tests::unresolved_herdr_and_failed_probes_never_read_as_dead
 services::provider_auth::tests::detect_provider_credentials_reports_env_presence_without_auth_claim
 services::provider_auth::tests::env_file_contains_key_requires_non_empty_supported_key
 services::provider_auth::tests::gemini_corrupt_creds_are_not_unconfigured

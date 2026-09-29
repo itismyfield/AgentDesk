@@ -296,6 +296,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/process/stream_child/stream_queue/test_delay.rs",
         "src/services/process/stream_child/test_fixture.rs",
         "src/services/provider/read_fault.rs",
+        "src/services/session_host/test_support.rs",
         "src/services/tmux_turn_liveness/tests_pg.rs",
         "src/test_env_panic_probe.rs",
     }

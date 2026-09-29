@@ -16,6 +16,8 @@ pub(crate) mod legacy_collapse;
 mod model;
 mod process_host;
 mod resolve;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod tmux_host;
 mod traits;
 
