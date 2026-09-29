@@ -734,7 +734,7 @@ fn header_is_read_from_the_open_descriptor_not_by_reopening_the_path() {
     assert_eq!(
         result,
         Ok(a_identity),
-        "the header must come from A's descriptor, not from B at the reopened path"
+        "identity and header must both come from A's open descriptor"
     );
 
     // B stays in place: the path no longer names the descriptor whose header was read.

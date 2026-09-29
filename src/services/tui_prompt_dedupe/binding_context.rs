@@ -237,9 +237,11 @@ impl PreparedIncarnation {
             host: stable_host_identity(),
             expected_native_session_id: expected.map(str::to_owned),
             launch_mode: if resume { "resume" } else { "fresh" }.to_owned(),
-            provider_root: (provider == "claude")
-                .then(configured_claude_projects_root)
-                .flatten(),
+            provider_root: match provider {
+                "claude" => configured_claude_projects_root(),
+                "codex" => crate::services::codex_tui::rollout_tail::default_codex_sessions_dir(),
+                _ => None,
+            },
         };
         sweep(
             provider,
@@ -282,10 +284,19 @@ impl PreparedIncarnation {
     }
 
     pub(crate) fn env_lines(&self) -> String {
-        format!(
+        let mut lines = format!(
             "{UNSET_CONTEXT}export AGENTDESK_BINDING_CONTEXT={}\n",
             crate::services::process::shell_escape(&self.path.to_string_lossy())
-        )
+        );
+        if self.context.provider == "codex"
+            && let Some(home) = self.context.provider_root.as_deref().and_then(Path::parent)
+        {
+            lines.push_str(&format!(
+                "export CODEX_HOME={}\n",
+                crate::services::process::shell_escape(&home.to_string_lossy())
+            ));
+        }
+        lines
     }
 
     pub(crate) fn finish_spawn(&self, result: io::Result<String>) -> Result<(), String> {

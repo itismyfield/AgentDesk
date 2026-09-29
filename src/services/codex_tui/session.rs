@@ -1,5 +1,3 @@
-// Hook source verification is read only by its tests until the Codex hook wiring lands.
-#[allow(dead_code)]
 pub(crate) mod source_observation;
 
 use serde_json::Value;

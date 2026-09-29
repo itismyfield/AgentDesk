@@ -1,0 +1,588 @@
+use super::*;
+use crate::config::TestEnvVarGuard as Guard;
+use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::codex_tui::{rollout_index, session};
+use crate::services::tui_prompt_dedupe as dedupe;
+use dedupe::binding_context::{
+    BINDING_HEADER, BindingContext, CapturedContext, HookBindingEnvelope, ObservedHookProcess,
+    PreparedIncarnation,
+};
+use dedupe::binding_events::{self, APPEND_FAULT, BindingEvent, BindingTarget};
+use std::fs;
+use std::path::{Path, PathBuf};
+use tower::ServiceExt;
+
+struct Harness {
+    _env: Vec<Guard>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+    root: tempfile::TempDir,
+    requests:
+        std::cell::RefCell<std::collections::HashMap<String, (axum::http::HeaderMap, String)>>,
+    context: BindingContext,
+    app: Router,
+    state: HookServerState,
+    rt: tokio::runtime::Runtime,
+    command: String,
+    payload: Value,
+    header: Value,
+    path: PathBuf,
+}
+
+impl Harness {
+    fn new() -> Self {
+        let lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (root, env) = dedupe::binding_context::tests::fixture();
+        let home = root.path().join("launch-home");
+        let home_env = Guard::set_path_after_shared_test_env_lock("CODEX_HOME", &home);
+        dedupe::reset_state_for_tests();
+        binding_events::set_test_root(Some(root.path()));
+        let data: Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/hook_payload/codex-0.157.1.json"
+        ))
+        .unwrap();
+        let run = &data["runs"][1];
+        let start = &run["events"][0];
+        let clear = &run["events"][3];
+        let command = clear["command_session_id"].as_str().unwrap().to_owned();
+        let prepared = PreparedIncarnation::prepare(
+            "codex",
+            "codex-ingress-test",
+            Some(8745),
+            start["payload"]["session_id"].as_str(),
+            false,
+        )
+        .unwrap();
+        let context = prepared.context;
+        let marker =
+            crate::services::tmux_common::session_temp_path(&context.tmux_session, "spawn_nonce");
+        fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
+        fs::write(marker, &context.execution_nonce).unwrap();
+        let local = |payload: &Value| {
+            home.join("sessions").join(
+                payload["transcript_path"]
+                    .as_str()
+                    .unwrap()
+                    .split_once("/.codex/sessions/")
+                    .unwrap()
+                    .1,
+            )
+        };
+        let old = local(&start["payload"]);
+        write(&old, &run["rollout_session_meta"][0]);
+        let path = local(&clear["payload"]);
+        let mut payload = clear["payload"].clone();
+        payload["transcript_path"] = json!(path);
+        dedupe::register_provider_session("codex", &command, &context.tmux_session);
+        dedupe::register_tmux_channel(&context.tmux_session, 8745);
+        session::install_codex_tui_runtime_binding(
+            &context.tmux_session,
+            Some(19),
+            dedupe::TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::CodexTui,
+                output_path: old.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: start["payload"]["session_id"].as_str().map(str::to_owned),
+                last_offset: 19,
+                relay_last_offset: Some(19),
+            },
+        );
+        let state = HookServerState::new();
+        Self {
+            _env: std::iter::once(home_env).chain(env).collect(),
+            _lock: lock,
+            root,
+            context,
+            requests: Default::default(),
+            app: hook_receiver_router_with_state(state.clone()),
+            state,
+            rt: tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+            command,
+            payload,
+            header: run["rollout_session_meta"][1].clone(),
+            path,
+        }
+    }
+
+    fn send(&self, payload: &Value, context: Option<BindingContext>, id: &str) -> (u16, Value) {
+        let (headers, body) = self
+            .requests
+            .borrow_mut()
+            .entry(id.to_owned())
+            .or_insert_with(|| {
+                let envelope = HookBindingEnvelope {
+                    context: context.map_or_else(
+                        || {
+                            CapturedContext::Absent(
+                                dedupe::binding_context::AbsentReason::LegacyRequest,
+                            )
+                        },
+                        CapturedContext::Captured,
+                    ),
+                    observed: ObservedHookProcess::default(),
+                };
+                let now = Utc::now();
+                let mut headers = axum::http::HeaderMap::new();
+                for (name, value) in [
+                    ("content-type", "application/json".to_owned()),
+                    (BINDING_HEADER, envelope.encode().unwrap()),
+                    (
+                        relay_receipts::RELAY_REQUEST_ID_HEADER,
+                        uuid::Uuid::new_v4().to_string(),
+                    ),
+                    (relay_receipts::RELAY_PUBLISHED_AT_HEADER, now.to_rfc3339()),
+                    (
+                        relay_receipts::RELAY_DEADLINE_HEADER,
+                        (now + chrono::Duration::minutes(5)).to_rfc3339(),
+                    ),
+                ] {
+                    headers.insert(name, value.parse().unwrap());
+                }
+                (headers, payload.to_string())
+            })
+            .clone();
+        let mut req = axum::http::Request::post(format!(
+            "/hooks/codex/SessionStart?session_id={}",
+            self.command
+        ))
+        .body(axum::body::Body::from(body))
+        .unwrap();
+        *req.headers_mut() = headers;
+        self.rt.block_on(async {
+            let response = self.app.clone().oneshot(req).await.unwrap();
+            let status = response.status().as_u16();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap())
+        })
+    }
+    fn hook(&self) -> (u16, Value) {
+        self.send(
+            &self.payload,
+            Some(self.context.clone()),
+            &uuid::Uuid::new_v4().to_string(),
+        )
+    }
+    fn binding(&self) -> dedupe::TuiRuntimeBinding {
+        dedupe::runtime_binding_for_tmux_session(&self.context.tmux_session).unwrap()
+    }
+    fn events(&self) -> Vec<BindingEvent> {
+        binding_events::binding_events_since(8745, 0).unwrap()
+    }
+    fn snapshot(
+        &self,
+    ) -> (
+        dedupe::TuiRuntimeBinding,
+        Vec<BindingEvent>,
+        session::CodexTuiRolloutMarker,
+    ) {
+        (
+            self.binding(),
+            self.events(),
+            session::read_codex_tui_rollout_marker(&self.context.tmux_session).unwrap(),
+        )
+    }
+}
+impl Drop for Harness {
+    fn drop(&mut self) {
+        APPEND_FAULT.with(|s| s.set(None));
+        binding_events::set_test_root(None);
+        dedupe::reset_state_for_tests();
+    }
+}
+fn write(path: &Path, header: &Value) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, format!("{header}\n")).unwrap();
+}
+fn source(event: &BindingEvent) -> &binding_events::SourceId {
+    match &event.new {
+        BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => source,
+        other => panic!("expected verified source, got {other:?}"),
+    }
+}
+
+#[test]
+fn codex_clear_fixture_binds_the_verified_rollout_and_preserves_repeat_cursor() {
+    let h = Harness::new();
+    write(&h.path, &h.header);
+    let before = h.events().len();
+    assert_eq!(h.hook().0, 202);
+    assert_eq!(
+        h.binding().output_path,
+        h.path.canonicalize().unwrap().display().to_string(),
+        "clear must bind the verified new rollout"
+    );
+    let events = h.events();
+    assert_eq!(events.len(), before + 1);
+    let event = events.last().unwrap();
+    assert_eq!(source(event).path, h.path.canonicalize().unwrap());
+    assert_eq!(
+        source(event).session_id,
+        h.payload["session_id"].as_str().unwrap()
+    );
+    assert_eq!(
+        event.execution_nonce.as_deref(),
+        Some(h.context.execution_nonce.as_str())
+    );
+    assert_eq!(event.cause, binding_events::BindingCause::Clear);
+    assert_eq!(event.evidence.hook_event.as_deref(), Some("session_start"));
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::metadata(&h.path).unwrap();
+    assert_eq!(
+        (source(event).dev, source(event).ino),
+        (meta.dev(), meta.ino())
+    );
+    let marker = session::read_codex_tui_rollout_marker(&h.context.tmux_session).unwrap();
+    assert_eq!(marker.rollout_path, source(event).path);
+    assert_eq!(marker.session_id, h.binding().session_id);
+    assert_eq!(h.binding().last_offset, 0);
+    session::advance_codex_tui_runtime_binding_and_marker_offset(
+        &h.context.tmux_session,
+        &h.path,
+        47,
+    );
+    let stable = h.snapshot();
+    assert_eq!(h.hook().0, 202);
+    assert_eq!(
+        h.snapshot(),
+        stable,
+        "repeat hook must preserve the source cursor"
+    );
+}
+
+#[test]
+fn codex_retryable_claims_are_durable_pending_even_when_a_file_exists() {
+    let h = Harness::new();
+    let original = h.binding();
+    for phase in ["absent", "unfinished", "complete"] {
+        if phase == "unfinished" {
+            fs::write(&h.path, "{\"type\":").unwrap();
+        }
+        if phase == "complete" {
+            write(&h.path, &h.header);
+        }
+        assert_eq!(h.hook().0, 202);
+        let events = h.events();
+        if phase != "complete" {
+            assert!(
+                matches!(events.last().unwrap().new, BindingTarget::Pending { .. }),
+                "retryable source must be durable Pending before ACK: {phase}"
+            );
+            assert_eq!(h.binding(), original);
+        } else {
+            assert!(matches!(
+                events.last().unwrap().new,
+                BindingTarget::Resolved { .. }
+            ));
+            assert_ne!(h.binding(), original);
+        }
+    }
+}
+
+#[test]
+fn codex_incomplete_index_is_pending_and_never_a_verified_source() {
+    let h = Harness::new();
+    let _index = rollout_index::lock_cache_for_tests();
+    write(&h.path, &h.header);
+    let before = h.binding();
+    let mut payload = h.payload.clone();
+    payload.as_object_mut().unwrap().remove("transcript_path");
+    rollout_index::fail_header_reads_for_tests(Some(h.path.clone()));
+    assert_eq!(
+        h.send(&payload, Some(h.context.clone()), "incomplete-index")
+            .0,
+        202
+    );
+    let events = h.events();
+    rollout_index::fail_header_reads_for_tests(None);
+    assert!(
+        matches!(events.last().unwrap().new, BindingTarget::Pending { .. }),
+        "incomplete index must not be accepted as a Source"
+    );
+    assert_eq!(h.binding(), before);
+}
+
+#[test]
+fn codex_permanent_rejections_leave_binding_log_and_cursor_untouched() {
+    let h = Harness::new();
+    write(&h.path, &h.header);
+    let stable = h.snapshot();
+    for problem in ["filename", "source", "outside"] {
+        let mut payload = h.payload.clone();
+        match problem {
+            "filename" => payload["transcript_path"] = json!(h.path.with_file_name("wrong.jsonl")),
+            "source" => {
+                let mut header = h.header.clone();
+                header["payload"]["source"] = json!("exec");
+                write(&h.path, &header);
+            }
+            _ => {
+                let outside = h.root.path().join(h.path.file_name().unwrap());
+                write(&outside, &h.header);
+                payload["transcript_path"] = json!(outside);
+            }
+        }
+        let (status, body) = h.send(&payload, Some(h.context.clone()), problem);
+        assert_eq!(status, 202);
+        assert_eq!(
+            h.snapshot(),
+            stable,
+            "permanent rejection must not become Pending or move binding/log/cursor: {problem}"
+        );
+        assert_eq!(
+            body["binding_observation"], "NotApplicable(CodexSourceRejected)",
+            "permanent rejection must be observable, not Proceed"
+        );
+    }
+}
+
+#[test]
+fn codex_launch_root_is_captured_and_hook_env_cannot_change_the_verdict() {
+    let h = Harness::new();
+    let prepared =
+        PreparedIncarnation::prepare("codex", "codex-root-capture", Some(8745), None, false)
+            .unwrap();
+    assert_eq!(
+        prepared.context.provider_root, h.context.provider_root,
+        "launch must capture the Codex sessions root"
+    );
+    assert!(
+        prepared.env_lines().contains("export CODEX_HOME="),
+        "launch must apply its captured home"
+    );
+    write(&h.path, &h.header);
+    let other = h.root.path().join("later-home");
+    let _changed = Guard::set_path_after_shared_test_env_lock("CODEX_HOME", &other);
+    let output = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            &format!("{}\n/usr/bin/printenv CODEX_HOME", prepared.env_lines()),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        h.context
+            .provider_root
+            .as_ref()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "launch environment must apply the home captured before env changed"
+    );
+    assert_eq!(h.hook().0, 202);
+    assert_eq!(
+        h.binding().output_path,
+        h.path.canonicalize().unwrap().display().to_string(),
+        "hook must use launch root after env changes"
+    );
+}
+
+#[test]
+fn codex_missing_root_never_falls_back_to_hook_environment() {
+    let h = Harness::new();
+    write(&h.path, &h.header);
+    let before = h.snapshot();
+    let mut context = h.context.clone();
+    context.provider_root = None;
+    let (status, body) = h.send(&h.payload, Some(context), "no-root");
+    assert_eq!(status, 202);
+    assert_eq!(
+        h.snapshot(),
+        before,
+        "missing launch root must not fall back to env"
+    );
+    assert_eq!(
+        body["binding_observation"], "NotApplicable(CodexContextUnavailable)",
+        "missing root must be explicitly rejected"
+    );
+}
+
+#[test]
+fn codex_pending_and_source_fsync_failures_are_425_and_retry_the_same_receipt() {
+    let h = Harness::new();
+    let mut events = h.state.subscribe();
+    for (present, step) in [
+        (false, "write"),
+        (false, "sync"),
+        (true, "write"),
+        (true, "sync"),
+    ] {
+        if present {
+            write(&h.path, &h.header);
+        }
+        let before = h.snapshot();
+        APPEND_FAULT.with(|s| s.set(Some(step)));
+        let (status, _) = h.send(
+            &h.payload,
+            Some(h.context.clone()),
+            &format!("{present}-{step}"),
+        );
+        APPEND_FAULT.with(|s| s.set(None));
+        assert_eq!(status, 425, "failed Codex persistence must refuse ACK");
+        assert!(
+            events.try_recv().is_err(),
+            "refused source must not broadcast"
+        );
+        assert_eq!(
+            h.snapshot(),
+            before,
+            "fsync failure must not publish or leave a log line"
+        );
+    }
+    assert_eq!(
+        h.send(&h.payload, Some(h.context.clone()), "true-sync").0,
+        202,
+        "abandoned receipt must retry"
+    );
+    assert_eq!(
+        h.binding().session_id.as_deref(),
+        h.payload["session_id"].as_str()
+    );
+}
+
+#[test]
+fn codex_stale_context_is_rejected_before_binding() {
+    let h = Harness::new();
+    write(&h.path, &h.header);
+    let before = h.snapshot();
+    for field in ["nonce", "provider", "pane", "absent"] {
+        let mut ctx = h.context.clone();
+        match field {
+            "nonce" => ctx.execution_nonce = "0".repeat(32),
+            "provider" => ctx.provider = "claude".into(),
+            "pane" => ctx.tmux_session = "other-pane".into(),
+            _ => {}
+        }
+        let ctx = (field != "absent").then_some(ctx);
+        let (_, body) = h.send(&h.payload, ctx, field);
+        assert_eq!(h.snapshot(), before);
+        assert_eq!(
+            body["binding_observation"], "NotApplicable(CodexContextUnavailable)",
+            "invalid context must be refused"
+        );
+    }
+}
+
+#[test]
+fn codex_successive_clear_hooks_cannot_rebind_a_retired_session() {
+    let h = Harness::new();
+    let first = h.binding();
+    write(&h.path, &h.header);
+    assert_eq!(h.hook().0, 202);
+    let id = uuid::Uuid::new_v4().to_string();
+    let next = h
+        .path
+        .with_file_name(format!("rollout-2026-09-27T21-06-14-{id}.jsonl"));
+    let mut header = h.header.clone();
+    header["payload"]["id"] = json!(id);
+    write(&next, &header);
+    let mut payload = h.payload.clone();
+    payload["session_id"] = json!(id);
+    payload["transcript_path"] = json!(next);
+    assert_eq!(
+        h.send(&payload, Some(h.context.clone()), "next-clear").0,
+        202
+    );
+    let stable = h.snapshot();
+    for (id, path) in [
+        (first.session_id.unwrap(), first.output_path),
+        (
+            h.payload["session_id"].as_str().unwrap().to_owned(),
+            h.path.display().to_string(),
+        ),
+    ] {
+        payload["session_id"] = json!(id);
+        payload["transcript_path"] = json!(path);
+        let (_, body) = h.send(&payload, Some(h.context.clone()), &format!("late-{id}"));
+        assert_eq!(
+            h.snapshot(),
+            stable,
+            "late known source must not reverse a clear"
+        );
+        assert_eq!(
+            body["binding_observation"],
+            "NotApplicable(CodexSourceRejected)"
+        );
+    }
+}
+
+#[test]
+fn codex_pending_claim_cannot_override_a_later_verified_source() {
+    let h = Harness::new();
+    assert_eq!(h.hook().0, 202);
+    let id = uuid::Uuid::new_v4().to_string();
+    let next = h
+        .path
+        .with_file_name(format!("rollout-2026-09-27T21-06-14-{id}.jsonl"));
+    let mut header = h.header.clone();
+    header["payload"]["id"] = json!(id);
+    write(&next, &header);
+    let mut payload = h.payload.clone();
+    payload["session_id"] = json!(id);
+    payload["transcript_path"] = json!(next);
+    assert_eq!(h.send(&payload, Some(h.context.clone()), "newer").0, 202);
+    let stable = h.snapshot();
+    write(&h.path, &h.header);
+    assert_eq!(
+        h.hook().1["binding_observation"],
+        "NotApplicable(CodexSourceRejected)"
+    );
+    assert_eq!(
+        h.snapshot(),
+        stable,
+        "superseded Pending cannot overwrite Source"
+    );
+}
+
+#[test]
+fn codex_marker_failure_retries_the_durable_source_without_a_duplicate_event() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = Harness::new();
+    write(&h.path, &h.header);
+    let before = h.snapshot();
+    let path = crate::services::tmux_common::session_temp_path(
+        &h.context.tmux_session,
+        crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
+    );
+    let permissions = fs::metadata(&path).unwrap().permissions();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+    let result = h.send(&h.payload, Some(h.context.clone()), "marker-failure");
+    fs::set_permissions(&path, permissions).unwrap();
+    assert_eq!(result.0, 425, "marker failure must be retried");
+    assert_eq!(h.binding(), before.0);
+    assert_eq!(h.snapshot().2, before.2);
+    assert_eq!(h.events().len(), before.1.len() + 1);
+    assert_eq!(
+        h.send(&h.payload, Some(h.context.clone()), "marker-failure")
+            .0,
+        202
+    );
+    let after = h.snapshot();
+    assert_eq!(
+        h.events().len(),
+        before.1.len() + 1,
+        "retry must reuse durable Source"
+    );
+    assert_eq!(
+        h.binding().session_id.as_deref(),
+        h.payload["session_id"].as_str()
+    );
+    assert_eq!(
+        h.send(&h.payload, Some(h.context.clone()), "marker-failure")
+            .0,
+        202
+    );
+    assert_eq!(
+        h.snapshot(),
+        after,
+        "cached receipt must not repeat adoption"
+    );
+}

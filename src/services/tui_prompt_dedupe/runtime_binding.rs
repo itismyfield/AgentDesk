@@ -1,6 +1,8 @@
 use super::*;
 use binding_events::{BindingPersistError, CauseSource, HookSignal, Proposal};
 mod adopt_skip;
+mod codex_hook;
+pub(crate) use codex_hook::observe_codex_hook;
 pub(crate) mod pane_registration;
 pub(crate) use adopt_skip::{AdoptSkip, adopt_claude_continuation_explained};
 
