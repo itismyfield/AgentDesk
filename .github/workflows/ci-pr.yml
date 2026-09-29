@@ -822,8 +822,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Keep Windows inline and default-feature-only instead of `just check`.
-      # This PR lane provides broad compile signal plus the bounded writer
-      # namespace owner below; main-push and
+      # This PR lane provides broad compile signal; the bounded writer namespace
+      # owner runs in `check_fast_cross_os_targets`, and main-push and
       # nightly retain the Windows runtime and non-PG test coverage outside the
       # PR critical path (#4747 option 2). Ubuntu fmt/staged clippy and full
       # workspace checks remain authoritative in the jobs above.
@@ -834,6 +834,65 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: cargo check --workspace --all-targets
+
+      - name: sccache stats
+        if: always() && runner.os != 'macOS'
+        shell: bash
+        run: sccache --show-stats || true
+
+  # The writer namespace test build runs on its own Windows runner so it
+  # overlaps `cargo check`; the required-context mirror waits for both jobs.
+  check_fast_cross_os_targets:
+    name: Windows exact targets (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Provision Python 3.11 (tomllib owner for check_test_target_integrity, a2a-C PR-1)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Disable sccache on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          {
+            echo "RUSTC_WRAPPER="
+            echo "SCCACHE_GHA_ENABLED="
+          } >> "$GITHUB_ENV"
+
+      - name: Install Opus on macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew install opus pkg-config
+          echo "PKG_CONFIG_PATH=$(brew --prefix opus)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+
+      - name: Setup sccache
+        if: runner.os != 'macOS'
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Writer namespace exact Windows targets
         if: runner.os == 'Windows'
@@ -1635,13 +1694,16 @@ jobs:
     needs:
       - changes
       - check_fast_cross_os
+      - check_fast_cross_os_targets
     if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Mirror check_fast_cross_os result for branch protection
+        shell: bash
         env:
+          BASH_ENV: /dev/null
           CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
           # Mirror on `cross_os_rust`, NOT `rust_compile`: the cross-OS lane is
           # now gated on cross_os_rust, so a relay-only PR (rust_compile=true,
@@ -1653,6 +1715,17 @@ jobs:
           FILTER_OUTPUT: ${{ needs.changes.outputs.cross_os_rust }}
           UPSTREAM_JOB_NAME: check_fast_cross_os
           UPSTREAM_RESULT: ${{ needs.check_fast_cross_os.result }}
+        run: ./scripts/required-check-mirror.sh
+
+      - name: Mirror check_fast_cross_os_targets result for branch protection
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
+          FILTER_NAME: cross_os_rust
+          FILTER_OUTPUT: ${{ needs.changes.outputs.cross_os_rust }}
+          UPSTREAM_JOB_NAME: check_fast_cross_os_targets
+          UPSTREAM_RESULT: ${{ needs.check_fast_cross_os_targets.result }}
         run: ./scripts/required-check-mirror.sh
 
   win32_build_token_required_context:
@@ -1907,7 +1980,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=b23cb16675728a6d470bda30a74489ed64c072e60a452c7d484deff5cfd9386c
+          expected=8be1f1ea00cb47e08491ba20c29d4d3f13f6b552e10d7f8c88582b9eee460da2
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2122,7 +2195,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=b23cb16675728a6d470bda30a74489ed64c072e60a452c7d484deff5cfd9386c
+          expected=8be1f1ea00cb47e08491ba20c29d4d3f13f6b552e10d7f8c88582b9eee460da2
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
