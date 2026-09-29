@@ -194,7 +194,7 @@ async fn run(turn: Turn) {
     let gateway = Arc::new(RelayContractFakeGateway::edited());
     let mut sink = SessionBoundDiscordRelaySink::new(registry);
     sink.test_gateway = Some(gateway.clone());
-    let writer = writer::WriterFixture::new(&root, &source, shadow, channel_id);
+    let writer = writer::WriterFixture::new(&root, &source, shadow, channel_id, session);
     let payload = transcript(turn);
     std::fs::write(&source, &payload).unwrap();
     let end = payload.len() as u64;
