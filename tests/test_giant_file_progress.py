@@ -1351,5 +1351,118 @@ class GiantFileCandidateBaseTest(unittest.TestCase):
                 self.assertEqual(evidence["comparison_base_sha"], self.comparison_base)
 
 
+GONE, KEPT, SMALL = "src/gone.rs", "src/kept.rs", "src/small.rs"
+
+
+def deletion_registry(*paths):
+    return ("grandfathered_baseline_paths = [\n" + "".join(f'  "{path}",\n' for path in paths)
+            + "]\ngrandfathered = []\n\n" + "".join(entry(path, NEW) for path in paths))
+
+
+class GiantFileDeletionTest(unittest.TestCase):
+    """Real Git deletion of a registered giant evaluated through main()."""
+
+    git, put, commit = (GiantFileCandidateBaseTest.git, GiantFileCandidateBaseTest.put,
+                        GiantFileCandidateBaseTest.commit)
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.repo = Path(self.temp.name) / "repo"
+        self.repo.mkdir()
+        self.evidence = Path(self.temp.name) / "evidence.json"
+        self.overdue = set()
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "deletion@example.invalid")
+        self.git("config", "user.name", "Giant Deletion Test")
+        self.put(P.EVALUATOR, Path(P.__file__).read_text(encoding="utf-8"))
+        self.put(P.GIANT_PIN, "# unchanged pins\n")
+        self.put(P.METADATA, '{"ratchets": 2}\n')
+        self.put(SMALL, "pub fn small() {}\n" * 10)
+        for path in (GONE, KEPT):
+            self.put(path, "pub fn giant() {}\n" * 1200)
+        self.ledger((GONE, KEPT))
+        self.base = self.commit("base")
+        patch = mock.patch.object(P, "ROOT", self.repo)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def ledger(self, paths, transition=None):
+        self.put(P.REGISTRY, deletion_registry(*paths))
+        self.put(P.TRANSITION, "# transition\n" + "".join(
+            f"{path}\n" for path in (paths if transition is None else transition)))
+
+    def snapshot(self, root, evaluation_date=None):
+        registry = (root / P.REGISTRY).read_text()
+        registrations = {path: META_ROOT for path in (GONE, KEPT) if f'file = "{path}"' in registry}
+        return {"modules": {path: len((root / path).read_text().splitlines())
+                            for path in (GONE, KEPT, SMALL) if (root / path).exists()},
+                "registrations": registrations,
+                "overdue": sorted(self.overdue & registrations.keys())}
+
+    def run_pr(self, *, delete=(GONE,), ledger=(KEPT,), transition=None, files=None):
+        self.git("checkout", "-qf", "--detach", self.base)
+        for path in delete:
+            (self.repo / path).unlink()
+        self.ledger(ledger, transition)
+        for path, text in {P.METADATA: '{"ratchets": 1}\n', **(files or {})}.items():
+            self.put(path, text)
+        head = self.commit("delete giant")
+        self.git("checkout", "-qf", "--detach", self.base)
+        self.git("merge", "--no-ff", "-qm", "candidate", head)
+        env = {"GFP_EVENT_NAME": "pull_request", "GFP_REPOSITORY": "itismyfield/AgentDesk",
+               "GFP_HEAD_REPOSITORY": "itismyfield/AgentDesk", "GFP_CANDIDATE_SHA": self.git("rev-parse", "HEAD"),
+               "GFP_BASE_SHA": self.base, "GFP_HEAD_SHA": head}
+        with mock.patch.dict(P.os.environ, env, clear=True), mock.patch.object(
+                P, "EVIDENCE", self.evidence), mock.patch.object(
+                G, "giant_file_snapshot", side_effect=self.snapshot), redirect_stderr(io.StringIO()):
+            rc = P.main()
+        return rc, json.loads(self.evidence.read_text())
+
+    def test_exact_deletion_passes_before_strict_progress(self):
+        for overdue in (set(), {GONE}):
+            with self.subTest(overdue=overdue):
+                self.overdue = overdue
+                rc, evidence = self.run_pr()
+                self.assertEqual(rc, 0, evidence)
+                self.assertEqual((evidence["selector"], evidence["deleted"], evidence["retired"]),
+                                 ("pr_giant_deletion", [GONE], []))
+                self.assertEqual(evidence["base_overdue"], sorted(overdue))
+
+    def test_inexact_ledger_pin_change_or_new_giant_rejects(self):
+        cases = [({"ledger": (), "transition": (KEPT,)}, ("registry is not the exact deleted-entry removal",
+                                                           f"retained metadata changed: {KEPT}")),
+                 ({"files": {P.GIANT_PIN: "# changed pins\n"}}, ("giant pin blob changed",)),
+                 ({"files": {SMALL: "pub fn small() {}\n" * 1000}}, (f"new or growing giant: {SMALL}",)),
+                 ({"transition": ()}, ("transition list is not the exact deleted-path removal",))]
+        for options, reasons in cases:
+            with self.subTest(reasons=reasons):
+                rc, evidence = self.run_pr(**options)
+                self.assertEqual((rc, evidence["selector"], evidence.get("deleted")),
+                                 (2, "pr_giant_deletion", [GONE]), evidence)
+                self.assertEqual(evidence["reason"], "; ".join(reasons))
+
+    def test_entry_removal_needs_an_actual_file_deletion(self):
+        # The kept file is edited in place: Git reports "M", not "D", and the PR is not ledger-only.
+        rc, evidence = self.run_pr(delete=(), files={GONE: "pub fn edited() {}\n" * 1200})
+        self.assertEqual((rc, evidence["selector"], "deleted" in evidence),
+                         (2, "pr_ordinary_no_regression", False), evidence)
+        self.assertEqual(evidence["reason"],
+                         "frozen authority blob changed; registry changed in ordinary no-regression PR")
+        base = {"overdue": [], "modules": {GONE: 1200, KEPT: 1200},
+                "registrations": {GONE: META_ROOT, KEPT: META_ROOT}}
+        candidate = copy.deepcopy(base)
+        candidate["registrations"].pop(GONE)
+        facts = {"changed": {P.REGISTRY, P.TRANSITION}, "statuses": {P.REGISTRY: "M", P.TRANSITION: "M"},
+                 "authority_equal": False, "registry_equal": False}
+        self.assertEqual(P.pr_evaluation(base, candidate, facts), ("pr_ordinary_no_regression", [
+            "frozen authority blob changed", "registry changed in ordinary no-regression PR"]))
+        candidate["modules"].pop(GONE)
+        facts.update(statuses={GONE: "D"}, pin_equal=True, deletion_ledgers={
+            P.REGISTRY: (deletion_registry(KEPT), deletion_registry(KEPT)), P.TRANSITION: ("", "")})
+        self.assertEqual(P.pr_evaluation(base, candidate, facts), (
+            "pr_giant_deletion", [f"registry entry not found for deleted giant: {GONE}"]))
+
+
 if __name__ == "__main__":
     unittest.main()
